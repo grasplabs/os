@@ -1,0 +1,7 @@
+# Copy to .dev.vars for local development. Never commit real values.
+COMPOSIO_API_KEY=
+GOOGLE_CLIENT_ID=
+GOOGLE_CLIENT_SECRET=
+MICROSOFT_CLIENT_ID=
+MICROSOFT_CLIENT_SECRET=
+TOKEN_ENCRYPTION_KEY=

@@ -1,0 +1,28 @@
+{
+  "name": "@grasp-os/connect",
+  "private": true,
+  "description": "The connect Worker: connector layer and the only place OAuth tokens live",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typegen": "wrangler types --include-runtime=false",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@composio/core": "catalog:",
+    "@grasp-os/connector-google-workspace": "workspace:*",
+    "@grasp-os/connector-microsoft-365": "workspace:*",
+    "@grasp-os/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "catalog:",
+    "drizzle-orm": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@cloudflare/workers-types": "catalog:",
+    "drizzle-kit": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

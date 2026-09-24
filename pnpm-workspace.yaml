@@ -1,0 +1,89 @@
+packages:
+  - apps/*
+  - packages/*
+  - packages/connectors/*
+
+# Supply-chain defaults: new versions wait 3 days, exotic sub-dependencies are
+# blocked, and only the packages listed here may run install scripts.
+minimumReleaseAge: 4320
+blockExoticSubdeps: true
+strictDepBuilds: true
+allowBuilds:
+  esbuild: true
+  workerd: true
+  "@google/genai": false
+  protobufjs: false
+  sharp: false
+
+catalog:
+  # Tooling
+  "@commitlint/cli": 21.2.3
+  "@commitlint/config-conventional": 21.2.3
+  "@playwright/test": 1.63.0
+  "@shadcn/lint": 0.1.5
+  "@secretlint/secretlint-rule-preset-recommend": 13.0.5
+  "@types/node": 26.6.2
+  secretlint: 13.0.5
+  typescript: 7.0.2
+  ultracite: 7.12.0
+  vite: npm:@voidzero-dev/vite-plus-core@0.3.3
+  vite-plus: 0.3.3
+  vitest: 4.1.11
+  # Same workerd as Wrangler; runs the on-prem smoke test.
+  workerd: 1.20260921.1
+  wrangler: 4.136.0
+
+  # Workers runtime and data
+  "@cloudflare/dynamic-workflows": 0.1.1
+  "@cloudflare/vite-plugin": 1.57.0
+  "@cloudflare/vitest-pool-workers": 0.22.0
+  "@cloudflare/worker-bundler": 0.2.4
+  "@cloudflare/workers-types": 5.20260921.1
+  capnweb: 0.12.0
+  drizzle-kit: 0.31.11
+  drizzle-orm: 0.45.3
+  zod: 4.6.5
+
+  # Identity, agents, connections
+  "@better-auth/sso": 1.7.5
+  "@composio/core": 0.18.1
+  # Exact, and the two move together.
+  "@earendil-works/pi-agent-core": 0.86.1
+  "@earendil-works/pi-ai": 0.86.1
+  "@modelcontextprotocol/sdk": 1.30.0
+  better-auth: 1.7.5
+
+  # Frontend
+  # Babel 7 until babel-plugin-react-compiler supports Babel 8.
+  "@babel/core": 7.29.7
+  "@base-ui/react": 1.8.0
+  "@rolldown/plugin-babel": 0.2.4
+  "@tailwindcss/vite": 4.3.3
+  "@tanstack/react-router": 1.170.38
+  "@tanstack/react-start": 1.168.56
+  "@tanstack/router-plugin": 1.168.40
+  "@types/react": 19.3.0
+  "@types/react-dom": 19.3.0
+  "@vitejs/plugin-react": 6.1.1
+  babel-plugin-react-compiler: 1.0.0
+  class-variance-authority: 0.7.1
+  clsx: 2.1.1
+  lucide-react: 1.47.0
+  react: 19.3.0
+  react-dom: 19.3.0
+  shadcn: 4.21.0
+  tailwind-merge: 3.7.0
+  tailwindcss: 4.3.3
+  tw-animate-css: 1.4.0
+
+# Vite+ replaces Vite and pins Vitest for every package in the workspace.
+overrides:
+  vite: "catalog:"
+  vitest: "catalog:"
+  # The test pool bundles an older workerd; align it with Wrangler's so tests
+  # run on the same compatibility date as production.
+  "@cloudflare/vitest-pool-workers>miniflare": 5.20260921.0-alpha
+
+peerDependencyRules:
+  allowedVersions:
+    vite: "*"

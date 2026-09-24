@@ -1,0 +1,169 @@
+# Trunk-based: feature branch -> pull request into main -> merge queue, which
+# tests it on top of the latest main and squash-merges it. Checks run on pull
+# requests and in the merge queue; a push to main only deploys what those
+# checks already tested, to grasp-os-staging. grasp-os-ops is deployed by hand
+# with the Deploy grasp-os-ops workflow. Jobs with secrets never run for pull
+# requests from forks. CI never deploys to a client account: the console
+# rolls releases out.
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  merge_group:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+jobs:
+  check:
+    name: check
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ["--frozen-lockfile"]
+      - run: vp check
+      - run: vp run check:secrets
+      - run: vp run check:docs
+      - run: vp test
+      - run: vp run -r build
+      # Generated files (Worker types, route trees, migrations) must be committed.
+      - run: vp run -r typegen && vp run -r db:generate
+      - run: git diff --exit-code && test -z "$(git status --porcelain)"
+
+  e2e:
+    name: e2e
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ["--frozen-lockfile"]
+      - run: vp exec playwright install --with-deps chromium
+      - run: vp run e2e
+
+  # On-prem ready: core must boot on plain workerd.
+  workerd:
+    name: workerd
+    if: github.event_name != 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ["--frozen-lockfile"]
+      - run: vp run --filter @grasp-os/web build
+      - run: vp run smoke:workerd
+
+  # The branch name and the PR title, which becomes the commit on main and the
+  # release note. Skipped (which counts as passing) in the merge queue.
+  conventions:
+    name: conventions
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ["--frozen-lockfile"]
+      - run: vp run check:branch
+      - run: printf '%s\n' "$PR_TITLE" | vp exec commitlint
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+
+  # Secrets come from 1Password: one service account per environment, each
+  # limited to its own vault, its token stored as a GitHub environment secret.
+  preview:
+    name: preview
+    if: github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository
+    needs: [check]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: grasp-os-staging
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ["--frozen-lockfile"]
+      - uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: op://grasp-os-staging/cloudflare/account-id
+          CLOUDFLARE_API_TOKEN: op://grasp-os-staging/cloudflare/api-token
+      - run: vp run --filter @grasp-os/web build
+      - run: vp -C apps/core exec wrangler versions upload --preview-alias "pr-$PR_NUMBER"
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+
+  deploy-staging:
+    name: deploy-staging
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: grasp-os-staging
+    concurrency:
+      group: deploy-grasp-os-staging
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ["--frozen-lockfile"]
+      - uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: op://grasp-os-staging/cloudflare/account-id
+          CLOUDFLARE_API_TOKEN: op://grasp-os-staging/cloudflare/api-token
+      - run: vp run --filter @grasp-os/web build
+      # connect first: core's service binding points at it.
+      - run: vp run --filter @grasp-os/connect deploy
+      - run: vp run --filter @grasp-os/core deploy
+      - run: vp run --filter @grasp-os/console --filter @grasp-os/router deploy

@@ -1,0 +1,17 @@
+{
+  "name": "@grasp-os/router",
+  "private": true,
+  "description": "Stateless router in grasp-os-ops: forwards *.<domain> to each client's core Worker",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typegen": "wrangler types --include-runtime=false"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@cloudflare/workers-types": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

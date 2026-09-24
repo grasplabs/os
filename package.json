@@ -1,0 +1,43 @@
+{
+  "name": "grasp-os",
+  "version": "0.0.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "prepare": "vp config --no-agent",
+    "e2e": "playwright test",
+    "smoke:workerd": "node scripts/workerd-smoke.ts",
+    "check:docs": "node scripts/check-docs.ts",
+    "github:setup": "node scripts/github-setup.ts",
+    "check:branch": "node scripts/check-branch-name.ts",
+    "check:secrets": "secretlint \"**/*\""
+  },
+  "devDependencies": {
+    "@commitlint/cli": "catalog:",
+    "@commitlint/config-conventional": "catalog:",
+    "@playwright/test": "catalog:",
+    "@secretlint/secretlint-rule-preset-recommend": "catalog:",
+    "@shadcn/lint": "catalog:",
+    "@types/node": "catalog:",
+    "secretlint": "catalog:",
+    "typescript": "catalog:",
+    "ultracite": "catalog:",
+    "vite-plus": "catalog:",
+    "workerd": "catalog:",
+    "wrangler": "catalog:"
+  },
+  "commitlint": {
+    "extends": [
+      "@commitlint/config-conventional"
+    ]
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^24.11.0",
+      "onFail": "error"
+    }
+  },
+  "packageManager": "pnpm@11.27.1+sha512.a81d4c21b9b09a4b0aebf90ef5e527d4262bdda322d26082978cb549023ac6d9cafc98b19fffaa5c71db438a65f70224edb78d7311187861ff96480d1cdca23c"
+}

@@ -1,0 +1,40 @@
+{
+  "name": "@grasp-os/console",
+  "private": true,
+  "description": "The Grasp staff console: onboards clients and rolls out releases",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "vp build",
+    "preview": "vp preview",
+    "deploy": "vp build && wrangler deploy",
+    "typegen": "wrangler types --include-runtime=false",
+    "db:generate": "drizzle-kit generate"
+  },
+  "dependencies": {
+    "@grasp-os/shared": "workspace:*",
+    "@grasp-os/ui": "workspace:*",
+    "@tanstack/react-router": "catalog:",
+    "@tanstack/react-start": "catalog:",
+    "drizzle-orm": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@babel/core": "catalog:",
+    "@cloudflare/vite-plugin": "catalog:",
+    "@cloudflare/workers-types": "catalog:",
+    "@rolldown/plugin-babel": "catalog:",
+    "@tailwindcss/vite": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "babel-plugin-react-compiler": "catalog:",
+    "drizzle-kit": "catalog:",
+    "tailwindcss": "catalog:",
+    "vite-plus": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

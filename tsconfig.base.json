@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+  "compilerOptions": {
+    "target": "es2024",
+    "lib": ["es2024"],
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "resolveJsonModule": true,
+    "allowImportingTsExtensions": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "noEmit": true,
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noImplicitReturns": true,
+    "noUncheckedSideEffectImports": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+    "skipLibCheck": true,
+    "types": []
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://ui.shadcn.com/schema.json",
+  "style": "base-nova",
+  "rsc": false,
+  "tsx": true,
+  "tailwind": {
+    "config": "",
+    "css": "src/styles.css",
+    "baseColor": "neutral",
+    "cssVariables": true
+  },
+  "iconLibrary": "lucide",
+  "aliases": {
+    "components": "@grasp-os/ui/components",
+    "utils": "@grasp-os/ui/lib/utils",
+    "hooks": "@grasp-os/ui/hooks",
+    "lib": "@grasp-os/ui/lib",
+    "ui": "@grasp-os/ui/components"
+  }
+}

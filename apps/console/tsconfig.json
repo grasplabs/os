@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2024", "dom", "dom.iterable"],
+    "jsx": "react-jsx",
+    "types": ["@cloudflare/workers-types", "vite-plus/client"]
+  },
+  "include": ["src", "worker-configuration.d.ts", "*.ts"]
+}

@@ -1,0 +1,34 @@
+{
+  "name": "@grasp-os/core",
+  "private": true,
+  "description": "The core Worker: sign-in, knowledge, Apps, workflows, model gateway, audit log",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "typegen": "wrangler types --include-runtime=false",
+    "db:generate": "drizzle-kit generate --config src/db/core/drizzle.config.ts && drizzle-kit generate --config src/db/knowledge/drizzle.config.ts && drizzle-kit generate --config src/db/workspace/drizzle.config.ts && drizzle-kit generate --config src/db/audit-log/drizzle.config.ts"
+  },
+  "dependencies": {
+    "@better-auth/sso": "catalog:",
+    "@cloudflare/dynamic-workflows": "catalog:",
+    "@earendil-works/pi-agent-core": "catalog:",
+    "@earendil-works/pi-ai": "catalog:",
+    "@grasp-os/compiler": "workspace:*",
+    "@grasp-os/sdk": "workspace:*",
+    "@grasp-os/shared": "workspace:*",
+    "better-auth": "catalog:",
+    "capnweb": "catalog:",
+    "drizzle-orm": "catalog:",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@cloudflare/workers-types": "catalog:",
+    "@grasp-os/connect": "workspace:*",
+    "@grasp-os/web": "workspace:*",
+    "drizzle-kit": "catalog:",
+    "wrangler": "catalog:"
+  }
+}

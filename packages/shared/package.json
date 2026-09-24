@@ -1,0 +1,14 @@
+{
+  "name": "@grasp-os/shared",
+  "private": true,
+  "description": "Types and Zod schemas shared across Grasp OS",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./audit": "./src/audit.ts"
+  },
+  "dependencies": {
+    "zod": "catalog:"
+  }
+}

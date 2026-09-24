@@ -1,0 +1,33 @@
+{
+  "name": "@grasp-os/ui",
+  "private": true,
+  "description": "Grasp OS UI kit: shadcn on Base UI, Tailwind v4, shared with App screens",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    "./components/*": "./src/components/*.tsx",
+    "./lib/*": "./src/lib/*.ts",
+    "./hooks/*": "./src/hooks/*.ts",
+    "./styles.css": "./src/styles.css"
+  },
+  "dependencies": {
+    "@base-ui/react": "catalog:",
+    "class-variance-authority": "catalog:",
+    "clsx": "catalog:",
+    "lucide-react": "catalog:",
+    "shadcn": "catalog:",
+    "tailwind-merge": "catalog:",
+    "tw-animate-css": "catalog:"
+  },
+  "devDependencies": {
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "tailwindcss": "catalog:"
+  },
+  "peerDependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  }
+}

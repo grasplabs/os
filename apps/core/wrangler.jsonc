@@ -1,0 +1,79 @@
+// grasp-os-staging deployment. Client deployments are provisioned by the console,
+// which creates every resource below with EU jurisdiction.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "grasp-os-core",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-15",
+  "compatibility_flags": ["nodejs_compat"],
+  // Durable Objects bundle their Drizzle migrations as text.
+  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true },
+  },
+  // The frontend (apps/web) is served as static files by core.
+  "assets": {
+    "directory": "../web/dist",
+    "not_found_handling": "single-page-application",
+    "run_worker_first": ["/api/*", "/rpc", "/health"],
+  },
+  "durable_objects": {
+    "bindings": [
+      { "name": "WORKSPACES", "class_name": "Workspace" },
+      { "name": "APPS", "class_name": "App" },
+      { "name": "AUDIT_LOG", "class_name": "AuditLog" },
+    ],
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["Workspace", "App", "AuditLog"] },
+  ],
+  "workflows": [
+    {
+      "name": "grasp-os-workflows",
+      "binding": "WORKFLOWS",
+      "class_name": "WorkflowDispatcher",
+    },
+  ],
+  // Runs App sandboxes and the screen compiler.
+  "worker_loaders": [{ "binding": "LOADER" }],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "grasp-os-core",
+      "migrations_dir": "src/db/core/migrations",
+    },
+    {
+      "binding": "KNOWLEDGE",
+      "database_name": "grasp-os-knowledge",
+      "migrations_dir": "src/db/knowledge/migrations",
+    },
+  ],
+  "r2_buckets": [
+    {
+      "binding": "FILES",
+      "bucket_name": "grasp-os-files",
+      "jurisdiction": "eu",
+    },
+  ],
+  "kv_namespaces": [{ "binding": "KV" }],
+  // Audit events from core and connect, appended to the AuditLog object.
+  // Delivery is at least once; events that keep failing land in the dead
+  // letter queue instead of being lost.
+  "queues": {
+    "producers": [{ "binding": "AUDIT_QUEUE", "queue": "grasp-os-audit" }],
+    "consumers": [
+      {
+        "queue": "grasp-os-audit",
+        "max_batch_size": 100,
+        "max_batch_timeout": 5,
+        "max_retries": 10,
+        "dead_letter_queue": "grasp-os-audit-dlq",
+      },
+    ],
+  },
+  // Model gateway transport; core never holds a raw provider key.
+  "ai": { "binding": "AI", "remote": true },
+  "send_email": [{ "name": "EMAIL" }],
+  "services": [{ "binding": "CONNECT", "service": "grasp-os-connect" }],
+}

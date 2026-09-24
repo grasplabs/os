@@ -1,0 +1,15 @@
+{
+  "name": "@grasp-os/sdk",
+  "private": true,
+  "description": "Workflow SDK and screen hooks: the only API App code sees",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    "./workflow": "./src/workflow.ts",
+    "./screen": "./src/screen.ts"
+  },
+  "dependencies": {
+    "@grasp-os/shared": "workspace:*",
+    "zod": "catalog:"
+  }
+}

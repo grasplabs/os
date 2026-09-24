@@ -1,0 +1,17 @@
+{
+  "name": "@grasp-os/compiler",
+  "private": true,
+  "description": "Screen compiler: React Compiler + worker-bundler in its own isolate",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@cloudflare/worker-bundler": "catalog:",
+    "babel-plugin-react-compiler": "catalog:"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "catalog:"
+  }
+}

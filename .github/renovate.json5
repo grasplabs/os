@@ -1,0 +1,107 @@
+// Dependency updates. Versions live in the pnpm catalog (pnpm-workspace.yaml),
+// so one PR bumps a dependency everywhere it's used.
+{
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: [
+    "config:recommended",
+    "helpers:pinGitHubActionDigestsToSemver",
+    ":semanticCommits",
+    ":dependencyDashboard",
+  ],
+  timezone: "Europe/Amsterdam",
+  schedule: ["before 7am on monday"],
+  // Same 3-day wait as pnpm's minimumReleaseAge; no PR until a version is old
+  // enough to install.
+  minimumReleaseAge: "3 days",
+  internalChecksFilter: "strict",
+  rangeStrategy: "pin",
+  prConcurrentLimit: 10,
+  lockFileMaintenance: {
+    enabled: true,
+    schedule: ["before 7am on monday"],
+  },
+  packageRules: [
+    // Stable minor and patch updates merge themselves once required checks pass.
+    {
+      matchUpdateTypes: ["minor", "patch", "pin", "digest"],
+      matchCurrentVersion: "!/^0/",
+      automerge: true,
+    },
+    // Majors never merge themselves: approve them on the dependency dashboard.
+    // Below 1.0, where a minor can break, updates also wait for review.
+    {
+      matchUpdateTypes: ["major"],
+      automerge: false,
+      dependencyDashboardApproval: true,
+    },
+
+    // Families that have to move together.
+    {
+      groupName: "cloudflare toolchain",
+      matchPackageNames: ["wrangler", "miniflare", "workerd", "@cloudflare/**"],
+    },
+    {
+      groupName: "vite+ toolchain",
+      matchPackageNames: [
+        "vite-plus",
+        "vite",
+        "@voidzero-dev/vite-plus-core",
+        "vitest",
+        "typescript",
+        "ultracite",
+        "@shadcn/lint",
+      ],
+    },
+    {
+      groupName: "pi",
+      matchPackageNames: ["@earendil-works/**"],
+    },
+    {
+      groupName: "react",
+      matchPackageNames: [
+        "react",
+        "react-dom",
+        "@types/react",
+        "@types/react-dom",
+        "@vitejs/plugin-react",
+        "@rolldown/plugin-babel",
+        "@babel/core",
+        "babel-plugin-react-compiler",
+      ],
+    },
+    {
+      groupName: "tanstack",
+      matchPackageNames: ["@tanstack/**"],
+    },
+    {
+      groupName: "ui kit",
+      matchPackageNames: [
+        "@base-ui/react",
+        "shadcn",
+        "tailwindcss",
+        "@tailwindcss/**",
+        "tw-animate-css",
+        "class-variance-authority",
+        "clsx",
+        "tailwind-merge",
+        "lucide-react",
+      ],
+    },
+    {
+      groupName: "drizzle",
+      matchPackageNames: ["drizzle-orm", "drizzle-kit"],
+    },
+    {
+      groupName: "better-auth",
+      matchPackageNames: ["better-auth", "@better-auth/**"],
+    },
+    {
+      groupName: "commitlint",
+      matchPackageNames: ["@commitlint/**"],
+    },
+    {
+      groupName: "github actions",
+      matchManagers: ["github-actions"],
+    },
+  ],
+}

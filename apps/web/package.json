@@ -1,0 +1,33 @@
+{
+  "name": "@grasp-os/web",
+  "private": true,
+  "description": "The Grasp OS frontend: a single-page app served by core",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "dev": "vp dev",
+    "build": "vp build",
+    "preview": "vp preview"
+  },
+  "dependencies": {
+    "@grasp-os/sdk": "workspace:*",
+    "@grasp-os/shared": "workspace:*",
+    "@grasp-os/ui": "workspace:*",
+    "@tanstack/react-router": "catalog:",
+    "capnweb": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "devDependencies": {
+    "@babel/core": "catalog:",
+    "@rolldown/plugin-babel": "catalog:",
+    "@tailwindcss/vite": "catalog:",
+    "@tanstack/router-plugin": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "@vitejs/plugin-react": "catalog:",
+    "babel-plugin-react-compiler": "catalog:",
+    "tailwindcss": "catalog:",
+    "vite-plus": "catalog:"
+  }
+}

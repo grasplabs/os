@@ -1,0 +1,14 @@
+// Deployed to grasp-os-staging on every merge and to grasp-os-ops by hand. Serves
+// *.<domain> and stores nothing.
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "grasp-os-router",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-09-15",
+  "workers_dev": false,
+  "preview_urls": false,
+  "observability": {
+    "enabled": true,
+    "traces": { "enabled": true },
+  },
+}
