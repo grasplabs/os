@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import { appIdSchema, runIdSchema, workflowIdSchema } from "./ids.ts";
+
 /**
  * Who did something: a person, an agent acting for one, part of an App (its
  * screens or server code), a workflow run, the platform itself, or Grasp
@@ -14,14 +16,14 @@ export const auditActorSchema = z.discriminatedUnion("type", [
   }),
   z.object({
     type: z.literal("app"),
-    appId: z.string(),
+    appId: appIdSchema,
     part: z.enum(["screen", "server"]),
   }),
   z.object({
     type: z.literal("workflow"),
-    appId: z.string(),
-    workflowId: z.string(),
-    runId: z.string(),
+    appId: appIdSchema,
+    workflowId: workflowIdSchema,
+    runId: runIdSchema,
   }),
   z.object({ type: z.literal("staff"), userId: z.string() }),
   z.object({ type: z.literal("system") }),
