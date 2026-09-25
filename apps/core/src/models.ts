@@ -20,7 +20,13 @@ import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.mode
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
-import { auditActorSchema, auditEventSchema } from "@grasp-os/shared/audit";
+import {
+  auditActorSchema,
+  auditEventSchema,
+  auditIdentifierMaxLength,
+  createAuditEvent,
+} from "@grasp-os/shared/audit";
+import type { AuditEntry } from "@grasp-os/shared/audit";
 import { modelErrors } from "@grasp-os/shared/models";
 import { z } from "zod";
 
@@ -202,6 +208,8 @@ export interface ModelAnswer<Output> {
   text: string;
   /** The answer parsed with the call's schema; `undefined` without one. */
   output: Output;
+  /** The model hit its output limit, so the text may stop short. */
+  truncated: boolean;
   /** Across every request the call made. */
   usage: { inputTokens: number; outputTokens: number };
   /** In US dollars, at the provider's list prices. */
@@ -317,7 +325,8 @@ interface Request {
 
 interface Sent {
   answer: AssistantMessage;
-  /** The gateway's log entry for the request, once it answered. */
+  /** The HTTP status and the gateway's log entry, once it answered. */
+  status: number | undefined;
   logId: string | undefined;
 }
 
@@ -329,6 +338,7 @@ const send = async (
   env: ModelsEnv,
   { model, ref, system, messages }: Request
 ): Promise<Sent> => {
+  let status: number | undefined = undefined;
   let logId: string | undefined = undefined;
   // SAFETY: the provider picks both the adapter and the catalog the model
   // comes from, so the model always speaks the adapter's API.
@@ -343,17 +353,69 @@ const send = async (
     {
       fetch: createAiBindingFetch(env.AI),
       headers: gatewayHeaders,
-      onResponse: ({ headers }) => {
-        logId = headers["cf-aig-log-id"];
+      onResponse: (response) => {
+        ({ status } = response);
+        logId = response.headers["cf-aig-log-id"];
       },
     }
   );
   const answer = await stream.result();
-  return { answer, logId };
+  return { answer, status, logId };
 };
 
 /** How one request ended, as the audit log records it. */
-type Outcome = "answered" | "invalid_output" | "failed";
+type Outcome = "answered" | "truncated" | "invalid_output" | "failed";
+
+/** What the audit log records of one request. */
+interface Recorded {
+  inputTokens: number;
+  outputTokens: number;
+  cost: number;
+  logId: string | undefined;
+  attempt: number;
+  outcome: Outcome;
+}
+
+const auditEntry = (call: Call, ref: ModelRef, recorded: Recorded) => {
+  const { logId } = recorded;
+  return {
+    actor: call.trigger,
+    action: "model.call",
+    requestId: call.requestId,
+    provenance: call.provenance,
+    model: {
+      provider: ref.provider,
+      model: ref.id,
+      inputTokens: recorded.inputTokens,
+      outputTokens: recorded.outputTokens,
+    },
+    cost: { amount: recorded.cost, currency: "USD" },
+    detail: {
+      purpose: call.purpose,
+      outcome: recorded.outcome,
+      attempt: recorded.attempt,
+      // Never an ID so long that the event would be refused.
+      gatewayLogId:
+        logId !== undefined && logId.length <= auditIdentifierMaxLength
+          ? logId
+          : null,
+    },
+  } satisfies AuditEntry;
+};
+
+/**
+ * The most any request can add to its call's audit event: a call whose
+ * event wouldn't fit the audit log with it is refused before anything is
+ * sent and paid for, rather than left unrecorded after.
+ */
+const largestRecord: Recorded = {
+  inputTokens: Number.MAX_SAFE_INTEGER,
+  outputTokens: Number.MAX_SAFE_INTEGER,
+  cost: Number.MAX_VALUE,
+  logId: "x".repeat(auditIdentifierMaxLength),
+  attempt: 2,
+  outcome: "invalid_output",
+};
 
 /** Records one request in the audit log, however it ended. */
 const record = async (
@@ -364,25 +426,16 @@ const record = async (
   attempt: number,
   outcome: Outcome
 ): Promise<void> => {
-  await audit(env).log({
-    actor: call.trigger,
-    action: "model.call",
-    requestId: call.requestId,
-    provenance: call.provenance,
-    model: {
-      provider: ref.provider,
-      model: ref.id,
+  await audit(env).log(
+    auditEntry(call, ref, {
       inputTokens: inputTokens(answer.usage),
       outputTokens: answer.usage.output,
-    },
-    cost: { amount: costOf(answer.usage), currency: "USD" },
-    detail: {
-      purpose: call.purpose,
-      outcome,
+      cost: costOf(answer.usage),
+      logId,
       attempt,
-      gatewayLogId: logId ?? null,
-    },
-  });
+      outcome,
+    })
+  );
 };
 
 /** Checks a call against the deployment's config, before anything is sent. */
@@ -404,6 +457,12 @@ const admit = (
     : undefined;
   if (ref === undefined) {
     throw modelErrors.create("model.not_allowed", { model: call.model });
+  }
+  try {
+    createAuditEvent(auditEntry(call, ref, largestRecord), "core");
+  } catch {
+    // Its provenance, say, is too long to record.
+    throw modelErrors.create("model.invalid_call");
   }
   return { call, ref, gateway: config.gateway };
 };
@@ -439,12 +498,14 @@ const callModel = async <Output>(
     usage.outputTokens += answer.usage.output;
     cost += costOf(answer.usage);
     const text = answerText(answer);
+    const truncated = answer.stopReason === "length";
 
     if (hasFailed(answer)) {
+      // The status only: a provider's error message may quote the request.
       log.warn("model.failed", {
         model: call.model,
-        // Provider errors describe the request; they don't quote the prompt.
-        errorMessage: answer.errorMessage?.slice(0, 300),
+        status: sent.status,
+        stopReason: answer.stopReason,
       });
       // oxlint-disable-next-line no-await-in-loop
       await record(env, call, ref, sent, attempt, "failed");
@@ -452,12 +513,21 @@ const callModel = async <Output>(
     }
     if (schema === undefined) {
       // oxlint-disable-next-line no-await-in-loop
-      await record(env, call, ref, sent, attempt, "answered");
+      await record(
+        env,
+        call,
+        ref,
+        sent,
+        attempt,
+        truncated ? "truncated" : "answered"
+      );
       // SAFETY: without a schema `Output` can't be inferred, so it is its
       // default, `undefined`.
       // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-      return { text, output: undefined as Output, usage, cost };
+      return { text, output: undefined as Output, truncated, usage, cost };
     }
+    // An answer cut short is judged like any other: JSON that stops short
+    // doesn't parse, so the model is asked again.
     const result = parseOutput(text, schema);
     // oxlint-disable-next-line no-await-in-loop
     await record(
@@ -469,7 +539,7 @@ const callModel = async <Output>(
       result.ok ? "answered" : "invalid_output"
     );
     if (result.ok) {
-      return { text, output: result.output, usage, cost };
+      return { text, output: result.output, truncated, usage, cost };
     }
     request.messages.push(answer, {
       role: "user",

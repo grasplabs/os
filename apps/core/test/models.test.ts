@@ -328,6 +328,17 @@ describe("model gateway", () => {
         provenance: Array.from({ length: 101 }, (_, i) => `doc-${i}`),
       },
     ],
+    [
+      // Within every field's bound, but two bytes a character: the audit
+      // event would be too large, and the call would go unrecorded.
+      "provenance too large to record",
+      {
+        input: "Hi.",
+        provenance: Array.from({ length: 100 }, (_, i) =>
+          `${i}`.padEnd(256, "é")
+        ),
+      },
+    ],
   ])("refuses a call with %s", async (_, fields) => {
     const { gateway, gatewayEnv } = withGateway([answer("Hi.")]);
     // SAFETY: invalid on purpose: what a caller that isn't type-checked (a
@@ -391,6 +402,27 @@ describe("model gateway", () => {
     const stored = JSON.stringify(event);
     expect(stored).not.toContain("Acme");
     expect(stored).not.toContain("October");
+  });
+
+  it("says when an answer stopped at the model's output limit", async () => {
+    const trigger = newPerson();
+    const { gatewayEnv } = withGateway([
+      { ...answer("The first part of a long"), truncated: true },
+    ]);
+
+    const result = await models(gatewayEnv).call({
+      model: workersAi,
+      input: "Write a long essay.",
+      purpose: "chat.turn",
+      trigger,
+    });
+
+    expect(result).toMatchObject({
+      text: "The first part of a long",
+      truncated: true,
+    });
+    const [event] = await auditedFor(trigger.userId, 1);
+    expect(event?.detail).toMatchObject({ outcome: "truncated" });
   });
 
   it("audits a call the provider refuses, and fails it", async () => {

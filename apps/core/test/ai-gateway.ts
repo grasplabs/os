@@ -6,7 +6,13 @@
 
 /** A scripted answer, or a refusal with an HTTP status. */
 export type GatewayReply =
-  | { text: string; inputTokens: number; outputTokens: number }
+  | {
+      text: string;
+      inputTokens: number;
+      outputTokens: number;
+      /** The model hit its output limit (Anthropic and chat completions). */
+      truncated?: boolean;
+    }
   | { status: number };
 
 export interface GatewayRequest {
@@ -45,7 +51,12 @@ const eventStream = (
 
 type Answer = Extract<GatewayReply, { text: string }>;
 
-const anthropicEvents = ({ text, inputTokens, outputTokens }: Answer) => [
+const anthropicEvents = ({
+  text,
+  inputTokens,
+  outputTokens,
+  truncated,
+}: Answer) => [
   {
     event: "message_start",
     data: {
@@ -86,7 +97,10 @@ const anthropicEvents = ({ text, inputTokens, outputTokens }: Answer) => [
     event: "message_delta",
     data: {
       type: "message_delta",
-      delta: { stop_reason: "end_turn", stop_sequence: null },
+      delta: {
+        stop_reason: truncated === true ? "max_tokens" : "end_turn",
+        stop_sequence: null,
+      },
       usage: { output_tokens: outputTokens },
     },
   },
@@ -103,7 +117,12 @@ const chunk = (fields: object) => ({
   },
 });
 
-const chatCompletionEvents = ({ text, inputTokens, outputTokens }: Answer) => [
+const chatCompletionEvents = ({
+  text,
+  inputTokens,
+  outputTokens,
+  truncated,
+}: Answer) => [
   chunk({
     choices: [
       {
@@ -113,7 +132,15 @@ const chatCompletionEvents = ({ text, inputTokens, outputTokens }: Answer) => [
       },
     ],
   }),
-  chunk({ choices: [{ index: 0, delta: {}, finish_reason: "stop" }] }),
+  chunk({
+    choices: [
+      {
+        index: 0,
+        delta: {},
+        finish_reason: truncated === true ? "length" : "stop",
+      },
+    ],
+  }),
   chunk({
     choices: [],
     usage: {
