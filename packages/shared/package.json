@@ -9,7 +9,9 @@
     ".": "./src/index.ts",
     "./audit": "./src/audit.ts",
     "./errors": "./src/errors.ts",
-    "./ids": "./src/ids.ts"
+    "./ids": "./src/ids.ts",
+    "./router": "./src/router.ts",
+    "./rpc": "./src/rpc.ts"
   },
   "dependencies": {
     "zod": "catalog:"
