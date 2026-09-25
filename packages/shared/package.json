@@ -14,6 +14,7 @@
     "./errors": "./src/errors.ts",
     "./ids": "./src/ids.ts",
     "./json": "./src/json.ts",
+    "./knowledge": "./src/knowledge.ts",
     "./models": "./src/models.ts",
     "./permissions": "./src/permissions.ts",
     "./router": "./src/router.ts",

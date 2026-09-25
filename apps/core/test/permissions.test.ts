@@ -373,7 +373,8 @@ describe("permissions", () => {
 
   it("can't take the name of any of core's own bindings", () => {
     // Test-only bindings aside, every name in core's env is the platform's.
-    const own = Object.keys(env).filter((name) => name !== "CORE_MIGRATIONS");
+    const testOnly = new Set(["CORE_MIGRATIONS", "KNOWLEDGE_MIGRATIONS"]);
+    const own = Object.keys(env).filter((name) => !testOnly.has(name));
     expect(
       own.filter((name) => bindingNameSchema.safeParse(name).success)
     ).toStrictEqual([]);

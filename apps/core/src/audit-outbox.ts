@@ -7,8 +7,9 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { auditOutbox } from "./db/core/schema.ts";
 import { errorFields, log } from "./log.ts";
 
-// A change to the core database that must be audited stores its event in
-// the outbox in the same batch as the change: both are kept, or neither.
+// A change to the core or Knowledge database that must be audited stores
+// its event in that database's outbox (each has an `audit_outbox` table) in
+// the same batch as the change: both are kept, or neither.
 // The event is sent right after; whatever wasn't (the queue refused it, the
 // Worker stopped) goes with the next send, from the cron trigger at the
 // latest. An event may reach the queue more than once, always with the same
@@ -55,13 +56,15 @@ const queueBody = (event: string): unknown => {
 };
 
 /**
- * Sends the oldest events in the outbox to the audit queue, then removes
- * those sent: a failure in between sends them again later, and one that
- * fails to send stays for the next time. Returns how many it
- * sent. The cron trigger calls it.
+ * Sends the oldest events in one database's outbox to the audit queue,
+ * then removes those sent: a failure in between sends them again later,
+ * and one that fails to send stays for the next time.
  */
-export const sendAuditOutbox = async (env: Env): Promise<number> => {
-  const db = drizzle(env.DB);
+const sendOutboxOf = async (
+  env: Env,
+  database: D1Database
+): Promise<number> => {
+  const db = drizzle(database);
   const rows = await db
     .select()
     .from(auditOutbox)
@@ -86,6 +89,20 @@ export const sendAuditOutbox = async (env: Env): Promise<number> => {
     await db.delete(auditOutbox).where(inArray(auditOutbox.id, sent));
   }
   return sent.length;
+};
+
+/**
+ * Sends the outboxes of the core and Knowledge databases, each of which
+ * holds the events of its own changes. Returns how many it sent. The cron
+ * trigger calls it.
+ */
+export const sendAuditOutbox = async (env: Env): Promise<number> => {
+  const counts = await Promise.all(
+    [env.DB, env.KNOWLEDGE].map(
+      async (database) => await sendOutboxOf(env, database)
+    )
+  );
+  return counts.reduce((total, count) => total + count, 0);
 };
 
 /**

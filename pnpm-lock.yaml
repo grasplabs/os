@@ -150,6 +150,9 @@ catalogs:
     wrangler:
       specifier: 4.136.0
       version: 4.136.0
+    yaml:
+      specifier: 2.9.1
+      version: 2.9.1
     zod:
       specifier: 4.6.5
       version: 4.6.5
@@ -307,6 +310,9 @@ importers:
       drizzle-orm:
         specifier: 'catalog:'
         version: 0.45.3(@cloudflare/workers-types@5.20260921.1)(kysely@0.29.6)
+      yaml:
+        specifier: 'catalog:'
+        version: 2.9.1
       zod:
         specifier: 'catalog:'
         version: 4.6.5

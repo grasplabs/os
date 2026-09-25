@@ -1,5 +1,6 @@
 import type { AppsApi } from "./apps.ts";
 import type { Role } from "./index.ts";
+import type { KnowledgeApi } from "./knowledge.ts";
 import type {
   Permission,
   PermissionRequest,
@@ -48,6 +49,8 @@ export interface SessionApi {
   listPermissions: (subject?: PermissionSubjectInput) => Promise<Permission[]>;
   /** The App registry and each App's code. Admins and builders. */
   readonly apps: AppsApi;
+  /** Knowledge: collections, documents and their versions. */
+  readonly knowledge: KnowledgeApi;
 }
 
 /**
