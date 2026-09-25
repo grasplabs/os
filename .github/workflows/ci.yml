@@ -31,6 +31,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          # check:migrations compares with origin/main.
+          fetch-depth: 0
       - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
         with:
           node-version-file: .node-version
@@ -40,6 +42,7 @@ jobs:
       - run: vp check
       - run: vp run check:secrets
       - run: vp run check:docs
+      - run: vp run check:migrations
       - run: vp test
       - run: vp run -r build
       # Generated files (Worker types, route trees, migrations) must be committed.

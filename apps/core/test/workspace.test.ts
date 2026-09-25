@@ -17,29 +17,24 @@ const previousRelease: Migrations = {
   migrations: migrations.migrations,
 };
 
-/** A release after this one, which adds a column the code doesn't know yet. */
-const nextRelease = (): Migrations => {
-  const last = migrations.journal.entries.at(-1);
-  const idx = (last?.idx ?? -1) + 1;
+/** A release that adds one migration after this release's. */
+const withMigration = (tag: string, sql: string, idx?: number): Migrations => {
+  const next = idx ?? migrations.journal.entries.length;
   return {
-    journal: {
-      entries: [
-        ...migrations.journal.entries,
-        {
-          idx,
-          when: (last?.when ?? 0) + 1,
-          tag: "next_release",
-          breakpoints: true,
-        },
-      ],
-    },
+    journal: { entries: [...migrations.journal.entries, { idx: next, tag }] },
     migrations: {
       ...migrations.migrations,
-      [`m${String(idx).padStart(4, "0")}`]:
-        "ALTER TABLE `chats` ADD `pinned` integer DEFAULT 0 NOT NULL;",
+      [`m${String(next).padStart(4, "0")}`]: sql,
     },
   };
 };
+
+/** A release after this one, which adds a column the code doesn't know yet. */
+const nextRelease = (): Migrations =>
+  withMigration(
+    "next_release",
+    "ALTER TABLE `chats` ADD `pinned` integer DEFAULT 0 NOT NULL;"
+  );
 
 /** Replaces the object's storage with what `release` would have left. */
 const migrateTo = async (
@@ -51,7 +46,7 @@ const migrateTo = async (
     if (fromScratch) {
       await state.storage.deleteAll();
     }
-    await migrateOnWake(state, release);
+    migrateOnWake(state, release);
   });
   await evictDurableObject(stub);
 };
@@ -86,6 +81,56 @@ describe("Workspace schema", () => {
         { title: before.title, pinned: 0 },
         { title: after.title, pinned: 0 },
       ]);
+    });
+  });
+
+  it("rolls back a failing migration and reports its error", async () => {
+    const stub = newWorkspace();
+    await stub.createChat("Before the release");
+    const broken = withMigration(
+      "broken",
+      "ALTER TABLE `chats` ADD `pinned` integer;\n--> statement-breakpoint\nALTER TABLE `missing` ADD `x` integer;"
+    );
+
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(() => {
+        migrateOnWake(state, broken);
+      }).toThrow(/no such table: missing/u);
+      // Nothing of the failed migration stays, not even its first statement.
+      const columns = state.storage.sql
+        .exec("SELECT name FROM pragma_table_info('chats')")
+        .toArray()
+        .map(({ name }) => name);
+      expect(columns).not.toContain("pinned");
+    });
+    const after = await stub.createChat("After the failure");
+    expect(after).toMatchObject({ title: "After the failure" });
+  });
+
+  it("refuses a migration history that doesn't match the code", async () => {
+    const stub = newWorkspace();
+    await migrateTo(stub, withMigration("ours", "SELECT 1;"), {
+      fromScratch: false,
+    });
+
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(() => {
+        migrateOnWake(state, withMigration("theirs", "SELECT 1;"));
+      }).toThrow(/applied as ours/u);
+    });
+  });
+
+  it("refuses a migration that comes before one already applied", async () => {
+    const stub = newWorkspace();
+    const next = migrations.journal.entries.length;
+    await migrateTo(stub, withMigration("later", "SELECT 1;", next + 1), {
+      fromScratch: false,
+    });
+
+    await runInDurableObject(stub, (_instance, state) => {
+      expect(() => {
+        migrateOnWake(state, withMigration("earlier", "SELECT 1;", next));
+      }).toThrow(/comes before/u);
     });
   });
 });
