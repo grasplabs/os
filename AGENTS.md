@@ -59,7 +59,7 @@ Trunk-based: `main` is the only long-lived branch; every merge deploys all apps 
 
 Nobody pushes to `main` directly. In an emergency, organisation owners can merge a pull request without a second review or passing checks; GitHub records every bypass. Use it only when waiting would do more harm. The rules live in `.github/rulesets/`; apply changes with `vp run github:setup`.
 
-Conflicts: rebase your branch on `main`. For generated files (lockfile, Worker types, route trees, migrations) take either side and regenerate (`vp install`, `vp run -r typegen`, `vp run -r build`, `vp run -r db:generate`) instead of merging by hand.
+Conflicts: rebase your branch on `main`. For generated files (lockfile, Worker types, route trees) take either side and regenerate (`vp install`, `vp run -r typegen`, `vp run -r build`) instead of merging by hand. Migrations are different: keep `main`'s, delete your branch's, and run `vp run -r db:generate` again so yours come after them. A migration on `main` never changes; `vp run check:migrations` enforces it.
 
 ## Working from Linear
 

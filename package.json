@@ -10,6 +10,7 @@
     "e2e": "playwright test",
     "smoke:workerd": "node scripts/workerd-smoke.ts",
     "check:docs": "node scripts/check-docs.ts",
+    "check:migrations": "node scripts/check-migrations.ts",
     "github:setup": "node scripts/github-setup.ts",
     "check:branch": "node scripts/check-branch-name.ts",
     "check:secrets": "secretlint \"**/*\""
