@@ -104,6 +104,13 @@ export const classes = ["mt-7","${"(".repeat(400)}"];`
     await expect(summaries({ ...screen(""), ...many })).resolves.toStrictEqual([
       "undefined:undefined limits: The App has 202 files; a build takes at most 200.",
     ]);
+    // Files a build doesn't read don't count.
+    const unread = Object.fromEntries(
+      Object.keys(many).map((path) => [`workflows/${path}`, "x".repeat(10_000)])
+    );
+    await expect(
+      buildScreens(env, app({ ...screen(""), ...unread }))
+    ).resolves.toMatchObject({ ok: true });
 
     const long = `// ${"x".repeat(200_001)}\n`;
     await expect(

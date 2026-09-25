@@ -21,8 +21,13 @@ import { isError } from "./diagnostic.ts";
 import type { Diagnostic } from "./diagnostic.ts";
 import { collectImports, importError, rewriteImports } from "./imports.ts";
 import type { ImportSite } from "./imports.ts";
+import {
+  buildFiles,
+  declarationFile,
+  limitErrors,
+  screenFile,
+} from "./inputs.ts";
 import { appModuleName, kitStylesheet, ownEntry } from "./kit.ts";
-import { limitErrors } from "./limits.ts";
 import { lint } from "./lint.ts";
 import { typeCheck } from "./type-check.ts";
 
@@ -40,12 +45,6 @@ export type ScreenBuild =
       diagnostics: Diagnostic[];
     }
   | { ok: false; diagnostics: Diagnostic[] };
-
-const screenFile = /^screens\/[\w-]+\.tsx$/u;
-// Folders are plain names, so a path can't step out of `components/`.
-const componentFile = /^components\/(?:[\w-]+\/)*[\w.-]+\.tsx?$/u;
-/** Types the App's code can use but that aren't code, e.g. its server's. */
-const declarationFile = /^[\w-]+\.d\.ts$/u;
 
 /** The line a React Compiler error points at in its code frame: `> 3 |`. */
 const framedLine = /^> *(?<line>\d+) \|/mu;
@@ -215,23 +214,12 @@ const buildCss = async (sources: string[]): Promise<string> => {
   ]);
 };
 
-/** The files a build reads: screens, components and declarations. */
-const appFiles = (files: Record<string, string>): Record<string, string> =>
-  Object.fromEntries(
-    Object.entries(files).filter(
-      ([path]) =>
-        screenFile.test(path) ||
-        componentFile.test(path) ||
-        declarationFile.test(path)
-    )
-  );
-
 /**
  * Type-checks the App against the kit's types and lints it against the
  * kit's design system.
  */
 export const checkScreens = (files: Record<string, string>): Diagnostic[] => {
-  const app = appFiles(files);
+  const app = buildFiles(files);
   const tooMuch = limitErrors(app);
   if (tooMuch.length > 0) {
     return tooMuch;
@@ -246,7 +234,7 @@ export const checkScreens = (files: Record<string, string>): Diagnostic[] => {
 export const buildScreens = async (
   files: Record<string, string>
 ): Promise<ScreenBuild> => {
-  const app = appFiles(files);
+  const app = buildFiles(files);
   const tooMuch = limitErrors(app);
   if (tooMuch.length > 0) {
     return { ok: false, diagnostics: tooMuch };

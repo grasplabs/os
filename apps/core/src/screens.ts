@@ -1,4 +1,5 @@
 import {
+  buildFiles,
   compilerVersion,
   limitErrors,
   startScreenCompiler,
@@ -42,19 +43,21 @@ export const buildScreens = async (
   env: Env,
   source: ScreenSource
 ): Promise<ScreenBuild> => {
-  // Before hashing: the limits bound that work too.
-  const tooMuch = limitErrors(source.files);
+  // Only what a build reads is limited, hashed and sent; the limits come
+  // before the hash, so they bound that work too.
+  const files = buildFiles(source.files);
+  const tooMuch = limitErrors(files);
   if (tooMuch.length > 0) {
     return { ok: false, diagnostics: tooMuch };
   }
-  const key = await buildKey(source);
+  const key = await buildKey({ ...source, files });
   const cacheKey = `screen-builds/${key}.json`;
   const cached = await env.FILES.get(cacheKey);
   if (cached) {
     return await cached.json<ScreenBuild>();
   }
   const compiler = startScreenCompiler(env.LOADER, key);
-  const built = await compiler.build(source.files);
+  const built = await compiler.build(files);
   if (built.ok) {
     await env.FILES.put(cacheKey, JSON.stringify(built));
   }

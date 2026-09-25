@@ -1,4 +1,28 @@
+/**
+ * What a build reads of an App's files, and how much of it a build takes.
+ * Core uses these before it hashes and sends the files; the compiler again
+ * on what it is sent.
+ */
 import type { Diagnostic } from "./diagnostic.ts";
+
+export const screenFile = /^screens\/[\w-]+\.tsx$/u;
+// Folders are plain names, so a path can't step out of `components/`.
+export const componentFile = /^components\/(?:[\w-]+\/)*[\w.-]+\.tsx?$/u;
+/** Types the App's code can use but that aren't code, e.g. its server's. */
+export const declarationFile = /^[\w-]+\.d\.ts$/u;
+
+/** The files a build reads: screens, components and declarations. */
+export const buildFiles = (
+  files: Record<string, string>
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(files).filter(
+      ([path]) =>
+        screenFile.test(path) ||
+        componentFile.test(path) ||
+        declarationFile.test(path)
+    )
+  );
 
 /**
  * The most a build takes, so that it stays well inside its isolate's CPU
@@ -13,10 +37,7 @@ const tooMuch = (message: string, file?: string): Diagnostic => ({
   message,
 });
 
-/**
- * Why these files are more than a build takes, if they are. Core checks
- * what it is given before it hashes it; the compiler checks what it reads.
- */
+/** Why a build's files (`buildFiles`) are more than it takes, if they are. */
 export const limitErrors = (files: Record<string, string>): Diagnostic[] => {
   const entries = Object.entries(files);
   if (entries.length > limits.files) {
