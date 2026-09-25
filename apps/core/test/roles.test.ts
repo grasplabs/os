@@ -1,9 +1,11 @@
 import type { Role } from "@grasp-os/shared";
 import { authErrors } from "@grasp-os/shared/errors";
+import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import worker from "../src/index.ts";
 import { mockIdp } from "./idp.ts";
 import {
   auditedDuring,
@@ -272,6 +274,32 @@ describe("member and team changes", () => {
         detail: { userId: person.userId },
       }),
     ]);
+  });
+
+  it("keep their audit event when the audit queue is down, and send it later", async () => {
+    const admin = await signedInAs("admin");
+    const person = await signedInAs("user");
+    const memberId = await memberIdOf(admin.session, person.userId);
+    const down = vi
+      .spyOn(env.AUDIT_QUEUE, "send")
+      .mockRejectedValue(new Error("Queue unavailable"));
+    try {
+      const changed = await callAuth(
+        "/organization/update-member-role",
+        admin.session,
+        { memberId, role: "builder" }
+      );
+      expect(changed.status).toBe(200);
+    } finally {
+      down.mockRestore();
+    }
+
+    const sent = await auditedDuring(async () => {
+      await worker.scheduled(createScheduledController(), env);
+    });
+    expect(
+      sent.map(({ action, target }) => [action, target?.id])
+    ).toContainEqual(["member.role.updated", memberId]);
   });
 
   it("aren't audited when refused", async () => {

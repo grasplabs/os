@@ -1,6 +1,7 @@
 import { sso } from "@better-auth/sso";
 import { roleSchema } from "@grasp-os/shared";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { canonicalJson } from "@grasp-os/shared/json";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import {
   APIError,
@@ -14,7 +15,8 @@ import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { audit } from "../audit.ts";
+import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
+import { actorOf, audit } from "../audit.ts";
 import {
   accounts,
   invitations,
@@ -277,15 +279,30 @@ const auditedChanges: Record<
 };
 
 /**
- * Sends an event to the audit log. The change it records has already
- * happened, so a failure is logged rather than turned into a failed request.
+ * Records a change Better Auth has made: its event goes into the audit
+ * outbox, in the same database, and is sent from there, again by the cron
+ * trigger if sending fails now. Better Auth commits the change itself, so
+ * the event can't join its batch. If storing it fails, the event goes to
+ * the audit queue directly; if that fails too, it is written to the logs,
+ * so a change is never left without a record. A failed request wouldn't
+ * undo the change, so none of this fails the request.
  */
 const record = async (env: Env, entry: AuditEntry): Promise<void> => {
   try {
-    await audit(env).log(entry);
-  } catch (error) {
-    log.error("audit.failed", { action: entry.action, ...errorFields(error) });
+    await outboxed(drizzle(env.DB), entry);
+  } catch (outboxError) {
+    log.error("audit.outbox.store_failed", errorFields(outboxError));
+    try {
+      await audit(env).log(entry);
+    } catch (queueError) {
+      log.error("audit.lost", {
+        ...errorFields(queueError),
+        entry: canonicalJson(entry),
+      });
+    }
+    return;
   }
+  await sendAuditOutboxNow(env);
 };
 
 /** A member's role before a change, from the request's before hook to its after hook. */
@@ -387,7 +404,7 @@ const createAuth = (env: AuthEnv, config: SignInConfig) => {
           after: async (session) => {
             if (session.staff === true) {
               await record(env, {
-                actor: { type: "staff", userId: session.userId },
+                actor: actorOf({ userId: session.userId, staff: true }),
                 action: "staff.session.started",
                 target: { type: "session", id: session.id },
                 detail: { expiresAt: session.expiresAt.toISOString() },
@@ -431,7 +448,10 @@ const createAuth = (env: AuthEnv, config: SignInConfig) => {
           return;
         }
         await record(env, {
-          actor: { type: "person", userId: actor.user.id },
+          actor: actorOf({
+            userId: actor.user.id,
+            staff: actor.session.staff === true,
+          }),
           ...describe(
             changeSchema.parse(context.body ?? {}),
             returnedSchema.safeParse(returned).data ?? {},

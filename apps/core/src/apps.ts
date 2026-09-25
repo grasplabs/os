@@ -17,6 +17,7 @@ import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
+import { canBuild, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -58,8 +59,8 @@ const storedTreeSchema = z.record(z.string(), z.string());
 const versionsPerPage = 100;
 
 const requireBuilder = (by: Identity): void => {
-  if (by.role === "user") {
-    throw appErrors.create("app.forbidden");
+  if (!canBuild(by.role)) {
+    throw roleErrors.create("role.forbidden");
   }
 };
 
