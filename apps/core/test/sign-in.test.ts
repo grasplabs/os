@@ -204,10 +204,14 @@ describe("signing in", () => {
             z.object({ event: z.literal("config.invalid") }).safeParse(line)
               .success
         );
-      expect(invalid).toStrictEqual([
-        { event: "config.invalid", var: "SIGN_IN", paths: "<root>" },
-        { event: "config.invalid", var: "SIGN_IN", paths: "domains" },
-      ]);
+      // In either order: the two connections run at once.
+      expect(new Set(invalid)).toStrictEqual(
+        new Set([
+          { event: "config.invalid", var: "SIGN_IN", paths: "<root>" },
+          { event: "config.invalid", var: "SIGN_IN", paths: "domains" },
+        ])
+      );
+      expect(invalid).toHaveLength(2);
     } finally {
       logged.mockRestore();
     }
