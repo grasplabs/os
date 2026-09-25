@@ -243,9 +243,14 @@ export const fakeGateway = (...replies: GatewayReply[]) => {
     }
     if ("hang" in reply) {
       const aborted = Promise.withResolvers<Response>();
-      request.signal.addEventListener("abort", () => {
+      const stop = () => {
         aborted.reject(new Error("The request was aborted"));
-      });
+      };
+      // It may have been aborted while its body was read.
+      if (request.signal.aborted) {
+        stop();
+      }
+      request.signal.addEventListener("abort", stop);
       return await aborted.promise;
     }
     if ("status" in reply) {

@@ -67,7 +67,7 @@ const auditedFor = async (
   return await mine();
 };
 
-/** An audit queue that is down. */
+/** A queue or database that is down. */
 const refuse = (): never => {
   throw new Error("Queue unavailable");
 };
@@ -563,6 +563,25 @@ describe("model gateway", () => {
     expect(result.text).toBe("Hello, Ada.");
     // The cron trigger sends what the queue refused.
     await sendAuditOutbox(env);
+    const [event] = await auditedFor(trigger.userId, 1);
+    expect(event).toMatchObject({ action: "model.call", actor: trigger });
+  });
+
+  it("keeps a paid answer when the database refuses its audit event, and sends the event straight to the queue", async () => {
+    const trigger = newPerson();
+    const { gatewayEnv } = withGateway([answer("Hello, Ada.")]);
+    const databaseDown = new Proxy(env.DB, {
+      get: () => refuse,
+    });
+
+    const result = await models({ ...gatewayEnv, DB: databaseDown }).call({
+      model: anthropic,
+      input: "Say hello.",
+      purpose: "chat.turn",
+      trigger,
+    });
+
+    expect(result.text).toBe("Hello, Ada.");
     const [event] = await auditedFor(trigger.userId, 1);
     expect(event).toMatchObject({ action: "model.call", actor: trigger });
   });
