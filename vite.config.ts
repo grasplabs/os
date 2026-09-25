@@ -91,6 +91,7 @@ export default defineConfig({
     projects: [
       "apps/*",
       "!apps/console",
+      "apps/core/vite.screens.config.ts",
       "packages/*",
       "packages/connectors/*",
     ],
