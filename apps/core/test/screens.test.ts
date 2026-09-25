@@ -20,8 +20,10 @@ export default function Desk() {
       <CardHeader>
         <CardTitle><Greeting name="desk" /></CardTitle>
       </CardHeader>
-      <CardContent className="grid grid-cols-3 gap-2">
-        <Button onClick={() => setCount(count + 1)}>Clicked {count}</Button>
+      <CardContent>
+        <div className="grid grid-cols-3 gap-2">
+          <Button onClick={() => setCount(count + 1)}>Clicked {count}</Button>
+        </div>
       </CardContent>
     </Card>
   );
@@ -104,8 +106,9 @@ describe("screen builds", { timeout: 60_000 }, () => {
   it("builds every screen into modules that run on the kit's", async () => {
     const built = await buildScreens(env, app(sampleApp));
     if (!built.ok) {
-      throw new Error(built.errors.join("\n"));
+      throw new Error(JSON.stringify(built.diagnostics, null, 2));
     }
+    expect(built.diagnostics).toStrictEqual([]);
 
     // Evaluating them links every import, the icon's too, without `require`.
     await expect(
@@ -166,31 +169,33 @@ export default function Desk() {
       })
     );
 
-    expect(built).toStrictEqual({
-      ok: false,
-      errors: [
-        expect.stringContaining(
-          'screens/desk.tsx:1: "left-pad" is outside the kit'
-        ),
-        expect.stringContaining(
-          'screens/desk.tsx:2: "@base-ui/react/dialog" is outside the kit'
-        ),
-        expect.stringContaining(
-          'screens/desk.tsx:3: "@grasp-os/ui/components/nope" is outside the kit'
-        ),
-        'screens/desk.tsx:4: "../../outside" is not a file in this App.',
-        'screens/desk.tsx:5: "NotAnIcon" is not a lucide-react icon.',
-        expect.stringContaining(
-          "screens/desk.tsx:6: import or export icons from lucide-react by name"
-        ),
-        expect.stringContaining(
-          "screens/desk.tsx:7: import or export icons from lucide-react by name"
-        ),
-        expect.stringContaining(
-          'screens/desk.tsx:9: "https://example.com/remote.js" is outside the kit'
-        ),
-      ],
-    });
+    expect(built.ok).toBeFalsy();
+    expect(
+      built.diagnostics.map(
+        ({ file, line, rule, message }) => `${file}:${line} ${rule}: ${message}`
+      )
+    ).toStrictEqual([
+      expect.stringContaining(
+        'screens/desk.tsx:1 imports: "left-pad" is outside the kit'
+      ),
+      expect.stringContaining(
+        'screens/desk.tsx:2 imports: "@base-ui/react/dialog" is outside the kit'
+      ),
+      expect.stringContaining(
+        'screens/desk.tsx:3 imports: "@grasp-os/ui/components/nope" is outside the kit'
+      ),
+      'screens/desk.tsx:4 imports: "../../outside" is not a file in this App.',
+      'screens/desk.tsx:5 imports: "NotAnIcon" is not a lucide-react icon.',
+      expect.stringContaining(
+        "screens/desk.tsx:6 imports: import or export icons from lucide-react by name"
+      ),
+      expect.stringContaining(
+        "screens/desk.tsx:7 imports: import or export icons from lucide-react by name"
+      ),
+      expect.stringContaining(
+        'screens/desk.tsx:9 imports: "https://example.com/remote.js" is outside the kit'
+      ),
+    ]);
   });
 
   it("builds a version once and serves it from the cache after", async () => {

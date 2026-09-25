@@ -23,15 +23,21 @@
   "dependencies": {
     "@babel/standalone": "catalog:",
     "@grasp-os/ui": "workspace:*",
+    "@shadcn/lint": "catalog:",
+    "@typescript-eslint/parser": "catalog:",
     "babel-plugin-react-compiler": "catalog:",
+    "eslint": "catalog:",
     "lucide-react": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:",
-    "tailwindcss": "catalog:"
+    "tailwindcss": "catalog:",
+    "typescript": "catalog:typescript6"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:",
     "@types/node": "catalog:",
+    "@types/react": "catalog:",
+    "ultracite": "catalog:",
     "vite-plus": "catalog:",
     "zod": "catalog:"
   }

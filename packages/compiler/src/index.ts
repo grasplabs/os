@@ -5,10 +5,13 @@
  * with an import map.
  */
 import { kitModules as builtKitModules, source, version } from "#isolate";
+import kit from "#kit";
 
+import { kitModule } from "./kit.ts";
 import type { KitModules } from "./kit.ts";
 import type ScreenCompiler from "./worker.ts";
 
+export type { Diagnostic } from "./diagnostic.ts";
 export type { KitModules } from "./kit.ts";
 export type { ScreenBuild } from "./worker.ts";
 /** Part of every build's cache key: a new compiler or kit builds again. */
@@ -18,7 +21,10 @@ export { version as compilerVersion } from "#isolate";
 export interface ScreenSource {
   app: string;
   version: string;
-  /** `screens/*.tsx` and `components/` files by path; other files are ignored. */
+  /**
+   * `screens/*.tsx`, `components/` files and declarations at the root
+   * (`*.d.ts`, e.g. the server's types) by path; other files are ignored.
+   */
   files: Record<string, string>;
 }
 
@@ -42,7 +48,7 @@ export const startScreenCompiler = (
       compatibilityDate,
       compatibilityFlags: ["nodejs_compat"],
       mainModule: "compiler.js",
-      modules: { "compiler.js": source },
+      modules: { "compiler.js": source, [kitModule]: { json: kit } },
       env: {},
       globalOutbound: null,
     }))
