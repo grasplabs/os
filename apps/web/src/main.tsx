@@ -1,4 +1,6 @@
+import "./zod-jitless.ts";
 import "./styles.css";
+import { CSPProvider } from "@base-ui/react/csp-provider";
 import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
@@ -20,6 +22,10 @@ if (!root) {
 
 createRoot(root).render(
   <StrictMode>
-    <RouterProvider router={router} />
+    {/* The CSP allows no inline <style>, so Base UI renders none of its
+        own; styles.css carries the rule they held. */}
+    <CSPProvider disableStyleElements>
+      <RouterProvider router={router} />
+    </CSPProvider>
   </StrictMode>
 );

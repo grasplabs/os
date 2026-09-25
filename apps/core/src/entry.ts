@@ -7,6 +7,7 @@ import { errorFields, log } from "./log.ts";
 import type { LogFields } from "./log.ts";
 import { checkRouterSecret } from "./router-secret.ts";
 import { rpcResponse } from "./rpc.ts";
+import { setSecurityHeaders } from "./security-headers.ts";
 
 /** Carries the request ID back to the caller, on every response. */
 const requestIdHeader = "x-request-id";
@@ -96,15 +97,20 @@ export const handleRequest = async (
 ): Promise<Response> => {
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
+  const url = new URL(request.url);
   const { response, level, fields } = await respond(request, env, requestId);
   // One line per request. Only the path: query strings can carry tokens.
   log[level]("request", {
     requestId,
     method: request.method,
-    path: new URL(request.url).pathname,
+    path: url.pathname,
     status: response.status,
     durationMs: Date.now() - startedAt,
     ...fields,
   });
-  return withRequestId(response, requestId);
+  const tagged = withRequestId(response, requestId);
+  // On every response, not only the frontend's: a route added later that
+  // serves HTML is covered too.
+  setSecurityHeaders(tagged.headers, url);
+  return tagged;
 };

@@ -10,13 +10,15 @@
     "preview": "vp preview"
   },
   "dependencies": {
+    "@base-ui/react": "catalog:",
     "@grasp-os/sdk": "workspace:*",
     "@grasp-os/shared": "workspace:*",
     "@grasp-os/ui": "workspace:*",
     "@tanstack/react-router": "catalog:",
     "capnweb": "catalog:",
     "react": "catalog:",
-    "react-dom": "catalog:"
+    "react-dom": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@babel/core": "catalog:",
