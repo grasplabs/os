@@ -1,5 +1,6 @@
 import { runIdSchema } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
+import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
 
 import { isNonRetryable } from "./engine.ts";
@@ -452,9 +453,13 @@ export const testRun = async <Output>(
 // equal values compare equal whatever order their keys are in.
 const canonical = (value: unknown): string => {
   const stored = JSON.stringify(value);
-  return stored === undefined
-    ? "undefined"
-    : canonicalJson(z.json().parse(JSON.parse(stored)));
+  if (stored === undefined) {
+    return "undefined";
+  }
+  // SAFETY: parsing JSON text always gives a JSON value.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+  const parsed = JSON.parse(stored) as Json;
+  return canonicalJson(parsed);
 };
 
 const describeValue = (value: unknown): string =>
