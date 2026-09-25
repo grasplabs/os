@@ -1,6 +1,7 @@
 import { sso } from "@better-auth/sso";
 import { roleSchema } from "@grasp-os/shared";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { canonicalJson } from "@grasp-os/shared/json";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import {
   APIError,
@@ -15,7 +16,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
-import { actorOf } from "../audit.ts";
+import { actorOf, audit } from "../audit.ts";
 import {
   accounts,
   invitations,
@@ -280,15 +281,25 @@ const auditedChanges: Record<
 /**
  * Records a change Better Auth has made: its event goes into the audit
  * outbox, in the same database, and is sent from there, again by the cron
- * trigger if sending fails now. The change has already happened, so a
- * failure to store the event is logged rather than turned into a failed
- * request.
+ * trigger if sending fails now. Better Auth commits the change itself, so
+ * the event can't join its batch. If storing it fails, the event goes to
+ * the audit queue directly; if that fails too, it is written to the logs,
+ * so a change is never left without a record. A failed request wouldn't
+ * undo the change, so none of this fails the request.
  */
 const record = async (env: Env, entry: AuditEntry): Promise<void> => {
   try {
     await outboxed(drizzle(env.DB), entry);
-  } catch (error) {
-    log.error("audit.failed", { action: entry.action, ...errorFields(error) });
+  } catch (outboxError) {
+    log.error("audit.outbox.store_failed", errorFields(outboxError));
+    try {
+      await audit(env).log(entry);
+    } catch (queueError) {
+      log.error("audit.lost", {
+        ...errorFields(queueError),
+        entry: canonicalJson(entry),
+      });
+    }
     return;
   }
   await sendAuditOutboxNow(env);
