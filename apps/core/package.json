@@ -29,6 +29,7 @@
     "@grasp-os/connect": "workspace:*",
     "@grasp-os/web": "workspace:*",
     "drizzle-kit": "catalog:",
+    "vite-plus": "catalog:",
     "wrangler": "catalog:"
   }
 }

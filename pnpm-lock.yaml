@@ -349,6 +349,9 @@ importers:
       drizzle-kit:
         specifier: 'catalog:'
         version: 0.31.11
+      vite-plus:
+        specifier: 'catalog:'
+        version: 0.3.3(@types/node@26.6.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(typescript@7.0.2)(yaml@2.9.1)
       wrangler:
         specifier: 'catalog:'
         version: 4.136.0(@cloudflare/workers-types@5.20260921.1)(@types/node@26.6.2)
