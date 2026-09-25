@@ -1,5 +1,7 @@
-// Dev-only check that the UI kit renders with the theme, in light and dark
-// mode (e2e/kit.e2e.ts). Not product UI: production builds answer not found.
+// Local check that the UI kit renders with the theme, in light and dark mode
+// (e2e/kit.e2e.ts). Not product UI: builds in production mode answer not
+// found. Gated on the mode rather than `DEV`, because the local stack serves
+// a `--mode development` build, which Vite still builds with `DEV` false.
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -191,7 +193,7 @@ const Kit = () => (
 
 export const Route = createFileRoute("/kit")({
   beforeLoad: () => {
-    if (!import.meta.env.DEV) {
+    if (import.meta.env.MODE === "production") {
       throw notFound();
     }
   },
