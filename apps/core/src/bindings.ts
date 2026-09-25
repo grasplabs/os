@@ -9,7 +9,10 @@ import type { Authority, PermissionObject } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
+import type { CollectionBinding } from "./knowledge/binding.ts";
 import { authorize, grantedPermissions } from "./permissions.ts";
+import { requireUnrestricted } from "./restricted.ts";
+import type { WorkContext } from "./restricted.ts";
 
 // What Apps and agents get in their env: one stub per granted permission,
 // and nothing else. Each stub is a loopback entrypoint of core whose props
@@ -21,14 +24,16 @@ import { authorize, grantedPermissions } from "./permissions.ts";
 type ConnectionObject = Extract<PermissionObject, { type: "connection" }>;
 
 /**
- * Calls an action on a connection for an App or agent: checks the
- * permission (only `permissionId`, when given), then signs the capability
+ * Calls an action on a connection for an App or agent working in
+ * `context`: checks the permission (only `permissionId`, when given) and
+ * that `context` isn't in restricted mode, then signs the capability
  * connect needs for exactly this call. Core makes capabilities here and
  * nowhere else, and nothing outside core reaches this function.
  */
 export const callConnection = async (
   env: Env,
   authority: Authority,
+  context: WorkContext,
   connection: ConnectionObject,
   {
     action,
@@ -38,6 +43,7 @@ export const callConnection = async (
   permissionId?: PermissionId
 ): Promise<ConnectResult> => {
   await authorize(env, authority, connection, action, permissionId);
+  await requireUnrestricted(env, context);
   const scope = {
     connectionId: connection.connectionId,
     resource: connection.resource,
@@ -56,7 +62,7 @@ export const callConnection = async (
  * What an error looks like inside a sandbox: expected refusals as they are,
  * anything else replaced, so no internals reach App or agent code.
  */
-const forSandbox = (error: unknown): Error => {
+export const forSandbox = (error: unknown): Error => {
   if (!isExpectedError(error)) {
     log.error("binding.failed", errorFields(error));
   }
@@ -74,6 +80,7 @@ const stubCallSchema = z.tuple([
 
 interface ConnectionBindingProps {
   authority: Authority;
+  context: WorkContext;
   /** The permission the stub was built from: only it counts on each call. */
   permissionId: PermissionId;
   connection: ConnectionObject;
@@ -93,7 +100,7 @@ export class ConnectionBinding extends WorkerEntrypoint<
     input: unknown,
     options?: unknown
   ): Promise<ConnectResult> {
-    const { authority, permissionId, connection } = this.ctx.props;
+    const { authority, context, permissionId, connection } = this.ctx.props;
     const call = stubCallSchema.safeParse([action, input, options]);
     if (!call.success) {
       throw connectErrors.create("connect.invalid_call");
@@ -103,6 +110,7 @@ export class ConnectionBinding extends WorkerEntrypoint<
       return await callConnection(
         this.env,
         authority,
+        context,
         connection,
         {
           action: checkedAction,
@@ -118,10 +126,11 @@ export class ConnectionBinding extends WorkerEntrypoint<
 }
 
 /**
- * The env for one authority, built from the permission records as they are
- * now: one stub per active permission, under the permission's binding name.
- * Every stub acts for `authority.onBehalfOf`. Throws
- * `permission.person_inactive` when that person has left.
+ * The env for one authority working in `context`, built from the
+ * permission records as they are now: one stub per active permission,
+ * under the permission's binding name. Every stub acts for
+ * `authority.onBehalfOf`, and keeps its restricted mode in `context`.
+ * Throws `permission.person_inactive` when that person has left.
  *
  * That fits a workflow run, which acts for one person: the dispatcher
  * builds it on every start and resume, so a revoked permission is gone from
@@ -130,21 +139,33 @@ export class ConnectionBinding extends WorkerEntrypoint<
  * it. The App sandbox has to take the person from the host on each call (or
  * give App authority no person); that design is the sandbox's.
  *
- * Collections and workflows get their stubs with the Knowledge API and the
- * workflow dispatcher; until then nothing reaches them.
+ * Workflows get their stubs with the workflow dispatcher; until then
+ * nothing reaches them.
  */
 export const bindingsFor = async (
   env: Env,
-  authority: Authority
-): Promise<Record<string, Fetcher<ConnectionBinding>>> => {
-  const bindings: Record<string, Fetcher<ConnectionBinding>> = {};
+  authority: Authority,
+  context: WorkContext
+): Promise<
+  Record<string, Fetcher<ConnectionBinding> | Fetcher<CollectionBinding>>
+> => {
+  const bindings: Record<
+    string,
+    Fetcher<ConnectionBinding> | Fetcher<CollectionBinding>
+  > = {};
   for (const { id, binding, object } of await grantedPermissions(
     env,
     authority
   )) {
+    const name = bindingNameSchema.parse(binding);
+    const props = { authority, context, permissionId: id };
     if (object.type === "connection") {
-      bindings[bindingNameSchema.parse(binding)] = exports.ConnectionBinding({
-        props: { authority, permissionId: id, connection: object },
+      bindings[name] = exports.ConnectionBinding({
+        props: { ...props, connection: object },
+      });
+    } else if (object.type === "collection") {
+      bindings[name] = exports.CollectionBinding({
+        props: { ...props, collectionId: object.collectionId },
       });
     }
   }

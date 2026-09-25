@@ -1,20 +1,22 @@
 import type {
-  Backlink,
+  BacklinkPage,
   Collection,
   CollectionInput,
+  DocumentPage,
   DocumentRead,
   DocumentSummary,
   HistoryOptions,
+  HistoryPage,
   KnowledgeApi,
   ListDocumentsOptions,
   RestoreInput,
   SaveInput,
-  VersionSummary,
 } from "@grasp-os/shared/knowledge";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
 import type { SessionCheck } from "../session-rpc.ts";
+import type { Reader } from "./access.ts";
 import { createCollection, listCollections } from "./collections.ts";
 import {
   backlinks,
@@ -45,9 +47,15 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
     return await run(await this.#check());
   }
 
-  async listCollections(): Promise<Collection[]> {
+  async #asReader<T>(run: (reader: Reader) => Promise<T>): Promise<T> {
     return await this.#asPerson(
-      async (person) => await listCollections(this.#env, person)
+      async (person) => await run({ type: "person", person })
+    );
+  }
+
+  async listCollections(): Promise<Collection[]> {
+    return await this.#asReader(
+      async (reader) => await listCollections(this.#env, reader)
     );
   }
 
@@ -60,10 +68,10 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   async listDocuments(
     collectionId: string,
     options?: ListDocumentsOptions
-  ): Promise<DocumentSummary[]> {
-    return await this.#asPerson(
-      async (person) =>
-        await listDocuments(this.#env, person, collectionId, options)
+  ): Promise<DocumentPage> {
+    return await this.#asReader(
+      async (reader) =>
+        await listDocuments(this.#env, reader, collectionId, options)
     );
   }
 
@@ -71,9 +79,9 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
     documentId: string,
     version?: number
   ): Promise<DocumentRead> {
-    return await this.#asPerson(
-      async (person) =>
-        await getDocument(this.#env, person, documentId, version)
+    return await this.#asReader(
+      async (reader) =>
+        await getDocument(this.#env, reader, documentId, version)
     );
   }
 
@@ -86,9 +94,9 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   async history(
     documentId: string,
     options?: HistoryOptions
-  ): Promise<VersionSummary[]> {
-    return await this.#asPerson(
-      async (person) => await history(this.#env, person, documentId, options)
+  ): Promise<HistoryPage> {
+    return await this.#asReader(
+      async (reader) => await history(this.#env, reader, documentId, options)
     );
   }
 
@@ -101,9 +109,9 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   async backlinks(
     documentId: string,
     options?: ListDocumentsOptions
-  ): Promise<Backlink[]> {
-    return await this.#asPerson(
-      async (person) => await backlinks(this.#env, person, documentId, options)
+  ): Promise<BacklinkPage> {
+    return await this.#asReader(
+      async (reader) => await backlinks(this.#env, reader, documentId, options)
     );
   }
 }

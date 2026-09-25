@@ -1,0 +1,1 @@
+ALTER TABLE `chats` ADD `restricted` integer DEFAULT false NOT NULL;

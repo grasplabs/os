@@ -1,3 +1,5 @@
+import type { AppId } from "@grasp-os/shared/ids";
+
 /**
  * Durable Objects keep their data in the EU. workerd doesn't implement
  * jurisdictions (tests, local dev) and on-prem has no Cloudflare jurisdiction,
@@ -13,3 +15,7 @@ export const inJurisdiction = <T extends Rpc.DurableObjectBranded | undefined>(
   env.DURABLE_OBJECT_JURISDICTION === "none"
     ? namespace
     : namespace.jurisdiction("eu");
+
+/** The object that hosts an App's server code (app.ts), named by the App's ID. */
+export const appHost = (env: Env, app: AppId) =>
+  inJurisdiction(env, env.APPS).getByName(app);

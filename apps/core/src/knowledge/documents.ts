@@ -11,15 +11,18 @@ import {
   versionInputSchema,
 } from "@grasp-os/shared/knowledge";
 import type {
-  Backlink,
+  BacklinkPage,
+  DocumentPage,
   DocumentRead,
   DocumentSummary,
   DocumentType,
+  HistoryPage,
   Version,
   VersionSummary,
 } from "@grasp-os/shared/knowledge";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, desc, eq, gt, lt, ne } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
@@ -36,7 +39,8 @@ import {
   sections,
   versions,
 } from "../db/knowledge/schema.ts";
-import { readableBy } from "./access.ts";
+import { allowedCollections, recordRead } from "./access.ts";
+import type { Reader } from "./access.ts";
 import { readableCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
 import {
@@ -344,12 +348,12 @@ const parseOrInvalid = <Output>(
 };
 
 /**
- * The document with `documentId` and its collection, if `person` may read
- * it. A malformed ID is one that doesn't exist.
+ * The document with `documentId` and its collection, if it is in one of the
+ * `allowed` collections. A malformed ID is one that doesn't exist.
  */
 const readableDocument = async (
   db: DrizzleD1Database,
-  person: Identity,
+  allowed: SQL,
   documentId: unknown
 ): Promise<{ document: DocumentRow; collection: CollectionRow }> => {
   const id = documentIdInputSchema.safeParse(documentId);
@@ -358,7 +362,7 @@ const readableDocument = async (
         .select({ document: documents, collection: collections })
         .from(documents)
         .innerJoin(collections, eq(collections.id, documents.collectionId))
-        .where(and(eq(documents.id, id.data), readableBy(db, person)))
+        .where(and(eq(documents.id, id.data), allowed))
         .get()
     : undefined;
   if (!found) {
@@ -377,9 +381,10 @@ export const saveDocument = async (
     saveInputSchema,
     input
   );
+  const db = drizzle(env.KNOWLEDGE);
   const collection = await readableCollection(
-    drizzle(env.KNOWLEDGE),
-    person,
+    db,
+    await allowedCollections(env, db, { type: "person", person }),
     collectionId
   );
   requireWritable(person, collection);
@@ -406,7 +411,7 @@ export const restoreVersion = async (
   const db = drizzle(env.KNOWLEDGE);
   const { document, collection } = await readableDocument(
     db,
-    person,
+    await allowedCollections(env, db, { type: "person", person }),
     documentId
   );
   requireWritable(person, collection);
@@ -433,7 +438,7 @@ export const restoreVersion = async (
 /** A document with its current version, or with `version`. */
 export const getDocument = async (
   env: Env,
-  person: Identity,
+  reader: Reader,
   documentId: unknown,
   version?: unknown
 ): Promise<DocumentRead> => {
@@ -442,7 +447,11 @@ export const getDocument = async (
       ? undefined
       : parseOrInvalid(versionInputSchema, version);
   const db = drizzle(env.KNOWLEDGE);
-  const { document } = await readableDocument(db, person, documentId);
+  const { document, collection } = await readableDocument(
+    db,
+    await allowedCollections(env, db, reader),
+    documentId
+  );
   const row = await db
     .select({ ...versionSummaryColumns, text: versions.text })
     .from(versions)
@@ -457,19 +466,21 @@ export const getDocument = async (
     throw knowledgeErrors.create("knowledge.not_found");
   }
   const read: Version = { ...toVersionSummary(row), text: row.text };
-  return { ...toSummary(document), version: read };
+  const provenance = await recordRead(env, reader, collection);
+  return { ...toSummary(document), version: read, provenance };
 };
 
 /** A page of a collection's documents, in path order. */
 export const listDocuments = async (
   env: Env,
-  person: Identity,
+  reader: Reader,
   collectionId: unknown,
   options?: unknown
-): Promise<DocumentSummary[]> => {
+): Promise<DocumentPage> => {
   const { after, limit } = parseOrInvalid(listDocumentsOptionsSchema, options);
   const db = drizzle(env.KNOWLEDGE);
-  const collection = await readableCollection(db, person, collectionId);
+  const allowed = await allowedCollections(env, db, reader);
+  const collection = await readableCollection(db, allowed, collectionId);
   const rows = await db
     .select({ document: documents })
     .from(documents)
@@ -477,28 +488,34 @@ export const listDocuments = async (
     .where(
       and(
         eq(documents.collectionId, collection.id),
-        readableBy(db, person),
+        allowed,
         after === undefined ? undefined : gt(documents.path, after)
       )
     )
     .orderBy(asc(documents.path))
     .limit(limit);
-  return rows.map(({ document }) => toSummary(document));
+  const provenance = await recordRead(env, reader, collection);
+  return {
+    documents: rows.map(({ document }) => toSummary(document)),
+    provenance,
+  };
 };
 
 /** A page of a document's versions, newest first, without their text. */
 export const history = async (
   env: Env,
-  person: Identity,
+  reader: Reader,
   documentId: unknown,
   options?: unknown
-): Promise<VersionSummary[]> => {
+): Promise<HistoryPage> => {
   const { before, limit } = parseOrInvalid(historyOptionsSchema, options);
   const db = drizzle(env.KNOWLEDGE);
-  const id = documentIdInputSchema.safeParse(documentId);
-  if (!id.success) {
-    throw knowledgeErrors.create("knowledge.not_found");
-  }
+  const allowed = await allowedCollections(env, db, reader);
+  const { document, collection } = await readableDocument(
+    db,
+    allowed,
+    documentId
+  );
   const rows = await db
     .select(versionSummaryColumns)
     .from(versions)
@@ -506,36 +523,39 @@ export const history = async (
     .innerJoin(collections, eq(collections.id, documents.collectionId))
     .where(
       and(
-        eq(versions.documentId, id.data),
-        readableBy(db, person),
+        eq(versions.documentId, document.id),
+        allowed,
         before === undefined ? undefined : lt(versions.number, before)
       )
     )
     .orderBy(desc(versions.number))
     .limit(limit);
-  if (rows.length === 0) {
-    // Tells an empty page apart from a document that isn't there.
-    await readableDocument(db, person, id.data);
-  }
-  return rows.map(toVersionSummary);
+  const provenance = await recordRead(env, reader, collection);
+  return { versions: rows.map(toVersionSummary), provenance };
 };
 
 const linking = alias(documents, "linking");
 
 /**
  * A page of the documents that link to this one, in path order after
- * `after`: only those in collections `person` may read. Links name paths in
- * their own collection, so a path is enough to page by.
+ * `after`: only those in collections `reader` may read. Links name paths in
+ * their own collection, so a path is enough to page by, and every backlink
+ * is in the document's own collection: the read's provenance.
  */
 export const backlinks = async (
   env: Env,
-  person: Identity,
+  reader: Reader,
   documentId: unknown,
   options?: unknown
-): Promise<Backlink[]> => {
+): Promise<BacklinkPage> => {
   const { after, limit } = parseOrInvalid(listDocumentsOptionsSchema, options);
   const db = drizzle(env.KNOWLEDGE);
-  const { document } = await readableDocument(db, person, documentId);
+  const allowed = await allowedCollections(env, db, reader);
+  const { document, collection } = await readableDocument(
+    db,
+    allowed,
+    documentId
+  );
   const rows = await db
     .select({
       documentId: linking.id,
@@ -552,15 +572,19 @@ export const backlinks = async (
         eq(links.toCollectionId, document.collectionId),
         eq(links.toPath, document.path),
         ne(linking.id, document.id),
-        readableBy(db, person),
+        allowed,
         after === undefined ? undefined : gt(linking.path, after)
       )
     )
     .orderBy(asc(linking.path))
     .limit(limit);
-  return rows.map((row) => ({
-    ...row,
-    documentId: documentIdSchema.parse(row.documentId),
-    collectionId: collectionIdSchema.parse(row.collectionId),
-  }));
+  const provenance = await recordRead(env, reader, collection);
+  return {
+    backlinks: rows.map((row) => ({
+      ...row,
+      documentId: documentIdSchema.parse(row.documentId),
+      collectionId: collectionIdSchema.parse(row.collectionId),
+    })),
+    provenance,
+  };
 };

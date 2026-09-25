@@ -1,6 +1,7 @@
 import { chatIdSchema } from "@grasp-os/shared/ids";
-import type { WorkspaceId } from "@grasp-os/shared/ids";
+import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import { DurableObject } from "cloudflare:workers";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 
 import { migrateOnWake } from "./db/migrate.ts";
@@ -29,6 +30,36 @@ export class Workspace extends DurableObject<Env> {
       })
       .returning()
       .get();
+  }
+
+  // Restricted mode of a chat (see restricted.ts). A chat that isn't here
+  // has nowhere to keep it, so both throw for one, and whatever asked is
+  // refused.
+
+  /** Whether the chat has read restricted data. */
+  isChatRestricted(chatId: ChatId): boolean {
+    const chat = this.#db
+      .select({ restricted: chats.restricted })
+      .from(chats)
+      .where(eq(chats.id, chatId))
+      .get();
+    if (!chat) {
+      throw new Error("No such chat in this workspace");
+    }
+    return chat.restricted;
+  }
+
+  /** Puts the chat in restricted mode, for good. */
+  restrictChat(chatId: ChatId): void {
+    const changed = this.#db
+      .update(chats)
+      .set({ restricted: true })
+      .where(eq(chats.id, chatId))
+      .returning({ id: chats.id })
+      .all();
+    if (changed.length === 0) {
+      throw new Error("No such chat in this workspace");
+    }
   }
 }
 

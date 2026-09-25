@@ -21,6 +21,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { bindingsFor } from "../src/bindings.ts";
 import worker from "../src/index.ts";
 import { authorize } from "../src/permissions.ts";
+import { connectionIn, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
 import { auditedDuring, openRpc, signedInWithRole } from "./sign-in.ts";
 
@@ -78,29 +79,31 @@ const outcome = async (promise: Promise<unknown>): Promise<string> => {
   }
 };
 
-type Stub = Awaited<ReturnType<typeof bindingsFor>>[string];
+/** The env an agent gets for `authority`, in a chat of its own. */
+const envOf = async (authority: Authority) =>
+  await bindingsFor(env, authority, await newChat());
 
 /**
- * What App code gets when it calls a connection stub from its env.
- * These tests register no connection in connect, so
+ * What App code gets when it calls the connection stub `binding` from its
+ * env. These tests register no connection in connect, so
  * "connect.connection_not_found" is a call that passed every check, core's
  * and connect's capability check.
  */
 const callStub = async (
-  stub: Stub | undefined,
+  bindings: Awaited<ReturnType<typeof envOf>>,
+  binding = "OUTLOOK",
   action = "mail.list"
-): Promise<string> =>
-  stub ? await outcome(stub.call(action, {})) : "no binding";
+): Promise<string> => {
+  const stub = connectionIn(bindings, binding);
+  return stub ? await outcome(stub.call(action, {})) : "no binding";
+};
 
 /** Builds the env as an App load or a workflow resume does, and calls `binding`. */
 const callThrough = async (
   authority: Authority,
   binding: string,
   action = "mail.list"
-): Promise<string> => {
-  const bindings = await bindingsFor(env, authority);
-  return await callStub(bindings[binding], action);
-};
+): Promise<string> => await callStub(await envOf(authority), binding, action);
 
 /** Runs core's cron trigger, as Cloudflare does every minute. */
 const runCron = async () => {
@@ -177,7 +180,7 @@ describe("permissions", () => {
     await admin.api.grantPermission(id);
 
     // A running App or workflow keeps the env it was given.
-    const { OUTLOOK: held } = await bindingsFor(env, authority);
+    const held = await envOf(authority);
     await expect(callStub(held)).resolves.toBe(reached);
 
     const revoked = await admin.api.revokePermission(id);
@@ -187,7 +190,7 @@ describe("permissions", () => {
     });
     await expect(callStub(held)).resolves.toBe("permission.denied");
     // The next load or resume doesn't get it at all.
-    await expect(bindingsFor(env, authority)).resolves.toStrictEqual({});
+    await expect(envOf(authority)).resolves.toStrictEqual({});
     // And it can't be granted back to life.
     await expect(outcome(admin.api.grantPermission(id))).resolves.toBe(
       "permission.not_requested"
@@ -207,7 +210,7 @@ describe("permissions", () => {
     };
     const first = await grant("OUTLOOK");
     await grant("OUTLOOK_TOO");
-    const { OUTLOOK: held } = await bindingsFor(env, authority);
+    const held = await envOf(authority);
 
     await admin.api.revokePermission(first.id);
     await expect(
@@ -310,13 +313,13 @@ describe("permissions", () => {
     const { id } = await admin.api.requestPermission(outlook(app));
     await admin.api.grantPermission(id);
     const authority = actingFor(app, builder.userId);
-    const { OUTLOOK: held } = await bindingsFor(env, authority);
+    const held = await envOf(authority);
 
     await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
       .bind(builder.userId)
       .run();
     await expect(callStub(held)).resolves.toBe("permission.person_inactive");
-    await expect(outcome(bindingsFor(env, authority))).resolves.toBe(
+    await expect(outcome(envOf(authority))).resolves.toBe(
       "permission.person_inactive"
     );
   });
@@ -343,8 +346,8 @@ describe("permissions", () => {
       binding: "SOMEONE_ELSES",
     });
 
-    const bindings = await bindingsFor(env, actingFor(app, admin.userId));
-    expect(Object.keys(bindings)).toStrictEqual(["OUTLOOK"]);
+    const bindings = await envOf(actingFor(app, admin.userId));
+    expect(Object.keys(bindings)).toStrictEqual(["OUTLOOK", "POLICIES"]);
   });
 
   it("are refused when they would reach past a stub's names", async () => {
