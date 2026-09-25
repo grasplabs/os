@@ -1,5 +1,5 @@
-import { model, money, person, workflow, z } from "../src/workflow.ts";
-import type { DecisionRequest } from "../src/workflow.ts";
+import { model, money, person, workflow, z } from "@grasp-os/sdk/workflow";
+import type { DecisionRequest } from "@grasp-os/sdk/workflow";
 
 /**
  * The outside systems the sample invoice workflow talks to. Connectors aren't
@@ -47,33 +47,14 @@ export const invoiceWorkflow = (systems: InvoiceSystems) =>
         }),
       },
       triggers: [{ type: "event", event: "invoice.received" }],
-      steps: {
-        "match-po": {
-          kind: "exact",
-          description: "Find the purchase order the invoice refers to",
-        },
-        extract: {
-          kind: "ai",
-          description: "Read the total and currency from the invoice",
-          uses: ["extractionModel"],
-          retries: 2,
-        },
-        review: {
-          kind: "decision",
-          description: "Ask the reviewer to approve invoices above the limit",
-          uses: ["threshold", "reviewer"],
-        },
-        book: {
-          kind: "exact",
-          description: "Book the invoice in the ledger",
-          sideEffect: true,
-          locked: true,
-        },
-      },
     },
     async (step, { input, params }) => {
       const order = await step.do(
         "match-po",
+        {
+          description: "Find the purchase order the invoice refers to",
+          locked: true,
+        },
         async () => await systems.findPurchaseOrder(input.purchaseOrder)
       );
       if (!order) {
@@ -81,13 +62,18 @@ export const invoiceWorkflow = (systems: InvoiceSystems) =>
       }
 
       const extracted = await step.llm("extract", {
+        description: "Read the total and currency from the invoice",
         model: params.extractionModel,
+        instructions:
+          "Read the invoice's total amount and its ISO 4217 currency code.",
         input: input.text,
         schema: extractionSchema,
+        retries: 2,
       });
 
       if (extracted.total > params.threshold) {
         const decision = await step.decision("review", {
+          description: "Ask the reviewer to approve invoices above the limit",
           from: params.reviewer,
           ask: systems.askReviewer,
           timeout: "7 days",
@@ -100,6 +86,11 @@ export const invoiceWorkflow = (systems: InvoiceSystems) =>
 
       const entry = await step.do(
         "book",
+        {
+          description: "Book the invoice in the ledger",
+          sideEffect: true,
+          locked: true,
+        },
         async ({ idempotencyKey }) =>
           await systems.book(
             { invoice: input.number, total: extracted.total },

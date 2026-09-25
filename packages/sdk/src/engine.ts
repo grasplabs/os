@@ -19,8 +19,10 @@ export type EngineEvent =
 export interface ModelRequest {
   /** The step the call is made for, for the audit log and cost reporting. */
   step: string;
-  /** Model to use; the deployment's default when missing. */
-  model?: string;
+  model: string;
+  /** What the model is asked to do. */
+  instructions: string;
+  /** What it works on. */
   input: JsonValue;
   /** The model must answer with JSON that matches this schema. */
   outputSchema: z.core.JSONSchema.JSONSchema;

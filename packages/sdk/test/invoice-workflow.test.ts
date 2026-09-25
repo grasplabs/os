@@ -13,6 +13,9 @@ import type { DecisionRequest } from "../src/workflow.ts";
 import { createFakeEngine } from "./fake-engine.ts";
 import { invoiceWorkflow } from "./invoice-workflow.ts";
 import type { InvoiceSystems } from "./invoice-workflow.ts";
+// oxlint-disable-next-line import/default -- Vite's `?raw` import; typed in raw.d.ts
+import invoiceSource from "./invoice-workflow.ts?raw";
+import { outlineOf } from "./outline.ts";
 
 const invoice = {
   number: "INV-7",
@@ -61,41 +64,77 @@ describe("the sample invoice workflow", () => {
     vi.useRealTimers();
   });
 
-  it("exposes every step, including the decision behind the threshold", () => {
-    const { metadata } = invoiceWorkflow(fakeSystems());
-
-    expect(metadata.steps).toStrictEqual([
+  it("lists its steps from the code, with the review nested under its condition", () => {
+    expect(outlineOf(invoiceSource)).toStrictEqual([
       {
+        type: "step",
         name: "match-po",
         kind: "exact",
         description: "Find the purchase order the invoice refers to",
-        params: [],
         sideEffect: false,
-        locked: false,
+        locked: true,
+        params: [],
+        options: {},
       },
       {
+        type: "step",
         name: "extract",
         kind: "ai",
         description: "Read the total and currency from the invoice",
-        params: ["extractionModel"],
         sideEffect: false,
         locked: false,
+        params: ["extractionModel"],
+        options: {
+          instructions:
+            "Read the invoice's total amount and its ISO 4217 currency code.",
+          retries: 2,
+        },
       },
       {
-        name: "review",
-        kind: "decision",
-        description: "Ask the reviewer to approve invoices above the limit",
-        params: ["threshold", "reviewer"],
-        sideEffect: true,
-        locked: false,
+        type: "branch",
+        condition: "extracted.total > params.threshold",
+        params: ["threshold"],
+        steps: [
+          {
+            type: "step",
+            name: "review",
+            kind: "decision",
+            description: "Ask the reviewer to approve invoices above the limit",
+            sideEffect: true,
+            locked: false,
+            params: ["reviewer"],
+            options: { timeout: "7 days", remindAfter: "2 days" },
+          },
+        ],
+        otherwise: [],
       },
       {
+        type: "step",
         name: "book",
         kind: "exact",
         description: "Book the invoice in the ledger",
-        params: [],
         sideEffect: true,
         locked: true,
+        params: [],
+        options: {},
+      },
+    ]);
+  });
+
+  it("asks the model with the instructions and the model parameter", async () => {
+    const { engine, modelRequests } = createFakeEngine({
+      model: modelSays(4000),
+    });
+
+    await invoiceWorkflow(fakeSystems()).run(engine, invoice);
+
+    expect(modelRequests).toMatchObject([
+      {
+        step: "extract",
+        model: "mistral-large",
+        instructions:
+          "Read the invoice's total amount and its ISO 4217 currency code.",
+        input: "Total €8,000",
       },
     ]);
   });
@@ -159,7 +198,7 @@ describe("the sample invoice workflow", () => {
       {
         link: "https://grasp.test/decisions/review",
         reminder: false,
-        idempotencyKey: "run-1:review:ask",
+        idempotencyKey: "run-1:review#ask",
       },
     ]);
   });

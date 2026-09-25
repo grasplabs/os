@@ -7,10 +7,16 @@
   "exports": {
     "./workflow": "./src/workflow.ts",
     "./engine": "./src/engine.ts",
+    "./describe": "./src/describe.ts",
     "./screen": "./src/screen.ts"
   },
   "dependencies": {
+    "@babel/parser": "catalog:",
     "@grasp-os/shared": "workspace:*",
     "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@babel/types": "catalog:",
+    "@cloudflare/vitest-pool-workers": "catalog:"
   }
 }

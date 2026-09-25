@@ -9,6 +9,12 @@ catalogs:
     '@babel/core':
       specifier: 7.29.7
       version: 7.29.7
+    '@babel/parser':
+      specifier: 7.29.9
+      version: 7.29.9
+    '@babel/types':
+      specifier: 7.29.8
+      version: 7.29.8
     '@base-ui/react':
       specifier: 1.8.0
       version: 1.8.0
@@ -464,12 +470,22 @@ importers:
 
   packages/sdk:
     dependencies:
+      '@babel/parser':
+        specifier: 'catalog:'
+        version: 7.29.9
       '@grasp-os/shared':
         specifier: workspace:*
         version: link:../shared
       zod:
         specifier: 'catalog:'
         version: 4.6.5
+    devDependencies:
+      '@babel/types':
+        specifier: 'catalog:'
+        version: 7.29.8
+      '@cloudflare/vitest-pool-workers':
+        specifier: 'catalog:'
+        version: 0.22.0(@cloudflare/workers-types@5.20260921.1)(@types/node@26.6.2)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)
 
   packages/shared:
     dependencies:

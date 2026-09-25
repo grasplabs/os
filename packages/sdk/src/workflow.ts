@@ -4,24 +4,23 @@ import { z } from "zod";
 
 import { decisionAnswerSchema } from "./engine.ts";
 import type { EngineEvent, JsonValue, WorkflowEngine } from "./engine.ts";
+import { namePattern } from "./steps.ts";
 
 /**
  * Workflow SDK: the only API workflow code sees. A workflow declares its
- * parameters and steps up front, then runs them in code:
+ * parameters, then runs its steps in code, each with its options inline:
  *
  * ```ts
  * export default workflow("invoice-approval", {
  *   params: { threshold: money({ label: "Review invoices above", default: 5000 }) },
- *   steps: { book: { kind: "exact", description: "Book the invoice", sideEffect: true } },
  * }, async (step, { params }) => {
- *   await step.do("book", async ({ idempotencyKey }) => ...);
+ *   await step.do("book", { description: "Book the invoice", sideEffect: true },
+ *     async ({ idempotencyKey }) => ...);
  * });
  * ```
  *
- * Steps are declared rather than discovered by running the code, so the step
- * list (for the UI and for review) includes steps behind branches that a given
- * run never reaches. The types tie the two together: code can only run a
- * declared step, with the method for its kind.
+ * The code is the only source of truth: `describeWorkflow` in
+ * `@grasp-os/sdk/describe` reads the step list from it.
  */
 
 // Workflow code imports only this module, so it gets Zod from here too.
@@ -36,8 +35,8 @@ export type WorkflowErrorCode =
   | "workflow.invalid_event";
 
 /**
- * Thrown for a workflow that is wrong: a bad definition, a step run twice or
- * with the wrong method, or a value that doesn't match its schema.
+ * Thrown for a workflow that is wrong: a bad definition, a bad step call, or
+ * a value that doesn't match its schema.
  */
 export class WorkflowError extends Error {
   /** Stable and machine-readable; branch on this, never on the message. */
@@ -131,70 +130,61 @@ export type ParamValues<P extends Params> = {
 
 // Steps
 
-/**
- * How a step works: `exact` is plain code, `ai` asks a model for output of a
- * fixed shape, `decision` waits for a person, `wait` waits for time or an
- * event.
- */
-export type StepKind = "exact" | "ai" | "decision" | "wait";
-
-interface BaseStep<ParamName extends string> {
-  /** What the step does, in plain language; shown to people. */
-  description: string;
-  /** Parameters the step depends on, shown next to it. */
-  uses?: readonly ParamName[];
-  /** Only a person may change or remove this step, never an agent. */
-  locked?: boolean;
-}
-
-/** Declares a step. The kind decides which `step` method runs it. */
-export type StepDeclaration<ParamName extends string = string> =
-  | (BaseStep<ParamName> & {
-      kind: "exact";
-      /**
-       * Changes something outside Grasp. The step gets an idempotency key to
-       * pass to connector calls, so a retry never does the change twice.
-       */
-      sideEffect?: boolean;
-      /** Extra attempts after a failure; the engine's default when missing. */
-      retries?: number;
-    })
-  | (BaseStep<ParamName> & {
-      kind: "ai";
-      sideEffect?: never;
-      /** Extra attempts after a failure or an answer that doesn't fit. */
-      retries?: number;
-    })
-  | (BaseStep<ParamName> & {
-      kind: "decision" | "wait";
-      sideEffect?: never;
-      retries?: never;
-    });
-
-type Steps<ParamName extends string> = Record<
-  string,
-  StepDeclaration<ParamName>
->;
-
-type StepsOfKind<S, Kind extends StepKind> = {
-  [Name in keyof S]: S[Name] extends { kind: Kind } ? Name : never;
-}[keyof S] &
-  string;
-
 /** A time span: milliseconds, or e.g. `"30 minutes"` or `"3 days"`. */
 export type Duration =
   | number
   | `${number} ${"second" | "minute" | "hour" | "day" | "week"}${"" | "s"}`;
 
+/** Options every step takes. */
+interface StepOptions {
+  /** What the step does, in plain language; the UI shows it. */
+  description: string;
+  /**
+   * Tells apart the runs of this step within one run, e.g. the ID of the
+   * item a loop is on. Without it, a step runs once per run.
+   */
+  key?: string | number;
+}
+
+export interface DoOptions extends StepOptions {
+  /**
+   * Changes something outside Grasp. The step gets an idempotency key to
+   * pass to connector calls, so a retry never does the change twice.
+   */
+  sideEffect?: boolean;
+  /**
+   * Deterministic, with no model involvement: totals, account numbers and
+   * references always come from a locked step.
+   */
+  locked?: boolean;
+  /** Extra attempts after a failure; the engine's default when missing. */
+  retries?: number;
+}
+
 /** Passed to a side-effect step: hand `idempotencyKey` to connector calls. */
 export interface SideEffectContext {
-  /** `runId:stepName`; the same on every retry and replay of the step. */
+  /**
+   * `runId:stepName` (`runId:stepName:key` for a keyed step); the same on
+   * every retry and replay of the step.
+   */
   idempotencyKey: string;
 }
 
-type ExactStepFn<Declaration, T> = Declaration extends { sideEffect: true }
-  ? (context: SideEffectContext) => Promise<T>
-  : () => Promise<T>;
+export interface LlmOptions<Output extends z.ZodType> extends StepOptions {
+  /** A model parameter, so people see and govern which model is used. */
+  model: Model;
+  /** What the model is asked to do: the prompt. */
+  instructions: string;
+  /** What the model works on, e.g. the text of an invoice. */
+  input: JsonValue;
+  /** The shape the answer must have. */
+  schema: Output;
+  /** Extra attempts after a failure or an answer that doesn't fit. */
+  retries?: number;
+  /** A model is involved, so an AI step is never locked. */
+  locked?: never;
+  sideEffect?: never;
+}
 
 /** How a person is asked to decide; `step.decision` calls it. */
 export interface DecisionRequest extends SideEffectContext {
@@ -204,26 +194,7 @@ export interface DecisionRequest extends SideEffectContext {
   reminder: boolean;
 }
 
-/** How a decision ended. */
-export type Decision =
-  | { outcome: "approved" | "rejected"; by: string; comment?: string }
-  | { outcome: "timedOut" };
-
-/** What `step.waitFor` ends with. */
-export type WaitResult<T> =
-  | { received: true; payload: T }
-  | { received: false };
-
-export interface LlmOptions<Output extends z.ZodType> {
-  /** A model parameter; the deployment's default when missing. */
-  model?: Model;
-  /** What the model works on, e.g. the text of an invoice. */
-  input: JsonValue;
-  /** The shape the answer must have. */
-  schema: Output;
-}
-
-export interface DecisionOptions {
+export interface DecisionOptions extends StepOptions {
   /** Who decides; only they can answer. */
   from: Person;
   /** Tells them there is something to decide, e.g. by email. */
@@ -237,7 +208,16 @@ export interface DecisionOptions {
   remindAfter?: Duration;
 }
 
-export interface WaitForOptions<Payload extends z.ZodType> {
+/** How a decision ended. */
+export type Decision =
+  | { outcome: "approved" | "rejected"; by: string; comment?: string }
+  | { outcome: "timedOut" };
+
+export interface SleepOptions extends StepOptions {
+  duration: Duration;
+}
+
+export interface WaitForOptions<Payload extends z.ZodType> extends StepOptions {
   /** The type of event to wait for, e.g. `document.signed`. */
   type: string;
   /** Stop waiting after this long. */
@@ -246,51 +226,66 @@ export interface WaitForOptions<Payload extends z.ZodType> {
   schema?: Payload;
 }
 
-/** Runs the declared steps. Each step runs at most once per run. */
-export interface StepRunner<S extends Steps<string>> {
+/** What `step.waitFor` ends with. */
+export type WaitResult<T> =
+  | { received: true; payload: T }
+  | { received: false };
+
+/**
+ * Runs steps. Names and options are literals in the code, so the step list
+ * can be read from it; a step name runs once per run unless each run of it
+ * has its own `key`.
+ */
+export interface StepRunner {
   /**
    * Runs plain code. Its result must be JSON: it's recorded, and a replay
    * returns the recorded result instead of running the code again.
    */
-  do: <Name extends StepsOfKind<S, "exact">, T>(
-    name: Name,
-    fn: ExactStepFn<S[Name], T>
-  ) => Promise<T>;
+  do: {
+    <T>(
+      name: string,
+      options: DoOptions & { sideEffect: true },
+      fn: (context: SideEffectContext) => Promise<T>
+    ): Promise<T>;
+    <T>(
+      name: string,
+      options: DoOptions & { sideEffect?: false },
+      fn: () => Promise<T>
+    ): Promise<T>;
+  };
   /**
    * Asks a model through the model gateway. The answer must match `schema`;
    * an answer that doesn't counts as a failure and is retried.
    */
   llm: <Output extends z.ZodType>(
-    name: StepsOfKind<S, "ai">,
+    name: string,
     options: LlmOptions<Output>
   ) => Promise<z.output<Output>>;
   /**
    * Asks a person to decide and durably waits for the answer. How they are
    * asked is up to `ask`, which gets a link to where they answer.
    */
-  decision: (
-    name: StepsOfKind<S, "decision">,
-    options: DecisionOptions
-  ) => Promise<Decision>;
+  decision: (name: string, options: DecisionOptions) => Promise<Decision>;
   /** Durably pauses the run. */
-  sleep: (name: StepsOfKind<S, "wait">, duration: Duration) => Promise<void>;
+  sleep: (name: string, options: SleepOptions) => Promise<void>;
   /** Durably waits for an event of `type`, e.g. from a connector. */
   waitFor: <Payload extends z.ZodType = z.ZodUnknown>(
-    name: StepsOfKind<S, "wait">,
+    name: string,
     options: WaitForOptions<Payload>
   ) => Promise<WaitResult<z.output<Payload>>>;
 }
 
-// What the runner implements: the same steps, checked at run time instead of
-// by the types, which only narrow what code may pass.
+// What the runner implements: the same steps, with their options checked at
+// run time as well as by the types.
 interface UntypedStepRunner {
   do: (
     name: string,
+    options: DoOptions,
     fn: (context?: SideEffectContext) => Promise<unknown>
   ) => Promise<unknown>;
   llm: (name: string, options: LlmOptions<z.ZodType>) => Promise<unknown>;
   decision: (name: string, options: DecisionOptions) => Promise<Decision>;
-  sleep: (name: string, duration: Duration) => Promise<void>;
+  sleep: (name: string, options: SleepOptions) => Promise<void>;
   waitFor: (
     name: string,
     options: WaitForOptions<z.ZodType>
@@ -335,24 +330,13 @@ export interface ParamMetadata {
   sensitive: boolean;
 }
 
-/** A step as the UI shows it. */
-export interface StepMetadata {
-  name: string;
-  kind: StepKind;
-  description: string;
-  /** Names of the parameters the step uses. */
-  params: string[];
-  /** Changes something outside Grasp; a decision's `ask` always does. */
-  sideEffect: boolean;
-  locked: boolean;
-}
-
-/** Everything the UI shows about a workflow, as plain JSON. */
+/**
+ * What the UI shows about a workflow besides its steps, as plain JSON. The
+ * steps come from the code, through `describeWorkflow`.
+ */
 export interface WorkflowMetadata {
   id: WorkflowId;
   params: ParamMetadata[];
-  /** In the order they are declared. */
-  steps: StepMetadata[];
   triggers: Trigger[];
 }
 
@@ -363,11 +347,6 @@ export interface WorkflowDefinition<Output> {
   run: (engine: WorkflowEngine, input?: unknown) => Promise<Output>;
 }
 
-// Names become part of engine step names and idempotency keys (`runId:name`),
-// so they never contain a colon or start with `$`; the SDK's own step names
-// always do one or the other.
-const namePattern = /^[A-Za-z][\w-]{0,63}$/u;
-
 const durationPattern =
   /^(?<amount>\d+(?:\.\d+)?) (?<unit>second|minute|hour|day|week)s?$/u;
 const unitMilliseconds = new Map([
@@ -377,8 +356,12 @@ const unitMilliseconds = new Map([
   ["day", 86_400_000],
   ["week", 604_800_000],
 ]);
+const maxKeyLength = 128;
 
-const toMilliseconds = (duration: Duration): number => {
+const invalidCall = (message: string): WorkflowError =>
+  new WorkflowError("workflow.invalid_step_call", message);
+
+const toMilliseconds = (duration: unknown): number => {
   const match =
     typeof duration === "string" ? durationPattern.exec(duration) : null;
   const milliseconds = match
@@ -390,10 +373,7 @@ const toMilliseconds = (duration: Duration): number => {
     !Number.isFinite(milliseconds) ||
     milliseconds <= 0
   ) {
-    throw new WorkflowError(
-      "workflow.invalid_step_call",
-      `"${duration}" is not a duration`
-    );
+    throw invalidCall(`"${String(duration)}" is not a duration`);
   }
   return milliseconds;
 };
@@ -411,7 +391,7 @@ const parseOrThrow = <Schema extends z.ZodType>(
   return result.data;
 };
 
-const validateDefinition = (params: Params, steps: Steps<string>): void => {
+const validateParams = (params: Params): void => {
   for (const [name, definition] of Object.entries(params)) {
     parseOrThrow(
       paramValueSchemas[definition.kind],
@@ -420,47 +400,16 @@ const validateDefinition = (params: Params, steps: Steps<string>): void => {
       `Default of parameter "${name}"`
     );
   }
-  for (const [name, { retries }] of Object.entries(steps)) {
-    if (!namePattern.test(name)) {
-      throw new WorkflowError(
-        "workflow.invalid_definition",
-        `Step "${name}" needs a name of up to 64 letters, digits, "-" or "_", starting with a letter`
-      );
-    }
-    if (retries !== undefined && !(Number.isInteger(retries) && retries >= 0)) {
-      throw new WorkflowError(
-        "workflow.invalid_definition",
-        `Step "${name}" needs a whole, non-negative number of retries`
-      );
-    }
-  }
 };
 
-const describe = (
-  id: WorkflowId,
-  params: Params,
-  steps: Steps<string>,
-  triggers: Trigger[]
-): WorkflowMetadata => ({
-  id,
-  params: Object.entries(params).map(([name, definition]) => ({
+const describeParams = (params: Params): ParamMetadata[] =>
+  Object.entries(params).map(([name, definition]) => ({
     name,
     kind: definition.kind,
     label: definition.label,
     default: definition.default,
     sensitive: definition.sensitive,
-  })),
-  steps: Object.entries(steps).map(([name, declaration]) => ({
-    name,
-    kind: declaration.kind,
-    description: declaration.description,
-    params: [...(declaration.uses ?? [])],
-    sideEffect:
-      declaration.kind === "decision" || declaration.sideEffect === true,
-    locked: declaration.locked ?? false,
-  })),
-  triggers,
-});
+  }));
 
 const resolveParams = (
   params: Params,
@@ -480,31 +429,72 @@ const resolveParams = (
     ])
   );
 
-const createStepRunner = (
-  engine: WorkflowEngine,
-  steps: Steps<string>
-): UntypedStepRunner => {
-  const started = new Set<string>();
-  const idempotencyKey = (name: string): string => `${engine.runId}:${name}`;
+const idempotencyKeyOf = (engine: WorkflowEngine, step: string): string =>
+  `${engine.runId}:${step}`;
 
-  // Types already stop code from running an undeclared step, a step with the
-  // wrong method or a step twice; this catches code that got past them.
-  const start = (name: string, kind: StepKind): StepDeclaration => {
-    const declaration = steps[name];
-    if (declaration?.kind !== kind) {
-      throw new WorkflowError(
-        "workflow.invalid_step_call",
-        `Step "${name}" isn't declared as a ${kind} step`
+/** Fails the step call with `message` unless `condition` holds. */
+const check = (condition: boolean, message: string): void => {
+  if (!condition) {
+    throw invalidCall(message);
+  }
+};
+
+const isOptionalBoolean = (value: unknown): boolean =>
+  value === undefined || typeof value === "boolean";
+
+const isRetries = (retries: unknown): retries is number | undefined =>
+  retries === undefined ||
+  (typeof retries === "number" && Number.isInteger(retries) && retries >= 0);
+
+const createStepRunner = (engine: WorkflowEngine): UntypedStepRunner => {
+  const started = new Set<string>();
+
+  // Checks what every step takes and returns the step's engine name: its
+  // name, or `name:key` for a keyed step. Types catch most of this; workflow
+  // code that got past them still fails here, before anything runs.
+  const start = (name: string, options: StepOptions): string => {
+    if (typeof name !== "string" || !namePattern.test(name)) {
+      throw invalidCall(
+        `Step "${name}" needs a name of up to 64 letters, digits, "-" or "_", starting with a letter`
       );
     }
-    if (started.has(name)) {
-      throw new WorkflowError(
-        "workflow.invalid_step_call",
-        `Step "${name}" already ran in this run; a step runs once per run`
+    if (
+      typeof options.description !== "string" ||
+      options.description.trim() === ""
+    ) {
+      throw invalidCall(`Step "${name}" needs a description`);
+    }
+    const { key } = options;
+    const keyIsValid =
+      key === undefined ||
+      (typeof key === "string" && key !== "") ||
+      (typeof key === "number" && Number.isFinite(key));
+    // Encoded, so a key never contains the separators of engine step names.
+    const encodedKey = key === undefined ? "" : encodeURIComponent(key);
+    if (!keyIsValid || encodedKey.length > maxKeyLength) {
+      throw invalidCall(
+        `Step "${name}" needs a key that is a non-empty string or a number, of up to ${maxKeyLength} characters`
       );
     }
-    started.add(name);
-    return declaration;
+    const step = key === undefined ? name : `${name}:${encodedKey}`;
+    if (started.has(step)) {
+      throw invalidCall(
+        key === undefined
+          ? `Step "${name}" already ran in this run; give each run of it its own key`
+          : `Step "${name}" already ran with key "${String(key)}" in this run`
+      );
+    }
+    started.add(step);
+    return step;
+  };
+
+  const retriesOf = (name: string, retries: unknown): number | undefined => {
+    if (!isRetries(retries)) {
+      throw invalidCall(
+        `Step "${name}" needs a whole, non-negative number of retries`
+      );
+    }
+    return retries;
   };
 
   const waitForEvent = async (
@@ -518,45 +508,65 @@ const createStepRunner = (
     });
 
   return {
-    do: async (name, fn) => {
-      const declaration = start(name, "exact");
-      return await engine.do(
-        name,
-        { retries: declaration.retries },
-        async () =>
-          declaration.sideEffect === true
-            ? await fn({ idempotencyKey: idempotencyKey(name) })
-            : await fn()
+    do: async (name, options, fn) => {
+      const step = start(name, options);
+      const retries = retriesOf(name, options.retries);
+      check(
+        isOptionalBoolean(options.sideEffect) &&
+          isOptionalBoolean(options.locked),
+        `Step "${name}" needs \`sideEffect\` and \`locked\` to be true or false`
+      );
+      check(typeof fn === "function", `Step "${name}" needs a function to run`);
+      return await engine.do(step, { retries }, async () =>
+        options.sideEffect === true
+          ? await fn({ idempotencyKey: idempotencyKeyOf(engine, step) })
+          : await fn()
       );
     },
 
-    llm: async (name, { model: modelName, input, schema }) => {
-      const declaration = start(name, "ai");
+    llm: async (name, options) => {
+      const step = start(name, options);
+      const retries = retriesOf(name, options.retries);
+      const { model: modelName, instructions, input, schema } = options;
+      check(
+        typeof instructions === "string" && instructions.trim() !== "",
+        `Step "${name}" needs instructions for the model`
+      );
+      check(
+        schema instanceof z.ZodType,
+        `Step "${name}" needs a Zod schema for the answer`
+      );
+      check(
+        z.json().safeParse(input).success,
+        `Step "${name}" needs input the model gateway can take: JSON`
+      );
       const request = {
-        step: name,
+        step,
+        model: parseOrThrow(
+          paramValueSchemas.model,
+          modelName,
+          "workflow.invalid_step_call",
+          `Model of step "${name}"`
+        ),
+        instructions,
         input,
         // The model writes what the schema accepts, so describe its input side.
         outputSchema: z.toJSONSchema(schema, { io: "input" }),
-        ...(modelName === undefined ? {} : { model: modelName }),
       };
       // The raw answer is recorded, not the parsed one: parsed output may
       // hold values that don't survive being recorded (a transform to a Date,
       // say). Checking it inside the step makes an answer that doesn't fit a
       // retryable failure.
-      const answer = await engine.do(
-        name,
-        { retries: declaration.retries },
-        async () => {
-          const raw = await engine.callModel(request);
-          parseOrThrow(
-            schema,
-            raw,
-            "workflow.invalid_model_output",
-            `Answer to step "${name}"`
-          );
-          return raw;
-        }
-      );
+      const answer = await engine.do(step, { retries }, async () => {
+        const raw = await engine.callModel(request);
+        parseOrThrow(
+          schema,
+          raw,
+          "workflow.invalid_model_output",
+          `Answer to step "${name}"`
+        );
+        return raw;
+      });
       return parseOrThrow(
         schema,
         answer,
@@ -565,8 +575,13 @@ const createStepRunner = (
       );
     },
 
-    decision: async (name, { from, ask, timeout, remindAfter }) => {
-      start(name, "decision");
+    decision: async (name, options) => {
+      const step = start(name, options);
+      const { from, ask, timeout, remindAfter } = options;
+      check(
+        typeof ask === "function",
+        `Decision "${name}" needs an \`ask\` function`
+      );
       const timeoutMs =
         timeout === undefined ? undefined : toMilliseconds(timeout);
       const remindMs =
@@ -576,32 +591,35 @@ const createStepRunner = (
         timeoutMs !== undefined &&
         remindMs >= timeoutMs
       ) {
-        throw new WorkflowError(
-          "workflow.invalid_step_call",
-          `Decision "${name}" must remind before it times out`
-        );
+        throw invalidCall(`Decision "${name}" must remind before it times out`);
       }
+      const decider = parseOrThrow(
+        paramValueSchemas.person,
+        from,
+        "workflow.invalid_step_call",
+        `Who decides on "${name}"`
+      );
 
       // Times are taken inside steps, so a replay computes the same waits.
       // The timeout counts from when the decision opened, so time spent
       // asking or reminding never pushes the deadline out.
       const { link, eventType, openedAt } = await engine.do(
-        name,
+        step,
         {},
         async () => ({
-          ...(await engine.openDecision({ step: name, from })),
+          ...(await engine.openDecision({ step, from: decider })),
           openedAt: Date.now(),
         })
       );
       const deadline =
         timeoutMs === undefined ? undefined : openedAt + timeoutMs;
       const askPerson = async (reminder: boolean): Promise<number> => {
-        const askStep = `${name}:${reminder ? "remind" : "ask"}`;
+        const askStep = `${step}#${reminder ? "remind" : "ask"}`;
         return await engine.do(askStep, {}, async () => {
           await ask({
             link,
             reminder,
-            idempotencyKey: idempotencyKey(askStep),
+            idempotencyKey: idempotencyKeyOf(engine, askStep),
           });
           return Date.now();
         });
@@ -625,14 +643,14 @@ const createStepRunner = (
         remindAt !== undefined &&
         (deadline === undefined || remindAt < deadline);
       let event = await waitForAnswer(
-        `${name}:answer`,
+        `${step}#answer`,
         askedAt,
         reminds ? remindAt : deadline
       );
       if (!event.received && reminds) {
         const remindedAt = await askPerson(true);
         event = await waitForAnswer(
-          `${name}:answer-after-reminder`,
+          `${step}#answer-after-reminder`,
           remindedAt,
           deadline
         );
@@ -653,14 +671,23 @@ const createStepRunner = (
       };
     },
 
-    sleep: async (name, duration) => {
-      start(name, "wait");
-      await engine.sleep(name, toMilliseconds(duration));
+    sleep: async (name, options) => {
+      const step = start(name, options);
+      await engine.sleep(step, toMilliseconds(options.duration));
     },
 
-    waitFor: async (name, { type, timeout, schema }) => {
-      start(name, "wait");
-      const event = await waitForEvent(name, type, toMilliseconds(timeout));
+    waitFor: async (name, options) => {
+      const step = start(name, options);
+      const { type, timeout, schema } = options;
+      check(
+        typeof type === "string" && type !== "",
+        `Step "${name}" needs an event type`
+      );
+      check(
+        schema === undefined || schema instanceof z.ZodType,
+        `Step "${name}" needs a Zod schema for the event, or none`
+      );
+      const event = await waitForEvent(step, type, toMilliseconds(timeout));
       if (!event.received) {
         return { received: false };
       }
@@ -684,10 +711,9 @@ const createStepRunner = (
 const createStateStore = (engine: WorkflowEngine): StateStore => {
   const calls = new Map<string, number>();
   const stepName = (operation: "get" | "set", key: string): string => {
-    if (!namePattern.test(key)) {
-      throw new WorkflowError(
-        "workflow.invalid_step_call",
-        `State key "${key}" needs letters, digits, "-" or "_", starting with a letter`
+    if (typeof key !== "string" || !namePattern.test(key)) {
+      throw invalidCall(
+        `State key "${key}" needs up to 64 letters, digits, "-" or "_", starting with a letter`
       );
     }
     const base = `$state:${operation}:${key}`;
@@ -696,43 +722,45 @@ const createStateStore = (engine: WorkflowEngine): StateStore => {
     return `${base}:${count}`;
   };
   return {
-    get: async (key) =>
-      await engine.do(
-        stepName("get", key),
-        {},
-        async () => await engine.getState(key)
-      ),
+    get: async (key) => {
+      const step = stepName("get", key);
+      return await engine.do(step, {}, async () => await engine.getState(key));
+    },
     set: async (key, value) => {
       const step = stepName("set", key);
+      const json = parseOrThrow(
+        z.json(),
+        value,
+        "workflow.invalid_step_call",
+        `Value for state "${key}"`
+      );
       await engine.do(step, {}, async () => {
-        await engine.setState(key, value, `${engine.runId}:${step}`);
+        await engine.setState(key, json, idempotencyKeyOf(engine, step));
       });
     },
   };
 };
 
 /**
- * Defines a workflow. `params` are the tunable values, `steps` every step the
- * code may run, in the order they usually run; `run` is the workflow itself.
- * Checks the definition right away, so a bad one fails when it loads.
+ * Defines a workflow. `params` are the tunable values; `run` is the workflow
+ * itself, with every step and its options written inline. Checks the
+ * definition right away, so a bad one fails when it loads.
  */
 export const workflow = <
   const P extends Params,
-  const S extends Steps<keyof P & string>,
   Output,
   InputSchema extends z.ZodType = z.ZodUndefined,
 >(
   id: string,
   config: {
     params: P;
-    steps: S;
     /** The run's input, e.g. the invoice that started it. */
     input?: InputSchema;
     /** Manual only when missing. */
     triggers?: Trigger<ScheduleParams<P>>[];
   },
   run: (
-    step: StepRunner<S>,
+    step: StepRunner,
     context: WorkflowContext<P, z.output<InputSchema>>
   ) => Promise<Output>
 ): WorkflowDefinition<Output> => {
@@ -742,16 +770,15 @@ export const workflow = <
     "workflow.invalid_definition",
     "Workflow ID"
   );
-  validateDefinition(config.params, config.steps);
+  validateParams(config.params);
   const inputSchema: z.ZodType = config.input ?? z.undefined();
 
   return {
-    metadata: describe(
-      workflowId,
-      config.params,
-      config.steps,
-      config.triggers ?? [{ type: "manual" }]
-    ),
+    metadata: {
+      id: workflowId,
+      params: describeParams(config.params),
+      triggers: config.triggers ?? [{ type: "manual" }],
+    },
     run: async (engine, rawInput) => {
       // SAFETY: parsed by `config.input`, or checked to be undefined when
       // there is none, which is the default of `InputSchema`.
@@ -771,10 +798,10 @@ export const workflow = <
           await Promise.resolve(resolveParams(config.params, engine.params))
       );
       return await run(
-        // SAFETY: the runner checks each call against the declared steps at
-        // run time; `S` only narrows which names and callbacks code may pass.
+        // SAFETY: the untyped runner takes every call the typed one allows
+        // and checks each option at run time.
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-        createStepRunner(engine, config.steps) as StepRunner<S>,
+        createStepRunner(engine) as StepRunner,
         {
           runId: engine.runId,
           input,

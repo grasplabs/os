@@ -29,16 +29,16 @@ const params = {
   extractionModel: model({ label: "Model", default: "mistral-large" }),
   reminder: template({ label: "Reminder", default: "invoice-reminder" }),
 };
-const steps = {
-  match: { kind: "exact", description: "Match" },
-  book: { kind: "exact", description: "Book", sideEffect: true },
-  extract: { kind: "ai", description: "Extract" },
-  review: { kind: "decision", description: "Review" },
-  pause: { kind: "wait", description: "Pause" },
-} as const;
-declare const step: StepRunner<typeof steps>;
+declare const step: StepRunner;
 declare const context: WorkflowContext<typeof params, undefined>;
 const { params: p } = context;
+const llm = {
+  description: "Extract",
+  model: p.extractionModel,
+  instructions: "Read the total.",
+  input: "",
+  schema: extractionSchema,
+};
 
 // Parameters are typed by their kind.
 expectTypeOf(p.threshold).toExtend<number>();
@@ -48,19 +48,12 @@ expectTypeOf(context.runId).toEqualTypeOf<RunId>();
 expectTypeOf<string>().not.toExtend<Person>();
 
 // A parameter of the wrong kind doesn't compile.
-await step.llm("extract", {
-  // @ts-expect-error -- a person isn't a model
-  model: p.reviewer,
-  input: "",
-  schema: extractionSchema,
-});
-await step.llm("extract", {
-  // @ts-expect-error -- models come from a model parameter, not a literal
-  model: "mistral-large",
-  input: "",
-  schema: extractionSchema,
-});
+// @ts-expect-error -- a person isn't a model
+await step.llm("extract", { ...llm, model: p.reviewer });
+// @ts-expect-error -- models come from a model parameter, not a literal
+await step.llm("extract", { ...llm, model: "mistral-large" });
 await step.decision("review", {
+  description: "Review",
   // @ts-expect-error -- a template isn't a person
   from: p.reminder,
   ask: async () => {},
@@ -68,68 +61,62 @@ await step.decision("review", {
 // @ts-expect-error -- a money parameter holds a number
 money({ label: "Above", default: "5000" });
 
-// step.llm needs a schema, and its answer is typed by it.
+// step.llm needs instructions and a schema, can't be locked, and its answer
+// is typed by the schema.
+const { instructions: _instructions, ...withoutInstructions } = llm;
+// @ts-expect-error -- the instructions are required
+await step.llm("extract", withoutInstructions);
+const { schema: _schema, ...withoutSchema } = llm;
 // @ts-expect-error -- the schema is required
-await step.llm("extract", { input: "" });
-expectTypeOf(
-  await step.llm("extract", { input: "", schema: extractionSchema })
-).toEqualTypeOf<{ total: number; currency: string }>();
+await step.llm("extract", withoutSchema);
+// @ts-expect-error -- a model is involved, so an AI step is never locked
+await step.llm("extract", { ...llm, locked: true });
+expectTypeOf(await step.llm("extract", llm)).toEqualTypeOf<{
+  total: number;
+  currency: string;
+}>();
 
-// Code runs only declared steps, each with the method for its kind.
-// @ts-expect-error -- not declared
-await step.do("missing", async () => 1);
-// @ts-expect-error -- an AI step runs through step.llm
-await step.do("extract", async () => 1);
-// @ts-expect-error -- a decision isn't a wait
-await step.sleep("review", "1 day");
+// Every step needs a description.
+// @ts-expect-error -- the description is required
+await step.do("match", {}, async () => 1);
+// @ts-expect-error -- the description is required
+await step.sleep("pause", { duration: "1 day" });
 // @ts-expect-error -- durations need a unit
-await step.sleep("pause", "1 fortnight");
+await step.sleep("pause", { description: "Pause", duration: "1 fortnight" });
 
 // Only side-effect steps get an idempotency key.
 expectTypeOf(
-  await step.do("book", async ({ idempotencyKey }) => idempotencyKey)
+  await step.do(
+    "book",
+    { description: "Book", sideEffect: true },
+    async ({ idempotencyKey }) => idempotencyKey
+  )
 ).toEqualTypeOf<string>();
 await step.do(
   "match",
+  { description: "Match" },
   // @ts-expect-error -- a step without side effects gets no key
   async (sideEffect: SideEffectContext) => sideEffect.idempotencyKey
 );
 
 // An event's payload is typed by its schema, and unknown without one.
 expectTypeOf(
-  await step.waitFor("pause", {
+  await step.waitFor("signed", {
+    description: "Wait for the signature",
     type: "document.signed",
     timeout: "1 day",
     schema: z.object({ signer: z.string() }),
   })
 ).toEqualTypeOf<WaitResult<{ signer: string }>>();
 expectTypeOf(
-  await step.waitFor("pause", { type: "document.signed", timeout: "1 day" })
+  await step.waitFor("signed", {
+    description: "Wait for the signature",
+    type: "document.signed",
+    timeout: "1 day",
+  })
 ).toEqualTypeOf<WaitResult<unknown>>();
 
-// Declarations are checked against the parameters.
-workflow(
-  "typo",
-  {
-    params,
-    steps: {
-      // @ts-expect-error -- "treshold" isn't a parameter
-      review: { kind: "decision", description: "Review", uses: ["treshold"] },
-    },
-  },
-  async () => null
-);
-workflow(
-  "no-side-effect",
-  {
-    params,
-    steps: {
-      // @ts-expect-error -- only exact steps have side effects of their own
-      extract: { kind: "ai", description: "Extract", sideEffect: true },
-    },
-  },
-  async () => null
-);
+// Schedule triggers refer to schedule parameters.
 workflow(
   "schedule-trigger",
   {
@@ -137,7 +124,6 @@ workflow(
       ...params,
       every: schedule({ label: "Runs", default: "0 9 * * *" }),
     },
-    steps: {},
     // @ts-expect-error -- a schedule trigger needs a schedule parameter
     triggers: [{ type: "schedule", param: "threshold" }],
   },

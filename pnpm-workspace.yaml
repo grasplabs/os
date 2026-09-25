@@ -56,6 +56,8 @@ catalog:
   # Frontend
   # Babel 7 until babel-plugin-react-compiler supports Babel 8.
   "@babel/core": 7.29.7
+  "@babel/parser": 7.29.9
+  "@babel/types": 7.29.8
   "@base-ui/react": 1.8.0
   "@rolldown/plugin-babel": 0.2.4
   "@tailwindcss/vite": 4.3.3

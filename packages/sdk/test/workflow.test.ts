@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  model,
   number,
   person,
   schedule,
@@ -9,57 +10,41 @@ import {
   workflow,
   z,
 } from "../src/workflow.ts";
-import type { Duration } from "../src/workflow.ts";
+import type { DoOptions, Duration, StepRunner } from "../src/workflow.ts";
 import { createFakeEngine, createFakeState } from "./fake-engine.ts";
 
 const noParams = {};
 
-describe("workflow definitions", () => {
-  it("rejects an empty ID, a bad step name, bad retries and a bad default", () => {
-    const exact = { kind: "exact", description: "Do it" } as const;
-    const definitions = [
-      () => workflow("", { params: noParams, steps: {} }, async () => null),
-      () =>
-        workflow(
-          "bad-name",
-          { params: noParams, steps: { "has:colon": exact } },
-          async () => null
-        ),
-      () =>
-        workflow(
-          "bad-retries",
-          { params: noParams, steps: { go: { ...exact, retries: -1 } } },
-          async () => null
-        ),
-      () =>
-        workflow(
-          "bad-default",
-          {
-            params: { limit: number({ label: "Limit", default: Number.NaN }) },
-            steps: {},
-          },
-          async () => null
-        ),
-    ];
+/** A workflow that runs `body` with the input it's given. */
+const withStep = <Output>(
+  body: (step: StepRunner, input: unknown) => Promise<Output>
+) =>
+  workflow(
+    "sample",
+    { params: noParams, input: z.unknown() },
+    async (step, { input }) => await body(step, input)
+  );
 
-    for (const define of definitions) {
-      expect(define).toThrow(
-        expect.objectContaining({ code: "workflow.invalid_definition" })
-      );
-    }
+describe("workflow definitions", () => {
+  it("rejects an empty ID and a default that doesn't fit its kind", () => {
+    expect(() => workflow("", { params: noParams }, async () => null)).toThrow(
+      expect.objectContaining({ code: "workflow.invalid_definition" })
+    );
+    expect(() =>
+      workflow(
+        "bad-default",
+        { params: { limit: number({ label: "Limit", default: Number.NaN }) } },
+        async () => null
+      )
+    ).toThrow(expect.objectContaining({ code: "workflow.invalid_definition" }));
   });
 
   it("is started by hand unless it declares triggers", () => {
-    const manual = workflow(
-      "manual",
-      { params: noParams, steps: {} },
-      async () => null
-    );
+    const manual = workflow("manual", { params: noParams }, async () => null);
     const scheduled = workflow(
       "scheduled",
       {
         params: { every: schedule({ label: "Runs", default: "0 9 * * 1" }) },
-        steps: {},
         triggers: [{ type: "schedule", param: "every" }],
       },
       async () => null
@@ -74,10 +59,7 @@ describe("workflow definitions", () => {
   it("treats parameters as not sensitive unless declared so", () => {
     const { metadata } = workflow(
       "greeting",
-      {
-        params: { greeting: text({ label: "Greeting", default: "Hi" }) },
-        steps: {},
-      },
+      { params: { greeting: text({ label: "Greeting", default: "Hi" }) } },
       async () => null
     );
 
@@ -85,43 +67,109 @@ describe("workflow definitions", () => {
   });
 });
 
+describe("step calls", () => {
+  it("reject a bad name, a missing description, a bad key or bad retries", async () => {
+    const calls: [string, DoOptions & { sideEffect?: false }][] = [
+      ["has:colon", { description: "Go" }],
+      ["go", { description: " " }],
+      ["go", { description: "Go", key: "" }],
+      ["go", { description: "Go", key: "x".repeat(200) }],
+      ["go", { description: "Go", retries: -1 }],
+    ];
+
+    for (const [name, options] of calls) {
+      const definition = withStep(
+        async (step) => await step.do(name, options, async () => 1)
+      );
+      // oxlint-disable-next-line no-await-in-loop -- each run is one case
+      await expect(
+        definition.run(createFakeEngine().engine)
+      ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
+    }
+  });
+
+  it("reject options of the wrong type before anything runs", async () => {
+    const ran: string[] = [];
+    const withoutAsk = { description: "Approve", from: "anna" };
+    const calls: ((step: StepRunner) => Promise<unknown>)[] = [
+      async (step) =>
+        await step.do(
+          "go",
+          // @ts-expect-error -- sideEffect is true or false
+          { description: "Go", sideEffect: "yes" },
+          async () => ran.push("go")
+        ),
+      async (step) =>
+        // @ts-expect-error -- a decision needs someone to ask, and how
+        await step.decision("approve", withoutAsk),
+      async (step) =>
+        await step.waitFor("signed", {
+          description: "Wait",
+          type: "document.signed",
+          timeout: "1 day",
+          // @ts-expect-error -- the schema is a Zod schema
+          schema: "signer",
+        }),
+    ];
+
+    for (const call of calls) {
+      // oxlint-disable-next-line no-await-in-loop -- each run is one case
+      await expect(
+        withStep(call).run(createFakeEngine().engine)
+      ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
+    }
+    expect(ran).toStrictEqual([]);
+  });
+
+  it("run a step name once per run, or once per key", async () => {
+    const once = { description: "Once" };
+    const twice = withStep(async (step) => {
+      await step.do("once", once, async () => 1);
+      await step.do("once", once, async () => 2);
+    });
+    const perItem = withStep(async (step) => {
+      for (const key of ["a", "b"]) {
+        // oxlint-disable-next-line no-await-in-loop -- steps run in order
+        await step.do("item", { ...once, key }, async () => key);
+      }
+      await step.do("item", { ...once, key: "a" }, async () => "again");
+    });
+
+    await expect(twice.run(createFakeEngine().engine)).rejects.toThrow(
+      "give each run of it its own key"
+    );
+    await expect(perItem.run(createFakeEngine().engine)).rejects.toThrow(
+      'already ran with key "a"'
+    );
+  });
+});
+
 describe("step.do", () => {
   it("gives only side-effect steps an idempotency key", async () => {
     const received: unknown[] = [];
-    const definition = workflow(
-      "keys",
-      {
-        params: noParams,
-        steps: {
-          read: { kind: "exact", description: "Read" },
-          write: { kind: "exact", description: "Write", sideEffect: true },
-        },
-      },
-      async (step) => {
-        await step.do("read", async (...args: unknown[]) => {
+    const definition = withStep(async (step) => {
+      await step.do("read", { description: "Read" }, async (...args) => {
+        received.push(args);
+      });
+      await step.do(
+        "write",
+        { description: "Write", sideEffect: true, key: 7 },
+        async (...args) => {
           received.push(args);
-        });
-        await step.do("write", async (...args: unknown[]) => {
-          received.push(args);
-        });
-      }
-    );
+        }
+      );
+    });
 
     await definition.run(createFakeEngine().engine);
 
-    expect(received).toStrictEqual([[], [{ idempotencyKey: "run-1:write" }]]);
+    expect(received).toStrictEqual([[], [{ idempotencyKey: "run-1:write:7" }]]);
   });
 
-  it("retries a failing step as often as declared", async () => {
+  it("retries a failing step as often as asked", async () => {
     let attempts = 0;
-    const definition = workflow(
-      "flaky",
-      {
-        params: noParams,
-        steps: { call: { kind: "exact", description: "Call", retries: 2 } },
-      },
+    const definition = withStep(
       async (step) =>
-        await step.do("call", async () => {
+        await step.do("call", { description: "Call", retries: 2 }, async () => {
           attempts += 1;
           if (attempts < 3) {
             throw new Error("Flaky");
@@ -132,58 +180,25 @@ describe("step.do", () => {
 
     await expect(definition.run(createFakeEngine().engine)).resolves.toBe(3);
   });
-
-  it("refuses to run a step twice in one run", async () => {
-    const definition = workflow(
-      "twice",
-      {
-        params: noParams,
-        steps: { once: { kind: "exact", description: "Once" } },
-      },
-      async (step) => {
-        await step.do("once", async () => 1);
-        await step.do("once", async () => 2);
-      }
-    );
-
-    await expect(
-      definition.run(createFakeEngine().engine)
-    ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
-  });
-
-  it("refuses a step declared with another kind, and an undeclared one", async () => {
-    const definition = workflow(
-      "wrong-kind",
-      {
-        params: noParams,
-        steps: { nap: { kind: "wait", description: "Nap" } },
-        input: z.string(),
-      },
-      async (step, { input }) =>
-        // @ts-expect-error -- only exact steps run as plain code
-        await step.do(input, async () => 1)
-    );
-    const run = definition.run.bind(null, createFakeEngine().engine);
-
-    await expect(run("nap")).rejects.toMatchObject({
-      code: "workflow.invalid_step_call",
-    });
-    await expect(run("missing")).rejects.toMatchObject({
-      code: "workflow.invalid_step_call",
-    });
-  });
 });
 
 const extraction = z.object({ total: z.number() });
+const modelParams = {
+  reader: model({ label: "Model", default: "small-model" }),
+};
 
 const llmWorkflow = workflow(
   "llm",
-  {
-    params: noParams,
-    steps: { read: { kind: "ai", description: "Read", retries: 1 } },
-  },
-  async (step) =>
-    await step.llm("read", { input: "Total: 12", schema: extraction })
+  { params: modelParams },
+  async (step, { params }) =>
+    await step.llm("read", {
+      description: "Read the total",
+      model: params.reader,
+      instructions: "Read the total.",
+      input: "Total: 12",
+      schema: extraction,
+      retries: 1,
+    })
 );
 
 describe("step.llm", () => {
@@ -197,10 +212,11 @@ describe("step.llm", () => {
     });
     expect(modelRequests[0]).toMatchObject({
       step: "read",
+      model: "small-model",
+      instructions: "Read the total.",
       input: "Total: 12",
       outputSchema: { type: "object", required: ["total"] },
     });
-    expect(modelRequests[0]).not.toHaveProperty("model");
   });
 
   it("retries an answer that doesn't fit the schema", async () => {
@@ -238,12 +254,12 @@ describe("step.llm", () => {
   it("asks for what the schema accepts and returns what it makes of it", async () => {
     const dueDate = workflow(
       "due-date",
-      {
-        params: noParams,
-        steps: { read: { kind: "ai", description: "Read the due date" } },
-      },
-      async (step) =>
+      { params: modelParams },
+      async (step, { params }) =>
         await step.llm("read", {
+          description: "Read the due date",
+          model: params.reader,
+          instructions: "Read the due date.",
           input: "Due on 1 March 2026",
           schema: z.object({
             due: z.iso.date().transform((day) => new Date(day)),
@@ -263,26 +279,49 @@ describe("step.llm", () => {
     expect(first.due).toStrictEqual(new Date("2026-03-01"));
     expect(replayed.due).toStrictEqual(new Date("2026-03-01"));
   });
+
+  it("refuses a call without instructions, a schema or a model before asking", async () => {
+    const { engine, modelRequests } = createFakeEngine({
+      model: () => ({ total: 12 }),
+    });
+    const options = {
+      description: "Read",
+      model: "small-model",
+      instructions: "Read the total.",
+      input: "",
+      schema: extraction,
+    };
+    const broken = [
+      { ...options, instructions: "" },
+      { ...options, schema: undefined },
+      { ...options, model: 42 },
+      { ...options, input: new Date(0) },
+    ];
+
+    for (const [index, brokenOptions] of broken.entries()) {
+      const definition = withStep(
+        async (step) =>
+          // @ts-expect-error -- each case breaks one required option
+          await step.llm(`read-${index}`, brokenOptions)
+      );
+      // oxlint-disable-next-line no-await-in-loop -- each run is one case
+      await expect(definition.run(engine)).rejects.toMatchObject({
+        code: "workflow.invalid_step_call",
+      });
+    }
+    expect(modelRequests).toStrictEqual([]);
+  });
 });
 
-const waitingWorkflow = workflow(
-  "waiting",
-  {
-    params: noParams,
-    steps: {
-      pause: { kind: "wait", description: "Pause" },
-      signed: { kind: "wait", description: "Wait for the signature" },
-    },
-  },
-  async (step) => {
-    await step.sleep("pause", "90 minutes");
-    return await step.waitFor("signed", {
-      type: "document.signed",
-      timeout: "2 weeks",
-      schema: z.object({ signer: z.string() }),
-    });
-  }
-);
+const waitingWorkflow = withStep(async (step) => {
+  await step.sleep("pause", { description: "Pause", duration: "90 minutes" });
+  return await step.waitFor("signed", {
+    description: "Wait for the signature",
+    type: "document.signed",
+    timeout: "2 weeks",
+    schema: z.object({ signer: z.string() }),
+  });
+});
 
 describe("step.sleep and step.waitFor", () => {
   it("hand the engine the wait in milliseconds", async () => {
@@ -322,18 +361,10 @@ describe("step.sleep and step.waitFor", () => {
   });
 
   it("reject a duration that isn't one", async () => {
-    const definition = workflow(
-      "bad-duration",
-      {
-        params: noParams,
-        steps: { pause: { kind: "wait", description: "Pause" } },
-        input: z.unknown(),
-      },
-      async (step, { input }) => {
-        // @ts-expect-error -- durations are milliseconds or "<n> <unit>"
-        await step.sleep("pause", input);
-      }
-    );
+    const definition = withStep(async (step, duration) => {
+      // @ts-expect-error -- durations are milliseconds or "<n> <unit>"
+      await step.sleep("pause", { description: "Pause", duration });
+    });
     const run = definition.run.bind(null, createFakeEngine().engine);
 
     for (const duration of ["soon", "-1 days", 0, Number.POSITIVE_INFINITY]) {
@@ -351,12 +382,10 @@ const decisionWorkflow = (
 ) =>
   workflow(
     "decide",
-    {
-      params: { approver: person({ label: "Approver", default: "anna" }) },
-      steps: { approve: { kind: "decision", description: "Approve" } },
-    },
+    { params: { approver: person({ label: "Approver", default: "anna" }) } },
     async (step, { params }) =>
       await step.decision("approve", {
+        description: "Approve",
         from: params.approver,
         ask,
         ...limits,
@@ -434,7 +463,7 @@ describe("step.decision", () => {
 describe("state", () => {
   const counter = workflow(
     "counter",
-    { params: noParams, steps: {} },
+    { params: noParams },
     async (_step, { state }) => {
       const seen = await state.get("count");
       const count = typeof seen === "number" ? seen + 1 : 1;
@@ -479,15 +508,26 @@ describe("state", () => {
     expect(state.values.get("count")).toBe(2);
   });
 
-  it("rejects a key that isn't a name", async () => {
-    const definition = workflow(
+  it("rejects a key that isn't a name, and a value that isn't JSON", async () => {
+    const keyWorkflow = workflow(
       "bad-key",
-      { params: noParams, steps: {} },
+      { params: noParams },
       async (_step, { state }) => await state.get("a:b")
+    );
+    const valueWorkflow = workflow(
+      "bad-value",
+      { params: noParams },
+      async (_step, { state }) => {
+        // @ts-expect-error -- state holds JSON only
+        await state.set("when", new Date(0));
+      }
     );
 
     await expect(
-      definition.run(createFakeEngine().engine)
+      keyWorkflow.run(createFakeEngine().engine)
+    ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
+    await expect(
+      valueWorkflow.run(createFakeEngine().engine)
     ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
   });
 });
