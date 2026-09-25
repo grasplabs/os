@@ -7,6 +7,8 @@ import type { Identity, SessionApi } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
 import { AppsRpc } from "./apps-rpc.ts";
+import { requireFeature } from "./features.ts";
+import type { Feature } from "./features.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
 import {
   grantPermission,
@@ -38,13 +40,32 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     return await run(await this.#check());
   }
 
+  /**
+   * The session check, refused first while `feature` is switched off. Every
+   * call of a flagged API goes through it, so switching a feature off stops
+   * it at the next call.
+   */
+  #checkWith(feature: Feature): SessionCheck {
+    return async () => {
+      requireFeature(this.#env, feature);
+      return await this.#check();
+    };
+  }
+
+  async #asPersonWith<T>(
+    feature: Feature,
+    run: (identity: Identity) => Promise<T>
+  ): Promise<T> {
+    return await run(await this.#checkWith(feature)());
+  }
+
   get apps(): AppsRpc {
-    return new AppsRpc(this.#env, this.#check);
+    return new AppsRpc(this.#env, this.#checkWith("apps"));
   }
 
   /** Knowledge, whose every method checks the session again. */
   get knowledge(): KnowledgeRpc {
-    return new KnowledgeRpc(this.#env, this.#check);
+    return new KnowledgeRpc(this.#env, this.#checkWith("knowledge"));
   }
 
   async whoami(): Promise<Identity> {
@@ -55,19 +76,22 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   // validate it, and check the person's role, on every call.
 
   async requestPermission(request: PermissionRequest): Promise<Permission> {
-    return await this.#asPerson(
+    return await this.#asPersonWith(
+      "permissions",
       async (identity) => await requestPermission(this.#env, identity, request)
     );
   }
 
   async grantPermission(id: string): Promise<Permission> {
-    return await this.#asPerson(
+    return await this.#asPersonWith(
+      "permissions",
       async (identity) => await grantPermission(this.#env, identity, id)
     );
   }
 
   async revokePermission(id: string): Promise<Permission> {
-    return await this.#asPerson(
+    return await this.#asPersonWith(
+      "permissions",
       async (identity) => await revokePermission(this.#env, identity, id)
     );
   }
@@ -75,7 +99,8 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   async listPermissions(
     subject?: PermissionSubjectInput
   ): Promise<Permission[]> {
-    return await this.#asPerson(
+    return await this.#asPersonWith(
+      "permissions",
       async (identity) => await listPermissions(this.#env, identity, subject)
     );
   }

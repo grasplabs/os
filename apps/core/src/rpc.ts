@@ -1,6 +1,7 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import {
   authErrors,
+  featureErrors,
   internalErrors,
   requestErrors,
 } from "@grasp-os/shared/errors";
@@ -59,6 +60,7 @@ export const toClientError = (
     requestErrors.codeOf(error) ||
     authErrors.codeOf(error) ||
     roleErrors.codeOf(error) ||
+    featureErrors.codeOf(error) ||
     permissionErrors.codeOf(error) ||
     appErrors.codeOf(error) ||
     knowledgeErrors.codeOf(error) ||

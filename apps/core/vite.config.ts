@@ -47,6 +47,8 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             BETTER_AUTH_SECRET: "test-better-auth-secret-of-32-chars-or-more",
             CAPABILITY_SIGNING_KEY: capabilitySigningKey,
             ...testSignIn,
+            // Every flagged feature on; features.test.ts switches them off.
+            FEATURES: { apps: true, permissions: true, knowledge: true },
             // workerd doesn't implement Durable Object jurisdictions.
             DURABLE_OBJECT_JURISDICTION: "none",
             CORE_MIGRATIONS: coreMigrations,
