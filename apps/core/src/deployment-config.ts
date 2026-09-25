@@ -32,7 +32,10 @@ export const deploymentConfig = <Schema extends z.ZodType>(
   if (!parsed.success) {
     log.error("config.invalid", {
       var: name,
-      paths: parsed.error.issues.map(({ path }) => path.join(".")).join(" "),
+      // Text that isn't JSON fails as a whole, at the root.
+      paths: parsed.error.issues
+        .map(({ path }) => (path.length === 0 ? "<root>" : path.join(".")))
+        .join(" "),
     });
   }
   const config = parsed.success ? parsed.data : undefined;

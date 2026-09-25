@@ -1,6 +1,7 @@
 import { authErrors } from "@grasp-os/shared/errors";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import { mockIdp } from "./idp.ts";
 import type { Claims } from "./idp.ts";
@@ -172,6 +173,44 @@ describe("signing in", () => {
       unconfigured
     );
     expect(start.status).toBe(404);
+  });
+
+  it("offers nothing when its config doesn't parse, and says which var and where", async () => {
+    const logged = vi.spyOn(console, "error");
+    try {
+      const configs = [
+        `{"origin": "https://acme.test"`,
+        { ...signInConfig, domains: "acme.test" },
+      ];
+      const offered = await Promise.all(
+        configs.map(async (config) => {
+          const { core } = await openRpc(undefined, {
+            coreEnv: { ...env, SIGN_IN: config },
+            origin: coreOrigin,
+          });
+          try {
+            return await core.signInOptions();
+          } finally {
+            core[Symbol.dispose]();
+          }
+        })
+      );
+      expect(offered).toStrictEqual([[], []]);
+      // Once per config, however often it's read: it's parsed once.
+      const invalid = logged.mock.calls
+        .map(([line]: unknown[]) => line)
+        .filter(
+          (line) =>
+            z.object({ event: z.literal("config.invalid") }).safeParse(line)
+              .success
+        );
+      expect(invalid).toStrictEqual([
+        { event: "config.invalid", var: "SIGN_IN", paths: "<root>" },
+        { event: "config.invalid", var: "SIGN_IN", paths: "domains" },
+      ]);
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it("gives a connection without a session nothing but the public calls", async () => {
