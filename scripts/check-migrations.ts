@@ -14,7 +14,7 @@ const git = (...args: string[]): string =>
   execFileSync("git", args, { encoding: "utf-8" });
 
 interface Journal {
-  entries: { idx: number; when: number }[];
+  entries: { idx: number; when: number; tag: string }[];
 }
 
 const isJournal = (value: unknown): value is Journal =>
@@ -22,6 +22,23 @@ const isJournal = (value: unknown): value is Journal =>
   value !== null &&
   "entries" in value &&
   Array.isArray(value.entries);
+
+const readJournal = (file: string, text: string): Journal => {
+  const journal: unknown = JSON.parse(text);
+  if (!isJournal(journal)) {
+    throw new Error(`${file} is not a drizzle-kit journal`);
+  }
+  return journal;
+};
+
+/** The journal as main has it, or undefined when main has none yet. */
+const mainJournal = (file: string): Journal | undefined => {
+  try {
+    return readJournal(file, git("show", `origin/main:${file}`));
+  } catch {
+    return undefined;
+  }
+};
 
 const errors: string[] = [];
 
@@ -45,11 +62,19 @@ const journals = git("ls-files", "*/migrations/meta/_journal.json")
   .split("\n")
   .filter(Boolean);
 for (const file of journals) {
-  const journal: unknown = JSON.parse(readFileSync(file, "utf-8"));
-  if (!isJournal(journal)) {
-    throw new Error(`${file} is not a drizzle-kit journal`);
+  const { entries } = readJournal(file, readFileSync(file, "utf-8"));
+  // Objects record each applied migration by index and tag, so the entries
+  // main has must stay exactly as they are, in front of any new ones.
+  for (const [position, shipped] of (
+    mainJournal(file)?.entries ?? []
+  ).entries()) {
+    const entry = entries[position];
+    if (entry?.idx !== shipped.idx || entry.tag !== shipped.tag) {
+      errors.push(
+        `${file}: migration ${shipped.idx} (${shipped.tag}) is on main already; keep its journal entry as it is.`
+      );
+    }
   }
-  const { entries } = journal;
   for (const [position, entry] of entries.entries()) {
     const previous = entries[position - 1];
     if (entry.idx !== position) {
