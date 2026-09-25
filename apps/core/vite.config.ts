@@ -2,6 +2,8 @@ import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineProject } from "vite-plus";
 
 export default defineProject({
+  // Core bundles the screen compiler from its build output.
+  test: { globalSetup: ["../../packages/compiler/build.ts"] },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },
