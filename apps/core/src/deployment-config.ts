@@ -1,7 +1,7 @@
+import { log } from "@grasp-os/shared/log";
 import type { z } from "zod";
 
 import { jsonVar } from "./json-var.ts";
-import { log } from "./log.ts";
 
 // Parsed configs by the var's raw value: a Worker's env holds the same
 // values for every request, so each is parsed once per isolate.
