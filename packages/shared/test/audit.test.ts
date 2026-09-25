@@ -58,4 +58,22 @@ describe("audit logger", () => {
     ).rejects.toThrow(ZodError);
     expect(queue.sent).toStrictEqual([]);
   });
+
+  it("keeps content out of detail: only short, flat values", async () => {
+    const queue = memoryQueue();
+    const { log } = auditLogger(queue, "core");
+    const entry = { actor: { type: "system" }, action: "model.call" } as const;
+
+    await expect(
+      log({ ...entry, detail: { status: "ok", attempt: 2, cached: false } })
+    ).resolves.toMatchObject({ detail: { status: "ok" } });
+    await expect(
+      log({ ...entry, detail: { prompt: "x".repeat(10_000) } })
+    ).rejects.toThrow(ZodError);
+    await expect(
+      // @ts-expect-error -- nested values are not allowed
+      log({ ...entry, detail: { response: { text: "Dear team" } } })
+    ).rejects.toThrow(ZodError);
+    expect(queue.sent).toHaveLength(1);
+  });
 });

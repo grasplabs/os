@@ -53,6 +53,21 @@ export const auditCostSchema = z.object({
 });
 export type AuditCost = z.infer<typeof auditCostSchema>;
 
+/** Longest string a detail value may hold: room for IDs, not for content. */
+const detailValueMaxLength = 256;
+
+/**
+ * One `detail` value: a flat, identifier-sized scalar, so a prompt, a message
+ * body or a document can't end up in the append-only log by accident.
+ */
+export const auditDetailValueSchema = z.union([
+  z.string().max(detailValueMaxLength),
+  z.number(),
+  z.boolean(),
+  z.null(),
+]);
+export type AuditDetailValue = z.infer<typeof auditDetailValueSchema>;
+
 /**
  * One audit event, sent by core and connect through the audit queue and
  * appended to the hash chain by the AuditLog object. Messages outlive a
@@ -80,7 +95,8 @@ export const auditEventSchema = z.object({
   model: auditModelSchema.optional(),
   /** Set where the action has a cost, such as a model call. */
   cost: auditCostSchema.optional(),
-  detail: z.record(z.string(), z.json()).default({}),
+  /** Anything else worth recording, as identifiers and small values. */
+  detail: z.record(z.string(), auditDetailValueSchema).default({}),
 });
 export type AuditEvent = z.infer<typeof auditEventSchema>;
 
