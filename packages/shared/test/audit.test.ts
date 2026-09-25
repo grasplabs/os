@@ -3,6 +3,7 @@ import { ZodError } from "zod";
 
 import {
   auditDetailMaxKeys,
+  auditEventMaxBytes,
   auditEventSchema,
   auditIdentifierMaxLength,
   auditLogger,
@@ -62,6 +63,20 @@ describe("audit logger", () => {
         cost: { amount: -1, currency: "usd" },
       })
     ).rejects.toThrow(ZodError);
+    expect(queue.sent).toStrictEqual([]);
+  });
+
+  it("refuses an event over the log's size cap before it reaches the queue", async () => {
+    const queue = memoryQueue();
+    // Every field within its bound, the whole over the cap.
+    const provenance = Array.from({ length: 100 }, () => "r".repeat(100));
+    await expect(
+      auditLogger(queue, "core").log({
+        actor: { type: "system" },
+        action: "model.call",
+        provenance,
+      })
+    ).rejects.toThrow(`over ${auditEventMaxBytes} bytes`);
     expect(queue.sent).toStrictEqual([]);
   });
 });

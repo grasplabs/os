@@ -150,15 +150,23 @@ export interface AuditLogger {
   log: (entry: AuditEntry) => Promise<AuditEvent>;
 }
 
-// Web Crypto is a global in every runtime this package runs in (Workers,
-// browsers, Node); the package declares no runtime types of its own.
+// Web Crypto and the Encoding API are globals in every runtime this package
+// runs in (Workers, browsers, Node); the package declares no runtime types.
 declare const crypto: { randomUUID: () => string };
+declare const TextEncoder: new () => {
+  encode: (input: string) => Uint8Array;
+};
+
+/** Whether an event's JSON is over {@link auditEventMaxBytes}. */
+export const isAuditEventTooLarge = (json: string): boolean =>
+  new TextEncoder().encode(json).byteLength > auditEventMaxBytes;
 
 /**
  * The audit logger for one Worker: `audit.log({ actor, action, ... })`. It
  * gives each event a new ID, the time and the Worker it comes from (never the
- * caller's), validates it, so a malformed event fails where it is made
- * instead of in the dead letter queue, and sends it to the audit queue.
+ * caller's), validates it and checks its size, so a malformed or oversized
+ * event fails where it is made instead of in the dead letter queue, and
+ * sends it to the audit queue.
  */
 export const auditLogger = (
   queue: AuditQueue,
@@ -171,6 +179,13 @@ export const auditLogger = (
       at: new Date().toISOString(),
       source,
     });
+    // The log refuses it too; failing here keeps it out of the DLQ.
+    // (Canonical JSON only reorders keys, so its size is the same.)
+    if (isAuditEventTooLarge(JSON.stringify(event))) {
+      throw new RangeError(
+        `Audit event ${event.id} is over ${auditEventMaxBytes} bytes`
+      );
+    }
     await queue.send(event);
     return event;
   },

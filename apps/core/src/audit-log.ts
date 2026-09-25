@@ -1,4 +1,8 @@
-import { auditEventMaxBytes, auditEventSchema } from "@grasp-os/shared/audit";
+import {
+  auditEventMaxBytes,
+  auditEventSchema,
+  isAuditEventTooLarge,
+} from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { DurableObject } from "cloudflare:workers";
 import { asc, desc, eq, gt } from "drizzle-orm";
@@ -44,7 +48,7 @@ const prepare = (input: AuditEvent): Incoming => {
   // caller to have validated, and keeps only the fields the schema knows.
   const parsed = auditEventSchema.parse(input);
   const event = canonicalJson(parsed);
-  if (new TextEncoder().encode(event).byteLength > auditEventMaxBytes) {
+  if (isAuditEventTooLarge(event)) {
     throw new RangeError(
       `Audit event ${parsed.id} is over ${auditEventMaxBytes} bytes`
     );
