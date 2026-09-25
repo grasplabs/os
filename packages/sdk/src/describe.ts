@@ -371,6 +371,39 @@ const checkBindingUses = (body: Node, bindings: Bindings): void => {
   });
 };
 
+// Where the outline shows a parameter read: in a step's call, an `if`
+// condition or a loop head.
+const isShownPosition = (bindings: Bindings, ancestor: Ancestor): boolean => {
+  const { node, key } = ancestor;
+  if (node.type === "IfStatement") {
+    return key === "test";
+  }
+  if (node.type === "ForOfStatement") {
+    return key === "left" || key === "right";
+  }
+  if (node.type === "ForStatement") {
+    return key === "init" || key === "test" || key === "update";
+  }
+  return key === "arguments" && isStepCall(bindings, node);
+};
+
+// A parameter read anywhere else (into a variable, say) could steer steps in
+// ways the outline can't follow, so it's an error rather than a silent gap.
+const checkParamReads = (body: Node, bindings: Bindings): void => {
+  visit(body, (node, ancestors) => {
+    const name = paramReadOf(bindings, node);
+    if (
+      name !== undefined &&
+      !ancestors.some((ancestor) => isShownPosition(bindings, ancestor))
+    ) {
+      throw fail(
+        node,
+        `Read parameter "${name}" where it's used: in a step's options or function, an \`if\` condition or a loop head`
+      );
+    }
+  });
+};
+
 /** The workflow function: the third argument of the one `workflow` call. */
 const findWorkflowFunction = (
   file: Node
@@ -697,14 +730,17 @@ const describeIf = (
   const otherwise = node.alternate
     ? describeBody(reader, node.alternate, inLoop)
     : [];
-  if (steps.length === 0 && otherwise.length === 0) {
+  const params = paramsIn(reader.bindings, [node.test]);
+  // Kept when it reads a parameter, so every tunable value that steers the
+  // run shows up.
+  if (steps.length === 0 && otherwise.length === 0 && params.length === 0) {
     return [];
   }
   return [
     {
       type: "branch",
       condition: textOf(reader, node.test),
-      params: paramsIn(reader.bindings, [node.test]),
+      params,
       steps,
       otherwise,
       line: lineOf(node),
@@ -727,14 +763,15 @@ const describeLoop = (
     throw fail(inHead, "Run a step before the loop, not in its head");
   }
   const steps = describeBody(reader, node.body, true);
-  if (steps.length === 0) {
+  const params = paramsIn(reader.bindings, head);
+  if (steps.length === 0 && params.length === 0) {
     return [];
   }
   return [
     {
       type: "loop",
       header: reader.source.slice(node.start ?? 0, node.body.start ?? 0).trim(),
-      params: paramsIn(reader.bindings, head),
+      params,
       steps,
       line: lineOf(node),
     },
@@ -796,6 +833,7 @@ export const describeWorkflow = (source: string): WorkflowOutline => {
   const run = findWorkflowFunction(file);
   const bindings = bindingsOf(run.params);
   checkBindingUses(run.body, bindings);
+  checkParamReads(run.body, bindings);
   const reader: Reader = { source, bindings, names: new Set() };
   const steps =
     run.body.type === "BlockStatement"

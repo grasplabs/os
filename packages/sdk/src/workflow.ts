@@ -467,10 +467,12 @@ const createStepRunner = (engine: WorkflowEngine): UntypedStepRunner => {
     const { key } = options;
     const keyIsValid =
       key === undefined ||
-      (typeof key === "string" && key !== "") ||
+      // Well formed, or encoding it throws.
+      (typeof key === "string" && key !== "" && key.isWellFormed()) ||
       (typeof key === "number" && Number.isFinite(key));
     // Encoded, so a key never contains the separators of engine step names.
-    const encodedKey = key === undefined ? "" : encodeURIComponent(key);
+    const encodedKey =
+      key === undefined || !keyIsValid ? "" : encodeURIComponent(key);
     if (!keyIsValid || encodedKey.length > maxKeyLength) {
       throw invalidCall(
         `Step "${name}" needs a key that is a non-empty string or a number, of up to ${maxKeyLength} characters`

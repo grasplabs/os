@@ -74,6 +74,7 @@ describe("step calls", () => {
       ["go", { description: " " }],
       ["go", { description: "Go", key: "" }],
       ["go", { description: "Go", key: "x".repeat(200) }],
+      ["go", { description: "Go", key: "\uD800" }],
       ["go", { description: "Go", retries: -1 }],
     ];
 

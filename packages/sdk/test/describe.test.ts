@@ -126,6 +126,26 @@ describe(describeWorkflow, () => {
     ]);
   });
 
+  it("keeps a condition that reads a parameter, even without steps under it", () => {
+    const source = workflowSource(`
+  if (input.total > params.limit) {
+    return "too much";
+  }
+  if (input.total > 0) {
+    return "fine";
+  }`);
+
+    expect(outlineOf(source)).toStrictEqual([
+      {
+        type: "branch",
+        condition: "input.total > params.limit",
+        params: ["limit"],
+        steps: [],
+        otherwise: [],
+      },
+    ]);
+  });
+
   it("rejects what it can't read, saying how to write it instead", () => {
     const step = `step.do("go", { description: "Go" }, async () => 1)`;
     const cases: [string, string][] = [
@@ -167,6 +187,10 @@ describe(describeWorkflow, () => {
       [`if (await ${step}) {}`, "not in its condition"],
       [`await helper(step);`, "don't pass `step` around"],
       [`const { limit } = params;`, "Read parameters as"],
+      [
+        `const limit = params.limit; if (input.total > limit) { await ${step}; }`,
+        'Read parameter "limit" where it\'s used',
+      ],
       [`await step.run("x", {});`, "isn't a step"],
     ];
 
