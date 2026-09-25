@@ -1,7 +1,26 @@
 const whitespace = /\s+/u;
 const quotes = /["'`]/u;
 /** Quotes and punctuation around a class in code: `"flex",` or `("p-2")`. */
-const wrapping = /^["'`({,]+|["'`)},;]+$/gu;
+const before = new Set(['"', "'", "`", "(", "{", ","]);
+const after = new Set(['"', "'", "`", ")", "}", ",", ";"]);
+/**
+ * Longer candidates aren't classes (the kit's longest is under 100
+ * characters), so Tailwind needn't look at them.
+ */
+const longestCandidate = 300;
+
+/** A token without the quotes and punctuation around it. */
+const unwrap = (token: string): string => {
+  let start = 0;
+  let end = token.length;
+  while (start < end && before.has(token.charAt(start))) {
+    start += 1;
+  }
+  while (end > start && after.has(token.charAt(end - 1))) {
+    end -= 1;
+  }
+  return token.slice(start, end);
+};
 
 /**
  * Tailwind class candidates in a source file. Tailwind's own scanner is
@@ -14,9 +33,8 @@ const wrapping = /^["'`({,]+|["'`)},;]+$/gu;
 export const extractCandidates = (source: string): string[] =>
   source
     .split(whitespace)
-    .flatMap((token) => [
-      token,
-      token.replaceAll(wrapping, ""),
-      ...token.split(quotes),
-    ])
-    .filter((token) => token.length > 0);
+    .flatMap((token) => [token, unwrap(token), ...token.split(quotes)])
+    .filter(
+      (candidate) =>
+        candidate.length > 0 && candidate.length <= longestCandidate
+    );

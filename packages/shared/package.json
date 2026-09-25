@@ -12,7 +12,8 @@
     "./ids": "./src/ids.ts",
     "./json": "./src/json.ts",
     "./router": "./src/router.ts",
-    "./rpc": "./src/rpc.ts"
+    "./rpc": "./src/rpc.ts",
+    "./runtime": "./src/runtime.ts"
   },
   "dependencies": {
     "zod": "catalog:"

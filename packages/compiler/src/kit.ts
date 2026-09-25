@@ -20,6 +20,8 @@ export interface Kit {
   stylesheets: Record<string, string>;
   /** Tailwind class candidates in the kit's own sources. */
   candidates: string[];
+  /** What each of the kit's modules imports, by flat name. */
+  moduleImports: Record<string, string[]>;
   /**
    * What the type check reads, by absolute path: TypeScript's libraries
    * and the kit's packages with their declarations, as `/node_modules/…`.
@@ -42,6 +44,28 @@ export interface KitModules {
   /** Module code by flat name. */
   modules: Record<string, string>;
 }
+
+/**
+ * A record's own entry: never one `Object.prototype` has, such as
+ * `toString`, which an App could otherwise name.
+ */
+export const ownEntry = <T>(
+  record: Record<string, T>,
+  key: string
+): T | undefined => (Object.hasOwn(record, key) ? record[key] : undefined);
+
+/**
+ * Where a release's compiler is among core's static assets, and its files:
+ * the compiler's code, what it knows of the kit (`Kit`) and the kit's
+ * modules (`KitModules`). The path has the compiler's version in it, so a
+ * cache never serves another release's.
+ */
+export const compilerAssets = {
+  directory: (version: string): string => `/_compiler/${version}`,
+  source: "compiler.js",
+  kit: "kit.json",
+  kitModules: "kit-modules.json",
+} as const;
 
 /** The name the compiler's isolate has `Kit` under, as a JSON module. */
 export const kitModule = "kit.json";

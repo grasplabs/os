@@ -1,5 +1,6 @@
 import { kitModules } from "@grasp-os/compiler";
 import type { ScreenSource } from "@grasp-os/compiler";
+import { compatibilityDate } from "@grasp-os/shared/runtime";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -62,18 +63,24 @@ const app = (
   version = crypto.randomUUID()
 ): ScreenSource => ({ app: "sample", version, files });
 
+/** These of the kit's modules, by flat name. */
+const kitModulesNamed = async (
+  names: string[]
+): Promise<Record<string, string>> => {
+  const { modules } = await kitModules(env.ASSETS);
+  return Object.fromEntries(names.map((name) => [name, modules[name] ?? ""]));
+};
+
 /**
- * Loads an App's modules and the kit's into a fresh isolate, as a page does
- * with an import map, and says what `imports` evaluate to there.
+ * Loads modules into a fresh isolate, as a page does with an import map,
+ * and says what `imports` evaluate to there.
  */
 const evaluate = async (
-  appModules: Record<string, string>,
+  code: Record<string, string>,
   imports: string[]
 ): Promise<unknown> => {
   const modules = Object.fromEntries(
-    Object.entries({ ...kitModules().modules, ...appModules }).map(
-      ([name, js]) => [name, { js }]
-    )
+    Object.entries(code).map(([name, js]) => [name, { js }])
   );
   const probe = `${imports.map((name, index) => `import * as m${index} from "${name}";`).join("\n")}
 export default {
@@ -82,7 +89,7 @@ ${imports.map((name, index) => `    "${name}": Object.fromEntries(Object.entries
   }),
 };`;
   const worker = env.LOADER.load({
-    compatibilityDate: "2026-09-15",
+    compatibilityDate,
     mainModule: "probe.js",
     modules: { ...modules, "probe.js": probe },
     globalOutbound: null,
@@ -90,6 +97,14 @@ ${imports.map((name, index) => `    "${name}": Object.fromEntries(Object.entries
   const response = await worker.getEntrypoint().fetch("https://probe/");
   return await response.json();
 };
+
+/** A screen that says `text`. */
+const screen = (text: string): Record<string, string> => ({
+  "screens/desk.tsx": `export default function Desk() {
+  return <p>${text}</p>;
+}
+`,
+});
 
 /** A Worker Loader that fails the test if anything is built. */
 const noBuilds: WorkerLoader = {
@@ -110,23 +125,46 @@ describe("screen builds", { timeout: 60_000 }, () => {
     }
     expect(built.diagnostics).toStrictEqual([]);
 
-    // Evaluating them links every import, the icon's too, without `require`.
+    // Evaluating them with only the kit modules the build names links
+    // every import, the icons' too, without `require`.
     await expect(
-      evaluate(built.modules, [
-        "app~screens~desk.js",
-        "app~screens~inbox.js",
-        "react-dom~client.js",
-      ])
+      evaluate(
+        {
+          ...(await kitModulesNamed(built.kitModules)),
+          ...built.modules,
+        },
+        ["app~screens~desk.js", "app~screens~inbox.js"]
+      )
     ).resolves.toMatchObject({
       "app~screens~desk.js": { default: "function" },
       "app~screens~inbox.js": { default: "function" },
-      "react-dom~client.js": { createRoot: "function" },
     });
     // The App's own classes, the kit's classes (quotes and all, from the
     // button's icon sizing) and the kit's theme.
     expect(built.css).toContain(".grid-cols-3");
     expect(built.css).toContain("svg:not([class*='size-'])");
     expect(built.css).toContain("--primary:");
+  });
+
+  it("names only the kit modules the App needs", async () => {
+    const built = await buildScreens(env, app(sampleApp));
+
+    expect(built.ok && built.kitModules).toContain(
+      "lucide-react~icons~inbox.js"
+    );
+    expect(built.ok && built.kitModules).not.toContain(
+      "lucide-react~icons~house.js"
+    );
+  });
+
+  it("has React DOM in the kit, for the page that renders screens", async () => {
+    const { modules } = await kitModules(env.ASSETS);
+
+    await expect(
+      evaluate(modules, ["react-dom~client.js"])
+    ).resolves.toMatchObject({
+      "react-dom~client.js": { createRoot: "function" },
+    });
   });
 
   it("runs screens through the React Compiler", async () => {
@@ -198,7 +236,7 @@ export default function Desk() {
     ]);
   });
 
-  it("builds a version once and serves it from the cache after", async () => {
+  it("builds the same files once and serves them from the cache after", async () => {
     const source = app(sampleApp);
     const built = await buildScreens(env, source);
     expect(built.ok).toBeTruthy();
@@ -206,29 +244,32 @@ export default function Desk() {
     const cached = await buildScreens({ ...env, LOADER: noBuilds }, source);
     expect(cached).toStrictEqual(built);
 
-    const next = buildScreens(
-      { ...env, LOADER: noBuilds },
-      { ...source, version: crypto.randomUUID() }
-    );
-    await expect(next).rejects.toThrow("Built again");
+    // Another version, or other files under the same version, build again.
+    await expect(
+      buildScreens(
+        { ...env, LOADER: noBuilds },
+        { ...source, version: crypto.randomUUID() }
+      )
+    ).rejects.toThrow("Built again");
+    await expect(
+      buildScreens(
+        { ...env, LOADER: noBuilds },
+        {
+          ...source,
+          files: { ...source.files, "components/extra.ts": "export {};\n" },
+        }
+      )
+    ).rejects.toThrow("Built again");
   });
 
-  it("builds a version once when requests for it arrive together", async () => {
-    let builds = 0;
-    const counting: WorkerLoader = {
-      get: (name, code) => {
-        builds += 1;
-        return env.LOADER.get(name, code);
-      },
-      load: (code) => env.LOADER.load(code),
-    };
-    const source = app(sampleApp);
-    const [first, second] = await Promise.all([
-      buildScreens({ ...env, LOADER: counting }, source),
-      buildScreens({ ...env, LOADER: counting }, source),
-    ]);
+  it("builds other files under the same version on their own", async () => {
+    const version = crypto.randomUUID();
+    const first = await buildScreens(env, app(screen("first"), version));
+    const second = await buildScreens(env, app(screen("second"), version));
 
-    expect(second).toStrictEqual(first);
-    expect(builds).toBe(1);
+    expect(first.ok && first.modules["app~screens~desk.js"]).toContain("first");
+    expect(second.ok && second.modules["app~screens~desk.js"]).toContain(
+      "second"
+    );
   });
 });

@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -25,7 +26,12 @@ import { z } from "zod";
 
 import { extractCandidates } from "./src/candidates.ts";
 import { compileModule } from "./src/compile.ts";
-import { kitModule, kitModuleName, kitStylesheet } from "./src/kit.ts";
+import {
+  compilerAssets,
+  kitModule,
+  kitModuleName,
+  kitStylesheet,
+} from "./src/kit.ts";
 import type { Kit, KitModules } from "./src/kit.ts";
 import { compilerOptions } from "./src/type-check.ts";
 
@@ -174,11 +180,15 @@ const chunksOf = (
  * The kit's modules: React, `@grasp-os/ui` and lucide-react's icons, built
  * together so they share one React and one copy of every dependency. Entries
  * and the chunks they share are named flat (`react.js`, `kit~….js`), and
- * import each other by that name instead of by relative path.
+ * import each other by that name instead of by relative path. Returns their
+ * code and what each imports, by flat name.
  */
 const buildKitModules = async (
   entries: Entry[]
-): Promise<Record<string, string>> => {
+): Promise<{
+  code: Record<string, string>;
+  imports: Record<string, string[]>;
+}> => {
   const config: InlineConfig = {
     configFile: false,
     root,
@@ -218,22 +228,25 @@ const buildKitModules = async (
   };
   const chunks = chunksOf(await build(config));
   const kitModules: Record<string, string> = {};
+  const imports: Record<string, string[]> = {};
   for (const chunk of chunks) {
     let { code } = chunk;
-    for (const imported of [...chunk.imports, ...chunk.dynamicImports]) {
-      code = code.replaceAll(`"./${imported}"`, `"${imported}"`);
+    const imported = [...chunk.imports, ...chunk.dynamicImports];
+    for (const name of imported) {
+      code = code.replaceAll(`"./${name}"`, `"${name}"`);
     }
     if (code.includes('"./')) {
       throw new Error(`${chunk.fileName} still imports by relative path`);
     }
     kitModules[chunk.fileName] = code;
+    imports[chunk.fileName] = imported;
   }
   for (const { specifier } of entries) {
     if (kitModules[kitModuleName(specifier)] === undefined) {
       throw new Error(`The kit has no module for ${specifier}`);
     }
   }
-  return kitModules;
+  return { code: kitModules, imports };
 };
 
 /** The kit's stylesheet and the ones it imports, by their `style` export. */
@@ -463,11 +476,10 @@ ${code.replace(required, "typescriptEslintParser")}`;
 };
 
 /**
- * The compiler's main module. It imports what it knows of the kit (`#kit`,
- * dist/kit.json) as a module of its own, `kit.json`, which the isolate is
- * started with. Most of it is the type check's declarations; in the
- * compiler's code they made one module of 17 MB, which crashes the Workers
- * test pool when core's tests load it.
+ * The compiler's main module. It imports what it knows of the kit (`#kit`)
+ * as a module of its own, `kit.json`, which the isolate is started with:
+ * most of it is the type check's declarations, which the compiler's code
+ * doesn't need to carry.
  */
 const buildCompiler = async (): Promise<string> => {
   const config: InlineConfig = {
@@ -503,7 +515,9 @@ const buildCompiler = async (): Promise<string> => {
 };
 
 /** Builds the kit, then the compiler, into dist/. */
-const buildScreenCompiler = async (): Promise<void> => {
+const buildScreenCompiler = async (
+  assets = path.join(dist, "assets")
+): Promise<void> => {
   mkdirSync(dist, { recursive: true });
   const { entries: icons, icons: iconNames } = iconEntries();
   const components = uiEntries();
@@ -511,7 +525,11 @@ const buildScreenCompiler = async (): Promise<void> => {
     specifier,
     id: `${virtualEntry}${specifier}`,
   }));
-  const kitCode = await buildKitModules([...react, ...components, ...icons]);
+  const { code: kitCode, imports: moduleImports } = await buildKitModules([
+    ...react,
+    ...components,
+    ...icons,
+  ]);
   const candidates = sourcesIn(path.join(ui, "src")).flatMap((file) =>
     extractCandidates(readText(file))
   );
@@ -525,13 +543,13 @@ const buildScreenCompiler = async (): Promise<void> => {
     icons: iconNames,
     stylesheets,
     candidates: [...new Set(candidates)].toSorted(),
+    moduleImports,
     types: collectTypes([...imports, "lucide-react"]),
     lintProject: collectLintProject(stylesheets),
     // The repo's lint config extends the same preset.
     lintRules: rulesSchema.parse(shadcnPreset.rules),
   };
   const kitJson = JSON.stringify(kit);
-  writeFileSync(path.join(dist, "kit.json"), kitJson);
   const compiler = await buildCompiler();
   const kitModules: KitModules = {
     version: createHash("sha256")
@@ -548,12 +566,21 @@ const buildScreenCompiler = async (): Promise<void> => {
     .update(kitModules.version)
     .digest("hex")
     .slice(0, 16);
+  // Core imports only the version; the rest it reads from its static
+  // assets when it starts a build, so it never loads them otherwise.
   writeFileSync(
-    path.join(dist, "isolate.js"),
-    `export const version = "${version}";
-export const source = ${JSON.stringify(compiler)};
-export const kitModules = ${JSON.stringify(kitModules)};
-`
+    path.join(dist, "version.js"),
+    `export const version = "${version}";\n`
+  );
+  const releases = path.join(assets, compilerAssets.directory(""));
+  rmSync(releases, { recursive: true, force: true });
+  const release = path.join(assets, compilerAssets.directory(version));
+  mkdirSync(release, { recursive: true });
+  writeFileSync(path.join(release, compilerAssets.source), compiler);
+  writeFileSync(path.join(release, compilerAssets.kit), kitJson);
+  writeFileSync(
+    path.join(release, compilerAssets.kitModules),
+    JSON.stringify(kitModules)
   );
   const kitSize = Object.values(kitCode).join("").length;
   console.info(
@@ -561,8 +588,11 @@ export const kitModules = ${JSON.stringify(kitModules)};
   );
 };
 
-// Core's tests run this as their global setup; core's build runs the file.
+/**
+ * Builds the compiler, with its files in `assets` (dist/assets unless
+ * given): core runs this with its own static assets directory.
+ */
 export default buildScreenCompiler;
 if (import.meta.main) {
-  await buildScreenCompiler();
+  await buildScreenCompiler(process.argv[2]);
 }
