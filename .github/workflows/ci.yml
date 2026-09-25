@@ -137,15 +137,15 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: op://grasp-os-staging/cloudflare/account-id
           CLOUDFLARE_API_TOKEN: op://grasp-os-staging/cloudflare/api-token
       - run: vp run --filter @grasp-os/web build
-      # connect first: core's service binding points at it.
-      - run: vp run --filter @grasp-os/connect deploy
       # A D1 database's jurisdiction is set only when it is created, and deploy
-      # would auto-provision a missing one outside the EU: create them first.
-      # One that exists outside the EU stops the deploy; it has to be recreated.
-      - name: Create core's D1 databases in the EU
+      # would auto-provision a missing one outside the EU: create every
+      # database a deployed app binds (see each wrangler.jsonc) before the
+      # first deploy. One that exists outside the EU stops the deploy; it has
+      # to be recreated.
+      - name: Create the D1 databases in the EU
         run: |
           existing=$(vp exec wrangler d1 list --json)
-          for db in grasp-os-core grasp-os-knowledge; do
+          for db in grasp-os-core grasp-os-knowledge grasp-os-connect grasp-os-console; do
             jurisdiction=$(jq -r --arg db "$db" '.[] | select(.name == $db) | .jurisdiction // "none"' <<< "$existing")
             if [ -z "$jurisdiction" ]; then
               vp exec wrangler d1 create "$db" --jurisdiction eu
@@ -154,6 +154,12 @@ jobs:
               exit 1
             fi
           done
+      # Deploy creates the queues bound as producers (grasp-os-audit), but not
+      # a dead letter queue, which is only named in core's consumer config.
+      - name: Create the audit dead letter queue
+        run: vp exec wrangler queues info grasp-os-audit-dlq || vp exec wrangler queues create grasp-os-audit-dlq
+      # connect first: core's service binding points at it.
+      - run: vp run --filter @grasp-os/connect deploy
       # D1 migrations are additive, so the running code keeps working on the
       # new schema until the deploy after them replaces it.
       - run: vp run --filter @grasp-os/core db:migrate

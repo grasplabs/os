@@ -66,7 +66,6 @@
       "jurisdiction": "eu",
     },
   ],
-  "kv_namespaces": [{ "binding": "KV" }],
   // Audit events from core and connect, appended to the AuditLog object.
   // Delivery is at least once; events that keep failing land in the dead
   // letter queue instead of being lost.
