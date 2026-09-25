@@ -9,6 +9,9 @@ export default defineProject({
         bindings: {
           CAPABILITY_SIGNING_KEY:
             "test-capability-signing-key-of-32-chars-or-more",
+          // As while rotating keys.
+          CAPABILITY_SIGNING_KEY_PREVIOUS:
+            "test-previous-signing-key-of-32-chars-or-more",
         },
       },
     }),

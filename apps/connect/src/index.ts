@@ -4,6 +4,23 @@ import type { ConnectApi, ConnectResult } from "@grasp-os/shared/connect";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 /**
+ * Rotating the signing key: set the old one as
+ * `CAPABILITY_SIGNING_KEY_PREVIOUS` on connect, then the new one as
+ * `CAPABILITY_SIGNING_KEY` on connect and core (core always signs with the
+ * current key), then remove the previous one. Optional, so it isn't in
+ * `secrets.required`.
+ */
+interface ConnectEnv extends Env {
+  CAPABILITY_SIGNING_KEY_PREVIOUS?: string;
+}
+
+/** The keys a capability may be made with: the current, then the previous. */
+const signingKeys = (env: ConnectEnv): string[] =>
+  [env.CAPABILITY_SIGNING_KEY, env.CAPABILITY_SIGNING_KEY_PREVIOUS].filter(
+    (key): key is string => typeof key === "string" && key !== ""
+  );
+
+/**
  * The connector layer. Every external call from agents, Apps and the
  * knowledge indexer passes through here: scoped, approved, logged.
  *
@@ -30,7 +47,7 @@ export default class Connect
       throw connectErrors.create("connect.invalid_call");
     }
     const { capability, ...scope } = call.data;
-    await verifyCapability(this.env.CAPABILITY_SIGNING_KEY, capability, scope);
+    await verifyCapability(signingKeys(this.env), capability, scope);
     // Connections come with the connection registry; until then there are
     // none, so a verified call has nothing to reach.
     throw connectErrors.create("connect.connection_not_found");

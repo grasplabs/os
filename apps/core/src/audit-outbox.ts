@@ -1,4 +1,4 @@
-import { auditEventSchema, createAuditEvent } from "@grasp-os/shared/audit";
+import { createAuditEvent } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { asc, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -42,8 +42,22 @@ export const outboxedIfChanged = (db: DrizzleD1Database, entry: AuditEntry) => {
 };
 
 /**
+ * What goes on the queue for a stored event. One that doesn't parse goes as
+ * it is: the queue's consumer refuses it until it lands in the dead letter
+ * queue, where it can be looked at, instead of staying here forever.
+ */
+const queueBody = (event: string): unknown => {
+  try {
+    return JSON.parse(event);
+  } catch {
+    return event;
+  }
+};
+
+/**
  * Sends the oldest events in the outbox to the audit queue, then removes
- * them: a failure in between sends them again later. Returns how many it
+ * those sent: a failure in between sends them again later, and one that
+ * fails to send stays for the next time. Returns how many it
  * sent. The cron trigger calls it.
  */
 export const sendAuditOutbox = async (env: Env): Promise<number> => {
@@ -53,22 +67,25 @@ export const sendAuditOutbox = async (env: Env): Promise<number> => {
     .from(auditOutbox)
     .orderBy(asc(auditOutbox.createdAt), asc(auditOutbox.id))
     .limit(sendBatchSize);
-  if (rows.length === 0) {
-    return 0;
+  // Each row on its own, so one that can't be sent doesn't hold up the rest.
+  const results = await Promise.allSettled(
+    rows.map(async ({ id, event }) => {
+      await env.AUDIT_QUEUE.send(queueBody(event));
+      return id;
+    })
+  );
+  const sent = results.flatMap((result) =>
+    result.status === "fulfilled" ? [result.value] : []
+  );
+  for (const result of results) {
+    if (result.status === "rejected") {
+      log.error("audit.outbox.send_failed", errorFields(result.reason));
+    }
   }
-  await Promise.all(
-    rows.map(
-      async ({ event }) =>
-        await env.AUDIT_QUEUE.send(auditEventSchema.parse(JSON.parse(event)))
-    )
-  );
-  await db.delete(auditOutbox).where(
-    inArray(
-      auditOutbox.id,
-      rows.map(({ id }) => id)
-    )
-  );
-  return rows.length;
+  if (sent.length > 0) {
+    await db.delete(auditOutbox).where(inArray(auditOutbox.id, sent));
+  }
+  return sent.length;
 };
 
 /**

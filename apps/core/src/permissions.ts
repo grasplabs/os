@@ -390,17 +390,25 @@ export const grantedPermissions = async (
 /**
  * The permission check. Every server path that lets an App or agent touch a
  * connection, a collection or a workflow calls it first, on every call:
- * the person it acts for is still here, and an active permission of that
- * exact subject covers the object and allows the action. A permission for
- * a whole connection covers each resource in it; one for a resource covers
- * only that resource. Returns the permission that allows it, and throws
- * `permission.denied` or `permission.person_inactive` otherwise.
+ * the person it acts for is still a member, and an active permission of
+ * that exact subject covers the object and allows the action. A permission
+ * for a whole connection covers each resource in it; one for a resource
+ * covers only that resource. With `permissionId` (a stub's own permission),
+ * only that permission counts, so revoking it stops its stubs even when
+ * another permission covers the same thing. Returns the permission that
+ * allows it, and throws `permission.denied` or `permission.person_inactive`
+ * otherwise.
+ *
+ * It doesn't intersect the grant with the person's own access (R5): connect
+ * does that for personal connections, and the Knowledge queries for
+ * collections.
  */
 export const authorize = async (
   env: Env,
   authority: Authority,
   object: PermissionObject,
-  action: string
+  action: string,
+  permissionId?: PermissionId
 ): Promise<PermissionId> => {
   await requireActivePerson(env, authority);
   const { objectType, objectId, resource } = objectColumns(object);
@@ -411,6 +419,9 @@ export const authorize = async (
       and(
         ofSubject(authority.subject),
         eq(permissions.status, "active"),
+        permissionId === undefined
+          ? undefined
+          : eq(permissions.id, permissionId),
         eq(permissions.objectType, objectType),
         eq(permissions.objectId, objectId),
         resource === null

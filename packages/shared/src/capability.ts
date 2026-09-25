@@ -145,9 +145,24 @@ export const signCapability = async (
 const invalid = (reason: "malformed" | "mac" | "expired" | "scope") =>
   capabilityErrors.create("capability.invalid", { reason });
 
+/** Whether one of `keys` made `mac` over `payload`, in constant time each. */
+const madeWithOneOf = async (
+  keys: readonly CryptoKey[],
+  mac: Uint8Array<ArrayBuffer>,
+  payload: string
+): Promise<boolean> => {
+  const checks = await Promise.all(
+    keys.map(
+      async (key) =>
+        await crypto.subtle.verify("HMAC", key, mac, macInput(payload))
+    )
+  );
+  return checks.includes(true);
+};
+
 /** The claims, if the MAC over the payload holds; throws otherwise. */
 const readClaims = async (
-  secret: string,
+  secrets: readonly string[],
   token: unknown
 ): Promise<CapabilityClaims> => {
   const parts = typeof token === "string" ? tokenPattern.exec(token) : null;
@@ -156,15 +171,20 @@ const readClaims = async (
   if (payload === undefined || mac === undefined) {
     throw invalid("malformed");
   }
-  // The key is checked before anything else; `verify` compares in constant time.
-  const key = await macKey(secret, "verify");
+  // The keys are checked before anything else.
+  const keys = await Promise.all(
+    secrets.map(async (secret) => await macKey(secret, "verify"))
+  );
+  if (keys.length === 0) {
+    throw new Error("No capability signing key to verify with");
+  }
   let macBytes: Uint8Array<ArrayBuffer>;
   try {
     macBytes = fromBase64Url(mac);
   } catch {
     throw invalid("malformed");
   }
-  if (!(await crypto.subtle.verify("HMAC", key, macBytes, macInput(payload)))) {
+  if (!(await madeWithOneOf(keys, macBytes, payload))) {
     throw invalid("mac");
   }
   try {
@@ -178,18 +198,19 @@ const readClaims = async (
 };
 
 /**
- * Checks a capability against the call it came with: made with this
- * deployment's key, for connect, still valid, and for exactly this
- * connection, resource, action and idempotency key. Returns what it says
- * (who, for whom, how); throws `capability.invalid` otherwise.
+ * Checks a capability against the call it came with: made with one of
+ * `secrets` (the current key, and the previous one while a rotation is
+ * under way), for connect, still valid, and for exactly this connection,
+ * resource, action and idempotency key. Returns what it says (who, for
+ * whom, how); throws `capability.invalid` otherwise.
  */
 export const verifyCapability = async (
-  secret: string,
+  secrets: readonly string[],
   token: unknown,
   scope: CapabilityScope,
   now: number = Date.now()
 ): Promise<CapabilityClaims> => {
-  const claims = await readClaims(secret, token);
+  const claims = await readClaims(secrets, token);
   const live =
     claims.iat <= now + capabilityClockSkewMs &&
     now < claims.exp &&

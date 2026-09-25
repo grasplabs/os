@@ -2,6 +2,7 @@ import { signCapability } from "@grasp-os/shared/capability";
 import { connectCallSchema, connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectCall, ConnectResult } from "@grasp-os/shared/connect";
 import { internalErrors } from "@grasp-os/shared/errors";
+import type { PermissionId } from "@grasp-os/shared/ids";
 import {
   bindingNameSchema,
   permissionErrors,
@@ -24,9 +25,9 @@ type ConnectionObject = Extract<PermissionObject, { type: "connection" }>;
 
 /**
  * Calls an action on a connection for an App or agent: checks the
- * permission, then signs the capability connect needs for exactly this call.
- * Core makes capabilities here and nowhere else, and nothing outside core
- * reaches this function.
+ * permission (only `permissionId`, when given), then signs the capability
+ * connect needs for exactly this call. Core makes capabilities here and
+ * nowhere else, and nothing outside core reaches this function.
  */
 export const callConnection = async (
   env: Env,
@@ -36,9 +37,10 @@ export const callConnection = async (
     action,
     input,
     idempotencyKey,
-  }: Pick<ConnectCall, "action" | "input" | "idempotencyKey">
+  }: Pick<ConnectCall, "action" | "input" | "idempotencyKey">,
+  permissionId?: PermissionId
 ): Promise<ConnectResult> => {
-  await authorize(env, authority, connection, action);
+  await authorize(env, authority, connection, action, permissionId);
   const scope = {
     connectionId: connection.connectionId,
     resource: connection.resource,
@@ -81,6 +83,8 @@ const stubCallSchema = z.tuple([
 
 interface ConnectionBindingProps {
   authority: Authority;
+  /** The permission the stub was built from: only it counts on each call. */
+  permissionId: PermissionId;
   connection: ConnectionObject;
 }
 
@@ -98,18 +102,24 @@ export class ConnectionBinding extends WorkerEntrypoint<
     input: unknown,
     options?: unknown
   ): Promise<ConnectResult> {
-    const { authority, connection } = this.ctx.props;
+    const { authority, permissionId, connection } = this.ctx.props;
     const call = stubCallSchema.safeParse([action, input, options]);
     if (!call.success) {
       throw connectErrors.create("connect.invalid_call");
     }
     const [checkedAction, checkedInput, checkedOptions] = call.data;
     try {
-      return await callConnection(this.env, authority, connection, {
-        action: checkedAction,
-        input: checkedInput,
-        idempotencyKey: checkedOptions?.idempotencyKey,
-      });
+      return await callConnection(
+        this.env,
+        authority,
+        connection,
+        {
+          action: checkedAction,
+          input: checkedInput,
+          idempotencyKey: checkedOptions?.idempotencyKey,
+        },
+        permissionId
+      );
     } catch (error) {
       throw forSandbox(error);
     }
@@ -117,11 +127,17 @@ export class ConnectionBinding extends WorkerEntrypoint<
 }
 
 /**
- * The env of an App or agent, built from its permission records as they
- * are now: one stub per active permission, under the permission's binding
- * name. App sandboxes build it on every load, and the workflow dispatcher on
- * every start and resume, so a revoked permission is gone from the next one.
- * Throws `permission.person_inactive` when the person it acts for has left.
+ * The env for one authority, built from the permission records as they are
+ * now: one stub per active permission, under the permission's binding name.
+ * Every stub acts for `authority.onBehalfOf`. Throws
+ * `permission.person_inactive` when that person has left.
+ *
+ * That fits a workflow run, which acts for one person: the dispatcher
+ * builds it on every start and resume, so a revoked permission is gone from
+ * the next one. It doesn't fit an App as is: one App object serves everyone
+ * using the App, so an env built once per load would act for whoever loaded
+ * it. The App sandbox has to take the person from the host on each call (or
+ * give App authority no person); that design is the sandbox's.
  *
  * Collections and workflows get their stubs with the Knowledge API and the
  * workflow dispatcher; until then nothing reaches them.
@@ -131,10 +147,13 @@ export const bindingsFor = async (
   authority: Authority
 ): Promise<Record<string, Fetcher<ConnectionBinding>>> => {
   const bindings: Record<string, Fetcher<ConnectionBinding>> = {};
-  for (const { binding, object } of await grantedPermissions(env, authority)) {
+  for (const { id, binding, object } of await grantedPermissions(
+    env,
+    authority
+  )) {
     if (object.type === "connection") {
       bindings[bindingNameSchema.parse(binding)] = exports.ConnectionBinding({
-        props: { authority, connection: object },
+        props: { authority, permissionId: id, connection: object },
       });
     }
   }

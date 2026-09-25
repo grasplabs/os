@@ -1,8 +1,10 @@
 import type { Role } from "@grasp-os/shared";
+import { auditEventSchema } from "@grasp-os/shared/audit";
 import { capabilityErrors, signCapability } from "@grasp-os/shared/capability";
 import { connectErrors } from "@grasp-os/shared/connect";
 import {
   authoritySchema,
+  bindingNameSchema,
   permissionErrors,
   permissionObjectSchema,
 } from "@grasp-os/shared/permissions";
@@ -186,6 +188,27 @@ describe("permissions", () => {
     );
   });
 
+  it("stop their own stubs once revoked, even when another permission covers the same", async () => {
+    const admin = await permissionApi("admin");
+    const app = newApp();
+    const authority = actingFor(app, admin.userId);
+    const grant = async (binding: string) => {
+      const { id } = await admin.api.requestPermission({
+        ...outlook(app),
+        binding,
+      });
+      return await admin.api.grantPermission(id);
+    };
+    const first = await grant("OUTLOOK");
+    await grant("OUTLOOK_TOO");
+    const { OUTLOOK: held } = await bindingsFor(env, authority);
+
+    await admin.api.revokePermission(first.id);
+    await expect(
+      Promise.all([callStub(held), callThrough(authority, "OUTLOOK_TOO")])
+    ).resolves.toStrictEqual(["permission.denied", reached]);
+  });
+
   it("belong to their subject alone: not another App, not an agent with the same ID", async () => {
     const admin = await permissionApi("admin");
     const app = newApp();
@@ -322,6 +345,9 @@ describe("permissions", () => {
       { ...outlook(app), binding: "__proto__" },
       { ...outlook(app), binding: "constructor" },
       { ...outlook(app), binding: "outlook" },
+      // Core's own bindings.
+      { ...outlook(app), binding: "DB" },
+      { ...outlook(app), binding: "CONNECT" },
       { ...outlook(app), actions: [] },
       { ...outlook(app), actions: ["mail.list", "mail.list"] },
       {
@@ -343,6 +369,14 @@ describe("permissions", () => {
       )
     );
     expect(refused).toStrictEqual(requests.map(() => "permission.invalid"));
+  });
+
+  it("can't take the name of any of core's own bindings", () => {
+    // Test-only bindings aside, every name in core's env is the platform's.
+    const own = Object.keys(env).filter((name) => name !== "CORE_MIGRATIONS");
+    expect(
+      own.filter((name) => bindingNameSchema.safeParse(name).success)
+    ).toStrictEqual([]);
   });
 
   it("keep binding names unique while they're live", async () => {
@@ -384,6 +418,52 @@ describe("permissions", () => {
       sent: [["permission.granted", id]],
       sentAgain: [],
     });
+  });
+
+  it("keep sending audit events past one that can't be sent or read", async () => {
+    const admin = await permissionApi("admin");
+    const app = newApp();
+    const { id } = await admin.api.requestPermission(outlook(app));
+    // A stored event that isn't JSON, older than anything else waiting.
+    await env.DB.prepare(
+      "INSERT INTO audit_outbox (id, event, created_at) VALUES (?, ?, 0)"
+    )
+      .bind(crypto.randomUUID(), "not an event")
+      .run();
+    const down = vi
+      .spyOn(env.AUDIT_QUEUE, "send")
+      .mockRejectedValue(new Error("Queue unavailable"));
+    try {
+      await admin.api.grantPermission(id);
+    } finally {
+      down.mockRestore();
+    }
+
+    const send = vi.spyOn(env.AUDIT_QUEUE, "send");
+    try {
+      // The queue refuses the oldest one once: the rest still go.
+      send.mockRejectedValueOnce(new Error("Queue unavailable"));
+      await runCron();
+      const first = send.mock.calls.slice(1).map(([body]) => body);
+      send.mockClear();
+      await runCron();
+      const second = send.mock.calls.map(([body]) => body);
+      const waiting = await env.DB.prepare(
+        "SELECT count(*) AS waiting FROM audit_outbox"
+      ).first("waiting");
+      expect({
+        first: first.map((body) => auditEventSchema.parse(body).action),
+        second,
+        waiting,
+      }).toStrictEqual({
+        first: ["permission.granted"],
+        // Sent as it is, for the queue's consumer to dead-letter.
+        second: ["not an event"],
+        waiting: 0,
+      });
+    } finally {
+      send.mockRestore();
+    }
   });
 
   it("are audited when requested, granted and revoked, by who did it", async () => {

@@ -93,13 +93,51 @@ export const isActionOf = (
 export const permissionMaxActions = 16;
 
 /**
+ * The names of core's and connect's own bindings, secrets and vars. A
+ * permission can't use one, so a stub is never mistaken for, or passed off
+ * as, a platform binding. Tests check this list against both Workers' env.
+ */
+export const platformBindingNames: ReadonlySet<string> = new Set([
+  "AI",
+  "APPS",
+  "ASSETS",
+  "AUDIT_LOG",
+  "AUDIT_QUEUE",
+  "BETTER_AUTH_SECRET",
+  "CAPABILITY_SIGNING_KEY",
+  "CAPABILITY_SIGNING_KEY_PREVIOUS",
+  "COMPOSIO_API_KEY",
+  "CONNECT",
+  "DB",
+  "DEV_SKIP_ROUTER_SECRET",
+  "DURABLE_OBJECT_JURISDICTION",
+  "EMAIL",
+  "ENTRA_CLIENT_SECRET",
+  "FILES",
+  "GOOGLE_CLIENT_ID",
+  "GOOGLE_CLIENT_SECRET",
+  "KNOWLEDGE",
+  "LOADER",
+  "MICROSOFT_CLIENT_ID",
+  "MICROSOFT_CLIENT_SECRET",
+  "ROUTER_SECRET",
+  "SIGN_IN",
+  "TOKEN_ENCRYPTION_KEY",
+  "WORKFLOWS",
+  "WORKSPACES",
+]);
+
+/**
  * The name a permission's stub has in the env of the App or agent, such as
  * `OUTLOOK`. Upper case only, like every other binding: that also keeps out
  * `__proto__`, `constructor` and every other name an object already has.
  */
 export const bindingNameSchema = z
   .string()
-  .regex(/^[A-Z][A-Z0-9_]{0,63}$/u, "Upper case letters, digits and _");
+  .regex(/^[A-Z][A-Z0-9_]{0,63}$/u, "Upper case letters, digits and _")
+  .refine((name) => !platformBindingNames.has(name), {
+    message: "A name the platform uses itself",
+  });
 
 /** What a person asks for: the subject, the object, its actions, the name. */
 export const permissionRequestSchema = z
@@ -174,9 +212,13 @@ export const permissionIdInputSchema = identifier().pipe(permissionIdSchema);
  * on its own. The host sets it, from the session or the run; never the code
  * that makes the call.
  *
- * An App or agent never gets more than the person it acts for: a workflow
- * run acts for the person who started it, or for the workflow's owner when
- * a trigger or schedule started it, and stops when that person leaves.
+ * A workflow run acts for the person who started it, or for the workflow's
+ * owner when a trigger or schedule started it, and stops when that person
+ * leaves. The permission check only requires that the person is still a
+ * member; it doesn't intersect the grant with the person's own access. That
+ * part of "never more than the person" (R5) is enforced where the access
+ * lives: connect limits personal connections to their owner, and the
+ * Knowledge queries limit collections to what the person may read.
  */
 export const authoritySchema = z.strictObject({
   subject: permissionSubjectSchema,

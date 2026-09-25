@@ -2,6 +2,8 @@
 # Verifies the capability core signs for each call. The same value as in
 # apps/core/.dev.vars; at least 32 characters, e.g. `openssl rand -base64 32`.
 CAPABILITY_SIGNING_KEY=
+# Optional, only while rotating: the key core signed with before. Leave empty.
+CAPABILITY_SIGNING_KEY_PREVIOUS=
 COMPOSIO_API_KEY=
 GOOGLE_CLIENT_ID=
 GOOGLE_CLIENT_SECRET=

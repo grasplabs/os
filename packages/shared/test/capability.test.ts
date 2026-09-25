@@ -46,7 +46,7 @@ const refusal = async (run: () => Promise<unknown>): Promise<string> => {
 describe("capabilities", () => {
   it("name who, for whom and how, for the one call they were made for", async () => {
     const token = await signCapability(key, authority, scope, now);
-    const claims = await verifyCapability(key, token, scope, now + 1000);
+    const claims = await verifyCapability([key], token, scope, now + 1000);
     expect(claims).toMatchObject({
       aud: "connect",
       authority,
@@ -65,7 +65,7 @@ describe("capabilities", () => {
       now
     );
     await expect(
-      refusal(async () => await verifyCapability(key, forged, scope, now))
+      refusal(async () => await verifyCapability([key], forged, scope, now))
     ).resolves.toBe("mac");
   });
 
@@ -88,7 +88,8 @@ describe("capabilities", () => {
       ).toString("base64url");
       // oxlint-disable-next-line no-await-in-loop -- one change at a time
       const reason = await refusal(
-        async () => await verifyCapability(key, `${altered}.${mac}`, scope, now)
+        async () =>
+          await verifyCapability([key], `${altered}.${mac}`, scope, now)
       );
       expect(reason).toBe("mac");
     }
@@ -113,7 +114,7 @@ describe("capabilities", () => {
       notTokens.map(
         async (notToken) =>
           await refusal(
-            async () => await verifyCapability(key, notToken, scope, now)
+            async () => await verifyCapability([key], notToken, scope, now)
           )
       )
     );
@@ -136,13 +137,13 @@ describe("capabilities", () => {
     await expect(
       refusal(
         async () =>
-          await verifyCapability(key, token, scope, now + capabilityTtlMs - 1)
+          await verifyCapability([key], token, scope, now + capabilityTtlMs - 1)
       )
     ).resolves.toBe("none");
     await expect(
       refusal(
         async () =>
-          await verifyCapability(key, token, scope, now + capabilityTtlMs)
+          await verifyCapability([key], token, scope, now + capabilityTtlMs)
       )
     ).resolves.toBe("expired");
 
@@ -153,7 +154,7 @@ describe("capabilities", () => {
       now + capabilityClockSkewMs + 1000
     );
     await expect(
-      refusal(async () => await verifyCapability(key, early, scope, now))
+      refusal(async () => await verifyCapability([key], early, scope, now))
     ).resolves.toBe("expired");
   });
 
@@ -171,7 +172,7 @@ describe("capabilities", () => {
       otherCalls.map(
         async (call) =>
           await refusal(
-            async () => await verifyCapability(key, token, call, now)
+            async () => await verifyCapability([key], token, call, now)
           )
       )
     );
@@ -185,7 +186,7 @@ describe("capabilities", () => {
       now
     );
     await expect(
-      refusal(async () => await verifyCapability(key, whole, scope, now))
+      refusal(async () => await verifyCapability([key], whole, scope, now))
     ).resolves.toBe("scope");
   });
 
@@ -203,8 +204,33 @@ describe("capabilities", () => {
       signCapability("short", authority, scope, now)
     ).rejects.toThrow("at least 32 characters");
     const token = await signCapability(key, authority, scope, now);
-    await expect(verifyCapability("", token, scope, now)).rejects.toThrow(
+    await expect(verifyCapability([""], token, scope, now)).rejects.toThrow(
       "at least 32 characters"
     );
+    await expect(verifyCapability([], token, scope, now)).rejects.toThrow(
+      "No capability signing key"
+    );
+  });
+
+  it("verify with the previous key while a rotation is under way, and not after", async () => {
+    const previous = "the-previous-key-of-32-characters-or-more";
+    const fromBefore = await signCapability(previous, authority, scope, now);
+    const fromNow = await signCapability(key, authority, scope, now);
+    const during = await Promise.all(
+      [fromBefore, fromNow].map(
+        async (token) =>
+          await refusal(
+            async () =>
+              await verifyCapability([key, previous], token, scope, now)
+          )
+      )
+    );
+    const after = await refusal(
+      async () => await verifyCapability([key], fromBefore, scope, now)
+    );
+    expect({ during, after }).toStrictEqual({
+      during: ["none", "none"],
+      after: "mac",
+    });
   });
 });
