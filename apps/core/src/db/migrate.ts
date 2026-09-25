@@ -1,4 +1,4 @@
-import { errorFields, log } from "../log.ts";
+import { errorFields, log } from "@grasp-os/shared/log";
 
 /**
  * A Durable Object's migrations, as drizzle-kit bundles them

@@ -3,6 +3,7 @@ import { connectCallSchema, connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectCall, ConnectResult } from "@grasp-os/shared/connect";
 import { internalErrors } from "@grasp-os/shared/errors";
 import type { PermissionId } from "@grasp-os/shared/ids";
+import { errorFields, log } from "@grasp-os/shared/log";
 import {
   bindingNameSchema,
   permissionErrors,
@@ -11,7 +12,6 @@ import type { Authority, PermissionObject } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
-import { errorFields, log } from "./log.ts";
 import { authorize, grantedPermissions } from "./permissions.ts";
 
 // What Apps and agents get in their env: one stub per granted permission,

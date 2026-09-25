@@ -6,6 +6,7 @@ import {
   requestErrors,
 } from "@grasp-os/shared/errors";
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { roleErrors } from "@grasp-os/shared/roles";
 import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
@@ -14,7 +15,6 @@ import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 import { oidcProviders, signInConfig } from "./auth/config.ts";
 import { identify } from "./auth/identity.ts";
 import { errorResponse } from "./errors.ts";
-import { errorFields, log } from "./log.ts";
 import { SessionRpc } from "./session-rpc.ts";
 
 /** What the frontend reaches over `/rpc`, signed in or not. */

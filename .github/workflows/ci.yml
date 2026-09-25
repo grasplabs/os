@@ -158,10 +158,11 @@ jobs:
       # a dead letter queue, which is only named in core's consumer config.
       - name: Create the audit dead letter queue
         run: vp exec wrangler queues info grasp-os-audit-dlq || vp exec wrangler queues create grasp-os-audit-dlq
-      # connect first: core's service binding points at it.
-      - run: vp run --filter @grasp-os/connect deploy
       # D1 migrations are additive, so the running code keeps working on the
-      # new schema until the deploy after them replaces it.
+      # new schema until the deploy after them replaces it. connect first:
+      # core's service binding points at it.
+      - run: vp run --filter @grasp-os/connect db:migrate
+      - run: vp run --filter @grasp-os/connect deploy
       - run: vp run --filter @grasp-os/core db:migrate
       - run: vp run --filter @grasp-os/core deploy
       - run: vp run --filter @grasp-os/console --filter @grasp-os/router deploy

@@ -1,7 +1,17 @@
-import { verifyCapability } from "@grasp-os/shared/capability";
+import {
+  capabilityErrors,
+  verifyCapability,
+} from "@grasp-os/shared/capability";
+import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import { connectCallSchema, connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectApi, ConnectResult } from "@grasp-os/shared/connect";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint } from "cloudflare:workers";
+
+import { auditCall, sendAuditOutbox } from "./audit.ts";
+import type { CallOutcome, CallRecord } from "./audit.ts";
+import { carryOut } from "./call.ts";
+import type { CallDone, CallProgress } from "./call.ts";
 
 /**
  * Rotating the signing key: set the old one as
@@ -20,6 +30,46 @@ const signingKeys = (env: ConnectEnv): string[] =>
     (key): key is string => typeof key === "string" && key !== ""
   );
 
+/** How a call that threw ended, for the audit log. */
+const outcomeOf = (code: string | undefined): CallOutcome => {
+  switch (code) {
+    case "connect.outcome_unknown": {
+      return "unknown";
+    }
+    case "connect.action_failed":
+    case "connect.server_unavailable":
+    case undefined: {
+      return "failed";
+    }
+    default: {
+      return "refused";
+    }
+  }
+};
+
+/**
+ * Records a call that didn't go through. If even that fails, it is logged:
+ * the caller learns why its call failed, not why its event did.
+ */
+const auditFailure = async (env: Env, record: CallRecord): Promise<void> => {
+  try {
+    await auditCall(env, record);
+  } catch (error) {
+    log.error("audit.record_failed", errorFields(error));
+  }
+};
+
+/** How a call that returned ended, for the audit log. */
+const callOutcome = ({ failed, replayed }: CallDone): CallOutcome => {
+  if (replayed) {
+    return "replayed";
+  }
+  return failed ? "failed" : "ok";
+};
+
+const codeOf = (error: unknown): string | undefined =>
+  connectErrors.codeOf(error) ?? capabilityErrors.codeOf(error);
+
 /**
  * The connector layer. Every external call from agents, Apps and the
  * knowledge indexer passes through here: scoped, approved, logged.
@@ -27,6 +77,7 @@ const signingKeys = (env: ConnectEnv): string[] =>
  * Only core reaches it, over its service binding; it has no route and no
  * public address. Even so it trusts no call on its own: each one carries a
  * capability core made for exactly that call, and connect checks it first.
+ * Every call goes into the audit log, refused ones too.
  */
 export default class Connect
   extends WorkerEntrypoint<Env>
@@ -41,15 +92,74 @@ export default class Connect
     return new Response("Not found", { status: 404 });
   }
 
+  /** Every minute: sends the audit events whose first send failed. */
+  override async scheduled(): Promise<void> {
+    await sendAuditOutbox(this.env);
+  }
+
   async call(request: unknown): Promise<ConnectResult> {
-    const call = connectCallSchema.safeParse(request);
-    if (!call.success) {
+    const parsed = connectCallSchema.safeParse(request);
+    if (!parsed.success) {
+      await auditFailure(this.env, {
+        outcome: "refused",
+        reason: "connect.invalid_call",
+      });
       throw connectErrors.create("connect.invalid_call");
     }
-    const { capability, ...scope } = call.data;
-    await verifyCapability(signingKeys(this.env), capability, scope);
-    // Connections come with the connection registry; until then there are
-    // none, so a verified call has nothing to reach.
-    throw connectErrors.create("connect.connection_not_found");
+    const { capability, ...call } = parsed.data;
+    const { input: _input, ...stated } = call;
+    let claims: CapabilityClaims | undefined;
+    let done: CallDone;
+    const progress: CallProgress = {};
+    try {
+      claims = await verifyCapability(signingKeys(this.env), capability, call);
+      done = await carryOut(this.env, claims, call, progress);
+    } catch (error) {
+      const reason = codeOf(error);
+      await auditFailure(this.env, {
+        call: stated,
+        claims,
+        sideEffect: progress.sideEffect,
+        outcome: outcomeOf(reason),
+        reason: reason ?? "internal",
+      });
+      throw error;
+    }
+    // Nothing is returned, or stored for a repeat, that the audit log
+    // doesn't have: a side effect's answer is stored with its events. If
+    // that fails, the call happened but went unrecorded: its key is spent,
+    // and it is recorded, as far as possible, with an unknown outcome.
+    const record: CallRecord = {
+      call: stated,
+      claims,
+      sideEffect: done.sideEffect,
+      outcome: callOutcome(done),
+      reason: done.failed ? "connect.action_failed" : undefined,
+      provenance: done.result.provenance,
+    };
+    try {
+      await auditCall(
+        this.env,
+        record,
+        done.commit === undefined ? [] : [done.commit]
+      );
+    } catch (error) {
+      log.error("audit.record_failed", errorFields(error));
+      await done.spend?.().catch((spendError: unknown) => {
+        log.error("idempotency.spend_failed", errorFields(spendError));
+      });
+      await auditFailure(this.env, {
+        ...record,
+        outcome: "unknown",
+        reason: "connect.outcome_unknown",
+      });
+      throw connectErrors.create("connect.outcome_unknown");
+    }
+    if (done.failed) {
+      throw connectErrors.create("connect.action_failed", {
+        output: done.result.output,
+      });
+    }
+    return done.result;
   }
 }

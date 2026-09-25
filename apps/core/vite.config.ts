@@ -14,6 +14,9 @@ const coreMigrations = await readD1Migrations(
 const knowledgeMigrations = await readD1Migrations(
   `${import.meta.dirname}/src/db/knowledge/migrations`
 );
+const connectMigrations = await readD1Migrations(
+  `${import.meta.dirname}/../connect/src/db/migrations`
+);
 
 /** The real connect Worker, for the CONNECT service binding. */
 const connectScript = bundleConnect();
@@ -53,7 +56,10 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             DURABLE_OBJECT_JURISDICTION: "none",
             CORE_MIGRATIONS: coreMigrations,
             KNOWLEDGE_MIGRATIONS: knowledgeMigrations,
+            CONNECT_MIGRATIONS: connectMigrations,
           },
+          // Connect's database, as CONNECT_DB, so the setup can migrate it.
+          d1Databases: { CONNECT_DB: "grasp-os-connect" },
           // Deliver audit events at once instead of waiting to fill a batch.
           queueConsumers: { "grasp-os-audit": { maxBatchTimeout: 0 } },
           // A stand-in frontend and the screen compiler, written by the
@@ -67,8 +73,13 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               modules: true,
               script: connectScript,
               compatibilityDate: "2026-09-15",
-              compatibilityFlags: ["nodejs_compat"],
+              compatibilityFlags: [
+                "nodejs_compat",
+                "global_fetch_strictly_public",
+              ],
               bindings: { CAPABILITY_SIGNING_KEY: capabilitySigningKey },
+              d1Databases: { DB: "grasp-os-connect" },
+              queueProducers: { AUDIT_QUEUE: "grasp-os-audit" },
             },
           ],
         },

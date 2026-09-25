@@ -15,6 +15,7 @@
     "./ids": "./src/ids.ts",
     "./json": "./src/json.ts",
     "./knowledge": "./src/knowledge.ts",
+    "./log": "./src/log.ts",
     "./models": "./src/models.ts",
     "./permissions": "./src/permissions.ts",
     "./roles": "./src/roles.ts",

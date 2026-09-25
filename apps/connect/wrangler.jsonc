@@ -4,7 +4,10 @@
   "name": "grasp-os-connect",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-15",
-  "compatibility_flags": ["nodejs_compat"],
+  // global_fetch_strictly_public: connect's own calls out (to Composio's MCP
+  // servers) can't reach private or internal addresses, even when a public
+  // name resolves to one.
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": false,
   "preview_urls": false,
   "observability": {
@@ -21,9 +24,14 @@
     {
       "binding": "DB",
       "database_name": "grasp-os-connect",
+      // Local only: `vp run dev` runs connect next to core, which binds its
+      // own database as DB too; this keeps the two local databases apart.
+      "preview_database_id": "grasp-os-connect",
       "migrations_dir": "src/db/migrations",
     },
   ],
+  // Sends the audit events whose first send failed.
+  "triggers": { "crons": ["* * * * *"] },
   "queues": {
     "producers": [{ "binding": "AUDIT_QUEUE", "queue": "grasp-os-audit" }],
   },
