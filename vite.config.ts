@@ -33,6 +33,19 @@ export default defineConfig({
       "anti-slop/no-chained-type-assertions": "error",
       "anti-slop/no-widen-then-assert": "error",
       "anti-slop/require-safety-comment-for-type-assertion": "error",
+      // TanStack Router's `throw notFound()` is control flow, not an error.
+      "typescript/only-throw-error": [
+        "error",
+        {
+          allow: [
+            {
+              from: "package",
+              package: "@tanstack/router-core",
+              name: "NotFoundError",
+            },
+          ],
+        },
+      ],
       // Test through real interfaces; mock only outside systems, at their
       // boundary. (anti-slop/no-module-mocking only knows `vitest` imports.)
       "no-restricted-properties": [
