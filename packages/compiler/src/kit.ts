@@ -9,6 +9,8 @@
  * map them to `data:` URLs with an import map, and they resolve as they are
  * between modules loaded into a Worker.
  */
+import type { Linter } from "eslint/universal";
+
 export interface Kit {
   /** The specifiers App code may import, e.g. `@grasp-os/ui/components/button`. */
   imports: string[];
@@ -18,6 +20,19 @@ export interface Kit {
   stylesheets: Record<string, string>;
   /** Tailwind class candidates in the kit's own sources. */
   candidates: string[];
+  /**
+   * What the type check reads, by absolute path: TypeScript's libraries
+   * and the kit's packages with their declarations, as `/node_modules/…`.
+   */
+  types: Record<string, string>;
+  /**
+   * The kit as the design-system lint reads it from disk, by path
+   * relative to the App: `components.json`, the theme and the kit's
+   * component sources.
+   */
+  lintProject: Record<string, string>;
+  /** The design-system lint's rules (@shadcn/lint's), as the repo lints with them. */
+  lintRules: Linter.RulesRecord;
 }
 
 /** The kit's modules, shared by every App of a release. */
@@ -27,6 +42,9 @@ export interface KitModules {
   /** Module code by flat name. */
   modules: Record<string, string>;
 }
+
+/** The name the compiler's isolate has `Kit` under, as a JSON module. */
+export const kitModule = "kit.json";
 
 /** The kit's stylesheet, by the id its content is filed under in `stylesheets`. */
 export const kitStylesheet = "@grasp-os/ui/styles.css";

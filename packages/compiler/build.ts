@@ -11,19 +11,23 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  statSync,
   writeFileSync,
 } from "node:fs";
 import { builtinModules, createRequire } from "node:module";
 import path from "node:path";
 
+import ts from "typescript";
+import shadcnPreset from "ultracite/oxlint/shadcn";
 import { build } from "vite-plus";
 import type { InlineConfig, Plugin, Rolldown } from "vite-plus";
 import { z } from "zod";
 
 import { extractCandidates } from "./src/candidates.ts";
 import { compileModule } from "./src/compile.ts";
-import { kitModuleName, kitStylesheet } from "./src/kit.ts";
+import { kitModule, kitModuleName, kitStylesheet } from "./src/kit.ts";
 import type { Kit, KitModules } from "./src/kit.ts";
+import { compilerOptions } from "./src/type-check.ts";
 
 const root = import.meta.dirname;
 const dist = path.join(root, "dist");
@@ -251,6 +255,158 @@ const collectStylesheets = (): Record<string, string> => {
   return stylesheets;
 };
 
+/**
+ * Drops JSDoc comments: most of TypeScript's and lucide-react's
+ * declarations, and nothing a type check reads.
+ */
+const withoutDocComments = (source: string): string => {
+  const scanner = ts.createScanner(
+    ts.ScriptTarget.Latest,
+    false,
+    ts.LanguageVariant.Standard,
+    source
+  );
+  let result = "";
+  let kept = 0;
+  for (
+    let token = scanner.scan();
+    token !== ts.SyntaxKind.EndOfFileToken;
+    token = scanner.scan()
+  ) {
+    const start = scanner.getTokenStart();
+    if (
+      token === ts.SyntaxKind.MultiLineCommentTrivia &&
+      source.startsWith("/**", start)
+    ) {
+      result += source.slice(kept, start);
+      kept = scanner.getTokenEnd();
+    }
+  }
+  return result + source.slice(kept);
+};
+
+const declaration = /\.d\.[cm]?ts$/u;
+
+/**
+ * The files a type check of App code reads, by the path the isolate knows
+ * them by (see src/type-check.ts): TypeScript loads everything App code may
+ * import, with the options the isolate checks with, and every file it reads
+ * is kept. Packages are flattened into `/node_modules/<name>`, the kit's
+ * sources too; two versions of one package would clash, and fail the build.
+ */
+const collectTypes = (specifiers: string[]): Record<string, string> => {
+  const entry = path.join(root, "kit-types.ts");
+  const host = ts.createCompilerHost(compilerOptions);
+  const read = new Map<string, string>();
+  const readFile = host.readFile.bind(host);
+  host.readFile = (file) => {
+    const content = readFile(file);
+    if (content !== undefined) {
+      read.set(file, content);
+    }
+    return content;
+  };
+  const getSourceFile = host.getSourceFile.bind(host);
+  host.getSourceFile = (file, ...rest) =>
+    file === entry
+      ? ts.createSourceFile(
+          file,
+          specifiers.map((specifier) => `import "${specifier}";`).join("\n"),
+          ts.ScriptTarget.Latest
+        )
+      : getSourceFile(file, ...rest);
+  const program = ts.createProgram([entry], compilerOptions, host);
+  const [error] = ts.getPreEmitDiagnostics(program);
+  if (error !== undefined) {
+    throw new Error(
+      `The kit doesn't type-check: ${ts.flattenDiagnosticMessageText(error.messageText, "\n")}`
+    );
+  }
+  const types: Record<string, string> = {};
+  for (const [file, content] of read) {
+    const real = realpathSync(file);
+    const inPackage = real.split("/node_modules/").at(-1) ?? real;
+    let name: string;
+    if (real.startsWith(`${ui}/`)) {
+      name = `/node_modules/@grasp-os/ui${real.slice(ui.length)}`;
+    } else if (inPackage === real) {
+      // The compiler's own package.json, read for the entry.
+      continue;
+    } else {
+      name = `/node_modules/${inPackage}`;
+    }
+    const kept = declaration.test(name) ? withoutDocComments(content) : content;
+    if (types[name] !== undefined && types[name] !== kept) {
+      throw new Error(`Two versions of ${name} in the kit's types`);
+    }
+    types[name] = kept;
+  }
+  return types;
+};
+
+const componentsJsonSchema = z.looseObject({
+  tailwind: z.looseObject({ css: z.string() }),
+});
+
+/**
+ * The kit as the design-system lint reads it from disk (see src/lint.ts),
+ * by path relative to the App. The kit's sources go in `ui/`: in
+ * `node_modules`, the lint doesn't read components' sources, so it couldn't
+ * name their variants. A tsconfig maps the kit's exports there; the
+ * stylesheets the theme imports go in `node_modules`, where the lint looks.
+ */
+const collectLintProject = (
+  stylesheets: Record<string, string>
+): Record<string, string> => {
+  const files: Record<string, string> = {
+    "package.json": JSON.stringify({ name: "app", private: true }),
+    "ui/package.json": readText(path.join(ui, "package.json")),
+  };
+  for (const file of readdirSync(path.join(ui, "src"), {
+    recursive: true,
+    encoding: "utf-8",
+  })) {
+    const source = path.join(ui, "src", file);
+    if (statSync(source).isFile()) {
+      files[`ui/src/${file}`] = readText(source);
+    }
+  }
+  const components = componentsJsonSchema.parse(
+    JSON.parse(readText(path.join(ui, "components.json")))
+  );
+  files["components.json"] = JSON.stringify({
+    ...components,
+    tailwind: { ...components.tailwind, css: `ui/${components.tailwind.css}` },
+  });
+  const paths: Record<string, string[]> = {};
+  for (const [key, target] of Object.entries(exportsOf(ui))) {
+    if (typeof target === "string") {
+      const specifier = `@grasp-os/ui${key.slice(1)}`;
+      paths[specifier] = [`./ui${target.slice(1)}`];
+      // `components.json` names the components' directory by its alias.
+      if (key.endsWith("/*")) {
+        paths[specifier.slice(0, -2)] = [
+          `./ui${path.posix.dirname(target.slice(1))}`,
+        ];
+      }
+    }
+  }
+  files["tsconfig.json"] = JSON.stringify({ compilerOptions: { paths } });
+  for (const [id, content] of Object.entries(stylesheets)) {
+    if (id !== kitStylesheet) {
+      files[`node_modules/${id.endsWith(".css") ? id : `${id}/index.css`}`] =
+        content;
+    }
+  }
+  return files;
+};
+
+const severity = z.enum(["off", "warn", "error"]);
+const rulesSchema = z.record(
+  z.string(),
+  z.union([severity, z.tuple([severity]).rest(z.unknown())])
+);
+
 /** Node's built-ins, which the isolate has through `nodejs_compat`. */
 const nodeBuiltins = [
   /^node:/u,
@@ -258,19 +414,59 @@ const nodeBuiltins = [
 ];
 
 /**
- * The React Compiler is CommonJS written for Node and `require`s Node's
- * built-ins. An ES module has no `require`; the bundle's `require` shim uses
- * one if it is in scope, and `createRequire` makes one. It takes the
- * module's URL, and a Dynamic Worker's modules have no `import.meta.url`, so
- * this passes the URL the module would have. It goes in after minifying,
- * which would rename `require`. Nothing else in the bundle
- * reads `import.meta.url`, `__filename` or `__dirname`: they only appear in
- * code Babel generates as text.
+ * The React Compiler and TypeScript are CommonJS written for Node and
+ * `require` Node's built-ins. An ES module has no `require`; the bundle's
+ * `require` shim uses one if it is in scope, and `createRequire` makes one.
+ * It takes the module's URL, and a Dynamic Worker's modules have no
+ * `import.meta.url`, so this passes the URL the module would have. It goes
+ * in after minifying, which would rename `require`.
  */
-const requireShim =
-  'import { createRequire } from "node:module"; const require = createRequire("file:///compiler.js");';
+const moduleUrl = "file:///compiler.js";
+const requireShim = `import { createRequire } from "node:module"; const require = createRequire("${moduleUrl}");`;
 
-/** The compiler's main module; `#kit` resolves to dist/kit.json. */
+/**
+ * Where the module would be, for the libraries that ask: TypeScript
+ * (`__filename`, `__dirname`) and @shadcn/lint (`import.meta.url`). They
+ * only look next to themselves for files that aren't there, and carry on
+ * without them. Babel's generated code mentions them only as text.
+ */
+const moduleLocation = {
+  "import.meta.url": JSON.stringify(moduleUrl),
+  __filename: JSON.stringify("/compiler.js"),
+  __dirname: JSON.stringify("/"),
+};
+
+/**
+ * The design-system lint (@shadcn/lint) loads its parser with a `require`
+ * at runtime, which in the isolate only finds Node's built-ins: this hands
+ * it the bundled typescript-eslint parser instead. oxc-parser, which it
+ * tries first, has no build that runs in a Worker (its WASM one needs
+ * threads); that `require` fails and it falls back to typescript-eslint.
+ */
+const shadcnParser: Plugin = {
+  name: "shadcn-lint-parser",
+  transform: (code, id) => {
+    if (!id.endsWith("/@shadcn/lint/dist/index.js")) {
+      return null;
+    }
+    const required = 'require("@typescript-eslint/parser")';
+    if (!code.includes(required)) {
+      throw new Error(
+        "@shadcn/lint no longer requires its parser the way the build expects"
+      );
+    }
+    return `import * as typescriptEslintParser from "@typescript-eslint/parser";
+${code.replace(required, "typescriptEslintParser")}`;
+  },
+};
+
+/**
+ * The compiler's main module. It imports what it knows of the kit (`#kit`,
+ * dist/kit.json) as a module of its own, `kit.json`, which the isolate is
+ * started with. Most of it is the type check's declarations; in the
+ * compiler's code they made one module of 17 MB, which crashes the Workers
+ * test pool when core's tests load it.
+ */
 const buildCompiler = async (): Promise<string> => {
   const config: InlineConfig = {
     configFile: false,
@@ -279,14 +475,21 @@ const buildCompiler = async (): Promise<string> => {
     mode: "production",
     resolve: { conditions: ["workerd", "worker", "browser"] },
     ssr: { noExternal: true, target: "webworker" },
+    define: moduleLocation,
+    plugins: [shadcnParser],
     build: {
       ssr: "src/worker.ts",
       write: false,
       minify: true,
       target: "es2022",
       rolldownOptions: {
-        external: ["cloudflare:workers", ...nodeBuiltins],
-        output: { format: "es", codeSplitting: false, postBanner: requireShim },
+        external: ["cloudflare:workers", "#kit", ...nodeBuiltins],
+        output: {
+          format: "es",
+          codeSplitting: false,
+          paths: { "#kit": kitModule },
+          postBanner: requireShim,
+        },
       },
     },
   };
@@ -310,13 +513,23 @@ const buildScreenCompiler = async (): Promise<void> => {
   const candidates = sourcesIn(path.join(ui, "src")).flatMap((file) =>
     extractCandidates(readText(file))
   );
+  const imports = [
+    ...reactImports,
+    ...components.map(({ specifier }) => specifier),
+  ];
+  const stylesheets = collectStylesheets();
   const kit: Kit = {
-    imports: [...reactImports, ...components.map(({ specifier }) => specifier)],
+    imports,
     icons: iconNames,
-    stylesheets: collectStylesheets(),
+    stylesheets,
     candidates: [...new Set(candidates)].toSorted(),
+    types: collectTypes([...imports, "lucide-react"]),
+    lintProject: collectLintProject(stylesheets),
+    // The repo's lint config extends the same preset.
+    lintRules: rulesSchema.parse(shadcnPreset.rules),
   };
-  writeFileSync(path.join(dist, "kit.json"), JSON.stringify(kit));
+  const kitJson = JSON.stringify(kit);
+  writeFileSync(path.join(dist, "kit.json"), kitJson);
   const compiler = await buildCompiler();
   const kitModules: KitModules = {
     version: createHash("sha256")
@@ -329,6 +542,7 @@ const buildScreenCompiler = async (): Promise<void> => {
   // and the kit's modules the App's modules import.
   const version = createHash("sha256")
     .update(compiler)
+    .update(kitJson)
     .update(kitModules.version)
     .digest("hex")
     .slice(0, 16);
@@ -341,7 +555,7 @@ export const kitModules = ${JSON.stringify(kitModules)};
   );
   const kitSize = Object.values(kitCode).join("").length;
   console.info(
-    `Screen compiler ${version}: ${(compiler.length / 1e6).toFixed(1)} MB; kit ${kitModules.version}: ${Object.keys(kitCode).length} modules, ${(kitSize / 1e6).toFixed(1)} MB`
+    `Screen compiler ${version}: ${(compiler.length / 1e6).toFixed(1)} MB and ${(kitJson.length / 1e6).toFixed(1)} MB of what it knows of the kit; kit ${kitModules.version}: ${Object.keys(kitCode).length} modules, ${(kitSize / 1e6).toFixed(1)} MB`
   );
 };
 

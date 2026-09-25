@@ -53,6 +53,10 @@
       ],
     },
     {
+      groupName: "screen checks",
+      matchPackageNames: ["eslint", "@typescript-eslint/**"],
+    },
+    {
       groupName: "pi",
       matchPackageNames: ["@earendil-works/**"],
     },
@@ -102,6 +106,12 @@
     {
       groupName: "github actions",
       matchManagers: ["github-actions"],
+    },
+
+    // The screen compiler's TypeScript: 7 has no JavaScript API.
+    {
+      matchDepTypes: ["pnpm.catalog.typescript6"],
+      allowedVersions: "<7",
     },
   ],
 }

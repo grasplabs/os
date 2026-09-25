@@ -191,27 +191,25 @@ const iconError = (
 
 /** Why an import isn't allowed, or undefined when it is. */
 export const importError = (
-  { specifier, line, names }: ImportSite,
+  { specifier, names }: ImportSite,
   file: string,
   files: ReadonlySet<string>,
   kit: Kit
 ): string | undefined => {
-  const where = line === undefined ? file : `${file}:${line}`;
   if (specifier === undefined) {
-    return `${where}: import() must name a module in quotes.`;
+    return "import() must name a module in quotes.";
   }
   if (isRelative(specifier)) {
     return resolveRelative(file, specifier, files) === undefined
-      ? `${where}: "${specifier}" is not a file in this App.`
+      ? `"${specifier}" is not a file in this App.`
       : undefined;
   }
   if (specifier === "lucide-react") {
-    const error = iconError(names, kit);
-    return error === undefined ? undefined : `${where}: ${error}`;
+    return iconError(names, kit);
   }
   return kit.imports.includes(specifier)
     ? undefined
-    : `${where}: "${specifier}" is outside the kit. Screens can import the App's own files and ${packagesOf(kit)}.`;
+    : `"${specifier}" is outside the kit. Screens can import the App's own files and ${packagesOf(kit)}.`;
 };
 
 /**
