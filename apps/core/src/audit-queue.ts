@@ -8,8 +8,9 @@ import { errorFields, log } from "./log.ts";
  * Consumes the audit queue. Valid events are appended in one call and
  * acknowledged; malformed ones are retried until they reach the dead letter
  * queue, where they stay for inspection. If the append fails, the valid
- * events are retried; the log dedupes by event id. Logs its own outcome, as
- * the platform's invocation logs are off.
+ * events are retried; the log dedupes by event id, so a redelivered event is
+ * acknowledged without being appended again. Logs its own outcome, as the
+ * platform's invocation logs are off.
  */
 export const consumeAuditQueue = async (
   batch: MessageBatch,
@@ -32,7 +33,13 @@ export const consumeAuditQueue = async (
     return;
   }
   try {
-    await auditLog(env).append(valid.map(({ event }) => event));
+    const { appended, duplicates } = await auditLog(env).append(
+      valid.map(({ event }) => event)
+    );
+    for (const { message } of valid) {
+      message.ack();
+    }
+    log.info("audit.appended", { events: appended, duplicates });
   } catch (error) {
     log.error("audit.append_failed", {
       events: valid.length,
@@ -41,10 +48,5 @@ export const consumeAuditQueue = async (
     for (const { message } of valid) {
       message.retry();
     }
-    return;
   }
-  for (const { message } of valid) {
-    message.ack();
-  }
-  log.info("audit.appended", { events: valid.length });
 };

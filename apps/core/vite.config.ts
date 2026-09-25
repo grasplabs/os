@@ -15,6 +15,8 @@ export default defineProject({
           // workerd doesn't implement Durable Object jurisdictions.
           DURABLE_OBJECT_JURISDICTION: "none",
         },
+        // Deliver audit events at once instead of waiting to fill a batch.
+        queueConsumers: { "grasp-os-audit": { maxBatchTimeout: 0 } },
         // A stand-in frontend, so tests don't wait for a build of apps/web.
         assets: { directory: "./test/fixtures/assets" },
         // Stand-in for the connect Worker behind the CONNECT service binding.

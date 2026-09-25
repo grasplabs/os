@@ -30,17 +30,43 @@ export const auditActorSchema = z.discriminatedUnion("type", [
 ]);
 export type AuditActor = z.infer<typeof auditActorSchema>;
 
+/** The Workers that send audit events. */
+export const auditSourceSchema = z.enum(["core", "connect"]);
+export type AuditSource = z.infer<typeof auditSourceSchema>;
+
+/**
+ * A model call, as metadata only: never the prompt or the response. The
+ * resources that fed the prompt go in the event's `provenance`.
+ */
+export const auditModelSchema = z.object({
+  provider: z.string(),
+  model: z.string(),
+  inputTokens: z.int().nonnegative(),
+  outputTokens: z.int().nonnegative(),
+});
+export type AuditModel = z.infer<typeof auditModelSchema>;
+
+/** What an action cost, in an ISO 4217 currency such as `USD`. */
+export const auditCostSchema = z.object({
+  amount: z.number().nonnegative(),
+  currency: z.string().regex(/^[A-Z]{3}$/u),
+});
+export type AuditCost = z.infer<typeof auditCostSchema>;
+
 /**
  * One audit event, sent by core and connect through the audit queue and
  * appended to the hash chain by the AuditLog object. Messages outlive a
  * release while they wait in the queue, so this schema only ever expands:
  * add optional fields, never rename or remove.
+ *
+ * Events carry identifiers, never secrets or content (prompts, message
+ * bodies, tokens): the log is append-only, so nothing in it can be purged.
  */
 export const auditEventSchema = z.object({
   /** Unique per event; the queue delivers at least once, the log dedupes. */
   id: z.uuid(),
   at: z.iso.datetime(),
-  source: z.enum(["core", "connect"]),
+  source: auditSourceSchema,
   actor: auditActorSchema,
   /** Dotted verb, e.g. `connection.action.approved` or `model.call`. */
   action: z.string(),
@@ -48,8 +74,54 @@ export const auditEventSchema = z.object({
   target: z.object({ type: z.string(), id: z.string() }).optional(),
   /** Ties the events of one request together. */
   requestId: z.string().optional(),
-  /** Resources the action read from or was built from. */
+  /** IDs of the resources the action read from or was built from. */
   provenance: z.array(z.string()).default([]),
+  /** Set on model calls. */
+  model: auditModelSchema.optional(),
+  /** Set where the action has a cost, such as a model call. */
+  cost: auditCostSchema.optional(),
   detail: z.record(z.string(), z.json()).default({}),
 });
 export type AuditEvent = z.infer<typeof auditEventSchema>;
+
+/** What a caller records; the logger sets the ID, the time and the source. */
+export type AuditEntry = Omit<
+  z.input<typeof auditEventSchema>,
+  "id" | "at" | "source"
+>;
+
+/** The audit queue's producer binding, as far as the logger needs it. */
+export interface AuditQueue {
+  send: (event: AuditEvent) => Promise<unknown>;
+}
+
+/** Records audit events for one Worker. */
+export interface AuditLogger {
+  log: (entry: AuditEntry) => Promise<AuditEvent>;
+}
+
+// Web Crypto is a global in every runtime this package runs in (Workers,
+// browsers, Node); the package declares no runtime types of its own.
+declare const crypto: { randomUUID: () => string };
+
+/**
+ * The audit logger for one Worker: `audit.log({ actor, action, ... })`. It
+ * gives each event a new ID, the time and the Worker it comes from (never the
+ * caller's), validates it, so a malformed event fails where it is made
+ * instead of in the dead letter queue, and sends it to the audit queue.
+ */
+export const auditLogger = (
+  queue: AuditQueue,
+  source: AuditSource
+): AuditLogger => ({
+  log: async (entry) => {
+    const event = auditEventSchema.parse({
+      ...entry,
+      id: crypto.randomUUID(),
+      at: new Date().toISOString(),
+      source,
+    });
+    await queue.send(event);
+    return event;
+  },
+});
