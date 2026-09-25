@@ -67,7 +67,7 @@ export class AuditLog extends DurableObject<Env> {
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
-    void migrateOnWake(ctx, migrations);
+    migrateOnWake(ctx, migrations);
   }
 
   /**
