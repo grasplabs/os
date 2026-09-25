@@ -98,9 +98,12 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
     );
   }
 
-  async backlinks(documentId: string): Promise<Backlink[]> {
+  async backlinks(
+    documentId: string,
+    options?: ListDocumentsOptions
+  ): Promise<Backlink[]> {
     return await this.#asPerson(
-      async (person) => await backlinks(this.#env, person, documentId)
+      async (person) => await backlinks(this.#env, person, documentId, options)
     );
   }
 }

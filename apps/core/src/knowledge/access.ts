@@ -11,7 +11,7 @@ import { collectionTeams, collections } from "../db/knowledge/schema.ts";
 // path (listing, history, backlinks) can show more than a read would.
 //
 // This covers people only: a collection is read by everyone, by the members
-// of its teams, or by its owner alone. Apps and agents (their grant
+// of its teams, or by its owner alone; its owner can always read it. Apps and agents (their grant
 // intersected with the access of the person they act for), sensitivity
 // markers on what is read, and restricted mode build on this function; none
 // of them exist yet, so nothing but a signed-in person reaches Knowledge.
@@ -22,7 +22,8 @@ export const readableBy = (db: DrizzleD1Database, person: Identity): SQL => {
   return (
     or(
       eq(collections.access, "everyone"),
-      and(eq(collections.access, "me"), eq(collections.owner, person.userId)),
+      // Its owner always, also of a team collection for teams they aren't in.
+      eq(collections.owner, person.userId),
       teamIds.length === 0
         ? undefined
         : and(

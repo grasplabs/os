@@ -105,6 +105,9 @@ export const documentPathMaxLength = 512;
 // oxlint-disable-next-line no-control-regex -- control characters are what it finds
 const controlCharacters = /[\u0000-\u001F\u007F]/u;
 
+/** Characters `[[path#heading|label]]` links use, so no path has them. */
+const linkSyntax = /[[\]#|]/u;
+
 /**
  * Why `path` isn't a document path, or `undefined` when it is one. A path is
  * relative, with `/` between folders, and names one document in its
@@ -116,6 +119,9 @@ export const documentPathProblem = (path: string): string | undefined => {
   }
   if (controlCharacters.test(path) || path.includes("\\")) {
     return "A path has no control characters or backslashes";
+  }
+  if (linkSyntax.test(path)) {
+    return "A path has no [, ], # or |";
   }
   if (
     path
@@ -275,8 +281,11 @@ export interface KnowledgeApi {
   ) => Promise<VersionSummary[]>;
   /** Saves an earlier version's text as a new version. */
   restoreVersion: (input: RestoreInput) => Promise<DocumentSummary>;
-  /** The documents that link to this one. */
-  backlinks: (documentId: string) => Promise<Backlink[]>;
+  /** A page of the documents that link to this one, in path order. */
+  backlinks: (
+    documentId: string,
+    options?: ListDocumentsOptions
+  ) => Promise<Backlink[]>;
 }
 
 /** Why a Knowledge call was refused. */

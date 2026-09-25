@@ -103,8 +103,12 @@ const leaveV2 = [
 ].join("\n");
 
 /** The paths of the documents that link to `documentId`. */
-const backlinkPaths = async (api: KnowledgeApi, documentId: string) => {
-  const found = await api.backlinks(documentId);
+const backlinkPaths = async (
+  api: KnowledgeApi,
+  documentId: string,
+  options?: { after?: string; limit?: number }
+) => {
+  const found = await api.backlinks(documentId, options);
   return found.map(({ path }) => path);
 };
 
@@ -230,11 +234,16 @@ describe("saving a document", () => {
     await save("index.md", "Start with [[handbook/leave|leave]] and [[faq]].");
     const faq = await save("faq.md", "See [[handbook/leave]].");
     const before = await api.backlinks(leave.id);
+    const pages = [
+      await backlinkPaths(api, leave.id, { limit: 1 }),
+      await backlinkPaths(api, leave.id, { after: "faq.md", limit: 1 }),
+    ];
     // The index stops linking to leave: its links are its current version's.
     await save("index.md", "Only [[faq]] now.", 1);
 
     expect({
       before: before.map(({ path, label }) => ({ path, label })),
+      pages,
       after: await backlinkPaths(api, leave.id),
       faq: await backlinkPaths(api, faq.id),
     }).toStrictEqual({
@@ -242,6 +251,7 @@ describe("saving a document", () => {
         { path: "faq.md", label: null },
         { path: "index.md", label: "leave" },
       ],
+      pages: [["faq.md"], ["index.md"]],
       after: ["faq.md"],
       faq: ["index.md"],
     });
@@ -348,6 +358,8 @@ describe("saving a document", () => {
     expect({
       frontmatter: await save("a.md", "---\ntype: essay\n---\nText"),
       path: await save("../escape.md", "Text"),
+      // A path with link syntax couldn't be linked to.
+      linkSyntax: await save("q#a.md", "Text"),
       skill: await save("pdf/SKILL.md", "No frontmatter."),
     }).toStrictEqual({
       frontmatter: {
@@ -359,6 +371,10 @@ describe("saving a document", () => {
         issues: [
           "path: A path has no empty, blank, '.' or '..' folders and doesn't start or end with /",
         ],
+      },
+      linkSyntax: {
+        code: "knowledge.invalid",
+        issues: ["path: A path has no [, ], # or |"],
       },
       skill: {
         code: "knowledge.invalid",
@@ -635,6 +651,8 @@ describe("collections", () => {
         sensitive: collection.sensitive,
         source: collection.source,
       },
+      // Its owner isn't in the team, and still sees it.
+      ownerSees: await sees(admin.api),
       memberSees: await sees(member.api),
       outsiderSees: await sees(outsider.api),
       outsiderReads: await outcome(outsider.api.getDocument(saved.id)),
@@ -648,6 +666,7 @@ describe("collections", () => {
       ),
     }).toStrictEqual({
       collection: { teams: [team.id], sensitive: true, source: "here" },
+      ownerSees: true,
       memberSees: true,
       outsiderSees: false,
       outsiderReads: "knowledge.not_found",

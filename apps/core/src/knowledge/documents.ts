@@ -6,7 +6,6 @@ import {
   historyOptionsSchema,
   knowledgeErrors,
   listDocumentsOptionsSchema,
-  pageMaxLimit,
   restoreInputSchema,
   saveInputSchema,
   versionInputSchema,
@@ -524,14 +523,17 @@ export const history = async (
 const linking = alias(documents, "linking");
 
 /**
- * The documents that link to this one, in path order: only those in
- * collections `person` may read.
+ * A page of the documents that link to this one, in path order after
+ * `after`: only those in collections `person` may read. Links name paths in
+ * their own collection, so a path is enough to page by.
  */
 export const backlinks = async (
   env: Env,
   person: Identity,
-  documentId: unknown
+  documentId: unknown,
+  options?: unknown
 ): Promise<Backlink[]> => {
+  const { after, limit } = parseOrInvalid(listDocumentsOptionsSchema, options);
   const db = drizzle(env.KNOWLEDGE);
   const { document } = await readableDocument(db, person, documentId);
   const rows = await db
@@ -550,11 +552,12 @@ export const backlinks = async (
         eq(links.toCollectionId, document.collectionId),
         eq(links.toPath, document.path),
         ne(linking.id, document.id),
-        readableBy(db, person)
+        readableBy(db, person),
+        after === undefined ? undefined : gt(linking.path, after)
       )
     )
     .orderBy(asc(linking.path))
-    .limit(pageMaxLimit);
+    .limit(limit);
   return rows.map((row) => ({
     ...row,
     documentId: documentIdSchema.parse(row.documentId),
