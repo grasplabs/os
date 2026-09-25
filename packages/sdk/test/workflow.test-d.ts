@@ -4,6 +4,7 @@
 import type { RunId } from "@grasp-os/shared/ids";
 import { expectTypeOf } from "vite-plus/test";
 
+import type { stepOptionSchemas } from "../src/steps.ts";
 import {
   model,
   money,
@@ -14,9 +15,14 @@ import {
   z,
 } from "../src/workflow.ts";
 import type {
+  DecisionOptions,
+  DoOptions,
+  LlmOptions,
   Model,
   Person,
   SideEffectContext,
+  SleepOptions,
+  WaitForOptions,
   StepRunner,
   WaitResult,
   WorkflowContext,
@@ -27,7 +33,7 @@ import {
 } from "./workflows/invoice-approval.ts";
 
 const params = {
-  threshold: money({ label: "Above", default: 5000 }),
+  threshold: money({ label: "Above", currency: "EUR", default: 500_000 }),
   reviewer: person({ label: "Reviewer", default: "finance-team" }),
   extractionModel: model({ label: "Model", default: "mistral-large" }),
   reminder: template({ label: "Reminder", default: "invoice-reminder" }),
@@ -60,9 +66,63 @@ await step.decision("review", {
   // @ts-expect-error -- a template isn't a person
   from: p.reminder,
   ask: async () => {},
+  timeout: "7 days",
 });
 // @ts-expect-error -- a money parameter holds a number
-money({ label: "Above", default: "5000" });
+money({ label: "Above", currency: "EUR", default: "5000" });
+// @ts-expect-error -- money is in a currency
+money({ label: "Above", default: 500_000 });
+
+// The SDK owns how long a decision waits.
+// @ts-expect-error -- a decision needs a timeout
+await step.decision("review", {
+  description: "Review",
+  from: p.reviewer,
+  ask: async () => {},
+});
+
+// Retries say how many, and how far apart.
+await step.do(
+  "match",
+  // @ts-expect-error -- retries are an object
+  { description: "Match", retries: 2 },
+  async () => 1
+);
+await step.do(
+  "match",
+  {
+    description: "Match",
+    retries: { limit: 2, delay: "30 seconds", backoff: "exponential" },
+    timeout: "5 minutes",
+  },
+  async () => 1
+);
+
+// A step's result is JSON, which the engine records.
+await step.do(
+  "when",
+  { description: "When" },
+  // @ts-expect-error -- a Date isn't JSON
+  async () => new Date(0)
+);
+
+// The typed options and the schemas that check them at run time take the
+// same options.
+expectTypeOf<keyof DoOptions>().toEqualTypeOf<
+  keyof z.input<typeof stepOptionSchemas.do>
+>();
+expectTypeOf<
+  Exclude<keyof LlmOptions<z.ZodType>, "locked" | "sideEffect">
+>().toEqualTypeOf<keyof z.input<typeof stepOptionSchemas.llm>>();
+expectTypeOf<keyof DecisionOptions>().toEqualTypeOf<
+  keyof z.input<typeof stepOptionSchemas.decision>
+>();
+expectTypeOf<keyof SleepOptions>().toEqualTypeOf<
+  keyof z.input<typeof stepOptionSchemas.sleep>
+>();
+expectTypeOf<keyof WaitForOptions<z.ZodType>>().toEqualTypeOf<
+  keyof z.input<typeof stepOptionSchemas.waitFor>
+>();
 
 // step.llm needs instructions and a schema, can't be locked, and its answer
 // is typed by the schema.

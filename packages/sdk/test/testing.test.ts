@@ -46,7 +46,7 @@ const reminders = (systems: {
     async (step, { input }) => {
       const customer = await step.do(
         "read-customer",
-        { description: "Read the customer", retries: 3 },
+        { description: "Read the customer", retries: { limit: 3 } },
         async () => await systems.customer(input.customer)
       );
       const sent: string[] = [];
@@ -145,7 +145,7 @@ describe("test runs", () => {
   it("still check a mocked model answer against the step's schema", async () => {
     const run = await testRun(invoiceWorkflow(unusedSystems), {
       input: invoice,
-      mocks: { "match-po": { amount: 8000 }, extract: { total: "lots" } },
+      mocks: { "match-po": { amount: 800_000 }, extract: { total: "lots" } },
     });
 
     expect(run).toMatchObject({
@@ -172,6 +172,7 @@ describe("test runs", () => {
           description: "Approve",
           from: params.approver,
           ask: noAsk,
+          timeout: "3 days",
         });
         const second = await step.decision("second", {
           description: "Approve again",
@@ -218,7 +219,7 @@ describe("dry runs", () => {
     const definition = invoiceWorkflow({
       findPurchaseOrder: async (number) => {
         reads.push(number);
-        return { amount: 8000 };
+        return { amount: 800_000 };
       },
       book: async (entry) => {
         writes.push(`booked ${entry.invoice}`);
@@ -231,7 +232,7 @@ describe("dry runs", () => {
 
     const run = await dryRun(definition, {
       input: invoice,
-      model: () => ({ total: 8000, currency: "EUR" }),
+      model: () => ({ total: 800_000, currency: "EUR" }),
       decisions: { review: { approved: true, by: "anna" } },
     });
 
@@ -245,13 +246,13 @@ describe("dry runs", () => {
       ].join("\n")
     );
     expect(run.report).toContain(
-      'extract "Total €8,000": ran, returned {"total":8000,"currency":"EUR"}'
+      'extract "Total €8,000": ran, returned {"total":800000,"currency":"EUR"}'
     );
     expect(run.report).toContain(
       [
         "Would have changed:",
         '- review#ask {"from":"finance-team","reminder":false}',
-        '- book {"invoice":"INV-7","total":8000}',
+        '- book {"invoice":"INV-7","total":800000}',
       ].join("\n")
     );
   });
@@ -300,7 +301,7 @@ describe("workflow tests", () => {
           {
             description: "Book the invoice in the ledger",
             sideEffect: true,
-            input: { invoice: input.number, total: 8000 },
+            input: { invoice: input.number, total: 800_000 },
           },
           async () => "ledger-42"
         );
@@ -323,7 +324,7 @@ describe("workflow tests", () => {
     ]);
     expect(report.results.at(-1)?.failures).toStrictEqual([
       'Expected the run to fail with "Purchase order system unavailable"; it completed',
-      'Expected side effects []; got [{"input":{"invoice":"INV-7","total":8000},"name":"book"}]',
+      'Expected side effects []; got [{"input":{"invoice":"INV-7","total":800000},"name":"book"}]',
     ]);
   });
 

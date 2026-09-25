@@ -3,7 +3,8 @@ import { money, workflow, z } from "@grasp-os/sdk/workflow";
 const payoutSchema = z.object({
   id: z.string(),
   supplier: z.string(),
-  amount: z.number(),
+  /** In whole minor units of the limit's currency: cents for EUR. */
+  amount: z.int(),
 });
 
 /** Pays a batch of suppliers, one payment step per payout. */
@@ -17,7 +18,14 @@ export const payoutWorkflow = (
     "supplier-payouts",
     {
       input: z.object({ payouts: z.array(payoutSchema) }),
-      params: { limit: money({ label: "Pay at most", default: 10_000 }) },
+      params: {
+        limit: money({
+          label: "Pay at most",
+          currency: "EUR",
+          // €10,000.00
+          default: 1_000_000,
+        }),
+      },
     },
     async (step, { input, params }) => {
       const paid: string[] = [];

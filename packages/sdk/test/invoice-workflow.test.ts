@@ -35,7 +35,7 @@ const fakeSystems = (
   return {
     booked,
     asked,
-    findPurchaseOrder: async () => ({ amount: 8000 }),
+    findPurchaseOrder: async () => ({ amount: 800_000 }),
     book: async (_entry, idempotencyKey) => {
       booked.push({ idempotencyKey });
       return "ledger-42";
@@ -86,8 +86,8 @@ describe("the sample invoice workflow", () => {
         params: ["extractionModel"],
         options: {
           instructions:
-            "Read the invoice's total amount and its ISO 4217 currency code.",
-          retries: 2,
+            "Read the invoice's total amount in whole minor units (cents for EUR) and its ISO 4217 currency code.",
+          retries: { limit: 2 },
         },
       },
       {
@@ -123,7 +123,7 @@ describe("the sample invoice workflow", () => {
 
   it("asks the model with the instructions and the model parameter", async () => {
     const { engine, modelRequests } = createFakeEngine({
-      model: modelSays(4000),
+      model: modelSays(400_000),
     });
 
     await invoiceWorkflow(fakeSystems()).run(engine, invoice);
@@ -133,7 +133,7 @@ describe("the sample invoice workflow", () => {
         step: "extract",
         model: "mistral-large",
         instructions:
-          "Read the invoice's total amount and its ISO 4217 currency code.",
+          "Read the invoice's total amount in whole minor units (cents for EUR) and its ISO 4217 currency code.",
         input: "Total €8,000",
       },
     ]);
@@ -148,8 +148,9 @@ describe("the sample invoice workflow", () => {
         name: "threshold",
         kind: "money",
         label: "Review invoices above",
-        default: 5000,
+        default: 500_000,
         sensitive: true,
+        currency: "EUR",
       },
       {
         name: "reviewer",
@@ -174,7 +175,7 @@ describe("the sample invoice workflow", () => {
 
   it("books an invoice below the threshold without asking anyone", async () => {
     const systems = fakeSystems();
-    const { engine } = createFakeEngine({ model: modelSays(4000) });
+    const { engine } = createFakeEngine({ model: modelSays(400_000) });
 
     const result = await invoiceWorkflow(systems).run(engine, invoice);
 
@@ -186,7 +187,7 @@ describe("the sample invoice workflow", () => {
   it("asks the reviewer above the threshold and books once approved", async () => {
     const systems = fakeSystems();
     const { engine } = createFakeEngine({
-      model: modelSays(8000),
+      model: modelSays(800_000),
       decisions: { review: { approved: true, by: "anna" } },
     });
 
@@ -205,7 +206,7 @@ describe("the sample invoice workflow", () => {
   it("doesn't book an invoice the reviewer rejects", async () => {
     const systems = fakeSystems();
     const { engine } = createFakeEngine({
-      model: modelSays(8000),
+      model: modelSays(800_000),
       decisions: {
         review: { approved: false, by: "anna", comment: "Wrong PO" },
       },
@@ -228,7 +229,7 @@ describe("the sample invoice workflow", () => {
       }
     };
     const { engine, steps } = createFakeEngine({
-      model: modelSays(8000),
+      model: modelSays(800_000),
       // A wait that times out takes its time; move the frozen clock on.
       skipTime: (milliseconds) => {
         vi.setSystemTime(Date.now() + milliseconds);
@@ -253,8 +254,8 @@ describe("the sample invoice workflow", () => {
   it("uses the values people set instead of the defaults", async () => {
     const systems = fakeSystems();
     const { engine, modelRequests } = createFakeEngine({
-      params: { threshold: 10_000, extractionModel: "small-model" },
-      model: modelSays(8000),
+      params: { threshold: 1_000_000, extractionModel: "small-model" },
+      model: modelSays(800_000),
     });
 
     const result = await invoiceWorkflow(systems).run(engine, invoice);
@@ -286,17 +287,17 @@ describe("the sample invoice workflow", () => {
       }
       return await book(entry, idempotencyKey);
     };
-    const params: Record<string, unknown> = { threshold: 10_000 };
+    const params: Record<string, unknown> = { threshold: 1_000_000 };
     const { engine } = createFakeEngine({
       params,
-      model: modelSays(8000),
+      model: modelSays(800_000),
     });
     const definition = invoiceWorkflow(systems);
 
     await expect(definition.run(engine, invoice)).rejects.toThrow(
       "Ledger went away"
     );
-    params.threshold = 1000;
+    params.threshold = 100_000;
     const result = await definition.run(engine, invoice);
 
     expect(result.status).toBe("booked");
@@ -317,7 +318,7 @@ describe("the sample invoice workflow", () => {
     const systems = fakeSystems({
       findPurchaseOrder: async () => {
         lookups += 1;
-        return { amount: 4000 };
+        return { amount: 400_000 };
       },
     });
     const bookOnce = systems.book;
@@ -331,7 +332,7 @@ describe("the sample invoice workflow", () => {
       return await bookOnce(entry, idempotencyKey);
     };
     const { engine, modelRequests } = createFakeEngine({
-      model: modelSays(4000),
+      model: modelSays(400_000),
     });
     const definition = invoiceWorkflow(systems);
 
