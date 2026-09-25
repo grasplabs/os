@@ -27,7 +27,7 @@ import type { WorkflowDefinition } from "./workflow.ts";
 
 /** A step's call, as a mock gets it. */
 export interface StepCall {
-  /** The engine's name for the step: `pay:inv-7` for key `inv-7`. */
+  /** The step's name, with its key if it has one: `pay:inv-7`. */
   name: string;
   input?: JsonValue;
 }
@@ -41,13 +41,16 @@ export type StepMock =
 export type StepRecord =
   | {
       type: "step";
-      /** The engine's name for the step, e.g. `pay:inv-7` or `review#ask`. */
+      /**
+       * The step's name, with its key if it has one (`pay:inv-7`), or the
+       * part of a decision (`review#ask`).
+       */
       name: string;
       sideEffect: boolean;
       input?: JsonValue;
       /**
        * `ran` for its function, `mocked` for a mocked result and `recorded`
-       * for a side effect that didn't run.
+       * for a side effect that didn't run, which has no result.
        */
       status: "ran" | "mocked" | "recorded";
       output: unknown;
@@ -100,8 +103,10 @@ export interface TestEngineOptions {
   params?: Record<string, unknown>;
   /**
    * Step results by step name, instead of running the step. A keyed step
-   * takes the mock for `name:key`, or else the one for `name`. An AI step's
-   * mock is the model's answer, which is still checked against its schema.
+   * takes the mock for `name:key` (the key as the workflow gives it), or
+   * else the one for `name`. An AI step's mock is the model's answer, which
+   * is still checked against its schema. A side-effect step that isn't
+   * mocked has no result.
    */
   mocks?: Readonly<Record<string, StepMock>>;
   /** Steps that fail, by name (as for mocks), with this error message. */
@@ -131,25 +136,36 @@ export interface TestEngineOptions {
 
 const decisionEventPrefix = "decision:";
 
-/** The value for an engine step: by its exact name, else its written name. */
+interface StepName {
+  /** With the key as the workflow gave it, not as the engine got it. */
+  name: string;
+  /** What a keyed step also answers to: its name without the key. */
+  unkeyed?: string;
+}
+
+const stepNameOf = (engineName: string): StepName => {
+  const groups = engineStepPattern.exec(engineName)?.groups;
+  if (groups?.name === undefined || groups.key === undefined) {
+    return { name: engineName };
+  }
+  const part = groups.part === undefined ? "" : `#${groups.part}`;
+  return {
+    name: `${groups.name}:${decodeURIComponent(groups.key)}${part}`,
+    // The parts of a decision (`review#ask`) only match by their full name.
+    ...(groups.part === undefined ? { unkeyed: groups.name } : {}),
+  };
+};
+
+/** The value for a step: by its name and key, else by its name alone. */
 const byStepName = <T>(
   values: Readonly<Record<string, T>> | undefined,
-  engineName: string
+  { name, unkeyed }: StepName
 ): T | undefined => {
-  if (!values) {
-    return undefined;
+  if (values && Object.hasOwn(values, name)) {
+    return values[name];
   }
-  if (Object.hasOwn(values, engineName)) {
-    return values[engineName];
-  }
-  // A keyed step falls back to its written name; the parts of a decision
-  // (`review#ask`) and the SDK's own steps only match exactly.
-  const groups = engineStepPattern.exec(engineName)?.groups;
-  const name = groups?.name;
-  return name !== undefined &&
-    groups?.part === undefined &&
-    Object.hasOwn(values, name)
-    ? values[name]
+  return values && unkeyed !== undefined && Object.hasOwn(values, unkeyed)
+    ? values[unkeyed]
     : undefined;
 };
 
@@ -200,7 +216,10 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
       return { received: true, payload: event?.payload };
     }
     const answer = type.startsWith(decisionEventPrefix)
-      ? byStepName(options.decisions, type.slice(decisionEventPrefix.length))
+      ? byStepName(
+          options.decisions,
+          stepNameOf(type.slice(decisionEventPrefix.length))
+        )
       : undefined;
     return answer ? { received: true, payload: answer } : { received: false };
   };
@@ -215,9 +234,13 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
         return recorded.get(name) as Awaited<ReturnType<typeof fn>>;
       }
-      const call = { name, ...(input === undefined ? {} : { input }) };
-      const failure = byStepName(options.failures, name);
-      const mock = byStepName(options.mocks, name);
+      const step = stepNameOf(name);
+      const call = {
+        name: step.name,
+        ...(input === undefined ? {} : { input }),
+      };
+      const failure = byStepName(options.failures, step);
+      const mock = byStepName(options.mocks, step);
       try {
         if (failure !== undefined) {
           throw new Error(failure);
@@ -252,7 +275,7 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
     sleep: async (name, milliseconds) => {
       if (!recorded.has(name)) {
         recorded.set(name, null);
-        log({ type: "sleep", name, milliseconds });
+        log({ type: "sleep", name: stepNameOf(name).name, milliseconds });
         options.skipTime?.(milliseconds);
       }
       await Promise.resolve();
@@ -268,7 +291,7 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
       recorded.set(name, event);
       log({
         type: "wait",
-        name,
+        name: stepNameOf(name).name,
         eventType: type,
         ...(timeout === undefined ? {} : { timeout }),
         event,
@@ -375,6 +398,16 @@ export const testRun = async <Output>(
 
 // Reports
 
+// JSON with sorted keys, so equal values compare equal whatever the order.
+const canonical = (value: unknown): string =>
+  JSON.stringify(value, (_key, nested: unknown) =>
+    typeof nested === "object" && nested !== null && !Array.isArray(nested)
+      ? Object.fromEntries(
+          Object.entries(nested).toSorted(([a], [b]) => a.localeCompare(b))
+        )
+      : nested
+  ) ?? "undefined";
+
 const describeValue = (value: unknown): string =>
   JSON.stringify(value) ?? "nothing";
 
@@ -414,7 +447,7 @@ const describeRecord = (record: StepRecord): string => {
     return `${record.name}${input}: failed: ${record.error}`;
   }
   if (record.status === "recorded") {
-    return `${record.name}${input}: would change something, not run`;
+    return `${record.name}${input}: would change something, not run, so it has no result`;
   }
   return `${record.name}${input}: ${record.status}, returned ${describeValue(record.output)}`;
 };
@@ -441,17 +474,37 @@ export const dryRun = async <Output>(
     ({ name, input }) =>
       `- ${name}${input === undefined ? "" : ` ${describeValue(input)}`}`
   );
+  // State is the workflow's own, but a dry run doesn't keep it either.
+  const initialState = options.state ?? {};
+  const stateWrites = Object.entries(run.state).flatMap(([key, value]) =>
+    Object.hasOwn(initialState, key) &&
+    canonical(initialState[key]) === canonical(value)
+      ? []
+      : [`- state "${key}" to ${describeValue(value)}`]
+  );
+  // Whatever the run did after a side effect without a result may differ
+  // from a real run, where that side effect returns something.
+  const withoutResult = run.steps.flatMap((record) =>
+    record.type === "step" && record.status === "recorded" ? [record.name] : []
+  );
   const report = [
     `Dry run of ${definition.metadata.id}`,
     run.status === "completed"
       ? `Completed with ${describeValue(run.output)}`
       : `Failed: ${run.error.message}`,
+    ...(withoutResult.length === 0
+      ? []
+      : [
+          `Side effects that didn't run have no result, which a real run may use: ${withoutResult.join(", ")}`,
+        ]),
     "",
     "Steps:",
     ...run.steps.map((record) => `- ${describeRecord(record)}`),
     "",
     "Would have changed:",
-    ...(writes.length === 0 ? ["- nothing"] : writes),
+    ...(writes.length + stateWrites.length === 0
+      ? ["- nothing"]
+      : [...writes, ...stateWrites]),
   ].join("\n");
   return { ...run, report };
 };
@@ -501,16 +554,6 @@ export interface TestReport {
   passed: boolean;
   results: TestResult[];
 }
-
-// JSON with sorted keys, so equal values compare equal whatever the order.
-const canonical = (value: unknown): string =>
-  JSON.stringify(value, (_key, nested: unknown) =>
-    typeof nested === "object" && nested !== null && !Array.isArray(nested)
-      ? Object.fromEntries(
-          Object.entries(nested).toSorted(([a], [b]) => a.localeCompare(b))
-        )
-      : nested
-  ) ?? "undefined";
 
 const missedExpectations = (test: WorkflowTest, run: TestRun): string[] => {
   const { expect } = test;

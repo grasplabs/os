@@ -25,6 +25,16 @@ const unusedSystems: InvoiceSystems = {
 
 const noAsk = async (): Promise<void> => {};
 
+/** Counts its runs in its state. */
+const counter = workflow(
+  "counter",
+  { params: {} },
+  async (_step, { state }) => {
+    const count = await state.get("count");
+    await state.set("count", typeof count === "number" ? count + 1 : 1);
+  }
+);
+
 /** Reads a customer, then emails each of their open orders. */
 const reminders = (systems: {
   customer: (id: string) => Promise<{ email: string; open: string[] }>;
@@ -68,7 +78,7 @@ const liveSystems = () => {
     sent,
     customer: async (id: string) => {
       reads.push(id);
-      return { email: "ann@example.com", open: ["o-1", "o-2"] };
+      return { email: "ann@example.com", open: ["o-1", "o/2"] };
     },
     send: async (email: string, order: string) => {
       sent.push(`${email} ${order}`);
@@ -89,7 +99,7 @@ describe("test runs", () => {
     expect(systems.sent).toStrictEqual([]);
     expect(run.sideEffects).toStrictEqual([
       { name: "send:o-1", input: { to: "ann@example.com", order: "o-1" } },
-      { name: "send:o-2", input: { to: "ann@example.com", order: "o-2" } },
+      { name: "send:o/2", input: { to: "ann@example.com", order: "o/2" } },
     ]);
   });
 
@@ -99,10 +109,10 @@ describe("test runs", () => {
     const run = await testRun(reminders(systems), {
       input: { customer: "c-1" },
       mocks: {
-        "read-customer": { email: "bo@example.com", open: ["o-1", "o-2"] },
+        "read-customer": { email: "bo@example.com", open: ["o-1", "o/2"] },
         send: ({ name, input }) =>
           `mocked ${name} for ${JSON.stringify(input)}`,
-        "send:o-2": "mocked o-2",
+        "send:o/2": "mocked o/2",
       },
     });
 
@@ -111,7 +121,7 @@ describe("test runs", () => {
       status: "completed",
       output: [
         'mocked send:o-1 for {"to":"bo@example.com","order":"o-1"}',
-        "mocked o-2",
+        "mocked o/2",
       ],
     });
   });
@@ -195,15 +205,6 @@ describe("test runs", () => {
   });
 
   it("start from the state they're given and keep what the run writes", async () => {
-    const counter = workflow(
-      "counter",
-      { params: {} },
-      async (_step, { state }) => {
-        const count = await state.get("count");
-        await state.set("count", typeof count === "number" ? count + 1 : 1);
-      }
-    );
-
     const run = await testRun(counter, { state: { count: 41 } });
 
     expect(run.state).toStrictEqual({ count: 42 });
@@ -236,7 +237,13 @@ describe("dry runs", () => {
 
     expect(reads).toStrictEqual(["PO-1"]);
     expect(writes).toStrictEqual([]);
-    expect(run.report).toContain("Dry run of invoice-approval");
+    expect(run.report).toContain(
+      [
+        "Dry run of invoice-approval",
+        'Completed with {"status":"booked"}',
+        "Side effects that didn't run have no result, which a real run may use: review#ask, book",
+      ].join("\n")
+    );
     expect(run.report).toContain(
       'extract "Total €8,000": ran, returned {"total":8000,"currency":"EUR"}'
     );
@@ -247,6 +254,16 @@ describe("dry runs", () => {
         '- book {"invoice":"INV-7","total":8000}',
       ].join("\n")
     );
+  });
+
+  it("report the state they would have written, and keep none of it", async () => {
+    const state = { count: 41, other: "same" };
+
+    const run = await dryRun(counter, { state });
+
+    expect(run.report).toContain('Would have changed:\n- state "count" to 42');
+    expect(run.report).not.toContain("other");
+    expect(state).toStrictEqual({ count: 41, other: "same" });
   });
 
   it("report a run that fails, and where", async () => {
