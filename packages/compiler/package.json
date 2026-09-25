@@ -1,17 +1,38 @@
 {
   "name": "@grasp-os/compiler",
   "private": true,
-  "description": "Screen compiler: React Compiler + worker-bundler in its own isolate",
+  "description": "Screen compiler: builds an App's screens into ES modules and CSS, in its own isolate",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "imports": {
+    "#isolate": {
+      "types": "./src/isolate.d.ts",
+      "default": "./dist/isolate.js"
+    },
+    "#kit": {
+      "types": "./src/kit-module.d.ts",
+      "default": "./dist/kit.json"
+    }
+  },
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "build": "node build.ts"
+  },
   "dependencies": {
-    "@cloudflare/worker-bundler": "catalog:",
-    "babel-plugin-react-compiler": "catalog:"
+    "@babel/standalone": "catalog:",
+    "@grasp-os/ui": "workspace:*",
+    "babel-plugin-react-compiler": "catalog:",
+    "lucide-react": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:",
+    "tailwindcss": "catalog:"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "catalog:"
+    "@cloudflare/workers-types": "catalog:",
+    "@types/node": "catalog:",
+    "vite-plus": "catalog:",
+    "zod": "catalog:"
   }
 }
