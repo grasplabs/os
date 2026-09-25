@@ -2,8 +2,6 @@ import { featureErrors } from "@grasp-os/shared/errors";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
-import type { AuthEnv } from "../src/auth/config.ts";
-import type { FeaturesEnv } from "../src/features.ts";
 import { mockIdp } from "./idp.ts";
 import { openRpc, signedInWithRole } from "./sign-in.ts";
 
@@ -25,7 +23,7 @@ const outcome = async (promise: Promise<unknown>): Promise<string> => {
 /** What an admin gets from each flagged API with `features` as the flags. */
 const callsWith = async (features?: unknown) => {
   const admin = await signedInWithRole(idp, "admin");
-  const coreEnv: AuthEnv & FeaturesEnv = { ...env, FEATURES: features };
+  const coreEnv: Env = { ...env, FEATURES: features };
   const { core } = await openRpc(admin.session, { coreEnv });
   const session = core.authenticate();
   return await Promise.all([

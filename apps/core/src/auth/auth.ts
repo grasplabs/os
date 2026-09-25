@@ -33,7 +33,7 @@ import {
 import { errorFields, log } from "../log.ts";
 import { checkClaims } from "./claims.ts";
 import { oidcProviders, providerIds, staffWindowOpen } from "./config.ts";
-import type { AuthEnv, SignInConfig } from "./config.ts";
+import type { OidcProvider, SignInConfig } from "./config.ts";
 
 /** Better Auth's routes, under core's API. */
 export const authBasePath = "/api/auth";
@@ -308,7 +308,11 @@ const record = async (env: Env, entry: AuditEntry): Promise<void> => {
 /** A member's role before a change, from the request's before hook to its after hook. */
 const previousRoles = new WeakMap<object, string>();
 
-const createAuth = (env: AuthEnv, config: SignInConfig) => {
+const createAuth = (
+  env: Env,
+  config: SignInConfig,
+  providers: OidcProvider[]
+) => {
   const db = drizzle(env.DB);
   return betterAuth({
     appName: "Grasp",
@@ -493,7 +497,7 @@ const createAuth = (env: AuthEnv, config: SignInConfig) => {
       sso({
         // Providers come only from deployment config, never from the
         // database: registering one in-product is off.
-        defaultSSO: oidcProviders(env, config, Date.now()).map((provider) => ({
+        defaultSSO: providers.map((provider) => ({
           providerId: provider.providerId,
           domain: config.domains[0] ?? "",
           oidcConfig: {
@@ -520,12 +524,29 @@ const createAuth = (env: AuthEnv, config: SignInConfig) => {
 export type Auth = ReturnType<typeof createAuth>;
 
 /**
+ * Better Auth instances by env, one per set of providers on offer: the
+ * staff provider comes and goes with its window, everything else stays the
+ * same for as long as the env does.
+ */
+const auths = new WeakMap<Env, Map<string, Auth>>();
+
+/**
  * Better Auth for this deployment, or `undefined` while sign-in isn't
  * configured. Fails closed: without the secret or the config nobody is
  * signed in.
  */
 export const authFor = (
-  env: AuthEnv,
+  env: Env,
   config: SignInConfig | undefined
-): Auth | undefined =>
-  config && env.BETTER_AUTH_SECRET ? createAuth(env, config) : undefined;
+): Auth | undefined => {
+  if (!(config && env.BETTER_AUTH_SECRET)) {
+    return undefined;
+  }
+  const providers = oidcProviders(env, config, Date.now());
+  const key = providers.map(({ providerId }) => providerId).join(" ");
+  const byProviders = auths.get(env) ?? new Map<string, Auth>();
+  auths.set(env, byProviders);
+  const auth = byProviders.get(key) ?? createAuth(env, config, providers);
+  byProviders.set(key, auth);
+  return auth;
+};

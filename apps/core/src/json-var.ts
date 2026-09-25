@@ -1,6 +1,7 @@
 /**
- * The value of a JSON var the console sets. It arrives parsed; one set from a
- * .dev.vars file is a string, parsed here, and `undefined` if it isn't JSON.
+ * The value of a JSON var the console sets. It arrives parsed; one set as
+ * text (`wrangler dev --var NAME:<json>`) is parsed here, and is `undefined`
+ * if it isn't JSON.
  */
 export const jsonVar = (value: unknown): unknown => {
   if (typeof value !== "string") {

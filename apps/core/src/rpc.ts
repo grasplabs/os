@@ -12,7 +12,6 @@ import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 
 import { oidcProviders, signInConfig } from "./auth/config.ts";
-import type { AuthEnv } from "./auth/config.ts";
 import { identify } from "./auth/identity.ts";
 import { errorResponse } from "./errors.ts";
 import { errorFields, log } from "./log.ts";
@@ -81,7 +80,7 @@ const sessionRecheckMs = 60_000;
 /** The close code a connection gets when its session ends. */
 export const sessionEndedCloseCode = 4401;
 
-const signInOptions = (env: AuthEnv): SignInOption[] => {
+const signInOptions = (env: Env): SignInOption[] => {
   const config = signInConfig(env);
   return config
     ? oidcProviders(env, config, Date.now()).map(({ providerId, label }) => ({
@@ -101,13 +100,13 @@ const signInOptions = (env: AuthEnv): SignInOption[] => {
  * workers.dev address. Without sign-in config (local development) nobody can
  * have a session, and the page's own origin is accepted.
  */
-const isOwnOrigin = (request: Request, env: AuthEnv): boolean =>
+const isOwnOrigin = (request: Request, env: Env): boolean =>
   request.headers.get("Origin") ===
   (signInConfig(env)?.origin ?? new URL(request.url).origin);
 
 /** Who the connection signed in as, and how to tell they still are. */
 interface ConnectionSession {
-  env: AuthEnv;
+  env: Env;
   /** Only the cookie of the upgrade request. */
   headers: Headers;
   connectedAs: Identity;
@@ -164,7 +163,7 @@ const sessionApi = (
  */
 export const rpcResponse = async (
   request: Request,
-  env: AuthEnv,
+  env: Env,
   requestId: string
 ): Promise<Response> => {
   if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
