@@ -23,3 +23,11 @@ export type StepMethod = keyof typeof stepKinds;
 // (`runId:name`), so they never contain `:`, `#` or `$`, which the SDK uses
 // for per-item keys and its own step names.
 export const namePattern = /^[A-Za-z][\w-]{0,63}$/u;
+
+/**
+ * The name the engine gets for a step: its name, `name:key` for a keyed step
+ * (the key URI-encoded), plus `#part` for the parts of a decision
+ * (`review#ask`). The SDK's own steps (parameters, state) start with `$`.
+ */
+export const engineStepPattern =
+  /^(?<name>[A-Za-z][\w-]{0,63})(?::(?<key>[^#]+))?(?:#(?<part>[\w-]+))?$/u;

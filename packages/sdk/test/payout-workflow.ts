@@ -32,8 +32,10 @@ export const payoutWorkflow = (
                 key: payout.id,
                 description: "Pay the supplier",
                 sideEffect: true,
+                input: payout,
               },
-              async ({ idempotencyKey }) => await pay(payout, idempotencyKey)
+              async ({ idempotencyKey, input: payment }) =>
+                await pay(payment, idempotencyKey)
             )
           );
         }

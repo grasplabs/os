@@ -2,7 +2,7 @@
 import { describe, expect, it } from "vite-plus/test";
 
 import { describeWorkflow } from "../src/describe.ts";
-import { createFakeEngine } from "./fake-engine.ts";
+import { createTestEngine } from "../src/testing.ts";
 import { outlineOf } from "./outline.ts";
 import { payoutWorkflow } from "./payout-workflow.ts";
 // oxlint-disable-next-line import/default -- Vite's `?raw` import; typed in raw.d.ts
@@ -54,7 +54,7 @@ describe(describeWorkflow, () => {
 
   it("runs the loop's step once per item, keyed by the item", async () => {
     const keys: string[] = [];
-    const { engine } = createFakeEngine();
+    const { engine } = createTestEngine({ sideEffects: "run" });
     const payouts = [
       { id: "p1", supplier: "Acme", amount: 100 },
       { id: "p/2", supplier: "Globex", amount: 200 },
@@ -163,6 +163,10 @@ describe(describeWorkflow, () => {
         "non-empty string literal",
       ],
       [`await step.do("go", {}, async () => 1);`, "needs description"],
+      [
+        `await step.do("go", { description: "Go", sideEffect: true }, async () => 1);`,
+        "needs input",
+      ],
       [
         `await step.do("go", { description: "Go", retry: 2 }, async () => 1);`,
         "isn't an option",

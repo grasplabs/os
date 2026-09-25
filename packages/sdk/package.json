@@ -8,6 +8,7 @@
     "./workflow": "./src/workflow.ts",
     "./engine": "./src/engine.ts",
     "./describe": "./src/describe.ts",
+    "./testing": "./src/testing.ts",
     "./screen": "./src/screen.ts"
   },
   "dependencies": {

@@ -21,7 +21,10 @@ import type {
   WaitResult,
   WorkflowContext,
 } from "../src/workflow.ts";
-import { extractionSchema, invoiceWorkflow } from "./invoice-workflow.ts";
+import {
+  extractionSchema,
+  invoiceWorkflow,
+} from "./workflows/invoice-approval.ts";
 
 const params = {
   threshold: money({ label: "Above", default: 5000 }),
@@ -88,15 +91,39 @@ await step.sleep("pause", { description: "Pause", duration: "1 fortnight" });
 expectTypeOf(
   await step.do(
     "book",
-    { description: "Book", sideEffect: true },
+    { description: "Book", sideEffect: true, input: null },
     async ({ idempotencyKey }) => idempotencyKey
   )
 ).toEqualTypeOf<string>();
+await step.do(
+  "book",
+  // @ts-expect-error -- a side-effect step says what it writes
+  { description: "Book", sideEffect: true },
+  async () => 1
+);
 await step.do(
   "match",
   { description: "Match" },
   // @ts-expect-error -- a step without side effects gets no key
   async (sideEffect: SideEffectContext) => sideEffect.idempotencyKey
+);
+
+// A step gets back the input it's given, as typed, and input is JSON.
+await step.do(
+  "notify",
+  { description: "Notify", sideEffect: true, input: { to: "anna", count: 2 } },
+  async ({ input }) => {
+    expectTypeOf(input).toEqualTypeOf<{ to: string; count: number }>();
+  }
+);
+await step.do("match", { description: "Match" }, async ({ input }) => {
+  expectTypeOf(input).toBeUndefined();
+});
+await step.do(
+  "match",
+  // @ts-expect-error -- input is JSON
+  { description: "Match", input: { at: new Date(0) } },
+  async () => 1
 );
 
 // An event's payload is typed by its schema, and unknown without one.

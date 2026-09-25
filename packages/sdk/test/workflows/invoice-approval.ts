@@ -90,12 +90,10 @@ export const invoiceWorkflow = (systems: InvoiceSystems) =>
           description: "Book the invoice in the ledger",
           sideEffect: true,
           locked: true,
+          input: { invoice: input.number, total: extracted.total },
         },
-        async ({ idempotencyKey }) =>
-          await systems.book(
-            { invoice: input.number, total: extracted.total },
-            idempotencyKey
-          )
+        async ({ idempotencyKey, input: booking }) =>
+          await systems.book(booking, idempotencyKey)
       );
       return { status: "booked", entry } as const;
     }
