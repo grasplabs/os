@@ -296,7 +296,9 @@ const declaration = /\.d\.[cm]?ts$/u;
  */
 const collectTypes = (specifiers: string[]): Record<string, string> => {
   const entry = path.join(root, "kit-types.ts");
-  const host = ts.createCompilerHost(compilerOptions);
+  // Third-party declarations can have errors that don't matter here.
+  const options = { ...compilerOptions, skipLibCheck: true };
+  const host = ts.createCompilerHost(options);
   const read = new Map<string, string>();
   const readFile = host.readFile.bind(host);
   host.readFile = (file) => {
@@ -315,7 +317,7 @@ const collectTypes = (specifiers: string[]): Record<string, string> => {
           ts.ScriptTarget.Latest
         )
       : getSourceFile(file, ...rest);
-  const program = ts.createProgram([entry], compilerOptions, host);
+  const program = ts.createProgram([entry], options, host);
   const [error] = ts.getPreEmitDiagnostics(program);
   if (error !== undefined) {
     throw new Error(

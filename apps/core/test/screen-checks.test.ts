@@ -97,7 +97,9 @@ export function Status({ status }: { status: Ticket["status"] }) {
 }
 `,
   // The App's server types, which screens use but don't compile.
-  "server.d.ts": `export interface Ticket {
+  "server.d.ts": `export type { ReactNode } from "react";
+
+export interface Ticket {
   id: string;
   title: string;
   status: "open" | "waiting" | "closed";

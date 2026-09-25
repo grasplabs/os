@@ -23,9 +23,9 @@ export const compilerOptions: ts.CompilerOptions = {
   isolatedModules: true,
   allowImportingTsExtensions: true,
   noEmit: true,
-  // The kit's declarations are checked when it is built. This skips every
-  // declaration file, so the App's own are checked as .ts files instead.
-  skipLibCheck: true,
+  // Off, so the App's own declaration files are checked. Only App files'
+  // diagnostics are asked for, so the kit's declarations aren't checked.
+  skipLibCheck: false,
   types: [],
 };
 
@@ -33,17 +33,6 @@ export const compilerOptions: ts.CompilerOptions = {
 export const libLocation = "/node_modules/typescript/lib";
 
 const trailingSlashes = /\/+$/u;
-const declarationExtension = /\.d\.ts$/u;
-
-/**
- * Where an App file is in the check: `screens/desk.tsx` at
- * `/screens/desk.tsx`. A declaration file (`server.d.ts`) goes in as the
- * TypeScript file it declares (`/server.ts`), which screens import the same
- * way, so that `skipLibCheck` doesn't skip it: the App's server types are
- * checked like its code.
- */
-const checkedPath = (path: string): string =>
-  `/${path.replace(declarationExtension, ".ts")}`;
 
 /** Every directory that holds one of these files. */
 const directoriesOf = (paths: Iterable<string>): Set<string> => {
@@ -90,10 +79,7 @@ const severities: Partial<
   [ts.DiagnosticCategory.Warning]: "warning",
 };
 
-const toDiagnostic = (
-  diagnostic: ts.Diagnostic,
-  appPaths: ReadonlyMap<string, string>
-): Diagnostic | undefined => {
+const toDiagnostic = (diagnostic: ts.Diagnostic): Diagnostic | undefined => {
   const severity = severities[diagnostic.category];
   if (severity === undefined) {
     return undefined;
@@ -105,7 +91,7 @@ const toDiagnostic = (
   };
   const { file, start } = diagnostic;
   if (file !== undefined) {
-    result.file = appPaths.get(file.fileName) ?? file.fileName.slice(1);
+    result.file = file.fileName.slice(1);
     if (start !== undefined) {
       const { line, character } = file.getLineAndCharacterOfPosition(start);
       result.line = line + 1;
@@ -126,13 +112,7 @@ export const typeCheck = (
 ): Diagnostic[] => {
   const kit = kitOf(kitTypes);
   const app = new Map(
-    Object.entries(appFiles).map(([path, source]) => [
-      checkedPath(path),
-      source,
-    ])
-  );
-  const appPaths = new Map(
-    Object.keys(appFiles).map((path) => [checkedPath(path), path])
+    Object.entries(appFiles).map(([path, source]) => [`/${path}`, source])
   );
   const appDirectories = directoriesOf(app.keys());
   const readFile = (path: string): string | undefined =>
@@ -187,6 +167,6 @@ export const typeCheck = (
       ...program.getSemanticDiagnostics(file),
     ]),
   ]
-    .map((diagnostic) => toDiagnostic(diagnostic, appPaths))
+    .map((diagnostic) => toDiagnostic(diagnostic))
     .filter((diagnostic) => diagnostic !== undefined);
 };
