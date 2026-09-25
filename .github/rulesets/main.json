@@ -10,8 +10,8 @@
   },
   "bypass_actors": [
     {
-      "actor_id": 19720765,
-      "actor_type": "Team",
+      "actor_id": null,
+      "actor_type": "OrganizationAdmin",
       "bypass_mode": "pull_request"
     }
   ],

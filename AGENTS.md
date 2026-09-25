@@ -57,7 +57,7 @@ Trunk-based: `main` is the only long-lived branch; every merge deploys all apps 
 3. Nick or Jakob approves (CODEOWNERS); pushing after an approval needs a new one.
 4. Add it to the merge queue, which tests it on top of the latest `main` and squash-merges it. No need to keep the branch up to date by hand.
 
-Nobody pushes to `main` directly. In an emergency, members of the `os-admins` team (Nick and Jakob) can merge their own pull request without a second review or passing checks; GitHub records every bypass. Use it only when waiting would do more harm. The rules live in `.github/rulesets/`; apply changes with `vp run github:setup`.
+Nobody pushes to `main` directly. In an emergency, organisation owners can merge a pull request without a second review or passing checks; GitHub records every bypass. Use it only when waiting would do more harm. The rules live in `.github/rulesets/`; apply changes with `vp run github:setup`.
 
 Conflicts: rebase your branch on `main`. For generated files (lockfile, Worker types, route trees, migrations) take either side and regenerate (`vp install`, `vp run -r typegen`, `vp run -r build`, `vp run -r db:generate`) instead of merging by hand.
 
