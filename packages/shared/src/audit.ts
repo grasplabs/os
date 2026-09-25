@@ -1,8 +1,9 @@
 import { z } from "zod";
 
 /**
- * Who did something: a person, an agent or workflow acting for one, the
- * platform itself, or Grasp staff (whose access is always logged).
+ * Who did something: a person, an agent acting for one, part of an App (its
+ * screens or server code), a workflow run, the platform itself, or Grasp
+ * staff (whose access is always logged).
  */
 export const auditActorSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("person"), userId: z.string() }),
@@ -10,6 +11,11 @@ export const auditActorSchema = z.discriminatedUnion("type", [
     type: z.literal("agent"),
     agentId: z.string(),
     onBehalfOf: z.string(),
+  }),
+  z.object({
+    type: z.literal("app"),
+    appId: z.string(),
+    part: z.enum(["screen", "server"]),
   }),
   z.object({
     type: z.literal("workflow"),
@@ -38,6 +44,8 @@ export const auditEventSchema = z.object({
   action: z.string(),
   /** What was acted on, e.g. `{ type: "connection", id }`. */
   target: z.object({ type: z.string(), id: z.string() }).optional(),
+  /** Ties the events of one request together. */
+  requestId: z.string().optional(),
   /** Resources the action read from or was built from. */
   provenance: z.array(z.string()).default([]),
   detail: z.record(z.string(), z.json()).default({}),

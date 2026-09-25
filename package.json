@@ -6,6 +6,7 @@
   "type": "module",
   "scripts": {
     "prepare": "vp config --no-agent",
+    "dev": "vp run --parallel --filter @grasp-os/core --filter @grasp-os/web dev",
     "e2e": "playwright test",
     "smoke:workerd": "node scripts/workerd-smoke.ts",
     "check:docs": "node scripts/check-docs.ts",

@@ -31,7 +31,7 @@ Vite+ (`vp`) is the toolchain. Run from the repo root:
 - `vp run -r build`: build everything
 - `vp run e2e`: Playwright end-to-end tests (`*.e2e.ts` in `e2e/`)
 - `vp run smoke:workerd`: boot core on plain workerd (on-prem readiness)
-- `vp -C apps/web dev`, `vp run --filter @grasp-os/core dev`: run one app
+- `vp run dev`: run the frontend (localhost:5173) with core and connect behind it (localhost:8787); `vp -C apps/console dev` for the console
 - `vp run -r typegen`: regenerate `worker-configuration.d.ts` after changing a `wrangler.jsonc`
 - `vp run -r db:generate`: generate migrations after changing a schema
 
@@ -53,13 +53,23 @@ Vite+ docs: `node_modules/vite-plus/docs`.
 Trunk-based: `main` is the only long-lived branch; every merge deploys all apps to grasp-os-staging. The console and router reach grasp-os-ops only through the manual Deploy grasp-os-ops workflow. Releases reach clients through the console, ring by ring, and risky work ships behind a feature flag.
 
 1. Branch from `main` as `<type>/<kebab-description>`, e.g. `feat/audit-export`, using the commit types. A pre-push hook and CI check the name.
-2. Open a pull request into `main`. CI runs, and a same-repo PR gets a preview in grasp-os-staging.
+2. Open a pull request into `main`. CI runs.
 3. Nick or Jakob approves (CODEOWNERS); pushing after an approval needs a new one.
 4. Add it to the merge queue, which tests it on top of the latest `main` and squash-merges it. No need to keep the branch up to date by hand.
 
-Nobody pushes to `main` directly. The rules live in `.github/rulesets/`; apply changes with `vp run github:setup`.
+Nobody pushes to `main` directly. In an emergency, organisation owners can merge a pull request without a second review or passing checks; GitHub records every bypass. Use it only when waiting would do more harm. The rules live in `.github/rulesets/`; apply changes with `vp run github:setup`.
 
 Conflicts: rebase your branch on `main`. For generated files (lockfile, Worker types, route trees, migrations) take either side and regenerate (`vp install`, `vp run -r typegen`, `vp run -r build`, `vp run -r db:generate`) instead of merging by hand.
+
+## Working from Linear
+
+Work is planned in Linear (team Grasp OS), not in this repo.
+
+- Only pick up issues in **Todo**; their blockers are done. Parent issues are containers; never pick one up.
+- Move the issue to **In Progress** when you start and to **In Review** when the pull request is ready. Branch names and PR titles don't carry the issue ID, so move issues by hand.
+- When your issue is **Done**, move any issue it blocked to **Todo** once all of that issue's blockers are done.
+- Issues labelled **Security** are reviewed by a person before merge.
+- Don't follow an issue blindly: if its scope conflicts with this file or the code, raise it in the issue.
 
 ## Architecture rules
 
