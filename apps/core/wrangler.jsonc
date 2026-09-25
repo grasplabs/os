@@ -8,8 +8,11 @@
   "compatibility_flags": ["nodejs_compat"],
   // Durable Objects bundle their Drizzle migrations as text.
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  // Core logs one structured line per request itself (src/log.ts), so the
+  // platform's own line per invocation would only double every entry.
   "observability": {
     "enabled": true,
+    "logs": { "invocation_logs": false },
     "traces": { "enabled": true },
   },
   // The frontend (apps/web) is served as static files by core. The Worker runs

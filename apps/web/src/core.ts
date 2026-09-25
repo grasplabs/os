@@ -8,14 +8,24 @@ export const connectCore = () => {
   return newWebSocketRpcSession<CoreApi>(url.href);
 };
 
-/** Whether core answers over RPC. Opens a session just for this call. */
+const pingTimeoutMs = 5000;
+
+/**
+ * Whether core answers over RPC within a few seconds. Opens a session just
+ * for this call; a hanging connection counts as no answer.
+ */
 export const pingCore = async (): Promise<boolean> => {
   const core = connectCore();
+  const { promise: timeout, resolve } = Promise.withResolvers<string>();
+  const timer = setTimeout(() => {
+    resolve("timeout");
+  }, pingTimeoutMs);
   try {
-    return (await core.ping()) === "pong";
+    return (await Promise.race([core.ping(), timeout])) === "pong";
   } catch {
     return false;
   } finally {
+    clearTimeout(timer);
     core[Symbol.dispose]();
   }
 };
