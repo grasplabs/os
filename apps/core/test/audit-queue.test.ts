@@ -1,4 +1,4 @@
-import { auditEventSchema, auditLogger } from "@grasp-os/shared/audit";
+import { auditLogger } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { auditLog } from "../src/audit-log.ts";
 import { audit } from "../src/audit.ts";
 import worker from "../src/index.ts";
+import { allEvents, oversizedFields } from "./audit-events.ts";
 
 // These tests share the deployment's single log, so they look only at the
 // events they sent.
@@ -29,7 +30,8 @@ type Outcome = "acked" | { retryAfter: number | undefined } | "pending";
  * Delivers one batch to core's queue consumer, as the queue does on the
  * given attempt, and returns what the consumer did with each message.
  */
-const deliverAttempt = async (
+const deliverTo = async (
+  workerEnv: Env,
   attempts: number,
   ...bodies: unknown[]
 ): Promise<Outcome[]> => {
@@ -59,28 +61,17 @@ const deliverAttempt = async (
       }
     },
   };
-  await worker.queue(batch, env);
+  await worker.queue(batch, workerEnv);
   return outcomes;
 };
 
+const deliverAttempt = async (
+  attempts: number,
+  ...bodies: unknown[]
+): Promise<Outcome[]> => await deliverTo(env, attempts, ...bodies);
+
 const deliver = async (...bodies: unknown[]): Promise<Outcome[]> =>
   await deliverAttempt(1, ...bodies);
-
-/** Every event in the log, oldest first. */
-const allEvents = async (): Promise<AuditEvent[]> => {
-  const log = auditLog(env);
-  const events: AuditEvent[] = [];
-  let page = await log.entries();
-  while (page.length > 0) {
-    for (const { event } of page) {
-      events.push(auditEventSchema.parse(JSON.parse(event)));
-    }
-    // Pages are read one after another.
-    // oxlint-disable-next-line no-await-in-loop
-    page = await log.entries(page.at(-1)?.seq);
-  }
-  return events;
-};
 
 /** The stored events with these IDs, in log order. */
 const storedWith = async (ids: readonly string[]): Promise<AuditEvent[]> => {
@@ -128,17 +119,32 @@ describe("audit queue consumer", () => {
     ).resolves.toStrictEqual([valid]);
   });
 
-  it("appends the rest of a batch when the log refuses one event, and backs off that one", async () => {
+  it("moves an event over the log's size cap to the dead letter queue at once, and appends the rest", async () => {
     const [before, after] = [newEvent(), newEvent()];
-    // Valid to the queue, but over the log's size cap.
-    const oversized = {
-      ...newEvent(),
-      provenance: Array.from({ length: 100 }, () => "r".repeat(100)),
+    // Valid to the schema, but over the log's size cap.
+    const oversized = { ...newEvent(), ...oversizedFields };
+    // The real dead letter queue, noting what it's sent.
+    const deadLetters: unknown[] = [];
+    const deadLetterQueue: Queue = {
+      metrics: async () => await env.AUDIT_DLQ.metrics(),
+      send: async (body, options) => {
+        deadLetters.push(body);
+        return await env.AUDIT_DLQ.send(body, options);
+      },
+      sendBatch: async (messages, options) =>
+        await env.AUDIT_DLQ.sendBatch(messages, options),
     };
 
     await expect(
-      deliverAttempt(3, before, oversized, after)
-    ).resolves.toStrictEqual(["acked", { retryAfter: 40 }, "acked"]);
+      deliverTo(
+        { ...env, AUDIT_DLQ: deadLetterQueue },
+        1,
+        before,
+        oversized,
+        after
+      )
+    ).resolves.toStrictEqual(["acked", "acked", "acked"]);
+    expect(deadLetters).toStrictEqual([oversized]);
     await expect(
       storedWith([before, oversized, after].map(({ id }) => id))
     ).resolves.toStrictEqual([before, after]);

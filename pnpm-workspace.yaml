@@ -12,6 +12,9 @@ allowBuilds:
   esbuild: true
   workerd: true
   sharp: false
+  # Install scripts of the model SDKs under pi-ai, which core never needs.
+  "@google/genai": false
+  protobufjs: false
 
 catalog:
   # Tooling
@@ -43,6 +46,7 @@ catalog:
 
   # Identity, agents, connections
   "@better-auth/sso": 1.7.5
+  "@earendil-works/pi-ai": 0.87.1
   "@modelcontextprotocol/sdk": 1.30.0
   better-auth: 1.7.5
 

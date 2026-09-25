@@ -5,6 +5,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { chainHash } from "../src/audit-chain.ts";
+import { oversizedFields } from "./audit-events.ts";
 
 // A fresh log per test; the deployment's own is `auditLog(env)`.
 const newLog = () => env.AUDIT_LOG.getByName(crypto.randomUUID());
@@ -127,8 +128,7 @@ describe("AuditLog", () => {
 
   it("refuses an event over the size cap, however each field is bounded", async () => {
     const log = newLog();
-    const provenance = Array.from({ length: 100 }, () => "r".repeat(100));
-    const oversized = { ...newEvent(), provenance };
+    const oversized = { ...newEvent(), ...oversizedFields };
     expect(auditEventSchema.safeParse(oversized).success).toBeTruthy();
 
     await runInDurableObject(log, async (instance) => {

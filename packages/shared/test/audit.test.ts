@@ -66,15 +66,33 @@ describe("audit logger", () => {
     expect(queue.sent).toStrictEqual([]);
   });
 
+  it("sends an event naming a large retrieval: a full provenance of identifier-sized IDs", async () => {
+    const queue = memoryQueue();
+    const event = await auditLogger(queue, "core").log({
+      actor: { type: "person", userId: "user-1" },
+      action: "model.call",
+      provenance: Array.from({ length: auditProvenanceMaxItems }, () =>
+        "r".repeat(auditIdentifierMaxLength)
+      ),
+    });
+    expect(queue.sent).toStrictEqual([event]);
+  });
+
   it("refuses an event over the log's size cap before it reaches the queue", async () => {
     const queue = memoryQueue();
     // Every field within its bound, the whole over the cap.
-    const provenance = Array.from({ length: 100 }, () => "r".repeat(100));
+    const full = "r".repeat(auditIdentifierMaxLength);
     await expect(
       auditLogger(queue, "core").log({
         actor: { type: "system" },
         action: "model.call",
-        provenance,
+        provenance: Array.from({ length: auditProvenanceMaxItems }, () => full),
+        detail: Object.fromEntries(
+          Array.from({ length: auditDetailMaxKeys }, (_, i) => [
+            `key${i}`,
+            full,
+          ])
+        ),
       })
     ).rejects.toThrow(`over ${auditEventMaxBytes} bytes`);
     expect(queue.sent).toStrictEqual([]);
