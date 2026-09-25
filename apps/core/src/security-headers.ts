@@ -7,8 +7,10 @@
  *   script, no eval. `'self'` covers the same-origin WebSocket to `/rpc`.
  * - Sign-in leaves for the IdP by top-level navigation, which the policy
  *   doesn't govern, so form-action needs no IdP hosts.
- * - Screens (App UIs) will run in sandboxed `data:` iframes with a policy of
- *   their own; allowing them here takes a `frame-src` directive.
+ * - Screens (App UIs) will run in sandboxed iframes. A `srcdoc` iframe
+ *   inherits this policy, which would block its scripts, and a `data:` one
+ *   needs a `frame-src` entry; the screen host decides which and adjusts
+ *   this policy to match.
  */
 const contentSecurityPolicy = Object.entries({
   "default-src": "'self'",
