@@ -5,10 +5,11 @@ import {
 import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import { connectCallSchema, connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectApi, ConnectResult } from "@grasp-os/shared/connect";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
-import { auditCall } from "./audit.ts";
-import type { CallOutcome } from "./audit.ts";
+import { auditCall, sendAuditOutbox } from "./audit.ts";
+import type { CallOutcome, CallRecord } from "./audit.ts";
 import { carryOut } from "./call.ts";
 import type { CallDone, CallProgress } from "./call.ts";
 
@@ -46,6 +47,26 @@ const outcomeOf = (code: string | undefined): CallOutcome => {
   }
 };
 
+/**
+ * Records a call that didn't go through. If even that fails, it is logged:
+ * the caller learns why its call failed, not why its event did.
+ */
+const auditFailure = async (env: Env, record: CallRecord): Promise<void> => {
+  try {
+    await auditCall(env, record);
+  } catch (error) {
+    log.error("audit.record_failed", errorFields(error));
+  }
+};
+
+/** How a call that returned ended, for the audit log. */
+const callOutcome = ({ failed, replayed }: CallDone): CallOutcome => {
+  if (failed) {
+    return "failed";
+  }
+  return replayed ? "replayed" : "ok";
+};
+
 const codeOf = (error: unknown): string | undefined =>
   connectErrors.codeOf(error) ?? capabilityErrors.codeOf(error);
 
@@ -71,10 +92,15 @@ export default class Connect
     return new Response("Not found", { status: 404 });
   }
 
+  /** Every minute: sends the audit events whose first send failed. */
+  override async scheduled(): Promise<void> {
+    await sendAuditOutbox(this.env);
+  }
+
   async call(request: unknown): Promise<ConnectResult> {
     const parsed = connectCallSchema.safeParse(request);
     if (!parsed.success) {
-      await auditCall(this.env, {
+      await auditFailure(this.env, {
         outcome: "refused",
         reason: "connect.invalid_call",
       });
@@ -90,7 +116,7 @@ export default class Connect
       done = await carryOut(this.env, claims, call, progress);
     } catch (error) {
       const reason = codeOf(error);
-      await auditCall(this.env, {
+      await auditFailure(this.env, {
         call: stated,
         claims,
         sideEffect: progress.sideEffect,
@@ -99,14 +125,25 @@ export default class Connect
       });
       throw error;
     }
-    // Nothing is returned that the audit log doesn't have.
-    await auditCall(this.env, {
-      call: stated,
-      claims,
-      sideEffect: done.sideEffect,
-      outcome: done.replayed ? "replayed" : "ok",
-      provenance: done.result.provenance,
-    });
+    // Nothing is returned, or stored for a repeat, that the audit log
+    // doesn't have: a side effect's answer is stored with its events.
+    await auditCall(
+      this.env,
+      {
+        call: stated,
+        claims,
+        sideEffect: done.sideEffect,
+        outcome: callOutcome(done),
+        reason: done.failed ? "connect.action_failed" : undefined,
+        provenance: done.result.provenance,
+      },
+      done.commit === undefined ? [] : [done.commit]
+    );
+    if (done.failed) {
+      throw connectErrors.create("connect.action_failed", {
+        output: done.result.output,
+      });
+    }
     return done.result;
   }
 }

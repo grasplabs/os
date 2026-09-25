@@ -3,17 +3,20 @@ import type { ConnectResult } from "@grasp-os/shared/connect";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Json } from "@grasp-os/shared/json";
 import type { PermissionSubject } from "@grasp-os/shared/permissions";
-import { and, eq, lt } from "drizzle-orm";
+import { and, eq, inArray, lt } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { idempotentCalls } from "./db/schema.ts";
 
 // Side effects happen once per idempotency key. The first call claims the
-// key before it calls out; its result is stored under the key, and a repeat
-// gets that result without calling out again. A call that fails after it
-// may have reached the server spends the key: nobody can tell whether the
-// effect happened, so a repeat is refused rather than risk doing it twice.
+// key before it calls out; its answer (a result, or the tool's error) is
+// stored under the key, and a repeat gets that answer without calling out
+// again. A call that fails after it may have reached the server spends the
+// key: nobody can tell whether the effect happened, so a repeat is refused
+// rather than risk doing it twice. Only a server that turned the call away
+// frees the key again.
 
 /**
  * How long a claim holds before connect stops waiting for its call: well
@@ -23,20 +26,28 @@ import { idempotentCalls } from "./db/schema.ts";
 const claimTimeoutMs = 5 * 60 * 1000;
 
 /**
- * How long stored results are kept. A workflow retries a step within this;
- * after it, the key is free again.
+ * How long stored answers are kept. A workflow retries a step within this;
+ * after it, the key is free again. Spent keys are kept for good.
  */
 const retentionMs = 30 * 24 * 60 * 60 * 1000;
 
 /** Whose key it is, and for which call: never the key alone. */
 export interface IdempotencyScope {
   subject: PermissionSubject;
+  onBehalfOf: string;
   connectionId: string;
   action: string;
   idempotencyKey: string;
 }
 
 type Row = typeof idempotentCalls.$inferSelect;
+
+/** An earlier call's answer: its result, or the tool's error. */
+export interface StoredAnswer {
+  result: ConnectResult;
+  /** The tool reported an error; `result` holds what it said. */
+  failed: boolean;
+}
 
 const provenanceSchema = z.array(z.string());
 
@@ -50,6 +61,7 @@ const keyOf = (scope: IdempotencyScope) => {
   return and(
     eq(idempotentCalls.subjectType, subjectType),
     eq(idempotentCalls.subjectId, subjectId),
+    eq(idempotentCalls.onBehalfOf, scope.onBehalfOf),
     eq(idempotentCalls.connectionId, scope.connectionId),
     eq(idempotentCalls.action, scope.action),
     eq(idempotentCalls.idempotencyKey, scope.idempotencyKey)
@@ -70,15 +82,19 @@ export const hashCall = async (
   ).join("");
 };
 
-/** What a stored row means for a repeat of the call: its result, or why not. */
-const replay = (row: Row, inputHash: string, now: number): ConnectResult => {
+/** What a stored row means for a repeat of the call: its answer, or why not. */
+const replay = (row: Row, inputHash: string, now: number): StoredAnswer => {
   if (row.inputHash !== inputHash) {
     throw connectErrors.create("connect.idempotency_conflict");
   }
-  if (row.state === "done" && row.output !== null) {
+  const answered = row.state === "done" || row.state === "failed";
+  if (answered && row.output !== null) {
     return {
-      output: row.output,
-      provenance: provenanceSchema.parse(JSON.parse(row.provenance ?? "[]")),
+      result: {
+        output: row.output,
+        provenance: provenanceSchema.parse(JSON.parse(row.provenance ?? "[]")),
+      },
+      failed: row.state === "failed",
     };
   }
   if (
@@ -103,8 +119,8 @@ export const idempotencyStore = (
     await db.select().from(idempotentCalls).where(key).get();
 
   return {
-    /** The stored result of an earlier call with this key, if there was one. */
-    replay: async (): Promise<ConnectResult | undefined> => {
+    /** The stored answer of an earlier call with this key, if there was one. */
+    replay: async (): Promise<StoredAnswer | undefined> => {
       const row = await find();
       return row === undefined ? undefined : replay(row, inputHash, Date.now());
     },
@@ -113,22 +129,28 @@ export const idempotencyStore = (
      * Claims the key for a call about to go out: undefined once claimed. If
      * another call claimed it first, answers as a repeat of that call.
      */
-    claim: async (onBehalfOf: string): Promise<ConnectResult | undefined> => {
+    claim: async (): Promise<StoredAnswer | undefined> => {
       const now = Date.now();
       const [, claimed] = await db.batch([
-        // Expired results make room; the index on created_at keeps it cheap.
+        // Expired answers make room; the index on created_at keeps it
+        // cheap. Spent keys stay: their effect may have happened.
         db
           .delete(idempotentCalls)
-          .where(lt(idempotentCalls.createdAt, new Date(now - retentionMs))),
+          .where(
+            and(
+              lt(idempotentCalls.createdAt, new Date(now - retentionMs)),
+              inArray(idempotentCalls.state, ["done", "failed"])
+            )
+          ),
         db
           .insert(idempotentCalls)
           .values({
             ...subjectColumns(scope.subject),
+            onBehalfOf: scope.onBehalfOf,
             connectionId: scope.connectionId,
             action: scope.action,
             idempotencyKey: scope.idempotencyKey,
             inputHash,
-            onBehalfOf,
             state: "running",
             createdAt: new Date(now),
           })
@@ -146,17 +168,19 @@ export const idempotencyStore = (
       return replay(row, inputHash, now);
     },
 
-    /** Stores the result of the call this key was claimed for. */
-    complete: async (result: ConnectResult): Promise<void> => {
-      await db
+    /**
+     * The statement that stores the answer of the call this key was claimed
+     * for, to run in one batch with the call's audit events.
+     */
+    completion: ({ result, failed }: StoredAnswer): BatchItem<"sqlite"> =>
+      db
         .update(idempotentCalls)
         .set({
-          state: "done",
+          state: failed ? "failed" : "done",
           output: result.output,
           provenance: JSON.stringify(result.provenance),
         })
-        .where(and(key, eq(idempotentCalls.state, "running")));
-    },
+        .where(and(key, eq(idempotentCalls.state, "running"))),
 
     /** Frees the key: the call is known not to have had its effect. */
     release: async (): Promise<void> => {

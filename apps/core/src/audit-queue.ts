@@ -1,10 +1,10 @@
 import { auditEventSchema, isAuditEventTooLarge } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { canonicalJson } from "@grasp-os/shared/json";
+import { errorFields, log } from "@grasp-os/shared/log";
 
 import { auditLog } from "./audit-log.ts";
 import type { AppendResult } from "./audit-log.ts";
-import { errorFields, log } from "./log.ts";
 
 /** First retry delay; doubles with each attempt. */
 const retryBaseSeconds = 10;

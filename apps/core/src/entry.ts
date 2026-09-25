@@ -1,10 +1,10 @@
 import { internalErrors, requestErrors } from "@grasp-os/shared/errors";
+import { errorFields, log } from "@grasp-os/shared/log";
+import type { LogFields } from "@grasp-os/shared/log";
 
 import { authBasePath } from "./auth/auth.ts";
 import { handleAuthRequest } from "./auth/routes.ts";
 import { errorResponse } from "./errors.ts";
-import { errorFields, log } from "./log.ts";
-import type { LogFields } from "./log.ts";
 import { checkRouterSecret } from "./router-secret.ts";
 import { rpcResponse } from "./rpc.ts";
 import { setSecurityHeaders } from "./security-headers.ts";

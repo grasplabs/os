@@ -1,16 +1,63 @@
-import { auditLogger, auditProvenanceMaxItems } from "@grasp-os/shared/audit";
-import type {
-  AuditActor,
-  AuditDetailValue,
-  AuditLogger,
+import {
+  auditProvenanceMaxItems,
+  createAuditEvent,
 } from "@grasp-os/shared/audit";
+import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
 import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import type { ConnectCall } from "@grasp-os/shared/connect";
+import { errorFields, log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
+import { asc, inArray } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
+import { drizzle } from "drizzle-orm/d1";
 
-/** Records audit events from connect. */
-const audit = (env: Env): AuditLogger =>
-  auditLogger(env.AUDIT_QUEUE, "connect");
+import { auditOutbox } from "./db/schema.ts";
+
+/** Most events one send takes from the outbox. */
+const sendBatchSize = 100;
+
+/**
+ * What goes on the queue for a stored event. One that doesn't parse goes as
+ * it is: the queue's consumer refuses it until it lands in the dead letter
+ * queue, where it can be looked at, instead of staying here forever.
+ */
+const queueBody = (event: string): unknown => {
+  try {
+    return JSON.parse(event);
+  } catch {
+    return event;
+  }
+};
+
+/**
+ * Sends events to the audit queue, then removes those sent from the
+ * outbox. One that fails stays for the next send; one sent twice has the
+ * same ID, and the log keeps it once.
+ */
+const send = async (
+  env: Env,
+  events: readonly { id: string; body: unknown }[]
+): Promise<void> => {
+  const results = await Promise.allSettled(
+    events.map(async ({ id, body }) => {
+      await env.AUDIT_QUEUE.send(body);
+      return id;
+    })
+  );
+  const sent: string[] = [];
+  for (const result of results) {
+    if (result.status === "fulfilled") {
+      sent.push(result.value);
+    } else {
+      log.error("audit.outbox.send_failed", errorFields(result.reason));
+    }
+  }
+  if (sent.length > 0) {
+    await drizzle(env.DB)
+      .delete(auditOutbox)
+      .where(inArray(auditOutbox.id, sent));
+  }
+};
 
 /**
  * How a call ended: done, answered from its stored result, refused before
@@ -77,10 +124,16 @@ const actorOf = (authority: Authority): AuditActor =>
  * Identifiers only, never the input or the output. A call that read more
  * than one event holds continues in `connection.call.provenance` events
  * with the same request ID.
+ *
+ * The events are stored in the outbox first, in one batch with `alongside`
+ * (the call's stored answer, for a side effect), so a call's answer is
+ * never kept without its events. They are sent right after; a send that
+ * fails is logged, not passed on, and the cron trigger sends it again.
  */
 export const auditCall = async (
   env: Env,
-  record: CallRecord
+  record: CallRecord,
+  alongside: readonly BatchItem<"sqlite">[] = []
 ): Promise<void> => {
   const { call, claims, sideEffect, outcome, reason } = record;
   const provenance = record.provenance ?? [];
@@ -106,22 +159,57 @@ export const auditCall = async (
   add("provenanceCount", provenance.length);
 
   const [first = [], ...rest] = provenanceGroups(provenance);
-  const logger = audit(env);
   const common = { actor, target, requestId: claims?.jti };
-  await logger.log({
-    ...common,
-    action: "connection.call",
-    provenance: first,
-    detail,
-  });
-  await Promise.all(
-    rest.map(
-      async (group) =>
-        await logger.log({
+  const events = [
+    createAuditEvent(
+      { ...common, action: "connection.call", provenance: first, detail },
+      "connect"
+    ),
+    ...rest.map((group) =>
+      createAuditEvent(
+        {
           ...common,
           action: "connection.call.provenance",
           provenance: group,
-        })
-    )
+        },
+        "connect"
+      )
+    ),
+  ];
+
+  const db = drizzle(env.DB);
+  const createdAt = new Date();
+  const [stored, ...alsoStored] = events.map((event) =>
+    db
+      .insert(auditOutbox)
+      .values({ id: event.id, event: JSON.stringify(event), createdAt })
+  );
+  if (stored === undefined) {
+    throw new Error("A call always has an event");
+  }
+  await db.batch([stored, ...alsoStored, ...alongside]);
+  try {
+    await send(
+      env,
+      events.map((event) => ({ id: event.id, body: event }))
+    );
+  } catch (error) {
+    log.error("audit.outbox.send_failed", errorFields(error));
+  }
+};
+
+/**
+ * Sends the oldest events in the outbox to the audit queue: those whose
+ * send failed when their call was made. The cron trigger calls it.
+ */
+export const sendAuditOutbox = async (env: Env): Promise<void> => {
+  const rows = await drizzle(env.DB)
+    .select()
+    .from(auditOutbox)
+    .orderBy(asc(auditOutbox.createdAt), asc(auditOutbox.id))
+    .limit(sendBatchSize);
+  await send(
+    env,
+    rows.map(({ id, event }) => ({ id, body: queueBody(event) }))
   );
 };

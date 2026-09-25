@@ -1,11 +1,11 @@
 import { createAuditEvent } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { asc, inArray, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
 import { auditOutbox } from "./db/core/schema.ts";
-import { errorFields, log } from "./log.ts";
 
 // A change to the core or Knowledge database that must be audited stores
 // its event in that database's outbox (each has an `audit_outbox` table) in

@@ -23,6 +23,8 @@ export interface FakeTool {
 
 export interface FakeResult {
   output: Record<string, unknown>;
+  /** Content blocks to answer with instead of `output`, such as an image. */
+  content?: { type: "image"; data: string; mimeType: string }[];
   /** The IDs of the resources it read. */
   provenance?: string[];
   /** It failed, and says so in its result. */
@@ -62,10 +64,12 @@ const serverWith = (tools: readonly FakeTool[], ran: Ran[]): McpServer => {
       },
       async (input: Record<string, unknown>) => {
         ran.push({ tool: tool.name, input });
-        const { output, provenance, isError } = await tool.run(input);
+        const { output, content, provenance, isError } = await tool.run(input);
         return {
-          content: [{ type: "text" as const, text: JSON.stringify(output) }],
-          structuredContent: output,
+          content: content ?? [
+            { type: "text" as const, text: JSON.stringify(output) },
+          ],
+          structuredContent: content === undefined ? output : undefined,
           isError,
           _meta:
             provenance === undefined

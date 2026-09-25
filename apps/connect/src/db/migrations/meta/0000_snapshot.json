@@ -1,9 +1,40 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "d7f38d46-d6cb-4222-8a60-a6cabc649e63",
+  "id": "cc730116-932e-4aa6-b4c3-4fd16ae899c7",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
+    "audit_outbox": {
+      "name": "audit_outbox",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "event": {
+          "name": "event",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "connections": {
       "name": "connections",
       "columns": {
@@ -99,6 +130,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "on_behalf_of": {
+          "name": "on_behalf_of",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "connection_id": {
           "name": "connection_id",
           "type": "text",
@@ -122,13 +160,6 @@
         },
         "input_hash": {
           "name": "input_hash",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "on_behalf_of": {
-          "name": "on_behalf_of",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -174,15 +205,16 @@
       },
       "foreignKeys": {},
       "compositePrimaryKeys": {
-        "idempotent_calls_subject_type_subject_id_connection_id_action_idempotency_key_pk": {
+        "idempotent_calls_subject_type_subject_id_on_behalf_of_connection_id_action_idempotency_key_pk": {
           "columns": [
             "subject_type",
             "subject_id",
+            "on_behalf_of",
             "connection_id",
             "action",
             "idempotency_key"
           ],
-          "name": "idempotent_calls_subject_type_subject_id_connection_id_action_idempotency_key_pk"
+          "name": "idempotent_calls_subject_type_subject_id_on_behalf_of_connection_id_action_idempotency_key_pk"
         }
       },
       "uniqueConstraints": {},

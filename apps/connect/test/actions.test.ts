@@ -36,6 +36,14 @@ const tools: FakeTool[] = [
     }),
   },
   {
+    name: "mail.photo",
+    readOnly: true,
+    run: () => ({
+      output: {},
+      content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
+    }),
+  },
+  {
     name: "mail.search",
     readOnly: true,
     run: ({ query }) =>
@@ -199,6 +207,18 @@ describe("a call on a connection", () => {
         })
       )
     ).resolves.toBe("ok");
+  });
+
+  it("returns content other than text as the content blocks themselves", async () => {
+    const connectionId = await addConnection();
+    const result = await callAs(anna, {
+      connectionId,
+      action: "mail.photo",
+      input: {},
+    });
+    expect(JSON.parse(result.output)).toStrictEqual([
+      { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
+    ]);
   });
 
   it("reports the tool's own error with its output", async () => {

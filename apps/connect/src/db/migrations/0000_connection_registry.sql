@@ -1,3 +1,9 @@
+CREATE TABLE `audit_outbox` (
+	`id` text PRIMARY KEY NOT NULL,
+	`event` text NOT NULL,
+	`created_at` integer NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE `connections` (
 	`id` text PRIMARY KEY NOT NULL,
 	`provider` text NOT NULL,
@@ -14,16 +20,16 @@ CREATE TABLE `connections` (
 CREATE TABLE `idempotent_calls` (
 	`subject_type` text NOT NULL,
 	`subject_id` text NOT NULL,
+	`on_behalf_of` text NOT NULL,
 	`connection_id` text NOT NULL,
 	`action` text NOT NULL,
 	`idempotency_key` text NOT NULL,
 	`input_hash` text NOT NULL,
-	`on_behalf_of` text NOT NULL,
 	`state` text NOT NULL,
 	`output` text,
 	`provenance` text,
 	`created_at` integer NOT NULL,
-	PRIMARY KEY(`subject_type`, `subject_id`, `connection_id`, `action`, `idempotency_key`)
+	PRIMARY KEY(`subject_type`, `subject_id`, `on_behalf_of`, `connection_id`, `action`, `idempotency_key`)
 );
 --> statement-breakpoint
 CREATE INDEX `idempotent_calls_created_idx` ON `idempotent_calls` (`created_at`);

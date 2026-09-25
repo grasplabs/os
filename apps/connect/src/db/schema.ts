@@ -1,7 +1,7 @@
 /**
- * Connect D1 schema: the connection registry and the stored results of
- * side effects. OAuth providers, encrypted tokens and pending actions join
- * them here.
+ * Connect D1 schema: the connection registry, the stored answers of side
+ * effects and the audit outbox. OAuth providers, encrypted tokens and
+ * pending actions join them here.
  */
 import { sql } from "drizzle-orm";
 import {
@@ -50,30 +50,31 @@ export const connections = sqliteTable(
 );
 
 /**
- * One side effect per subject, connection, action and idempotency key: its
- * claim while it runs, then its result, returned to a repeat instead of
- * calling out again. Never keyed by the key alone: App code chooses keys,
- * so one subject's key must not reach another's result, or another
- * action's.
+ * One side effect per subject, person, connection, action and idempotency
+ * key: its claim while it runs, then its result, returned to a repeat
+ * instead of calling out again. Never keyed by the key alone: App and agent
+ * code chooses keys, so one subject's key must never reach another
+ * subject's result, another person's, or another action's.
  *
  * `input_hash` is the SHA-256 of the call's resource and input, so a key
  * can't be reused for a different call. `state` is `running` while the call
- * is out, `done` once its result is stored, and `unknown` when it failed
- * after it may have reached the server: that key is then spent for good.
+ * is out, `done` once its result is stored, `failed` once the tool's error
+ * is stored (a tool may have acted before it failed, so that is final too),
+ * and `unknown` when the call failed after it may have reached the server:
+ * that key is spent for good, and its row is never deleted.
  */
 export const idempotentCalls = sqliteTable(
   "idempotent_calls",
   {
     subjectType: text("subject_type", { enum: ["app", "agent"] }).notNull(),
     subjectId: text("subject_id").notNull(),
+    onBehalfOf: text("on_behalf_of").notNull(),
     connectionId: text("connection_id").notNull(),
     action: text().notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
     inputHash: text("input_hash").notNull(),
-    /** The person the first call acted for. */
-    onBehalfOf: text("on_behalf_of").notNull(),
-    state: text({ enum: ["running", "done", "unknown"] }).notNull(),
-    /** Set once done: the result as returned to the first call. */
+    state: text({ enum: ["running", "done", "failed", "unknown"] }).notNull(),
+    /** Set once done or failed: the result as returned to the first call. */
     output: text(),
     provenance: text(),
     createdAt: timestamp("created_at").notNull(),
@@ -83,6 +84,7 @@ export const idempotentCalls = sqliteTable(
       columns: [
         table.subjectType,
         table.subjectId,
+        table.onBehalfOf,
         table.connectionId,
         table.action,
         table.idempotencyKey,
@@ -91,3 +93,15 @@ export const idempotentCalls = sqliteTable(
     index("idempotent_calls_created_idx").on(table.createdAt),
   ]
 );
+
+/**
+ * Audit events not yet on the audit queue. Each call's events are stored
+ * here first, with the call's own result where it has one, then sent; what
+ * didn't go out is sent again by the cron trigger. `event` is the event as
+ * JSON.
+ */
+export const auditOutbox = sqliteTable("audit_outbox", {
+  id: text().primaryKey(),
+  event: text().notNull(),
+  createdAt: timestamp("created_at").notNull(),
+});

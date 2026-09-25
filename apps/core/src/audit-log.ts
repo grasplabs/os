@@ -5,6 +5,7 @@ import {
 } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { canonicalJson } from "@grasp-os/shared/json";
+import { log } from "@grasp-os/shared/log";
 import { DurableObject } from "cloudflare:workers";
 import { asc, desc, eq, gt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
@@ -20,7 +21,6 @@ import migrations from "./db/audit-log/migrations/migrations.js";
 import { events } from "./db/audit-log/schema.ts";
 import { migrateOnWake } from "./db/migrate.ts";
 import { inJurisdiction } from "./durable-objects.ts";
-import { log } from "./log.ts";
 
 /** How many entries one read returns at most. */
 const pageSize = 500;

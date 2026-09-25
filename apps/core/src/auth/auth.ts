@@ -2,6 +2,7 @@ import { sso } from "@better-auth/sso";
 import { roleSchema } from "@grasp-os/shared";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { canonicalJson } from "@grasp-os/shared/json";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import {
   APIError,
@@ -30,7 +31,6 @@ import {
   users,
   verifications,
 } from "../db/core/schema.ts";
-import { errorFields, log } from "../log.ts";
 import { checkClaims } from "./claims.ts";
 import { oidcProviders, providerIds, staffWindowOpen } from "./config.ts";
 import type { OidcProvider, SignInConfig } from "./config.ts";

@@ -37,12 +37,22 @@ const server = fakeMcpServer(serverUrl, [
     },
   },
   {
+    name: "mail.open",
+    readOnly: true,
+    run: () => ({
+      output: { error: "The message is too large to open" },
+      provenance: ["message-9"],
+      isError: true,
+    }),
+  },
+  {
     name: "mail.send",
     run: () => ({ output: { messageId: "sent-1" } }),
   },
 ]);
 
-const events = auditEvents();
+const queue = auditEvents();
+const { events } = queue;
 
 const anna = agentFor("user-anna");
 
@@ -191,6 +201,32 @@ describe("the audit log", () => {
       },
     ]);
     expect(server.ran).toStrictEqual([]);
+  });
+
+  it("records what a failed read touched", async () => {
+    const connectionId = await addConnection();
+    await expect(
+      outcome(callAs(anna, { connectionId, action: "mail.open", input: {} }))
+    ).resolves.toBe("connect.action_failed");
+    expect(events).toMatchObject([
+      {
+        provenance: ["message-9"],
+        detail: { outcome: "failed", reason: "connect.action_failed" },
+      },
+    ]);
+  });
+
+  it("keeps an event the queue refused, and sends it on the next cron run", async () => {
+    const connectionId = await addConnection();
+    queue.refuseNext();
+    await expect(
+      outcome(callAs(anna, { connectionId, action: "mail.list", input: {} }))
+    ).resolves.toBe("ok");
+    expect(events).toStrictEqual([]);
+    await exports.default.scheduled();
+    expect(events).toMatchObject([
+      { action: "connection.call", target: { id: connectionId } },
+    ]);
   });
 
   it("records a side effect whose outcome is unknown as such", async () => {

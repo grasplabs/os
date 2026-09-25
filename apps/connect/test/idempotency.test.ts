@@ -111,6 +111,15 @@ describe("a side effect", () => {
     expect(server.ran).toHaveLength(3);
   });
 
+  it("for another person, with the same key and input, runs as their own call", async () => {
+    const connectionId = await addConnection();
+    const call = send(connectionId, "run-1:send");
+    const forAnna = await callAs(anna, call);
+    const forBen = await callAs(agentFor("user-ben"), call);
+    expect(forBen.output).not.toBe(forAnna.output);
+    expect(server.ran).toHaveLength(2);
+  });
+
   it("with a key used for another action or connection runs as its own call", async () => {
     const connectionId = await addConnection();
     const otherConnection = await addConnection();
@@ -168,7 +177,7 @@ describe("a side effect", () => {
     expect(server.ran).toHaveLength(1);
   });
 
-  it("that the tool reported as failed can be retried with its key", async () => {
+  it("that the tool reported as failed answers a repeat with that error", async () => {
     const connectionId = await addConnection();
     const call = {
       connectionId,
@@ -180,9 +189,12 @@ describe("a side effect", () => {
     await expect(outcome(callAs(anna, call))).resolves.toBe(
       "connect.action_failed"
     );
+    // The tool may have acted before it failed: never run it again.
     rateLimited = false;
-    await expect(outcome(callAs(anna, call))).resolves.toBe("ok");
-    expect(server.ran).toHaveLength(2);
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.action_failed"
+    );
+    expect(server.ran).toHaveLength(1);
   });
 
   it("running at the same time as a repeat runs once", async () => {

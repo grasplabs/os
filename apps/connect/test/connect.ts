@@ -98,12 +98,21 @@ export const outcome = async (promise: Promise<unknown>): Promise<string> => {
   }
 };
 
-/** The audit events connect sends in each test of the file. */
-export const auditEvents = (): AuditEvent[] => {
+/**
+ * The audit queue, as far as connect reaches it: the events it takes in
+ * each test of the file, and `refuseNext` to make it refuse the next send.
+ */
+export const auditEvents = () => {
   const events: AuditEvent[] = [];
+  let refuse = false;
   beforeEach(() => {
     events.length = 0;
+    refuse = false;
     vi.spyOn(env.AUDIT_QUEUE, "send").mockImplementation(async (event) => {
+      if (refuse) {
+        refuse = false;
+        throw new Error("Queue unavailable");
+      }
       events.push(auditEventSchema.parse(event));
       return await Promise.resolve({
         metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
@@ -113,5 +122,10 @@ export const auditEvents = (): AuditEvent[] => {
   afterEach(() => {
     vi.restoreAllMocks();
   });
-  return events;
+  return {
+    events,
+    refuseNext: () => {
+      refuse = true;
+    },
+  };
 };

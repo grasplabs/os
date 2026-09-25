@@ -1,18 +1,25 @@
 import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import { connectErrors } from "@grasp-os/shared/connect";
-import type { ConnectCall, ConnectResult } from "@grasp-os/shared/connect";
+import type { ConnectCall } from "@grasp-os/shared/connect";
 import type { Json } from "@grasp-os/shared/json";
+import type { BatchItem } from "drizzle-orm/batch";
 
 import { serverOf, usableConnection } from "./connections.ts";
 import { hashCall, idempotencyStore } from "./idempotency.ts";
+import type { StoredAnswer } from "./idempotency.ts";
 import { McpError } from "./mcp.ts";
 import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
 
-/** A call connect carried out (or answered from its stored result). */
-export interface CallDone {
-  result: ConnectResult;
+/**
+ * A call connect carried out, or answered from its stored answer: its
+ * result, or the tool's error (`failed`), which goes back to the caller as
+ * `connect.action_failed` once it is audited.
+ */
+export interface CallDone extends StoredAnswer {
   sideEffect: boolean;
   replayed: boolean;
+  /** Stores a side effect's answer, in one batch with its audit events. */
+  commit?: BatchItem<"sqlite">;
 }
 
 /** Knows once the action is found whether it has a side effect. */
@@ -47,13 +54,15 @@ const checkResourceScope = (
   }
 };
 
-/** The tool's result, or its error as `connect.action_failed`. */
-const resultOf = ({ output, provenance, isError }: McpToolResult) => {
-  if (isError) {
-    throw connectErrors.create("connect.action_failed", { output });
-  }
-  return { output, provenance };
-};
+/** The tool's answer, as connect stores and returns it. */
+const answerOf = ({
+  output,
+  provenance,
+  isError,
+}: McpToolResult): StoredAnswer => ({
+  result: { output, provenance },
+  failed: isError,
+});
 
 /** Finds the action's tool, exactly as named. */
 const toolFor = async (server: McpServer, action: string): Promise<McpTool> => {
@@ -105,6 +114,7 @@ export const carryOut = async (
           env.DB,
           {
             subject: authority.subject,
+            onBehalfOf: authority.onBehalfOf,
             connectionId: call.connectionId,
             action: call.action,
             idempotencyKey,
@@ -114,7 +124,7 @@ export const carryOut = async (
   const stored = await store?.replay();
   if (stored !== undefined) {
     progress.sideEffect = true;
-    return { result: stored, sideEffect: true, replayed: true };
+    return { ...stored, sideEffect: true, replayed: true };
   }
 
   const server = serverOf(connection);
@@ -130,7 +140,7 @@ export const carryOut = async (
   if (!sideEffect) {
     try {
       return {
-        result: resultOf(await server.call(tool.name, input)),
+        ...answerOf(await server.call(tool.name, input)),
         sideEffect,
         replayed: false,
       };
@@ -144,14 +154,16 @@ export const carryOut = async (
   if (store === undefined) {
     throw connectErrors.create("connect.idempotency_key_required");
   }
-  const earlier = await store.claim(authority.onBehalfOf);
+  const earlier = await store.claim();
   if (earlier !== undefined) {
-    return { result: earlier, sideEffect, replayed: true };
+    return { ...earlier, sideEffect, replayed: true };
   }
-  let answer: McpToolResult;
+  let answer: StoredAnswer;
   try {
-    answer = await server.call(tool.name, input);
+    answer = answerOf(await server.call(tool.name, input));
   } catch (error) {
+    // Only a server that turned the call away frees the key. A tool that
+    // reports an error may have acted first, so its answer is kept below.
     if (error instanceof McpError && error.declined) {
       await store.release();
       throw connectErrors.create("connect.server_unavailable");
@@ -159,12 +171,10 @@ export const carryOut = async (
     await store.spend();
     throw connectErrors.create("connect.outcome_unknown");
   }
-  if (answer.isError) {
-    // A tool reports an error when it didn't act (invalid input, a 429 from
-    // the provider), so the key is free for a retry.
-    await store.release();
-  }
-  const result = resultOf(answer);
-  await store.complete(result);
-  return { result, sideEffect, replayed: false };
+  return {
+    ...answer,
+    sideEffect,
+    replayed: false,
+    commit: store.completion(answer),
+  };
 };

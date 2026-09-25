@@ -54,7 +54,10 @@ export interface McpTool {
 
 /** What a tool call returned. */
 export interface McpToolResult {
-  /** Its structured content, or else its text content, as JSON text. */
+  /**
+   * Its structured content, or else its text, or else its content blocks
+   * as they are, as JSON text.
+   */
   output: string;
   provenance: string[];
   /** The tool reported an error instead of a result. */
@@ -111,9 +114,7 @@ const toolsPageSchema = z.object({
 });
 
 const callResultSchema = z.object({
-  content: z
-    .array(z.object({ type: z.string(), text: z.string().optional() }))
-    .default([]),
+  content: z.array(z.record(z.string(), z.json())).default([]),
   structuredContent: z.record(z.string(), z.json()).optional(),
   isError: z.boolean().default(false),
   _meta: metaSchema,
@@ -222,12 +223,17 @@ const resultOf = (result: unknown): McpToolResult => {
     throw new McpError("The tool's result isn't one connect can read");
   }
   const { structuredContent, content, isError } = parsed.data;
-  const text = content
-    .map((block) => block.text)
-    .filter((part) => part !== undefined)
-    .join("\n");
+  const texts = content.map((block) =>
+    block.type === "text" && typeof block.text === "string"
+      ? block.text
+      : undefined
+  );
+  const text = texts.every((part) => part !== undefined)
+    ? texts.join("\n")
+    : undefined;
   return {
-    output: JSON.stringify(structuredContent ?? text),
+    // Other content (images, resources) goes as the blocks themselves.
+    output: JSON.stringify(structuredContent ?? text ?? content),
     provenance: provenance.data,
     isError,
   };
