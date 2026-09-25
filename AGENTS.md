@@ -53,7 +53,7 @@ Vite+ docs: `node_modules/vite-plus/docs`.
 Trunk-based: `main` is the only long-lived branch; every merge deploys all apps to grasp-os-staging. The console and router reach grasp-os-ops only through the manual Deploy grasp-os-ops workflow. Releases reach clients through the console, ring by ring, and risky work ships behind a feature flag.
 
 1. Branch from `main` as `<type>/<kebab-description>`, e.g. `feat/audit-export`, using the commit types. A pre-push hook and CI check the name.
-2. Open a pull request into `main`. CI runs, and a same-repo PR gets a preview in grasp-os-staging.
+2. Open a pull request into `main`. CI runs.
 3. Nick or Jakob approves (CODEOWNERS); pushing after an approval needs a new one.
 4. Add it to the merge queue, which tests it on top of the latest `main` and squash-merges it. No need to keep the branch up to date by hand.
 
