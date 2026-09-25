@@ -159,6 +159,57 @@ describe("screen checks", { timeout: 60_000 }, () => {
     });
   });
 
+  it("fails a type error in the App's server types", async () => {
+    const built = await buildScreens(
+      env,
+      app({
+        "server.d.ts": `export interface Ticket {
+  id: string;
+  title: string;
+  status: "open" | "waiting" | "closed";
+  assignee: Person | null;
+}
+`,
+      })
+    );
+
+    expect(built).toStrictEqual({
+      ok: false,
+      diagnostics: [
+        {
+          file: "server.d.ts",
+          line: 5,
+          column: 13,
+          rule: "TS2304",
+          severity: "error",
+          message: "Cannot find name 'Person'.",
+        },
+      ],
+    });
+  });
+
+  it("fails a syntax error, saying where", async () => {
+    const built = await buildScreens(
+      env,
+      app(
+        withLine(
+          `const [query, setQuery] = useState("");`,
+          'const [query, setQuery = useState("");'
+        )
+      )
+    );
+
+    expect(built.ok).toBeFalsy();
+    expect(
+      built.diagnostics.map((diagnostic) => summary(diagnostic))
+    ).toStrictEqual([
+      expect.stringMatching(
+        /^screens\/tickets\.tsx:26:40 compile error: Unexpected token/u
+      ),
+    ]);
+    expect(built.diagnostics[0]?.rule).toBe("compile");
+  });
+
   it("fails a restyled component, naming its variants and sizes", async () => {
     const built = await buildScreens(
       env,

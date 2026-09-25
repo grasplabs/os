@@ -47,11 +47,37 @@ const declarationFile = /^[\w-]+\.d\.ts$/u;
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+interface Location {
+  file?: string;
+  line?: number;
+  column?: number;
+}
+
+/** Where Babel says an error is: its syntax errors carry `loc`, columns from 0. */
+const locationOf = (error: unknown): Location => {
+  if (typeof error !== "object" || error === null || !("loc" in error)) {
+    return {};
+  }
+  const { loc } = error;
+  if (
+    typeof loc !== "object" ||
+    loc === null ||
+    !("line" in loc) ||
+    !("column" in loc)
+  ) {
+    return {};
+  }
+  const { line, column } = loc;
+  return typeof line === "number" && typeof column === "number"
+    ? { line, column: column + 1 }
+    : {};
+};
+
 /** An error, which fails the build. */
 const problem = (
   rule: string,
   message: string,
-  at: { file?: string; line?: number } = {}
+  at: Location = {}
 ): Diagnostic => ({ ...at, rule, severity: "error", message });
 
 /** Two App files that would share a module name, e.g. `a.ts` and `a.tsx`. */
@@ -84,16 +110,15 @@ const compileFile = (
   try {
     compiled = compileModule(source, path, [collectImports(imports)]);
   } catch (error) {
-    // Babel names the file in syntax errors; the React Compiler doesn't.
+    // Babel names the file in syntax errors (as `/<path>`); the React
+    // Compiler doesn't. The diagnostic names it on its own.
     const message = messageOf(error);
     return {
       errors: [
         problem(
           "compile",
-          message.startsWith(`${path}: `)
-            ? message.slice(path.length + 2)
-            : message,
-          { file: path }
+          message.replace(`/${path}: `, "").replace(`${path}: `, ""),
+          { file: path, ...locationOf(error) }
         ),
       ],
     };
