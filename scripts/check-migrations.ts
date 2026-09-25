@@ -69,7 +69,11 @@ for (const file of journals) {
     mainJournal(file)?.entries ?? []
   ).entries()) {
     const entry = entries[position];
-    if (entry?.idx !== shipped.idx || entry.tag !== shipped.tag) {
+    if (
+      entry?.idx !== shipped.idx ||
+      entry.tag !== shipped.tag ||
+      entry.when !== shipped.when
+    ) {
       errors.push(
         `${file}: migration ${shipped.idx} (${shipped.tag}) is on main already; keep its journal entry as it is.`
       );
