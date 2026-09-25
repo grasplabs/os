@@ -11,8 +11,6 @@ strictDepBuilds: true
 allowBuilds:
   esbuild: true
   workerd: true
-  "@google/genai": false
-  protobufjs: false
   sharp: false
 
 catalog:
@@ -45,10 +43,6 @@ catalog:
 
   # Identity, agents, connections
   "@better-auth/sso": 1.7.5
-  "@composio/core": 0.18.1
-  # Exact, and the two move together.
-  "@earendil-works/pi-agent-core": 0.86.1
-  "@earendil-works/pi-ai": 0.86.1
   "@modelcontextprotocol/sdk": 1.30.0
   better-auth: 1.7.5
 

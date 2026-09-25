@@ -1,3 +1,4 @@
+// The engine adapter's entry point (`@grasp-os/sdk/engine`); workflow code never imports it.
 import type { RunId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
