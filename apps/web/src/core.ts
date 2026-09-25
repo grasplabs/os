@@ -10,22 +10,33 @@ export const connectCore = () => {
 
 const pingTimeoutMs = 5000;
 
+/** Rejects when `promise` hasn't settled within `ms`. */
+const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  // oxlint-disable-next-line promise/avoid-new -- setTimeout has no promise form in browsers
+  const timeout = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`Timed out after ${ms} ms`));
+    }, ms);
+  });
+  try {
+    return await Promise.race([promise, timeout]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
 /**
  * Whether core answers over RPC within a few seconds. Opens a session just
  * for this call; a hanging connection counts as no answer.
  */
 export const pingCore = async (): Promise<boolean> => {
   const core = connectCore();
-  const { promise: timeout, resolve } = Promise.withResolvers<string>();
-  const timer = setTimeout(() => {
-    resolve("timeout");
-  }, pingTimeoutMs);
   try {
-    return (await Promise.race([core.ping(), timeout])) === "pong";
+    return (await withTimeout(core.ping(), pingTimeoutMs)) === "pong";
   } catch {
     return false;
   } finally {
-    clearTimeout(timer);
     core[Symbol.dispose]();
   }
 };
