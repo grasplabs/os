@@ -11,6 +11,9 @@ import { testSignIn } from "./test/sign-in-config.ts";
 const coreMigrations = await readD1Migrations(
   `${import.meta.dirname}/src/db/core/migrations`
 );
+const knowledgeMigrations = await readD1Migrations(
+  `${import.meta.dirname}/src/db/knowledge/migrations`
+);
 
 /** The real connect Worker, for the CONNECT service binding. */
 const connectScript = bundleConnect();
@@ -29,7 +32,7 @@ export const screenTests = ["test/screen*.test.ts"];
 export const coreProject = (test: UserWorkspaceConfig["test"]) =>
   defineProject({
     test: {
-      // Brings the core database up to the committed migrations.
+      // Brings the D1 databases up to the committed migrations.
       setupFiles: ["./test/apply-migrations.ts"],
       ...test,
     },
@@ -47,6 +50,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             // workerd doesn't implement Durable Object jurisdictions.
             DURABLE_OBJECT_JURISDICTION: "none",
             CORE_MIGRATIONS: coreMigrations,
+            KNOWLEDGE_MIGRATIONS: knowledgeMigrations,
           },
           // Deliver audit events at once instead of waiting to fill a batch.
           queueConsumers: { "grasp-os-audit": { maxBatchTimeout: 0 } },

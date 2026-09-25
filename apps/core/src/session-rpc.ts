@@ -7,6 +7,7 @@ import type { Identity, SessionApi } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
 import { AppsRpc } from "./apps-rpc.ts";
+import { KnowledgeRpc } from "./knowledge/rpc.ts";
 import {
   grantPermission,
   listPermissions,
@@ -39,6 +40,11 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get apps(): AppsRpc {
     return new AppsRpc(this.#env, this.#check);
+  }
+
+  /** Knowledge, whose every method checks the session again. */
+  get knowledge(): KnowledgeRpc {
+    return new KnowledgeRpc(this.#env, this.#check);
   }
 
   async whoami(): Promise<Identity> {
