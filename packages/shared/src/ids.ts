@@ -31,6 +31,10 @@ export type RunId = z.infer<typeof runIdSchema>;
 export const workspaceIdSchema = idSchema<"WorkspaceId">();
 export type WorkspaceId = z.infer<typeof workspaceIdSchema>;
 
+/** A chat in a workspace. */
+export const chatIdSchema = idSchema<"ChatId">();
+export type ChatId = z.infer<typeof chatIdSchema>;
+
 /** A knowledge collection. */
 export const collectionIdSchema = idSchema<"CollectionId">();
 export type CollectionId = z.infer<typeof collectionIdSchema>;

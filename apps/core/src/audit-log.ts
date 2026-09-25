@@ -1,6 +1,8 @@
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { DurableObject } from "cloudflare:workers";
 
+import { inJurisdiction } from "./durable-objects.ts";
+
 /**
  * The client's audit log: one object per deployment, in the EU. It handles
  * one request at a time, so events are chained in the order they arrive:
@@ -15,4 +17,4 @@ export class AuditLog extends DurableObject<Env> {
 
 /** The deployment's single audit log. */
 export const auditLog = (env: Env): DurableObjectStub<AuditLog> =>
-  env.AUDIT_LOG.jurisdiction("eu").getByName("audit-log");
+  inJurisdiction(env, env.AUDIT_LOG).getByName("audit-log");

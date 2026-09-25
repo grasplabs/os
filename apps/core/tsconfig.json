@@ -1,6 +1,8 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
+    // drizzle-kit writes each Durable Object's migrations.js.
+    "allowJs": true,
     "types": [
       "@cloudflare/workers-types",
       "@cloudflare/vitest-pool-workers/types"

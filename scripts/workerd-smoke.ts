@@ -4,7 +4,7 @@
  * ready: only platform APIs that also run on workerd.
  */
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -22,6 +22,14 @@ execFileSync("wrangler", ["deploy", "--dry-run", "--outdir", out], {
   stdio: "inherit",
 });
 
+// Durable Object migrations are bundled next to index.js as text modules.
+const modules = [
+  `(name = "index.js", esModule = embed "index.js")`,
+  ...readdirSync(out)
+    .filter((file) => file.endsWith(".sql"))
+    .map((file) => `(name = "${file}", text = embed "${file}")`),
+];
+
 writeFileSync(
   path.join(out, "config.capnp"),
   `using Workerd = import "/workerd/workerd.capnp";
@@ -32,10 +40,13 @@ const config :Workerd.Config = (
 );
 
 const core :Workerd.Worker = (
-  modules = [(name = "index.js", esModule = embed "index.js")],
+  modules = [${modules.join(", ")}],
   compatibilityDate = "2026-09-15",
   compatibilityFlags = ["nodejs_compat"],
-  bindings = [(name = "ROUTER_SECRET", text = "${ROUTER_SECRET}")],
+  bindings = [
+    (name = "ROUTER_SECRET", text = "${ROUTER_SECRET}"),
+    (name = "DURABLE_OBJECT_JURISDICTION", text = "none"),
+  ],
   durableObjectNamespaces = [
     (className = "Workspace", uniqueKey = "workspace", enableSql = true),
     (className = "App", uniqueKey = "app", enableSql = true),

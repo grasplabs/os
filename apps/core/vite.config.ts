@@ -8,7 +8,11 @@ export default defineProject({
       // Tests run fully local, including in CI without Cloudflare credentials.
       remoteBindings: false,
       miniflare: {
-        bindings: { ROUTER_SECRET: "test-router-secret" },
+        bindings: {
+          ROUTER_SECRET: "test-router-secret",
+          // workerd doesn't implement Durable Object jurisdictions.
+          DURABLE_OBJECT_JURISDICTION: "none",
+        },
         // A stand-in frontend, so tests don't wait for a build of apps/web.
         assets: { directory: "./test/fixtures/assets" },
         // Stand-in for the connect Worker behind the CONNECT service binding.
