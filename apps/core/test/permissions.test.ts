@@ -335,9 +335,13 @@ describe("permissions", () => {
     await admin.api.requestPermission({ ...outlook(app), binding: "ASKED" });
     const gone = await grant({ ...outlook(app), binding: "GONE" });
     await admin.api.revokePermission(gone.id);
+    const policies = await admin.api.knowledge.createCollection({
+      name: `Policies ${unique()}`,
+      access: "everyone",
+    });
     await grant({
       subject: app,
-      object: { type: "collection", collectionId: "collection-policies" },
+      object: { type: "collection", collectionId: policies.id },
       actions: ["read"],
       binding: "POLICIES",
     });

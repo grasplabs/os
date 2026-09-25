@@ -4,7 +4,7 @@ import type { Provenance } from "@grasp-os/shared/knowledge";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, eq, exists, or, sql } from "drizzle-orm";
+import { and, eq, exists, ne, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
@@ -23,7 +23,8 @@ import type { WorkContext } from "../restricted.ts";
 //
 // A person reads a collection for everyone, one of their teams', or one
 // they own. An App or agent reads the collections it has a permission to
-// read, and of those only the ones the person it acts for may read too
+// read, never a personal one, and of those only the ones the person it
+// acts for may read too
 // (R5): a grant never reaches past that person. What it reads is marked
 // with where it came from, and restricted data puts the chat or App it
 // works in in restricted mode (`recordRead`).
@@ -32,6 +33,11 @@ import type { WorkContext } from "../restricted.ts";
  * Who reads Knowledge: a signed-in person, or an App or agent acting for
  * one in a chat or App. `permissionId` limits an App or agent to that one
  * permission: its stub's.
+ *
+ * A person's reads never put anything in restricted mode: a person has no
+ * context to restrict. So an App or agent reads only as a delegate, through
+ * its stubs (knowledge/binding.ts), never through a person's reader, or
+ * restricted data would reach it without restricting it.
  */
 export type Reader =
   | { type: "person"; person: Identity }
@@ -119,6 +125,11 @@ export const allowedCollections = async (
   return (
     and(
       inList(collections.id, granted),
+      // A personal collection is read only in its owner's own context, and
+      // no context is one yet: an App is shared, and workspaces have no
+      // owner. Once a workspace has one, allow its owner's personal
+      // collections in its chats here.
+      ne(collections.access, "me"),
       readableBy(db, {
         userId: authority.onBehalfOf,
         teamIds: teams.map(({ id }) => id),
@@ -146,7 +157,7 @@ export const recordRead = async (
     restricted: collection.sensitive,
   };
   if (provenance.restricted && reader.type === "delegate") {
-    await restrict(env, reader.context);
+    await restrict(env, reader.authority, reader.context);
   }
   return provenance;
 };

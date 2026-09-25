@@ -233,6 +233,8 @@ export type Authority = z.infer<typeof authoritySchema>;
 /** Why a permission call was refused. */
 export const permissionErrors = defineErrorFamily({
   "permission.denied": "This App or agent has no permission to do that.",
+  "permission.context_invalid":
+    "This App or agent can't work in that chat or App, or it doesn't exist.",
   "permission.restricted":
     "This chat, App or run has read restricted data, so it can no longer act on or fetch from outside systems.",
   "permission.person_inactive":

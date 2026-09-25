@@ -447,24 +447,33 @@ export const getDocument = async (
       ? undefined
       : parseOrInvalid(versionInputSchema, version);
   const db = drizzle(env.KNOWLEDGE);
-  const { document, collection } = await readableDocument(
-    db,
-    await allowedCollections(env, db, reader),
-    documentId
-  );
-  const row = await db
-    .select({ ...versionSummaryColumns, text: versions.text })
-    .from(versions)
-    .where(
-      and(
-        eq(versions.documentId, document.id),
-        eq(versions.number, number ?? document.currentVersion)
-      )
-    )
-    .get();
-  if (!row) {
+  const allowed = await allowedCollections(env, db, reader);
+  const id = documentIdInputSchema.safeParse(documentId);
+  // The text is read in the same query as the access check, so it is never
+  // read from a collection that stopped being readable in between.
+  const found = id.success
+    ? await db
+        .select({
+          document: documents,
+          collection: collections,
+          version: { ...versionSummaryColumns, text: versions.text },
+        })
+        .from(documents)
+        .innerJoin(collections, eq(collections.id, documents.collectionId))
+        .innerJoin(
+          versions,
+          and(
+            eq(versions.documentId, documents.id),
+            eq(versions.number, number ?? documents.currentVersion)
+          )
+        )
+        .where(and(eq(documents.id, id.data), allowed))
+        .get()
+    : undefined;
+  if (!found) {
     throw knowledgeErrors.create("knowledge.not_found");
   }
+  const { document, collection, version: row } = found;
   const read: Version = { ...toVersionSummary(row), text: row.text };
   const provenance = await recordRead(env, reader, collection);
   return { ...toSummary(document), version: read, provenance };
@@ -572,6 +581,9 @@ export const backlinks = async (
         eq(links.toCollectionId, document.collectionId),
         eq(links.toPath, document.path),
         ne(linking.id, document.id),
+        // What links are made of already keeps them in one collection; this
+        // keeps the provenance true however links come to be written.
+        eq(linking.collectionId, document.collectionId),
         allowed,
         after === undefined ? undefined : gt(linking.path, after)
       )

@@ -56,8 +56,8 @@ const personOf = async (role: Role) => {
 
 type Person = Awaited<ReturnType<typeof personOf>>;
 
-const newAgent = (): PermissionSubjectInput => ({
-  type: "agent",
+const newAgent = () => ({
+  type: "agent" as const,
   agentId: `agent-${unique()}`,
 });
 
@@ -100,6 +100,34 @@ const granted = async (admin: Person, request: PermissionRequest) => {
   const { id } = await admin.api.requestPermission(request);
   await admin.api.grantPermission(id);
   return id;
+};
+
+/**
+ * An active permission stored as it is, past the checks a request and a
+ * grant make, as a bug or an old record could leave one: the reads and
+ * calls must refuse what it shouldn't allow on their own.
+ */
+const storedGrant = async (
+  subject: { type: "app" | "agent"; id: string },
+  object: { type: "collection" | "connection"; id: string },
+  actions: string[],
+  binding: string
+) => {
+  await env.DB.prepare(
+    `INSERT INTO permissions (id, subject_type, subject_id, object_type, object_id,
+      actions, binding, status, requested_by, requested_at, granted_by, granted_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 'test', 0, 'test', 0)`
+  )
+    .bind(
+      crypto.randomUUID(),
+      subject.type,
+      subject.id,
+      object.type,
+      object.id,
+      JSON.stringify(actions),
+      binding
+    )
+    .run();
 };
 
 const readCollection = (
@@ -267,31 +295,85 @@ describe("Apps and agents reading Knowledge", () => {
       access: "teams",
       teams: [teamId],
     });
-    const diary = await collectionWithNote(member, {
-      name: "Diary",
-      access: "me",
-    });
     const agent = newAgent();
     await granted(admin, readCollection(agent, finance.collectionId));
-    await granted(admin, readCollection(agent, diary.collectionId, "DIARY"));
-
-    const readsAs = async (person: Person) => {
-      const bindings = await envOf(agent, person.userId, await newChat());
-      return {
-        finance: await everyRead(readerIn(bindings), finance.noteId),
-        diary: await everyRead(readerIn(bindings, "DIARY"), diary.noteId),
-      };
-    };
+    const readsAs = async (person: Person) =>
+      await everyRead(
+        readerIn(await envOf(agent, person.userId, await newChat())),
+        finance.noteId
+      );
     const allOk = ["ok", "ok", "ok", "ok", "ok"];
     const noneFound = Array.from({ length: 5 }, () => "knowledge.not_found");
     expect({
       member: await readsAs(member),
-      outsider: await readsAs(outsider),
-    }).toStrictEqual({
-      member: { finance: allOk, diary: allOk },
       // The grant alone isn't enough: an agent granted a collection, acting
       // for someone who can't see it, reads nothing of it.
-      outsider: { finance: noneFound, diary: noneFound },
+      outsider: await readsAs(outsider),
+    }).toStrictEqual({ member: allOk, outsider: noneFound });
+
+    // The member leaves the team while the agent holds its stub.
+    const held = readerIn(await envOf(agent, member.userId, await newChat()));
+    await callAuth("/organization/remove-team-member", admin.session, {
+      teamId,
+      userId: member.userId,
+    });
+    await expect(everyRead(held, finance.noteId)).resolves.toStrictEqual(
+      noneFound
+    );
+  });
+
+  it("never read a personal collection, not even their person's own", async () => {
+    const admin = await personOf("admin");
+    const owner = await personOf("user");
+    const diary = await collectionWithNote(owner, {
+      name: "Diary",
+      access: "me",
+    });
+    const agent = newAgent();
+    const creator = await personOf("admin");
+    const { id } = await creator.api.apps.create({ name: `App ${unique()}` });
+    const app = { type: "app" as const, appId: appIdSchema.parse(id) };
+
+    // Nobody can be asked to give one, nor one that doesn't exist.
+    const requests = await Promise.all([
+      outcome(
+        admin.api.requestPermission(readCollection(agent, diary.collectionId))
+      ),
+      outcome(
+        admin.api.requestPermission(readCollection(agent, "no-such-collection"))
+      ),
+    ]);
+    // A grant that exists anyway reads nothing in a chat or an App, even
+    // acting for the owner: both can be shared with others.
+    await storedGrant(
+      { type: "agent", id: agent.agentId },
+      { type: "collection", id: diary.collectionId },
+      ["read"],
+      "DIARY"
+    );
+    await storedGrant(
+      { type: "app", id: app.appId },
+      { type: "collection", id: diary.collectionId },
+      ["read"],
+      "DIARY"
+    );
+    const inChat = readerIn(
+      await envOf(agent, owner.userId, await newChat()),
+      "DIARY"
+    );
+    const inApp = readerIn(
+      await envOf(app, owner.userId, { type: "app", appId: app.appId }),
+      "DIARY"
+    );
+    const noneFound = Array.from({ length: 5 }, () => "knowledge.not_found");
+    expect({
+      requests,
+      inChat: await everyRead(inChat, diary.noteId),
+      inApp: await everyRead(inApp, diary.noteId),
+    }).toStrictEqual({
+      requests: ["permission.invalid", "permission.invalid"],
+      inChat: noneFound,
+      inApp: noneFound,
     });
   });
 
@@ -513,20 +595,72 @@ describe("restricted mode", () => {
     });
   });
 
-  it("keeps a chat that doesn't exist from reading or calling out", async () => {
+  it("is kept only in a context that exists and is the App's own", async () => {
     const { admin, subject, sensitive } = await setUp();
-    const missing: WorkContext = {
-      type: "chat",
-      workspaceId: workspaceIdSchema.parse(crypto.randomUUID()),
-      chatId: chatIdSchema.parse(crypto.randomUUID()),
+    const creator = await personOf("admin");
+    const appOf = async () => {
+      const { id } = await creator.api.apps.create({ name: `App ${unique()}` });
+      return appIdSchema.parse(id);
     };
-    const bindings = await envOf(subject, admin.userId, missing);
-    // Nowhere to keep restricted mode, so nothing that would need it runs.
+    const [own, other] = await Promise.all([appOf(), appOf()]);
+    const app = { type: "app" as const, appId: own };
+    await granted(admin, outlook(app));
+    await granted(admin, readCollection(app, sensitive.collectionId));
+    const ghost = `app-${unique()}`;
+    await storedGrant(
+      { type: "app", id: ghost },
+      { type: "connection", id: "connection-outlook" },
+      ["mail.list"],
+      "OUTLOOK"
+    );
+
+    const refusedIn = async (
+      who: PermissionSubjectInput,
+      context: WorkContext,
+      read: boolean
+    ) => {
+      const bindings = await envOf(who, admin.userId, context);
+      return [
+        await callOutlook(bindings),
+        read
+          ? await outcome(readerIn(bindings).getDocument(sensitive.noteId))
+          : "no read",
+      ];
+    };
+    // Nowhere to keep restricted mode, or someone else's: nothing that would
+    // need it runs.
+    expect({
+      missingChat: await refusedIn(
+        subject,
+        {
+          type: "chat",
+          workspaceId: workspaceIdSchema.parse(crypto.randomUUID()),
+          chatId: chatIdSchema.parse(crypto.randomUUID()),
+        },
+        true
+      ),
+      agentInApp: await refusedIn(subject, { type: "app", appId: own }, true),
+      otherApp: await refusedIn(app, { type: "app", appId: other }, true),
+      unknownApp: await refusedIn(
+        { type: "app", appId: ghost },
+        { type: "app", appId: appIdSchema.parse(ghost) },
+        false
+      ),
+    }).toStrictEqual({
+      missingChat: ["permission.context_invalid", "permission.context_invalid"],
+      agentInApp: ["permission.context_invalid", "permission.context_invalid"],
+      otherApp: ["permission.context_invalid", "permission.context_invalid"],
+      unknownApp: ["permission.context_invalid", "no read"],
+    });
+    // Neither App was restricted by reads made in its name.
     await expect(
       Promise.all([
-        callOutlook(bindings),
-        outcome(readerIn(bindings).getDocument(sensitive.noteId)),
+        appHost(env, own).isRestricted(),
+        appHost(env, other).isRestricted(),
+        callOutlook(
+          await envOf(app, admin.userId, { type: "app", appId: own })
+        ),
       ])
-    ).resolves.toStrictEqual(["internal.unexpected", "internal.unexpected"]);
+    ).resolves.toStrictEqual([false, false, reached]);
   });
 });

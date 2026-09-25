@@ -30,6 +30,7 @@ import { actorOf } from "./audit.ts";
 import { memberRole } from "./auth/identity.ts";
 import { apps, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
+import { collections } from "./db/knowledge/schema.ts";
 
 // Permission records and the one check every server path runs. A person
 // asks for a permission (it allows nothing yet), an admin grants it, and an
@@ -238,6 +239,37 @@ const requireApps = async (
 };
 
 /**
+ * A collection a permission names must exist, and not be someone's
+ * personal collection: Apps and agents never read those (see
+ * knowledge/access.ts), so nobody can be asked to grant one.
+ */
+const requireCollection = async (
+  env: Env,
+  object: PermissionObject
+): Promise<void> => {
+  if (object.type !== "collection") {
+    return;
+  }
+  const found = await drizzle(env.KNOWLEDGE)
+    .select({ access: collections.access })
+    .from(collections)
+    .where(eq(collections.id, object.collectionId))
+    .get();
+  if (!found) {
+    throw permissionErrors.create("permission.invalid", {
+      issues: ["object.collectionId: There's no such collection."],
+    });
+  }
+  if (found.access === "me") {
+    throw permissionErrors.create("permission.invalid", {
+      issues: [
+        "object.collectionId: A personal collection can't be given to an App or agent.",
+      ],
+    });
+  }
+};
+
+/**
  * Asks for a permission for an App or agent. It allows nothing until an
  * admin grants it.
  */
@@ -257,6 +289,7 @@ export const requestPermission = async (
   }
   const { subject, object, actions, binding } = parsed.data;
   await requireApps(env, subject, object);
+  await requireCollection(env, object);
   const row: Row = {
     id: crypto.randomUUID(),
     ...subjectColumns(subject),
@@ -299,6 +332,9 @@ export const grantPermission = async (
   if (!found) {
     throw permissionErrors.create("permission.not_found");
   }
+  // Checked again here, so no grant ever names a missing or personal
+  // collection, however old its request.
+  await requireCollection(env, objectOf(found));
   const db = drizzle(env.DB);
   // A conditional update, so a grant can't race a revoke back to life, and
   // its audit event, stored only if the update changed the row.

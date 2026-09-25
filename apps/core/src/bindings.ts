@@ -43,7 +43,7 @@ export const callConnection = async (
   permissionId?: PermissionId
 ): Promise<ConnectResult> => {
   await authorize(env, authority, connection, action, permissionId);
-  await requireUnrestricted(env, context);
+  await requireUnrestricted(env, authority, context);
   const scope = {
     connectionId: connection.connectionId,
     resource: connection.resource,
