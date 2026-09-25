@@ -1,6 +1,8 @@
 import { roleSchema } from "@grasp-os/shared";
 import { z } from "zod";
 
+import { jsonVar } from "../json-var.ts";
+
 /**
  * How people sign in to this deployment. Deployment config, set by the
  * console as the `SIGN_IN` var, never an in-product setting: a compromised
@@ -76,23 +78,12 @@ export type AuthEnv = Env & {
   GOOGLE_CLIENT_SECRET?: string;
 };
 
-const safeJson = (text: string): unknown => {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-};
-
 /**
  * The deployment's sign-in config, or `undefined` when none is set. A config
  * that doesn't parse counts as none: sign-in fails closed.
  */
 export const signInConfig = (env: AuthEnv): SignInConfig | undefined => {
-  // A JSON var arrives parsed; one set from a .dev.vars file is a string.
-  const raw =
-    typeof env.SIGN_IN === "string" ? safeJson(env.SIGN_IN) : env.SIGN_IN;
-  const parsed = signInConfigSchema.safeParse(raw);
+  const parsed = signInConfigSchema.safeParse(jsonVar(env.SIGN_IN));
   return parsed.success ? parsed.data : undefined;
 };
 

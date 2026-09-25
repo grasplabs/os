@@ -1,5 +1,6 @@
-import { auditEventSchema } from "@grasp-os/shared/audit";
+import { auditEventSchema, isAuditEventTooLarge } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
+import { canonicalJson } from "@grasp-os/shared/json";
 
 import { auditLog } from "./audit-log.ts";
 import type { AppendResult } from "./audit-log.ts";
@@ -53,12 +54,35 @@ const appendOneByOne = async (valid: Valid[], env: Env): Promise<void> => {
 };
 
 /**
+ * Moves an event the log would refuse for its size straight to the dead
+ * letter queue, where it stays for inspection: no retry could ever append
+ * it. Retried as usual only if that send fails.
+ */
+const refuseOversized = async (
+  { event, message }: Valid,
+  env: Env
+): Promise<void> => {
+  log.error("audit.oversized", { eventId: event.id });
+  try {
+    await env.AUDIT_DLQ.send(message.body);
+    message.ack();
+  } catch (error) {
+    log.error("audit.dead_letter_failed", {
+      eventId: event.id,
+      ...errorFields(error),
+    });
+    retryLater(message);
+  }
+};
+
+/**
  * Consumes the audit queue. Valid events are appended in one call and
  * acknowledged; malformed ones are retried until they reach the dead letter
- * queue, where they stay for inspection. If the batch append fails, the
- * events are appended one at a time. The log dedupes by event ID, so a
- * redelivered event is acknowledged without being appended again. Logs its
- * own outcome, as the platform's invocation logs are off.
+ * queue, where they stay for inspection. Events over the log's size cap go
+ * there at once. If the batch append fails, the events are appended one at
+ * a time. The log dedupes by event ID, so a redelivered event is
+ * acknowledged without being appended again. Logs its own outcome, as the
+ * platform's invocation logs are off.
  */
 export const consumeAuditQueue = async (
   batch: MessageBatch,
@@ -67,14 +91,18 @@ export const consumeAuditQueue = async (
   const valid: Valid[] = [];
   for (const message of batch.messages) {
     const parsed = auditEventSchema.safeParse(message.body);
-    if (parsed.success) {
-      valid.push({ event: parsed.data, message });
-    } else {
+    if (!parsed.success) {
       log.warn("audit.malformed", {
         messageId: message.id,
         attempts: message.attempts,
       });
       retryLater(message);
+    } else if (isAuditEventTooLarge(canonicalJson(parsed.data))) {
+      // Rare, so one at a time.
+      // oxlint-disable-next-line no-await-in-loop
+      await refuseOversized({ event: parsed.data, message }, env);
+    } else {
+      valid.push({ event: parsed.data, message });
     }
   }
   if (valid.length === 0) {

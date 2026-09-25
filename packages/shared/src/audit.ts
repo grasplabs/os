@@ -19,11 +19,13 @@ export const auditProvenanceMaxItems = 100;
 export const auditDetailMaxKeys = 32;
 
 /**
- * Largest event the AuditLog object appends, in bytes of canonical JSON. The
- * per-field bounds allow more in theory; this caps the whole event at a few
- * KB, well above a real one and well below a pasted document.
+ * Largest event the AuditLog object appends, in bytes of canonical JSON. Room
+ * for a full provenance of identifier-sized IDs (about 26 KB) next to the
+ * other fields, so an event that names a large retrieval is always kept; the
+ * per-field bounds together allow a little more, and this caps it well below
+ * a pasted document.
  */
-export const auditEventMaxBytes = 8192;
+export const auditEventMaxBytes = 32 * 1024;
 
 /** A `detail` key: a short camelCase or dotted name, never free text. */
 const detailKeyPattern = /^[a-z][a-zA-Z0-9_.]{0,63}$/u;
