@@ -522,18 +522,18 @@ const createRunner = (
   engine: WorkflowEngine
 ): { steps: UntypedStepRunner; state: StateStore } => {
   const started = new Set<string>();
-  // The step running now, if any. Steps run one after another: a step or
-  // state call from inside a step's function, or next to it, would be
-  // recorded in an order a replay can't promise to repeat.
+  // The step or state call running now, if any. They run one after
+  // another: one started from inside a step's function, or next to another,
+  // would be recorded in an order a replay can't promise to repeat.
   let running: string | undefined;
 
-  const exclusive = async <T>(name: string, run: () => Promise<T>) => {
+  const exclusive = async <T>(what: string, run: () => Promise<T>) => {
     if (running !== undefined) {
       throw invalidCall(
-        `Step "${name}" started while step "${running}" runs; run steps one after another, never inside another step`
+        `${what} started while ${running} runs; run steps and state calls one after another, never inside a step`
       );
     }
-    running = name;
+    running = what;
     try {
       return await run();
     } finally {
@@ -566,7 +566,7 @@ const createRunner = (
 
   const steps: UntypedStepRunner = {
     do: async (name, rawOptions, fn) =>
-      await exclusive(name, async () => {
+      await exclusive(`Step "${name}"`, async () => {
         const options = optionsOf(stepOptionSchemas.do, name, rawOptions);
         const step = start(name, options.key);
         if (typeof fn !== "function") {
@@ -588,7 +588,7 @@ const createRunner = (
       }),
 
     llm: async (name, rawOptions) =>
-      await exclusive(name, async () => {
+      await exclusive(`Step "${name}"`, async () => {
         const options = optionsOf(stepOptionSchemas.llm, name, rawOptions);
         const step = start(name, options.key);
         const { instructions, input, schema, retries, timeout } = options;
@@ -629,7 +629,7 @@ const createRunner = (
       }),
 
     decision: async (name, rawOptions) =>
-      await exclusive(name, async () => {
+      await exclusive(`Step "${name}"`, async () => {
         const { key, from, ask, timeout, remindAfter } = optionsOf(
           stepOptionSchemas.decision,
           name,
@@ -716,7 +716,7 @@ const createRunner = (
       }),
 
     sleep: async (name, rawOptions) => {
-      await exclusive(name, async () => {
+      await exclusive(`Step "${name}"`, async () => {
         const { key, duration } = optionsOf(
           stepOptionSchemas.sleep,
           name,
@@ -727,7 +727,7 @@ const createRunner = (
     },
 
     waitFor: async (name, rawOptions) =>
-      await exclusive(name, async () => {
+      await exclusive(`Step "${name}"`, async () => {
         const { key, type, timeout, schema } = optionsOf(
           stepOptionSchemas.waitFor,
           name,
@@ -758,11 +758,6 @@ const createRunner = (
   // carries an idempotency key, so a replayed write never lands twice.
   const calls = new Map<string, number>();
   const stateStep = (operation: "get" | "set", key: string): string => {
-    if (running !== undefined) {
-      throw invalidCall(
-        `State "${key}" was used while step "${running}" runs; read and write state between steps`
-      );
-    }
     if (typeof key !== "string" || !namePattern.test(key)) {
       throw invalidCall(
         `State key "${key}" needs up to 64 letters, digits, "-" or "_", starting with a letter`
@@ -774,20 +769,27 @@ const createRunner = (
     return `${base}:${count}`;
   };
   const state: StateStore = {
-    get: async (key) => {
-      const name = stateStep("get", key);
-      return await engine.do(name, {}, async () => await engine.getState(key));
-    },
+    get: async (key) =>
+      await exclusive(`State "${key}"`, async () => {
+        const name = stateStep("get", key);
+        return await engine.do(
+          name,
+          {},
+          async () => await engine.getState(key)
+        );
+      }),
     set: async (key, value) => {
-      const name = stateStep("set", key);
-      const json = parseOrThrow(
-        z.json(),
-        value,
-        "workflow.invalid_step_call",
-        `Value for state "${key}"`
-      );
-      await engine.do(name, {}, async () => {
-        await engine.setState(key, json, idempotencyKeyOf(engine, name));
+      await exclusive(`State "${key}"`, async () => {
+        const name = stateStep("set", key);
+        const json = parseOrThrow(
+          z.json(),
+          value,
+          "workflow.invalid_step_call",
+          `Value for state "${key}"`
+        );
+        await engine.do(name, {}, async () => {
+          await engine.setState(key, json, idempotencyKeyOf(engine, name));
+        });
       });
     },
   };

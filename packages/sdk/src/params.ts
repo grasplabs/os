@@ -23,8 +23,13 @@ export const paramValueSchemas = {
   template: z.string().min(1).brand<"Template">(),
 };
 
+// The ISO 4217 codes the runtime knows, e.g. `EUR`.
+const currencies = new Set(Intl.supportedValuesOf("currency"));
+
 /** An ISO 4217 currency code, e.g. `EUR`. */
-export const currencySchema = z.string().regex(/^[A-Z]{3}$/u);
+export const currencySchema = z
+  .string()
+  .refine((code) => currencies.has(code), "Not an ISO 4217 currency code");
 
 export type ParamKind = keyof typeof paramValueSchemas;
 export type ParamValue<Kind extends ParamKind> = z.output<

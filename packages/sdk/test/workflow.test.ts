@@ -66,6 +66,7 @@ describe("workflow definitions", () => {
     for (const [currency, amount] of [
       ["EUR", 5000.5],
       ["euro", 500_000],
+      ["ZZZ", 500_000],
     ] as const) {
       expect(() => priced(currency, amount)).toThrow(
         expect.objectContaining({ code: "workflow.invalid_definition" })
@@ -756,7 +757,7 @@ describe("one step at a time", () => {
     expect(state.values.has("seen")).toBeFalsy();
   });
 
-  it("refuses a step started while another runs", async () => {
+  it("refuses a step or state call started while another runs", async () => {
     const ran: string[] = [];
     const inside = withStep(async (step) => {
       await step.do("outer", { description: "Outer" }, async () => {
@@ -772,8 +773,19 @@ describe("one step at a time", () => {
           step.do("second", { description: "Second" }, async () => 2),
         ])
     );
+    const alongsideState = workflow(
+      "alongside-state",
+      { params: noParams },
+      async (step, { state }) =>
+        await Promise.all([
+          state.get("seen"),
+          step.do("first", { description: "First" }, async () => {
+            ran.push("first");
+          }),
+        ])
+    );
 
-    for (const definition of [inside, alongside]) {
+    for (const definition of [inside, alongside, alongsideState]) {
       // oxlint-disable-next-line no-await-in-loop -- each run is one case
       await expect(
         definition.run(createFakeEngine().engine)
