@@ -4,6 +4,7 @@
   "description": "Workflow SDK: the only API App code sees",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "sideEffects": false,
   "exports": {
     "./workflow": "./src/workflow.ts",
     "./engine": "./src/engine.ts",

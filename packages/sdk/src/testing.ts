@@ -24,9 +24,10 @@ import type { WorkflowDefinition } from "./workflow.ts";
  * - decisions and events are answered up front, and waits for anything else
  *   time out right away, as sleeps end right away.
  *
- * Every workflow ships with its tests next to it (`invoice.test.ts` beside
- * `invoice.ts`), written with `workflowTests`, and `runWorkflowTests` runs
- * them, so a version whose tests fail is never activated.
+ * Every workflow ships with its tests next to it (`invoice.workflow-tests.ts`
+ * beside `invoice.ts`), written with `workflowTests`, and `runWorkflowTests`
+ * runs them, so a version whose tests fail is never activated. The suffix
+ * isn't `.test.ts`: these aren't Vitest files.
  */
 
 /** A step's call, as a mock gets it. */
@@ -300,8 +301,15 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         }
         const stored = toStored(step.name, output);
         results.set(name, stored);
-        const result = fromStored(stored);
-        log({ type: "step", ...call, sideEffect, status, output: result });
+        log({
+          type: "step",
+          ...call,
+          sideEffect,
+          status,
+          output: fromStored(stored),
+        });
+        // A copy of its own: the workflow may change what it gets back,
+        // which must not change the record above.
         // SAFETY: a mock stands in for the step's result, and a side effect
         // that isn't run has none; the test decides what the step returns.
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
@@ -575,9 +583,9 @@ export interface WorkflowTests<Output = unknown> {
 }
 
 /**
- * Declares a workflow's tests; the default export of the `*.test.ts` file
- * next to the workflow. A test expects the run to complete unless it names
- * an `error`.
+ * Declares a workflow's tests; the default export of the
+ * `*.workflow-tests.ts` file next to the workflow. A test expects the run to
+ * complete unless it names an `error`.
  */
 export const workflowTests = <Output>(
   definition: WorkflowDefinition<Output>,

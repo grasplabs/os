@@ -344,9 +344,6 @@ importers:
       '@base-ui/react':
         specifier: 'catalog:'
         version: 1.8.0(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
-      '@grasp-os/sdk':
-        specifier: workspace:*
-        version: link:../../packages/sdk
       '@grasp-os/shared':
         specifier: workspace:*
         version: link:../../packages/shared

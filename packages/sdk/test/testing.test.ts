@@ -8,9 +8,9 @@ import {
   workflowTests,
 } from "../src/testing.ts";
 import { person, workflow, z } from "../src/workflow.ts";
-import invoiceTests from "./workflows/invoice-approval.test.ts";
 import { invoiceWorkflow } from "./workflows/invoice-approval.ts";
 import type { InvoiceSystems } from "./workflows/invoice-approval.ts";
+import invoiceTests from "./workflows/invoice-approval.workflow-tests.ts";
 
 const invoice = {
   number: "INV-7",
