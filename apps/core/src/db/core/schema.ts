@@ -289,3 +289,64 @@ export const permissions = sqliteTable(
       .where(sql`status <> 'revoked'`),
   ]
 );
+
+/**
+ * The App registry. Each App's code is a series of versions
+ * (`app_versions`); `current_version` is the one that runs and
+ * `pending_version` one put up for review. Both only ever name a version
+ * the App has.
+ */
+export const apps = sqliteTable("apps", {
+  id: text().primaryKey(),
+  name: text().notNull(),
+  description: text().notNull(),
+  /** The user who created it. */
+  ownerId: text("owner_id").notNull(),
+  blueprint: text(),
+  currentVersion: integer("current_version"),
+  pendingVersion: integer("pending_version"),
+  createdAt: timestamp("created_at").notNull(),
+});
+
+/**
+ * Every committed version of an App, never changed or deleted. `tree` is
+ * the SHA-256 of the version's files, which are stored under it in R2
+ * (`src/apps.ts`). Versions count up from 1 per App, and the primary key
+ * makes two commits of the same version conflict instead of both landing.
+ */
+export const appVersions = sqliteTable(
+  "app_versions",
+  {
+    appId: text("app_id")
+      .notNull()
+      .references(() => apps.id),
+    version: integer().notNull(),
+    parent: integer(),
+    tree: text().notNull(),
+    files: integer().notNull(),
+    authorId: text("author_id").notNull(),
+    message: text().notNull(),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.appId, table.version] })]
+);
+
+/**
+ * An App's working copy: the files written since its latest version, until
+ * they are committed. `blob` is the SHA-256 of the content, stored in R2;
+ * null means the file is deleted. `length` is the content's length.
+ */
+export const appWorkingFiles = sqliteTable(
+  "app_working_files",
+  {
+    appId: text("app_id")
+      .notNull()
+      .references(() => apps.id),
+    path: text().notNull(),
+    blob: text(),
+    length: integer().notNull(),
+    writtenBy: text("written_by").notNull(),
+    writtenAt: timestamp("written_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.appId, table.path] })]
+);

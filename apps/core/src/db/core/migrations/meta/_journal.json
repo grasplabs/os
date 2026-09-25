@@ -15,6 +15,13 @@
       "when": 1790363674466,
       "tag": "0001_permissions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790366232016,
+      "tag": "0002_apps",
+      "breakpoints": true
     }
   ]
 }

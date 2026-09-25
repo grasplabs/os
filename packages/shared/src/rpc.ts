@@ -1,3 +1,4 @@
+import type { AppsApi } from "./apps.ts";
 import type { Role } from "./index.ts";
 import type {
   Permission,
@@ -45,6 +46,8 @@ export interface SessionApi {
   revokePermission: (id: string) => Promise<Permission>;
   /** Every permission, or one App's or agent's. Admins and builders. */
   listPermissions: (subject?: PermissionSubjectInput) => Promise<Permission[]>;
+  /** The App registry and each App's code. Admins and builders. */
+  readonly apps: AppsApi;
 }
 
 /**
