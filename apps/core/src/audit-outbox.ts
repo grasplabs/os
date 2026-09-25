@@ -16,6 +16,9 @@ import { auditOutbox } from "./db/core/schema.ts";
 // latest. An event may reach the queue more than once, always with the same
 // ID, and the log keeps it once.
 
+/** What sending the outboxes needs: the databases and the queue. */
+type OutboxEnv = Pick<Env, "DB" | "KNOWLEDGE" | "AUDIT_QUEUE">;
+
 /** Most events one send takes from the outbox. */
 const sendBatchSize = 100;
 
@@ -62,7 +65,7 @@ const queueBody = (event: string): unknown => {
  * and one that fails to send stays for the next time.
  */
 const sendOutboxOf = async (
-  env: Env,
+  env: OutboxEnv,
   database: D1Database
 ): Promise<number> => {
   const db = drizzle(database);
@@ -97,7 +100,7 @@ const sendOutboxOf = async (
  * holds the events of its own changes. Returns how many it sent. The cron
  * trigger calls it.
  */
-export const sendAuditOutbox = async (env: Env): Promise<number> => {
+export const sendAuditOutbox = async (env: OutboxEnv): Promise<number> => {
   const counts = await Promise.all(
     [env.DB, env.KNOWLEDGE].map(
       async (database) => await sendOutboxOf(env, database)
@@ -111,7 +114,7 @@ export const sendAuditOutbox = async (env: Env): Promise<number> => {
  * change has happened and its event is safe in the outbox, so a failure
  * here is logged, not passed on to whoever made the change.
  */
-export const sendAuditOutboxNow = async (env: Env): Promise<void> => {
+export const sendAuditOutboxNow = async (env: OutboxEnv): Promise<void> => {
   try {
     await sendAuditOutbox(env);
   } catch (error) {

@@ -1,9 +1,11 @@
+import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { modelErrors } from "@grasp-os/shared/models";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { sendAuditOutbox } from "../src/audit-outbox.ts";
 import { models } from "../src/models.ts";
 import type { ModelCall, ModelsEnv } from "../src/models.ts";
 import { fakeGateway } from "./ai-gateway.ts";
@@ -63,6 +65,11 @@ const auditedFor = async (
     { timeout: 10_000, interval: 50 }
   );
   return await mine();
+};
+
+/** An audit queue that is down. */
+const refuse = (): never => {
+  throw new Error("Queue unavailable");
 };
 
 const codeOf = async (call: Promise<unknown>) => {
@@ -145,6 +152,9 @@ describe("model gateway", () => {
       );
       // The gateway logs metadata only, never the prompt or the answer.
       expect(headers.get("cf-aig-collect-log-payload")).toBe("false");
+      expect(
+        JSON.parse(headers.get("cf-aig-metadata") ?? "null")
+      ).toStrictEqual({ purpose: "chat.turn", actor: "person" });
     }
     // Nor could core send one: its env holds no provider key or gateway token.
     expect(
@@ -425,25 +435,151 @@ describe("model gateway", () => {
     expect(event?.detail).toMatchObject({ outcome: "truncated" });
   });
 
-  it("audits a call the provider refuses, and fails it", async () => {
+  it.each([
+    [anthropic, 401, "authentication_error", 1],
+    [openai, 402, "insufficient_quota", 1],
+    // Refused for a moment: tried twice more before it fails.
+    [workersAi, 429, "rate_limit_error", 3],
+    [anthropic, 503, "overloaded_error", 3],
+  ])(
+    "audits a call to %s the provider refuses with %i, with the status and error type only",
+    async (model, status, errorType, requests) => {
+      const trigger = newPerson();
+      const { gateway, gatewayEnv } = withGateway(
+        Array.from({ length: requests }, () => ({ status, errorType }))
+      );
+
+      await expect(
+        codeOf(
+          models(gatewayEnv).call({
+            model,
+            input: "Hello.",
+            purpose: "chat.turn",
+            trigger,
+          })
+        )
+      ).resolves.toBe("model.failed");
+      expect(gateway.requests).toHaveLength(requests);
+      const [event] = await auditedFor(trigger.userId, 1);
+      expect(event).toMatchObject({
+        action: "model.call",
+        detail: { outcome: "failed", attempt: 1, status, errorType },
+      });
+      // Never the provider's message, which may quote the prompt.
+      expect(JSON.stringify(event)).not.toContain("Refused");
+    }
+  );
+
+  it("answers when the provider refuses for a moment, then answers", async () => {
     const trigger = newPerson();
-    const { gatewayEnv } = withGateway([{ status: 401 }]);
+    const { gateway, gatewayEnv } = withGateway([
+      { status: 429, errorType: "rate_limit_error" },
+      answer("Hi."),
+    ]);
+
+    const result = await models(gatewayEnv).call({
+      model: anthropic,
+      input: "Hello.",
+      purpose: "chat.turn",
+      trigger,
+    });
+
+    expect(result.text).toBe("Hi.");
+    expect(gateway.requests).toHaveLength(2);
+    const [event] = await auditedFor(trigger.userId, 1);
+    expect(event?.detail).toMatchObject({ outcome: "answered", status: 200 });
+  });
+
+  it("fails a call that takes longer than its timeout, and audits it", async () => {
+    const trigger = newPerson();
+    const { gatewayEnv } = withGateway([{ hang: true }]);
 
     await expect(
       codeOf(
         models(gatewayEnv).call({
-          model: anthropic,
+          model: openai,
           input: "Hello.",
+          timeoutMs: 100,
           purpose: "chat.turn",
           trigger,
         })
       )
     ).resolves.toBe("model.failed");
     const [event] = await auditedFor(trigger.userId, 1);
-    expect(event).toMatchObject({
-      action: "model.call",
-      model: { provider: "anthropic", model: "claude-sonnet-4-5" },
-      detail: { outcome: "failed", attempt: 1 },
+    expect(event?.detail).toMatchObject({
+      outcome: "failed",
+      errorType: "timeout",
     });
+  });
+
+  it("caps the answer's length at the call's limit, or a default, never above the model's", async () => {
+    const { gateway, gatewayEnv } = withGateway([
+      answer("One"),
+      answer("Two"),
+      answer("Three"),
+    ]);
+    for (const maxTokens of [500, undefined, 10_000_000]) {
+      // One after another, as a person would.
+      // oxlint-disable-next-line no-await-in-loop
+      await models(gatewayEnv).call({
+        model: openai,
+        input: "Write something.",
+        maxTokens,
+        purpose: "chat.turn",
+        trigger: newPerson(),
+      });
+    }
+
+    const sentLimits = gateway.requests.map(
+      ({ body }) =>
+        z.object({ max_output_tokens: z.number() }).parse(body)
+          .max_output_tokens
+    );
+    expect(sentLimits).toStrictEqual([
+      500,
+      16_384,
+      OPENAI_MODELS["gpt-5.4"].maxTokens,
+    ]);
+  });
+
+  it("keeps a paid answer when the audit queue is down, and delivers its event later", async () => {
+    const trigger = newPerson();
+    const { gatewayEnv } = withGateway([answer("Hello, Ada.")]);
+    const queueDown: Env["AUDIT_QUEUE"] = {
+      send: refuse,
+      sendBatch: refuse,
+      metrics: refuse,
+    };
+
+    const result = await models({ ...gatewayEnv, AUDIT_QUEUE: queueDown }).call(
+      {
+        model: anthropic,
+        input: "Say hello.",
+        purpose: "chat.turn",
+        trigger,
+      }
+    );
+
+    expect(result.text).toBe("Hello, Ada.");
+    // The cron trigger sends what the queue refused.
+    await sendAuditOutbox(env);
+    const [event] = await auditedFor(trigger.userId, 1);
+    expect(event).toMatchObject({ action: "model.call", actor: trigger });
+  });
+
+  it("refuses every call on a deployment without the AI binding, such as plain workerd", async () => {
+    const { gatewayEnv } = withGateway([answer("Hi.")]);
+    const { AI: _, ...withoutAi } = gatewayEnv;
+
+    await expect(
+      codeOf(
+        models(withoutAi).call({
+          model: workersAi,
+          input: "Hello.",
+          purpose: "chat.turn",
+          trigger: newPerson(),
+        })
+      )
+    ).resolves.toBe("model.unconfigured");
   });
 });
