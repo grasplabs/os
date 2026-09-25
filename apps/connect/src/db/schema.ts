@@ -60,8 +60,9 @@ export const connections = sqliteTable(
  * can't be reused for a different call. `state` is `running` while the call
  * is out, `done` once its result is stored, `failed` once the tool's error
  * is stored (a tool may have acted before it failed, so that is final too),
- * and `unknown` when the call failed after it may have reached the server:
- * that key is spent for good, and its row is never deleted.
+ * and `unknown` when the call failed after it may have reached the server.
+ * Rows are never deleted, so no key is ever used twice: past retention, or
+ * when too large, an answer's output is dropped and a repeat is refused.
  */
 export const idempotentCalls = sqliteTable(
   "idempotent_calls",
@@ -74,7 +75,10 @@ export const idempotentCalls = sqliteTable(
     idempotencyKey: text("idempotency_key").notNull(),
     inputHash: text("input_hash").notNull(),
     state: text({ enum: ["running", "done", "failed", "unknown"] }).notNull(),
-    /** Set once done or failed: the result as returned to the first call. */
+    /**
+     * Once done or failed: the result as returned to the first call, while
+     * it is kept.
+     */
     output: text(),
     provenance: text(),
     createdAt: timestamp("created_at").notNull(),

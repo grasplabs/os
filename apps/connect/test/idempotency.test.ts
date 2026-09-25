@@ -201,7 +201,7 @@ describe("a side effect", () => {
     expect(server.ran).toHaveLength(1);
   });
 
-  it("with an answer too large to keep returns it once, then a note", async () => {
+  it("with an answer too large to keep returns it once, and never runs again", async () => {
     const connectionId = await addConnection();
     const call = {
       connectionId,
@@ -210,20 +210,28 @@ describe("a side effect", () => {
       idempotencyKey: "run-1:export",
     };
     const first = await callAs(anna, call);
-    const repeat = await callAs(anna, call);
     expect(first.output.length).toBeGreaterThan(200 * 1024);
-    expect(JSON.parse(repeat.output)).toMatch(/too large to keep/u);
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.answer_not_kept"
+    );
     expect(server.ran).toHaveLength(1);
   });
 
-  it("runs again once its answer is past retention", async () => {
+  it("past retention is refused, never run again", async () => {
     const connectionId = await addConnection();
     const call = send(connectionId, "run-1:send");
     await callAs(anna, call);
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
       vi.setSystemTime(Date.now() + 31 * 24 * 60 * 60 * 1000);
-      await expect(outcome(callAs(anna, call))).resolves.toBe("ok");
+      await expect(outcome(callAs(anna, call))).resolves.toBe(
+        "connect.answer_not_kept"
+      );
+      // Another call's claim drops the expired answer; the key stays used.
+      await callAs(anna, send(connectionId, "run-2:send"));
+      await expect(outcome(callAs(anna, call))).resolves.toBe(
+        "connect.answer_not_kept"
+      );
     } finally {
       vi.useRealTimers();
     }

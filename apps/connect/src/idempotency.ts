@@ -3,7 +3,7 @@ import type { ConnectResult } from "@grasp-os/shared/connect";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Json } from "@grasp-os/shared/json";
 import type { PermissionSubject } from "@grasp-os/shared/permissions";
-import { and, eq, inArray, lt } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, lt } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
@@ -26,8 +26,9 @@ import { idempotentCalls } from "./db/schema.ts";
 const claimTimeoutMs = 5 * 60 * 1000;
 
 /**
- * How long stored answers are kept. A workflow retries a step within this;
- * after it, the key is free again. Spent keys are kept for good.
+ * How long stored answers are kept. A workflow retries a step within this.
+ * After it the answer is dropped, but the key stays used for good: a repeat
+ * is refused, never run again.
  */
 const retentionMs = 30 * 24 * 60 * 60 * 1000;
 
@@ -42,7 +43,7 @@ export interface IdempotencyScope {
 
 /**
  * Largest output kept for a repeat, in bytes. A larger one goes back to the
- * first call in full; a repeat gets a note that it was too large to keep.
+ * first call in full, and a repeat is refused as for an expired answer.
  */
 const maxStoredOutputBytes = 128 * 1024;
 
@@ -99,9 +100,9 @@ const replay = (
   }
   const answered = row.state === "done" || row.state === "failed";
   const expired = now - row.createdAt.getTime() > retentionMs;
-  if (answered && expired) {
-    // Past retention the key is free again, as if pruned already.
-    return undefined;
+  if (answered && (expired || row.output === null)) {
+    // It ran, but its answer isn't kept: never run it again.
+    throw connectErrors.create("connect.answer_not_kept");
   }
   if (answered && row.output !== null) {
     return {
@@ -121,13 +122,11 @@ const replay = (
   throw connectErrors.create("connect.outcome_unknown");
 };
 
-/** The output as kept for repeats: itself, or a note when too large. */
-const retainable = (output: string): string => {
-  const bytes = new TextEncoder().encode(output).byteLength;
-  return bytes <= maxStoredOutputBytes
+/** The output as kept for repeats: itself, or nothing when too large. */
+const retainable = (output: string): string | null =>
+  new TextEncoder().encode(output).byteLength <= maxStoredOutputBytes
     ? output
-    : JSON.stringify(`(The result was too large to keep: ${bytes} bytes.)`);
-};
+    : null;
 
 /** The idempotency store for one key: see the module comment. */
 export const idempotencyStore = (
@@ -155,14 +154,16 @@ export const idempotencyStore = (
     claim: async (): Promise<StoredAnswer | undefined> => {
       const now = Date.now();
       const [, claimed] = await db.batch([
-        // Expired answers make room; the index on created_at keeps it
-        // cheap. Spent keys stay: their effect may have happened.
+        // Expired answers are dropped; the index on created_at keeps it
+        // cheap. Their keys stay used: their effect happened.
         db
-          .delete(idempotentCalls)
+          .update(idempotentCalls)
+          .set({ output: null, provenance: null })
           .where(
             and(
               lt(idempotentCalls.createdAt, new Date(now - retentionMs)),
-              inArray(idempotentCalls.state, ["done", "failed"])
+              inArray(idempotentCalls.state, ["done", "failed"]),
+              isNotNull(idempotentCalls.output)
             )
           ),
         db

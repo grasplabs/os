@@ -62,6 +62,8 @@ export const connectErrors = defineErrorFamily({
     "This action has a side effect, so it needs an idempotency key.",
   "connect.idempotency_conflict":
     "This idempotency key was already used with a different input.",
+  "connect.answer_not_kept":
+    "A call with this idempotency key already ran, but its answer is no longer kept, so it won't run again. Use a new key to run it anew.",
   "connect.call_in_progress":
     "A call with this idempotency key is still running. Try again shortly.",
   "connect.outcome_unknown":
