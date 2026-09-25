@@ -1,4 +1,4 @@
-import { auditEventSchema } from "@grasp-os/shared/audit";
+import { auditEventMaxBytes, auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { DurableObject } from "cloudflare:workers";
 import { asc, desc, eq, gt } from "drizzle-orm";
@@ -7,6 +7,7 @@ import { drizzle } from "drizzle-orm/durable-sqlite";
 import {
   canonicalJson,
   chainHash,
+  chainVersion,
   genesisHash,
   verifyChain,
 } from "./audit-chain.ts";
@@ -15,15 +16,41 @@ import migrations from "./db/audit-log/migrations/migrations.js";
 import { events } from "./db/audit-log/schema.ts";
 import { migrateOnWake } from "./db/migrate.ts";
 import { inJurisdiction } from "./durable-objects.ts";
+import { log } from "./log.ts";
 
 /** How many entries one read returns at most. */
 const pageSize = 500;
 
-/** What an append did: events added to the chain, and those it already had. */
+/**
+ * What an append did: events added to the chain, and those it already had.
+ * A conflict is a duplicate whose content differs from the stored event: a
+ * bug or a forgery, never a plain redelivery.
+ */
 export interface AppendResult {
   appended: number;
   duplicates: number;
+  conflicts: number;
 }
+
+/** An event ready to chain: its ID and canonical JSON. */
+interface Incoming {
+  id: string;
+  event: string;
+}
+
+/** Validates an event and gives its canonical JSON, within the size cap. */
+const prepare = (input: AuditEvent): Incoming => {
+  // The object is the chain's last line of defence: it doesn't trust its
+  // caller to have validated, and keeps only the fields the schema knows.
+  const parsed = auditEventSchema.parse(input);
+  const event = canonicalJson(parsed);
+  if (new TextEncoder().encode(event).byteLength > auditEventMaxBytes) {
+    throw new RangeError(
+      `Audit event ${parsed.id} is over ${auditEventMaxBytes} bytes`
+    );
+  }
+  return { id: parsed.id, event };
+};
 
 /**
  * The client's audit log: one object per deployment, in the EU. Appends
@@ -41,29 +68,44 @@ export class AuditLog extends DurableObject<Env> {
 
   /**
    * Appends events in the given order, skipping any whose ID the log already
-   * has. Validates every event first, so a malformed one appends nothing.
+   * has. Validates every event first, so one malformed or oversized event
+   * appends nothing from its batch.
    */
   async append(batch: readonly AuditEvent[]): Promise<AppendResult> {
-    // The object is the chain's last line of defence: it doesn't trust its
-    // caller to have validated, and keeps only the fields the schema knows.
-    const parsed = batch.map((event) => auditEventSchema.parse(event));
+    const incoming = batch.map((event) => prepare(event));
     // Hashing is async, so another append could otherwise run between
     // reading the head and writing after it, and fork the chain.
     return await this.ctx.blockConcurrencyWhile(async () => {
+      const receivedAt = new Date().toISOString();
       const head = this.#head();
-      const seen = new Set<string>();
+      // Every event this call has seen, by ID: stored ones and new ones.
+      const known = new Map<string, string | undefined>();
       const entries: (ChainEntry & { id: string })[] = [];
+      let conflicts = 0;
       let prevHash = head?.hash ?? genesisHash;
       let seq = head?.seq ?? 0;
-      for (const event of parsed) {
-        if (!(seen.has(event.id) || this.#has(event.id))) {
-          seen.add(event.id);
+      for (const { id, event } of incoming) {
+        if (!known.has(id)) {
+          known.set(id, this.#stored(id));
+        }
+        const existing = known.get(id);
+        if (existing === undefined) {
+          known.set(id, event);
           seq += 1;
-          const link = { seq, prevHash, event: canonicalJson(event) };
+          const link = {
+            version: chainVersion,
+            seq,
+            prevHash,
+            receivedAt,
+            event,
+          };
           // Each hash needs the one before it.
           // oxlint-disable-next-line no-await-in-loop
           prevHash = await chainHash(link);
-          entries.push({ ...link, id: event.id, hash: prevHash });
+          entries.push({ ...link, id, hash: prevHash });
+        } else if (existing !== event) {
+          conflicts += 1;
+          log.warn("audit.conflicting_duplicate", { eventId: id });
         }
       }
       this.#db.transaction((tx) => {
@@ -73,12 +115,13 @@ export class AuditLog extends DurableObject<Env> {
       });
       return {
         appended: entries.length,
-        duplicates: parsed.length - entries.length,
+        duplicates: incoming.length - entries.length,
+        conflicts,
       };
     });
   }
 
-  /** Events after position `after`, oldest first, at most one page. */
+  /** Entries after position `after`, oldest first, at most one page. */
   entries(after = 0): ChainEntry[] {
     return this.#page(after);
   }
@@ -101,23 +144,24 @@ export class AuditLog extends DurableObject<Env> {
       .get();
   }
 
-  #has(id: string): boolean {
-    return (
-      this.#db
-        .select({ seq: events.seq })
-        .from(events)
-        .where(eq(events.id, id))
-        .get() !== undefined
-    );
+  /** The stored canonical JSON of the event with this ID, if any. */
+  #stored(id: string): string | undefined {
+    return this.#db
+      .select({ event: events.event })
+      .from(events)
+      .where(eq(events.id, id))
+      .get()?.event;
   }
 
   #page(after: number): ChainEntry[] {
     return this.#db
       .select({
+        version: events.version,
         seq: events.seq,
         prevHash: events.prevHash,
-        hash: events.hash,
+        receivedAt: events.receivedAt,
         event: events.event,
+        hash: events.hash,
       })
       .from(events)
       .where(gt(events.seq, after))

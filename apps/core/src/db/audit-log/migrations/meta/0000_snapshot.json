@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "8a1ceb80-b183-46f0-9add-26d849606e05",
+  "id": "79ea8b0e-7243-4e13-8f5d-eac50e682f6c",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "events": {
@@ -16,6 +16,20 @@
         },
         "id": {
           "name": "id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "received_at": {
+          "name": "received_at",
           "type": "text",
           "primaryKey": false,
           "notNull": true,
@@ -55,7 +69,12 @@
       "foreignKeys": {},
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
-      "checkConstraints": {}
+      "checkConstraints": {
+        "events_seq_positive": {
+          "name": "events_seq_positive",
+          "value": "\"events\".\"seq\" >= 1"
+        }
+      }
     }
   },
   "views": {},

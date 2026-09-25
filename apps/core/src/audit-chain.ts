@@ -1,14 +1,20 @@
 /**
- * The audit log's hash chain. Each entry's hash covers its position, the hash
- * of the entry before it and the event itself:
+ * The audit log's hash chain. Each entry's hash covers the hash format
+ * version, its position, the hash of the entry before it, the time the log
+ * received it and the event itself:
  *
- *   hash = hex(SHA-256(`${seq}\n${prevHash}\n${event}`))
+ *   hash = hex(SHA-256(`v1\n${seq}\n${prevHash}\n${receivedAt}\n${event}`))
  *
- * where `event` is the event's canonical JSON, stored as it was hashed. The
- * first entry links to {@link genesisHash}. Changing, removing or reordering
- * an entry breaks the chain from that position on, so {@link verifyChain}
- * finds it. The head isn't anchored outside the deployment, so someone who
- * can deploy code could still rewrite the chain from some point to its end.
+ * where `event` is the event's canonical JSON, stored as it was hashed, and
+ * `receivedAt` is set by the log, so the chain attests when the log saw an
+ * event, whatever time its sender claims. Each entry stores its format
+ * version, so a later format can be added without rehashing old entries. The
+ * first entry links to {@link genesisHash}.
+ *
+ * Changing, removing or reordering an entry breaks the chain from that
+ * position on, so {@link verifyChain} finds it. The head isn't anchored
+ * outside the deployment, so someone who can deploy code could still rewrite
+ * the chain from some point to its end.
  */
 
 /** A JSON value, as audit events are made of. */
@@ -56,14 +62,21 @@ export const canonicalJson = (value: Json): string => {
 /** What the first entry links to: 64 zeros, the width of a SHA-256 hex hash. */
 export const genesisHash = "0".repeat(64);
 
+/** The hash format new entries use, described at the top of this file. */
+export const chainVersion = 1;
+
 /** One stored entry of the chain. */
 export interface ChainEntry {
+  /** The entry's hash format. */
+  version: number;
   /** Position in the chain, from 1, without gaps. */
   seq: number;
   prevHash: string;
-  hash: string;
+  /** When the log received the event (ISO 8601), set by the log. */
+  receivedAt: string;
   /** The event's canonical JSON. */
   event: string;
+  hash: string;
 }
 
 const hex = (bytes: ArrayBuffer): string =>
@@ -74,15 +87,13 @@ const hex = (bytes: ArrayBuffer): string =>
 /** The hash an entry must have. */
 export const chainHash = async (
   entry: Omit<ChainEntry, "hash">
-): Promise<string> =>
-  hex(
-    await crypto.subtle.digest(
-      "SHA-256",
-      new TextEncoder().encode(
-        `${entry.seq}\n${entry.prevHash}\n${entry.event}`
-      )
-    )
+): Promise<string> => {
+  const { version, seq, prevHash, receivedAt, event } = entry;
+  const input = `v${version}\n${seq}\n${prevHash}\n${receivedAt}\n${event}`;
+  return hex(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input))
   );
+};
 
 /**
  * Why the chain breaks at a position: an entry is missing there, its link
@@ -105,17 +116,19 @@ export const verifyChain = async (
   let expected = 1;
   let prevHash = genesisHash;
   for await (const entry of entries) {
+    // Entries come in position order, so one that doesn't follow on means
+    // the entry expected here is gone.
     if (entry.seq !== expected) {
-      return {
-        ok: false,
-        brokenAt: expected,
-        reason: entry.seq > expected ? "missing" : "altered",
-      };
+      return { ok: false, brokenAt: expected, reason: "missing" };
     }
     if (entry.prevHash !== prevHash) {
       return { ok: false, brokenAt: expected, reason: "unlinked" };
     }
-    if ((await chainHash(entry)) !== entry.hash) {
+    // Only one format exists, so an entry claiming another was altered.
+    if (
+      entry.version !== chainVersion ||
+      (await chainHash(entry)) !== entry.hash
+    ) {
       return { ok: false, brokenAt: expected, reason: "altered" };
     }
     prevHash = entry.hash;

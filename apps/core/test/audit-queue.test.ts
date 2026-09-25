@@ -22,24 +22,28 @@ const newEvent = (): AuditEvent => ({
   detail: {},
 });
 
-type Outcome = "acked" | "retried" | "pending";
+/** What the consumer did with a message: acked, or retried after a delay. */
+type Outcome = "acked" | { retryAfter: number | undefined } | "pending";
 
 /**
- * Delivers one batch to core's queue consumer, as the queue does, and
- * returns what the consumer did with each message, in order.
+ * Delivers one batch to core's queue consumer, as the queue does on the
+ * given attempt, and returns what the consumer did with each message.
  */
-const deliver = async (...bodies: unknown[]): Promise<Outcome[]> => {
+const deliverAttempt = async (
+  attempts: number,
+  ...bodies: unknown[]
+): Promise<Outcome[]> => {
   const outcomes: Outcome[] = bodies.map(() => "pending");
   const messages = bodies.map((body, index): Message => ({
     id: crypto.randomUUID(),
     timestamp: new Date(),
-    attempts: 1,
+    attempts,
     body,
     ack: () => {
       outcomes[index] = "acked";
     },
-    retry: () => {
-      outcomes[index] = "retried";
+    retry: (options) => {
+      outcomes[index] = { retryAfter: options?.delaySeconds };
     },
   }));
   const batch: MessageBatch = {
@@ -49,13 +53,18 @@ const deliver = async (...bodies: unknown[]): Promise<Outcome[]> => {
     ackAll: () => {
       outcomes.fill("acked");
     },
-    retryAll: () => {
-      outcomes.fill("retried");
+    retryAll: (options) => {
+      for (const index of outcomes.keys()) {
+        outcomes[index] = { retryAfter: options?.delaySeconds };
+      }
     },
   };
   await worker.queue(batch, env);
   return outcomes;
 };
+
+const deliver = async (...bodies: unknown[]): Promise<Outcome[]> =>
+  await deliverAttempt(1, ...bodies);
 
 /** Every event in the log, oldest first. */
 const allEvents = async (): Promise<AuditEvent[]> => {
@@ -111,12 +120,34 @@ describe("audit queue consumer", () => {
       deliver(valid, ...malformed, "not an event")
     ).resolves.toStrictEqual([
       "acked",
-      ...malformed.map(() => "retried"),
-      "retried",
+      ...malformed.map(() => ({ retryAfter: 10 })),
+      { retryAfter: 10 },
     ]);
     await expect(
       storedWith([valid, ...malformed].map(({ id }) => id))
     ).resolves.toStrictEqual([valid]);
+  });
+
+  it("appends the rest of a batch when the log refuses one event, and backs off that one", async () => {
+    const [before, after] = [newEvent(), newEvent()];
+    // Valid to the queue, but over the log's size cap.
+    const oversized = {
+      ...newEvent(),
+      provenance: Array.from({ length: 100 }, () => "r".repeat(100)),
+    };
+
+    await expect(
+      deliverAttempt(3, before, oversized, after)
+    ).resolves.toStrictEqual(["acked", { retryAfter: 40 }, "acked"]);
+    await expect(
+      storedWith([before, oversized, after].map(({ id }) => id))
+    ).resolves.toStrictEqual([before, after]);
+  });
+
+  it("backs off retries up to a ceiling", async () => {
+    await expect(deliverAttempt(20, "not an event")).resolves.toStrictEqual([
+      { retryAfter: 30 * 60 },
+    ]);
   });
 
   it("chains the events core and connect send through the queue", async () => {

@@ -1,4 +1,4 @@
-import { auditEventSchema } from "@grasp-os/shared/audit";
+import { auditEventMaxBytes, auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
@@ -22,7 +22,7 @@ const newEvent = (action = "knowledge.read"): AuditEvent => ({
 });
 
 const appendThree = async (log: Log): Promise<AuditEvent[]> => {
-  const batch = [newEvent("a"), newEvent("b"), newEvent("c")];
+  const batch = [newEvent("test.a"), newEvent("test.b"), newEvent("test.c")];
   await log.append(batch);
   return batch;
 };
@@ -49,13 +49,24 @@ describe("AuditLog", () => {
   it("appends events in order, each chained to the one before", async () => {
     const log = newLog();
     const first = await appendThree(log);
-    const second = [newEvent("d")];
+    const second = [newEvent("test.d")];
     await log.append(second);
 
     await expect(stored(log)).resolves.toStrictEqual(
       [...first, ...second].map((event, index) => ({ seq: index + 1, event }))
     );
     await expect(log.verify()).resolves.toMatchObject({ ok: true, length: 4 });
+  });
+
+  it("records when it received each event, whatever time the sender claims", async () => {
+    const log = newLog();
+    const before = new Date().toISOString();
+    await log.append([{ ...newEvent(), at: "2000-01-01T00:00:00Z" }]);
+
+    const [entry] = await log.entries();
+    const receivedAt = entry?.receivedAt ?? "";
+    expect(receivedAt >= before).toBeTruthy();
+    expect(receivedAt <= new Date().toISOString()).toBeTruthy();
   });
 
   it("verifies an empty log", async () => {
@@ -72,20 +83,32 @@ describe("AuditLog", () => {
     await expect(log.append([event, event])).resolves.toStrictEqual({
       appended: 1,
       duplicates: 1,
+      conflicts: 0,
     });
-    // A redelivery, even with other content under the same ID, is dropped.
+    // The same ID in capitals is the same event.
     await expect(
-      log.append([{ ...event, action: "knowledge.deleted" }, newEvent()])
-    ).resolves.toStrictEqual({ appended: 1, duplicates: 1 });
+      log.append([{ ...event, id: event.id.toUpperCase() }])
+    ).resolves.toStrictEqual({ appended: 0, duplicates: 1, conflicts: 0 });
 
-    const entries = await stored(log);
-    expect(entries.map((entry) => entry.event.action)).toStrictEqual([
-      "knowledge.read",
-      "knowledge.read",
-    ]);
-    await expect(log.verify()).resolves.toMatchObject({ ok: true, length: 2 });
+    await expect(stored(log)).resolves.toStrictEqual([{ seq: 1, event }]);
   });
 
+  it("counts a redelivery with other content as a conflict and keeps the first", async () => {
+    const log = newLog();
+    const event = newEvent();
+    await log.append([event]);
+
+    const changed = { ...event, action: "knowledge.deleted" };
+    await expect(
+      log.append([changed, { ...changed, id: event.id.toUpperCase() }])
+    ).resolves.toStrictEqual({ appended: 0, duplicates: 2, conflicts: 2 });
+
+    await expect(stored(log)).resolves.toStrictEqual([{ seq: 1, event }]);
+    await expect(log.verify()).resolves.toMatchObject({ ok: true, length: 1 });
+  });
+
+  // Called inside the object: the test pool reports an error thrown across
+  // its RPC wrapper as unhandled, even when the caller handles it.
   it("appends nothing from a batch that holds a malformed event", async () => {
     const log = newLog();
     const forged = {
@@ -93,12 +116,24 @@ describe("AuditLog", () => {
       actor: { type: "admin", userId: "user-1" },
     };
 
-    // Called inside the object: the test pool reports an error thrown across
-    // its RPC wrapper as unhandled, even when the caller handles it.
     await runInDurableObject(log, async (instance) => {
       // @ts-expect-error -- the actor type is not one the schema knows
       await expect(instance.append([newEvent(), forged])).rejects.toThrow(
         "Invalid discriminator value"
+      );
+    });
+    await expect(log.entries()).resolves.toStrictEqual([]);
+  });
+
+  it("refuses an event over the size cap, however each field is bounded", async () => {
+    const log = newLog();
+    const provenance = Array.from({ length: 100 }, () => "r".repeat(100));
+    const oversized = { ...newEvent(), provenance };
+    expect(auditEventSchema.safeParse(oversized).success).toBeTruthy();
+
+    await runInDurableObject(log, async (instance) => {
+      await expect(instance.append([newEvent(), oversized])).rejects.toThrow(
+        `over ${auditEventMaxBytes} bytes`
       );
     });
     await expect(log.entries()).resolves.toStrictEqual([]);
@@ -150,8 +185,33 @@ describe("AuditLog tamper detection", () => {
     await appendThree(log);
     await tamper(
       log,
-      `UPDATE events SET event = replace(event, '"b"', '"x"') WHERE seq = 2`
+      `UPDATE events SET event = replace(event, 'test.b', 'test.x') WHERE seq = 2`
     );
+    await expect(log.verify()).resolves.toStrictEqual({
+      ok: false,
+      brokenAt: 2,
+      reason: "altered",
+    });
+  });
+
+  it("finds an altered receipt time", async () => {
+    const log = newLog();
+    await appendThree(log);
+    await tamper(
+      log,
+      `UPDATE events SET received_at = '2000-01-01T00:00:00.000Z' WHERE seq = 2`
+    );
+    await expect(log.verify()).resolves.toStrictEqual({
+      ok: false,
+      brokenAt: 2,
+      reason: "altered",
+    });
+  });
+
+  it("finds an entry that claims another hash format", async () => {
+    const log = newLog();
+    await appendThree(log);
+    await tamper(log, "UPDATE events SET version = 2 WHERE seq = 2");
     await expect(log.verify()).resolves.toStrictEqual({
       ok: false,
       brokenAt: 2,
@@ -162,18 +222,13 @@ describe("AuditLog tamper detection", () => {
   it("finds an altered event whose hash was recomputed, at the next event", async () => {
     const log = newLog();
     await appendThree(log);
-    await runInDurableObject(log, async (_instance, state) => {
-      const [row] = state.storage.sql
-        .exec<{ prev_hash: string; event: string }>(
-          "SELECT prev_hash, event FROM events WHERE seq = 2"
-        )
-        .toArray();
-      const event = row?.event.replace('"b"', '"x"') ?? "";
-      const hash = await chainHash({
-        seq: 2,
-        prevHash: row?.prev_hash ?? "",
-        event,
-      });
+    await runInDurableObject(log, async (instance, state) => {
+      const [, second] = instance.entries();
+      if (!second) {
+        throw new Error("Expected a second entry");
+      }
+      const event = second.event.replace("test.b", "test.x");
+      const hash = await chainHash({ ...second, event });
       state.storage.sql.exec(
         "UPDATE events SET event = ?, hash = ? WHERE seq = 2",
         event,
@@ -206,9 +261,10 @@ describe("AuditLog tamper detection", () => {
       "DELETE FROM events WHERE seq = 2",
       "UPDATE events SET seq = 2 WHERE seq = 3"
     );
-    await expect(log.verify()).resolves.toMatchObject({
+    await expect(log.verify()).resolves.toStrictEqual({
       ok: false,
       brokenAt: 2,
+      reason: "unlinked",
     });
   });
 
@@ -217,9 +273,9 @@ describe("AuditLog tamper detection", () => {
     await appendThree(log);
     await tamper(
       log,
-      "UPDATE events SET seq = -1 WHERE seq = 2",
+      "UPDATE events SET seq = 100 WHERE seq = 2",
       "UPDATE events SET seq = 2 WHERE seq = 3",
-      "UPDATE events SET seq = 3 WHERE seq = -1"
+      "UPDATE events SET seq = 3 WHERE seq = 100"
     );
     await expect(log.verify()).resolves.toStrictEqual({
       ok: false,
