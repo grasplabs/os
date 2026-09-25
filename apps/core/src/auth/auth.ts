@@ -14,7 +14,8 @@ import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { audit } from "../audit.ts";
+import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
+import { actorOf } from "../audit.ts";
 import {
   accounts,
   invitations,
@@ -277,15 +278,20 @@ const auditedChanges: Record<
 };
 
 /**
- * Sends an event to the audit log. The change it records has already
- * happened, so a failure is logged rather than turned into a failed request.
+ * Records a change Better Auth has made: its event goes into the audit
+ * outbox, in the same database, and is sent from there, again by the cron
+ * trigger if sending fails now. The change has already happened, so a
+ * failure to store the event is logged rather than turned into a failed
+ * request.
  */
 const record = async (env: Env, entry: AuditEntry): Promise<void> => {
   try {
-    await audit(env).log(entry);
+    await outboxed(drizzle(env.DB), entry);
   } catch (error) {
     log.error("audit.failed", { action: entry.action, ...errorFields(error) });
+    return;
   }
+  await sendAuditOutboxNow(env);
 };
 
 /** A member's role before a change, from the request's before hook to its after hook. */
@@ -387,7 +393,7 @@ const createAuth = (env: AuthEnv, config: SignInConfig) => {
           after: async (session) => {
             if (session.staff === true) {
               await record(env, {
-                actor: { type: "staff", userId: session.userId },
+                actor: actorOf({ userId: session.userId, staff: true }),
                 action: "staff.session.started",
                 target: { type: "session", id: session.id },
                 detail: { expiresAt: session.expiresAt.toISOString() },
@@ -431,7 +437,10 @@ const createAuth = (env: AuthEnv, config: SignInConfig) => {
           return;
         }
         await record(env, {
-          actor: { type: "person", userId: actor.user.id },
+          actor: actorOf({
+            userId: actor.user.id,
+            staff: actor.session.staff === true,
+          }),
           ...describe(
             changeSchema.parse(context.body ?? {}),
             returnedSchema.safeParse(returned).data ?? {},

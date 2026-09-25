@@ -6,6 +6,7 @@ import {
 } from "@grasp-os/shared/errors";
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
 import { permissionErrors } from "@grasp-os/shared/permissions";
+import { roleErrors } from "@grasp-os/shared/roles";
 import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 
@@ -57,6 +58,7 @@ export const toClientError = (
   if (
     requestErrors.codeOf(error) ||
     authErrors.codeOf(error) ||
+    roleErrors.codeOf(error) ||
     permissionErrors.codeOf(error) ||
     appErrors.codeOf(error) ||
     knowledgeErrors.codeOf(error) ||

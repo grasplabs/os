@@ -173,7 +173,6 @@ export interface AppsApi {
 
 /** Why a call to the App registry was refused. */
 export const appErrors = defineErrorFamily({
-  "app.forbidden": "Your role can't change Apps or read their code.",
   "app.invalid": "That isn't a valid request for an App.",
   "app.not_found": "There's no such App.",
   "app.version_not_found": "The App has no such version.",

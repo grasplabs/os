@@ -17,6 +17,7 @@
     "./knowledge": "./src/knowledge.ts",
     "./models": "./src/models.ts",
     "./permissions": "./src/permissions.ts",
+    "./roles": "./src/roles.ts",
     "./router": "./src/router.ts",
     "./rpc": "./src/rpc.ts",
     "./runtime": "./src/runtime.ts"

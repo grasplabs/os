@@ -7,5 +7,8 @@ export const audit = (env: Pick<Env, "AUDIT_QUEUE">): AuditLogger =>
   auditLogger(env.AUDIT_QUEUE, "core");
 
 /** A signed-in person as the audit log names them: staff apart. */
-export const actorOf = ({ userId, staff }: Identity): AuditActor =>
+export const actorOf = ({
+  userId,
+  staff,
+}: Pick<Identity, "userId" | "staff">): AuditActor =>
   staff ? { type: "staff", userId } : { type: "person", userId };

@@ -1,5 +1,6 @@
 import type { Role } from "@grasp-os/shared";
 import { appErrors, appLimits } from "@grasp-os/shared/apps";
+import { roleErrors } from "@grasp-os/shared/roles";
 import { describe, expect, it } from "vite-plus/test";
 
 import { mockIdp } from "./idp.ts";
@@ -27,7 +28,7 @@ const outcome = async (promise: Promise<unknown>): Promise<string> => {
     await promise;
     return "ok";
   } catch (error) {
-    return appErrors.codeOf(error) ?? String(error);
+    return appErrors.codeOf(error) ?? roleErrors.codeOf(error) ?? String(error);
   }
 };
 
@@ -294,7 +295,7 @@ describe("App code", () => {
       outcome(user.versions.propose(app.id, 1)),
       outcome(user.versions.setCurrent(app.id, 1)),
     ]);
-    expect(new Set(refused)).toStrictEqual(new Set(["app.forbidden"]));
+    expect(new Set(refused)).toStrictEqual(new Set(["role.forbidden"]));
     await expect(builder.get(app.id)).resolves.toMatchObject({
       currentVersion: null,
     });

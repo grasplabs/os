@@ -234,7 +234,6 @@ export const permissionErrors = defineErrorFamily({
   "permission.denied": "This App or agent has no permission to do that.",
   "permission.person_inactive":
     "The person this acts for no longer has access to this deployment.",
-  "permission.forbidden": "Your role can't do that with permissions.",
   "permission.invalid": "That isn't a valid permission request.",
   "permission.not_found": "There's no such permission.",
   "permission.not_requested": "Only a requested permission can be granted.",

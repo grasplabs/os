@@ -14,6 +14,7 @@ import type {
   PermissionObject,
   PermissionSubject,
 } from "@grasp-os/shared/permissions";
+import { canBuild, isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, eq, inArray, isNull, or } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
@@ -27,7 +28,7 @@ import {
 } from "./audit-outbox.ts";
 import { actorOf } from "./audit.ts";
 import { memberRole } from "./auth/identity.ts";
-import { permissions } from "./db/core/schema.ts";
+import { apps, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 
 // Permission records and the one check every server path runs. A person
@@ -176,15 +177,15 @@ const changeEntry = (
 });
 
 const requireAdmin = (by: Identity): void => {
-  if (by.role !== "admin") {
-    throw permissionErrors.create("permission.forbidden");
+  if (!isAdmin(by.role)) {
+    throw roleErrors.create("role.forbidden");
   }
 };
 
 /** Admins, and builders who build the Apps that need permissions. */
 const requireBuilder = (by: Identity): void => {
-  if (by.role === "user") {
-    throw permissionErrors.create("permission.forbidden");
+  if (!canBuild(by.role)) {
+    throw roleErrors.create("role.forbidden");
   }
 };
 
@@ -202,6 +203,39 @@ const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
     .from(permissions)
     .where(eq(permissions.id, id))
     .get();
+
+/**
+ * The Apps a permission names, its subject and a workflow's App, must be in
+ * the registry: one query for both. Apps are never deleted, so one that
+ * exists now still does when the permission is stored.
+ */
+const requireApps = async (
+  env: Env,
+  subject: PermissionSubject,
+  object: PermissionObject
+): Promise<void> => {
+  const named = new Map<string, string>();
+  if (subject.type === "app") {
+    named.set("subject.appId", subject.appId);
+  }
+  if (object.type === "workflow") {
+    named.set("object.appId", object.appId);
+  }
+  if (named.size === 0) {
+    return;
+  }
+  const found = await drizzle(env.DB)
+    .select({ id: apps.id })
+    .from(apps)
+    .where(inArray(apps.id, [...new Set(named.values())]));
+  const existing = new Set(found.map(({ id }) => id));
+  const missing = [...named].filter(([, appId]) => !existing.has(appId));
+  if (missing.length > 0) {
+    throw permissionErrors.create("permission.invalid", {
+      issues: missing.map(([path]) => `${path}: There's no such App.`),
+    });
+  }
+};
 
 /**
  * Asks for a permission for an App or agent. It allows nothing until an
@@ -222,6 +256,7 @@ export const requestPermission = async (
     });
   }
   const { subject, object, actions, binding } = parsed.data;
+  await requireApps(env, subject, object);
   const row: Row = {
     id: crypto.randomUUID(),
     ...subjectColumns(subject),
