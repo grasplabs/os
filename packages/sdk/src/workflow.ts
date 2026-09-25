@@ -11,7 +11,7 @@ import type {
 } from "./engine.ts";
 import { currencySchema, paramValueSchemas } from "./params.ts";
 import type { ParamDefault, ParamKind, ParamValue } from "./params.ts";
-import { namePattern, stepOptionSchemas } from "./steps.ts";
+import { namePattern, nameRule, stepOptionSchemas } from "./steps.ts";
 
 /**
  * Workflow SDK: the only API workflow code sees. A workflow declares its
@@ -546,9 +546,7 @@ const createRunner = (
   // still fails here, before anything runs.
   const start = (name: string, key: string | number | undefined): string => {
     if (typeof name !== "string" || !namePattern.test(name)) {
-      throw invalidCall(
-        `Step "${name}" needs a name of up to 64 letters, digits, "-" or "_", starting with a letter`
-      );
+      throw invalidCall(`Step "${name}" needs a name of ${nameRule}`);
     }
     // Encoded, so a key never contains the separators of engine step names.
     const step =
@@ -759,9 +757,7 @@ const createRunner = (
   const calls = new Map<string, number>();
   const stateStep = (operation: "get" | "set", key: string): string => {
     if (typeof key !== "string" || !namePattern.test(key)) {
-      throw invalidCall(
-        `State key "${key}" needs up to 64 letters, digits, "-" or "_", starting with a letter`
-      );
+      throw invalidCall(`State key "${key}" needs ${nameRule}`);
     }
     const base = `$state:${operation}:${key}`;
     const count = (calls.get(base) ?? 0) + 1;

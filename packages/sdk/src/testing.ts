@@ -1,4 +1,5 @@
 import { runIdSchema } from "@grasp-os/shared/ids";
+import { canonicalJson } from "@grasp-os/shared/json";
 import { z } from "zod";
 
 import { isNonRetryable } from "./engine.ts";
@@ -9,7 +10,7 @@ import type {
   ModelRequest,
   WorkflowEngine,
 } from "./engine.ts";
-import { engineStepPattern } from "./steps.ts";
+import { durationUnits, engineStepPattern, messageOf } from "./steps.ts";
 import type { WorkflowDefinition } from "./workflow.ts";
 
 /**
@@ -171,9 +172,6 @@ const byStepName = <T>(
     : undefined;
 };
 
-const errorMessage = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
-
 /**
  * Runs `fn`, and again up to `retries` times while it fails with an error
  * that trying again may fix. Delays and timeouts aren't simulated.
@@ -202,7 +200,7 @@ const attempt = async <T>(
  * (Cloudflare Workflows does), so tests catch anything that relies on more.
  */
 const asKept = (error: unknown): Error => {
-  const kept = new Error(errorMessage(error));
+  const kept = new Error(messageOf(error));
   if (error instanceof Error) {
     kept.name = error.name;
   }
@@ -313,7 +311,7 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
           ...call,
           sideEffect,
           status: "failed",
-          error: errorMessage(error),
+          error: messageOf(error),
         });
         throw asKept(error);
       }
@@ -450,26 +448,17 @@ export const testRun = async <Output>(
 
 // Reports
 
-// JSON with sorted keys, so equal values compare equal whatever the order.
-const canonical = (value: unknown): string =>
-  JSON.stringify(value, (_key, nested: unknown) =>
-    typeof nested === "object" && nested !== null && !Array.isArray(nested)
-      ? Object.fromEntries(
-          Object.entries(nested).toSorted(([a], [b]) => a.localeCompare(b))
-        )
-      : nested
-  ) ?? "undefined";
+// Values as an engine stores them (through JSON), in canonical JSON, so
+// equal values compare equal whatever order their keys are in.
+const canonical = (value: unknown): string => {
+  const stored = JSON.stringify(value);
+  return stored === undefined
+    ? "undefined"
+    : canonicalJson(z.json().parse(JSON.parse(stored)));
+};
 
 const describeValue = (value: unknown): string =>
   JSON.stringify(value) ?? "nothing";
-
-const durationUnits = [
-  ["week", 604_800_000],
-  ["day", 86_400_000],
-  ["hour", 3_600_000],
-  ["minute", 60_000],
-  ["second", 1000],
-] as const;
 
 /** `3 days` for 259200000, in the largest unit that divides it. */
 const describeDuration = (milliseconds: number): string => {

@@ -4,12 +4,12 @@ import {
   isAuditEventTooLarge,
 } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
+import { canonicalJson } from "@grasp-os/shared/json";
 import { DurableObject } from "cloudflare:workers";
 import { asc, desc, eq, gt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 
 import {
-  canonicalJson,
   chainHash,
   chainVersion,
   genesisHash,

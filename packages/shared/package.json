@@ -10,6 +10,7 @@
     "./audit": "./src/audit.ts",
     "./errors": "./src/errors.ts",
     "./ids": "./src/ids.ts",
+    "./json": "./src/json.ts",
     "./router": "./src/router.ts",
     "./rpc": "./src/rpc.ts"
   },
