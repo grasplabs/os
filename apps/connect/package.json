@@ -8,14 +8,18 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "typegen": "wrangler types --include-runtime=false",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "wrangler d1 migrations apply DB --remote"
   },
   "dependencies": {
-    "@grasp-os/shared": "workspace:*"
+    "@grasp-os/shared": "workspace:*",
+    "drizzle-orm": "catalog:",
+    "zod": "catalog:"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "catalog:",
+    "@modelcontextprotocol/sdk": "catalog:",
     "drizzle-kit": "catalog:",
     "wrangler": "catalog:"
   }

@@ -82,8 +82,9 @@ type Stub = Awaited<ReturnType<typeof bindingsFor>>[string];
 
 /**
  * What App code gets when it calls a connection stub from its env.
- * Connections don't exist in connect yet, so "connect.connection_not_found"
- * is a call that passed every check, core's and connect's.
+ * These tests register no connection in connect, so
+ * "connect.connection_not_found" is a call that passed every check, core's
+ * and connect's capability check.
  */
 const callStub = async (
   stub: Stub | undefined,
@@ -402,7 +403,12 @@ describe("permissions", () => {
 
   it("can't take the name of any of core's own bindings", () => {
     // Test-only bindings aside, every name in core's env is the platform's.
-    const testOnly = new Set(["CORE_MIGRATIONS", "KNOWLEDGE_MIGRATIONS"]);
+    const testOnly = new Set([
+      "CORE_MIGRATIONS",
+      "KNOWLEDGE_MIGRATIONS",
+      "CONNECT_DB",
+      "CONNECT_MIGRATIONS",
+    ]);
     const own = Object.keys(env).filter((name) => !testOnly.has(name));
     expect(
       own.filter((name) => bindingNameSchema.safeParse(name).success)

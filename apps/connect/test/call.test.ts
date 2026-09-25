@@ -1,53 +1,48 @@
-import { capabilityErrors, signCapability } from "@grasp-os/shared/capability";
-import { connectErrors } from "@grasp-os/shared/connect";
-import {
-  authoritySchema,
-  bindingNameSchema,
-} from "@grasp-os/shared/permissions";
+import { capabilityMaxTtlMs } from "@grasp-os/shared/capability";
+import { bindingNameSchema } from "@grasp-os/shared/permissions";
 import { env, exports } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeEach, describe, expect, it } from "vite-plus/test";
+
+import {
+  addConnection,
+  agentFor,
+  capabilityFor,
+  outcome,
+  serverUrl,
+} from "./connect.ts";
+import type { Call } from "./connect.ts";
+import { fakeMcpServer } from "./mcp-server.ts";
 
 // Connect is reached only by core, but trusts no call from it blindly: each
-// one needs a capability for exactly that call. Connections don't exist yet,
-// so a call that passes the check ends at "no such connection".
+// one needs a capability core signed for exactly that call, and nothing
+// goes out before it holds.
 
-const authority = authoritySchema.parse({
-  subject: { type: "agent", agentId: "agent-anna" },
-  onBehalfOf: "user-anna",
-  mode: "interactive",
-});
+const server = fakeMcpServer(serverUrl, [
+  {
+    name: "mail.list",
+    readOnly: true,
+    run: () => ({ output: { messages: [] } }),
+  },
+]);
 
-const call = {
-  connectionId: "connection-outlook",
-  action: "mail.list",
-  input: { top: 10 },
-};
+const anna = agentFor("user-anna");
 
-const capabilityFor = async (
-  scope: { connectionId: string; action: string; resource?: string },
-  key: string = env.CAPABILITY_SIGNING_KEY
-) => await signCapability(key, authority, scope);
+let call: Call;
 
-/** The code connect refused `request` with, or "ok" if it didn't. */
-const refusal = async (request: unknown): Promise<string> => {
-  try {
-    await exports.default.call(request);
-    return "ok";
-  } catch (error) {
-    return (
-      capabilityErrors.codeOf(error) ??
-      connectErrors.codeOf(error) ??
-      String(error)
-    );
-  }
-};
+const callWith = async (capability: unknown, request: object = call) =>
+  await outcome(exports.default.call({ ...request, capability }));
 
 describe("calls to connect", () => {
+  beforeEach(async () => {
+    call = {
+      connectionId: await addConnection(),
+      action: "mail.list",
+      input: { top: 10 },
+    };
+  });
+
   it("go through with a capability for exactly that call", async () => {
-    const capability = await capabilityFor(call);
-    await expect(refusal({ ...call, capability })).resolves.toBe(
-      "connect.connection_not_found"
-    );
+    await expect(callWith(await capabilityFor(anna, call))).resolves.toBe("ok");
   });
 
   it("go through with a capability made with the previous key while it is set", async () => {
@@ -58,50 +53,73 @@ describe("calls to connect", () => {
     if (typeof previous !== "string") {
       throw new TypeError("Expected a previous key");
     }
-    const capability = await capabilityFor(call, previous);
-    await expect(refusal({ ...call, capability })).resolves.toBe(
-      "connect.connection_not_found"
-    );
+    await expect(
+      callWith(await capabilityFor(anna, call, previous))
+    ).resolves.toBe("ok");
   });
 
   it("can't be given a stub name that is one of connect's own bindings", () => {
-    const own = Object.keys(env).filter(
-      (name) => !bindingNameSchema.safeParse(name).success
+    // Test-only bindings aside, every name in connect's env is the platform's.
+    const names = Object.keys(env).filter(
+      (name) => name !== "CONNECT_MIGRATIONS"
     );
-    expect(own).toStrictEqual(Object.keys(env));
+    expect(
+      names.filter((name) => bindingNameSchema.safeParse(name).success)
+    ).toStrictEqual([]);
   });
 
   it("are refused without a valid capability", async () => {
     const forged = await capabilityFor(
+      anna,
       call,
       "an-attackers-own-key-of-32-characters-or-more"
     );
-    const withoutOne = [
-      call,
-      { ...call, capability: "" },
-      { ...call, capability: "not.a-capability" },
-      { ...call, capability: forged },
-    ];
-    const refused = await Promise.all(withoutOne.map(refusal));
-    expect(refused).toStrictEqual(withoutOne.map(() => "capability.invalid"));
+    const valid = await capabilityFor(anna, call);
+    const [payload = "", mac = ""] = valid.split(".");
+    const altered = `${payload.slice(0, -2)}AA.${mac}`;
+    const refused = await Promise.all(
+      [undefined, "", "not.a-capability", forged, altered, 42].map(
+        async (capability) => await callWith(capability)
+      )
+    );
+    expect(refused).toStrictEqual(refused.map(() => "capability.invalid"));
+    expect(server.requests).toBe(0);
   });
 
-  it("are refused with a capability for another action, connection or resource", async () => {
-    const capability = await capabilityFor(call);
+  it("are refused with an expired capability, or one from the future", async () => {
+    const now = Date.now();
+    const expired = await capabilityFor(
+      anna,
+      call,
+      undefined,
+      now - capabilityMaxTtlMs
+    );
+    const future = await capabilityFor(anna, call, undefined, now + 60_000);
+    const refused = await Promise.all(
+      [expired, future].map(async (capability) => await callWith(capability))
+    );
+    expect(refused).toStrictEqual(["capability.invalid", "capability.invalid"]);
+    expect(server.requests).toBe(0);
+  });
+
+  it("are refused with a capability for another action, connection, resource or key", async () => {
+    const capability = await capabilityFor(anna, call);
     const otherCalls = [
       { ...call, action: "mail.send" },
-      { ...call, connectionId: "connection-gmail" },
+      { ...call, action: "MAIL.LIST" },
+      { ...call, connectionId: await addConnection() },
       { ...call, resource: "ceo@acme.test" },
       { ...call, idempotencyKey: "send-1" },
     ];
     const refused = await Promise.all(
-      otherCalls.map(async (other) => await refusal({ ...other, capability }))
+      otherCalls.map(async (other) => await callWith(capability, other))
     );
     expect(refused).toStrictEqual(otherCalls.map(() => "capability.invalid"));
+    expect(server.requests).toBe(0);
   });
 
   it("are refused when they aren't a call", async () => {
-    const capability = await capabilityFor(call);
+    const capability = await capabilityFor(anna, call);
     const notCalls = [
       undefined,
       "call",
@@ -109,7 +127,11 @@ describe("calls to connect", () => {
       { ...call, capability, extra: true },
       { ...call, capability, input: new Date() },
     ];
-    const refused = await Promise.all(notCalls.map(refusal));
+    const refused = await Promise.all(
+      notCalls.map(
+        async (request) => await outcome(exports.default.call(request))
+      )
+    );
     expect(refused).toStrictEqual(notCalls.map(() => "connect.invalid_call"));
   });
 });
