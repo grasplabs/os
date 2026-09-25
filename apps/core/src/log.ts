@@ -2,7 +2,7 @@
  * Structured logs for Workers Logs: one object per line, so every field is
  * searchable. Never log secrets, headers, prompts or bodies.
  */
-type LogFields = Readonly<Record<string, string | number | undefined>>;
+export type LogFields = Readonly<Record<string, string | number | undefined>>;
 
 // Workers Logs collects what the Worker writes to the console.
 export const log = {

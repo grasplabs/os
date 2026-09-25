@@ -2,6 +2,7 @@ import { internalErrors, requestErrors } from "@grasp-os/shared/errors";
 
 import { errorResponse } from "./errors.ts";
 import { errorFields, log } from "./log.ts";
+import type { LogFields } from "./log.ts";
 import { checkRouterSecret } from "./router-secret.ts";
 import { rpcResponse } from "./rpc.ts";
 
@@ -35,35 +36,39 @@ const route = async (
   return await env.ASSETS.fetch(request);
 };
 
+/** A response, and what the request's log line says about it. */
+interface Outcome {
+  response: Response;
+  level: keyof typeof log;
+  fields?: LogFields;
+}
+
 const respond = async (
   request: Request,
   env: Env,
-  requestId: string,
-  fields: Readonly<Record<string, string>>
-): Promise<Response> => {
+  requestId: string
+): Promise<Outcome> => {
   try {
     const checked = await checkRouterSecret(request, env);
     if (checked.ok) {
-      return await route(checked.request, env, requestId);
+      const response = await route(checked.request, env, requestId);
+      return { response, level: "info" };
     }
-    const refused = { ...fields, reason: checked.reason };
-    if (checked.reason === "not_configured") {
-      log.error("request.refused", refused);
-    } else {
-      log.warn("request.refused", refused);
-    }
-    return errorResponse(
+    const response = errorResponse(
       403,
       requestErrors.create("request.forbidden"),
       requestId
     );
+    // A missing secret on core's side refuses everything: that's an error.
+    const level = checked.reason === "not_configured" ? "error" : "warn";
+    return { response, level, fields: { refused: checked.reason } };
   } catch (error) {
-    log.error("request.failed", { ...fields, ...errorFields(error) });
-    return errorResponse(
+    const response = errorResponse(
       500,
       internalErrors.create("internal.unexpected"),
       requestId
     );
+    return { response, level: "error", fields: errorFields(error) };
   }
 };
 
@@ -86,17 +91,15 @@ export const handleRequest = async (
 ): Promise<Response> => {
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
-  // Only the path: query strings can carry tokens.
-  const fields = {
+  const { response, level, fields } = await respond(request, env, requestId);
+  // One line per request. Only the path: query strings can carry tokens.
+  log[level]("request", {
     requestId,
     method: request.method,
     path: new URL(request.url).pathname,
-  };
-  const response = await respond(request, env, requestId, fields);
-  log.info("request", {
-    ...fields,
     status: response.status,
     durationMs: Date.now() - startedAt,
+    ...fields,
   });
   return withRequestId(response, requestId);
 };
