@@ -8,6 +8,11 @@ import { log } from "./log.ts";
 // with the `FEATURES` var, e.g. `{"apps": true}`, and switching it off again
 // is its kill switch. A feature not named, or a var that doesn't parse, is
 // off: flags fail closed.
+//
+// Changing a var deploys a new version of the Worker: every request and
+// every connection opened from then on gets the new flags. A WebSocket
+// opened before stays on the version it opened with, and so keeps its
+// flags, until it closes (at the latest when its session ends).
 
 /** Every feature behind a flag. */
 export type Feature = "apps" | "permissions" | "knowledge";
