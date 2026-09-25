@@ -31,16 +31,15 @@ const serveFramingPage = async (
 };
 
 test("can't be framed by another origin", async ({ page, baseURL }) => {
-  const app = new URL("/", baseURL);
-  const { url, server } = await serveFramingPage(app.href);
+  const { url, server } = await serveFramingPage(new URL("/", baseURL).href);
   try {
+    const violations = await recordCspViolations(page);
     await page.goto(url);
 
-    // The frame leaves about:blank either way: for the app or, refused, for
-    // the browser's error page.
-    const framedUrl = () => page.mainFrame().childFrames()[0]?.url() ?? "";
-    await expect.poll(framedUrl).toMatch(/^(?!about:blank$)./u);
-    expect(framedUrl()).not.toContain(app.host);
+    // Refused by the policy, not by some other failure to load the frame.
+    await expect
+      .poll(() => violations.some((text) => text.includes("frame-ancestors")))
+      .toBeTruthy();
     await expect(
       page.frameLocator("iframe").getByRole("heading", { name: "Grasp" })
     ).toHaveCount(0);
