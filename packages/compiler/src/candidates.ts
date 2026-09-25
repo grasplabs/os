@@ -4,8 +4,8 @@ const quotes = /["'`]/u;
 const before = new Set(['"', "'", "`", "(", "{", ","]);
 const after = new Set(['"', "'", "`", ")", "}", ",", ";"]);
 /**
- * Longer tokens aren't classes (the kit's longest is under 100
- * characters); skipping them keeps a build's work in step with its size.
+ * Longer candidates aren't classes (the kit's longest is under 100
+ * characters), so Tailwind needn't look at them.
  */
 const longestCandidate = 300;
 
@@ -33,9 +33,8 @@ const unwrap = (token: string): string => {
 export const extractCandidates = (source: string): string[] =>
   source
     .split(whitespace)
-    .flatMap((token) =>
-      token.length > longestCandidate
-        ? []
-        : [token, unwrap(token), ...token.split(quotes)]
-    )
-    .filter((token) => token.length > 0);
+    .flatMap((token) => [token, unwrap(token), ...token.split(quotes)])
+    .filter(
+      (candidate) =>
+        candidate.length > 0 && candidate.length <= longestCandidate
+    );

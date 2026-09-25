@@ -22,6 +22,7 @@ import type { Diagnostic } from "./diagnostic.ts";
 import { collectImports, importError, rewriteImports } from "./imports.ts";
 import type { ImportSite } from "./imports.ts";
 import { appModuleName, kitStylesheet, ownEntry } from "./kit.ts";
+import { limitErrors } from "./limits.ts";
 import { lint } from "./lint.ts";
 import { typeCheck } from "./type-check.ts";
 
@@ -46,11 +47,6 @@ const componentFile = /^components\/(?:[\w-]+\/)*[\w.-]+\.tsx?$/u;
 /** Types the App's code can use but that aren't code, e.g. its server's. */
 const declarationFile = /^[\w-]+\.d\.ts$/u;
 
-/**
- * The most a build takes, so that it stays well inside its isolate's CPU
- * and memory, and a mistake (or an attack) fails fast and says why.
- */
-const limits = { files: 200, fileLength: 200_000, totalLength: 1_000_000 };
 /** The line a React Compiler error points at in its code frame: `> 3 |`. */
 const framedLine = /^> *(?<line>\d+) \|/mu;
 
@@ -217,38 +213,6 @@ const buildCss = async (sources: string[]): Promise<string> => {
     ...kit.candidates,
     ...sources.flatMap((source) => extractCandidates(source)),
   ]);
-};
-
-/** Why these App files are more than a build takes, if they are. */
-const limitErrors = (files: Record<string, string>): Diagnostic[] => {
-  const entries = Object.entries(files);
-  if (entries.length > limits.files) {
-    return [
-      problem(
-        "limits",
-        `The App has ${entries.length} screens, components and declarations; a build takes at most ${limits.files}.`
-      ),
-    ];
-  }
-  const errors = entries
-    .filter(([, source]) => source.length > limits.fileLength)
-    .map(([path, source]) =>
-      problem(
-        "limits",
-        `This file has ${source.length} characters; a file can have at most ${limits.fileLength}. Split it up.`,
-        { file: path }
-      )
-    );
-  const total = entries.reduce((sum, [, source]) => sum + source.length, 0);
-  if (total > limits.totalLength) {
-    errors.push(
-      problem(
-        "limits",
-        `The App's files have ${total} characters together; a build takes at most ${limits.totalLength}.`
-      )
-    );
-  }
-  return errors;
 };
 
 /** The files a build reads: screens, components and declarations. */

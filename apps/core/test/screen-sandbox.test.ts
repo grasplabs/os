@@ -80,13 +80,18 @@ export default function Desk() {
     ]);
   });
 
-  it("builds a file of one huge token quickly", async () => {
+  it("builds a file of huge tokens quickly, keeping the classes in them", async () => {
     const built = await buildScreens(
       env,
-      app(screen(`export const noise = "${")".repeat(150_000)}x";`))
+      app(
+        screen(
+          `export const noise = "${")".repeat(150_000)}x";
+export const classes = ["mt-7","${"(".repeat(400)}"];`
+        )
+      )
     );
 
-    expect(built.ok).toBeTruthy();
+    expect(built.ok && built.css).toContain(".mt-7");
   });
 
   it("refuses more files and characters than a build takes", async () => {
@@ -97,7 +102,7 @@ export default function Desk() {
       ])
     );
     await expect(summaries({ ...screen(""), ...many })).resolves.toStrictEqual([
-      "undefined:undefined limits: The App has 202 screens, components and declarations; a build takes at most 200.",
+      "undefined:undefined limits: The App has 202 files; a build takes at most 200.",
     ]);
 
     const long = `// ${"x".repeat(200_001)}\n`;

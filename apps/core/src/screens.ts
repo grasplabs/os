@@ -1,4 +1,8 @@
-import { compilerVersion, startScreenCompiler } from "@grasp-os/compiler";
+import {
+  compilerVersion,
+  limitErrors,
+  startScreenCompiler,
+} from "@grasp-os/compiler";
 import type { ScreenBuild, ScreenSource } from "@grasp-os/compiler";
 
 /** A hash of an App's files, whatever order they come in. */
@@ -38,6 +42,11 @@ export const buildScreens = async (
   env: Env,
   source: ScreenSource
 ): Promise<ScreenBuild> => {
+  // Before hashing: the limits bound that work too.
+  const tooMuch = limitErrors(source.files);
+  if (tooMuch.length > 0) {
+    return { ok: false, diagnostics: tooMuch };
+  }
   const key = await buildKey(source);
   const cacheKey = `screen-builds/${key}.json`;
   const cached = await env.FILES.get(cacheKey);
