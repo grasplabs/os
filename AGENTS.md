@@ -31,7 +31,7 @@ Vite+ (`vp`) is the toolchain. Run from the repo root:
 - `vp run -r build`: build everything
 - `vp run e2e`: Playwright end-to-end tests (`*.e2e.ts` in `e2e/`)
 - `vp run smoke:workerd`: boot core on plain workerd (on-prem readiness)
-- `vp -C apps/web dev`, `vp run --filter @grasp-os/core dev`: run one app
+- `vp run dev`: run the frontend (localhost:5173) with core and connect behind it (localhost:8787); `vp -C apps/console dev` for the console
 - `vp run -r typegen`: regenerate `worker-configuration.d.ts` after changing a `wrangler.jsonc`
 - `vp run -r db:generate`: generate migrations after changing a schema
 
@@ -60,6 +60,16 @@ Trunk-based: `main` is the only long-lived branch; every merge deploys all apps 
 Nobody pushes to `main` directly. The rules live in `.github/rulesets/`; apply changes with `vp run github:setup`.
 
 Conflicts: rebase your branch on `main`. For generated files (lockfile, Worker types, route trees, migrations) take either side and regenerate (`vp install`, `vp run -r typegen`, `vp run -r build`, `vp run -r db:generate`) instead of merging by hand.
+
+## Working from Linear
+
+Work is planned in Linear (team Grasp OS), not in this repo.
+
+- Only pick up issues in **Todo**; their blockers are done. Parent issues are containers; never pick one up.
+- Move the issue to **In Progress** when you start and to **In Review** when the pull request is ready. Branch names and PR titles don't carry the issue ID, so move issues by hand.
+- When your issue is **Done**, move any issue it blocked to **Todo** once all of that issue's blockers are done.
+- Issues labelled **Security** are reviewed by a person before merge.
+- Don't follow an issue blindly: if its scope conflicts with this file or the code, raise it in the issue.
 
 ## Architecture rules
 
