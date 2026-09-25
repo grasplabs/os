@@ -12,7 +12,9 @@ import type {
 import { z } from "zod";
 
 import {
+  messageOf,
   namePattern,
+  nameRule,
   optionForms,
   stepKinds,
   stepOptionSchemas,
@@ -592,10 +594,7 @@ const stepNameOf = (
   const [nameNode] = call.arguments;
   const name = nameNode ? literalOf(nameNode) : undefined;
   if (typeof name !== "string" || !namePattern.test(name)) {
-    throw fail(
-      call,
-      'A step name is a string literal of up to 64 letters, digits, "-" or "_", starting with a letter'
-    );
+    throw fail(call, `A step name is a string literal of ${nameRule}`);
   }
   if (reader.names.has(name)) {
     throw fail(
@@ -821,8 +820,7 @@ export const describeWorkflow = (source: string): WorkflowOutline => {
   try {
     file = parse(source, { sourceType: "module", plugins: ["typescript"] });
   } catch (error) {
-    const reason = error instanceof Error ? error.message : String(error);
-    throw fail(undefined, `The workflow doesn't parse: ${reason}`);
+    throw fail(undefined, `The workflow doesn't parse: ${messageOf(error)}`);
   }
   const run = findWorkflowFunction(file);
   const bindings = bindingsOf(run.params);

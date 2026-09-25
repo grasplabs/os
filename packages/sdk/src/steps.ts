@@ -18,23 +18,37 @@ export type StepKind = "exact" | "ai" | "decision" | "wait";
 // for per-item keys and its own step names.
 export const namePattern = /^[A-Za-z][\w-]{0,63}$/u;
 
+/** What {@link namePattern} allows, for error messages. */
+export const nameRule =
+  'up to 64 letters, digits, "-" or "_", starting with a letter';
+
 /**
  * The name the engine gets for a step: its name, `name:key` for a keyed step
  * (the key URI-encoded), plus `#part` for the parts of a decision
  * (`review#ask`). The SDK's own steps (parameters, state) start with `$`.
  */
-export const engineStepPattern =
-  /^(?<name>[A-Za-z][\w-]{0,63})(?::(?<key>[^#]+))?(?:#(?<part>[\w-]+))?$/u;
+export const engineStepPattern = new RegExp(
+  // namePattern without its anchors.
+  `^(?<name>${namePattern.source.slice(1, -1)})(?::(?<key>[^#]+))?(?:#(?<part>[\\w-]+))?$`,
+  "u"
+);
+
+/** An error's message, or what was thrown as text. */
+export const messageOf = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
 
 // Durations
 
-const unitMilliseconds = new Map([
-  ["second", 1000],
-  ["minute", 60_000],
-  ["hour", 3_600_000],
-  ["day", 86_400_000],
+/** The units a duration is written in, largest first, in milliseconds. */
+export const durationUnits = [
   ["week", 604_800_000],
-]);
+  ["day", 86_400_000],
+  ["hour", 3_600_000],
+  ["minute", 60_000],
+  ["second", 1000],
+] as const;
+
+const unitMilliseconds = new Map<string, number>(durationUnits);
 const durationPattern =
   /^(?<amount>\d+(?:\.\d+)?) (?<unit>second|minute|hour|day|week)s?$/u;
 /** The longest wait the SDK allows, which every engine it targets supports. */

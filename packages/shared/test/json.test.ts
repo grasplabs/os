@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { canonicalJson } from "../src/audit-chain.ts";
+import { canonicalJson } from "../src/json.ts";
 
 describe("canonical JSON", () => {
   it("gives the same text whatever order the keys were written in", () => {
@@ -13,6 +13,12 @@ describe("canonical JSON", () => {
     expect(
       canonicalJson({ b: "x", a: [true, "é\n"], skipped: undefined, "": 0 })
     ).toBe('{"":0,"a":[true,"é\\n"],"b":"x"}');
+  });
+
+  it("orders keys by UTF-16 code unit, not by locale", () => {
+    expect(canonicalJson({ é: 1, z: 2, a: 3, B: 4 })).toBe(
+      '{"B":4,"a":3,"z":2,"é":1}'
+    );
   });
 
   it("keeps array order, which carries meaning", () => {

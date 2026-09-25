@@ -1,14 +1,9 @@
 import type { RunId } from "@grasp-os/shared/ids";
+import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
 
 /** A value that survives being recorded by the engine and read back. */
-export type JsonValue =
-  | string
-  | number
-  | boolean
-  | null
-  | JsonValue[]
-  | { [key: string]: JsonValue };
+export type JsonValue = Json;
 
 /** What a durable wait ends with: the event, or nothing before the timeout. */
 export type EngineEvent =
