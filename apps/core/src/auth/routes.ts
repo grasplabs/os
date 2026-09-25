@@ -3,7 +3,6 @@ import { requestErrors } from "@grasp-os/shared/errors";
 import { errorResponse } from "../errors.ts";
 import { authBasePath, authFor } from "./auth.ts";
 import { signInConfig } from "./config.ts";
-import type { AuthEnv } from "./config.ts";
 
 /**
  * The Better Auth routes core serves; everything else under `/api/auth` is
@@ -43,7 +42,7 @@ const isAllowed = (method: string, path: string): boolean =>
 /** Serves `/api/auth/*`. */
 export const handleAuthRequest = async (
   request: Request,
-  env: AuthEnv,
+  env: Env,
   requestId: string
 ): Promise<Response> => {
   const path = new URL(request.url).pathname.slice(authBasePath.length);

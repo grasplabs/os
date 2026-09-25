@@ -12,7 +12,6 @@ import { env } from "cloudflare:workers";
 import { vi } from "vite-plus/test";
 import { z } from "zod";
 
-import type { AuthEnv } from "../src/auth/config.ts";
 import worker from "../src/index.ts";
 import type { Claims, Idp } from "./idp.ts";
 import {
@@ -28,7 +27,7 @@ export const coreOrigin = "https://grasp-os-core.acme.workers.test";
 export const sessionCookieName = "__Host-grasp.session_token";
 
 /** Core's env with a different sign-in config. */
-export const withSignIn = (changes: Record<string, unknown>): AuthEnv => ({
+export const withSignIn = (changes: Record<string, unknown>): Env => ({
   ...env,
   SIGN_IN: { ...signInConfig, ...changes },
 });
@@ -37,7 +36,7 @@ export const withSignIn = (changes: Record<string, unknown>): AuthEnv => ({
 export const routed = async (
   path: string,
   init: RequestInit = {},
-  coreEnv: AuthEnv = env
+  coreEnv: Env = env
 ): Promise<Response> => {
   const headers = new Headers(init.headers);
   headers.set(routerSecretHeader, env.ROUTER_SECRET);
@@ -69,7 +68,7 @@ const startedSchema = z.object({ url: z.url(), redirect: z.literal(true) });
 interface SignInOptions {
   /** Cookies the browser already has. */
   cookie?: string;
-  coreEnv?: AuthEnv;
+  coreEnv?: Env;
 }
 
 /** Asks core to start signing in; returns the IdP URL and the browser's cookies. */
@@ -152,7 +151,7 @@ export const signedIn = async (
 interface RpcOptions {
   /** The page the connection comes from. */
   origin?: string;
-  coreEnv?: AuthEnv;
+  coreEnv?: Env;
 }
 
 /** Opens `/rpc` with `cookie`, from the client's own page unless told otherwise. */
@@ -179,7 +178,7 @@ export const openRpc = async (
 };
 
 /** Who the session behind `cookie` is, on a connection of its own. */
-export const whoami = async (cookie?: string, coreEnv: AuthEnv = env) => {
+export const whoami = async (cookie?: string, coreEnv: Env = env) => {
   const { core } = await openRpc(cookie, { coreEnv });
   try {
     using session = core.authenticate();

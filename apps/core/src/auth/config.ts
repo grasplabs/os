@@ -1,7 +1,7 @@
 import { roleSchema } from "@grasp-os/shared";
 import { z } from "zod";
 
-import { jsonVar } from "../json-var.ts";
+import { deploymentConfig } from "../deployment-config.ts";
 
 /**
  * How people sign in to this deployment. Deployment config, set by the
@@ -71,21 +71,12 @@ const signInConfigSchema = z.object({
 });
 export type SignInConfig = z.infer<typeof signInConfigSchema>;
 
-/** Settings core reads that aren't in wrangler.jsonc for every deployment. */
-export type AuthEnv = Env & {
-  SIGN_IN?: unknown;
-  ENTRA_CLIENT_SECRET?: string;
-  GOOGLE_CLIENT_SECRET?: string;
-};
-
 /**
  * The deployment's sign-in config, or `undefined` when none is set. A config
  * that doesn't parse counts as none: sign-in fails closed.
  */
-export const signInConfig = (env: AuthEnv): SignInConfig | undefined => {
-  const parsed = signInConfigSchema.safeParse(jsonVar(env.SIGN_IN));
-  return parsed.success ? parsed.data : undefined;
-};
+export const signInConfig = (env: Env): SignInConfig | undefined =>
+  deploymentConfig(signInConfigSchema, "SIGN_IN", env.SIGN_IN);
 
 /** The longest a staff window may be. */
 const staffWindowMaxMs = 7 * 24 * 60 * 60 * 1000;
@@ -164,7 +155,7 @@ const entraProvider = (
  * secret set, and staff sign-in only while its window is open.
  */
 export const oidcProviders = (
-  env: AuthEnv,
+  env: Env,
   config: SignInConfig,
   now: number
 ): OidcProvider[] => {

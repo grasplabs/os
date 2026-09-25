@@ -1,4 +1,6 @@
 # Copy to .dev.vars for local development. Never commit real values.
+# Wrangler loads only core's required secrets from it; deployment config
+# (SIGN_IN, MODEL_GATEWAY, FEATURES) goes in with `wrangler dev --var`.
 # Shared with the router. `vp run dev` skips the router-secret check for
 # requests to localhost, so it may stay empty locally.
 ROUTER_SECRET=

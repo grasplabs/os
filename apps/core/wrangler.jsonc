@@ -24,6 +24,10 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": true,
   },
+  // The console sets the deployment config vars below (SIGN_IN,
+  // MODEL_GATEWAY, FEATURES) through the API; without this, every deploy
+  // would delete them, as Wrangler deletes the vars it doesn't find here.
+  "keep_vars": true,
   // Every secret core needs: deploys fail while one is unset, and local dev
   // loads only these from .dev.vars. ROUTER_SECRET is shared with the router,
   // which sends it on every request. BETTER_AUTH_SECRET signs session cookies
@@ -41,6 +45,11 @@
   //
   // So are feature flags: the `FEATURES` var (src/features.ts), e.g.
   // `{"apps": true}`. Every feature is off until it names it.
+  //
+  // Local dev reads none of these from .dev.vars (Wrangler loads only the
+  // required secrets and declared vars from it): pass them with
+  // `wrangler dev --var NAME:<value>`, as core's dev script does for its own
+  // switches. Their types are in src/env.d.ts.
   "secrets": {
     "required": [
       "ROUTER_SECRET",

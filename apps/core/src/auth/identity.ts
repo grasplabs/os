@@ -13,7 +13,6 @@ import {
 } from "../db/core/schema.ts";
 import { authFor, organizationId } from "./auth.ts";
 import { providerIds, signInConfig, staffWindowOpen } from "./config.ts";
-import type { AuthEnv } from "./config.ts";
 
 /**
  * A person's role in the organization, read now. `undefined` when they have
@@ -57,7 +56,7 @@ export const memberRole = async (
  * `undefined` means nobody is signed in.
  */
 export const identify = async (
-  env: AuthEnv,
+  env: Env,
   headers: Headers
 ): Promise<Identity | undefined> => {
   const config = signInConfig(env);
