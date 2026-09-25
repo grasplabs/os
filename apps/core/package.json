@@ -5,7 +5,7 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
-    "dev": "vp -C ../web build && wrangler dev -c wrangler.jsonc -c ../connect/wrangler.jsonc",
+    "dev": "vp -C ../web build && wrangler dev -c wrangler.jsonc -c ../connect/wrangler.jsonc --var DEV_SKIP_ROUTER_SECRET:true",
     "deploy": "wrangler deploy",
     "typegen": "wrangler types --include-runtime=false",
     "db:generate": "drizzle-kit generate --config src/db/core/drizzle.config.ts && drizzle-kit generate --config src/db/knowledge/drizzle.config.ts && drizzle-kit generate --config src/db/workspace/drizzle.config.ts && drizzle-kit generate --config src/db/audit-log/drizzle.config.ts"

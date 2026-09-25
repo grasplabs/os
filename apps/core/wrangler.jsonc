@@ -12,12 +12,19 @@
     "enabled": true,
     "traces": { "enabled": true },
   },
-  // The frontend (apps/web) is served as static files by core.
+  // The frontend (apps/web) is served as static files by core. The Worker runs
+  // first for every path, so static files too pass the router-secret check
+  // before it serves them through the ASSETS binding.
   "assets": {
     "directory": "../web/dist",
+    "binding": "ASSETS",
     "not_found_handling": "single-page-application",
-    "run_worker_first": ["/api/*", "/rpc", "/health"],
+    "run_worker_first": true,
   },
+  // Every secret core reads: deploys fail while one is unset, and local dev
+  // loads only these from .dev.vars. ROUTER_SECRET is shared with the router,
+  // which sends it on every request.
+  "secrets": { "required": ["ROUTER_SECRET"] },
   "durable_objects": {
     "bindings": [
       { "name": "WORKSPACES", "class_name": "Workspace" },

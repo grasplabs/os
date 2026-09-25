@@ -9,7 +9,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 
+import { routerSecretHeader } from "../packages/shared/src/router.ts";
+
 const PORT = 8790;
+const ROUTER_SECRET = "smoke-router-secret";
 const ATTEMPTS = 50;
 const core = path.join(import.meta.dirname, "../apps/core");
 const out = mkdtempSync(path.join(tmpdir(), "grasp-os-workerd-"));
@@ -32,6 +35,7 @@ const core :Workerd.Worker = (
   modules = [(name = "index.js", esModule = embed "index.js")],
   compatibilityDate = "2026-09-15",
   compatibilityFlags = ["nodejs_compat"],
+  bindings = [(name = "ROUTER_SECRET", text = "${ROUTER_SECRET}")],
   durableObjectNamespaces = [
     (className = "Workspace", uniqueKey = "workspace", enableSql = true),
     (className = "App", uniqueKey = "app", enableSql = true),
@@ -52,7 +56,9 @@ const waitForCore = async (attempt = 0): Promise<boolean> => {
     return false;
   }
   try {
-    const response = await fetch(`http://127.0.0.1:${PORT}/health`);
+    const response = await fetch(`http://127.0.0.1:${PORT}/health`, {
+      headers: { [routerSecretHeader]: ROUTER_SECRET },
+    });
     return response.ok;
   } catch {
     await sleep(100);
