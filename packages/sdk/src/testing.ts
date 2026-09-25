@@ -1,4 +1,5 @@
 import { runIdSchema } from "@grasp-os/shared/ids";
+import { z } from "zod";
 
 import type {
   DecisionAnswer,
@@ -190,13 +191,35 @@ const attempt = async <T>(
 };
 
 /**
+ * A step's result as an engine stores it: JSON text, or nothing. A result
+ * that isn't JSON (a Date, a class) fails the step here, as it would when a
+ * real engine stores it.
+ */
+const toStored = (step: string, result: unknown): string | undefined => {
+  if (result === undefined) {
+    return undefined;
+  }
+  if (!z.json().safeParse(result).success) {
+    throw new Error(
+      `Step "${step}" returned something that isn't JSON, which an engine can't store`
+    );
+  }
+  return JSON.stringify(result);
+};
+
+// A fresh copy every time, so changing a result never changes its replays.
+const fromStored = (stored: string | undefined): unknown =>
+  stored === undefined ? undefined : JSON.parse(stored);
+
+/**
  * An in-memory engine with the durable semantics workflows rely on: a step's
- * result is recorded under its name, and running the workflow again on the
- * same engine replays it (completed steps return their recorded result), as
+ * result is stored as JSON under its name, and running the workflow again on
+ * the same engine replays it (completed steps return their stored result), as
  * a resume after a crash does.
  */
 export const createTestEngine = (options: TestEngineOptions = {}) => {
   const recorded = new Map<string, unknown>();
+  const results = new Map<string, string | undefined>();
   const steps: StepRecord[] = [];
   const modelRequests: ModelRequest[] = [];
   const events = [...(options.events ?? [])];
@@ -228,11 +251,11 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
     runId: runIdSchema.parse(options.runId ?? "run-1"),
     params: options.params ?? {},
     do: async (name, { retries, sideEffect = false, input }, fn) => {
-      if (recorded.has(name)) {
-        // SAFETY: only `do` records under a name, with the result of the
-        // same step, which a deterministic workflow asks for with the same T.
+      if (results.has(name)) {
+        // SAFETY: only `do` stores under a name, with the result of the same
+        // step, which a deterministic workflow asks for with the same T.
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-        return recorded.get(name) as Awaited<ReturnType<typeof fn>>;
+        return fromStored(results.get(name)) as Awaited<ReturnType<typeof fn>>;
       }
       const step = stepNameOf(name);
       const call = {
@@ -255,12 +278,14 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         } else {
           output = await attempt(retries ?? 0, fn);
         }
-        recorded.set(name, output);
-        log({ type: "step", ...call, sideEffect, status, output });
+        const stored = toStored(step.name, output);
+        results.set(name, stored);
+        const result = fromStored(stored);
+        log({ type: "step", ...call, sideEffect, status, output: result });
         // SAFETY: a mock stands in for the step's result, and a side effect
         // that isn't run has none; the test decides what the step returns.
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-        return output as Awaited<ReturnType<typeof fn>>;
+        return fromStored(stored) as Awaited<ReturnType<typeof fn>>;
       } catch (error) {
         log({
           type: "step",

@@ -163,7 +163,7 @@ describe("step.do", () => {
       );
       await step.do(
         "write",
-        { description: "Write", sideEffect: true, key: 7 },
+        { description: "Write", sideEffect: true, key: 7, input: null },
         async (context) => {
           received.push(context);
         }
@@ -174,25 +174,39 @@ describe("step.do", () => {
 
     expect(received).toStrictEqual([
       { input: { id: 7 } },
-      { idempotencyKey: "run-1:write:7", input: undefined },
+      { idempotencyKey: "run-1:write:7", input: null },
     ]);
   });
 
-  it("rejects input that isn't JSON before the step runs", async () => {
+  it("rejects a side effect without input, or input that isn't JSON, before it runs", async () => {
     const ran: string[] = [];
-    const definition = withStep(
-      async (step) =>
-        await step.do(
-          "write",
-          // @ts-expect-error -- input is JSON
-          { description: "Write", sideEffect: true, input: new Date(0) },
-          async () => ran.push("write")
-        )
-    );
+    const definitions = [
+      withStep(
+        async (step) =>
+          await step.do(
+            "write",
+            // @ts-expect-error -- input is JSON
+            { description: "Write", sideEffect: true, input: new Date(0) },
+            async () => ran.push("write")
+          )
+      ),
+      withStep(
+        async (step) =>
+          await step.do(
+            "write",
+            // @ts-expect-error -- a side-effect step says what it writes
+            { description: "Write", sideEffect: true },
+            async () => ran.push("write")
+          )
+      ),
+    ];
 
-    await expect(
-      definition.run(createFakeEngine().engine)
-    ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
+    for (const definition of definitions) {
+      // oxlint-disable-next-line no-await-in-loop -- each run is one case
+      await expect(
+        definition.run(createFakeEngine().engine)
+      ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
+    }
     expect(ran).toStrictEqual([]);
   });
 
@@ -210,6 +224,35 @@ describe("step.do", () => {
     );
 
     await expect(definition.run(createFakeEngine().engine)).resolves.toBe(3);
+  });
+
+  it("fails a step whose result isn't JSON, which an engine can't store", async () => {
+    const definition = withStep(
+      async (step) =>
+        await step.do("when", { description: "When" }, async () => new Date(0))
+    );
+
+    await expect(definition.run(createFakeEngine().engine)).rejects.toThrow(
+      "isn't JSON"
+    );
+  });
+
+  it("replays a step's stored result, whatever the run did to it since", async () => {
+    const definition = withStep(async (step) => {
+      const list = await step.do("list", { description: "List" }, async () => ({
+        items: ["a"],
+      }));
+      list.items.push("added by the run");
+      return list.items;
+    });
+    const { engine } = createFakeEngine();
+
+    await definition.run(engine);
+
+    await expect(definition.run(engine)).resolves.toStrictEqual([
+      "a",
+      "added by the run",
+    ]);
   });
 });
 

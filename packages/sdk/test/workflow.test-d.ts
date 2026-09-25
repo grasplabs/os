@@ -91,10 +91,16 @@ await step.sleep("pause", { description: "Pause", duration: "1 fortnight" });
 expectTypeOf(
   await step.do(
     "book",
-    { description: "Book", sideEffect: true },
+    { description: "Book", sideEffect: true, input: null },
     async ({ idempotencyKey }) => idempotencyKey
   )
 ).toEqualTypeOf<string>();
+await step.do(
+  "book",
+  // @ts-expect-error -- a side-effect step says what it writes
+  { description: "Book", sideEffect: true },
+  async () => 1
+);
 await step.do(
   "match",
   { description: "Match" },

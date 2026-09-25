@@ -562,9 +562,13 @@ const readOptions = (
     }
     options.set(option, value);
   }
-  const missing = requiredOptions[method].filter(
-    (option) => !options.has(option)
-  );
+  const sideEffect = options.get("sideEffect");
+  // A side effect's input is what a dry run shows it would write.
+  const required =
+    method === "do" && sideEffect && literalOf(sideEffect) === true
+      ? [...requiredOptions.do, "input"]
+      : requiredOptions[method];
+  const missing = required.filter((option) => !options.has(option));
   if (missing.length > 0) {
     throw fail(object, `Step "${name}" needs ${missing.join(", ")}`);
   }

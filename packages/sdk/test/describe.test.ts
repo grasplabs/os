@@ -164,6 +164,10 @@ describe(describeWorkflow, () => {
       ],
       [`await step.do("go", {}, async () => 1);`, "needs description"],
       [
+        `await step.do("go", { description: "Go", sideEffect: true }, async () => 1);`,
+        "needs input",
+      ],
+      [
         `await step.do("go", { description: "Go", retry: 2 }, async () => 1);`,
         "isn't an option",
       ],

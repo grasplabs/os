@@ -14,8 +14,9 @@ import { namePattern } from "./steps.ts";
  * export default workflow("invoice-approval", {
  *   params: { threshold: money({ label: "Review invoices above", default: 5000 }) },
  * }, async (step, { params }) => {
- *   await step.do("book", { description: "Book the invoice", sideEffect: true },
- *     async ({ idempotencyKey }) => ...);
+ *   await step.do("book",
+ *     { description: "Book the invoice", sideEffect: true, input: { invoice: 7 } },
+ *     async ({ idempotencyKey, input }) => ...);
  * });
  * ```
  *
@@ -167,7 +168,8 @@ export interface DoOptions<
   /**
    * What the step works on, as JSON; the function gets it back as `input`.
    * It's recorded with the step, and a dry run shows it for a side-effect
-   * step it doesn't run, so take everything such a step writes from here.
+   * step it doesn't run, so a side-effect step must give it (`null` when it
+   * writes nothing of its own) and take everything it writes from here.
    */
   input?: Input;
 }
@@ -253,9 +255,9 @@ export interface StepRunner {
    * returns the recorded result instead of running the code again.
    */
   do: {
-    <T, Input extends StepInput = undefined>(
+    <T, Input extends JsonValue>(
       name: string,
-      options: DoOptions<Input> & { sideEffect: true },
+      options: DoOptions<Input> & { sideEffect: true; input: Input },
       fn: (context: SideEffectContext & { input: Input }) => Promise<T>
     ): Promise<T>;
     <T, Input extends StepInput = undefined>(
@@ -538,6 +540,10 @@ const createStepRunner = (engine: WorkflowEngine): UntypedStepRunner => {
         `Step "${name}" needs input that is JSON`
       );
       const sideEffect = options.sideEffect === true;
+      check(
+        !sideEffect || input !== undefined,
+        `Step "${name}" changes something, so it needs \`input\`: what it writes, or null`
+      );
       return await engine.do(
         step,
         { retries, sideEffect, ...(input === undefined ? {} : { input }) },
