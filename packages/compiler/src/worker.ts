@@ -21,18 +21,20 @@ import { isError } from "./diagnostic.ts";
 import type { Diagnostic } from "./diagnostic.ts";
 import { collectImports, importError, rewriteImports } from "./imports.ts";
 import type { ImportSite } from "./imports.ts";
-import { appModuleName, kitStylesheet } from "./kit.ts";
+import { appModuleName, kitStylesheet, ownEntry } from "./kit.ts";
 import { lint } from "./lint.ts";
 import { typeCheck } from "./type-check.ts";
 
 /**
- * An App's modules by flat name and the CSS they use, or why it failed.
- * Errors fail a build; warnings don't.
+ * An App's modules by flat name, the kit's modules they need (directly or
+ * through each other) and the CSS they use; or why it failed. Errors fail
+ * a build; warnings don't.
  */
 export type ScreenBuild =
   | {
       ok: true;
       modules: Record<string, string>;
+      kitModules: string[];
       css: string;
       diagnostics: Diagnostic[];
     }
@@ -43,6 +45,14 @@ const screenFile = /^screens\/[\w-]+\.tsx$/u;
 const componentFile = /^components\/(?:[\w-]+\/)*[\w.-]+\.tsx?$/u;
 /** Types the App's code can use but that aren't code, e.g. its server's. */
 const declarationFile = /^[\w-]+\.d\.ts$/u;
+
+/**
+ * The most a build takes, so that it stays well inside its isolate's CPU
+ * and memory, and a mistake (or an attack) fails fast and says why.
+ */
+const limits = { files: 200, fileLength: 200_000, totalLength: 1_000_000 };
+/** The line a React Compiler error points at in its code frame: `> 3 |`. */
+const framedLine = /^> *(?<line>\d+) \|/mu;
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
@@ -73,6 +83,21 @@ const locationOf = (error: unknown): Location => {
     : {};
 };
 
+/** Where a compile error is: Babel's location, or the React Compiler's line. */
+const compileErrorAt = (error: unknown, message: string): Location => {
+  const located = locationOf(error);
+  const line = framedLine.exec(message)?.groups?.line;
+  return located.line === undefined && line !== undefined
+    ? { line: Number(line) }
+    : located;
+};
+
+/** A compile error's message, in words for whoever fixes the file. */
+const compileMessage = (message: string): string =>
+  message.includes("Handle Import expressions")
+    ? "import() can't be used inside a component or hook: import the module at the top of the file."
+    : message;
+
 /** An error, which fails the build. */
 const problem = (
   rule: string,
@@ -99,27 +124,35 @@ const nameClashes = (paths: string[]): Diagnostic[] => {
   return clashes;
 };
 
-/** Compiles one App file, or says why it can't be. */
+/**
+ * An error's message without the file Babel names in it (as `/<path>`):
+ * the diagnostic names it on its own.
+ */
+const messageIn = (path: string, error: unknown): string =>
+  messageOf(error).replace(`/${path}: `, "").replace(`${path}: `, "");
+
+/**
+ * Compiles one App file, or says why it can't be. Adds the kit modules it
+ * imports to `kitImports`.
+ */
 const compileFile = (
   path: string,
   source: string,
-  files: ReadonlySet<string>
+  files: ReadonlySet<string>,
+  kitImports: Set<string>
 ): { code: string } | { errors: Diagnostic[] } => {
   const imports: ImportSite[] = [];
   let compiled: string;
   try {
     compiled = compileModule(source, path, [collectImports(imports)]);
   } catch (error) {
-    // Babel names the file in syntax errors (as `/<path>`); the React
-    // Compiler doesn't. The diagnostic names it on its own.
-    const message = messageOf(error);
+    const message = messageIn(path, error);
     return {
       errors: [
-        problem(
-          "compile",
-          message.replace(`/${path}: `, "").replace(`${path}: `, ""),
-          { file: path, ...locationOf(error) }
-        ),
+        problem("compile", compileMessage(message), {
+          file: path,
+          ...compileErrorAt(error, message),
+        }),
       ],
     };
   }
@@ -141,9 +174,30 @@ const compileFile = (
   if (errors.length > 0) {
     return { errors };
   }
-  return {
-    code: transformModule(compiled, path, [rewriteImports(path, files, kit)]),
-  };
+  try {
+    return {
+      code: transformModule(compiled, path, [
+        rewriteImports(path, files, kit, kitImports),
+      ]),
+    };
+  } catch (error) {
+    return {
+      errors: [problem("imports", messageIn(path, error), { file: path })],
+    };
+  }
+};
+
+/** The kit's modules these import, and every kit module those import. */
+const kitModulesFor = (imported: Iterable<string>): string[] => {
+  const needed = new Set<string>();
+  const queue = [...imported];
+  for (const name of queue) {
+    if (!needed.has(name)) {
+      needed.add(name);
+      queue.push(...(ownEntry(kit.moduleImports, name) ?? []));
+    }
+  }
+  return [...needed].toSorted();
 };
 
 /** The CSS for the kit's theme and every class the App and the kit use. */
@@ -152,7 +206,7 @@ const buildCss = async (sources: string[]): Promise<string> => {
     // The kit's stylesheet only imports stylesheets that ship with the kit.
     // oxlint-disable-next-line require-await -- Tailwind expects a promise
     loadStylesheet: async (id: string) => {
-      const content = kit.stylesheets[id];
+      const content = ownEntry(kit.stylesheets, id);
       if (content === undefined) {
         throw new Error(`The stylesheet "${id}" is not in the kit`);
       }
@@ -163,6 +217,38 @@ const buildCss = async (sources: string[]): Promise<string> => {
     ...kit.candidates,
     ...sources.flatMap((source) => extractCandidates(source)),
   ]);
+};
+
+/** Why these App files are more than a build takes, if they are. */
+const limitErrors = (files: Record<string, string>): Diagnostic[] => {
+  const entries = Object.entries(files);
+  if (entries.length > limits.files) {
+    return [
+      problem(
+        "limits",
+        `The App has ${entries.length} screens, components and declarations; a build takes at most ${limits.files}.`
+      ),
+    ];
+  }
+  const errors = entries
+    .filter(([, source]) => source.length > limits.fileLength)
+    .map(([path, source]) =>
+      problem(
+        "limits",
+        `This file has ${source.length} characters; a file can have at most ${limits.fileLength}. Split it up.`,
+        { file: path }
+      )
+    );
+  const total = entries.reduce((sum, [, source]) => sum + source.length, 0);
+  if (total > limits.totalLength) {
+    errors.push(
+      problem(
+        "limits",
+        `The App's files have ${total} characters together; a build takes at most ${limits.totalLength}.`
+      )
+    );
+  }
+  return errors;
 };
 
 /** The files a build reads: screens, components and declarations. */
@@ -182,6 +268,10 @@ const appFiles = (files: Record<string, string>): Record<string, string> =>
  */
 export const checkScreens = (files: Record<string, string>): Diagnostic[] => {
   const app = appFiles(files);
+  const tooMuch = limitErrors(app);
+  if (tooMuch.length > 0) {
+    return tooMuch;
+  }
   return [...typeCheck(app, kit.types), ...lint(app, kit)];
 };
 
@@ -192,7 +282,12 @@ export const checkScreens = (files: Record<string, string>): Diagnostic[] => {
 export const buildScreens = async (
   files: Record<string, string>
 ): Promise<ScreenBuild> => {
-  const sources = Object.entries(appFiles(files)).filter(
+  const app = appFiles(files);
+  const tooMuch = limitErrors(app);
+  if (tooMuch.length > 0) {
+    return { ok: false, diagnostics: tooMuch };
+  }
+  const sources = Object.entries(app).filter(
     ([path]) => !declarationFile.test(path)
   );
   const paths = sources.map(([path]) => path);
@@ -213,9 +308,10 @@ export const buildScreens = async (
   }
   const known = new Set(paths);
   const modules: Record<string, string> = {};
+  const kitImports = new Set<string>();
   const errors: Diagnostic[] = [];
   for (const [path, source] of sources) {
-    const result = compileFile(path, source, known);
+    const result = compileFile(path, source, known, kitImports);
     if ("code" in result) {
       modules[appModuleName(path)] = result.code;
     } else {
@@ -231,7 +327,13 @@ export const buildScreens = async (
     return { ok: false, diagnostics };
   }
   const css = await buildCss(sources.map(([, source]) => source));
-  return { ok: true, modules, css, diagnostics };
+  return {
+    ok: true,
+    modules,
+    kitModules: kitModulesFor(kitImports),
+    css,
+    diagnostics,
+  };
 };
 
 export default class ScreenCompiler extends WorkerEntrypoint {

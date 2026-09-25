@@ -12,6 +12,10 @@
     "#kit": {
       "types": "./src/kit-module.d.ts",
       "default": "./dist/kit.json"
+    },
+    "#version": {
+      "types": "./src/version.d.ts",
+      "default": "./dist/version.js"
     }
   },
   "exports": {
@@ -22,6 +26,7 @@
   },
   "dependencies": {
     "@babel/standalone": "catalog:",
+    "@grasp-os/shared": "workspace:*",
     "@grasp-os/ui": "workspace:*",
     "@shadcn/lint": "catalog:",
     "@typescript-eslint/parser": "catalog:",

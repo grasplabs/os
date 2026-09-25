@@ -3,9 +3,11 @@
  * Dynamic Worker of its own. The modules import each other and the kit's
  * modules by flat name (see kit.ts); a page maps those names to the code
  * with an import map.
+ *
+ * The compiler's code and what it knows of the kit are most of core's
+ * code, and most requests never build: they are evaluated on first use.
  */
-import { kitModules as builtKitModules, source, version } from "#isolate";
-import kit from "#kit";
+import { compatibilityDate } from "@grasp-os/shared/runtime";
 
 import { kitModule } from "./kit.ts";
 import type { KitModules } from "./kit.ts";
@@ -15,7 +17,7 @@ export type { Diagnostic } from "./diagnostic.ts";
 export type { KitModules } from "./kit.ts";
 export type { ScreenBuild } from "./worker.ts";
 /** Part of every build's cache key: a new compiler or kit builds again. */
-export { version as compilerVersion } from "#isolate";
+export { version as compilerVersion } from "#version";
 
 /** An App's screens at one version. */
 export interface ScreenSource {
@@ -29,27 +31,44 @@ export interface ScreenSource {
 }
 
 /** The kit's modules, which every App's modules import: one set per release. */
-export const kitModules = (): KitModules => builtKitModules;
-
-/** The compiler's compatibility date, as core's. */
-const compatibilityDate = "2026-09-15";
+export const kitModules = async (): Promise<KitModules> => {
+  const { kitModules: modules } = await import("#isolate");
+  return modules;
+};
 
 /**
- * Starts the compiler in its own isolate, one per build: no bindings and no
- * network (`globalOutbound: null`). `nodejs_compat` is for the React
- * Compiler, which is written for Node.
+ * How the compiler's isolate runs: no bindings, no network
+ * (`globalOutbound: null` and no subrequests), and at most 20 s of CPU per
+ * call, many times what a large App takes. `nodejs_compat` is for the
+ * React Compiler, which is written for Node.
+ */
+export const isolateSettings = {
+  compatibilityDate,
+  compatibilityFlags: ["nodejs_compat"],
+  env: {},
+  globalOutbound: null,
+  limits: { cpuMs: 20_000, subRequests: 0 },
+} satisfies Omit<WorkerLoaderWorkerCode, "mainModule" | "modules">;
+
+/**
+ * Starts the compiler in its own isolate, one per build, named `build`.
+ * The loader reuses a running isolate with the same name, so `build` must
+ * name what is built (see core's screens.ts).
  */
 export const startScreenCompiler = (
   loader: WorkerLoader,
   build: string
 ): Service<ScreenCompiler> =>
   loader
-    .get(`screen-compiler:${version}:${build}`, () => ({
-      compatibilityDate,
-      compatibilityFlags: ["nodejs_compat"],
-      mainModule: "compiler.js",
-      modules: { "compiler.js": source, [kitModule]: { json: kit } },
-      env: {},
-      globalOutbound: null,
-    }))
+    .get(`screen-compiler:${build}`, async () => {
+      const [{ source }, { default: kit }] = await Promise.all([
+        import("#isolate"),
+        import("#kit"),
+      ]);
+      return {
+        ...isolateSettings,
+        mainModule: "compiler.js",
+        modules: { "compiler.js": source, [kitModule]: { json: kit } },
+      };
+    })
     .getEntrypoint<ScreenCompiler>();

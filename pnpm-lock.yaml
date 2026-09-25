@@ -444,6 +444,9 @@ importers:
       '@babel/standalone':
         specifier: 'catalog:'
         version: 7.29.9
+      '@grasp-os/shared':
+        specifier: workspace:*
+        version: link:../shared
       '@grasp-os/ui':
         specifier: workspace:*
         version: link:../ui

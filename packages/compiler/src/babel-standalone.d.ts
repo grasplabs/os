@@ -6,7 +6,6 @@ declare module "@babel/standalone" {
     configFile: false;
     sourceType: "module";
     compact?: boolean;
-    parserOpts?: { plugins: string[] };
     presets?: unknown[];
     plugins: unknown[];
   }

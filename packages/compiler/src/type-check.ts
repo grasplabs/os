@@ -7,6 +7,7 @@
 import ts from "typescript";
 
 import type { Diagnostic } from "./diagnostic.ts";
+import { ownEntry } from "./kit.ts";
 
 /**
  * How App code is checked. `build.ts` loads the kit with the same options
@@ -116,7 +117,7 @@ export const typeCheck = (
   );
   const appDirectories = directoriesOf(app.keys());
   const readFile = (path: string): string | undefined =>
-    app.get(path) ?? kit.files[path];
+    app.get(path) ?? ownEntry(kit.files, path);
   const parse = (
     path: string,
     languageVersion: ts.ScriptTarget | ts.CreateSourceFileOptions

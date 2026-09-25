@@ -174,11 +174,15 @@ const chunksOf = (
  * The kit's modules: React, `@grasp-os/ui` and lucide-react's icons, built
  * together so they share one React and one copy of every dependency. Entries
  * and the chunks they share are named flat (`react.js`, `kit~….js`), and
- * import each other by that name instead of by relative path.
+ * import each other by that name instead of by relative path. Returns their
+ * code and what each imports, by flat name.
  */
 const buildKitModules = async (
   entries: Entry[]
-): Promise<Record<string, string>> => {
+): Promise<{
+  code: Record<string, string>;
+  imports: Record<string, string[]>;
+}> => {
   const config: InlineConfig = {
     configFile: false,
     root,
@@ -218,22 +222,25 @@ const buildKitModules = async (
   };
   const chunks = chunksOf(await build(config));
   const kitModules: Record<string, string> = {};
+  const imports: Record<string, string[]> = {};
   for (const chunk of chunks) {
     let { code } = chunk;
-    for (const imported of [...chunk.imports, ...chunk.dynamicImports]) {
-      code = code.replaceAll(`"./${imported}"`, `"${imported}"`);
+    const imported = [...chunk.imports, ...chunk.dynamicImports];
+    for (const name of imported) {
+      code = code.replaceAll(`"./${name}"`, `"${name}"`);
     }
     if (code.includes('"./')) {
       throw new Error(`${chunk.fileName} still imports by relative path`);
     }
     kitModules[chunk.fileName] = code;
+    imports[chunk.fileName] = imported;
   }
   for (const { specifier } of entries) {
     if (kitModules[kitModuleName(specifier)] === undefined) {
       throw new Error(`The kit has no module for ${specifier}`);
     }
   }
-  return kitModules;
+  return { code: kitModules, imports };
 };
 
 /** The kit's stylesheet and the ones it imports, by their `style` export. */
@@ -511,7 +518,11 @@ const buildScreenCompiler = async (): Promise<void> => {
     specifier,
     id: `${virtualEntry}${specifier}`,
   }));
-  const kitCode = await buildKitModules([...react, ...components, ...icons]);
+  const { code: kitCode, imports: moduleImports } = await buildKitModules([
+    ...react,
+    ...components,
+    ...icons,
+  ]);
   const candidates = sourcesIn(path.join(ui, "src")).flatMap((file) =>
     extractCandidates(readText(file))
   );
@@ -525,6 +536,7 @@ const buildScreenCompiler = async (): Promise<void> => {
     icons: iconNames,
     stylesheets,
     candidates: [...new Set(candidates)].toSorted(),
+    moduleImports,
     types: collectTypes([...imports, "lucide-react"]),
     lintProject: collectLintProject(stylesheets),
     // The repo's lint config extends the same preset.
@@ -548,10 +560,14 @@ const buildScreenCompiler = async (): Promise<void> => {
     .update(kitModules.version)
     .digest("hex")
     .slice(0, 16);
+  // Apart, so that reading the version doesn't load the rest.
+  writeFileSync(
+    path.join(dist, "version.js"),
+    `export const version = "${version}";\n`
+  );
   writeFileSync(
     path.join(dist, "isolate.js"),
-    `export const version = "${version}";
-export const source = ${JSON.stringify(compiler)};
+    `export const source = ${JSON.stringify(compiler)};
 export const kitModules = ${JSON.stringify(kitModules)};
 `
   );

@@ -1,4 +1,4 @@
-import { appModuleName, kitModuleName } from "./kit.ts";
+import { appModuleName, kitModuleName, ownEntry } from "./kit.ts";
 import type { Kit } from "./kit.ts";
 
 /** An import in a source file, as written. */
@@ -183,7 +183,7 @@ const iconError = (
   if (names === undefined) {
     return "import or export icons from lucide-react by name, e.g. { InboxIcon }.";
   }
-  const unknown = names.filter((name) => kit.icons[name] === undefined);
+  const unknown = names.filter((name) => !Object.hasOwn(kit.icons, name));
   return unknown.length === 0
     ? undefined
     : `${unknown.map((name) => `"${name}"`).join(", ")} is not a lucide-react icon.`;
@@ -240,31 +240,56 @@ const fromIconModule = (specifier: Specifier, module: string): Statement => {
   };
 };
 
+/** What the React Compiler's output imports, besides what App code may. */
+const compilerRuntime = "react/compiler-runtime";
+
 /**
  * A Babel plugin that points a compiled module's imports at flat module
  * names: App files by path, kit modules by specifier, and each lucide-react
- * icon at its own module, so a page loads only the icons it uses. Runs on
- * compiled code, so it sees the imports the compiler and the JSX transform
- * added; the imports were checked before.
+ * icon at its own module, so a page loads only the icons it uses. It adds
+ * the kit modules it points at to `kitImports`.
+ *
+ * It runs on compiled code, so it also sees the imports the compiler and
+ * the JSX transform added, which the check of the source can't: a
+ * `@jsxImportSource` comment, for one, makes JSX import from any package.
+ * Anything that isn't the kit or the App's own files throws.
  */
 export const rewriteImports =
-  (file: string, files: ReadonlySet<string>, kit: Kit) => () => {
+  (
+    file: string,
+    files: ReadonlySet<string>,
+    kit: Kit,
+    kitImports: Set<string>
+  ) =>
+  () => {
+    const allowed = new Set([...kit.imports, compilerRuntime]);
+    const kitModule = (module: string | undefined): string => {
+      if (module === undefined) {
+        throw new Error("Not a lucide-react icon.");
+      }
+      kitImports.add(module);
+      return module;
+    };
     const moduleFor = (specifier: string): string => {
       if (!isRelative(specifier)) {
-        return kitModuleName(specifier);
+        if (!allowed.has(specifier)) {
+          throw new Error(
+            `"${specifier}" is outside the kit, and the compiled file imports it: remove what adds it, such as a @jsxImportSource comment.`
+          );
+        }
+        return kitModule(kitModuleName(specifier));
       }
       const target = resolveRelative(file, specifier, files);
       if (target === undefined) {
-        throw new Error(`${file}: "${specifier}" is not a file in this App.`);
+        throw new Error(`"${specifier}" is not a file in this App.`);
       }
       return appModuleName(target);
     };
-    // The check allowed only named icons, so every name has a module.
     const icons = (statement: Statement): Statement[] =>
       valueSpecifiers(statement).map((specifier) =>
         fromIconModule(
           specifier,
-          kit.icons[importedName(specifier) ?? ""] ?? ""
+          kitModule(ownEntry(kit.icons, importedName(specifier) ?? ""))
         )
       );
     return {

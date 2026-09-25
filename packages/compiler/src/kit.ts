@@ -20,6 +20,8 @@ export interface Kit {
   stylesheets: Record<string, string>;
   /** Tailwind class candidates in the kit's own sources. */
   candidates: string[];
+  /** What each of the kit's modules imports, by flat name. */
+  moduleImports: Record<string, string[]>;
   /**
    * What the type check reads, by absolute path: TypeScript's libraries
    * and the kit's packages with their declarations, as `/node_modules/…`.
@@ -42,6 +44,15 @@ export interface KitModules {
   /** Module code by flat name. */
   modules: Record<string, string>;
 }
+
+/**
+ * A record's own entry: never one `Object.prototype` has, such as
+ * `toString`, which an App could otherwise name.
+ */
+export const ownEntry = <T>(
+  record: Record<string, T>,
+  key: string
+): T | undefined => (Object.hasOwn(record, key) ? record[key] : undefined);
 
 /** The name the compiler's isolate has `Kit` under, as a JSON module. */
 export const kitModule = "kit.json";
