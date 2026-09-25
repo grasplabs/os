@@ -1,0 +1,607 @@
+import {
+  appErrors,
+  appIdInputSchema,
+  appLimits,
+  appVersionSchema,
+  commitMessageSchema,
+  fileChangesSchema,
+  newAppSchema,
+} from "@grasp-os/shared/apps";
+import type {
+  App,
+  AppFiles,
+  AppVersion,
+  FileDiff,
+} from "@grasp-os/shared/apps";
+import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
+import { appIdSchema } from "@grasp-os/shared/ids";
+import type { AppId } from "@grasp-os/shared/ids";
+import { canonicalJson } from "@grasp-os/shared/json";
+import type { Identity } from "@grasp-os/shared/rpc";
+import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
+import { z } from "zod";
+
+import {
+  outboxed,
+  outboxedIfChanged,
+  sendAuditOutboxNow,
+} from "./audit-outbox.ts";
+import { actorOf } from "./audit.ts";
+import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
+import { isUniqueViolation } from "./db/d1.ts";
+
+// The App registry and each App's code. The registry, the versions and the
+// working copy (files written since the latest version) are rows in the
+// core database. A version's files are one object in R2 (EU),
+// `apps/<app>/trees/<sha256>.json`: canonical JSON by path, stored under
+// its own SHA-256, which the version row names. Reading a version is one
+// read, checked against the hash.
+//
+// A tree is only ever written under its own hash and version rows never
+// change, so a version's files stay exactly as committed whatever happens
+// to the App later. The tree is stored before the row that names it, so a
+// row never names a missing tree. A commit refused as a conflict can leave
+// its tree named by no version: rare, and one version's size at most.
+//
+// Versions are linear: each commit is the latest version plus the working
+// copy, as the next number. Two commits at once both try the same number,
+// and the database keeps one; the other is refused as a conflict.
+
+type AppRow = typeof apps.$inferSelect;
+type VersionRow = typeof appVersions.$inferSelect;
+
+/** A tree as `commitFiles` stores it. */
+const storedTreeSchema = z.record(z.string(), z.string());
+
+/** Most versions one `listVersions` call returns. */
+const versionsPerPage = 100;
+
+const requireBuilder = (by: Identity): void => {
+  if (by.role === "user") {
+    throw appErrors.create("app.forbidden");
+  }
+};
+
+/** `input` as `schema` has it, or `app.invalid` saying why not. */
+const parse = <Schema extends z.ZodType>(
+  schema: Schema,
+  input: unknown
+): z.output<Schema> => {
+  const parsed = schema.safeParse(input);
+  if (!parsed.success) {
+    throw appErrors.create("app.invalid", {
+      issues: parsed.error.issues.map(
+        ({ path, message }) => `${path.map(String).join(".")}: ${message}`
+      ),
+    });
+  }
+  return parsed.data;
+};
+
+const sha256 = async (text: string): Promise<string> => {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(text)
+  );
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+};
+
+const treeKey = (app: AppId, tree: string): string =>
+  `apps/${app}/trees/${tree}.json`;
+
+/** A version's files, checked against the hash that names them. */
+const readTree = async (
+  env: Env,
+  app: AppId,
+  tree: string
+): Promise<Map<string, string>> => {
+  const key = treeKey(app, tree);
+  const object = await env.FILES.get(key);
+  const text = await object?.text();
+  if (text === undefined || (await sha256(text)) !== tree) {
+    throw new Error(`App tree ${key} is missing or damaged`);
+  }
+  return new Map(Object.entries(storedTreeSchema.parse(JSON.parse(text))));
+};
+
+const iso = (date: Date): string => date.toISOString();
+
+const toApp = (row: AppRow): App => ({
+  id: appIdSchema.parse(row.id),
+  name: row.name,
+  description: row.description,
+  owner: row.ownerId,
+  blueprint: row.blueprint,
+  currentVersion: row.currentVersion,
+  pendingVersion: row.pendingVersion,
+  createdAt: iso(row.createdAt),
+});
+
+const toVersion = (row: VersionRow): AppVersion => ({
+  app: appIdSchema.parse(row.appId),
+  version: row.version,
+  parent: row.parent,
+  tree: row.tree,
+  files: row.files,
+  author: row.authorId,
+  message: row.message,
+  createdAt: iso(row.createdAt),
+});
+
+/** The audit entry of a change to `app` by `by`: identifiers only. */
+const changeEntry = (
+  by: Identity,
+  action:
+    | "app.created"
+    | "app.committed"
+    | "app.version.proposed"
+    | "app.version.current",
+  app: AppId,
+  detail: Record<string, AuditDetailValue>
+): AuditEntry => ({
+  actor: actorOf(by),
+  action,
+  target: { type: "app", id: app },
+  detail,
+});
+
+/** The App `input` names, which must exist. */
+const findApp = async (env: Env, input: unknown): Promise<App> => {
+  const id = appIdInputSchema.safeParse(input);
+  const row = id.success
+    ? await drizzle(env.DB)
+        .select()
+        .from(apps)
+        .where(eq(apps.id, id.data))
+        .get()
+    : undefined;
+  if (!row) {
+    throw appErrors.create("app.not_found");
+  }
+  return toApp(row);
+};
+
+const findVersion = async (
+  env: Env,
+  app: AppId,
+  input: unknown
+): Promise<VersionRow> => {
+  const version = appVersionSchema.safeParse(input);
+  const row = version.success
+    ? await drizzle(env.DB)
+        .select()
+        .from(appVersions)
+        .where(
+          and(eq(appVersions.appId, app), eq(appVersions.version, version.data))
+        )
+        .get()
+    : undefined;
+  if (!row) {
+    throw appErrors.create("app.version_not_found");
+  }
+  return row;
+};
+
+/**
+ * An App's working copy: its latest version's files with the changes
+ * written since over them. The version, the rows and the App's working
+ * revision are read in one batch, so a commit landing in between can't
+ * pair a new version with rows it already committed.
+ */
+const workingCopy = async (env: Env, app: AppId) => {
+  const db = drizzle(env.DB);
+  const [[latest], rows, [registered]] = await db.batch([
+    db
+      .select()
+      .from(appVersions)
+      .where(eq(appVersions.appId, app))
+      .orderBy(desc(appVersions.version))
+      .limit(1),
+    db
+      .select()
+      .from(appWorkingFiles)
+      .where(eq(appWorkingFiles.appId, app))
+      .orderBy(asc(appWorkingFiles.path)),
+    db
+      .select({ revision: apps.workingRevision })
+      .from(apps)
+      .where(eq(apps.id, app)),
+  ]);
+  const files = latest
+    ? await readTree(env, app, latest.tree)
+    : new Map<string, string>();
+  for (const { path, content } of rows) {
+    if (content === null) {
+      files.delete(path);
+    } else {
+      files.set(path, content);
+    }
+  }
+  return { latest, rows, files, revision: registered?.revision ?? null };
+};
+
+/** `app.too_large` if `files` are over an App's limits. */
+const checkLimits = (files: ReadonlyMap<string, string>): void => {
+  let length = 0;
+  for (const content of files.values()) {
+    length += content.length;
+  }
+  if (files.size > appLimits.files || length > appLimits.totalLength) {
+    throw appErrors.create("app.too_large", {
+      files: files.size,
+      maxFiles: appLimits.files,
+      length,
+      maxLength: appLimits.totalLength,
+    });
+  }
+};
+
+/** The files of one of an App's versions. For the runtime and the compiler. */
+export const versionFiles = async (
+  env: Env,
+  app: AppId,
+  version: unknown
+): Promise<AppFiles> => {
+  const row = await findVersion(env, app, version);
+  return Object.fromEntries(await readTree(env, app, row.tree));
+};
+
+/** Creates an App, with no versions yet. */
+export const createApp = async (
+  env: Env,
+  by: Identity,
+  input: unknown
+): Promise<App> => {
+  requireBuilder(by);
+  const { name, description, blueprint } = parse(newAppSchema, input);
+  const row: AppRow = {
+    id: crypto.randomUUID(),
+    name,
+    description,
+    ownerId: by.userId,
+    blueprint: blueprint ?? null,
+    currentVersion: null,
+    pendingVersion: null,
+    workingRevision: null,
+    createdAt: new Date(),
+  };
+  const app = toApp(row);
+  const db = drizzle(env.DB);
+  await db.batch([
+    db.insert(apps).values(row),
+    outboxed(
+      db,
+      changeEntry(by, "app.created", app.id, { blueprint: row.blueprint })
+    ),
+  ]);
+  await sendAuditOutboxNow(env);
+  return app;
+};
+
+/** Every App, oldest first. */
+export const listApps = async (env: Env, by: Identity): Promise<App[]> => {
+  requireBuilder(by);
+  const rows = await drizzle(env.DB)
+    .select()
+    .from(apps)
+    .orderBy(asc(apps.createdAt), asc(apps.id));
+  return rows.map(toApp);
+};
+
+export const getApp = async (
+  env: Env,
+  by: Identity,
+  app: unknown
+): Promise<App> => {
+  requireBuilder(by);
+  return await findApp(env, app);
+};
+
+/** An App's files at `version`, or its working copy without one. */
+export const readFiles = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  version?: unknown
+): Promise<AppFiles> => {
+  requireBuilder(by);
+  const { id: appId } = await findApp(env, app);
+  if (version !== undefined) {
+    return await versionFiles(env, appId, version);
+  }
+  const { files } = await workingCopy(env, appId);
+  return Object.fromEntries(files);
+};
+
+/**
+ * Writes changes to an App's working copy: new content by path, or null to
+ * delete a file. Refused as a whole when the working copy would be over
+ * the App's limits.
+ *
+ * Each write is a new revision of the working copy, and lands only over
+ * the revision its limit check read: two writes at once can't together
+ * take the App over its limits. The one that loses is refused as a
+ * conflict, and nothing of it is written.
+ */
+export const writeFiles = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  input: unknown
+): Promise<void> => {
+  requireBuilder(by);
+  const { id: appId } = await findApp(env, app);
+  const changes = Object.entries(parse(fileChangesSchema, input));
+  const { files, revision } = await workingCopy(env, appId);
+  for (const [path, content] of changes) {
+    if (content === null) {
+      files.delete(path);
+    } else {
+      files.set(path, content);
+    }
+  }
+  checkLimits(files);
+
+  const db = drizzle(env.DB);
+  const next = crypto.randomUUID();
+  const writtenAt = Date.now();
+  const [[claimed]] = await db.batch([
+    db
+      .update(apps)
+      .set({ workingRevision: next })
+      .where(
+        and(eq(apps.id, appId), sql`${apps.workingRevision} IS ${revision}`)
+      )
+      .returning({ id: apps.id }),
+    // Each only if this write claimed the revision above.
+    ...changes.map(([path, content]) =>
+      db
+        .insert(appWorkingFiles)
+        .select(
+          sql`SELECT ${appId}, ${path}, ${content}, ${next}, ${by.userId}, ${writtenAt} WHERE (SELECT ${apps.workingRevision} FROM ${apps} WHERE ${apps.id} = ${appId}) = ${next}`
+        )
+        .onConflictDoUpdate({
+          target: [appWorkingFiles.appId, appWorkingFiles.path],
+          set: {
+            content: sql`excluded.content`,
+            revision: sql`excluded.revision`,
+            writtenBy: sql`excluded.written_by`,
+            writtenAt: sql`excluded.written_at`,
+          },
+        })
+    ),
+  ]);
+  if (!claimed) {
+    throw appErrors.create("app.conflict");
+  }
+};
+
+/**
+ * Commits an App's working copy as its next version, by `by` with
+ * `message`. Changes written while it commits stay in the working copy.
+ */
+export const commitFiles = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  message: unknown
+): Promise<AppVersion> => {
+  requireBuilder(by);
+  const { id: appId } = await findApp(env, app);
+  const text = parse(commitMessageSchema, message);
+  const { latest, rows, files } = await workingCopy(env, appId);
+  if (rows.length === 0) {
+    throw appErrors.create("app.nothing_to_commit");
+  }
+  checkLimits(files);
+  const json = canonicalJson(Object.fromEntries(files));
+  const tree = await sha256(json);
+  if (tree === latest?.tree) {
+    throw appErrors.create("app.nothing_to_commit");
+  }
+  await env.FILES.put(treeKey(appId, tree), json);
+
+  const row: VersionRow = {
+    appId,
+    version: (latest?.version ?? 0) + 1,
+    parent: latest?.version ?? null,
+    tree,
+    files: files.size,
+    authorId: by.userId,
+    message: text,
+    createdAt: new Date(),
+  };
+  // Only the rows this commit read: a row written since has a newer revision.
+  const committed = JSON.stringify(
+    rows.map(({ path, revision }) => `${path}\u0000${revision}`)
+  );
+  const db = drizzle(env.DB);
+  try {
+    await db.batch([
+      db.insert(appVersions).values(row),
+      outboxed(
+        db,
+        changeEntry(by, "app.committed", appId, {
+          version: row.version,
+          parent: row.parent,
+          tree,
+          files: row.files,
+        })
+      ),
+      db
+        .delete(appWorkingFiles)
+        .where(
+          and(
+            eq(appWorkingFiles.appId, appId),
+            sql`${appWorkingFiles.path} || char(0) || ${appWorkingFiles.revision} IN (SELECT value FROM json_each(${committed}))`
+          )
+        ),
+    ]);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw appErrors.create("app.conflict");
+    }
+    throw error;
+  }
+  await sendAuditOutboxNow(env);
+  return toVersion(row);
+};
+
+/** An App's versions, newest first, a page at a time. */
+export const listVersions = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  before?: unknown
+): Promise<AppVersion[]> => {
+  requireBuilder(by);
+  const { id } = await findApp(env, app);
+  const until =
+    before === undefined ? undefined : parse(appVersionSchema, before);
+  const rows = await drizzle(env.DB)
+    .select()
+    .from(appVersions)
+    .where(
+      and(
+        eq(appVersions.appId, id),
+        until === undefined ? undefined : lt(appVersions.version, until)
+      )
+    )
+    .orderBy(desc(appVersions.version))
+    .limit(versionsPerPage);
+  return rows.map(toVersion);
+};
+
+export const getVersion = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  version: unknown
+): Promise<AppVersion> => {
+  requireBuilder(by);
+  const { id: appId } = await findApp(env, app);
+  return toVersion(await findVersion(env, appId, version));
+};
+
+/** How the files of version `to` differ from those of `from`, by path. */
+export const diffVersions = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  from: unknown,
+  to: unknown
+): Promise<FileDiff[]> => {
+  requireBuilder(by);
+  const { id: appId } = await findApp(env, app);
+  const [before, after] = await Promise.all(
+    [from, to].map(async (version) => {
+      const row = await findVersion(env, appId, version);
+      return await readTree(env, appId, row.tree);
+    })
+  );
+  if (!(before && after)) {
+    throw new Error("Expected two trees");
+  }
+  const paths = [...new Set([...before.keys(), ...after.keys()])].toSorted();
+  return paths.flatMap((path): FileDiff[] => {
+    const old = before.get(path);
+    const now = after.get(path);
+    if (old === undefined) {
+      return now === undefined ? [] : [{ path, change: "added", after: now }];
+    }
+    if (now === undefined) {
+      return [{ path, change: "deleted", before: old }];
+    }
+    return old === now
+      ? []
+      : [{ path, change: "modified", before: old, after: now }];
+  });
+};
+
+/** Puts a version up for review. The current version can't be. */
+export const proposeVersion = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  version: unknown
+): Promise<App> => {
+  requireBuilder(by);
+  const found = await findApp(env, app);
+  const appId = found.id;
+  const { version: number } = await findVersion(env, appId, version);
+  const db = drizzle(env.DB);
+  const [[proposed]] = await db.batch([
+    db
+      .update(apps)
+      .set({ pendingVersion: number })
+      .where(
+        and(
+          eq(apps.id, appId),
+          sql`${apps.pendingVersion} IS NOT ${number}`,
+          sql`${apps.currentVersion} IS NOT ${number}`
+        )
+      )
+      .returning(),
+    outboxedIfChanged(
+      db,
+      changeEntry(by, "app.version.proposed", appId, { version: number })
+    ),
+  ]);
+  if (!proposed) {
+    // Pending or current already: nothing changed, nothing is recorded.
+    return await findApp(env, appId);
+  }
+  await sendAuditOutboxNow(env);
+  return toApp(proposed);
+};
+
+/**
+ * Makes a version the one that runs: the pending one after review, or any
+ * other, such as an earlier one to roll back. The pending version is
+ * cleared once it is current.
+ */
+export const setCurrentVersion = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  version: unknown
+): Promise<App> => {
+  requireBuilder(by);
+  const found = await findApp(env, app);
+  const appId = found.id;
+  const { version: number } = await findVersion(env, appId, version);
+  if (found.currentVersion === number) {
+    return found;
+  }
+  const previous = found.currentVersion;
+  const db = drizzle(env.DB);
+  // Only over the current version read above, so the event's `previous`
+  // is the version this replaced.
+  const [[changed]] = await db.batch([
+    db
+      .update(apps)
+      .set({
+        currentVersion: number,
+        pendingVersion: sql`CASE WHEN ${apps.pendingVersion} = ${number} THEN NULL ELSE ${apps.pendingVersion} END`,
+      })
+      .where(
+        and(eq(apps.id, appId), sql`${apps.currentVersion} IS ${previous}`)
+      )
+      .returning(),
+    outboxedIfChanged(
+      db,
+      changeEntry(by, "app.version.current", appId, {
+        version: number,
+        previous,
+      })
+    ),
+  ]);
+  if (!changed) {
+    throw appErrors.create("app.conflict");
+  }
+  await sendAuditOutboxNow(env);
+  return toApp(changed);
+};

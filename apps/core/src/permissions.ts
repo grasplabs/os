@@ -1,8 +1,4 @@
-import type {
-  AuditActor,
-  AuditDetailValue,
-  AuditEntry,
-} from "@grasp-os/shared/audit";
+import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { PermissionId } from "@grasp-os/shared/ids";
 import {
@@ -29,8 +25,10 @@ import {
   outboxedIfChanged,
   sendAuditOutboxNow,
 } from "./audit-outbox.ts";
+import { actorOf } from "./audit.ts";
 import { memberRole } from "./auth/identity.ts";
 import { permissions } from "./db/core/schema.ts";
+import { isUniqueViolation } from "./db/d1.ts";
 
 // Permission records and the one check every server path runs. A person
 // asks for a permission (it allows nothing yet), an admin grants it, and an
@@ -144,9 +142,6 @@ const ofSubject = (subject: PermissionSubject): SQL | undefined => {
   );
 };
 
-const actorOf = ({ userId, staff }: Identity): AuditActor =>
-  staff ? { type: "staff", userId } : { type: "person", userId };
-
 /** What the audit log records of a permission: identifiers only. */
 const auditDetail = ({
   subject,
@@ -200,12 +195,6 @@ const parseId = (id: unknown): PermissionId => {
   }
   return parsed.data;
 };
-
-/** Whether D1 refused a write for a unique index, however it was wrapped. */
-const isUniqueViolation = (error: unknown): boolean =>
-  error instanceof Error &&
-  (error.message.includes("UNIQUE constraint failed") ||
-    isUniqueViolation(error.cause));
 
 const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
   await drizzle(env.DB)
