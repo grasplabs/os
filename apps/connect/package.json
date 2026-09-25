@@ -11,13 +11,7 @@
     "db:generate": "drizzle-kit generate"
   },
   "dependencies": {
-    "@composio/core": "catalog:",
-    "@grasp-os/connector-google-workspace": "workspace:*",
-    "@grasp-os/connector-microsoft-365": "workspace:*",
-    "@grasp-os/shared": "workspace:*",
-    "@modelcontextprotocol/sdk": "catalog:",
-    "drizzle-orm": "catalog:",
-    "zod": "catalog:"
+    "@grasp-os/shared": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",

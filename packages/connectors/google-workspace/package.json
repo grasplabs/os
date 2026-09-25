@@ -8,8 +8,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "catalog:",
-    "zod": "catalog:"
+    "@modelcontextprotocol/sdk": "catalog:"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:"
