@@ -4,12 +4,16 @@
  * modules by flat name (see kit.ts); a page maps those names to the code
  * with an import map.
  *
- * The compiler's code and what it knows of the kit are most of core's
- * code, and most requests never build: they are evaluated on first use.
+ * The compiler's code and what it knows of the kit are many times core's
+ * size, and most requests never build. They are core's static assets
+ * (`compilerAssets`), read when a build starts an isolate; core itself
+ * imports only the version.
  */
 import { compatibilityDate } from "@grasp-os/shared/runtime";
 
-import { kitModule } from "./kit.ts";
+import { version } from "#version";
+
+import { compilerAssets, kitModule } from "./kit.ts";
 import type { KitModules } from "./kit.ts";
 import type ScreenCompiler from "./worker.ts";
 
@@ -31,10 +35,42 @@ export interface ScreenSource {
   files: Record<string, string>;
 }
 
+/**
+ * One of this release's compiler files, from core's static assets. The
+ * assets answer unknown paths with the frontend's index.html, so anything
+ * but the file's own type means it is missing.
+ */
+const readCompilerFile = async (
+  assets: Fetcher,
+  file: string,
+  type: string
+): Promise<string> => {
+  const url = `https://assets${compilerAssets.directory(version)}/${file}`;
+  const response = await assets.fetch(url);
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!(response.ok && contentType.includes(type))) {
+    throw new Error(
+      `The screen compiler's ${file} is not among the static assets: build the compiler into them (packages/compiler/build.ts).`
+    );
+  }
+  return await response.text();
+};
+
+const isKitModules = (value: unknown): value is KitModules =>
+  typeof value === "object" &&
+  value !== null &&
+  "version" in value &&
+  "modules" in value;
+
 /** The kit's modules, which every App's modules import: one set per release. */
-export const kitModules = async (): Promise<KitModules> => {
-  const { kitModules: modules } = await import("#isolate");
-  return modules;
+export const kitModules = async (assets: Fetcher): Promise<KitModules> => {
+  const parsed: unknown = JSON.parse(
+    await readCompilerFile(assets, compilerAssets.kitModules, "json")
+  );
+  if (!isKitModules(parsed)) {
+    throw new Error("The kit's modules are not in the expected shape.");
+  }
+  return parsed;
 };
 
 /**
@@ -52,24 +88,30 @@ export const isolateSettings = {
 } satisfies Omit<WorkerLoaderWorkerCode, "mainModule" | "modules">;
 
 /**
- * Starts the compiler in its own isolate, one per build, named `build`.
- * The loader reuses a running isolate with the same name, so `build` must
- * name what is built (see core's screens.ts).
+ * Starts the compiler in its own isolate, one per build, named `build`,
+ * with its code read from core's static assets. The loader reuses a
+ * running isolate with the same name, so `build` must name what is built
+ * (see core's screens.ts).
  */
 export const startScreenCompiler = (
   loader: WorkerLoader,
+  assets: Fetcher,
   build: string
 ): Service<ScreenCompiler> =>
   loader
     .get(`screen-compiler:${build}`, async () => {
-      const [{ source }, { default: kit }] = await Promise.all([
-        import("#isolate"),
-        import("#kit"),
+      const [source, kitJson] = await Promise.all([
+        readCompilerFile(assets, compilerAssets.source, "javascript"),
+        readCompilerFile(assets, compilerAssets.kit, "json"),
       ]);
+      const kit: unknown = JSON.parse(kitJson);
       return {
         ...isolateSettings,
         mainModule: "compiler.js",
-        modules: { "compiler.js": source, [kitModule]: { json: kit } },
+        modules: {
+          "compiler.js": source,
+          [kitModule]: { json: kit },
+        },
       };
     })
     .getEntrypoint<ScreenCompiler>();

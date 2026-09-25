@@ -42,8 +42,9 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
           },
           // Deliver audit events at once instead of waiting to fill a batch.
           queueConsumers: { "grasp-os-audit": { maxBatchTimeout: 0 } },
-          // A stand-in frontend, so tests don't wait for a build of apps/web.
-          assets: { directory: "./test/fixtures/assets" },
+          // A stand-in frontend and the screen compiler, written by the
+          // screens project's global setup (test/global-setup.ts).
+          assets: { directory: "./dist/test-assets" },
           // Stand-in for the connect Worker behind the CONNECT service binding.
           workers: [
             {

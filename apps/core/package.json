@@ -5,7 +5,7 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "scripts": {
-    "build": "vp -C ../../packages/compiler run build",
+    "build": "node ../../packages/compiler/build.ts ../web/dist",
     "dev": "vp -C ../web build --mode development && vp run build && wrangler d1 migrations apply DB --local && wrangler dev -c wrangler.jsonc -c ../connect/wrangler.jsonc --var DEV_SKIP_ROUTER_SECRET:true --var DURABLE_OBJECT_JURISDICTION:none",
     "deploy": "vp run build && wrangler deploy",
     "typegen": "wrangler types --include-runtime=false",

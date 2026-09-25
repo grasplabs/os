@@ -11,6 +11,7 @@ import {
   readdirSync,
   readFileSync,
   realpathSync,
+  rmSync,
   statSync,
   writeFileSync,
 } from "node:fs";
@@ -25,7 +26,12 @@ import { z } from "zod";
 
 import { extractCandidates } from "./src/candidates.ts";
 import { compileModule } from "./src/compile.ts";
-import { kitModule, kitModuleName, kitStylesheet } from "./src/kit.ts";
+import {
+  compilerAssets,
+  kitModule,
+  kitModuleName,
+  kitStylesheet,
+} from "./src/kit.ts";
 import type { Kit, KitModules } from "./src/kit.ts";
 import { compilerOptions } from "./src/type-check.ts";
 
@@ -470,11 +476,10 @@ ${code.replace(required, "typescriptEslintParser")}`;
 };
 
 /**
- * The compiler's main module. It imports what it knows of the kit (`#kit`,
- * dist/kit.json) as a module of its own, `kit.json`, which the isolate is
- * started with. Most of it is the type check's declarations; in the
- * compiler's code they made one module of 17 MB, which crashes the Workers
- * test pool when core's tests load it.
+ * The compiler's main module. It imports what it knows of the kit (`#kit`)
+ * as a module of its own, `kit.json`, which the isolate is started with:
+ * most of it is the type check's declarations, which the compiler's code
+ * doesn't need to carry.
  */
 const buildCompiler = async (): Promise<string> => {
   const config: InlineConfig = {
@@ -510,7 +515,9 @@ const buildCompiler = async (): Promise<string> => {
 };
 
 /** Builds the kit, then the compiler, into dist/. */
-const buildScreenCompiler = async (): Promise<void> => {
+const buildScreenCompiler = async (
+  assets = path.join(dist, "assets")
+): Promise<void> => {
   mkdirSync(dist, { recursive: true });
   const { entries: icons, icons: iconNames } = iconEntries();
   const components = uiEntries();
@@ -543,7 +550,6 @@ const buildScreenCompiler = async (): Promise<void> => {
     lintRules: rulesSchema.parse(shadcnPreset.rules),
   };
   const kitJson = JSON.stringify(kit);
-  writeFileSync(path.join(dist, "kit.json"), kitJson);
   const compiler = await buildCompiler();
   const kitModules: KitModules = {
     version: createHash("sha256")
@@ -560,16 +566,21 @@ const buildScreenCompiler = async (): Promise<void> => {
     .update(kitModules.version)
     .digest("hex")
     .slice(0, 16);
-  // Apart, so that reading the version doesn't load the rest.
+  // Core imports only the version; the rest it reads from its static
+  // assets when it starts a build, so it never loads them otherwise.
   writeFileSync(
     path.join(dist, "version.js"),
     `export const version = "${version}";\n`
   );
+  const releases = path.join(assets, compilerAssets.directory(""));
+  rmSync(releases, { recursive: true, force: true });
+  const release = path.join(assets, compilerAssets.directory(version));
+  mkdirSync(release, { recursive: true });
+  writeFileSync(path.join(release, compilerAssets.source), compiler);
+  writeFileSync(path.join(release, compilerAssets.kit), kitJson);
   writeFileSync(
-    path.join(dist, "isolate.js"),
-    `export const source = ${JSON.stringify(compiler)};
-export const kitModules = ${JSON.stringify(kitModules)};
-`
+    path.join(release, compilerAssets.kitModules),
+    JSON.stringify(kitModules)
   );
   const kitSize = Object.values(kitCode).join("").length;
   console.info(
@@ -577,8 +588,11 @@ export const kitModules = ${JSON.stringify(kitModules)};
   );
 };
 
-// Core's tests run this as their global setup; core's build runs the file.
+/**
+ * Builds the compiler, with its files in `assets` (dist/assets unless
+ * given): core runs this with its own static assets directory.
+ */
 export default buildScreenCompiler;
 if (import.meta.main) {
-  await buildScreenCompiler();
+  await buildScreenCompiler(process.argv[2]);
 }

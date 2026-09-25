@@ -67,7 +67,7 @@ const app = (
 const kitModulesNamed = async (
   names: string[]
 ): Promise<Record<string, string>> => {
-  const { modules } = await kitModules();
+  const { modules } = await kitModules(env.ASSETS);
   return Object.fromEntries(names.map((name) => [name, modules[name] ?? ""]));
 };
 
@@ -158,7 +158,7 @@ describe("screen builds", { timeout: 60_000 }, () => {
   });
 
   it("has React DOM in the kit, for the page that renders screens", async () => {
-    const { modules } = await kitModules();
+    const { modules } = await kitModules(env.ASSETS);
 
     await expect(
       evaluate(modules, ["react-dom~client.js"])

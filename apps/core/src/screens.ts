@@ -33,7 +33,7 @@ const buildKey = async ({
 
 /**
  * Builds an App's screens into ES modules and their CSS, in an isolate of
- * its own. The modules import the release's kit modules (`kitModules()`);
+ * its own. The modules import the release's kit modules (`kitModules(env.ASSETS)`);
  * `kitModules` in the result names the ones they need. A build is cached
  * in R2 (in the EU), and later requests for the same files read it from
  * there. Failed builds aren't cached. Two requests for a build that isn't
@@ -56,7 +56,7 @@ export const buildScreens = async (
   if (cached) {
     return await cached.json<ScreenBuild>();
   }
-  const compiler = startScreenCompiler(env.LOADER, key);
+  const compiler = startScreenCompiler(env.LOADER, env.ASSETS, key);
   const built = await compiler.build(files);
   if (built.ok) {
     await env.FILES.put(cacheKey, JSON.stringify(built));

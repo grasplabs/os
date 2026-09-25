@@ -259,7 +259,7 @@ describe("screen checks", { timeout: 60_000 }, () => {
   });
 
   it("checks a typical screen quickly once the isolate is warm", async () => {
-    const compiler = startScreenCompiler(env.LOADER, "timing");
+    const compiler = startScreenCompiler(env.LOADER, env.ASSETS, "timing");
     // The first check parses the kit's declarations; later ones reuse them.
     await expect(compiler.check(typicalApp)).resolves.toStrictEqual([]);
 

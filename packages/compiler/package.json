@@ -5,13 +5,8 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "imports": {
-    "#isolate": {
-      "types": "./src/isolate.d.ts",
-      "default": "./dist/isolate.js"
-    },
     "#kit": {
-      "types": "./src/kit-module.d.ts",
-      "default": "./dist/kit.json"
+      "types": "./src/kit-module.d.ts"
     },
     "#version": {
       "types": "./src/version.d.ts",
