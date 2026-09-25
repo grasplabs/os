@@ -61,10 +61,8 @@ describe("errors a caller outside core may see", () => {
       own.create("own.refused"),
     ];
     for (const error of expected) {
-      expect([isExpectedError(error), toOpaqueError(error)]).toStrictEqual([
-        true,
-        error,
-      ]);
+      expect(isExpectedError(error)).toBeTruthy();
+      expect(toOpaqueError(error)).toBe(error);
     }
   });
 
