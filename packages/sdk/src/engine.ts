@@ -50,12 +50,16 @@ export type DecisionAnswer = z.infer<typeof decisionAnswerSchema>;
  * from the start at any time: every method that takes a step name must return
  * the recorded outcome when that name already completed in this run.
  *
- * The SDK calls `callModel`, `openDecision`, `getState` and `setState` only
- * inside `do`, so they need not be durable themselves.
+ * The SDK reads `params` and calls `callModel`, `openDecision`, `getState`
+ * and `setState` only inside `do`, so they need not be durable themselves.
  */
 export interface WorkflowEngine {
   readonly runId: RunId;
-  /** Parameter values people set, by name; missing ones use the default. */
+  /**
+   * Parameter values people set, by name; missing ones use the default. The
+   * SDK records them in the run's first step, so a run keeps the values it
+   * started with even when people change them before it resumes.
+   */
   readonly params: Readonly<Record<string, unknown>>;
   /**
    * Runs `fn` as a durable step and records its result. Retries a failing
@@ -89,6 +93,14 @@ export interface WorkflowEngine {
   }) => Promise<{ link: string; eventType: string }>;
   /** Reads the workflow's key-value state, shared by all its runs. */
   getState: (key: string) => Promise<JsonValue | undefined>;
-  /** Writes the workflow's key-value state, shared by all its runs. */
-  setState: (key: string, value: JsonValue) => Promise<void>;
+  /**
+   * Writes the workflow's key-value state, shared by all its runs. Applies
+   * each idempotency key once and ignores a repeat, so a step that wrote but
+   * crashed before it was recorded can't overwrite a newer value on replay.
+   */
+  setState: (
+    key: string,
+    value: JsonValue,
+    idempotencyKey: string
+  ) => Promise<void>;
 }

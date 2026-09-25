@@ -228,9 +228,12 @@ export interface DecisionOptions {
   from: Person;
   /** Tells them there is something to decide, e.g. by email. */
   ask: (request: DecisionRequest) => Promise<void>;
-  /** Stop waiting after this long; the engine's limit when missing. */
+  /**
+   * Stop waiting this long after the decision opened, however long asking
+   * took; the engine's limit when missing.
+   */
   timeout?: Duration;
-  /** Ask once more when there is no answer after this long. */
+  /** Ask once more when there is no answer this long after asking. */
   remindAfter?: Duration;
 }
 
@@ -361,7 +364,8 @@ export interface WorkflowDefinition<Output> {
 }
 
 // Names become part of engine step names and idempotency keys (`runId:name`),
-// so they never contain a colon; the SDK's own step names always do.
+// so they never contain a colon or start with `$`; the SDK's own step names
+// always do one or the other.
 const namePattern = /^[A-Za-z][\w-]{0,63}$/u;
 
 const durationPattern =
@@ -462,18 +466,18 @@ const resolveParams = (
   params: Params,
   configured: Readonly<Record<string, unknown>>
 ): Record<string, unknown> =>
-  Object.freeze(
-    Object.fromEntries(
-      Object.entries(params).map(([name, definition]) => [
-        name,
-        parseOrThrow(
-          paramValueSchemas[definition.kind],
-          configured[name] ?? definition.default,
-          "workflow.invalid_param",
-          `Parameter "${name}"`
-        ),
-      ])
-    )
+  Object.fromEntries(
+    Object.entries(params).map(([name, definition]) => [
+      name,
+      parseOrThrow(
+        paramValueSchemas[definition.kind],
+        // A value that is set but empty fails, rather than quietly falling
+        // back to the default.
+        Object.hasOwn(configured, name) ? configured[name] : definition.default,
+        "workflow.invalid_param",
+        `Parameter "${name}"`
+      ),
+    ])
   );
 
 const createStepRunner = (
@@ -506,7 +510,7 @@ const createStepRunner = (
   const waitForEvent = async (
     name: string,
     type: string,
-    timeout: number | undefined
+    timeout?: number
   ): Promise<EngineEvent> =>
     await engine.waitForEvent(name, {
       type,
@@ -578,34 +582,59 @@ const createStepRunner = (
         );
       }
 
-      const { link, eventType } = await engine.do(
+      // Times are taken inside steps, so a replay computes the same waits.
+      // The timeout counts from when the decision opened, so time spent
+      // asking or reminding never pushes the deadline out.
+      const { link, eventType, openedAt } = await engine.do(
         name,
         {},
-        async () => await engine.openDecision({ step: name, from })
+        async () => ({
+          ...(await engine.openDecision({ step: name, from })),
+          openedAt: Date.now(),
+        })
       );
-      const askPerson = async (reminder: boolean): Promise<void> => {
+      const deadline =
+        timeoutMs === undefined ? undefined : openedAt + timeoutMs;
+      const askPerson = async (reminder: boolean): Promise<number> => {
         const askStep = `${name}:${reminder ? "remind" : "ask"}`;
-        await engine.do(askStep, {}, async () => {
+        return await engine.do(askStep, {}, async () => {
           await ask({
             link,
             reminder,
             idempotencyKey: idempotencyKey(askStep),
           });
+          return Date.now();
         });
       };
+      const waitForAnswer = async (
+        waitStep: string,
+        since: number,
+        until: number | undefined
+      ): Promise<EngineEvent> => {
+        if (until === undefined) {
+          return await waitForEvent(waitStep, eventType);
+        }
+        return until > since
+          ? await waitForEvent(waitStep, eventType, until - since)
+          : { received: false };
+      };
 
-      await askPerson(false);
-      let event = await waitForEvent(
+      const askedAt = await askPerson(false);
+      const remindAt = remindMs === undefined ? undefined : askedAt + remindMs;
+      const reminds =
+        remindAt !== undefined &&
+        (deadline === undefined || remindAt < deadline);
+      let event = await waitForAnswer(
         `${name}:answer`,
-        eventType,
-        remindMs ?? timeoutMs
+        askedAt,
+        reminds ? remindAt : deadline
       );
-      if (!event.received && remindMs !== undefined) {
-        await askPerson(true);
-        event = await waitForEvent(
+      if (!event.received && reminds) {
+        const remindedAt = await askPerson(true);
+        event = await waitForAnswer(
           `${name}:answer-after-reminder`,
-          eventType,
-          timeoutMs === undefined ? undefined : timeoutMs - remindMs
+          remindedAt,
+          deadline
         );
       }
       if (!event.received) {
@@ -650,7 +679,8 @@ const createStepRunner = (
 
 // State is shared by all runs of a workflow, so another run can change it
 // between two replays of this one. Each read and write is its own step, so a
-// replay sees exactly what the first execution saw.
+// replay sees exactly what the first execution saw, and each write carries an
+// idempotency key, so a replayed write never lands twice.
 const createStateStore = (engine: WorkflowEngine): StateStore => {
   const calls = new Map<string, number>();
   const stepName = (operation: "get" | "set", key: string): string => {
@@ -673,8 +703,9 @@ const createStateStore = (engine: WorkflowEngine): StateStore => {
         async () => await engine.getState(key)
       ),
     set: async (key, value) => {
-      await engine.do(stepName("set", key), {}, async () => {
-        await engine.setState(key, value);
+      const step = stepName("set", key);
+      await engine.do(step, {}, async () => {
+        await engine.setState(key, value, `${engine.runId}:${step}`);
       });
     },
   };
@@ -731,6 +762,14 @@ export const workflow = <
         "workflow.invalid_input",
         "Input"
       ) as z.output<InputSchema>;
+      // Recorded, so a replay runs with the values the run started with. A
+      // value that doesn't fit won't fit on a retry either.
+      const params = await engine.do(
+        "$params",
+        { retries: 0 },
+        async () =>
+          await Promise.resolve(resolveParams(config.params, engine.params))
+      );
       return await run(
         // SAFETY: the runner checks each call against the declared steps at
         // run time; `S` only narrows which names and callbacks code may pass.
@@ -742,7 +781,7 @@ export const workflow = <
           // SAFETY: resolveParams parses every declared parameter with the
           // schema of its kind, which is what ParamValues<P> describes.
           // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-          params: resolveParams(config.params, engine.params) as ParamValues<P>,
+          params: Object.freeze(params) as ParamValues<P>,
           state: createStateStore(engine),
         }
       );

@@ -1,5 +1,5 @@
 /* oxlint-disable require-await -- fakes of async interfaces answer right away */
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   number,
@@ -10,7 +10,7 @@ import {
   z,
 } from "../src/workflow.ts";
 import type { Duration } from "../src/workflow.ts";
-import { createFakeEngine } from "./fake-engine.ts";
+import { createFakeEngine, createFakeState } from "./fake-engine.ts";
 
 const noParams = {};
 
@@ -345,10 +345,10 @@ describe("step.sleep and step.waitFor", () => {
   });
 });
 
-const decisionWorkflow = (limits: {
-  timeout?: Duration;
-  remindAfter?: Duration;
-}) =>
+const decisionWorkflow = (
+  limits: { timeout?: Duration; remindAfter?: Duration },
+  ask: () => Promise<void> = async () => {}
+) =>
   workflow(
     "decide",
     {
@@ -358,12 +358,35 @@ const decisionWorkflow = (limits: {
     async (step, { params }) =>
       await step.decision("approve", {
         from: params.approver,
-        ask: async () => {},
+        ask,
         ...limits,
       })
   );
 
 describe("step.decision", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("times out without reminding when asking outlasts the timeout", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const asked: boolean[] = [];
+    const slowAsk = async () => {
+      asked.push(true);
+      vi.setSystemTime(Date.now() + 2 * 86_400_000);
+    };
+    const { engine, waits } = createFakeEngine();
+
+    await expect(
+      decisionWorkflow(
+        { timeout: "1 day", remindAfter: "12 hours" },
+        slowAsk
+      ).run(engine)
+    ).resolves.toStrictEqual({ outcome: "timedOut" });
+    expect(asked).toHaveLength(1);
+    expect(waits).toStrictEqual([]);
+  });
+
   it("waits as long as the engine allows without a timeout", async () => {
     const { engine, waits } = createFakeEngine();
 
@@ -421,21 +444,39 @@ describe("state", () => {
   );
 
   it("keeps values between runs of the workflow", async () => {
-    const first = createFakeEngine();
-    const second = createFakeEngine({ state: first.state });
+    const state = createFakeState();
+    const first = createFakeEngine({ runId: "run-1", state });
+    const second = createFakeEngine({ runId: "run-2", state });
 
     await expect(counter.run(first.engine)).resolves.toBe(1);
     await expect(counter.run(second.engine)).resolves.toBe(2);
   });
 
   it("replays what a run read, even when another run changed it since", async () => {
-    const first = createFakeEngine();
-    const other = createFakeEngine({ state: first.state });
+    const state = createFakeState();
+    const first = createFakeEngine({ runId: "run-1", state });
+    const other = createFakeEngine({ runId: "run-2", state });
 
     await counter.run(first.engine);
     await counter.run(other.engine);
 
     await expect(counter.run(first.engine)).resolves.toBe(1);
+  });
+
+  it("doesn't write again when a run resumes after a crash mid-write", async () => {
+    const state = createFakeState();
+    const crashing = createFakeEngine({
+      runId: "run-1",
+      state,
+      crashAfterFirstWrite: true,
+    });
+    const other = createFakeEngine({ runId: "run-2", state });
+
+    await expect(counter.run(crashing.engine)).rejects.toThrow("Engine died");
+    await counter.run(other.engine);
+    await counter.run(crashing.engine);
+
+    expect(state.values.get("count")).toBe(2);
   });
 
   it("rejects a key that isn't a name", async () => {

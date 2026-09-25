@@ -1,5 +1,6 @@
 /* oxlint-disable require-await -- fakes of async interfaces answer right away */
 import { runIdSchema } from "@grasp-os/shared/ids";
+import { vi } from "vite-plus/test";
 
 import type {
   EngineEvent,
@@ -8,14 +9,25 @@ import type {
   WorkflowEngine,
 } from "../src/engine.ts";
 
+/** A workflow's state; pass one to several engines to share it between runs. */
+export const createFakeState = () => ({
+  values: new Map<string, JsonValue>(),
+  appliedWrites: new Set<string>(),
+});
+
 interface FakeEngineOptions {
+  runId?: string;
   params?: Record<string, unknown>;
   /** Answers the model gateway. */
   model?: (request: ModelRequest) => unknown;
   /** Delivers an event to a wait, or nothing (a timeout). */
   event?: (name: string, options: { type: string }) => EngineEvent;
-  /** The workflow's state, shared between engines to share it between runs. */
-  state?: Map<string, JsonValue>;
+  state?: ReturnType<typeof createFakeState>;
+  /**
+   * The first state write lands, then the engine dies before it records the
+   * step, as a crash between the two would.
+   */
+  crashAfterFirstWrite?: boolean;
 }
 
 /**
@@ -29,7 +41,8 @@ export const createFakeEngine = (options: FakeEngineOptions = {}) => {
   const waits: { name: string; type: string; timeout?: number }[] = [];
   const modelRequests: ModelRequest[] = [];
   const decisions: { step: string; from: string }[] = [];
-  const state = options.state ?? new Map<string, JsonValue>();
+  const state = options.state ?? createFakeState();
+  let crashed = false;
 
   const durable = async <T>(
     name: string,
@@ -57,7 +70,7 @@ export const createFakeEngine = (options: FakeEngineOptions = {}) => {
   };
 
   const engine: WorkflowEngine = {
-    runId: runIdSchema.parse("run-1"),
+    runId: runIdSchema.parse(options.runId ?? "run-1"),
     params: options.params ?? {},
     do: async (name, { retries }, fn) => await durable(name, retries ?? 0, fn),
     sleep: async (name, milliseconds) => {
@@ -72,7 +85,12 @@ export const createFakeEngine = (options: FakeEngineOptions = {}) => {
           type,
           ...(timeout === undefined ? {} : { timeout }),
         });
-        return options.event?.(name, { type }) ?? { received: false };
+        const event = options.event?.(name, { type }) ?? { received: false };
+        // A wait that times out takes its time; on a fake clock, move it on.
+        if (!event.received && timeout !== undefined && vi.isFakeTimers()) {
+          vi.setSystemTime(Date.now() + timeout);
+        }
+        return event;
       }),
     callModel: async (request) => {
       modelRequests.push(request);
@@ -88,9 +106,17 @@ export const createFakeEngine = (options: FakeEngineOptions = {}) => {
         eventType: `decision-${request.step}`,
       };
     },
-    getState: async (key) => state.get(key),
-    setState: async (key, value) => {
-      state.set(key, value);
+    getState: async (key) => state.values.get(key),
+    setState: async (key, value, idempotencyKey) => {
+      if (state.appliedWrites.has(idempotencyKey)) {
+        return;
+      }
+      state.appliedWrites.add(idempotencyKey);
+      state.values.set(key, value);
+      if (options.crashAfterFirstWrite === true && !crashed) {
+        crashed = true;
+        throw new Error("Engine died before recording the step");
+      }
     },
   };
 

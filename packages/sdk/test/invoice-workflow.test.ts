@@ -1,5 +1,12 @@
 /* oxlint-disable require-await -- fakes of async interfaces answer right away */
-import { describe, expect, it } from "vite-plus/test";
+import {
+  afterEach,
+  beforeEach,
+  describe,
+  expect,
+  it,
+  vi,
+} from "vite-plus/test";
 
 import { z } from "../src/workflow.ts";
 import type { DecisionRequest } from "../src/workflow.ts";
@@ -43,7 +50,17 @@ const approvedBy = (by: string) => () => ({
   payload: { approved: true, by },
 });
 
+const day = 86_400_000;
+
 describe("the sample invoice workflow", () => {
+  // Decisions read the clock; a frozen one makes their waits exact.
+  beforeEach(() => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+  });
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("exposes every step, including the decision behind the threshold", () => {
     const { metadata } = invoiceWorkflow(fakeSystems());
 
@@ -165,11 +182,18 @@ describe("the sample invoice workflow", () => {
 
   it("reminds the reviewer once, then gives up at the timeout", async () => {
     const systems = fakeSystems();
+    const { askReviewer } = systems;
+    // Sending the reminder takes a day, which comes off the time left.
+    systems.askReviewer = async (request) => {
+      await askReviewer(request);
+      if (request.reminder) {
+        vi.setSystemTime(Date.now() + day);
+      }
+    };
     const { engine, waits } = createFakeEngine({ model: modelSays(8000) });
 
     const result = await invoiceWorkflow(systems).run(engine, invoice);
 
-    const day = 86_400_000;
     expect(result).toStrictEqual({ status: "timedOut" });
     expect(systems.asked.map(({ reminder }) => reminder)).toStrictEqual([
       false,
@@ -177,7 +201,7 @@ describe("the sample invoice workflow", () => {
     ]);
     expect(waits.map(({ timeout }) => timeout)).toStrictEqual([
       2 * day,
-      5 * day,
+      4 * day,
     ]);
     expect(systems.booked).toStrictEqual([]);
   });
@@ -195,12 +219,43 @@ describe("the sample invoice workflow", () => {
     expect(modelRequests[0]?.model).toBe("small-model");
   });
 
-  it("fails a run whose parameter value doesn't fit its kind", async () => {
-    const { engine } = createFakeEngine({ params: { threshold: "lots" } });
+  it("fails a run whose parameter value doesn't fit its kind, or is empty", async () => {
+    for (const threshold of ["lots", null]) {
+      const { engine } = createFakeEngine({ params: { threshold } });
 
-    await expect(
-      invoiceWorkflow(fakeSystems()).run(engine, invoice)
-    ).rejects.toMatchObject({ code: "workflow.invalid_param" });
+      // oxlint-disable-next-line no-await-in-loop -- each run is one case
+      await expect(
+        invoiceWorkflow(fakeSystems()).run(engine, invoice)
+      ).rejects.toMatchObject({ code: "workflow.invalid_param" });
+    }
+  });
+
+  it("keeps the parameter values it started with when it resumes", async () => {
+    const systems = fakeSystems();
+    const { book } = systems;
+    let crashed = false;
+    systems.book = async (entry, idempotencyKey) => {
+      if (!crashed) {
+        crashed = true;
+        throw new Error("Ledger went away mid-call");
+      }
+      return await book(entry, idempotencyKey);
+    };
+    const params: Record<string, unknown> = { threshold: 10_000 };
+    const { engine, decisions } = createFakeEngine({
+      params,
+      model: modelSays(8000),
+    });
+    const definition = invoiceWorkflow(systems);
+
+    await expect(definition.run(engine, invoice)).rejects.toThrow(
+      "Ledger went away"
+    );
+    params.threshold = 1000;
+    const result = await definition.run(engine, invoice);
+
+    expect(result.status).toBe("booked");
+    expect(decisions).toStrictEqual([]);
   });
 
   it("fails a run whose input doesn't match the input schema", async () => {
