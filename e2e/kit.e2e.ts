@@ -10,13 +10,23 @@ const expectKitRendered = async (page: Page): Promise<void> => {
   await page.goto("/kit");
   await expect(page.getByRole("heading", { name: "UI kit" })).toBeVisible();
   await expect(page.getByLabel("Name")).toBeVisible();
-  await expect(page.getByRole("combobox", { name: "Model" })).toBeVisible();
-  await expect(
-    page.getByRole("checkbox", { name: "Email me a summary" })
-  ).toBeChecked();
-  await expect(
-    page.getByRole("switch", { name: "Notifications" })
-  ).not.toBeChecked();
+
+  const model = page.getByRole("combobox", { name: "Model" });
+  await expect(model).toContainText("Small");
+  await model.click();
+  await page.getByRole("option", { name: "Large" }).click();
+  await expect(model).toContainText("Large");
+
+  const summary = page.getByRole("checkbox", { name: "Email me a summary" });
+  await expect(summary).toBeChecked();
+  await summary.click();
+  await expect(summary).not.toBeChecked();
+
+  const notifications = page.getByRole("switch", { name: "Notifications" });
+  await expect(notifications).not.toBeChecked();
+  await notifications.click();
+  await expect(notifications).toBeChecked();
+
   await expect(page.getByRole("cell", { name: "Weekly report" })).toBeVisible();
 
   await page.getByRole("tab", { name: "Actions" }).click();
