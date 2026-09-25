@@ -6,6 +6,7 @@
   "type": "module",
   "exports": {
     "./workflow": "./src/workflow.ts",
+    "./engine": "./src/engine.ts",
     "./screen": "./src/screen.ts"
   },
   "dependencies": {

@@ -1,0 +1,111 @@
+import { model, money, person, workflow, z } from "../src/workflow.ts";
+import type { DecisionRequest } from "../src/workflow.ts";
+
+/**
+ * The outside systems the sample invoice workflow talks to. Connectors aren't
+ * part of the SDK yet, so the sample takes them as arguments and tests stand
+ * them in.
+ */
+export interface InvoiceSystems {
+  findPurchaseOrder: (number: string) => Promise<{ amount: number } | null>;
+  book: (
+    entry: { invoice: string; total: number },
+    idempotencyKey: string
+  ) => Promise<string>;
+  askReviewer: (request: DecisionRequest) => Promise<void>;
+}
+
+export const extractionSchema = z.object({
+  total: z.number(),
+  currency: z.string(),
+});
+
+/**
+ * Matches an incoming invoice to its purchase order, reads the total with a
+ * model, asks a person to approve large invoices and books the invoice.
+ */
+export const invoiceWorkflow = (systems: InvoiceSystems) =>
+  workflow(
+    "invoice-approval",
+    {
+      input: z.object({
+        number: z.string(),
+        purchaseOrder: z.string(),
+        text: z.string(),
+      }),
+      params: {
+        threshold: money({
+          label: "Review invoices above",
+          default: 5000,
+          sensitive: true,
+        }),
+        reviewer: person({ label: "Reviewer", default: "finance-team" }),
+        extractionModel: model({
+          label: "Extraction model",
+          default: "mistral-large",
+          sensitive: true,
+        }),
+      },
+      triggers: [{ type: "event", event: "invoice.received" }],
+      steps: {
+        "match-po": {
+          kind: "exact",
+          description: "Find the purchase order the invoice refers to",
+        },
+        extract: {
+          kind: "ai",
+          description: "Read the total and currency from the invoice",
+          uses: ["extractionModel"],
+          retries: 2,
+        },
+        review: {
+          kind: "decision",
+          description: "Ask the reviewer to approve invoices above the limit",
+          uses: ["threshold", "reviewer"],
+        },
+        book: {
+          kind: "exact",
+          description: "Book the invoice in the ledger",
+          sideEffect: true,
+          locked: true,
+        },
+      },
+    },
+    async (step, { input, params }) => {
+      const order = await step.do(
+        "match-po",
+        async () => await systems.findPurchaseOrder(input.purchaseOrder)
+      );
+      if (!order) {
+        return { status: "unmatched" } as const;
+      }
+
+      const extracted = await step.llm("extract", {
+        model: params.extractionModel,
+        input: input.text,
+        schema: extractionSchema,
+      });
+
+      if (extracted.total > params.threshold) {
+        const decision = await step.decision("review", {
+          from: params.reviewer,
+          ask: systems.askReviewer,
+          timeout: "7 days",
+          remindAfter: "2 days",
+        });
+        if (decision.outcome !== "approved") {
+          return { status: decision.outcome };
+        }
+      }
+
+      const entry = await step.do(
+        "book",
+        async ({ idempotencyKey }) =>
+          await systems.book(
+            { invoice: input.number, total: extracted.total },
+            idempotencyKey
+          )
+      );
+      return { status: "booked", entry } as const;
+    }
+  );
