@@ -38,6 +38,9 @@
   // So is the model gateway: the `MODEL_GATEWAY` var (src/models.ts) names
   // the deployment's AI Gateway and the models it allows. It needs no secret:
   // provider keys stay in AI Gateway. Without it every model call is refused.
+  //
+  // So are feature flags: the `FEATURES` var (src/features.ts), e.g.
+  // `{"apps": true}`. Every feature is off until it names it.
   "secrets": {
     "required": [
       "ROUTER_SECRET",

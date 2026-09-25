@@ -64,6 +64,11 @@ export const authErrors = defineErrorFamily({
   "auth.unauthenticated": "Sign in to continue.",
 });
 
+/** Why a call was refused: its feature is switched off for this deployment. */
+export const featureErrors = defineErrorFamily({
+  "feature.disabled": "This isn't switched on for this deployment.",
+});
+
 /**
  * Anything nobody planned for. Its details carry the request ID, never the
  * cause: that stays in the logs.
