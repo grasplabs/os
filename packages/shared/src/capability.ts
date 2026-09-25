@@ -74,42 +74,7 @@ export const capabilityErrors = defineErrorFamily({
     "This call doesn't carry a valid capability for this action.",
 });
 
-// Web Crypto and base64 are globals in every runtime this package runs in
-// (Workers, browsers, Node); the package declares no runtime types.
-interface MacKey {
-  readonly type: string;
-}
-type KeyUsage = "sign" | "verify";
-declare const crypto: {
-  randomUUID: () => string;
-  subtle: {
-    importKey: (
-      format: "raw",
-      keyData: Uint8Array,
-      algorithm: { name: "HMAC"; hash: "SHA-256" },
-      extractable: false,
-      usages: KeyUsage[]
-    ) => Promise<MacKey>;
-    sign: (
-      algorithm: "HMAC",
-      key: MacKey,
-      data: Uint8Array
-    ) => Promise<ArrayBuffer>;
-    verify: (
-      algorithm: "HMAC",
-      key: MacKey,
-      signature: Uint8Array,
-      data: Uint8Array
-    ) => Promise<boolean>;
-  };
-};
-declare const TextEncoder: new () => { encode: (input: string) => Uint8Array };
-declare const TextDecoder: new (
-  label: "utf-8",
-  options: { fatal: true }
-) => { decode: (input: Uint8Array) => string };
-declare const btoa: (data: string) => string;
-declare const atob: (data: string) => string;
+type MacUsage = "sign" | "verify";
 
 const base64UrlPattern = /^[A-Za-z0-9_-]+$/u;
 const tokenPattern = /^(?<payload>[A-Za-z0-9_-]+)\.(?<mac>[A-Za-z0-9_-]+)$/u;
@@ -120,7 +85,7 @@ const toBase64Url = (bytes: Uint8Array): string =>
     .replaceAll("/", "_")
     .replace(/[=]+$/u, "");
 
-const fromBase64Url = (text: string): Uint8Array => {
+const fromBase64Url = (text: string): Uint8Array<ArrayBuffer> => {
   if (!base64UrlPattern.test(text)) {
     throw new TypeError("Not base64url");
   }
@@ -128,7 +93,7 @@ const fromBase64Url = (text: string): Uint8Array => {
   return Uint8Array.from(binary, (char) => char.codePointAt(0) ?? 0);
 };
 
-const macKey = async (secret: string, usage: KeyUsage): Promise<MacKey> => {
+const macKey = async (secret: string, usage: MacUsage): Promise<CryptoKey> => {
   if (secret.length < capabilityKeyMinLength) {
     throw new Error(
       `The capability signing key must be at least ${capabilityKeyMinLength} characters`
@@ -143,7 +108,7 @@ const macKey = async (secret: string, usage: KeyUsage): Promise<MacKey> => {
   );
 };
 
-const macInput = (payload: string): Uint8Array =>
+const macInput = (payload: string): Uint8Array<ArrayBuffer> =>
   new TextEncoder().encode(`${macContext}${payload}`);
 
 /**
@@ -193,7 +158,7 @@ const readClaims = async (
   }
   // The key is checked before anything else; `verify` compares in constant time.
   const key = await macKey(secret, "verify");
-  let macBytes: Uint8Array;
+  let macBytes: Uint8Array<ArrayBuffer>;
   try {
     macBytes = fromBase64Url(mac);
   } catch {

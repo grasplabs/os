@@ -150,13 +150,6 @@ export interface AuditLogger {
   log: (entry: AuditEntry) => Promise<AuditEvent>;
 }
 
-// Web Crypto and the Encoding API are globals in every runtime this package
-// runs in (Workers, browsers, Node); the package declares no runtime types.
-declare const crypto: { randomUUID: () => string };
-declare const TextEncoder: new () => {
-  encode: (input: string) => Uint8Array;
-};
-
 /** Whether an event's JSON is over {@link auditEventMaxBytes}. */
 export const isAuditEventTooLarge = (json: string): boolean =>
   new TextEncoder().encode(json).byteLength > auditEventMaxBytes;
