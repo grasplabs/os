@@ -1,5 +1,7 @@
 import { internalErrors, requestErrors } from "@grasp-os/shared/errors";
 
+import { authBasePath } from "./auth/auth.ts";
+import { handleAuthRequest } from "./auth/routes.ts";
 import { errorResponse } from "./errors.ts";
 import { errorFields, log } from "./log.ts";
 import type { LogFields } from "./log.ts";
@@ -9,8 +11,8 @@ import { rpcResponse } from "./rpc.ts";
 /** Carries the request ID back to the caller, on every response. */
 const requestIdHeader = "x-request-id";
 
-const isApiPath = (pathname: string): boolean =>
-  pathname === "/api" || pathname.startsWith("/api/");
+const isUnder = (pathname: string, base: string): boolean =>
+  pathname === base || pathname.startsWith(`${base}/`);
 
 /** Routes a request that has passed the router-secret check. */
 const route = async (
@@ -23,9 +25,12 @@ const route = async (
     return Response.json({ ok: true });
   }
   if (pathname === "/rpc") {
-    return rpcResponse(request, requestId);
+    return await rpcResponse(request, env, requestId);
   }
-  if (isApiPath(pathname)) {
+  if (isUnder(pathname, authBasePath)) {
+    return await handleAuthRequest(request, env, requestId);
+  }
+  if (isUnder(pathname, "/api")) {
     return errorResponse(
       404,
       requestErrors.create("request.not_found"),

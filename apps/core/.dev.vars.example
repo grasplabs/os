@@ -2,3 +2,6 @@
 # Shared with the router. `vp run dev` skips the router-secret check for
 # requests to localhost, so it may stay empty locally.
 ROUTER_SECRET=
+# Signs session cookies and encrypts sign-in state. Any random value of at
+# least 32 characters, e.g. `openssl rand -base64 32`.
+BETTER_AUTH_SECRET=
