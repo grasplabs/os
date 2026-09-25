@@ -61,10 +61,10 @@ const auditFailure = async (env: Env, record: CallRecord): Promise<void> => {
 
 /** How a call that returned ended, for the audit log. */
 const callOutcome = ({ failed, replayed }: CallDone): CallOutcome => {
-  if (failed) {
-    return "failed";
+  if (replayed) {
+    return "replayed";
   }
-  return replayed ? "replayed" : "ok";
+  return failed ? "failed" : "ok";
 };
 
 const codeOf = (error: unknown): string | undefined =>
@@ -126,19 +126,35 @@ export default class Connect
       throw error;
     }
     // Nothing is returned, or stored for a repeat, that the audit log
-    // doesn't have: a side effect's answer is stored with its events.
-    await auditCall(
-      this.env,
-      {
-        call: stated,
-        claims,
-        sideEffect: done.sideEffect,
-        outcome: callOutcome(done),
-        reason: done.failed ? "connect.action_failed" : undefined,
-        provenance: done.result.provenance,
-      },
-      done.commit === undefined ? [] : [done.commit]
-    );
+    // doesn't have: a side effect's answer is stored with its events. If
+    // that fails, the call happened but went unrecorded: its key is spent,
+    // and it is recorded, as far as possible, with an unknown outcome.
+    const record: CallRecord = {
+      call: stated,
+      claims,
+      sideEffect: done.sideEffect,
+      outcome: callOutcome(done),
+      reason: done.failed ? "connect.action_failed" : undefined,
+      provenance: done.result.provenance,
+    };
+    try {
+      await auditCall(
+        this.env,
+        record,
+        done.commit === undefined ? [] : [done.commit]
+      );
+    } catch (error) {
+      log.error("audit.record_failed", errorFields(error));
+      await done.spend?.().catch((spendError: unknown) => {
+        log.error("idempotency.spend_failed", errorFields(spendError));
+      });
+      await auditFailure(this.env, {
+        ...record,
+        outcome: "unknown",
+        reason: "connect.outcome_unknown",
+      });
+      throw connectErrors.create("connect.outcome_unknown");
+    }
     if (done.failed) {
       throw connectErrors.create("connect.action_failed", {
         output: done.result.output,

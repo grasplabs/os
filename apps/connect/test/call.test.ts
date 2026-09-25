@@ -38,6 +38,7 @@ describe("calls to connect", () => {
       connectionId: await addConnection(),
       action: "mail.list",
       input: { top: 10 },
+      idempotencyKey: "run-1:list",
     };
   });
 
@@ -109,7 +110,7 @@ describe("calls to connect", () => {
       { ...call, action: "MAIL.LIST" },
       { ...call, connectionId: await addConnection() },
       { ...call, resource: "ceo@acme.test" },
-      { ...call, idempotencyKey: "send-1" },
+      { ...call, idempotencyKey: "run-2:list" },
     ];
     const refused = await Promise.all(
       otherCalls.map(async (other) => await callWith(capability, other))

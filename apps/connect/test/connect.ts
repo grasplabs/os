@@ -23,7 +23,8 @@ import { connections } from "../src/db/schema.ts";
 type ConnectionRow = typeof connections.$inferInsert;
 
 /** The URL of the MCP server behind the test connections. */
-export const serverUrl = "https://mcp.composio.test/toolkits/mail";
+export const serverUrl =
+  "https://backend.composio.dev/v3/mcp/server-mail?user_id=grasp";
 
 /** A shared connection to `serverUrl`, unless `fields` say otherwise. */
 export const addConnection = async (
@@ -47,12 +48,19 @@ export const addConnection = async (
   return id;
 };
 
-/** An agent acting for `person`. */
-export const agentFor = (person: string, agentId = "agent-chat"): Authority =>
+/**
+ * An agent acting for `person`: in a workflow run unless `mode` says chat
+ * (`interactive`), where connect holds no writes yet.
+ */
+export const agentFor = (
+  person: string,
+  agentId = "agent-chat",
+  mode: Authority["mode"] = "workflow"
+): Authority =>
   authoritySchema.parse({
     subject: { type: "agent", agentId },
     onBehalfOf: person,
-    mode: "interactive",
+    mode,
   });
 
 /** An App's workflow acting for `person`. */

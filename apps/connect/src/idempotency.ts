@@ -40,6 +40,12 @@ export interface IdempotencyScope {
   idempotencyKey: string;
 }
 
+/**
+ * Largest output kept for a repeat, in bytes. A larger one goes back to the
+ * first call in full; a repeat gets a note that it was too large to keep.
+ */
+const maxStoredOutputBytes = 128 * 1024;
+
 type Row = typeof idempotentCalls.$inferSelect;
 
 /** An earlier call's answer: its result, or the tool's error. */
@@ -83,11 +89,20 @@ export const hashCall = async (
 };
 
 /** What a stored row means for a repeat of the call: its answer, or why not. */
-const replay = (row: Row, inputHash: string, now: number): StoredAnswer => {
+const replay = (
+  row: Row,
+  inputHash: string,
+  now: number
+): StoredAnswer | undefined => {
   if (row.inputHash !== inputHash) {
     throw connectErrors.create("connect.idempotency_conflict");
   }
   const answered = row.state === "done" || row.state === "failed";
+  const expired = now - row.createdAt.getTime() > retentionMs;
+  if (answered && expired) {
+    // Past retention the key is free again, as if pruned already.
+    return undefined;
+  }
   if (answered && row.output !== null) {
     return {
       result: {
@@ -104,6 +119,14 @@ const replay = (row: Row, inputHash: string, now: number): StoredAnswer => {
     throw connectErrors.create("connect.call_in_progress");
   }
   throw connectErrors.create("connect.outcome_unknown");
+};
+
+/** The output as kept for repeats: itself, or a note when too large. */
+const retainable = (output: string): string => {
+  const bytes = new TextEncoder().encode(output).byteLength;
+  return bytes <= maxStoredOutputBytes
+    ? output
+    : JSON.stringify(`(The result was too large to keep: ${bytes} bytes.)`);
 };
 
 /** The idempotency store for one key: see the module comment. */
@@ -161,11 +184,13 @@ export const idempotencyStore = (
         return undefined;
       }
       const row = await find();
-      if (row === undefined) {
+      const earlier =
+        row === undefined ? undefined : replay(row, inputHash, now);
+      if (earlier === undefined) {
         // Claimed and released again in between: that call did nothing.
         throw connectErrors.create("connect.call_in_progress");
       }
-      return replay(row, inputHash, now);
+      return earlier;
     },
 
     /**
@@ -177,7 +202,7 @@ export const idempotencyStore = (
         .update(idempotentCalls)
         .set({
           state: failed ? "failed" : "done",
-          output: result.output,
+          output: retainable(result.output),
           provenance: JSON.stringify(result.provenance),
         })
         .where(and(key, eq(idempotentCalls.state, "running"))),

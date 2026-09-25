@@ -32,11 +32,59 @@ export interface FakeResult {
 }
 
 /**
- * How the next `tools/call` fares on the way: `ok`, `drop` (it reaches the
- * server and runs, but the answer is lost), or `unauthorised` (the server
- * turns it away with a 401 before running it).
+ * How the next `tools/call` fares on the way: `ok`; `drop` (it reaches the
+ * server and runs, but the answer is lost); `unauthorised` (the server
+ * turns it away with a 401 before running it); `no-method` (a JSON-RPC
+ * "method not found", before running it); or `invalid-params` (the tool
+ * runs, then the server answers with a JSON-RPC "invalid params" error).
  */
-export type Network = "ok" | "drop" | "unauthorised";
+export type Network =
+  | "ok"
+  | "drop"
+  | "unauthorised"
+  | "no-method"
+  | "invalid-params";
+
+const rpcError = (body: unknown, code: number): Response =>
+  Response.json({
+    jsonrpc: "2.0",
+    id:
+      typeof body === "object" && body !== null && "id" in body
+        ? body.id
+        : null,
+    error: { code, message: "Refused" },
+  });
+
+/**
+ * The response with `padding` tiny events in front, each in a chunk of its
+ * own, as a chatty server streams them.
+ */
+const padded = (response: Response, padding: number): Response => {
+  const { body } = response;
+  if (padding === 0 || body === null) {
+    return response;
+  }
+  const encoder = new TextEncoder();
+  let sent = 0;
+  const reader = body.getReader();
+  const stream = new ReadableStream<Uint8Array>({
+    pull: async (controller) => {
+      if (sent < padding) {
+        sent += 1;
+        controller.enqueue(encoder.encode(": ping\n\n"));
+        return;
+      }
+      const read: ReadableStreamReadResult<unknown> = await reader.read();
+      const bytes = read.done ? undefined : read.value;
+      if (bytes instanceof Uint8Array) {
+        controller.enqueue(bytes);
+      } else {
+        controller.close();
+      }
+    },
+  });
+  return new Response(stream, { headers: response.headers });
+};
 
 interface Ran {
   tool: string;
@@ -89,7 +137,15 @@ const serverWith = (tools: readonly FakeTool[], ran: Ran[]): McpServer => {
 export const fakeMcpServer = (
   url: string,
   tools: readonly FakeTool[],
-  { stream = false }: { stream?: boolean } = {}
+  {
+    stream = false,
+    padding = 0,
+  }: {
+    /** Answer in event streams instead of JSON bodies. */
+    stream?: boolean;
+    /** Tiny events to send ahead of each streamed answer. */
+    padding?: number;
+  } = {}
 ) => {
   const state: {
     /** Every tool run, in order. */
@@ -110,6 +166,9 @@ export const fakeMcpServer = (
     if (network === "unauthorised") {
       return new Response("Unauthorized", { status: 401 });
     }
+    if (network === "no-method") {
+      return rpcError(body, -32_601);
+    }
     // Stateless, as a server behind a load balancer: one server per request.
     const transport = new WebStandardStreamableHTTPServerTransport({
       sessionIdGenerator: undefined,
@@ -121,7 +180,11 @@ export const fakeMcpServer = (
       await response.text();
       throw new TypeError("Network connection lost.");
     }
-    return response;
+    if (network === "invalid-params") {
+      await response.text();
+      return rpcError(body, -32_602);
+    }
+    return padded(response, stream ? padding : 0);
   };
 
   beforeEach(() => {

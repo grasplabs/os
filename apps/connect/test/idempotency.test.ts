@@ -50,9 +50,8 @@ const server = fakeMcpServer(serverUrl, [
     run: () => ({ output: { draftId: "draft-1" } }),
   },
   {
-    name: "mail.list",
-    readOnly: true,
-    run: () => ({ output: { messages: [] } }),
+    name: "mail.export",
+    run: () => ({ output: { text: "x".repeat(200 * 1024) } }),
   },
 ]);
 
@@ -177,6 +176,60 @@ describe("a side effect", () => {
     expect(server.ran).toHaveLength(1);
   });
 
+  it("that ran, then drew a JSON-RPC error, is never sent again", async () => {
+    const connectionId = await addConnection();
+    const call = send(connectionId, "run-1:send");
+    // A tool handler may throw "invalid params" after it has written.
+    server.network = "invalid-params";
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.outcome_unknown"
+    );
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.outcome_unknown"
+    );
+    expect(server.ran).toHaveLength(1);
+  });
+
+  it("that the server has no method for can be retried with its key", async () => {
+    const connectionId = await addConnection();
+    const call = send(connectionId, "run-1:send");
+    server.network = "no-method";
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.server_unavailable"
+    );
+    await expect(outcome(callAs(anna, call))).resolves.toBe("ok");
+    expect(server.ran).toHaveLength(1);
+  });
+
+  it("with an answer too large to keep returns it once, then a note", async () => {
+    const connectionId = await addConnection();
+    const call = {
+      connectionId,
+      action: "mail.export",
+      input: {},
+      idempotencyKey: "run-1:export",
+    };
+    const first = await callAs(anna, call);
+    const repeat = await callAs(anna, call);
+    expect(first.output.length).toBeGreaterThan(200 * 1024);
+    expect(JSON.parse(repeat.output)).toMatch(/too large to keep/u);
+    expect(server.ran).toHaveLength(1);
+  });
+
+  it("runs again once its answer is past retention", async () => {
+    const connectionId = await addConnection();
+    const call = send(connectionId, "run-1:send");
+    await callAs(anna, call);
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(Date.now() + 31 * 24 * 60 * 60 * 1000);
+      await expect(outcome(callAs(anna, call))).resolves.toBe("ok");
+    } finally {
+      vi.useRealTimers();
+    }
+    expect(server.ran).toHaveLength(2);
+  });
+
   it("that the tool reported as failed answers a repeat with that error", async () => {
     const connectionId = await addConnection();
     const call = {
@@ -241,14 +294,5 @@ describe("a side effect whose call never came back", () => {
     }
     await expect(first).resolves.toBe("ok");
     expect(server.ran).toHaveLength(1);
-  });
-});
-
-describe("a read", () => {
-  it("needs no idempotency key", async () => {
-    const connectionId = await addConnection();
-    await expect(
-      outcome(callAs(anna, { connectionId, action: "mail.list", input: {} }))
-    ).resolves.toBe("ok");
   });
 });

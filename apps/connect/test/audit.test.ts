@@ -1,5 +1,5 @@
-import { exports } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { env, exports } from "cloudflare:workers";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   addConnection,
@@ -11,6 +11,7 @@ import {
   outcome,
   serverUrl,
 } from "./connect.ts";
+import type { Call } from "./connect.ts";
 import { fakeMcpServer } from "./mcp-server.ts";
 
 // Every call to connect is in the audit log: who made it and for whom, on
@@ -56,14 +57,25 @@ const { events } = queue;
 
 const anna = agentFor("user-anna");
 
+/** A call of `action` with a fresh idempotency key. */
+const write = (
+  connectionId: string,
+  action: string,
+  input: Call["input"] = {}
+): Call => ({
+  connectionId,
+  action,
+  input,
+  idempotencyKey: crypto.randomUUID(),
+});
+
 describe("the audit log", () => {
-  it("records a read with who made it, for whom, and what it read", async () => {
+  it("records a call with who made it, for whom, and what it read", async () => {
     const connectionId = await addConnection();
-    await callAs(anna, {
-      connectionId,
-      action: "mail.list",
-      input: { query: "secret project" },
-    });
+    await callAs(
+      anna,
+      write(connectionId, "mail.list", { query: "secret project" })
+    );
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
       source: "connect",
@@ -74,8 +86,8 @@ describe("the audit log", () => {
       detail: {
         action: "mail.list",
         onBehalfOf: "user-anna",
-        mode: "interactive",
-        sideEffect: false,
+        mode: "workflow",
+        sideEffect: true,
         outcome: "ok",
         provenanceCount: 1,
       },
@@ -88,11 +100,10 @@ describe("the audit log", () => {
 
   it("records every resource a large read touched", async () => {
     const connectionId = await addConnection();
-    await callAs(appFor("user-anna"), {
-      connectionId,
-      action: "mail.list",
-      input: { many: true },
-    });
+    await callAs(
+      appFor("user-anna"),
+      write(connectionId, "mail.list", { many: true })
+    );
     const [first, ...rest] = events;
     expect(first).toMatchObject({
       actor: { type: "app", appId: "app-crm", part: "server" },
@@ -122,10 +133,15 @@ describe("the audit log", () => {
     };
     await callAs(anna, call);
     await callAs(anna, call);
-    expect(events.map((event) => event.detail)).toMatchObject([
-      { sideEffect: true, outcome: "ok", idempotencyKey: "run-1:send" },
-      { sideEffect: true, outcome: "replayed", idempotencyKey: "run-1:send" },
+    const [first, repeat] = events.map((event) => event.detail);
+    expect([first, repeat]).toMatchObject([
+      { sideEffect: true, outcome: "ok" },
+      { sideEffect: true, outcome: "replayed" },
     ]);
+    // App code chooses keys: the log gets a hash, never the key.
+    expect(first?.idempotencyKeyHash).toMatch(/^[0-9a-f]{64}$/u);
+    expect(repeat?.idempotencyKeyHash).toBe(first?.idempotencyKeyHash);
+    expect(JSON.stringify(events)).not.toContain("run-1:send");
     expect(server.ran).toHaveLength(1);
   });
 
@@ -203,16 +219,50 @@ describe("the audit log", () => {
     expect(server.ran).toStrictEqual([]);
   });
 
-  it("records what a failed read touched", async () => {
+  it("records what a failed call touched, and its repeat as replayed", async () => {
     const connectionId = await addConnection();
-    await expect(
-      outcome(callAs(anna, { connectionId, action: "mail.open", input: {} }))
-    ).resolves.toBe("connect.action_failed");
+    const call = write(connectionId, "mail.open");
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.action_failed"
+    );
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.action_failed"
+    );
     expect(events).toMatchObject([
       {
         provenance: ["message-9"],
         detail: { outcome: "failed", reason: "connect.action_failed" },
       },
+      {
+        provenance: ["message-9"],
+        detail: { outcome: "replayed", reason: "connect.action_failed" },
+      },
+    ]);
+  });
+
+  it("records a call whose answer couldn't be stored as unknown, and spends its key", async () => {
+    const connectionId = await addConnection();
+    const call = write(connectionId, "mail.send");
+    // The database refuses the batch that stores the answer with its event.
+    const batch = env.DB.batch.bind(env.DB);
+    let batches = 0;
+    vi.spyOn(env.DB, "batch").mockImplementation(async (statements) => {
+      batches += 1;
+      if (batches === 2) {
+        throw new Error("D1 is unavailable");
+      }
+      return await batch(statements);
+    });
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.outcome_unknown"
+    );
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.outcome_unknown"
+    );
+    expect(server.ran).toHaveLength(1);
+    expect(events.map((event) => event.detail)).toMatchObject([
+      { outcome: "unknown", reason: "connect.outcome_unknown" },
+      { outcome: "unknown", reason: "connect.outcome_unknown" },
     ]);
   });
 
@@ -220,7 +270,7 @@ describe("the audit log", () => {
     const connectionId = await addConnection();
     queue.refuseNext();
     await expect(
-      outcome(callAs(anna, { connectionId, action: "mail.list", input: {} }))
+      outcome(callAs(anna, write(connectionId, "mail.list")))
     ).resolves.toBe("ok");
     expect(events).toStrictEqual([]);
     await exports.default.scheduled();

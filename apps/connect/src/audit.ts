@@ -13,6 +13,15 @@ import { drizzle } from "drizzle-orm/d1";
 
 import { auditOutbox } from "./db/schema.ts";
 
+/** SHA-256 of `text`, in hex. */
+const sha256 = async (text: string): Promise<string> =>
+  Array.from(
+    new Uint8Array(
+      await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text))
+    ),
+    (byte) => byte.toString(16).padStart(2, "0")
+  ).join("");
+
 /** Most events one send takes from the outbox. */
 const sendBatchSize = 100;
 
@@ -151,7 +160,13 @@ export const auditCall = async (
   };
   add("action", call?.action);
   add("resource", call?.resource);
-  add("idempotencyKey", call?.idempotencyKey);
+  // App code chooses keys, so the log gets a hash, never the key itself.
+  add(
+    "idempotencyKeyHash",
+    call?.idempotencyKey === undefined
+      ? undefined
+      : await sha256(call.idempotencyKey)
+  );
   add("onBehalfOf", claims?.authority.onBehalfOf);
   add("mode", claims?.authority.mode);
   add("sideEffect", sideEffect);

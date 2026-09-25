@@ -13,12 +13,25 @@ import type { McpServer } from "./mcp.ts";
 export type Connection = typeof connections.$inferSelect;
 
 /**
- * A Composio server's URL, as stored. Only HTTPS, and never with
- * credentials in it: those are added per call.
+ * Where Composio serves the MCP servers it creates: `composio.mcp.generate`
+ * returns `https://backend.composio.dev/v3/mcp/<server id>?user_id=...`.
+ */
+const composioMcpHost = "backend.composio.dev";
+const composioMcpPath = "/v3/mcp/";
+
+/**
+ * A Composio server's URL, as stored: HTTPS on Composio's MCP host, and
+ * never with credentials in it (those are added per call). Anything else
+ * is never called, whatever the registry says.
  */
 const composioUrlSchema = z.url({ protocol: /^https$/u }).refine((url) => {
-  const { username, password } = new URL(url);
-  return username === "" && password === "";
+  const { host, pathname, username, password } = new URL(url);
+  return (
+    host === composioMcpHost &&
+    pathname.startsWith(composioMcpPath) &&
+    username === "" &&
+    password === ""
+  );
 });
 
 /**

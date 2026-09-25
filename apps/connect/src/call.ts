@@ -9,6 +9,7 @@ import { hashCall, idempotencyStore } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
 import { McpError } from "./mcp.ts";
 import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
+import { checkResourceScope, hasSideEffect } from "./policy.ts";
 
 /**
  * A call connect carried out, or answered from its stored answer: its
@@ -20,6 +21,8 @@ export interface CallDone extends StoredAnswer {
   replayed: boolean;
   /** Stores a side effect's answer, in one batch with its audit events. */
   commit?: BatchItem<"sqlite">;
+  /** Spends the key if that batch fails: the effect happened, unrecorded. */
+  spend?: () => Promise<void>;
 }
 
 /** Knows once the action is found whether it has a side effect. */
@@ -29,30 +32,11 @@ export interface CallProgress {
 
 type Input = Record<string, Json>;
 
+/** Largest input a call may carry, in bytes of JSON. */
+const maxInputBytes = 64 * 1024;
+
 const isInput = (input: Json): input is Input =>
   typeof input === "object" && input !== null && !Array.isArray(input);
-
-/**
- * Keeps a call for one resource on that resource. The capability names the
- * resource, but the call's target is in its free-form input, in the
- * property the tool declares for it: that property must name exactly the
- * capability's resource. A tool that declares none can't be called for one
- * resource at all, since nothing shows which resource it would touch.
- */
-const checkResourceScope = (
-  resource: string | null,
-  tool: McpTool,
-  input: Input
-): void => {
-  if (resource === null) {
-    return;
-  }
-  const inScope =
-    tool.resourceField !== undefined && input[tool.resourceField] === resource;
-  if (!inScope) {
-    throw connectErrors.create("connect.resource_out_of_scope");
-  }
-};
 
 /** The tool's answer, as connect stores and returns it. */
 const answerOf = ({
@@ -104,6 +88,11 @@ export const carryOut = async (
   if (!isInput(input)) {
     throw connectErrors.create("connect.invalid_call");
   }
+  if (
+    new TextEncoder().encode(JSON.stringify(input)).byteLength > maxInputBytes
+  ) {
+    throw connectErrors.create("connect.input_too_large");
+  }
 
   // A repeat of a side effect gets its stored result before anything goes
   // out, not even a look at the server's tools.
@@ -129,13 +118,15 @@ export const carryOut = async (
 
   const server = serverOf(connection);
   const tool = await toolFor(server, call.action);
-  // Read or side effect is the server's word: only a tool it declares
-  // read-only is a read. That fits native connectors, which are ours. For
-  // Composio servers the admin's per-tool choice replaces it when they
-  // connect a toolkit.
-  const sideEffect = !tool.readOnly;
+  const sideEffect = hasSideEffect(connection.serverKind, tool);
   progress.sideEffect = sideEffect;
-  checkResourceScope(resource, tool, input);
+  checkResourceScope(resource, connection.serverKind, tool, input);
+  // A side effect from chat waits for the person to confirm it on a view of
+  // the exact input (R7). Until connect holds writes for that, it refuses
+  // them: only workflows, whose code a person reviewed, write.
+  if (sideEffect && authority.mode === "interactive") {
+    throw connectErrors.create("connect.confirmation_required");
+  }
 
   if (!sideEffect) {
     try {
@@ -176,5 +167,6 @@ export const carryOut = async (
     sideEffect,
     replayed: false,
     commit: store.completion(answer),
+    spend: store.spend,
   };
 };

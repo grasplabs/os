@@ -18,8 +18,8 @@ const protocolVersion = "2025-06-18";
 /** Largest response connect reads from an MCP server, in bytes. */
 const maxResponseBytes = 1024 * 1024;
 
-/** How long one MCP request may take, response included. */
-const requestTimeoutMs = 30_000;
+/** How long one call may take, all its MCP requests together. */
+const callTimeoutMs = 30_000;
 
 /** Most `tools/list` pages read while looking for a tool. */
 const maxToolPages = 20;
@@ -50,6 +50,8 @@ export interface McpTool {
   readOnly: boolean;
   /** The input property holding the resource it acts on, if it names one. */
   resourceField: string | undefined;
+  /** The properties its input schema declares, if it declares any. */
+  inputProperties: readonly string[] | undefined;
 }
 
 /** What a tool call returned. */
@@ -65,11 +67,12 @@ export interface McpToolResult {
 }
 
 /**
- * A request to the server failed. `declined` is true only when the server
- * answered that it didn't take the request (unauthorised, redirected, or a
- * JSON-RPC error for a malformed or unknown request). Anything else, a
- * dropped connection or an unreadable reply, leaves open whether a tool
- * call ran before it failed.
+ * A request to the server failed. `declined` is true only when the request
+ * provably never reached a tool: the server refused it as unauthorised
+ * (401, 403), couldn't parse it, or has no such method. Anything else, a
+ * dropped connection, an unreadable reply, or a JSON-RPC error a tool may
+ * throw after acting (such as invalid params), leaves open whether the call
+ * ran.
  */
 export class McpError extends Error {
   readonly declined: boolean;
@@ -81,14 +84,12 @@ export class McpError extends Error {
   }
 }
 
-/** JSON-RPC errors that mean the server refused the request as sent. */
-const refusedRequestCodes: ReadonlySet<number> = new Set([
-  -32_700, -32_600, -32_601, -32_602,
-]);
+/** JSON-RPC errors raised before any tool runs: parse error, no such method. */
+const refusedRequestCodes: ReadonlySet<number> = new Set([-32_700, -32_601]);
 
 /** HTTP statuses that mean the server didn't act on the request. */
 const isDeclinedStatus = (status: number): boolean =>
-  status === 401 || status === 403 || (status >= 300 && status < 400);
+  status === 401 || status === 403;
 
 const rpcResponseSchema = z.object({
   jsonrpc: z.literal("2.0"),
@@ -107,6 +108,9 @@ const toolsPageSchema = z.object({
     z.object({
       name: z.string(),
       annotations: z.object({ readOnlyHint: z.unknown() }).partial().optional(),
+      inputSchema: z
+        .object({ properties: z.record(z.string(), z.unknown()).optional() })
+        .optional(),
       _meta: metaSchema,
     })
   ),
@@ -128,19 +132,6 @@ const provenanceSchema = z
 const sseEventEnd = /\r?\n\r?\n/u;
 const sseLine = /\r?\n/u;
 
-/** The data of each complete event in an event stream's text. */
-const sseData = (text: string): string[] =>
-  text
-    .split(sseEventEnd)
-    .slice(0, -1)
-    .map((event) =>
-      event
-        .split(sseLine)
-        .filter((line) => line.startsWith("data:"))
-        .map((line) => line.slice("data:".length).trimStart())
-        .join("\n")
-    );
-
 const parseMessage = (text: string): RpcResponse | undefined => {
   try {
     const message = rpcResponseSchema.safeParse(JSON.parse(text));
@@ -150,11 +141,49 @@ const parseMessage = (text: string): RpcResponse | undefined => {
   }
 };
 
-/** The answer to request `id` among the complete events of a stream. */
-const answerIn = (stream: string, id: number): RpcResponse | undefined =>
-  sseData(stream)
-    .map(parseMessage)
-    .find((message) => message?.id === id);
+/** The JSON-RPC message in one event of a stream, if it carries one. */
+const eventMessage = (event: string): RpcResponse | undefined =>
+  parseMessage(
+    event
+      .split(sseLine)
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice("data:".length).trimStart())
+      .join("\n")
+  );
+
+/**
+ * Reads an event stream as it arrives, one complete event at a time, and
+ * keeps only the incomplete rest: many tiny events cost no more than a few
+ * large ones.
+ */
+const eventReader = (id: number) => {
+  let pending = "";
+  const take = (): RpcResponse | undefined => {
+    for (;;) {
+      const end = sseEventEnd.exec(pending);
+      if (end === null) {
+        return undefined;
+      }
+      const message = eventMessage(pending.slice(0, end.index));
+      pending = pending.slice(end.index + end[0].length);
+      if (message?.id === id) {
+        return message;
+      }
+    }
+  };
+  return {
+    add: (text: string): RpcResponse | undefined => {
+      pending += text;
+      return take();
+    },
+    /** The stream ended: its last event may lack the closing blank line. */
+    end: (): RpcResponse | undefined => {
+      const message = eventMessage(pending);
+      pending = "";
+      return message?.id === id ? message : undefined;
+    },
+  };
+};
 
 /**
  * The answer to request `id`: the JSON body, or the first event carrying it
@@ -170,8 +199,16 @@ const readResponse = async (
   );
   const reader = response.body?.getReader();
   const decoder = new TextDecoder();
-  let text = "";
+  const events = eventReader(id);
+  const parts: string[] = [];
   let bytes = 0;
+  const add = (text: string): RpcResponse | undefined => {
+    if (isStream) {
+      return events.add(text);
+    }
+    parts.push(text);
+    return undefined;
+  };
   try {
     for (;;) {
       // oxlint-disable-next-line no-await-in-loop -- a stream is read in order
@@ -187,8 +224,7 @@ const readResponse = async (
       if (bytes > maxResponseBytes) {
         throw new McpError(`The response is over ${maxResponseBytes} bytes`);
       }
-      text += decoder.decode(bytesRead, { stream: true });
-      const answer = isStream ? answerIn(text, id) : undefined;
+      const answer = add(decoder.decode(bytesRead, { stream: true }));
       if (answer !== undefined) {
         return answer;
       }
@@ -197,20 +233,26 @@ const readResponse = async (
     // Stops a stream the server keeps open once the answer is in.
     await reader?.cancel();
   }
+  const answer = add(decoder.decode());
   if (isStream) {
-    return answerIn(`${text}\n\n`, id);
+    return answer ?? events.end();
   }
-  const message = parseMessage(text);
+  const message = parseMessage(parts.join(""));
   return message?.id === id ? message : undefined;
 };
 
-const toolOf = (tool: z.infer<typeof toolsPageSchema>["tools"][number]) => {
+const toolOf = (
+  tool: z.infer<typeof toolsPageSchema>["tools"][number]
+): McpTool => {
   const resourceField = tool._meta?.[resourceMetaKey];
+  const properties = tool.inputSchema?.properties;
   return {
     name: tool.name,
     readOnly: tool.annotations?.readOnlyHint === true,
     resourceField:
       typeof resourceField === "string" ? resourceField : undefined,
+    inputProperties:
+      properties === undefined ? undefined : Object.keys(properties),
   };
 };
 
@@ -253,6 +295,8 @@ export const mcpServer = (endpoint: string, send: McpFetch): McpServer => {
   let sessionId: string | null = null;
   let version = protocolVersion;
   let session: Promise<void> | undefined;
+  // One deadline for the whole call, however many requests it takes.
+  const deadline = AbortSignal.timeout(callTimeoutMs);
 
   const post = async (body: object): Promise<Response> => {
     const headers = new Headers({
@@ -270,7 +314,7 @@ export const mcpServer = (endpoint: string, send: McpFetch): McpServer => {
         body: JSON.stringify(body),
         // A redirect could carry the request somewhere else: never follow.
         redirect: "manual",
-        signal: AbortSignal.timeout(requestTimeoutMs),
+        signal: deadline,
       })
     );
     if (!response.ok) {

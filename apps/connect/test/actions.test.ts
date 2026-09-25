@@ -10,13 +10,14 @@ import {
   outcome,
   serverUrl,
 } from "./connect.ts";
+import type { Call } from "./connect.ts";
 import { fakeMcpServer } from "./mcp-server.ts";
 import type { FakeTool } from "./mcp-server.ts";
 
 // Which connection a call may reach and what it may do there: only a
 // connection that is active, a personal one only for its owner, only the
-// exact action the capability names, and within one resource the
-// capability's resource, whatever the input says.
+// exact action the capability names, and only what connect can vouch for
+// on a Composio server, whatever the server says about its own tools.
 
 const messages = ["message-1", "message-2"];
 
@@ -30,14 +31,10 @@ const tools: FakeTool[] = [
     name: "mail.read",
     readOnly: true,
     resourceField: "mailbox",
-    run: ({ mailbox }) => ({
-      output: { mailbox, messages },
-      provenance: messages,
-    }),
+    run: ({ mailbox }) => ({ output: { mailbox, messages } }),
   },
   {
     name: "mail.photo",
-    readOnly: true,
     run: () => ({
       output: {},
       content: [{ type: "image", data: "aGVsbG8=", mimeType: "image/png" }],
@@ -45,7 +42,6 @@ const tools: FakeTool[] = [
   },
   {
     name: "mail.search",
-    readOnly: true,
     run: ({ query }) =>
       query === ""
         ? { output: { error: "An empty query" }, isError: true }
@@ -58,14 +54,25 @@ const server = fakeMcpServer(serverUrl, tools);
 const anna = agentFor("user-anna");
 const ben = agentFor("user-ben");
 
+/** A call of `action` with a fresh idempotency key. */
+const write = (
+  connectionId: string,
+  action = "mail.list",
+  input: Call["input"] = {}
+): Call => ({
+  connectionId,
+  action,
+  input,
+  idempotencyKey: crypto.randomUUID(),
+});
+
 describe("a call on a connection", () => {
   it("runs the action and returns its output and the resources it read", async () => {
     const connectionId = await addConnection();
-    const result = await callAs(anna, {
-      connectionId,
-      action: "mail.list",
-      input: { top: 10 },
-    });
+    const result = await callAs(
+      anna,
+      write(connectionId, "mail.list", { top: 10 })
+    );
     expect(JSON.parse(result.output)).toStrictEqual({ messages });
     expect(result.provenance).toStrictEqual(messages);
     expect(server.ran).toStrictEqual([
@@ -75,13 +82,7 @@ describe("a call on a connection", () => {
 
   it("is refused on a connection that doesn't exist", async () => {
     await expect(
-      outcome(
-        callAs(anna, {
-          connectionId: "connection-missing",
-          action: "mail.list",
-          input: {},
-        })
-      )
+      outcome(callAs(anna, write("connection-missing")))
     ).resolves.toBe("connect.connection_not_found");
     expect(server.requests).toBe(0);
   });
@@ -91,9 +92,7 @@ describe("a call on a connection", () => {
     const refused = await Promise.all(
       statuses.map(async (status) => {
         const connectionId = await addConnection({ status });
-        return await outcome(
-          callAs(anna, { connectionId, action: "mail.list", input: {} })
-        );
+        return await outcome(callAs(anna, write(connectionId)));
       })
     );
     expect(refused).toStrictEqual(
@@ -107,12 +106,12 @@ describe("a call on a connection", () => {
       scope: "personal",
       ownerUserId: "user-anna",
     });
-    const call = { connectionId, action: "mail.list", input: {} };
+    const call = write(connectionId);
     await expect(outcome(callAs(anna, call))).resolves.toBe("ok");
     // Ben's agent, even with a capability for exactly this call (core signs
     // one for any member whose agent holds a permission for it).
     await expect(outcome(callAs(ben, call))).resolves.toBe("connect.not_owner");
-    // Another agent or App acting for Anna is Anna's own context.
+    // Another agent acting for Anna is Anna's own context.
     await expect(
       outcome(callAs(agentFor("user-anna", "agent-other"), call))
     ).resolves.toBe("ok");
@@ -125,16 +124,17 @@ describe("a call on a connection", () => {
       ownerUserId: "user-anna",
       status: "disconnected",
     });
-    await expect(
-      outcome(callAs(ben, { connectionId, action: "mail.list", input: {} }))
-    ).resolves.toBe("connect.not_owner");
+    await expect(outcome(callAs(ben, write(connectionId)))).resolves.toBe(
+      "connect.not_owner"
+    );
   });
 
   it("reaches any member's shared connection", async () => {
     const connectionId = await addConnection({ scope: "shared" });
-    const call = { connectionId, action: "mail.list", input: {} };
-    await expect(outcome(callAs(anna, call))).resolves.toBe("ok");
-    await expect(outcome(callAs(ben, call))).resolves.toBe("ok");
+    await expect(outcome(callAs(anna, write(connectionId)))).resolves.toBe(
+      "ok"
+    );
+    await expect(outcome(callAs(ben, write(connectionId)))).resolves.toBe("ok");
   });
 
   it("runs only an action named exactly as the server names it", async () => {
@@ -143,7 +143,7 @@ describe("a call on a connection", () => {
     const refused = await Promise.all(
       others.map(
         async (action) =>
-          await outcome(callAs(anna, { connectionId, action, input: {} }))
+          await outcome(callAs(anna, write(connectionId, action)))
       )
     );
     expect(refused).toStrictEqual(others.map(() => "connect.action_not_found"));
@@ -152,70 +152,50 @@ describe("a call on a connection", () => {
 
   it("is refused when the call names another action than its capability", async () => {
     const connectionId = await addConnection();
-    const capability = await capabilityFor(anna, {
-      connectionId,
-      action: "mail.list",
-      input: {},
-    });
+    const call = write(connectionId);
+    const capability = await capabilityFor(anna, call);
     await expect(
       outcome(
-        exports.default.call({
-          connectionId,
-          action: "MAIL.LIST",
-          input: {},
-          capability,
-        })
+        exports.default.call({ ...call, action: "MAIL.LIST", capability })
       )
     ).resolves.toBe("capability.invalid");
   });
 
-  it("stays on the one resource its capability is for", async () => {
+  it("treats every tool of a Composio server as a side effect, whatever it declares", async () => {
     const connectionId = await addConnection();
-    const resource = "anna@acme.test";
-    const reach = async (
-      input: Record<string, string>,
-      action = "mail.read"
-    ): Promise<string> =>
-      await outcome(callAs(anna, { connectionId, resource, action, input }));
-
-    await expect(reach({ mailbox: resource })).resolves.toBe("ok");
-    const escapes = await Promise.all([
-      // Another mailbox, the same one spelt differently, or none at all.
-      reach({ mailbox: "ceo@acme.test" }),
-      reach({ mailbox: "Anna@acme.test" }),
-      reach({}),
-      reach({ mailboxes: resource }),
-      // An action that doesn't say which resource it touches.
-      reach({ mailbox: resource }, "mail.list"),
-    ]);
-    expect(escapes).toStrictEqual(
-      escapes.map(() => "connect.resource_out_of_scope")
+    const { idempotencyKey: _key, ...withoutKey } = write(connectionId);
+    await expect(outcome(callAs(anna, withoutKey))).resolves.toBe(
+      "connect.idempotency_key_required"
     );
-    expect(server.ran).toStrictEqual([
-      { tool: "mail.read", input: { mailbox: resource } },
-    ]);
+    expect(server.ran).toStrictEqual([]);
   });
 
-  it("reaches every resource with a capability for the whole connection", async () => {
+  it("holds no Composio call to one resource, whatever the server declares", async () => {
     const connectionId = await addConnection();
+    const resource = "anna@acme.test";
     await expect(
       outcome(
         callAs(anna, {
-          connectionId,
-          action: "mail.read",
-          input: { mailbox: "ceo@acme.test" },
+          ...write(connectionId, "mail.read", { mailbox: resource }),
+          resource,
         })
       )
-    ).resolves.toBe("ok");
+    ).resolves.toBe("connect.resource_out_of_scope");
+    expect(server.ran).toStrictEqual([]);
+  });
+
+  it("refuses a side effect from chat until the person can confirm it", async () => {
+    const connectionId = await addConnection();
+    const inChat = agentFor("user-anna", "agent-chat", "interactive");
+    await expect(outcome(callAs(inChat, write(connectionId)))).resolves.toBe(
+      "connect.confirmation_required"
+    );
+    expect(server.ran).toStrictEqual([]);
   });
 
   it("returns content other than text as the content blocks themselves", async () => {
     const connectionId = await addConnection();
-    const result = await callAs(anna, {
-      connectionId,
-      action: "mail.photo",
-      input: {},
-    });
+    const result = await callAs(anna, write(connectionId, "mail.photo"));
     expect(JSON.parse(result.output)).toStrictEqual([
       { type: "image", data: "aGVsbG8=", mimeType: "image/png" },
     ]);
@@ -223,29 +203,34 @@ describe("a call on a connection", () => {
 
   it("reports the tool's own error with its output", async () => {
     const connectionId = await addConnection();
-    const failed = await callAs(anna, {
-      connectionId,
-      action: "mail.search",
-      input: { query: "" },
-    }).catch((error: unknown) => error);
+    const failed = await callAs(
+      anna,
+      write(connectionId, "mail.search", { query: "" })
+    ).catch((error: unknown) => error);
     expect(connectErrors.codeOf(failed)).toBe("connect.action_failed");
     expect(failed).toHaveProperty("details", {
       output: JSON.stringify({ error: "An empty query" }),
     });
   });
 
-  it("is refused when its input isn't an object of arguments", async () => {
+  it("is refused when its input isn't an object of arguments, or is too large", async () => {
     const connectionId = await addConnection();
     const inputs = [[], "query", 1, null];
     const refused = await Promise.all(
       inputs.map(
         async (input) =>
-          await outcome(
-            callAs(anna, { connectionId, action: "mail.list", input })
-          )
+          await outcome(callAs(anna, write(connectionId, "mail.list", input)))
       )
     );
     expect(refused).toStrictEqual(inputs.map(() => "connect.invalid_call"));
+    await expect(
+      outcome(
+        callAs(
+          anna,
+          write(connectionId, "mail.list", { text: "x".repeat(70 * 1024) })
+        )
+      )
+    ).resolves.toBe("connect.input_too_large");
     expect(server.requests).toBe(0);
   });
 
@@ -254,26 +239,28 @@ describe("a call on a connection", () => {
       serverKind: "native",
       server: "microsoft-365",
     });
-    await expect(
-      outcome(callAs(anna, { connectionId, action: "mail.list", input: {} }))
-    ).resolves.toBe("connect.server_unavailable");
+    await expect(outcome(callAs(anna, write(connectionId)))).resolves.toBe(
+      "connect.server_unavailable"
+    );
     expect(server.requests).toBe(0);
   });
 
-  it("goes nowhere when a connection's server isn't a plain HTTPS URL", async () => {
+  it("goes nowhere but Composio's MCP host, over HTTPS, without credentials", async () => {
     const withCredentials = new URL(serverUrl);
     withCredentials.username = "user";
     withCredentials.password = "not-a-real-password";
     const servers = [
       serverUrl.replace("https:", "http:"),
       withCredentials.href,
+      "https://mcp.attacker.example/v3/mcp/server-mail",
+      "https://backend.composio.dev.attacker.example/v3/mcp/server-mail",
+      "https://backend.composio.dev/api/v3/connected_accounts",
+      "https://127.0.0.1/v3/mcp/server-mail",
     ];
     const ends = await Promise.all(
       servers.map(async (url) => {
         const connectionId = await addConnection({ server: url });
-        return await outcome(
-          callAs(anna, { connectionId, action: "mail.list", input: {} })
-        );
+        return await outcome(callAs(anna, write(connectionId)));
       })
     );
     expect(ends).toStrictEqual(servers.map(() => "connect.server_unavailable"));
@@ -282,15 +269,16 @@ describe("a call on a connection", () => {
 });
 
 describe("a call to a server that answers in event streams", () => {
-  const streaming = fakeMcpServer(serverUrl, tools, { stream: true });
+  const streaming = fakeMcpServer(serverUrl, tools, {
+    stream: true,
+    padding: 20_000,
+  });
 
-  it("runs the action as with JSON answers", async () => {
+  it("runs the action, reading many tiny events in linear time", async () => {
     const connectionId = await addConnection();
-    const result = await callAs(anna, {
-      connectionId,
-      action: "mail.list",
-      input: {},
-    });
+    const started = Date.now();
+    const result = await callAs(anna, write(connectionId));
+    expect(Date.now() - started).toBeLessThan(5000);
     expect(result.provenance).toStrictEqual(messages);
     expect(streaming.ran).toHaveLength(1);
   });
