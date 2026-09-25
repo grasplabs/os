@@ -1,4 +1,9 @@
 import type { Role } from "./index.ts";
+import type {
+  Permission,
+  PermissionRequest,
+  PermissionSubjectInput,
+} from "./permissions.ts";
 
 /** A way to sign in to this deployment, for the sign-in screen. */
 export interface SignInOption {
@@ -29,6 +34,17 @@ export interface Identity {
 export interface SessionApi {
   /** The person behind the session, with their current role and teams. */
   whoami: () => Promise<Identity>;
+  /**
+   * Asks for a permission for an App or agent (a `PermissionRequest`);
+   * it allows nothing until an admin grants it. Admins and builders.
+   */
+  requestPermission: (request: PermissionRequest) => Promise<Permission>;
+  /** Grants a requested permission. Admins only. */
+  grantPermission: (id: string) => Promise<Permission>;
+  /** Revokes a permission; the next call that needs it is refused. Admins only. */
+  revokePermission: (id: string) => Promise<Permission>;
+  /** Every permission, or one App's or agent's. Admins and builders. */
+  listPermissions: (subject?: PermissionSubjectInput) => Promise<Permission[]>;
 }
 
 /**

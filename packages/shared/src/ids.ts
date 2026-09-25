@@ -47,6 +47,10 @@ export type DocumentId = z.infer<typeof documentIdSchema>;
 export const connectionIdSchema = idSchema<"ConnectionId">();
 export type ConnectionId = z.infer<typeof connectionIdSchema>;
 
+/** An agent that works for people, such as the chat agent of a workspace. */
+export const agentIdSchema = idSchema<"AgentId">();
+export type AgentId = z.infer<typeof agentIdSchema>;
+
 /** One permission granted to an agent or App. */
 export const permissionIdSchema = idSchema<"PermissionId">();
 export type PermissionId = z.infer<typeof permissionIdSchema>;

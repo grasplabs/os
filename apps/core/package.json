@@ -8,7 +8,7 @@
     "build": "node ../../packages/compiler/build.ts ../web/dist",
     "dev": "vp -C ../web build --mode development && vp run build && wrangler d1 migrations apply DB --local && wrangler dev -c wrangler.jsonc -c ../connect/wrangler.jsonc --var DEV_SKIP_ROUTER_SECRET:true --var DURABLE_OBJECT_JURISDICTION:none",
     "deploy": "vp run build && wrangler deploy",
-    "typegen": "wrangler types --include-runtime=false",
+    "typegen": "wrangler types --include-runtime=false -c wrangler.jsonc -c ../connect/wrangler.jsonc",
     "db:migrate": "wrangler d1 migrations apply DB --remote && wrangler d1 migrations apply KNOWLEDGE --remote",
     "db:generate": "drizzle-kit generate --config src/db/core/drizzle.config.ts && drizzle-kit generate --config src/db/knowledge/drizzle.config.ts && drizzle-kit generate --config src/db/workspace/drizzle.config.ts && drizzle-kit generate --config src/db/audit-log/drizzle.config.ts"
   },

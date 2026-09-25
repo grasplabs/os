@@ -6,6 +6,7 @@
  * plural table names and snake_case columns. Better Auth fills ids and
  * timestamps itself.
  */
+import { sql } from "drizzle-orm";
 import {
   index,
   integer,
@@ -231,3 +232,60 @@ export const ssoProviders = sqliteTable("sso_providers", {
   organizationId: text("organization_id"),
   domain: text().notNull(),
 });
+
+/**
+ * Audit events of changes to this database that haven't reached the audit
+ * queue yet. Each is written in the same batch as its change, so a change
+ * is never kept without its event; `src/audit-outbox.ts` sends and removes
+ * them. `event` is the event as JSON.
+ */
+export const auditOutbox = sqliteTable("audit_outbox", {
+  id: text().primaryKey(),
+  event: text().notNull(),
+  createdAt: timestamp("created_at").notNull(),
+});
+
+/**
+ * What each App and agent may use: one row per permission, never deleted,
+ * so who asked, who granted and who revoked stays readable. Only its status
+ * and the grant and revoke columns ever change.
+ *
+ * The object is stored by type: a connection is `object_id`, with
+ * `resource` naming one resource in it or null for all of it; a collection
+ * is `object_id`; a workflow is its App's ID in `object_id` and the
+ * workflow's in `resource`. `actions` is a JSON array of action names.
+ */
+export const permissions = sqliteTable(
+  "permissions",
+  {
+    id: text().primaryKey(),
+    subjectType: text("subject_type", { enum: ["app", "agent"] }).notNull(),
+    subjectId: text("subject_id").notNull(),
+    objectType: text("object_type", {
+      enum: ["connection", "collection", "workflow"],
+    }).notNull(),
+    objectId: text("object_id").notNull(),
+    resource: text(),
+    actions: text().notNull(),
+    binding: text().notNull(),
+    status: text({ enum: ["requested", "active", "revoked"] }).notNull(),
+    requestedBy: text("requested_by").notNull(),
+    requestedAt: timestamp("requested_at").notNull(),
+    grantedBy: text("granted_by"),
+    grantedAt: timestamp("granted_at"),
+    revokedBy: text("revoked_by"),
+    revokedAt: timestamp("revoked_at"),
+  },
+  (table) => [
+    index("permissions_subject_idx").on(
+      table.subjectType,
+      table.subjectId,
+      table.status
+    ),
+    // A binding name is one stub in the subject's env, so it is unique
+    // among the permissions that aren't revoked.
+    uniqueIndex("permissions_live_binding_idx")
+      .on(table.subjectType, table.subjectId, table.binding)
+      .where(sql`status <> 'revoked'`),
+  ]
+);

@@ -8,9 +8,12 @@
   "exports": {
     ".": "./src/index.ts",
     "./audit": "./src/audit.ts",
+    "./capability": "./src/capability.ts",
+    "./connect": "./src/connect.ts",
     "./errors": "./src/errors.ts",
     "./ids": "./src/ids.ts",
     "./json": "./src/json.ts",
+    "./permissions": "./src/permissions.ts",
     "./router": "./src/router.ts",
     "./rpc": "./src/rpc.ts",
     "./runtime": "./src/runtime.ts"

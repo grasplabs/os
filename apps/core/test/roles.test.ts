@@ -1,37 +1,23 @@
+import type { Role } from "@grasp-os/shared";
 import { authErrors } from "@grasp-os/shared/errors";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { mockIdp } from "./idp.ts";
-import { acmeTenant } from "./sign-in-config.ts";
 import {
   auditedDuring,
   callAuth,
-  entraPerson,
   openRpc,
   signIn,
   signedIn,
+  signedInWithRole,
   whoami,
-  withSignIn,
 } from "./sign-in.ts";
 
 const idp = mockIdp();
 
-/** Someone signed in with `role`, as the configured admins or made so by one. */
-const signedInAs = async (role: "admin" | "builder" | "user") => {
-  const person = entraPerson(acmeTenant);
-  const session = await signedIn(idp, "microsoft", person, {
-    coreEnv: withSignIn({ admins: [person.email] }),
-  });
-  const { userId } = await whoami(session);
-  if (role !== "admin") {
-    await env.DB.prepare("UPDATE members SET role = ? WHERE user_id = ?")
-      .bind(role, userId)
-      .run();
-  }
-  return { session, userId, person };
-};
+const signedInAs = async (role: Role) => await signedInWithRole(idp, role);
 
 const membersSchema = z.object({
   members: z.array(z.object({ id: z.string(), userId: z.string() })),

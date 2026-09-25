@@ -5,3 +5,6 @@ ROUTER_SECRET=
 # Signs session cookies and encrypts sign-in state. Any random value of at
 # least 32 characters, e.g. `openssl rand -base64 32`.
 BETTER_AUTH_SECRET=
+# Signs the capability each call to connect carries. The same value as in
+# apps/connect/.dev.vars; at least 32 characters, e.g. `openssl rand -base64 32`.
+CAPABILITY_SIGNING_KEY=

@@ -3,6 +3,7 @@ import {
   internalErrors,
   requestErrors,
 } from "@grasp-os/shared/errors";
+import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 
@@ -54,6 +55,7 @@ export const toClientError = (
   if (
     requestErrors.codeOf(error) ||
     authErrors.codeOf(error) ||
+    permissionErrors.codeOf(error) ||
     internalErrors.codeOf(error)
   ) {
     return undefined;
@@ -141,7 +143,7 @@ const sessionApi = (
   server.addEventListener("close", () => {
     clearInterval(recheck);
   });
-  return new SessionRpc(check);
+  return new SessionRpc(env, check);
 };
 
 /**

@@ -11,6 +11,10 @@
     "enabled": true,
     "traces": { "enabled": true },
   },
+  // Every secret connect needs: deploys fail while one is unset, and local
+  // dev loads only these from .dev.vars. CAPABILITY_SIGNING_KEY is shared
+  // with core, which signs a capability for every call connect gets.
+  "secrets": { "required": ["CAPABILITY_SIGNING_KEY"] },
   // Loads each native connector into its own isolate.
   "worker_loaders": [{ "binding": "LOADER" }],
   "d1_databases": [

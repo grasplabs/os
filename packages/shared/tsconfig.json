@@ -1,4 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Web Crypto, the Encoding API and base64: globals in every runtime this
+    // package runs in (Workers, browsers, Node).
+    "lib": ["es2024", "dom"]
+  },
   "include": ["src", "test"]
 }

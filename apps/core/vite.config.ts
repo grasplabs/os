@@ -5,11 +5,18 @@ import {
 import { defaultExclude, defineProject } from "vite-plus";
 import type { UserWorkspaceConfig } from "vite-plus";
 
+import { bundleConnect } from "./test/build-connect.ts";
 import { testSignIn } from "./test/sign-in-config.ts";
 
 const coreMigrations = await readD1Migrations(
   `${import.meta.dirname}/src/db/core/migrations`
 );
+
+/** The real connect Worker, for the CONNECT service binding. */
+const connectScript = bundleConnect();
+
+/** Shared by core and connect, as in a deployment. */
+const capabilitySigningKey = "test-capability-signing-key-of-32-chars-or-more";
 
 /**
  * The screen compiler's tests, which compile whole Apps. They run as their
@@ -35,6 +42,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
           bindings: {
             ROUTER_SECRET: "test-router-secret",
             BETTER_AUTH_SECRET: "test-better-auth-secret-of-32-chars-or-more",
+            CAPABILITY_SIGNING_KEY: capabilitySigningKey,
             ...testSignIn,
             // workerd doesn't implement Durable Object jurisdictions.
             DURABLE_OBJECT_JURISDICTION: "none",
@@ -45,14 +53,16 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
           // A stand-in frontend and the screen compiler, written by the
           // screens project's global setup (test/global-setup.ts).
           assets: { directory: "./dist/test-assets" },
-          // Stand-in for the connect Worker behind the CONNECT service binding.
+          // The real connect Worker behind the CONNECT service binding. Given
+          // as a script: a `scriptPath` fails to start in the test pool.
           workers: [
             {
               name: "grasp-os-connect",
               modules: true,
+              script: connectScript,
               compatibilityDate: "2026-09-15",
-              script:
-                "export default { fetch: () => new Response(null, { status: 404 }) };",
+              compatibilityFlags: ["nodejs_compat"],
+              bindings: { CAPABILITY_SIGNING_KEY: capabilitySigningKey },
             },
           ],
         },
