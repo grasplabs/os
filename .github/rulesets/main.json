@@ -3,18 +3,19 @@
   "target": "branch",
   "enforcement": "active",
   "conditions": {
-    "ref_name": { "include": ["refs/heads/main"], "exclude": [] }
-  },
-  "bypass_actors": [
-    {
-      "actor_id": null,
-      "actor_type": "OrganizationAdmin",
-      "bypass_mode": "pull_request"
+    "ref_name": {
+      "include": ["refs/heads/main"],
+      "exclude": []
     }
-  ],
+  },
+  "bypass_actors": [],
   "rules": [
-    { "type": "deletion" },
-    { "type": "non_fast_forward" },
+    {
+      "type": "deletion"
+    },
+    {
+      "type": "non_fast_forward"
+    },
     {
       "type": "pull_request",
       "parameters": {
@@ -30,10 +31,18 @@
       "type": "required_status_checks",
       "parameters": {
         "required_status_checks": [
-          { "context": "check" },
-          { "context": "e2e" },
-          { "context": "workerd" },
-          { "context": "conventions" }
+          {
+            "context": "check"
+          },
+          {
+            "context": "e2e"
+          },
+          {
+            "context": "workerd"
+          },
+          {
+            "context": "conventions"
+          }
         ],
         "strict_required_status_checks_policy": false,
         "do_not_enforce_on_create": false
