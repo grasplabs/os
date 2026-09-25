@@ -228,9 +228,14 @@ describe("capabilities", () => {
     const after = await refusal(
       async () => await verifyCapability([key], fromBefore, scope, now)
     );
-    expect({ during, after }).toStrictEqual({
+    // A previous key set wrong doesn't stop the current one.
+    const withBadPrevious = await refusal(
+      async () => await verifyCapability([key, "short"], fromNow, scope, now)
+    );
+    expect({ during, after, withBadPrevious }).toStrictEqual({
       during: ["none", "none"],
       after: "mac",
+      withBadPrevious: "none",
     });
   });
 });

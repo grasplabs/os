@@ -171,13 +171,19 @@ const readClaims = async (
   if (payload === undefined || mac === undefined) {
     throw invalid("malformed");
   }
-  // The keys are checked before anything else.
-  const keys = await Promise.all(
-    secrets.map(async (secret) => await macKey(secret, "verify"))
-  );
-  if (keys.length === 0) {
+  // The keys are checked before anything else. The current key must be
+  // sound; a previous one that isn't is left out, so a slip while rotating
+  // can't stop calls made with the current key.
+  const [current, ...previous] = secrets;
+  if (current === undefined) {
     throw new Error("No capability signing key to verify with");
   }
+  const keys = await Promise.all(
+    [
+      current,
+      ...previous.filter((secret) => secret.length >= capabilityKeyMinLength),
+    ].map(async (secret) => await macKey(secret, "verify"))
+  );
   let macBytes: Uint8Array<ArrayBuffer>;
   try {
     macBytes = fromBase64Url(mac);
