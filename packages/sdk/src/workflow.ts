@@ -146,7 +146,12 @@ interface StepOptions {
   key?: string | number;
 }
 
-export interface DoOptions extends StepOptions {
+/** What a step works on: JSON, or nothing. */
+export type StepInput = JsonValue | undefined;
+
+export interface DoOptions<
+  Input extends StepInput = StepInput,
+> extends StepOptions {
   /**
    * Changes something outside Grasp. The step gets an idempotency key to
    * pass to connector calls, so a retry never does the change twice.
@@ -159,6 +164,12 @@ export interface DoOptions extends StepOptions {
   locked?: boolean;
   /** Extra attempts after a failure; the engine's default when missing. */
   retries?: number;
+  /**
+   * What the step works on, as JSON; the function gets it back as `input`.
+   * It's recorded with the step, and a dry run shows it for a side-effect
+   * step it doesn't run, so take everything such a step writes from here.
+   */
+  input?: Input;
 }
 
 /** Passed to a side-effect step: hand `idempotencyKey` to connector calls. */
@@ -242,15 +253,15 @@ export interface StepRunner {
    * returns the recorded result instead of running the code again.
    */
   do: {
-    <T>(
+    <T, Input extends StepInput = undefined>(
       name: string,
-      options: DoOptions & { sideEffect: true },
-      fn: (context: SideEffectContext) => Promise<T>
+      options: DoOptions<Input> & { sideEffect: true },
+      fn: (context: SideEffectContext & { input: Input }) => Promise<T>
     ): Promise<T>;
-    <T>(
+    <T, Input extends StepInput = undefined>(
       name: string,
-      options: DoOptions & { sideEffect?: false },
-      fn: () => Promise<T>
+      options: DoOptions<Input> & { sideEffect?: false },
+      fn: (context: { input: Input }) => Promise<T>
     ): Promise<T>;
   };
   /**
@@ -281,7 +292,9 @@ interface UntypedStepRunner {
   do: (
     name: string,
     options: DoOptions,
-    fn: (context?: SideEffectContext) => Promise<unknown>
+    fn: (
+      context: Partial<SideEffectContext> & { input: StepInput }
+    ) => Promise<unknown>
   ) => Promise<unknown>;
   llm: (name: string, options: LlmOptions<z.ZodType>) => Promise<unknown>;
   decision: (name: string, options: DecisionOptions) => Promise<Decision>;
@@ -519,10 +532,22 @@ const createStepRunner = (engine: WorkflowEngine): UntypedStepRunner => {
         `Step "${name}" needs \`sideEffect\` and \`locked\` to be true or false`
       );
       check(typeof fn === "function", `Step "${name}" needs a function to run`);
-      return await engine.do(step, { retries }, async () =>
-        options.sideEffect === true
-          ? await fn({ idempotencyKey: idempotencyKeyOf(engine, step) })
-          : await fn()
+      const { input } = options;
+      check(
+        input === undefined || z.json().safeParse(input).success,
+        `Step "${name}" needs input that is JSON`
+      );
+      const sideEffect = options.sideEffect === true;
+      return await engine.do(
+        step,
+        { retries, sideEffect, ...(input === undefined ? {} : { input }) },
+        async () =>
+          sideEffect
+            ? await fn({
+                idempotencyKey: idempotencyKeyOf(engine, step),
+                input,
+              })
+            : await fn({ input })
       );
     },
 
@@ -559,7 +584,7 @@ const createStepRunner = (engine: WorkflowEngine): UntypedStepRunner => {
       // hold values that don't survive being recorded (a transform to a Date,
       // say). Checking it inside the step makes an answer that doesn't fit a
       // retryable failure.
-      const answer = await engine.do(step, { retries }, async () => {
+      const answer = await engine.do(step, { retries, input }, async () => {
         const raw = await engine.callModel(request);
         parseOrThrow(
           schema,
@@ -607,7 +632,7 @@ const createStepRunner = (engine: WorkflowEngine): UntypedStepRunner => {
       // asking or reminding never pushes the deadline out.
       const { link, eventType, openedAt } = await engine.do(
         step,
-        {},
+        { input: { from: decider } },
         async () => ({
           ...(await engine.openDecision({ step, from: decider })),
           openedAt: Date.now(),
@@ -615,16 +640,26 @@ const createStepRunner = (engine: WorkflowEngine): UntypedStepRunner => {
       );
       const deadline =
         timeoutMs === undefined ? undefined : openedAt + timeoutMs;
+      // Asking is a side effect, which a dry run doesn't run, so when it
+      // finished is a step of its own rather than the ask step's result.
       const askPerson = async (reminder: boolean): Promise<number> => {
         const askStep = `${step}#${reminder ? "remind" : "ask"}`;
-        return await engine.do(askStep, {}, async () => {
-          await ask({
-            link,
-            reminder,
-            idempotencyKey: idempotencyKeyOf(engine, askStep),
-          });
-          return Date.now();
-        });
+        await engine.do(
+          askStep,
+          { sideEffect: true, input: { from: decider, reminder } },
+          async () => {
+            await ask({
+              link,
+              reminder,
+              idempotencyKey: idempotencyKeyOf(engine, askStep),
+            });
+          }
+        );
+        return await engine.do(
+          `${step}#${reminder ? "reminded" : "asked"}`,
+          {},
+          async () => await Promise.resolve(Date.now())
+        );
       };
       const waitForAnswer = async (
         waitStep: string,

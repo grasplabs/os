@@ -8,14 +8,15 @@ import {
   vi,
 } from "vite-plus/test";
 
+import { createTestEngine } from "../src/testing.ts";
+import type { TestEngineOptions } from "../src/testing.ts";
 import { z } from "../src/workflow.ts";
 import type { DecisionRequest } from "../src/workflow.ts";
-import { createFakeEngine } from "./fake-engine.ts";
-import { invoiceWorkflow } from "./invoice-workflow.ts";
-import type { InvoiceSystems } from "./invoice-workflow.ts";
-// oxlint-disable-next-line import/default -- Vite's `?raw` import; typed in raw.d.ts
-import invoiceSource from "./invoice-workflow.ts?raw";
 import { outlineOf } from "./outline.ts";
+import { invoiceWorkflow } from "./workflows/invoice-approval.ts";
+import type { InvoiceSystems } from "./workflows/invoice-approval.ts";
+// oxlint-disable-next-line import/default -- Vite's `?raw` import; typed in raw.d.ts
+import invoiceSource from "./workflows/invoice-approval.ts?raw";
 
 const invoice = {
   number: "INV-7",
@@ -48,10 +49,9 @@ const fakeSystems = (
 
 const modelSays = (total: number) => () => ({ total, currency: "EUR" });
 
-const approvedBy = (by: string) => () => ({
-  received: true as const,
-  payload: { approved: true, by },
-});
+// These tests run the steps that change something, against fakes.
+const createFakeEngine = (options: TestEngineOptions = {}) =>
+  createTestEngine({ sideEffects: "run", ...options });
 
 const day = 86_400_000;
 
@@ -174,26 +174,25 @@ describe("the sample invoice workflow", () => {
 
   it("books an invoice below the threshold without asking anyone", async () => {
     const systems = fakeSystems();
-    const { engine, decisions } = createFakeEngine({ model: modelSays(4000) });
+    const { engine } = createFakeEngine({ model: modelSays(4000) });
 
     const result = await invoiceWorkflow(systems).run(engine, invoice);
 
     expect(result).toStrictEqual({ status: "booked", entry: "ledger-42" });
-    expect(decisions).toStrictEqual([]);
+    expect(systems.asked).toStrictEqual([]);
     expect(systems.booked).toStrictEqual([{ idempotencyKey: "run-1:book" }]);
   });
 
   it("asks the reviewer above the threshold and books once approved", async () => {
     const systems = fakeSystems();
-    const { engine, decisions } = createFakeEngine({
+    const { engine } = createFakeEngine({
       model: modelSays(8000),
-      event: approvedBy("anna"),
+      decisions: { review: { approved: true, by: "anna" } },
     });
 
     const result = await invoiceWorkflow(systems).run(engine, invoice);
 
     expect(result).toStrictEqual({ status: "booked", entry: "ledger-42" });
-    expect(decisions).toStrictEqual([{ step: "review", from: "finance-team" }]);
     expect(systems.asked).toStrictEqual([
       {
         link: "https://grasp.test/decisions/review",
@@ -207,10 +206,9 @@ describe("the sample invoice workflow", () => {
     const systems = fakeSystems();
     const { engine } = createFakeEngine({
       model: modelSays(8000),
-      event: () => ({
-        received: true,
-        payload: { approved: false, by: "anna", comment: "Wrong PO" },
-      }),
+      decisions: {
+        review: { approved: false, by: "anna", comment: "Wrong PO" },
+      },
     });
 
     const result = await invoiceWorkflow(systems).run(engine, invoice);
@@ -229,7 +227,13 @@ describe("the sample invoice workflow", () => {
         vi.setSystemTime(Date.now() + day);
       }
     };
-    const { engine, waits } = createFakeEngine({ model: modelSays(8000) });
+    const { engine, steps } = createFakeEngine({
+      model: modelSays(8000),
+      // A wait that times out takes its time; move the frozen clock on.
+      skipTime: (milliseconds) => {
+        vi.setSystemTime(Date.now() + milliseconds);
+      },
+    });
 
     const result = await invoiceWorkflow(systems).run(engine, invoice);
 
@@ -238,23 +242,25 @@ describe("the sample invoice workflow", () => {
       false,
       true,
     ]);
-    expect(waits.map(({ timeout }) => timeout)).toStrictEqual([
-      2 * day,
-      4 * day,
-    ]);
+    expect(
+      steps.flatMap((record) =>
+        record.type === "wait" ? [record.timeout] : []
+      )
+    ).toStrictEqual([2 * day, 4 * day]);
     expect(systems.booked).toStrictEqual([]);
   });
 
   it("uses the values people set instead of the defaults", async () => {
-    const { engine, decisions, modelRequests } = createFakeEngine({
+    const systems = fakeSystems();
+    const { engine, modelRequests } = createFakeEngine({
       params: { threshold: 10_000, extractionModel: "small-model" },
       model: modelSays(8000),
     });
 
-    const result = await invoiceWorkflow(fakeSystems()).run(engine, invoice);
+    const result = await invoiceWorkflow(systems).run(engine, invoice);
 
     expect(result.status).toBe("booked");
-    expect(decisions).toStrictEqual([]);
+    expect(systems.asked).toStrictEqual([]);
     expect(modelRequests[0]?.model).toBe("small-model");
   });
 
@@ -281,7 +287,7 @@ describe("the sample invoice workflow", () => {
       return await book(entry, idempotencyKey);
     };
     const params: Record<string, unknown> = { threshold: 10_000 };
-    const { engine, decisions } = createFakeEngine({
+    const { engine } = createFakeEngine({
       params,
       model: modelSays(8000),
     });
@@ -294,7 +300,7 @@ describe("the sample invoice workflow", () => {
     const result = await definition.run(engine, invoice);
 
     expect(result.status).toBe("booked");
-    expect(decisions).toStrictEqual([]);
+    expect(systems.asked).toStrictEqual([]);
   });
 
   it("fails a run whose input doesn't match the input schema", async () => {

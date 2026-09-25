@@ -1,6 +1,8 @@
 /* oxlint-disable require-await -- fakes of async interfaces answer right away */
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
+import { createTestEngine, createTestState } from "../src/testing.ts";
+import type { TestEngineOptions } from "../src/testing.ts";
 import {
   model,
   number,
@@ -11,7 +13,10 @@ import {
   z,
 } from "../src/workflow.ts";
 import type { DoOptions, Duration, StepRunner } from "../src/workflow.ts";
-import { createFakeEngine, createFakeState } from "./fake-engine.ts";
+
+// These tests run the steps that change something, against fakes.
+const createFakeEngine = (options: TestEngineOptions = {}) =>
+  createTestEngine({ sideEffects: "run", ...options });
 
 const noParams = {};
 
@@ -146,24 +151,49 @@ describe("step calls", () => {
 });
 
 describe("step.do", () => {
-  it("gives only side-effect steps an idempotency key", async () => {
+  it("gives each step its input, and only side-effect steps an idempotency key", async () => {
     const received: unknown[] = [];
     const definition = withStep(async (step) => {
-      await step.do("read", { description: "Read" }, async (...args) => {
-        received.push(args);
-      });
+      await step.do(
+        "read",
+        { description: "Read", input: { id: 7 } },
+        async (context) => {
+          received.push(context);
+        }
+      );
       await step.do(
         "write",
         { description: "Write", sideEffect: true, key: 7 },
-        async (...args) => {
-          received.push(args);
+        async (context) => {
+          received.push(context);
         }
       );
     });
 
     await definition.run(createFakeEngine().engine);
 
-    expect(received).toStrictEqual([[], [{ idempotencyKey: "run-1:write:7" }]]);
+    expect(received).toStrictEqual([
+      { input: { id: 7 } },
+      { idempotencyKey: "run-1:write:7", input: undefined },
+    ]);
+  });
+
+  it("rejects input that isn't JSON before the step runs", async () => {
+    const ran: string[] = [];
+    const definition = withStep(
+      async (step) =>
+        await step.do(
+          "write",
+          // @ts-expect-error -- input is JSON
+          { description: "Write", sideEffect: true, input: new Date(0) },
+          async () => ran.push("write")
+        )
+    );
+
+    await expect(
+      definition.run(createFakeEngine().engine)
+    ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
+    expect(ran).toStrictEqual([]);
   });
 
   it("retries a failing step as often as asked", async () => {
@@ -326,19 +356,25 @@ const waitingWorkflow = withStep(async (step) => {
 
 describe("step.sleep and step.waitFor", () => {
   it("hand the engine the wait in milliseconds", async () => {
-    const { engine, sleeps, waits } = createFakeEngine();
+    const { engine, steps } = createFakeEngine();
 
     await waitingWorkflow.run(engine);
 
-    expect(sleeps).toStrictEqual([{ name: "pause", milliseconds: 5_400_000 }]);
-    expect(waits).toStrictEqual([
-      { name: "signed", type: "document.signed", timeout: 1_209_600_000 },
+    expect(steps).toStrictEqual([
+      { type: "sleep", name: "pause", milliseconds: 5_400_000 },
+      {
+        type: "wait",
+        name: "signed",
+        eventType: "document.signed",
+        timeout: 1_209_600_000,
+        event: { received: false },
+      },
     ]);
   });
 
   it("return the event's checked payload, or that none came", async () => {
     const signed = createFakeEngine({
-      event: () => ({ received: true, payload: { signer: "anna" } }),
+      events: [{ type: "document.signed", payload: { signer: "anna" } }],
     });
     const silent = createFakeEngine();
 
@@ -353,7 +389,7 @@ describe("step.sleep and step.waitFor", () => {
 
   it("fail the run on an event that doesn't match the schema", async () => {
     const { engine } = createFakeEngine({
-      event: () => ({ received: true, payload: { signer: 7 } }),
+      events: [{ type: "document.signed", payload: { signer: 7 } }],
     });
 
     await expect(waitingWorkflow.run(engine)).rejects.toMatchObject({
@@ -405,7 +441,7 @@ describe("step.decision", () => {
       asked.push(true);
       vi.setSystemTime(Date.now() + 2 * 86_400_000);
     };
-    const { engine, waits } = createFakeEngine();
+    const { engine, steps } = createFakeEngine();
 
     await expect(
       decisionWorkflow(
@@ -414,15 +450,16 @@ describe("step.decision", () => {
       ).run(engine)
     ).resolves.toStrictEqual({ outcome: "timedOut" });
     expect(asked).toHaveLength(1);
-    expect(waits).toStrictEqual([]);
+    expect(steps.filter(({ type }) => type === "wait")).toStrictEqual([]);
   });
 
   it("waits as long as the engine allows without a timeout", async () => {
-    const { engine, waits } = createFakeEngine();
+    const { engine, steps } = createFakeEngine();
 
     await expect(decisionWorkflow({}).run(engine)).resolves.toStrictEqual({
       outcome: "timedOut",
     });
+    const waits = steps.filter(({ type }) => type === "wait");
     expect(waits).toHaveLength(1);
     expect(waits[0]).not.toHaveProperty("timeout");
   });
@@ -437,10 +474,7 @@ describe("step.decision", () => {
 
   it("passes on the comment with the answer", async () => {
     const { engine } = createFakeEngine({
-      event: () => ({
-        received: true,
-        payload: { approved: true, by: "anna", comment: "Fine" },
-      }),
+      decisions: { approve: { approved: true, by: "anna", comment: "Fine" } },
     });
 
     await expect(decisionWorkflow({}).run(engine)).resolves.toStrictEqual({
@@ -452,7 +486,7 @@ describe("step.decision", () => {
 
   it("fails the run on an answer without who gave it", async () => {
     const { engine } = createFakeEngine({
-      event: () => ({ received: true, payload: { approved: true } }),
+      events: [{ type: "decision:approve", payload: { approved: true } }],
     });
 
     await expect(decisionWorkflow({}).run(engine)).rejects.toMatchObject({
@@ -474,7 +508,7 @@ describe("state", () => {
   );
 
   it("keeps values between runs of the workflow", async () => {
-    const state = createFakeState();
+    const state = createTestState();
     const first = createFakeEngine({ runId: "run-1", state });
     const second = createFakeEngine({ runId: "run-2", state });
 
@@ -483,7 +517,7 @@ describe("state", () => {
   });
 
   it("replays what a run read, even when another run changed it since", async () => {
-    const state = createFakeState();
+    const state = createTestState();
     const first = createFakeEngine({ runId: "run-1", state });
     const other = createFakeEngine({ runId: "run-2", state });
 
@@ -494,17 +528,26 @@ describe("state", () => {
   });
 
   it("doesn't write again when a run resumes after a crash mid-write", async () => {
-    const state = createFakeState();
-    const crashing = createFakeEngine({
-      runId: "run-1",
-      state,
-      crashAfterFirstWrite: true,
-    });
+    const state = createTestState();
+    const { engine } = createFakeEngine({ runId: "run-1", state });
+    let crashed = false;
+    // The first write lands, then the engine dies before it records the
+    // step, as a crash between the two would.
+    const crashing = {
+      ...engine,
+      setState: async (...write: Parameters<typeof engine.setState>) => {
+        await engine.setState(...write);
+        if (!crashed) {
+          crashed = true;
+          throw new Error("Engine died before recording the step");
+        }
+      },
+    };
     const other = createFakeEngine({ runId: "run-2", state });
 
-    await expect(counter.run(crashing.engine)).rejects.toThrow("Engine died");
+    await expect(counter.run(crashing)).rejects.toThrow("Engine died");
     await counter.run(other.engine);
-    await counter.run(crashing.engine);
+    await counter.run(crashing);
 
     expect(state.values.get("count")).toBe(2);
   });

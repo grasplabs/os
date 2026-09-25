@@ -83,7 +83,13 @@ type OptionRule =
 
 const common = { description: "text", key: "any" } as const;
 const optionRules: Record<StepMethod, Record<string, OptionRule>> = {
-  do: { ...common, sideEffect: "boolean", locked: "boolean", retries: "count" },
+  do: {
+    ...common,
+    sideEffect: "boolean",
+    locked: "boolean",
+    retries: "count",
+    input: "any",
+  },
   llm: {
     ...common,
     model: "param",

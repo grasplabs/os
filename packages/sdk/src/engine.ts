@@ -40,6 +40,19 @@ export const decisionAnswerSchema = z.object({
 });
 export type DecisionAnswer = z.infer<typeof decisionAnswerSchema>;
 
+/** What the SDK tells the engine about a step it runs. */
+export interface EngineStepOptions {
+  /** Extra attempts after a failure; the engine's default when missing. */
+  retries?: number;
+  /**
+   * The step changes something outside Grasp. A dry run records it with its
+   * input instead of running it.
+   */
+  sideEffect?: boolean;
+  /** What the step works on, for run history and dry-run reports. */
+  input?: JsonValue;
+}
+
 /**
  * What a durable runtime implements to run workflows written with
  * `@grasp-os/sdk/workflow`. Workflow code never sees it, so the engine
@@ -70,7 +83,7 @@ export interface WorkflowEngine {
    */
   do: <T>(
     name: string,
-    options: { retries?: number },
+    options: EngineStepOptions,
     fn: () => Promise<T>
   ) => Promise<T>;
   /** Durably pauses the run. */
