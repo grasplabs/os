@@ -94,6 +94,8 @@
       },
     ],
   },
+  // Sends audit events left in the outbox when their first send failed.
+  "triggers": { "crons": ["* * * * *"] },
   // Model gateway transport; core never holds a raw provider key.
   "ai": { "binding": "AI", "remote": true },
   "send_email": [{ "name": "EMAIL" }],

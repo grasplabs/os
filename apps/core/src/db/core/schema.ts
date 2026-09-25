@@ -234,6 +234,18 @@ export const ssoProviders = sqliteTable("sso_providers", {
 });
 
 /**
+ * Audit events of changes to this database that haven't reached the audit
+ * queue yet. Each is written in the same batch as its change, so a change
+ * is never kept without its event; `src/audit-outbox.ts` sends and removes
+ * them. `event` is the event as JSON.
+ */
+export const auditOutbox = sqliteTable("audit_outbox", {
+  id: text().primaryKey(),
+  event: text().notNull(),
+  createdAt: timestamp("created_at").notNull(),
+});
+
+/**
  * What each App and agent may use: one row per permission, never deleted,
  * so who asked, who granted and who revoked stays readable. Only its status
  * and the grant and revoke columns ever change.

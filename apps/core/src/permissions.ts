@@ -1,4 +1,8 @@
-import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
+import type {
+  AuditActor,
+  AuditDetailValue,
+  AuditEntry,
+} from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { PermissionId } from "@grasp-os/shared/ids";
 import {
@@ -20,7 +24,11 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { audit } from "./audit.ts";
+import {
+  outboxed,
+  outboxedIfChanged,
+  sendAuditOutboxNow,
+} from "./audit-outbox.ts";
 import { memberRole } from "./auth/identity.ts";
 import { permissions } from "./db/core/schema.ts";
 
@@ -160,19 +168,17 @@ const auditDetail = ({
   };
 };
 
-const recordChange = async (
-  env: Env,
+/** The audit entry of a change to `permission` by `by`. */
+const changeEntry = (
   by: Identity,
   action: "permission.requested" | "permission.granted" | "permission.revoked",
   permission: Permission
-): Promise<void> => {
-  await audit(env).log({
-    actor: actorOf(by),
-    action,
-    target: { type: "permission", id: permission.id },
-    detail: auditDetail(permission),
-  });
-};
+): AuditEntry => ({
+  actor: actorOf(by),
+  action,
+  target: { type: "permission", id: permission.id },
+  detail: auditDetail(permission),
+});
 
 const requireAdmin = (by: Identity): void => {
   if (by.role !== "admin") {
@@ -201,7 +207,7 @@ const isUniqueViolation = (error: unknown): boolean =>
   (error.message.includes("UNIQUE constraint failed") ||
     isUniqueViolation(error.cause));
 
-const findRow = async (env: Env, id: PermissionId): Promise<Row | undefined> =>
+const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
   await drizzle(env.DB)
     .select()
     .from(permissions)
@@ -227,30 +233,34 @@ export const requestPermission = async (
     });
   }
   const { subject, object, actions, binding } = parsed.data;
-  let row: Row;
+  const row: Row = {
+    id: crypto.randomUUID(),
+    ...subjectColumns(subject),
+    ...objectColumns(object),
+    actions: JSON.stringify(actions),
+    binding,
+    status: "requested",
+    requestedBy: by.userId,
+    requestedAt: new Date(),
+    grantedBy: null,
+    grantedAt: null,
+    revokedBy: null,
+    revokedAt: null,
+  };
+  const permission = toPermission(row);
+  const db = drizzle(env.DB);
   try {
-    row = await drizzle(env.DB)
-      .insert(permissions)
-      .values({
-        id: crypto.randomUUID(),
-        ...subjectColumns(subject),
-        ...objectColumns(object),
-        actions: JSON.stringify(actions),
-        binding,
-        status: "requested",
-        requestedBy: by.userId,
-        requestedAt: new Date(),
-      })
-      .returning()
-      .get();
+    await db.batch([
+      db.insert(permissions).values(row),
+      outboxed(db, changeEntry(by, "permission.requested", permission)),
+    ]);
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw permissionErrors.create("permission.conflict", { binding });
     }
     throw error;
   }
-  const permission = toPermission(row);
-  await recordChange(env, by, "permission.requested", permission);
+  await sendAuditOutboxNow(env);
   return permission;
 };
 
@@ -261,23 +271,31 @@ export const grantPermission = async (
   id: unknown
 ): Promise<Permission> => {
   requireAdmin(by);
-  const permissionId = parseId(id);
-  // One conditional update, so a grant can't race a revoke back to life.
-  const [row] = await drizzle(env.DB)
-    .update(permissions)
-    .set({ status: "active", grantedBy: by.userId, grantedAt: new Date() })
-    .where(
-      and(eq(permissions.id, permissionId), eq(permissions.status, "requested"))
-    )
-    .returning();
-  if (!row) {
-    throw (await findRow(env, permissionId))
-      ? permissionErrors.create("permission.not_requested")
-      : permissionErrors.create("permission.not_found");
+  const found = await findRow(env, parseId(id));
+  if (!found) {
+    throw permissionErrors.create("permission.not_found");
   }
-  const permission = toPermission(row);
-  await recordChange(env, by, "permission.granted", permission);
-  return permission;
+  const db = drizzle(env.DB);
+  // A conditional update, so a grant can't race a revoke back to life, and
+  // its audit event, stored only if the update changed the row.
+  const [[granted]] = await db.batch([
+    db
+      .update(permissions)
+      .set({ status: "active", grantedBy: by.userId, grantedAt: new Date() })
+      .where(
+        and(eq(permissions.id, found.id), eq(permissions.status, "requested"))
+      )
+      .returning(),
+    outboxedIfChanged(
+      db,
+      changeEntry(by, "permission.granted", toPermission(found))
+    ),
+  ]);
+  if (!granted) {
+    throw permissionErrors.create("permission.not_requested");
+  }
+  await sendAuditOutboxNow(env);
+  return toPermission(granted);
 };
 
 /**
@@ -290,27 +308,33 @@ export const revokePermission = async (
   id: unknown
 ): Promise<Permission> => {
   requireAdmin(by);
-  const permissionId = parseId(id);
-  const [row] = await drizzle(env.DB)
-    .update(permissions)
-    .set({ status: "revoked", revokedBy: by.userId, revokedAt: new Date() })
-    .where(
-      and(
-        eq(permissions.id, permissionId),
-        inArray(permissions.status, ["requested", "active"])
-      )
-    )
-    .returning();
-  if (!row) {
-    const revoked = await findRow(env, permissionId);
-    if (!revoked) {
-      throw permissionErrors.create("permission.not_found");
-    }
-    return toPermission(revoked);
+  const found = await findRow(env, parseId(id));
+  if (!found) {
+    throw permissionErrors.create("permission.not_found");
   }
-  const permission = toPermission(row);
-  await recordChange(env, by, "permission.revoked", permission);
-  return permission;
+  const db = drizzle(env.DB);
+  const [[revoked]] = await db.batch([
+    db
+      .update(permissions)
+      .set({ status: "revoked", revokedBy: by.userId, revokedAt: new Date() })
+      .where(
+        and(
+          eq(permissions.id, found.id),
+          inArray(permissions.status, ["requested", "active"])
+        )
+      )
+      .returning(),
+    outboxedIfChanged(
+      db,
+      changeEntry(by, "permission.revoked", toPermission(found))
+    ),
+  ]);
+  if (!revoked) {
+    // Already revoked: nothing changed, and nothing is recorded.
+    return toPermission((await findRow(env, found.id)) ?? found);
+  }
+  await sendAuditOutboxNow(env);
+  return toPermission(revoked);
 };
 
 /** Every permission, or those of one App or agent, oldest first. */

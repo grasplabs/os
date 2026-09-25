@@ -11,10 +11,12 @@ import type {
   PermissionRequest,
   PermissionSubjectInput,
 } from "@grasp-os/shared/permissions";
+import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { bindingsFor } from "../src/bindings.ts";
+import worker from "../src/index.ts";
 import { authorize } from "../src/permissions.ts";
 import { mockIdp } from "./idp.ts";
 import { auditedDuring, openRpc, signedInWithRole } from "./sign-in.ts";
@@ -87,6 +89,11 @@ const callThrough = async (
 ): Promise<string> => {
   const bindings = await bindingsFor(env, authority);
   return await callStub(bindings[binding], action);
+};
+
+/** Runs core's cron trigger, as Cloudflare does every minute. */
+const runCron = async () => {
+  await worker.scheduled(createScheduledController(), env);
 };
 
 /** Reached through connect, as a call from an App would be. */
@@ -349,6 +356,34 @@ describe("permissions", () => {
     await expect(
       outcome(admin.api.requestPermission(outlook(app)))
     ).resolves.toBe("ok");
+  });
+
+  it("keep their audit event when the audit queue is down, and send it later, once", async () => {
+    const admin = await permissionApi("admin");
+    const app = newApp();
+    const { id } = await admin.api.requestPermission(outlook(app));
+
+    const down = vi
+      .spyOn(env.AUDIT_QUEUE, "send")
+      .mockRejectedValue(new Error("Queue unavailable"));
+    let granted: Awaited<ReturnType<typeof admin.api.grantPermission>>;
+    try {
+      granted = await admin.api.grantPermission(id);
+    } finally {
+      down.mockRestore();
+    }
+
+    const sent = await auditedDuring(runCron);
+    const sentAgain = await auditedDuring(runCron);
+    expect({
+      status: granted.status,
+      sent: sent.map(({ action, target }) => [action, target?.id]),
+      sentAgain,
+    }).toStrictEqual({
+      status: "active",
+      sent: [["permission.granted", id]],
+      sentAgain: [],
+    });
   });
 
   it("are audited when requested, granted and revoked, by who did it", async () => {

@@ -1,3 +1,9 @@
+CREATE TABLE `audit_outbox` (
+	`id` text PRIMARY KEY NOT NULL,
+	`event` text NOT NULL,
+	`created_at` integer NOT NULL
+);
+--> statement-breakpoint
 CREATE TABLE `permissions` (
 	`id` text PRIMARY KEY NOT NULL,
 	`subject_type` text NOT NULL,

@@ -162,6 +162,32 @@ export const isAuditEventTooLarge = (json: string): boolean =>
   new TextEncoder().encode(json).byteLength > auditEventMaxBytes;
 
 /**
+ * An audit event ready to send: a new ID, the time and the Worker it comes
+ * from, validated and within {@link auditEventMaxBytes}. For a sender that
+ * stores the event first and sends it later, maybe more than once: the log
+ * dedupes by ID.
+ */
+export const createAuditEvent = (
+  entry: AuditEntry,
+  source: AuditSource
+): AuditEvent => {
+  const event = auditEventSchema.parse({
+    ...entry,
+    id: crypto.randomUUID(),
+    at: new Date().toISOString(),
+    source,
+  });
+  // The log refuses it too; failing here keeps it out of the DLQ.
+  // (Canonical JSON only reorders keys, so its size is the same.)
+  if (isAuditEventTooLarge(JSON.stringify(event))) {
+    throw new RangeError(
+      `Audit event ${event.id} is over ${auditEventMaxBytes} bytes`
+    );
+  }
+  return event;
+};
+
+/**
  * The audit logger for one Worker: `audit.log({ actor, action, ... })`. It
  * gives each event a new ID, the time and the Worker it comes from (never the
  * caller's), validates it and checks its size, so a malformed or oversized
@@ -173,19 +199,7 @@ export const auditLogger = (
   source: AuditSource
 ): AuditLogger => ({
   log: async (entry) => {
-    const event = auditEventSchema.parse({
-      ...entry,
-      id: crypto.randomUUID(),
-      at: new Date().toISOString(),
-      source,
-    });
-    // The log refuses it too; failing here keeps it out of the DLQ.
-    // (Canonical JSON only reorders keys, so its size is the same.)
-    if (isAuditEventTooLarge(JSON.stringify(event))) {
-      throw new RangeError(
-        `Audit event ${event.id} is over ${auditEventMaxBytes} bytes`
-      );
-    }
+    const event = createAuditEvent(entry, source);
     await queue.send(event);
     return event;
   },
