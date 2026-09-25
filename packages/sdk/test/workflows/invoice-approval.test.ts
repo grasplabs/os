@@ -12,7 +12,7 @@ const invoice = {
   text: "Total €8,000",
 };
 
-const matched = { "match-po": { amount: 8000 }, book: "ledger-42" };
+const matched = { "match-po": { amount: 800_000 }, book: "ledger-42" };
 const extracted = (total: number) => ({ total, currency: "EUR" });
 const asked = {
   name: "review#ask",
@@ -33,26 +33,26 @@ export default workflowTests(
     {
       name: "books an invoice below the threshold without asking anyone",
       input: invoice,
-      mocks: { ...matched, extract: extracted(4000) },
+      mocks: { ...matched, extract: extracted(400_000) },
       expect: {
         output: { status: "booked", entry: "ledger-42" },
-        sideEffects: [booked(4000)],
+        sideEffects: [booked(400_000)],
       },
     },
     {
       name: "asks the reviewer above the threshold and books once approved",
       input: invoice,
-      mocks: { ...matched, extract: extracted(8000) },
+      mocks: { ...matched, extract: extracted(800_000) },
       decisions: { review: { approved: true, by: "anna" } },
       expect: {
         output: { status: "booked", entry: "ledger-42" },
-        sideEffects: [asked, booked(8000)],
+        sideEffects: [asked, booked(800_000)],
       },
     },
     {
       name: "doesn't book an invoice the reviewer rejects",
       input: invoice,
-      mocks: { ...matched, extract: extracted(8000) },
+      mocks: { ...matched, extract: extracted(800_000) },
       decisions: {
         review: { approved: false, by: "anna", comment: "Wrong PO" },
       },

@@ -40,10 +40,27 @@ export const decisionAnswerSchema = z.object({
 });
 export type DecisionAnswer = z.infer<typeof decisionAnswerSchema>;
 
+/** How the delay between attempts grows. */
+export type Backoff = "constant" | "linear" | "exponential";
+
+/**
+ * How often to try a failing step again. `limit` counts retries, not
+ * attempts: `limit: 2` is three attempts in all.
+ */
+export interface EngineRetries {
+  limit: number;
+  /** Before the first retry, in milliseconds; the engine's when missing. */
+  delay?: number;
+  /** The engine's when missing. */
+  backoff?: Backoff;
+}
+
 /** What the SDK tells the engine about a step it runs. */
 export interface EngineStepOptions {
-  /** Extra attempts after a failure; the engine's default when missing. */
-  retries?: number;
+  /** The engine's defaults when missing. */
+  retries?: EngineRetries;
+  /** How long one attempt may take, in milliseconds; the engine's when missing. */
+  timeout?: number;
   /**
    * The step changes something outside Grasp. A dry run records it with its
    * input instead of running it.
@@ -67,6 +84,9 @@ export interface EngineStepOptions {
  *
  * The SDK reads `params` and calls `callModel`, `openDecision`, `getState`
  * and `setState` only inside `do`, so they need not be durable themselves.
+ *
+ * Engines may keep only a failed step's error name and message (Cloudflare
+ * Workflows does); the SDK puts what it needs to recover into both.
  */
 export interface WorkflowEngine {
   readonly runId: RunId;
@@ -78,8 +98,10 @@ export interface WorkflowEngine {
   readonly params: Readonly<Record<string, unknown>>;
   /**
    * Runs `fn` as a durable step and records its result. Retries a failing
-   * `fn` up to `retries` more times (the engine's default when missing) and
-   * then fails the run with the last error.
+   * `fn` as `retries` says and then fails the run with the last error. An
+   * error for which `isNonRetryable` holds is a deterministic failure: fail
+   * at once, without retrying (the Cloudflare adapter throws it on as a
+   * `NonRetryableError`).
    */
   do: <T>(
     name: string,
@@ -89,18 +111,23 @@ export interface WorkflowEngine {
   /** Durably pauses the run. */
   sleep: (name: string, milliseconds: number) => Promise<void>;
   /**
-   * Durably waits for the first event of `type` sent to this run. Without a
-   * timeout, waits as long as the engine allows.
+   * Durably waits for the first event of `type` sent to this run, for at
+   * most `timeout` milliseconds (the SDK keeps it within 365 days).
    */
   waitForEvent: (
     name: string,
-    options: { type: string; timeout?: number }
+    options: { type: string; timeout: number }
   ) => Promise<EngineEvent>;
   /** Calls the model gateway and returns the model's JSON answer. */
   callModel: (request: ModelRequest) => Promise<unknown>;
   /**
    * Records that `from` is asked to decide on `step` in this run. Returns
    * where they answer, and the event type their answer arrives as.
+   *
+   * Idempotent per run and step: the SDK calls it inside a step, which a
+   * crash before the step is recorded runs again, so a second call for the
+   * same `step` returns what the first did and opens nothing new. (Closing a
+   * decision once it's answered or times out belongs to the decisions work.)
    */
   openDecision: (request: {
     step: string;
@@ -119,3 +146,13 @@ export interface WorkflowEngine {
     idempotencyKey: string
   ) => Promise<void>;
 }
+
+/**
+ * Whether an error is a deterministic failure that trying again can't fix:
+ * a bad parameter value, say. The SDK marks these with `nonRetryable: true`.
+ */
+export const isNonRetryable = (error: unknown): boolean =>
+  typeof error === "object" &&
+  error !== null &&
+  "nonRetryable" in error &&
+  error.nonRetryable === true;

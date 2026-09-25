@@ -9,15 +9,25 @@ import type {
   Node,
   ObjectExpression,
 } from "@babel/types";
+import { z } from "zod";
 
-import { namePattern, stepKinds } from "./steps.ts";
-import type { StepKind, StepMethod } from "./steps.ts";
+import {
+  namePattern,
+  optionForms,
+  stepKinds,
+  stepOptionSchemas,
+} from "./steps.ts";
+import type { OptionForm, StepKind, StepMethod } from "./steps.ts";
 import { WorkflowError } from "./workflow.ts";
 
 export type { StepKind } from "./steps.ts";
 
-/** An option written as a literal. */
-export type OptionValue = string | number | boolean;
+/** An option written as a literal, or an object of literals. */
+export type OptionValue =
+  | string
+  | number
+  | boolean
+  | { [key: string]: OptionValue };
 
 /** A step as the UI shows it. */
 export interface StepOutline {
@@ -70,57 +80,11 @@ export interface WorkflowOutline {
   steps: OutlineNode[];
 }
 
-type OptionRule =
-  // A non-empty string literal.
-  | "text"
-  | "boolean"
-  // A whole, non-negative number literal.
-  | "count"
-  // A parameter, read as `params.name`.
-  | "param"
-  // Any expression; recorded when it's a literal (durations, say).
-  | "any";
-
-const common = { description: "text", key: "any" } as const;
-const optionRules: Record<StepMethod, Record<string, OptionRule>> = {
-  do: {
-    ...common,
-    sideEffect: "boolean",
-    locked: "boolean",
-    retries: "count",
-    input: "any",
-  },
-  llm: {
-    ...common,
-    model: "param",
-    instructions: "text",
-    input: "any",
-    schema: "any",
-    retries: "count",
-  },
-  decision: {
-    ...common,
-    from: "param",
-    ask: "any",
-    timeout: "any",
-    remindAfter: "any",
-  },
-  sleep: { ...common, duration: "any" },
-  waitFor: { ...common, type: "text", timeout: "any", schema: "any" },
-};
-const requiredOptions: Record<StepMethod, string[]> = {
-  do: ["description"],
-  llm: ["description", "model", "instructions", "input", "schema"],
-  decision: ["description", "from", "ask"],
-  sleep: ["description", "duration"],
-  waitFor: ["description", "type", "timeout"],
-};
-const ruleHints: Record<OptionRule, string> = {
-  text: "must be a non-empty string literal",
-  boolean: "must be `true` or `false`",
-  count: "must be a whole, non-negative number",
+const formHints: Record<OptionForm, string> = {
+  literal: "must be a literal",
   param: "must be a parameter, e.g. `params.reviewer`",
-  any: "",
+  value: "must be a literal, an object of literals or a parameter",
+  code: "",
 };
 // Options with a field of their own in the outline, or no literal meaning.
 const unrecordedOptions = new Set([
@@ -199,7 +163,7 @@ const some = (node: Node, predicate: (node: Node) => boolean): boolean => {
 };
 
 /** A string, template without placeholders, number or boolean literal. */
-const literalOf = (node: Node): OptionValue | undefined => {
+const literalOf = (node: Node): string | number | boolean | undefined => {
   if (
     node.type === "StringLiteral" ||
     node.type === "NumericLiteral" ||
@@ -221,14 +185,18 @@ const nameOf = (node: Node): string | undefined => {
   return typeof literal === "string" ? literal : undefined;
 };
 
-/** Names the workflow function binds for its steps and parameters. */
+/** Names the workflow function binds for its steps, parameters and state. */
 interface Bindings {
   step: string | undefined;
   /** `params` in `async (step, { params }) => …`, or what it's renamed to. */
   params: string | undefined;
-  /** `ctx` in `async (step, ctx) => …`, read as `ctx.params.name`. */
-  context: string | undefined;
+  /** `state` in `async (step, { state }) => …`, or what it's renamed to. */
+  state: string | undefined;
 }
+
+const contextKeys = new Set(["params", "input", "state", "runId"]);
+const contextHint =
+  "Destructure the workflow function's context, e.g. `async (step, { params, input, state }) => …`";
 
 const bindingsOf = (params: Node[]): Bindings => {
   const [stepParam, contextParam] = params;
@@ -241,53 +209,49 @@ const bindingsOf = (params: Node[]): Bindings => {
   const bindings: Bindings = {
     step: stepParam?.name,
     params: undefined,
-    context: undefined,
+    state: undefined,
   };
-  if (contextParam?.type === "Identifier") {
-    bindings.context = contextParam.name;
+  if (!contextParam) {
     return bindings;
   }
-  if (contextParam && contextParam.type !== "ObjectPattern") {
-    throw fail(
-      contextParam,
-      "Name the workflow function's second parameter or destructure it"
-    );
+  if (contextParam.type !== "ObjectPattern") {
+    throw fail(contextParam, contextHint);
   }
-  for (const property of contextParam?.properties ?? []) {
-    const isParams =
-      property.type === "ObjectProperty" &&
-      !property.computed &&
-      nameOf(property.key) === "params";
-    if (!isParams) {
+  for (const property of contextParam.properties) {
+    const key =
+      property.type === "ObjectProperty" && !property.computed
+        ? nameOf(property.key)
+        : undefined;
+    // A rest element or a computed key would hide what the workflow reads.
+    if (
+      property.type !== "ObjectProperty" ||
+      key === undefined ||
+      !contextKeys.has(key)
+    ) {
+      throw fail(property, contextHint);
+    }
+    if (key !== "params" && key !== "state") {
       continue;
     }
     if (property.value.type !== "Identifier") {
       throw fail(
         property,
-        "Read parameters as `params.name`, without destructuring them"
+        `Read ${key === "params" ? "parameters as `params.name`" : "state as `state.get(…)`"}, without destructuring it`
       );
     }
-    bindings.params = property.value.name;
+    bindings[key] = property.value.name;
   }
   return bindings;
 };
 
-/** The parameter a node reads (`params.name` or `ctx.params.name`), if any. */
-const paramReadOf = (bindings: Bindings, node: Node): string | undefined => {
-  if (node.type !== "MemberExpression" || node.computed) {
-    return undefined;
-  }
-  const { object } = node;
-  const direct =
-    object.type === "Identifier" && object.name === bindings.params;
-  const throughContext =
-    object.type === "MemberExpression" &&
-    !object.computed &&
-    object.object.type === "Identifier" &&
-    object.object.name === bindings.context &&
-    nameOf(object.property) === "params";
-  return direct || throughContext ? nameOf(node.property) : undefined;
-};
+/** The parameter a node reads (`params.name`), if any. */
+const paramReadOf = (bindings: Bindings, node: Node): string | undefined =>
+  node.type === "MemberExpression" &&
+  !node.computed &&
+  node.object.type === "Identifier" &&
+  node.object.name === bindings.params
+    ? nameOf(node.property)
+    : undefined;
 
 const paramsIn = (bindings: Bindings, nodes: Node[]): string[] => {
   const names: string[] = [];
@@ -359,20 +323,17 @@ const checkBindingUses = (body: Node, bindings: Bindings): void => {
         `Read parameters as \`${node.name}.name\`, so the step list shows which are used`
       );
     }
-    if (node.name !== bindings.context) {
-      return;
-    }
-    if (!member) {
+    // A step's function runs inside the step, where state can't be used, and
+    // its options are read before it: state belongs between steps.
+    const inStepCall = ancestors.some(
+      ({ node: ancestor, key }) =>
+        key === "arguments" && isStepCall(bindings, ancestor)
+    );
+    if (node.name === bindings.state && inStepCall) {
       throw fail(
         node,
-        `Read the context as \`${node.name}.input\`, \`${node.name}.params.name\` and so on`
+        `Read and write \`${node.name}\` between steps, not in a step's options or function`
       );
-    }
-    const readsParams =
-      parent?.node.type === "MemberExpression" &&
-      nameOf(parent.node.property) === "params";
-    if (readsParams && !isObjectOfMember(grandparent)) {
-      throw fail(node, `Read parameters as \`${node.name}.params.name\``);
     }
   });
 };
@@ -471,7 +432,8 @@ const textOf = (reader: Reader, node: Node): string =>
 const hasSteps = (reader: Reader, node: Node): boolean =>
   some(node, (candidate) => isStepCall(reader.bindings, candidate));
 
-const stepMethods: StepMethod[] = ["do", "llm", "decision", "sleep", "waitFor"];
+const isStepMethod = (method: string | undefined): method is StepMethod =>
+  method !== undefined && Object.hasOwn(stepOptionSchemas, method);
 
 const stepMethodOf = (call: CallExpression): StepMethod => {
   const { callee } = call;
@@ -479,44 +441,71 @@ const stepMethodOf = (call: CallExpression): StepMethod => {
     callee.type === "MemberExpression" && !callee.computed
       ? nameOf(callee.property)
       : undefined;
-  const stepMethod = stepMethods.find((candidate) => candidate === method);
-  if (!stepMethod) {
+  if (!isStepMethod(method)) {
     throw fail(
       call,
-      `\`step.${method ?? "?"}\` isn't a step; steps are ${stepMethods.join(", ")}`
+      `\`step.${method ?? "?"}\` isn't a step; steps are ${Object.keys(stepOptionSchemas).join(", ")}`
     );
   }
-  return stepMethod;
+  return method;
 };
 
-const optionIsValid = (
-  rule: OptionRule,
+/** A literal, or an object of them, as written; undefined for anything else. */
+const staticValueOf = (node: Node): OptionValue | undefined => {
+  const literal = literalOf(node);
+  if (literal !== undefined || node.type !== "ObjectExpression") {
+    return literal;
+  }
+  const value: Record<string, OptionValue> = {};
+  for (const property of node.properties) {
+    const key =
+      property.type === "ObjectProperty" && !property.computed
+        ? nameOf(property.key)
+        : undefined;
+    const nested =
+      property.type === "ObjectProperty" && key !== undefined
+        ? staticValueOf(property.value)
+        : undefined;
+    if (key === undefined || nested === undefined) {
+      return undefined;
+    }
+    value[key] = nested;
+  }
+  return value;
+};
+
+/** The options a step method takes, each with its schema and form. */
+const optionsOfMethod = (method: StepMethod) =>
+  new Map(
+    Object.entries(stepOptionSchemas[method].shape).map(
+      ([option, schema]: [string, z.ZodType]) => [
+        option,
+        { schema, form: optionForms.get(schema)?.form ?? "code" },
+      ]
+    )
+  );
+
+/** Why an option's value can't be read as its form asks; undefined if it can. */
+const optionProblem = (
+  { schema, form }: { schema: z.ZodType; form: OptionForm },
   value: Node,
   bindings: Bindings
-): boolean => {
-  const literal = literalOf(value);
-  switch (rule) {
-    case "text": {
-      return typeof literal === "string" && literal.trim() !== "";
-    }
-    case "boolean": {
-      return typeof literal === "boolean";
-    }
-    case "count": {
-      return (
-        typeof literal === "number" && Number.isInteger(literal) && literal >= 0
-      );
-    }
-    case "param": {
-      return paramReadOf(bindings, value) !== undefined;
-    }
-    case "any": {
-      return true;
-    }
-    default: {
-      return rule satisfies never;
-    }
+): string | undefined => {
+  if (form === "code") {
+    return undefined;
   }
+  const isParam = paramReadOf(bindings, value) !== undefined;
+  if (form === "param" || (form === "value" && isParam)) {
+    return isParam ? undefined : formHints.param;
+  }
+  const literal = form === "literal" ? literalOf(value) : staticValueOf(value);
+  if (literal === undefined) {
+    return formHints[form];
+  }
+  const result = schema.safeParse(literal);
+  return result.success
+    ? undefined
+    : `is invalid: ${z.prettifyError(result.error)}`;
 };
 
 const optionOf = (
@@ -543,31 +532,31 @@ const readOptions = (
   method: StepMethod,
   object: ObjectExpression
 ): Map<string, Node> => {
-  const rules = optionRules[method];
+  const allowed = optionsOfMethod(method);
   const options = new Map<string, Node>();
   for (const property of object.properties) {
     const { option, value } = optionOf(name, property);
-    const rule = rules[option];
-    if (!rule) {
+    const allowedOption = allowed.get(option);
+    if (!allowedOption) {
       throw fail(
         property,
-        `\`${option}\` isn't an option of \`step.${method}\`; it takes ${Object.keys(rules).join(", ")}`
+        `\`${option}\` isn't an option of \`step.${method}\`; it takes ${[...allowed.keys()].join(", ")}`
       );
     }
-    if (!optionIsValid(rule, value, reader.bindings)) {
-      throw fail(
-        property,
-        `Option \`${option}\` of step "${name}" ${ruleHints[rule]}`
-      );
+    const problem = optionProblem(allowedOption, value, reader.bindings);
+    if (problem !== undefined) {
+      throw fail(property, `Option \`${option}\` of step "${name}" ${problem}`);
     }
     options.set(option, value);
   }
   const sideEffect = options.get("sideEffect");
+  const required = [...allowed]
+    .filter(([, { schema }]) => !(schema instanceof z.ZodOptional))
+    .map(([option]) => option);
   // A side effect's input is what a dry run shows it would write.
-  const required =
-    method === "do" && sideEffect && literalOf(sideEffect) === true
-      ? [...requiredOptions.do, "input"]
-      : requiredOptions[method];
+  if (sideEffect && literalOf(sideEffect) === true) {
+    required.push("input");
+  }
   const missing = required.filter((option) => !options.has(option));
   if (missing.length > 0) {
     throw fail(object, `Step "${name}" needs ${missing.join(", ")}`);
@@ -576,17 +565,12 @@ const readOptions = (
 };
 
 const literalOptions = (
-  options: Map<string, Node>,
-  rules: Record<string, OptionRule>
+  options: Map<string, Node>
 ): Record<string, OptionValue> => {
   const literals: Record<string, OptionValue> = {};
   for (const [option, value] of options) {
-    const literal = literalOf(value);
-    if (
-      literal !== undefined &&
-      !unrecordedOptions.has(option) &&
-      rules[option] !== "param"
-    ) {
+    const literal = staticValueOf(value);
+    if (literal !== undefined && !unrecordedOptions.has(option)) {
       literals[option] = literal;
     }
   }
@@ -660,7 +644,7 @@ const describeCall = (
       method === "decision" || (method === "do" && flag("sideEffect")),
     locked: method === "do" && flag("locked"),
     params: paramsIn(reader.bindings, call.arguments),
-    options: literalOptions(options, optionRules[method]),
+    options: literalOptions(options),
     line: lineOf(call),
   };
 };

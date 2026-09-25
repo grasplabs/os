@@ -5,11 +5,13 @@ import { createTestEngine, createTestState } from "../src/testing.ts";
 import type { TestEngineOptions } from "../src/testing.ts";
 import {
   model,
+  money,
   number,
   person,
   schedule,
   text,
   workflow,
+  WorkflowError,
   z,
 } from "../src/workflow.ts";
 import type { DoOptions, Duration, StepRunner } from "../src/workflow.ts";
@@ -30,6 +32,18 @@ const withStep = <Output>(
     async (step, { input }) => await body(step, input)
   );
 
+/** A workflow with one money parameter. */
+const priced = (currency: string, amount: number) =>
+  workflow(
+    "priced",
+    {
+      params: {
+        limit: money({ label: "Limit", currency, default: amount }),
+      },
+    },
+    async () => null
+  );
+
 describe("workflow definitions", () => {
   it("rejects an empty ID and a default that doesn't fit its kind", () => {
     expect(() => workflow("", { params: noParams }, async () => null)).toThrow(
@@ -42,6 +56,21 @@ describe("workflow definitions", () => {
         async () => null
       )
     ).toThrow(expect.objectContaining({ code: "workflow.invalid_definition" }));
+  });
+
+  it("holds money in whole minor units of a declared currency", () => {
+    expect(priced("EUR", 500_000).metadata.params[0]).toMatchObject({
+      currency: "EUR",
+      default: 500_000,
+    });
+    for (const [currency, amount] of [
+      ["EUR", 5000.5],
+      ["euro", 500_000],
+    ] as const) {
+      expect(() => priced(currency, amount)).toThrow(
+        expect.objectContaining({ code: "workflow.invalid_definition" })
+      );
+    }
   });
 
   it("is started by hand unless it declares triggers", () => {
@@ -73,14 +102,16 @@ describe("workflow definitions", () => {
 });
 
 describe("step calls", () => {
-  it("reject a bad name, a missing description, a bad key or bad retries", async () => {
+  it("reject a bad name, a missing description, a bad key, bad retries or a bad timeout", async () => {
     const calls: [string, DoOptions & { sideEffect?: false }][] = [
       ["has:colon", { description: "Go" }],
       ["go", { description: " " }],
       ["go", { description: "Go", key: "" }],
       ["go", { description: "Go", key: "x".repeat(200) }],
       ["go", { description: "Go", key: "\uD800" }],
-      ["go", { description: "Go", retries: -1 }],
+      ["go", { description: "Go", retries: { limit: -1 } }],
+      ["go", { description: "Go", retries: { limit: 1, delay: 1.5 } }],
+      ["go", { description: "Go", timeout: "400 days" }],
     ];
 
     for (const [name, options] of calls) {
@@ -214,13 +245,17 @@ describe("step.do", () => {
     let attempts = 0;
     const definition = withStep(
       async (step) =>
-        await step.do("call", { description: "Call", retries: 2 }, async () => {
-          attempts += 1;
-          if (attempts < 3) {
-            throw new Error("Flaky");
+        await step.do(
+          "call",
+          { description: "Call", retries: { limit: 2 } },
+          async () => {
+            attempts += 1;
+            if (attempts < 3) {
+              throw new Error("Flaky");
+            }
+            return attempts;
           }
-          return attempts;
-        })
+        )
     );
 
     await expect(definition.run(createFakeEngine().engine)).resolves.toBe(3);
@@ -229,7 +264,12 @@ describe("step.do", () => {
   it("fails a step whose result isn't JSON, which an engine can't store", async () => {
     const definition = withStep(
       async (step) =>
-        await step.do("when", { description: "When" }, async () => new Date(0))
+        await step.do(
+          "when",
+          { description: "When" },
+          // @ts-expect-error -- a step's result is JSON
+          async () => new Date(0)
+        )
     );
 
     await expect(definition.run(createFakeEngine().engine)).rejects.toThrow(
@@ -271,7 +311,7 @@ const llmWorkflow = workflow(
       instructions: "Read the total.",
       input: "Total: 12",
       schema: extraction,
-      retries: 1,
+      retries: { limit: 1 },
     })
 );
 
@@ -440,14 +480,22 @@ describe("step.sleep and step.waitFor", () => {
     });
   });
 
-  it("reject a duration that isn't one", async () => {
+  it("reject a duration that isn't whole milliseconds, up to 365 days", async () => {
     const definition = withStep(async (step, duration) => {
       // @ts-expect-error -- durations are milliseconds or "<n> <unit>"
       await step.sleep("pause", { description: "Pause", duration });
     });
     const run = definition.run.bind(null, createFakeEngine().engine);
 
-    for (const duration of ["soon", "-1 days", 0, Number.POSITIVE_INFINITY]) {
+    const durations = [
+      "soon",
+      "-1 days",
+      0,
+      1.5,
+      "366 days",
+      Number.POSITIVE_INFINITY,
+    ];
+    for (const duration of durations) {
       // oxlint-disable-next-line no-await-in-loop -- each run is one case
       await expect(run(duration)).rejects.toMatchObject({
         code: "workflow.invalid_step_call",
@@ -457,7 +505,7 @@ describe("step.sleep and step.waitFor", () => {
 });
 
 const decisionWorkflow = (
-  limits: { timeout?: Duration; remindAfter?: Duration },
+  limits: { timeout: Duration; remindAfter?: Duration },
   ask: () => Promise<void> = async () => {}
 ) =>
   workflow(
@@ -496,15 +544,71 @@ describe("step.decision", () => {
     expect(steps.filter(({ type }) => type === "wait")).toStrictEqual([]);
   });
 
-  it("waits as long as the engine allows without a timeout", async () => {
-    const { engine, steps } = createFakeEngine();
+  it("refuses a decision without a timeout", async () => {
+    const { engine } = createFakeEngine();
 
-    await expect(decisionWorkflow({}).run(engine)).resolves.toStrictEqual({
-      outcome: "timedOut",
+    await expect(
+      // @ts-expect-error -- the SDK owns how long a decision waits
+      decisionWorkflow({}).run(engine)
+    ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
+  });
+
+  it("opens a decision once, even when the step that opened it runs again", async () => {
+    const { engine, decisions } = createFakeEngine();
+    let crashed = false;
+    // The engine dies after opening the decision, before it records the step.
+    const crashing = {
+      ...engine,
+      openDecision: async (
+        ...request: Parameters<typeof engine.openDecision>
+      ) => {
+        const opened = await engine.openDecision(...request);
+        if (!crashed) {
+          crashed = true;
+          throw new Error("Engine died before recording the step");
+        }
+        return opened;
+      },
+    };
+    const definition = decisionWorkflow({ timeout: "7 days" });
+
+    await expect(definition.run(crashing)).rejects.toThrow("Engine died");
+    await definition.run(crashing);
+
+    expect(decisions).toStrictEqual([{ step: "approve", from: "anna" }]);
+  });
+
+  it("picks up a decision after the run was killed waiting for it, asking once", async () => {
+    let asks = 0;
+    const { engine, decisions } = createFakeEngine({
+      decisions: { approve: { approved: true, by: "anna" } },
     });
-    const waits = steps.filter(({ type }) => type === "wait");
-    expect(waits).toHaveLength(1);
-    expect(waits[0]).not.toHaveProperty("timeout");
+    let killed = false;
+    // The run is killed while it waits; the answer comes in meanwhile.
+    const killedWhileWaiting = {
+      ...engine,
+      waitForEvent: async (...wait: Parameters<typeof engine.waitForEvent>) => {
+        if (!killed) {
+          killed = true;
+          throw new Error("Run killed while waiting");
+        }
+        return await engine.waitForEvent(...wait);
+      },
+    };
+    const definition = decisionWorkflow({ timeout: "7 days" }, async () => {
+      asks += 1;
+    });
+
+    await expect(definition.run(killedWhileWaiting)).rejects.toThrow(
+      "Run killed"
+    );
+    const outcome = await definition.run(killedWhileWaiting);
+    const replayed = await definition.run(killedWhileWaiting);
+
+    expect(outcome).toStrictEqual({ outcome: "approved", by: "anna" });
+    expect(replayed).toStrictEqual(outcome);
+    expect(asks).toBe(1);
+    expect(decisions).toHaveLength(1);
   });
 
   it("refuses a reminder that comes after the timeout", async () => {
@@ -520,7 +624,9 @@ describe("step.decision", () => {
       decisions: { approve: { approved: true, by: "anna", comment: "Fine" } },
     });
 
-    await expect(decisionWorkflow({}).run(engine)).resolves.toStrictEqual({
+    await expect(
+      decisionWorkflow({ timeout: "7 days" }).run(engine)
+    ).resolves.toStrictEqual({
       outcome: "approved",
       by: "anna",
       comment: "Fine",
@@ -532,7 +638,9 @@ describe("step.decision", () => {
       events: [{ type: "decision:approve", payload: { approved: true } }],
     });
 
-    await expect(decisionWorkflow({}).run(engine)).rejects.toMatchObject({
+    await expect(
+      decisionWorkflow({ timeout: "7 days" }).run(engine)
+    ).rejects.toMatchObject({
       code: "workflow.invalid_event",
     });
   });
@@ -616,5 +724,116 @@ describe("state", () => {
     await expect(
       valueWorkflow.run(createFakeEngine().engine)
     ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
+  });
+});
+
+describe("one step at a time", () => {
+  it("refuses state and steps inside a step's function, again on replay, without retrying", async () => {
+    let attempts = 0;
+    const nested = workflow(
+      "nested",
+      { params: noParams },
+      async (step, { state }) => {
+        await step.do(
+          "outer",
+          { description: "Outer", retries: { limit: 3 } },
+          async () => {
+            attempts += 1;
+            await state.set("seen", true);
+          }
+        );
+      }
+    );
+    const { engine, state } = createFakeEngine();
+
+    await expect(nested.run(engine)).rejects.toMatchObject({
+      code: "workflow.invalid_step_call",
+    });
+    await expect(nested.run(engine)).rejects.toMatchObject({
+      code: "workflow.invalid_step_call",
+    });
+    expect(attempts).toBe(2);
+    expect(state.values.has("seen")).toBeFalsy();
+  });
+
+  it("refuses a step started while another runs", async () => {
+    const ran: string[] = [];
+    const inside = withStep(async (step) => {
+      await step.do("outer", { description: "Outer" }, async () => {
+        await step.do("inner", { description: "Inner" }, async () => {
+          ran.push("inner");
+        });
+      });
+    });
+    const alongside = withStep(
+      async (step) =>
+        await Promise.all([
+          step.do("first", { description: "First" }, async () => 1),
+          step.do("second", { description: "Second" }, async () => 2),
+        ])
+    );
+
+    for (const definition of [inside, alongside]) {
+      // oxlint-disable-next-line no-await-in-loop -- each run is one case
+      await expect(
+        definition.run(createFakeEngine().engine)
+      ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
+    }
+    expect(ran).toStrictEqual([]);
+  });
+});
+
+describe("errors", () => {
+  it("keep their code through an engine that keeps only an error's name and message", async () => {
+    const { engine } = createFakeEngine({ params: { approver: "" } });
+    const definition = workflow(
+      "coded",
+      { params: { approver: person({ label: "Approver", default: "anna" }) } },
+      async () => null
+    );
+
+    const failure: unknown = await definition
+      .run(engine)
+      .catch((error: unknown) => error);
+
+    expect(failure).toBeInstanceOf(WorkflowError);
+    expect(failure).toMatchObject({ code: "workflow.invalid_param" });
+  });
+
+  it("are read back from a name and message alone, and only when they are workflow errors", () => {
+    const kept = new Error('Parameter "approver" is empty');
+    kept.name = new WorkflowError("workflow.invalid_param", "x").name;
+    const other = new Error("Ledger went away");
+
+    expect(WorkflowError.from(kept)).toMatchObject({
+      code: "workflow.invalid_param",
+      message: kept.message,
+    });
+    expect(WorkflowError.from(other)).toBeUndefined();
+  });
+});
+
+describe("idempotency keys", () => {
+  it("never collide between runs, whatever the run ID holds", async () => {
+    const keys: string[] = [];
+    const write = withStep(async (step, key) => {
+      await step.do(
+        "b",
+        {
+          description: "Write",
+          sideEffect: true,
+          input: null,
+          ...(typeof key === "string" ? { key } : {}),
+        },
+        async ({ idempotencyKey }) => {
+          keys.push(idempotencyKey);
+        }
+      );
+    });
+
+    await write.run(createFakeEngine({ runId: "a:b" }).engine);
+    await write.run(createFakeEngine({ runId: "a" }).engine, "b");
+
+    expect(keys).toStrictEqual(["a%3Ab:b", "a:b:b"]);
   });
 });

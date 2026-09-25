@@ -1,6 +1,7 @@
 import { runIdSchema } from "@grasp-os/shared/ids";
 import { z } from "zod";
 
+import { isNonRetryable } from "./engine.ts";
 import type {
   DecisionAnswer,
   EngineEvent,
@@ -69,7 +70,7 @@ export type StepRecord =
       type: "wait";
       name: string;
       eventType: string;
-      timeout?: number;
+      timeout: number;
       event: EngineEvent;
     };
 
@@ -173,7 +174,10 @@ const byStepName = <T>(
 const errorMessage = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
-/** Runs `fn`, and again up to `retries` times while it fails. */
+/**
+ * Runs `fn`, and again up to `retries` times while it fails with an error
+ * that trying again may fix. Delays and timeouts aren't simulated.
+ */
 const attempt = async <T>(
   retries: number,
   fn: () => Promise<T>
@@ -185,9 +189,24 @@ const attempt = async <T>(
       return await fn();
     } catch (error) {
       lastError = error;
+      if (isNonRetryable(error)) {
+        break;
+      }
     }
   }
   throw lastError;
+};
+
+/**
+ * A failed step's error as some engines keep it: only its name and message
+ * (Cloudflare Workflows does), so tests catch anything that relies on more.
+ */
+const asKept = (error: unknown): Error => {
+  const kept = new Error(errorMessage(error));
+  if (error instanceof Error) {
+    kept.name = error.name;
+  }
+  return kept;
 };
 
 /**
@@ -222,6 +241,8 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
   const results = new Map<string, string | undefined>();
   const steps: StepRecord[] = [];
   const modelRequests: ModelRequest[] = [];
+  /** The decisions opened, once each. */
+  const decisions: { step: string; from: string }[] = [];
   const events = [...(options.events ?? [])];
   const state = options.state ?? createTestState();
   const runSideEffects = options.sideEffects === "run";
@@ -276,7 +297,7 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         } else if (sideEffect && !runSideEffects) {
           status = "recorded";
         } else {
-          output = await attempt(retries ?? 0, fn);
+          output = await attempt(retries?.limit ?? 0, fn);
         }
         const stored = toStored(step.name, output);
         results.set(name, stored);
@@ -294,7 +315,7 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
           status: "failed",
           error: errorMessage(error),
         });
-        throw error;
+        throw asKept(error);
       }
     },
     sleep: async (name, milliseconds) => {
@@ -318,10 +339,10 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         type: "wait",
         name: stepNameOf(name).name,
         eventType: type,
-        ...(timeout === undefined ? {} : { timeout }),
+        timeout,
         event,
       });
-      if (!event.received && timeout !== undefined) {
+      if (!event.received) {
         options.skipTime?.(timeout);
       }
       return await Promise.resolve(event);
@@ -335,11 +356,17 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
       }
       return await options.model(request);
     },
-    openDecision: async ({ step }) =>
-      await Promise.resolve({
+    // Idempotent per step, as the engine contract asks: opening a decision
+    // again (a crash before its step was recorded) opens nothing new.
+    openDecision: async ({ step, from }) => {
+      if (!decisions.some((decision) => decision.step === step)) {
+        decisions.push({ step, from });
+      }
+      return await Promise.resolve({
         link: `https://grasp.test/decisions/${step}`,
         eventType: `${decisionEventPrefix}${step}`,
-      }),
+      });
+    },
     getState: async (key) => await Promise.resolve(state.values.get(key)),
     setState: async (key, value, idempotencyKey) => {
       if (!state.appliedWrites.has(idempotencyKey)) {
@@ -350,7 +377,7 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
     },
   };
 
-  return { engine, steps, modelRequests, state };
+  return { engine, steps, modelRequests, decisions, state };
 };
 
 /** What a test run or dry run needs besides the workflow. */
@@ -462,9 +489,7 @@ const describeRecord = (record: StepRecord): string => {
     if (record.event.received) {
       return `${waited}, received ${describeValue(record.event.payload)}`;
     }
-    return record.timeout === undefined
-      ? `${waited}, none came`
-      : `${waited}, none came within ${describeDuration(record.timeout)}`;
+    return `${waited}, none came within ${describeDuration(record.timeout)}`;
   }
   const input =
     record.input === undefined ? "" : ` ${describeValue(record.input)}`;

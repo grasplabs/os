@@ -3,8 +3,15 @@ import type { RunId, WorkflowId } from "@grasp-os/shared/ids";
 import { z } from "zod";
 
 import { decisionAnswerSchema } from "./engine.ts";
-import type { EngineEvent, JsonValue, WorkflowEngine } from "./engine.ts";
-import { namePattern } from "./steps.ts";
+import type {
+  Backoff,
+  EngineEvent,
+  JsonValue,
+  WorkflowEngine,
+} from "./engine.ts";
+import { currencySchema, paramValueSchemas } from "./params.ts";
+import type { ParamDefault, ParamKind, ParamValue } from "./params.ts";
+import { namePattern, stepOptionSchemas } from "./steps.ts";
 
 /**
  * Workflow SDK: the only API workflow code sees. A workflow declares its
@@ -12,7 +19,9 @@ import { namePattern } from "./steps.ts";
  *
  * ```ts
  * export default workflow("invoice-approval", {
- *   params: { threshold: money({ label: "Review invoices above", default: 5000 }) },
+ *   params: {
+ *     threshold: money({ label: "Review invoices above", currency: "EUR", default: 500_000 }),
+ *   },
  * }, async (step, { params }) => {
  *   await step.do("book",
  *     { description: "Book the invoice", sideEffect: true, input: { invoice: 7 } },
@@ -26,14 +35,23 @@ import { namePattern } from "./steps.ts";
 
 // Workflow code imports only this module, so it gets Zod from here too.
 export { z } from "zod";
+export type { ParamKind, ParamValue } from "./params.ts";
 
-export type WorkflowErrorCode =
-  | "workflow.invalid_definition"
-  | "workflow.invalid_step_call"
-  | "workflow.invalid_input"
-  | "workflow.invalid_param"
-  | "workflow.invalid_model_output"
-  | "workflow.invalid_event";
+const workflowErrorCodes = [
+  "workflow.invalid_definition",
+  "workflow.invalid_step_call",
+  "workflow.invalid_input",
+  "workflow.invalid_param",
+  "workflow.invalid_model_output",
+  "workflow.invalid_event",
+] as const;
+export type WorkflowErrorCode = (typeof workflowErrorCodes)[number];
+
+const isWorkflowErrorCode = (code: unknown): code is WorkflowErrorCode =>
+  workflowErrorCodes.some((known) => known === code);
+
+// The code rides in the name, which every engine keeps with the message.
+const errorNamePattern = /^WorkflowError\((?<code>[\w.]+)\)$/u;
 
 /**
  * Thrown for a workflow that is wrong: a bad definition, a bad step call, or
@@ -42,40 +60,67 @@ export type WorkflowErrorCode =
 export class WorkflowError extends Error {
   /** Stable and machine-readable; branch on this, never on the message. */
   readonly code: WorkflowErrorCode;
+  /**
+   * Trying again can't fix it, so the engine doesn't retry the step it
+   * failed. Only a model's answer that doesn't fit may be retried.
+   */
+  readonly nonRetryable: boolean;
 
-  constructor(code: WorkflowErrorCode, message: string) {
+  constructor(
+    code: WorkflowErrorCode,
+    message: string,
+    { nonRetryable = true }: { nonRetryable?: boolean } = {}
+  ) {
     super(message);
-    this.name = "WorkflowError";
+    // Not just the class name: the code rides in the name, which every
+    // engine keeps with the message.
+    // oxlint-disable-next-line unicorn/custom-error-definition -- see above
+    this.name = `WorkflowError(${code})`;
     this.code = code;
+    this.nonRetryable = nonRetryable;
+  }
+
+  /**
+   * The workflow error `error` is, or was before an engine kept only its
+   * name and message; undefined for any other error.
+   */
+  static from(error: unknown): WorkflowError | undefined {
+    if (error instanceof WorkflowError) {
+      return error;
+    }
+    if (!(error instanceof Error)) {
+      return undefined;
+    }
+    const code = errorNamePattern.exec(error.name)?.groups?.code;
+    return isWorkflowErrorCode(code)
+      ? new WorkflowError(code, error.message)
+      : undefined;
   }
 }
 
-// Parameters
+const invalidCall = (message: string): WorkflowError =>
+  new WorkflowError("workflow.invalid_step_call", message);
 
-/**
- * The value each kind of parameter holds. References to people, models,
- * templates and schedules are branded, so a parameter of one kind can't be
- * passed where another is expected (a reviewer as the model, say).
- */
-const paramValueSchemas = {
-  /** An amount in the deployment's currency. */
-  money: z.number(),
-  number: z.number(),
-  text: z.string(),
-  /** A person or a group of people. */
-  person: z.string().min(1).brand<"Person">(),
-  /** When something happens, as a cron expression. */
-  schedule: z.string().min(1).brand<"Schedule">(),
-  /** A model offered by the model gateway. */
-  model: z.string().min(1).brand<"Model">(),
-  /** A template, e.g. for an email. */
-  template: z.string().min(1).brand<"Template">(),
+const parseOrThrow = <Schema extends z.ZodType>(
+  schema: Schema,
+  value: unknown,
+  code: WorkflowErrorCode,
+  what: string,
+  options?: { nonRetryable: boolean }
+): z.output<Schema> => {
+  const result = schema.safeParse(value);
+  if (!result.success) {
+    throw new WorkflowError(
+      code,
+      `${what}: ${z.prettifyError(result.error)}`,
+      options
+    );
+  }
+  return result.data;
 };
 
-export type ParamKind = keyof typeof paramValueSchemas;
-export type ParamValue<Kind extends ParamKind> = z.output<
-  (typeof paramValueSchemas)[Kind]
->;
+// Parameters
+
 export type Person = ParamValue<"person">;
 export type Schedule = ParamValue<"schedule">;
 export type Model = ParamValue<"model">;
@@ -86,14 +131,16 @@ export interface Param<Kind extends ParamKind = ParamKind> {
   kind: Kind;
   /** What people see next to the value, e.g. "Review invoices above". */
   label: string;
-  default: z.input<(typeof paramValueSchemas)[Kind]>;
+  default: ParamDefault<Kind>;
   /** Changing it needs a second person's approval. */
   sensitive: boolean;
+  /** For money: the ISO 4217 currency its amounts are in, e.g. `EUR`. */
+  currency?: string;
 }
 
 interface ParamOptions<Kind extends ParamKind> {
   label: string;
-  default: z.input<(typeof paramValueSchemas)[Kind]>;
+  default: ParamDefault<Kind>;
   /** Changing it needs a second person's approval; defaults to false. */
   sensitive?: boolean;
 }
@@ -107,8 +154,19 @@ const param =
     sensitive: options.sensitive ?? false,
   });
 
-/** An amount of money, in the deployment's currency. */
-export const money = param("money");
+/**
+ * An amount of money in whole minor units of `currency` (cents for EUR):
+ * `default: 500_000` is €5,000.00.
+ */
+export const money = (
+  options: ParamOptions<"money"> & {
+    /** ISO 4217, e.g. `EUR`. */
+    currency: string;
+  }
+): Param<"money"> => ({
+  ...param("money")(options),
+  currency: options.currency,
+});
 /** A number. */
 export const number = param("number");
 /** A piece of text. */
@@ -131,10 +189,17 @@ export type ParamValues<P extends Params> = {
 
 // Steps
 
-/** A time span: milliseconds, or e.g. `"30 minutes"` or `"3 days"`. */
+/**
+ * A time span: whole milliseconds, or e.g. `"30 minutes"` or `"3 days"`; at
+ * most 365 days.
+ */
 export type Duration =
   | number
   | `${number} ${"second" | "minute" | "hour" | "day" | "week"}${"" | "s"}`;
+
+/** What a step returns: JSON, which the engine records, or nothing. */
+// oxlint-disable-next-line typescript/no-invalid-void-type -- a step may return nothing
+export type StepResult = JsonValue | undefined | void;
 
 /** Options every step takes. */
 interface StepOptions {
@@ -147,12 +212,35 @@ interface StepOptions {
   key?: string | number;
 }
 
+/**
+ * How often to try a failing step again. `limit` counts retries, not
+ * attempts (as in Cloudflare Workflows): `limit: 2` is three attempts in
+ * all. Missing, the engine's defaults apply (Cloudflare Workflows: 5 retries,
+ * 10 seconds apart, backing off exponentially).
+ */
+export interface Retries {
+  limit: number;
+  /** Before the first retry. */
+  delay?: Duration;
+  /** How the delay grows. */
+  backoff?: Backoff;
+}
+
+/** Options of a step that runs code, and so can fail and be tried again. */
+interface AttemptOptions {
+  retries?: Retries;
+  /**
+   * How long one attempt may take; the engine's default when missing
+   * (Cloudflare Workflows: 10 minutes).
+   */
+  timeout?: Duration;
+}
+
 /** What a step works on: JSON, or nothing. */
 export type StepInput = JsonValue | undefined;
 
-export interface DoOptions<
-  Input extends StepInput = StepInput,
-> extends StepOptions {
+export interface DoOptions<Input extends StepInput = StepInput>
+  extends StepOptions, AttemptOptions {
   /**
    * Changes something outside Grasp. The step gets an idempotency key to
    * pass to connector calls, so a retry never does the change twice.
@@ -163,8 +251,6 @@ export interface DoOptions<
    * references always come from a locked step.
    */
   locked?: boolean;
-  /** Extra attempts after a failure; the engine's default when missing. */
-  retries?: number;
   /**
    * What the step works on, as JSON; the function gets it back as `input`.
    * It's recorded with the step, and a dry run shows it for a side-effect
@@ -177,13 +263,14 @@ export interface DoOptions<
 /** Passed to a side-effect step: hand `idempotencyKey` to connector calls. */
 export interface SideEffectContext {
   /**
-   * `runId:stepName` (`runId:stepName:key` for a keyed step); the same on
-   * every retry and replay of the step.
+   * `runId:stepName` (`runId:stepName:key` for a keyed step, the run ID and
+   * key URI-encoded); the same on every retry and replay of the step.
    */
   idempotencyKey: string;
 }
 
-export interface LlmOptions<Output extends z.ZodType> extends StepOptions {
+export interface LlmOptions<Output extends z.ZodType>
+  extends StepOptions, AttemptOptions {
   /** A model parameter, so people see and govern which model is used. */
   model: Model;
   /** What the model is asked to do: the prompt. */
@@ -192,8 +279,6 @@ export interface LlmOptions<Output extends z.ZodType> extends StepOptions {
   input: JsonValue;
   /** The shape the answer must have. */
   schema: Output;
-  /** Extra attempts after a failure or an answer that doesn't fit. */
-  retries?: number;
   /** A model is involved, so an AI step is never locked. */
   locked?: never;
   sideEffect?: never;
@@ -212,11 +297,8 @@ export interface DecisionOptions extends StepOptions {
   from: Person;
   /** Tells them there is something to decide, e.g. by email. */
   ask: (request: DecisionRequest) => Promise<void>;
-  /**
-   * Stop waiting this long after the decision opened, however long asking
-   * took; the engine's limit when missing.
-   */
-  timeout?: Duration;
+  /** Stop waiting this long after the decision opened, however long asking took. */
+  timeout: Duration;
   /** Ask once more when there is no answer this long after asking. */
   remindAfter?: Duration;
 }
@@ -245,9 +327,10 @@ export type WaitResult<T> =
   | { received: false };
 
 /**
- * Runs steps. Names and options are literals in the code, so the step list
- * can be read from it; a step name runs once per run unless each run of it
- * has its own `key`.
+ * Runs steps, one after another. Names and options are literals in the
+ * code, so the step list can be read from it; a step name runs once per run
+ * unless each run of it has its own `key`. A step never starts while another
+ * step runs, e.g. from inside its function.
  */
 export interface StepRunner {
   /**
@@ -255,12 +338,12 @@ export interface StepRunner {
    * returns the recorded result instead of running the code again.
    */
   do: {
-    <T, Input extends JsonValue>(
+    <T extends StepResult, Input extends JsonValue>(
       name: string,
       options: DoOptions<Input> & { sideEffect: true; input: Input },
       fn: (context: SideEffectContext & { input: Input }) => Promise<T>
     ): Promise<T>;
-    <T, Input extends StepInput = undefined>(
+    <T extends StepResult, Input extends StepInput = undefined>(
       name: string,
       options: DoOptions<Input> & { sideEffect?: false },
       fn: (context: { input: Input }) => Promise<T>
@@ -275,8 +358,9 @@ export interface StepRunner {
     options: LlmOptions<Output>
   ) => Promise<z.output<Output>>;
   /**
-   * Asks a person to decide and durably waits for the answer. How they are
-   * asked is up to `ask`, which gets a link to where they answer.
+   * Asks a person to decide and durably waits for the answer, until the
+   * timeout. How they are asked is up to `ask`, which gets a link to where
+   * they answer.
    */
   decision: (name: string, options: DecisionOptions) => Promise<Decision>;
   /** Durably pauses the run. */
@@ -293,21 +377,21 @@ export interface StepRunner {
 interface UntypedStepRunner {
   do: (
     name: string,
-    options: DoOptions,
+    options: unknown,
     fn: (
       context: Partial<SideEffectContext> & { input: StepInput }
     ) => Promise<unknown>
   ) => Promise<unknown>;
-  llm: (name: string, options: LlmOptions<z.ZodType>) => Promise<unknown>;
-  decision: (name: string, options: DecisionOptions) => Promise<Decision>;
-  sleep: (name: string, options: SleepOptions) => Promise<void>;
-  waitFor: (
-    name: string,
-    options: WaitForOptions<z.ZodType>
-  ) => Promise<WaitResult<unknown>>;
+  llm: (name: string, options: unknown) => Promise<unknown>;
+  decision: (name: string, options: unknown) => Promise<Decision>;
+  sleep: (name: string, options: unknown) => Promise<void>;
+  waitFor: (name: string, options: unknown) => Promise<WaitResult<unknown>>;
 }
 
-/** Key-value state of the workflow, shared by all its runs. */
+/**
+ * Key-value state of the workflow, shared by all its runs. Read and write it
+ * between steps, never while one runs.
+ */
 export interface StateStore {
   get: (key: string) => Promise<JsonValue | undefined>;
   set: (key: string, value: JsonValue) => Promise<void>;
@@ -343,6 +427,8 @@ export interface ParamMetadata {
   label: string;
   default: string | number;
   sensitive: boolean;
+  /** For money: its ISO 4217 currency; amounts are in its minor units. */
+  currency?: string;
 }
 
 /**
@@ -358,53 +444,13 @@ export interface WorkflowMetadata {
 /** A workflow, ready for the runtime to run. */
 export interface WorkflowDefinition<Output> {
   metadata: WorkflowMetadata;
-  /** Runs (or replays) one run on `engine`; `input` is checked first. */
+  /**
+   * Runs (or replays) one run on `engine`; `input` is checked first. A
+   * `WorkflowError` keeps its code even through an engine that keeps only a
+   * failed step's error name and message.
+   */
   run: (engine: WorkflowEngine, input?: unknown) => Promise<Output>;
 }
-
-const durationPattern =
-  /^(?<amount>\d+(?:\.\d+)?) (?<unit>second|minute|hour|day|week)s?$/u;
-const unitMilliseconds = new Map([
-  ["second", 1000],
-  ["minute", 60_000],
-  ["hour", 3_600_000],
-  ["day", 86_400_000],
-  ["week", 604_800_000],
-]);
-const maxKeyLength = 128;
-
-const invalidCall = (message: string): WorkflowError =>
-  new WorkflowError("workflow.invalid_step_call", message);
-
-const toMilliseconds = (duration: unknown): number => {
-  const match =
-    typeof duration === "string" ? durationPattern.exec(duration) : null;
-  const milliseconds = match
-    ? Number(match.groups?.amount) *
-      (unitMilliseconds.get(match.groups?.unit ?? "") ?? Number.NaN)
-    : duration;
-  if (
-    typeof milliseconds !== "number" ||
-    !Number.isFinite(milliseconds) ||
-    milliseconds <= 0
-  ) {
-    throw invalidCall(`"${String(duration)}" is not a duration`);
-  }
-  return milliseconds;
-};
-
-const parseOrThrow = <Schema extends z.ZodType>(
-  schema: Schema,
-  value: unknown,
-  code: WorkflowErrorCode,
-  what: string
-): z.output<Schema> => {
-  const result = schema.safeParse(value);
-  if (!result.success) {
-    throw new WorkflowError(code, `${what}: ${z.prettifyError(result.error)}`);
-  }
-  return result.data;
-};
 
 const validateParams = (params: Params): void => {
   for (const [name, definition] of Object.entries(params)) {
@@ -414,6 +460,14 @@ const validateParams = (params: Params): void => {
       "workflow.invalid_definition",
       `Default of parameter "${name}"`
     );
+    if (definition.kind === "money") {
+      parseOrThrow(
+        currencySchema,
+        definition.currency,
+        "workflow.invalid_definition",
+        `Currency of parameter "${name}"`
+      );
+    }
   }
 };
 
@@ -424,6 +478,9 @@ const describeParams = (params: Params): ParamMetadata[] =>
     label: definition.label,
     default: definition.default,
     sensitive: definition.sensitive,
+    ...(definition.currency === undefined
+      ? {}
+      : { currency: definition.currency }),
   }));
 
 const resolveParams = (
@@ -444,56 +501,58 @@ const resolveParams = (
     ])
   );
 
+// Both parts encoded, so no run ID and step name make another's key.
 const idempotencyKeyOf = (engine: WorkflowEngine, step: string): string =>
-  `${engine.runId}:${step}`;
+  `${encodeURIComponent(engine.runId)}:${step}`;
 
-/** Fails the step call with `message` unless `condition` holds. */
-const check = (condition: boolean, message: string): void => {
-  if (!condition) {
-    throw invalidCall(message);
-  }
-};
+/** A step call's options, checked against its method's schema. */
+const optionsOf = <Schema extends z.ZodType>(
+  schema: Schema,
+  name: string,
+  options: unknown
+): z.output<Schema> =>
+  parseOrThrow(
+    schema,
+    options,
+    "workflow.invalid_step_call",
+    `Options of step "${name}"`
+  );
 
-const isOptionalBoolean = (value: unknown): boolean =>
-  value === undefined || typeof value === "boolean";
-
-const isRetries = (retries: unknown): retries is number | undefined =>
-  retries === undefined ||
-  (typeof retries === "number" && Number.isInteger(retries) && retries >= 0);
-
-const createStepRunner = (engine: WorkflowEngine): UntypedStepRunner => {
+const createRunner = (
+  engine: WorkflowEngine
+): { steps: UntypedStepRunner; state: StateStore } => {
   const started = new Set<string>();
+  // The step running now, if any. Steps run one after another: a step or
+  // state call from inside a step's function, or next to it, would be
+  // recorded in an order a replay can't promise to repeat.
+  let running: string | undefined;
 
-  // Checks what every step takes and returns the step's engine name: its
-  // name, or `name:key` for a keyed step. Types catch most of this; workflow
-  // code that got past them still fails here, before anything runs.
-  const start = (name: string, options: StepOptions): string => {
+  const exclusive = async <T>(name: string, run: () => Promise<T>) => {
+    if (running !== undefined) {
+      throw invalidCall(
+        `Step "${name}" started while step "${running}" runs; run steps one after another, never inside another step`
+      );
+    }
+    running = name;
+    try {
+      return await run();
+    } finally {
+      running = undefined;
+    }
+  };
+
+  // Returns the step's engine name: its name, or `name:key` for a keyed
+  // step. Types catch most bad calls; workflow code that got past them
+  // still fails here, before anything runs.
+  const start = (name: string, key: string | number | undefined): string => {
     if (typeof name !== "string" || !namePattern.test(name)) {
       throw invalidCall(
         `Step "${name}" needs a name of up to 64 letters, digits, "-" or "_", starting with a letter`
       );
     }
-    if (
-      typeof options.description !== "string" ||
-      options.description.trim() === ""
-    ) {
-      throw invalidCall(`Step "${name}" needs a description`);
-    }
-    const { key } = options;
-    const keyIsValid =
-      key === undefined ||
-      // Well formed, or encoding it throws.
-      (typeof key === "string" && key !== "" && key.isWellFormed()) ||
-      (typeof key === "number" && Number.isFinite(key));
     // Encoded, so a key never contains the separators of engine step names.
-    const encodedKey =
-      key === undefined || !keyIsValid ? "" : encodeURIComponent(key);
-    if (!keyIsValid || encodedKey.length > maxKeyLength) {
-      throw invalidCall(
-        `Step "${name}" needs a key that is a non-empty string or a number, of up to ${maxKeyLength} characters`
-      );
-    }
-    const step = key === undefined ? name : `${name}:${encodedKey}`;
+    const step =
+      key === undefined ? name : `${name}:${encodeURIComponent(key)}`;
     if (started.has(step)) {
       throw invalidCall(
         key === undefined
@@ -505,255 +564,205 @@ const createStepRunner = (engine: WorkflowEngine): UntypedStepRunner => {
     return step;
   };
 
-  const retriesOf = (name: string, retries: unknown): number | undefined => {
-    if (!isRetries(retries)) {
-      throw invalidCall(
-        `Step "${name}" needs a whole, non-negative number of retries`
-      );
-    }
-    return retries;
-  };
+  const steps: UntypedStepRunner = {
+    do: async (name, rawOptions, fn) =>
+      await exclusive(name, async () => {
+        const options = optionsOf(stepOptionSchemas.do, name, rawOptions);
+        const step = start(name, options.key);
+        if (typeof fn !== "function") {
+          throw invalidCall(`Step "${name}" needs a function to run`);
+        }
+        const { input, retries, timeout } = options;
+        const sideEffect = options.sideEffect === true;
+        return await engine.do(
+          step,
+          { retries, timeout, sideEffect, input },
+          async () =>
+            sideEffect
+              ? await fn({
+                  idempotencyKey: idempotencyKeyOf(engine, step),
+                  input,
+                })
+              : await fn({ input })
+        );
+      }),
 
-  const waitForEvent = async (
-    name: string,
-    type: string,
-    timeout?: number
-  ): Promise<EngineEvent> =>
-    await engine.waitForEvent(name, {
-      type,
-      ...(timeout === undefined ? {} : { timeout }),
-    });
-
-  return {
-    do: async (name, options, fn) => {
-      const step = start(name, options);
-      const retries = retriesOf(name, options.retries);
-      check(
-        isOptionalBoolean(options.sideEffect) &&
-          isOptionalBoolean(options.locked),
-        `Step "${name}" needs \`sideEffect\` and \`locked\` to be true or false`
-      );
-      check(typeof fn === "function", `Step "${name}" needs a function to run`);
-      const { input } = options;
-      check(
-        input === undefined || z.json().safeParse(input).success,
-        `Step "${name}" needs input that is JSON`
-      );
-      const sideEffect = options.sideEffect === true;
-      check(
-        !sideEffect || input !== undefined,
-        `Step "${name}" changes something, so it needs \`input\`: what it writes, or null`
-      );
-      return await engine.do(
-        step,
-        { retries, sideEffect, ...(input === undefined ? {} : { input }) },
-        async () =>
-          sideEffect
-            ? await fn({
-                idempotencyKey: idempotencyKeyOf(engine, step),
-                input,
-              })
-            : await fn({ input })
-      );
-    },
-
-    llm: async (name, options) => {
-      const step = start(name, options);
-      const retries = retriesOf(name, options.retries);
-      const { model: modelName, instructions, input, schema } = options;
-      check(
-        typeof instructions === "string" && instructions.trim() !== "",
-        `Step "${name}" needs instructions for the model`
-      );
-      check(
-        schema instanceof z.ZodType,
-        `Step "${name}" needs a Zod schema for the answer`
-      );
-      check(
-        z.json().safeParse(input).success,
-        `Step "${name}" needs input the model gateway can take: JSON`
-      );
-      const request = {
-        step,
-        model: parseOrThrow(
-          paramValueSchemas.model,
-          modelName,
-          "workflow.invalid_step_call",
-          `Model of step "${name}"`
-        ),
-        instructions,
-        input,
-        // The model writes what the schema accepts, so describe its input side.
-        outputSchema: z.toJSONSchema(schema, { io: "input" }),
-      };
-      // The raw answer is recorded, not the parsed one: parsed output may
-      // hold values that don't survive being recorded (a transform to a Date,
-      // say). Checking it inside the step makes an answer that doesn't fit a
-      // retryable failure.
-      const answer = await engine.do(step, { retries, input }, async () => {
-        const raw = await engine.callModel(request);
-        parseOrThrow(
+    llm: async (name, rawOptions) =>
+      await exclusive(name, async () => {
+        const options = optionsOf(stepOptionSchemas.llm, name, rawOptions);
+        const step = start(name, options.key);
+        const { instructions, input, schema, retries, timeout } = options;
+        const request = {
+          step,
+          model: options.model,
+          instructions,
+          input,
+          // The model writes what the schema accepts, so describe its input
+          // side.
+          outputSchema: z.toJSONSchema(schema, { io: "input" }),
+        };
+        // The raw answer is recorded, not the parsed one: parsed output may
+        // hold values that don't survive being recorded (a transform to a
+        // Date, say). Checking it inside the step makes an answer that
+        // doesn't fit a failure the step's retries may fix.
+        const answer = await engine.do(
+          step,
+          { retries, timeout, input },
+          async () => {
+            const raw = await engine.callModel(request);
+            parseOrThrow(
+              schema,
+              raw,
+              "workflow.invalid_model_output",
+              `Answer to step "${name}"`,
+              { nonRetryable: false }
+            );
+            return raw;
+          }
+        );
+        return parseOrThrow(
           schema,
-          raw,
+          answer,
           "workflow.invalid_model_output",
           `Answer to step "${name}"`
         );
-        return raw;
-      });
-      return parseOrThrow(
-        schema,
-        answer,
-        "workflow.invalid_model_output",
-        `Answer to step "${name}"`
-      );
-    },
+      }),
 
-    decision: async (name, options) => {
-      const step = start(name, options);
-      const { from, ask, timeout, remindAfter } = options;
-      check(
-        typeof ask === "function",
-        `Decision "${name}" needs an \`ask\` function`
-      );
-      const timeoutMs =
-        timeout === undefined ? undefined : toMilliseconds(timeout);
-      const remindMs =
-        remindAfter === undefined ? undefined : toMilliseconds(remindAfter);
-      if (
-        remindMs !== undefined &&
-        timeoutMs !== undefined &&
-        remindMs >= timeoutMs
-      ) {
-        throw invalidCall(`Decision "${name}" must remind before it times out`);
-      }
-      const decider = parseOrThrow(
-        paramValueSchemas.person,
-        from,
-        "workflow.invalid_step_call",
-        `Who decides on "${name}"`
-      );
+    decision: async (name, rawOptions) =>
+      await exclusive(name, async () => {
+        const { key, from, ask, timeout, remindAfter } = optionsOf(
+          stepOptionSchemas.decision,
+          name,
+          rawOptions
+        );
+        const step = start(name, key);
 
-      // Times are taken inside steps, so a replay computes the same waits.
-      // The timeout counts from when the decision opened, so time spent
-      // asking or reminding never pushes the deadline out.
-      const { link, eventType, openedAt } = await engine.do(
-        step,
-        { input: { from: decider } },
-        async () => ({
-          ...(await engine.openDecision({ step, from: decider })),
-          openedAt: Date.now(),
-        })
-      );
-      const deadline =
-        timeoutMs === undefined ? undefined : openedAt + timeoutMs;
-      // Asking is a side effect, which a dry run doesn't run, so when it
-      // finished is a step of its own rather than the ask step's result.
-      const askPerson = async (reminder: boolean): Promise<number> => {
-        const askStep = `${step}#${reminder ? "remind" : "ask"}`;
-        await engine.do(
-          askStep,
-          { sideEffect: true, input: { from: decider, reminder } },
-          async () => {
-            await ask({
-              link,
-              reminder,
-              idempotencyKey: idempotencyKeyOf(engine, askStep),
-            });
-          }
+        // Times are taken inside steps, so a replay computes the same waits.
+        // The timeout counts from when the decision opened, so time spent
+        // asking or reminding never pushes the deadline out.
+        const { link, eventType, openedAt } = await engine.do(
+          step,
+          { input: { from } },
+          async () => ({
+            ...(await engine.openDecision({ step, from })),
+            openedAt: Date.now(),
+          })
         );
-        return await engine.do(
-          `${step}#${reminder ? "reminded" : "asked"}`,
-          {},
-          async () => await Promise.resolve(Date.now())
+        const deadline = openedAt + timeout;
+        // Asking is a side effect, which a dry run doesn't run, so when it
+        // finished is a step of its own rather than the ask step's result.
+        const askPerson = async (reminder: boolean): Promise<number> => {
+          const askStep = `${step}#${reminder ? "remind" : "ask"}`;
+          await engine.do(
+            askStep,
+            { sideEffect: true, input: { from, reminder } },
+            async () => {
+              await ask({
+                link,
+                reminder,
+                idempotencyKey: idempotencyKeyOf(engine, askStep),
+              });
+            }
+          );
+          return await engine.do(
+            `${step}#${reminder ? "reminded" : "asked"}`,
+            {},
+            async () => await Promise.resolve(Date.now())
+          );
+        };
+        const waitForAnswer = async (
+          waitStep: string,
+          since: number,
+          until: number
+        ): Promise<EngineEvent> =>
+          until > since
+            ? await engine.waitForEvent(waitStep, {
+                type: eventType,
+                timeout: until - since,
+              })
+            : { received: false };
+
+        const askedAt = await askPerson(false);
+        const remindAt =
+          remindAfter === undefined ? undefined : askedAt + remindAfter;
+        const reminds = remindAt !== undefined && remindAt < deadline;
+        let event = await waitForAnswer(
+          `${step}#answer`,
+          askedAt,
+          reminds ? remindAt : deadline
         );
-      };
-      const waitForAnswer = async (
-        waitStep: string,
-        since: number,
-        until: number | undefined
-      ): Promise<EngineEvent> => {
-        if (until === undefined) {
-          return await waitForEvent(waitStep, eventType);
+        if (!event.received && reminds) {
+          const remindedAt = await askPerson(true);
+          event = await waitForAnswer(
+            `${step}#answer-after-reminder`,
+            remindedAt,
+            deadline
+          );
         }
-        return until > since
-          ? await waitForEvent(waitStep, eventType, until - since)
-          : { received: false };
-      };
-
-      const askedAt = await askPerson(false);
-      const remindAt = remindMs === undefined ? undefined : askedAt + remindMs;
-      const reminds =
-        remindAt !== undefined &&
-        (deadline === undefined || remindAt < deadline);
-      let event = await waitForAnswer(
-        `${step}#answer`,
-        askedAt,
-        reminds ? remindAt : deadline
-      );
-      if (!event.received && reminds) {
-        const remindedAt = await askPerson(true);
-        event = await waitForAnswer(
-          `${step}#answer-after-reminder`,
-          remindedAt,
-          deadline
-        );
-      }
-      if (!event.received) {
-        return { outcome: "timedOut" };
-      }
-      const answer = parseOrThrow(
-        decisionAnswerSchema,
-        event.payload,
-        "workflow.invalid_event",
-        `Answer to decision "${name}"`
-      );
-      return {
-        outcome: answer.approved ? "approved" : "rejected",
-        by: answer.by,
-        ...(answer.comment === undefined ? {} : { comment: answer.comment }),
-      };
-    },
-
-    sleep: async (name, options) => {
-      const step = start(name, options);
-      await engine.sleep(step, toMilliseconds(options.duration));
-    },
-
-    waitFor: async (name, options) => {
-      const step = start(name, options);
-      const { type, timeout, schema } = options;
-      check(
-        typeof type === "string" && type !== "",
-        `Step "${name}" needs an event type`
-      );
-      check(
-        schema === undefined || schema instanceof z.ZodType,
-        `Step "${name}" needs a Zod schema for the event, or none`
-      );
-      const event = await waitForEvent(step, type, toMilliseconds(timeout));
-      if (!event.received) {
-        return { received: false };
-      }
-      return {
-        received: true,
-        payload: parseOrThrow(
-          schema ?? z.unknown(),
+        if (!event.received) {
+          return { outcome: "timedOut" };
+        }
+        const answer = parseOrThrow(
+          decisionAnswerSchema,
           event.payload,
           "workflow.invalid_event",
-          `Event for step "${name}"`
-        ),
-      };
-    },
-  };
-};
+          `Answer to decision "${name}"`
+        );
+        return {
+          outcome: answer.approved ? "approved" : "rejected",
+          by: answer.by,
+          ...(answer.comment === undefined ? {} : { comment: answer.comment }),
+        };
+      }),
 
-// State is shared by all runs of a workflow, so another run can change it
-// between two replays of this one. Each read and write is its own step, so a
-// replay sees exactly what the first execution saw, and each write carries an
-// idempotency key, so a replayed write never lands twice.
-const createStateStore = (engine: WorkflowEngine): StateStore => {
+    sleep: async (name, rawOptions) => {
+      await exclusive(name, async () => {
+        const { key, duration } = optionsOf(
+          stepOptionSchemas.sleep,
+          name,
+          rawOptions
+        );
+        await engine.sleep(start(name, key), duration);
+      });
+    },
+
+    waitFor: async (name, rawOptions) =>
+      await exclusive(name, async () => {
+        const { key, type, timeout, schema } = optionsOf(
+          stepOptionSchemas.waitFor,
+          name,
+          rawOptions
+        );
+        const event = await engine.waitForEvent(start(name, key), {
+          type,
+          timeout,
+        });
+        if (!event.received) {
+          return { received: false };
+        }
+        return {
+          received: true,
+          payload: parseOrThrow(
+            schema ?? z.unknown(),
+            event.payload,
+            "workflow.invalid_event",
+            `Event for step "${name}"`
+          ),
+        };
+      }),
+  };
+
+  // State is shared by all runs of a workflow, so another run can change it
+  // between two replays of this one. Each read and write is its own step, so
+  // a replay sees exactly what the first execution saw, and each write
+  // carries an idempotency key, so a replayed write never lands twice.
   const calls = new Map<string, number>();
-  const stepName = (operation: "get" | "set", key: string): string => {
+  const stateStep = (operation: "get" | "set", key: string): string => {
+    if (running !== undefined) {
+      throw invalidCall(
+        `State "${key}" was used while step "${running}" runs; read and write state between steps`
+      );
+    }
     if (typeof key !== "string" || !namePattern.test(key)) {
       throw invalidCall(
         `State key "${key}" needs up to 64 letters, digits, "-" or "_", starting with a letter`
@@ -764,24 +773,26 @@ const createStateStore = (engine: WorkflowEngine): StateStore => {
     calls.set(base, count);
     return `${base}:${count}`;
   };
-  return {
+  const state: StateStore = {
     get: async (key) => {
-      const step = stepName("get", key);
-      return await engine.do(step, {}, async () => await engine.getState(key));
+      const name = stateStep("get", key);
+      return await engine.do(name, {}, async () => await engine.getState(key));
     },
     set: async (key, value) => {
-      const step = stepName("set", key);
+      const name = stateStep("set", key);
       const json = parseOrThrow(
         z.json(),
         value,
         "workflow.invalid_step_call",
         `Value for state "${key}"`
       );
-      await engine.do(step, {}, async () => {
-        await engine.setState(key, json, idempotencyKeyOf(engine, step));
+      await engine.do(name, {}, async () => {
+        await engine.setState(key, json, idempotencyKeyOf(engine, name));
       });
     },
   };
+
+  return { steps, state };
 };
 
 /**
@@ -816,6 +827,45 @@ export const workflow = <
   validateParams(config.params);
   const inputSchema: z.ZodType = config.input ?? z.undefined();
 
+  const runOnce = async (
+    engine: WorkflowEngine,
+    rawInput: unknown
+  ): Promise<Output> => {
+    // SAFETY: parsed by `config.input`, or checked to be undefined when
+    // there is none, which is the default of `InputSchema`.
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+    const input = parseOrThrow(
+      inputSchema,
+      rawInput,
+      "workflow.invalid_input",
+      "Input"
+    ) as z.output<InputSchema>;
+    // Recorded, so a replay runs with the values the run started with. A
+    // value that doesn't fit fails for good: the error is non-retryable.
+    const params = await engine.do(
+      "$params",
+      {},
+      async () =>
+        await Promise.resolve(resolveParams(config.params, engine.params))
+    );
+    const runner = createRunner(engine);
+    return await run(
+      // SAFETY: the untyped runner takes every call the typed one allows
+      // and checks each option at run time.
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+      runner.steps as StepRunner,
+      {
+        runId: engine.runId,
+        input,
+        // SAFETY: resolveParams parses every declared parameter with the
+        // schema of its kind, which is what ParamValues<P> describes.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+        params: Object.freeze(params) as ParamValues<P>,
+        state: runner.state,
+      }
+    );
+  };
+
   return {
     metadata: {
       id: workflowId,
@@ -823,38 +873,13 @@ export const workflow = <
       triggers: config.triggers ?? [{ type: "manual" }],
     },
     run: async (engine, rawInput) => {
-      // SAFETY: parsed by `config.input`, or checked to be undefined when
-      // there is none, which is the default of `InputSchema`.
-      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-      const input = parseOrThrow(
-        inputSchema,
-        rawInput,
-        "workflow.invalid_input",
-        "Input"
-      ) as z.output<InputSchema>;
-      // Recorded, so a replay runs with the values the run started with. A
-      // value that doesn't fit won't fit on a retry either.
-      const params = await engine.do(
-        "$params",
-        { retries: 0 },
-        async () =>
-          await Promise.resolve(resolveParams(config.params, engine.params))
-      );
-      return await run(
-        // SAFETY: the untyped runner takes every call the typed one allows
-        // and checks each option at run time.
-        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-        createStepRunner(engine) as StepRunner,
-        {
-          runId: engine.runId,
-          input,
-          // SAFETY: resolveParams parses every declared parameter with the
-          // schema of its kind, which is what ParamValues<P> describes.
-          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-          params: Object.freeze(params) as ParamValues<P>,
-          state: createStateStore(engine),
-        }
-      );
+      try {
+        return await runOnce(engine, rawInput);
+      } catch (error) {
+        // Engines may keep only a failed step's error name and message;
+        // the code is in the name, so the error comes back whole.
+        throw WorkflowError.from(error) ?? error;
+      }
     },
   };
 };

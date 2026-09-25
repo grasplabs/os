@@ -17,7 +17,13 @@ export const payoutWorkflow = (
     "supplier-payouts",
     {
       input: z.object({ payouts: z.array(payoutSchema) }),
-      params: { limit: money({ label: "Pay at most", default: 10_000 }) },
+      params: {
+        limit: money({
+          label: "Pay at most",
+          currency: "EUR",
+          default: 10_000,
+        }),
+      },
     },
     async (step, { input, params }) => {
       const paid: string[] = [];

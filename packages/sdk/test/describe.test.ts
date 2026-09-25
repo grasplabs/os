@@ -11,7 +11,7 @@ import payoutSource from "./payout-workflow.ts?raw";
 /** A workflow source around `body`, the workflow function's statements. */
 const workflowSource = (
   body: string,
-  signature = "step, { params, input }"
+  signature = "step, { params, input, state }"
 ) => `
 import { workflow } from "@grasp-os/sdk/workflow";
 
@@ -104,26 +104,33 @@ describe(describeWorkflow, () => {
     ]);
   });
 
-  it("reads parameters through a context argument too", () => {
-    const source = workflowSource(
-      `
-  if (ctx.params.enabled) {
-    await step.do("go", { description: "Go", retries: 1 }, async () => ctx.params.target);
-  } else {
-    await step.sleep("rest", { description: "Rest", duration: 1000 });
-  }`,
-      "step, ctx"
-    );
+  it("records options written as objects of literals, such as retries", () => {
+    const source = workflowSource(`
+  await step.do("go", {
+    description: "Go",
+    retries: { limit: 2, delay: "1 minute", backoff: "exponential" },
+    timeout: "5 minutes",
+  }, async () => 1);`);
 
     expect(describeWorkflow(source).steps).toMatchObject([
       {
-        type: "branch",
-        condition: "ctx.params.enabled",
-        params: ["enabled"],
-        steps: [{ name: "go", params: ["target"], options: { retries: 1 } }],
-        otherwise: [{ name: "rest", options: { duration: 1000 } }],
+        name: "go",
+        options: {
+          retries: { limit: 2, delay: "1 minute", backoff: "exponential" },
+          timeout: "5 minutes",
+        },
       },
     ]);
+  });
+
+  it("reads the context only when it's destructured, without a rest element", () => {
+    const body = `await step.sleep("rest", { description: "Rest", duration: 1000 });`;
+
+    for (const signature of ["step, ctx", "step, { params, ...rest }"]) {
+      expect(() => describeWorkflow(workflowSource(body, signature))).toThrow(
+        "Destructure the workflow function's context"
+      );
+    }
   });
 
   it("keeps a condition that reads a parameter, even without steps under it", () => {
@@ -160,7 +167,27 @@ describe(describeWorkflow, () => {
       ],
       [
         `await step.do("go", { description: label }, async () => 1);`,
-        "non-empty string literal",
+        "must be a literal",
+      ],
+      [
+        `await step.do("go", { description: " " }, async () => 1);`,
+        "is invalid",
+      ],
+      [
+        `await step.do("go", { description: "Go", retries: count }, async () => 1);`,
+        "must be a literal, an object of literals or a parameter",
+      ],
+      [
+        `await step.sleep("go", { description: "Go", duration: "366 days" });`,
+        "up to 365 days",
+      ],
+      [
+        `await step.decision("go", { description: "Go", from: params.reviewer, ask });`,
+        "needs timeout",
+      ],
+      [
+        `await step.do("go", { description: "Go" }, async () => await state.get("seen"));`,
+        "between steps",
       ],
       [`await step.do("go", {}, async () => 1);`, "needs description"],
       [

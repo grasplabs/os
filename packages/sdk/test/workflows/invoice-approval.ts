@@ -16,7 +16,8 @@ export interface InvoiceSystems {
 }
 
 export const extractionSchema = z.object({
-  total: z.number(),
+  /** In whole minor units: cents for EUR. */
+  total: z.int(),
   currency: z.string(),
 });
 
@@ -36,7 +37,9 @@ export const invoiceWorkflow = (systems: InvoiceSystems) =>
       params: {
         threshold: money({
           label: "Review invoices above",
-          default: 5000,
+          currency: "EUR",
+          // €5,000.00
+          default: 500_000,
           sensitive: true,
         }),
         reviewer: person({ label: "Reviewer", default: "finance-team" }),
@@ -65,10 +68,10 @@ export const invoiceWorkflow = (systems: InvoiceSystems) =>
         description: "Read the total and currency from the invoice",
         model: params.extractionModel,
         instructions:
-          "Read the invoice's total amount and its ISO 4217 currency code.",
+          "Read the invoice's total amount in whole minor units (cents for EUR) and its ISO 4217 currency code.",
         input: input.text,
         schema: extractionSchema,
-        retries: 2,
+        retries: { limit: 2 },
       });
 
       if (extracted.total > params.threshold) {
