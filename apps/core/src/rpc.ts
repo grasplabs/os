@@ -1,14 +1,10 @@
-import { appErrors } from "@grasp-os/shared/apps";
 import {
   authErrors,
-  featureErrors,
-  internalErrors,
+  isExpectedError,
   requestErrors,
+  toOpaqueError,
 } from "@grasp-os/shared/errors";
-import { knowledgeErrors } from "@grasp-os/shared/knowledge";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { permissionErrors } from "@grasp-os/shared/permissions";
-import { roleErrors } from "@grasp-os/shared/roles";
 import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession, RpcTarget } from "capnweb";
 
@@ -54,26 +50,8 @@ export class CoreRpc extends RpcTarget implements CoreApi {
 export const toClientError = (
   error: Error,
   requestId: string
-): Error | undefined => {
-  if (
-    requestErrors.codeOf(error) ||
-    authErrors.codeOf(error) ||
-    roleErrors.codeOf(error) ||
-    featureErrors.codeOf(error) ||
-    permissionErrors.codeOf(error) ||
-    appErrors.codeOf(error) ||
-    knowledgeErrors.codeOf(error) ||
-    internalErrors.codeOf(error)
-  ) {
-    return undefined;
-  }
-  const replacement = internalErrors.create("internal.unexpected", {
-    requestId,
-  });
-  // Cap'n Web sends the stack of a replacement error; this one has none to send.
-  replacement.stack = undefined;
-  return replacement;
-};
+): Error | undefined =>
+  isExpectedError(error) ? undefined : toOpaqueError(error, { requestId });
 
 /** How often an idle connection checks that its session still holds. */
 const sessionRecheckMs = 60_000;

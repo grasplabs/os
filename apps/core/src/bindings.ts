@@ -1,13 +1,10 @@
 import { signCapability } from "@grasp-os/shared/capability";
 import { connectCallSchema, connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectCall, ConnectResult } from "@grasp-os/shared/connect";
-import { internalErrors } from "@grasp-os/shared/errors";
+import { isExpectedError, toOpaqueError } from "@grasp-os/shared/errors";
 import type { PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
-import {
-  bindingNameSchema,
-  permissionErrors,
-} from "@grasp-os/shared/permissions";
+import { bindingNameSchema } from "@grasp-os/shared/permissions";
 import type { Authority, PermissionObject } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
@@ -60,16 +57,10 @@ export const callConnection = async (
  * anything else replaced, so no internals reach App or agent code.
  */
 const forSandbox = (error: unknown): Error => {
-  const expected =
-    permissionErrors.codeOf(error) !== undefined ||
-    connectErrors.codeOf(error) !== undefined;
-  if (expected && error instanceof Error) {
-    return error;
+  if (!isExpectedError(error)) {
+    log.error("binding.failed", errorFields(error));
   }
-  log.error("binding.failed", errorFields(error));
-  const replacement = internalErrors.create("internal.unexpected");
-  replacement.stack = undefined;
-  return replacement;
+  return toOpaqueError(error);
 };
 
 /** What App or agent code passes to a connection stub; the rest is core's. */

@@ -1,10 +1,16 @@
 import { describe, expect, it } from "vite-plus/test";
 
+import { capabilityErrors } from "../src/capability.ts";
+import { connectErrors } from "../src/connect.ts";
 import {
+  defineErrorFamily,
   errorPayloadSchema,
   internalErrors,
+  isExpectedError,
   requestErrors,
+  toOpaqueError,
 } from "../src/errors.ts";
+import { modelErrors } from "../src/models.ts";
 
 describe("error payload", () => {
   it("rejects details that wouldn't survive a trip through JSON", () => {
@@ -40,6 +46,42 @@ describe("error families", () => {
     const system = Object.assign(new Error("no such file"), { code: "ENOENT" });
     for (const error of [internal, system, "request.forbidden", null, 1]) {
       expect(requestErrors.codeOf(error)).toBeUndefined();
+    }
+  });
+});
+
+describe("errors a caller outside core may see", () => {
+  it("are the errors of every family, and pass as they are", () => {
+    const own = defineErrorFamily({ "own.refused": "Refused." });
+    const expected = [
+      requestErrors.create("request.forbidden"),
+      connectErrors.create("connect.invalid_call"),
+      capabilityErrors.create("capability.invalid"),
+      modelErrors.create("model.not_allowed"),
+      own.create("own.refused"),
+    ];
+    for (const error of expected) {
+      expect([isExpectedError(error), toOpaqueError(error)]).toStrictEqual([
+        true,
+        error,
+      ]);
+    }
+  });
+
+  it("replace anything else, keeping only the details given", () => {
+    const secret = new Error("Bucket grasp-internal unreachable");
+    const unknownCode = Object.assign(new Error("no such file"), {
+      code: "ENOENT",
+    });
+    // An error's code alone isn't enough: it has to be an Error.
+    const lookalike = { message: "Forbidden.", code: "request.forbidden" };
+    for (const error of [secret, unknownCode, lookalike, "boom", undefined]) {
+      const sent = toOpaqueError(error, { requestId: "request-1" });
+      expect(isExpectedError(error)).toBeFalsy();
+      expect(internalErrors.codeOf(sent)).toBe("internal.unexpected");
+      expect(sent.message).not.toContain("grasp-internal");
+      expect(sent.stack).toBeUndefined();
+      expect(sent).toMatchObject({ details: { requestId: "request-1" } });
     }
   });
 });
