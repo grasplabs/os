@@ -1,3 +1,16 @@
 @import "@grasp-os/ui/styles.css";
 
 @source "../";
+
+/*
+ * Base UI hides native scrollbars (a Select's list) with this class and an
+ * inline <style> it renders. The CSP blocks that element, so main.tsx turns
+ * it off and the rule lives here.
+ */
+.base-ui-disable-scrollbar {
+  scrollbar-width: none;
+}
+
+.base-ui-disable-scrollbar::-webkit-scrollbar {
+  display: none;
+}
