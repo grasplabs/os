@@ -10,6 +10,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { toClientError } from "../src/rpc.ts";
+import { clientOrigin } from "./sign-in-config.ts";
 
 const openRpc = async (headers: HeadersInit) =>
   await exports.default.fetch("https://core/rpc", { headers });
@@ -18,6 +19,8 @@ describe("Cap'n Web RPC", () => {
   it("answers ping over a WebSocket", async () => {
     const response = await openRpc({
       Upgrade: "websocket",
+      // The deployment's own page, from its sign-in config.
+      Origin: clientOrigin,
       [routerSecretHeader]: env.ROUTER_SECRET,
     });
     expect(response.status).toBe(101);

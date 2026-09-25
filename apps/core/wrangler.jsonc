@@ -24,10 +24,16 @@
     "not_found_handling": "single-page-application",
     "run_worker_first": true,
   },
-  // Every secret core reads: deploys fail while one is unset, and local dev
+  // Every secret core needs: deploys fail while one is unset, and local dev
   // loads only these from .dev.vars. ROUTER_SECRET is shared with the router,
-  // which sends it on every request.
-  "secrets": { "required": ["ROUTER_SECRET"] },
+  // which sends it on every request. BETTER_AUTH_SECRET signs session cookies
+  // and encrypts sign-in state.
+  //
+  // Sign-in is deployment config the console sets, not listed here: the
+  // `SIGN_IN` var (src/auth/config.ts) and the client secret of each IdP it
+  // names, ENTRA_CLIENT_SECRET and GOOGLE_CLIENT_SECRET. Without them nobody
+  // can sign in.
+  "secrets": { "required": ["ROUTER_SECRET", "BETTER_AUTH_SECRET"] },
   "durable_objects": {
     "bindings": [
       { "name": "WORKSPACES", "class_name": "Workspace" },

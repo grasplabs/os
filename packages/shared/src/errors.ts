@@ -59,6 +59,11 @@ export const requestErrors = defineErrorFamily({
     "This endpoint only accepts WebSocket connections.",
 });
 
+/** Why a call needs a person to sign in (again). */
+export const authErrors = defineErrorFamily({
+  "auth.unauthenticated": "Sign in to continue.",
+});
+
 /**
  * Anything nobody planned for. Its details carry the request ID, never the
  * cause: that stays in the logs.

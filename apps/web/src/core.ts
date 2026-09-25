@@ -1,14 +1,20 @@
-import type { CoreApi } from "@grasp-os/shared/rpc";
+import { authErrors } from "@grasp-os/shared/errors";
+import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";
+import type { RpcStub } from "capnweb";
 
-/** Opens a Cap'n Web session with core, on the origin this page came from. */
+/**
+ * Opens a Cap'n Web session with core, on the origin this page came from.
+ * The browser sends the session cookie with it; core checks it on connect
+ * and on every call that needs the person.
+ */
 export const connectCore = () => {
   const url = new URL("/rpc", window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return newWebSocketRpcSession<CoreApi>(url.href);
 };
 
-const pingTimeoutMs = 5000;
+const timeoutMs = 5000;
 
 /** Rejects when `promise` hasn't settled within `ms`. */
 const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
@@ -26,17 +32,82 @@ const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
   }
 };
 
+/** Who is signed in on this connection, or `undefined` for nobody. */
+const signedInAs = async (
+  core: RpcStub<CoreApi>
+): Promise<Identity | undefined> => {
+  try {
+    using session = core.authenticate();
+    return await session.whoami();
+  } catch (error) {
+    if (authErrors.codeOf(error) === "auth.unauthenticated") {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
+/** What the start page shows: whether core answers, and who is signed in. */
+export interface CoreStatus {
+  connected: boolean;
+  signInOptions: SignInOption[];
+  identity?: Identity;
+}
+
 /**
- * Whether core answers over RPC within a few seconds. Opens a session just
- * for this call; a hanging connection counts as no answer.
+ * Asks core over RPC, within a few seconds, whether it answers, how people
+ * sign in here and who is signed in. Opens a session just for this; a
+ * hanging connection counts as no answer.
  */
-export const pingCore = async (): Promise<boolean> => {
+export const loadCoreStatus = async (): Promise<CoreStatus> => {
   const core = connectCore();
   try {
-    return (await withTimeout(core.ping(), pingTimeoutMs)) === "pong";
+    const [pong, signInOptions, identity] = await withTimeout(
+      Promise.all([core.ping(), core.signInOptions(), signedInAs(core)]),
+      timeoutMs
+    );
+    return { connected: pong === "pong", signInOptions, identity };
   } catch {
-    return false;
+    return { connected: false, signInOptions: [] };
   } finally {
     core[Symbol.dispose]();
   }
+};
+
+/**
+ * Starts signing in with the IdP `providerId`: core answers with the IdP's
+ * address, and the IdP sends the person back to this page, signed in or with
+ * `?error=<code>`.
+ */
+export const signIn = async (providerId: string): Promise<void> => {
+  const response = await fetch("/api/auth/sign-in/sso", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      providerId,
+      callbackURL: "/",
+      errorCallbackURL: "/",
+    }),
+  });
+  const body: unknown = await response.json();
+  if (
+    !response.ok ||
+    typeof body !== "object" ||
+    body === null ||
+    !("url" in body) ||
+    typeof body.url !== "string"
+  ) {
+    throw new Error(`Sign-in did not start (${response.status})`);
+  }
+  window.location.assign(body.url);
+};
+
+/** Ends this browser's session, then reloads the page signed out. */
+export const signOut = async (): Promise<void> => {
+  await fetch("/api/auth/sign-out", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: "{}",
+  });
+  window.location.reload();
 };
