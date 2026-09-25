@@ -17,6 +17,8 @@ const ATTEMPTS = 50;
 const core = path.join(import.meta.dirname, "../apps/core");
 const out = mkdtempSync(path.join(tmpdir(), "grasp-os-workerd-"));
 
+// The same build core's deploy runs, so the bundle below is what ships.
+execFileSync("vp", ["run", "build"], { cwd: core, stdio: "inherit" });
 execFileSync("wrangler", ["deploy", "--dry-run", "--outdir", out], {
   cwd: core,
   stdio: "inherit",
