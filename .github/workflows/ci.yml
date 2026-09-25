@@ -136,5 +136,18 @@ jobs:
       - run: vp run --filter @grasp-os/web build
       # connect first: core's service binding points at it.
       - run: vp run --filter @grasp-os/connect deploy
+      # A D1 database's jurisdiction is set only when it is created, and deploy
+      # would auto-provision a missing one outside the EU: create them first.
+      - name: Create core's D1 databases in the EU
+        run: |
+          existing=$(vp exec wrangler d1 list --json)
+          for db in grasp-os-core grasp-os-knowledge; do
+            if ! jq -e --arg db "$db" 'any(.[]; .name == $db)' <<< "$existing" > /dev/null; then
+              vp exec wrangler d1 create "$db" --jurisdiction eu
+            fi
+          done
+      # D1 migrations are additive, so the running code keeps working on the
+      # new schema until the deploy after them replaces it.
+      - run: vp run --filter @grasp-os/core db:migrate
       - run: vp run --filter @grasp-os/core deploy
       - run: vp run --filter @grasp-os/console --filter @grasp-os/router deploy
