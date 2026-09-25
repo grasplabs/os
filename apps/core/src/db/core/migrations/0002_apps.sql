@@ -14,8 +14,8 @@ CREATE TABLE `app_versions` (
 CREATE TABLE `app_working_files` (
 	`app_id` text NOT NULL,
 	`path` text NOT NULL,
-	`blob` text,
-	`length` integer NOT NULL,
+	`content` text,
+	`revision` text NOT NULL,
 	`written_by` text NOT NULL,
 	`written_at` integer NOT NULL,
 	PRIMARY KEY(`app_id`, `path`),
@@ -30,5 +30,6 @@ CREATE TABLE `apps` (
 	`blueprint` text,
 	`current_version` integer,
 	`pending_version` integer,
+	`working_revision` text,
 	`created_at` integer NOT NULL
 );

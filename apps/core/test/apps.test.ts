@@ -357,6 +357,38 @@ describe("App code", () => {
     });
   });
 
+  it("keeps the working copy within its limits when two writes race", async () => {
+    const { apps } = await appsApi("builder");
+    const app = await newApp(apps);
+    const largest = "x".repeat(appLimits.fileLength);
+    const count = appLimits.totalLength / appLimits.fileLength;
+    // Room for one more of the largest files, not two.
+    await apps.files.write(
+      app.id,
+      Object.fromEntries(
+        Array.from({ length: count - 1 }, (_, index) => [
+          `components/part-${index}.ts`,
+          largest,
+        ])
+      )
+    );
+
+    const results = await Promise.all(
+      ["components/a.ts", "components/b.ts"].map(
+        async (path) =>
+          await outcome(apps.files.write(app.id, { [path]: largest }))
+      )
+    );
+    expect(results.toSorted()).toStrictEqual(
+      results.includes("app.conflict")
+        ? ["app.conflict", "ok"]
+        : ["app.too_large", "ok"]
+    );
+    await expect(apps.files.read(app.id)).resolves.toSatisfy(
+      (files: Record<string, string>) => Object.keys(files).length === count
+    );
+  });
+
   it("refuses Apps and versions that don't exist", async () => {
     const { apps } = await appsApi("builder");
     const app = await newApp(apps);

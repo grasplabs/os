@@ -305,6 +305,8 @@ export const apps = sqliteTable("apps", {
   blueprint: text(),
   currentVersion: integer("current_version"),
   pendingVersion: integer("pending_version"),
+  /** The latest write to the working copy (`app_working_files.revision`). */
+  workingRevision: text("working_revision"),
   createdAt: timestamp("created_at").notNull(),
 });
 
@@ -333,8 +335,8 @@ export const appVersions = sqliteTable(
 
 /**
  * An App's working copy: the files written since its latest version, until
- * they are committed. `blob` is the SHA-256 of the content, stored in R2;
- * null means the file is deleted. `length` is the content's length.
+ * they are committed. A null `content` means the file is deleted.
+ * `revision` names the write that wrote the row.
  */
 export const appWorkingFiles = sqliteTable(
   "app_working_files",
@@ -343,8 +345,8 @@ export const appWorkingFiles = sqliteTable(
       .notNull()
       .references(() => apps.id),
     path: text().notNull(),
-    blob: text(),
-    length: integer().notNull(),
+    content: text(),
+    revision: text().notNull(),
     writtenBy: text("written_by").notNull(),
     writtenAt: timestamp("written_at").notNull(),
   },

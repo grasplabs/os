@@ -32,19 +32,17 @@ import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 
 // The App registry and each App's code. The registry, the versions and the
-// working copy are rows in the core database; the content is in R2 (EU),
-// addressed by its SHA-256:
+// working copy (files written since the latest version) are rows in the
+// core database. A version's files are one object in R2 (EU),
+// `apps/<app>/trees/<sha256>.json`: canonical JSON by path, stored under
+// its own SHA-256, which the version row names. Reading a version is one
+// read, checked against the hash.
 //
-// - `apps/<app>/trees/<sha256>.json`: all of a version's files, as
-//   canonical JSON by path. A version names its tree by hash, so reading a
-//   version is one read, and what is read is checked against the hash.
-// - `apps/<app>/blobs/<sha256>`: one file written to the working copy.
-//
-// Content is only ever written under its own hash, so nothing stored
-// changes after the fact: a version's files stay exactly as committed
-// whatever happens to the App later. Writing content comes first and the
-// rows that name it after, so a row never names content that isn't there;
-// a failure in between leaves content nothing names, which is harmless.
+// A tree is only ever written under its own hash and version rows never
+// change, so a version's files stay exactly as committed whatever happens
+// to the App later. The tree is stored before the row that names it, so a
+// row never names a missing tree. A commit refused as a conflict can leave
+// its tree named by no version: rare, and one version's size at most.
 //
 // Versions are linear: each commit is the latest version plus the working
 // copy, as the next number. Two commits at once both try the same number,
@@ -53,7 +51,7 @@ import { isUniqueViolation } from "./db/d1.ts";
 type AppRow = typeof apps.$inferSelect;
 type VersionRow = typeof appVersions.$inferSelect;
 
-/** A tree as `writeTree` stores it. */
+/** A tree as `commitFiles` stores it. */
 const storedTreeSchema = z.record(z.string(), z.string());
 
 /** Most versions one `listVersions` call returns. */
@@ -93,44 +91,20 @@ const sha256 = async (text: string): Promise<string> => {
 
 const treeKey = (app: AppId, tree: string): string =>
   `apps/${app}/trees/${tree}.json`;
-const blobKey = (app: AppId, blob: string): string =>
-  `apps/${app}/blobs/${blob}`;
 
-/** Stored content by its hash, checked against it. */
-const readContent = async (
-  env: Env,
-  key: string,
-  hash: string
-): Promise<string> => {
-  const object = await env.FILES.get(key);
-  const text = await object?.text();
-  if (text === undefined || (await sha256(text)) !== hash) {
-    throw new Error(`App content ${key} is missing or damaged`);
-  }
-  return text;
-};
-
+/** A version's files, checked against the hash that names them. */
 const readTree = async (
   env: Env,
   app: AppId,
   tree: string
 ): Promise<Map<string, string>> => {
-  const files = storedTreeSchema.parse(
-    JSON.parse(await readContent(env, treeKey(app, tree), tree))
-  );
-  return new Map(Object.entries(files));
-};
-
-/** Stores `files` as a tree and returns its hash. */
-const writeTree = async (
-  env: Env,
-  app: AppId,
-  files: ReadonlyMap<string, string>
-): Promise<string> => {
-  const json = canonicalJson(Object.fromEntries(files));
-  const tree = await sha256(json);
-  await env.FILES.put(treeKey(app, tree), json);
-  return tree;
+  const key = treeKey(app, tree);
+  const object = await env.FILES.get(key);
+  const text = await object?.text();
+  if (text === undefined || (await sha256(text)) !== tree) {
+    throw new Error(`App tree ${key} is missing or damaged`);
+  }
+  return new Map(Object.entries(storedTreeSchema.parse(JSON.parse(text))));
 };
 
 const iso = (date: Date): string => date.toISOString();
@@ -212,13 +186,14 @@ const findVersion = async (
 };
 
 /**
- * An App's latest version and the working copy's rows, read together in
- * one batch, so a commit landing in between can't pair a new version with
- * rows it already committed.
+ * An App's working copy: its latest version's files with the changes
+ * written since over them. The version, the rows and the App's working
+ * revision are read in one batch, so a commit landing in between can't
+ * pair a new version with rows it already committed.
  */
-const workingState = async (env: Env, app: AppId) => {
+const workingCopy = async (env: Env, app: AppId) => {
   const db = drizzle(env.DB);
-  const [[latest], rows] = await db.batch([
+  const [[latest], rows, [registered]] = await db.batch([
     db
       .select()
       .from(appVersions)
@@ -230,21 +205,35 @@ const workingState = async (env: Env, app: AppId) => {
       .from(appWorkingFiles)
       .where(eq(appWorkingFiles.appId, app))
       .orderBy(asc(appWorkingFiles.path)),
+    db
+      .select({ revision: apps.workingRevision })
+      .from(apps)
+      .where(eq(apps.id, app)),
   ]);
-  return { latest, rows };
+  const files = latest
+    ? await readTree(env, app, latest.tree)
+    : new Map<string, string>();
+  for (const { path, content } of rows) {
+    if (content === null) {
+      files.delete(path);
+    } else {
+      files.set(path, content);
+    }
+  }
+  return { latest, rows, files, revision: registered?.revision ?? null };
 };
 
-/** `app.too_large` if `lengths` (by path) are over an App's limits. */
-const checkLimits = (lengths: ReadonlyMap<string, number>): void => {
-  let total = 0;
-  for (const length of lengths.values()) {
-    total += length;
+/** `app.too_large` if `files` are over an App's limits. */
+const checkLimits = (files: ReadonlyMap<string, string>): void => {
+  let length = 0;
+  for (const content of files.values()) {
+    length += content.length;
   }
-  if (lengths.size > appLimits.files || total > appLimits.totalLength) {
+  if (files.size > appLimits.files || length > appLimits.totalLength) {
     throw appErrors.create("app.too_large", {
-      files: lengths.size,
+      files: files.size,
       maxFiles: appLimits.files,
-      length: total,
+      length,
       maxLength: appLimits.totalLength,
     });
   }
@@ -258,29 +247,6 @@ export const versionFiles = async (
 ): Promise<AppFiles> => {
   const row = await findVersion(env, app, version);
   return Object.fromEntries(await readTree(env, app, row.tree));
-};
-
-/** The latest version's files with the working copy's changes over them. */
-const workingCopy = async (env: Env, app: AppId) => {
-  const { latest, rows } = await workingState(env, app);
-  const files = latest
-    ? await readTree(env, app, latest.tree)
-    : new Map<string, string>();
-  const written = await Promise.all(
-    rows.map(async ({ path, blob }) =>
-      blob === null
-        ? ([path, undefined] as const)
-        : ([path, await readContent(env, blobKey(app, blob), blob)] as const)
-    )
-  );
-  for (const [path, content] of written) {
-    if (content === undefined) {
-      files.delete(path);
-    } else {
-      files.set(path, content);
-    }
-  }
-  return { latest, rows, files };
 };
 
 /** Creates an App, with no versions yet. */
@@ -299,6 +265,7 @@ export const createApp = async (
     blueprint: blueprint ?? null,
     currentVersion: null,
     pendingVersion: null,
+    workingRevision: null,
     createdAt: new Date(),
   };
   const app = toApp(row);
@@ -353,6 +320,11 @@ export const readFiles = async (
  * Writes changes to an App's working copy: new content by path, or null to
  * delete a file. Refused as a whole when the working copy would be over
  * the App's limits.
+ *
+ * Each write is a new revision of the working copy, and lands only over
+ * the revision its limit check read: two writes at once can't together
+ * take the App over its limits. The one that loses is refused as a
+ * conflict, and nothing of it is written.
  */
 export const writeFiles = async (
   env: Env,
@@ -363,55 +335,47 @@ export const writeFiles = async (
   requireBuilder(by);
   const { id: appId } = await findApp(env, app);
   const changes = Object.entries(parse(fileChangesSchema, input));
-
-  // The working copy's lengths after these changes.
-  const { latest, rows } = await workingState(env, appId);
-  const lengths = new Map<string, number>();
-  if (latest) {
-    for (const [path, content] of await readTree(env, appId, latest.tree)) {
-      lengths.set(path, content.length);
-    }
-  }
-  for (const { path, blob, length } of rows) {
-    if (blob === null) {
-      lengths.delete(path);
-    } else {
-      lengths.set(path, length);
-    }
-  }
+  const { files, revision } = await workingCopy(env, appId);
   for (const [path, content] of changes) {
     if (content === null) {
-      lengths.delete(path);
+      files.delete(path);
     } else {
-      lengths.set(path, content.length);
+      files.set(path, content);
     }
   }
-  checkLimits(lengths);
+  checkLimits(files);
 
-  const written = await Promise.all(
-    changes.map(async ([path, content]) => {
-      if (content === null) {
-        return { path, blob: null, length: 0 };
-      }
-      const blob = await sha256(content);
-      await env.FILES.put(blobKey(appId, blob), content);
-      return { path, blob, length: content.length };
-    })
-  );
   const db = drizzle(env.DB);
-  const writtenAt = new Date();
-  const [first, ...rest] = written.map(({ path, blob, length }) =>
+  const next = crypto.randomUUID();
+  const writtenAt = Date.now();
+  const [[claimed]] = await db.batch([
     db
-      .insert(appWorkingFiles)
-      .values({ appId, path, blob, length, writtenBy: by.userId, writtenAt })
-      .onConflictDoUpdate({
-        target: [appWorkingFiles.appId, appWorkingFiles.path],
-        set: { blob, length, writtenBy: by.userId, writtenAt },
-      })
-  );
-  // The schema requires at least one change.
-  if (first) {
-    await db.batch([first, ...rest]);
+      .update(apps)
+      .set({ workingRevision: next })
+      .where(
+        and(eq(apps.id, appId), sql`${apps.workingRevision} IS ${revision}`)
+      )
+      .returning({ id: apps.id }),
+    // Each only if this write claimed the revision above.
+    ...changes.map(([path, content]) =>
+      db
+        .insert(appWorkingFiles)
+        .select(
+          sql`SELECT ${appId}, ${path}, ${content}, ${next}, ${by.userId}, ${writtenAt} WHERE (SELECT ${apps.workingRevision} FROM ${apps} WHERE ${apps.id} = ${appId}) = ${next}`
+        )
+        .onConflictDoUpdate({
+          target: [appWorkingFiles.appId, appWorkingFiles.path],
+          set: {
+            content: sql`excluded.content`,
+            revision: sql`excluded.revision`,
+            writtenBy: sql`excluded.written_by`,
+            writtenAt: sql`excluded.written_at`,
+          },
+        })
+    ),
+  ]);
+  if (!claimed) {
+    throw appErrors.create("app.conflict");
   }
 };
 
@@ -432,13 +396,13 @@ export const commitFiles = async (
   if (rows.length === 0) {
     throw appErrors.create("app.nothing_to_commit");
   }
-  checkLimits(
-    new Map([...files].map(([path, content]) => [path, content.length]))
-  );
-  const tree = await writeTree(env, appId, files);
+  checkLimits(files);
+  const json = canonicalJson(Object.fromEntries(files));
+  const tree = await sha256(json);
   if (tree === latest?.tree) {
     throw appErrors.create("app.nothing_to_commit");
   }
+  await env.FILES.put(treeKey(appId, tree), json);
 
   const row: VersionRow = {
     appId,
@@ -450,9 +414,9 @@ export const commitFiles = async (
     message: text,
     createdAt: new Date(),
   };
-  // Only the rows this commit read: one written since has other content.
+  // Only the rows this commit read: a row written since has a newer revision.
   const committed = JSON.stringify(
-    rows.map(({ path, blob }) => `${path}\u0000${blob ?? ""}`)
+    rows.map(({ path, revision }) => `${path}\u0000${revision}`)
   );
   const db = drizzle(env.DB);
   try {
@@ -472,7 +436,7 @@ export const commitFiles = async (
         .where(
           and(
             eq(appWorkingFiles.appId, appId),
-            sql`${appWorkingFiles.path} || char(0) || coalesce(${appWorkingFiles.blob}, '') IN (SELECT value FROM json_each(${committed}))`
+            sql`${appWorkingFiles.path} || char(0) || ${appWorkingFiles.revision} IN (SELECT value FROM json_each(${committed}))`
           )
         ),
     ]);
