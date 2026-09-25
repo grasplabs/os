@@ -2,6 +2,7 @@
  * Drives sign-in the way a browser on the client's page does, through the
  * router: requests go to core's own address with the router secret.
  */
+import type { Role } from "@grasp-os/shared";
 import { auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { routerSecretHeader } from "@grasp-os/shared/router";
@@ -14,7 +15,12 @@ import { z } from "zod";
 import type { AuthEnv } from "../src/auth/config.ts";
 import worker from "../src/index.ts";
 import type { Claims, Idp } from "./idp.ts";
-import { clientOrigin, signInConfig, staffOid } from "./sign-in-config.ts";
+import {
+  acmeTenant,
+  clientOrigin,
+  signInConfig,
+  staffOid,
+} from "./sign-in-config.ts";
 
 /** Where the router sends requests: core's own address. */
 export const coreOrigin = "https://grasp-os-core.acme.workers.test";
@@ -254,4 +260,19 @@ export const googlePerson = (claims: Claims = {}): Claims => {
     name: `Person ${id}`,
     ...claims,
   };
+};
+
+/** Someone signed in with `role`, as the configured admins or made so by one. */
+export const signedInWithRole = async (idp: Idp, role: Role) => {
+  const person = entraPerson(acmeTenant);
+  const session = await signedIn(idp, "microsoft", person, {
+    coreEnv: withSignIn({ admins: [person.email] }),
+  });
+  const { userId } = await whoami(session);
+  if (role !== "admin") {
+    await env.DB.prepare("UPDATE members SET role = ? WHERE user_id = ?")
+      .bind(role, userId)
+      .run();
+  }
+  return { session, userId, person };
 };

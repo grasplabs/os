@@ -27,13 +27,20 @@
   // Every secret core needs: deploys fail while one is unset, and local dev
   // loads only these from .dev.vars. ROUTER_SECRET is shared with the router,
   // which sends it on every request. BETTER_AUTH_SECRET signs session cookies
-  // and encrypts sign-in state.
+  // and encrypts sign-in state. CAPABILITY_SIGNING_KEY is shared with
+  // connect: core signs the capability every call to connect carries.
   //
   // Sign-in is deployment config the console sets, not listed here: the
   // `SIGN_IN` var (src/auth/config.ts) and the client secret of each IdP it
   // names, ENTRA_CLIENT_SECRET and GOOGLE_CLIENT_SECRET. Without them nobody
   // can sign in.
-  "secrets": { "required": ["ROUTER_SECRET", "BETTER_AUTH_SECRET"] },
+  "secrets": {
+    "required": [
+      "ROUTER_SECRET",
+      "BETTER_AUTH_SECRET",
+      "CAPABILITY_SIGNING_KEY",
+    ],
+  },
   "durable_objects": {
     "bindings": [
       { "name": "WORKSPACES", "class_name": "Workspace" },

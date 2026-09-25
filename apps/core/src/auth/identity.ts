@@ -1,4 +1,5 @@
 import { roleSchema } from "@grasp-os/shared";
+import type { Role } from "@grasp-os/shared";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, eq, notExists } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -13,6 +14,40 @@ import {
 import { authFor, organizationId } from "./auth.ts";
 import { providerIds, signInConfig, staffWindowOpen } from "./config.ts";
 import type { AuthEnv } from "./config.ts";
+
+/**
+ * A person's role in the organization, read now. `undefined` when they have
+ * no membership, a removed one, or a role that isn't exactly one of ours:
+ * no access.
+ */
+export const memberRole = async (
+  database: D1Database,
+  userId: string
+): Promise<Role | undefined> => {
+  const db = drizzle(database);
+  const [membership] = await db
+    .select({ role: members.role })
+    .from(members)
+    .where(
+      and(
+        eq(members.organizationId, organizationId),
+        eq(members.userId, userId),
+        notExists(
+          db
+            .select()
+            .from(memberRemovals)
+            .where(
+              and(
+                eq(memberRemovals.organizationId, organizationId),
+                eq(memberRemovals.userId, userId)
+              )
+            )
+        )
+      )
+    );
+  const role = roleSchema.safeParse(membership?.role);
+  return role.success ? role.data : undefined;
+};
 
 /**
  * Who a request comes from: the person behind its session cookie, with their
@@ -65,30 +100,8 @@ export const identify = async (
       : undefined;
   }
 
-  const [membership] = await db
-    .select({ role: members.role })
-    .from(members)
-    .where(
-      and(
-        eq(members.organizationId, organizationId),
-        eq(members.userId, user.id),
-        notExists(
-          db
-            .select()
-            .from(memberRemovals)
-            .where(
-              and(
-                eq(memberRemovals.organizationId, organizationId),
-                eq(memberRemovals.userId, user.id)
-              )
-            )
-        )
-      )
-    );
-  // No membership, a removed one, or a role that isn't exactly one of ours:
-  // no access.
-  const role = roleSchema.safeParse(membership?.role);
-  if (!role.success) {
+  const role = await memberRole(env.DB, user.id);
+  if (!role) {
     return undefined;
   }
   const memberOf = await db
@@ -102,5 +115,5 @@ export const identify = async (
       )
     )
     .orderBy(teams.name);
-  return { ...person, role: role.data, teams: memberOf, staff: false };
+  return { ...person, role, teams: memberOf, staff: false };
 };

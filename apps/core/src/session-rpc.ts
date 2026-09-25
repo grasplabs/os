@@ -1,5 +1,17 @@
+import type {
+  Permission,
+  PermissionRequest,
+  PermissionSubjectInput,
+} from "@grasp-os/shared/permissions";
 import type { Identity, SessionApi } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
+
+import {
+  grantPermission,
+  listPermissions,
+  requestPermission,
+  revokePermission,
+} from "./permissions.ts";
 
 /** Checks the connection's session again; throws when it has ended. */
 export type SessionCheck = () => Promise<Identity>;
@@ -11,10 +23,12 @@ export type SessionCheck = () => Promise<Identity>;
  * without the check, or use one kept from an earlier call.
  */
 export class SessionRpc extends RpcTarget implements SessionApi {
+  readonly #env: Env;
   readonly #check: SessionCheck;
 
-  constructor(check: SessionCheck) {
+  constructor(env: Env, check: SessionCheck) {
     super();
+    this.#env = env;
     this.#check = check;
   }
 
@@ -24,5 +38,34 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   async whoami(): Promise<Identity> {
     return await this.#asPerson((identity) => identity);
+  }
+
+  // Each takes what the client sent as it is: the permission functions
+  // validate it, and check the person's role, on every call.
+
+  async requestPermission(request: PermissionRequest): Promise<Permission> {
+    return await this.#asPerson(
+      async (identity) => await requestPermission(this.#env, identity, request)
+    );
+  }
+
+  async grantPermission(id: string): Promise<Permission> {
+    return await this.#asPerson(
+      async (identity) => await grantPermission(this.#env, identity, id)
+    );
+  }
+
+  async revokePermission(id: string): Promise<Permission> {
+    return await this.#asPerson(
+      async (identity) => await revokePermission(this.#env, identity, id)
+    );
+  }
+
+  async listPermissions(
+    subject?: PermissionSubjectInput
+  ): Promise<Permission[]> {
+    return await this.#asPerson(
+      async (identity) => await listPermissions(this.#env, identity, subject)
+    );
   }
 }

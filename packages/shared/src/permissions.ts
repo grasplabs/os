@@ -1,0 +1,199 @@
+import { z } from "zod";
+
+import { auditIdentifierMaxLength } from "./audit.ts";
+import { defineErrorFamily } from "./errors.ts";
+import {
+  agentIdSchema,
+  appIdSchema,
+  collectionIdSchema,
+  connectionIdSchema,
+  permissionIdSchema,
+  workflowIdSchema,
+} from "./ids.ts";
+import type { PermissionId } from "./ids.ts";
+
+// Apps and agents start with nothing. Each thing they may use is one
+// permission: a person asks for it, an admin grants it, and every call
+// checks it again on the server. Everything here names things by ID and
+// stays identifier-sized, because each grant and revoke goes into the audit
+// log with these values.
+
+/** An ID as permissions store it: non-empty and identifier-sized. */
+const identifier = () => z.string().min(1).max(auditIdentifierMaxLength);
+
+/** Who a permission is for: an App, or an agent. Never a person. */
+export const permissionSubjectSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("app"),
+    appId: identifier().pipe(appIdSchema),
+  }),
+  z.strictObject({
+    type: z.literal("agent"),
+    agentId: identifier().pipe(agentIdSchema),
+  }),
+]);
+export type PermissionSubject = z.infer<typeof permissionSubjectSchema>;
+/** A subject as a client sends it, with a plain string ID. */
+export type PermissionSubjectInput = z.input<typeof permissionSubjectSchema>;
+
+/**
+ * What a permission gives access to: a connection (all of it, or one
+ * resource in it, such as one mailbox), a Knowledge collection, or one
+ * workflow of an App.
+ */
+export const permissionObjectSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("connection"),
+    connectionId: identifier().pipe(connectionIdSchema),
+    /** One resource in the connection; absent means the whole connection. */
+    resource: identifier().optional(),
+  }),
+  z.strictObject({
+    type: z.literal("collection"),
+    collectionId: identifier().pipe(collectionIdSchema),
+  }),
+  z.strictObject({
+    type: z.literal("workflow"),
+    appId: identifier().pipe(appIdSchema),
+    workflowId: identifier().pipe(workflowIdSchema),
+  }),
+]);
+export type PermissionObject = z.infer<typeof permissionObjectSchema>;
+export type PermissionObjectType = PermissionObject["type"];
+
+/**
+ * A connection's actions are its connector's tool names (native ones such
+ * as `mail.send`, or a catalog's such as `GMAIL_SEND_EMAIL`); which of them
+ * write is the connector's to say, in connect.
+ */
+const connectionActionPattern = /^[A-Za-z][\w.-]{0,63}$/u;
+
+/** The actions of the other objects, fixed by the platform. */
+export const platformActions = {
+  collection: ["read", "write"],
+  workflow: ["read", "start"],
+} as const;
+
+/** One action a permission allows. */
+export const permissionActionSchema = z.string().regex(connectionActionPattern);
+
+/** Whether `action` is one an object of `type` has. */
+export const isActionOf = (
+  type: PermissionObjectType,
+  action: string
+): boolean => {
+  if (type === "connection") {
+    return connectionActionPattern.test(action);
+  }
+  const actions: readonly string[] = platformActions[type];
+  return actions.includes(action);
+};
+
+/** Most actions one permission lists. */
+export const permissionMaxActions = 16;
+
+/**
+ * The name a permission's stub has in the env of the App or agent, such as
+ * `OUTLOOK`. Upper case only, like every other binding: that also keeps out
+ * `__proto__`, `constructor` and every other name an object already has.
+ */
+export const bindingNameSchema = z
+  .string()
+  .regex(/^[A-Z][A-Z0-9_]{0,63}$/u, "Upper case letters, digits and _");
+
+/** What a person asks for: the subject, the object, its actions, the name. */
+export const permissionRequestSchema = z
+  .strictObject({
+    subject: permissionSubjectSchema,
+    object: permissionObjectSchema,
+    actions: z
+      .array(permissionActionSchema)
+      .min(1)
+      .max(permissionMaxActions)
+      .refine((actions) => new Set(actions).size === actions.length, {
+        message: "Each action once",
+      }),
+    binding: bindingNameSchema,
+  })
+  .superRefine(({ object, actions }, context) => {
+    for (const action of actions) {
+      if (!isActionOf(object.type, action)) {
+        context.addIssue({
+          code: "custom",
+          path: ["actions"],
+          message: `A ${object.type} has no action ${action}`,
+        });
+      }
+    }
+    // The audit log records the actions as one identifier-sized value.
+    if (actions.join(" ").length > auditIdentifierMaxLength) {
+      context.addIssue({
+        code: "custom",
+        path: ["actions"],
+        message: "Too many actions for one permission",
+      });
+    }
+  });
+/** A permission request as a client sends it, with plain string IDs. */
+export type PermissionRequest = z.input<typeof permissionRequestSchema>;
+
+/**
+ * Requested: asked for, allows nothing yet. Active: granted, allows its
+ * actions. Revoked: allows nothing, for good (ask again for a new one).
+ */
+export const permissionStatusSchema = z.enum([
+  "requested",
+  "active",
+  "revoked",
+]);
+export type PermissionStatus = z.infer<typeof permissionStatusSchema>;
+
+/** One permission, as the API returns it. */
+export interface Permission {
+  id: PermissionId;
+  subject: PermissionSubject;
+  object: PermissionObject;
+  actions: string[];
+  binding: string;
+  status: PermissionStatus;
+  /** User IDs, and when (ISO 8601). */
+  requestedBy: string;
+  requestedAt: string;
+  grantedBy: string | null;
+  grantedAt: string | null;
+  revokedBy: string | null;
+  revokedAt: string | null;
+}
+
+/** A permission's ID, as the API takes it. */
+export const permissionIdInputSchema = identifier().pipe(permissionIdSchema);
+
+/**
+ * How a call reaches for access: which App or agent makes it, the person it
+ * acts for, and whether a person is there (interactive) or a workflow runs
+ * on its own. The host sets it, from the session or the run; never the code
+ * that makes the call.
+ *
+ * An App or agent never gets more than the person it acts for: a workflow
+ * run acts for the person who started it, or for the workflow's owner when
+ * a trigger or schedule started it, and stops when that person leaves.
+ */
+export const authoritySchema = z.strictObject({
+  subject: permissionSubjectSchema,
+  onBehalfOf: identifier(),
+  mode: z.enum(["interactive", "workflow"]),
+});
+export type Authority = z.infer<typeof authoritySchema>;
+
+/** Why a permission call was refused. */
+export const permissionErrors = defineErrorFamily({
+  "permission.denied": "This App or agent has no permission to do that.",
+  "permission.person_inactive":
+    "The person this acts for no longer has access to this deployment.",
+  "permission.forbidden": "Your role can't do that with permissions.",
+  "permission.invalid": "That isn't a valid permission request.",
+  "permission.not_found": "There's no such permission.",
+  "permission.not_requested": "Only a requested permission can be granted.",
+  "permission.conflict":
+    "This App or agent already has a permission with that binding name.",
+});
