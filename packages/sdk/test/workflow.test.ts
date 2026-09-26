@@ -907,6 +907,7 @@ describe("idempotency keys", () => {
     await write.run(createFakeEngine({ runId: "a" }).engine, "b");
 
     // Two writes, two different keys.
+    expect(keys).toHaveLength(2);
     expect(new Set(keys).size).toBe(2);
   });
 });
