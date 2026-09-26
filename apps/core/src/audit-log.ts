@@ -328,22 +328,38 @@ export class AuditLog extends DurableObject<Env> {
    * appends nothing from its batch.
    */
   async append(batch: readonly AuditEvent[]): Promise<AppendResult> {
-    const incoming = batch.map((event) => prepare(event));
-    // Hashing is async, so another append could otherwise run between
-    // reading the head and writing after it, and fork the chain.
-    return await this.ctx.blockConcurrencyWhile(async () => {
-      const { entries, conflicts } = await this.#link(incoming);
-      this.#db.transaction((tx) => {
-        for (const entry of entries) {
-          tx.insert(events).values(entry).run();
-        }
-      });
-      return {
-        appended: entries.length,
-        duplicates: incoming.length - entries.length,
-        conflicts,
-      };
-    });
+    return await this.#append(batch);
+  }
+
+  /**
+   * Appends events recovered from the audit queue's dead letter queue, as
+   * `append` does, then `audit.gap`, recorded by the platform: how many it
+   * appended late, with their IDs as its provenance, and how many dead
+   * letters could never be appended (`lost`). All in one transaction, so a
+   * recovered event never goes in without its gap. Records nothing when it
+   * appended nothing and nothing was lost: an event the log already holds
+   * left no gap. A batch holds at most 100 events (the queue's largest),
+   * as many IDs as an event's provenance holds.
+   */
+  async recover(
+    batch: readonly AuditEvent[],
+    lost: number
+  ): Promise<AppendResult> {
+    return await this.#append(batch, (recovered) =>
+      recovered.length === 0 && lost === 0
+        ? undefined
+        : prepare(
+            createAuditEvent(
+              {
+                actor: { type: "system" },
+                action: "audit.gap",
+                provenance: [...recovered],
+                detail: { recovered: recovered.length, lost },
+              },
+              "core"
+            )
+          )
+    );
   }
 
   /** Entries after position `after`, oldest first, at most one page. */
@@ -711,14 +727,48 @@ export class AuditLog extends DurableObject<Env> {
   }
 
   /**
-   * Links events onto the head, each one after the last, skipping IDs the
-   * log already holds. Receipt times never go backwards: a clock behind the
-   * head's time is held at it. Call only while nothing else can append.
+   * Appends events, skipping IDs the log already holds, and then the event
+   * `after` gives for the IDs it appended, if any, in one transaction.
+   * Validates every event first, so one malformed or oversized event
+   * appends nothing from its batch.
+   */
+  async #append(
+    batch: readonly AuditEvent[],
+    after?: (appended: readonly string[]) => Incoming | undefined
+  ): Promise<AppendResult> {
+    const incoming = batch.map((event) => prepare(event));
+    // Hashing is async, so another append could otherwise run between
+    // reading the head and writing after it, and fork the chain.
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const { entries, conflicts } = await this.#link(incoming);
+      const next = after?.(entries.map(({ id }) => id));
+      const { entries: then } =
+        next === undefined
+          ? { entries: [] }
+          : await this.#link([next], entries.at(-1));
+      this.#db.transaction((tx) => {
+        for (const entry of [...entries, ...then]) {
+          tx.insert(events).values(entry).run();
+        }
+      });
+      return {
+        appended: entries.length,
+        duplicates: incoming.length - entries.length,
+        conflicts,
+      };
+    });
+  }
+
+  /**
+   * Links events onto the head, or after `tail` (entries linked but not
+   * yet written), each one after the last, skipping IDs the log already
+   * holds. Receipt times never go backwards: a clock behind the head's time
+   * is held at it. Call only while nothing else can append.
    */
   async #link(
-    incoming: readonly Incoming[]
+    incoming: readonly Incoming[],
+    tail: ChainLink & { receivedAt: string } = this.#tail()
   ): Promise<{ entries: (ChainEntry & { id: string })[]; conflicts: number }> {
-    const tail = this.#tail();
     const now = new Date().toISOString();
     const receivedAt = now > tail.receivedAt ? now : tail.receivedAt;
     const heldMs = Date.parse(tail.receivedAt) - Date.parse(now);

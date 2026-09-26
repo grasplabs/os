@@ -6,6 +6,9 @@ import { errorFields, log } from "@grasp-os/shared/log";
 import { auditLog } from "./audit-log.ts";
 import type { AppendResult } from "./audit-log.ts";
 
+/** The audit queue's dead letter queue, as wrangler.jsonc names it. */
+export const auditDeadLetterQueue = "grasp-os-audit-dlq";
+
 /** First retry delay; doubles with each attempt. */
 const retryBaseSeconds = 10;
 /** Longest retry delay, so ten attempts span hours rather than days. */
@@ -55,8 +58,8 @@ const appendOneByOne = async (valid: Valid[], env: Env): Promise<void> => {
 
 /**
  * Moves an event the log would refuse for its size straight to the dead
- * letter queue, where it stays for inspection: no retry could ever append
- * it. Retried as usual only if that send fails.
+ * letter queue, which records it as lost (`consumeDeadLetters`): no retry
+ * could ever append it. Retried as usual only if that send fails.
  */
 const refuseOversized = async (
   { event, message }: Valid,
@@ -76,10 +79,58 @@ const refuseOversized = async (
 };
 
 /**
+ * Consumes the dead letter queue: events the audit queue gave up on after
+ * its retries, and those it moved there as too large (threat model AU4).
+ * Every one raises an alert: an error log naming the message, and the
+ * event when it is one. Those the log can take are appended late, and an
+ * `audit.gap` after them records how many and which; those it never can
+ * (malformed, too large) are counted in the gap as lost, their content
+ * kept out of the chain and the logs alike. Only once the gap is recorded
+ * is the batch acknowledged: while the log can't take it, it is retried,
+ * so nothing leaves the dead letter queue unrecorded. A batch redelivered
+ * after it was recorded counts its lost ones again, never none.
+ */
+export const consumeDeadLetters = async (
+  batch: MessageBatch,
+  env: Env
+): Promise<void> => {
+  const recovered: AuditEvent[] = [];
+  let lost = 0;
+  for (const message of batch.messages) {
+    const parsed = auditEventSchema.safeParse(message.body);
+    const event = parsed.success ? parsed.data : undefined;
+    log.error("audit.dead_lettered", {
+      messageId: message.id,
+      attempts: message.attempts,
+      eventId: event?.id,
+    });
+    if (event === undefined || isAuditEventTooLarge(canonicalJson(event))) {
+      lost += 1;
+    } else {
+      recovered.push(event);
+    }
+  }
+  try {
+    logAppended(await auditLog(env).recover(recovered, lost));
+    for (const message of batch.messages) {
+      message.ack();
+    }
+  } catch (error) {
+    log.error("audit.recovery_failed", {
+      messages: batch.messages.length,
+      ...errorFields(error),
+    });
+    for (const message of batch.messages) {
+      retryLater(message);
+    }
+  }
+};
+
+/**
  * Consumes the audit queue. Valid events are appended in one call and
  * acknowledged; malformed ones are retried until they reach the dead letter
- * queue, where they stay for inspection. Events over the log's size cap go
- * there at once. If the batch append fails, the events are appended one at
+ * queue (`consumeDeadLetters`). Events over the log's size cap go there at
+ * once. If the batch append fails, the events are appended one at
  * a time. The log dedupes by event ID, so a redelivered event is
  * acknowledged without being appended again. Logs its own outcome, as the
  * platform's invocation logs are off.

@@ -118,6 +118,10 @@
   // Delivery is at least once; events that keep failing land in the dead
   // letter queue instead of being lost. The consumer moves an event the log
   // can never take (over its size cap) there itself, without retrying it.
+  // The dead letter queue's own consumer raises an alert for each one and
+  // records it in the log as an `audit.gap` (src/audit-queue.ts); it keeps
+  // retrying while the log can't take them, for about two days (the most
+  // retries a queue allows, backing off to half an hour).
   "queues": {
     "producers": [
       { "binding": "AUDIT_QUEUE", "queue": "grasp-os-audit" },
@@ -130,6 +134,12 @@
         "max_batch_timeout": 5,
         "max_retries": 10,
         "dead_letter_queue": "grasp-os-audit-dlq",
+      },
+      {
+        "queue": "grasp-os-audit-dlq",
+        "max_batch_size": 100,
+        "max_batch_timeout": 5,
+        "max_retries": 100,
       },
     ],
   },

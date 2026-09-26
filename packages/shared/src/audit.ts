@@ -7,6 +7,7 @@ import {
   runIdSchema,
   workflowIdSchema,
 } from "./ids.ts";
+import { errorFields, log } from "./log.ts";
 import type { Authority } from "./permissions.ts";
 import type { Identity } from "./rpc.ts";
 
@@ -208,7 +209,9 @@ export const createAuditEvent = (
  * gives each event a new ID, the time and the Worker it comes from (never the
  * caller's), validates it and checks its size, so a malformed or oversized
  * event fails where it is made instead of in the dead letter queue, and
- * sends it to the audit queue.
+ * sends it to the audit queue. A send the queue refuses is logged and
+ * thrown to the caller: an action whose event can't be recorded must not
+ * look recorded.
  */
 export const auditLogger = (
   queue: AuditQueue,
@@ -216,7 +219,16 @@ export const auditLogger = (
 ): AuditLogger => ({
   log: async (entry) => {
     const event = createAuditEvent(entry, source);
-    await queue.send(event);
+    try {
+      await queue.send(event);
+    } catch (error) {
+      log.error("audit.send_failed", {
+        eventId: event.id,
+        action: event.action,
+        ...errorFields(error),
+      });
+      throw error;
+    }
     return event;
   },
 });

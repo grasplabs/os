@@ -31,6 +31,12 @@ const entriesAfter = async (
   return entries;
 };
 
+/** The events the deployment's log appended after position `after`. */
+export const eventsAfter = async (after: number): Promise<AuditEvent[]> => {
+  const entries = await entriesAfter(after);
+  return entries.map(({ event }) => event);
+};
+
 /** Every event in the deployment's log, oldest first. */
 export const allEvents = async (): Promise<AuditEvent[]> => {
   const entries = await entriesAfter();
