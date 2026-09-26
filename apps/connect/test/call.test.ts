@@ -133,6 +133,6 @@ describe("calls to connect", () => {
         async (request) => await outcome(exports.default.call(request))
       )
     );
-    expect(refused).toStrictEqual(notCalls.map(() => "connect.invalid_call"));
+    expect(refused).toStrictEqual(notCalls.map(() => "connect.invalid"));
   });
 });

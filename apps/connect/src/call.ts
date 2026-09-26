@@ -194,7 +194,7 @@ export const carryOut = async (
   const { input } = call;
   // MCP tools take an object of arguments.
   if (!isInput(input)) {
-    throw connectErrors.create("connect.invalid_call");
+    throw connectErrors.create("connect.invalid");
   }
   if (
     new TextEncoder().encode(JSON.stringify(input)).byteLength > maxInputBytes

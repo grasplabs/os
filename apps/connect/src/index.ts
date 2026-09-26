@@ -168,9 +168,9 @@ export default class Connect
     if (!parsed.success) {
       await auditFailure(this.env, {
         outcome: "refused",
-        reason: "connect.invalid_call",
+        reason: "connect.invalid",
       });
-      throw connectErrors.create("connect.invalid_call");
+      throw connectErrors.create("connect.invalid");
     }
     const { capability, ...call } = parsed.data;
     const { input: _input, ...stated } = call;

@@ -131,7 +131,7 @@ export const runStubCall = async (
 ): Promise<ConnectResult> => {
   const parsed = stubCallSchema.safeParse(call);
   if (!parsed.success) {
-    throw connectErrors.create("connect.invalid_call");
+    throw connectErrors.create("connect.invalid");
   }
   const [action, input, options] = parsed.data;
   try {

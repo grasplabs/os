@@ -1,4 +1,8 @@
-import { defineTool, ToolError } from "@grasp-os/connector-kit/connector";
+import {
+  defineTool,
+  invalidCode,
+  ToolError,
+} from "@grasp-os/connector-kit/connector";
 import {
   checkReadable,
   contentAs,
@@ -445,7 +449,7 @@ const labelMessage = defineTool({
   run: async ({ mailbox, message: id, add = [], remove = [] }) => {
     if (add.length === 0 && remove.length === 0) {
       throw new ToolError("Name a label to add or to remove", {
-        code: "invalid_request",
+        code: invalidCode,
       });
     }
     const modified = await googleJson(

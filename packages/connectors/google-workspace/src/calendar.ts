@@ -1,4 +1,8 @@
-import { defineTool, ToolError } from "@grasp-os/connector-kit/connector";
+import {
+  defineTool,
+  invalidCode,
+  ToolError,
+} from "@grasp-os/connector-kit/connector";
 import { z } from "zod";
 
 import {
@@ -145,7 +149,7 @@ const listEvents = defineTool({
   run: async ({ calendar, start, end, top, page }) => {
     if (Date.parse(end) <= Date.parse(start)) {
       throw new ToolError("The range must end after it starts", {
-        code: "invalid_request",
+        code: invalidCode,
       });
     }
     const { items, nextPageToken } = await googleJson(

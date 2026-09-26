@@ -70,7 +70,7 @@ describe("errors sent to the client", () => {
     for (const expected of [
       requestErrors.create("request.forbidden"),
       modelErrors.create("model.not_allowed"),
-      connectErrors.create("connect.invalid_call"),
+      connectErrors.create("connect.invalid"),
     ]) {
       expect(toClientError(expected, "request-1")).toBeUndefined();
     }

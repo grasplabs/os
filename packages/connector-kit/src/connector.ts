@@ -85,13 +85,31 @@ export interface ToolDefinition<
   run: (input: z.output<Input>) => Promise<ToolResult<z.input<Output>>>;
 }
 
+/** What went wrong in a tool's error, for code to act on. */
+export type ToolErrorCode =
+  | "invalid"
+  | "egress_refused"
+  | "egress_failed"
+  | "downloads_unavailable"
+  | "throttled"
+  | "unavailable"
+  | "access_denied"
+  | "not_found"
+  | "failed"
+  | "too_large"
+  | "not_text"
+  | "not_a_file";
+
 /** What a caller may act on in a tool's error, besides its message. */
 export interface ToolErrorDetails {
   /** What went wrong, for code to act on, such as `throttled`. */
-  code: string;
+  code: ToolErrorCode;
   /** How long the provider asks callers to wait before trying again. */
   retryAfterSeconds?: number;
 }
+
+/** The code for a call that isn't valid: the tool or the provider refused its input. */
+export const invalidCode: ToolErrorCode = "invalid";
 
 /**
  * An error whose message the caller may see, such as "No such message",

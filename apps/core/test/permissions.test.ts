@@ -245,11 +245,7 @@ describe("permissions", () => {
         callThrough(authority, "FINANCE_MAIL", "mail.send"),
         callThrough(authority, "FINANCE_MAIL", "mail.list; mail.send"),
       ])
-    ).resolves.toStrictEqual([
-      reached,
-      "permission.denied",
-      "connect.invalid_call",
-    ]);
+    ).resolves.toStrictEqual([reached, "permission.denied", "connect.invalid"]);
 
     const checks = await Promise.all(
       [

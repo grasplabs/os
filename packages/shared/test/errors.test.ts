@@ -55,7 +55,7 @@ describe("errors a caller outside core may see", () => {
     const own = defineErrorFamily({ "own.refused": "Refused." });
     const expected = [
       requestErrors.create("request.forbidden"),
-      connectErrors.create("connect.invalid_call"),
+      connectErrors.create("connect.invalid"),
       capabilityErrors.create("capability.invalid"),
       modelErrors.create("model.not_allowed"),
       own.create("own.refused"),

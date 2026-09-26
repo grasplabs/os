@@ -133,7 +133,7 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
     const person = await this.#person();
     const parsed = startRequestSchema.safeParse(request);
     if (!parsed.success) {
-      throw connectionErrors.create("connection.invalid_request");
+      throw connectionErrors.create("connection.invalid");
     }
     const { provider, scope, returnTo } = parsed.data;
     const config = signInConfig(this.#env);
@@ -144,7 +144,7 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
     }
     const back = onOrigin(config.origin, returnTo);
     if (back === undefined) {
-      throw connectionErrors.create("connection.invalid_request");
+      throw connectionErrors.create("connection.invalid");
     }
     return await this.#env.CONNECT.startConnection({
       person,

@@ -189,7 +189,7 @@ describe("the audit log", () => {
       "capability.invalid",
       "connect.not_owner",
       "connect.idempotency_key_required",
-      "connect.invalid_call",
+      "connect.invalid",
     ]);
     expect(
       events.map(({ actor, target, detail }) => ({
@@ -228,7 +228,7 @@ describe("the audit log", () => {
         actor: "system",
         target: undefined,
         outcome: "refused",
-        reason: "connect.invalid_call",
+        reason: "connect.invalid",
       },
     ]);
     expect(server.ran).toStrictEqual([]);

@@ -1,3 +1,4 @@
+import { invalidCode } from "@grasp-os/connector-kit/connector";
 import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
@@ -583,7 +584,7 @@ describe("the Google Workspace connector's Gmail tools", () => {
     ]);
     await expect(
       toolError(label("run-7:nothing", { add: [], remove: [] }))
-    ).resolves.toMatchObject({ error: { code: "invalid_request" } });
+    ).resolves.toMatchObject({ error: { code: invalidCode } });
     expect(google.writesDone()).toBe(1);
   });
 
@@ -772,7 +773,7 @@ describe("the Google Workspace connector's Calendar tools", () => {
       toolError(
         call(connection, "calendar.list", { ...range, end: range.start })
       )
-    ).resolves.toMatchObject({ error: { code: "invalid_request" } });
+    ).resolves.toMatchObject({ error: { code: invalidCode } });
   });
 
   it("get an event with its description and attendees, and an all-day one", async () => {

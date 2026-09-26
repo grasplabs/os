@@ -222,7 +222,7 @@ describe("a call on a connection", () => {
           await outcome(callAs(anna, write(connectionId, "mail.list", input)))
       )
     );
-    expect(refused).toStrictEqual(inputs.map(() => "connect.invalid_call"));
+    expect(refused).toStrictEqual(inputs.map(() => "connect.invalid"));
     await expect(
       outcome(
         callAs(

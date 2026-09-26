@@ -205,7 +205,7 @@ export interface ConnectApi {
 
 /** Why connecting or disconnecting an account didn't work. */
 export const connectionErrors = defineErrorFamily({
-  "connection.invalid_request": "That isn't a valid connection request.",
+  "connection.invalid": "That isn't a valid connection request.",
   "connection.provider_unavailable":
     "Connecting this provider isn't set up for this deployment.",
   "connection.flow_invalid":
@@ -226,7 +226,7 @@ export const connectionErrors = defineErrorFamily({
 
 /** Why connect refused or couldn't finish a call, other than its capability. */
 export const connectErrors = defineErrorFamily({
-  "connect.invalid_call":
+  "connect.invalid":
     "That isn't a valid call: an action name, JSON input and options.",
   "connect.connection_not_found": "There's no such connection.",
   "connect.connection_inactive":
