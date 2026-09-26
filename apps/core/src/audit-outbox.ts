@@ -1,11 +1,13 @@
 import { createAuditEvent } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { canonicalJson } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { asc, inArray, sql } from "drizzle-orm";
 import type { BatchItem, BatchResponse } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
+import { audit } from "./audit.ts";
 import { auditOutbox } from "./db/core/schema.ts";
 
 // A change to the core or Knowledge database that must be audited stores
@@ -120,6 +122,35 @@ export const sendAuditOutboxNow = async (env: OutboxEnv): Promise<void> => {
   } catch (error) {
     log.error("audit.outbox.send_failed", errorFields(error));
   }
+};
+
+/**
+ * Stores the event for a change that has already happened outside a batch
+ * of ours, so the event can't join it, and sends it: in `db`'s outbox; if
+ * the database refuses it, on the queue; and if that fails too, in the
+ * logs (an event is identifiers only, so the logs may keep it). Never
+ * throws: the change is done, and failing its caller wouldn't undo it.
+ */
+export const keepAuditEvent = async (
+  env: OutboxEnv,
+  db: DrizzleD1Database,
+  entry: AuditEntry
+): Promise<void> => {
+  try {
+    await outboxed(db, entry);
+  } catch (outboxError) {
+    log.error("audit.outbox.store_failed", errorFields(outboxError));
+    try {
+      await audit(env).log(entry);
+    } catch (queueError) {
+      log.error("audit.lost", {
+        ...errorFields(queueError),
+        entry: canonicalJson(entry),
+      });
+    }
+    return;
+  }
+  await sendAuditOutboxNow(env);
 };
 
 /**

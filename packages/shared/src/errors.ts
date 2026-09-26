@@ -27,13 +27,19 @@ export type CodedError<Code extends string = string> = Error & {
 /**
  * What's wrong with some input, for an error's `details.issues`: each issue
  * as `path: message`, which names the field and never repeats its value.
+ * `prefix` goes before every path, e.g. `frontmatter`; an issue with no path
+ * at all is its message alone.
  */
-export const issuesOf = (error: {
-  issues: readonly { path: readonly PropertyKey[]; message: string }[];
-}): string[] =>
-  error.issues.map(
-    ({ path, message }) => `${path.map(String).join(".")}: ${message}`
-  );
+export const issuesOf = (
+  error: {
+    issues: readonly { path: readonly PropertyKey[]; message: string }[];
+  },
+  prefix = ""
+): string[] =>
+  error.issues.map(({ path, message }) => {
+    const where = [prefix, ...path.map(String)].filter(Boolean).join(".");
+    return where === "" ? message : `${where}: ${message}`;
+  });
 
 /**
  * Every code of every family defined: the expected errors, which whoever

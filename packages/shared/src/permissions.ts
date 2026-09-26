@@ -90,7 +90,7 @@ export type PermissionObjectType = PermissionObject["type"];
 const connectionActionPattern = /^[A-Za-z][\w.-]{0,63}$/u;
 
 /** The actions of the other objects, fixed by the platform. */
-export const platformActions = {
+const platformActions = {
   collection: ["read", "write"],
   workflow: ["read", "start"],
 } as const;
@@ -99,10 +99,7 @@ export const platformActions = {
 export const permissionActionSchema = z.string().regex(connectionActionPattern);
 
 /** Whether `action` is one an object of `type` has. */
-export const isActionOf = (
-  type: PermissionObjectType,
-  action: string
-): boolean => {
+const isActionOf = (type: PermissionObjectType, action: string): boolean => {
   if (type === "connection") {
     return connectionActionPattern.test(action);
   }
@@ -118,7 +115,7 @@ export const permissionMaxActions = 16;
  * permission can't use one, so a stub is never mistaken for, or passed off
  * as, a platform binding. Tests check this list against both Workers' env.
  */
-export const platformBindingNames: ReadonlySet<string> = new Set([
+const platformBindingNames: ReadonlySet<string> = new Set([
   "AI",
   // A workflow run's own App (its server methods), next to its permissions.
   "APP",

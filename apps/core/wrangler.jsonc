@@ -1,5 +1,8 @@
 // grasp-os-staging deployment. Client deployments are provisioned by the console,
-// which creates every resource below with EU jurisdiction.
+// which creates the D1 databases and R2 buckets below in the EU jurisdiction;
+// Durable Objects run in it through `jurisdiction("eu")` (src/durable-objects.ts).
+// Two resources can't be pinned to the EU: Workflows takes only a location
+// hint (`weur`, set on each run), and queues have no jurisdiction at all.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "grasp-os-core",
@@ -8,8 +11,8 @@
   "compatibility_flags": ["nodejs_compat"],
   // Durable Objects bundle their Drizzle migrations as text.
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
-  // Core logs one structured line per request itself (src/log.ts), so the
-  // platform's own line per invocation would only double every entry.
+  // No platform line per invocation: core logs the events it needs itself
+  // (@grasp-os/shared/log), never headers or bodies (threat model R17).
   // Query strings stay out of logs and traces: the OAuth callback's carries
   // the code and state (threat model R17, CN3).
   "observability": {
@@ -80,7 +83,7 @@
   // The one dispatcher of every App's workflow runs (src/workflows/): it
   // loads each run's code by App and pinned version, with an env rebuilt
   // from permissions on every start and resume. Runs are created with the
-  // `weur` location hint.
+  // `weur` location hint, a preference Cloudflare may not follow.
   "workflows": [
     {
       "name": "grasp-os-workflows",

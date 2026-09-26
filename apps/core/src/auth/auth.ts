@@ -2,8 +2,7 @@ import { sso } from "@better-auth/sso";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
 import { fromBase64Url } from "@grasp-os/shared/encoding";
-import { canonicalJson } from "@grasp-os/shared/json";
-import { errorFields, log } from "@grasp-os/shared/log";
+import { log } from "@grasp-os/shared/log";
 import type { SignInRefusal } from "@grasp-os/shared/sign-in";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import {
@@ -22,11 +21,9 @@ import { z } from "zod";
 
 import {
   auditedBatch,
-  outboxed,
+  keepAuditEvent,
   outboxedIfChanged,
-  sendAuditOutboxNow,
 } from "../audit-outbox.ts";
-import { audit } from "../audit.ts";
 import {
   accounts,
   invitations,
@@ -116,6 +113,17 @@ export const notRemoved = (
     AND ${memberRemovals.userId} = ${userId}
 )`;
 
+/**
+ * `userId`'s current membership of the organization, as a SQL condition on
+ * `members`: none once an admin removed them.
+ */
+export const currentMembership = (userId: string): SQL | undefined =>
+  and(
+    eq(members.organizationId, organizationId),
+    eq(members.userId, userId),
+    notRemoved(userId)
+  );
+
 /** Whether an admin removed `userId` from the organization. */
 export const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
   const row = await drizzle(env.DB).get<{ member: number }>(
@@ -152,30 +160,12 @@ export const activeMember = (
 )`;
 
 /**
- * Records a change Better Auth has made: its event goes into the audit
- * outbox, in the same database, and is sent from there, again by the cron
- * trigger if sending fails now. Better Auth commits the change itself, so
- * the event can't join its batch. If storing it fails, the event goes to
- * the audit queue directly; if that fails too, it is written to the logs,
- * so a change is never left without a record. A failed request wouldn't
- * undo the change, so none of this fails the request.
+ * Records a change Better Auth has made. Better Auth commits the change
+ * itself, so its event can't join the change's batch; a failed request
+ * wouldn't undo the change, so recording it never fails the request.
  */
 const record = async (env: Env, entry: AuditEntry): Promise<void> => {
-  try {
-    await outboxed(drizzle(env.DB), entry);
-  } catch (outboxError) {
-    log.error("audit.outbox.store_failed", errorFields(outboxError));
-    try {
-      await audit(env).log(entry);
-    } catch (queueError) {
-      log.error("audit.lost", {
-        ...errorFields(queueError),
-        entry: canonicalJson(entry),
-      });
-    }
-    return;
-  }
-  await sendAuditOutboxNow(env);
+  await keepAuditEvent(env, drizzle(env.DB), entry);
 };
 
 /**
@@ -189,12 +179,7 @@ const restoreAdmin = async (env: Env, userId: string): Promise<void> => {
   const [membership] = await db
     .select({ id: members.id })
     .from(members)
-    .where(
-      and(
-        eq(members.organizationId, organizationId),
-        eq(members.userId, userId)
-      )
-    );
+    .where(currentMembership(userId));
   if (!membership) {
     return;
   }

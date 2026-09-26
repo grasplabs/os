@@ -1,9 +1,11 @@
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf, delegateActorOf } from "@grasp-os/shared/audit";
+import { toHex } from "@grasp-os/shared/encoding";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
   collectionSearchOptionsSchema,
   documentTypeSchema,
+  knowledgeErrors,
   searchOptionsSchema,
   searchQuerySchema,
 } from "@grasp-os/shared/knowledge";
@@ -13,12 +15,11 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
+import { keepAuditEvent } from "../audit-outbox.ts";
 import { derivedHmacKey } from "../derived-keys.ts";
 import { allowedCollections, recordRead } from "./access.ts";
 import type { Reader } from "./access.ts";
 import { readableCollection } from "./collections.ts";
-import { parseOrInvalid } from "./documents.ts";
 
 // Full-text search over sections, in two FTS5 indexes kept by triggers on
 // the sections table (see the migration `0001_search.sql`): whole words,
@@ -244,9 +245,7 @@ const queryKey = async (env: Env, terms: string[]): Promise<string> => {
     key,
     new TextEncoder().encode(normalized)
   );
-  return [...new Uint8Array(mac)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
+  return toHex(new Uint8Array(mac));
 };
 
 /**
@@ -273,9 +272,7 @@ const recordNothingFound = async (
       : { target: { type: "collection", id: collectionId } }),
     detail: { terms: terms.length, queryKey: await queryKey(env, terms) },
   };
-  const db = drizzle(env.KNOWLEDGE);
-  await outboxed(db, entry);
-  await sendAuditOutboxNow(env);
+  await keepAuditEvent(env, drizzle(env.KNOWLEDGE), entry);
 };
 
 /**
@@ -290,12 +287,18 @@ export const search = async (
   options?: unknown,
   only?: string
 ): Promise<SearchResults> => {
-  const terms = termsOf(parseOrInvalid(searchQuerySchema, query));
+  const terms = termsOf(
+    knowledgeErrors.parse("knowledge.invalid", searchQuerySchema, query)
+  );
   const { collectionId: scope, limit } =
     only === undefined
-      ? parseOrInvalid(searchOptionsSchema, options)
+      ? knowledgeErrors.parse("knowledge.invalid", searchOptionsSchema, options)
       : {
-          ...parseOrInvalid(collectionSearchOptionsSchema, options),
+          ...knowledgeErrors.parse(
+            "knowledge.invalid",
+            collectionSearchOptionsSchema,
+            options
+          ),
           collectionId: only,
         };
   const db = drizzle(env.KNOWLEDGE);

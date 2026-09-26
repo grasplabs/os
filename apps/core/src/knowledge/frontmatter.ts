@@ -1,3 +1,4 @@
+import { issuesOf } from "@grasp-os/shared/errors";
 import { documentTypeSchema } from "@grasp-os/shared/knowledge";
 import type { DocumentType } from "@grasp-os/shared/knowledge";
 import { parse } from "yaml";
@@ -125,13 +126,6 @@ const readYaml = (yaml: string): Record<string, unknown> => {
   return Object.fromEntries(Object.entries(value));
 };
 
-/** A Zod error as lines people read, such as `frontmatter.tags.0: …`. */
-export const issueLines = (error: z.ZodError, prefix: string): string[] =>
-  error.issues.map(({ path, message }) => {
-    const where = [prefix, ...path.map(String)].filter(Boolean).join(".");
-    return where === "" ? message : `${where}: ${message}`;
-  });
-
 /**
  * Reads and checks the frontmatter of the document at `path`. Without a
  * `type`, a document is a `doc`, unless its file name says otherwise
@@ -155,7 +149,7 @@ export const parseFrontmatter = (
   }
   const parsed = frontmatterSchemas[type.data].safeParse(fields);
   if (!parsed.success) {
-    throw new FrontmatterError(issueLines(parsed.error, "frontmatter"));
+    throw new FrontmatterError(issuesOf(parsed.error, "frontmatter"));
   }
   return { type: type.data, frontmatter: parsed.data, body };
 };

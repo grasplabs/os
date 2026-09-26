@@ -28,13 +28,12 @@ import {
   createAuditEvent,
 } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
-import { errorFields, log } from "@grasp-os/shared/log";
+import { log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { outboxed, sendAuditOutboxNow } from "./audit-outbox.ts";
-import { audit } from "./audit.ts";
+import { keepAuditEvent } from "./audit-outbox.ts";
 import { jsonVar } from "./json-var.ts";
 
 // The model gateway: every model call in a deployment goes through here, and
@@ -531,32 +530,10 @@ const largestRecord: Recorded = {
 };
 
 /**
- * Stores the event for a request that was paid for, whatever fails: in the
- * outbox; if the database refuses it, on the queue; and if that fails too,
- * in the logs. Never throws: a caller that lost a paid answer to a
- * bookkeeping failure would ask (and pay) again.
+ * Records one request in the audit log, however it ended. Never throws: a
+ * caller that lost a paid answer to a bookkeeping failure would ask (and
+ * pay) again.
  */
-const keep = async (env: ModelsEnv, entry: AuditEntry): Promise<void> => {
-  try {
-    await outboxed(drizzle(env.DB), entry);
-  } catch (error) {
-    log.error("model.audit_outbox_failed", errorFields(error));
-    try {
-      await audit(env).log(entry);
-    } catch (queueError) {
-      // The event is identifiers only, so the logs may keep it.
-      log.error("model.audit_failed", {
-        ...errorFields(queueError),
-        auditEntry: JSON.stringify(entry),
-      });
-    }
-    return;
-  }
-  // Sent at once; what the queue refuses, the cron trigger sends later.
-  await sendAuditOutboxNow(env);
-};
-
-/** Records one request in the audit log, however it ended. */
 const record = async (
   env: ModelsEnv,
   call: Call,
@@ -566,8 +543,9 @@ const record = async (
   outcome: Outcome,
   failure?: Failure
 ): Promise<void> => {
-  await keep(
+  await keepAuditEvent(
     env,
+    drizzle(env.DB),
     auditEntry(call, ref, {
       inputTokens: inputTokens(answer.usage),
       outputTokens: answer.usage.output,

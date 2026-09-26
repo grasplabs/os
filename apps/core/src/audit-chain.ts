@@ -21,7 +21,7 @@ import { sha256Hex } from "@grasp-os/shared/encoding";
  */
 
 /** What the first entry links to: 64 zeros, the width of a SHA-256 hex hash. */
-export const genesisHash = "0".repeat(64);
+const genesisHash = "0".repeat(64);
 
 /** The hash format new entries use, described at the top of this file. */
 export const chainVersion = 1;
