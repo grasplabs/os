@@ -53,8 +53,12 @@ import { jsonVar } from "./json-var.ts";
 /** How many entries one read returns at most. */
 const pageSize = 500;
 
-/** Most entries one step of verification checks. */
-const verifyStretch = 10_000;
+/**
+ * Most entries one step of verification checks. A step reads them in one
+ * query and holds them in memory while it hashes them: at most 500 ×
+ * `auditEventMaxBytes` (about 16 MB), the bound a page read had before.
+ */
+const verifyStretch = 500;
 
 /**
  * Most entries one search reads, matching or not, so every call is bounded
@@ -357,13 +361,6 @@ const entryColumns =
  */
 export class AuditLog extends DurableObject<Env> {
   readonly #db = drizzle(this.ctx.storage);
-  /**
-   * Steps of verification reading held entries right now. They read a page
-   * at a time, with hashing awaited in between, so an archive could
-   * otherwise delete entries a step is about to read; an archive leaves its
-   * stretch for the next run of the cron trigger instead.
-   */
-  #verifying = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -585,11 +582,7 @@ export class AuditLog extends DurableObject<Env> {
     const first = expired.at(0);
     const last = expired.at(-1);
     const start = this.#lastArchived() ?? chainOrigin;
-    if (
-      first === undefined ||
-      last === undefined ||
-      this.#deferred(first.seq, last.seq)
-    ) {
+    if (first === undefined || last === undefined) {
       return null;
     }
     const checked = await verifyChain(expired, start);
@@ -598,11 +591,6 @@ export class AuditLog extends DurableObject<Env> {
         brokenAt: checked.brokenAt,
         reason: checked.reason,
       });
-      return null;
-    }
-    // Checked again before writing, so no object is written for a stretch
-    // left for the next run.
-    if (this.#deferred(first.seq, last.seq)) {
       return null;
     }
     const key = this.#archiveKey(first.seq, last.seq);
@@ -621,13 +609,8 @@ export class AuditLog extends DurableObject<Env> {
     );
     // Linking the event needs the head, as an append does.
     const recorded = await this.ctx.blockConcurrencyWhile(async () => {
-      // Another archive moved these meanwhile, or a step started reading
-      // them while the object was written. In the second case the object
-      // is taken up by the next run if it moves the same stretch.
-      if (
-        (this.#lastArchived()?.seq ?? 0) !== start.seq ||
-        this.#deferred(first.seq, last.seq)
-      ) {
+      // Another archive moved these meanwhile.
+      if ((this.#lastArchived()?.seq ?? 0) !== start.seq) {
         return false;
       }
       const { entries } = await this.#link([archivedEvent]);
@@ -782,22 +765,6 @@ export class AuditLog extends DurableObject<Env> {
         )
       )
       .run();
-  }
-
-  /**
-   * Whether an archive of the stretch from `from` to `through` must wait
-   * for the next run, as a step of verification is reading held entries.
-   */
-  #deferred(from: number, through: number): boolean {
-    if (this.#verifying === 0) {
-      return false;
-    }
-    log.warn("audit.archive_deferred", {
-      from,
-      through,
-      verifying: this.#verifying,
-    });
-    return true;
   }
 
   /**
@@ -1039,21 +1006,23 @@ export class AuditLog extends DurableObject<Env> {
     };
   }
 
-  /** Verifies entries the log holds, from after `after`. */
+  /**
+   * Verifies entries the log holds, from after `after`. Reads the hash it
+   * starts from and the whole stretch synchronously, before it awaits
+   * anything, and hashes that in-memory copy. A Durable Object runs no
+   * other code between awaits, so by construction an archive that moves
+   * these entries out while the step hashes them can't change what it
+   * checks.
+   */
   async #verifyHeld(after: number): Promise<StretchVerification> {
     const hash = this.#hashAt(after);
     if (hash === undefined) {
       return { ok: false, brokenAt: after, reason: "missing" };
     }
-    this.#verifying += 1;
-    try {
-      return await verifyChain(this.#stretch(after, verifyStretch), {
-        seq: after,
-        hash,
-      });
-    } finally {
-      this.#verifying -= 1;
-    }
+    return await verifyChain(this.#page(after, verifyStretch), {
+      seq: after,
+      hash,
+    });
   }
 
   /**
@@ -1159,27 +1128,6 @@ export class AuditLog extends DurableObject<Env> {
       .orderBy(asc(events.seq))
       .limit(limit)
       .all();
-  }
-
-  /**
-   * Up to `max` entries after position `after`, in position order, read a
-   * page at a time.
-   * @yields {ChainEntry} each entry, oldest first
-   */
-  *#stretch(after: number, max: number): Generator<ChainEntry> {
-    let read = 0;
-    let page = this.#page(after, Math.min(pageSize, max));
-    while (page.length > 0) {
-      yield* page;
-      read += page.length;
-      page =
-        read < max
-          ? this.#page(
-              page.at(-1)?.seq ?? after,
-              Math.min(pageSize, max - read)
-            )
-          : [];
-    }
   }
 }
 
