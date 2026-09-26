@@ -7,7 +7,8 @@ import {
 } from "@grasp-os/shared/knowledge";
 import type { Collection, CollectionSource } from "@grasp-os/shared/knowledge";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
@@ -15,8 +16,10 @@ import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
 import { actorOf } from "../audit.ts";
 import { organizationId } from "../auth/auth.ts";
 import { teams } from "../db/core/schema.ts";
+import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
-import { canCreate, canWrite, readableBy } from "./access.ts";
+import { allowedCollections, canCreate, canWrite } from "./access.ts";
+import type { Reader } from "./access.ts";
 import { issueLines } from "./frontmatter.ts";
 
 export type CollectionRow = typeof collections.$inferSelect;
@@ -33,16 +36,17 @@ const toCollection = (row: CollectionRow, teamIds: string[]): Collection => ({
   createdAt: row.createdAt.toISOString(),
 });
 
-/** The collections `person` may read, by name. */
+/** The collections `reader` may read, by name. */
 export const listCollections = async (
   env: Env,
-  person: Identity
+  reader: Reader
 ): Promise<Collection[]> => {
   const db = drizzle(env.KNOWLEDGE);
+  const allowed = await allowedCollections(env, db, reader);
   const rows = await db
     .select()
     .from(collections)
-    .where(readableBy(db, person))
+    .where(allowed)
     .orderBy(asc(collections.name), asc(collections.id));
   const shared = await db
     .select({
@@ -51,7 +55,7 @@ export const listCollections = async (
     })
     .from(collectionTeams)
     .innerJoin(collections, eq(collections.id, collectionTeams.collectionId))
-    .where(readableBy(db, person))
+    .where(allowed)
     .orderBy(asc(collectionTeams.teamId));
   return rows.map((row) =>
     toCollection(
@@ -63,10 +67,10 @@ export const listCollections = async (
   );
 };
 
-/** The collection, if `person` may read it. */
+/** The collection, if it is one of the `allowed` collections. */
 export const readableCollection = async (
   db: DrizzleD1Database,
-  person: Identity,
+  allowed: SQL,
   collectionId: unknown
 ): Promise<CollectionRow> => {
   const id = collectionIdInputSchema.safeParse(collectionId);
@@ -74,7 +78,7 @@ export const readableCollection = async (
     ? await db
         .select()
         .from(collections)
-        .where(and(eq(collections.id, id.data), readableBy(db, person)))
+        .where(and(eq(collections.id, id.data), allowed))
         .get()
     : undefined;
   if (!row) {
@@ -108,10 +112,7 @@ const unknownTeams = async (env: Env, teamIds: string[]): Promise<string[]> => {
     .select({ id: teams.id })
     .from(teams)
     .where(
-      and(
-        eq(teams.organizationId, organizationId),
-        sql`${teams.id} IN (SELECT value FROM json_each(${JSON.stringify(teamIds)}))`
-      )
+      and(eq(teams.organizationId, organizationId), inList(teams.id, teamIds))
     );
   const known = new Set(found.map(({ id }) => id));
   return teamIds.filter((id) => !known.has(id));

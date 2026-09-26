@@ -108,13 +108,13 @@ const backlinkPaths = async (
   documentId: string,
   options?: { after?: string; limit?: number }
 ) => {
-  const found = await api.backlinks(documentId, options);
-  return found.map(({ path }) => path);
+  const { backlinks } = await api.backlinks(documentId, options);
+  return backlinks.map(({ path }) => path);
 };
 
 /** The version numbers in a document's history, newest first. */
 const versionNumbers = async (api: KnowledgeApi, documentId: string) => {
-  const versions = await api.history(documentId);
+  const { versions } = await api.history(documentId);
   return versions.map(({ number }) => number);
 };
 
@@ -154,7 +154,7 @@ describe("saving a document", () => {
     const sectionsOfSecond = await storedSections(first.id);
     const { version: current, ...read } = await api.getDocument(first.id);
     const { version: earlier } = await api.getDocument(first.id, 1);
-    const versions = await api.history(first.id);
+    const { versions } = await api.history(first.id);
     expect({
       first,
       sectionsOfFirst,
@@ -215,6 +215,11 @@ describe("saving a document", () => {
           restoredFrom: null,
           createdAt: second.updatedAt,
         },
+        provenance: {
+          collectionIds: [collectionId],
+          sensitive: false,
+          restricted: false,
+        },
       },
       earlier: leaveV1,
       history: [
@@ -233,7 +238,7 @@ describe("saving a document", () => {
     const leave = await save("handbook/leave.md", leaveV1);
     await save("index.md", "Start with [[handbook/leave|leave]] and [[faq]].");
     const faq = await save("faq.md", "See [[handbook/leave]].");
-    const before = await api.backlinks(leave.id);
+    const { backlinks: before } = await api.backlinks(leave.id);
     const pages = [
       await backlinkPaths(api, leave.id, { limit: 1 }),
       await backlinkPaths(api, leave.id, { after: "faq.md", limit: 1 }),
@@ -324,7 +329,9 @@ describe("saving a document", () => {
       );
 
     const created = await Promise.all([save("# One", 0), save("# Two", 0)]);
-    const [document] = await api.listDocuments(collectionId);
+    const {
+      documents: [document],
+    } = await api.listDocuments(collectionId);
     const edited = await Promise.all([save("# Three", 1), save("# Four", 1)]);
 
     const current = await api.getDocument(document?.id ?? "");
@@ -384,7 +391,9 @@ describe("saving a document", () => {
         ],
       },
     });
-    await expect(api.listDocuments(collectionId)).resolves.toStrictEqual([]);
+    await expect(api.listDocuments(collectionId)).resolves.toMatchObject({
+      documents: [],
+    });
   });
 
   it("stays within D1's limits: bounded size, sections and links", async () => {

@@ -9,4 +9,6 @@ export const chats = sqliteTable("chats", {
   id: text().$type<ChatId>().primaryKey(),
   title: text().notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  /** It read restricted data, and is in restricted mode for good. */
+  restricted: integer({ mode: "boolean" }).notNull().default(false),
 });

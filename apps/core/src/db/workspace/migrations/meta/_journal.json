@@ -8,6 +8,13 @@
       "when": 1790342242340,
       "tag": "0000_chats",
       "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "6",
+      "when": 1790378731683,
+      "tag": "0001_restricted_chats",
+      "breakpoints": true
     }
   ]
 }

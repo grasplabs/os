@@ -240,9 +240,39 @@ export interface Version extends VersionSummary {
   text: string;
 }
 
+/**
+ * Where what a read returned comes from, so whoever builds on it (an agent,
+ * an App, a sharing check) can label what it derives from it.
+ */
+export interface Provenance {
+  /** The collections it was read from. */
+  collectionIds: CollectionId[];
+  /** Some of it is from a sensitive collection: the model data rules apply. */
+  sensitive: boolean;
+  /**
+   * Some of it is restricted data: the chat, App or run that read it can no
+   * longer act on or fetch from outside systems. In Knowledge, restricted
+   * data is what a sensitive collection holds.
+   */
+  restricted: boolean;
+}
+
 /** A document with one of its versions. */
 export interface DocumentRead extends DocumentSummary {
   version: Version;
+  provenance: Provenance;
+}
+
+/** A page of a collection's documents. */
+export interface DocumentPage {
+  documents: DocumentSummary[];
+  provenance: Provenance;
+}
+
+/** A page of a document's history. */
+export interface HistoryPage {
+  versions: VersionSummary[];
+  provenance: Provenance;
 }
 
 /** A document that links to another one. */
@@ -253,6 +283,12 @@ export interface Backlink {
   title: string;
   /** The link's own text (`[[path|label]]`), if it has one. */
   label: string | null;
+}
+
+/** A page of the documents that link to one document. */
+export interface BacklinkPage {
+  backlinks: Backlink[];
+  provenance: Provenance;
 }
 
 /**
@@ -270,7 +306,7 @@ export interface KnowledgeApi {
   listDocuments: (
     collectionId: string,
     options?: ListDocumentsOptions
-  ) => Promise<DocumentSummary[]>;
+  ) => Promise<DocumentPage>;
   /** The current version, or `version`. */
   getDocument: (documentId: string, version?: number) => Promise<DocumentRead>;
   /** Saves a new version; `knowledge.conflict` if `ifVersion` is stale. */
@@ -278,14 +314,37 @@ export interface KnowledgeApi {
   history: (
     documentId: string,
     options?: HistoryOptions
-  ) => Promise<VersionSummary[]>;
+  ) => Promise<HistoryPage>;
   /** Saves an earlier version's text as a new version. */
   restoreVersion: (input: RestoreInput) => Promise<DocumentSummary>;
   /** A page of the documents that link to this one, in path order. */
   backlinks: (
     documentId: string,
     options?: ListDocumentsOptions
-  ) => Promise<Backlink[]>;
+  ) => Promise<BacklinkPage>;
+}
+
+/**
+ * One collection, as an App or agent holds it through a permission to read
+ * it: `await env.HANDBOOK.getDocument(id)`. It reads that collection only,
+ * and only while the person the App or agent acts for may read it too.
+ * Reading restricted data puts the chat, App or run it works in in
+ * restricted mode, before the data is returned.
+ */
+export interface CollectionReader {
+  /** A page of the collection's documents, in path order. */
+  listDocuments: (options?: ListDocumentsOptions) => Promise<DocumentPage>;
+  /** The current version, or `version`. */
+  getDocument: (documentId: string, version?: number) => Promise<DocumentRead>;
+  history: (
+    documentId: string,
+    options?: HistoryOptions
+  ) => Promise<HistoryPage>;
+  /** A page of the documents that link to this one, in path order. */
+  backlinks: (
+    documentId: string,
+    options?: ListDocumentsOptions
+  ) => Promise<BacklinkPage>;
 }
 
 /** Why a Knowledge call was refused. */

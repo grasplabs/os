@@ -48,6 +48,23 @@ export const memberRole = async (
   return role.success ? role.data : undefined;
 };
 
+/** The teams of the organization a person is in, read now, by name. */
+export const teamsOf = async (
+  database: D1Database,
+  userId: string
+): Promise<Identity["teams"]> =>
+  await drizzle(database)
+    .select({ id: teams.id, name: teams.name })
+    .from(teamMembers)
+    .innerJoin(teams, eq(teams.id, teamMembers.teamId))
+    .where(
+      and(
+        eq(teamMembers.userId, userId),
+        eq(teams.organizationId, organizationId)
+      )
+    )
+    .orderBy(teams.name);
+
 /**
  * Who a request comes from: the person behind its session cookie, with their
  * role and teams read now, from the database. Called on every request and
@@ -103,16 +120,6 @@ export const identify = async (
   if (!role) {
     return undefined;
   }
-  const memberOf = await db
-    .select({ id: teams.id, name: teams.name })
-    .from(teamMembers)
-    .innerJoin(teams, eq(teams.id, teamMembers.teamId))
-    .where(
-      and(
-        eq(teamMembers.userId, user.id),
-        eq(teams.organizationId, organizationId)
-      )
-    )
-    .orderBy(teams.name);
+  const memberOf = await teamsOf(env.DB, user.id);
   return { ...person, role, teams: memberOf, staff: false };
 };

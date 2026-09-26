@@ -5,6 +5,7 @@ import { handleRequest } from "./entry.ts";
 export { App } from "./app.ts";
 export { AuditLog } from "./audit-log.ts";
 export { ConnectionBinding } from "./bindings.ts";
+export { CollectionBinding } from "./knowledge/binding.ts";
 export { DynamicWorkflowBinding, WorkflowDispatcher } from "./workflows.ts";
 export { Workspace } from "./workspace.ts";
 
