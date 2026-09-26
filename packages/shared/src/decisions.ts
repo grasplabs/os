@@ -36,7 +36,11 @@ export const decisionErrors = defineErrorFamily({
     "A decision asks at most 50 people: ask a smaller team or a role with fewer people.",
 });
 
-/** The most people one decision asks, so asking stays one email each. */
+/**
+ * The most people one decision asks, so asking stays one email each. It
+ * counts everyone who may answer, the run's starter included when `from`
+ * names them.
+ */
 export const maxDeciders = 50;
 
 /** Where a decision stands; `closed` once its run ended while it was open. */

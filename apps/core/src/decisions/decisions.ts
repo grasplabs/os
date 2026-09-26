@@ -291,8 +291,8 @@ const mayAnswer = (
  * The people an open decision asks now, each with the decision's link:
  * the members who may answer it at this moment (`eligibleMembers`). An
  * answered or closed decision asks nobody, and nor does one past its
- * deadline. More than {@link maxDeciders}
- * is refused. Who was asked is audited: their IDs, never their emails.
+ * deadline. More than {@link maxDeciders} (everyone who may answer, the
+ * run's starter included) is refused. Who was asked is audited: their IDs, never their emails.
  * While decisions are switched off, nobody is asked: the run waits
  * before the step that asks (host.ts), and a call that got past that just
  * as the switch went is refused with `feature.disabled`, which the ask
