@@ -435,11 +435,11 @@ export const appWorkingFiles = sqliteTable(
  * Changes nobody makes alone (src/approvals.ts): each row asks for one, and
  * moves from `pending` once, in one conditional statement that also checks
  * who decides, in the same batch as the change and its audit event. A
- * `permission` row grants the requested permission `permission_id`; a
- * `param` row sets `param` of workflow `workflow_id` of App `app_id` from
- * `previous` (null: the code's default) to `value` (JSON), as App
- * version `version` declares it: approving it once another version is
- * current is refused. `approvers` names who may approve: `admins`, or
+ * `permission` row grants the requested permission `permission_id`. A
+ * `param` row is legacy: a change of `param` of workflow `workflow_id` of
+ * App `app_id` from `previous` to `value` (JSON), asked for at App version
+ * `version` when sensitive values needed approval. It is never listed or
+ * approved now, and changes nothing. `approvers` names who may approve: `admins`, or
  * `builders` (admins and builders); never `requested_by`, except the only
  * admin approving their own permission request as break-glass, which
  * `break_glass` records. `decision` is a nonce the deciding update sets,
@@ -485,9 +485,9 @@ export const approvals = sqliteTable(
 
 /**
  * The values people set for workflows' parameters, one per App, workflow
- * and parameter; a parameter without one has its code's default. A
- * sensitive one is set only by an approval (`approval_id`), whose
- * requester is `set_by`.
+ * and parameter; a parameter without one has its code's default. `set_by`
+ * set it directly. `approval_id` is legacy: set only by an approval from
+ * when sensitive values needed one, and cleared by the next set.
  */
 export const workflowParamValues = sqliteTable(
   "workflow_param_values",

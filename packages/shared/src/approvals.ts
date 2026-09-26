@@ -2,11 +2,12 @@ import { z } from "zod";
 
 import { defineErrorFamily } from "./errors.ts";
 
-// Changes the platform lets nobody make alone (threat model R4, R8, WF5):
-// granting an App or agent a permission, and changing a workflow's
-// sensitive parameter. Each is a request that does nothing until someone
-// other than the person who asked approves it; the approval and the change
-// it approves happen together, once.
+// Changes the platform lets nobody make alone (threat model R4, R8):
+// granting an App or agent a permission. Each is a request that does
+// nothing until someone other than the person who asked approves it; the
+// approval and the change it approves happen together, once. `param` rows
+// are legacy, from when a sensitive parameter's change needed approval:
+// they are never listed or approved, and change nothing.
 
 /** What an approval is for. */
 export const approvalKindSchema = z.enum(["permission", "param"]);
@@ -27,7 +28,8 @@ export type ApprovalStatus = z.infer<typeof approvalStatusSchema>;
 
 /**
  * Who may approve: admins (permission grants), or admins and builders
- * (sensitive values). Never the person who asked, and never Grasp staff.
+ * (parameter changes asked for before values were set directly). Never the
+ * person who asked, and never Grasp staff.
  */
 export const approversSchema = z.enum(["admins", "builders"]);
 export type Approvers = z.infer<typeof approversSchema>;
@@ -111,6 +113,4 @@ export const approvalErrors = defineErrorFamily({
   "approval.closed": "This approval was already decided or withdrawn.",
   "approval.stale":
     "What this approval asks for no longer applies: the person who asked has left or lost the role to ask, what it changes is gone, or the App version it was asked against is no longer current.",
-  "approval.conflict":
-    "A change of this value is already waiting for approval.",
 });

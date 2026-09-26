@@ -25,12 +25,13 @@ import type { MailAnswer } from "./mail-server.ts";
 import {
   endLiveRuns,
   finished,
+  leave,
   liveStatus,
   resumed,
   stepDone,
   stopped,
 } from "./runs.ts";
-import { openRpc, signedInWithRole } from "./sign-in.ts";
+import { openRpc, refusal, signedInWithRole } from "./sign-in.ts";
 import { connectDb, testBinding } from "./test-env.ts";
 
 // Workflows are code the agent writes, run for real: committed to an App,
@@ -314,31 +315,6 @@ const hitsOf = async (app: string, userId: string, name: string) =>
     [name]
   );
 
-/** Removes a person from the organization; returns how to bring them back. */
-const leave = async (userId: string): Promise<() => Promise<void>> => {
-  const membership = await env.DB.prepare(
-    "SELECT * FROM members WHERE user_id = ?"
-  )
-    .bind(userId)
-    .first<Record<string, string | number>>();
-  await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
-    .bind(userId)
-    .run();
-  return async () => {
-    await env.DB.prepare(
-      "INSERT INTO members (id, organization_id, user_id, role, created_at) VALUES (?, ?, ?, ?, ?)"
-    )
-      .bind(
-        membership?.id,
-        membership?.organization_id,
-        membership?.user_id,
-        membership?.role,
-        membership?.created_at
-      )
-      .run();
-  };
-};
-
 /** A run a trigger started, which acts for the App's owner. */
 const triggered = async (app: string, workflow: string) =>
   await startRun(env, {
@@ -368,12 +344,6 @@ const runEvents = async (run: string, last: string): Promise<string[]> =>
         .toSorted();
     },
     { timeout: 10_000, interval: 100 }
-  );
-
-const refusal = async (promise: Promise<unknown>): Promise<unknown> =>
-  await promise.then(
-    () => "ok",
-    (error: unknown) => error
   );
 
 const isFetcher = (value: unknown): value is Fetcher =>
@@ -999,7 +969,7 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
     // Written by hand, past the SDK: the host is the boundary, not the SDK.
     const rogue = {
       "workflows/rogue.ts": `export default {
-  metadata: { id: "rogue" },
+  metadata: { id: "rogue", params: [] },
   run: async (engine) => {
     await engine.do("$sneaky", {}, async () => "sneaked");
     // Steps the engine would refuse, which it fails the whole run for:

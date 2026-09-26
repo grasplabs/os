@@ -15,7 +15,7 @@ import { versionFiles } from "../apps.ts";
 import { runBindingsFor } from "../bindings.ts";
 import { requireActivePerson } from "../permissions.ts";
 import type { WorkContext } from "../restricted.ts";
-import { loadRun } from "./code.ts";
+import { declaredParams, loadRun } from "./code.ts";
 import type { Settled, StepError } from "./code.ts";
 import {
   coreStepPrefix,
@@ -26,6 +26,7 @@ import {
   watchedStep,
 } from "./host.ts";
 import type { FailedStep, HostedRun, RunStep } from "./host.ts";
+import { paramValues } from "./params.ts";
 import {
   actFor,
   appRecord,
@@ -53,6 +54,12 @@ export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 // nobody who has left, checked at every load and before every step: a
 // person's run fails, and a triggered run pauses until its App has an
 // owner again.
+//
+// A run's parameter values are the ones people set (params.ts), read as
+// the version it is pinned to declares them, never the current version:
+// so a stored value counts only where that version declares it of that
+// kind. The SDK records them in the run's first step, so a run keeps the
+// values it started with.
 
 /** What the dispatcher tags each run with (runs.ts). */
 const pinnedSchema = z.object({
@@ -223,11 +230,20 @@ const runWorkflow = async (
     await resumeRun(env, row);
     await actFor(env, row, authority.onBehalfOf);
     const run: HostedRun = { ...pinned.data, runId, authority, connections };
+    const files = await versionFiles(env, run.app, run.version);
+    // Read on every load, though only the run's first uses them: after
+    // that the SDK replays the values its `$params` step recorded.
+    const params = await paramValues(
+      env,
+      run.app,
+      run.workflow,
+      await declaredParams(env, run.app, run.version, run.workflow, files)
+    );
     const code = loadRun(env, {
       app: run.app,
       version: run.version,
       workflow: run.workflow,
-      files: await versionFiles(env, run.app, run.version),
+      files,
       env: bindings,
     });
     // Before every step, the person the run acts for must still be there.
@@ -247,9 +263,7 @@ const runWorkflow = async (
     });
     return await code.run(host, {
       runId,
-      // Parameter values people set come with the workflow view; until
-      // then every run uses the defaults in the code.
-      params: {},
+      params: Object.fromEntries(params),
       input: event.payload,
       connections: Object.keys(connections),
     });

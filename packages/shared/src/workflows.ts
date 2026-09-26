@@ -1,4 +1,6 @@
-import type { Approval, ParamValue } from "./approvals.ts";
+import { z } from "zod";
+
+import type { ParamValue } from "./approvals.ts";
 import { defineErrorFamily } from "./errors.ts";
 import type { AppId, RunId, WorkflowId } from "./ids.ts";
 import type { Json } from "./json.ts";
@@ -26,12 +28,50 @@ export const workflowErrors = defineErrorFamily({
     "The workflow has no such parameter in the App's current version.",
   "workflow.param_invalid": "That isn't a valid value for this parameter.",
   "workflow.param_conflict":
-    "The value changed hands while it was set: the App's current version changed, or an approval set it, which only another approval changes. Try again.",
+    "The App's current version changed while the value was set. Try again.",
   // What a step or run failed with when its error named no code of its
   // own: the audit log and failure reports carry these instead.
   "workflow.step_failed": "A step of the workflow failed.",
   "workflow.run_failed": "The workflow run failed.",
 });
+
+/**
+ * A parameter as a workflow's code declares it (the SDK's
+ * `ParamMetadata`), within the bounds core keeps and shows: the SDK
+ * refuses a definition outside them, so a version whose declarations core
+ * would refuse never passes its tests. Kinds, and whether a default fits
+ * its kind, are the SDK's to check (`paramValueSchemas`).
+ */
+export const paramDeclarationSchema = z.object({
+  name: z.string().regex(/^[A-Za-z_$][\w$]{0,63}$/u),
+  kind: z.string(),
+  label: z.string().max(200),
+  default: z.union([z.string().max(4096), z.number()]),
+  sensitive: z.boolean(),
+  currency: z.string().max(3).optional(),
+});
+
+/** Most parameters one workflow declares. */
+const maxParamDeclarations = 100;
+
+/**
+ * A workflow's parameter declarations, each as `item` has it: at most
+ * {@link maxParamDeclarations}, and each name once: with two declarations
+ * of one name, which one a read goes by would be anyone's guess.
+ */
+export const paramDeclarationsSchema = <
+  Item extends z.ZodType<{ name: string }>,
+>(
+  item: Item
+) =>
+  z
+    .array(item)
+    .max(maxParamDeclarations)
+    .refine(
+      (params) =>
+        new Set(params.map(({ name }) => name)).size === params.length,
+      { message: "Each name once" }
+    );
 
 /**
  * The idempotency key of a run's step, as the SDK hands it to the step
@@ -188,28 +228,26 @@ export interface WorkflowParam {
   /** `money`, `number`, `text`, `person`, `schedule`, `model` or `template`. */
   kind: string;
   label: string;
-  /** Changing it needs a second person's approval. */
+  /**
+   * Its value needs care where it's shown. It's set like any other, and,
+   * like any other, never goes in an audit event.
+   */
   sensitive: boolean;
   default: ParamValue;
   /** For money: its ISO 4217 currency; amounts are in its minor units. */
   currency?: string;
   /** The value people set; null while the code's default applies. */
   value: ParamValue | null;
-  /** A change of a sensitive value, waiting for a second person. */
-  pending: Approval | null;
 }
 
 /**
- * The values of workflows' parameters. Admins and builders. A sensitive
- * parameter changes only once someone else approves the change.
+ * The values of workflows' parameters. Admins and builders set them
+ * directly, sensitive or not, audited without the value.
  */
 export interface WorkflowParamsApi {
   /** A workflow's parameters, in the order its code declares them. */
   list: (app: string, workflow: string) => Promise<WorkflowParam[]>;
-  /**
-   * Sets a parameter's value: at once, or, for a sensitive one, as a
-   * change that waits for approval (`pending`).
-   */
+  /** Sets a parameter's value, audited without the value. */
   set: (
     app: string,
     workflow: string,
