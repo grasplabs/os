@@ -161,9 +161,13 @@ export const fakeGoogle = () => {
         if (found === undefined) {
           return json(notFound, 404);
         }
-        return query.get("alt") === "media"
-          ? new Response(contentOf(id, null))
-          : json(found);
+        if (query.get("alt") === "media") {
+          return new Response(contentOf(id, null));
+        }
+        // Google answers with the fields asked for: the drive check's only.
+        return json(
+          query.get("fields") === "driveId" ? { driveId: found.driveId } : found
+        );
       }
     ),
     route(

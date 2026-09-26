@@ -131,7 +131,9 @@ describe("a native connector", () => {
       );
     const first = await send();
     await expect(send()).resolves.toStrictEqual(first);
-    expect(api.sent.map(({ method }) => method)).toStrictEqual(["POST"]);
+    expect(
+      api.sent.map(({ method, body }) => ({ method, body }))
+    ).toStrictEqual([{ method: "POST", body: '{"subject":"Paid"}' }]);
   });
 
   it("that says its provider rate limited it frees its key, so a retry writes once", async () => {

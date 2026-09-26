@@ -1,4 +1,3 @@
-import { invalidCode } from "@grasp-os/connector-kit/connector";
 import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
@@ -227,7 +226,7 @@ describe("the Microsoft 365 connector's mail tools", () => {
           page: "$select=body",
         })
       )
-    ).resolves.toMatchObject({ error: { code: invalidCode } });
+    ).resolves.toMatchObject({ error: { code: "invalid" } });
   });
 
   it("search a folder, filter, but not both at once", async () => {
@@ -265,7 +264,7 @@ describe("the Microsoft 365 connector's mail tools", () => {
           unreadOnly: true,
         })
       )
-    ).resolves.toMatchObject({ error: { code: invalidCode } });
+    ).resolves.toMatchObject({ error: { code: "invalid" } });
     expect(graph.sent).toHaveLength(2);
   });
 
@@ -534,7 +533,7 @@ describe("the Microsoft 365 connector's calendar tools", () => {
       toolError(
         call(connection, "calendar.list", { ...range, end: range.start })
       )
-    ).resolves.toMatchObject({ error: { code: invalidCode } });
+    ).resolves.toMatchObject({ error: { code: "invalid" } });
   });
 
   it("get an event with its body and attendees", async () => {

@@ -105,10 +105,18 @@ describe("the audit log", () => {
     // As an earlier core signs it: without one.
     await callAs(appFor("user-anna"), call);
     expect(
-      events.map(({ actor, detail }) => ({ actor, detail }))
+      events.map(({ action, actor, detail }) => ({ action, actor, detail }))
     ).toMatchObject([
-      { actor: { type: "app", appId: "app-crm" }, detail: { appVersion: 3 } },
-      { actor: { type: "app", appId: "app-crm" } },
+      {
+        action: "connection.call",
+        actor: { type: "app", appId: "app-crm" },
+        detail: { action: "mail.list", appVersion: 3 },
+      },
+      {
+        action: "connection.call",
+        actor: { type: "app", appId: "app-crm" },
+        detail: { action: "mail.list" },
+      },
     ]);
     expect(events[1]?.detail).not.toHaveProperty("appVersion");
   });
