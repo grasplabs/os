@@ -1,4 +1,5 @@
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { actorOf, delegateActorOf } from "@grasp-os/shared/audit";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
   collectionSearchOptionsSchema,
@@ -13,7 +14,6 @@ import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
-import { actorOf, delegateActorOf } from "../audit.ts";
 import { derivedHmacKey } from "../derived-keys.ts";
 import { allowedCollections, recordRead } from "./access.ts";
 import type { Reader } from "./access.ts";

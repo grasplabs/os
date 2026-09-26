@@ -1,6 +1,7 @@
 import {
   auditProvenanceMaxItems,
   createAuditEvent,
+  delegateActorOf,
 } from "@grasp-os/shared/audit";
 import type {
   AuditActor,
@@ -12,7 +13,6 @@ import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import type { ConnectCall } from "@grasp-os/shared/connect";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 import { errorFields, log } from "@grasp-os/shared/log";
-import type { Authority } from "@grasp-os/shared/permissions";
 import { asc, inArray, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
@@ -194,15 +194,6 @@ const provenanceGroups = (ids: readonly string[]): string[][] => {
   return groups;
 };
 
-const actorOf = (authority: Authority): AuditActor =>
-  authority.subject.type === "agent"
-    ? {
-        type: "agent",
-        agentId: authority.subject.agentId,
-        onBehalfOf: authority.onBehalfOf,
-      }
-    : { type: "app", appId: authority.subject.appId, part: "server" };
-
 /**
  * Records one call: who made it (the platform, while its capability isn't
  * verified), on which connection, what it did and read, and how it ended.
@@ -219,7 +210,9 @@ export const auditCall = async (
   const { call, claims, sideEffect, outcome, reason } = record;
   const provenance = record.provenance ?? [];
   const actor: AuditActor =
-    claims === undefined ? { type: "system" } : actorOf(claims.authority);
+    claims === undefined
+      ? { type: "system" }
+      : delegateActorOf(claims.authority);
   const target =
     call === undefined
       ? undefined

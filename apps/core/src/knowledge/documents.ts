@@ -1,4 +1,5 @@
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
   documentTypeSchema,
@@ -29,7 +30,6 @@ import { alias } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
-import { actorOf } from "../audit.ts";
 import { isUniqueViolation } from "../db/d1.ts";
 import {
   collections,
