@@ -16,6 +16,7 @@ import { z } from "zod";
 import {
   allDayEvent,
   attachmentBody,
+  cancelledOccurrence,
   contentOf,
   draftId,
   eventDetail,
@@ -25,6 +26,8 @@ import {
   googleError,
   labelled,
   labels,
+  largeMessage,
+  largeMessageFull,
   messageFull,
   messageList,
   messageId,
@@ -91,7 +94,11 @@ export const fakeGoogle = () => {
       // Each read gives the attachments new IDs, as Gmail's do.
       const attachmentId = `ANGjdJ_${crypto.randomUUID().replaceAll("-", "")}`;
       attachmentIds.add(`${id}/${attachmentId}`);
-      return json(messageFull(mailbox, numberOf(id), attachmentId));
+      return json(
+        numberOf(id) === largeMessage
+          ? largeMessageFull(mailbox, attachmentId)
+          : messageFull(mailbox, numberOf(id), attachmentId)
+      );
     }),
     route(
       gmailHost,
@@ -138,12 +145,16 @@ export const fakeGoogle = () => {
       apisHost,
       "GET",
       `${calendars}/events/(?<id>[^/]+)`,
-      ({ calendar, id }) =>
-        json(
+      ({ calendar, id }) => {
+        if (id.includes("_")) {
+          return json(cancelledOccurrence(calendar));
+        }
+        return json(
           id.endsWith("3")
             ? allDayEvent(calendar)
             : eventDetail(calendar, numberOf(id))
-        )
+        );
+      }
     ),
     route(apisHost, "GET", String.raw`^/drive/v3/files`, ({ query }) =>
       json(

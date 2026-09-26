@@ -178,6 +178,51 @@ export const messageFull = (
   },
 });
 
+/**
+ * The number of the message whose body is too large for Gmail to send
+ * inline, and whose headers carry RFC 2047 encoded words.
+ */
+export const largeMessage = 4;
+
+/**
+ * Message `largeMessage` of `mailbox`, as `format=full` returns it: its
+ * text and HTML bodies as attachment IDs, without their data, and its
+ * subject and names encoded as mail clients send them: `Q` and `B` words,
+ * charsets in any case, a character split across two words, and a word in
+ * a charset nobody knows.
+ */
+export const largeMessageFull = (mailbox: string, attachmentId: string) => ({
+  ...messageMetadata(mailbox, largeMessage),
+  payload: {
+    partId: "",
+    mimeType: "multipart/alternative",
+    filename: "",
+    headers: [
+      header(
+        "Subject",
+        "Re: =?UTF-8?Q?Factuur_2026-0044_=E2=80=94_=E2=82?= =?utf-8?Q?=AC_1.250,00?="
+      ),
+      header(
+        "From",
+        "=?ISO-8859-1?Q?Andr=E9_M=FCller?= <andre@northwind.example.org>"
+      ),
+      header("To", "=?x-unknown?B?SGk=?= <jane@example.com>"),
+      header(
+        "Reply-To",
+        "=?UTF-8?B?Tm9vcmR3aW5kIELDvGNoZXI=?= <accounts@northwind.example.org>"
+      ),
+    ],
+    body: { size: 0 },
+    parts: ["text/plain", "text/html"].map((mimeType, index) => ({
+      partId: String(index),
+      mimeType,
+      filename: "",
+      headers: [header("Content-Type", `${mimeType}; charset="UTF-8"`)],
+      body: { attachmentId: `${attachmentId}${index}`, size: 3 * 1024 * 1024 },
+    })),
+  },
+});
+
 /** An attachment's content, as `GET .../attachments/{id}` returns it. */
 export const attachmentBody = {
   size: invoicePdf.byteLength,
@@ -258,6 +303,19 @@ export const allDayEvent = (calendar: string) => ({
   ...event(calendar, 3),
   start: { date: "2026-10-01" },
   end: { date: "2026-10-02" },
+});
+
+/**
+ * A cancelled occurrence of a recurring event, as `GET /events/{id}`
+ * returns one: no start or end, only the start it had.
+ */
+export const cancelledOccurrence = (calendar: string) => ({
+  kind: "calendar#event",
+  etag: '"3341784200000000"',
+  id: `${eventId(calendar, 1)}_20261006T090000Z`,
+  status: "cancelled",
+  recurringEventId: eventId(calendar, 1),
+  originalStartTime: { dateTime: "2026-10-06T09:00:00Z", timeZone: "UTC" },
 });
 
 /** File IDs, by what each is. */

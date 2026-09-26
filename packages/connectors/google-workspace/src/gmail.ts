@@ -25,6 +25,7 @@ import {
   addressesOf,
   attachmentsOf,
   bodyOf,
+  decodeHeader,
   headerOf,
   partSchema,
   rawMessage,
@@ -98,13 +99,14 @@ const summaryOf = (
   const headers = message.payload?.headers;
   const labelIds = message.labelIds ?? [];
   const [from] = addressesOf(headerOf(headers, "From"));
+  const subject = headerOf(headers, "Subject");
   return {
     mailbox,
     id: message.id,
     threadId: message.threadId ?? null,
     labelIds,
     internetMessageId: headerOf(headers, "Message-ID") ?? null,
-    subject: headerOf(headers, "Subject") ?? null,
+    subject: subject === undefined ? null : decodeHeader(subject),
     bodyPreview: message.snippet ?? null,
     from: from ?? null,
     to: addressesOf(headerOf(headers, "To")),
@@ -259,7 +261,7 @@ const fullMessage = async (mailbox: string, id: string) =>
 const getMessage = defineTool({
   name: "mail.get",
   description:
-    "Gets one message of a mailbox with its body, and its attachments' names, types and sizes (read one with mail.readAttachment).",
+    "Gets one message of a mailbox with its body, and its attachments' names, types and sizes (read one with mail.readAttachment). The body is null when the message has no text or HTML body Gmail sends inline.",
   input: z.strictObject({
     mailbox: mailboxSchema,
     message: idSchema,
@@ -286,10 +288,7 @@ const getMessage = defineTool({
       output: {
         message: {
           ...summaryOf(mailbox, message),
-          body: bodyOf(message.payload ?? undefined, bodyType ?? "text") ?? {
-            contentType: "text",
-            content: "",
-          },
+          body: bodyOf(message.payload ?? undefined, bodyType ?? "text"),
           bcc: addressesOf(headerOf(headers, "Bcc")),
           replyTo: addressesOf(headerOf(headers, "Reply-To")),
           attachments: attachmentsOf(message.payload ?? undefined).map(

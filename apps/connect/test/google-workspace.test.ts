@@ -18,6 +18,7 @@ import {
   holidayCalendar,
   htmlBody,
   invoices,
+  largeMessage,
   messageId,
   messagePageToken,
   otherDrive,
@@ -434,6 +435,45 @@ describe("the Google Workspace connector's Gmail tools", () => {
     });
   });
 
+  it("get a message whose body isn't inline with no body, and its encoded subject and names decoded", async () => {
+    const connection = await connected();
+    const input = {
+      mailbox: invoices,
+      message: messageId(invoices, largeMessage),
+    };
+    const [text, html] = await Promise.all([
+      outputOf(call(connection, "mail.get", input)),
+      outputOf(call(connection, "mail.get", { ...input, bodyType: "html" })),
+    ]);
+    expect({ text, html }).toMatchObject({
+      text: {
+        message: {
+          subject: "Re: Factuur 2026-0044 — € 1.250,00",
+          from: {
+            name: "André Müller",
+            address: "andre@northwind.example.org",
+          },
+          // A word in a charset nobody knows is left as it came.
+          to: [{ name: "=?x-unknown?B?SGk=?=", address: "jane@example.com" }],
+          replyTo: [
+            {
+              name: "Noordwind Bücher",
+              address: "accounts@northwind.example.org",
+            },
+          ],
+          body: null,
+          attachments: [],
+        },
+      },
+      html: { message: { body: null } },
+    });
+    // The body parts' attachment IDs aren't followed.
+    expect(paths()).toStrictEqual([
+      `${mailboxPath}/messages/${messageId(invoices, largeMessage)}`,
+      `${mailboxPath}/messages/${messageId(invoices, largeMessage)}`,
+    ]);
+  });
+
   it("read an attachment by its part, with the ID Gmail gives it on that read", async () => {
     const connection = await connected();
     const input = {
@@ -738,7 +778,7 @@ describe("the Google Workspace connector's Calendar tools", () => {
     ).resolves.toMatchObject({ error: { code: "invalid" } });
   });
 
-  it("get an event with its description and attendees, and an all-day one", async () => {
+  it("get an event with its description and attendees, an all-day one, and a cancelled occurrence", async () => {
     const connection = await connected();
     await expect(
       resultOf(
@@ -781,6 +821,24 @@ describe("the Google Workspace connector's Calendar tools", () => {
       )
     ).resolves.toMatchObject({
       event: { start: "2026-10-01", end: "2026-10-02", isAllDay: true },
+    });
+    // A cancelled occurrence has only the start it had, and no end.
+    await expect(
+      outputOf(
+        call(connection, "calendar.get", {
+          calendar: teamCalendar,
+          event: `${eventId(teamCalendar, 1)}_20261006T090000Z`,
+        })
+      )
+    ).resolves.toMatchObject({
+      event: {
+        start: "2026-10-06T09:00:00Z",
+        end: "",
+        isAllDay: false,
+        isCancelled: true,
+        recurringEventId: eventId(teamCalendar, 1),
+        attendees: [],
+      },
     });
     expect(paths()[0]).toBe(
       `${calendarPath}/events/${eventId(teamCalendar, 1)}`

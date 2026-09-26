@@ -156,6 +156,34 @@ export const attachments = {
   ],
 };
 
+/** Where the second page of a message's attachments starts. */
+export const attachmentsSkipToken = "a7e3c1d9-2f4b-4c8e-9d6a-1b5f3e7c2a90";
+
+/** The number of the message whose attachment list never ends. */
+export const endlessAttachments = 9;
+
+/**
+ * A page of message `n`'s attachments: one per page, two in all, or a next
+ * page every time for `endlessAttachments`. Graph's next link names the
+ * user its own way and repeats the query.
+ */
+export const attachmentPage = (
+  mailbox: string,
+  n: number,
+  skipToken: string | null
+) => {
+  const last = skipToken !== null && n !== endlessAttachments;
+  return {
+    "@odata.context": attachments["@odata.context"],
+    value: [attachments.value[skipToken === null ? 0 : 1]],
+    ...(last
+      ? {}
+      : {
+          "@odata.nextLink": `https://graph.microsoft.com/v1.0/users('${encodeURIComponent(mailbox)}')/messages('${messageId(mailbox, n)}')/attachments?%24select=id%2cname%2ccontentType%2csize%2cisInline&%24skiptoken=${attachmentsSkipToken}`,
+        }),
+  };
+};
+
 /** One attachment, with its content unless `bare`. */
 export const attachment = (id: string, bare: boolean) => {
   if (id === itemAttachmentId) {

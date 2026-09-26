@@ -61,8 +61,11 @@ const googleEvent = z.object({
   summary: z.string().nullish(),
   description: z.string().nullish(),
   location: z.string().nullish(),
-  start: googleTime,
-  end: googleTime,
+  // A cancelled occurrence of a recurring event, as calendar.get reads
+  // one, may have neither start nor end: only the start it had.
+  start: googleTime.nullish(),
+  end: googleTime.nullish(),
+  originalStartTime: googleTime.nullish(),
   organizer: googlePerson.nullish(),
   recurringEventId: z.string().nullish(),
   attendees: z
@@ -86,7 +89,10 @@ const summarySchema = z.strictObject({
   calendar: z.string(),
   id: z.string(),
   subject: z.string().nullable(),
-  /** A time in UTC, or a date for an all-day event. */
+  /**
+   * A time in UTC, or a date for an all-day event; empty when Google gave
+   * none (a cancelled occurrence's end).
+   */
   start: z.string(),
   end: z.string(),
   isAllDay: z.boolean(),
@@ -104,24 +110,35 @@ const personOf = (
   address: person.email ?? null,
 });
 
+type GoogleTime = z.infer<typeof googleTime>;
+
+/** A time, or a date for an all-day event, if Google gave either. */
+const timeOf = (time: GoogleTime | null | undefined): string | undefined =>
+  time?.dateTime ?? time?.date ?? undefined;
+
 const summaryOf = (
   calendar: string,
   event: GoogleEvent
-): z.infer<typeof summarySchema> => ({
-  calendar,
-  id: event.id,
-  subject: event.summary ?? null,
-  start: event.start.dateTime ?? event.start.date ?? "",
-  end: event.end.dateTime ?? event.end.date ?? "",
-  isAllDay:
-    typeof event.start.dateTime !== "string" &&
-    typeof event.start.date === "string",
-  isCancelled: event.status === "cancelled",
-  location: event.location ?? null,
-  organizer: event.organizer ? personOf(event.organizer) : null,
-  recurringEventId: event.recurringEventId ?? null,
-  webLink: event.htmlLink ?? null,
-});
+): z.infer<typeof summarySchema> => {
+  // Without a start, the start the occurrence had (a cancelled one's);
+  // without an end, none: empty, as the schema's strings allow.
+  const start =
+    timeOf(event.start) === undefined ? event.originalStartTime : event.start;
+  return {
+    calendar,
+    id: event.id,
+    subject: event.summary ?? null,
+    start: timeOf(start) ?? "",
+    end: timeOf(event.end) ?? "",
+    isAllDay:
+      typeof start?.dateTime !== "string" && typeof start?.date === "string",
+    isCancelled: event.status === "cancelled",
+    location: event.location ?? null,
+    organizer: event.organizer ? personOf(event.organizer) : null,
+    recurringEventId: event.recurringEventId ?? null,
+    webLink: event.htmlLink ?? null,
+  };
+};
 
 const eventPage = z.object({
   items: z.array(googleEvent).nullish(),

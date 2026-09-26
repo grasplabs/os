@@ -11,7 +11,7 @@ import { z } from "zod";
 
 import {
   attachment,
-  attachments,
+  attachmentPage,
   childrenPage,
   downloadUrl,
   draft,
@@ -80,7 +80,12 @@ const graphRoutes: ProviderRoute<Part>[] = [
           )
         );
   }),
-  route("GET", `${users}/messages/[^/]+/attachments`, () => json(attachments)),
+  route(
+    "GET",
+    `${users}/messages/(?<id>[^/]+)/attachments`,
+    ({ mailbox, id, query }) =>
+      json(attachmentPage(mailbox, numberOf(id), query.get("$skiptoken")))
+  ),
   route("GET", `${users}/mailFolders/(?<id>[^/]+)`, ({ id }) => {
     const folder = mailFolder(id);
     return folder === undefined ? json(notFound, 404) : json(folder);

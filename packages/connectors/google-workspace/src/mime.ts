@@ -6,7 +6,8 @@ import { z } from "zod";
 // header value is either an address the input schema checked (no line
 // breaks or controls) or encoded (RFC 2047), and the body is base64, so no
 // input can add a header or a MIME part. Gmail hands a stored message back
-// as a tree of MIME parts, which this reads the body and attachments from.
+// as a tree of MIME parts, which this reads the body and attachments from,
+// and its headers, whose encoded words (RFC 2047) this decodes.
 
 const crlf = "\r\n";
 
@@ -132,6 +133,65 @@ export const headerOf = (
   headers?.find((header) => header.name.toLowerCase() === name.toLowerCase())
     ?.value;
 
+/** One RFC 2047 encoded word: `=?charset?B|Q?text?=` (a `*lang` dropped). */
+const encodedWord =
+  /[=]\?(?<charset>[^?*\s]+)(?:\*[^?\s]*)?\?(?<encoding>[BbQq])\?(?<text>[^?\s]*)\?=/gu;
+
+/** Encoded words in a row, with only white space between them. */
+const encodedRun =
+  /[=]\?[^?\s]+\?[BbQq]\?[^?\s]*\?=(?:\s+=\?[^?\s]+\?[BbQq]\?[^?\s]*\?=)*/gu;
+
+const qEscape = /[=](?<hex>[\dA-Fa-f]{2})/gu;
+
+/** An encoded word's bytes: base64 (`B`), or quoted-printable-like (`Q`). */
+const wordBytes = (encoding: string, text: string): Uint8Array => {
+  if (encoding.toUpperCase() === "B") {
+    return fromBase64(text);
+  }
+  const latin = text
+    .replaceAll("_", " ")
+    .replaceAll(qEscape, (_match, hex: string) =>
+      String.fromCodePoint(Number.parseInt(hex, 16))
+    );
+  return Uint8Array.from(latin, (character) => character.codePointAt(0) ?? 0);
+};
+
+/**
+ * A header value with its RFC 2047 encoded words decoded
+ * (`=?UTF-8?Q?Caf=C3=A9?=` is `Café`), and the white space between two of
+ * them dropped, as the RFC has it. Adjacent words in one charset are
+ * decoded together, so a character split across two still reads. A run
+ * that doesn't decode (an unknown charset, bad base64) stays as it was.
+ * Text without encoded words comes back unchanged.
+ */
+export const decodeHeader = (value: string): string =>
+  value.replaceAll(encodedRun, (run) => {
+    try {
+      let text = "";
+      let charset = "";
+      let decoder: TextDecoder | undefined;
+      for (const { groups } of run.matchAll(encodedWord)) {
+        const wordCharset = (groups?.charset ?? "").toLowerCase();
+        if (decoder === undefined || wordCharset !== charset) {
+          // A new charset: what the last one holds must be whole.
+          text += decoder?.decode() ?? "";
+          decoder = new TextDecoder(wordCharset, {
+            fatal: true,
+            ignoreBOM: false,
+          });
+          charset = wordCharset;
+        }
+        text += decoder.decode(
+          wordBytes(groups?.encoding ?? "", groups?.text ?? ""),
+          { stream: true }
+        );
+      }
+      return text + (decoder?.decode() ?? "");
+    } catch {
+      return run;
+    }
+  });
+
 /** Every part of the tree, depth first, down to `maxDepth`. */
 const partsOf = (root: Part | undefined): Part[] => {
   const found: Part[] = [];
@@ -206,7 +266,10 @@ const textOf = (part: Part, data: string): string => {
 /**
  * A message's body: its text part, or its HTML part, whichever `prefer`
  * names if it has both; the other if it has only one; `null` if neither
- * (or the body is too large for Gmail to send inline).
+ * came inline. Gmail sends a body part too large to go inline with an
+ * `attachmentId` instead of its data. That part isn't fetched (one more
+ * request, for a body of any size): the body is then `null`, never text
+ * that looks like an empty message.
  */
 export const bodyOf = (
   payload: Part | undefined,
@@ -271,10 +334,12 @@ export const addressesOf = (value: string | undefined): Address[] =>
     if (named === null) {
       return { name: null, address: each };
     }
-    const name = (named.groups?.name ?? "")
-      .replace(/^"(?<inner>.*)"$/su, "$<inner>")
-      .replaceAll(/\\(?<escaped>.)/gu, "$<escaped>")
-      .trim();
+    const name = decodeHeader(
+      (named.groups?.name ?? "")
+        .replace(/^"(?<inner>.*)"$/su, "$<inner>")
+        .replaceAll(/\\(?<escaped>.)/gu, "$<escaped>")
+        .trim()
+    );
     const address = named.groups?.address?.trim() ?? "";
     return {
       name: name === "" ? null : name,
