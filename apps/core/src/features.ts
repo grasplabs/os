@@ -20,7 +20,8 @@ export type Feature =
   | "knowledge"
   | "connections"
   | "workflows"
-  | "screens";
+  | "screens"
+  | "members";
 
 // Names nobody knows (a flag since removed) are ignored, not an error.
 const featuresSchema = z.record(z.string(), z.boolean());

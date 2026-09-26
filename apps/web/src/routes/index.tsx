@@ -1,5 +1,5 @@
 import { Button } from "@grasp-os/ui/components/button";
-import { createFileRoute } from "@tanstack/react-router";
+import { createFileRoute, Link } from "@tanstack/react-router";
 
 import { loadCoreStatus, signIn, signOut } from "../core.ts";
 import { signInErrorMessage } from "../sign-in-errors.ts";
@@ -19,6 +19,11 @@ const Chat = () => {
             Signed in as {identity.name} ({identity.role}
             {identity.staff ? ", Grasp staff" : ""})
           </p>
+          {identity.role === "admin" && !identity.staff ? (
+            <Link className="text-sm underline" to="/members">
+              Members
+            </Link>
+          ) : null}
           <Button
             variant="outline"
             onClick={() => {

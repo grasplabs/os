@@ -9,7 +9,9 @@ import { signInConfig } from "./config.ts";
  * not found. Better Auth and its plugins bring many more (password sign-up,
  * registering SSO providers, creating organizations, invitations), and an
  * allowlist keeps each one off until we choose it. Role and team changes go
- * through the organization plugin's own permission checks (`auth.ts`).
+ * through the organization plugin's own permission checks (`auth.ts`);
+ * removing members goes through core's own API (`members.ts`), which also
+ * ends their sessions.
  */
 const allowedRoutes = new Set([
   "POST /sign-in/sso",
@@ -22,7 +24,6 @@ const allowedRoutes = new Set([
   "GET /organization/get-full-organization",
   "GET /organization/list-members",
   "POST /organization/update-member-role",
-  "POST /organization/remove-member",
   "GET /organization/list-teams",
   "POST /organization/create-team",
   "POST /organization/update-team",

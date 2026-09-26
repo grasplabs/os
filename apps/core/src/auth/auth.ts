@@ -17,6 +17,7 @@ import { defaultAc } from "better-auth/plugins/organization/access";
 import { eq, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
 import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
@@ -56,9 +57,12 @@ const staffSessionMs = hour;
 
 /**
  * Roles as the organization plugin checks them. Admins manage members and
- * teams; builders and users manage nothing here. Admin is also the plugin's
- * creator role, which the plugin allows everything it offers; the route
- * allowlist (`routes.ts`) decides what that is.
+ * teams (the plugin asks for `member: delete` to take someone off a team);
+ * builders and users manage nothing here. Removing someone from the
+ * organization isn't the plugin's: core does it (`members.ts`), ending
+ * their sessions too. Admin is also the plugin's creator role, which the
+ * plugin allows everything it offers; the route allowlist (`routes.ts`)
+ * decides what that is.
  */
 const roles = {
   admin: defaultAc.newRole({
@@ -91,17 +95,21 @@ const authLogger = {
 };
 
 /**
- * That an admin hasn't removed `userId` from the organization, as a SQL
- * condition. A removal is kept after the membership goes, so every read and
- * write of a membership checks it: nothing brings a removed person back.
+ * That an admin hasn't removed `userId` (an ID, or the column holding one)
+ * from the organization, as a SQL condition. A removal is kept after the
+ * membership goes, so every read and write of a membership checks it:
+ * nothing brings a removed person back.
  */
-export const notRemoved = (userId: string): SQL => sql`NOT EXISTS (
+export const notRemoved = (
+  userId: string | SQLiteColumn
+): SQL => sql`NOT EXISTS (
   SELECT 1 FROM ${memberRemovals}
   WHERE ${memberRemovals.organizationId} = ${organizationId}
     AND ${memberRemovals.userId} = ${userId}
 )`;
 
-const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
+/** Whether an admin removed `userId` from the organization. */
+export const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
   const row = await drizzle(env.DB).get<{ member: number }>(
     sql`SELECT ${notRemoved(userId)} AS member`
   );
@@ -116,9 +124,9 @@ const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
  * they are a member.
  *
  * The removal check is part of the insert itself, one statement: a removal
- * records its marker before it deletes the membership, so an insert racing
- * it either lands first and is deleted, or sees the marker and inserts
- * nothing.
+ * records its marker before it deletes the membership (`members.ts`), so
+ * an insert racing it either lands first and is deleted, or sees the
+ * marker and inserts nothing.
  */
 const ensureMember = async (
   env: Env,
@@ -220,15 +228,11 @@ const withoutTokens = <T extends Record<string, unknown>>(account: T) => ({
 /** The ids a member or team change names; nothing else is recorded. */
 const changeSchema = z.looseObject({
   memberId: z.string().optional(),
-  memberIdOrEmail: z.string().optional(),
   teamId: z.string().optional(),
   userId: z.string().optional(),
   role: z.union([z.string(), z.array(z.string())]).optional(),
 });
-const returnedSchema = z.looseObject({
-  id: z.string().optional(),
-  member: z.looseObject({ id: z.string(), userId: z.string() }).optional(),
-});
+const returnedSchema = z.looseObject({ id: z.string().optional() });
 
 type Change = z.infer<typeof changeSchema>;
 type Returned = z.infer<typeof returnedSchema>;
@@ -253,11 +257,6 @@ const auditedChanges: Record<
       previousRole: previousRole ?? null,
       role: [change.role ?? []].flat().join(","),
     },
-  }),
-  "/organization/remove-member": (_change, returned) => ({
-    action: "member.removed",
-    target: { type: "member", id: returned.member?.id ?? "unknown" },
-    detail: { userId: returned.member?.userId ?? null },
   }),
   "/organization/create-team": (_change, returned) => ({
     action: "team.created",
@@ -484,18 +483,6 @@ const createAuth = (
             if (!roleSchema.safeParse(newRole).success) {
               throw new APIError("BAD_REQUEST", { message: "Unknown role." });
             }
-          },
-          // Recorded before the membership goes, so signing in again can't
-          // bring it back even if the removal itself fails halfway.
-          beforeRemoveMember: async ({ member }) => {
-            await db
-              .insert(memberRemovals)
-              .values({
-                organizationId,
-                userId: member.userId,
-                removedAt: new Date(),
-              })
-              .onConflictDoNothing();
           },
         },
       }),

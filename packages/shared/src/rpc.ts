@@ -1,6 +1,7 @@
 import type { AppsApi } from "./apps.ts";
 import type { ConnectionsApi } from "./connect.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
+import type { MembersApi } from "./members.ts";
 import type { PermissionsApi } from "./permissions.ts";
 import type { Role } from "./roles.ts";
 import type { ScreensApi } from "./screens.ts";
@@ -51,6 +52,8 @@ export interface SessionApi {
   readonly workflows: WorkflowsApi;
   /** Apps' screens: their builds, their servers and their error logs. */
   readonly screens: ScreensApi;
+  /** The organization's members: offboarding. Admins only. */
+  readonly members: MembersApi;
 }
 
 /**

@@ -4,6 +4,7 @@ import {
   connectionCallbackPath,
   connectionErrors,
   connectionPersonSchema,
+  disconnectPersonalSchema,
   disconnectSchema,
   finishConnectionSchema,
   oauthProviderSchema,
@@ -541,9 +542,46 @@ const revoke = async (
 };
 
 /**
- * Disconnects: revokes the grant where the provider can, then deletes the
- * tokens and stops the connection, in one write with its event. A
- * personal connection only by its owner, a shared one only by an admin.
+ * Stops `connection`: revokes the grant where the provider can, then
+ * deletes the tokens and marks it disconnected, in one write with its
+ * event. Returns whether the provider revoked the grant.
+ */
+const stop = async (
+  env: Env,
+  person: ConnectionPerson,
+  connection: typeof connections.$inferSelect,
+  detail: Record<string, AuditDetailValue> = {}
+): Promise<boolean> => {
+  const db = drizzle(env.DB);
+  const revoked = await revoke(env, connection);
+  // Recorded only by the disconnect that stops it, if two run at once.
+  const stillConnected = sql`${connections.id} = ${connection.id} AND ${connections.status} <> 'disconnected'`;
+  await recordEventIf(
+    env,
+    event(person, "connection.disconnect", connection.id, {
+      ...detail,
+      provider: connection.provider,
+      scope: connection.scope,
+      outcome: "ok",
+      revoked,
+    }),
+    { from: connections, where: stillConnected },
+    [
+      db
+        .update(connections)
+        .set({ status: "disconnected", updatedAt: new Date() })
+        .where(stillConnected),
+      db
+        .delete(connectionTokens)
+        .where(eq(connectionTokens.connectionId, connection.id)),
+    ]
+  );
+  return revoked;
+};
+
+/**
+ * Disconnects: stops the connection (see `stop`). A personal connection
+ * only by its owner, a shared one only by an admin.
  */
 export const disconnect = async (
   env: Env,
@@ -582,29 +620,45 @@ export const disconnect = async (
   if (connection.status === "disconnected") {
     return { revoked: false };
   }
-  const revoked = await revoke(env, connection);
-  // Recorded only by the disconnect that stops it, if two run at once.
-  const stillConnected = sql`${connections.id} = ${connectionId} AND ${connections.status} <> 'disconnected'`;
-  await recordEventIf(
-    env,
-    event(person, "connection.disconnect", connectionId, {
-      provider: connection.provider,
-      scope: connection.scope,
-      outcome: "ok",
-      revoked,
-    }),
-    { from: connections, where: stillConnected },
-    [
-      db
-        .update(connections)
-        .set({ status: "disconnected", updatedAt: new Date() })
-        .where(stillConnected),
-      db
-        .delete(connectionTokens)
-        .where(eq(connectionTokens.connectionId, connectionId)),
-    ]
-  );
-  return { revoked };
+  return { revoked: await stop(env, person, connection) };
+};
+
+/**
+ * Disconnects every personal connection of `ownerUserId`, each as
+ * `disconnect` does, for the admin who removed them from the organization.
+ * Core calls it only then, and says who the admin is; staff are refused,
+ * as they are for connecting.
+ */
+export const disconnectPersonal = async (
+  env: Env,
+  request: unknown
+): Promise<{ disconnected: number }> => {
+  const { person, ownerUserId } = parse(disconnectPersonalSchema, request);
+  if (person.staff || !isAdmin(person.role)) {
+    await auditRefusal(env, person, "connection.disconnect", {
+      ownerUserId,
+      outcome: "refused",
+      reason: "role.forbidden",
+    });
+    throw roleErrors.create("role.forbidden");
+  }
+  const owned = await drizzle(env.DB)
+    .select()
+    .from(connections)
+    .where(
+      and(
+        eq(connections.scope, "personal"),
+        eq(connections.ownerUserId, ownerUserId),
+        ne(connections.status, "disconnected")
+      )
+    );
+  // One at a time: each revokes at its provider, and the first failure
+  // stops the rest, for a later try to pick up.
+  for (const connection of owned) {
+    // oxlint-disable-next-line no-await-in-loop -- one connection at a time
+    await stop(env, person, connection, { ownerUserId });
+  }
+  return { disconnected: owned.length };
 };
 
 /**

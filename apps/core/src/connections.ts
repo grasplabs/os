@@ -50,7 +50,7 @@ type StartRequest = Parameters<ConnectionsApi["start"]>[0];
  * Entra accounts by their object ID, which is the same for every app in
  * the tenant; Google ones by their subject.
  */
-const personOf = async (
+export const personOf = async (
   env: Env,
   { userId, role, staff, email }: Identity
 ): Promise<ConnectionPerson> => {

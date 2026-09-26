@@ -11,7 +11,6 @@ import {
   auditedDuring,
   callAuth,
   openRpc,
-  signIn,
   signedIn,
   signedInWithRole,
   whoami,
@@ -139,26 +138,7 @@ describe("roles and teams", () => {
   });
 });
 
-describe("removing a member", () => {
-  it("ends their access, and signing in again doesn't bring it back", async () => {
-    const admin = await signedInAs("admin");
-    const person = await signedInAs("user");
-    const memberIdOrEmail = await memberIdOf(admin.session, person.userId);
-    const removed = await callAuth(
-      "/organization/remove-member",
-      admin.session,
-      { memberIdOrEmail }
-    );
-    expect(removed.status).toBe(200);
-
-    const refusal = await whoami(person.session).catch(
-      (error: unknown) => error
-    );
-    expect(authErrors.codeOf(refusal)).toBe("auth.unauthenticated");
-    const again = await signIn(idp, "microsoft", person.person);
-    expect(again.session).toBeUndefined();
-  });
-
+describe("a removed member", () => {
   it("holds even when the membership row outlives it", async () => {
     const admin = await signedInAs("admin");
     // As if deleting the membership failed after the removal was recorded.
@@ -176,22 +156,6 @@ describe("removing a member", () => {
       name: "Still here",
     });
     expect(team.status).toBe(403);
-  });
-
-  it("is for admins only", async () => {
-    const admin = await signedInAs("admin");
-    const person = await signedInAs("user");
-    const other = await signedInAs("builder");
-    const memberIdOrEmail = await memberIdOf(admin.session, other.userId);
-    const refused = await callAuth(
-      "/organization/remove-member",
-      person.session,
-      { memberIdOrEmail }
-    );
-    expect(refused.ok).toBeFalsy();
-    await expect(whoami(other.session)).resolves.toMatchObject({
-      role: "builder",
-    });
   });
 });
 
@@ -227,9 +191,6 @@ describe("member and team changes", () => {
         data: { name: "Finance and legal" },
       });
       await callAuth("/organization/remove-team", admin.session, { teamId });
-      await callAuth("/organization/remove-member", admin.session, {
-        memberIdOrEmail: memberId,
-      });
     });
 
     const actor = { type: "person", userId: admin.userId };
@@ -266,12 +227,6 @@ describe("member and team changes", () => {
         actor,
         action: "team.deleted",
         target: { type: "team", id: teamId },
-      }),
-      expect.objectContaining({
-        actor,
-        action: "member.removed",
-        target: { type: "member", id: memberId },
-        detail: { userId: person.userId },
       }),
     ]);
   });

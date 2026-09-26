@@ -10,6 +10,7 @@ import type {
   ConnectionSummary,
   ConnectResult,
   Disconnect,
+  DisconnectPersonal,
   FinishConnection,
   StartConnection,
 } from "@grasp-os/shared/connect";
@@ -23,6 +24,7 @@ import type { CallDone, CallProgress } from "./call.ts";
 import {
   abandonFlow,
   disconnect,
+  disconnectPersonal,
   finishConnection,
   listConnections,
   purgeExpiredFlows,
@@ -149,6 +151,12 @@ export default class Connect
 
   async disconnect(request: Disconnect): Promise<{ revoked: boolean }> {
     return await disconnect(this.env, request);
+  }
+
+  async disconnectPersonal(
+    request: DisconnectPersonal
+  ): Promise<{ disconnected: number }> {
+    return await disconnectPersonal(this.env, request);
   }
 
   async abandonFlow(state: string): Promise<void> {
