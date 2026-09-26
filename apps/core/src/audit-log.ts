@@ -1,6 +1,7 @@
 import {
   auditEventMaxBytes,
   auditEventSchema,
+  createAuditEvent,
   isAuditEventTooLarge,
 } from "@grasp-os/shared/audit";
 import type { AuditActor, AuditEvent } from "@grasp-os/shared/audit";
@@ -9,6 +10,7 @@ import type {
   AuditPage,
   AuditRecord,
   ChainVerification,
+  FullVerification,
   ParsedAuditFilter,
 } from "@grasp-os/shared/audit-log";
 import { canonicalJson } from "@grasp-os/shared/json";
@@ -52,6 +54,10 @@ const searchScanMax = 5000;
 /** Most entries one archive moves out: a few MB, well within memory. */
 export const archiveStretch = 500;
 
+/** Where the object keeps the pass of verification under way, and the last. */
+const passKey = "verify.pass";
+const lastPassKey = "verify.last";
+
 /**
  * What an append did: events added to the chain, and those it already had.
  * A conflict is a duplicate whose content differs from the stored event: a
@@ -71,6 +77,12 @@ export interface ArchivedStretch {
   key: string;
 }
 
+/** The positions a search reads, both included; empty when `low > high`. */
+export interface SearchRange {
+  low: number;
+  high: number;
+}
+
 /** A search: which events, in which order, from which position on. */
 export interface SearchQuery {
   filter: ParsedAuditFilter;
@@ -78,12 +90,23 @@ export interface SearchQuery {
   /** The position to continue from, not included. */
   cursor?: number;
   limit: number;
+  /**
+   * The positions to read, worked out once for a search read over many
+   * calls (an export); by default from the filter's times, now.
+   */
+  range?: SearchRange;
 }
 
 /** An event ready to chain: its ID and canonical JSON. */
 interface Incoming {
   id: string;
   event: string;
+}
+
+/** A pass of verification under way: when it began, and how far it got. */
+interface Pass {
+  startedAt: string;
+  through: number;
 }
 
 /** Validates an event and gives its canonical JSON, within the size cap. */
@@ -147,21 +170,34 @@ const matchesWhat = (filter: ParsedAuditFilter, event: AuditEvent): boolean =>
     event.provenance.includes(filter.resource) ||
     event.detail.resource === filter.resource);
 
-/** Whether an event the log received at `receivedAt` matches the filter. */
+/**
+ * Whether an entry the log received at `receivedAt` matches the filter. An
+ * entry that isn't an event (`null`) has nothing else to match on, so it
+ * matches a filter by time alone: it is never hidden from an unfiltered
+ * search or export.
+ */
 const matches = (
   filter: ParsedAuditFilter,
   receivedAt: string,
-  event: AuditEvent
-): boolean =>
-  (filter.from === undefined || receivedAt >= filter.from) &&
-  (filter.to === undefined || receivedAt < filter.to) &&
-  matchesWho(filter, event) &&
-  matchesWhat(filter, event);
+  event: AuditEvent | null
+): boolean => {
+  const { from, to, ...fields } = filter;
+  const inTime =
+    (from === undefined || receivedAt >= from) &&
+    (to === undefined || receivedAt < to);
+  if (!inTime) {
+    return false;
+  }
+  if (event === null) {
+    return Object.values(fields).every((value) => value === undefined);
+  }
+  return matchesWho(filter, event) && matchesWhat(filter, event);
+};
 
-/** A stored event, or `undefined` if what's stored isn't one. */
-const parseStored = (event: string): AuditEvent | undefined => {
+/** A stored event, or `null` if what's stored isn't one. */
+const parseStored = (event: string): AuditEvent | null => {
   const parsed = auditEventSchema.safeParse(jsonVar(event));
-  return parsed.success ? parsed.data : undefined;
+  return parsed.success ? parsed.data : null;
 };
 
 /** One line of an archived stretch: an entry as the log held it. */
@@ -174,9 +210,26 @@ const archivedEntrySchema = z.strictObject({
   hash: z.string(),
 });
 
-/** Where a stretch of entries is archived: sorts by position. */
-const archiveKey = (from: number, through: number): string =>
-  `audit-log/${String(from).padStart(12, "0")}-${String(through).padStart(12, "0")}.ndjson`;
+/**
+ * The lines of an archived stretch's object, read as they arrive.
+ * @yields {string} each non-empty line
+ */
+const linesOf = async function* linesOf(
+  object: R2ObjectBody
+): AsyncGenerator<string> {
+  let rest = "";
+  for await (const chunk of object.body.pipeThrough(new TextDecoderStream())) {
+    const lines = `${rest}${chunk}`.split("\n");
+    rest = lines.pop() ?? "";
+    yield* lines.filter((line) => line !== "");
+  }
+  if (rest !== "") {
+    yield rest;
+  }
+};
+
+/** A position as archive keys write it, so keys sort by position. */
+const keyPosition = (seq: number): string => String(seq).padStart(12, "0");
 
 /** A row of `events` as raw SQL reads it, with the entry's field names. */
 type EntryRow = { [Key in keyof ChainEntry]: ChainEntry[Key] };
@@ -188,19 +241,32 @@ const entryColumns =
  * The client's audit log: one object per deployment, in the EU. Appends
  * events in the order they arrive, each linked to the one before it by a
  * hash chain (src/audit-chain.ts), and appends each event ID only once.
- * Nothing updates an entry.
+ * Nothing updates an entry. Receipt times never go backwards along the
+ * chain (a clock that does is held at the last time), so a time range is
+ * a range of positions.
  *
  * Retention moves the oldest entries out, a stretch at a time, to the
  * AUDIT_ARCHIVE bucket (in the EU), as they were stored, and keeps a record
  * of each stretch (`archives`): its positions, the hash before it and its
  * last hash. The chain carries on from there, so it stays one chain that
  * can be verified from its first entry to its last, archived stretches
- * included. The log searches only what it holds now, and dedupes only
- * against that: an event redelivered after its first delivery was archived
- * would be appended again (the queue gives up long before retention).
+ * included. Nothing deletes an archived object: deleting one (a purge
+ * outside the product) makes verification report its stretch as missing,
+ * until the log has a way to record a purge.
+ *
+ * The log searches only what it holds now, and dedupes only against that:
+ * an event redelivered after its first delivery was archived would be
+ * appended again (the queue gives up long before retention).
  */
 export class AuditLog extends DurableObject<Env> {
   readonly #db = drizzle(this.ctx.storage);
+  /**
+   * Steps of verification reading held entries right now. They read a page
+   * at a time, with hashing awaited in between, so an archive could
+   * otherwise delete entries a step is about to read; archives wait for the
+   * next run instead.
+   */
+  #verifying = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -217,38 +283,7 @@ export class AuditLog extends DurableObject<Env> {
     // Hashing is async, so another append could otherwise run between
     // reading the head and writing after it, and fork the chain.
     return await this.ctx.blockConcurrencyWhile(async () => {
-      const receivedAt = new Date().toISOString();
-      const head = this.head();
-      // Every event this call has seen, by ID: stored ones and new ones.
-      const known = new Map<string, string | undefined>();
-      const entries: (ChainEntry & { id: string })[] = [];
-      let conflicts = 0;
-      let prevHash = head.hash;
-      let { seq } = head;
-      for (const { id, event } of incoming) {
-        if (!known.has(id)) {
-          known.set(id, this.#stored(id));
-        }
-        const existing = known.get(id);
-        if (existing === undefined) {
-          known.set(id, event);
-          seq += 1;
-          const link = {
-            version: chainVersion,
-            seq,
-            prevHash,
-            receivedAt,
-            event,
-          };
-          // Each hash needs the one before it.
-          // oxlint-disable-next-line no-await-in-loop
-          prevHash = await chainHash(link);
-          entries.push({ ...link, id, hash: prevHash });
-        } else if (existing !== event) {
-          conflicts += 1;
-          log.warn("audit.conflicting_duplicate", { eventId: id });
-        }
-      }
+      const { entries, conflicts } = await this.#link(incoming);
       this.#db.transaction((tx) => {
         for (const entry of entries) {
           tx.insert(events).values(entry).run();
@@ -272,27 +307,52 @@ export class AuditLog extends DurableObject<Env> {
    * the first entry while there is none.
    */
   head(): ChainLink {
-    const row = this.#db
-      .select({ seq: events.seq, hash: events.hash })
-      .from(events)
-      .orderBy(desc(events.seq))
-      .limit(1)
-      .get();
-    return row ?? this.#lastArchived() ?? chainOrigin;
+    const { seq, hash } = this.#tail();
+    return { seq, hash };
+  }
+
+  /**
+   * The positions that hold the entries the log received in the filter's
+   * times, found with the index on receipt time, as times never go
+   * backwards along the chain.
+   */
+  range(filter: ParsedAuditFilter): SearchRange {
+    const bound = (query: string, ...params: string[]): number | undefined =>
+      this.ctx.storage.sql.exec<{ seq: number }>(query, ...params).toArray()[0]
+        ?.seq;
+    const low =
+      filter.from === undefined
+        ? bound("SELECT seq FROM events ORDER BY seq LIMIT 1")
+        : bound(
+            "SELECT seq FROM events WHERE received_at >= ? ORDER BY received_at, seq LIMIT 1",
+            filter.from
+          );
+    const high =
+      filter.to === undefined
+        ? bound("SELECT seq FROM events ORDER BY seq DESC LIMIT 1")
+        : bound(
+            "SELECT seq FROM events WHERE received_at < ? ORDER BY received_at DESC, seq DESC LIMIT 1",
+            filter.to
+          );
+    // Nothing in range reads as an empty one.
+    return low === undefined || high === undefined
+      ? { low: 1, high: 0 }
+      : { low, high };
   }
 
   /**
    * The events that match the filter, in the order asked for, from after
    * `cursor`. Reads at most {@link searchScanMax} entries: `next` says
-   * where to carry on, or is `null` when nothing is left.
+   * where to carry on, or is `null` when nothing is left. `null` instead of
+   * a page when retention has archived where the search would read next.
    */
   async search({
     filter,
     order,
     cursor,
     limit,
-  }: SearchQuery): Promise<AuditPage> {
-    const range = this.#range(filter);
+    range = this.range(filter),
+  }: SearchQuery): Promise<AuditPage | null> {
     const newest = order === "newest";
     const low =
       !newest && cursor !== undefined
@@ -305,7 +365,11 @@ export class AuditLog extends DurableObject<Env> {
     if (low > high) {
       return { records: [], next: null };
     }
-    const matched: { entry: EntryRow; event: AuditEvent }[] = [];
+    const [oldest] = this.#page(0, 1);
+    if (oldest === undefined || (newest ? high : low) < oldest.seq) {
+      return null;
+    }
+    const matched: { entry: EntryRow; event: AuditEvent | null }[] = [];
     // Hashes read on the way, so most links are checked without a lookup.
     const hashes = new Map<number, string>();
     let last: number | undefined;
@@ -319,9 +383,7 @@ export class AuditLog extends DurableObject<Env> {
       last = entry.seq;
       hashes.set(entry.seq, entry.hash);
       const event = parseStored(entry.event);
-      if (event === undefined) {
-        log.warn("audit.unreadable", { seq: entry.seq });
-      } else if (matches(filter, entry.receivedAt, event)) {
+      if (matches(filter, entry.receivedAt, event)) {
         matched.push({ entry, event });
         if (matched.length === limit) {
           break;
@@ -341,13 +403,12 @@ export class AuditLog extends DurableObject<Env> {
    * Checks the chain from after position `after`, from the hash the log
    * holds there: one archived stretch, or up to {@link verifyStretch} of
    * the entries it holds. Reports how far it got, and whether that's the
-   * head, or the first position where the chain breaks.
+   * head, or the first position where the chain breaks. Steps that follow
+   * on from one another from position 0 make a pass; the last pass to end
+   * is kept (`lastFullVerification`).
    */
   async verify(after = 0): Promise<ChainVerification> {
     const head = this.head();
-    if (after >= head.seq) {
-      return { ok: true, through: head.seq, head: head.hash, done: true };
-    }
     const archived = this.#db
       .select()
       .from(archives)
@@ -355,32 +416,53 @@ export class AuditLog extends DurableObject<Env> {
       .orderBy(asc(archives.firstSeq))
       .limit(1)
       .get();
-    const result =
-      archived !== undefined && archived.firstSeq <= after + 1
-        ? await this.#verifyArchived(archived)
-        : await this.#verifyHeld(after);
-    return result.ok ? { ...result, done: result.through >= head.seq } : result;
+    let result: StretchVerification;
+    if (after >= head.seq) {
+      result = { ok: true, through: head.seq, head: head.hash };
+    } else if (archived !== undefined && archived.firstSeq <= after + 1) {
+      result = await this.#verifyArchived(archived);
+    } else {
+      result = await this.#verifyHeld(after);
+    }
+    const step: ChainVerification = result.ok
+      ? { ...result, done: result.through >= head.seq }
+      : result;
+    this.#recordPass(after, step);
+    return step;
+  }
+
+  /** The last full pass of verification, if one has ended. */
+  lastFullVerification(): FullVerification | null {
+    return this.ctx.storage.kv.get<FullVerification>(lastPassKey) ?? null;
   }
 
   /**
    * Moves the oldest entries the log received before `cutoff` out to the
    * archive: at most {@link archiveStretch}, and only a stretch that
    * verifies, so a break stays where it can be found. Writes the stretch
-   * first, then records it and deletes its entries in one transaction: an
-   * archive cut short leaves the entries in place, and the next one writes
-   * the same object again.
+   * first, to an object only this log writes and never overwrites, then
+   * records it, deletes its entries and appends `audit.archived` in one
+   * transaction: an archive cut short leaves the entries in place, and the
+   * next one finds the same object already written.
    */
-  async archive(cutoff: string): Promise<ArchivedStretch | null> {
-    const oldest = this.#page(0, archiveStretch);
-    // Only the oldest entries, without gaps: up to the first one to keep.
-    const kept = oldest.findIndex(({ receivedAt }) => receivedAt >= cutoff);
-    const expired = kept === -1 ? oldest : oldest.slice(0, kept);
-    const first = expired.at(0);
-    const last = expired.at(-1);
-    if (first === undefined || last === undefined) {
+  async archive(
+    cutoff: string,
+    retentionDays: number
+  ): Promise<ArchivedStretch | null> {
+    const [oldest] = this.#page(0, 1);
+    if (oldest === undefined || oldest.receivedAt >= cutoff) {
       return null;
     }
+    const page = this.#page(0, archiveStretch);
+    // Only the oldest entries, without gaps: up to the first one to keep.
+    const kept = page.findIndex(({ receivedAt }) => receivedAt >= cutoff);
+    const expired = kept === -1 ? page : page.slice(0, kept);
+    const first = expired.at(0);
+    const last = expired.at(-1);
     const start = this.#lastArchived() ?? chainOrigin;
+    if (first === undefined || last === undefined || this.#verifying > 0) {
+      return null;
+    }
     const checked = await verifyChain(expired, start);
     if (!checked.ok) {
       log.error("audit.archive_refused", {
@@ -389,33 +471,186 @@ export class AuditLog extends DurableObject<Env> {
       });
       return null;
     }
-    const key = archiveKey(first.seq, last.seq);
-    const lines = expired.map((entry) => `${JSON.stringify(entry)}\n`);
-    await this.env.AUDIT_ARCHIVE.put(key, lines.join(""), {
-      httpMetadata: { contentType: "application/x-ndjson" },
-    });
-    const recorded = this.#db.transaction((tx) => {
-      // Another archive ran while this one wrote: it moved these already.
-      if ((this.#lastArchived()?.seq ?? 0) !== start.seq) {
+    const key = this.#archiveKey(first.seq, last.seq);
+    if (!(await this.#write(key, expired))) {
+      return null;
+    }
+    const archivedEvent = prepare(
+      createAuditEvent(
+        {
+          actor: { type: "system" },
+          action: "audit.archived",
+          detail: { from: first.seq, through: last.seq, key, retentionDays },
+        },
+        "core"
+      )
+    );
+    // Linking the event needs the head, as an append does.
+    const recorded = await this.ctx.blockConcurrencyWhile(async () => {
+      // Another archive moved these meanwhile, or a step is reading them.
+      if (
+        (this.#lastArchived()?.seq ?? 0) !== start.seq ||
+        this.#verifying > 0
+      ) {
         return false;
       }
-      tx.insert(archives)
-        .values({
-          firstSeq: first.seq,
-          lastSeq: last.seq,
-          prevHash: start.hash,
-          lastHash: last.hash,
-          lastReceivedAt: last.receivedAt,
-          key,
-          archivedAt: new Date().toISOString(),
-        })
-        .run();
-      tx.delete(events)
-        .where(between(events.seq, first.seq, last.seq))
-        .run();
+      const { entries } = await this.#link([archivedEvent]);
+      this.#db.transaction((tx) => {
+        tx.insert(archives)
+          .values({
+            firstSeq: first.seq,
+            lastSeq: last.seq,
+            prevHash: start.hash,
+            lastHash: last.hash,
+            lastReceivedAt: last.receivedAt,
+            key,
+            archivedAt: new Date().toISOString(),
+          })
+          .run();
+        tx.delete(events)
+          .where(between(events.seq, first.seq, last.seq))
+          .run();
+        for (const entry of entries) {
+          tx.insert(events).values(entry).run();
+        }
+      });
       return true;
     });
     return recorded ? { from: first.seq, through: last.seq, key } : null;
+  }
+
+  /**
+   * Links events onto the head, each one after the last, skipping IDs the
+   * log already holds. Receipt times never go backwards: a clock behind the
+   * head's time is held at it. Call only while nothing else can append.
+   */
+  async #link(
+    incoming: readonly Incoming[]
+  ): Promise<{ entries: (ChainEntry & { id: string })[]; conflicts: number }> {
+    const tail = this.#tail();
+    const now = new Date().toISOString();
+    const receivedAt = now > tail.receivedAt ? now : tail.receivedAt;
+    // Every event this call has seen, by ID: stored ones and new ones.
+    const known = new Map<string, string | undefined>();
+    const entries: (ChainEntry & { id: string })[] = [];
+    let conflicts = 0;
+    let prevHash = tail.hash;
+    let { seq } = tail;
+    for (const { id, event } of incoming) {
+      if (!known.has(id)) {
+        known.set(id, this.#stored(id));
+      }
+      const existing = known.get(id);
+      if (existing === undefined) {
+        known.set(id, event);
+        seq += 1;
+        const link = {
+          version: chainVersion,
+          seq,
+          prevHash,
+          receivedAt,
+          event,
+        };
+        // Each hash needs the one before it.
+        // oxlint-disable-next-line no-await-in-loop
+        prevHash = await chainHash(link);
+        entries.push({ ...link, id, hash: prevHash });
+      } else if (existing !== event) {
+        conflicts += 1;
+        log.warn("audit.conflicting_duplicate", { eventId: id });
+      }
+    }
+    return { entries, conflicts };
+  }
+
+  /** The last entry, held or archived: its position, hash and receipt time. */
+  #tail(): ChainLink & { receivedAt: string } {
+    const row = this.#db
+      .select({
+        seq: events.seq,
+        hash: events.hash,
+        receivedAt: events.receivedAt,
+      })
+      .from(events)
+      .orderBy(desc(events.seq))
+      .limit(1)
+      .get();
+    const archived = this.#db
+      .select({
+        seq: archives.lastSeq,
+        hash: archives.lastHash,
+        receivedAt: archives.lastReceivedAt,
+      })
+      .from(archives)
+      .orderBy(desc(archives.lastSeq))
+      .limit(1)
+      .get();
+    return row ?? archived ?? { ...chainOrigin, receivedAt: "" };
+  }
+
+  /**
+   * Where a stretch is archived: under this object's own ID, so a log
+   * created again, or restored, never writes over another's stretches.
+   * Sorts by position.
+   */
+  #archiveKey(from: number, through: number): string {
+    return `audit-log/${this.ctx.id.toString()}/${keyPosition(from)}-${keyPosition(through)}.ndjson`;
+  }
+
+  /**
+   * Writes a stretch's object, only if there is none yet. One already there
+   * is accepted only with exactly these bytes: an earlier archive of the
+   * same stretch that stopped before recording it. Anything else is
+   * refused, and the entries stay where they are.
+   */
+  async #write(key: string, stretch: readonly ChainEntry[]): Promise<boolean> {
+    const body = stretch.map((entry) => `${JSON.stringify(entry)}\n`).join("");
+    const written = await this.env.AUDIT_ARCHIVE.put(key, body, {
+      onlyIf: { etagDoesNotMatch: "*" },
+      httpMetadata: { contentType: "application/x-ndjson" },
+    });
+    if (written !== null) {
+      return true;
+    }
+    const existing = await this.env.AUDIT_ARCHIVE.get(key);
+    const text = existing === null ? undefined : await existing.text();
+    if (text === body) {
+      return true;
+    }
+    log.error("audit.archive_conflict", { key });
+    return false;
+  }
+
+  /**
+   * Keeps track of a pass of verification: a step from position 0 starts
+   * one, a step from where it got to carries it on, and the step that ends
+   * it (at the head, or at a break) keeps its result.
+   */
+  #recordPass(after: number, step: ChainVerification): void {
+    const now = new Date().toISOString();
+    const pass: Pass | undefined =
+      after === 0
+        ? { startedAt: now, through: 0 }
+        : this.ctx.storage.kv.get<Pass>(passKey);
+    if (pass?.through !== after) {
+      return;
+    }
+    if (step.ok && !step.done) {
+      this.ctx.storage.kv.put(passKey, { ...pass, through: step.through });
+      return;
+    }
+    const { startedAt } = pass;
+    const last: FullVerification = step.ok
+      ? {
+          startedAt,
+          finishedAt: now,
+          ok: true,
+          through: step.through,
+          head: step.head,
+        }
+      : { startedAt, finishedAt: now, ...step };
+    this.ctx.storage.kv.put(lastPassKey, last);
+    this.ctx.storage.kv.delete(passKey);
   }
 
   /** The last archived position and its hash, if anything is archived. */
@@ -448,47 +683,29 @@ export class AuditLog extends DurableObject<Env> {
     );
   }
 
-  /**
-   * The positions a search reads, from the filter's times: every row with a
-   * time in range lies between them, whatever order the times are in.
-   */
-  #range(filter: ParsedAuditFilter): { low: number; high: number } {
-    const bound = (query: string, ...params: string[]): number | null =>
-      this.ctx.storage.sql.exec<{ seq: number | null }>(query, ...params).one()
-        .seq;
-    const low =
-      filter.from === undefined
-        ? bound("SELECT min(seq) AS seq FROM events")
-        : bound(
-            "SELECT min(seq) AS seq FROM events WHERE received_at >= ?",
-            filter.from
-          );
-    const high =
-      filter.to === undefined
-        ? bound("SELECT max(seq) AS seq FROM events")
-        : bound(
-            "SELECT max(seq) AS seq FROM events WHERE received_at < ?",
-            filter.to
-          );
-    // Nothing in range reads as an empty one.
-    return low === null || high === null ? { low: 1, high: 0 } : { low, high };
-  }
-
   /** An entry as a search returns it, checked against the chain. */
   async #record(
     entry: EntryRow,
-    event: AuditEvent,
+    event: AuditEvent | null,
     hashes: ReadonlyMap<number, string>
   ): Promise<AuditRecord> {
     const previous = hashes.get(entry.seq - 1) ?? this.#hashAt(entry.seq - 1);
     const verified =
+      event !== null &&
       entry.prevHash === previous &&
-      // The event as returned is exactly what was hashed.
-      canonicalJson(event) === entry.event &&
       (await hashMatches(entry));
     const { seq, receivedAt, version, prevHash, hash } = entry;
-    const type = auditEventTypeOf(event);
-    return { seq, receivedAt, event, type, version, prevHash, hash, verified };
+    return {
+      seq,
+      receivedAt,
+      eventJson: entry.event,
+      event,
+      type: event === null ? null : auditEventTypeOf(event),
+      version,
+      prevHash,
+      hash,
+      verified,
+    };
   }
 
   /** Verifies entries the log holds, from after `after`. */
@@ -497,16 +714,22 @@ export class AuditLog extends DurableObject<Env> {
     if (hash === undefined) {
       return { ok: false, brokenAt: after, reason: "missing" };
     }
-    return await verifyChain(this.#stretch(after, verifyStretch), {
-      seq: after,
-      hash,
-    });
+    this.#verifying += 1;
+    try {
+      return await verifyChain(this.#stretch(after, verifyStretch), {
+        seq: after,
+        hash,
+      });
+    } finally {
+      this.#verifying -= 1;
+    }
   }
 
   /**
    * Verifies an archived stretch: that it links to the stretch before it,
    * and that its object holds the entries from its first position to its
-   * last, chained from its first hash to its last.
+   * last, chained from its first hash to its last. Reads the object as it
+   * arrives.
    */
   async #verifyArchived(
     archived: typeof archives.$inferSelect
@@ -519,22 +742,29 @@ export class AuditLog extends DurableObject<Env> {
     if (object === null) {
       return { ok: false, brokenAt: firstSeq, reason: "missing" };
     }
-    const text = await object.text();
-    const lines = text.split("\n").filter(Boolean);
-    const entries: ChainEntry[] = [];
-    for (const [index, line] of lines.entries()) {
-      const parsed = archivedEntrySchema.safeParse(jsonVar(line));
-      if (!parsed.success) {
-        return { ok: false, brokenAt: firstSeq + index, reason: "altered" };
+    // The position of a line that isn't an entry, where reading stopped.
+    let unreadable: number | undefined;
+    const entries = async function* entries(): AsyncGenerator<ChainEntry> {
+      let seq = firstSeq;
+      for await (const line of linesOf(object)) {
+        const parsed = archivedEntrySchema.safeParse(jsonVar(line));
+        if (!parsed.success) {
+          unreadable = seq;
+          return;
+        }
+        yield parsed.data;
+        seq += 1;
       }
-      entries.push(parsed.data);
-    }
-    const result = await verifyChain(entries, {
+    };
+    const result = await verifyChain(entries(), {
       seq: firstSeq - 1,
       hash: prevHash,
     });
     if (!result.ok) {
       return result;
+    }
+    if (unreadable !== undefined) {
+      return { ok: false, brokenAt: unreadable, reason: "altered" };
     }
     if (result.through < lastSeq) {
       return { ok: false, brokenAt: result.through + 1, reason: "missing" };

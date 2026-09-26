@@ -7,6 +7,7 @@ import type {
 } from "@grasp-os/shared/audit-log";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Role } from "@grasp-os/shared/roles";
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
@@ -43,7 +44,7 @@ const logged = async (...events: AuditEvent[]): Promise<AuditEvent[]> => {
 };
 
 const idsOf = (records: readonly AuditRecord[]) =>
-  records.map(({ event: { id } }) => id);
+  records.map((record) => record.event?.id);
 
 /** Every record a search finds, following its pages. */
 const searchAll = async (api: Api, filter: AuditFilter) => {
@@ -80,15 +81,31 @@ const exportSchema = z.object({
       prevHash: z.string(),
       hash: z.string(),
       verified: z.boolean(),
-      event: auditEventSchema,
+      eventJson: z.string(),
     })
   ),
-  verification: z.object({
+  recordCheck: z.object({
     ok: z.boolean(),
     records: z.int(),
     unverified: z.array(z.int()),
   }),
+  lastFullVerification: z.looseObject({ ok: z.boolean() }).nullable(),
 });
+
+/** The ID of an exported record's event, read from its stored bytes. */
+const exportedId = ({ eventJson }: { eventJson: string }) =>
+  auditEventSchema.parse(JSON.parse(eventJson)).id;
+
+/** Verifies the whole chain a step at a time, as an admin does. */
+const verifyAll = async (api: Api) => {
+  let result = await api.audit.verify();
+  while (result.ok && !result.done) {
+    // Each step starts where the one before it stopped.
+    // oxlint-disable-next-line no-await-in-loop
+    result = await api.audit.verify(result.through);
+  }
+  return result;
+};
 
 /** The live chain's hash at each position the log holds. */
 const liveHashes = async (): Promise<Map<number, string>> => {
@@ -263,29 +280,75 @@ describe("audit log export", () => {
     const document = exportSchema.parse(
       JSON.parse(await exported(api, filter, "json"))
     );
-    expect(document.records.map(({ event: { id } }) => id)).toStrictEqual([
+    expect(document.records.map(exportedId)).toStrictEqual([
       wrote?.id,
       read?.id,
       ran?.id,
     ]);
-    expect(document.verification).toStrictEqual({
+    expect(document.recordCheck).toStrictEqual({
       ok: true,
       records: 3,
       unverified: [],
     });
-    // Each record's hash is what its own fields hash to, and what the live
-    // chain holds at its position.
+    // Each record's hash is what its own fields hash to, its event taken
+    // byte for byte as exported, and what the live chain holds there.
     const live = await liveHashes();
-    for (const { event: exportedEvent, ...record } of document.records) {
+    for (const { eventJson, ...record } of document.records) {
       // oxlint-disable-next-line no-await-in-loop
-      const hash = await chainHash({
-        ...record,
-        event: canonicalJson(exportedEvent),
-      });
+      const hash = await chainHash({ ...record, event: eventJson });
       expect(hash).toBe(record.hash);
       expect(live.get(record.seq)).toBe(record.hash);
     }
-    await expect(api.audit.verify()).resolves.toMatchObject({ ok: true });
+  });
+
+  it("exports events as they were stored, whatever today's schema adds", async () => {
+    const { api } = await signedInApi(idp, "admin");
+    const targetId = `older-${unique()}`;
+    // As a release before `provenance` and `detail` had defaults stored it.
+    const {
+      provenance: _p,
+      detail: _d,
+      ...older
+    } = event({
+      target: { type: "doc", id: targetId },
+    });
+    const stored = canonicalJson(older);
+    await runInDurableObject(auditLog(env), async (instance, state) => {
+      const head = instance.head();
+      const entry = {
+        version: 1,
+        seq: head.seq + 1,
+        prevHash: head.hash,
+        receivedAt: new Date().toISOString(),
+        event: stored,
+      };
+      state.storage.sql.exec(
+        "INSERT INTO events (seq, id, version, received_at, event, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        entry.seq,
+        older.id,
+        entry.version,
+        entry.receivedAt,
+        stored,
+        entry.prevHash,
+        await chainHash(entry)
+      );
+    });
+
+    const document = exportSchema.parse(
+      JSON.parse(await exported(api, { targetId }, "json"))
+    );
+    expect(document.records).toMatchObject([
+      { eventJson: stored, verified: true },
+    ]);
+  });
+
+  it("reports the last full verification with the export", async () => {
+    const { api } = await signedInApi(idp, "admin");
+    await expect(verifyAll(api)).resolves.toMatchObject({ ok: true });
+    const document = exportSchema.parse(
+      JSON.parse(await exported(api, { targetId: `none-${unique()}` }, "json"))
+    );
+    expect(document.lastFullVerification).toMatchObject({ ok: true });
   });
 
   it("exports an empty result as a document with no records", async () => {
@@ -294,7 +357,7 @@ describe("audit log export", () => {
       JSON.parse(await exported(api, { targetId: `none-${unique()}` }, "json"))
     );
     expect(document.records).toStrictEqual([]);
-    expect(document.verification.ok).toBeTruthy();
+    expect(document.recordCheck.ok).toBeTruthy();
   });
 
   it("exports CSV that a spreadsheet opens as data", async () => {
@@ -353,6 +416,10 @@ describe("audit log access", () => {
         detail: { "filter.targetId": targetId, records: 0 },
       },
     ]);
+    // A later page that finds nothing isn't recorded again.
+    await expect(
+      auditedDuring(async () => await api.audit.search({ targetId }, 1))
+    ).resolves.toStrictEqual([]);
     await expect(
       auditedDuring(async () => await exported(api, { targetId }, "csv"))
     ).resolves.toMatchObject([

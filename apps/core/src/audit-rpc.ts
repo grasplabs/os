@@ -15,23 +15,23 @@ import type {
   ChainVerification,
   ParsedAuditFilter,
 } from "@grasp-os/shared/audit-log";
-import { canonicalJson } from "@grasp-os/shared/json";
 import { isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
 import { actorIdsOf, auditLog } from "./audit-log.ts";
-import type { SearchQuery } from "./audit-log.ts";
+import type { SearchRange } from "./audit-log.ts";
 import { actorOf, audit } from "./audit.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
 // Reading the audit log (threat model section 13, R16): admins search it,
 // export it and verify its chain. Admins see all of it, so an export holds
-// no more than a search shows them. Every read is recorded in the log
-// itself before anything is returned, so a read that can't be recorded
-// returns nothing. Grasp staff read it only with the admin role their
-// staff access gives them, and are recorded as staff.
+// no more than a search shows them. Reads are recorded in the log itself
+// before anything is returned, so a read that can't be recorded returns
+// nothing. Grasp staff read it only through the admin role their staff
+// access gives them, and are recorded as staff; they can't change retention
+// or archive anything (that's deployment config and the cron trigger).
 
 /** Most records one page of a search holds. */
 const searchPageSize = 100;
@@ -81,7 +81,8 @@ const recordRead = async (
 /**
  * A spreadsheet reads a cell that starts with one of these as a formula,
  * so such a cell is written with a `'` in front (CSV injection). Only
- * convenience columns can start with one: an event's JSON starts with `{`.
+ * convenience columns can start with one: the event column starts with
+ * `{`, so it is always exactly the stored event.
  */
 const formulaStart = /^[=+\-@\t\r]/u;
 const csvQuoted = /[",\r\n]/u;
@@ -119,92 +120,126 @@ const csvRecord = ({ event, ...record }: AuditRecord): string =>
   csvRow([
     record.seq,
     record.receivedAt,
-    event.at,
+    event?.at,
     record.type,
-    event.action,
-    event.actor.type,
+    event?.action,
+    event?.actor.type,
     // The most specific: a workflow run's, rather than its App's.
-    actorIdsOf(event.actor).at(-1),
-    event.target?.type,
-    event.target?.id,
-    event.source,
-    event.requestId,
+    event ? actorIdsOf(event.actor).at(-1) : undefined,
+    event?.target?.type,
+    event?.target?.id,
+    event?.source,
+    event?.requestId,
     record.verified,
     record.version,
     record.prevHash,
     record.hash,
-    canonicalJson(event),
+    record.eventJson,
   ]);
 
-/** A record as JSON, its event as the canonical JSON that was hashed. */
-const jsonRecord = ({ event, ...record }: AuditRecord): string =>
-  `${JSON.stringify(record).slice(0, -1)},"event":${canonicalJson(event)}}`;
+/** A record as JSON: its event only as the stored bytes, `eventJson`. */
+const jsonRecord = ({ event: _parsed, ...record }: AuditRecord): string =>
+  JSON.stringify(record);
 
 /**
  * An export, oldest first, as a stream that reads the log a page at a time
  * while the client takes it in: `json` or `csv`, per `AuditApi.export`.
+ * Every read checks the session, role and flag again (`recheck`). It reads
+ * the positions that matched when it began, up to the head then, so it
+ * ends; if retention archives some it hasn't read yet, it stops.
  */
 const exportStream = (
   env: Env,
   filter: ParsedAuditFilter,
-  format: AuditExportFormat
+  format: AuditExportFormat,
+  recheck: () => Promise<void>
 ): ReadableStream<Uint8Array> => {
   const log = auditLog(env);
   const encoder = new TextEncoder();
   const unverified: number[] = [];
   let count = 0;
   let cursor: number | undefined;
-  let started = false;
+  let range: SearchRange | undefined;
+
+  /** The start of the export; fixes the positions it reads. */
+  const header = async (): Promise<string> => {
+    const chain = await log.head();
+    const found = await log.range(filter);
+    range = { low: found.low, high: Math.min(found.high, chain.seq) };
+    return format === "csv"
+      ? csvRow(csvColumns)
+      : `{"exportedAt":${JSON.stringify(new Date().toISOString())},"filter":${JSON.stringify(filter)},"chain":${JSON.stringify(chain)},"records":[\n`;
+  };
+
+  /** The end of the export: for JSON, how its records checked out. */
+  const footer = async (): Promise<string> => {
+    if (format === "csv") {
+      return "";
+    }
+    const recordCheck = {
+      ok: unverified.length === 0,
+      records: count,
+      unverified,
+    };
+    const lastFullVerification = await log.lastFullVerification();
+    return `\n],"recordCheck":${JSON.stringify(recordCheck)},"lastFullVerification":${JSON.stringify(lastFullVerification)}}\n`;
+  };
+
+  /** The next page of records as text, and whether it was the last. */
+  const page = async (
+    within: SearchRange
+  ): Promise<{ text: string; done: boolean }> => {
+    const found = await log.search({
+      filter,
+      order: "oldest",
+      cursor,
+      limit: exportPageSize,
+      range: within,
+    });
+    if (found === null) {
+      throw auditErrors.create("audit.export_interrupted");
+    }
+    if (count + found.records.length > auditExportMaxRecords) {
+      throw auditErrors.create("audit.export_too_large");
+    }
+    const lines = found.records.map((record, index) => {
+      if (!record.verified) {
+        unverified.push(record.seq);
+      }
+      if (format === "csv") {
+        return csvRecord(record);
+      }
+      return `${count + index === 0 ? "" : ",\n"}${jsonRecord(record)}`;
+    });
+    count += found.records.length;
+    cursor = found.next ?? cursor;
+    return { text: lines.join(""), done: found.next === null };
+  };
+
   return new ReadableStream<Uint8Array>({
     pull: async (controller) => {
-      if (!started) {
-        started = true;
-        const chain = await log.head();
-        controller.enqueue(
-          encoder.encode(
-            format === "csv"
-              ? csvRow(csvColumns)
-              : `{"exportedAt":${JSON.stringify(new Date().toISOString())},"filter":${JSON.stringify(filter)},"chain":${JSON.stringify(chain)},"records":[\n`
-          )
-        );
-        return;
-      }
-      const query: SearchQuery = {
-        filter,
-        order: "oldest",
-        cursor,
-        limit: exportPageSize,
-      };
-      const { records, next } = await log.search(query);
-      if (count + records.length > auditExportMaxRecords) {
-        controller.error(auditErrors.create("audit.export_too_large"));
-        return;
-      }
-      const lines = records.map((record, index) => {
-        if (!record.verified) {
-          unverified.push(record.seq);
+      try {
+        await recheck();
+        if (range === undefined) {
+          controller.enqueue(encoder.encode(await header()));
+          return;
         }
-        if (format === "csv") {
-          return csvRecord(record);
+        // A page can match nothing: read on until there's something to send.
+        let chunk = { text: "", done: false };
+        while (chunk.text === "" && !chunk.done) {
+          // Pages one after another, each from where the last stopped.
+          // oxlint-disable-next-line no-await-in-loop
+          chunk = await page(range);
         }
-        return `${count + index === 0 ? "" : ",\n"}${jsonRecord(record)}`;
-      });
-      count += records.length;
-      if (next === null && format === "json") {
-        const verification = {
-          ok: unverified.length === 0,
-          records: count,
-          unverified,
-        };
-        lines.push(`\n],"verification":${JSON.stringify(verification)}}\n`);
-      }
-      if (lines.length > 0) {
-        controller.enqueue(encoder.encode(lines.join("")));
-      }
-      if (next === null) {
-        controller.close();
-      } else {
-        cursor = next;
+        const text = chunk.done ? `${chunk.text}${await footer()}` : chunk.text;
+        if (text !== "") {
+          controller.enqueue(encoder.encode(text));
+        }
+        if (chunk.done) {
+          controller.close();
+        }
+      } catch (error) {
+        controller.error(error);
       }
     },
   });
@@ -229,17 +264,22 @@ export class AuditRpc extends RpcTarget implements AuditApi {
       requireAdmin(person);
       const parsed = parseFilter(filter);
       const cursor = parsePosition(before);
-      const page = await auditLog(this.#env).search({
+      const page = (await auditLog(this.#env).search({
         filter: parsed,
         order: "newest",
         cursor,
         limit: searchPageSize,
-      });
-      await recordRead(this.#env, person, "audit.searched", {
-        ...filterDetail(parsed),
-        ...(cursor === undefined ? {} : { before: cursor }),
-        records: page.records.length,
-      });
+      })) ?? { records: [], next: null };
+      // Every search is recorded once, and so is every later page that
+      // returns something: nothing is read without a record of it, and
+      // paging through empty stretches doesn't fill the log.
+      if (cursor === undefined || page.records.length > 0) {
+        await recordRead(this.#env, person, "audit.searched", {
+          ...filterDetail(parsed),
+          ...(cursor === undefined ? {} : { before: cursor }),
+          records: page.records.length,
+        });
+      }
       return page;
     });
   }
@@ -260,7 +300,10 @@ export class AuditRpc extends RpcTarget implements AuditApi {
         ...filterDetail(parsed),
         format: parsedFormat,
       });
-      return exportStream(this.#env, parsed, parsedFormat);
+      const recheck = async (): Promise<void> => {
+        await withPerson(this.#check, requireAdmin);
+      };
+      return exportStream(this.#env, parsed, parsedFormat, recheck);
     });
   }
 

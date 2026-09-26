@@ -2,7 +2,6 @@ import { log } from "@grasp-os/shared/log";
 import { z } from "zod";
 
 import { archiveStretch, auditLog } from "./audit-log.ts";
-import { audit } from "./audit.ts";
 import { deploymentConfig } from "./deployment-config.ts";
 import { featureEnabled } from "./features.ts";
 
@@ -11,7 +10,8 @@ import { featureEnabled } from "./features.ts";
 // as it was stored, and the chain carries on (src/audit-log.ts), so an
 // archived event still counts when the chain is verified. Nothing here
 // deletes an archived event: the archive keeps it for as long as the bucket
-// does.
+// does. Deleting archived objects (a GDPR purge, say) is done outside the
+// product for now, and verification reports those stretches as missing.
 //
 // The console sets it per deployment with the `AUDIT_RETENTION_DAYS` var:
 // 180 days unless set, at least 30 (so an admin always has the last month
@@ -50,9 +50,9 @@ const retentionDays = (env: Env): number | undefined =>
 
 /**
  * Archives the events the log received longer ago than the deployment's
- * retention, oldest first, a stretch at a time, and records each stretch
- * in the log. The cron trigger calls it; a backlog is worked off over
- * several runs.
+ * retention, oldest first, a stretch at a time; the log records each
+ * stretch as `audit.archived`, in the same transaction. The cron trigger
+ * calls it; a backlog is worked off over several runs.
  */
 export const archiveAuditLog = async (env: Env): Promise<void> => {
   const days = retentionDays(env);
@@ -63,18 +63,12 @@ export const archiveAuditLog = async (env: Env): Promise<void> => {
   for (let run = 0; run < stretchesPerRun; run += 1) {
     // One stretch after another: each starts where the last one ended.
     // oxlint-disable-next-line no-await-in-loop
-    const stretch = await auditLog(env).archive(cutoff);
+    const stretch = await auditLog(env).archive(cutoff, days);
     if (stretch === null) {
       return;
     }
-    const { from, through, key } = stretch;
+    const { from, through } = stretch;
     log.info("audit.archived", { from, through });
-    // oxlint-disable-next-line no-await-in-loop
-    await audit(env).log({
-      actor: { type: "system" },
-      action: "audit.archived",
-      detail: { from, through, key, retentionDays: days },
-    });
     if (through - from + 1 < archiveStretch) {
       return;
     }

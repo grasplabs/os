@@ -52,8 +52,10 @@ const typeRules: readonly {
   { action: "team", type: "config" },
   { action: "workflow.step", type: "action" },
   { action: "platform", type: "platform_update" },
-  { action: "audit.searched", type: "read" },
-  { action: "audit.exported", type: "read" },
+  // Retention moving events out, then reading the log: searches, exports
+  // and verifications.
+  { action: "audit.archived", type: "action" },
+  { action: "audit", type: "read" },
 ];
 
 /** Whether `action` is `prefix` or starts with it and a dot. */
@@ -126,15 +128,21 @@ export interface AuditRecord {
   seq: number;
   /** When the log received it (ISO 8601), set by the log. */
   receivedAt: string;
-  event: AuditEvent;
+  /**
+   * The event exactly as it was stored and hashed: its canonical JSON
+   * (RFC 8785). This, not `event`, is what the hash covers.
+   */
+  eventJson: string;
+  /** The event, read with today's schema; `null` if what's stored isn't one. */
+  event: AuditEvent | null;
   type: AuditEventType | null;
   /** The hash format, the hash of the entry before it, and its own hash. */
   version: number;
   prevHash: string;
   hash: string;
   /**
-   * Whether its hash matches its content and it links to the entry before
-   * it as the log holds that now.
+   * Whether it's an event, its hash matches `eventJson` and its other
+   * fields, and it links to the entry before it as the log holds that now.
    */
   verified: boolean;
 }
@@ -168,27 +176,45 @@ export type ChainVerification =
   | { ok: false; brokenAt: number; reason: ChainBreak };
 
 /**
- * The audit log, over `/rpc`, for admins only. Every search and export is
- * itself recorded in the log, and so is every verification that finishes
- * or finds a break.
+ * The last pass that verified the whole chain, from its first position, in
+ * unbroken steps: when it ran, and how it ended.
+ */
+export type FullVerification = { startedAt: string; finishedAt: string } & (
+  | { ok: true; through: number; head: string }
+  | { ok: false; brokenAt: number; reason: ChainBreak }
+);
+
+/**
+ * The audit log, over `/rpc`, for admins only. Every search that returns
+ * records, every first page of a search, every export, and every
+ * verification that finishes or finds a break is itself recorded in the log.
  */
 export interface AuditApi {
   /** The events that match `filter`, newest first, from before `before`. */
   search: (filter?: AuditFilter, before?: number) => Promise<AuditPage>;
   /**
-   * Every event that matches `filter`, oldest first, as a download.
+   * Every event that matches `filter`, oldest first, up to the head the log
+   * had when the export began, as a download.
    *
    * `json`: one document, `{ exportedAt, filter, chain, records,
-   * verification }`, where `chain` is the log's head when the export began
-   * and `verification` says whether every record verified. `csv`: a header
-   * and a row per record; its `verified`, `prev_hash` and `hash` columns
-   * are the verification. A cell that a spreadsheet would read as a formula
-   * starts with `'`.
+   * recordCheck, lastFullVerification }`. `chain` is the log's head when
+   * the export began. `recordCheck` says whether each exported record
+   * verified on its own and against the entry before it; that is not a
+   * verification of the whole chain, which `lastFullVerification` (the last
+   * full `verify` pass, or `null`) reports.
    *
-   * Either way each record carries its event as the canonical JSON that was
-   * hashed (RFC 8785), so anyone can recompute its hash, and compare it with
-   * the live chain. An export stops with `audit.export_too_large` past
-   * {@link auditExportMaxRecords}: narrow the filter.
+   * `csv`: a header and a row per record; its `verified`, `prev_hash` and
+   * `hash` columns are the record check. A cell that a spreadsheet would
+   * read as a formula starts with `'`, so the convenience columns are for
+   * reading; the `event` column (never changed: it starts with `{`) is the
+   * authoritative one.
+   *
+   * Either way each record carries `eventJson`, its event byte for byte as
+   * stored and hashed, so anyone can recompute its hash (see core's
+   * src/audit-chain.ts) and compare it with the live chain. An export stops
+   * with `audit.export_too_large` past {@link auditExportMaxRecords}, and
+   * with `audit.export_interrupted` if retention archives events it hasn't
+   * read yet.
    */
   export: (
     filter: AuditFilter | undefined,
@@ -201,9 +227,11 @@ export interface AuditApi {
 /** Most records one export holds. */
 export const auditExportMaxRecords = 100_000;
 
-/** Why a read of the audit log was refused. */
+/** Why a read of the audit log was refused or stopped. */
 export const auditErrors = defineErrorFamily({
   "audit.invalid": "That isn't a valid audit log query.",
   "audit.export_too_large":
     "Too many events for one export. Narrow the time range or the filter.",
+  "audit.export_interrupted":
+    "Older events were archived while exporting. Export again.",
 });
