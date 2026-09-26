@@ -1,4 +1,4 @@
-import { routerSecretHeader } from "@grasp-os/shared/router";
+import { loopbackHosts, routerSecretHeader } from "@grasp-os/shared/router";
 
 /** Why a request was refused. Logged; the caller only ever sees 403. */
 export type RouterSecretRefusal = "missing" | "mismatch" | "not_configured";
@@ -12,8 +12,6 @@ export type RouterSecretCheck =
  * flag with `wrangler dev --var`; it is never set in wrangler.jsonc. Even when
  * set, it only applies to requests addressed to this machine.
  */
-const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
-
 const isLocalDevRequest = (request: Request, env: Env): boolean =>
   env.DEV_SKIP_ROUTER_SECRET === "true" &&
   loopbackHosts.has(new URL(request.url).hostname);

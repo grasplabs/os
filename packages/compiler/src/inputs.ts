@@ -3,6 +3,8 @@
  * Core uses these before it hashes and sends the files; the compiler again
  * on what it is sent.
  */
+import { appLimits } from "@grasp-os/shared/app-limits";
+
 import type { Diagnostic } from "./diagnostic.ts";
 
 export const screenFile = /^screens\/[\w-]+\.tsx$/u;
@@ -41,10 +43,10 @@ export const serverFiles = (
   );
 
 /**
- * The most a build takes, so that it stays well inside its isolate's CPU
- * and memory, and a mistake (or an attack) fails fast and says why.
+ * The most a build takes: as much as an App holds, so any App fits, and a
+ * mistake (or an attack) fails fast and says why.
  */
-const limits = { files: 200, fileLength: 200_000, totalLength: 1_000_000 };
+const limits = appLimits;
 
 const tooMuch = (message: string, file?: string): Diagnostic => ({
   ...(file === undefined ? {} : { file }),

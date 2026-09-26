@@ -1,4 +1,3 @@
-import type { Role } from "@grasp-os/shared";
 import { auditEventSchema } from "@grasp-os/shared/audit";
 import { capabilityErrors, signCapability } from "@grasp-os/shared/capability";
 import { connectErrors } from "@grasp-os/shared/connect";
@@ -13,6 +12,7 @@ import type {
   PermissionRequest,
   PermissionSubjectInput,
 } from "@grasp-os/shared/permissions";
+import type { Role } from "@grasp-os/shared/roles";
 import { roleErrors } from "@grasp-os/shared/roles";
 import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";

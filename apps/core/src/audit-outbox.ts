@@ -2,6 +2,7 @@ import { createAuditEvent } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { asc, inArray, sql } from "drizzle-orm";
+import type { BatchItem, BatchResponse } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
@@ -116,4 +117,22 @@ export const sendAuditOutboxNow = async (env: Env): Promise<void> => {
   } catch (error) {
     log.error("audit.outbox.send_failed", errorFields(error));
   }
+};
+
+/**
+ * Runs an audited change: `statements` (the change and its `outboxed`
+ * events) in one batch on `db`, core's or Knowledge's database, then sends
+ * the outboxes. A batch that fails stores and sends nothing.
+ */
+export const auditedBatch = async <
+  U extends BatchItem<"sqlite">,
+  T extends Readonly<[U, ...U[]]>,
+>(
+  env: Env,
+  db: DrizzleD1Database,
+  statements: T
+): Promise<BatchResponse<T>> => {
+  const results = await db.batch(statements);
+  await sendAuditOutboxNow(env);
+  return results;
 };

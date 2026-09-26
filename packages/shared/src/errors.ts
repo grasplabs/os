@@ -61,6 +61,17 @@ export const defineErrorFamily = <Code extends string>(
   };
 };
 
+/**
+ * What's wrong with some input, for an error's `details.issues`: each issue
+ * as `path: message`, which names the field and never repeats its value.
+ */
+export const issuesOf = (error: {
+  issues: readonly { path: readonly PropertyKey[]; message: string }[];
+}): string[] =>
+  error.issues.map(
+    ({ path, message }) => `${path.map(String).join(".")}: ${message}`
+  );
+
 /** Why core refused a request before it reached any feature. */
 export const requestErrors = defineErrorFamily({
   "request.forbidden": "Forbidden.",

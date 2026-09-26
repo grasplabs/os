@@ -1,16 +1,19 @@
 import { z } from "zod";
 
-import { appIdSchema, runIdSchema, workflowIdSchema } from "./ids.ts";
+import {
+  appIdSchema,
+  identifierMaxLength,
+  identifierSchema,
+  runIdSchema,
+  workflowIdSchema,
+} from "./ids.ts";
 
 // The audit log is append-only and can't be purged, so every field is bounded
 // to identifier size: an event can name things, never carry their content
 // (prompts, message bodies, documents, tokens).
 
-/**
- * Longest string any field may hold: room for provider IDs (Microsoft Graph
- * item IDs run past 100 characters), not for content.
- */
-export const auditIdentifierMaxLength = 256;
+/** Longest string any field may hold: an identifier's. */
+export { identifierMaxLength as auditIdentifierMaxLength } from "./ids.ts";
 
 /** Most resources one event names as provenance: a large retrieval, no more. */
 export const auditProvenanceMaxItems = 100;
@@ -33,33 +36,30 @@ const detailKeyPattern = /^[a-z][a-zA-Z0-9_.]{0,63}$/u;
 /** A dotted verb such as `model.call`: at least two lowercase segments. */
 const actionPattern = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/u;
 
-/** An identifier: non-empty and at most identifier-sized. */
-const identifier = () => z.string().min(1).max(auditIdentifierMaxLength);
-
 /**
  * Who did something: a person, an agent acting for one, part of an App (its
  * screens or server code), a workflow run, the platform itself, or Grasp
  * staff (whose access is always logged).
  */
 export const auditActorSchema = z.discriminatedUnion("type", [
-  z.object({ type: z.literal("person"), userId: identifier() }),
+  z.object({ type: z.literal("person"), userId: identifierSchema }),
   z.object({
     type: z.literal("agent"),
-    agentId: identifier(),
-    onBehalfOf: identifier(),
+    agentId: identifierSchema,
+    onBehalfOf: identifierSchema,
   }),
   z.object({
     type: z.literal("app"),
-    appId: identifier().pipe(appIdSchema),
+    appId: appIdSchema,
     part: z.enum(["screen", "server"]),
   }),
   z.object({
     type: z.literal("workflow"),
-    appId: identifier().pipe(appIdSchema),
-    workflowId: identifier().pipe(workflowIdSchema),
-    runId: identifier().pipe(runIdSchema),
+    appId: appIdSchema,
+    workflowId: workflowIdSchema,
+    runId: runIdSchema,
   }),
-  z.object({ type: z.literal("staff"), userId: identifier() }),
+  z.object({ type: z.literal("staff"), userId: identifierSchema }),
   z.object({ type: z.literal("system") }),
 ]);
 export type AuditActor = z.infer<typeof auditActorSchema>;
@@ -73,8 +73,8 @@ export type AuditSource = z.infer<typeof auditSourceSchema>;
  * resources that fed the prompt go in the event's `provenance`.
  */
 export const auditModelSchema = z.object({
-  provider: identifier(),
-  model: identifier(),
+  provider: identifierSchema,
+  model: identifierSchema,
   inputTokens: z.int().nonnegative(),
   outputTokens: z.int().nonnegative(),
 });
@@ -89,7 +89,7 @@ export type AuditCost = z.infer<typeof auditCostSchema>;
 
 /** One `detail` value: a flat, identifier-sized scalar. */
 export const auditDetailValueSchema = z.union([
-  z.string().max(auditIdentifierMaxLength),
+  z.string().max(identifierMaxLength),
   z.number(),
   z.boolean(),
   z.null(),
@@ -115,13 +115,16 @@ export const auditEventSchema = z.object({
   source: auditSourceSchema,
   actor: auditActorSchema,
   /** Dotted verb, e.g. `connection.action.approved` or `model.call`. */
-  action: z.string().max(auditIdentifierMaxLength).regex(actionPattern),
+  action: z.string().max(identifierMaxLength).regex(actionPattern),
   /** What was acted on, e.g. `{ type: "connection", id }`. */
-  target: z.object({ type: identifier(), id: identifier() }).optional(),
+  target: z.object({ type: identifierSchema, id: identifierSchema }).optional(),
   /** Ties the events of one request together. */
-  requestId: identifier().optional(),
+  requestId: identifierSchema.optional(),
   /** IDs of the resources the action read from or was built from. */
-  provenance: z.array(identifier()).max(auditProvenanceMaxItems).default([]),
+  provenance: z
+    .array(identifierSchema)
+    .max(auditProvenanceMaxItems)
+    .default([]),
   /** Set on model calls. */
   model: auditModelSchema.optional(),
   /** Set where the action has a cost, such as a model call. */

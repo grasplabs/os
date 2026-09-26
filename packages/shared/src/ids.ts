@@ -1,19 +1,31 @@
 import { z } from "zod";
 
 /**
+ * The longest an ID, or any other identifier, may be: room for provider IDs
+ * (Microsoft Graph item IDs run past 100 characters), not for content.
+ * Everything that names something has to fit in an audit event, which names
+ * things and never carries their content.
+ */
+export const identifierMaxLength = 256;
+
+/** An identifier: non-empty, and at most {@link identifierMaxLength}. */
+export const identifierSchema = z.string().min(1).max(identifierMaxLength);
+
+/**
  * Creates the schema for one kind of ID. The brand exists only in the type
  * system: an `AppId` can't be passed where a `RunId` is expected, and a plain
  * string becomes an ID only by parsing it.
  *
  * IDs are opaque: nothing may read meaning into their contents, and each store
- * picks how it mints them, so the only rule is that an ID is never empty.
+ * picks how it mints them, so the only rules are those of an identifier: never
+ * empty, and short enough for the audit log.
  *
  * Marked free of side effects so bundlers drop the ID schemas a consumer
  * doesn't import.
  */
 /* @__NO_SIDE_EFFECTS__ */
 // oxlint-disable-next-line typescript/no-unnecessary-type-parameters -- the brand is type-only by design
-const idSchema = <Brand extends string>() => z.string().min(1).brand<Brand>();
+const idSchema = <Brand extends string>() => identifierSchema.brand<Brand>();
 
 /** An App: its screens, workflows and permissions, installed as one unit. */
 export const appIdSchema = idSchema<"AppId">();

@@ -1,6 +1,6 @@
-import type { Role } from "@grasp-os/shared";
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
 import type { CollectionInput, KnowledgeApi } from "@grasp-os/shared/knowledge";
+import type { Role } from "@grasp-os/shared/roles";
 import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";

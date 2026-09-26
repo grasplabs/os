@@ -1,15 +1,10 @@
+import type { SignInRefusal } from "@grasp-os/shared/sign-in";
+
 import { providerIds, staffWindowOpen } from "./config.ts";
 import type { SignInConfig } from "./config.ts";
 
 /** Why a verified ID token doesn't get someone in. Shown to them as a code. */
-export type ClaimsRefusal =
-  | "provider_unknown"
-  | "tenant_mismatch"
-  | "guest_not_allowed"
-  | "email_unverified"
-  | "domain_not_allowed"
-  | "staff_not_listed"
-  | "staff_window_closed";
+export type ClaimsRefusal = Exclude<SignInRefusal, "method_not_allowed">;
 
 type Claims = Readonly<Record<string, unknown>>;
 

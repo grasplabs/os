@@ -7,7 +7,6 @@ import { isNonRetryable } from "./engine.ts";
 import type {
   DecisionAnswer,
   EngineEvent,
-  JsonValue,
   ModelRequest,
   WorkflowEngine,
 } from "./engine.ts";
@@ -34,13 +33,11 @@ import type { WorkflowDefinition } from "./workflow.ts";
 export interface StepCall {
   /** The step's name, with its key if it has one: `pay:inv-7`. */
   name: string;
-  input?: JsonValue;
+  input?: Json;
 }
 
 /** A step's result instead of running it, or a function that computes it. */
-export type StepMock =
-  | JsonValue
-  | ((call: StepCall) => JsonValue | Promise<JsonValue>);
+export type StepMock = Json | ((call: StepCall) => Json | Promise<Json>);
 
 /** What a step did in a test run. */
 export type StepRecord =
@@ -52,7 +49,7 @@ export type StepRecord =
        */
       name: string;
       sideEffect: boolean;
-      input?: JsonValue;
+      input?: Json;
       /**
        * `ran` for its function, `mocked` for a mocked result and `recorded`
        * for a side effect that didn't run, which has no result.
@@ -64,7 +61,7 @@ export type StepRecord =
       type: "step";
       name: string;
       sideEffect: boolean;
-      input?: JsonValue;
+      input?: Json;
       status: "failed";
       error: string;
     }
@@ -80,17 +77,17 @@ export type StepRecord =
 /** A side effect the run would have had, in the order it would happen. */
 export interface SideEffect {
   name: string;
-  input?: JsonValue;
+  input?: Json;
 }
 
 /** A workflow's key-value state, shared by the engines given the same one. */
 export interface TestState {
-  values: Map<string, JsonValue>;
+  values: Map<string, Json>;
   appliedWrites: Set<string>;
 }
 
 export const createTestState = (
-  initial: Readonly<Record<string, JsonValue>> = {}
+  initial: Readonly<Record<string, Json>> = {}
 ): TestState => ({
   values: new Map(Object.entries(initial)),
   appliedWrites: new Set(),
@@ -395,7 +392,7 @@ export interface TestRunOptions extends Omit<
   /** The run's input, e.g. the invoice that started it. */
   input?: unknown;
   /** The workflow's state when the run starts. */
-  state?: Readonly<Record<string, JsonValue>>;
+  state?: Readonly<Record<string, Json>>;
 }
 
 /** How a test run or dry run went. */
@@ -408,7 +405,7 @@ export type TestRun<Output = unknown> = (
   /** The side effects the run would have had, and their input. */
   sideEffects: SideEffect[];
   /** The workflow's state after the run. */
-  state: Record<string, JsonValue>;
+  state: Record<string, Json>;
 };
 
 /**

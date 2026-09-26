@@ -1,5 +1,5 @@
-import type { Role } from "@grasp-os/shared";
 import { authErrors } from "@grasp-os/shared/errors";
+import type { Role } from "@grasp-os/shared/roles";
 import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";

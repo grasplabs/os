@@ -1,7 +1,6 @@
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
-  documentIdInputSchema,
   documentTypeSchema,
   historyOptionsSchema,
   knowledgeErrors,
@@ -29,7 +28,7 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { alias } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
-import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
+import { auditedBatch, outboxed } from "../audit-outbox.ts";
 import { actorOf } from "../audit.ts";
 import { isUniqueViolation } from "../db/d1.ts";
 import {
@@ -325,14 +324,13 @@ const writeVersion = async (
         )
     : db.insert(documents).values(row);
   try {
-    await db.batch([document, ...statements]);
+    await auditedBatch(env, db, [document, ...statements]);
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw conflict(await findByPath(db, collection.id, path));
     }
     throw error;
   }
-  await sendAuditOutboxNow(env);
   return toSummary(row);
 };
 
@@ -357,7 +355,7 @@ const readableDocument = async (
   allowed: SQL,
   documentId: unknown
 ): Promise<{ document: DocumentRow; collection: CollectionRow }> => {
-  const id = documentIdInputSchema.safeParse(documentId);
+  const id = documentIdSchema.safeParse(documentId);
   const found = id.success
     ? await db
         .select({ document: documents, collection: collections })
@@ -449,7 +447,7 @@ export const getDocument = async (
       : parseOrInvalid(versionInputSchema, version);
   const db = drizzle(env.KNOWLEDGE);
   const allowed = await allowedCollections(env, db, reader);
-  const id = documentIdInputSchema.safeParse(documentId);
+  const id = documentIdSchema.safeParse(documentId);
   // The text is read in the same query as the access check, so it is never
   // read from a collection that stopped being readable in between.
   const found = id.success

@@ -1,17 +1,11 @@
-import { roleSchema } from "@grasp-os/shared";
-import type { Role } from "@grasp-os/shared";
+import { roleSchema } from "@grasp-os/shared/roles";
+import type { Role } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, eq, notExists } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import {
-  accounts,
-  memberRemovals,
-  members,
-  teamMembers,
-  teams,
-} from "../db/core/schema.ts";
-import { authFor, organizationId } from "./auth.ts";
+import { accounts, members, teamMembers, teams } from "../db/core/schema.ts";
+import { authFor, notRemoved, organizationId } from "./auth.ts";
 import { providerIds, signInConfig, staffWindowOpen } from "./config.ts";
 
 /**
@@ -31,17 +25,7 @@ export const memberRole = async (
       and(
         eq(members.organizationId, organizationId),
         eq(members.userId, userId),
-        notExists(
-          db
-            .select()
-            .from(memberRemovals)
-            .where(
-              and(
-                eq(memberRemovals.organizationId, organizationId),
-                eq(memberRemovals.userId, userId)
-              )
-            )
-        )
+        notRemoved(userId)
       )
     );
   const role = roleSchema.safeParse(membership?.role);

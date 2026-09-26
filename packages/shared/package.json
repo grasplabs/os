@@ -6,11 +6,12 @@
   "type": "module",
   "sideEffects": false,
   "exports": {
-    ".": "./src/index.ts",
+    "./app-limits": "./src/app-limits.ts",
     "./apps": "./src/apps.ts",
     "./audit": "./src/audit.ts",
     "./capability": "./src/capability.ts",
     "./connect": "./src/connect.ts",
+    "./encoding": "./src/encoding.ts",
     "./errors": "./src/errors.ts",
     "./ids": "./src/ids.ts",
     "./json": "./src/json.ts",
@@ -21,7 +22,8 @@
     "./roles": "./src/roles.ts",
     "./router": "./src/router.ts",
     "./rpc": "./src/rpc.ts",
-    "./runtime": "./src/runtime.ts"
+    "./runtime": "./src/runtime.ts",
+    "./sign-in": "./src/sign-in.ts"
   },
   "dependencies": {
     "zod": "catalog:"

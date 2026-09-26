@@ -5,7 +5,6 @@ import type {
   AppVersionsApi,
   NewApp,
 } from "@grasp-os/shared/apps";
-import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
 import {
@@ -21,7 +20,8 @@ import {
   setCurrentVersion,
   writeFiles,
 } from "./apps.ts";
-import type { SessionCheck } from "./session-rpc.ts";
+import { withPerson } from "./session-check.ts";
+import type { SessionCheck } from "./session-check.ts";
 
 /**
  * A signed-in person's `apps`, with `apps.files` and `apps.versions`
@@ -40,26 +40,22 @@ export class AppsRpc extends RpcTarget implements AppsApi {
     this.#check = check;
   }
 
-  async #asPerson<T>(
-    run: (env: Env, identity: Identity) => Promise<T>
-  ): Promise<T> {
-    return await run(this.#env, await this.#check());
-  }
-
   get files(): AppFilesApi {
     return {
       read: async (app, version) =>
-        await this.#asPerson(
-          async (env, by) => await readFiles(env, by, app, version)
+        await withPerson(
+          this.#check,
+          async (by) => await readFiles(this.#env, by, app, version)
         ),
       write: async (app, changes) => {
-        await this.#asPerson(async (env, by) => {
-          await writeFiles(env, by, app, changes);
+        await withPerson(this.#check, async (by) => {
+          await writeFiles(this.#env, by, app, changes);
         });
       },
       commit: async (app, message) =>
-        await this.#asPerson(
-          async (env, by) => await commitFiles(env, by, app, message)
+        await withPerson(
+          this.#check,
+          async (by) => await commitFiles(this.#env, by, app, message)
         ),
     };
   }
@@ -67,39 +63,51 @@ export class AppsRpc extends RpcTarget implements AppsApi {
   get versions(): AppVersionsApi {
     return {
       list: async (app, before) =>
-        await this.#asPerson(
-          async (env, by) => await listVersions(env, by, app, before)
+        await withPerson(
+          this.#check,
+          async (by) => await listVersions(this.#env, by, app, before)
         ),
       get: async (app, version) =>
-        await this.#asPerson(
-          async (env, by) => await getVersion(env, by, app, version)
+        await withPerson(
+          this.#check,
+          async (by) => await getVersion(this.#env, by, app, version)
         ),
       diff: async (app, from, to) =>
-        await this.#asPerson(
-          async (env, by) => await diffVersions(env, by, app, from, to)
+        await withPerson(
+          this.#check,
+          async (by) => await diffVersions(this.#env, by, app, from, to)
         ),
       propose: async (app, version) =>
-        await this.#asPerson(
-          async (env, by) => await proposeVersion(env, by, app, version)
+        await withPerson(
+          this.#check,
+          async (by) => await proposeVersion(this.#env, by, app, version)
         ),
       setCurrent: async (app, version) =>
-        await this.#asPerson(
-          async (env, by) => await setCurrentVersion(env, by, app, version)
+        await withPerson(
+          this.#check,
+          async (by) => await setCurrentVersion(this.#env, by, app, version)
         ),
     };
   }
 
   async create(app: NewApp): Promise<App> {
-    return await this.#asPerson(
-      async (env, by) => await createApp(env, by, app)
+    return await withPerson(
+      this.#check,
+      async (by) => await createApp(this.#env, by, app)
     );
   }
 
   async list(): Promise<App[]> {
-    return await this.#asPerson(async (env, by) => await listApps(env, by));
+    return await withPerson(
+      this.#check,
+      async (by) => await listApps(this.#env, by)
+    );
   }
 
   async get(app: string): Promise<App> {
-    return await this.#asPerson(async (env, by) => await getApp(env, by, app));
+    return await withPerson(
+      this.#check,
+      async (by) => await getApp(this.#env, by, app)
+    );
   }
 }

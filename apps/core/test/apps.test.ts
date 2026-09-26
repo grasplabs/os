@@ -1,6 +1,8 @@
-import type { Role } from "@grasp-os/shared";
-import { appErrors, appLimits } from "@grasp-os/shared/apps";
+import { appLimits } from "@grasp-os/shared/app-limits";
+import { appErrors } from "@grasp-os/shared/apps";
+import type { Role } from "@grasp-os/shared/roles";
 import { roleErrors } from "@grasp-os/shared/roles";
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { mockIdp } from "./idp.ts";
@@ -388,6 +390,68 @@ describe("App code", () => {
     await expect(apps.files.read(app.id)).resolves.toSatisfy(
       (files: Record<string, string>) => Object.keys(files).length === count
     );
+  });
+
+  it("lets an App over its limits shrink, but not grow or commit", async () => {
+    const { apps, userId } = await appsApi("builder");
+    const app = await newApp(apps);
+    // More files than an App may have now: written when the limits were
+    // higher, straight into its working copy.
+    const count = appLimits.files + 2;
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE apps SET working_revision = 'earlier' WHERE id = ?"
+      ).bind(app.id),
+      ...Array.from({ length: count }, (_, index) =>
+        env.DB.prepare(
+          "INSERT INTO app_working_files (app_id, path, content, revision, written_by, written_at) VALUES (?, ?, 'x', 'earlier', ?, 0)"
+        ).bind(app.id, `components/part-${index}.ts`, userId)
+      ),
+    ]);
+
+    // One after another: each step depends on the one before.
+    const steps: [string, () => Promise<unknown>][] = [
+      [
+        "add",
+        async () => {
+          await apps.files.write(app.id, { "components/new.ts": "x" });
+        },
+      ],
+      [
+        "grow",
+        async () => {
+          await apps.files.write(app.id, { "components/part-0.ts": "xx" });
+        },
+      ],
+      [
+        "shrink",
+        async () => {
+          await apps.files.write(app.id, { "components/part-0.ts": null });
+        },
+      ],
+      // Still over them: it can't become a version until it's within them.
+      ["commit over", async () => await apps.files.commit(app.id, "Smaller")],
+      [
+        "shrink again",
+        async () => {
+          await apps.files.write(app.id, { "components/part-1.ts": null });
+        },
+      ],
+      ["commit within", async () => await apps.files.commit(app.id, "Fits")],
+    ];
+    const outcomes: [string, string][] = [];
+    for (const [step, run] of steps) {
+      // oxlint-disable-next-line no-await-in-loop -- steps are sequential by design
+      outcomes.push([step, await outcome(run())]);
+    }
+    expect(outcomes).toStrictEqual([
+      ["add", "app.too_large"],
+      ["grow", "app.too_large"],
+      ["shrink", "ok"],
+      ["commit over", "app.too_large"],
+      ["shrink again", "ok"],
+      ["commit within", "ok"],
+    ]);
   });
 
   it("refuses Apps and versions that don't exist", async () => {

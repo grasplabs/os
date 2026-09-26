@@ -1,11 +1,8 @@
 import { z } from "zod";
 
-import { auditIdentifierMaxLength } from "./audit.ts";
 import { defineErrorFamily } from "./errors.ts";
-import { connectionIdSchema } from "./ids.ts";
+import { connectionIdSchema, identifierSchema } from "./ids.ts";
 import { permissionActionSchema } from "./permissions.ts";
-
-const identifier = () => z.string().min(1).max(auditIdentifierMaxLength);
 
 /**
  * One call from core to connect, over the service binding: an action on a
@@ -14,12 +11,12 @@ const identifier = () => z.string().min(1).max(auditIdentifierMaxLength);
 export const connectCallSchema = z.strictObject({
   /** Checked on its own, so a call without one is refused for that. */
   capability: z.unknown().optional(),
-  connectionId: identifier().pipe(connectionIdSchema),
-  resource: identifier().optional(),
+  connectionId: connectionIdSchema,
+  resource: identifierSchema.optional(),
   action: permissionActionSchema,
   input: z.json(),
   /** Required for side effects: a repeat returns the stored result. */
-  idempotencyKey: identifier().optional(),
+  idempotencyKey: identifierSchema.optional(),
 });
 export type ConnectCall = z.infer<typeof connectCallSchema>;
 
