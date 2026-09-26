@@ -7,11 +7,11 @@ import { createApp, getApp, listApps } from "./apps.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
-// Like SessionRpc, every call checks the session first and hands the
-// identity that check returned to the App functions, which check the
-// person's role and validate what the client sent.
-
-/** A signed-in person's `apps`, with `apps.files` and `apps.versions`. */
+/**
+ * A signed-in person's `apps`, with `apps.files` and `apps.versions`, in
+ * SessionRpc's form. The App functions check the person's role and
+ * validate what the client sent.
+ */
 export class AppsRpc extends RpcTarget implements AppsApi {
   readonly #env: Env;
   readonly #check: SessionCheck;

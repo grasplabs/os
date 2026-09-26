@@ -10,16 +10,16 @@ import { PermissionsRpc } from "./permissions-rpc.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
-// Every API a person reaches has the same form: an RpcTarget built once
-// per session with core's env and a session check, whose every method goes
-// through `withPerson`. A feature's namespace is one of them, created with
-// its flag in the check and handed out as the same object every time.
-
 /**
- * What a signed-in person reaches over `/rpc`. It holds no identity: every
- * method runs through `withPerson`, which checks the session first and hands
- * over the identity that check returned, so a method can't reach the person
- * without the check, or use one kept from an earlier call.
+ * What a signed-in person reaches over `/rpc`. Every API here has the same
+ * form: an RpcTarget built once per session with core's env and a session
+ * check, holding no identity. Each method runs through `withPerson`, which
+ * checks the session first and hands over the identity that check returned,
+ * so a method can't reach the person without the check, or use one kept
+ * from an earlier call. A feature's namespace is created with its flag in
+ * the check and handed out as the same object every time. There's no base
+ * class: an RpcTarget's methods, protected ones too, can be called over
+ * RPC, so each keeps its env and check in private fields.
  */
 export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #check: SessionCheck;

@@ -169,12 +169,6 @@ const findVersion = async (
   return row;
 };
 
-/**
- * An App's working copy: its latest version's files with the changes
- * written since over them. The version, the rows and the App's working
- * revision are read in one batch, so a commit landing in between can't
- * pair a new version with rows it already committed.
- */
 interface Size {
   files: number;
   /** Characters in all files together. */
@@ -189,6 +183,12 @@ const sizeOf = (files: ReadonlyMap<string, string>): Size => {
   return { files: files.size, length };
 };
 
+/**
+ * An App's working copy: its latest version's files with the changes
+ * written since over them. The version, the rows and the App's working
+ * revision are read in one batch, so a commit landing in between can't
+ * pair a new version with rows it already committed.
+ */
 const workingCopy = async (env: Env, app: AppId) => {
   const db = drizzle(env.DB);
   const [[latest], rows, [registered]] = await db.batch([
@@ -223,31 +223,50 @@ const workingCopy = async (env: Env, app: AppId) => {
 
 /**
  * `app.invalid` if two paths can't both exist on a disk: a file and a
- * folder of the same name (`a` and `a/b.ts`), or names that differ only in
- * case (`App.ts` and `app.ts`), which a case-insensitive file system, and
- * whoever reads the code, can't tell apart.
+ * folder of the same name (`a` and `a/b.ts`), or names of files or folders
+ * that differ only in case (`App.ts` and `app.ts`, `components/` and
+ * `Components/`), which a case-insensitive file system, and whoever reads
+ * the code, can't tell apart. Only collisions with a path this write
+ * `added` count, as with the limits: an App whose files already collide
+ * can still be changed, and fixed.
  */
-const checkPaths = (paths: Iterable<string>): void => {
-  const seen = new Set<string>();
-  const issues: string[] = [];
-  const lowered = [...paths].map((path) => path.toLowerCase());
-  for (const path of lowered) {
-    if (seen.has(path)) {
-      issues.push(`${path}: Another path differs from it only in case`);
-    }
-    seen.add(path);
-  }
-  for (const path of lowered) {
+const checkPaths = (
+  paths: Iterable<string>,
+  added: ReadonlySet<string>
+): void => {
+  // Every name a path takes, as a file or a folder, by its lowercase form:
+  // the first spelling, and the path that took it. Paths that were there
+  // before come first, so a clash names the one the write adds.
+  const taken = new Map<
+    string,
+    { spelling: string; file: boolean; path: string }
+  >();
+  const issues = new Set<string>();
+  const ordered = [...paths].toSorted(
+    (a, b) => Number(added.has(a)) - Number(added.has(b)) || (a < b ? -1 : 1)
+  );
+  for (const path of ordered) {
     const segments = path.split("/");
-    for (let depth = 1; depth < segments.length; depth += 1) {
-      const folder = segments.slice(0, depth).join("/");
-      if (seen.has(folder)) {
-        issues.push(`${folder}: A file, and the folder of ${path}`);
+    for (let depth = 1; depth <= segments.length; depth += 1) {
+      const spelling = segments.slice(0, depth).join("/");
+      const file = depth === segments.length;
+      const first = taken.get(spelling.toLowerCase());
+      if (first === undefined) {
+        taken.set(spelling.toLowerCase(), { spelling, file, path });
+      } else if (
+        (first.spelling !== spelling || first.file || file) &&
+        added.has(path)
+      ) {
+        issues.add(
+          first.file === file
+            ? `${path}: Differs only in case from ${first.path}`
+            : `${path}: A file and a folder of the same name, with ${first.path}`
+        );
       }
     }
   }
-  if (issues.length > 0) {
-    throw appErrors.create("app.invalid", { issues: [...new Set(issues)] });
+  if (issues.size > 0) {
+    throw appErrors.create("app.invalid", { issues: [...issues] });
   }
 };
 
@@ -375,6 +394,11 @@ export const writeFiles = async (
   const changes = Object.entries(parse(fileChangesSchema, input));
   const { files, revision } = await workingCopy(env, appId);
   const before = sizeOf(files);
+  const added = new Set(
+    changes.flatMap(([path, content]) =>
+      content === null || files.has(path) ? [] : [path]
+    )
+  );
   for (const [path, content] of changes) {
     if (content === null) {
       files.delete(path);
@@ -383,7 +407,7 @@ export const writeFiles = async (
     }
   }
   checkLimits(files, before);
-  checkPaths(files.keys());
+  checkPaths(files.keys(), added);
 
   const db = drizzle(env.DB);
   const next = crypto.randomUUID();
