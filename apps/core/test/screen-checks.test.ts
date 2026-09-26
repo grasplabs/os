@@ -1,5 +1,5 @@
 import { startScreenCompiler } from "@grasp-os/compiler";
-import type { Diagnostic, ScreenSource } from "@grasp-os/compiler";
+import type { Diagnostic, AppSource } from "@grasp-os/compiler";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -108,7 +108,7 @@ export interface Ticket {
 `,
 };
 
-const app = (files: Record<string, string>): ScreenSource => ({
+const app = (files: Record<string, string>): AppSource => ({
   app: "tickets",
   version: crypto.randomUUID(),
   files: { ...typicalApp, ...files },

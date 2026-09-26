@@ -14,7 +14,6 @@ import type {
 } from "@grasp-os/shared/apps";
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import { sha256Hex } from "@grasp-os/shared/encoding";
-import { issuesOf } from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
@@ -61,20 +60,6 @@ export const requireBuilder = (by: Identity): void => {
   if (!canBuild(by.role)) {
     throw roleErrors.create("role.forbidden");
   }
-};
-
-/** `input` as `schema` has it, or `app.invalid` saying why not. */
-const parse = <Schema extends z.ZodType>(
-  schema: Schema,
-  input: unknown
-): z.output<Schema> => {
-  const parsed = schema.safeParse(input);
-  if (!parsed.success) {
-    throw appErrors.create("app.invalid", {
-      issues: issuesOf(parsed.error),
-    });
-  }
-  return parsed.data;
 };
 
 const treeKey = (app: AppId, tree: string): string =>
@@ -135,7 +120,7 @@ const changeEntry = (
 });
 
 /** The App `input` names, which must exist. */
-const findApp = async (env: Env, input: unknown): Promise<App> => {
+export const findApp = async (env: Env, input: unknown): Promise<App> => {
   const id = appIdSchema.safeParse(input);
   const row = id.success
     ? await drizzle(env.DB)
@@ -316,7 +301,11 @@ export const createApp = async (
   input: unknown
 ): Promise<App> => {
   requireBuilder(by);
-  const { name, description, blueprint } = parse(newAppSchema, input);
+  const { name, description, blueprint } = appErrors.parse(
+    "app.invalid",
+    newAppSchema,
+    input
+  );
   const row: AppRow = {
     id: crypto.randomUUID(),
     name,
@@ -393,7 +382,9 @@ export const writeFiles = async (
 ): Promise<void> => {
   requireBuilder(by);
   const { id: appId } = await findApp(env, app);
-  const changes = Object.entries(parse(fileChangesSchema, input));
+  const changes = Object.entries(
+    appErrors.parse("app.invalid", fileChangesSchema, input)
+  );
   const { files, revision } = await workingCopy(env, appId);
   const before = sizeOf(files);
   const added = new Set(
@@ -457,7 +448,7 @@ export const commitFiles = async (
 ): Promise<AppVersion> => {
   requireBuilder(by);
   const { id: appId } = await findApp(env, app);
-  const text = parse(commitMessageSchema, message);
+  const text = appErrors.parse("app.invalid", commitMessageSchema, message);
   const { latest, rows, files } = await workingCopy(env, appId);
   if (rows.length === 0) {
     throw appErrors.create("app.nothing_to_commit");
@@ -525,7 +516,9 @@ export const listVersions = async (
   requireBuilder(by);
   const { id } = await findApp(env, app);
   const until =
-    before === undefined ? undefined : parse(appVersionSchema, before);
+    before === undefined
+      ? undefined
+      : appErrors.parse("app.invalid", appVersionSchema, before);
   const rows = await drizzle(env.DB)
     .select()
     .from(appVersions)

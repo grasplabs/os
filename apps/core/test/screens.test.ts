@@ -1,5 +1,5 @@
 import { kitModules } from "@grasp-os/compiler";
-import type { ScreenSource } from "@grasp-os/compiler";
+import type { AppSource } from "@grasp-os/compiler";
 import { compatibilityDate } from "@grasp-os/shared/runtime";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
@@ -61,7 +61,7 @@ export default function Inbox() {
 const app = (
   files: Record<string, string>,
   version = crypto.randomUUID()
-): ScreenSource => ({ app: "sample", version, files });
+): AppSource => ({ app: "sample", version, files });
 
 /** These of the kit's modules, by flat name. */
 const kitModulesNamed = async (

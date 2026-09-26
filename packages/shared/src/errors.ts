@@ -25,6 +25,17 @@ export type CodedError<Code extends string = string> = Error & {
 };
 
 /**
+ * What's wrong with some input, for an error's `details.issues`: each issue
+ * as `path: message`, which names the field and never repeats its value.
+ */
+export const issuesOf = (error: {
+  issues: readonly { path: readonly PropertyKey[]; message: string }[];
+}): string[] =>
+  error.issues.map(
+    ({ path, message }) => `${path.map(String).join(".")}: ${message}`
+  );
+
+/**
  * Every code of every family defined: the expected errors, which whoever
  * made the call may see, a person or App code. A family's module is loaded
  * before any of its errors can be created, so its codes are here by then.
@@ -44,13 +55,29 @@ export const defineErrorFamily = <Code extends string>(
     expectedCodes.add(code);
   }
   const isCode = (value: unknown): value is Code => codes.has(value);
+  const create = (
+    code: Code,
+    details?: ErrorPayload["details"]
+  ): CodedError<Code> =>
+    Object.assign(
+      new Error(messages[code]),
+      details === undefined ? { code } : { code, details }
+    );
 
   return {
-    create: (code: Code, details?: ErrorPayload["details"]): CodedError<Code> =>
-      Object.assign(
-        new Error(messages[code]),
-        details === undefined ? { code } : { code, details }
-      ),
+    create,
+    /** `input` as `schema` has it, or error `code` saying why not. */
+    parse: <Schema extends z.ZodType>(
+      code: Code,
+      schema: Schema,
+      input: unknown
+    ): z.output<Schema> => {
+      const parsed = schema.safeParse(input);
+      if (!parsed.success) {
+        throw create(code, { issues: issuesOf(parsed.error) });
+      }
+      return parsed.data;
+    },
     /** The error's code if it belongs to this family, otherwise `undefined`. */
     codeOf: (error: unknown): Code | undefined => {
       if (typeof error !== "object" || error === null || !("code" in error)) {
@@ -64,17 +91,6 @@ export const defineErrorFamily = <Code extends string>(
 /** An error's message, or what was thrown, as text. */
 export const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
-
-/**
- * What's wrong with some input, for an error's `details.issues`: each issue
- * as `path: message`, which names the field and never repeats its value.
- */
-export const issuesOf = (error: {
-  issues: readonly { path: readonly PropertyKey[]; message: string }[];
-}): string[] =>
-  error.issues.map(
-    ({ path, message }) => `${path.map(String).join(".")}: ${message}`
-  );
 
 /** Why core refused a request before it reached any feature. */
 export const requestErrors = defineErrorFamily({
