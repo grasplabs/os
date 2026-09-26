@@ -6,7 +6,7 @@ import type { AppErrorEntry } from "@grasp-os/shared/screens";
 // newest entries, so a screen that fails in a loop fills it and no more.
 
 /** How many entries the log keeps. */
-export const errorLogSize = 100;
+const errorLogSize = 100;
 
 const countKey = "error-log-count";
 const entryPrefix = "error-log:";

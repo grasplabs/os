@@ -21,6 +21,7 @@ import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import {
   activeAdminExists,
   activeMember,
+  currentMembership,
   isRemoved,
   notRemoved,
   organizationId,
@@ -93,13 +94,7 @@ const membershipOf = async (
   const [membership] = await drizzle(env.DB)
     .select({ id: members.id, role: members.role })
     .from(members)
-    .where(
-      and(
-        eq(members.organizationId, organizationId),
-        eq(members.userId, userId),
-        notRemoved(userId)
-      )
-    );
+    .where(currentMembership(userId));
   return membership;
 };
 
@@ -127,10 +122,7 @@ const memberEntry = (
 });
 
 /** The organization's members, by name. For admins. */
-export const listMembers = async (
-  env: Env,
-  by: Identity
-): Promise<Member[]> => {
+const listMembers = async (env: Env, by: Identity): Promise<Member[]> => {
   requireAdmin(by);
   const rows = await drizzle(env.DB)
     .select({
@@ -254,7 +246,7 @@ const disconnectPersonal = async (
  * removed only does the second part again, so a removal whose disconnect
  * failed can also be finished by trying again.
  */
-export const removeMember = async (
+const removeMember = async (
   env: Env,
   by: Identity,
   userId: unknown
@@ -283,7 +275,7 @@ export const removeMember = async (
  * sessions go only while the admin still is one, checked in the same
  * statement as the delete.
  */
-export const revokeMemberSessions = async (
+const revokeMemberSessions = async (
   env: Env,
   by: Identity,
   userId: unknown
@@ -319,7 +311,7 @@ export const revokeMemberSessions = async (
  * like it (`recordRemoval`), so however they race, the organization keeps
  * an admin.
  */
-export const setMemberRole = async (
+const setMemberRole = async (
   env: Env,
   by: Identity,
   userId: unknown,
@@ -350,9 +342,7 @@ export const setMemberRole = async (
       .set({ role: newRole })
       .where(
         and(
-          eq(members.organizationId, organizationId),
-          eq(members.userId, target.data),
-          notRemoved(target.data),
+          currentMembership(target.data),
           isActiveAdmin(by.userId),
           keepsAnAdmin
         )

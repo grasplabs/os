@@ -42,11 +42,7 @@ import { allowedCollections, recordRead } from "./access.ts";
 import type { Reader } from "./access.ts";
 import { readableCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
-import {
-  FrontmatterError,
-  issueLines,
-  parseFrontmatter,
-} from "./frontmatter.ts";
+import { FrontmatterError, parseFrontmatter } from "./frontmatter.ts";
 import { extractLinks, splitSections } from "./markdown.ts";
 import type { Link, Section } from "./markdown.ts";
 
@@ -334,18 +330,6 @@ const writeVersion = async (
   return toSummary(row);
 };
 
-/** `input` as `schema` reads it; `knowledge.invalid` if it doesn't. */
-export const parseOrInvalid = <Output>(
-  schema: z.ZodType<Output>,
-  input: unknown
-): Output => {
-  const parsed = schema.safeParse(input);
-  if (!parsed.success) {
-    throw invalid(issueLines(parsed.error, ""));
-  }
-  return parsed.data;
-};
-
 /**
  * The document with `documentId` and its collection, if it is in one of the
  * `allowed` collections. A malformed ID is one that doesn't exist.
@@ -376,10 +360,8 @@ export const saveDocument = async (
   person: Identity,
   input: unknown
 ): Promise<DocumentSummary> => {
-  const { collectionId, path, text, ifVersion, message } = parseOrInvalid(
-    saveInputSchema,
-    input
-  );
+  const { collectionId, path, text, ifVersion, message } =
+    knowledgeErrors.parse("knowledge.invalid", saveInputSchema, input);
   const db = drizzle(env.KNOWLEDGE);
   const collection = await readableCollection(
     db,
@@ -403,7 +385,8 @@ export const restoreVersion = async (
   person: Identity,
   input: unknown
 ): Promise<DocumentSummary> => {
-  const { documentId, version, ifVersion } = parseOrInvalid(
+  const { documentId, version, ifVersion } = knowledgeErrors.parse(
+    "knowledge.invalid",
     restoreInputSchema,
     input
   );
@@ -444,7 +427,7 @@ export const getDocument = async (
   const number =
     version === undefined
       ? undefined
-      : parseOrInvalid(versionInputSchema, version);
+      : knowledgeErrors.parse("knowledge.invalid", versionInputSchema, version);
   const db = drizzle(env.KNOWLEDGE);
   const allowed = await allowedCollections(env, db, reader);
   const id = documentIdSchema.safeParse(documentId);
@@ -491,7 +474,11 @@ export const listDocuments = async (
   collectionId: unknown,
   options?: unknown
 ): Promise<DocumentPage> => {
-  const { after, limit } = parseOrInvalid(listDocumentsOptionsSchema, options);
+  const { after, limit } = knowledgeErrors.parse(
+    "knowledge.invalid",
+    listDocumentsOptionsSchema,
+    options
+  );
   const db = drizzle(env.KNOWLEDGE);
   const allowed = await allowedCollections(env, db, reader);
   const collection = await readableCollection(db, allowed, collectionId);
@@ -522,7 +509,11 @@ export const history = async (
   documentId: unknown,
   options?: unknown
 ): Promise<HistoryPage> => {
-  const { before, limit } = parseOrInvalid(historyOptionsSchema, options);
+  const { before, limit } = knowledgeErrors.parse(
+    "knowledge.invalid",
+    historyOptionsSchema,
+    options
+  );
   const db = drizzle(env.KNOWLEDGE);
   const allowed = await allowedCollections(env, db, reader);
   const { document, collection } = await readableDocument(
@@ -562,7 +553,11 @@ export const backlinks = async (
   documentId: unknown,
   options?: unknown
 ): Promise<BacklinkPage> => {
-  const { after, limit } = parseOrInvalid(listDocumentsOptionsSchema, options);
+  const { after, limit } = knowledgeErrors.parse(
+    "knowledge.invalid",
+    listDocumentsOptionsSchema,
+    options
+  );
   const db = drizzle(env.KNOWLEDGE);
   const allowed = await allowedCollections(env, db, reader);
   const { document, collection } = await readableDocument(

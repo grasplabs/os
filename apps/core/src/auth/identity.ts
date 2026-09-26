@@ -5,7 +5,7 @@ import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { accounts, members, teamMembers, teams } from "../db/core/schema.ts";
-import { authFor, notRemoved, organizationId } from "./auth.ts";
+import { authFor, currentMembership, organizationId } from "./auth.ts";
 import { providerIds, signInConfig, staffWindowOpen } from "./config.ts";
 
 /**
@@ -21,13 +21,7 @@ export const memberRole = async (
   const [membership] = await db
     .select({ role: members.role })
     .from(members)
-    .where(
-      and(
-        eq(members.organizationId, organizationId),
-        eq(members.userId, userId),
-        notRemoved(userId)
-      )
-    );
+    .where(currentMembership(userId));
   const role = roleSchema.safeParse(membership?.role);
   return role.success ? role.data : undefined;
 };

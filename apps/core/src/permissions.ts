@@ -194,6 +194,7 @@ export const changeEntry = (
   detail: { ...auditDetail(permission), ...extra },
 });
 
+/** Refuses anyone but an admin. */
 export const requireAdmin = (by: Identity): void => {
   if (!isAdmin(by.role)) {
     throw roleErrors.create("role.forbidden");

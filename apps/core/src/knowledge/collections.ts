@@ -19,7 +19,6 @@ import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
 import { allowedCollections, canCreate, canWrite } from "./access.ts";
 import type { Reader } from "./access.ts";
-import { issueLines } from "./frontmatter.ts";
 
 export type CollectionRow = typeof collections.$inferSelect;
 
@@ -128,13 +127,13 @@ export const createCollection = async (
   input: unknown,
   source: CollectionSource = "here"
 ): Promise<Collection> => {
-  const parsed = collectionInputSchema.safeParse(input);
-  if (!parsed.success) {
-    throw knowledgeErrors.create("knowledge.invalid", {
-      issues: issueLines(parsed.error, ""),
-    });
-  }
-  const { name, description, access, teams: teamIds, sensitive } = parsed.data;
+  const {
+    name,
+    description,
+    access,
+    teams: teamIds,
+    sensitive,
+  } = knowledgeErrors.parse("knowledge.invalid", collectionInputSchema, input);
   if (!canCreate(person, access)) {
     throw knowledgeErrors.create("knowledge.forbidden");
   }
