@@ -82,6 +82,26 @@ const loadMembers = async (): Promise<MembersView> => {
 
 type Change = (members: Session["members"]) => Promise<unknown>;
 
+/**
+ * Makes `change`, then reads the list again with `refresh`, whatever the
+ * outcome: even a failed change may have changed something (a removal
+ * whose disconnect is still pending). Run as the action itself, so the
+ * controls stay off until the list is back: they act on the member as
+ * shown. Outside the component, as the React Compiler can't compile
+ * `try`/`finally`.
+ */
+const changeThenRefresh = async (
+  change: Change,
+  members: Session["members"],
+  refresh: () => Promise<void>
+): Promise<void> => {
+  try {
+    await change(members);
+  } finally {
+    await refresh();
+  }
+};
+
 /** Shows why a change failed, or clears it when given nothing. */
 type Report = (failure?: string) => void;
 
@@ -102,22 +122,13 @@ const MemberActions = ({
     onNotice();
     setConfirming(false);
     setPromoting(false);
-    await runAction(
-      async (session) => {
-        await change(session.members);
-      },
-      {
-        report,
-        // Even a failed change may have changed something (a removal whose
-        // disconnect is still pending), so the list is read again, and the
-        // controls stay off until it is: they act on the member as shown.
-        // `sync` waits for the loader; without it, the router reloads the
-        // page's data in the background and resolves at once.
-        afterwards: async () => {
-          await router.invalidate({ sync: true });
-        },
-      }
-    );
+    await runAction(async (session) => {
+      // `sync` waits for the loader; without it, the router reloads the
+      // page's data in the background and resolves at once.
+      await changeThenRefresh(change, session.members, async () => {
+        await router.invalidate({ sync: true });
+      });
+    }, report);
   };
   const setRole = (role: Role): void => {
     void run(async (members) => {

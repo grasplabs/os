@@ -102,8 +102,7 @@ export const loadCoreStatus = async (): Promise<CoreStatus> => {
   const core = connectCore();
   try {
     const [pong, signInOptions, identity] = await withTimeout(
-      Promise.all([core.ping(), core.signInOptions(), signedInAs(core)]),
-      timeoutMs
+      Promise.all([core.ping(), core.signInOptions(), signedInAs(core)])
     );
     return { connected: pong === "pong", signInOptions, identity };
   } catch {

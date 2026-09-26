@@ -1,10 +1,10 @@
-import type { Page } from "@playwright/test";
+import type { Page, WebSocketRoute } from "@playwright/test";
 
 type Message = string | Buffer;
 
 /** A page's connection to core, through Playwright. */
 interface Connection {
-  forward: (message: Message) => void;
+  server: WebSocketRoute;
   queue: Message[];
 }
 
@@ -19,13 +19,9 @@ export const callGate = async (page: Page, call: string) => {
   /** The connections held back, each with what it sent since. */
   const stalled: Connection[] = [];
   await page.routeWebSocket("**/rpc", (socket) => {
-    const server = socket.connectToServer();
-    const queue: Message[] = [];
     const connection: Connection = {
-      forward: (message) => {
-        server.send(message);
-      },
-      queue,
+      server: socket.connectToServer(),
+      queue: [],
     };
     socket.onMessage((message) => {
       const makesCall = String(message).includes(call);
@@ -35,7 +31,7 @@ export const callGate = async (page: Page, call: string) => {
       if (stalled.includes(connection)) {
         connection.queue.push(message);
       } else {
-        connection.forward(message);
+        connection.server.send(message);
       }
     });
   });
@@ -46,9 +42,9 @@ export const callGate = async (page: Page, call: string) => {
     stalled: () => stalled.length,
     release: () => {
       holding = false;
-      for (const connection of stalled.splice(0)) {
-        for (const message of connection.queue.splice(0)) {
-          connection.forward(message);
+      for (const { server, queue } of stalled.splice(0)) {
+        for (const message of queue.splice(0)) {
+          server.send(message);
         }
       }
     },
