@@ -29,7 +29,9 @@ import type { WorkflowDefinition } from "./workflow.ts";
  * Every workflow ships with its tests next to it (`invoice.workflow-tests.ts`
  * beside `invoice.ts`), written with `workflowTests`, and `runWorkflowTests`
  * runs them, so a version whose tests fail is never activated. The suffix
- * isn't `.test.ts`: these aren't Vitest files.
+ * isn't `.test.ts`: these aren't Vitest files. Every .ts file directly in
+ * workflows/, other than its tests, is a workflow: put shared code in a
+ * folder under it, such as workflows/lib/.
  */
 
 /** A step's call, as a mock gets it. */
