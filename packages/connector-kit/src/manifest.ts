@@ -103,6 +103,22 @@ const namesParameter = (path: string, name: string): boolean =>
     .split("/")
     .some((segment) => parameterSegment.exec(segment)?.groups?.name === name);
 
+/** A query parameter's value an action leaves open: `{name}`, all of it. */
+const queryParameter = /^\{(?<name>[A-Za-z_]\w*)\}$/u;
+
+/** A query parameter's value an action names as it is, such as `drive`. */
+const literalQueryValue = /^[\w.~:@$-]{1,256}$/u;
+
+/** Whether a route names `name` as a parameter, in its path or its query. */
+const routeNames = (
+  { path, query = {} }: { path: string; query?: Record<string, string> },
+  name: string
+): boolean =>
+  namesParameter(path, name) ||
+  Object.values(query).some(
+    (value) => queryParameter.exec(value)?.groups?.name === name
+  );
+
 /** Whether `path` is a path template: `/` and one or more segments. */
 const isPathTemplate = (path: string): boolean => {
   const [empty, ...segments] = path.split("/");
@@ -155,7 +171,18 @@ export const redirectHostMatches = (
 /**
  * One request an action may send: its method, host and path, where a
  * `{name}` segment stands for any one segment. The query string is the
- * action's own.
+ * action's own, but for the parameters `query` names: each must be sent
+ * exactly once, with the literal value given, or any one value for a
+ * `{name}` (bound, as a path's is, where the call binds `name`). That is
+ * how a route names its resource where the provider takes it in the query
+ * (Google Drive's `driveId`).
+ *
+ * A GET may be `unbound`: a route of a resource-scoped action that can't
+ * name the resource, because the provider's API has no place for it in
+ * that request (Google Drive addresses a file by its ID alone). The
+ * egress then can't hold it to the resource, so the tool must check the
+ * resource in the provider's answer before it passes anything on or sends
+ * anything else; reviewers check it does.
  *
  * A GET may name `redirects`: the hosts connect's egress follows one
  * redirect of its answer to, itself, without the token or any of the
@@ -170,10 +197,28 @@ export const routeSchema = z
     host: hostSchema,
     path: z.string().max(512).refine(isPathTemplate, "Not a path template"),
     redirects: z.array(redirectHostSchema).min(1).max(4).optional(),
+    query: z
+      .record(
+        z.string().regex(/^[A-Za-z_$][\w.$-]{0,63}$/u),
+        z
+          .string()
+          .refine(
+            (value) =>
+              queryParameter.test(value) || literalQueryValue.test(value),
+            "Not a query value: a literal or {name}"
+          )
+      )
+      .refine((query) => Object.keys(query).length <= 8, "Too many")
+      .optional(),
+    unbound: z.literal(true).optional(),
   })
   .refine(
     ({ method, redirects }) => redirects === undefined || method === "GET",
     "Only a GET may follow a redirect"
+  )
+  .refine(
+    ({ method, unbound }) => unbound === undefined || method === "GET",
+    "Only a GET may be unbound"
   );
 export type Route = z.infer<typeof routeSchema>;
 
@@ -256,10 +301,13 @@ export const connectorManifestSchema = z
       Object.values(actions).every(
         ({ resource, routes }) =>
           resource === null ||
-          routes.every(({ path }) => namesParameter(path, resource))
+          routes.every(
+            (route) => route.unbound === true || routeNames(route, resource)
+          )
       ),
-    // So the egress always binds it to the resource a capability names.
-    "Every route of an action with a resource must name it as a {segment}"
+    // So the egress always binds it to the resource a capability names,
+    // unless the route says it can't (the tool checks it then).
+    "Every route of an action with a resource must name it as a {segment}, in its path or its query, or be unbound"
   );
 export type ConnectorManifest = z.infer<typeof connectorManifestSchema>;
 
@@ -347,3 +395,43 @@ export const pathMatches = (
     })
   );
 };
+
+// oxlint-disable-next-line no-control-regex -- control characters are the point
+const controlCharacter = /[\u0000-\u001F\u007F]/u;
+
+/** A query parameter's name as a provider may also read it (`drive_id`, `DriveId`). */
+const spellingOf = (key: string): string =>
+  key.toLowerCase().replaceAll("_", "");
+
+/**
+ * Whether a URL's query has each parameter the route's `query` names
+ * exactly once, and in no other spelling (a second copy, or Google's
+ * `drive_id` for `driveId`, could be the one a provider reads), with
+ * its literal value, or, for a `{name}`, a non-empty value without
+ * control characters, equal to `values[name]` where that is given. Other
+ * parameters are the connector's own.
+ */
+export const queryMatches = (
+  query: Readonly<Record<string, string>> | undefined,
+  searchParams: URLSearchParams,
+  values: Readonly<Record<string, string>> = {}
+): boolean =>
+  Object.entries(query ?? {}).every(([key, expected]) => {
+    const spellings = [...searchParams.keys()].filter(
+      (each) => spellingOf(each) === spellingOf(key)
+    );
+    const value = searchParams.get(key);
+    if (spellings.length !== 1 || value === null) {
+      return false;
+    }
+    const name = queryParameter.exec(expected)?.groups?.name;
+    if (name === undefined) {
+      return value === expected;
+    }
+    const bound = Object.hasOwn(values, name) ? values[name] : undefined;
+    return (
+      value !== "" &&
+      !controlCharacter.test(value) &&
+      (bound === undefined || value === bound)
+    );
+  });

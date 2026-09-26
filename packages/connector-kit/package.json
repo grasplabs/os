@@ -7,6 +7,7 @@
   "sideEffects": false,
   "exports": {
     "./connector": "./src/connector.ts",
+    "./content": "./src/content.ts",
     "./manifest": "./src/manifest.ts"
   },
   "dependencies": {

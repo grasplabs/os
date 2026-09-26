@@ -3,6 +3,7 @@ import {
   hostSchema,
   httpMethods,
   pathMatches,
+  queryMatches,
   redirectHostMatches,
   routeSchema,
 } from "@grasp-os/connector-kit/manifest";
@@ -25,8 +26,9 @@ import { z } from "zod";
 // `global_fetch_strictly_public` keeps an allowed name that resolves to a
 // private address from being reached (R9).
 //
-// What the allowlist doesn't constrain: the query string and the body of
-// an allowed request are the connector's own (threat model EG3).
+// What the allowlist doesn't constrain: the query string (but for the
+// parameters a route names) and the body of an allowed request are the
+// connector's own (threat model EG3).
 //
 // A provider's 429 goes back to the connector as it is. Whether its call
 // did nothing (`notPerformedMetaKey`) is the connector's to say: this
@@ -99,8 +101,9 @@ const egressPropsSchema = z.strictObject({
   /** The requests the called action declares. */
   routes: z.array(routeSchema),
   /**
-   * Path parameters bound to one value: the action's resource property,
-   * to the resource the call's capability names.
+   * Parameters (of a path, or a route's query) bound to one value: the
+   * action's resource property, to the resource the call's capability
+   * names.
    */
   values: z.record(z.string(), z.string()),
   /** The connection's access token, for this call only. */
@@ -179,7 +182,8 @@ const routeFor = (
     (route) =>
       route.method === method &&
       route.host === url.hostname &&
-      pathMatches(route.path, url.pathname, values)
+      pathMatches(route.path, url.pathname, values) &&
+      queryMatches(route.query, url.searchParams, values)
   );
 
 /** Redirects a route's `redirects` hosts may be followed for. */

@@ -23,14 +23,11 @@
  * is a shared mailbox. Never point it at a client's tenant.
  */
 import { env } from "cloudflare:workers";
-import { drizzle } from "drizzle-orm/d1";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
-import { connections, connectionTokens } from "../src/db/schema.ts";
-import { firstTokens } from "../src/tokens.ts";
-import { vaultFor } from "../src/vault.ts";
-import { agentFor, callAs, outcome } from "./connect.ts";
+import { outcome } from "./connect.ts";
+import { smokeConnection, smokeRun as run } from "./smoke.ts";
 
 const smoke = z
   .object({
@@ -42,64 +39,15 @@ const smoke = z
   })
   .safeParse(env);
 
-/** How long the token is taken to be valid: Entra's are for an hour. */
-const tokenLifetimeMs = 50 * 60 * 1000;
-
 describe.runIf(smoke.success)("Microsoft 365, live", () => {
   const config = smoke.data;
-  const person = "user-smoke";
-
   /** A shared connection holding the token, as OAuth would leave one. */
-  const connection = async (): Promise<string> => {
-    const vault = await vaultFor(env);
-    if (vault === undefined || config === undefined) {
-      throw new Error("No token vault in the test env");
-    }
-    const id = `connection-smoke-${crypto.randomUUID()}`;
-    const now = new Date();
-    const db = drizzle(env.DB);
-    await db.insert(connections).values({
-      id,
-      provider: "microsoft",
-      scope: "shared",
-      status: "active",
-      serverKind: "native",
-      server: "microsoft-365",
-      createdAt: now,
-      updatedAt: now,
-    });
-    await db.insert(connectionTokens).values(
-      await firstTokens(
-        vault,
-        id,
-        {
-          accessToken: config.M365_SMOKE_ACCESS_TOKEN,
-          // Never used: the token isn't refreshed within the test.
-          refreshToken: "unused",
-          expiresAt: Date.now() + tokenLifetimeMs,
-        },
-        now
-      )
+  const connection = async (): Promise<string> =>
+    await smokeConnection(
+      "microsoft",
+      "microsoft-365",
+      config?.M365_SMOKE_ACCESS_TOKEN ?? ""
     );
-    return id;
-  };
-
-  const run = async (
-    connectionId: string,
-    action: string,
-    input: Record<string, string | number | string[]>,
-    resource: string,
-    idempotencyKey?: string
-  ): Promise<Record<string, unknown>> => {
-    const { output } = await callAs(agentFor(person), {
-      connectionId,
-      action,
-      input,
-      resource,
-      idempotencyKey,
-    });
-    return z.record(z.string(), z.unknown()).parse(JSON.parse(output));
-  };
 
   it("reads mail, a calendar and files, and pages through mail", async () => {
     const id = await connection();

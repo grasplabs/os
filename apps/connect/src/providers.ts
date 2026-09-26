@@ -178,14 +178,14 @@ const google: ProviderConfig = {
   authorizationEndpoint: () => "https://accounts.google.com/o/oauth2/v2/auth",
   tokenEndpoint: () => "https://oauth2.googleapis.com/token",
   revocationEndpoint: "https://oauth2.googleapis.com/revoke",
-  // What the Google Workspace connector needs: Gmail (read, label, send),
-  // Calendar and Drive, read-only where it only reads.
+  // What the Google Workspace connector needs: Gmail (read, label, draft,
+  // send), calendar events and Drive, read-only where it only reads.
   scopes: [
     "openid",
     "email",
     "profile",
     "https://www.googleapis.com/auth/gmail.modify",
-    "https://www.googleapis.com/auth/calendar.readonly",
+    "https://www.googleapis.com/auth/calendar.events.readonly",
     "https://www.googleapis.com/auth/drive.readonly",
   ],
   authorizationParams: (tenant) => ({

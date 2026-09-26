@@ -75,9 +75,11 @@ export interface ToolDefinition<
     Record<Extract<keyof z.input<Input>, string>, readonly string[]>
   >;
   /**
-   * The only requests it may send (threat model Q11). A path segment named
-   * after the resource property (`{mailbox}`) must hold the resource a
-   * call's capability names, whenever it names one.
+   * The only requests it may send (threat model Q11). A parameter named
+   * after the resource property (`{mailbox}`), in a path or a route's
+   * `query`, must hold the resource a call's capability names, whenever it
+   * names one. An `unbound` route can't be held to it: the tool must check
+   * the resource in the provider's answer itself.
    */
   routes: readonly Route[];
   run: (input: z.output<Input>) => Promise<ToolResult<z.input<Output>>>;

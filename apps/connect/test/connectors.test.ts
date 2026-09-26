@@ -707,6 +707,45 @@ describe("the egress handler", () => {
     expect(api.sent).toStrictEqual([]);
   });
 
+  it("holds the query parameters a route names to their values and the resource", async () => {
+    const egress = exports.ConnectorEgress({
+      props: egressProps({
+        routes: [
+          {
+            method: "GET",
+            host: sampleHost,
+            path: "/v1/probe/ok",
+            query: { corpora: "drive", driveId: "{drive}" },
+          },
+        ],
+        values: { drive: "d-1" },
+      }),
+    });
+    const statuses = await Promise.all(
+      [
+        "corpora=drive&driveId=d-1&q=anything",
+        "corpora=drive&driveId=d-2",
+        "corpora=user&driveId=d-1",
+        "driveId=d-1",
+        // A second copy could be the one the provider reads.
+        "corpora=drive&driveId=d-1&driveId=d-2",
+      ].map(async (query) => {
+        const response = await egress.fetch(`${url}?${query}`);
+        return response.headers.get("grasp-egress") ?? "sent";
+      })
+    );
+    expect(statuses).toStrictEqual([
+      "sent",
+      "refused",
+      "refused",
+      "refused",
+      "refused",
+    ]);
+    expect(api.sent.map(({ path }) => path)).toStrictEqual([
+      "/v1/probe/ok?corpora=drive&driveId=d-1&q=anything",
+    ]);
+  });
+
   it("closes when the call's time is up", async () => {
     const egress = exports.ConnectorEgress({
       props: egressProps({ expiresAt: Date.now() - 1 }),

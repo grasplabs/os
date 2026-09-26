@@ -5,6 +5,7 @@ import { defineConnector, defineTool, ToolError } from "../src/connector.ts";
 import {
   connectorManifestSchema,
   pathMatches,
+  queryMatches,
   redirectHostMatches,
 } from "../src/manifest.ts";
 import type { Route } from "../src/manifest.ts";
@@ -277,7 +278,7 @@ describe("a connector", () => {
   });
 
   it("binds every route of a resource-scoped tool to its resource", () => {
-    const withRoutes = (paths: string[]) =>
+    const withRoutes = (paths: (string | Partial<Route>)[]) =>
       connectorWith({
         tools: [
           defineTool({
@@ -287,7 +288,11 @@ describe("a connector", () => {
             output: z.strictObject({}),
             readOnly: true,
             resource: "mailbox",
-            routes: paths.map((path) => ({ ...route, path })),
+            routes: paths.map((path) =>
+              typeof path === "string"
+                ? { ...route, path }
+                : { ...route, ...path }
+            ),
             run: async () => await Promise.resolve({ output: {} }),
           }),
         ],
@@ -301,6 +306,24 @@ describe("a connector", () => {
     ]) {
       expect(() => withRoutes(paths)).toThrow("must name it");
     }
+    // In the query, where the provider takes it there; or, for a GET
+    // where it has no place at all, declared unbound.
+    expect(() =>
+      withRoutes([
+        { query: { box: "{mailbox}", corpora: "drive" } },
+        { path: "/v1/items/{item}", unbound: true },
+      ])
+    ).not.toThrow();
+    for (const unnamed of [
+      { query: { box: "{user}" } },
+      { query: { box: "mailbox" } },
+      { query: { box: "x{mailbox}" } },
+    ]) {
+      expect(() => withRoutes([unnamed])).toThrow(/must name it|Not a query/u);
+    }
+    expect(() =>
+      withRoutes([{ method: "POST", path: "/v1/items/{item}", unbound: true }])
+    ).toThrow("Only a GET may be unbound");
   });
 
   it("follows a redirect only from a GET, to hosts one label under a named one", () => {
@@ -465,6 +488,47 @@ describe("a route's path", () => {
       "/v1/files/a:b:batchUpdate",
     ]) {
       expect(pathMatches(custom, path)).toBeFalsy();
+    }
+  });
+});
+
+const params = (search: string) => new URLSearchParams(search);
+
+describe("a route's query", () => {
+  const query = { corpora: "drive", driveId: "{drive}" };
+
+  it("holds each parameter it names exactly once, as declared", () => {
+    expect(
+      queryMatches(query, params("corpora=drive&driveId=d-1&q=x"))
+    ).toBeTruthy();
+    expect(queryMatches(undefined, params("anything=1"))).toBeTruthy();
+    for (const search of [
+      "driveId=d-1",
+      "corpora=user&driveId=d-1",
+      "corpora=drive",
+      "corpora=drive&driveId=",
+      "corpora=drive&driveId=d-1&driveId=d-2",
+      "corpora=drive&corpora=user&driveId=d-1",
+      "corpora=drive&driveId=d%0A1",
+      "corpora=drive&driveId=d-1&drive_id=d-2",
+      "corpora=drive&driveId=d-1&DriveID=d-2",
+      "Corpora=drive&driveId=d-1",
+    ]) {
+      expect(queryMatches(query, params(search))).toBeFalsy();
+    }
+  });
+
+  it("binds a parameter to a value, where it is given one", () => {
+    const values = { drive: "d-1" };
+    expect(
+      queryMatches(query, params("corpora=drive&driveId=d-1"), values)
+    ).toBeTruthy();
+    for (const search of [
+      "corpora=drive&driveId=d-2",
+      "corpora=drive&driveId=D-1",
+      "corpora=drive&driveId=d-1%20",
+    ]) {
+      expect(queryMatches(query, params(search), values)).toBeFalsy();
     }
   });
 });
