@@ -1,12 +1,14 @@
 import type {
   Api,
   AssistantMessage,
+  AssistantMessageEventStream,
   FetchFunction,
   Message,
   Model,
   ProviderHeaders,
   SimpleStreamOptions,
   StreamFunction,
+  TranscriptContext,
   Usage,
 } from "@earendil-works/pi-ai";
 import { streamSimple as anthropicMessages } from "@earendil-works/pi-ai/api/anthropic-messages";
@@ -20,6 +22,7 @@ import { streamSimple as openaiResponses } from "@earendil-works/pi-ai/api/opena
 import { ANTHROPIC_MODELS } from "@earendil-works/pi-ai/providers/anthropic.models";
 import { CLOUDFLARE_WORKERS_AI_MODELS } from "@earendil-works/pi-ai/providers/cloudflare-workers-ai.models";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
+import { createAssistantMessageEventStream } from "@earendil-works/pi-ai/utils/event-stream";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import {
   auditActorSchema,
@@ -35,6 +38,8 @@ import { z } from "zod";
 
 import { outboxed, sendAuditOutboxNow } from "./audit-outbox.ts";
 import { audit } from "./audit.ts";
+import { deadline } from "./deadline.ts";
+import type { Deadline, Stopped } from "./deadline.ts";
 import { jsonVar } from "./json-var.ts";
 
 // The model gateway: every model call in a deployment goes through here, and
@@ -179,10 +184,29 @@ const modelGatewayConfig = (env: ModelsEnv): ModelGatewayConfig | undefined => {
 /** What a call is for, such as `workflow.step` or `chat.turn`. */
 const purposePattern = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u;
 
-const callSchema = z
-  .strictObject({
-    /** `<provider>/<model>`, one the deployment allows. */
-    model: z.string().min(1),
+/**
+ * What every model request says about itself: the model, its limits, and
+ * what the audit log records of why and for whom it was made.
+ */
+const sessionSchema = z.strictObject({
+  /** `<provider>/<model>`, one the deployment allows. */
+  model: z.string().min(1),
+  /** The most tokens an answer may take; capped at the model's limit. */
+  maxTokens: z.int().positive().optional(),
+  /** How long a request may take, in milliseconds, retries included. */
+  timeoutMs: z.int().positive().max(maxTimeoutMs).optional(),
+  /** Why the call is made, for the audit log. */
+  purpose: z.string().max(64).regex(purposePattern),
+  /** Who or what asked: a person, an agent, an App or a workflow run. */
+  trigger: auditActorSchema,
+  /** IDs of the resources that fed the prompt. */
+  provenance: auditEventSchema.shape.provenance,
+  requestId: auditEventSchema.shape.requestId,
+});
+type Session = z.output<typeof sessionSchema>;
+
+const callSchema = sessionSchema
+  .extend({
     /** Instructions: the system prompt. */
     system: z.string().optional(),
     /** One message to answer: text, or JSON sent as its text. */
@@ -197,17 +221,6 @@ const callSchema = z
       )
       .min(1)
       .optional(),
-    /** The most tokens the answer may take; capped at the model's limit. */
-    maxTokens: z.int().positive().optional(),
-    /** How long the call may take, in milliseconds, retries included. */
-    timeoutMs: z.int().positive().max(maxTimeoutMs).optional(),
-    /** Why the call is made, for the audit log. */
-    purpose: z.string().max(64).regex(purposePattern),
-    /** Who or what asked: a person, an agent, an App or a workflow run. */
-    trigger: auditActorSchema,
-    /** IDs of the resources that fed the prompt. */
-    provenance: auditEventSchema.shape.provenance,
-    requestId: auditEventSchema.shape.requestId,
   })
   .refine(({ input, messages }) => (input === undefined) !== !messages, {
     message: "Either input or messages",
@@ -254,7 +267,7 @@ const gatewayModel = (gateway: string, ref: ModelRef): Model<Api> => ({
       : ref.catalog.maxTokens,
 });
 
-const gatewayHeaders = (call: Call): ProviderHeaders => ({
+const gatewayHeaders = (session: Session): ProviderHeaders => ({
   // The binding authenticates the request. pi still wants auth before it
   // sends, and the gateway strips this placeholder. The nulls drop the
   // SDKs' own auth headers, which the gateway would take for a caller's
@@ -267,9 +280,11 @@ const gatewayHeaders = (call: Call): ProviderHeaders => ({
   // So the gateway's log can be searched by why and for what kind of
   // caller; identifiers only, like the audit event.
   "cf-aig-metadata": JSON.stringify({
-    purpose: call.purpose,
-    actor: call.trigger.type,
-    ...(call.requestId === undefined ? {} : { requestId: call.requestId }),
+    purpose: session.purpose,
+    actor: session.trigger.type,
+    ...(session.requestId === undefined
+      ? {}
+      : { requestId: session.requestId }),
   }),
 });
 
@@ -347,40 +362,37 @@ const costOf = ({ cost }: Usage): number =>
 const hasFailed = ({ stopReason }: AssistantMessage): boolean =>
   stopReason === "error" || stopReason === "aborted";
 
-interface Request {
+/** Where a session's requests go, and what they say about themselves. */
+interface Route {
+  /** The model at the deployment's gateway. */
   model: Model<Api>;
   ref: ModelRef;
-  call: Call;
+  session: Session;
   /** The AI binding's fetch, which reaches the gateway. */
   transport: FetchFunction;
-  /** Ends the call when it takes too long, retries included. */
-  signal: AbortSignal;
-  system: string | undefined;
-  messages: Message[];
 }
 
-interface Sent {
-  answer: AssistantMessage;
-  /** The HTTP status and the gateway's log entry, once it answered. */
+/** What the gateway said about a request, once it answered. */
+interface GatewayResponse {
   status: number | undefined;
   logId: string | undefined;
 }
 
+interface Sent extends GatewayResponse {
+  answer: AssistantMessage;
+}
+
 /**
- * Sends one request through the gateway. pi reports a failed request as an
- * answer with an error stop reason instead of throwing.
+ * Opens one request through the gateway: the model's answer as it streams
+ * in, and the gateway's response once it came. pi reports a failed request
+ * as a final error event instead of throwing.
  */
-const send = async ({
-  model,
-  ref,
-  call,
-  transport,
-  signal,
-  system,
-  messages,
-}: Request): Promise<Sent> => {
-  let status: number | undefined = undefined;
-  let logId: string | undefined = undefined;
+const open = (
+  { model, ref, session, transport }: Route,
+  context: TranscriptContext,
+  signal: AbortSignal
+) => {
+  const response: GatewayResponse = { status: undefined, logId: undefined };
   // SAFETY: the provider picks both the adapter and the catalog the model
   // comes from, so the model always speaks the adapter's API.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
@@ -388,26 +400,37 @@ const send = async ({
     Api,
     SimpleStreamOptions
   >;
-  const stream = adapter(
-    model,
+  const events = adapter(model, context, {
+    fetch: transport,
+    headers: gatewayHeaders(session),
+    maxTokens: Math.min(session.maxTokens ?? defaultMaxTokens, model.maxTokens),
+    maxRetries,
+    // Reasoning at a middle effort where the model has it: without a level
+    // pi turns it off.
+    reasoning: model.reasoning ? "medium" : undefined,
+    signal,
+    onResponse: ({ status, headers }) => {
+      response.status = status;
+      response.logId = headers["cf-aig-log-id"];
+    },
+  });
+  return { events, response };
+};
+
+/** Sends one request through the gateway and waits for the whole answer. */
+const send = async (
+  route: Route,
+  system: string | undefined,
+  messages: Message[],
+  signal: AbortSignal
+): Promise<Sent> => {
+  const { events, response } = open(
+    route,
     normalizeContext({ systemPrompt: system, messages }),
-    {
-      fetch: transport,
-      headers: gatewayHeaders(call),
-      maxTokens: Math.min(call.maxTokens ?? defaultMaxTokens, model.maxTokens),
-      maxRetries,
-      // Reasoning at a middle effort where the model has it: without a
-      // level pi turns it off.
-      reasoning: model.reasoning ? "medium" : undefined,
-      signal,
-      onResponse: (response) => {
-        ({ status } = response);
-        logId = response.headers["cf-aig-log-id"];
-      },
-    }
+    signal
   );
-  const answer = await stream.result();
-  return { answer, status, logId };
+  const answer = await events.result();
+  return { answer, ...response };
 };
 
 /**
@@ -416,7 +439,8 @@ const send = async ({
  * pi fails such a request before `onResponse`, so this is the only place
  * the status is.
  */
-const failedStatusPattern = /^[^{]{0,40}?\b(?<status>[1-5]\d{2})\b/u;
+const failedStatusPattern =
+  /^(?:OpenAI API error \()?(?<status>[1-5]\d{2})(?:\):|:)?\s/u;
 
 const errorTypeSchema = z.string().regex(/^[A-Za-z][\w.-]{0,63}$/u);
 
@@ -432,7 +456,10 @@ const providerErrorSchema = z.union([
 /** Why a request failed, as far as can be told without its message. */
 interface Failure {
   status: number | undefined;
-  /** The provider's error type, such as `rate_limit_error`, or `timeout`. */
+  /**
+   * The provider's error type, such as `rate_limit_error`, or `timeout` or
+   * `cancelled` when it was stopped here.
+   */
   errorType: string | undefined;
 }
 
@@ -458,9 +485,12 @@ const providerErrorType = (text: string): string | undefined => {
  * What failed: the status and the provider's error type, never the error's
  * message, which may quote the prompt.
  */
-const failureOf = ({ answer, status }: Sent, signal: AbortSignal): Failure => {
-  if (signal.aborted) {
-    return { status, errorType: "timeout" };
+const failureOf = (
+  { answer, status }: Sent,
+  stopped: Stopped | undefined
+): Failure => {
+  if (stopped !== undefined) {
+    return { status, errorType: stopped };
   }
   const text = answer.errorMessage?.trim() ?? "";
   const quoted = failedStatusPattern.exec(text)?.groups?.status;
@@ -470,8 +500,24 @@ const failureOf = ({ answer, status }: Sent, signal: AbortSignal): Failure => {
   };
 };
 
+/** A failure in our own words, for whoever reads the answer. */
+const failureMessage = ({ status, errorType }: Failure): string => {
+  if (errorType === "cancelled") {
+    return "The model call was cancelled.";
+  }
+  const cause = [status, errorType].filter((part) => part !== undefined);
+  return cause.length === 0
+    ? "The model call failed."
+    : `The model call failed (${cause.join(" ")}).`;
+};
+
 /** How one request ended, as the audit log records it. */
-type Outcome = "answered" | "truncated" | "invalid_output" | "failed";
+type Outcome =
+  | "answered"
+  | "truncated"
+  | "invalid_output"
+  | "failed"
+  | "cancelled";
 
 /** What the audit log records of one request. */
 interface Recorded {
@@ -485,13 +531,13 @@ interface Recorded {
   errorType: string | undefined;
 }
 
-const auditEntry = (call: Call, ref: ModelRef, recorded: Recorded) => {
+const auditEntry = (session: Session, ref: ModelRef, recorded: Recorded) => {
   const { logId } = recorded;
   return {
-    actor: call.trigger,
+    actor: session.trigger,
     action: "model.call",
-    requestId: call.requestId,
-    provenance: call.provenance,
+    requestId: session.requestId,
+    provenance: session.provenance,
     model: {
       provider: ref.provider,
       model: ref.id,
@@ -500,7 +546,7 @@ const auditEntry = (call: Call, ref: ModelRef, recorded: Recorded) => {
     },
     cost: { amount: recorded.cost, currency: "USD" },
     detail: {
-      purpose: call.purpose,
+      purpose: session.purpose,
       outcome: recorded.outcome,
       attempt: recorded.attempt,
       status: recorded.status ?? null,
@@ -559,8 +605,7 @@ const keep = async (env: ModelsEnv, entry: AuditEntry): Promise<void> => {
 /** Records one request in the audit log, however it ended. */
 const record = async (
   env: ModelsEnv,
-  call: Call,
-  ref: ModelRef,
+  { session, ref }: Route,
   { answer, logId, status }: Sent,
   attempt: number,
   outcome: Outcome,
@@ -568,7 +613,7 @@ const record = async (
 ): Promise<void> => {
   await keep(
     env,
-    auditEntry(call, ref, {
+    auditEntry(session, ref, {
       inputTokens: inputTokens(answer.usage),
       outputTokens: answer.usage.output,
       cost: costOf(answer.usage),
@@ -581,62 +626,73 @@ const record = async (
   );
 };
 
-/** Checks a call against the deployment's config, before anything is sent. */
-const admit = (
-  env: ModelsEnv,
-  fields: unknown
-): { call: Call; ref: ModelRef; gateway: string; transport: FetchFunction } => {
-  const parsed = callSchema.safeParse(fields);
-  if (!parsed.success) {
-    throw modelErrors.create("model.invalid_call");
+/**
+ * Whether the session's audit event fits the log whatever its requests
+ * end as. One that doesn't (its provenance, say, is too long to record) is
+ * refused before anything is sent and paid for.
+ */
+const fits = (session: Session, ref: ModelRef): boolean => {
+  try {
+    createAuditEvent(auditEntry(session, ref, largestRecord), "core");
+    return true;
+  } catch {
+    return false;
   }
-  const call = parsed.data;
+};
+
+/**
+ * Checks a session against the deployment's config, before anything is
+ * sent, and routes it to the model at the gateway.
+ */
+const admit = (env: ModelsEnv, session: Session): Route => {
   const config = modelGatewayConfig(env);
   // Plain workerd (on-prem) has no AI binding, so no gateway either.
   if (config === undefined || typeof env.AI?.fetch !== "function") {
     throw modelErrors.create("model.unconfigured");
   }
-  const ref = config.models.includes(call.model)
-    ? parseModelRef(call.model)
+  const ref = config.models.includes(session.model)
+    ? parseModelRef(session.model)
     : undefined;
   if (ref === undefined) {
-    throw modelErrors.create("model.not_allowed", { model: call.model });
+    throw modelErrors.create("model.not_allowed", { model: session.model });
   }
-  try {
-    createAuditEvent(auditEntry(call, ref, largestRecord), "core");
-  } catch {
-    // Its provenance, say, is too long to record.
+  if (!fits(session, ref)) {
     throw modelErrors.create("model.invalid_call");
   }
   return {
-    call,
+    model: gatewayModel(config.gateway, ref),
     ref,
-    gateway: config.gateway,
+    session,
     transport: createAiBindingFetch(env.AI),
   };
 };
 
-const callModel = async <Output>(
+/** `fields` parsed with `schema`, or refused as an invalid call. */
+const parseCall = <Schema extends z.ZodType>(
+  schema: Schema,
+  fields: unknown
+): z.output<Schema> => {
+  const parsed = schema.safeParse(fields);
+  if (!parsed.success) {
+    throw modelErrors.create("model.invalid_call");
+  }
+  return parsed.data;
+};
+
+const answerCall = async <Output>(
   env: ModelsEnv,
-  { schema, ...fields }: ModelCall<Output>
+  route: Route,
+  call: Call,
+  schema: z.ZodType<Output> | undefined,
+  limit: Deadline
 ): Promise<ModelAnswer<Output>> => {
-  const { call, ref, gateway, transport } = admit(env, fields);
-  const model = gatewayModel(gateway, ref);
-  const signal = AbortSignal.timeout(call.timeoutMs ?? defaultTimeoutMs);
-  const request: Request = {
-    model,
-    ref,
-    call,
-    transport,
-    signal,
-    system:
-      schema === undefined
-        ? call.system
-        : [call.system, structuredInstructions(schema)]
-            .filter((part) => part !== undefined)
-            .join("\n\n"),
-    messages: toMessages(call, model),
-  };
+  const system =
+    schema === undefined
+      ? call.system
+      : [call.system, structuredInstructions(schema)]
+          .filter((part) => part !== undefined)
+          .join("\n\n");
+  const messages = toMessages(call, route.model);
 
   const usage = { inputTokens: 0, outputTokens: 0 };
   let cost = 0;
@@ -645,7 +701,7 @@ const callModel = async <Output>(
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     // Each attempt follows up on the answer before it.
     // oxlint-disable-next-line no-await-in-loop
-    const sent = await send(request);
+    const sent = await send(route, system, messages, limit.signal);
     const { answer } = sent;
     usage.inputTokens += inputTokens(answer.usage);
     usage.outputTokens += answer.usage.output;
@@ -654,7 +710,7 @@ const callModel = async <Output>(
     const truncated = answer.stopReason === "length";
 
     if (hasFailed(answer)) {
-      const failure = failureOf(sent, signal);
+      const failure = failureOf(sent, limit.stopped());
       log.warn("model.failed", {
         model: call.model,
         status: failure.status,
@@ -662,15 +718,14 @@ const callModel = async <Output>(
         stopReason: answer.stopReason,
       });
       // oxlint-disable-next-line no-await-in-loop
-      await record(env, call, ref, sent, attempt, "failed", failure);
+      await record(env, route, sent, attempt, "failed", failure);
       throw modelErrors.create("model.failed");
     }
     if (schema === undefined) {
       // oxlint-disable-next-line no-await-in-loop
       await record(
         env,
-        call,
-        ref,
+        route,
         sent,
         attempt,
         truncated ? "truncated" : "answered"
@@ -686,8 +741,7 @@ const callModel = async <Output>(
     // oxlint-disable-next-line no-await-in-loop
     await record(
       env,
-      call,
-      ref,
+      route,
       sent,
       attempt,
       result.ok ? "answered" : "invalid_output"
@@ -695,7 +749,7 @@ const callModel = async <Output>(
     if (result.ok) {
       return { text, output: result.output, truncated, usage, cost };
     }
-    request.messages.push(answer, {
+    messages.push(answer, {
       role: "user",
       content: `That answer doesn't fit: ${result.problem}\nAnswer again, with only the JSON.`,
       timestamp: Date.now(),
@@ -704,14 +758,220 @@ const callModel = async <Output>(
   throw modelErrors.create("model.invalid_output");
 };
 
+const callModel = async <Output>(
+  env: ModelsEnv,
+  { schema, ...fields }: ModelCall<Output>
+): Promise<ModelAnswer<Output>> => {
+  const call = parseCall(callSchema, fields);
+  const route = admit(env, call);
+  const limit = deadline(call.timeoutMs ?? defaultTimeoutMs);
+  try {
+    return await answerCall(env, route, call, schema, limit);
+  } finally {
+    limit.clear();
+  }
+};
+
+/** A failed answer in our own words, for a request that got none. */
+const failedAnswer = (
+  route: Route,
+  errorMessage: string
+): AssistantMessage => ({
+  role: "assistant",
+  content: [],
+  api: route.model.api,
+  provider: route.model.provider,
+  model: route.model.id,
+  usage: noUsage,
+  stopReason: "error",
+  errorMessage,
+  timestamp: Date.now(),
+});
+
+const relayEvents = async (
+  env: ModelsEnv,
+  route: Route,
+  { events, response }: ReturnType<typeof open>,
+  out: AssistantMessageEventStream,
+  limit: Deadline
+): Promise<void> => {
+  for await (const event of events) {
+    if (event.type === "error") {
+      const sent: Sent = { answer: event.error, ...response };
+      const stopped = limit.stopped();
+      const failure = failureOf(sent, stopped);
+      log.warn("model.failed", {
+        model: route.session.model,
+        status: failure.status,
+        errorType: failure.errorType,
+        stopReason: event.error.stopReason,
+      });
+      await record(
+        env,
+        route,
+        sent,
+        1,
+        stopped === "cancelled" ? "cancelled" : "failed",
+        failure
+      );
+      out.push({
+        ...event,
+        error: { ...event.error, errorMessage: failureMessage(failure) },
+      });
+      return;
+    }
+    if (event.type === "done") {
+      await record(
+        env,
+        route,
+        { answer: event.message, ...response },
+        1,
+        event.reason === "length" ? "truncated" : "answered"
+      );
+      out.push(event);
+      return;
+    }
+    out.push(event);
+  }
+  // The adapter ended without a last event: a failure, recorded as one.
+  const answer = failedAnswer(route, "The model call failed.");
+  await record(env, route, { answer, ...response }, 1, "failed");
+  out.push({ type: "error", reason: "error", error: answer });
+};
+
+/**
+ * Streams one request of an agent loop to `out`, event by event, and
+ * records it before its last event: the loop sees an answer only once its
+ * audit event is safe. A failure reaches the loop in our own words.
+ */
+const relay = async (
+  env: ModelsEnv,
+  route: Route,
+  context: TranscriptContext,
+  out: AssistantMessageEventStream,
+  caller: AbortSignal | undefined
+): Promise<void> => {
+  if (caller?.aborted === true) {
+    // Cancelled before it was sent: nothing to record.
+    out.push({
+      type: "error",
+      reason: "aborted",
+      error: {
+        ...failedAnswer(route, "The model call was cancelled."),
+        stopReason: "aborted",
+      },
+    });
+    return;
+  }
+  if (!fits(route.session, route.ref)) {
+    // What the turn read since it began makes its event too large.
+    out.push({
+      type: "error",
+      reason: "error",
+      error: failedAnswer(
+        route,
+        "The model call was refused: it read from too many resources to record."
+      ),
+    });
+    return;
+  }
+  const limit = deadline(route.session.timeoutMs ?? defaultTimeoutMs, caller);
+  try {
+    await relayEvents(
+      env,
+      route,
+      open(route, context, limit.signal),
+      out,
+      limit
+    );
+  } finally {
+    limit.clear();
+  }
+};
+
+/** A model for an agent loop: pi's stream function, bound to one model. */
+export interface AgentModel {
+  /** The model at the deployment's gateway, as the loop names it. */
+  model: Model<Api>;
+  /**
+   * Streams one request, with the tools its transcript declares. Whatever
+   * model the loop passes, the request goes to this one, through the
+   * gateway. Never throws: a failure is the stream's last event.
+   */
+  stream: (
+    model: Model<Api>,
+    context: TranscriptContext,
+    options?: SimpleStreamOptions
+  ) => AssistantMessageEventStream;
+}
+
+/** An agent loop's model: everything of a call but the conversation. */
+export type ModelSession = z.input<typeof sessionSchema>;
+
+/**
+ * {@link relay}, but never failing: if the request can't be recorded, say,
+ * the loop gets a failure instead of waiting for an answer forever.
+ */
+const relayOrFail = async (
+  env: ModelsEnv,
+  route: Route,
+  context: TranscriptContext,
+  out: AssistantMessageEventStream,
+  caller: AbortSignal | undefined
+): Promise<void> => {
+  try {
+    await relay(env, route, context, out, caller);
+  } catch (error) {
+    log.error("model.stream_failed", errorFields(error));
+    // Ignored if the loop already has the request's last event.
+    out.push({
+      type: "error",
+      reason: "error",
+      error: failedAnswer(route, "The model call failed."),
+    });
+  }
+};
+
+const agentModel = (
+  env: ModelsEnv,
+  fields: ModelSession,
+  provenance: () => readonly string[]
+): AgentModel => {
+  const route = admit(env, parseCall(sessionSchema, fields));
+  return {
+    model: route.model,
+    stream: (_model, context, options) => {
+      const out = createAssistantMessageEventStream();
+      // What fed this request: whatever the loop has read by now.
+      const request: Route = {
+        ...route,
+        session: { ...route.session, provenance: [...provenance()] },
+      };
+      // The loop reads the answer from `out` as it streams in.
+      void relayOrFail(env, request, context, out, options?.signal);
+      return out;
+    },
+  };
+};
+
 /**
  * The model gateway for core: `await models(env).call({ model, input,
  * purpose, trigger })`. Refuses a model the deployment doesn't allow, sends
  * the call through AI Gateway, and records every request it makes in the
  * audit log. With a `schema`, the answer is JSON that matches it.
+ *
+ * `models(env).agent({ model, purpose, trigger })` is the same for an agent
+ * loop: a model that streams and calls tools, each request refused, sent
+ * and audited the same way. It refuses the session up front, before the
+ * loop sends anything. `provenance` is read for each request: the IDs of
+ * the resources the loop has read by then.
  */
 export const models = (env: ModelsEnv) => ({
   call: async <Output = undefined>(
     call: ModelCall<Output>
   ): Promise<ModelAnswer<Output>> => await callModel(env, call),
+  agent: (
+    session: ModelSession,
+    provenance: () => readonly string[] = () => []
+  ): AgentModel => agentModel(env, session, provenance),
 });

@@ -11,7 +11,10 @@ export const newChat = async (): Promise<
   Extract<WorkContext, { type: "chat" }>
 > => {
   const workspaceId = workspaceIdSchema.parse(crypto.randomUUID());
-  const { id } = await workspace(env, workspaceId).createChat("Chat");
+  const { id } = await workspace(env, workspaceId).createChat(
+    "Chat",
+    "person-1"
+  );
   return { type: "chat", workspaceId, chatId: id };
 };
 

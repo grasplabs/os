@@ -13,8 +13,12 @@ import { deploymentConfig } from "./deployment-config.ts";
 // opened before stays on the version it opened with, and so keeps its
 // flags, until it closes (at the latest when its session ends).
 
-/** Every feature behind a flag. */
-export type Feature = "apps" | "permissions" | "knowledge";
+/**
+ * Every feature behind a flag. `agent` stays off on-prem (plain workerd,
+ * as `vp run smoke:workerd` runs it): plain workerd doesn't enforce the
+ * CPU limit of the isolates Code Mode runs the agent's code in.
+ */
+export type Feature = "apps" | "permissions" | "knowledge" | "agent";
 
 // Names nobody knows (a flag since removed) are ignored, not an error.
 const featuresSchema = z.record(z.string(), z.boolean());

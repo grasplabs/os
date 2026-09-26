@@ -53,7 +53,7 @@ const migrateTo = async (
 
 describe("Workspace schema", () => {
   it("migrates a fresh workspace before its first call", async () => {
-    const chat = await newWorkspace().createChat("Plans");
+    const chat = await newWorkspace().createChat("Plans", "person-1");
     expect(chat).toMatchObject({ title: "Plans" });
   });
 
@@ -61,17 +61,17 @@ describe("Workspace schema", () => {
     const stub = newWorkspace();
     await migrateTo(stub, previousRelease, { fromScratch: true });
 
-    const chat = await stub.createChat("Plans");
+    const chat = await stub.createChat("Plans", "person-1");
     expect(chat).toMatchObject({ title: "Plans" });
   });
 
   it("keeps working when the code is rolled back after an additive migration", async () => {
     const stub = newWorkspace();
-    const before = await stub.createChat("Before the release");
+    const before = await stub.createChat("Before the release", "person-1");
     await migrateTo(stub, nextRelease(), { fromScratch: false });
 
     // Waking up again on this release's code leaves the newer schema alone.
-    const after = await stub.createChat("After the rollback");
+    const after = await stub.createChat("After the rollback", "person-1");
     expect(after).toMatchObject({ title: "After the rollback" });
     await runInDurableObject(stub, (_instance, state) => {
       const rows = state.storage.sql
@@ -86,7 +86,7 @@ describe("Workspace schema", () => {
 
   it("rolls back a failing migration and reports its error", async () => {
     const stub = newWorkspace();
-    await stub.createChat("Before the release");
+    await stub.createChat("Before the release", "person-1");
     const broken = withMigration(
       "broken",
       "ALTER TABLE `chats` ADD `pinned` integer;\n--> statement-breakpoint\nALTER TABLE `missing` ADD `x` integer;"
@@ -103,7 +103,7 @@ describe("Workspace schema", () => {
         .map(({ name }) => name);
       expect(columns).not.toContain("pinned");
     });
-    const after = await stub.createChat("After the failure");
+    const after = await stub.createChat("After the failure", "person-1");
     expect(after).toMatchObject({ title: "After the failure" });
   });
 

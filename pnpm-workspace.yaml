@@ -48,6 +48,7 @@ catalog:
 
   # Identity, agents, connections
   "@better-auth/sso": 1.7.5
+  "@earendil-works/pi-agent-core": 0.87.1
   "@earendil-works/pi-ai": 0.87.1
   "@modelcontextprotocol/sdk": 1.30.0
   better-auth: 1.7.5

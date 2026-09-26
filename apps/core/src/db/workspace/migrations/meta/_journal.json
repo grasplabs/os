@@ -15,6 +15,13 @@
       "when": 1790378731683,
       "tag": "0001_restricted_chats",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790381798411,
+      "tag": "0002_agent_sessions",
+      "breakpoints": true
     }
   ]
 }
