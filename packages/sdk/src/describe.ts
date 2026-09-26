@@ -9,10 +9,10 @@ import type {
   Node,
   ObjectExpression,
 } from "@babel/types";
+import { messageOf } from "@grasp-os/shared/errors";
 import { z } from "zod";
 
 import {
-  messageOf,
   namePattern,
   nameRule,
   optionForms,
