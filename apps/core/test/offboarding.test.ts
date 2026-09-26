@@ -646,44 +646,61 @@ describe("changing a member's role", () => {
     });
   });
 
-  it("records each change against the role it replaced, also when two admins change it at once", async () => {
-    for (const _round of [1, 2, 3]) {
-      // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      const [first, second, person] = await Promise.all([
-        signedInApi(idp, "admin"),
-        signedInApi(idp, "admin"),
-        signedInApi(idp, "user"),
-      ]);
-      let outcomes: string[] = [];
-      // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      const audited = await auditedDuring(async () => {
-        outcomes = await Promise.all([
-          outcome(first.api.members.setRole(person.userId, "builder")),
-          outcome(second.api.members.setRole(person.userId, "admin")),
-        ]);
-      });
-      // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      const { role } = await person.api.whoami();
-      // A change that raced the other applies after it, or is refused.
-      const replaced = role === "admin" ? "builder" : "admin";
-      const expected = outcomes.includes("member.role_changed")
-        ? [{ userId: person.userId, previousRole: "user", role }]
-        : [
-            { userId: person.userId, previousRole: "user", role: replaced },
-            { userId: person.userId, previousRole: replaced, role },
-          ];
-      expect(outcomes).toContain("ok");
-      expect(
-        outcomes.filter(
-          (each) => each !== "ok" && each !== "member.role_changed"
-        )
-      ).toStrictEqual([]);
-      const changes = audited
+  it("records each change against the role it replaced, and refuses one that another admin's change overtook", async () => {
+    const [first, second, person] = await Promise.all([
+      signedInApi(idp, "admin"),
+      signedInApi(idp, "admin"),
+      signedInApi(idp, "user"),
+    ]);
+    // The second admin's change lands after the first admin's change read
+    // the role, just before it writes.
+    let overtaken = false;
+    const overtakingDb = new Proxy(env.DB, {
+      get: (target, key) => {
+        if (key === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!overtaken) {
+              overtaken = true;
+              await second.api.members.setRole(person.userId, "builder");
+            }
+            return await target.batch(statements);
+          };
+        }
+        const value: unknown = Reflect.get(target, key, target);
+        if (typeof value !== "function") {
+          return value;
+        }
+        const bound: unknown = value.bind(target);
+        return bound;
+      },
+    });
+    const { core } = await openRpc(first.session, {
+      coreEnv: { ...env, DB: overtakingDb },
+    });
+
+    const audited = await auditedDuring(async () => {
+      await expect(
+        outcome(core.authenticate().members.setRole(person.userId, "admin"))
+      ).resolves.toBe("member.role_changed");
+    });
+    await expect(person.api.whoami()).resolves.toMatchObject({
+      role: "builder",
+    });
+    expect(
+      audited
         .filter(({ action }) => action === "member.role.updated")
-        .map(({ detail }) => detail);
-      expect(changes).toHaveLength(expected.length);
-      expect(changes).toStrictEqual(expect.arrayContaining(expected));
-    }
+        .map(({ detail }) => detail)
+    ).toStrictEqual([
+      { userId: person.userId, previousRole: "user", role: "builder" },
+    ]);
+
+    // Trying again changes it from the role it has now.
+    const again = await auditedDuring(async () => {
+      await core.authenticate().members.setRole(person.userId, "admin");
+    });
+    expect(again.map(({ detail }) => detail)).toStrictEqual([
+      { userId: person.userId, previousRole: "builder", role: "admin" },
+    ]);
   });
 
   it("is for admins only, and only to one of Grasp's roles", async () => {
