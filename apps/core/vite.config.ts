@@ -62,6 +62,9 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             ROUTER_SECRET: "test-router-secret",
             BETTER_AUTH_SECRET: "test-better-auth-secret-of-32-chars-or-more",
             CAPABILITY_SIGNING_KEY: capabilitySigningKey,
+            // The audit log works out when to purge archives from its own
+            // env: the shortest archive retention the console may set.
+            AUDIT_ARCHIVE_RETENTION_DAYS: "365",
             ...testSignIn,
             // Every flagged feature on; features.test.ts switches them off.
             FEATURES: {

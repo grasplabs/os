@@ -61,4 +61,10 @@ export const archives = sqliteTable("archives", {
    * before its object was deleted. `null` while the object is kept.
    */
   purgedAt: text("purged_at"),
+  /**
+   * When the purged stretch's object was deleted (ISO 8601). `null` while
+   * a purged stretch's delete hasn't succeeded yet: the next purge tries
+   * it again.
+   */
+  deletedAt: text("deleted_at"),
 });

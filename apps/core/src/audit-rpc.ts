@@ -253,8 +253,8 @@ const exportStream = (
         }
       },
     },
-    // Nothing is read ahead: each read of the log waits for the client to
-    // ask, so the check before it is as fresh as the read.
+    // Nothing is read ahead: a pull runs only when the client asks for
+    // more, and checks the session again before each page it reads.
     { highWaterMark: 0 }
   );
 };

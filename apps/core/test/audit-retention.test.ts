@@ -55,11 +55,13 @@ const receivedAtOf = async ({ id }: AuditEvent): Promise<number> => {
  * never go back, so each test counts from its own event.
  */
 const cronAfter = async (
-  event: AuditEvent,
+  event: AuditEvent | number,
   days: number,
   changes: Partial<Env> = {}
 ) => {
-  const receivedAt = await receivedAtOf(event);
+  // Or when the log received it, once it no longer holds it.
+  const receivedAt =
+    typeof event === "number" ? event : await receivedAtOf(event);
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(receivedAt + days * dayMs);
   try {
@@ -70,6 +72,27 @@ const cronAfter = async (
   } finally {
     vi.useRealTimers();
   }
+};
+
+/** The event's position in the chain. */
+const seqOf = async ({ id }: AuditEvent): Promise<number> => {
+  const entries = await auditLog(env).entries();
+  const entry = entries.find(({ event }) => event.includes(id));
+  if (!entry) {
+    throw new Error("The log doesn't hold the event");
+  }
+  return entry.seq;
+};
+
+/** The purges the log recorded of the stretch holding position `seq`. */
+const purgesOf = async (seq: number): Promise<AuditEvent[]> => {
+  const events = await allEvents();
+  return events.filter(
+    ({ action, detail }) =>
+      action === "audit.purged" &&
+      Number(detail.from) <= seq &&
+      seq <= Number(detail.through)
+  );
 };
 
 type Api = Awaited<ReturnType<typeof signedInApi>>["api"];
@@ -152,6 +175,20 @@ describe("audit log retention", () => {
     await expect(outcome(reader.read())).resolves.toBe(
       "audit.export_interrupted"
     );
+  });
+
+  it("purges archived events once the deployment's archive retention has passed", async () => {
+    const event = await logged();
+    const receivedAt = await receivedAtOf(event);
+    const seq = await seqOf(event);
+    await cronAfter(receivedAt, 181);
+    // Archive retention is 365 days in tests, from when the log received it.
+    await cronAfter(receivedAt, 364);
+    await expect(purgesOf(seq)).resolves.toStrictEqual([]);
+    await cronAfter(receivedAt, 366);
+    await expect(purgesOf(seq)).resolves.toMatchObject([
+      { actor: { type: "system" }, action: "audit.purged" },
+    ]);
   });
 
   it("archives nothing while the feature is off", async () => {

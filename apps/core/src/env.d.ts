@@ -15,6 +15,8 @@ interface __BaseEnv_Env {
   FEATURES?: unknown;
   /** Days the audit log keeps events before archiving (src/audit-retention.ts). */
   AUDIT_RETENTION_DAYS?: unknown;
+  /** Days archived audit events are kept before they're purged (src/audit-log.ts). */
+  AUDIT_ARCHIVE_RETENTION_DAYS?: unknown;
   /** `none` where Durable Objects have no jurisdiction (src/durable-objects.ts). */
   DURABLE_OBJECT_JURISDICTION?: string;
   /** Tests only: a shorter limit for one call into an App (src/app.ts). */

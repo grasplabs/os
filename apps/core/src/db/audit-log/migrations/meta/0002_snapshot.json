@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "35a80828-ecdc-4204-b766-78ea63cdb452",
+  "id": "5b37bba4-8504-4365-8825-4383f3e285f2",
   "prevId": "7e73922a-ee12-4478-b591-348168801a7d",
   "tables": {
     "archives": {
@@ -58,6 +58,13 @@
         },
         "purged_at": {
           "name": "purged_at",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "deleted_at": {
+          "name": "deleted_at",
           "type": "text",
           "primaryKey": false,
           "notNull": false,
