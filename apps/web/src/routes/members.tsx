@@ -31,7 +31,12 @@ import {
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 
-import { loadCoreStatus, withSession } from "../core.ts";
+import {
+  CoreTimeoutError,
+  loadCoreStatus,
+  withSession,
+  withTimeout,
+} from "../core.ts";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
@@ -62,11 +67,15 @@ const loadMembers = async (): Promise<MembersView> => {
     return { state: "signed-out", signInOptions };
   }
   try {
+    // A connection that answered the status check can still hang here.
     const members = await withSession(
-      async (session) => await session.members.list()
+      async (session) => await withTimeout(session.members.list())
     );
     return { state: "ready", members, me: identity.userId };
   } catch (error) {
+    if (error instanceof CoreTimeoutError) {
+      return { state: "offline" };
+    }
     return { state: "refused", message: messageOf(error) };
   }
 };
@@ -93,12 +102,22 @@ const MemberActions = ({
     onNotice();
     setConfirming(false);
     setPromoting(false);
-    await runAction(async (session) => {
-      await change(session.members);
-    }, report);
-    // Even a failed change may have changed something (a removal whose
-    // disconnect is still pending), so the list is read again.
-    await router.invalidate();
+    await runAction(
+      async (session) => {
+        await change(session.members);
+      },
+      {
+        report,
+        // Even a failed change may have changed something (a removal whose
+        // disconnect is still pending), so the list is read again, and the
+        // controls stay off until it is: they act on the member as shown.
+        // `sync` waits for the loader; without it, the router reloads the
+        // page's data in the background and resolves at once.
+        afterwards: async () => {
+          await router.invalidate({ sync: true });
+        },
+      }
+    );
   };
   const setRole = (role: Role): void => {
     void run(async (members) => {

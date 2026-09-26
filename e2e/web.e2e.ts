@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
 import { test } from "./csp.ts";
 import { signedIn, signInTo } from "./people.ts";
@@ -71,5 +72,104 @@ test("shows the members page only to someone signed in", async ({ page }) => {
     page.getByText("Sign in to see your organization's members.")
   ).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("table")).toHaveCount(0);
+});
+
+/** How the page's Cap'n Web messages name `members.list`. */
+const membersListCall = '["members","list"]';
+
+type Message = string | Buffer;
+
+/** A page's connection to core, through Playwright. */
+interface Connection {
+  forward: (message: Message) => void;
+  queue: Message[];
+}
+
+/**
+ * Holds back the page's requests for the members list, from `hold` until
+ * `release`: the message asking for it, and everything after it on that
+ * connection, which may build on it.
+ */
+const membersListGate = async (page: Page) => {
+  let holding = false;
+  /** The connections held back, each with what it sent since. */
+  const stalled: Connection[] = [];
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const server = socket.connectToServer();
+    const queue: Message[] = [];
+    const connection: Connection = {
+      forward: (message) => {
+        server.send(message);
+      },
+      queue,
+    };
+    socket.onMessage((message) => {
+      const asksForList = String(message).includes(membersListCall);
+      if (holding && asksForList && !stalled.includes(connection)) {
+        stalled.push(connection);
+      }
+      if (stalled.includes(connection)) {
+        connection.queue.push(message);
+      } else {
+        connection.forward(message);
+      }
+    });
+  });
+  return {
+    hold: () => {
+      holding = true;
+    },
+    stalled: () => stalled.length,
+    release: () => {
+      holding = false;
+      for (const connection of stalled.splice(0)) {
+        for (const message of connection.queue.splice(0)) {
+          connection.forward(message);
+        }
+      }
+    },
+  };
+};
+
+test("an admin changes a member's role, and the controls wait for the list to show it", async ({
+  context,
+  page,
+}) => {
+  const { admin, one } = await signedIn({ admin: "admin", one: "user" });
+  await signInTo(context, admin);
+  const gate = await membersListGate(page);
+  await page.goto("/members");
+  const who = `Person (${one.userId}@acme.test)`;
+  const role = page.getByRole("combobox", { name: `Role of ${who}` });
+  await expect(role).toContainText("user");
+
+  gate.hold();
+  await role.click();
+  await page.getByRole("option", { name: "builder" }).click();
+  // The change went through; the list that shows it hasn't come back yet.
+  await expect.poll(gate.stalled).toBe(1);
+  await expect(role).toBeDisabled();
+  await expect(
+    page.getByRole("button", { name: `Remove ${who}`, exact: true })
+  ).toBeDisabled();
+
+  gate.release();
+  await expect(role).toBeEnabled();
+  await expect(role).toContainText("builder");
+});
+
+test("says core can't be reached when the members list never comes", async ({
+  context,
+  page,
+}) => {
+  const { admin } = await signedIn({ admin: "admin" });
+  await signInTo(context, admin);
+  const gate = await membersListGate(page);
+  gate.hold();
+  await page.goto("/members");
+  await expect(
+    page.getByText("Grasp can't be reached right now. Try again in a moment.")
+  ).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("table")).toHaveCount(0);
 });
