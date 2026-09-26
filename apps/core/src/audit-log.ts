@@ -55,9 +55,10 @@ const pageSize = 500;
 
 /**
  * Most entries one step of verification checks. A step reads them in one
- * query, so they're held in memory while hashed: about 1 MB.
+ * query and holds them in memory while it hashes them: at most 500 ×
+ * `auditEventMaxBytes` (about 16 MB), the bound a page read had before.
  */
-const verifyStretch = 1000;
+const verifyStretch = 500;
 
 /**
  * Most entries one search reads, matching or not, so every call is bounded
@@ -1007,9 +1008,11 @@ export class AuditLog extends DurableObject<Env> {
 
   /**
    * Verifies entries the log holds, from after `after`. Reads the hash it
-   * starts from and the stretch synchronously, before hashing awaits
-   * anything, so it checks one consistent copy: an archive that moves
-   * these entries out meanwhile can't change what it reads.
+   * starts from and the whole stretch synchronously, before it awaits
+   * anything, and hashes that in-memory copy. A Durable Object runs no
+   * other code between awaits, so by construction an archive that moves
+   * these entries out while the step hashes them can't change what it
+   * checks.
    */
   async #verifyHeld(after: number): Promise<StretchVerification> {
     const hash = this.#hashAt(after);

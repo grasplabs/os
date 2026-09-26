@@ -406,14 +406,14 @@ const firstThreeKey = (log: Log) =>
 describe("AuditLog verification in steps", () => {
   it("verifies a long chain over several steps, each from where the last stopped", async () => {
     const log = newLog();
-    await appendMany(log, 2500);
+    await appendMany(log, 1200);
 
     const { result, steps } = await verifyAll(log);
-    expect(result).toMatchObject({ ok: true, through: 2500, done: true });
+    expect(result).toMatchObject({ ok: true, through: 1200, done: true });
     expect(steps).toBe(3);
     await expect(log.lastFullVerification()).resolves.toMatchObject({
       ok: true,
-      through: 2500,
+      through: 1200,
     });
   });
 
@@ -643,27 +643,28 @@ describe("AuditLog retention", () => {
     });
   });
 
-  it("verifies what a step read while an archive moves those entries out", async () => {
+  it("archives while a verification step is under way", async () => {
     const log = newLog();
     await appendMany(log, 1500);
     const cutoff = await cutoffNow();
-    // A step reading held entries is under way when the archive starts:
-    // both go through, and the step checks every entry it read.
+    // The step reads its stretch before it awaits anything, so the archive
+    // then moves out the very entries the step is hashing: both go through,
+    // and the step still checks every entry it read.
     const [step, stretch] = await runInDurableObject(
       log,
       async (instance) =>
         await Promise.all([instance.verify(), instance.archive(cutoff, 180)])
     );
     expect({ step, stretch }).toMatchObject({
-      step: { ok: true, through: 1000, done: false },
+      step: { ok: true, through: 500, done: false },
       stretch: { from: 1, through: 500 },
     });
-    // The next step carries on from there, and the chain still verifies
-    // across the archived stretch.
-    await expect(log.verify(1000)).resolves.toMatchObject({
+    // The next step carries on from there, from the archived stretch's
+    // last hash, and the chain still verifies across the archived stretch.
+    await expect(log.verify(500)).resolves.toMatchObject({
       ok: true,
-      through: 1501,
-      done: true,
+      through: 1000,
+      done: false,
     });
     await expect(verifyAll(log)).resolves.toMatchObject({
       result: { ok: true, through: 1501, done: true },
