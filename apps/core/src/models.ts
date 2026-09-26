@@ -1,6 +1,7 @@
 import type {
   Api,
   AssistantMessage,
+  FetchFunction,
   Message,
   Model,
   ProviderHeaders,
@@ -27,10 +28,12 @@ import {
   createAuditEvent,
 } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
-import { log } from "@grasp-os/shared/log";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
+import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import { outboxed, sendAuditOutboxNow } from "./audit-outbox.ts";
 import { audit } from "./audit.ts";
 import { jsonVar } from "./json-var.ts";
 
@@ -40,7 +43,9 @@ import { jsonVar } from "./json-var.ts";
 // Unified Billing (Cloudflare credits) or the client's own keys stored in
 // the gateway, and core reaches it over the AI binding, which needs no token
 // either. Every request is audited as metadata only: who or what asked, why,
-// the model, tokens and cost, never the prompt or the answer.
+// the model, tokens and cost, never the prompt or the answer. The event goes
+// through the audit outbox, so a request that was answered (and paid for)
+// is recorded even when the queue refuses it for a moment.
 //
 // Only providers whose pi adapter takes a custom fetch can ride the binding.
 // Google's refuses one, so Google models would need a gateway token over
@@ -80,6 +85,25 @@ const isProvider = (value: string): value is Provider =>
  * a request whose total is over it, so answers are capped well below.
  */
 const workersAiMaxTokens = 32_768;
+
+/**
+ * How long an answer may be when the call doesn't say: enough for a long
+ * answer, well below what most models could write (and bill) in one go.
+ */
+const defaultMaxTokens = 16_384;
+
+/**
+ * How long a call may take, retries included, when it doesn't say; and the
+ * most it may ask for.
+ */
+const defaultTimeoutMs = 3 * 60_000;
+const maxTimeoutMs = 15 * 60_000;
+
+/**
+ * Retries for a request the provider refused for a moment (429 or 5xx) or
+ * that didn't connect; the provider SDKs back off in between.
+ */
+const maxRetries = 2;
 
 interface ModelRef {
   provider: Provider;
@@ -126,14 +150,10 @@ const modelGatewayConfigSchema = z.object({
 type ModelGatewayConfig = z.infer<typeof modelGatewayConfigSchema>;
 
 /**
- * What the gateway needs from core's env: the AI binding (as pi describes
- * it), the audit queue, and the config, which isn't in wrangler.jsonc as
- * the console sets it per deployment.
+ * Core's env, with the AI binding as pi describes it. It is absent on plain
+ * workerd (on-prem), where no call can be made.
  */
-export interface ModelsEnv extends Pick<Env, "AUDIT_QUEUE"> {
-  AI: AiBinding;
-  MODEL_GATEWAY?: unknown;
-}
+export type ModelsEnv = Omit<Env, "AI"> & { AI?: AiBinding };
 
 /**
  * The deployment's model gateway config: deployment config, set by the
@@ -177,6 +197,10 @@ const callSchema = z
       )
       .min(1)
       .optional(),
+    /** The most tokens the answer may take; capped at the model's limit. */
+    maxTokens: z.int().positive().optional(),
+    /** How long the call may take, in milliseconds, retries included. */
+    timeoutMs: z.int().positive().max(maxTimeoutMs).optional(),
     /** Why the call is made, for the audit log. */
     purpose: z.string().max(64).regex(purposePattern),
     /** Who or what asked: a person, an agent, an App or a workflow run. */
@@ -230,7 +254,7 @@ const gatewayModel = (gateway: string, ref: ModelRef): Model<Api> => ({
       : ref.catalog.maxTokens,
 });
 
-const gatewayHeaders: ProviderHeaders = {
+const gatewayHeaders = (call: Call): ProviderHeaders => ({
   // The binding authenticates the request. pi still wants auth before it
   // sends, and the gateway strips this placeholder. The nulls drop the
   // SDKs' own auth headers, which the gateway would take for a caller's
@@ -240,7 +264,14 @@ const gatewayHeaders: ProviderHeaders = {
   "x-api-key": null,
   // The gateway logs metadata, never prompts or answers.
   "cf-aig-collect-log-payload": "false",
-};
+  // So the gateway's log can be searched by why and for what kind of
+  // caller; identifiers only, like the audit event.
+  "cf-aig-metadata": JSON.stringify({
+    purpose: call.purpose,
+    actor: call.trigger.type,
+    ...(call.requestId === undefined ? {} : { requestId: call.requestId }),
+  }),
+});
 
 const noUsage: Usage = {
   input: 0,
@@ -319,6 +350,11 @@ const hasFailed = ({ stopReason }: AssistantMessage): boolean =>
 interface Request {
   model: Model<Api>;
   ref: ModelRef;
+  call: Call;
+  /** The AI binding's fetch, which reaches the gateway. */
+  transport: FetchFunction;
+  /** Ends the call when it takes too long, retries included. */
+  signal: AbortSignal;
   system: string | undefined;
   messages: Message[];
 }
@@ -334,10 +370,15 @@ interface Sent {
  * Sends one request through the gateway. pi reports a failed request as an
  * answer with an error stop reason instead of throwing.
  */
-const send = async (
-  env: ModelsEnv,
-  { model, ref, system, messages }: Request
-): Promise<Sent> => {
+const send = async ({
+  model,
+  ref,
+  call,
+  transport,
+  signal,
+  system,
+  messages,
+}: Request): Promise<Sent> => {
   let status: number | undefined = undefined;
   let logId: string | undefined = undefined;
   // SAFETY: the provider picks both the adapter and the catalog the model
@@ -351,8 +392,14 @@ const send = async (
     model,
     normalizeContext({ systemPrompt: system, messages }),
     {
-      fetch: createAiBindingFetch(env.AI),
-      headers: gatewayHeaders,
+      fetch: transport,
+      headers: gatewayHeaders(call),
+      maxTokens: Math.min(call.maxTokens ?? defaultMaxTokens, model.maxTokens),
+      maxRetries,
+      // Reasoning at a middle effort where the model has it: without a
+      // level pi turns it off.
+      reasoning: model.reasoning ? "medium" : undefined,
+      signal,
       onResponse: (response) => {
         ({ status } = response);
         logId = response.headers["cf-aig-log-id"];
@@ -361,6 +408,66 @@ const send = async (
   );
   const answer = await stream.result();
   return { answer, status, logId };
+};
+
+/**
+ * The HTTP status at the start of pi's text for a refused request, in each
+ * adapter's form: `429 {…}`, `429: {…}` or `OpenAI API error (429): {…}`.
+ * pi fails such a request before `onResponse`, so this is the only place
+ * the status is.
+ */
+const failedStatusPattern = /^[^{]{0,40}?\b(?<status>[1-5]\d{2})\b/u;
+
+const errorTypeSchema = z.string().regex(/^[A-Za-z][\w.-]{0,63}$/u);
+
+/**
+ * The provider's error body, as pi quotes it after the status: Anthropic's
+ * `{ error: { type } }`, or the `{ type }` pi takes from OpenAI's.
+ */
+const providerErrorSchema = z.union([
+  z.object({ error: z.object({ type: errorTypeSchema }) }),
+  z.object({ type: errorTypeSchema }),
+]);
+
+/** Why a request failed, as far as can be told without its message. */
+interface Failure {
+  status: number | undefined;
+  /** The provider's error type, such as `rate_limit_error`, or `timeout`. */
+  errorType: string | undefined;
+}
+
+const providerErrorType = (text: string): string | undefined => {
+  const start = text.indexOf("{");
+  if (start === -1) {
+    return undefined;
+  }
+  let body: unknown = undefined;
+  try {
+    body = JSON.parse(text.slice(start));
+  } catch {
+    return undefined;
+  }
+  const parsed = providerErrorSchema.safeParse(body);
+  if (!parsed.success) {
+    return undefined;
+  }
+  return "error" in parsed.data ? parsed.data.error.type : parsed.data.type;
+};
+
+/**
+ * What failed: the status and the provider's error type, never the error's
+ * message, which may quote the prompt.
+ */
+const failureOf = ({ answer, status }: Sent, signal: AbortSignal): Failure => {
+  if (signal.aborted) {
+    return { status, errorType: "timeout" };
+  }
+  const text = answer.errorMessage?.trim() ?? "";
+  const quoted = failedStatusPattern.exec(text)?.groups?.status;
+  return {
+    status: quoted === undefined ? status : Number(quoted),
+    errorType: providerErrorType(text),
+  };
 };
 
 /** How one request ended, as the audit log records it. */
@@ -374,6 +481,8 @@ interface Recorded {
   logId: string | undefined;
   attempt: number;
   outcome: Outcome;
+  status: number | undefined;
+  errorType: string | undefined;
 }
 
 const auditEntry = (call: Call, ref: ModelRef, recorded: Recorded) => {
@@ -394,6 +503,8 @@ const auditEntry = (call: Call, ref: ModelRef, recorded: Recorded) => {
       purpose: call.purpose,
       outcome: recorded.outcome,
       attempt: recorded.attempt,
+      status: recorded.status ?? null,
+      errorType: recorded.errorType ?? null,
       // Never an ID so long that the event would be refused.
       gatewayLogId:
         logId !== undefined && logId.length <= auditIdentifierMaxLength
@@ -415,6 +526,34 @@ const largestRecord: Recorded = {
   logId: "x".repeat(auditIdentifierMaxLength),
   attempt: 2,
   outcome: "invalid_output",
+  status: 599,
+  errorType: "x".repeat(64),
+};
+
+/**
+ * Stores the event for a request that was paid for, whatever fails: in the
+ * outbox; if the database refuses it, on the queue; and if that fails too,
+ * in the logs. Never throws: a caller that lost a paid answer to a
+ * bookkeeping failure would ask (and pay) again.
+ */
+const keep = async (env: ModelsEnv, entry: AuditEntry): Promise<void> => {
+  try {
+    await outboxed(drizzle(env.DB), entry);
+  } catch (error) {
+    log.error("model.audit_outbox_failed", errorFields(error));
+    try {
+      await audit(env).log(entry);
+    } catch (queueError) {
+      // The event is identifiers only, so the logs may keep it.
+      log.error("model.audit_failed", {
+        ...errorFields(queueError),
+        auditEntry: JSON.stringify(entry),
+      });
+    }
+    return;
+  }
+  // Sent at once; what the queue refuses, the cron trigger sends later.
+  await sendAuditOutboxNow(env);
 };
 
 /** Records one request in the audit log, however it ended. */
@@ -422,11 +561,13 @@ const record = async (
   env: ModelsEnv,
   call: Call,
   ref: ModelRef,
-  { answer, logId }: Sent,
+  { answer, logId, status }: Sent,
   attempt: number,
-  outcome: Outcome
+  outcome: Outcome,
+  failure?: Failure
 ): Promise<void> => {
-  await audit(env).log(
+  await keep(
+    env,
     auditEntry(call, ref, {
       inputTokens: inputTokens(answer.usage),
       outputTokens: answer.usage.output,
@@ -434,6 +575,8 @@ const record = async (
       logId,
       attempt,
       outcome,
+      status: failure?.status ?? status,
+      errorType: failure?.errorType,
     })
   );
 };
@@ -442,14 +585,15 @@ const record = async (
 const admit = (
   env: ModelsEnv,
   fields: unknown
-): { call: Call; ref: ModelRef; gateway: string } => {
+): { call: Call; ref: ModelRef; gateway: string; transport: FetchFunction } => {
   const parsed = callSchema.safeParse(fields);
   if (!parsed.success) {
     throw modelErrors.create("model.invalid_call");
   }
   const call = parsed.data;
   const config = modelGatewayConfig(env);
-  if (config === undefined) {
+  // Plain workerd (on-prem) has no AI binding, so no gateway either.
+  if (config === undefined || typeof env.AI?.fetch !== "function") {
     throw modelErrors.create("model.unconfigured");
   }
   const ref = config.models.includes(call.model)
@@ -464,18 +608,27 @@ const admit = (
     // Its provenance, say, is too long to record.
     throw modelErrors.create("model.invalid_call");
   }
-  return { call, ref, gateway: config.gateway };
+  return {
+    call,
+    ref,
+    gateway: config.gateway,
+    transport: createAiBindingFetch(env.AI),
+  };
 };
 
 const callModel = async <Output>(
   env: ModelsEnv,
   { schema, ...fields }: ModelCall<Output>
 ): Promise<ModelAnswer<Output>> => {
-  const { call, ref, gateway } = admit(env, fields);
+  const { call, ref, gateway, transport } = admit(env, fields);
   const model = gatewayModel(gateway, ref);
+  const signal = AbortSignal.timeout(call.timeoutMs ?? defaultTimeoutMs);
   const request: Request = {
     model,
     ref,
+    call,
+    transport,
+    signal,
     system:
       schema === undefined
         ? call.system
@@ -492,7 +645,7 @@ const callModel = async <Output>(
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     // Each attempt follows up on the answer before it.
     // oxlint-disable-next-line no-await-in-loop
-    const sent = await send(env, request);
+    const sent = await send(request);
     const { answer } = sent;
     usage.inputTokens += inputTokens(answer.usage);
     usage.outputTokens += answer.usage.output;
@@ -501,14 +654,15 @@ const callModel = async <Output>(
     const truncated = answer.stopReason === "length";
 
     if (hasFailed(answer)) {
-      // The status only: a provider's error message may quote the request.
+      const failure = failureOf(sent, signal);
       log.warn("model.failed", {
         model: call.model,
-        status: sent.status,
+        status: failure.status,
+        errorType: failure.errorType,
         stopReason: answer.stopReason,
       });
       // oxlint-disable-next-line no-await-in-loop
-      await record(env, call, ref, sent, attempt, "failed");
+      await record(env, call, ref, sent, attempt, "failed", failure);
       throw modelErrors.create("model.failed");
     }
     if (schema === undefined) {

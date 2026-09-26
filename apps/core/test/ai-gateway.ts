@@ -4,7 +4,10 @@
  * request went to, and keeps every request it got.
  */
 
-/** A scripted answer, or a refusal with an HTTP status. */
+/**
+ * A scripted answer; a refusal with an HTTP status and the provider's error
+ * type; or no answer at all until the request is aborted.
+ */
 export type GatewayReply =
   | {
       text: string;
@@ -13,7 +16,8 @@ export type GatewayReply =
       /** The model hit its output limit (Anthropic and chat completions). */
       truncated?: boolean;
     }
-  | { status: number };
+  | { status: number; errorType?: string }
+  | { hang: true };
 
 export interface GatewayRequest {
   url: string;
@@ -237,9 +241,28 @@ export const fakeGateway = (...replies: GatewayReply[]) => {
     if (reply === undefined) {
       throw new Error("The fake gateway has no reply left");
     }
+    if ("hang" in reply) {
+      const aborted = Promise.withResolvers<Response>();
+      const stop = () => {
+        aborted.reject(new Error("The request was aborted"));
+      };
+      // It may have been aborted while its body was read.
+      if (request.signal.aborted) {
+        stop();
+      }
+      request.signal.addEventListener("abort", stop);
+      return await aborted.promise;
+    }
     if ("status" in reply) {
+      // As Anthropic words it; pi quotes OpenAI's inner `error` the same way.
       return Response.json(
-        { error: { type: "error", message: "Refused by the fake gateway" } },
+        {
+          type: "error",
+          error: {
+            type: reply.errorType ?? "api_error",
+            message: "Refused by the fake gateway",
+          },
+        },
         { status: reply.status }
       );
     }
