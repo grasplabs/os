@@ -2,7 +2,6 @@ import type { AiBinding } from "@earendil-works/pi-ai/api/cloudflare-ai-binding"
 import { appErrors } from "@grasp-os/shared/apps";
 import { featureErrors } from "@grasp-os/shared/errors";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
-import type { PermissionRequest } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import { introspectWorkflow, runInDurableObject } from "cloudflare:test";
@@ -15,7 +14,7 @@ import { callApp } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
 import { startRun } from "../src/workflows/runs.ts";
 import { fakeGateway } from "./ai-gateway.ts";
-import { release, requestGranted, serverBuilt } from "./apps.ts";
+import { outlook, release, requestGranted, serverBuilt } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote, readCollection } from "./knowledge.ts";
@@ -29,7 +28,7 @@ import {
   stepDone,
   stopped,
 } from "./runs.ts";
-import { openRpc, refusal, signedInWithRole } from "./sign-in.ts";
+import { refusal, signedInApi } from "./sign-in.ts";
 import {
   appWith,
   grantMail,
@@ -49,12 +48,7 @@ import {
 
 const idp = mockIdp();
 
-/** A signed-in person's API, on a connection of their own. */
-const personApi = async (role: Role) => {
-  const person = await signedInWithRole(idp, role);
-  const { core } = await openRpc(person.session);
-  return { ...person, api: core.authenticate() };
-};
+const personApi = async (role: Role) => await signedInApi(idp, role);
 type Person = Awaited<ReturnType<typeof personApi>>;
 
 /**
@@ -167,14 +161,6 @@ export default workflowTests(invoice, [
 ]);
 `;
 
-/** Outlook, as a connection the App may be given. */
-const outlook = (app: string): PermissionRequest => ({
-  subject: { type: "app", appId: app },
-  object: { type: "connection", connectionId: "connection-outlook" },
-  actions: ["mail.list"],
-  binding: "OUTLOOK",
-});
-
 /**
  * A step that calls Outlook: connections don't exist in connect yet, so
  * `reached` is a call that passed every check on its way.
@@ -205,14 +191,17 @@ const onlyRun = async (
     return instance;
   });
 
-/** Where core's record has a run now. */
-const rowStatus = async (run: string): Promise<string | undefined> => {
-  const row = await env.DB.prepare(
-    "SELECT status FROM workflow_runs WHERE id = ?"
-  )
-    .bind(run)
-    .first<{ status: string }>();
-  return row?.status;
+/**
+ * Where core's record has a run now, as the App's run list shows it: unlike
+ * a run's status, the list never asks the engine.
+ */
+const listedStatus = async (
+  person: Person,
+  app: string,
+  run: string
+): Promise<string | undefined> => {
+  const runs = await person.api.workflows.list(app);
+  return runs.find(({ id }) => id === run)?.status;
 };
 
 /** How often the App counted `name` (its server's `hit`). */
@@ -862,7 +851,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     const { status, error, failure } = await admin.api.workflows.status(run.id);
     expect({
       status,
-      row: await rowStatus(run.id),
+      row: await listedStatus(admin, app, run.id),
       hijack: error?.message.includes("bad: workflow.invalid"),
       // It failed after the step it caught, outside any step.
       failure: { step: failure?.step, code: failure?.error.code },
@@ -1219,7 +1208,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     const { status, failure } = await builder.api.workflows.status(taken);
     expect({
       refused: refused !== "ok",
-      row: await rowStatus(taken),
+      row: await listedStatus(builder, app, taken),
       status,
       failure: failure && {
         step: failure.step,
@@ -1606,7 +1595,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
     const { status, failure } = await admin.api.workflows.status(run.id);
     expect({
       status,
-      row: await rowStatus(run.id),
+      row: await listedStatus(admin, app, run.id),
       failure: failure?.error.code,
     }).toStrictEqual({
       status: "failed",
