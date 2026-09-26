@@ -7,7 +7,6 @@
   "sideEffects": false,
   "exports": {
     "./app-limits": "./src/app-limits.ts",
-    "./approvals": "./src/approvals.ts",
     "./apps": "./src/apps.ts",
     "./audit": "./src/audit.ts",
     "./audit-log": "./src/audit-log.ts",

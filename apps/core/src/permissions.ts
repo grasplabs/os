@@ -24,24 +24,26 @@ import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
+import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
-import { approvals, apps, permissions } from "./db/core/schema.ts";
+import { apps, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
 import { appHost } from "./durable-objects.ts";
 
 // Permission records and the one check every server path runs. A person
-// asks for a permission (it allows nothing yet), an admin other than them
-// grants it by approving the request (approvals.ts), and an admin can
-// revoke it at any time. Checks read the records on every call, so a
-// revoke applies to the next call. Every change is audited.
+// asks for a permission (it allows nothing yet), an admin grants it, their
+// own request included, and an admin can revoke it at any time. Grasp
+// staff do neither: a client's permissions are the client's to decide.
+// Checks read the records on every call, so a revoke applies to the next
+// call. Every change is audited with who made it and the permission's
+// subject, object, actions and binding.
 //
-// Granting is one step, from requested to active, taken only in the
-// statement that approves the request's approval.
+// Granting is one conditional update, from requested to active, in the
+// same batch as its audit event.
 
 type Row = typeof permissions.$inferSelect;
 
@@ -91,7 +93,7 @@ const objectColumns = (object: PermissionObject) => {
 };
 
 /** A stored object back in its API shape; anything unexpected fails. */
-export const objectOf = (row: Row): PermissionObject => {
+const objectOf = (row: Row): PermissionObject => {
   const resource = row.resource ?? undefined;
   switch (row.objectType) {
     case "connection": {
@@ -179,16 +181,11 @@ const auditDetail = ({
 
 /**
  * The audit entry of a change to `permission` by `by`, with `extra` detail
- * such as the approval it went through.
+ * such as who asked for it.
  */
-export const changeEntry = (
+const changeEntry = (
   by: Identity,
-  action: `permission.${
-    | "requested"
-    | "granted"
-    | "revoked"
-    | "declined"
-    | "withdrawn"}`,
+  action: `permission.${"requested" | "granted" | "revoked"}`,
   permission: Permission,
   extra: Record<string, AuditDetailValue> = {}
 ): AuditEntry => ({
@@ -198,7 +195,39 @@ export const changeEntry = (
   detail: { ...auditDetail(permission), ...extra },
 });
 
-export const parseId = (id: unknown): PermissionId => {
+/**
+ * Refuses anyone but one of the organization's own admins: who may grant
+ * and revoke. Grasp staff are admins, but never decide a client's
+ * permissions.
+ */
+const requireMemberAdmin = (by: Identity): void => {
+  requireAdmin(by);
+  if (by.staff) {
+    throw roleErrors.create("role.forbidden");
+  }
+};
+
+/**
+ * That `by` is still an active admin of the organization, as SQL: part of
+ * the very update that grants or revokes, so an admin demoted or removed
+ * after their session was checked changes nothing.
+ */
+const stillAdmin = (by: Identity): SQL => activeMember(by.userId, ["admin"]);
+
+/**
+ * After a grant or revoke changed nothing: refuses with `role.forbidden`
+ * if that was because `by` is no longer an active admin.
+ */
+const requireStillAdmin = async (env: Env, by: Identity): Promise<void> => {
+  const row = await drizzle(env.DB).get<{ admin: number }>(
+    sql`SELECT ${stillAdmin(by)} AS admin`
+  );
+  if (row.admin === 0) {
+    throw roleErrors.create("role.forbidden");
+  }
+};
+
+const parseId = (id: unknown): PermissionId => {
   const parsed = permissionIdSchema.safeParse(id);
   if (!parsed.success) {
     throw permissionErrors.create("permission.not_found");
@@ -212,7 +241,7 @@ export const parseId = (id: unknown): PermissionId => {
  * it still holds is refused anyway, on its next call. Best effort: the
  * change stands if the App can't be reached.
  */
-export const restartApp = async (
+const restartApp = async (
   env: Env,
   subject: PermissionSubject
 ): Promise<void> => {
@@ -229,7 +258,7 @@ export const restartApp = async (
   }
 };
 
-export const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
+const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
   await drizzle(env.DB)
     .select()
     .from(permissions)
@@ -274,7 +303,7 @@ const requireApps = async (
  * personal collection: Apps and agents never read those (see
  * knowledge/access.ts), so nobody can be asked to grant one.
  */
-export const requireCollection = async (
+const requireCollection = async (
   env: Env,
   object: PermissionObject
 ): Promise<void> => {
@@ -301,32 +330,8 @@ export const requireCollection = async (
 };
 
 /**
- * Opens the approval that grants the requested permission `id`, for an
- * admin to decide, unless it has one pending already or isn't requested
- * (anymore). The one way such an approval is made: in the batch that
- * requests the permission, and before granting one requested before
- * approvals existed.
- */
-export const openPermissionApproval = (
-  db: DrizzleD1Database,
-  id: string,
-  approval: string = crypto.randomUUID()
-) =>
-  db
-    .insert(approvals)
-    .select(
-      sql`SELECT ${approval}, 'permission', ${permissions.id},
-          NULL, NULL, NULL, NULL, NULL, 'admins', 'pending',
-          ${permissions.requestedBy}, ${permissions.requestedAt}, NULL, NULL, 0,
-          NULL, NULL
-        FROM ${permissions}
-        WHERE ${permissions.id} = ${id} AND ${permissions.status} = 'requested'`
-    )
-    .onConflictDoNothing();
-
-/**
  * Asks for a permission for an App or agent. It allows nothing until an
- * admin other than the requester approves it (approvals.ts).
+ * admin grants it.
  */
 export const requestPermission = async (
   env: Env,
@@ -335,7 +340,7 @@ export const requestPermission = async (
 ): Promise<Permission> => {
   requireBuilder(by);
   if (by.staff) {
-    // Grasp staff neither ask for nor decide a client's approvals.
+    // Grasp staff neither ask for nor decide a client's permissions.
     throw roleErrors.create("role.forbidden");
   }
   const { subject, object, actions, binding } = permissionErrors.parse(
@@ -360,16 +365,11 @@ export const requestPermission = async (
     revokedAt: null,
   };
   const permission = toPermission(row);
-  const approval = crypto.randomUUID();
   const db = drizzle(env.DB);
   try {
     await auditedBatch(env, db, [
       db.insert(permissions).values(row),
-      openPermissionApproval(db, row.id, approval),
-      outboxed(
-        db,
-        changeEntry(by, "permission.requested", permission, { approval })
-      ),
+      outboxed(db, changeEntry(by, "permission.requested", permission)),
     ]);
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -381,16 +381,62 @@ export const requestPermission = async (
 };
 
 /**
+ * Grants a requested permission, the admin's own request included. Only
+ * from requested: an active or revoked one is refused, so a revoke is for
+ * good. Audited with who asked for it.
+ */
+export const grantPermission = async (
+  env: Env,
+  by: Identity,
+  id: unknown
+): Promise<Permission> => {
+  requireMemberAdmin(by);
+  const found = await findRow(env, parseId(id));
+  if (!found) {
+    throw permissionErrors.create("permission.not_found");
+  }
+  // No grant ever names a missing or personal collection, however old its
+  // request.
+  await requireCollection(env, objectOf(found));
+  const db = drizzle(env.DB);
+  const [[granted]] = await auditedBatch(env, db, [
+    db
+      .update(permissions)
+      .set({ status: "active", grantedBy: by.userId, grantedAt: new Date() })
+      .where(
+        and(
+          eq(permissions.id, found.id),
+          eq(permissions.status, "requested"),
+          stillAdmin(by)
+        )
+      )
+      .returning(),
+    outboxedIfChanged(
+      db,
+      changeEntry(by, "permission.granted", toPermission(found), {
+        requestedBy: found.requestedBy,
+      })
+    ),
+  ]);
+  if (!granted) {
+    await requireStillAdmin(env, by);
+    throw permissionErrors.create("permission.not_requested");
+  }
+  const permission = toPermission(granted);
+  await restartApp(env, permission.subject);
+  return permission;
+};
+
+/**
  * Revokes a permission, requested or active: the next call that needs it
- * is refused, and a request waiting for approval is declined with it.
- * Revoking one that is already revoked changes nothing.
+ * is refused. Revoking one that is already revoked changes nothing.
  */
 export const revokePermission = async (
   env: Env,
   by: Identity,
   id: unknown
 ): Promise<Permission> => {
-  requireAdmin(by);
+  requireMemberAdmin(by);
   const found = await findRow(env, parseId(id));
   if (!found) {
     throw permissionErrors.create("permission.not_found");
@@ -403,7 +449,8 @@ export const revokePermission = async (
       .where(
         and(
           eq(permissions.id, found.id),
-          inArray(permissions.status, ["requested", "active"])
+          inArray(permissions.status, ["requested", "active"]),
+          stillAdmin(by)
         )
       )
       .returning(),
@@ -411,17 +458,9 @@ export const revokePermission = async (
       db,
       changeEntry(by, "permission.revoked", toPermission(found))
     ),
-    db
-      .update(approvals)
-      .set({ status: "declined", decidedBy: by.userId, decidedAt: new Date() })
-      .where(
-        and(
-          eq(approvals.permissionId, found.id),
-          eq(approvals.status, "pending")
-        )
-      ),
   ]);
   if (!revoked) {
+    await requireStillAdmin(env, by);
     // Already revoked: nothing changed, and nothing is recorded.
     return toPermission((await findRow(env, found.id)) ?? found);
   }

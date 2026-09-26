@@ -1,12 +1,11 @@
 import { paramValueSchemas } from "@grasp-os/sdk/params";
-import type { ParamValue } from "@grasp-os/shared/approvals";
 import { actorOf } from "@grasp-os/shared/audit";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
 import { requireBuilder, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { workflowErrors } from "@grasp-os/shared/workflows";
-import type { WorkflowParam } from "@grasp-os/shared/workflows";
+import type { ParamValue, WorkflowParam } from "@grasp-os/shared/workflows";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 

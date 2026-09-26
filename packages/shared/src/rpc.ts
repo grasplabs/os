@@ -1,4 +1,3 @@
-import type { ApprovalsApi } from "./approvals.ts";
 import type { AppsApi } from "./apps.ts";
 import type { AuditApi } from "./audit-log.ts";
 import type { ConnectionsApi } from "./connect.ts";
@@ -64,8 +63,6 @@ export interface SessionApi {
   readonly members: MembersApi;
   /** The audit log: search, export and chain verification. Admins only. */
   readonly audit: AuditApi;
-  /** Permission grants waiting for a second person. Admins and builders. */
-  readonly approvals: ApprovalsApi;
 }
 
 /**

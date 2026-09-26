@@ -37,7 +37,13 @@ import {
   readCollection,
   storedGrant,
 } from "./knowledge.ts";
-import { callAuth, outcome, signedInApi, unique } from "./sign-in.ts";
+import {
+  auditedDuring,
+  callAuth,
+  outcome,
+  signedInApi,
+  unique,
+} from "./sign-in.ts";
 
 // Knowledge as Apps and agents reach it, and restricted mode. These tests
 // start from the ways it can fail: an App or agent reads what it has no
@@ -155,8 +161,7 @@ describe("Apps and agents reading Knowledge", () => {
     });
 
     // Granted one collection: that one, and no document of another.
-    const approver = await personOf("admin");
-    await approver.api.permissions.grant(permissionId);
+    await admin.api.permissions.grant(permissionId);
     const reader = readerIn(
       await envOf(actingFor(agent, admin.userId), context)
     );
@@ -332,6 +337,45 @@ describe("Apps and agents reading Knowledge", () => {
       requests: ["permission.invalid", "permission.invalid"],
       inChat: noneFound,
       inApp: noneFound,
+    });
+
+    // Nor is a request for one that is stored anyway ever granted.
+    const asker = { type: "agent" as const, id: `agent-${unique()}` };
+    const personal = await storedGrant(
+      asker,
+      { type: "collection", id: diary.collectionId },
+      ["read"],
+      "DIARY",
+      "requested"
+    );
+    const missing = await storedGrant(
+      asker,
+      { type: "collection", id: "no-such-collection" },
+      ["read"],
+      "MISSING",
+      "requested"
+    );
+    let grants: string[] = [];
+    const events = await auditedDuring(async () => {
+      grants = [
+        await outcome(admin.api.permissions.grant(personal)),
+        await outcome(admin.api.permissions.grant(missing)),
+      ];
+    });
+    const listed = await admin.api.permissions.list({
+      type: "agent",
+      agentId: asker.id,
+    });
+    expect({
+      grants,
+      statuses: Object.fromEntries(
+        listed.map((permission) => [permission.id, permission.status])
+      ),
+      granted: events.filter(({ action }) => action === "permission.granted"),
+    }).toStrictEqual({
+      grants: ["permission.invalid", "permission.invalid"],
+      statuses: { [personal]: "requested", [missing]: "requested" },
+      granted: [],
     });
   });
 

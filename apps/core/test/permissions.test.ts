@@ -13,12 +13,24 @@ import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { authorize } from "../src/permissions.ts";
+import {
+  authorize,
+  grantPermission,
+  revokePermission,
+} from "../src/permissions.ts";
 import { outlook } from "./apps.ts";
 import { actingFor, connectionIn, envOf, reached } from "./contexts.ts";
 import { runCron, whileQueueDown } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
-import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
+import {
+  auditedDuring,
+  openRpc,
+  outcome,
+  signedIn,
+  signedInApi,
+  staffPerson,
+  unique,
+} from "./sign-in.ts";
 
 // Apps and agents start with nothing: a person asks, an admin grants, and
 // every call is checked again on the server, down to connect, which only
@@ -89,46 +101,164 @@ describe("permissions", () => {
     await expect(callThrough(authority, "OUTLOOK")).resolves.toBe(reached);
   });
 
-  it("can only be granted and revoked by an admin, even their own", async () => {
+  it("are granted and revoked by an admin, their own request included, and by nobody else", async () => {
     const admin = await permissionApi("admin");
-    const app = await newApp(admin.api);
-    for (const role of ["builder", "user"] as const) {
-      // oxlint-disable-next-line no-await-in-loop -- one person at a time
-      const person = await permissionApi(role);
-      // oxlint-disable-next-line no-await-in-loop -- one person at a time
-      const request = await admin.api.permissions.request({
-        ...outlook(app.appId),
-        binding: `OUTLOOK_${role.toUpperCase()}`,
-      });
-      // oxlint-disable-next-line no-await-in-loop -- one person at a time
-      const refused = await Promise.all([
-        outcome(person.api.permissions.grant(request.id)),
-        outcome(person.api.permissions.revoke(request.id)),
-      ]);
-      expect(refused).toStrictEqual(["role.forbidden", "role.forbidden"]);
-    }
+    const builder = await permissionApi("builder");
     const user = await permissionApi("user");
-    await expect(
-      Promise.all([
-        outcome(user.api.permissions.request(outlook(app.appId))),
-        outcome(user.api.permissions.list()),
-      ])
-    ).resolves.toStrictEqual(["role.forbidden", "role.forbidden"]);
-    const all = await admin.api.permissions.list(app);
-    expect(all.map(({ status }) => status)).toStrictEqual([
-      "requested",
-      "requested",
+    const staffSession = await signedIn(idp, "grasp-staff", staffPerson());
+    const { core: staffCore } = await openRpc(staffSession);
+    const staff = staffCore.authenticate();
+    // Staff sign in as admins: refused for being staff, not for the role.
+    await expect(staff.whoami()).resolves.toMatchObject({
+      role: "admin",
+      staff: true,
+    });
+    const app = await newApp(admin.api);
+    const { id } = await admin.api.permissions.request(outlook(app.appId));
+    const grantAndRevoke = async (api: Api) =>
+      await Promise.all([
+        outcome(api.permissions.grant(id)),
+        outcome(api.permissions.revoke(id)),
+      ]);
+    const refused = {
+      builder: await grantAndRevoke(builder.api),
+      user: await grantAndRevoke(user.api),
+      staff: await grantAndRevoke(staff),
+      userAsks: await outcome(user.api.permissions.request(outlook(app.appId))),
+      userLists: await outcome(user.api.permissions.list()),
+      staffAsks: await outcome(
+        staff.permissions.request({ ...outlook(app.appId), binding: "STAFF" })
+      ),
+    };
+    const listed = await admin.api.permissions.list(app);
+    expect({
+      ...refused,
+      status: listed.map(({ status }) => status),
+    }).toStrictEqual({
+      builder: ["role.forbidden", "role.forbidden"],
+      user: ["role.forbidden", "role.forbidden"],
+      staff: ["role.forbidden", "role.forbidden"],
+      userAsks: "role.forbidden",
+      userLists: "role.forbidden",
+      staffAsks: "role.forbidden",
+      status: ["requested"],
+    });
+
+    const events = await auditedDuring(async () => {
+      await expect(admin.api.permissions.grant(id)).resolves.toMatchObject({
+        status: "active",
+        requestedBy: admin.userId,
+        grantedBy: admin.userId,
+      });
+      await expect(admin.api.permissions.revoke(id)).resolves.toMatchObject({
+        status: "revoked",
+        revokedBy: admin.userId,
+      });
+    });
+    expect(
+      events.map(({ actor, action, detail }) => ({
+        actor,
+        action,
+        requestedBy: detail?.requestedBy,
+      }))
+    ).toStrictEqual([
+      {
+        actor: { type: "person", userId: admin.userId },
+        action: "permission.granted",
+        requestedBy: admin.userId,
+      },
+      {
+        actor: { type: "person", userId: admin.userId },
+        action: "permission.revoked",
+        requestedBy: undefined,
+      },
     ]);
+  });
+
+  it("are granted once, however many admins grant at once", async () => {
+    const builder = await permissionApi("builder");
+    const first = await permissionApi("admin");
+    const second = await permissionApi("admin");
+    const app = await newApp(builder.api);
+    const { id } = await builder.api.permissions.request(outlook(app.appId));
+    let outcomes: string[] = [];
+    const events = await auditedDuring(async () => {
+      outcomes = await Promise.all([
+        outcome(first.api.permissions.grant(id)),
+        outcome(second.api.permissions.grant(id)),
+      ]);
+    });
+    expect({
+      outcomes: outcomes.toSorted(),
+      events: events.map(({ action }) => action),
+    }).toStrictEqual({
+      outcomes: ["ok", "permission.not_requested"],
+      events: ["permission.granted"],
+    });
+  });
+
+  it("are neither granted nor revoked by an admin demoted after their session was checked", async () => {
+    const admin = await permissionApi("admin");
+    const builder = await permissionApi("builder");
+    const app = await newApp(admin.api);
+    const requested = await builder.api.permissions.request(outlook(app.appId));
+    const active = await builder.api.permissions.request(
+      outlook(app.appId, "ACTIVE")
+    );
+    await admin.api.permissions.grant(active.id);
+    // The identity the session check hands over while they are an admin.
+    // The check reads the role again on every call, so the only way in
+    // between it and the update is to call past it with that identity.
+    const checked = await admin.api.whoami();
+    await env.DB.prepare("UPDATE members SET role = 'user' WHERE user_id = ?")
+      .bind(admin.userId)
+      .run();
+    let refused: string[] = [];
+    const events = await auditedDuring(async () => {
+      refused = [
+        await outcome(grantPermission(env, checked, requested.id)),
+        await outcome(revokePermission(env, checked, active.id)),
+      ];
+    });
+    const listed = await builder.api.permissions.list(app);
+    expect({
+      refused,
+      events,
+      statuses: Object.fromEntries(
+        listed.map((permission) => [permission.id, permission.status])
+      ),
+    }).toStrictEqual({
+      refused: ["role.forbidden", "role.forbidden"],
+      events: [],
+      statuses: { [requested.id]: "requested", [active.id]: "active" },
+    });
+  });
+
+  it("are granted directly with an approval still pending from the release before", async () => {
+    const admin = await permissionApi("admin");
+    const builder = await permissionApi("builder");
+    const app = await newApp(admin.api);
+    const { id } = await builder.api.permissions.request(outlook(app.appId));
+    // The approval the release before opened with each request.
+    await env.DB.prepare(
+      `INSERT INTO approvals (id, kind, permission_id, approvers, status,
+        requested_by, requested_at, break_glass)
+       VALUES (?, 'permission', ?, 'admins', 'pending', ?, ?, 0)`
+    )
+      .bind(crypto.randomUUID(), id, builder.userId, Date.now())
+      .run();
+    await expect(admin.api.permissions.grant(id)).resolves.toMatchObject({
+      status: "active",
+      grantedBy: admin.userId,
+    });
   });
 
   it("stop working at the next call once revoked, in stubs already handed out", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const app = await newApp(admin.api);
     const authority = actingFor(app, admin.userId);
     const { id } = await admin.api.permissions.request(outlook(app.appId));
-    await approver.api.permissions.grant(id);
+    await admin.api.permissions.grant(id);
 
     // A running App or workflow keeps the env it was given.
     const held = await envOf(authority);
@@ -143,15 +273,13 @@ describe("permissions", () => {
     // The next load or resume doesn't get it at all.
     await expect(envOf(authority)).resolves.toStrictEqual({});
     // And it can't be granted back to life.
-    await expect(outcome(approver.api.permissions.grant(id))).resolves.toBe(
+    await expect(outcome(admin.api.permissions.grant(id))).resolves.toBe(
       "permission.not_requested"
     );
   });
 
   it("stop their own stubs once revoked, even when another permission covers the same", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const app = await newApp(admin.api);
     const authority = actingFor(app, admin.userId);
     const grant = async (binding: string) => {
@@ -159,7 +287,7 @@ describe("permissions", () => {
         ...outlook(app.appId),
         binding,
       });
-      return await approver.api.permissions.grant(id);
+      return await admin.api.permissions.grant(id);
     };
     const first = await grant("OUTLOOK");
     await grant("OUTLOOK_TOO");
@@ -173,11 +301,9 @@ describe("permissions", () => {
 
   it("belong to their subject alone: not another App, not an agent with the same ID", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const app = await newApp(admin.api);
     const { id } = await admin.api.permissions.request(outlook(app.appId));
-    await approver.api.permissions.grant(id);
+    await admin.api.permissions.grant(id);
     const others: PermissionSubjectInput[] = [
       { type: "agent", agentId: app.appId },
       await newApp(admin.api),
@@ -208,8 +334,6 @@ describe("permissions", () => {
 
   it("allow only their own actions, on their own resource", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const app = await newApp(admin.api);
     const authority = actingFor(app, admin.userId);
     const finance = {
@@ -223,7 +347,7 @@ describe("permissions", () => {
       actions: ["mail.list"],
       binding: "FINANCE_MAIL",
     });
-    await approver.api.permissions.grant(id);
+    await admin.api.permissions.grant(id);
 
     await expect(
       Promise.all([
@@ -263,8 +387,6 @@ describe("permissions", () => {
 
   it("keep the fields they mask, for connect to mask", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const app = await newApp(admin.api);
     const authority = actingFor(app, admin.userId);
     const metadataOnly = {
@@ -283,7 +405,7 @@ describe("permissions", () => {
       }));
     });
     expect(events[0]?.detail).toMatchObject({ mask: "body content" });
-    const granted = await approver.api.permissions.grant(id);
+    const granted = await admin.api.permissions.grant(id);
     expect(granted.object).toStrictEqual(metadataOnly);
     await expect(
       authorize(env, authority, granted.object, "mail.get", granted.id)
@@ -316,12 +438,10 @@ describe("permissions", () => {
 
   it("stop working when the person they act for leaves", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const builder = await permissionApi("builder");
     const app = await newApp(admin.api);
     const { id } = await admin.api.permissions.request(outlook(app.appId));
-    await approver.api.permissions.grant(id);
+    await admin.api.permissions.grant(id);
     const authority = actingFor(app, builder.userId);
     const held = await envOf(authority);
 
@@ -336,12 +456,10 @@ describe("permissions", () => {
 
   it("build an env with a stub for each active grant, and nothing else", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const app = await newApp(admin.api);
     const grant = async (request: PermissionRequest) => {
       const { id } = await admin.api.permissions.request(request);
-      return await approver.api.permissions.grant(id);
+      return await admin.api.permissions.grant(id);
     };
     await grant(outlook(app.appId));
     await admin.api.permissions.request(outlook(app.appId, "ASKED"));
@@ -366,12 +484,10 @@ describe("permissions", () => {
 
   it("leave a name out of the env once the platform takes it, and keep the rest", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const app = await newApp(admin.api);
     const grant = async (request: PermissionRequest) => {
       const { id } = await admin.api.permissions.request(request);
-      return await approver.api.permissions.grant(id);
+      return await admin.api.permissions.grant(id);
     };
     await grant(outlook(app.appId));
     const taken = await grant(outlook(app.appId, "LATER_TAKEN"));
@@ -471,13 +587,11 @@ describe("permissions", () => {
 
   it("keep their audit event when the audit queue is down, and send it later, once", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const app = await newApp(admin.api);
     const { id } = await admin.api.permissions.request(outlook(app.appId));
 
     const granted = await whileQueueDown(
-      async () => await approver.api.permissions.grant(id)
+      async () => await admin.api.permissions.grant(id)
     );
 
     const sent = await auditedDuring(runCron);
@@ -495,8 +609,6 @@ describe("permissions", () => {
 
   it("keep sending audit events past one that can't be sent or read", async () => {
     const admin = await permissionApi("admin");
-    // Nobody grants their own request: another admin does.
-    const approver = await permissionApi("admin");
     const app = await newApp(admin.api);
     const { id } = await admin.api.permissions.request(outlook(app.appId));
     // A stored event that isn't JSON, older than anything else waiting.
@@ -505,7 +617,7 @@ describe("permissions", () => {
     )
       .bind(crypto.randomUUID(), "not an event")
       .run();
-    await whileQueueDown(async () => await approver.api.permissions.grant(id));
+    await whileQueueDown(async () => await admin.api.permissions.grant(id));
 
     const send = vi.spyOn(env.AUDIT_QUEUE, "send");
     try {
@@ -547,7 +659,6 @@ describe("permissions", () => {
       await admin.api.permissions.revoke(id);
     });
     const target = { type: "permission", id };
-    const approval = events[0]?.detail?.approval;
     const detail = {
       subjectType: "app",
       subjectId: app.appId,
@@ -568,18 +679,13 @@ describe("permissions", () => {
         actor: { type: "person", userId: builder.userId },
         action: "permission.requested",
         target,
-        detail: { ...detail, approval },
+        detail,
       },
       {
         actor: { type: "person", userId: admin.userId },
         action: "permission.granted",
         target,
-        detail: {
-          ...detail,
-          approval,
-          requestedBy: builder.userId,
-          breakGlass: false,
-        },
+        detail: { ...detail, requestedBy: builder.userId },
       },
       {
         actor: { type: "person", userId: admin.userId },

@@ -280,34 +280,6 @@ describe("declarations", () => {
   });
 });
 
-describe("change requests from before values were set directly", () => {
-  it("are never listed or approved, and change nothing", async () => {
-    const requester = await personApi("builder");
-    const approver = await personApi("builder");
-    const app = await invoicesApp(requester);
-    // A pending change of the limit, as the release before this one made.
-    const pending = crypto.randomUUID();
-    await env.DB.prepare(
-      `INSERT INTO approvals (id, kind, app_id, workflow_id, param, value, approvers,
-        status, requested_by, requested_at, break_glass, version)
-       VALUES (?, 'param', ?, 'invoices', 'limit', '900000', 'builders', 'pending', ?, ?, 0, 1)`
-    )
-      .bind(pending, app, requester.userId, Date.now())
-      .run();
-    const listed = await approver.api.approvals.list();
-    const approve = await outcome(approver.api.approvals.approve(pending));
-    expect({
-      listed: listed.some(({ id }) => id === pending),
-      approve,
-      param: await paramOf(requester, app, "limit"),
-    }).toMatchObject({
-      listed: false,
-      approve: "approval.stale",
-      param: { value: null },
-    });
-  });
-});
-
 describe("runs", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);
 
