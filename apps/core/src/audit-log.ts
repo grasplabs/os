@@ -70,7 +70,14 @@ export const archiveStretch = 500;
  * How long archived stretches are kept, in days from when the log received
  * their last event: at least a year, at most ten.
  */
-const archiveRetentionSchema = z.int().min(365).max(3650);
+const archiveRetentionMinDays = 365;
+const archiveRetentionMaxDays = 3650;
+
+/** Days the log keeps an event where admins search it, unless set. */
+const retentionDefaultDays = 180;
+
+/** Days the console may set: at least 30 days, at most ten years. */
+const retentionSchema = z.int().min(30).max(3650);
 
 const dayMs = 24 * 60 * 60 * 1000;
 
@@ -78,19 +85,59 @@ const dayMs = 24 * 60 * 60 * 1000;
 const deleteBatchMax = 1000;
 
 /**
- * Days archived stretches are kept: the `AUDIT_ARCHIVE_RETENTION_DAYS` var
- * the console sets per deployment, as the DPA states it (AU7). `undefined`
- * while it's unset, or invalid (logged as `config.invalid`): then nothing
- * is purged. It's deployment config, so no session can shorten it.
+ * The deployment's retention in days (`AUDIT_RETENTION_DAYS`, see
+ * src/audit-retention.ts), or `undefined` if its config is invalid.
+ */
+export const auditRetentionDays = (
+  env: Pick<Env, "AUDIT_RETENTION_DAYS">
+): number | undefined =>
+  env.AUDIT_RETENTION_DAYS === undefined
+    ? retentionDefaultDays
+    : deploymentConfig(
+        retentionSchema,
+        "AUDIT_RETENTION_DAYS",
+        env.AUDIT_RETENTION_DAYS
+      );
+
+/**
+ * The archive retention schema for each retention: never shorter than it,
+ * so an event isn't purged before it was even archived. One per retention,
+ * so `deploymentConfig` parses and logs each value once.
+ */
+const archiveRetentionSchemas = new Map<number, z.ZodInt>();
+const archiveRetentionSchema = (retention: number): z.ZodInt => {
+  const known = archiveRetentionSchemas.get(retention);
+  if (known) {
+    return known;
+  }
+  const schema = z
+    .int()
+    .min(Math.max(archiveRetentionMinDays, retention))
+    .max(archiveRetentionMaxDays);
+  archiveRetentionSchemas.set(retention, schema);
+  return schema;
+};
+
+/**
+ * Days an event is kept in all, archive included, counted from when the
+ * log received it: the `AUDIT_ARCHIVE_RETENTION_DAYS` var the console sets
+ * per deployment, as the DPA states it (AU7). At least a year and at least
+ * the retention, at most ten years. `undefined` while it's unset, or
+ * invalid (logged as `config.invalid`), or while retention is invalid: then
+ * nothing is purged. It's deployment config, so no session can shorten it.
  */
 export const archiveRetentionDays = (
-  env: Pick<Env, "AUDIT_ARCHIVE_RETENTION_DAYS">
-): number | undefined =>
-  deploymentConfig(
-    archiveRetentionSchema,
-    "AUDIT_ARCHIVE_RETENTION_DAYS",
-    env.AUDIT_ARCHIVE_RETENTION_DAYS
-  );
+  env: Pick<Env, "AUDIT_ARCHIVE_RETENTION_DAYS" | "AUDIT_RETENTION_DAYS">
+): number | undefined => {
+  const retention = auditRetentionDays(env);
+  return retention === undefined
+    ? undefined
+    : deploymentConfig(
+        archiveRetentionSchema(retention),
+        "AUDIT_ARCHIVE_RETENTION_DAYS",
+        env.AUDIT_ARCHIVE_RETENTION_DAYS
+      );
+};
 
 /**
  * A receipt time held this far behind the head's is logged: the log holds

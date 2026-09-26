@@ -1,8 +1,6 @@
 import { log } from "@grasp-os/shared/log";
-import { z } from "zod";
 
-import { archiveStretch, auditLog } from "./audit-log.ts";
-import { deploymentConfig } from "./deployment-config.ts";
+import { archiveStretch, auditLog, auditRetentionDays } from "./audit-log.ts";
 import { featureEnabled } from "./features.ts";
 
 // Retention of the audit log: how long the log keeps an event where admins
@@ -10,8 +8,9 @@ import { featureEnabled } from "./features.ts";
 // as it was stored, and the chain carries on (src/audit-log.ts), so an
 // archived event still counts when the chain is verified. The archive keeps
 // it until the log purges it, once the deployment's archive retention has
-// passed (`AUDIT_ARCHIVE_RETENTION_DAYS`, worked out by the log itself; see
-// `AuditLog.purge`), and never while that is unset. Verification reports a
+// passed (`AUDIT_ARCHIVE_RETENTION_DAYS`, the event's total age, worked out
+// by the log itself; see `AuditLog.purge`), and never while that is unset.
+// Both are parsed in src/audit-log.ts, where the log reads them. Verification reports a
 // purged stretch as purged. Deleting archived objects any other way
 // (outside the product) makes verification report them missing.
 //
@@ -23,36 +22,14 @@ import { featureEnabled } from "./features.ts";
 // not an in-product setting, so a compromised admin session can't shorten
 // it. Archiving runs only while the `audit` feature is on.
 
-/** Days the log keeps an event where admins search it, unless set. */
-const auditRetentionDefaultDays = 180;
-/** Fewest days the console may set. */
-const auditRetentionMinDays = 30;
-/** Most days the console may set. */
-const auditRetentionMaxDays = 3650;
-
-const retentionSchema = z
-  .int()
-  .min(auditRetentionMinDays)
-  .max(auditRetentionMaxDays);
-
 const dayMs = 24 * 60 * 60 * 1000;
 
 /** Most stretches one run of the cron trigger archives. */
 const stretchesPerRun = 10;
 
-/** The deployment's retention in days, or `undefined` if its config is invalid. */
-const retentionDays = (env: Env): number | undefined =>
-  env.AUDIT_RETENTION_DAYS === undefined
-    ? auditRetentionDefaultDays
-    : deploymentConfig(
-        retentionSchema,
-        "AUDIT_RETENTION_DAYS",
-        env.AUDIT_RETENTION_DAYS
-      );
-
 /** Archives what is past retention, up to {@link stretchesPerRun} stretches. */
 const archiveExpired = async (env: Env): Promise<void> => {
-  const days = retentionDays(env);
+  const days = auditRetentionDays(env);
   if (days === undefined) {
     return;
   }

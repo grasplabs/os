@@ -50,9 +50,11 @@
   // `{"apps": true}`. Every feature is off until it names it.
   //
   // And the audit log's retention: the `AUDIT_RETENTION_DAYS` var
-  // (src/audit-retention.ts), 180 days unless set, at least 30. And how long
-  // its archive keeps them: `AUDIT_ARCHIVE_RETENTION_DAYS` (src/audit-log.ts),
-  // at least 365; archived events are never purged while it's unset.
+  // (src/audit-retention.ts), 180 days unless set, at least 30. And an
+  // event's total age before it is purged from the archive, counted from
+  // when the log received it: `AUDIT_ARCHIVE_RETENTION_DAYS`
+  // (src/audit-log.ts), at least 365 and at least `AUDIT_RETENTION_DAYS`;
+  // archived events are never purged while it's unset.
   //
   // Local dev reads none of these from .dev.vars (Wrangler loads only the
   // required secrets and declared vars from it): pass them with
