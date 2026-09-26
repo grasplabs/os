@@ -7,7 +7,7 @@ import { workflowErrors } from "@grasp-os/shared/workflows";
 import { introspectWorkflow, runInDurableObject } from "cloudflare:test";
 import type { WorkflowInstanceIntrospector } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
@@ -20,7 +20,14 @@ import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { mailControlUrl, mailServerUrl } from "./mail-server.ts";
 import type { MailAnswer } from "./mail-server.ts";
-import { finished, liveStatus, resumed, stepDone, stopped } from "./runs.ts";
+import {
+  endLiveRuns,
+  finished,
+  liveStatus,
+  resumed,
+  stepDone,
+  stopped,
+} from "./runs.ts";
 import { openRpc, signedInWithRole } from "./sign-in.ts";
 import { connectDb, testBinding } from "./test-env.ts";
 
@@ -405,6 +412,8 @@ ${after}
   );
 
 describe("workflow runs", { timeout: 60_000 }, () => {
+  afterEach(endLiveRuns);
+
   it("run the sample invoice workflow end to end, and audit it", async () => {
     const builder = await personApi("builder");
     const reviewer = await personApi("admin");
@@ -1108,6 +1117,8 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
 });
 
 describe("workflow side effects and failures", { timeout: 60_000 }, () => {
+  afterEach(endLiveRuns);
+
   it("send once when a side-effect step is killed after the mail went out, and retried", async () => {
     const admin = await personApi("admin");
     const mail = await mailConnection();

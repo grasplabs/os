@@ -26,7 +26,8 @@ jobs:
     name: check
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    # A passing run takes about 6 minutes.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -44,7 +45,12 @@ jobs:
       - run: vp run check:docs
       - run: vp run check:migrations
       - run: vp run check:worker-logs
+      # About 5 minutes when it passes. Nothing in Vitest times out a test
+      # worker stuck after its tests (see apps/core/vite.config.ts): this
+      # step timeout is the only backstop, so a hang fails here after 10
+      # minutes, with no earlier warning, instead of at the job's limit.
       - run: vp test
+        timeout-minutes: 10
       - run: vp run -r build
       # Generated files (Worker types, route trees, migrations) must be committed.
       - run: vp run -r typegen && vp run -r db:generate
