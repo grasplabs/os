@@ -83,6 +83,22 @@ export const delegateActorOf = ({
     ? { type: "agent", agentId: subject.agentId, onBehalfOf }
     : { type: "app", appId: subject.appId, part: "server" };
 
+/** A workflow run, acting on its own, as the audit log names it. */
+export const runActorOf = ({
+  runId,
+  app,
+  workflow,
+}: {
+  runId: string;
+  app: string;
+  workflow: string;
+}): AuditActor => ({
+  type: "workflow",
+  appId: appIdSchema.parse(app),
+  workflowId: workflowIdSchema.parse(workflow),
+  runId: runIdSchema.parse(runId),
+});
+
 /** The Workers that send audit events. */
 export const auditSourceSchema = z.enum(["core", "connect"]);
 export type AuditSource = z.infer<typeof auditSourceSchema>;

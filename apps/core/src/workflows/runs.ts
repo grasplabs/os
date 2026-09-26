@@ -1,7 +1,7 @@
 import { wrapWorkflowBinding } from "@cloudflare/dynamic-workflows";
 import { appErrors } from "@grasp-os/shared/apps";
 import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
-import { actorOf } from "@grasp-os/shared/audit";
+import { actorOf, runActorOf } from "@grasp-os/shared/audit";
 import {
   appIdSchema,
   runIdSchema,
@@ -9,6 +9,7 @@ import {
 } from "@grasp-os/shared/ids";
 import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
+import { errorFields, log } from "@grasp-os/shared/log";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import type {
@@ -24,6 +25,7 @@ import { requireBuilder, versionFiles } from "../apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
 import { apps, workflowRuns } from "../db/core/schema.ts";
 import { appHost } from "../durable-objects.ts";
+import { requireFeature } from "../features.ts";
 import { hasWorkflow } from "./code.ts";
 
 // Runs of Apps' workflows, as core keeps them: one row each (the App
@@ -33,6 +35,9 @@ import { hasWorkflow } from "./code.ts";
 // resume.
 
 export type RunRow = typeof workflowRuns.$inferSelect;
+
+/** The statuses of a run that hasn't ended. */
+const unended: RunRow["status"][] = ["running", "paused"];
 
 /** Most runs one `list` call returns. */
 const runsPerPage = 100;
@@ -137,12 +142,8 @@ export const runEntry = (
 /** The run's own actor in the audit log. */
 export const runActor = (
   row: Pick<RunRow, "id" | "appId" | "workflowId">
-): AuditActor => ({
-  type: "workflow",
-  appId: appIdSchema.parse(row.appId),
-  workflowId: workflowIdSchema.parse(row.workflowId),
-  runId: runIdSchema.parse(row.id),
-});
+): AuditActor =>
+  runActorOf({ runId: row.id, app: row.appId, workflow: row.workflowId });
 
 /** What starts a run: which workflow, with what input, for whom. */
 export interface RunRequest {
@@ -162,12 +163,14 @@ export interface RunRequest {
  * Starts a run on the App's current version, which it keeps until it ends.
  * The row and its audit event are written before the run is created, so
  * the dispatcher always finds the row; a run that can't be created is
- * marked failed.
+ * marked failed, audited as a failed run.
  */
 export const startRun = async (
   env: Env,
   { app, workflow, input, startedBy, actor }: RunRequest
 ): Promise<WorkflowRun> => {
+  // Every way a run starts, a trigger's too, stops with the kill switch.
+  requireFeature(env, "workflows");
   const db = drizzle(env.DB);
   const { currentVersion: version } = await appRecord(env, app);
   if (version === null) {
@@ -208,11 +211,44 @@ export const startRun = async (
     });
   } catch (error) {
     // The instance may exist all the same: the dispatcher refuses to run
-    // a failed run's row.
-    await db
-      .update(workflowRuns)
-      .set({ status: "failed", endedAt: new Date() })
-      .where(eq(workflowRuns.id, row.id));
+    // a failed run's row. Its report says only that it didn't start: the
+    // platform's error stays in the log.
+    log.error("workflow.start_failed", {
+      runId: row.id,
+      ...errorFields(error),
+    });
+    const failedAt = new Date();
+    const failure: RunFailure = {
+      run: runIdSchema.parse(row.id),
+      app,
+      workflow,
+      version,
+      step: null,
+      input: null,
+      error: {
+        code: "workflow.run_failed",
+        message: "The workflow run couldn't be started.",
+      },
+      failedAt: failedAt.toISOString(),
+    };
+    await auditedBatch(env, db, [
+      db
+        .update(workflowRuns)
+        .set({ status: "failed", endedAt: failedAt, failure })
+        .where(
+          and(
+            eq(workflowRuns.id, row.id),
+            inArray(workflowRuns.status, unended)
+          )
+        ),
+      outboxedIfChanged(
+        db,
+        runEntry(runActor(row), "workflow.run.failed", row, {
+          reason: "start_failed",
+          error: "workflow.run_failed",
+        })
+      ),
+    ]);
     throw error;
   }
   return toRun(row);
@@ -268,6 +304,31 @@ const runFor = (by: Identity, row: RunRow, ownerId: string): WorkflowRun =>
     ? { ...toRun(row), failure: row.failure }
     : toRun(row);
 
+/** How Workflows says it has no instance of that ID. */
+const instanceNotFound = /\binstance\.not_found\b/u;
+
+/**
+ * Where Workflows has a run; nothing for one that has ended without an
+ * instance to ask (its start failed), whose row says all there is.
+ */
+const liveOf = async (
+  env: Env,
+  row: RunRow
+): Promise<InstanceStatus | undefined> => {
+  try {
+    const instance = await env.WORKFLOWS.get(row.id);
+    return await instance.status();
+  } catch (error) {
+    if (
+      unended.includes(row.status) ||
+      !(error instanceof Error && instanceNotFound.test(error.message))
+    ) {
+      throw error;
+    }
+    return undefined;
+  }
+};
+
 /**
  * A run as it is now: where the engine has it while core last saw it
  * running. What it returned or why it failed can hold what the run read
@@ -281,12 +342,11 @@ export const runStatus = async (
   requireBuilder(by);
   const row = await foundRun(env, run);
   const { ownerId } = await appRecord(env, appIdSchema.parse(row.appId));
-  const instance = await env.WORKFLOWS.get(row.id);
-  const live = await instance.status();
+  const live = await liveOf(env, row);
   const status =
-    row.status === "running" ? liveStatuses[live.status] : row.status;
+    row.status === "running" && live ? liveStatuses[live.status] : row.status;
   const found = { ...runFor(by, row, ownerId), status };
-  if (!seesDetails(by, row, ownerId)) {
+  if (!(live && seesDetails(by, row, ownerId))) {
     return found;
   }
   const output = z.json().safeParse(live.output);
@@ -318,9 +378,6 @@ export const listRuns = async (
     .limit(runsPerPage);
   return rows.map((row) => runFor(by, row, ownerId));
 };
-
-/** The statuses of a run that hasn't ended. */
-const unended: RunRow["status"][] = ["running", "paused"];
 
 /** Drops the state writes an ended run applied (app.ts). */
 const forgetWrites = async (env: Env, row: RunRow): Promise<void> => {
@@ -469,6 +526,27 @@ export const pauseForOwner = async (env: Env, row: RunRow): Promise<number> => {
 };
 
 /**
+ * Records that a run waits while `feature` is switched off (host.ts), with
+ * nothing else to change: it goes on by itself once it's back on.
+ */
+export const recordWaiting = async (
+  env: Env,
+  row: RunRow,
+  feature: string
+): Promise<void> => {
+  const db = drizzle(env.DB);
+  await auditedBatch(env, db, [
+    outboxed(
+      db,
+      runEntry(runActor(row), "workflow.run.waiting", row, {
+        reason: "switched_off",
+        feature,
+      })
+    ),
+  ]);
+};
+
+/**
  * Keeps whom the run acts for in this execution (`person`) on its row, if
  * it's someone new: who sees what it read (`seesDetails`).
  */
@@ -486,10 +564,16 @@ export const actFor = async (
     .where(eq(workflowRuns.id, row.id));
 };
 
-/** Marks a paused run as running again. */
+/** Marks a paused run as running again, audited when it was paused. */
 export const resumeRun = async (env: Env, row: RunRow): Promise<void> => {
-  await drizzle(env.DB)
-    .update(workflowRuns)
-    .set({ status: "running" })
-    .where(and(eq(workflowRuns.id, row.id), eq(workflowRuns.status, "paused")));
+  const db = drizzle(env.DB);
+  await auditedBatch(env, db, [
+    db
+      .update(workflowRuns)
+      .set({ status: "running" })
+      .where(
+        and(eq(workflowRuns.id, row.id), eq(workflowRuns.status, "paused"))
+      ),
+    outboxedIfChanged(db, runEntry(runActor(row), "workflow.run.resumed", row)),
+  ]);
 };

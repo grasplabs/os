@@ -16,6 +16,7 @@ import { appBindings } from "./app-bindings.ts";
 import { addToErrorLog, readErrorLog } from "./app-error-log.ts";
 import { findApp, versionFiles } from "./apps.ts";
 import { appHost } from "./durable-objects.ts";
+import { requireFeature } from "./features.ts";
 import { sandbox } from "./sandbox.ts";
 import { buildFailed, buildServer } from "./screens.ts";
 
@@ -556,7 +557,8 @@ export class App extends DurableObject<Env> {
  * session (screens), or the person a workflow run acts for. Core takes the
  * caller from the session or the run, never from the request. Anything
  * that fails outside the App's own errors comes back as
- * `internal.unexpected`.
+ * `internal.unexpected`. Refused while `apps` is switched off: screens
+ * and workflows alike call Apps only through here.
  */
 export const callApp = async (
   env: Env,
@@ -565,6 +567,7 @@ export const callApp = async (
   method: string,
   args: unknown[] = []
 ): Promise<AppAnswer> => {
+  requireFeature(env, "apps");
   try {
     return await appHost(env, app).call(caller, method, args);
   } catch (error) {

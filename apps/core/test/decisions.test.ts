@@ -1,23 +1,16 @@
 import { toBase64Url, fromBase64Url } from "@grasp-os/shared/encoding";
-import { appIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
-import { callApp } from "../src/app.ts";
 import { signDecisionLink } from "../src/decisions/links.ts";
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
+import { asking, asksOf, linkOf, outputOf, week } from "./decisions.ts";
+import type { Ask, Person } from "./decisions.ts";
 import { mockIdp } from "./idp.ts";
-import {
-  endLiveRuns,
-  finished,
-  liveStatus,
-  resumed,
-  stepDone,
-  stopped,
-} from "./runs.ts";
+import { endLiveRuns, finished, resumed, stopped } from "./runs.ts";
 import { acmeTenant } from "./sign-in-config.ts";
 import {
   callAuth,
@@ -44,166 +37,8 @@ import {
 
 const idp = mockIdp();
 
-type Person = Awaited<ReturnType<typeof signedInApi>>;
-
 const personApi = async (role: Role): Promise<Person> =>
   await signedInApi(idp, role);
-
-/**
- * The App's server: it keeps whom each ask went to, with their links, as
- * a workflow that mails them would.
- */
-const server = `import { DurableObject } from "cloudflare:workers";
-
-export class App extends DurableObject {
-  #table() {
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS asks (n INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)");
-  }
-
-  remember(_caller, recipients, reminder) {
-    this.#table();
-    this.ctx.storage.sql.exec("INSERT INTO asks (body) VALUES (?)", JSON.stringify({ recipients, reminder }));
-  }
-
-  asks(_caller) {
-    this.#table();
-    return this.ctx.storage.sql.exec("SELECT body FROM asks ORDER BY n").toArray().map((row) => JSON.parse(row.body));
-  }
-}
-`;
-
-/** A workflow that waits for one decision and returns how it ended. */
-const approval = `import { workflow, z } from "@grasp-os/sdk/workflow";
-
-export default workflow(
-  "approval",
-  {
-    params: {},
-    input: z.object({ from: z.string(), timeout: z.number(), remindAfter: z.number().optional() }),
-  },
-  async (step, { input, env }) =>
-    await step.decision("review", {
-      description: "Approve the invoice",
-      from: input.from,
-      ask: async ({ recipients, reminder }) => {
-        await env.APP.call("remember", recipients, reminder);
-      },
-      timeout: input.timeout,
-      ...(input.remindAfter === undefined ? {} : { remindAfter: input.remindAfter }),
-    })
-);
-`;
-
-const approvalTests = `import { workflowTests } from "@grasp-os/sdk/testing";
-
-import approval from "./approval.ts";
-
-export default workflowTests(approval, [
-  {
-    name: "ends with the answer",
-    input: { from: "role:admin", timeout: 1000 },
-    decisions: { review: { approved: true, by: "anna" } },
-    expect: { output: { timedOut: false, approved: true, by: "anna", payload: null } },
-  },
-]);
-`;
-
-const week = 7 * 86_400_000;
-
-/** A new App with the approval workflow, released by `builder`. */
-const approvalApp = async (builder: Person): Promise<string> => {
-  const { id } = await builder.api.apps.create({ name: "Approvals" });
-  await release(builder, id, {
-    "app/server.ts": server,
-    "workflows/approval.ts": approval,
-    "workflows/approval.workflow-tests.ts": approvalTests,
-  });
-  return id;
-};
-
-const askSchema = z.array(
-  z.object({
-    recipients: z.array(
-      z.object({
-        userId: z.string(),
-        name: z.string(),
-        email: z.string(),
-        link: z.url(),
-      })
-    ),
-    reminder: z.boolean(),
-  })
-);
-type Ask = z.infer<typeof askSchema>[number];
-
-/** The asks the App's server kept, once there are `count` of them. */
-const asksOf = async (app: string, count = 1): Promise<Ask[]> =>
-  await vi.waitFor(
-    async () => {
-      const asks = askSchema.parse(
-        await callApp(
-          env,
-          appIdSchema.parse(app),
-          { userId: "test", mode: "interactive" },
-          "asks",
-          []
-        )
-      );
-      if (asks.length < count) {
-        throw new Error(`${asks.length} of ${count} asks so far`);
-      }
-      return asks;
-    },
-    { timeout: 20_000, interval: 100 }
-  );
-
-/** A decision link's decision and token, as its page reads them. */
-const readLink = (link: string): { decision: string; token: string } => {
-  const url = new URL(link);
-  const decision = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
-  return { decision, token: url.searchParams.get("link") ?? "" };
-};
-
-/** The link the ask sent to `userId`. */
-const linkOf = (ask: Ask | undefined, userId: string) => {
-  const recipient = ask?.recipients.find((person) => person.userId === userId);
-  if (!recipient) {
-    throw new Error(`The ask went to ${JSON.stringify(ask?.recipients)}`);
-  }
-  return readLink(recipient.link);
-};
-
-/** Starts the approval workflow and waits until it has asked. */
-const asking = async (
-  builder: Person,
-  input: { from: string; timeout: number; remindAfter?: number }
-) => {
-  const app = await approvalApp(builder);
-  const run = await builder.api.workflows.start(app, "approval", input);
-  const [ask] = await asksOf(app);
-  if (!ask) {
-    throw new Error("No ask");
-  }
-  const decision = await vi.waitFor(async () => {
-    const row = await env.DB.prepare(
-      "SELECT id FROM workflow_decisions WHERE run_id = ?"
-    )
-      .bind(run.id)
-      .first<{ id: string }>();
-    if (!row) {
-      throw new Error("No decision yet");
-    }
-    return row.id;
-  });
-  return { app, run, ask, decision };
-};
-
-/** What the run returned, once it has ended. */
-const outputOf = async (builder: Person, run: string): Promise<unknown> => {
-  await finished(run);
-  const { output } = await builder.api.workflows.status(run);
-  return output;
-};
 
 const joinTeam = async (
   admin: Person,
@@ -720,55 +555,6 @@ describe("decisions", { timeout: 60_000 }, () => {
       answer: "decision.forbidden",
       withAdminsLink: "decision.forbidden",
       withOwnLink: "decision.forbidden",
-    });
-  });
-
-  it("pause a waiting run while decisions are switched off, instead of reminding or timing it out", async () => {
-    const builder = await personApi("builder");
-    const decider = await personApi("user");
-    const { app, run, decision } = await asking(builder, {
-      from: `person:${decider.userId}`,
-      timeout: 3000,
-      remindAfter: 1500,
-    });
-    // Switched off once it waits for the answer, before it would remind.
-    await stepDone(run.id, "review#asked");
-    const { FEATURES: features } = env;
-    try {
-      env.FEATURES = {
-        ...z.record(z.string(), z.boolean()).parse(features),
-        decisions: false,
-      };
-      await vi.waitFor(
-        async () => {
-          await expect(liveStatus(run.id)).resolves.toBe("paused");
-        },
-        { timeout: 10_000, interval: 100 }
-      );
-    } finally {
-      env.FEATURES = features;
-    }
-    const whileOff = await env.DB.prepare(
-      "SELECT status FROM workflow_decisions WHERE id = ?"
-    )
-      .bind(decision)
-      .first<{ status: string }>();
-    const askedWhileOff = await asksOf(app);
-    await resumed(run.id);
-    // Back on: reminded, it ends as the timeout it is, never as an approval.
-    const output = await outputOf(builder, run.id);
-    const asked = await asksOf(app, 2);
-
-    expect({
-      whileOff: whileOff?.status,
-      remindedWhileOff: askedWhileOff.map(({ reminder }) => reminder),
-      output,
-      reminded: asked.map(({ reminder }) => reminder),
-    }).toStrictEqual({
-      whileOff: "open",
-      remindedWhileOff: [false],
-      output: { timedOut: true },
-      reminded: [false, true],
     });
   });
 

@@ -17,7 +17,7 @@ import { z } from "zod";
 
 import { keepAuditEvent } from "../audit-outbox.ts";
 import { derivedHmacKey } from "../derived-keys.ts";
-import { allowedCollections, recordRead } from "./access.ts";
+import { allowedCollections, noteProvenance } from "./access.ts";
 import type { Reader } from "./access.ts";
 import { readableCollection } from "./collections.ts";
 
@@ -36,7 +36,7 @@ import { readableCollection } from "./collections.ts";
 //
 // Access is part of the same statement (R11): a section of a collection
 // the reader can't read is never ranked, counted or returned. What comes
-// back is recorded as a read (`recordRead`), so a search that finds
+// back is noted as a read (`noteProvenance`), so a search that finds
 // restricted data puts the App or agent's chat or App in restricted mode
 // before the results are handed over, as any read does.
 
@@ -312,7 +312,10 @@ export const search = async (
   const scoped =
     scope === undefined ? [] : [await readableCollection(db, allowed, scope)];
   if (terms.length === 0) {
-    return { hits: [], provenance: await recordRead(env, reader, ...scoped) };
+    return {
+      hits: [],
+      provenance: await noteProvenance(env, reader, ...scoped),
+    };
   }
   const now = Date.now();
   const today = new Date(now).toISOString().slice(0, 10);
@@ -378,7 +381,7 @@ export const search = async (
   if (found.length === 0) {
     await recordNothingFound(env, reader, terms, scope);
   }
-  const provenance = await recordRead(
+  const provenance = await noteProvenance(
     env,
     reader,
     ...scoped,

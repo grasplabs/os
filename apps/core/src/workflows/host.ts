@@ -1,5 +1,7 @@
+import { runActorOf } from "@grasp-os/shared/audit";
 import type { AuditActor } from "@grasp-os/shared/audit";
 import { decidersSchema } from "@grasp-os/shared/decisions";
+import { toHex } from "@grasp-os/shared/encoding";
 import { isExpectedError } from "@grasp-os/shared/errors";
 import { identifierSchema } from "@grasp-os/shared/ids";
 import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
@@ -27,6 +29,7 @@ import { auditedBatch, outboxed } from "../audit-outbox.ts";
 import { forSandbox, requireStepKey, runStubCall } from "../bindings.ts";
 import type { ConnectionGrant } from "../bindings.ts";
 import {
+  decisionDeadline,
   decisionEventType,
   decisionOutcome,
   decisionRecipients,
@@ -93,34 +96,6 @@ export interface RunStep {
  */
 export const coreStepPrefix = "$grasp:";
 
-/**
- * A kill switch for runs: with `feature` switched off, the run pauses here
- * and goes on from here when resumed with it on. The dispatcher checks
- * `workflows` before any step; a decision's wait checks `decisions`, so
- * switching decisions off never lets a wait end in a timeout nobody could
- * have prevented. The sleep only holds the execution while the pause
- * lands; its name is new each time, as no execution comes back to it.
- * Nothing in core resumes runs yet: once the flag is back on, paused
- * instances must be resumed (the Workflows API or dashboard).
- */
-export const pauseWhileSwitchedOff = async (
-  env: Env,
-  step: RunStep,
-  runId: RunId,
-  feature: Feature
-): Promise<void> => {
-  if (featureEnabled(env, feature)) {
-    return;
-  }
-  const instance = await env.WORKFLOWS.get(runId);
-  await instance.pause();
-  await step.sleep(
-    `${coreStepPrefix}switched-off:${crypto.randomUUID()}`,
-    365 * 86_400_000
-  );
-  throw new Error(`${feature} is switched off: the run is paused.`);
-};
-
 /** Core's own events start with this; a workflow can't wait for one. */
 export const coreEventPrefix = "grasp-";
 
@@ -163,6 +138,7 @@ const doOptionsSchema = z.object({
   timeout: milliseconds.optional(),
   sideEffect: z.boolean().optional(),
   input: z.json().optional(),
+  decision: z.boolean().optional(),
 });
 
 const waitOptionsSchema = z.object({
@@ -345,11 +321,47 @@ const defaultStepLimit = 10_000;
 
 /**
  * Steps kept back for core's own (`$grasp:…`), so the step that records
- * how the run ended always fits: that one, an owner's wait or two, and a
- * kill-switch pause. A run's own steps are refused this far short of the
- * limit; past the limit, the engine would refuse core's end too.
+ * how the run ended always fits: that one, and an owner's wait or two. A
+ * run's own steps are refused this far short of the limit; past the
+ * limit, the engine would refuse core's end too.
  */
 const coreStepReserve = 5;
+
+/**
+ * The sleeps a run waits in while a feature is switched off. They are
+ * core's (workflow code can't name one), but count as the run's own
+ * against the reserve, so waiting can't use up the steps core's end needs.
+ */
+const offStepPrefix = `${coreStepPrefix}off:`;
+
+/**
+ * How long a run first waits before it checks a switched-off feature
+ * again; each wait after doubles, up to {@link maxOffWaits} times this.
+ */
+const defaultOffWaitMs = 60_000;
+
+/** The longest wait between checks, in first waits: 15 minutes. */
+const maxOffWaits = 15;
+
+/**
+ * A short, stable key for the step `name` a wait holds, as the wait's own
+ * step names take it: a step's name can be as long as a step name may be.
+ */
+const offKeyOf = async (name: unknown): Promise<string> => {
+  const digest = await crypto.subtle.digest(
+    "SHA-256",
+    new TextEncoder().encode(String(name))
+  );
+  return toHex(new Uint8Array(digest)).slice(0, 16);
+};
+
+/** The first wait between checks for this deployment; tests shorten it. */
+const offWaitOf = (env: Env): number => {
+  const set = Number(env.WORKFLOW_OFF_WAIT_MS);
+  return Number.isInteger(set) && set > 0 && set < defaultOffWaitMs
+    ? set
+    : defaultOffWaitMs;
+};
 
 /** The engine's step limit for this deployment. */
 export const stepLimitOf = (env: Env): number => {
@@ -390,10 +402,9 @@ export const watchedStep = (
   let taken = 0;
   const take = (name: string): void => {
     taken += 1;
-    if (
-      !name.startsWith(coreStepPrefix) &&
-      taken > stepLimit - coreStepReserve
-    ) {
+    const reserved =
+      name.startsWith(coreStepPrefix) && !name.startsWith(offStepPrefix);
+    if (!reserved && taken > stepLimit - coreStepReserve) {
       throw workflowErrors.create("workflow.too_many_steps");
     }
   };
@@ -552,6 +563,8 @@ export interface HostHooks {
   acting: () => Promise<void>;
   /** Hears of each step that failed, with the error it failed with. */
   stepFailed: (failure: FailedStep) => void;
+  /** Records that the run waits while `feature` is switched off. */
+  waiting: (feature: Feature) => Promise<void>;
   /** Calls a method of the run's App for `caller` (`callApp`). */
   callApp: (
     caller: AppCallerInput,
@@ -585,8 +598,7 @@ export class RunHost extends RpcTarget {
   }
 
   get #actor(): AuditActor {
-    const { app, workflow, runId } = this.#run;
-    return { type: "workflow", appId: app, workflowId: workflow, runId };
+    return runActorOf(this.#run);
   }
 
   /**
@@ -629,23 +641,116 @@ export class RunHost extends RpcTarget {
     }
   }
 
-  /** The person the run acts for must still be there. */
+  /**
+   * Waits, before the step `name`, while any of `features` is switched
+   * off, then lets the run go on: a kill switch holds a run without
+   * failing or pausing it, and nobody has to resume it.
+   *
+   * Each check is a durable sleep: a minute first (`offWaitOf`), doubling
+   * up to 15 minutes. Each is one step of the run's budget, so a run waits
+   * a long time (days at the default step limit), and past that its next
+   * step fails with `workflow.too_many_steps`.
+   *
+   * The wait's steps are named after the step it holds, so they are the
+   * same on every execution: a new execution replays the sleeps it already
+   * slept (each returns at once) and goes on waiting. The wait is recorded
+   * in a step of its own per feature waited on (`waiting`), so each
+   * stretch is audited once for each, whatever the executions. That step's retries cover a failing audit
+   * write; one that still fails is logged, and the run keeps waiting.
+   */
+  async #waitWhileOff(
+    name: unknown,
+    features: readonly Feature[]
+  ): Promise<void> {
+    let key: string | undefined;
+    // Each feature the run waits on is recorded once: with two off, the
+    // run waits on the first, then on the other once the first is on.
+    const recorded = new Set<Feature>();
+    for (let checks = 0; ; checks += 1) {
+      const off = features.find(
+        (feature) => !featureEnabled(this.#env, feature)
+      );
+      if (off === undefined) {
+        return;
+      }
+      // oxlint-disable-next-line no-await-in-loop -- once per wait
+      key ??= await offKeyOf(name);
+      if (!recorded.has(off)) {
+        recorded.add(off);
+        // oxlint-disable-next-line no-await-in-loop -- once per feature
+        await this.#recordWaiting(`${offStepPrefix}${key}:waiting:${off}`, off);
+      }
+      const first = offWaitOf(this.#env);
+      // oxlint-disable-next-line no-await-in-loop -- one check at a time
+      await this.#step.sleep(
+        `${offStepPrefix}${key}:${checks}`,
+        Math.min(first * 2 ** checks, first * maxOffWaits)
+      );
+    }
+  }
+
+  /** Records, once in step `step`, that the run waits while `feature` is off. */
+  async #recordWaiting(step: string, feature: Feature): Promise<void> {
+    try {
+      await this.#step.do(step, {}, async () => {
+        await this.#hooks.waiting(feature);
+        return null;
+      });
+    } catch (error) {
+      if (isEngineStop(error)) {
+        throw error;
+      }
+      log.error("workflow.waiting.audit_failed", {
+        runId: this.#run.runId,
+        feature,
+        ...errorFields(error),
+      });
+    }
+  }
+
+  /**
+   * The person the run acts for must still be there. Inside a step (a
+   * model call, an App call, state), a person who has left fails that
+   * step, and with it the run, even a triggered run, which pauses for its
+   * owner only when the check before a step (`acting`) finds them gone.
+   * Accepted: the window is one step.
+   */
   async #requirePerson(): Promise<void> {
     await requireActivePerson(this.#env, this.#run.authority);
   }
 
   /**
    * Runs `fn` (in the isolate) as a durable step, with the SDK's retries
-   * and timeout. A replay answers the recorded result without calling it.
-   * Its outcome is audited when it ran in this execution.
+   * and timeout. A replay answers the recorded result, or throws the
+   * recorded error, without calling it. Its outcome is audited, and a
+   * failure reported (`stepFailed`), only when it was attempted in this
+   * execution: a failure workflow code caught is replayed on every later
+   * execution, and was recorded when it happened. A step that fails
+   * before it starts (options that don't parse, a person who has left) is
+   * neither: the run's own failure records it. While `workflows` is
+   * switched off, or `decisions` for a step that opens or asks a
+   * decision, the run waits before the step (`#waitWhileOff`).
    */
   async do(
     name: unknown,
     options: unknown,
     fn: () => Promise<unknown>
   ): Promise<Settled<unknown>> {
+    // Before the step's name and options are checked, which fail the step:
+    // waiting mustn't. Options that don't parse wait for `workflows` only,
+    // and fail below.
+    const waited = await settle(async () => {
+      const decision = doOptionsSchema.safeParse(options).data?.decision;
+      await this.#waitWhileOff(
+        name,
+        decision === true ? ["workflows", "decisions"] : ["workflows"]
+      );
+    });
+    if (!waited.ok) {
+      return waited;
+    }
     let failed: StepError | undefined;
-    let ran = false;
+    let attempted = false;
     let step = "";
     let sideEffect = false;
     let input: InputShape | null = null;
@@ -656,15 +761,20 @@ export class RunHost extends RpcTarget {
       input = inputShape(parsed.input);
       await this.#hooks.acting();
       const value = await this.#step.do(step, stepConfig(parsed), async () => {
+        attempted = true;
         // Only the last attempt's error counts: an earlier one was retried.
         failed = undefined;
         const attempt = { step };
         this.#running = attempt;
         let result: Settled<unknown>;
+        // Whether no newer attempt began, and the step didn't end, while
+        // this one ran: an abandoned attempt's result is thrown away.
+        let current = false;
         try {
           result = fromIsolate(await fn());
         } finally {
-          if (this.#running === attempt) {
+          current = this.#running === attempt;
+          if (current) {
             this.#running = undefined;
           }
         }
@@ -689,18 +799,20 @@ export class RunHost extends RpcTarget {
           };
           throw toStepError(failed);
         }
-        ran = true;
+        // Recorded here, before the engine stores the result, so a stop
+        // between the two can't lose it: at least once, as a stop before
+        // the result is stored runs the step, and records it, again.
+        if (current) {
+          await this.#audited(step, "completed", { sideEffect });
+        }
         return result.value;
       });
       this.#stepEnded(step);
-      if (ran) {
-        await this.#audited(step, "completed", { sideEffect });
-      }
       return { ok: true, value };
     } catch (error) {
       this.#stepEnded(step);
       const reported = failed ?? forIsolate(error);
-      if (step !== "") {
+      if (attempted) {
         this.#hooks.stepFailed({ step, input, error: reported });
         await this.#audited(step, "failed", {
           sideEffect,
@@ -715,6 +827,7 @@ export class RunHost extends RpcTarget {
     return await settle(async () => {
       const step = checked(stepNameSchema, name);
       const ms = checked(milliseconds, duration);
+      await this.#waitWhileOff(step, ["workflows"]);
       await this.#step.sleep(step, ms);
       return null;
     });
@@ -730,6 +843,9 @@ export class RunHost extends RpcTarget {
     return await settle(async () => {
       const step = checked(stepNameSchema, name);
       const { type, timeout } = checked(waitOptionsSchema, options);
+      // Held before it begins, so it neither takes an event nor times out
+      // while workflows are off: an event sent meanwhile waits for it.
+      await this.#waitWhileOff(step, ["workflows"]);
       try {
         const event = await this.#step.waitForEvent(step, { type, timeout });
         return { received: true, payload: event.payload };
@@ -794,19 +910,6 @@ export class RunHost extends RpcTarget {
    */
   #stepKey(): string {
     return stepIdempotencyKey(this.#run.runId, this.#requireStep().step);
-  }
-
-  /**
-   * Pauses the run while decisions are switched off; the pause is the
-   * engine's, so the dispatcher hands it back to the engine as its own.
-   */
-  async #pauseWhileDecisionsOff(): Promise<void> {
-    await pauseWhileSwitchedOff(
-      this.#env,
-      this.#step,
-      this.#run.runId,
-      "decisions"
-    );
   }
 
   /** The step whose function runs now; refuses a call outside a step. */
@@ -919,9 +1022,8 @@ export class RunHost extends RpcTarget {
    * event that wakes the run carries nothing it takes. With `last`, a
    * decision still open is closed, timed out, unless an answer lands
    * first. An answer that came before the wait began is taken at once.
-   * While decisions are switched off, the run pauses instead of waiting,
-   * and again once the wait is over: instead of closing a decision nobody
-   * could answer meanwhile, or of going on to remind people of it.
+   * Switching decisions off stops only answering (decisions/rpc.ts): a wait
+   * that runs out meanwhile ends timed out, never approved.
    */
   async waitForDecision(
     name: unknown,
@@ -930,7 +1032,7 @@ export class RunHost extends RpcTarget {
     return await settle(async () => {
       const step = checked(stepNameSchema, name);
       const { decision, timeout, last } = checked(decisionWaitSchema, options);
-      await this.#pauseWhileDecisionsOff();
+      await this.#waitWhileOff(step, ["workflows"]);
       const before = await decisionOutcome(
         this.#env,
         this.#run,
@@ -940,11 +1042,18 @@ export class RunHost extends RpcTarget {
       if (before.answered) {
         return before;
       }
-      if (timeout > 0) {
+      // The SDK worked `timeout` out from when it asked, but a hold for
+      // switched-off workflows (just above) may have outlasted that: so
+      // never wait past the decision's deadline, as its row has it. Once
+      // that has passed, the decision is closed as timed out at once, so a
+      // reminder that follows asks nobody.
+      const deadline = await decisionDeadline(this.#env, this.#run, decision);
+      const left = Math.min(timeout, deadline - Date.now());
+      if (left > 0) {
         try {
           await this.#step.waitForEvent(step, {
             type: decisionEventType(decision),
-            timeout,
+            timeout: left,
           });
         } catch (error) {
           if (!isTimeout(error)) {
@@ -952,8 +1061,12 @@ export class RunHost extends RpcTarget {
           }
         }
       }
-      await this.#pauseWhileDecisionsOff();
-      return await decisionOutcome(this.#env, this.#run, decision, last);
+      return await decisionOutcome(
+        this.#env,
+        this.#run,
+        decision,
+        last || Date.now() >= deadline
+      );
     });
   }
 

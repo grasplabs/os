@@ -26,7 +26,7 @@ import type { WorkContext } from "../restricted.ts";
 // acts for may read too
 // (R5): a grant never reaches past that person. What it reads is marked
 // with where it came from, and restricted data puts the chat or App it
-// works in in restricted mode (`recordRead`).
+// works in in restricted mode (`noteProvenance`).
 
 /**
  * Who reads Knowledge: a signed-in person, or an App or agent acting for
@@ -138,14 +138,15 @@ export const allowedCollections = async (
 };
 
 /**
- * Records that `reader` read from `sources` (a collection, or those a
- * search found something in; none when it found nothing), and returns the
- * read's provenance. Call it after the read and before handing over what it
- * returned: an App or agent that read restricted data puts its chat or App
- * in restricted mode first, so the data never reaches anything that can
- * still call out. If that fails, the read fails.
+ * Notes where what `reader` read came from, `sources` (a collection, or
+ * those a search found something in; none when it found nothing), and
+ * returns the read's provenance. Call it after the read and before handing
+ * over what it returned: an App or agent that read restricted data puts
+ * its chat or App in restricted mode first, so the data never reaches
+ * anything that can still call out. If that fails, the read fails. The
+ * read itself isn't audited yet; entering restricted mode is (restricted.ts).
  */
-export const recordRead = async (
+export const noteProvenance = async (
   env: Env,
   reader: Reader,
   ...sources: { id: string; sensitive: boolean }[]
@@ -160,7 +161,12 @@ export const recordRead = async (
     restricted: sensitive,
   };
   if (provenance.restricted && reader.type === "delegate") {
-    await restrict(env, reader.authority, reader.context);
+    await restrict(
+      env,
+      reader.authority,
+      reader.context,
+      provenance.collectionIds
+    );
   }
   return provenance;
 };

@@ -27,6 +27,10 @@ export const workflowErrors = defineErrorFamily({
   "workflow.param_invalid": "That isn't a valid value for this parameter.",
   "workflow.param_conflict":
     "The value changed hands while it was set: the App's current version changed, or an approval set it, which only another approval changes. Try again.",
+  // What a step or run failed with when its error named no code of its
+  // own: the audit log and failure reports carry these instead.
+  "workflow.step_failed": "A step of the workflow failed.",
+  "workflow.run_failed": "The workflow run failed.",
 });
 
 /**
@@ -46,7 +50,9 @@ export const stepIdempotencyKey = (runId: string, step: string): string =>
  * idempotency key still running, whose answer a retry gets; a model call
  * that failed; something unplanned in the platform, where connect's
  * idempotency keys keep a retried side effect to once; and a model's answer
- * that didn't fit, which the SDK asks for again. Any other failure stops
+ * that didn't fit, which the SDK asks for again; and a feature switched
+ * off (`feature.disabled`), so a run goes on once it's switched back on
+ * within the step's retries. Any other failure stops
  * the run: a refusal, a tool's own error (it may have acted), a call whose
  * outcome is unknown (an App method that timed out, too), or an error the
  * workflow's code throws.
@@ -57,6 +63,7 @@ const retryableCodes: ReadonlySet<unknown> = new Set([
   "model.failed",
   "internal.unexpected",
   "workflow.invalid_model_output",
+  "feature.disabled",
 ]);
 
 /**

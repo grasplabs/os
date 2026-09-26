@@ -24,6 +24,11 @@ interface __BaseEnv_Env {
    * workflow's `stepLimit` (src/workflows/host.ts).
    */
   WORKFLOW_STEP_LIMIT?: string;
+  /**
+   * Tests only: a shorter wait between a run's checks of a switched-off
+   * feature (src/workflows/host.ts).
+   */
+  WORKFLOW_OFF_WAIT_MS?: string;
   /** Tests only: a shorter limit for one call into an App (src/app.ts). */
   APP_CALL_TIMEOUT_MS?: string;
   /** Local dev only (src/router-secret.ts). */

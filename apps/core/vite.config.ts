@@ -44,6 +44,7 @@ export const screenTests = [
   "test/app-sandbox.test.ts",
   "test/workflows.test.ts",
   "test/decisions.test.ts",
+  "test/decisions-switched-off.test.ts",
   "test/workflow-params.test.ts",
 ];
 
@@ -90,6 +91,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               screens: true,
               members: true,
               audit: true,
+              audit_retention: true,
               approvals: true,
             },
             // The gateway runs call the model through; tests fake the AI binding.
@@ -104,6 +106,8 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             // The engine's step limit, lowered below (`workflows`) so a test
             // reaches it; core must know it too.
             WORKFLOW_STEP_LIMIT: String(testStepLimit),
+            // So a run held by a kill switch checks again at once.
+            WORKFLOW_OFF_WAIT_MS: "250",
             CORE_MIGRATIONS: coreMigrations,
             KNOWLEDGE_MIGRATIONS: knowledgeMigrations,
             CONNECT_MIGRATIONS: connectMigrations,
