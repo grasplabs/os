@@ -55,6 +55,14 @@ export default workflowTests(approval, [
 ]);
 `;
 
+/**
+ * How long a decision page may take to show what core said. It reads core
+ * up to twice first (who is signed in, then the decision), each read
+ * within 5 seconds of its own (apps/web/src/core.ts), so the default
+ * 5-second wait is shorter than the page's.
+ */
+const pageRead = { timeout: 15_000 };
+
 /** The first recipient's link, from what the App's server kept. */
 const linkIn = (recipients: unknown): string => {
   const first: unknown = Array.isArray(recipients) ? recipients.at(0) : null;
@@ -109,7 +117,8 @@ test("the person a decision link was sent to approves it, and the run goes on", 
   const forwarded = await pageOf(browser, other);
   await forwarded.goto(link);
   await expect(forwarded.getByRole("alert")).toHaveText(
-    "You aren't one of the people who answer this decision."
+    "You aren't one of the people who answer this decision.",
+    pageRead
   );
 
   // Opened signed out, the link only asks them to sign in. The local stack
@@ -120,12 +129,12 @@ test("the person a decision link was sent to approves it, and the run goes on", 
   await page.goto(link);
   await expect(
     page.getByRole("heading", { name: "Sign in to answer" })
-  ).toBeVisible();
+  ).toBeVisible(pageRead);
   await signInTo(context, decider);
   await page.goto(link);
   await expect(
     page.getByRole("heading", { name: "Approve invoice INV-7" })
-  ).toBeVisible();
+  ).toBeVisible(pageRead);
   await page.getByLabel("Comment (optional)").fill("Matches the PO");
   await page.getByRole("button", { name: "Approve" }).click();
   await expect(page.getByRole("status")).toHaveText(/^Approved by Person on /u);

@@ -68,10 +68,17 @@ const releaseApp = async (
   }
 };
 
+/**
+ * Opens the notes screen, once it shows. The first open of an App's screen
+ * builds it before the frame can show anything, which on a loaded machine
+ * takes longer than the default 5 seconds.
+ */
 const openScreen = async (page: Page, app: string) => {
   await page.goto(`/apps/${app}/screens/notes`);
   const screen = page.frameLocator('iframe[title="notes screen"]');
-  await expect(screen.getByRole("heading", { name: "Notes" })).toBeVisible();
+  await expect(screen.getByRole("heading", { name: "Notes" })).toBeVisible({
+    timeout: 20_000,
+  });
   return screen;
 };
 
