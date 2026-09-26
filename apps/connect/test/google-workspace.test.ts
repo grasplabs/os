@@ -9,6 +9,7 @@ import { connectAccount, outcome, ownAccount, someone } from "./connect.ts";
 import {
   cancelledOccurrenceId,
   ceo,
+  detachedBody,
   docText,
   draftId,
   eventId,
@@ -18,8 +19,8 @@ import {
   financeDrive,
   holidayCalendar,
   htmlBody,
+  incompleteEventId,
   invoices,
-  detachedBody,
   messageId,
   messagePageToken,
   otherDrive,
@@ -484,6 +485,25 @@ describe("the Google Workspace connector's Gmail tools", () => {
     ]);
   });
 
+  it("read no body or attachment past the limit that Gmail said was small", async () => {
+    const connection = await connected();
+    const message = messageId(invoices, detachedBody.understated);
+    const refused = await Promise.all([
+      toolError(call(connection, "mail.get", { mailbox: invoices, message })),
+      toolError(
+        call(connection, "mail.readAttachment", {
+          mailbox: invoices,
+          message,
+          attachment: "9",
+        })
+      ),
+    ]);
+    expect(refused).toMatchObject([
+      { error: { code: "too_large" } },
+      { error: { code: "too_large" } },
+    ]);
+  });
+
   it("get a message with no body part as one without a body", async () => {
     const connection = await connected();
     await expect(
@@ -803,7 +823,7 @@ describe("the Google Workspace connector's Calendar tools", () => {
     ).resolves.toMatchObject({ error: { code: "invalid" } });
   });
 
-  it("get an event with its description and attendees, an all-day one, and a cancelled occurrence", async () => {
+  it("get an event with its description and attendees, and an all-day one", async () => {
     const connection = await connected();
     await expect(
       resultOf(
@@ -847,6 +867,13 @@ describe("the Google Workspace connector's Calendar tools", () => {
     ).resolves.toMatchObject({
       event: { start: "2026-10-01", end: "2026-10-02", isAllDay: true },
     });
+    expect(paths()[0]).toBe(
+      `${calendarPath}/events/${eventId(teamCalendar, 1)}`
+    );
+  });
+
+  it("get a cancelled occurrence without a start or end, and no other event", async () => {
+    const connection = await connected();
     // A cancelled occurrence has only the start it had, and no end.
     await expect(
       outputOf(
@@ -865,9 +892,14 @@ describe("the Google Workspace connector's Calendar tools", () => {
         attendees: [],
       },
     });
-    expect(paths()[0]).toBe(
-      `${calendarPath}/events/${eventId(teamCalendar, 1)}`
-    );
+    await expect(
+      outcome(
+        call(connection, "calendar.get", {
+          calendar: teamCalendar,
+          event: incompleteEventId(teamCalendar),
+        })
+      )
+    ).resolves.toBe("connect.action_failed");
   });
 });
 

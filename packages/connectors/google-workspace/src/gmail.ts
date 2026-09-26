@@ -264,30 +264,35 @@ const gmailAttachment = z.object({
 });
 
 /**
- * A part's data (base64url): inline, or fetched by the attachment ID this
- * read of the message gave it, if it is readable.
+ * A part's bytes: inline, or fetched by the attachment ID this read of the
+ * message gave it. Within the read limit by the size Gmail reports before
+ * a fetch, and by the size of what came after it: the report is Gmail's
+ * word, not the content.
  */
-const partData = async (
+const partBytes = async (
   mailbox: string,
   message: string,
   part: Part
-): Promise<string> => {
+): Promise<Uint8Array> => {
   const { attachmentId, data, size } = part.body ?? {};
-  if (data !== undefined) {
-    return data;
+  let encoded = data;
+  if (encoded === undefined) {
+    checkReadable(size ?? 0);
+    const fetched = await googleJson(
+      googleUrl(
+        gmailHost,
+        mailboxPath(
+          mailbox,
+          `/messages/${segment(message)}/attachments/${segment(attachmentId ?? "")}`
+        )
+      ),
+      gmailAttachment
+    );
+    encoded = fetched.data;
   }
-  checkReadable(size ?? 0);
-  const fetched = await googleJson(
-    googleUrl(
-      gmailHost,
-      mailboxPath(
-        mailbox,
-        `/messages/${segment(message)}/attachments/${segment(attachmentId ?? "")}`
-      )
-    ),
-    gmailAttachment
-  );
-  return fetched.data;
+  const bytes = fromBase64(encoded);
+  checkReadable(bytes.byteLength);
+  return bytes;
 };
 
 const getMessage = defineTool({
@@ -329,7 +334,7 @@ const getMessage = defineTool({
             contentType: found.contentType,
             content: textOf(
               found.part,
-              await partData(mailbox, id, found.part)
+              await partBytes(mailbox, id, found.part)
             ),
           };
     return {
@@ -392,7 +397,7 @@ const readAttachment = defineTool({
       });
     }
     checkReadable(found.size);
-    const bytes = fromBase64(await partData(mailbox, id, found.part));
+    const bytes = await partBytes(mailbox, id, found.part);
     return {
       output: {
         mailbox,

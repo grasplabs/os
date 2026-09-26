@@ -181,9 +181,27 @@ export const messageFull = (
 /**
  * The numbers of the messages whose bodies Gmail doesn't send inline: one
  * whose text and HTML bodies are behind attachment IDs, one whose body is
- * past the read limit, and one with no body part at all.
+ * past the read limit, one with no body part at all, and one whose body
+ * and attachment Gmail says are small but whose content is past the limit.
  */
-export const detachedBody = { readable: 4, tooLarge: 5, none: 6 } as const;
+export const detachedBody = {
+  readable: 4,
+  tooLarge: 5,
+  none: 6,
+  understated: 7,
+} as const;
+
+/** Groups of three bytes (`xxx`, base64 `eHh4`) past the 4 MiB read limit. */
+const overLimitGroups = Math.ceil((4 * 1024 * 1024 + 1) / 3);
+
+/**
+ * Content past the read limit, as `GET .../attachments/{id}` returns it,
+ * whatever size the message said it had.
+ */
+export const overLimitAttachment = {
+  size: overLimitGroups * 3,
+  data: "eHh4".repeat(overLimitGroups),
+};
 
 /** A body part whose data is behind `attachmentId`. */
 const detachedPart = (
@@ -201,7 +219,8 @@ const detachedPart = (
 
 /**
  * Message `n` of `detachedBody`, as `format=full` returns it. A body part's
- * attachment ID is this read's, with `text` or `html` after it.
+ * attachment ID is this read's, with `text` or `html` after it, or `huge`
+ * for content past the limit.
  */
 export const detachedMessageFull = (
   mailbox: string,
@@ -216,7 +235,12 @@ export const detachedMessageFull = (
     [detachedBody.tooLarge]: [
       detachedPart("0", "text/plain", `${attachmentId}text`, 5 * 1024 * 1024),
     ],
+    [detachedBody.understated]: [
+      detachedPart("0", "text/plain", `${attachmentId}huge`, plainBody.length),
+    ],
   }[n];
+  const attachment =
+    n === detachedBody.understated ? `${attachmentId}huge` : attachmentId;
   return {
     ...messageMetadata(mailbox, n),
     payload: {
@@ -232,7 +256,7 @@ export const detachedMessageFull = (
           mimeType: "application/pdf",
           filename: "Invoice-2026-0041.pdf",
           headers: [header("Content-Disposition", "attachment")],
-          body: { attachmentId, size: invoicePdf.byteLength },
+          body: { attachmentId: attachment, size: invoicePdf.byteLength },
         },
       ],
     },
@@ -326,6 +350,15 @@ export const allDayEvent = (calendar: string) => ({
   start: { date: "2026-10-01" },
   end: { date: "2026-10-02" },
 });
+
+/** An event that isn't cancelled, but that Google gave no start or end. */
+export const incompleteEventId = (calendar: string): string =>
+  eventId(calendar, 4);
+
+export const incompleteEvent = (calendar: string) => {
+  const { start: _start, end: _end, ...rest } = event(calendar, 4);
+  return rest;
+};
 
 /** An occurrence's ID, as Google shapes them: its event's, and its start. */
 export const cancelledOccurrenceId = (calendar: string): string =>

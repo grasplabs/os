@@ -30,12 +30,15 @@ import {
   googleError,
   labelled,
   htmlBody,
+  incompleteEvent,
+  incompleteEventId,
   labels,
   messageFull,
   messageList,
   messageId,
   messageMetadata,
   notFound,
+  overLimitAttachment,
   plainBody,
   searchResults,
   sentId,
@@ -101,6 +104,9 @@ export const fakeGoogle = () => {
       attachments.set(`${id}/${attachmentId}text`, bodyAttachment(plainBody));
       attachments.set(`${id}/${attachmentId}html`, bodyAttachment(htmlBody));
       const n = numberOf(id);
+      if (n === detachedBody.understated) {
+        attachments.set(`${id}/${attachmentId}huge`, overLimitAttachment);
+      }
       return json(
         Object.values(detachedBody).some((each) => each === n)
           ? detachedMessageFull(mailbox, n, attachmentId)
@@ -157,6 +163,9 @@ export const fakeGoogle = () => {
       ({ calendar, id }) => {
         if (id === cancelledOccurrenceId(calendar)) {
           return json(cancelledOccurrence(calendar));
+        }
+        if (id === incompleteEventId(calendar)) {
+          return json(incompleteEvent(calendar));
         }
         return json(
           id.endsWith("3")

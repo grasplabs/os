@@ -1,4 +1,4 @@
-import { fromBase64, toBase64 } from "@grasp-os/connector-kit/content";
+import { toBase64 } from "@grasp-os/connector-kit/content";
 import { z } from "zod";
 
 // Mail as Gmail sends and stores it: RFC 5322 messages. Gmail takes a new
@@ -193,9 +193,8 @@ const charsetOf = (part: Part): string => {
   );
 };
 
-/** Text of a part's data (base64url), in its charset (UTF-8 if unknown). */
-export const textOf = (part: Part, data: string): string => {
-  const bytes = fromBase64(data);
+/** Text of a part's bytes, in its charset (UTF-8 if unknown). */
+export const textOf = (part: Part, bytes: Uint8Array): string => {
   try {
     return new TextDecoder(charsetOf(part)).decode(bytes);
   } catch {

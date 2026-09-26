@@ -54,30 +54,41 @@ const googlePerson = z.object({
   displayName: z.string().nullish(),
 });
 
-const googleEvent = z.object({
-  id: z.string(),
-  status: z.string().nullish(),
-  htmlLink: z.string().nullish(),
-  summary: z.string().nullish(),
-  description: z.string().nullish(),
-  location: z.string().nullish(),
-  // A cancelled occurrence of a recurring event, as calendar.get reads
-  // one, may have neither start nor end: only the start it had.
-  start: googleTime.nullish(),
-  end: googleTime.nullish(),
-  originalStartTime: googleTime.nullish(),
-  organizer: googlePerson.nullish(),
-  recurringEventId: z.string().nullish(),
-  attendees: z
-    .array(
-      googlePerson.extend({
-        responseStatus: z.string().nullish(),
-        optional: z.boolean().nullish(),
-      })
-    )
-    .nullish(),
-  hangoutLink: z.string().nullish(),
-});
+const googleEvent = z
+  .object({
+    id: z.string(),
+    status: z.string().nullish(),
+    htmlLink: z.string().nullish(),
+    summary: z.string().nullish(),
+    description: z.string().nullish(),
+    location: z.string().nullish(),
+    // A cancelled occurrence of a recurring event, as calendar.get reads
+    // one, may have neither start nor end: only the start it had. Any other
+    // event has both (the refinement below).
+    start: googleTime.nullish(),
+    end: googleTime.nullish(),
+    originalStartTime: googleTime.nullish(),
+    organizer: googlePerson.nullish(),
+    recurringEventId: z.string().nullish(),
+    attendees: z
+      .array(
+        googlePerson.extend({
+          responseStatus: z.string().nullish(),
+          optional: z.boolean().nullish(),
+        })
+      )
+      .nullish(),
+    hangoutLink: z.string().nullish(),
+  })
+  .refine(
+    ({ status, start, end }) =>
+      status === "cancelled" ||
+      (start !== null &&
+        start !== undefined &&
+        end !== null &&
+        end !== undefined),
+    { message: "An event that isn't cancelled has a start and an end" }
+  );
 type GoogleEvent = z.infer<typeof googleEvent>;
 
 const personSchema = z.strictObject({
