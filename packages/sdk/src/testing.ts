@@ -1,3 +1,4 @@
+import { messageOf } from "@grasp-os/shared/errors";
 import { runIdSchema } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Json } from "@grasp-os/shared/json";
@@ -10,7 +11,7 @@ import type {
   ModelRequest,
   WorkflowEngine,
 } from "./engine.ts";
-import { durationUnits, engineStepPattern, messageOf } from "./steps.ts";
+import { durationUnits, engineStepPattern } from "./steps.ts";
 import type { WorkflowDefinition } from "./workflow.ts";
 
 /**

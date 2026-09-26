@@ -61,6 +61,10 @@ export const defineErrorFamily = <Code extends string>(
   };
 };
 
+/** An error's message, or what was thrown, as text. */
+export const messageOf = (error: unknown): string =>
+  error instanceof Error ? error.message : String(error);
+
 /**
  * What's wrong with some input, for an error's `details.issues`: each issue
  * as `path: message`, which names the field and never repeats its value.

@@ -1,6 +1,10 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import type { AppCaller } from "@grasp-os/shared/apps";
-import { isExpectedError, toOpaqueError } from "@grasp-os/shared/errors";
+import {
+  isExpectedError,
+  messageOf,
+  toOpaqueError,
+} from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
@@ -472,7 +476,7 @@ export class App extends DurableObject<Env> {
     const reported = appErrors.create("app.failed", {
       version,
       method,
-      message: error instanceof Error ? error.message : String(error),
+      message: messageOf(error),
     });
     reported.stack = undefined;
     return reported;

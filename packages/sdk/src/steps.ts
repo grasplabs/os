@@ -33,10 +33,6 @@ export const engineStepPattern = new RegExp(
   "u"
 );
 
-/** An error's message, or what was thrown as text. */
-export const messageOf = (error: unknown): string =>
-  error instanceof Error ? error.message : String(error);
-
 // Durations
 
 /** The units a duration is written in, largest first, in milliseconds. */

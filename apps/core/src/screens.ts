@@ -10,18 +10,15 @@ import type {
   ScreenSource,
   ServerBuild,
 } from "@grasp-os/compiler";
+import { sha256Hex } from "@grasp-os/shared/encoding";
 
 /** A hash of an App's files, whatever order they come in. */
-const hashOf = async (files: Record<string, string>): Promise<string> => {
-  const sorted = Object.entries(files).toSorted(([a], [b]) => (a < b ? -1 : 1));
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(JSON.stringify(sorted))
+const hashOf = async (files: Record<string, string>): Promise<string> =>
+  await sha256Hex(
+    JSON.stringify(
+      Object.entries(files).toSorted(([a], [b]) => (a < b ? -1 : 1))
+    )
   );
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-};
 
 /**
  * What a build is: the App and version it is filed under, the compiler
