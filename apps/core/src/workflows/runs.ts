@@ -388,6 +388,38 @@ export const listRuns = async (
   return rows.map((row) => runFor(by, row, ownerId));
 };
 
+/** Where Cloudflare Workflows has a run someone paused or terminated. */
+const stoppedStatuses = new Set<InstanceStatus["status"]>([
+  "paused",
+  "waitingForPause",
+  "terminated",
+]);
+
+/**
+ * Whether the engine has stopped the run: someone paused or terminated
+ * (cancelled) its instance. Read from where the engine has the run, never
+ * from an error's text, which workflow code can write. A cancelled row
+ * needs no check here: `endRun` changes, and audits, only a run that
+ * hasn't ended. When the instance can't be asked, it hasn't: a run that
+ * failed is recorded as failed, if the engine still lets it.
+ */
+export const engineStopped = async (
+  env: Env,
+  row: RunRow
+): Promise<boolean> => {
+  try {
+    const instance = await env.WORKFLOWS.get(row.id);
+    const { status } = await instance.status();
+    return stoppedStatuses.has(status);
+  } catch (error) {
+    log.error("workflow.status_unknown", {
+      runId: row.id,
+      ...errorFields(error),
+    });
+    return false;
+  }
+};
+
 /** Drops the state writes an ended run applied (app.ts). */
 const forgetWrites = async (env: Env, row: RunRow): Promise<void> => {
   await appHost(env, appIdSchema.parse(row.appId)).forgetWorkflowWrites(

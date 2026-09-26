@@ -326,23 +326,6 @@ const isTimeout = (error: unknown): boolean =>
   (error.name === "WorkflowTimeoutError" || timedOut.test(error.message));
 
 /**
- * How the engine stops an execution it will resume or end itself, when
- * someone pauses, terminates (cancels), restarts or deletes the run: in
- * the local runtime (Miniflare), an `Error` "Aborting engine: User called
- * pause" and so on, maybe with the name in front once it crossed to core.
- * The engine also aborts with "Aborting engine: …" when it fails a run
- * itself (a NonRetryableError, a value it can't serialise, the storage
- * limit): those, like any other error of the engine's (a step name it
- * refuses, the step limit, a storage failure), are real failures.
- * TODO(GRA-44): confirm that production's engine stops with these same
- * messages.
- */
-const userStop =
-  /^(?:\w+: )?Aborting engine: User called (?:pause|terminate|restart|delete)$/u;
-export const isEngineStop = (error: unknown): boolean =>
-  error instanceof Error && userStop.test(error.message);
-
-/**
  * The engine's limit on steps in one execution: Cloudflare's default, as
  * wrangler.jsonc sets no `limits.steps`. Only tests lower it, the
  * engine's and this one alike (`WORKFLOW_STEP_LIMIT`, vite.config.ts).
@@ -418,13 +401,27 @@ const isAttemptError = (error: unknown, attempt: unknown): boolean =>
     (error.message === attempt.message ||
       error.message.endsWith(`: ${attempt.message}`)));
 
+/** How `watchedStep` hears that the engine stopped the execution. */
+export interface EngineWatch {
+  /**
+   * Whether the engine has stopped the run now (`engineStopped`, runs.ts):
+   * asked when one of its calls throws an error that isn't a step's own.
+   */
+  stoppedNow: () => Promise<boolean>;
+  /** Hears the error the engine stopped the execution with, once. */
+  stopped: (error: unknown) => void;
+}
+
 /**
- * `step`, telling `engineStopped` when one of its calls throws the error
- * the engine stops the execution with (`isEngineStop`): a pause or a
- * cancel, after which the run goes on, or ends, in the engine's hands.
- * The dispatcher hands that error back (dispatcher.ts). A step's own
- * error, from any of its attempts, never counts, even one shaped like a
- * stop: workflow code throws what it likes.
+ * `step`, telling `watch` when one of its calls throws because the engine
+ * stopped the execution: someone paused or cancelled the run, after which
+ * it goes on, or ends, in the engine's hands. The dispatcher hands that
+ * error back (dispatcher.ts). A stop is told by where the engine has the
+ * run when the call throws, never by the error's text; a step's own
+ * error, from any of its attempts, is never one, whatever it says:
+ * workflow code throws what it likes. Asked then, and not once the run
+ * failed, so a run the engine resumed at once in a new execution still
+ * counts as stopped in this one.
  *
  * It counts every call, as the engine may, and refuses the run's own
  * ones {@link coreStepReserve} short of `stepLimit`, as a failure of that
@@ -432,7 +429,7 @@ const isAttemptError = (error: unknown, attempt: unknown): boolean =>
  */
 export const watchedStep = (
   step: RunStep,
-  engineStopped: (error: unknown) => void,
+  watch: EngineWatch,
   stepLimit: number
 ): RunStep => {
   let taken = 0;
@@ -444,11 +441,17 @@ export const watchedStep = (
       throw workflowErrors.create("workflow.too_many_steps");
     }
   };
-  const heard = (error: unknown, attempts: ReadonlySet<unknown>): void => {
+  let heardStop = false;
+  const threw = async (
+    error: unknown,
+    attempts: ReadonlySet<unknown>
+  ): Promise<void> => {
     const own = [...attempts].some((attempt) => isAttemptError(error, attempt));
-    if (isEngineStop(error) && !own) {
-      engineStopped(error);
+    if (heardStop || own || !(await watch.stoppedNow())) {
+      return;
     }
+    heardStop = true;
+    watch.stopped(error);
   };
   const none: ReadonlySet<unknown> = new Set();
   return {
@@ -467,7 +470,7 @@ export const watchedStep = (
           }
         });
       } catch (error) {
-        heard(error, attempts);
+        await threw(error, attempts);
         throw error;
       }
     },
@@ -476,7 +479,7 @@ export const watchedStep = (
       try {
         await step.sleep(name, duration);
       } catch (error) {
-        heard(error, none);
+        await threw(error, none);
         throw error;
       }
     },
@@ -485,7 +488,7 @@ export const watchedStep = (
       try {
         return await step.waitForEvent(name, options);
       } catch (error) {
-        heard(error, none);
+        await threw(error, none);
         throw error;
       }
     },
@@ -831,15 +834,25 @@ export class RunHost extends RpcTarget {
     }
   }
 
-  /** Records, once in step `step`, that the run waits, and why. */
+  /**
+   * Records, once in step `step`, that the run waits, and why. A record
+   * that can't be stored is logged, and the run waits on; an error of the
+   * engine's (it stopped the run, say) goes on up.
+   */
   async #recordWaiting(step: string, why: WaitReason): Promise<void> {
+    let failed: unknown;
     try {
       await this.#step.do(step, {}, async () => {
-        await this.#hooks.waiting(why);
+        try {
+          await this.#hooks.waiting(why);
+        } catch (error) {
+          failed = error;
+          throw error;
+        }
         return null;
       });
     } catch (error) {
-      if (isEngineStop(error)) {
+      if (failed === undefined || !isAttemptError(error, failed)) {
         throw error;
       }
       log.error("workflow.waiting.audit_failed", {

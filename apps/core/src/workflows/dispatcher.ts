@@ -25,7 +25,13 @@ import {
 } from "./host.ts";
 import type { FailedStep, HostedRun, RunStep } from "./host.ts";
 import { paramValues } from "./params.ts";
-import { appRecord, endRun, findRun, recordWaiting } from "./runs.ts";
+import {
+  appRecord,
+  endRun,
+  engineStopped,
+  findRun,
+  recordWaiting,
+} from "./runs.ts";
 import type { RunRow, Stopped } from "./runs.ts";
 
 export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
@@ -149,10 +155,16 @@ const runWorkflow = async (
   // once it has: it stays for the rest of the execution, whose every
   // later engine call stops the same way, and is the one to end it with.
   let engineError: { error: unknown } | undefined;
-  const engineStopped = (error: unknown): void => {
-    engineError = { error };
-  };
-  const step = watchedStep(engineStep, engineStopped, stepLimitOf(env));
+  const step = watchedStep(
+    engineStep,
+    {
+      stoppedNow: async () => await engineStopped(env, row),
+      stopped: (error) => {
+        engineError = { error };
+      },
+    },
+    stepLimitOf(env)
+  );
   let lastFailed: FailedStep | undefined;
   const stepFailed = (failure: FailedStep): void => {
     lastFailed = failure;
