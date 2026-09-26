@@ -32,12 +32,37 @@ const wrangler = path.join(
 
 const quoted = (value: string): string => `'${value.replaceAll("'", "''")}'`;
 
-/** Runs SQL on core's local database, the one the stack's dev server uses. */
+/**
+ * How often `execute` tries statements the database was too busy for: it
+ * shares the file with the dev server and with the other test workers.
+ */
+const busyAttempts = 5;
+
+const isBusy = (error: unknown): boolean =>
+  error instanceof Error &&
+  "stderr" in error &&
+  String(error.stderr).includes("SQLITE_BUSY");
+
+/**
+ * Runs SQL on core's local database, the one the stack's dev server uses.
+ * Wrangler runs the statements as one batch, which SQLite undoes whole
+ * when another connection holds the lock, so a busy batch is tried again.
+ */
 const execute = (sql: string): void => {
-  execFileSync(wrangler, ["d1", "execute", "DB", "--local", "--command", sql], {
-    cwd: coreDirectory,
-    stdio: "pipe",
-  });
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      execFileSync(
+        wrangler,
+        ["d1", "execute", "DB", "--local", "--command", sql],
+        { cwd: coreDirectory, stdio: "pipe" }
+      );
+      return;
+    } catch (error) {
+      if (attempt >= busyAttempts || !isBusy(error)) {
+        throw error;
+      }
+    }
+  }
 };
 
 /** Better Auth's signed cookie value: the token and its HMAC-SHA256. */
