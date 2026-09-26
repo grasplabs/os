@@ -38,6 +38,7 @@ export const screenTests = [
   "test/app-sandbox.test.ts",
   "test/workflows.test.ts",
   "test/decisions.test.ts",
+  "test/workflow-params.test.ts",
 ];
 
 /** Core's Worker test setup, shared by both of core's test projects. */
@@ -77,6 +78,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               screens: true,
               members: true,
               audit: true,
+              approvals: true,
             },
             // The gateway runs call the model through; tests fake the AI binding.
             MODEL_GATEWAY: {

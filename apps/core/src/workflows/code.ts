@@ -6,6 +6,8 @@ import {
   workflowIdOf,
   workflowPaths,
 } from "@grasp-os/compiler";
+import { paramValueSchemas } from "@grasp-os/sdk/params";
+import type { ParamKind } from "@grasp-os/sdk/params";
 import type { AppFiles } from "@grasp-os/shared/apps";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
@@ -90,6 +92,34 @@ interface TestsEntrypoint extends Rpc.WorkerEntrypointBranded {
 }
 
 /**
+ * A workflow's parameters as its code declares them (the SDK's
+ * `ParamMetadata`). The isolate sends them, so they are checked, and
+ * bounded.
+ */
+const declaredParamsSchema = z
+  .array(
+    z.object({
+      name: z.string().regex(/^[A-Za-z_$][\w$]{0,63}$/u),
+      kind: z.custom<ParamKind>(
+        (kind) =>
+          typeof kind === "string" && Object.hasOwn(paramValueSchemas, kind)
+      ),
+      label: z.string().max(200),
+      default: z.union([z.string().max(4096), z.number()]),
+      sensitive: z.boolean(),
+      currency: z.string().max(3).optional(),
+    })
+  )
+  .max(100);
+
+/** A parameter as a workflow's code declares it. */
+export type DeclaredParam = z.infer<typeof declaredParamsSchema>[number];
+
+interface ParamsEntrypoint extends Rpc.WorkerEntrypointBranded {
+  read: () => Promise<Settled<unknown>>;
+}
+
+/**
  * How workflow code runs: as App server code does, with more CPU. One load
  * runs the workflow from its start (finished steps replayed) to its next
  * wait, where one App call runs one method.
@@ -101,6 +131,7 @@ const workflowSandbox = {
 
 const runModule = "grasp-run.js";
 const testsModule = "grasp-tests.js";
+const paramsModule = "grasp-params.js";
 
 /**
  * The shared part of both main modules: settling a call into plain data
@@ -219,6 +250,24 @@ export class Tests extends WorkerEntrypoint {
 }
 `;
 
+/** The main module that reads workflow `id`'s parameters from its code. */
+const paramsMain = (
+  id: WorkflowId
+): string => `import { WorkerEntrypoint } from "cloudflare:workers";
+import definition from ${JSON.stringify(appModuleName(workflowPaths(id).workflow))};
+${settling}
+export class Params extends WorkerEntrypoint {
+  async read() {
+    return await settled(async () => {
+      if (definition?.metadata?.id !== ${JSON.stringify(id)}) {
+        throw new Error(${JSON.stringify(`workflows/${id}.ts must export the workflow "${id}" as its default export.`)});
+      }
+      return JSON.parse(JSON.stringify(definition.metadata.params));
+    });
+  }
+}
+`;
+
 /** The workflows in an App version's files, by ID. */
 const workflowIdsIn = (files: AppFiles): WorkflowId[] =>
   Object.keys(files).flatMap((path) => {
@@ -291,6 +340,40 @@ export const loadRun = (
     },
     env: runEnv,
   })).getEntrypoint<RunEntrypoint>("Run");
+
+/**
+ * The parameters workflow `id` declares at an App version (with its
+ * `files`), read from its code in an isolate of their own, kept by the
+ * loader for that version: a version's code never changes.
+ */
+export const declaredParams = async (
+  env: Env,
+  app: AppId,
+  version: number,
+  id: WorkflowId,
+  files: AppFiles
+): Promise<DeclaredParam[]> => {
+  const code = env.LOADER.get(
+    `workflow-params:${app}:${version}:${id}:${compilerVersion}`,
+    async () => ({
+      ...workflowSandbox,
+      mainModule: paramsModule,
+      modules: {
+        ...(await modulesOf(env, app, version, files)),
+        [paramsModule]: paramsMain(id),
+      },
+      env: {},
+    })
+  ).getEntrypoint<ParamsEntrypoint>("Params");
+  const outcome = fromIsolate(await code.read());
+  const params = outcome.ok
+    ? declaredParamsSchema.safeParse(outcome.value)
+    : undefined;
+  if (params?.success !== true) {
+    throw workflowErrors.create("workflow.invalid");
+  }
+  return params.data;
+};
 
 /** Why workflow `id`'s tests at `version` fail, one line each; none if they pass. */
 const testFailures = async (

@@ -325,6 +325,9 @@ importers:
       '@grasp-os/compiler':
         specifier: workspace:*
         version: link:../../packages/compiler
+      '@grasp-os/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@grasp-os/shared':
         specifier: workspace:*
         version: link:../../packages/shared

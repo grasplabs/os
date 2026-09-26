@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { ApproveOptions } from "./approvals.ts";
 import { defineErrorFamily } from "./errors.ts";
 import {
   agentIdSchema,
@@ -13,10 +14,10 @@ import {
 import type { PermissionId } from "./ids.ts";
 
 // Apps and agents start with nothing. Each thing they may use is one
-// permission: a person asks for it, an admin grants it, and every call
-// checks it again on the server. Everything here names things by ID and
-// stays identifier-sized, because each grant and revoke goes into the audit
-// log with these values.
+// permission: a person asks for it, an admin other than them grants it
+// (approvals.ts), and every call checks it again on the server.
+// Everything here names things by ID and stays identifier-sized, because
+// each grant and revoke goes into the audit log with these values.
 
 /** Who a permission is for: an App, or an agent. Never a person. */
 export const permissionSubjectSchema = z.discriminatedUnion("type", [
@@ -253,8 +254,12 @@ export interface PermissionsApi {
    * admin grants it. Admins and builders.
    */
   request: (request: PermissionRequest) => Promise<Permission>;
-  /** Grants a requested permission. Admins only. */
-  grant: (id: string) => Promise<Permission>;
+  /**
+   * Grants a requested permission, by approving its request. Admins only,
+   * and never the admin who asked, except as the only admin with
+   * `breakGlass`.
+   */
+  grant: (id: string, options?: ApproveOptions) => Promise<Permission>;
   /** Revokes a permission; the next call that needs it is refused. Admins only. */
   revoke: (id: string) => Promise<Permission>;
   /** Every permission, or one App's or agent's. Admins and builders. */

@@ -15,6 +15,7 @@ import { appHost } from "../src/durable-objects.ts";
 import { ownerEventType } from "../src/workflows/dispatcher.ts";
 import { startRun } from "../src/workflows/runs.ts";
 import { fakeGateway } from "./ai-gateway.ts";
+import { requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { mailControlUrl, mailServerUrl } from "./mail-server.ts";
@@ -386,18 +387,16 @@ const mailConnection = async (plan: MailAnswer[] = []) => {
 
 /** Gives the App `MAIL`, for sending on the connection; an admin grants it. */
 const grantMail = async (
-  admin: Person,
   requester: Person,
   app: string,
   connectionId: string
 ): Promise<void> => {
-  const { id } = await requester.api.permissions.request({
+  await requestGranted(idp, requester, {
     subject: { type: "app", appId: app },
     object: { type: "connection", connectionId },
     actions: ["mail.send"],
     binding: "MAIL",
   });
-  await admin.api.permissions.grant(id);
 };
 
 /** The mail each test's workflow sends. */
@@ -546,10 +545,7 @@ ${mailStep("after")}`,
         { before: "reached", after: "reached" }
       )
     );
-    const { id: permission } = await admin.api.permissions.request(
-      outlook(app)
-    );
-    await admin.api.permissions.grant(permission);
+    const permission = await requestGranted(idp, admin, outlook(app));
     const run = await admin.api.workflows.start(app, "mailer");
     await stepDone(run.id, "before");
     await stopped(run.id);
@@ -817,10 +813,7 @@ ${mailStep("after")}`,
         { probe: null }
       )
     );
-    const { id: permission } = await admin.api.permissions.request(
-      outlook(app)
-    );
-    await admin.api.permissions.grant(permission);
+    await requestGranted(idp, admin, outlook(app));
     await appHost(env, appIdSchema.parse(app)).restrict();
     const run = await admin.api.workflows.start(app, "probe");
     await finished(run.id);
@@ -1131,7 +1124,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
       }`
       )
     );
-    await grantMail(admin, admin, app, mail.id);
+    await grantMail(admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "mailer");
     await finished(run.id);
 
@@ -1156,7 +1149,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
       admin,
       mailer(`retries: { limit: 3, delay: 10, backoff: "constant" }`)
     );
-    await grantMail(admin, admin, app, mail.id);
+    await grantMail(admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "mailer");
     await finished(run.id);
     // Each attempt is audited with the version whose code made it.
@@ -1219,7 +1212,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
         { send: {}, hang: null }
       )
     );
-    await grantMail(admin, admin, app, mail.id);
+    await grantMail(admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "keys");
     await finished(run.id);
 
@@ -1264,7 +1257,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
         { send: {} }
       )
     );
-    await grantMail(admin, admin, app, mail.id);
+    await grantMail(admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "app-mailer");
     await finished(run.id);
 
@@ -1294,7 +1287,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
       owner,
       mailer(`retries: { limit: 3, delay: 10, backoff: "constant" }`)
     );
-    await grantMail(admin, owner, app, mail.id);
+    await grantMail(owner, app, mail.id);
     // One run a person started, which acts for them; one a trigger
     // started, which acts for the App's owner.
     const started = await starter.api.workflows.start(app, "mailer");

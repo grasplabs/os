@@ -1,6 +1,7 @@
 import type { PermissionRequest } from "@grasp-os/shared/permissions";
 
-import type { signedInApi } from "./sign-in.ts";
+import type { Idp } from "./idp.ts";
+import { signedInApi } from "./sign-in.ts";
 
 /** Someone signed in, with their API (`signedInApi`). */
 type Builder = Pick<Awaited<ReturnType<typeof signedInApi>>, "api">;
@@ -27,3 +28,22 @@ export const outlook = (
   actions: ["mail.list"],
   binding,
 });
+
+/**
+ * Asks for `request` as `requester`, and has another admin, signed in for
+ * it, grant it: nobody grants their own request. Returns its ID.
+ */
+export const requestGranted = async (
+  idp: Idp,
+  requester: Builder,
+  request: PermissionRequest
+): Promise<string> => {
+  const { id } = await requester.api.permissions.request(request);
+  const approver = await signedInApi(idp, "admin");
+  try {
+    await approver.api.permissions.grant(id);
+  } finally {
+    approver.core[Symbol.dispose]();
+  }
+  return id;
+};

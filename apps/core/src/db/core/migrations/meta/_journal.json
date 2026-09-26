@@ -57,6 +57,13 @@
       "when": 1790400114835,
       "tag": "0007_workflow_decisions",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "6",
+      "when": 1790406163851,
+      "tag": "0008_approvals",
+      "breakpoints": true
     }
   ]
 }

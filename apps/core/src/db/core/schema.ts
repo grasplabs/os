@@ -1,3 +1,4 @@
+import type { ParamValue } from "@grasp-os/shared/approvals";
 import type { Json } from "@grasp-os/shared/json";
 import type { RunFailure } from "@grasp-os/shared/workflows";
 /**
@@ -428,4 +429,75 @@ export const appWorkingFiles = sqliteTable(
     writtenAt: timestamp("written_at").notNull(),
   },
   (table) => [primaryKey({ columns: [table.appId, table.path] })]
+);
+
+/**
+ * Changes nobody makes alone (src/approvals.ts): each row asks for one, and
+ * moves from `pending` once, in one conditional statement that also checks
+ * who decides, in the same batch as the change and its audit event. A
+ * `permission` row grants the requested permission `permission_id`; a
+ * `param` row sets `param` of workflow `workflow_id` of App `app_id` from
+ * `previous` (null: the code's default) to `value` (JSON). `approvers`
+ * names who may approve: `admins`, or `builders` (admins and builders);
+ * never `requested_by`, except the only admin approving their own
+ * permission request as break-glass, which `break_glass` records. At most
+ * one pending row per permission and per parameter. Never deleted.
+ */
+export const approvals = sqliteTable(
+  "approvals",
+  {
+    id: text().primaryKey(),
+    kind: text({ enum: ["permission", "param"] }).notNull(),
+    permissionId: text("permission_id").references(() => permissions.id),
+    // Apps are never deleted; an approval checks its App is there anyway.
+    appId: text("app_id"),
+    workflowId: text("workflow_id"),
+    param: text(),
+    value: text({ mode: "json" }).$type<ParamValue>(),
+    previous: text({ mode: "json" }).$type<ParamValue>(),
+    approvers: text({ enum: ["admins", "builders"] }).notNull(),
+    status: text({
+      enum: ["pending", "approved", "declined", "withdrawn"],
+    }).notNull(),
+    requestedBy: text("requested_by").notNull(),
+    requestedAt: timestamp("requested_at").notNull(),
+    decidedBy: text("decided_by"),
+    decidedAt: timestamp("decided_at"),
+    breakGlass: integer("break_glass", { mode: "boolean" })
+      .notNull()
+      .default(false),
+  },
+  (table) => [
+    uniqueIndex("approvals_pending_permission_idx")
+      .on(table.permissionId)
+      .where(sql`status = 'pending'`),
+    uniqueIndex("approvals_pending_param_idx")
+      .on(table.appId, table.workflowId, table.param)
+      .where(sql`status = 'pending'`),
+    index("approvals_status_idx").on(table.status, table.requestedAt),
+  ]
+);
+
+/**
+ * The values people set for workflows' parameters, one per App, workflow
+ * and parameter; a parameter without one has its code's default. A
+ * sensitive one is set only by an approval (`approval_id`), whose
+ * requester is `set_by`.
+ */
+export const workflowParamValues = sqliteTable(
+  "workflow_param_values",
+  {
+    appId: text("app_id")
+      .notNull()
+      .references(() => apps.id),
+    workflowId: text("workflow_id").notNull(),
+    param: text().notNull(),
+    value: text({ mode: "json" }).$type<ParamValue>().notNull(),
+    setBy: text("set_by").notNull(),
+    setAt: timestamp("set_at").notNull(),
+    approvalId: text("approval_id"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.appId, table.workflowId, table.param] }),
+  ]
 );

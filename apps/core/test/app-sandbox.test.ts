@@ -14,7 +14,7 @@ import type { AppCallerInput } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
 import { sandbox } from "../src/sandbox.ts";
 import { buildServer } from "../src/screens.ts";
-import { outlook, release } from "./apps.ts";
+import { outlook, release, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import {
@@ -244,15 +244,11 @@ const inRun = (userId: string): AppCallerInput => ({
   idempotencyKey: `${crypto.randomUUID()}:step`,
 });
 
-/** Asks for and grants a permission; returns its ID. */
+/** Asks for a permission, which another admin grants; returns its ID. */
 const granted = async (
   admin: Builder,
   request: PermissionRequest
-): Promise<string> => {
-  const { id } = await admin.api.permissions.request(request);
-  await admin.api.permissions.grant(id);
-  return id;
-};
+): Promise<string> => await requestGranted(idp, admin, request);
 
 /**
  * Connections don't exist in connect yet, so this is a call that passed

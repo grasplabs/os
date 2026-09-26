@@ -21,6 +21,7 @@ import { bindingsFor } from "../src/bindings.ts";
 import { appHost } from "../src/durable-objects.ts";
 import type { WorkContext } from "../src/restricted.ts";
 import { workspace } from "../src/workspace.ts";
+import { requestGranted } from "./apps.ts";
 import { collectionIn, connectionIn, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
 import {
@@ -55,12 +56,9 @@ const newAgent = () => ({
   agentId: `agent-${unique()}`,
 });
 
-/** Asks for and grants `request`; returns the permission's ID. */
-const granted = async (admin: Person, request: PermissionRequest) => {
-  const { id } = await admin.api.permissions.request(request);
-  await admin.api.permissions.grant(id);
-  return id;
-};
+/** Asks for `request`, which another admin grants; returns its ID. */
+const granted = async (admin: Person, request: PermissionRequest) =>
+  await requestGranted(idp, admin, request);
 
 const outlook = (subject: PermissionSubjectInput): PermissionRequest => ({
   subject,
@@ -173,7 +171,8 @@ describe("Apps and agents reading Knowledge", () => {
     });
 
     // Granted one collection: that one, and no document of another.
-    await admin.api.permissions.grant(permissionId);
+    const approver = await personOf("admin");
+    await approver.api.permissions.grant(permissionId);
     const reader = readerIn(await envOf(agent, admin.userId, context));
     expect({
       own: await everyRead(reader, handbook.noteId),

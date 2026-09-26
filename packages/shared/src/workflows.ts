@@ -1,3 +1,4 @@
+import type { Approval, ParamValue } from "./approvals.ts";
 import { defineErrorFamily } from "./errors.ts";
 import type { AppId, RunId, WorkflowId } from "./ids.ts";
 import type { Json } from "./json.ts";
@@ -19,6 +20,11 @@ export const workflowErrors = defineErrorFamily({
     "A workflow calls its connections only inside a step: code between steps runs again on every replay.",
   "workflow.idempotency_key_invalid":
     "A workflow's connection calls take their step's own idempotency key (the `idempotencyKey` a side-effect step gets), or none: the platform keeps side effects to once per step and run.",
+  "workflow.param_not_found":
+    "The workflow has no such parameter in the App's current version.",
+  "workflow.param_invalid": "That isn't a valid value for this parameter.",
+  "workflow.param_conflict":
+    "The App's current version changed while the value was set; try again.",
 });
 
 /**
@@ -160,4 +166,45 @@ export interface WorkflowsApi {
   list: (app: string) => Promise<WorkflowRun[]>;
   /** Stops a run for good; a run that ended stays as it ended. */
   cancel: (run: string) => Promise<WorkflowRun>;
+  /** The values people set for a workflow's parameters. */
+  readonly params: WorkflowParamsApi;
+}
+
+/**
+ * A parameter of a workflow in its App's current version, as its code
+ * declares it, with the value people set.
+ */
+export interface WorkflowParam {
+  name: string;
+  /** `money`, `number`, `text`, `person`, `schedule`, `model` or `template`. */
+  kind: string;
+  label: string;
+  /** Changing it needs a second person's approval. */
+  sensitive: boolean;
+  default: ParamValue;
+  /** For money: its ISO 4217 currency; amounts are in its minor units. */
+  currency?: string;
+  /** The value people set; null while the code's default applies. */
+  value: ParamValue | null;
+  /** A change of a sensitive value, waiting for a second person. */
+  pending: Approval | null;
+}
+
+/**
+ * The values of workflows' parameters. Admins and builders. A sensitive
+ * parameter changes only once someone else approves the change.
+ */
+export interface WorkflowParamsApi {
+  /** A workflow's parameters, in the order its code declares them. */
+  list: (app: string, workflow: string) => Promise<WorkflowParam[]>;
+  /**
+   * Sets a parameter's value: at once, or, for a sensitive one, as a
+   * change that waits for approval (`pending`).
+   */
+  set: (
+    app: string,
+    workflow: string,
+    param: string,
+    value: ParamValue
+  ) => Promise<WorkflowParam>;
 }
