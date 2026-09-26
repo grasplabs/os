@@ -6,7 +6,8 @@ import type { Json } from "./json.ts";
 
 // A decision is a person's answer a workflow run waits for
 // (`step.decision`). Only the people the decision is `from` answer it,
-// signed in, each time checked against who they are then; a decision link
+// signed in, each time checked against who they are then, and never the
+// run's starter, unless `from` is exactly `person:<them>`; a decision link
 // (`/decisions/<id>`) only leads them to it (threat model R8, decision Q5).
 
 const decidersPattern =
@@ -81,7 +82,8 @@ export interface DecisionAnswerInput {
 
 /**
  * A signed-in person's decisions. Every call checks the session, and that
- * the person is one the decision is from, as they are now.
+ * the person is one the decision is from, as they are now: never the run's
+ * starter, unless `from` is exactly `person:<them>`.
  */
 export interface DecisionsApi {
   /** A decision the person may answer. */

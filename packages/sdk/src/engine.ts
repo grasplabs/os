@@ -155,7 +155,8 @@ export interface WorkflowEngine {
   callModel: (request: ModelRequest) => Promise<unknown>;
   /**
    * Opens a decision on `step` in this run, answered only by the people
-   * `from` names, for `timeout` milliseconds. Returns its ID and its
+   * `from` names, never the run's starter unless `from` is exactly
+   * `person:<them>`, for `timeout` milliseconds. Returns its ID and its
    * deadline (milliseconds since the epoch), which the engine sets.
    *
    * Idempotent per run and step: the SDK calls it inside a step, which a

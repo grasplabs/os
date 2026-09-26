@@ -1,9 +1,11 @@
 import { maxDeciders } from "@grasp-os/shared/decisions";
+import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { startRun } from "../src/workflows/runs.ts";
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import {
@@ -33,11 +35,13 @@ import {
 
 // `step.decision`, from its threat model (R8, WF1 to WF4): a run waits for
 // a person's answer, which only the people the decision is from can give,
-// signed in, as they are when they answer. A decision link only leads them
-// there. Each case below is a way it could go wrong, most of them on
-// purpose: someone else answering, two answers, a late one, people who
-// changed since they were asked, and workflow code or anyone with the
-// Workflows API trying to answer in their place.
+// signed in, as they are when they answer, and never the run's starter,
+// unless `from` is exactly `person:<them>`. A decision link only leads
+// them there. Each case below is a way it could go wrong, most of them on
+// purpose: someone else answering, the starter answering their own
+// request, two answers, a late one, people who changed since they were
+// asked, and workflow code or anyone with the Workflows API trying to
+// answer in their place.
 
 const idp = mockIdp();
 
@@ -422,6 +426,41 @@ describe("decisions", { timeout: 60_000 }, () => {
         actor: { type: "person", userId: otherAdmin.userId },
       },
     ]);
+  });
+
+  it("hold back nobody on a run a trigger started, so its App's owner is asked and answers", async () => {
+    const owner = await personApi("builder");
+    const admin = await personApi("admin");
+    const anna = await personApi("user");
+    const team = await teamOf(admin, [owner, anna]);
+    const app = await approvalApp(owner);
+    // As a trigger starts it: no starter, and it acts for the App's owner.
+    const run = await startRun(env, {
+      app: appIdSchema.parse(app),
+      workflow: workflowIdSchema.parse("approval"),
+      input: { from: `team:${team}`, timeout: week },
+      startedBy: null,
+      actor: { type: "system" },
+    });
+    const [ask] = await asksOf(app);
+    if (!ask) {
+      throw new Error("No ask");
+    }
+    const { decision } = linkOf(ask, owner.userId);
+
+    expect({
+      asked: askedTo(ask).toSorted(),
+      answer: await outcome(
+        owner.api.decisions.answer(decision, { approved: true })
+      ),
+    }).toStrictEqual({
+      asked: [owner.userId, anna.userId].toSorted(),
+      answer: "ok",
+    });
+    await expect(outputOf(owner, run.id)).resolves.toMatchObject({
+      approved: true,
+      by: owner.userId,
+    });
   });
 
   it("count only who may answer toward the cap, so a starter in a team of 51 leaves it within it", async () => {

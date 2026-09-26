@@ -301,8 +301,9 @@ export interface DecisionRequest extends SideEffectContext {
   /**
    * The people who may answer now, each with the decision's link. It
    * leads to where they answer once signed in, and grants nothing: only
-   * the people the decision is from can answer. Empty when nobody fits
-   * `from`, or the decision was answered meanwhile.
+   * the people the decision is from can answer, never the run's starter
+   * unless `from` is exactly `person:<them>` (see `DecisionOptions.from`).
+   * Empty when nobody fits `from`, or the decision was answered meanwhile.
    */
   recipients: DecisionRecipient[];
   /** False the first time, true when reminding. */
