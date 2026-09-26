@@ -1,24 +1,13 @@
-import { featureErrors } from "@grasp-os/shared/errors";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { mockIdp } from "./idp.ts";
-import { openRpc, outcome as codeOf, signedInWithRole } from "./sign-in.ts";
+import { openRpc, outcome, signedInWithRole } from "./sign-in.ts";
 
 // Features ship switched off, and switching one off is its kill switch:
 // every call of its API is refused, whoever makes it.
 
 const idp = mockIdp();
-
-/** The code a promise was refused with, or "ok" if it wasn't. */
-const outcome = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-    return "ok";
-  } catch (error) {
-    return featureErrors.codeOf(error) ?? String(error);
-  }
-};
 
 /** What an admin gets from each flagged API with `features` as the flags. */
 const callsWith = async (features?: unknown) => {
@@ -152,7 +141,7 @@ describe("feature flags", () => {
       actions: ["mail.list"],
       binding: "OUTLOOK",
     });
-    await expect(codeOf(session.permissions.grant(id))).resolves.toBe(
+    await expect(outcome(session.permissions.grant(id))).resolves.toBe(
       "approval.self"
     );
   });

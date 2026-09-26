@@ -5,10 +5,17 @@ import {
   auditProvenanceMaxItems,
 } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
-import type { AuditFilter } from "@grasp-os/shared/audit-log";
+import type {
+  AuditApi,
+  AuditFilter,
+  ChainVerification,
+} from "@grasp-os/shared/audit-log";
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { vi } from "vite-plus/test";
 
+import { chainHash } from "../src/audit-chain.ts";
+import type { AuditLog } from "../src/audit-log.ts";
 import { auditLog } from "../src/audit-log.ts";
 import { AuditRpc } from "../src/audit-rpc.ts";
 import { identify } from "../src/auth/identity.ts";
@@ -109,4 +116,49 @@ export const oversizedFields = {
   detail: Object.fromEntries(
     Array.from({ length: auditDetailMaxKeys }, (_, i) => [`key${i}`, full])
   ),
+};
+
+/** Verifies the whole chain a step at a time, as an admin does. */
+export const verifyAll = async (api: {
+  audit: Pick<AuditApi, "verify">;
+}): Promise<ChainVerification> => {
+  let result = await api.audit.verify();
+  while (result.ok && !result.done) {
+    // Each step starts where the one before it stopped.
+    // oxlint-disable-next-line no-await-in-loop
+    result = await api.audit.verify(result.through);
+  }
+  return result;
+};
+
+/**
+ * Appends a stored entry at the head as the log would have, with its hash,
+ * holding `event` as its stored text: what an older release wrote, or
+ * something that isn't an event at all.
+ */
+export const appendStored = async (
+  log: DurableObjectStub<AuditLog>,
+  event: string,
+  id: string = crypto.randomUUID()
+): Promise<void> => {
+  await runInDurableObject(log, async (instance, state) => {
+    const head = instance.head();
+    const entry = {
+      version: 1,
+      seq: head.seq + 1,
+      prevHash: head.hash,
+      receivedAt: new Date().toISOString(),
+      event,
+    };
+    state.storage.sql.exec(
+      "INSERT INTO events (seq, id, version, received_at, event, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
+      entry.seq,
+      id,
+      entry.version,
+      entry.receivedAt,
+      event,
+      entry.prevHash,
+      await chainHash(entry)
+    );
+  });
 };

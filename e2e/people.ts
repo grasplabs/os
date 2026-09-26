@@ -10,7 +10,7 @@ import path from "node:path";
 
 import type { Role } from "@grasp-os/shared/roles";
 import type { CoreApi } from "@grasp-os/shared/rpc";
-import type { BrowserContext } from "@playwright/test";
+import type { Browser, BrowserContext, Page } from "@playwright/test";
 import { newWebSocketRpcSession } from "capnweb";
 
 /** The local stack's address (playwright.config.ts). */
@@ -116,6 +116,16 @@ export const signInTo = async (
   ]);
 };
 
+/** A page signed in as `person`, in a browser context of its own. */
+export const pageOf = async (
+  browser: Browser,
+  person: Person
+): Promise<Page> => {
+  const context = await browser.newContext();
+  await signInTo(context, person);
+  return await context.newPage();
+};
+
 /** The person's API over `/rpc`, from Node, as their browser would open it. */
 export const apiOf = (person: Person) => {
   const url = new URL("/rpc", origin);
@@ -130,4 +140,16 @@ export const apiOf = (person: Person) => {
   const socket = new WebSocket(url, { headers } as never);
   const core = newWebSocketRpcSession<CoreApi>(socket);
   return { core, api: core.authenticate() };
+};
+
+/** Writes `files` to the App, commits them and makes that version current. */
+export const release = async (
+  api: ReturnType<typeof apiOf>["api"],
+  app: string,
+  files: Record<string, string>,
+  message: string
+): Promise<void> => {
+  await api.apps.files.write(app, files);
+  const { version } = await api.apps.files.commit(app, message);
+  await api.apps.versions.setCurrent(app, version);
 };

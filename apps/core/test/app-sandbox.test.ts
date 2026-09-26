@@ -2,7 +2,6 @@ import type { AppCaller } from "@grasp-os/shared/apps";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import type { KnowledgeApi } from "@grasp-os/shared/knowledge";
-import type { PermissionRequest } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
@@ -16,6 +15,7 @@ import { sandbox } from "../src/sandbox.ts";
 import { buildServer } from "../src/screens.ts";
 import { outlook, release, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
+import { reached } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
 import {
   collectionWithNote,
@@ -244,18 +244,6 @@ const inRun = (userId: string): AppCallerInput => ({
   idempotencyKey: `${crypto.randomUUID()}:step`,
 });
 
-/** Asks for a permission, which another admin grants; returns its ID. */
-const granted = async (
-  admin: Builder,
-  request: PermissionRequest
-): Promise<string> => await requestGranted(idp, admin, request);
-
-/**
- * Connections don't exist in connect yet, so this is a call that passed
- * every check on its way, core's and connect's.
- */
-const reached = "connect.connection_not_found";
-
 /** A Worker Loader that fails any load: proof that nothing was built. */
 const noLoader: WorkerLoader = {
   get: () => {
@@ -305,13 +293,13 @@ describe("App server code", { timeout: 60_000 }, () => {
   it("has only its own granted connections in its env, never core's bindings", async () => {
     const admin = await personApi("admin");
     const app = await sampleApp(admin);
-    await granted(admin, outlook(app));
+    await requestGranted(idp, admin, outlook(app));
     await admin.api.permissions.request(outlook(app, "ASKED"));
     await admin.api.permissions.revoke(
-      await granted(admin, outlook(app, "GONE"))
+      await requestGranted(idp, admin, outlook(app, "GONE"))
     );
     const other = await sampleApp(admin);
-    await granted(admin, outlook(other, "SOMEONE_ELSES"));
+    await requestGranted(idp, admin, outlook(other, "SOMEONE_ELSES"));
 
     const [envNames, importedEnv] = await Promise.all([
       callApp(env, app, as(admin.userId), "envNames"),
@@ -364,7 +352,7 @@ describe("App server code", { timeout: 60_000 }, () => {
     const stays = await personApi("user");
     const leaves = await personApi("user");
     const app = await sampleApp(admin);
-    await granted(admin, outlook(app));
+    await requestGranted(idp, admin, outlook(app));
     // Someone who left can't use the App's connections any more: that is
     // how these calls show whom they act for.
     await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
@@ -407,7 +395,7 @@ describe("App server code", { timeout: 60_000 }, () => {
   it("can't make up a caller, or use one after its call ended", async () => {
     const admin = await personApi("admin");
     const app = await sampleApp(admin);
-    await granted(admin, outlook(app));
+    await requestGranted(idp, admin, outlook(app));
     const caller = as(admin.userId);
 
     const madeUp = await Promise.all(
@@ -437,8 +425,8 @@ describe("App server code", { timeout: 60_000 }, () => {
       sampleApp(admin),
       sampleApp(admin),
     ]);
-    await granted(admin, outlook(mine));
-    await granted(admin, outlook(theirs));
+    await requestGranted(idp, admin, outlook(mine));
+    await requestGranted(idp, admin, outlook(theirs));
     await Promise.all([
       callApp(env, mine, as(admin.userId), "label"),
       callApp(env, theirs, as(admin.userId), "label"),
@@ -466,7 +454,7 @@ describe("App server code", { timeout: 60_000 }, () => {
     const admin = await personApi("admin");
     const app = await sampleApp(admin);
     const caller = as(admin.userId);
-    const permission = await granted(admin, outlook(app));
+    const permission = await requestGranted(idp, admin, outlook(app));
     const whileGranted = await callApp(env, app, caller, "mail");
 
     await admin.api.permissions.revoke(permission);
@@ -474,7 +462,7 @@ describe("App server code", { timeout: 60_000 }, () => {
       callApp(env, app, caller, "mail"),
       callApp(env, app, caller, "envNames"),
     ]);
-    await granted(admin, outlook(app, "OUTLOOK"));
+    await requestGranted(idp, admin, outlook(app, "OUTLOOK"));
     const afterNewGrant = await callApp(env, app, caller, "mail");
     expect({ whileGranted, afterRevoke, afterNewGrant }).toStrictEqual({
       whileGranted: reached,
@@ -486,7 +474,7 @@ describe("App server code", { timeout: 60_000 }, () => {
   it("is audited with the version whose code made each connection call", async () => {
     const admin = await personApi("admin");
     const app = await sampleApp(admin, "v1");
-    await granted(admin, outlook(app));
+    await requestGranted(idp, admin, outlook(app));
     /** The versions on the App's connection calls in the log, once `count` are. */
     const auditedVersions = async (count: number) =>
       await vi.waitFor(async () => {
@@ -523,7 +511,7 @@ describe("App server code", { timeout: 60_000 }, () => {
   it("makes no connection calls once it is in restricted mode", async () => {
     const admin = await personApi("admin");
     const app = await sampleApp(admin);
-    await granted(admin, outlook(app));
+    await requestGranted(idp, admin, outlook(app));
     const caller = as(admin.userId);
     const before = await callApp(env, app, caller, "mail");
     await appHost(env, app).restrict();
@@ -573,7 +561,7 @@ describe("App server code", { timeout: 60_000 }, () => {
   it("can't keep acting for a caller by holding a call open", async () => {
     const admin = await personApi("admin");
     const app = await sampleApp(admin);
-    await granted(admin, outlook(app));
+    await requestGranted(idp, admin, outlook(app));
     const caller = as(admin.userId);
     await callApp(env, app, caller, "label");
 
@@ -838,7 +826,8 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
       }),
     ]);
     const app = await sampleApp(admin);
-    const permission = await granted(
+    const permission = await requestGranted(
+      idp,
       admin,
       readCollection({ type: "app", appId: app }, finance.collectionId)
     );
@@ -939,7 +928,8 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
   it("can't read with a made-up caller, one whose call ended, or another App's", async () => {
     const { admin, member, app, finance } = await setUp();
     const theirs = await sampleApp(admin);
-    await granted(
+    await requestGranted(
+      idp,
       admin,
       readCollection({ type: "app", appId: theirs }, finance.collectionId)
     );
@@ -1029,9 +1019,14 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
     ]);
     const app = await sampleApp(admin);
     const subject = { type: "app" as const, appId: app };
-    await granted(admin, outlook(app));
-    await granted(admin, readCollection(subject, payroll.collectionId));
-    await granted(
+    await requestGranted(idp, admin, outlook(app));
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(subject, payroll.collectionId)
+    );
+    await requestGranted(
+      idp,
       admin,
       readCollection(subject, handbook.collectionId, "OTHER")
     );
@@ -1107,8 +1102,9 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
     const results = await Promise.all(
       reads.map(async ([method, args]) => {
         const app = await sampleApp(admin);
-        await granted(admin, outlook(app));
-        await granted(
+        await requestGranted(idp, admin, outlook(app));
+        await requestGranted(
+          idp,
           admin,
           readCollection({ type: "app", appId: app }, payroll.collectionId)
         );

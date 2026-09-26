@@ -19,14 +19,14 @@ import {
   startAs,
   stateOf,
 } from "./connect.ts";
+import { fakeProviders } from "./oauth-provider.ts";
+import type { Account } from "./oauth-provider.ts";
 import {
   acmeDomain,
   acmeTenant,
   clients,
-  fakeProviders,
   otherTenant,
-} from "./oauth-provider.ts";
-import type { Account } from "./oauth-provider.ts";
+} from "./provider-config.ts";
 
 // Connecting an account through OAuth. The ways it could go wrong come
 // first: a flow finished by someone other than who started it (the login

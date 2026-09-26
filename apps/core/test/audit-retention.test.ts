@@ -1,12 +1,11 @@
 import { auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
-import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { auditLog } from "../src/audit-log.ts";
-import worker from "../src/index.ts";
-import { allEvents, exportReader } from "./audit-events.ts";
+import { allEvents, exportReader, verifyAll } from "./audit-events.ts";
+import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { outcome, signedInApi, signedInWithRole, unique } from "./sign-in.ts";
 
@@ -65,10 +64,7 @@ const cronAfter = async (
   vi.useFakeTimers({ toFake: ["Date"] });
   vi.setSystemTime(receivedAt + days * dayMs);
   try {
-    await worker.scheduled(createScheduledController(), {
-      ...env,
-      ...changes,
-    });
+    await runCron(changes);
   } finally {
     vi.useRealTimers();
   }
@@ -93,19 +89,6 @@ const purgesOf = async (seq: number): Promise<AuditEvent[]> => {
       Number(detail.from) <= seq &&
       seq <= Number(detail.through)
   );
-};
-
-type Api = Awaited<ReturnType<typeof signedInApi>>["api"];
-
-/** Verifies the whole chain a step at a time, as an admin does. */
-const verifyAll = async (api: Api) => {
-  let result = await api.audit.verify();
-  while (result.ok && !result.done) {
-    // Each step starts where the one before it stopped.
-    // oxlint-disable-next-line no-await-in-loop
-    result = await api.audit.verify(result.through);
-  }
-  return result;
 };
 
 describe("audit log retention", () => {

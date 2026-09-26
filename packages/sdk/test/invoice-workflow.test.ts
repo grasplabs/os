@@ -8,21 +8,14 @@ import {
   vi,
 } from "vite-plus/test";
 
-import { createTestEngine } from "../src/testing.ts";
-import type { TestEngineOptions } from "../src/testing.ts";
 import { z } from "../src/workflow.ts";
 import type { DecisionRequest } from "../src/workflow.ts";
+import { createFakeEngine, invoice } from "./fakes.ts";
 import { outlineOf } from "./outline.ts";
 import { invoiceWorkflow } from "./workflows/invoice-approval.ts";
 import type { InvoiceSystems } from "./workflows/invoice-approval.ts";
 // oxlint-disable-next-line import/default -- Vite's `?raw` import; typed in raw.d.ts
 import invoiceSource from "./workflows/invoice-approval.ts?raw";
-
-const invoice = {
-  number: "INV-7",
-  purchaseOrder: "PO-1",
-  text: "Total €8,000",
-};
 
 const fakeSystems = (
   overrides: Partial<InvoiceSystems> = {}
@@ -48,10 +41,6 @@ const fakeSystems = (
 };
 
 const modelSays = (total: number) => () => ({ total, currency: "EUR" });
-
-// These tests run the steps that change something, against fakes.
-const createFakeEngine = (options: TestEngineOptions = {}) =>
-  createTestEngine({ sideEffects: "run", ...options });
 
 const day = 86_400_000;
 

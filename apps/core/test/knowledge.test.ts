@@ -1,17 +1,16 @@
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
 import type { CollectionInput, KnowledgeApi } from "@grasp-os/shared/knowledge";
 import type { Role } from "@grasp-os/shared/roles";
-import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
-import worker from "../src/index.ts";
 import { createCollection } from "../src/knowledge/collections.ts";
+import { runCron, whileQueueDown } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
+import { newTeam } from "./knowledge.ts";
 import {
   auditedDuring,
-  callAuth,
   outcome,
   signedInApi,
   unique,
@@ -113,11 +112,6 @@ const headings = (count: number) =>
 /** A document with that many links. */
 const linksTo = (count: number) =>
   Array.from({ length: count }, (_, index) => `[[doc-${index}]]`).join(" ");
-
-/** Runs core's cron trigger, as Cloudflare does every minute. */
-const runCron = async () => {
-  await worker.scheduled(createScheduledController(), env);
-};
 
 describe("saving a document", () => {
   it("adds the next version, with its sections and links, and replaces the last one's", async () => {
@@ -460,20 +454,15 @@ describe("saving a document", () => {
   it("keeps its audit event when the audit queue is down, and sends it later", async () => {
     const { api } = await knowledgeOf("user");
     const { id: collectionId } = await api.createCollection(personal());
-    const down = vi
-      .spyOn(env.AUDIT_QUEUE, "send")
-      .mockRejectedValue(new Error("Queue unavailable"));
-    let documentId = "";
-    try {
-      ({ id: documentId } = await api.saveDocument({
-        collectionId,
-        path: "leave.md",
-        text: leaveV1,
-        ifVersion: 0,
-      }));
-    } finally {
-      down.mockRestore();
-    }
+    const { id: documentId } = await whileQueueDown(
+      async () =>
+        await api.saveDocument({
+          collectionId,
+          path: "leave.md",
+          text: leaveV1,
+          ifVersion: 0,
+        })
+    );
     const sent = await auditedDuring(runCron);
     expect(
       sent.map(({ action, target }) => [action, target?.id])
@@ -616,19 +605,12 @@ describe("collections", () => {
     const admin = await knowledgeOf("admin");
     const member = await knowledgeOf("user");
     const outsider = await knowledgeOf("user");
-    const created = await callAuth("/organization/create-team", admin.session, {
-      name: `Finance ${unique()}`,
-    });
-    const team = z.object({ id: z.string() }).parse(await created.json());
-    await callAuth("/organization/add-team-member", admin.session, {
-      teamId: team.id,
-      userId: member.userId,
-    });
+    const teamId = await newTeam(admin, [member]);
 
     const collection = await admin.api.createCollection({
       name: "Finance",
       access: "teams",
-      teams: [team.id],
+      teams: [teamId],
       sensitive: true,
     });
     const saved = await member.api.saveDocument({
@@ -662,7 +644,7 @@ describe("collections", () => {
         })
       ),
     }).toStrictEqual({
-      collection: { teams: [team.id], sensitive: true, source: "here" },
+      collection: { teams: [teamId], sensitive: true, source: "here" },
       ownerSees: true,
       memberSees: true,
       outsiderSees: false,

@@ -1,4 +1,3 @@
-import { authErrors } from "@grasp-os/shared/errors";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -10,15 +9,13 @@ import {
   coreOrigin,
   entraPerson,
   openRpc,
+  outcome,
   routed,
   signedIn,
   whoami,
 } from "./sign-in.ts";
 
 const idp = mockIdp();
-
-const refusedWith = async (call: Promise<unknown>) =>
-  authErrors.codeOf(await call.catch((error: unknown) => error));
 
 const hour = 60 * 60 * 1000;
 const clientHost = new URL(clientOrigin).host;
@@ -47,7 +44,7 @@ describe("sessions end", () => {
       .bind(Date.now() - 1000, person.sub)
       .run();
 
-    await expect(refusedWith(whoami(session))).resolves.toBe(
+    await expect(outcome(whoami(session))).resolves.toBe(
       "auth.unauthenticated"
     );
     const response = await callAuth("/get-session", session);
@@ -59,7 +56,7 @@ describe("sessions end", () => {
     const signedOut = await callAuth("/sign-out", session, {});
     expect(signedOut.status).toBe(200);
 
-    await expect(refusedWith(whoami(session))).resolves.toBe(
+    await expect(outcome(whoami(session))).resolves.toBe(
       "auth.unauthenticated"
     );
   });
@@ -71,9 +68,7 @@ describe("sessions end", () => {
 
     const revoked = await callAuth("/revoke-other-sessions", laptop, {});
     expect(revoked.status).toBe(200);
-    await expect(refusedWith(whoami(phone))).resolves.toBe(
-      "auth.unauthenticated"
-    );
+    await expect(outcome(whoami(phone))).resolves.toBe("auth.unauthenticated");
     await expect(whoami(laptop)).resolves.toMatchObject({
       email: person.email,
     });
@@ -90,7 +85,7 @@ describe("sessions end", () => {
     });
 
     await callAuth("/revoke-other-sessions", laptop, {});
-    await expect(refusedWith(session.whoami())).resolves.toBe(
+    await expect(outcome(session.whoami())).resolves.toBe(
       "auth.unauthenticated"
     );
     await expect(closed).resolves.toBe(sessionEndedCloseCode);

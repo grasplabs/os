@@ -8,7 +8,7 @@ import { z } from "zod";
 
 import { chainHash } from "../src/audit-chain.ts";
 import { archiveRetentionDays } from "../src/audit-log.ts";
-import { oversizedFields } from "./audit-events.ts";
+import { appendStored, oversizedFields } from "./audit-events.ts";
 
 // A fresh log per test; the deployment's own is `auditLog(env)`.
 const newLog = () => env.AUDIT_LOG.getByName(crypto.randomUUID());
@@ -46,6 +46,32 @@ const tamper = async (log: Log, ...statements: string[]): Promise<void> => {
     for (const statement of statements) {
       state.storage.sql.exec(statement);
     }
+  });
+};
+
+/**
+ * Changes the event at `seq` from `from` to `to` and recomputes its hash, as
+ * someone who knows the hash format could: the entry verifies on its own.
+ */
+const rehashed = async (
+  log: Log,
+  seq: number,
+  from: string,
+  to: string
+): Promise<void> => {
+  await runInDurableObject(log, async (instance, state) => {
+    const entry = instance.entries().find((candidate) => candidate.seq === seq);
+    if (!entry) {
+      throw new Error(`Expected an entry at ${seq}`);
+    }
+    const event = entry.event.replace(from, to);
+    const hash = await chainHash({ ...entry, event });
+    state.storage.sql.exec(
+      "UPDATE events SET event = ?, hash = ? WHERE seq = ?",
+      event,
+      hash,
+      seq
+    );
   });
 };
 
@@ -270,19 +296,7 @@ describe("AuditLog tamper detection", () => {
   it("finds an altered event whose hash was recomputed, at the next event", async () => {
     const log = newLog();
     await appendThree(log);
-    await runInDurableObject(log, async (instance, state) => {
-      const [, second] = instance.entries();
-      if (!second) {
-        throw new Error("Expected a second entry");
-      }
-      const event = second.event.replace("test.b", "test.x");
-      const hash = await chainHash({ ...second, event });
-      state.storage.sql.exec(
-        "UPDATE events SET event = ?, hash = ? WHERE seq = 2",
-        event,
-        hash
-      );
-    });
+    await rehashed(log, 2, "test.b", "test.x");
     await expect(log.verify()).resolves.toStrictEqual({
       ok: false,
       brokenAt: 3,
@@ -389,34 +403,6 @@ const archivedLines = async (key: string): Promise<string[]> => {
 const firstThreeKey = (log: Log) =>
   `audit-log/${log.id.toString()}/000000000001-000000000003.ndjson`;
 
-/**
- * Appends a stored entry at the head as the log would have, with its hash,
- * holding `event` as its stored text: what an older release wrote, or
- * something that isn't an event at all.
- */
-const appendStored = async (log: Log, event: string): Promise<void> => {
-  await runInDurableObject(log, async (instance, state) => {
-    const head = instance.head();
-    const entry = {
-      version: 1,
-      seq: head.seq + 1,
-      prevHash: head.hash,
-      receivedAt: new Date().toISOString(),
-      event,
-    };
-    state.storage.sql.exec(
-      "INSERT INTO events (seq, id, version, received_at, event, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
-      entry.seq,
-      crypto.randomUUID(),
-      entry.version,
-      entry.receivedAt,
-      event,
-      entry.prevHash,
-      await chainHash(entry)
-    );
-  });
-};
-
 describe("AuditLog verification in steps", () => {
   it("verifies a long chain over several steps, each from where the last stopped", async () => {
     const log = newLog();
@@ -474,19 +460,7 @@ describe("AuditLog verification in steps", () => {
     await appendThree(log);
     // The first entry changed and rehashed: it verifies on its own, but the
     // next one no longer links to it.
-    await runInDurableObject(log, async (instance, state) => {
-      const [first] = instance.entries();
-      if (!first) {
-        throw new Error("Expected a first entry");
-      }
-      const event = first.event.replace("test.a", "test.x");
-      const hash = await chainHash({ ...first, event });
-      state.storage.sql.exec(
-        "UPDATE events SET event = ?, hash = ? WHERE seq = 1",
-        event,
-        hash
-      );
-    });
+    await rehashed(log, 1, "test.a", "test.x");
 
     await expect(log.verify(1)).resolves.toStrictEqual({
       ok: false,

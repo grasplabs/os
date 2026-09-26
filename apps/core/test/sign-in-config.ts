@@ -4,11 +4,14 @@
  * and a staff window open from a day ago until three days ahead. Imported by vite.config.ts (Node)
  * and by the tests (workerd), so it only holds data.
  */
+import { acmeTenant } from "../../connect/test/provider-config.ts";
+
 export const clientOrigin = "https://acme.grasp.test";
 
-export const acmeTenant = "11111111-1111-4111-8111-111111111111";
+// The same tenant connect's fake Entra knows, so people connect accounts
+// from the tenant they sign in from.
+export { acmeTenant, otherTenant } from "../../connect/test/provider-config.ts";
 const graspTenant = "22222222-2222-4222-8222-222222222222";
-export const otherTenant = "33333333-3333-4333-8333-333333333333";
 /** The one Grasp staff member allowed in. */
 export const staffOid = "44444444-4444-4444-8444-444444444444";
 

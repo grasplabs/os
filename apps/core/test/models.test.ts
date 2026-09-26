@@ -1,6 +1,5 @@
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import type { AuditEvent } from "@grasp-os/shared/audit";
-import { modelErrors } from "@grasp-os/shared/models";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
@@ -11,6 +10,7 @@ import type { ModelCall, ModelsEnv } from "../src/models.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { allEvents } from "./audit-events.ts";
+import { outcome } from "./sign-in.ts";
 
 // AI Gateway is the outside system here: a fake behind the AI binding
 // answers in each provider's own wire format. Everything else is real,
@@ -70,15 +70,6 @@ const auditedFor = async (
 /** A queue or database that is down. */
 const refuse = (): never => {
   throw new Error("Queue unavailable");
-};
-
-const codeOf = async (call: Promise<unknown>) => {
-  try {
-    await call;
-  } catch (error) {
-    return modelErrors.codeOf(error);
-  }
-  return "answered";
 };
 
 describe("model gateway", () => {
@@ -223,7 +214,7 @@ describe("model gateway", () => {
     ]);
 
     await expect(
-      codeOf(
+      outcome(
         models(gatewayEnv).call({
           model: workersAi,
           input: "What's the total?",
@@ -253,13 +244,13 @@ describe("model gateway", () => {
       });
 
     // A model the gateway offers, but not this deployment.
-    await expect(codeOf(call(anthropic))).resolves.toBe("model.not_allowed");
+    await expect(outcome(call(anthropic))).resolves.toBe("model.not_allowed");
     // A provider the gateway doesn't offer at all.
-    await expect(codeOf(call("google/gemini-3-pro"))).resolves.toBe(
+    await expect(outcome(call("google/gemini-3-pro"))).resolves.toBe(
       "model.not_allowed"
     );
     await expect(
-      codeOf(call("@cf/meta/llama-3.3-70b-instruct-fp8-fast"))
+      outcome(call("@cf/meta/llama-3.3-70b-instruct-fp8-fast"))
     ).resolves.toBe("model.not_allowed");
     await expect(call(anthropic)).rejects.toMatchObject({
       message: "This deployment doesn't allow that model.",
@@ -286,7 +277,7 @@ describe("model gateway", () => {
       );
 
       await expect(
-        codeOf(
+        outcome(
           models(gatewayEnv).call({
             model: workersAi,
             input: "Hello.",
@@ -302,7 +293,7 @@ describe("model gateway", () => {
   it("takes its config as the JSON text a .dev.vars file sets", async () => {
     const { gatewayEnv } = withGateway([answer("Hi.")], JSON.stringify(config));
     await expect(
-      codeOf(
+      outcome(
         models(gatewayEnv).call({
           model: workersAi,
           input: "Hello.",
@@ -310,7 +301,7 @@ describe("model gateway", () => {
           trigger: newPerson(),
         })
       )
-    ).resolves.toBe("answered");
+    ).resolves.toBe("ok");
   });
 
   it.each([
@@ -360,7 +351,7 @@ describe("model gateway", () => {
       trigger: newPerson(),
       ...fields,
     } as ModelCall<undefined>;
-    await expect(codeOf(models(gatewayEnv).call(call))).resolves.toBe(
+    await expect(outcome(models(gatewayEnv).call(call))).resolves.toBe(
       "model.invalid_call"
     );
     expect(gateway.requests).toStrictEqual([]);
@@ -450,7 +441,7 @@ describe("model gateway", () => {
       );
 
       await expect(
-        codeOf(
+        outcome(
           models(gatewayEnv).call({
             model,
             input: "Hello.",
@@ -495,7 +486,7 @@ describe("model gateway", () => {
     const { gatewayEnv } = withGateway([{ hang: true }]);
 
     await expect(
-      codeOf(
+      outcome(
         models(gatewayEnv).call({
           model: openai,
           input: "Hello.",
@@ -591,7 +582,7 @@ describe("model gateway", () => {
     const { AI: _, ...withoutAi } = gatewayEnv;
 
     await expect(
-      codeOf(
+      outcome(
         models(withoutAi).call({
           model: workersAi,
           input: "Hello.",

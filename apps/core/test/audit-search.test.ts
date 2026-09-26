@@ -7,14 +7,13 @@ import type {
 } from "@grasp-os/shared/audit-log";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Role } from "@grasp-os/shared/roles";
-import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { chainHash } from "../src/audit-chain.ts";
 import { auditLog } from "../src/audit-log.ts";
-import { exportReader } from "./audit-events.ts";
+import { appendStored, exportReader, verifyAll } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import {
   auditedDuring,
@@ -102,17 +101,6 @@ const exportSchema = z.object({
 /** The ID of an exported record's event, read from its stored bytes. */
 const exportedId = ({ eventJson }: { eventJson: string }) =>
   auditEventSchema.parse(JSON.parse(eventJson)).id;
-
-/** Verifies the whole chain a step at a time, as an admin does. */
-const verifyAll = async (api: Api) => {
-  let result = await api.audit.verify();
-  while (result.ok && !result.done) {
-    // Each step starts where the one before it stopped.
-    // oxlint-disable-next-line no-await-in-loop
-    result = await api.audit.verify(result.through);
-  }
-  return result;
-};
 
 /** The live chain's hash at each position the log holds. */
 const liveHashes = async (): Promise<Map<number, string>> => {
@@ -320,26 +308,7 @@ describe("audit log export", () => {
       target: { type: "doc", id: targetId },
     });
     const stored = canonicalJson(older);
-    await runInDurableObject(auditLog(env), async (instance, state) => {
-      const head = instance.head();
-      const entry = {
-        version: 1,
-        seq: head.seq + 1,
-        prevHash: head.hash,
-        receivedAt: new Date().toISOString(),
-        event: stored,
-      };
-      state.storage.sql.exec(
-        "INSERT INTO events (seq, id, version, received_at, event, prev_hash, hash) VALUES (?, ?, ?, ?, ?, ?, ?)",
-        entry.seq,
-        older.id,
-        entry.version,
-        entry.receivedAt,
-        stored,
-        entry.prevHash,
-        await chainHash(entry)
-      );
-    });
+    await appendStored(auditLog(env), stored, older.id);
 
     const document = exportSchema.parse(
       JSON.parse(await exported(api, { targetId }, "json"))

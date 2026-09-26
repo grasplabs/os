@@ -1,8 +1,7 @@
 import { expect } from "@playwright/test";
-import type { Browser } from "@playwright/test";
 
 import { test } from "./csp.ts";
-import { apiOf, signedIn, signInTo } from "./people.ts";
+import { apiOf, pageOf, release, signedIn, signInTo } from "./people.ts";
 import type { Person } from "./people.ts";
 
 // A decision a workflow run waits for, answered from the link its ask
@@ -71,13 +70,16 @@ const askedFor = async (builder: Person, decider: Person) => {
   const { core, api } = apiOf(builder);
   try {
     const { id: app } = await api.apps.create({ name: "Approvals" });
-    await api.apps.files.write(app, {
-      "app/server.ts": server,
-      "workflows/approval.ts": approval,
-      "workflows/approval.workflow-tests.ts": approvalTests,
-    });
-    const { version } = await api.apps.files.commit(app, "Approvals");
-    await api.apps.versions.setCurrent(app, version);
+    await release(
+      api,
+      app,
+      {
+        "app/server.ts": server,
+        "workflows/approval.ts": approval,
+        "workflows/approval.workflow-tests.ts": approvalTests,
+      },
+      "Approvals"
+    );
     const run = await api.workflows.start(app, "approval", {
       from: `person:${decider.userId}`,
     });
@@ -91,12 +93,6 @@ const askedFor = async (builder: Person, decider: Person) => {
   } finally {
     core[Symbol.dispose]();
   }
-};
-
-const pageOf = async (browser: Browser, person: Person) => {
-  const context = await browser.newContext();
-  await signInTo(context, person);
-  return await context.newPage();
 };
 
 test("the person a decision link was sent to approves it, and the run goes on", async ({

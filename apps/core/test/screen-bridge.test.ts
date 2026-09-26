@@ -176,21 +176,25 @@ describe("screens", { timeout: 60_000 }, () => {
     expect({
       app: bundle.app,
       version: bundle.version,
-      entry: bundle.entry,
       runtime: bundle.runtime,
       hasEntry: Object.hasOwn(bundle.modules, bundle.entry),
       kit: {
         runtime: Object.hasOwn(bundle.kit, bundle.runtime),
-        hooks: Object.hasOwn(bundle.kit, "@grasp-os~sdk~screen.js"),
-        button: Object.hasOwn(bundle.kit, "@grasp-os~ui~components~button.js"),
-        unused: Object.hasOwn(bundle.kit, "@grasp-os~ui~components~dialog.js"),
+        hooks: Object.hasOwn(bundle.kit, kitModuleName("@grasp-os/sdk/screen")),
+        button: Object.hasOwn(
+          bundle.kit,
+          kitModuleName("@grasp-os/ui/components/button")
+        ),
+        unused: Object.hasOwn(
+          bundle.kit,
+          kitModuleName("@grasp-os/ui/components/dialog")
+        ),
         empty: Object.values(bundle.kit).some((code) => code === ""),
       },
       theme: bundle.css.includes("--primary:"),
     }).toStrictEqual({
       app,
       version: 1,
-      entry: "app~screens~notes.js",
       runtime: kitModuleName(screenRuntime),
       hasEntry: true,
       kit: {

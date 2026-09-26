@@ -22,8 +22,8 @@ import { afterEach, beforeEach, vi } from "vite-plus/test";
 import type { z } from "zod";
 
 import { connections } from "../src/db/schema.ts";
-import { acmeDomain, acmeTenant } from "./oauth-provider.ts";
 import type { Account, fakeProviders } from "./oauth-provider.ts";
+import { acmeDomain, acmeTenant } from "./provider-config.ts";
 
 type ConnectionRow = typeof connections.$inferInsert;
 
