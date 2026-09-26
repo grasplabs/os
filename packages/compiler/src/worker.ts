@@ -42,13 +42,20 @@ import {
   serverFiles,
   workflowFiles,
 } from "./inputs.ts";
-import { appModuleName, kitStylesheet, ownEntry } from "./kit.ts";
+import {
+  appModuleName,
+  kitModuleName,
+  kitStylesheet,
+  ownEntry,
+  screenRuntime,
+} from "./kit.ts";
 import { lint } from "./lint.ts";
 import { typeCheck } from "./type-check.ts";
 
 /**
- * An App's modules by flat name, the kit's modules they need (directly or
- * through each other) and the CSS they use; or why it failed. Errors fail
+ * An App's modules by flat name, the kit's modules a page needs to run them
+ * (what they import, directly or through each other, and the screen
+ * runtime) and the CSS they use; or why it failed. Errors fail
  * a build; warnings don't.
  */
 export type ScreenBuild =
@@ -297,7 +304,8 @@ export const buildScreens = async (
   return {
     ok: true,
     modules,
-    kitModules: kitModulesFor(kitImports),
+    // The runtime renders the screens: a page needs it for any of them.
+    kitModules: kitModulesFor([...kitImports, kitModuleName(screenRuntime)]),
     css,
     diagnostics,
   };

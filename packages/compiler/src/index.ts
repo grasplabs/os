@@ -28,7 +28,7 @@ export {
   workflowIdOf,
   workflowPaths,
 } from "./inputs.ts";
-export { appModuleName, kitModuleName } from "./kit.ts";
+export { appModuleName, kitModuleName, screenRuntime } from "./kit.ts";
 /** Part of every build's cache key: a new compiler or kit builds again. */
 export { version as compilerVersion } from "#version";
 

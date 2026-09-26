@@ -1,7 +1,7 @@
 {
   "name": "@grasp-os/sdk",
   "private": true,
-  "description": "Workflow SDK: the only API App code sees",
+  "description": "Workflow SDK and screen hooks: the only API App code sees",
   "license": "AGPL-3.0-only",
   "type": "module",
   "sideEffects": false,
@@ -9,15 +9,26 @@
     "./workflow": "./src/workflow.ts",
     "./engine": "./src/engine.ts",
     "./describe": "./src/describe.ts",
-    "./testing": "./src/testing.ts"
+    "./testing": "./src/testing.ts",
+    "./screen": "./src/screen.ts",
+    "./screen-runtime": "./src/screen-runtime.ts"
   },
   "dependencies": {
     "@babel/parser": "catalog:",
     "@grasp-os/shared": "workspace:*",
+    "capnweb": "catalog:",
     "zod": "catalog:"
   },
   "devDependencies": {
     "@babel/types": "catalog:",
-    "@cloudflare/vitest-pool-workers": "catalog:"
+    "@cloudflare/vitest-pool-workers": "catalog:",
+    "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
+    "react": "catalog:",
+    "react-dom": "catalog:"
+  },
+  "peerDependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   }
 }

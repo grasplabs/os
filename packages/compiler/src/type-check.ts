@@ -15,7 +15,9 @@ import { ownEntry } from "./kit.ts";
  */
 export const compilerOptions: ts.CompilerOptions = {
   target: ts.ScriptTarget.ES2022,
-  lib: ["lib.es2024.d.ts", "lib.dom.d.ts"],
+  // `Symbol.dispose`: Cap'n Web's callbacks and stubs, which screens pass
+  // to and get from their server, are disposable.
+  lib: ["lib.es2024.d.ts", "lib.dom.d.ts", "lib.esnext.disposable.d.ts"],
   module: ts.ModuleKind.ESNext,
   moduleResolution: ts.ModuleResolutionKind.Bundler,
   jsx: ts.JsxEmit.ReactJSX,

@@ -32,6 +32,8 @@ import {
   kitModule,
   kitModuleName,
   kitStylesheet,
+  screenHooks,
+  screenRuntime,
 } from "./src/kit.ts";
 import type { Kit, KitModules } from "./src/kit.ts";
 import { compilerOptions } from "./src/type-check.ts";
@@ -40,6 +42,7 @@ const root = import.meta.dirname;
 const dist = path.join(root, "dist");
 const modules = path.join(root, "node_modules");
 const ui = realpathSync(path.join(modules, "@grasp-os/ui"));
+const sdk = realpathSync(path.join(modules, "@grasp-os/sdk"));
 const require = createRequire(path.join(root, "package.json"));
 
 /** React as the kit's modules and App modules import it. */
@@ -98,6 +101,20 @@ const uiEntries = (): Entry[] =>
       specifier: `@grasp-os/ui/${key.slice(2, -1)}${file.slice(0, -suffix.length)}`,
       id: path.join(dir, file),
     }));
+  });
+
+/**
+ * `@grasp-os/sdk`'s screen modules: the hooks App code imports and the
+ * runtime that renders a screen in its frame (see kit.ts).
+ */
+const sdkEntries = (): Entry[] =>
+  [screenHooks, screenRuntime].map((specifier) => {
+    const target =
+      exportsOf(sdk)[`.${specifier.slice("@grasp-os/sdk".length)}`];
+    if (typeof target !== "string") {
+      throw new TypeError(`@grasp-os/sdk doesn't export ${specifier}`);
+    }
+    return { specifier, id: path.join(sdk, target) };
   });
 
 /**
@@ -267,7 +284,6 @@ const buildKitModules = async (
  * like the kit's modules.
  */
 const buildSdkModules = async (): Promise<Record<string, string>> => {
-  const sdk = realpathSync(path.join(modules, "@grasp-os/sdk"));
   const exported = exportsOf(sdk);
   const config: InlineConfig = {
     configFile: false,
@@ -402,6 +418,8 @@ const collectTypes = (specifiers: string[]): Record<string, string> => {
     let name: string;
     if (real.startsWith(`${ui}/`)) {
       name = `/node_modules/@grasp-os/ui${real.slice(ui.length)}`;
+    } else if (real.startsWith(`${sdk}/`)) {
+      name = `/node_modules/@grasp-os/sdk${real.slice(sdk.length)}`;
     } else if (inPackage === real) {
       // The compiler's own package.json, read for the entry.
       continue;
@@ -596,6 +614,7 @@ const buildScreenCompiler = async (
     ...react,
     ...components,
     ...icons,
+    ...sdkEntries(),
   ]);
   const candidates = sourcesIn(path.join(ui, "src")).flatMap((file) =>
     extractCandidates(readText(file))
@@ -603,6 +622,7 @@ const buildScreenCompiler = async (
   const imports = [
     ...reactImports,
     ...components.map(({ specifier }) => specifier),
+    screenHooks,
   ];
   const stylesheets = collectStylesheets();
   const kit: Kit = {

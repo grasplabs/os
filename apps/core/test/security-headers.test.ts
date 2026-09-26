@@ -120,3 +120,40 @@ describe("security headers on the frontend", () => {
     });
   });
 });
+
+// The document App screens run in: code nobody reviewed line by line, which
+// must reach nothing but the page that frames it.
+describe("security headers on the screen frame", () => {
+  it("frames screens only from the product's own origin", async () => {
+    for (const response of await eachPage()) {
+      expect(policyOf(response).get("frame-src")).toStrictEqual(["'self'"]);
+    }
+  });
+
+  it("is an opaque sandbox, framed only by the product page, that runs only inline and data: code and reaches nothing", async () => {
+    const policy = policyOf(await routed("/screen-frame"));
+    expect(Object.fromEntries(policy)).toStrictEqual({
+      sandbox: ["allow-scripts"],
+      "default-src": ["'none'"],
+      "script-src": ["data:", "'unsafe-inline'"],
+      "style-src": ["data:", "'unsafe-inline'"],
+      "img-src": ["data:"],
+      "font-src": ["data:"],
+      "connect-src": ["'none'"],
+      "worker-src": ["'none'"],
+      "frame-src": ["'none'"],
+      "form-action": ["'none'"],
+      "base-uri": ["'none'"],
+      "frame-ancestors": ["'self'"],
+    });
+  });
+
+  it("gives its policy to its own address only", async () => {
+    const others = await Promise.all(
+      ["/screen-frame/", "/screen-frame.html", "/x/screen-frame"].map(
+        async (path) => policyOf(await routed(path)).get("script-src")
+      )
+    );
+    expect(others).toStrictEqual(others.map(() => ["'self'"]));
+  });
+});

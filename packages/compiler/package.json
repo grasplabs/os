@@ -21,6 +21,7 @@
   },
   "dependencies": {
     "@babel/standalone": "catalog:",
+    "@grasp-os/sdk": "workspace:*",
     "@grasp-os/shared": "workspace:*",
     "@grasp-os/ui": "workspace:*",
     "@shadcn/lint": "catalog:",
@@ -38,6 +39,7 @@
     "@grasp-os/sdk": "workspace:*",
     "@types/node": "catalog:",
     "@types/react": "catalog:",
+    "@types/react-dom": "catalog:",
     "ultracite": "catalog:",
     "vite-plus": "catalog:",
     "zod": "catalog:"

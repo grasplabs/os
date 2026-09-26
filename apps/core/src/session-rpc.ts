@@ -7,6 +7,7 @@ import { requireFeature } from "./features.ts";
 import type { Feature } from "./features.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
 import { PermissionsRpc } from "./permissions-rpc.ts";
+import { ScreensRpc } from "./screens-rpc.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 import { WorkflowsRpc } from "./workflows/rpc.ts";
@@ -29,18 +30,21 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #permissions: PermissionsRpc;
   readonly #connections: ConnectionsRpc;
   readonly #workflows: WorkflowsRpc;
+  readonly #screens: ScreensRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
     this.#check = check;
     /**
-     * The session check, refused first while `feature` is switched off, so
-     * switching a feature off stops its API at the next call.
+     * The session check, refused first while any of `features` is switched
+     * off, so switching a feature off stops its API at the next call.
      */
     const checkWith =
-      (feature: Feature): SessionCheck =>
+      (...features: Feature[]): SessionCheck =>
       async () => {
-        requireFeature(env, feature);
+        for (const feature of features) {
+          requireFeature(env, feature);
+        }
         return await check();
       };
     this.#apps = new AppsRpc(env, checkWith("apps"));
@@ -48,6 +52,8 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
     this.#connections = new ConnectionsRpc(env, checkWith("connections"));
     this.#workflows = new WorkflowsRpc(env, checkWith("workflows"));
+    // Screens run Apps: the Apps kill switch stops them too.
+    this.#screens = new ScreensRpc(env, checkWith("apps", "screens"));
   }
 
   get apps(): AppsRpc {
@@ -68,6 +74,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get workflows(): WorkflowsRpc {
     return this.#workflows;
+  }
+
+  get screens(): ScreensRpc {
+    return this.#screens;
   }
 
   async whoami(): Promise<Identity> {

@@ -23,6 +23,7 @@
     "./router": "./src/router.ts",
     "./rpc": "./src/rpc.ts",
     "./runtime": "./src/runtime.ts",
+    "./screens": "./src/screens.ts",
     "./sign-in": "./src/sign-in.ts",
     "./workflows": "./src/workflows.ts"
   },

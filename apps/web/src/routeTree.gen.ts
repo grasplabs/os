@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as KitRouteImport } from './routes/kit'
+import { Route as AppsAppScreensScreenRouteImport } from './routes/apps.$app.screens.$screen'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -22,31 +23,40 @@ const KitRoute = KitRouteImport.update({
   path: '/kit',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AppsAppScreensScreenRoute = AppsAppScreensScreenRouteImport.update({
+  id: '/apps/$app/screens/$screen',
+  path: '/apps/$app/screens/$screen',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/kit': typeof KitRoute
+  '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/kit': typeof KitRoute
+  '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/kit': typeof KitRoute
+  '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/kit'
+  fullPaths: '/' | '/kit' | '/apps/$app/screens/$screen'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/kit'
-  id: '__root__' | '/' | '/kit'
+  to: '/' | '/kit' | '/apps/$app/screens/$screen'
+  id: '__root__' | '/' | '/kit' | '/apps/$app/screens/$screen'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   KitRoute: typeof KitRoute
+  AppsAppScreensScreenRoute: typeof AppsAppScreensScreenRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -65,12 +75,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof KitRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/apps/$app/screens/$screen': {
+      id: '/apps/$app/screens/$screen'
+      path: '/apps/$app/screens/$screen'
+      fullPath: '/apps/$app/screens/$screen'
+      preLoaderRoute: typeof AppsAppScreensScreenRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   KitRoute: KitRoute,
+  AppsAppScreensScreenRoute: AppsAppScreensScreenRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)
