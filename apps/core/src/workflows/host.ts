@@ -617,6 +617,8 @@ export interface FailedStep {
 export interface HostHooks {
   /** Hears of each step that failed, with the error it failed with. */
   stepFailed: (failure: FailedStep) => void;
+  /** Whether the engine has stopped this execution (`watchedStep`). */
+  engineStopped: () => boolean;
   /**
    * Records that the run waits: while a feature is switched off, or while
    * a side effect of a step is held for the person it acts for.
@@ -864,8 +866,10 @@ export class RunHost extends RpcTarget {
    * and timeout. A replay answers the recorded result, or throws the
    * recorded error, without calling it. Its outcome is audited, and a
    * failure reported (`stepFailed`), only when it was attempted in this
-   * execution: a failure workflow code caught is replayed on every later
-   * execution, and was recorded when it happened. A step that fails
+   * execution and the engine didn't stop the execution: a failure workflow
+   * code caught is replayed on every later execution, and was recorded
+   * when it happened; a step the engine stopped (a pause, a cancel) runs,
+   * or replays, in the execution that goes on, if any. A step that fails
    * before it starts (options that don't parse, a person who has left) is
    * neither: the run's own failure records it. While `workflows` is
    * switched off, or `decisions` for a step that opens or asks a
@@ -997,7 +1001,7 @@ export class RunHost extends RpcTarget {
     } catch (error) {
       this.#stepEnded(step);
       const reported = failed ?? forIsolate(error);
-      if (attempted) {
+      if (attempted && !this.#hooks.engineStopped()) {
         this.#hooks.stepFailed({ step, input, error: reported });
         await this.#audited(step, "failed", {
           sideEffect,
