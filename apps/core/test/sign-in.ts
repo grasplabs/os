@@ -310,3 +310,13 @@ export const signedInApi = async (idp: Idp, role: Role) => {
   const { core, closed } = await openRpc(person.session);
   return { ...person, core, closed, api: core.authenticate() };
 };
+
+/** Makes the people `userIds` names the organization's only admins. */
+export const onlyAdmins = async (...userIds: string[]): Promise<void> => {
+  await env.DB.prepare(
+    `UPDATE members SET role = 'user'
+     WHERE role = 'admin' AND user_id NOT IN (${userIds.map(() => "?").join(", ")})`
+  )
+    .bind(...userIds)
+    .run();
+};

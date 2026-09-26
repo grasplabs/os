@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { mockIdp } from "./idp.ts";
-import { openRpc, signedInWithRole } from "./sign-in.ts";
+import { openRpc, outcome as codeOf, signedInWithRole } from "./sign-in.ts";
 
 // Features ship switched off, and switching one off is its kill switch:
 // every call of its API is refused, whoever makes it.
@@ -36,6 +36,7 @@ const callsWith = async (features?: unknown) => {
     outcome(session.screens.version("app")),
     outcome(session.members.list()),
     outcome(session.audit.verify()),
+    outcome(session.approvals.list()),
     outcome(session.whoami()),
   ]);
 };
@@ -43,6 +44,7 @@ const callsWith = async (features?: unknown) => {
 describe("feature flags", () => {
   it("refuse every flagged API while no flag is set", async () => {
     await expect(callsWith()).resolves.toStrictEqual([
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -61,6 +63,7 @@ describe("feature flags", () => {
       callsWith({ apps: true, permissions: false, unknown: true })
     ).resolves.toStrictEqual([
       "ok",
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -106,9 +109,52 @@ describe("feature flags", () => {
         "feature.disabled",
         "feature.disabled",
         "feature.disabled",
+        "feature.disabled",
         "ok",
       ]);
     }
+  });
+
+  it("stop workflow parameter values with either the workflows or the approvals flag", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const valuesWith = async (features: Record<string, boolean>) => {
+      const coreEnv: Env = { ...env, FEATURES: features };
+      const { core } = await openRpc(admin.session, { coreEnv });
+      const { params } = core.authenticate().workflows;
+      return await Promise.all([
+        outcome(params.list("app", "workflow")),
+        outcome(params.set("app", "workflow", "limit", 1)),
+      ]);
+    };
+    await expect(
+      Promise.all([
+        valuesWith({ workflows: true }),
+        valuesWith({ approvals: true }),
+      ])
+    ).resolves.toStrictEqual([
+      ["feature.disabled", "feature.disabled"],
+      ["feature.disabled", "feature.disabled"],
+    ]);
+  });
+
+  it("keep permission grants needing an approval with the approvals flag off", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const coreEnv: Env = {
+      ...env,
+      FEATURES: { apps: true, permissions: true },
+    };
+    const { core } = await openRpc(admin.session, { coreEnv });
+    const session = core.authenticate();
+    const { id: appId } = await session.apps.create({ name: "Flagged" });
+    const { id } = await session.permissions.request({
+      subject: { type: "app", appId },
+      object: { type: "connection", connectionId: "connection-outlook" },
+      actions: ["mail.list"],
+      binding: "OUTLOOK",
+    });
+    await expect(codeOf(session.permissions.grant(id))).resolves.toBe(
+      "approval.self"
+    );
   });
 
   it("stop decisions with the workflows kill switch, whose runs they belong to", async () => {

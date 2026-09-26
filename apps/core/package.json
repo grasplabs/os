@@ -17,6 +17,7 @@
     "@cloudflare/dynamic-workflows": "catalog:",
     "@earendil-works/pi-ai": "catalog:",
     "@grasp-os/compiler": "workspace:*",
+    "@grasp-os/sdk": "workspace:*",
     "@grasp-os/shared": "workspace:*",
     "better-auth": "catalog:",
     "capnweb": "catalog:",

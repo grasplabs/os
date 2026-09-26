@@ -21,6 +21,7 @@ import { acmeTenant, clientOrigin } from "./sign-in-config.ts";
 import {
   auditedDuring,
   callAuth,
+  onlyAdmins,
   openRpc,
   outcome,
   routed,
@@ -156,7 +157,7 @@ describe("removing a member", () => {
       name: `App ${unique()}`,
     });
     const app = { type: "app" as const, appId };
-    const { id } = await admin.api.permissions.request({
+    const { id } = await person.api.permissions.request({
       subject: app,
       object: { type: "connection", connectionId: "connection-outlook" },
       actions: ["mail.list"],
@@ -630,17 +631,6 @@ const activeAdmins = async (): Promise<number> => {
   return row?.count ?? 0;
 };
 
-/** Makes `admins` the organization's only admins. */
-const onlyAdmins = async (...admins: Person[]): Promise<void> => {
-  const ids = admins.map(({ userId }) => userId);
-  await env.DB.prepare(
-    `UPDATE members SET role = 'user'
-     WHERE role = 'admin' AND user_id NOT IN (${ids.map(() => "?").join(", ")})`
-  )
-    .bind(...ids)
-    .run();
-};
-
 describe("changing a member's role", () => {
   it("applies on their next call, and is audited with identifiers only", async () => {
     const admin = await personWith("admin");
@@ -705,7 +695,7 @@ describe("changing a member's role", () => {
 describe("the organization's admins", () => {
   it("can't all be demoted: the last admin stays one", async () => {
     const admin = await personWith("admin");
-    await onlyAdmins(admin);
+    await onlyAdmins(admin.userId);
     await expect(
       outcome(admin.api.members.setRole(admin.userId, "user"))
     ).resolves.toBe("member.last_admin");
@@ -720,7 +710,7 @@ describe("the organization's admins", () => {
         personWith("admin"),
       ]);
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      await onlyAdmins(first, second);
+      await onlyAdmins(first.userId, second.userId);
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
       const outcomes = await Promise.all([
         outcome(first.api.members.setRole(first.userId, "user")),
@@ -740,7 +730,7 @@ describe("the organization's admins", () => {
         personWith("admin"),
       ]);
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      await onlyAdmins(first, second);
+      await onlyAdmins(first.userId, second.userId);
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
       const outcomes = await Promise.all([
         outcome(first.api.members.remove(second.userId)),

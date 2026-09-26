@@ -1,3 +1,4 @@
+import type { ApproveOptions } from "@grasp-os/shared/approvals";
 import type {
   Permission,
   PermissionRequest,
@@ -6,8 +7,8 @@ import type {
 } from "@grasp-os/shared/permissions";
 import { RpcTarget } from "capnweb";
 
+import { grantPermission } from "./approvals.ts";
 import {
-  grantPermission,
   listPermissions,
   requestPermission,
   revokePermission,
@@ -37,10 +38,10 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
     );
   }
 
-  async grant(id: string): Promise<Permission> {
+  async grant(id: string, options?: ApproveOptions): Promise<Permission> {
     return await withPerson(
       this.#check,
-      async (person) => await grantPermission(this.#env, person, id)
+      async (person) => await grantPermission(this.#env, person, id, options)
     );
   }
 

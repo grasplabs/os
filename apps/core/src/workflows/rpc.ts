@@ -3,6 +3,7 @@ import { RpcTarget } from "capnweb";
 
 import { withPerson } from "../session-check.ts";
 import type { SessionCheck } from "../session-check.ts";
+import { WorkflowParamsRpc } from "./params-rpc.ts";
 import { cancelRun, listRuns, runStatus, startWorkflow } from "./runs.ts";
 
 /**
@@ -14,11 +15,18 @@ import { cancelRun, listRuns, runStatus, startWorkflow } from "./runs.ts";
 export class WorkflowsRpc extends RpcTarget implements WorkflowsApi {
   readonly #env: Env;
   readonly #check: SessionCheck;
+  readonly #params: WorkflowParamsRpc;
 
-  constructor(env: Env, check: SessionCheck) {
+  /** `paramsCheck` is the session check of `params`, with its flags. */
+  constructor(env: Env, check: SessionCheck, paramsCheck: SessionCheck) {
     super();
     this.#env = env;
     this.#check = check;
+    this.#params = new WorkflowParamsRpc(env, paramsCheck);
+  }
+
+  get params(): WorkflowParamsRpc {
+    return this.#params;
   }
 
   async start(
