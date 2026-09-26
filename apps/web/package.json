@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@base-ui/react": "catalog:",
+    "@grasp-os/sdk": "workspace:*",
     "@grasp-os/shared": "workspace:*",
     "@grasp-os/ui": "workspace:*",
     "@tanstack/react-router": "catalog:",

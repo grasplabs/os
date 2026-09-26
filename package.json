@@ -18,10 +18,12 @@
   "devDependencies": {
     "@commitlint/cli": "catalog:",
     "@commitlint/config-conventional": "catalog:",
+    "@grasp-os/shared": "workspace:*",
     "@playwright/test": "catalog:",
     "@secretlint/secretlint-rule-preset-recommend": "catalog:",
     "@shadcn/lint": "catalog:",
     "@types/node": "catalog:",
+    "capnweb": "catalog:",
     "secretlint": "catalog:",
     "typescript": "catalog:",
     "ultracite": "catalog:",

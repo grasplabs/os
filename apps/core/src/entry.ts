@@ -2,6 +2,7 @@ import { connectionCallbackPath } from "@grasp-os/shared/connect";
 import { internalErrors, requestErrors } from "@grasp-os/shared/errors";
 import { errorFields, log } from "@grasp-os/shared/log";
 import type { LogFields } from "@grasp-os/shared/log";
+import { screenFramePath } from "@grasp-os/shared/screens";
 
 import { authBasePath } from "./auth/auth.ts";
 import { handleAuthRequest } from "./auth/routes.ts";
@@ -9,6 +10,7 @@ import { handleConnectionCallback } from "./connections.ts";
 import { errorResponse } from "./errors.ts";
 import { checkRouterSecret } from "./router-secret.ts";
 import { rpcResponse } from "./rpc.ts";
+import { screenFrameResponse } from "./screen-frame.ts";
 import { setSecurityHeaders } from "./security-headers.ts";
 
 /** Carries the request ID back to the caller, on every response. */
@@ -29,6 +31,9 @@ const route = async (
   }
   if (pathname === "/rpc") {
     return await rpcResponse(request, env, requestId);
+  }
+  if (pathname === screenFramePath) {
+    return screenFrameResponse();
   }
   if (isUnder(pathname, authBasePath)) {
     return await handleAuthRequest(request, env, requestId);

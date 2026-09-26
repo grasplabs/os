@@ -9,11 +9,13 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
+import type { AppErrorEntry } from "@grasp-os/shared/screens";
 import { DurableObject } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { appBindings } from "./app-bindings.ts";
+import { addToErrorLog, readErrorLog } from "./app-error-log.ts";
 import { versionFiles } from "./apps.ts";
 import { apps } from "./db/core/schema.ts";
 import { appHost } from "./durable-objects.ts";
@@ -354,6 +356,16 @@ export class App extends DurableObject<Env> {
   /** Puts the App in restricted mode, for good. */
   async restrict(): Promise<void> {
     await this.ctx.storage.put(restrictedKey, true);
+  }
+
+  /** Adds an entry to the App's error log (app-error-log.ts). */
+  async logError(entry: AppErrorEntry): Promise<void> {
+    await addToErrorLog(this.ctx.storage, entry);
+  }
+
+  /** The App's error log, newest first. */
+  async errors(): Promise<AppErrorEntry[]> {
+    return await readErrorLog(this.ctx.storage);
   }
 
   /**

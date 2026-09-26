@@ -72,6 +72,15 @@ export const compilerAssets = {
 /** The name the compiler's isolate has `Kit` under, as a JSON module. */
 export const kitModule = "kit.json";
 
+/** What screens import to reach their App's server. */
+export const screenHooks = "@grasp-os/sdk/screen";
+
+/**
+ * What renders a screen in its frame. App code doesn't import it, but every
+ * build needs it (`ScreenBuild.kitModules`).
+ */
+export const screenRuntime = "@grasp-os/sdk/screen-runtime";
+
 /** The kit's stylesheet, by the id its content is filed under in `stylesheets`. */
 export const kitStylesheet = "@grasp-os/ui/styles.css";
 

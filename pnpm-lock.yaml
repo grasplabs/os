@@ -176,6 +176,9 @@ importers:
       '@commitlint/config-conventional':
         specifier: 'catalog:'
         version: 21.2.3
+      '@grasp-os/shared':
+        specifier: workspace:*
+        version: link:packages/shared
       '@playwright/test':
         specifier: 'catalog:'
         version: 1.63.0
@@ -188,6 +191,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.2
+      capnweb:
+        specifier: 'catalog:'
+        version: 0.12.0
       secretlint:
         specifier: 'catalog:'
         version: 13.0.5(supports-color@10.2.2)
@@ -365,6 +371,9 @@ importers:
       '@base-ui/react':
         specifier: 'catalog:'
         version: 1.8.0(@types/react@19.3.0)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)
+      '@grasp-os/sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       '@grasp-os/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -423,6 +432,9 @@ importers:
       '@babel/standalone':
         specifier: 'catalog:'
         version: 7.29.9
+      '@grasp-os/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@grasp-os/shared':
         specifier: workspace:*
         version: link:../shared
@@ -469,6 +481,9 @@ importers:
       '@types/react':
         specifier: 'catalog:'
         version: 19.3.0
+      '@types/react-dom':
+        specifier: 'catalog:'
+        version: 19.3.0(@types/react@19.3.0)
       ultracite:
         specifier: 'catalog:'
         version: 7.12.0(eslint@10.11.0(jiti@2.7.0)(supports-color@10.2.2))(oxfmt@0.68.0(vite-plus@0.3.3(@types/node@26.6.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(typescript@6.0.3)(yaml@2.9.1)))(oxlint@1.83.0(oxlint-tsgolint@7.0.2001)(vite-plus@0.3.3(@types/node@26.6.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(typescript@6.0.3)(yaml@2.9.1)))(prettier@3.9.8)
@@ -507,6 +522,9 @@ importers:
       '@grasp-os/shared':
         specifier: workspace:*
         version: link:../shared
+      capnweb:
+        specifier: 'catalog:'
+        version: 0.12.0
       zod:
         specifier: 'catalog:'
         version: 4.6.5
@@ -517,6 +535,18 @@ importers:
       '@cloudflare/vitest-pool-workers':
         specifier: 'catalog:'
         version: 0.22.0(@cloudflare/workers-types@5.20260921.1)(@types/node@26.6.2)(@vitest/runner@4.1.11)(@vitest/snapshot@4.1.11)(vitest@4.1.11)
+      '@types/react':
+        specifier: 'catalog:'
+        version: 19.3.0
+      '@types/react-dom':
+        specifier: 'catalog:'
+        version: 19.3.0(@types/react@19.3.0)
+      react:
+        specifier: 'catalog:'
+        version: 19.3.0
+      react-dom:
+        specifier: 'catalog:'
+        version: 19.3.0(react@19.3.0)
 
   packages/shared:
     dependencies:
