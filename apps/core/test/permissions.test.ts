@@ -1,10 +1,8 @@
 import { auditEventSchema } from "@grasp-os/shared/audit";
-import { capabilityErrors, signCapability } from "@grasp-os/shared/capability";
-import { connectErrors } from "@grasp-os/shared/connect";
+import { signCapability } from "@grasp-os/shared/capability";
 import {
   authoritySchema,
   bindingNameSchema,
-  permissionErrors,
   permissionObjectSchema,
 } from "@grasp-os/shared/permissions";
 import type {
@@ -14,7 +12,6 @@ import type {
   PermissionSubjectInput,
 } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
-import { roleErrors } from "@grasp-os/shared/roles";
 import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -24,7 +21,7 @@ import worker from "../src/index.ts";
 import { authorize } from "../src/permissions.ts";
 import { connectionIn, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
-import { auditedDuring, openRpc, signedInWithRole } from "./sign-in.ts";
+import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // Apps and agents start with nothing: a person asks, an admin grants, and
 // every call is checked again on the server, down to connect, which only
@@ -34,13 +31,7 @@ import { auditedDuring, openRpc, signedInWithRole } from "./sign-in.ts";
 const idp = mockIdp();
 
 /** A signed-in person's permission API, on a connection of their own. */
-const permissionApi = async (role: Role) => {
-  const person = await signedInWithRole(idp, role);
-  const { core } = await openRpc(person.session);
-  return { ...person, api: core.authenticate() };
-};
-
-const unique = () => crypto.randomUUID().slice(0, 8);
+const permissionApi = async (role: Role) => await signedInApi(idp, role);
 
 type Api = Awaited<ReturnType<typeof permissionApi>>["api"];
 
@@ -63,22 +54,6 @@ const actingFor = (
   userId: string
 ): Authority =>
   authoritySchema.parse({ subject, onBehalfOf: userId, mode: "interactive" });
-
-/** The code a promise was refused with, or "ok" if it wasn't. */
-const outcome = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-    return "ok";
-  } catch (error) {
-    return (
-      permissionErrors.codeOf(error) ??
-      roleErrors.codeOf(error) ??
-      connectErrors.codeOf(error) ??
-      capabilityErrors.codeOf(error) ??
-      String(error)
-    );
-  }
-};
 
 /** The env an agent gets for `authority`, in a chat of its own. */
 const envOf = async (authority: Authority) =>

@@ -1,4 +1,3 @@
-import { knowledgeErrors } from "@grasp-os/shared/knowledge";
 import type {
   CollectionInput,
   KnowledgeApi,
@@ -14,8 +13,9 @@ import { mockIdp } from "./idp.ts";
 import {
   auditedDuring,
   callAuth,
-  openRpc,
-  signedInWithRole,
+  outcome,
+  signedInApi,
+  unique,
 } from "./sign-in.ts";
 
 // Search as people use it: Dutch words find their sections with or without
@@ -27,13 +27,10 @@ import {
 
 const idp = mockIdp();
 
-const unique = () => crypto.randomUUID().slice(0, 8);
-
 /** A signed-in person's Knowledge API, on a connection of their own. */
 const personOf = async (role: Role) => {
-  const person = await signedInWithRole(idp, role);
-  const { core } = await openRpc(person.session);
-  const knowledge: KnowledgeApi = core.authenticate().knowledge;
+  const person = await signedInApi(idp, role);
+  const knowledge: KnowledgeApi = person.api.knowledge;
   return { ...person, knowledge };
 };
 
@@ -65,16 +62,6 @@ const collectionWith = async (
 /** Where each hit is: `path#heading`. */
 const places = ({ hits }: SearchResults) =>
   hits.map(({ path, headings }) => `${path}#${headings.at(-1) ?? ""}`);
-
-/** The code a promise was refused with, or "ok" if it wasn't. */
-const outcome = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-    return "ok";
-  } catch (error) {
-    return knowledgeErrors.codeOf(error) ?? String(error);
-  }
-};
 
 describe("searching Dutch documents", () => {
   const setUp = async () => {

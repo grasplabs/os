@@ -1,6 +1,3 @@
-import { connectErrors, connectionErrors } from "@grasp-os/shared/connect";
-import { featureErrors } from "@grasp-os/shared/errors";
-import { roleErrors } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -9,6 +6,7 @@ import { mockIdp } from "./idp.ts";
 import { acmeTenant, clientOrigin, otherTenant } from "./sign-in-config.ts";
 import {
   openRpc,
+  outcome,
   routed,
   signedIn,
   signedInWithRole,
@@ -22,22 +20,6 @@ import {
 // who started the flow, nor sends the browser anywhere but this origin.
 
 const idp = mockIdp();
-
-/** The code a promise was refused with, or "ok" if it wasn't. */
-const outcome = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-    return "ok";
-  } catch (error) {
-    return (
-      connectionErrors.codeOf(error) ??
-      connectErrors.codeOf(error) ??
-      roleErrors.codeOf(error) ??
-      featureErrors.codeOf(error) ??
-      String(error)
-    );
-  }
-};
 
 /** A signed-in person with their `connections` API. */
 const person = async (role: "admin" | "user" = "user") => {

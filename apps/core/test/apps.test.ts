@@ -1,14 +1,12 @@
 import { appLimits } from "@grasp-os/shared/app-limits";
 import { appErrors } from "@grasp-os/shared/apps";
-import { internalErrors } from "@grasp-os/shared/errors";
 import type { Role } from "@grasp-os/shared/roles";
-import { roleErrors } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { mockIdp } from "./idp.ts";
-import { auditedDuring, openRpc, signedInWithRole } from "./sign-in.ts";
+import { auditedDuring, outcome, signedInApi } from "./sign-in.ts";
 
 // An App's code is versioned as a whole: builders write files to its
 // working copy and commit them as the next version, which never changes
@@ -19,27 +17,11 @@ const idp = mockIdp();
 
 /** A signed-in person's App API, on a connection of their own. */
 const appsApi = async (role: Role) => {
-  const person = await signedInWithRole(idp, role);
-  const { core } = await openRpc(person.session);
-  return { ...person, apps: core.authenticate().apps };
+  const person = await signedInApi(idp, role);
+  return { ...person, apps: person.api.apps };
 };
 
 type Apps = Awaited<ReturnType<typeof appsApi>>["apps"];
-
-/** The code a promise was refused with, or "ok" if it wasn't. */
-const outcome = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-    return "ok";
-  } catch (error) {
-    return (
-      appErrors.codeOf(error) ??
-      roleErrors.codeOf(error) ??
-      internalErrors.codeOf(error) ??
-      String(error)
-    );
-  }
-};
 
 const refusalSchema = z.object({
   details: z.object({ issues: z.array(z.string()) }),

@@ -14,7 +14,7 @@ import { errorResponse } from "./errors.ts";
 import { SessionRpc } from "./session-rpc.ts";
 
 /** What the frontend reaches over `/rpc`, signed in or not. */
-export class CoreRpc extends RpcTarget implements CoreApi {
+class CoreRpc extends RpcTarget implements CoreApi {
   readonly #options: SignInOption[];
   readonly #session: SessionRpc | undefined;
 

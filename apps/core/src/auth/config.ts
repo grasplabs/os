@@ -108,7 +108,7 @@ export const providerIds = {
   google: "google",
   staff: "grasp-staff",
 } as const;
-export type ProviderId = (typeof providerIds)[keyof typeof providerIds];
+type ProviderId = (typeof providerIds)[keyof typeof providerIds];
 
 /**
  * One OIDC provider as the SSO plugin takes it. Endpoints are fixed rather

@@ -45,7 +45,7 @@ const fileSchema = baseSchema.extend({
 });
 
 /** The frontmatter schema of each type. */
-export const frontmatterSchemas = {
+const frontmatterSchemas = {
   doc: baseSchema,
   skill: skillSchema,
   memory: baseSchema,
@@ -53,7 +53,7 @@ export const frontmatterSchemas = {
   file: fileSchema,
 } as const satisfies Record<DocumentType, z.ZodType>;
 
-export type Frontmatter = z.infer<(typeof frontmatterSchemas)[DocumentType]>;
+type Frontmatter = z.infer<(typeof frontmatterSchemas)[DocumentType]>;
 
 /** Files that are a type by their name alone, as other tools write them. */
 const typeByFileName: Readonly<Record<string, DocumentType>> = {
@@ -64,7 +64,7 @@ const typeByFileName: Readonly<Record<string, DocumentType>> = {
 };
 
 /** A document's frontmatter, read and checked, and the Markdown after it. */
-export interface ParsedFrontmatter {
+interface ParsedFrontmatter {
   type: DocumentType;
   frontmatter: Frontmatter;
   body: string;

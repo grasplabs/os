@@ -1,20 +1,14 @@
-import { connectErrors } from "@grasp-os/shared/connect";
-import { internalErrors } from "@grasp-os/shared/errors";
 import {
   appIdSchema,
   chatIdSchema,
   workspaceIdSchema,
 } from "@grasp-os/shared/ids";
-import { knowledgeErrors } from "@grasp-os/shared/knowledge";
 import type {
   CollectionInput,
   CollectionReader,
   KnowledgeApi,
 } from "@grasp-os/shared/knowledge";
-import {
-  authoritySchema,
-  permissionErrors,
-} from "@grasp-os/shared/permissions";
+import { authoritySchema } from "@grasp-os/shared/permissions";
 import type {
   PermissionRequest,
   PermissionSubjectInput,
@@ -31,7 +25,7 @@ import type { WorkContext } from "../src/restricted.ts";
 import { workspace } from "../src/workspace.ts";
 import { collectionIn, connectionIn, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
-import { callAuth, openRpc, signedInWithRole } from "./sign-in.ts";
+import { callAuth, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // Knowledge as Apps and agents reach it, and restricted mode. These tests
 // start from the ways it can fail: an App or agent reads what it has no
@@ -43,15 +37,11 @@ import { callAuth, openRpc, signedInWithRole } from "./sign-in.ts";
 
 const idp = mockIdp();
 
-const unique = () => crypto.randomUUID().slice(0, 8);
-
 /** A signed-in person's API, on a connection of their own. */
 const personOf = async (role: Role) => {
-  const person = await signedInWithRole(idp, role);
-  const { core } = await openRpc(person.session);
-  const api = core.authenticate();
-  const knowledge: KnowledgeApi = api.knowledge;
-  return { ...person, api, knowledge };
+  const person = await signedInApi(idp, role);
+  const knowledge: KnowledgeApi = person.api.knowledge;
+  return { ...person, knowledge };
 };
 
 type Person = Awaited<ReturnType<typeof personOf>>;
@@ -173,22 +163,6 @@ const readerIn = (bindings: Env, binding = "HANDBOOK"): CollectionReader => {
     throw new Error(`No ${binding} binding`);
   }
   return stub;
-};
-
-/** The code a promise was refused with, or "ok" if it wasn't. */
-const outcome = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-    return "ok";
-  } catch (error) {
-    return (
-      knowledgeErrors.codeOf(error) ??
-      permissionErrors.codeOf(error) ??
-      connectErrors.codeOf(error) ??
-      internalErrors.codeOf(error) ??
-      String(error)
-    );
-  }
 };
 
 /**

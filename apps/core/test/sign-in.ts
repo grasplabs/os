@@ -13,6 +13,7 @@ import { vi } from "vite-plus/test";
 import { z } from "zod";
 
 import worker from "../src/index.ts";
+import { loggedEvents, logHead } from "./audit-events.ts";
 import type { Claims, Idp } from "./idp.ts";
 import {
   acmeTenant,
@@ -50,7 +51,7 @@ export const routed = async (
 };
 
 /** The `name=value` pairs a response sets, as a `Cookie` header. */
-export const cookiesFrom = (response: Response): string =>
+const cookiesFrom = (response: Response): string =>
   response.headers
     .getSetCookie()
     .map((cookie) => cookie.split(";")[0] ?? "")
@@ -58,7 +59,7 @@ export const cookiesFrom = (response: Response): string =>
     .join("; ");
 
 /** The session cookie a response sets, as a `Cookie` header, if any. */
-export const sessionCookieFrom = (response: Response): string | undefined =>
+const sessionCookieFrom = (response: Response): string | undefined =>
   cookiesFrom(response)
     .split("; ")
     .find((pair) => pair.startsWith(`${sessionCookieName}=`));
@@ -206,21 +207,46 @@ export const callAuth = async (
   });
 };
 
-/** The audit events core sent to the audit queue while `run` ran, in order. */
-export const auditedDuring = async (
-  run: () => Promise<unknown>
-): Promise<AuditEvent[]> => {
-  const sent = vi.spyOn(env.AUDIT_QUEUE, "send");
+/**
+ * The code a promise was refused with, or "ok" if it wasn't: an error's
+ * `code` (every expected error has one, and keeps it over RPC), or else
+ * the error as text.
+ */
+export const outcome = async (promise: Promise<unknown>): Promise<string> => {
   try {
-    await run();
-    return sent.mock.calls.map(([event]) => auditEventSchema.parse(event));
-  } finally {
-    sent.mockRestore();
+    await promise;
+    return "ok";
+  } catch (error) {
+    return typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      typeof error.code === "string"
+      ? error.code
+      : String(error);
   }
 };
 
-/** People at the IdPs, with a unique subject so tests don't share users. */
-const unique = () => crypto.randomUUID().slice(0, 8);
+/**
+ * The audit events core sent while `run` ran, as the audit log stored them,
+ * in log order: waits for the log to have each of them, by ID.
+ */
+export const auditedDuring = async (
+  run: () => Promise<unknown>
+): Promise<AuditEvent[]> => {
+  const after = await logHead();
+  const sent = vi.spyOn(env.AUDIT_QUEUE, "send");
+  let ids: string[];
+  try {
+    await run();
+    ids = sent.mock.calls.map(([event]) => auditEventSchema.parse(event).id);
+  } finally {
+    sent.mockRestore();
+  }
+  return await loggedEvents(ids, after);
+};
+
+/** A short random name part, so tests don't share people or things. */
+export const unique = () => crypto.randomUUID().slice(0, 8);
 
 /** Someone in the client's Entra tenant. */
 export const entraPerson = (
@@ -274,4 +300,11 @@ export const signedInWithRole = async (idp: Idp, role: Role) => {
       .run();
   }
   return { session, userId, person };
+};
+
+/** Someone signed in with `role`, and their API, on a connection of their own. */
+export const signedInApi = async (idp: Idp, role: Role) => {
+  const person = await signedInWithRole(idp, role);
+  const { core } = await openRpc(person.session);
+  return { ...person, api: core.authenticate() };
 };

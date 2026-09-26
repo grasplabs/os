@@ -60,13 +60,13 @@ import type { Link, Section } from "./markdown.ts";
  * Largest document text, in bytes of UTF-8. D1 keeps a row to 2 MB; the
  * version holds the whole text, with room to spare.
  */
-export const documentMaxBytes = 1024 * 1024;
+const documentMaxBytes = 1024 * 1024;
 
 /** Most sections one document has. */
-export const documentMaxSections = 1000;
+const documentMaxSections = 1000;
 
 /** Most distinct links one document has. */
-export const documentMaxLinks = 500;
+const documentMaxLinks = 500;
 
 /** D1 binds at most 100 parameters to one statement. */
 const maxBoundParameters = 100;

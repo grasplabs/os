@@ -52,7 +52,7 @@ export const chainHash = async (
  * Why the chain breaks at a position: an entry is missing there, its link
  * doesn't match the hash before it, or its content doesn't match its hash.
  */
-export type ChainBreak = "missing" | "unlinked" | "altered";
+type ChainBreak = "missing" | "unlinked" | "altered";
 
 export type ChainVerification =
   | { ok: true; length: number; head: string }
