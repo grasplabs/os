@@ -886,6 +886,52 @@ describe("the Microsoft 365 connector's answers", () => {
     });
   });
 
+  it("run a search under a mask, with the masked fields of what it finds null", async () => {
+    const connection = await connected();
+    const metadataOnly = {
+      mask: ["subject", "body", "bodyPreview", "content"],
+    };
+    // Which items match can say something of what a masked field holds:
+    // accepted (threat model CN17). What they hold stays masked.
+    const [mail, files] = await Promise.all([
+      outputOf(
+        call(
+          connection,
+          "mail.list",
+          { mailbox: invoices, search: "invoice 2026" },
+          metadataOnly
+        )
+      ),
+      outputOf(
+        call(
+          connection,
+          "files.search",
+          { drive: financeDrive, query: "invoice" },
+          metadataOnly
+        )
+      ),
+    ]);
+    expect({ mail, files }).toMatchObject({
+      mail: {
+        messages: [
+          {
+            id: messageId(invoices, 1),
+            subject: null,
+            bodyPreview: null,
+            from: { address: "billing@northwind.example.org" },
+          },
+          { id: messageId(invoices, 2), subject: null, bodyPreview: null },
+        ],
+      },
+      // A file search's items have nothing maskable: they come as they are.
+      files: { items: [{ id: itemIds.pdf }] },
+    });
+    // The search went to Graph as asked.
+    expect(
+      requests().some(({ query }) => query.$search === '"invoice 2026"')
+    ).toBeTruthy();
+  });
+
   it("refuse a mask naming a field no tool of the connector has", async () => {
     const connection = await connected();
     await expect(
