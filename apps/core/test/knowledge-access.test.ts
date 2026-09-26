@@ -463,8 +463,10 @@ describe("restricted mode", () => {
     });
   });
 
-  it("is entered by listings, history, backlinks and searches too", async () => {
+  it("is entered by listings, history, backlinks and searches too, also those that find nothing", async () => {
     const { admin, subject, sensitive } = await setUp();
+    // What finds nothing in a sensitive collection still tells something
+    // of it: a search for a word, or for a version, candidate by candidate.
     const reads = [
       async (reader: CollectionReader) => await reader.listDocuments(),
       async (reader: CollectionReader) =>
@@ -472,46 +474,56 @@ describe("restricted mode", () => {
       async (reader: CollectionReader) =>
         await reader.backlinks(sensitive.noteId),
       async (reader: CollectionReader) => await reader.search("note"),
+      async (reader: CollectionReader) =>
+        await reader.search(`nothing${unique()}`),
+      async (reader: CollectionReader) => await reader.search(""),
+      async (reader: CollectionReader) =>
+        await reader.getDocument(sensitive.noteId, 99),
     ];
     const results = await Promise.all(
       reads.map(async (read) => {
         const bindings = await envOf(subject, admin.userId, await newChat());
-        await read(readerIn(bindings));
+        await outcome(read(readerIn(bindings)));
         return await callOutlook(bindings);
       })
     );
-    expect(results).toStrictEqual([
-      "permission.restricted",
-      "permission.restricted",
-      "permission.restricted",
-      "permission.restricted",
-    ]);
+    expect(results).toStrictEqual(reads.map(() => "permission.restricted"));
   });
 
-  it("isn't entered by a read that was refused, or a search that found nothing", async () => {
-    const { admin, subject, sensitive } = await setUp();
+  it("isn't entered by a read that was refused, or one of an ordinary collection that found nothing", async () => {
+    const { admin, subject, sensitive, ordinary } = await setUp();
     const outsider = await personOf("user");
     const bindings = await envOf(subject, outsider.userId, await newChat());
     // The permission covers Outlook for the outsider too; Payroll isn't theirs.
-    const refused = await outcome(
-      readerIn(bindings).getDocument(sensitive.noteId)
-    );
+    const refused = await Promise.all([
+      outcome(readerIn(bindings).getDocument(sensitive.noteId)),
+      outcome(readerIn(bindings).search(`nothing${unique()}`)),
+    ]);
     const searched = await envOf(subject, admin.userId, await newChat());
-    const { hits, provenance } = await readerIn(searched).search(
+    const { hits, provenance } = await readerIn(searched, "OTHER").search(
       `nothing${unique()}`
+    );
+    const noVersion = await outcome(
+      readerIn(searched, "OTHER").getDocument(ordinary.noteId, 99)
     );
     expect({
       refused,
       call: await callOutlook(bindings),
       found: { hits, provenance },
+      noVersion,
       afterSearch: await callOutlook(searched),
     }).toStrictEqual({
-      refused: "knowledge.not_found",
+      refused: ["knowledge.not_found", "knowledge.not_found"],
       call: reached,
       found: {
         hits: [],
-        provenance: { collectionIds: [], sensitive: false, restricted: false },
+        provenance: {
+          collectionIds: [ordinary.collectionId],
+          sensitive: false,
+          restricted: false,
+        },
       },
+      noVersion: "knowledge.not_found",
       afterSearch: reached,
     });
   });

@@ -150,6 +150,11 @@ export class App extends DurableObject {
     ]);
   }
 
+  async readWith(caller: Caller, binding: string, method: string, args: unknown[]): Promise<string> {
+    const collection = (this.env as Record<string, any>)[binding];
+    return await outcome(collection[method](caller, ...args));
+  }
+
   async readLater(
     caller: Caller,
     wait: (caller: Caller) => Promise<void>,
@@ -836,6 +841,19 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
     await expect(readsAs(member.userId)).resolves.toStrictEqual(["no binding"]);
   });
 
+  it("reads nothing for someone who has left", async () => {
+    const { member, app, finance } = await setUp();
+    await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
+      .bind(member.userId)
+      .run();
+    await expect(
+      callApp(env, app, as(member.userId), "reads", [
+        "HANDBOOK",
+        finance.noteId,
+      ])
+    ).resolves.toStrictEqual(everyReadIs("permission.person_inactive"));
+  });
+
   it("reads for each caller of the App, when two people read at once", async () => {
     const { member, outsider, app, finance } = await setUp();
     await callApp(env, app, as(member.userId), "label");
@@ -1029,6 +1047,54 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
       after: ["permission.restricted", "permission.restricted"],
       stillReads: everyReadIs("ok"),
     });
+  });
+
+  it("is restricted by every read that reaches a sensitive collection, also one that finds nothing", async () => {
+    const admin = await personApi("admin");
+    const teamId = await newTeam(admin, []);
+    const payroll = await collectionWithNote(knowledgeOf(admin), {
+      name: "Payroll",
+      access: "teams",
+      teams: [teamId],
+      sensitive: true,
+    });
+    // A search that misses, or a version that isn't there, still tells App
+    // code something of the collection, so it could probe it candidate by
+    // candidate and send out what it learned.
+    const reads: [method: string, args: unknown[]][] = [
+      ["listDocuments", []],
+      ["history", [payroll.noteId]],
+      ["backlinks", [payroll.noteId]],
+      ["search", ["note"]],
+      ["search", ["zzzqqqxxx"]],
+      ["search", [""]],
+      ["getDocument", [payroll.noteId, 99]],
+    ];
+    const results = await Promise.all(
+      reads.map(async ([method, args]) => {
+        const app = await sampleApp(admin);
+        await granted(admin, outlook(app));
+        await granted(
+          admin,
+          readCollection({ type: "app", appId: app }, payroll.collectionId)
+        );
+        const read = await callApp(env, app, as(admin.userId), "readWith", [
+          "HANDBOOK",
+          method,
+          args,
+        ]);
+        return [read, await callApp(env, app, as(admin.userId), "mail")];
+      })
+    );
+    expect(results).toStrictEqual([
+      ["ok", "permission.restricted"],
+      ["ok", "permission.restricted"],
+      ["ok", "permission.restricted"],
+      ["ok", "permission.restricted"],
+      ["ok", "permission.restricted"],
+      ["ok", "permission.restricted"],
+      ["knowledge.not_found", "permission.restricted"],
+    ]);
   });
 
   it("reads for the person a workflow run acts for, when the run calls it", async () => {

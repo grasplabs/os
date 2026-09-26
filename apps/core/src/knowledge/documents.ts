@@ -459,7 +459,7 @@ export const getDocument = async (
         })
         .from(documents)
         .innerJoin(collections, eq(collections.id, documents.collectionId))
-        .innerJoin(
+        .leftJoin(
           versions,
           and(
             eq(versions.documentId, documents.id),
@@ -473,8 +473,14 @@ export const getDocument = async (
     throw knowledgeErrors.create("knowledge.not_found");
   }
   const { document, collection, version: row } = found;
-  const read: Version = { ...toVersionSummary(row), text: row.text };
+  // Recorded before a missing version is refused: that a version isn't
+  // there says something of the document too, so a sensitive one
+  // restricts the reader either way.
   const provenance = await recordRead(env, reader, collection);
+  if (row === null) {
+    throw knowledgeErrors.create("knowledge.not_found");
+  }
+  const read: Version = { ...toVersionSummary(row), text: row.text };
   return { ...toSummary(document), version: read, provenance };
 };
 
