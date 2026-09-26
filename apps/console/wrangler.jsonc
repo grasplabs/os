@@ -9,8 +9,12 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  // No platform line per invocation, and query strings stay out of logs and
+  // traces, as on every Worker (threat model R17).
   "observability": {
     "enabled": true,
+    "redact_query_string": true,
+    "logs": { "invocation_logs": false },
     "traces": { "enabled": true },
   },
   "d1_databases": [

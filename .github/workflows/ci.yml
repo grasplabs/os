@@ -43,6 +43,7 @@ jobs:
       - run: vp run check:secrets
       - run: vp run check:docs
       - run: vp run check:migrations
+      - run: vp run check:worker-logs
       - run: vp test
       - run: vp run -r build
       # Generated files (Worker types, route trees, migrations) must be committed.
