@@ -124,20 +124,15 @@ export const asksOf = async (app: string, count = 1): Promise<Ask[]> =>
     { timeout: 20_000, interval: 100 }
   );
 
-/** A decision link's decision and token, as its page reads them. */
-export const readLink = (link: string): { decision: string; token: string } => {
-  const url = new URL(link);
-  const decision = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
-  return { decision, token: url.searchParams.get("link") ?? "" };
-};
-
-/** The link the ask sent to `userId`. */
+/** The link the ask sent to `userId`, and the decision it leads to. */
 export const linkOf = (ask: Ask | undefined, userId: string) => {
   const recipient = ask?.recipients.find((person) => person.userId === userId);
   if (!recipient) {
     throw new Error(`The ask went to ${JSON.stringify(ask?.recipients)}`);
   }
-  return readLink(recipient.link);
+  const url = new URL(recipient.link);
+  const decision = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+  return { link: url, decision };
 };
 
 /** Starts the approval workflow and waits until it has asked. */

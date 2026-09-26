@@ -25,11 +25,10 @@ import { signInErrorSearch } from "../sign-in-errors.ts";
 import { SignInOptions } from "../sign-in-options.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 
-// Where a decision link leads (`/decisions/<id>?link=<token>`). Opening it
-// answers nothing (threat model R8): the person signs in, sees what is
-// asked, and answers with a button. Core checks on every call that they
-// may answer, and that the link is theirs; this page only shows what core
-// says. The link works for nobody but the person it was sent to.
+// Where a decision link leads (`/decisions/<id>`). Opening it answers
+// nothing (threat model R8): the person signs in, sees what is asked, and
+// answers with a button. Core checks on every call that they may answer;
+// this page only shows what core says.
 
 type DecisionPage =
   | { state: "offline" }
@@ -37,10 +36,7 @@ type DecisionPage =
   | { state: "refused"; name: string; message: string }
   | { state: "ready"; name: string; decision: DecisionView };
 
-const loadDecision = async (
-  decision: string,
-  link: string | undefined
-): Promise<DecisionPage> => {
+const loadDecision = async (decision: string): Promise<DecisionPage> => {
   const { connected, signInOptions, identity } = await loadCoreStatus();
   if (!connected) {
     return { state: "offline" };
@@ -51,8 +47,7 @@ const loadDecision = async (
   try {
     // A connection that answered the status check can still hang here.
     const found = await withSession(
-      async (session) =>
-        await withTimeout(session.decisions.get(decision, link))
+      async (session) => await withTimeout(session.decisions.get(decision))
     );
     return { state: "ready", name: identity.name, decision: found };
   } catch (error) {
@@ -82,13 +77,7 @@ const outcomeOf = (decision: DecisionView): string => {
   return `${answer} by ${decided.by.name} on ${dateTime.format(new Date(decided.at))}.`;
 };
 
-const Answer = ({
-  decision,
-  link,
-}: {
-  decision: DecisionView;
-  link: string | undefined;
-}) => {
+const Answer = ({ decision }: { decision: DecisionView }) => {
   const [current, setCurrent] = useState(decision);
   const [comment, setComment] = useState("");
   const { busy, failure, run } = useCoreAction();
@@ -98,8 +87,7 @@ const Answer = ({
       async (session) =>
         await session.decisions.answer(
           current.id,
-          note === "" ? { approved } : { approved, payload: { comment: note } },
-          link
+          note === "" ? { approved } : { approved, payload: { comment: note } }
         )
     );
     if (answered !== undefined) {
@@ -171,7 +159,7 @@ const Answer = ({
 
 const Decision = () => {
   const page = Route.useLoaderData();
-  const { link, error } = Route.useSearch();
+  const { error } = Route.useSearch();
   if (page.state === "offline") {
     return (
       <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
@@ -187,15 +175,13 @@ const Decision = () => {
       <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
         <h1 className="text-2xl font-medium">Sign in to answer</h1>
         <p className="text-muted-foreground text-sm">
-          Only the person this was sent to can answer it.
+          Only the people this decision is from can answer it.
         </p>
         <SignInOptions
           options={page.signInOptions}
           error={error}
-          // Back to this page with its link, and without an earlier error.
-          returnTo={`${window.location.pathname}?${new URLSearchParams(
-            link === undefined ? {} : { link }
-          )}`}
+          // Back to this page, without an earlier error.
+          returnTo={window.location.pathname}
         />
       </main>
     );
@@ -209,7 +195,7 @@ const Decision = () => {
           <ErrorText>{page.message}</ErrorText>
         </>
       ) : (
-        <Answer decision={page.decision} link={link} />
+        <Answer decision={page.decision} />
       )}
     </main>
   );
@@ -217,14 +203,8 @@ const Decision = () => {
 
 export const Route = createFileRoute("/decisions/$decision")({
   component: Decision,
-  // A refused sign-in comes back as `error=<code>`, next to the link.
-  validateSearch: (
-    search: Record<string, unknown>
-  ): { link?: string; error?: string } => ({
-    ...(typeof search.link === "string" ? { link: search.link } : {}),
-    ...signInErrorSearch(search),
-  }),
-  loaderDeps: ({ search: { link } }) => ({ link }),
-  loader: async ({ params, deps }) =>
-    await loadDecision(params.decision, deps.link),
+  // A refused sign-in comes back as `error=<code>`.
+  validateSearch: (search: Record<string, unknown>): { error?: string } =>
+    signInErrorSearch(search),
+  loader: async ({ params }) => await loadDecision(params.decision),
 });

@@ -43,7 +43,7 @@ export interface DecisionRecipient {
   userId: string;
   name: string;
   email: string;
-  /** Leads them, once signed in, to the decision; theirs alone. */
+  /** Leads them, once signed in, to the decision: `/decisions/<id>`. */
   link: string;
 }
 
@@ -169,7 +169,7 @@ export interface WorkflowEngine {
     timeout: number;
   }) => Promise<{ decision: string; deadline: number }>;
   /**
-   * The people an open decision asks now, each with a link of their own;
+   * The people an open decision asks now, each with the decision's link;
    * nobody once it's answered. Called inside the step that asks them.
    */
   decisionRecipients: (

@@ -116,9 +116,7 @@ export const loadCoreStatus = async (): Promise<CoreStatus> => {
  * Starts signing in with the IdP `providerId`: core answers with the IdP's
  * address, and the IdP sends the person back to `returnTo` (a path of this
  * site), signed in or with `error=<code>` added to it. Better Auth keeps
- * `returnTo` with the sign-in state until the person is back, a decision
- * link's token included; that is harmless, as the token grants nothing
- * without the bound person's own session.
+ * `returnTo` with the sign-in state until the person is back.
  */
 export const signIn = async (
   providerId: string,

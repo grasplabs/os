@@ -383,8 +383,11 @@ export const workflowRuns = sqliteTable(
  * `role:<role>` or `team:<id>`), until when (`expires_at`), and how it
  * ended. `status` moves from `open` once, in one conditional update, to an
  * answer (`approved`, `rejected`) or `timed_out`, so the first answer is
- * the only one. An answer keeps who gave it, when, through which channel
- * (`link` or `rpc`) and the payload they sent (JSON), which the run gets.
+ * the only one. An answer keeps who gave it, when, and the payload they
+ * sent (JSON), which the run gets. `decided_via` is no longer read, as
+ * links are plain; an answer still writes `rpc` so the previous release
+ * reads the row as answered after a rollback. It goes in a later release
+ * (expand, then contract).
  */
 export const workflowDecisions = sqliteTable(
   "workflow_decisions",

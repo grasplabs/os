@@ -1,10 +1,8 @@
-import { toBase64Url, fromBase64Url } from "@grasp-os/shared/encoding";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
-import { signDecisionLink } from "../src/decisions/links.ts";
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { asking, asksOf, linkOf, outputOf, week } from "./decisions.ts";
@@ -17,7 +15,6 @@ import {
   entraPerson,
   openRpc,
   outcome,
-  routed,
   signedIn,
   signedInApi,
   signIn,
@@ -30,10 +27,9 @@ import {
 // a person's answer, which only the people the decision is from can give,
 // signed in, as they are when they answer. A decision link only leads them
 // there. Each case below is a way it could go wrong, most of them on
-// purpose: someone else answering, with or without a link, a link
-// forwarded, forged, reused or out of date, two answers, a late one,
-// people who changed since they were asked, and workflow code or anyone
-// with the Workflows API trying to answer in their place.
+// purpose: someone else answering, two answers, a late one, people who
+// changed since they were asked, and workflow code or anyone with the
+// Workflows API trying to answer in their place.
 
 const idp = mockIdp();
 
@@ -99,16 +95,15 @@ describe("decisions", { timeout: 60_000 }, () => {
       from: `person:${decider.userId}`,
       timeout: week,
     });
-    const { token } = linkOf(ask, decider.userId);
-    const seen = await decider.api.decisions.get(decision, token);
+    const { link } = linkOf(ask, decider.userId);
+    const seen = await decider.api.decisions.get(decision);
     // The run is stopped while it waits, as a deploy or a crash does, and
     // the answer comes in while it's down, days before the deadline.
     await stopped(run.id);
-    const answered = await decider.api.decisions.answer(
-      decision,
-      { approved: true, payload: { comment: "Matches the PO" } },
-      token
-    );
+    const answered = await decider.api.decisions.answer(decision, {
+      approved: true,
+      payload: { comment: "Matches the PO" },
+    });
     await resumed(run.id);
 
     expect({
@@ -116,11 +111,14 @@ describe("decisions", { timeout: 60_000 }, () => {
         userId,
         email,
       })),
+      // A plain link to the decision: it grants nothing by itself.
+      link: { path: link.pathname, search: link.search },
       seen,
       answered,
       output: await outputOf(builder, run.id),
     }).toMatchObject({
       recipients: [{ userId: decider.userId, email: decider.person.email }],
+      link: { path: `/decisions/${decision}`, search: "" },
       seen: {
         id: decision,
         run: run.id,
@@ -130,7 +128,7 @@ describe("decisions", { timeout: 60_000 }, () => {
       },
       answered: {
         status: "approved",
-        decided: { by: { userId: decider.userId }, via: "link" },
+        decided: { by: { userId: decider.userId } },
       },
       output: {
         timedOut: false,
@@ -169,42 +167,44 @@ describe("decisions", { timeout: 60_000 }, () => {
       asked: { recipients: 1, reminder: false },
       askedWhom: [decider.userId],
       approvedBy: { type: "person", userId: decider.userId },
-      approved: { run: run.id, step: "review", via: "link" },
+      approved: { run: run.id, step: "review" },
     });
-    // Who and how, never what they wrote (R16).
+    // Who, never what they wrote (R16).
     expect(Object.keys(approved?.detail ?? {}).toSorted()).toStrictEqual([
       "app",
       "run",
       "step",
       "version",
-      "via",
       "workflow",
     ]);
+    // The row still names a channel, so the release before this one reads
+    // it as answered after a rollback.
+    const row = await env.DB.prepare(
+      "SELECT decided_via FROM workflow_decisions WHERE id = ?"
+    )
+      .bind(decision)
+      .first<{ decided_via: string | null }>();
+    expect(row?.decided_via).toBe("rpc");
   });
 
-  it("refuse anyone the decision isn't from, with the decider's link too", async () => {
+  it("refuse anyone the decision isn't from", async () => {
     const builder = await personApi("builder");
     const decider = await personApi("user");
     const outsider = await personApi("admin");
-    const { run, ask, decision } = await asking(builder, {
+    const { run, decision } = await asking(builder, {
       from: `person:${decider.userId}`,
       timeout: week,
     });
-    const { token } = linkOf(ask, decider.userId);
 
     await expect(
       Promise.all([
         outcome(outsider.api.decisions.get(decision)),
-        outcome(outsider.api.decisions.get(decision, token)),
         outcome(outsider.api.decisions.answer(decision, { approved: true })),
-        outcome(
-          outsider.api.decisions.answer(decision, { approved: true }, token)
-        ),
-        // The run's own starter is no decider either.
+        // Starting the run doesn't make its starter a decider.
         outcome(builder.api.decisions.answer(decision, { approved: true })),
       ])
     ).resolves.toStrictEqual(
-      Array.from({ length: 5 }, () => "decision.forbidden")
+      Array.from({ length: 3 }, () => "decision.forbidden")
     );
     // Still open: the decider answers.
     await decider.api.decisions.answer(decision, { approved: false });
@@ -214,135 +214,23 @@ describe("decisions", { timeout: 60_000 }, () => {
     });
   });
 
-  it("refuse a link forwarded to someone else, even someone the decision is also from", async () => {
-    const admin = await personApi("admin");
-    const anna = await personApi("user");
-    const ben = await personApi("user");
-    const team = await teamOf(admin, [anna, ben]);
-    const { ask, decision } = await asking(admin, {
-      from: `team:${team}`,
-      timeout: week,
-    });
-    const annasLink = linkOf(ask, anna.userId).token;
-
-    expect({
-      recipients: ask.recipients.map(({ userId }) => userId).toSorted(),
-      bensWithAnnasLink: await outcome(
-        ben.api.decisions.answer(decision, { approved: true }, annasLink)
-      ),
-      bensGetWithAnnasLink: await outcome(
-        ben.api.decisions.get(decision, annasLink)
-      ),
-    }).toStrictEqual({
-      recipients: [anna.userId, ben.userId].toSorted(),
-      bensWithAnnasLink: "decision.link_invalid",
-      bensGetWithAnnasLink: "decision.link_invalid",
-    });
-  });
-
-  it("refuse a link that was tampered with, is out of date, belongs to another decision or isn't one", async () => {
-    const builder = await personApi("builder");
-    const decider = await personApi("user");
-    const first = await asking(builder, {
-      from: `person:${decider.userId}`,
-      timeout: week,
-    });
-    const other = await asking(builder, {
-      from: `person:${decider.userId}`,
-      timeout: week,
-    });
-    const { token } = linkOf(first.ask, decider.userId);
-    const [payload = "", mac = ""] = token.split(".");
-    const claims: unknown = JSON.parse(
-      new TextDecoder().decode(fromBase64Url(payload))
-    );
-    const reencoded = (changes: Record<string, unknown>): string =>
-      `${toBase64Url(
-        new TextEncoder().encode(
-          JSON.stringify({
-            ...z.record(z.string(), z.unknown()).parse(claims),
-            ...changes,
-          })
-        )
-      )}.${mac}`;
-    const flipped = `${payload}.${mac.startsWith("A") ? "B" : "A"}${mac.slice(1)}`;
-    // Made with core's own key, so only its date is wrong.
-    const expired = await signDecisionLink(
-      env,
-      first.decision,
-      decider.userId,
-      Date.now() - 1
-    );
-    const links = {
-      flipped,
-      longerDeadline: reencoded({ exp: Date.now() + 10 * week }),
-      otherPerson: reencoded({ p: builder.userId }),
-      expired,
-      otherDecision: linkOf(other.ask, decider.userId).token,
-      garbage: "not-a-link",
-      huge: `${"a".repeat(5000)}.${mac}`,
-    };
-    const results = Object.fromEntries(
-      await Promise.all(
-        Object.entries(links).map(
-          async ([name, link]): Promise<[string, string]> => [
-            name,
-            await outcome(
-              decider.api.decisions.answer(
-                first.decision,
-                { approved: true },
-                link
-              )
-            ),
-          ]
-        )
-      )
-    );
-
-    expect(results).toStrictEqual(
-      Object.fromEntries(
-        Object.keys(links).map((name) => [name, "decision.link_invalid"])
-      )
-    );
-    // The real link still works: nothing above used the decision up.
-    await expect(
-      outcome(
-        decider.api.decisions.answer(first.decision, { approved: true }, token)
-      )
-    ).resolves.toBe("ok");
-  });
-
   it("take the first answer only, whether someone answers twice or two people at once", async () => {
     const admin = await personApi("admin");
     const anna = await personApi("user");
     const ben = await personApi("user");
     const team = await teamOf(admin, [anna, ben]);
-    const { run, ask, decision } = await asking(admin, {
+    const { run, decision } = await asking(admin, {
       from: `team:${team}`,
       timeout: week,
     });
     const racing = await Promise.all([
-      outcome(
-        anna.api.decisions.answer(
-          decision,
-          { approved: true },
-          linkOf(ask, anna.userId).token
-        )
-      ),
+      outcome(anna.api.decisions.answer(decision, { approved: true })),
       outcome(ben.api.decisions.answer(decision, { approved: false })),
     ]);
     const winner = racing[0] === "ok" ? anna : ben;
     const again = await Promise.all([
       outcome(anna.api.decisions.answer(decision, { approved: true })),
       outcome(ben.api.decisions.answer(decision, { approved: true })),
-      // The link, used once, answers nothing more.
-      outcome(
-        anna.api.decisions.answer(
-          decision,
-          { approved: false },
-          linkOf(ask, anna.userId).token
-        )
-      ),
     ]);
     const output = await outputOf(admin, run.id);
     const answers = await vi.waitFor(async () => {
@@ -363,7 +251,7 @@ describe("decisions", { timeout: 60_000 }, () => {
       auditedBy: answers.map(({ actor }) => actor),
     }).toStrictEqual({
       racing: ["decision.closed", "ok"],
-      again: ["decision.closed", "decision.closed", "decision.closed"],
+      again: ["decision.closed", "decision.closed"],
       output: {
         timedOut: false,
         approved: winner === anna,
@@ -377,7 +265,7 @@ describe("decisions", { timeout: 60_000 }, () => {
   it("time out, and refuse an answer after the timeout", async () => {
     const builder = await personApi("builder");
     const decider = await personApi("user");
-    const { run, ask, decision } = await asking(builder, {
+    const { run, decision } = await asking(builder, {
       from: `person:${decider.userId}`,
       timeout: 1500,
     });
@@ -388,19 +276,10 @@ describe("decisions", { timeout: 60_000 }, () => {
       late: await outcome(
         decider.api.decisions.answer(decision, { approved: true })
       ),
-      // A link lasts until the decision's deadline, and no longer.
-      lateWithLink: await outcome(
-        decider.api.decisions.answer(
-          decision,
-          { approved: true },
-          linkOf(ask, decider.userId).token
-        )
-      ),
       seen: await decider.api.decisions.get(decision),
     }).toMatchObject({
       output: { timedOut: true },
       late: "decision.closed",
-      lateWithLink: "decision.link_invalid",
       seen: { status: "timed_out" },
     });
     await vi.waitFor(async () => {
@@ -450,70 +329,37 @@ describe("decisions", { timeout: 60_000 }, () => {
     ).resolves.toBe("decision.closed");
   });
 
-  it("don't let whoever started the run answer it, unless it names exactly them", async () => {
+  it("let whoever started the run answer it when the decision is from them, audited under them", async () => {
     const admin = await personApi("admin");
     const anna = await personApi("user");
-    const otherAdmin = await personApi("admin");
     const team = await teamOf(admin, [admin, anna]);
     const byTeam = await asking(admin, { from: `team:${team}`, timeout: week });
     const byRole = await asking(admin, { from: "role:admin", timeout: week });
-    const byThemselves = await asking(admin, {
-      from: `person:${admin.userId}`,
-      timeout: week,
-    });
-    // A link to the starter, made with core's own key, doesn't help either.
-    const ownLink = await signDecisionLink(
-      env,
-      byTeam.decision,
-      admin.userId,
-      Date.now() + week
-    );
 
     expect({
-      team: {
-        asked: askedTo(byTeam.ask),
-        starter: await outcome(
-          admin.api.decisions.answer(byTeam.decision, { approved: true })
-        ),
-        starterWithLink: await outcome(
-          admin.api.decisions.answer(
-            byTeam.decision,
-            { approved: true },
-            ownLink
-          )
-        ),
-      },
-      role: {
-        askedStarter: askedTo(byRole.ask).includes(admin.userId),
-        askedOther: askedTo(byRole.ask).includes(otherAdmin.userId),
-        starter: await outcome(
-          admin.api.decisions.answer(byRole.decision, { approved: true })
-        ),
-      },
-      themselves: {
-        asked: askedTo(byThemselves.ask),
-        starter: await outcome(
-          admin.api.decisions.answer(byThemselves.decision, { approved: true })
-        ),
-      },
+      askedTeam: askedTo(byTeam.ask).toSorted(),
+      askedStarter: askedTo(byRole.ask).includes(admin.userId),
+      team: await outcome(
+        admin.api.decisions.answer(byTeam.decision, { approved: true })
+      ),
+      role: await outcome(
+        admin.api.decisions.answer(byRole.decision, { approved: false })
+      ),
     }).toStrictEqual({
-      team: {
-        asked: [anna.userId],
-        starter: "decision.forbidden",
-        starterWithLink: "decision.forbidden",
-      },
-      role: {
-        askedStarter: false,
-        askedOther: true,
-        starter: "decision.forbidden",
-      },
-      themselves: { asked: [admin.userId], starter: "ok" },
+      askedTeam: [admin.userId, anna.userId].toSorted(),
+      askedStarter: true,
+      team: "ok",
+      role: "ok",
     });
-    // Anyone else the decision is from still answers.
-    await otherAdmin.api.decisions.answer(byRole.decision, { approved: false });
-    await expect(outputOf(admin, byRole.run.id)).resolves.toMatchObject({
-      approved: false,
-      by: otherAdmin.userId,
+    await expect(outputOf(admin, byTeam.run.id)).resolves.toMatchObject({
+      approved: true,
+      by: admin.userId,
+    });
+    await vi.waitFor(async () => {
+      const events = await eventsOf(byRole.decision);
+      expect(events.map(({ action, actor }) => [action, actor])).toContainEqual(
+        ["workflow.decision.rejected", { type: "person", userId: admin.userId }]
+      );
     });
   });
 
@@ -528,51 +374,32 @@ describe("decisions", { timeout: 60_000 }, () => {
     const staff = await whoami(staffSession);
     const { core } = await openRpc(staffSession);
     const { decisions } = core.authenticate();
-    const staffLink = await signDecisionLink(
-      env,
-      decision,
-      staff.userId,
-      Date.now() + week
-    );
 
     expect({
       role: staff.role,
+      // The decision is the client admins' to answer.
+      asked: askedTo(ask).includes(admin.userId),
       get: await outcome(decisions.get(decision)),
       answer: await outcome(decisions.answer(decision, { approved: true })),
-      withAdminsLink: await outcome(
-        decisions.answer(
-          decision,
-          { approved: true },
-          linkOf(ask, admin.userId).token
-        )
-      ),
-      withOwnLink: await outcome(
-        decisions.answer(decision, { approved: true }, staffLink)
-      ),
     }).toStrictEqual({
       role: "admin",
+      asked: true,
       get: "decision.forbidden",
       answer: "decision.forbidden",
-      withAdminsLink: "decision.forbidden",
-      withOwnLink: "decision.forbidden",
     });
   });
 
-  it("bring the person back to the link's page after signing in, and send it no referrer", async () => {
-    const page = "/decisions/some-decision?link=some-token";
+  it("bring the person back to the decision's page after signing in", async () => {
+    const page = "/decisions/some-decision";
     const person = entraPerson(acmeTenant);
     const { location } = await signIn(idp, "microsoft", person, {
       callbackURL: page,
     });
-    const served = await routed(page);
 
-    expect({
-      back: location?.endsWith(page),
-      referrer: served.headers.get("referrer-policy"),
-    }).toStrictEqual({ back: true, referrer: "no-referrer" });
+    expect(location?.endsWith(page)).toBeTruthy();
   });
 
-  it("remind by asking again, with fresh links for who is in the team then", async () => {
+  it("remind by asking again, whoever is in the team then", async () => {
     const admin = await personApi("admin");
     const anna = await personApi("user");
     const ben = await personApi("user");
@@ -622,27 +449,15 @@ describe("decisions", { timeout: 60_000 }, () => {
 
     expect({
       leftTheTeam: await outcome(
-        leaves.api.decisions.answer(
-          inTeam.decision,
-          { approved: true },
-          linkOf(inTeam.ask, leaves.userId).token
-        )
+        leaves.api.decisions.answer(inTeam.decision, { approved: true })
       ),
       demoted: await outcome(
-        demoted.api.decisions.answer(
-          byRole.decision,
-          { approved: true },
-          linkOf(byRole.ask, demoted.userId).token
-        )
+        demoted.api.decisions.answer(byRole.decision, { approved: true })
       ),
       removed: await outcome(
-        removed.api.decisions.answer(
-          byPerson.decision,
-          { approved: true },
-          linkOf(byPerson.ask, removed.userId).token
-        )
+        removed.api.decisions.answer(byPerson.decision, { approved: true })
       ),
-      // Asked before they joined, so they have no link, but may answer.
+      // Asked before they joined, so they weren't asked, but may answer.
       joinedTheTeam: await outcome(
         joins.api.decisions.answer(inTeam.decision, { approved: true })
       ),
@@ -710,17 +525,14 @@ export default workflowTests(rogue, [{ name: "runs", expect: {} }]);
       from: `person:${decider.userId}`,
       timeout: week,
     });
-    const answer = async (value: unknown, link?: unknown) =>
+    const answer = async (value: unknown) =>
       await outcome(
         decider.api.decisions.answer(
           decision,
           // SAFETY: invalid on purpose: anything a client can send, as Cap'n
           // Web checks no types, so core must.
           // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-          value as never,
-          // SAFETY: as above.
-          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-          link as never
+          value as never
         )
       );
 
@@ -734,7 +546,6 @@ export default workflowTests(rogue, [{ name: "runs", expect: {} }]);
       notYesOrNo: await answer({ approved: "yes" }),
       missing: await answer({}),
       notAnObject: await answer("approve"),
-      badLink: await answer({ approved: true }, 42),
       unknownDecision: await outcome(
         decider.api.decisions.answer(crypto.randomUUID(), { approved: true })
       ),
@@ -744,7 +555,6 @@ export default workflowTests(rogue, [{ name: "runs", expect: {} }]);
       notYesOrNo: "decision.invalid",
       missing: "decision.invalid",
       notAnObject: "decision.invalid",
-      badLink: "decision.link_invalid",
       unknownDecision: "decision.not_found",
     });
     // None of it counted: the decision is still open.
