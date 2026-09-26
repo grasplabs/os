@@ -1,6 +1,5 @@
 import { collectionIdSchema } from "@grasp-os/shared/ids";
 import {
-  collectionIdInputSchema,
   collectionInputSchema,
   knowledgeErrors,
   readOnlySources,
@@ -12,7 +11,7 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
-import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
+import { auditedBatch, outboxed } from "../audit-outbox.ts";
 import { actorOf } from "../audit.ts";
 import { organizationId } from "../auth/auth.ts";
 import { teams } from "../db/core/schema.ts";
@@ -73,7 +72,7 @@ export const readableCollection = async (
   allowed: SQL,
   collectionId: unknown
 ): Promise<CollectionRow> => {
-  const id = collectionIdInputSchema.safeParse(collectionId);
+  const id = collectionIdSchema.safeParse(collectionId);
   const row = id.success
     ? await db
         .select()
@@ -159,7 +158,7 @@ export const createCollection = async (
   const insertTeams = teamIds.map((teamId) =>
     db.insert(collectionTeams).values({ collectionId: row.id, teamId })
   );
-  await db.batch([
+  await auditedBatch(env, db, [
     db.insert(collections).values(row),
     ...insertTeams,
     outboxed(db, {
@@ -169,6 +168,5 @@ export const createCollection = async (
       detail: { access, sensitive, source },
     }),
   ]);
-  await sendAuditOutboxNow(env);
   return toCollection(row, teamIds);
 };

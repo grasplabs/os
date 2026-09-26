@@ -19,9 +19,6 @@ import {
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
-// Knowledge's RPC imports the type from here.
-export type { SessionCheck } from "./session-check.ts";
-
 /**
  * What a signed-in person reaches over `/rpc`. It holds no identity: every
  * method runs through `withPerson`, which checks the session first and hands

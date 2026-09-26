@@ -14,10 +14,10 @@ import type {
   SearchOptions,
   SearchResults,
 } from "@grasp-os/shared/knowledge";
-import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
-import type { SessionCheck } from "../session-rpc.ts";
+import { withPerson } from "../session-check.ts";
+import type { SessionCheck } from "../session-check.ts";
 import type { Reader } from "./access.ts";
 import { createCollection, listCollections } from "./collections.ts";
 import {
@@ -46,12 +46,9 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
     this.#check = check;
   }
 
-  async #asPerson<T>(run: (person: Identity) => Promise<T>): Promise<T> {
-    return await run(await this.#check());
-  }
-
   async #asReader<T>(run: (reader: Reader) => Promise<T>): Promise<T> {
-    return await this.#asPerson(
+    return await withPerson(
+      this.#check,
       async (person) => await run({ type: "person", person })
     );
   }
@@ -63,7 +60,8 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   }
 
   async createCollection(input: CollectionInput): Promise<Collection> {
-    return await this.#asPerson(
+    return await withPerson(
+      this.#check,
       async (person) => await createCollection(this.#env, person, input)
     );
   }
@@ -89,7 +87,8 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   }
 
   async saveDocument(input: SaveInput): Promise<DocumentSummary> {
-    return await this.#asPerson(
+    return await withPerson(
+      this.#check,
       async (person) => await saveDocument(this.#env, person, input)
     );
   }
@@ -104,7 +103,8 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   }
 
   async restoreVersion(input: RestoreInput): Promise<DocumentSummary> {
-    return await this.#asPerson(
+    return await withPerson(
+      this.#check,
       async (person) => await restoreVersion(this.#env, person, input)
     );
   }

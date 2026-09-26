@@ -170,12 +170,6 @@ export const restoreInputSchema = z.strictObject({
 });
 export type RestoreInput = z.input<typeof restoreInputSchema>;
 
-// The ID schemas themselves now bound an ID's length; these names stay
-// until Knowledge's code (in flight) uses those directly.
-export {
-  collectionIdSchema as collectionIdInputSchema,
-  documentIdSchema as documentIdInputSchema,
-} from "./ids.ts";
 export const versionInputSchema = versionSchema;
 
 /** Most entries one page of a listing holds. */
@@ -321,7 +315,7 @@ export type CollectionSearchOptions = z.input<
 export const searchOptionsSchema = z
   .strictObject({
     /** Only this collection; otherwise every one the reader may read. */
-    collectionId: collectionIdInputSchema.optional(),
+    collectionId: collectionIdSchema.optional(),
     limit: z.int().min(1).max(searchMaxLimit).default(searchDefaultLimit),
   })
   .default({ limit: searchDefaultLimit });
