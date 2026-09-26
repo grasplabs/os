@@ -1,4 +1,4 @@
-import { ToolError } from "@grasp-os/connector-kit/connector";
+import { invalidCode, ToolError } from "@grasp-os/connector-kit/connector";
 import { retryAfterOf } from "@grasp-os/connector-kit/content";
 import { egressHeader } from "@grasp-os/connector-kit/manifest";
 import { z } from "zod";
@@ -188,7 +188,7 @@ const failureOf = async (
     case 412:
     case 413: {
       return new ToolError(`Google refused the request${named}`, {
-        code: "invalid_request",
+        code: invalidCode,
       });
     }
     default: {

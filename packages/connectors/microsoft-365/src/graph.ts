@@ -1,4 +1,4 @@
-import { ToolError } from "@grasp-os/connector-kit/connector";
+import { invalidCode, ToolError } from "@grasp-os/connector-kit/connector";
 import { retryAfterOf } from "@grasp-os/connector-kit/content";
 import { egressHeader } from "@grasp-os/connector-kit/manifest";
 import { z } from "zod";
@@ -185,7 +185,7 @@ const failureOf = async (
     case 413:
     case 422: {
       return new ToolError(`Microsoft 365 refused the request${named}`, {
-        code: "invalid_request",
+        code: invalidCode,
       });
     }
     default: {
@@ -288,7 +288,7 @@ export const atPage = (url: URL, page: string | undefined): URL => {
   }
   if (!found) {
     throw new ToolError("That isn't a page this tool handed out", {
-      code: "invalid_request",
+      code: invalidCode,
     });
   }
   return url;

@@ -264,7 +264,7 @@ describe("finishing a connection", () => {
       "connection.flow_invalid",
       "connection.flow_invalid",
       "connection.flow_invalid",
-      "connection.invalid_request",
+      "connection.invalid",
     ]);
     expect(providers.tokenRequests("authorization_code")).toStrictEqual([]);
     // The real state still works.
@@ -552,7 +552,7 @@ describe("a flow that can't finish", () => {
     await exports.default.abandonFlow(stateOf(abandoned));
     await expect(
       finish(anna, stateOf(malformed), "x".repeat(5000))
-    ).resolves.toBe("connection.invalid_request");
+    ).resolves.toBe("connection.invalid");
     const results = await Promise.all(
       [abandoned, malformed].map(
         async (url) =>

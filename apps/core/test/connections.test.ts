@@ -227,9 +227,7 @@ describe("connecting an account", () => {
           )
       )
     );
-    expect(refused).toStrictEqual(
-      elsewhere.map(() => "connection.invalid_request")
-    );
+    expect(refused).toStrictEqual(elsewhere.map(() => "connection.invalid"));
   });
 
   it("refuses someone else's account as a personal connection", async () => {

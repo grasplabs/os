@@ -1,3 +1,4 @@
+import { invalidCode } from "@grasp-os/connector-kit/connector";
 import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
 import { signCapability } from "@grasp-os/shared/capability";
 import type { Json } from "@grasp-os/shared/json";
@@ -259,7 +260,7 @@ describe("the Microsoft 365 connector's mail tools", () => {
           page: "$select=body",
         })
       )
-    ).resolves.toMatchObject({ error: { code: "invalid_request" } });
+    ).resolves.toMatchObject({ error: { code: invalidCode } });
   });
 
   it("search a folder, filter, but not both at once", async () => {
@@ -297,7 +298,7 @@ describe("the Microsoft 365 connector's mail tools", () => {
           unreadOnly: true,
         })
       )
-    ).resolves.toMatchObject({ error: { code: "invalid_request" } });
+    ).resolves.toMatchObject({ error: { code: invalidCode } });
     expect(graph.sent).toHaveLength(2);
   });
 
@@ -566,7 +567,7 @@ describe("the Microsoft 365 connector's calendar tools", () => {
       toolError(
         call(connection, "calendar.list", { ...range, end: range.start })
       )
-    ).resolves.toMatchObject({ error: { code: "invalid_request" } });
+    ).resolves.toMatchObject({ error: { code: invalidCode } });
   });
 
   it("get an event with its body and attendees", async () => {
@@ -1044,7 +1045,7 @@ describe("the Microsoft 365 connector's answers", () => {
     );
     await expect(
       outcome(exports.default.call({ ...stated, capability, mask: [] }))
-    ).resolves.toBe("connect.invalid_call");
+    ).resolves.toBe("connect.invalid");
     expect(graph.sent).toStrictEqual([]);
   });
 

@@ -22,7 +22,6 @@ import { isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import { and, desc, eq, like, lte, ne, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
-import type { z } from "zod";
 
 import { recordEventIf, recordEvents } from "./audit.ts";
 import { connections, connectionTokens, oauthFlows } from "./db/schema.ts";
@@ -93,17 +92,6 @@ const auditRefusal = async (
   } catch (error) {
     log.error("audit.record_failed", errorFields(error));
   }
-};
-
-const parse = <Schema extends z.ZodType>(
-  schema: Schema,
-  request: unknown
-): z.output<Schema> => {
-  const parsed = schema.safeParse(request);
-  if (!parsed.success) {
-    throw connectionErrors.create("connection.invalid_request");
-  }
-  return parsed.data;
 };
 
 /**
@@ -208,7 +196,11 @@ export const startConnection = async (
     origin,
     returnTo,
     ...rest
-  } = parse(startConnectionSchema, request);
+  } = connectionErrors.parse(
+    "connection.invalid",
+    startConnectionSchema,
+    request
+  );
   await refuseStaff(env, person, { provider: providerId, scope });
   if (!mayManage(person, scope)) {
     await auditRefusal(env, person, "connection.connect", {
@@ -373,7 +365,7 @@ export const finishConnection = async (
         ? Reflect.get(request, "state")
         : undefined;
     await abandonFlow(env, given);
-    throw connectionErrors.create("connection.invalid_request");
+    throw connectionErrors.create("connection.invalid");
   }
   const { person, state, code, error } = parsed.data;
   const flow = await takeFlow(env, state);
@@ -488,7 +480,11 @@ export const listConnections = async (
   env: Env,
   request: unknown
 ): Promise<ConnectionSummary[]> => {
-  const person = parse(connectionPersonSchema, request);
+  const person = connectionErrors.parse(
+    "connection.invalid",
+    connectionPersonSchema,
+    request
+  );
   const rows = await drizzle(env.DB)
     .select()
     .from(connections)
@@ -591,7 +587,11 @@ export const disconnect = async (
   env: Env,
   request: unknown
 ): Promise<{ revoked: boolean }> => {
-  const { person, connectionId } = parse(disconnectSchema, request);
+  const { person, connectionId } = connectionErrors.parse(
+    "connection.invalid",
+    disconnectSchema,
+    request
+  );
   const db = drizzle(env.DB);
   const connection = await db
     .select()
@@ -642,7 +642,11 @@ export const disconnectPersonal = async (
   env: Env,
   request: unknown
 ): Promise<{ disconnected: number }> => {
-  const { person, ownerUserIds } = parse(disconnectPersonalSchema, request);
+  const { person, ownerUserIds } = connectionErrors.parse(
+    "connection.invalid",
+    disconnectPersonalSchema,
+    request
+  );
   if (person !== null && (person.staff || !isAdmin(person.role))) {
     await auditRefusal(env, person, "connection.disconnect", {
       outcome: "refused",

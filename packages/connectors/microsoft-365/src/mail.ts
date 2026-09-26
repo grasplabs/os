@@ -1,4 +1,8 @@
-import { defineTool, ToolError } from "@grasp-os/connector-kit/connector";
+import {
+  defineTool,
+  invalidCode,
+  ToolError,
+} from "@grasp-os/connector-kit/connector";
 import {
   checkReadable,
   contentAs,
@@ -199,7 +203,7 @@ const listMessages = defineTool({
     if (search !== undefined && filtered) {
       throw new ToolError(
         "Microsoft 365 can't search and filter at once: search, or filter",
-        { code: "invalid_request" }
+        { code: invalidCode }
       );
     }
     // Graph sorts by a filtered property only once it leads the filter.
