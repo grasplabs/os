@@ -55,11 +55,6 @@ const storedTreeSchema = z.record(z.string(), z.string());
 /** Most versions one `listVersions` call returns. */
 const versionsPerPage = 100;
 
-// Also exported here, for approvals.ts and workflows/params.ts, which
-// import it from this module; new code imports it from
-// @grasp-os/shared/roles.
-export { requireBuilder } from "@grasp-os/shared/roles";
-
 const treeKey = (app: AppId, tree: string): string =>
   `apps/${app}/trees/${tree}.json`;
 
