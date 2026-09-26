@@ -7,6 +7,7 @@
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Role } from "@grasp-os/shared/roles";
 import type { CoreApi } from "@grasp-os/shared/rpc";
@@ -32,12 +33,42 @@ const wrangler = path.join(
 
 const quoted = (value: string): string => `'${value.replaceAll("'", "''")}'`;
 
-/** Runs SQL on core's local database, the one the stack's dev server uses. */
-const execute = (sql: string): void => {
-  execFileSync(wrangler, ["d1", "execute", "DB", "--local", "--command", sql], {
-    cwd: coreDirectory,
-    stdio: "pipe",
-  });
+/**
+ * How often `execute` tries statements the database was too busy for: it
+ * shares the file with the dev server and with the other test workers.
+ * It waits between tries, 200 ms first and twice as long each time after,
+ * so the lock holder can finish: 3 s at most in all.
+ */
+const busyAttempts = 5;
+const firstBusyWaitMs = 200;
+
+const isBusy = (error: unknown): boolean =>
+  error instanceof Error &&
+  "stderr" in error &&
+  String(error.stderr).includes("SQLITE_BUSY");
+
+/**
+ * Runs SQL on core's local database, the one the stack's dev server uses.
+ * Wrangler runs the statements as one batch, which SQLite undoes whole
+ * when another connection holds the lock, so a busy batch is tried again.
+ */
+const execute = async (sql: string): Promise<void> => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      execFileSync(
+        wrangler,
+        ["d1", "execute", "DB", "--local", "--command", sql],
+        { cwd: coreDirectory, stdio: "pipe" }
+      );
+      return;
+    } catch (error) {
+      if (attempt >= busyAttempts || !isBusy(error)) {
+        throw error;
+      }
+    }
+    // oxlint-disable-next-line no-await-in-loop -- one try at a time
+    await sleep(firstBusyWaitMs * 2 ** (attempt - 1));
+  }
 };
 
 /** Better Auth's signed cookie value: the token and its HMAC-SHA256. */
@@ -76,7 +107,7 @@ export const signedIn = async <Name extends string>(
     userId: crypto.randomUUID(),
     token: crypto.randomUUID(),
   }));
-  execute(
+  await execute(
     [
       `INSERT OR IGNORE INTO organizations (id, name, slug, created_at) VALUES (${quoted(organizationId)}, 'Acme', 'acme', ${now})`,
       ...people.flatMap(({ role, userId, token }) => [

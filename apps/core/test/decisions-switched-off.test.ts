@@ -12,6 +12,7 @@ import {
   deadlinePassed,
   linkOf,
   outputOf,
+  reminding,
   server,
   waitingFor,
   week,
@@ -40,8 +41,7 @@ describe("decisions while switched off", { timeout: 60_000 }, () => {
     const decider = await personApi("user");
     const { app, run, decision } = await asking(builder, {
       from: `person:${decider.userId}`,
-      timeout: 3000,
-      remindAfter: 1500,
+      ...reminding,
     });
     // Switched off once it waits for the answer, past the time to remind.
     await stepDone(run.id, "review#asked");
@@ -232,8 +232,7 @@ export default workflowTests(definition, [{ name: "runs", events: [{ type: "gate
     const decider = await personApi("user");
     const { app, run, decision } = await asking(builder, {
       from: `person:${decider.userId}`,
-      timeout: 3000,
-      remindAfter: 1500,
+      ...reminding,
     });
     await stepDone(run.id, "review#asked");
     // Stopped while it waits for the answer, and resumed with workflows
@@ -252,7 +251,7 @@ export default workflowTests(definition, [{ name: "runs", events: [{ type: "gate
         async () => {
           await expect(deadlinePassed(decision)).resolves.toBeTruthy();
         },
-        { timeout: 10_000, interval: 100 }
+        { timeout: 2 * reminding.timeout, interval: 100 }
       );
     } finally {
       env.FEATURES = features;

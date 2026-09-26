@@ -12,6 +12,11 @@ const devVar = (name: string, value: string): string =>
 export default defineConfig({
   testDir: "e2e",
   testMatch: "**/*.e2e.ts",
+  // Must cover a test's longest waits one after another. The decision
+  // test's are the longest (e2e/decisions.e2e.ts): up to 30 s for the ask,
+  // 15 s for each of three page loads and the answer, then 30 s for the
+  // run to end: 2 minutes, before its clicks and sign-ins.
+  timeout: 180_000,
   forbidOnly: ci,
   retries: ci ? 2 : 0,
   reporter: ci ? "github" : "list",

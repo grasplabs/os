@@ -55,6 +55,13 @@ import {
 
 const idp = mockIdp();
 
+/**
+ * Each test signs people in and has permissions granted before it
+ * reads anything, which on a loaded CI runner can take as long as Vitest's
+ * default 5 seconds per test.
+ */
+const setUpTime = { timeout: 60_000 };
+
 /** A signed-in person's API, on a connection of their own. */
 const personOf = async (role: Role) => {
   const person = await signedInApi(idp, role);
@@ -122,7 +129,7 @@ const callOutlook = async (bindings: Env, sideEffect = false) => {
   );
 };
 
-describe("Apps and agents reading Knowledge", () => {
+describe("Apps and agents reading Knowledge", setUpTime, () => {
   it("read no collection without a granted permission to read it", async () => {
     const admin = await personOf("admin");
     const agent = newAgent();
@@ -436,7 +443,7 @@ const marked = (collectionId: string, isSensitive: boolean) =>
     restricted: isSensitive,
   }));
 
-describe("provenance", () => {
+describe("provenance", setUpTime, () => {
   it("names the collection of every read, and marks sensitive ones", async () => {
     const admin = await personOf("admin");
     const teamId = await newTeam(admin, []);
@@ -489,7 +496,7 @@ describe("provenance", () => {
   });
 });
 
-describe("restricted mode", () => {
+describe("restricted mode", setUpTime, () => {
   /** An agent that may read a sensitive and an ordinary collection, and use Outlook. */
   const setUp = async (subject: PermissionSubjectInput = newAgent()) => {
     const admin = await personOf("admin");

@@ -13,7 +13,7 @@ import type { AppCallerInput } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
 import { sandbox } from "../src/sandbox.ts";
 import { buildServer } from "../src/screens.ts";
-import { outlook, release, requestGranted } from "./apps.ts";
+import { outlook, release, requestGranted, serverBuilt } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { reached } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
@@ -225,10 +225,13 @@ const sampleFiles = (label: string): Record<string, string> => ({
 
 type Builder = Awaited<ReturnType<typeof personApi>>;
 
-/** A new App running the sample server code. */
+/**
+ * A new App running the sample server code, built ahead (`serverBuilt`):
+ * a test may start several at once, each within its first call's deadline.
+ */
 const sampleApp = async (builder: Builder, label = "v1"): Promise<AppId> => {
   const { id } = await builder.api.apps.create({ name: "Invoice desk" });
-  await release(builder, id, sampleFiles(label));
+  await serverBuilt(id, await release(builder, id, sampleFiles(label)));
   return appIdSchema.parse(id);
 };
 

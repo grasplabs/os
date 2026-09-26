@@ -16,7 +16,7 @@ import { appHost } from "../src/durable-objects.ts";
 import { ownerEventType } from "../src/workflows/dispatcher.ts";
 import { startRun } from "../src/workflows/runs.ts";
 import { fakeGateway } from "./ai-gateway.ts";
-import { requestGranted } from "./apps.ts";
+import { requestGranted, serverBuilt } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote, readCollection } from "./knowledge.ts";
@@ -1564,14 +1564,15 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
         "app-mailer",
         `  return await step.do(
     "send",
-    { description: "Send the invoice", sideEffect: true, input: null, timeout: "1 second", retries: { limit: 1, delay: 10 } },
+    { description: "Send the invoice", sideEffect: true, input: null, retries: { limit: 1, delay: 10 } },
     async () => {
       // A key of the method's own would send once per attempt.
       const ownKey = await env.APP.call("mail", true);
       const sent = await env.APP.call("mail", false);
       if ((await env.APP.call("hit", "app-send")) === 1) {
-        // Hangs until the engine gives up on this attempt.
-        await new Promise(() => {});
+        // The mail went out, yet the attempt fails as if nothing was done,
+        // with a failure the engine retries: the retry mustn't mail again.
+        throw Object.assign(new Error("busy"), { code: "connect.server_unavailable" });
       }
       return { ownKey, sent };
     }
@@ -1579,6 +1580,9 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
         { send: {} }
       )
     );
+    // A method that times out fails the run for good, so the App's first
+    // call mustn't have to build its code.
+    await serverBuilt(app, 1);
     await grantMail(admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "app-mailer");
     await finished(run.id);
