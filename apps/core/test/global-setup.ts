@@ -22,7 +22,7 @@ const writeTestAssets = async (): Promise<void> => {
 const prepare = async (): Promise<void> => {
   await writeTestAssets();
   mkdirSync(path.dirname(connectBundle), { recursive: true });
-  writeFileSync(connectBundle, bundleConnect());
+  writeFileSync(connectBundle, await bundleConnect());
 };
 
 declare global {

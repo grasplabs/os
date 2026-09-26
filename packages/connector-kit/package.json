@@ -1,0 +1,16 @@
+{
+  "name": "@grasp-os/connector-kit",
+  "private": true,
+  "description": "How a native connector is written: its manifest and its MCP server, the only API connector code sees",
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    "./connector": "./src/connector.ts",
+    "./manifest": "./src/manifest.ts"
+  },
+  "dependencies": {
+    "@grasp-os/shared": "workspace:*",
+    "zod": "catalog:"
+  }
+}

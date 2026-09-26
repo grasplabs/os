@@ -4,7 +4,9 @@ import type { ConnectCall } from "@grasp-os/shared/connect";
 import type { Json } from "@grasp-os/shared/json";
 import type { BatchItem } from "drizzle-orm/batch";
 
-import { serverOf, usableConnection } from "./connections.ts";
+import { composioServer, usableConnection } from "./connections.ts";
+import type { Connection } from "./connections.ts";
+import { nativeAction, nativeServer } from "./connectors.ts";
 import { hashCall, idempotencyStore } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
 import { McpError } from "./mcp.ts";
@@ -66,6 +68,30 @@ const toolFor = async (server: McpServer, action: string): Promise<McpTool> => {
 };
 
 /**
+ * The tool a call names, and how to reach its server. A native connector's
+ * tool comes from its manifest, and its server (an isolate, with the
+ * connection's token for its egress) is only opened once the call passed
+ * every check. A Composio server is asked for its tools.
+ */
+const actionFor = async (
+  env: Env,
+  connection: Connection,
+  claims: CapabilityClaims,
+  action: string
+): Promise<{ tool: McpTool; open: () => Promise<McpServer> }> => {
+  if (connection.serverKind === "native") {
+    const native = nativeAction(connection, action);
+    return {
+      tool: native.tool,
+      open: async () => await nativeServer(env, connection, native, claims),
+    };
+  }
+  const server = composioServer(connection);
+  const tool = await toolFor(server, action);
+  return { tool, open: async () => await Promise.resolve(server) };
+};
+
+/**
  * Carries out one call whose capability is verified: `claims` say exactly
  * this connection, resource, action and idempotency key, for this subject
  * and person. Throws a `connect.*` error when it refuses the call or the
@@ -116,8 +142,7 @@ export const carryOut = async (
     return { ...stored, sideEffect: true, replayed: true };
   }
 
-  const server = serverOf(connection);
-  const tool = await toolFor(server, call.action);
+  const { tool, open } = await actionFor(env, connection, claims, call.action);
   const sideEffect = hasSideEffect(connection.serverKind, tool);
   progress.sideEffect = sideEffect;
   checkResourceScope(resource, connection.serverKind, tool, input);
@@ -127,7 +152,12 @@ export const carryOut = async (
   if (sideEffect && authority.mode === "interactive") {
     throw connectErrors.create("connect.confirmation_required");
   }
+  if (sideEffect && store === undefined) {
+    throw connectErrors.create("connect.idempotency_key_required");
+  }
 
+  // Every refusal is behind: only now may a token be read.
+  const server = await open();
   if (!sideEffect) {
     try {
       return {

@@ -1,0 +1,9 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // Fetch and the Encoding API: globals in the connector's isolate and in
+    // Node, where connect's build reads each connector's manifest.
+    "lib": ["es2024", "dom"]
+  },
+  "include": ["src", "test"]
+}

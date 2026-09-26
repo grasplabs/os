@@ -1,3 +1,8 @@
+import {
+  maxProvenanceItems,
+  provenanceMetaKey,
+  resourceMetaKey,
+} from "@grasp-os/connector-kit/manifest";
 import { auditIdentifierMaxLength } from "@grasp-os/shared/audit";
 import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
@@ -19,23 +24,10 @@ const protocolVersion = "2025-06-18";
 const maxResponseBytes = 1024 * 1024;
 
 /** How long one call may take, all its MCP requests together. */
-const callTimeoutMs = 30_000;
+export const callTimeoutMs = 30_000;
 
 /** Most `tools/list` pages read while looking for a tool. */
 const maxToolPages = 20;
-
-/** Most resource IDs one call may report reading. */
-export const maxProvenanceItems = 1000;
-
-/**
- * Tool `_meta` key: the name of the input property that holds the one
- * resource (a mailbox, a calendar) a call of the tool acts on. Only a tool
- * that names it can be called with a capability for a single resource.
- */
-export const resourceMetaKey = "grasp-os/resource";
-
-/** Result `_meta` key: the IDs of the resources the call read. */
-export const provenanceMetaKey = "grasp-os/provenance";
 
 /** Sends one request to the server. */
 export type McpFetch = (request: Request) => Promise<Response>;

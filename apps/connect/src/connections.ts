@@ -67,24 +67,11 @@ export const usableConnection = async (
   return connection;
 };
 
-/** The MCP server that carries out the connection's actions. */
-export const serverOf = (connection: Connection): McpServer => {
-  switch (connection.serverKind) {
-    case "composio": {
-      const url = composioUrlSchema.safeParse(connection.server);
-      if (!url.success) {
-        throw connectErrors.create("connect.server_unavailable");
-      }
-      return mcpServer(url.data, async (request) => await fetch(request));
-    }
-    case "native": {
-      // Native connectors run in their own isolates, loaded through LOADER
-      // with an egress allowlist. Until that loader exists, a native
-      // connection has no server to reach, and nothing is sent anywhere.
-      throw connectErrors.create("connect.server_unavailable");
-    }
-    default: {
-      return connection.serverKind satisfies never;
-    }
+/** The Composio MCP server behind the connection, if its URL is one. */
+export const composioServer = (connection: Connection): McpServer => {
+  const url = composioUrlSchema.safeParse(connection.server);
+  if (!url.success) {
+    throw connectErrors.create("connect.server_unavailable");
   }
+  return mcpServer(url.data, async (request) => await fetch(request));
 };

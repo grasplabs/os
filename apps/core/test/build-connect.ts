@@ -7,6 +7,12 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import {
+  buildConnectors,
+  connectorEntries,
+  connectorsFile,
+} from "../../connect/build.ts";
+
 const connect = path.join(import.meta.dirname, "../../connect");
 const wrangler = path.join(connect, "node_modules/.bin/wrangler");
 
@@ -16,8 +22,9 @@ export const connectBundle = path.join(
   "../dist/test-connect/index.js"
 );
 
-/** The connect Worker's bundle, as one ES module. */
-export const bundleConnect = (): string => {
+/** The connect Worker's bundle, as one ES module, its connectors in it. */
+export const bundleConnect = async (): Promise<string> => {
+  await buildConnectors(connectorEntries(), connectorsFile);
   const out = mkdtempSync(path.join(tmpdir(), "grasp-os-connect-"));
   try {
     // Its output is only shown if bundling fails, in the error.

@@ -4,6 +4,8 @@ import {
 } from "@cloudflare/vitest-pool-workers";
 import { defineProject } from "vite-plus";
 
+import { testConnectorsFile } from "./test/global-setup.ts";
+
 const migrations = await readD1Migrations(
   `${import.meta.dirname}/src/db/migrations`
 );
@@ -12,7 +14,11 @@ const migrations = await readD1Migrations(
 const testTokenKey = btoa("test-token-key-of-exactly-32-b!!");
 
 export default defineProject({
+  // The tests' connectors: the release's and the sample one (see the setup).
+  resolve: { alias: { "#connectors": testConnectorsFile } },
   test: {
+    // Builds the connectors the tests load, once per run.
+    globalSetup: ["./test/global-setup.ts"],
     // Brings the connect database up to the committed migrations.
     setupFiles: ["./test/apply-migrations.ts"],
   },
