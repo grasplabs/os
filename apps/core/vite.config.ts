@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import {
   cloudflareTest,
   readD1Migrations,
@@ -5,7 +7,7 @@ import {
 import { defaultExclude, defineProject } from "vite-plus";
 import type { UserWorkspaceConfig } from "vite-plus";
 
-import { bundleConnect } from "./test/build-connect.ts";
+import { connectBundle } from "./test/build-connect.ts";
 import { testSignIn } from "./test/sign-in-config.ts";
 
 const coreMigrations = await readD1Migrations(
@@ -17,9 +19,6 @@ const knowledgeMigrations = await readD1Migrations(
 const connectMigrations = await readD1Migrations(
   `${import.meta.dirname}/../connect/src/db/migrations`
 );
-
-/** The real connect Worker, for the CONNECT service binding. */
-const connectScript = bundleConnect();
 
 /** Shared by core and connect, as in a deployment. */
 const capabilitySigningKey = "test-capability-signing-key-of-32-chars-or-more";
@@ -35,12 +34,16 @@ export const screenTests = ["test/screen*.test.ts"];
 export const coreProject = (test: UserWorkspaceConfig["test"]) =>
   defineProject({
     test: {
+      // Writes the assets the tests serve and bundles connect, once per run,
+      // so each project also runs on its own.
+      globalSetup: ["./test/global-setup.ts"],
       // Brings the D1 databases up to the committed migrations.
       setupFiles: ["./test/apply-migrations.ts"],
       ...test,
     },
     plugins: [
-      cloudflareTest({
+      // Read when the pool starts, after the global setup wrote the bundle.
+      cloudflareTest(() => ({
         wrangler: { configPath: "./wrangler.jsonc" },
         // Tests run fully local, including in CI without Cloudflare credentials.
         remoteBindings: false,
@@ -63,15 +66,16 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
           // Deliver audit events at once instead of waiting to fill a batch.
           queueConsumers: { "grasp-os-audit": { maxBatchTimeout: 0 } },
           // A stand-in frontend and the screen compiler, written by the
-          // screens project's global setup (test/global-setup.ts).
+          // global setup.
           assets: { directory: "./dist/test-assets" },
-          // The real connect Worker behind the CONNECT service binding. Given
-          // as a script: a `scriptPath` fails to start in the test pool.
+          // The real connect Worker behind the CONNECT service binding,
+          // bundled by the global setup. Given as a script: a `scriptPath`
+          // fails to start in the test pool.
           workers: [
             {
               name: "grasp-os-connect",
               modules: true,
-              script: connectScript,
+              script: readFileSync(connectBundle, "utf-8"),
               compatibilityDate: "2026-09-15",
               compatibilityFlags: [
                 "nodejs_compat",
@@ -83,7 +87,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             },
           ],
         },
-      }),
+      })),
     ],
   });
 

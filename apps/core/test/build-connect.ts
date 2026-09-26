@@ -10,6 +10,12 @@ import path from "node:path";
 const connect = path.join(import.meta.dirname, "../../connect");
 const wrangler = path.join(connect, "node_modules/.bin/wrangler");
 
+/** Where core's global setup writes the bundle for its tests. */
+export const connectBundle = path.join(
+  import.meta.dirname,
+  "../dist/test-connect/index.js"
+);
+
 /** The connect Worker's bundle, as one ES module. */
 export const bundleConnect = (): string => {
   const out = mkdtempSync(path.join(tmpdir(), "grasp-os-connect-"));
