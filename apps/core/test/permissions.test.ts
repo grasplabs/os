@@ -13,7 +13,11 @@ import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { authorize } from "../src/permissions.ts";
+import {
+  authorize,
+  grantPermission,
+  revokePermission,
+} from "../src/permissions.ts";
 import { outlook } from "./apps.ts";
 import { actingFor, connectionIn, envOf, reached } from "./contexts.ts";
 import { runCron, whileQueueDown } from "./cron.ts";
@@ -190,6 +194,43 @@ describe("permissions", () => {
     }).toStrictEqual({
       outcomes: ["ok", "permission.not_requested"],
       events: ["permission.granted"],
+    });
+  });
+
+  it("are neither granted nor revoked by an admin demoted after their session was checked", async () => {
+    const admin = await permissionApi("admin");
+    const builder = await permissionApi("builder");
+    const app = await newApp(admin.api);
+    const requested = await builder.api.permissions.request(outlook(app.appId));
+    const active = await builder.api.permissions.request(
+      outlook(app.appId, "ACTIVE")
+    );
+    await admin.api.permissions.grant(active.id);
+    // The identity the session check hands over while they are an admin.
+    // The check reads the role again on every call, so the only way in
+    // between it and the update is to call past it with that identity.
+    const checked = await admin.api.whoami();
+    await env.DB.prepare("UPDATE members SET role = 'user' WHERE user_id = ?")
+      .bind(admin.userId)
+      .run();
+    let refused: string[] = [];
+    const events = await auditedDuring(async () => {
+      refused = [
+        await outcome(grantPermission(env, checked, requested.id)),
+        await outcome(revokePermission(env, checked, active.id)),
+      ];
+    });
+    const listed = await builder.api.permissions.list(app);
+    expect({
+      refused,
+      events,
+      statuses: Object.fromEntries(
+        listed.map((permission) => [permission.id, permission.status])
+      ),
+    }).toStrictEqual({
+      refused: ["role.forbidden", "role.forbidden"],
+      events: [],
+      statuses: { [requested.id]: "requested", [active.id]: "active" },
     });
   });
 

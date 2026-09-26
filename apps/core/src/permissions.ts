@@ -21,12 +21,13 @@ import {
   roleErrors,
 } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, eq, inArray, isNull, or } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
+import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
 import { apps, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
@@ -202,6 +203,26 @@ const changeEntry = (
 const requireMemberAdmin = (by: Identity): void => {
   requireAdmin(by);
   if (by.staff) {
+    throw roleErrors.create("role.forbidden");
+  }
+};
+
+/**
+ * That `by` is still an active admin of the organization, as SQL: part of
+ * the very update that grants or revokes, so an admin demoted or removed
+ * after their session was checked changes nothing.
+ */
+const stillAdmin = (by: Identity): SQL => activeMember(by.userId, ["admin"]);
+
+/**
+ * After a grant or revoke changed nothing: refuses with `role.forbidden`
+ * if that was because `by` is no longer an active admin.
+ */
+const requireStillAdmin = async (env: Env, by: Identity): Promise<void> => {
+  const row = await drizzle(env.DB).get<{ admin: number }>(
+    sql`SELECT ${stillAdmin(by)} AS admin`
+  );
+  if (row.admin === 0) {
     throw roleErrors.create("role.forbidden");
   }
 };
@@ -383,7 +404,11 @@ export const grantPermission = async (
       .update(permissions)
       .set({ status: "active", grantedBy: by.userId, grantedAt: new Date() })
       .where(
-        and(eq(permissions.id, found.id), eq(permissions.status, "requested"))
+        and(
+          eq(permissions.id, found.id),
+          eq(permissions.status, "requested"),
+          stillAdmin(by)
+        )
       )
       .returning(),
     outboxedIfChanged(
@@ -394,6 +419,7 @@ export const grantPermission = async (
     ),
   ]);
   if (!granted) {
+    await requireStillAdmin(env, by);
     throw permissionErrors.create("permission.not_requested");
   }
   const permission = toPermission(granted);
@@ -423,7 +449,8 @@ export const revokePermission = async (
       .where(
         and(
           eq(permissions.id, found.id),
-          inArray(permissions.status, ["requested", "active"])
+          inArray(permissions.status, ["requested", "active"]),
+          stillAdmin(by)
         )
       )
       .returning(),
@@ -433,6 +460,7 @@ export const revokePermission = async (
     ),
   ]);
   if (!revoked) {
+    await requireStillAdmin(env, by);
     // Already revoked: nothing changed, and nothing is recorded.
     return toPermission((await findRow(env, found.id)) ?? found);
   }
