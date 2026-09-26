@@ -40,6 +40,14 @@ const priced = (currency: string, amount: number) =>
     async () => null
   );
 
+/** A workflow with one number parameter labelled `label`. */
+const labelled = (label: string) =>
+  workflow(
+    "labelled",
+    { params: { limit: number({ label, default: 1 }) } },
+    async () => null
+  );
+
 describe("workflow definitions", () => {
   it("rejects an empty ID and a default that doesn't fit its kind", () => {
     expect(() => workflow("", { params: noParams }, async () => null)).toThrow(
@@ -52,6 +60,15 @@ describe("workflow definitions", () => {
         async () => null
       )
     ).toThrow(expect.objectContaining({ code: "workflow.invalid_definition" }));
+  });
+
+  it("rejects parameters past the bounds the platform keeps, such as a label over 200 characters", () => {
+    expect(labelled("L".repeat(200)).metadata.params[0]?.label).toHaveLength(
+      200
+    );
+    expect(() => labelled("L".repeat(201))).toThrow(
+      expect.objectContaining({ code: "workflow.invalid_definition" })
+    );
   });
 
   it("holds money in whole minor units of a declared currency", () => {

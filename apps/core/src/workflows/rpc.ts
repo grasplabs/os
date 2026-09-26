@@ -17,12 +17,11 @@ export class WorkflowsRpc extends RpcTarget implements WorkflowsApi {
   readonly #check: SessionCheck;
   readonly #params: WorkflowParamsRpc;
 
-  /** `paramsCheck` is the session check of `params`, with its flags. */
-  constructor(env: Env, check: SessionCheck, paramsCheck: SessionCheck) {
+  constructor(env: Env, check: SessionCheck) {
     super();
     this.#env = env;
     this.#check = check;
-    this.#params = new WorkflowParamsRpc(env, paramsCheck);
+    this.#params = new WorkflowParamsRpc(env, check);
   }
 
   get params(): WorkflowParamsRpc {

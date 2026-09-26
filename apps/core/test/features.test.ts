@@ -104,7 +104,7 @@ describe("feature flags", () => {
     }
   });
 
-  it("stop workflow parameter values with either the workflows or the approvals flag", async () => {
+  it("stop workflow parameter values with the workflows flag, whatever the approvals flag says", async () => {
     const admin = await signedInWithRole(idp, "admin");
     const valuesWith = async (features: Record<string, boolean>) => {
       const coreEnv: Env = { ...env, FEATURES: features };
@@ -117,12 +117,13 @@ describe("feature flags", () => {
     };
     await expect(
       Promise.all([
-        valuesWith({ workflows: true }),
         valuesWith({ approvals: true }),
+        valuesWith({ workflows: true }),
       ])
     ).resolves.toStrictEqual([
       ["feature.disabled", "feature.disabled"],
-      ["feature.disabled", "feature.disabled"],
+      // Past the flag: this App doesn't exist.
+      ["app.not_found", "app.not_found"],
     ]);
   });
 

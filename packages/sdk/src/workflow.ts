@@ -1,7 +1,11 @@
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { RunId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
-import { stepIdempotencyKey } from "@grasp-os/shared/workflows";
+import {
+  paramDeclarationSchema,
+  paramDeclarationsSchema,
+  stepIdempotencyKey,
+} from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import type {
@@ -129,7 +133,10 @@ export interface Param<Kind extends ParamKind = ParamKind> {
   /** What people see next to the value, e.g. "Review invoices above". */
   label: string;
   default: ParamDefault<Kind>;
-  /** Changing it needs a second person's approval. */
+  /**
+   * Its value needs care where it's shown. People set it like any other,
+   * and no value ever goes in the audit log.
+   */
   sensitive: boolean;
   /** For money: the ISO 4217 currency its amounts are in, e.g. `EUR`. */
   currency?: string;
@@ -138,7 +145,7 @@ export interface Param<Kind extends ParamKind = ParamKind> {
 interface ParamOptions<Kind extends ParamKind> {
   label: string;
   default: ParamDefault<Kind>;
-  /** Changing it needs a second person's approval; defaults to false. */
+  /** Its value needs care where it's shown; defaults to false. */
   sensitive?: boolean;
 }
 
@@ -477,7 +484,28 @@ export interface WorkflowDefinition<Output> {
   run: (engine: WorkflowEngine, input?: unknown) => Promise<Output>;
 }
 
+const describeParams = (params: Params): ParamMetadata[] =>
+  Object.entries(params).map(([name, definition]) => ({
+    name,
+    kind: definition.kind,
+    label: definition.label,
+    default: definition.default,
+    sensitive: definition.sensitive,
+    ...(definition.currency === undefined
+      ? {}
+      : { currency: definition.currency }),
+  }));
+
 const validateParams = (params: Params): void => {
+  // Within the bounds core keeps (`paramDeclarationsSchema`): a definition
+  // outside them fails here, so its tests fail and the version is never
+  // made current, rather than every run of it failing to load.
+  parseOrThrow(
+    paramDeclarationsSchema(paramDeclarationSchema),
+    describeParams(params),
+    "workflow.invalid_definition",
+    "Parameters"
+  );
   for (const [name, definition] of Object.entries(params)) {
     parseOrThrow(
       paramValueSchemas[definition.kind],
@@ -495,18 +523,6 @@ const validateParams = (params: Params): void => {
     }
   }
 };
-
-const describeParams = (params: Params): ParamMetadata[] =>
-  Object.entries(params).map(([name, definition]) => ({
-    name,
-    kind: definition.kind,
-    label: definition.label,
-    default: definition.default,
-    sensitive: definition.sensitive,
-    ...(definition.currency === undefined
-      ? {}
-      : { currency: definition.currency }),
-  }));
 
 const resolveParams = (
   params: Params,

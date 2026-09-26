@@ -31,7 +31,6 @@ import {
   memberRemovals,
   permissions,
   users,
-  workflowParamValues,
 } from "./db/core/schema.ts";
 import {
   changeEntry,
@@ -45,17 +44,18 @@ import {
   toPermission,
 } from "./permissions.ts";
 
-// Approvals: the changes nobody makes alone (threat model R4, R8, PM1,
-// WF5). Granting a permission needs an admin; changing a sensitive workflow
-// value needs an admin or a builder. Either way, never the person who
-// asked, and never Grasp staff.
+// Approvals: the changes nobody makes alone (threat model R4, R8, PM1).
+// Granting a permission needs an admin, never the person who asked, and
+// never Grasp staff. Workflow parameter values are set directly
+// (workflows/params.ts); a parameter change asked for before that is
+// legacy: never listed, never approved, and it changes nothing.
 //
 // - Deciding is one conditional update that moves the approval from
 //   `pending` once, and holds only while the decider may decide it: an
 //   active member with the role its approvers name, not its requester (the
 //   break-glass exception below), with a requester who is still an active
 //   admin or builder, and with what it changes still there. The change it
-//   approves (the permission made active, the value set) and its audit
+//   approves (the permission made active) and its audit
 //   event are in the same batch, each only if that update changed the
 //   row, so two approvers racing, a replay, or an approval after a
 //   decline or a withdrawal changes nothing.
@@ -66,13 +66,8 @@ import {
 //   with `breakGlass: true`. Another admin is an active admin, or anyone
 //   the deployment config names as one who hasn't been removed, signed in
 //   or not. Accepted residual: an admin who demotes every other admin can
-//   then break the glass; both steps are audited. Sensitive values have no
-//   break-glass: a builder is a second person too.
-// - A sensitive value change is asked for against the App version current
-//   then; once another version is current, it is stale.
+//   then break the glass; both steps are audited.
 // - Who decided comes from the session, never from the request.
-// - Builders see pending changes with their values (`list`), as they see
-//   and set the values themselves: by design.
 
 type ApprovalRow = typeof approvals.$inferSelect;
 type PermissionRow = typeof permissions.$inferSelect;
@@ -83,7 +78,7 @@ type Verdict = "approved" | "declined" | "withdrawn";
 /** The most pending approvals one list returns, oldest first. */
 const maxListed = 200;
 
-/** The roles that may ask for approvals, and approve sensitive values. */
+/** The roles that may ask for approvals, and decide a builders' one. */
 const buildRoles: readonly Role[] = ["admin", "builder"];
 
 /** That `userId` may decide the approval its approvers name, now. */
@@ -105,8 +100,8 @@ const appExists = (id: SQLiteColumn): SQL =>
 
 /**
  * That what the approval changes is still there: a permission still
- * requested, with the Apps it names; a parameter's App, still at the
- * version the change was asked against.
+ * requested, with the Apps it names. A parameter change asked for before
+ * builders set values directly (workflows/params.ts) is never live.
  */
 const changeLive = (): SQL => sql`CASE ${approvals.kind}
   WHEN 'permission' THEN EXISTS (
@@ -115,11 +110,6 @@ const changeLive = (): SQL => sql`CASE ${approvals.kind}
       AND ${permissions.status} = 'requested'
       AND (${permissions.subjectType} <> 'app' OR ${appExists(permissions.subjectId)})
       AND (${permissions.objectType} <> 'workflow' OR ${appExists(permissions.objectId)})
-  )
-  WHEN 'param' THEN EXISTS (
-    SELECT 1 FROM ${apps}
-    WHERE ${apps.id} = ${approvals.appId}
-      AND ${apps.currentVersion} = ${approvals.version}
   )
   ELSE 0 END`;
 
@@ -336,8 +326,6 @@ const decisionEntry = (
 /**
  * The change an approval makes when it ends with `verdict`, as statements
  * that run only if `decided` holds: that this very decision was stored.
- * An approved value is kept with its approval, which makes it count where
- * a version declares the parameter sensitive (workflows/params.ts).
  */
 const changesOf = (
   db: DrizzleD1Database,
@@ -347,32 +335,9 @@ const changesOf = (
   at: Date,
   decided: SQL
 ) => {
+  // A parameter change changes nothing: it can't be approved (`changeLive`).
   if (row.kind === "param") {
-    if (verdict !== "approved") {
-      return [];
-    }
-    return [
-      db
-        .insert(workflowParamValues)
-        .select(
-          sql`SELECT ${approvals.appId}, ${approvals.workflowId}, ${approvals.param},
-              ${approvals.value}, ${approvals.requestedBy}, ${at.getTime()}, ${approvals.id}
-            FROM ${approvals} WHERE ${approvals.id} = ${row.id} AND ${decided}`
-        )
-        .onConflictDoUpdate({
-          target: [
-            workflowParamValues.appId,
-            workflowParamValues.workflowId,
-            workflowParamValues.param,
-          ],
-          set: {
-            value: sql`excluded.value`,
-            setBy: sql`excluded.set_by`,
-            setAt: sql`excluded.set_at`,
-            approvalId: sql`excluded.approval_id`,
-          },
-        }),
-    ];
+    return [];
   }
   const requested = and(
     eq(permissions.id, row.permissionId ?? ""),
@@ -477,7 +442,11 @@ const breakGlassOf = (options: unknown): boolean =>
     options
   )?.breakGlass === true;
 
-/** Pending approvals, oldest first. For admins and builders. */
+/**
+ * Pending approvals, oldest first. For admins and builders. Legacy
+ * parameter changes are left out: nobody can approve them, and they would
+ * take up the list ahead of newer permission requests.
+ */
 export const listApprovals = async (
   env: Env,
   by: Identity
@@ -486,7 +455,9 @@ export const listApprovals = async (
   const rows = await drizzle(env.DB)
     .select()
     .from(approvals)
-    .where(eq(approvals.status, "pending"))
+    .where(
+      and(eq(approvals.status, "pending"), eq(approvals.kind, "permission"))
+    )
     .orderBy(asc(approvals.requestedAt), asc(approvals.id))
     .limit(maxListed);
   return rows.map(toApproval);

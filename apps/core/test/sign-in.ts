@@ -214,6 +214,13 @@ export const callAuth = async (
  * `code` (every expected error has one, and keeps it over RPC), or else
  * the error as text.
  */
+/** The error a promise was refused with, or "ok" if it wasn't. */
+export const refusal = async (promise: Promise<unknown>): Promise<unknown> =>
+  await promise.then(
+    () => "ok",
+    (error: unknown) => error
+  );
+
 export const outcome = async (promise: Promise<unknown>): Promise<string> => {
   try {
     await promise;

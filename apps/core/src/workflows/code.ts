@@ -11,7 +11,11 @@ import type { ParamKind } from "@grasp-os/sdk/params";
 import type { AppFiles } from "@grasp-os/shared/apps";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
-import { workflowErrors } from "@grasp-os/shared/workflows";
+import {
+  paramDeclarationSchema,
+  paramDeclarationsSchema,
+  workflowErrors,
+} from "@grasp-os/shared/workflows";
 import type { RpcTarget } from "cloudflare:workers";
 import { z } from "zod";
 
@@ -93,40 +97,26 @@ interface TestsEntrypoint extends Rpc.WorkerEntrypointBranded {
 
 /**
  * A workflow's parameters as its code declares them (the SDK's
- * `ParamMetadata`). The isolate sends them, so they are checked, and
- * bounded.
+ * `ParamMetadata`), within the bounds the SDK checks too. The isolate
+ * sends them, so they are checked again here.
  */
-const declaredParamsSchema = z
-  .array(
-    z.object({
-      name: z.string().regex(/^[A-Za-z_$][\w$]{0,63}$/u),
-      kind: z.custom<ParamKind>(
-        (kind) =>
-          typeof kind === "string" && Object.hasOwn(paramValueSchemas, kind)
-      ),
-      label: z.string().max(200),
-      default: z.union([z.string().max(4096), z.number()]),
-      sensitive: z.boolean(),
-      currency: z.string().max(3).optional(),
-    })
-  )
-  .max(100)
-  .superRefine((params, context) => {
-    // Each name once: two declarations of one name would let the one read
-    // decide whether the other is sensitive.
-    const names = new Set(params.map(({ name }) => name));
-    if (names.size !== params.length) {
-      context.addIssue({ code: "custom", message: "Each name once" });
+const declaredParamsSchema = paramDeclarationsSchema(
+  paramDeclarationSchema.extend({
+    kind: z.custom<ParamKind>(
+      (kind) =>
+        typeof kind === "string" && Object.hasOwn(paramValueSchemas, kind)
+    ),
+  })
+).superRefine((params, context) => {
+  for (const param of params) {
+    if (!paramValueSchemas[param.kind].safeParse(param.default).success) {
+      context.addIssue({
+        code: "custom",
+        message: `The default of ${param.name} isn't a ${param.kind}`,
+      });
     }
-    for (const param of params) {
-      if (!paramValueSchemas[param.kind].safeParse(param.default).success) {
-        context.addIssue({
-          code: "custom",
-          message: `The default of ${param.name} isn't a ${param.kind}`,
-        });
-      }
-    }
-  });
+  }
+});
 
 /** A parameter as a workflow's code declares it. */
 export type DeclaredParam = z.infer<typeof declaredParamsSchema>[number];
@@ -357,6 +347,28 @@ export const loadRun = (
     env: runEnv,
   })).getEntrypoint<RunEntrypoint>("Run");
 
+/** The most of why an isolate didn't start that a failure keeps. */
+const maxLoadFailure = 500;
+
+/**
+ * workerd's "Failed to start Worker" message: first line, and what threw.
+ * Should workerd word it otherwise, a start failure no longer matches, and
+ * shows as the platform's error (`internal.unexpected`), never as passing.
+ */
+const failedStart = /^Failed to start Worker:\n(?:Uncaught )?(?<cause>.*)/u;
+
+/**
+ * What threw as an isolate's code loaded, without the stack, when `error`
+ * is workerd's "Failed to start Worker"; nothing for any other error.
+ */
+const startFailure = (error: unknown): string | undefined => {
+  const cause =
+    error instanceof Error
+      ? failedStart.exec(error.message)?.groups?.cause
+      : undefined;
+  return cause?.slice(0, maxLoadFailure);
+};
+
 /**
  * The parameters workflow `id` declares at an App version (with its
  * `files`), read from its code in an isolate of their own, kept by the
@@ -381,7 +393,18 @@ export const declaredParams = async (
       env: {},
     })
   ).getEntrypoint<ParamsEntrypoint>("Params");
-  const outcome = fromIsolate(await code.read());
+  let outcome: Settled<unknown>;
+  try {
+    outcome = fromIsolate(await code.read());
+  } catch (error) {
+    // A module threw as it loaded (a definition the SDK refuses): the
+    // code's failure, as `workflow.invalid`. Anything else is the
+    // platform's.
+    if (startFailure(error) === undefined) {
+      throw error;
+    }
+    throw workflowErrors.create("workflow.invalid");
+  }
   const params = outcome.ok
     ? declaredParamsSchema.safeParse(outcome.value)
     : undefined;
@@ -408,7 +431,19 @@ const testFailures = async (
       env: {},
     })
   ).getEntrypoint<TestsEntrypoint>("Tests");
-  const outcome = fromIsolate(await tests.run());
+  let outcome: Settled<unknown>;
+  try {
+    outcome = fromIsolate(await tests.run());
+  } catch (error) {
+    // The isolate didn't start because a module threw as it loaded, such
+    // as a workflow whose definition the SDK refuses: the code's failure,
+    // reported as its tests'. Anything else is the platform's.
+    const cause = startFailure(error);
+    if (cause === undefined) {
+      throw error;
+    }
+    return [`${id}: its code doesn't load: ${cause}`];
+  }
   if (!outcome.ok) {
     return [`${id}: ${outcome.error.message}`];
   }

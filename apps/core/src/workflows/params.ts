@@ -1,5 +1,4 @@
 import { paramValueSchemas } from "@grasp-os/sdk/params";
-import { approvalErrors } from "@grasp-os/shared/approvals";
 import type { ParamValue } from "@grasp-os/shared/approvals";
 import { actorOf } from "@grasp-os/shared/audit";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
@@ -11,33 +10,26 @@ import type { WorkflowParam } from "@grasp-os/shared/workflows";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import { toApproval } from "../approvals.ts";
 import { findApp, requireBuilder, versionFiles } from "../apps.ts";
-import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
-import { apps, approvals, workflowParamValues } from "../db/core/schema.ts";
-import { isUniqueViolation } from "../db/d1.ts";
+import { auditedBatch, outboxedIfChanged } from "../audit-outbox.ts";
+import { apps, workflowParamValues } from "../db/core/schema.ts";
 import { declaredParams, hasWorkflow } from "./code.ts";
 import type { DeclaredParam } from "./code.ts";
 
 // The values people set for a workflow's parameters, over the defaults in
-// its code. Which parameters there are, of what kind, and which are
-// sensitive, is what the workflow's code in its App's current version
-// declares. A value that isn't sensitive is set at once; a sensitive one
-// becomes a pending change that someone other than its requester approves
-// (approvals.ts), and the approval sets it. Values are validated as the
-// SDK validates them when a run reads them, and kept out of the audit log
-// (R16): events name the parameter only. Builders see the values, which
-// they set themselves: by design.
+// its code. Which parameters there are, and of what kind, is what the
+// workflow's code in its App's current version declares. Builders set
+// values directly, audited as `workflow.param.updated`: the event names
+// the parameter, never its value (R16). A parameter the code declares
+// sensitive is set the same way; sensitivity only says how carefully its
+// value is shown. Values are validated as the SDK validates them when a
+// run reads them.
 //
-// Versions can disagree about which parameters are sensitive, and a
-// builder can make any version current. So what a version reads goes by
-// that version's own declarations (`paramValues`): for a parameter it
-// declares sensitive, only a value an approval set counts, and an approved
-// value is never overwritten without another approval, whatever a later
-// version declares.
-//
-// Runs don't read these values yet: every run uses its code's defaults
-// until the dispatcher passes them in, through `paramValues`.
+// Versions can disagree about a parameter's kind, and a builder can make
+// any version current. So what a version reads goes by that version's own
+// declarations (`paramValues`): a stored value that isn't of the kind it
+// declares doesn't count. Runs read them the same way, as the version they
+// are pinned to declares them (dispatcher.ts).
 
 /** The longest value kept, as JSON text. */
 const maxValueLength = 4096;
@@ -100,14 +92,13 @@ const valueRows = async (
 
 /**
  * The stored value that counts for `param` as a version declares it: one
- * of its kind and, for a sensitive parameter, set by an approval.
- * Otherwise none, and the code's default applies.
+ * of its kind. Otherwise none, and the code's default applies.
  */
 const valueFor = (
   param: DeclaredParam,
   row: ValueRow | undefined
 ): ParamValue | undefined => {
-  if (!row || (param.sensitive && row.approvalId === null)) {
+  if (!row) {
     return undefined;
   }
   const parsed = paramValueSchemas[param.kind].safeParse(row.value);
@@ -139,33 +130,16 @@ export const paramValues = async (
   return values;
 };
 
-/** The workflow's parameters with their values and pending changes. */
+/** The workflow's parameters with their values. */
 const paramsOf = async (
   env: Env,
   { app, workflow, params }: CurrentWorkflow
 ): Promise<WorkflowParam[]> => {
-  const [values, pending] = await Promise.all([
-    paramValues(env, app, workflow, params),
-    drizzle(env.DB)
-      .select()
-      .from(approvals)
-      .where(
-        and(
-          eq(approvals.kind, "param"),
-          eq(approvals.appId, app),
-          eq(approvals.workflowId, workflow),
-          eq(approvals.status, "pending")
-        )
-      ),
-  ]);
-  return params.map((param) => {
-    const change = pending.find((row) => row.param === param.name);
-    return {
-      ...param,
-      value: values.get(param.name) ?? null,
-      pending: change ? toApproval(change) : null,
-    };
-  });
+  const values = await paramValues(env, app, workflow, params);
+  return params.map((param) => ({
+    ...param,
+    value: values.get(param.name) ?? null,
+  }));
 };
 
 /** A workflow's parameters, as its App's current version declares them. */
@@ -186,62 +160,10 @@ const parseValue = (param: DeclaredParam, value: unknown): ParamValue => {
   return parsed.data;
 };
 
-/** Asks for `param` to change to `value`, for someone else to approve. */
-const requestChange = async (
-  env: Env,
-  by: Identity,
-  current: CurrentWorkflow,
-  param: DeclaredParam,
-  value: ParamValue
-): Promise<void> => {
-  const values = await paramValues(env, current.app, current.workflow, [param]);
-  const approval = crypto.randomUUID();
-  const db = drizzle(env.DB);
-  try {
-    await auditedBatch(env, db, [
-      db.insert(approvals).values({
-        id: approval,
-        kind: "param",
-        permissionId: null,
-        appId: current.app,
-        workflowId: current.workflow,
-        param: param.name,
-        value,
-        previous: values.get(param.name) ?? null,
-        approvers: "builders",
-        status: "pending",
-        requestedBy: by.userId,
-        requestedAt: new Date(),
-        decidedBy: null,
-        decidedAt: null,
-        breakGlass: false,
-        version: current.version,
-        decision: null,
-      }),
-      outboxed(db, {
-        actor: actorOf(by),
-        action: "workflow.param.requested",
-        target: { type: "app", id: current.app },
-        detail: {
-          workflow: current.workflow,
-          param: param.name,
-          approval,
-          version: current.version,
-        },
-      }),
-    ]);
-  } catch (error) {
-    if (isUniqueViolation(error)) {
-      throw approvalErrors.create("approval.conflict");
-    }
-    throw error;
-  }
-};
-
 /**
- * Sets a value that needs no approval, in one statement: only while the
- * App's current version is still the one read, and never over a value an
- * approval set. Otherwise `workflow.param_conflict`.
+ * Sets a value, in one statement: only while the App's current version is
+ * still the one read, whose declarations it was checked against.
+ * Otherwise `workflow.param_conflict`.
  */
 const setDirectly = async (
   env: Env,
@@ -273,8 +195,8 @@ const setDirectly = async (
           value: sql`excluded.value`,
           setBy: sql`excluded.set_by`,
           setAt: sql`excluded.set_at`,
+          approvalId: sql`excluded.approval_id`,
         },
-        setWhere: sql`${workflowParamValues.approvalId} IS NULL`,
       })
       .returning({ param: workflowParamValues.param }),
     outboxedIfChanged(db, {
@@ -293,11 +215,7 @@ const setDirectly = async (
   }
 };
 
-/**
- * Sets a parameter: at once, or, when the current version declares it
- * sensitive or an approval set its value, as a change that waits for
- * someone else's approval. Grasp staff set nothing.
- */
+/** Sets a parameter, sensitive or not. Grasp staff set nothing. */
 export const setParam = async (
   env: Env,
   by: Identity,
@@ -314,14 +232,7 @@ export const setParam = async (
   if (!param) {
     throw workflowErrors.create("workflow.param_not_found");
   }
-  const parsed = parseValue(param, value);
-  const rows = await valueRows(env, current.app, current.workflow);
-  const approved = rows.some(
-    (row) => row.param === param.name && row.approvalId !== null
-  );
-  // An approved value changes only through another approval.
-  const change = param.sensitive || approved ? requestChange : setDirectly;
-  await change(env, by, current, param, parsed);
+  await setDirectly(env, by, current, param, parseValue(param, value));
   const params = await paramsOf(env, current);
   const updated = params.find((declared) => declared.name === param.name);
   if (!updated) {

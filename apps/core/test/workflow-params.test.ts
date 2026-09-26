@@ -1,21 +1,28 @@
+import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
-import { describe, expect, it } from "vite-plus/test";
+import { workflowErrors } from "@grasp-os/shared/workflows";
+import { env } from "cloudflare:workers";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
+import { ownerEventType } from "../src/workflows/dispatcher.ts";
+import { startRun } from "../src/workflows/runs.ts";
 import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
+import { endLiveRuns, finished, leave } from "./runs.ts";
 import {
   auditedDuring,
   openRpc,
   outcome,
+  refusal,
   signedIn,
   signedInApi,
   staffPerson,
 } from "./sign-in.ts";
 
-// The values of workflows' parameters. A sensitive one never changes on
-// one person's word (threat model R8, WF5): a change waits until someone
-// other than the person who asked approves it, and the approval sets the
-// value. These tests try to get a sensitive value changed any other way.
+// The values of workflows' parameters: builders set them directly, audited
+// without the value (R16), and runs read them as the version they are
+// pinned to declares them. A sensitive parameter is set like any other.
 
 const idp = mockIdp();
 
@@ -58,6 +65,11 @@ export default workflowTests(definition, [{ name: "runs", mocks: { limit: 1 }, e
 
 const invoiceFiles = invoiceVersion();
 
+/** Why a version's tests failed, as `workflow.tests_failed` says. */
+const testsFailedSchema = z.object({
+  details: z.object({ failures: z.array(z.string()) }),
+});
+
 /** A new App with the invoice workflow as its current version. */
 const invoicesApp = async (builder: Person): Promise<string> => {
   const { id } = await builder.api.apps.create({ name: "Invoices" });
@@ -75,22 +87,36 @@ const paramOf = async (person: Person, app: string, name: string) => {
   return found;
 };
 
-/** Asks to change the limit as `requester`; returns the pending approval. */
-const limitChange = async (requester: Person, app: string, to: number) => {
-  const { pending } = await requester.api.workflows.params.set(
-    app,
-    "invoices",
-    "limit",
-    to
+/** The invoice workflow with its limit as text, not money. */
+const textLimitVersion = (): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(invoiceVersion()).map(([path, text]) => [
+      path,
+      text
+        .replace("{ money, person,", "{ money, person, text,")
+        .replace(
+          'money({ label: "Review invoices above", currency: "EUR", default: 500_000, sensitive: true })',
+          'text({ label: "Review invoices above", default: "none" })'
+        ),
+    ])
   );
-  if (!pending) {
-    throw new Error("The change isn't pending");
-  }
-  return pending;
+
+/** What a run of the invoice workflow read as its limit, once it ended. */
+const limitOfRun = async (person: Person, run: string): Promise<unknown> => {
+  await finished(run);
+  const { status, output } = await person.api.workflows.status(run);
+  expect(status).toBe("completed");
+  return output;
+};
+
+/** Starts the invoice workflow and returns the limit it read. */
+const runLimit = async (person: Person, app: string): Promise<unknown> => {
+  const run = await person.api.workflows.start(app, "invoices");
+  return await limitOfRun(person, run.id);
 };
 
 describe("workflow parameters", () => {
-  it("are listed as the code declares them, and a value that isn't sensitive is set at once", async () => {
+  it("are listed as the code declares them, and set at once, sensitive or not, audited without their values", async () => {
     const builder = await personApi("builder");
     const app = await invoicesApp(builder);
     await expect(
@@ -104,7 +130,6 @@ describe("workflow parameters", () => {
         default: 500_000,
         currency: "EUR",
         value: null,
-        pending: null,
       },
       {
         name: "reviewer",
@@ -113,7 +138,6 @@ describe("workflow parameters", () => {
         sensitive: false,
         default: "role:admin",
         value: null,
-        pending: null,
       },
     ]);
 
@@ -125,7 +149,10 @@ describe("workflow parameters", () => {
           "reviewer",
           "role:builder"
         )
-      ).resolves.toMatchObject({ value: "role:builder", pending: null });
+      ).resolves.toMatchObject({ value: "role:builder" });
+      await expect(
+        builder.api.workflows.params.set(app, "invoices", "limit", 912_345)
+      ).resolves.toMatchObject({ sensitive: true, value: 912_345 });
     });
     // The audit log names the parameter, never its value (R16).
     expect(events).toMatchObject([
@@ -135,14 +162,24 @@ describe("workflow parameters", () => {
         target: { type: "app", id: app },
         detail: { workflow: "invoices", param: "reviewer" },
       },
+      {
+        actor: { type: "person", userId: builder.userId },
+        action: "workflow.param.updated",
+        target: { type: "app", id: app },
+        detail: { workflow: "invoices", param: "limit" },
+      },
     ]);
-    expect(JSON.stringify(events)).not.toContain("role:builder");
+    expect(JSON.stringify(events)).not.toMatch(/role:builder|912345/u);
   });
 
   it("refuse values that don't fit, parameters that don't exist, and people who can't build", async () => {
     const builder = await personApi("builder");
     const user = await personApi("user");
     const app = await invoicesApp(builder);
+    const { core } = await openRpc(
+      await signedIn(idp, "grasp-staff", staffPerson())
+    );
+    const staff = core.authenticate();
     const set = async (person: Person, param: string, value: string | number) =>
       await outcome(
         person.api.workflows.params.set(app, "invoices", param, value)
@@ -154,6 +191,10 @@ describe("workflow parameters", () => {
       tooLong: await set(builder, "reviewer", `person:${"a".repeat(5000)}`),
       unknown: await set(builder, "budget", 1),
       byUser: await set(user, "reviewer", "role:builder"),
+      // Grasp staff set no client's values.
+      byStaff: await outcome(
+        staff.workflows.params.set(app, "invoices", "reviewer", "role:user")
+      ),
       listByUser: await outcome(
         user.api.workflows.params.list(app, "invoices")
       ),
@@ -167,278 +208,50 @@ describe("workflow parameters", () => {
       tooLong: "workflow.param_invalid",
       unknown: "workflow.param_not_found",
       byUser: "role.forbidden",
+      byStaff: "role.forbidden",
       listByUser: "role.forbidden",
       noWorkflow: "workflow.not_found",
     });
   });
 });
 
-describe("sensitive values", () => {
-  it("change only once someone other than the requester approves, and each step is audited", async () => {
+describe("declarations", () => {
+  it("count a stored value only where the reading version declares it of that kind", async () => {
     const builder = await personApi("builder");
-    const other = await personApi("builder");
     const app = await invoicesApp(builder);
-
-    let pending: Awaited<ReturnType<typeof limitChange>> | undefined;
-    const requested = await auditedDuring(async () => {
-      pending = await limitChange(builder, app, 900_000);
-    });
-    expect(pending).toMatchObject({
-      kind: "param",
-      status: "pending",
-      approvers: "builders",
-      app,
-      workflow: "invoices",
-      param: "limit",
-      from: null,
-      to: 900_000,
-      requestedBy: builder.userId,
-    });
-    await expect(paramOf(builder, app, "limit")).resolves.toMatchObject({
-      value: null,
-      pending: { id: pending?.id, to: 900_000 },
-    });
-    expect(requested).toMatchObject([
-      {
-        action: "workflow.param.requested",
-        target: { type: "app", id: app },
-        detail: { workflow: "invoices", param: "limit", approval: pending?.id },
-      },
-    ]);
-
-    const approved = await auditedDuring(async () => {
-      await other.api.approvals.approve(pending?.id ?? "");
-    });
+    const v1 = 1;
+    // v2 declares the limit as text, and a text value is set under it.
+    await release(builder, app, textLimitVersion());
+    const underV2 = await paramOf(builder, app, "limit");
+    await builder.api.workflows.params.set(app, "invoices", "limit", "none");
+    await builder.api.apps.versions.setCurrent(app, v1);
     expect({
-      param: await paramOf(builder, app, "limit"),
-      approved,
-      // The audit log never holds the values (R16).
-      valuesAudited: JSON.stringify([...requested, ...approved]).includes(
-        "900000"
-      ),
-      // The next change starts from the value now set.
-      next: await limitChange(other, app, 1_000_000),
+      underV2: underV2.kind,
+      // v1 declares money: the text isn't one, so the default applies.
+      underV1: await paramOf(builder, app, "limit"),
     }).toMatchObject({
-      param: { value: 900_000, pending: null },
-      approved: [
-        {
-          actor: { type: "person", userId: other.userId },
-          action: "workflow.param.approved",
-          detail: {
-            workflow: "invoices",
-            param: "limit",
-            approval: pending?.id,
-            requestedBy: builder.userId,
-          },
-        },
-      ],
-      valuesAudited: false,
-      next: { from: 900_000, to: 1_000_000 },
+      underV2: "text",
+      underV1: { kind: "money", value: null },
     });
   });
 
-  it("are never approved by the requester, not even an admin who is the only admin", async () => {
-    const admin = await personApi("admin");
-    const app = await invoicesApp(admin);
-    const pending = await limitChange(admin, app, 900_000);
-    expect([
-      await outcome(admin.api.approvals.approve(pending.id)),
-      await outcome(
-        admin.api.approvals.approve(pending.id, { breakGlass: true })
-      ),
-    ]).toStrictEqual(["approval.self", "approval.self"]);
-    await expect(paramOf(admin, app, "limit")).resolves.toMatchObject({
-      value: null,
-    });
-  });
-
-  it("are never approved by users or Grasp staff, and never asked for by staff", async () => {
-    const builder = await personApi("builder");
-    const user = await personApi("user");
-    const app = await invoicesApp(builder);
-    const pending = await limitChange(builder, app, 900_000);
-    const { core } = await openRpc(
-      await signedIn(idp, "grasp-staff", staffPerson())
-    );
-    const staff = core.authenticate();
-    expect([
-      await outcome(user.api.approvals.approve(pending.id)),
-      await outcome(staff.approvals.approve(pending.id)),
-      await outcome(staff.approvals.decline(pending.id)),
-      // Nor do they ask for changes.
-      await outcome(
-        staff.workflows.params.set(app, "invoices", "reviewer", "role:user")
-      ),
-    ]).toStrictEqual([
-      "approval.forbidden",
-      "approval.forbidden",
-      "approval.forbidden",
-      "role.forbidden",
-    ]);
-    await expect(paramOf(builder, app, "limit")).resolves.toMatchObject({
-      value: null,
-    });
-  });
-
-  it("take one approval when two people approve at once", async () => {
-    const builder = await personApi("builder");
-    const first = await personApi("builder");
-    const second = await personApi("admin");
-    const app = await invoicesApp(builder);
-    const pending = await limitChange(builder, app, 900_000);
-    let outcomes: string[] = [];
-    const events = await auditedDuring(async () => {
-      outcomes = await Promise.all([
-        outcome(first.api.approvals.approve(pending.id)),
-        outcome(second.api.approvals.approve(pending.id)),
-      ]);
-    });
-    expect(outcomes.toSorted()).toStrictEqual(["approval.closed", "ok"]);
-    expect(events.map(({ action }) => action)).toStrictEqual([
-      "workflow.param.approved",
-    ]);
-    await expect(paramOf(builder, app, "limit")).resolves.toMatchObject({
-      value: 900_000,
-    });
-  });
-
-  it("wait one at a time, and are withdrawn only by their requester", async () => {
-    const builder = await personApi("builder");
-    const other = await personApi("builder");
-    const app = await invoicesApp(builder);
-    const withdrawn = await limitChange(builder, app, 900_000);
-    const refused = {
-      second: await outcome(limitChange(other, app, 1)),
-      withdrawByOther: await outcome(
-        other.api.approvals.withdraw(withdrawn.id)
-      ),
-    };
-    const events = await auditedDuring(async () => {
-      await builder.api.approvals.withdraw(withdrawn.id);
-    });
-    expect({
-      refused,
-      events,
-      approveAfter: await outcome(other.api.approvals.approve(withdrawn.id)),
-      param: await paramOf(builder, app, "limit"),
-    }).toMatchObject({
-      refused: {
-        second: "approval.conflict",
-        withdrawByOther: "approval.forbidden",
-      },
-      events: [{ action: "workflow.param.withdrawn" }],
-      approveAfter: "approval.closed",
-      param: { value: null, pending: null },
-    });
-  });
-
-  it("never apply once declined", async () => {
-    const builder = await personApi("builder");
-    const other = await personApi("builder");
-    const app = await invoicesApp(builder);
-    const declined = await limitChange(other, app, 1);
-    const events = await auditedDuring(async () => {
-      await builder.api.approvals.decline(declined.id);
-    });
-    expect({
-      events,
-      approveAfter: await outcome(builder.api.approvals.approve(declined.id)),
-      param: await paramOf(builder, app, "limit"),
-    }).toMatchObject({
-      events: [{ action: "workflow.param.declined" }],
-      approveAfter: "approval.closed",
-      param: { value: null, pending: null },
-    });
-  });
-
-  it("aren't approved once the requester left", async () => {
-    const admin = await personApi("admin");
-    const leaver = await personApi("builder");
-    const app = await invoicesApp(admin);
-    const pending = await limitChange(leaver, app, 900_000);
-    await admin.api.members.remove(leaver.userId);
-    await expect(
-      outcome(admin.api.approvals.approve(pending.id))
-    ).resolves.toBe("approval.stale");
-    await expect(paramOf(admin, app, "limit")).resolves.toMatchObject({
-      value: null,
-    });
-  });
-
-  it("never take an unapproved value, whatever another version declared", async () => {
+  it("can't be declared past the bounds core keeps: the version's tests fail", async () => {
     const builder = await personApi("builder");
     const { id: app } = await builder.api.apps.create({ name: "Invoices" });
-    // v1 declares both sensitive; v2 declares neither.
-    const v1 = await release(
-      builder,
-      app,
-      invoiceVersion({ limit: true, reviewer: true })
+    const files = Object.fromEntries(
+      Object.entries(invoiceVersion()).map(([path, text]) => [
+        path,
+        text.replace("Review invoices above", "L".repeat(201)),
+      ])
     );
-    await release(
-      builder,
-      app,
-      invoiceVersion({ limit: false, reviewer: false })
-    );
-    // Set directly under v2, then v1 made current again.
-    const set = await Promise.all([
-      builder.api.workflows.params.set(app, "invoices", "limit", 1),
-      builder.api.workflows.params.set(
-        app,
-        "invoices",
-        "reviewer",
-        "role:user"
+    const refused = await refusal(release(builder, app, files));
+    const { failures } = testsFailedSchema.parse(refused).details;
+    expect({
+      code: workflowErrors.codeOf(refused),
+      loads: failures.some((failure) =>
+        /^invoices: its code doesn't load: .*Parameters/u.test(failure)
       ),
-    ]);
-    await builder.api.apps.versions.setCurrent(app, v1);
-    const afterSwitchingBack = await builder.api.workflows.params.list(
-      app,
-      "invoices"
-    );
-    expect({
-      underV2: set.map(({ value }) => value),
-      underV1: afterSwitchingBack.map(({ value }) => value),
-    }).toStrictEqual({
-      underV2: [1, "role:user"],
-      // The code's defaults: nobody approved those values.
-      underV1: [null, null],
-    });
-  });
-
-  it("keep an approved value until another approval, whatever a later version declares", async () => {
-    const builder = await personApi("builder");
-    const other = await personApi("builder");
-    const app = await invoicesApp(builder);
-    const approval = await limitChange(builder, app, 900_000);
-    await other.api.approvals.approve(approval.id);
-    await release(builder, app, invoiceVersion({ limit: false }));
-    // Not sensitive now, but its value came from an approval: a change
-    // still waits for one.
-    const set = await builder.api.workflows.params.set(
-      app,
-      "invoices",
-      "limit",
-      1
-    );
-    expect(set).toMatchObject({
-      sensitive: false,
-      value: 900_000,
-      pending: { from: 900_000, to: 1, requestedBy: builder.userId },
-    });
-  });
-
-  it("aren't approved once another App version is current", async () => {
-    const builder = await personApi("builder");
-    const other = await personApi("builder");
-    const app = await invoicesApp(builder);
-    const pending = await limitChange(builder, app, 900_000);
-    await release(builder, app, invoiceVersion({ limit: true }, "// v2"));
-    expect({
-      approve: await outcome(other.api.approvals.approve(pending.id)),
-      param: await paramOf(builder, app, "limit"),
-    }).toMatchObject({
-      approve: "approval.stale",
-      param: { value: null },
-    });
+    }).toStrictEqual({ code: "workflow.tests_failed", loads: true });
   });
 
   it("are refused from code that declares a parameter twice", async () => {
@@ -456,5 +269,104 @@ describe("sensitive values", () => {
     await expect(
       outcome(builder.api.workflows.params.list(app, "invoices"))
     ).resolves.toBe("workflow.invalid");
+    // A run of it fails as it loads: it can't read its values either.
+    const run = await builder.api.workflows.start(app, "invoices");
+    await finished(run.id);
+    const { status, failure } = await builder.api.workflows.status(run.id);
+    expect({ status, code: failure?.error.code }).toStrictEqual({
+      status: "failed",
+      code: "workflow.invalid",
+    });
+  });
+});
+
+describe("change requests from before values were set directly", () => {
+  it("are never listed or approved, and change nothing", async () => {
+    const requester = await personApi("builder");
+    const approver = await personApi("builder");
+    const app = await invoicesApp(requester);
+    // A pending change of the limit, as the release before this one made.
+    const pending = crypto.randomUUID();
+    await env.DB.prepare(
+      `INSERT INTO approvals (id, kind, app_id, workflow_id, param, value, approvers,
+        status, requested_by, requested_at, break_glass, version)
+       VALUES (?, 'param', ?, 'invoices', 'limit', '900000', 'builders', 'pending', ?, ?, 0, 1)`
+    )
+      .bind(pending, app, requester.userId, Date.now())
+      .run();
+    const listed = await approver.api.approvals.list();
+    const approve = await outcome(approver.api.approvals.approve(pending));
+    expect({
+      listed: listed.some(({ id }) => id === pending),
+      approve,
+      param: await paramOf(requester, app, "limit"),
+    }).toMatchObject({
+      listed: false,
+      approve: "approval.stale",
+      param: { value: null },
+    });
+  });
+});
+
+describe("runs", { timeout: 60_000 }, () => {
+  afterEach(endLiveRuns);
+
+  it("use a value as soon as it's set", async () => {
+    const builder = await personApi("builder");
+    const { id: app } = await builder.api.apps.create({ name: "Invoices" });
+    await release(builder, app, invoiceVersion({ limit: false }));
+    const before = await runLimit(builder, app);
+    await builder.api.workflows.params.set(app, "invoices", "limit", 700_000);
+    expect({ before, after: await runLimit(builder, app) }).toStrictEqual({
+      before: 500_000,
+      after: 700_000,
+    });
+  });
+
+  it("use a sensitive value as soon as it's set", async () => {
+    const builder = await personApi("builder");
+    const app = await invoicesApp(builder);
+    await builder.api.workflows.params.set(app, "invoices", "limit", 900_000);
+    await expect(runLimit(builder, app)).resolves.toBe(900_000);
+  });
+
+  it("go by what the version they are pinned to declares, not the current one", async () => {
+    const builder = await personApi("builder");
+    const app = await invoicesApp(builder);
+    // A triggered run pinned to v1, where the limit is money, waits for its
+    // App's owner before it reads its values.
+    const rejoin = await leave(builder.userId);
+    const run = await startRun(env, {
+      app: appIdSchema.parse(app),
+      workflow: workflowIdSchema.parse("invoices"),
+      input: undefined,
+      startedBy: null,
+      actor: { type: "system" },
+    });
+    await vi.waitFor(
+      async () => {
+        const row = await env.DB.prepare(
+          "SELECT status FROM workflow_runs WHERE id = ?"
+        )
+          .bind(run.id)
+          .first<{ status: string }>();
+        expect(row?.status).toBe("paused");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+    await rejoin();
+    // Meanwhile v2, where the limit is text, is current, with a text value.
+    await release(builder, app, textLimitVersion());
+    await builder.api.workflows.params.set(app, "invoices", "limit", "none");
+    const waiting = await env.WORKFLOWS.get(run.id);
+    await waiting.sendEvent({ type: ownerEventType, payload: null });
+    expect({
+      pinned: await limitOfRun(builder, run.id),
+      current: await runLimit(builder, app),
+    }).toStrictEqual({
+      // Not money, as v1 declares it: the code's default.
+      pinned: 500_000,
+      current: "none",
+    });
   });
 });

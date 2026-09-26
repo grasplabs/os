@@ -64,10 +64,7 @@ export interface SessionApi {
   readonly members: MembersApi;
   /** The audit log: search, export and chain verification. Admins only. */
   readonly audit: AuditApi;
-  /**
-   * Permission grants and sensitive value changes waiting for a second
-   * person. Admins and builders.
-   */
+  /** Permission grants waiting for a second person. Admins and builders. */
   readonly approvals: ApprovalsApi;
 }
 

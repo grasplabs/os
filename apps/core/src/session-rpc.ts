@@ -59,12 +59,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
     this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
     this.#connections = new ConnectionsRpc(env, checkWith("connections"));
-    // A workflow's parameter values are new with approvals: its flag too.
-    this.#workflows = new WorkflowsRpc(
-      env,
-      checkWith("workflows"),
-      checkWith("workflows", "approvals")
-    );
+    this.#workflows = new WorkflowsRpc(env, checkWith("workflows"));
     // Decisions belong to runs: the workflows kill switch stops them too.
     this.#decisions = new DecisionsRpc(
       env,

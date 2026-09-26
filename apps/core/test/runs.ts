@@ -116,3 +116,28 @@ export const liveStatus = async (run: string): Promise<string> => {
   const { status } = await instance.status();
   return status;
 };
+
+/** Removes a person from the organization; returns how to bring them back. */
+export const leave = async (userId: string): Promise<() => Promise<void>> => {
+  const membership = await env.DB.prepare(
+    "SELECT * FROM members WHERE user_id = ?"
+  )
+    .bind(userId)
+    .first<Record<string, string | number>>();
+  await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
+    .bind(userId)
+    .run();
+  return async () => {
+    await env.DB.prepare(
+      "INSERT INTO members (id, organization_id, user_id, role, created_at) VALUES (?, ?, ?, ?, ?)"
+    )
+      .bind(
+        membership?.id,
+        membership?.organization_id,
+        membership?.user_id,
+        membership?.role,
+        membership?.created_at
+      )
+      .run();
+  };
+};
