@@ -4,7 +4,7 @@ import { providerIds, staffWindowOpen } from "./config.ts";
 import type { SignInConfig } from "./config.ts";
 
 /** Why a verified ID token doesn't get someone in. Shown to them as a code. */
-export type ClaimsRefusal = Exclude<SignInRefusal, "method_not_allowed">;
+type ClaimsRefusal = Exclude<SignInRefusal, "method_not_allowed">;
 
 type Claims = Readonly<Record<string, unknown>>;
 

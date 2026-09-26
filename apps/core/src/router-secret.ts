@@ -1,9 +1,9 @@
 import { loopbackHosts, routerSecretHeader } from "@grasp-os/shared/router";
 
 /** Why a request was refused. Logged; the caller only ever sees 403. */
-export type RouterSecretRefusal = "missing" | "mismatch" | "not_configured";
+type RouterSecretRefusal = "missing" | "mismatch" | "not_configured";
 
-export type RouterSecretCheck =
+type RouterSecretCheck =
   | { ok: true; request: Request }
   | { ok: false; reason: RouterSecretRefusal };
 

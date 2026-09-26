@@ -7,7 +7,7 @@
 export const clientOrigin = "https://acme.grasp.test";
 
 export const acmeTenant = "11111111-1111-4111-8111-111111111111";
-export const graspTenant = "22222222-2222-4222-8222-222222222222";
+const graspTenant = "22222222-2222-4222-8222-222222222222";
 export const otherTenant = "33333333-3333-4333-8333-333333333333";
 /** The one Grasp staff member allowed in. */
 export const staffOid = "44444444-4444-4444-8444-444444444444";

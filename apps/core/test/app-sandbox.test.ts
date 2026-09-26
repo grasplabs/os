@@ -1,4 +1,3 @@
-import { appErrors } from "@grasp-os/shared/apps";
 import type { AppCaller } from "@grasp-os/shared/apps";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
@@ -14,7 +13,7 @@ import type { AppCallerInput } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
 import { buildServer } from "../src/screens.ts";
 import { mockIdp } from "./idp.ts";
-import { openRpc, signedInWithRole } from "./sign-in.ts";
+import { outcome, signedInApi } from "./sign-in.ts";
 
 // An App's server code is written by the agent and runs for everyone who
 // uses the App, so these tests take its side: code that tries to reach
@@ -25,11 +24,7 @@ import { openRpc, signedInWithRole } from "./sign-in.ts";
 const idp = mockIdp();
 
 /** A signed-in person's API, on a connection of their own. */
-const personApi = async (role: Role) => {
-  const person = await signedInWithRole(idp, role);
-  const { core } = await openRpc(person.session);
-  return { ...person, api: core.authenticate() };
-};
+const personApi = async (role: Role) => await signedInApi(idp, role);
 
 /**
  * The sample App's server code. `LABEL` tells versions apart; module
@@ -203,16 +198,6 @@ const as = (userId: string): AppCallerInput => ({
   userId,
   mode: "interactive",
 });
-
-/** The code a promise was refused with, or "ok" if it wasn't. */
-const outcome = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-    return "ok";
-  } catch (error) {
-    return appErrors.codeOf(error) ?? String(error);
-  }
-};
 
 /** Outlook, as a connection the App may be given. */
 const outlook = (app: AppId, binding = "OUTLOOK"): PermissionRequest => ({

@@ -12,8 +12,9 @@ import { mockIdp } from "./idp.ts";
 import {
   auditedDuring,
   callAuth,
-  openRpc,
-  signedInWithRole,
+  outcome,
+  signedInApi,
+  unique,
   whoami,
 } from "./sign-in.ts";
 
@@ -25,28 +26,15 @@ const idp = mockIdp();
 
 /** A signed-in person's Knowledge API, on a connection of their own. */
 const knowledgeOf = async (role: Role) => {
-  const person = await signedInWithRole(idp, role);
-  const { core } = await openRpc(person.session);
-  const api: KnowledgeApi = core.authenticate().knowledge;
+  const person = await signedInApi(idp, role);
+  const api: KnowledgeApi = person.api.knowledge;
   return { ...person, api };
 };
-
-const unique = () => crypto.randomUUID().slice(0, 8);
 
 const personal = (): CollectionInput => ({
   name: `Notes ${unique()}`,
   access: "me",
 });
-
-/** The code a promise was refused with, or "ok" if it wasn't. */
-const outcome = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-    return "ok";
-  } catch (error) {
-    return knowledgeErrors.codeOf(error) ?? String(error);
-  }
-};
 
 const detailsSchema = z.object({
   details: z.record(z.string(), z.unknown()).default({}),

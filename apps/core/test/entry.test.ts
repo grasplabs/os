@@ -4,14 +4,9 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import worker from "../src/index.ts";
+import { routed } from "./sign-in.ts";
 
 const requestIdHeader = "x-request-id";
-
-/** A request as the router sends it: with the secret. */
-const routed = async (path: string) =>
-  await exports.default.fetch(`https://core${path}`, {
-    headers: { [routerSecretHeader]: env.ROUTER_SECRET },
-  });
 
 /** A request with the secret header set to `presented`, or without it. */
 const presenting = (url: string, presented: string | null) => {
