@@ -337,6 +337,7 @@ export const cancelRun = async (
   const row = await foundRun(env, run);
   if (row.status === "cancelled") {
     await terminate(env, row.id);
+    await forgetWrites(env, row);
     return toRun(row);
   }
   if (!unended.includes(row.status)) {

@@ -516,7 +516,7 @@ ${mailStep("after")}`,
     });
   });
 
-  it("check a model's answer against the step's schema", async () => {
+  it("check a model's answer against the step's schema, formats included", async () => {
     const builder = await personApi("builder");
     const app = await appWith(
       builder,
@@ -527,10 +527,10 @@ ${mailStep("after")}`,
     model: "${extractionModel}",
     instructions: "Read the total in cents.",
     input: "Total 12.34 EUR",
-    schema: z.object({ total: z.int() }),
+    schema: z.object({ total: z.int(), from: z.email(), on: z.iso.date() }),
     retries: { limit: 0 },
   });`,
-        { extract: { total: 1234 } }
+        { extract: { total: 1234, from: "anna@example.com", on: "2026-09-26" } }
       )
     );
     const runWithAnswers = async (...texts: string[]) => {
@@ -552,7 +552,9 @@ ${mailStep("after")}`,
     };
     // The gateway asks once more when an answer doesn't fit.
     const unfit = await runWithAnswers('{"total": "lots"}', '{"total": 12.34}');
-    const fit = await runWithAnswers('{"total": 1234}');
+    const fit = await runWithAnswers(
+      '{"total": 1234, "from": "anna@example.com", "on": "2026-09-26"}'
+    );
     expect({ unfit, fit }).toMatchObject({
       unfit: {
         status: "failed",
@@ -561,7 +563,10 @@ ${mailStep("after")}`,
             "The model's answer didn't match the expected shape, also when asked again.",
         },
       },
-      fit: { status: "completed", output: { total: 1234 } },
+      fit: {
+        status: "completed",
+        output: { total: 1234, from: "anna@example.com", on: "2026-09-26" },
+      },
     });
   });
 

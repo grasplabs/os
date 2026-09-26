@@ -110,26 +110,13 @@ const waitOptionsSchema = z.object({
   timeout: milliseconds,
 });
 
-/** The largest output schema a model call takes, as JSON text. */
-const maxSchemaLength = 32 * 1024;
-
 /**
- * Whether a JSON Schema uses regular expressions, which the model gateway
- * would run on the model's answer: one that backtracks badly could hold
- * core's CPU, so workflows' schemas can't have them.
+ * The largest output schema a model call takes, as JSON text. Its regular
+ * expressions (Zod writes them for `z.email()`, `z.iso.date()` and the
+ * like) run on the model's answer; one that backtracks badly is bounded by
+ * the Worker's CPU limit, like any other expensive request.
  */
-const hasPattern = (schema: unknown): boolean => {
-  if (Array.isArray(schema)) {
-    return schema.some((item) => hasPattern(item));
-  }
-  if (typeof schema !== "object" || schema === null) {
-    return false;
-  }
-  return Object.entries(schema).some(
-    ([key, value]) =>
-      key === "pattern" || key === "patternProperties" || hasPattern(value)
-  );
-};
+const maxSchemaLength = 32 * 1024;
 
 const modelRequestSchema = z.object({
   step: stepNameSchema,
@@ -138,10 +125,7 @@ const modelRequestSchema = z.object({
   input: z.json(),
   outputSchema: z
     .record(z.string(), z.unknown())
-    .refine(
-      (schema) =>
-        JSON.stringify(schema).length <= maxSchemaLength && !hasPattern(schema)
-    ),
+    .refine((schema) => JSON.stringify(schema).length <= maxSchemaLength),
 });
 
 const decisionSchema = z.object({ step: stepNameSchema, from: z.string() });

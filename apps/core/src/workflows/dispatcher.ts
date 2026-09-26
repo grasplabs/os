@@ -150,7 +150,9 @@ const isStopping = async (env: Env, runId: RunId): Promise<boolean> => {
  * The kill switch: with workflows switched off, a run that starts or
  * resumes pauses at once, before any step, and goes on when resumed with
  * workflows on. The sleep only holds the execution while the pause lands;
- * its name is new each time, as no execution comes back to it.
+ * its name is new each time, as no execution comes back to it. Nothing in
+ * core resumes them yet: once the flag is back on, paused instances must be
+ * resumed (the Workflows API or dashboard).
  */
 const pauseWhileSwitchedOff = async (
   env: Env,

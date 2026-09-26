@@ -11,9 +11,11 @@ import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import type { RpcTarget } from "cloudflare:workers";
+import { z } from "zod";
 
 import { sandbox } from "../sandbox.ts";
 import { buildWorkflows } from "../screens.ts";
+import { fromIsolate } from "./host.ts";
 
 // An App's workflows are its code, written by the agent: they run as its
 // server code does, in a Worker Loader isolate with no network, no
@@ -67,14 +69,24 @@ export interface RunEntrypoint extends Rpc.WorkerEntrypointBranded {
   run: (host: RpcTarget, start: RunStart) => Promise<Settled<unknown>>;
 }
 
-/** A workflow's tests as `runWorkflowTests` reports them. */
-interface TestReport {
-  passed: boolean;
-  results: { name: string; passed: boolean; failures: string[] }[];
-}
+/**
+ * A workflow's tests as `runWorkflowTests` reports them, as far as core
+ * reads it; the isolate sends it, so it is checked, and bounded.
+ */
+const testReportSchema = z.object({
+  passed: z.boolean(),
+  results: z
+    .array(
+      z.object({
+        name: z.string().max(200),
+        failures: z.array(z.string().max(2000)).max(50),
+      })
+    )
+    .max(500),
+});
 
 interface TestsEntrypoint extends Rpc.WorkerEntrypointBranded {
-  run: () => Promise<Settled<TestReport>>;
+  run: () => Promise<Settled<unknown>>;
 }
 
 /**
@@ -280,11 +292,15 @@ const testFailures = async (
       env: {},
     })
   ).getEntrypoint<TestsEntrypoint>("Tests");
-  const outcome = await tests.run();
+  const outcome = fromIsolate(await tests.run());
   if (!outcome.ok) {
     return [`${id}: ${outcome.error.message}`];
   }
-  const { passed, results } = outcome.value;
+  const report = testReportSchema.safeParse(outcome.value);
+  if (!report.success) {
+    return [`${id}: its tests didn't report as the test harness does`];
+  }
+  const { passed, results } = report.data;
   if (results.length === 0) {
     return [`${id}: has no tests`];
   }
