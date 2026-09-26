@@ -28,13 +28,13 @@ import {
   createAuditEvent,
 } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { jsonVar } from "@grasp-os/shared/config";
 import { log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { keepAuditEvent } from "./audit-outbox.ts";
-import { jsonVar } from "./json-var.ts";
 
 // The model gateway: every model call in a deployment goes through here, and
 // from here through the deployment's AI Gateway, never straight to a

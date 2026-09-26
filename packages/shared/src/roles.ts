@@ -20,3 +20,17 @@ export const canBuild = (role: string): boolean =>
 export const roleErrors = defineErrorFamily({
   "role.forbidden": "Your role doesn't allow that.",
 });
+
+/** Refuses anyone but an admin, with `role.forbidden`. */
+export const requireAdmin = ({ role }: { role: string }): void => {
+  if (!isAdmin(role)) {
+    throw roleErrors.create("role.forbidden");
+  }
+};
+
+/** Refuses anyone who isn't an admin or a builder, with `role.forbidden`. */
+export const requireBuilder = ({ role }: { role: string }): void => {
+  if (!canBuild(role)) {
+    throw roleErrors.create("role.forbidden");
+  }
+};

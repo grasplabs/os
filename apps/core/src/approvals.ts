@@ -9,6 +9,7 @@ import type { CodedError } from "@grasp-os/shared/errors";
 import { identifierSchema } from "@grasp-os/shared/ids";
 import type { Permission } from "@grasp-os/shared/permissions";
 import { permissionErrors } from "@grasp-os/shared/permissions";
+import { requireAdmin, requireBuilder } from "@grasp-os/shared/roles";
 import type { Role } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, eq, ne, or, sql } from "drizzle-orm";
@@ -17,7 +18,6 @@ import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 
-import { requireBuilder } from "./apps.ts";
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import {
   activeAdminExists,
@@ -38,7 +38,6 @@ import {
   objectOf,
   openPermissionApproval,
   parseId,
-  requireAdmin,
   requireCollection,
   restartApp,
   toPermission,

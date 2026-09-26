@@ -16,13 +16,13 @@ import type {
   ChainVerification,
   ParsedAuditFilter,
 } from "@grasp-os/shared/audit-log";
+import { requireAdmin } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
 import { actorIdsOf, auditLog } from "./audit-log.ts";
 import type { SearchRange } from "./audit-log.ts";
 import { audit } from "./audit.ts";
-import { requireAdmin } from "./permissions.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 

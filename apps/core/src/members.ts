@@ -62,8 +62,11 @@ const refusal = (by: Identity, error: CodedError): CodedError => {
   return error;
 };
 
-/** Refuses anyone but a member who is an admin. */
-const requireAdmin = (by: Identity): void => {
+/**
+ * Refuses anyone but a member who is an admin: `requireAdmin`
+ * (@grasp-os/shared/roles), but also refusing Grasp staff, and logged.
+ */
+const requireMemberAdmin = (by: Identity): void => {
   if (by.staff || !isAdmin(by.role)) {
     throw refusal(by, roleErrors.create("role.forbidden"));
   }
@@ -123,7 +126,7 @@ const memberEntry = (
 
 /** The organization's members, by name. For admins. */
 const listMembers = async (env: Env, by: Identity): Promise<Member[]> => {
-  requireAdmin(by);
+  requireMemberAdmin(by);
   const rows = await drizzle(env.DB)
     .select({
       userId: members.userId,
@@ -251,7 +254,7 @@ const removeMember = async (
   by: Identity,
   userId: unknown
 ): Promise<{ connectionsDisconnected: number }> => {
-  requireAdmin(by);
+  requireMemberAdmin(by);
   const target = targetOf(by, userId);
   const membership = await membershipOf(env, target);
   if (membership) {
@@ -280,7 +283,7 @@ const revokeMemberSessions = async (
   by: Identity,
   userId: unknown
 ): Promise<void> => {
-  requireAdmin(by);
+  requireMemberAdmin(by);
   const target = targetOf(by, userId);
   const membership = await membershipOf(env, target);
   if (!membership) {
@@ -320,7 +323,7 @@ const setMemberRole = async (
   userId: unknown,
   role: unknown
 ): Promise<void> => {
-  requireAdmin(by);
+  requireMemberAdmin(by);
   const target = identifierSchema.safeParse(userId);
   const parsedRole = roleSchema.safeParse(role);
   if (!parsedRole.success) {

@@ -14,6 +14,7 @@ import type {
   ResourceCheck,
   Route,
 } from "@grasp-os/connector-kit/manifest";
+import { deploymentConfig } from "@grasp-os/shared/config";
 import { log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
@@ -151,10 +152,7 @@ const refuse = (
   );
 };
 
-/** The last `DOWNLOAD_HOSTS` value seen, and its hosts. */
-let parsedDownloadHosts:
-  | { raw: unknown; hosts: ReadonlySet<string> }
-  | undefined;
+const downloadHostsSchema = z.array(hostSchema).max(32);
 
 /**
  * The deployment's own download hosts, from connect's `DOWNLOAD_HOSTS` var
@@ -164,28 +162,8 @@ let parsedDownloadHosts:
  * its route's pattern: another tenant's SharePoint is never followed.
  * Unset or invalid, no redirect is followed.
  */
-const downloadHostsOf = (raw: unknown): ReadonlySet<string> => {
-  // A Worker's env holds the same value for every request: parsed, and an
-  // invalid one logged, once per value and isolate.
-  if (parsedDownloadHosts !== undefined && parsedDownloadHosts.raw === raw) {
-    return parsedDownloadHosts.hosts;
-  }
-  let value = raw;
-  if (typeof raw === "string") {
-    try {
-      value = JSON.parse(raw);
-    } catch {
-      value = undefined;
-    }
-  }
-  const parsed = z.array(hostSchema).max(32).safeParse(value);
-  if (raw !== undefined && !parsed.success) {
-    log.error("config.invalid", { var: "DOWNLOAD_HOSTS" });
-  }
-  const hosts = new Set(parsed.data);
-  parsedDownloadHosts = { raw, hosts };
-  return hosts;
-};
+const downloadHostsOf = (raw: unknown): ReadonlySet<string> =>
+  new Set(deploymentConfig(downloadHostsSchema, "DOWNLOAD_HOSTS", raw));
 
 /** The route the request is for, if the call declares it. */
 const routeFor = (

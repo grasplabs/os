@@ -7,6 +7,7 @@ import { env, exports } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import bundled from "#connectors";
 
@@ -564,19 +565,43 @@ describe("a connector's code", () => {
     ]);
   });
 
-  it("follows no download redirect while the deployment names no download hosts", async () => {
+  it("follows no download redirect while the deployment names no valid download hosts", async () => {
+    const downloadSchema = z.object({ status: z.number().nullable() });
+    const configInvalidSchema = z.object({
+      event: z.literal("config.invalid"),
+    });
     const connection = await connectionTo("sample");
     const hosts = env.DOWNLOAD_HOSTS;
-    env.DOWNLOAD_HOSTS = undefined;
+    const logged = vi.spyOn(console, "error").mockReturnValue();
+    const unset = [undefined, "not json", JSON.stringify(["not a host!"])];
+    const statuses: unknown[] = [];
     try {
-      const { output } = await call(connection, "probe.download", {
-        url: `https://${sampleHost}/v1/downloads/file`,
-      });
-      expect(JSON.parse(output)).toMatchObject({ status: 502 });
+      for (const value of unset) {
+        env.DOWNLOAD_HOSTS = value;
+        // oxlint-disable-next-line no-await-in-loop -- one setting at a time
+        const { output } = await call(connection, "probe.download", {
+          url: `https://${sampleHost}/v1/downloads/file`,
+        });
+        statuses.push(downloadSchema.parse(JSON.parse(output)).status);
+      }
+      // An invalid value is logged with the paths that are wrong; an unset
+      // one isn't.
+      expect(
+        logged.mock.calls
+          .flat()
+          .filter((line) => configInvalidSchema.safeParse(line).success)
+      ).toStrictEqual([
+        { event: "config.invalid", var: "DOWNLOAD_HOSTS", paths: "<root>" },
+        { event: "config.invalid", var: "DOWNLOAD_HOSTS", paths: "0" },
+      ]);
     } finally {
       env.DOWNLOAD_HOSTS = hosts;
+      logged.mockRestore();
     }
-    expect(api.sent.map(({ host }) => host)).toStrictEqual([sampleHost]);
+    expect(statuses).toStrictEqual([502, 502, 502]);
+    expect(api.sent.map(({ host }) => host)).toStrictEqual(
+      unset.map(() => sampleHost)
+    );
   });
 
   it("can't read a download past the size limit, after its redirect", async () => {

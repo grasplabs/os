@@ -1,8 +1,7 @@
+import { deploymentConfig } from "@grasp-os/shared/config";
 import { roleSchema } from "@grasp-os/shared/roles";
 import { loopbackHosts } from "@grasp-os/shared/router";
 import { z } from "zod";
-
-import { deploymentConfig } from "../deployment-config.ts";
 
 /**
  * How people sign in to this deployment. Deployment config, set by the

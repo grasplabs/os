@@ -18,7 +18,7 @@ import { sha256Hex } from "@grasp-os/shared/encoding";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
-import { canBuild, roleErrors } from "@grasp-os/shared/roles";
+import { requireBuilder } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -54,13 +54,6 @@ const storedTreeSchema = z.record(z.string(), z.string());
 
 /** Most versions one `listVersions` call returns. */
 const versionsPerPage = 100;
-
-/** Refuses anyone who isn't an admin or a builder. */
-export const requireBuilder = (by: Identity): void => {
-  if (!canBuild(by.role)) {
-    throw roleErrors.create("role.forbidden");
-  }
-};
 
 const treeKey = (app: AppId, tree: string): string =>
   `apps/${app}/trees/${tree}.json`;
