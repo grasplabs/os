@@ -510,6 +510,68 @@ ${mailStep("after")}`,
     });
   });
 
+  it("record a step paused mid-way once, as completed, not as failed", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(
+      builder,
+      workflowFiles(
+        "blocking",
+        `  return await step.do("block", { description: "Block" }, async () => {
+    await env.APP.call("hit", "entered");
+    while ((await env.APP.call("hits", "gate")) === 0) {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return "done";
+  });`,
+        { block: "done" }
+      )
+    );
+    const run = await builder.api.workflows.start(app, "blocking");
+    await vi.waitFor(
+      async () => {
+        await expect(
+          hitsOf(app, builder.userId, "entered")
+        ).resolves.toBeGreaterThan(0);
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+    // Paused while the step runs: the engine lets it end, then stops the
+    // execution, which throws out of the step's call.
+    const instance = await env.WORKFLOWS.get(run.id);
+    await instance.pause();
+    await callApp(
+      env,
+      appIdSchema.parse(app),
+      { userId: builder.userId, mode: "interactive" },
+      "hit",
+      ["gate"]
+    );
+    await vi.waitFor(
+      async () => {
+        await expect(liveStatus(run.id)).resolves.toBe("paused");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+    await resumed(run.id);
+    await finished(run.id);
+    const { status, output } = await builder.api.workflows.status(run.id);
+
+    expect({
+      status,
+      output,
+      audited: await runEvents(run.id, "workflow.run.completed"),
+    }).toStrictEqual({
+      status: "completed",
+      output: "done",
+      audited: [
+        "workflow.run.completed",
+        "workflow.run.started",
+        "workflow.step.completed $params",
+        "workflow.step.completed block",
+      ],
+    });
+  });
+
   it("record a step failure the workflow caught once, not again on every later execution", async () => {
     const builder = await personApi("builder");
     const app = await appWith(

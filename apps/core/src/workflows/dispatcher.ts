@@ -183,6 +183,7 @@ const runWorkflow = async (
     });
     const host = new RunHost(env, step, run, {
       stepFailed,
+      engineStopped: () => engineError !== undefined,
       waiting: async (why) => {
         await recordWaiting(env, row, why);
       },
