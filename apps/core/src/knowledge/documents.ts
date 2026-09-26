@@ -38,7 +38,7 @@ import {
   sections,
   versions,
 } from "../db/knowledge/schema.ts";
-import { allowedCollections, recordRead } from "./access.ts";
+import { allowedCollections, noteProvenance } from "./access.ts";
 import type { Reader } from "./access.ts";
 import { readableCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
@@ -459,7 +459,7 @@ export const getDocument = async (
   // Recorded before a missing version is refused: that a version isn't
   // there says something of the document too, so a sensitive one
   // restricts the reader either way.
-  const provenance = await recordRead(env, reader, collection);
+  const provenance = await noteProvenance(env, reader, collection);
   if (row === null) {
     throw knowledgeErrors.create("knowledge.not_found");
   }
@@ -495,7 +495,7 @@ export const listDocuments = async (
     )
     .orderBy(asc(documents.path))
     .limit(limit);
-  const provenance = await recordRead(env, reader, collection);
+  const provenance = await noteProvenance(env, reader, collection);
   return {
     documents: rows.map(({ document }) => toSummary(document)),
     provenance,
@@ -535,7 +535,7 @@ export const history = async (
     )
     .orderBy(desc(versions.number))
     .limit(limit);
-  const provenance = await recordRead(env, reader, collection);
+  const provenance = await noteProvenance(env, reader, collection);
   return { versions: rows.map(toVersionSummary), provenance };
 };
 
@@ -590,7 +590,7 @@ export const backlinks = async (
     )
     .orderBy(asc(linking.path))
     .limit(limit);
-  const provenance = await recordRead(env, reader, collection);
+  const provenance = await noteProvenance(env, reader, collection);
   return {
     backlinks: rows.map((row) => ({
       ...row,

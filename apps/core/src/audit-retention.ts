@@ -20,7 +20,8 @@ import { featureEnabled } from "./features.ts";
 // whole number of days, is logged as `config.invalid` and archives nothing:
 // events stay searchable until the config is fixed. It's deployment config,
 // not an in-product setting, so a compromised admin session can't shorten
-// it. Archiving runs only while the `audit` feature is on.
+// it. Archiving and purging run only while the `audit_retention` feature
+// is on (not `audit`, which gates reading the log).
 
 const dayMs = 24 * 60 * 60 * 1000;
 
@@ -55,10 +56,16 @@ const archiveExpired = async (env: Env): Promise<void> => {
  * stretch as `audit.archived`, in the same transaction. Then purges the
  * archived stretches past archive retention, likewise recorded as
  * `audit.purged`. The cron trigger calls it; a backlog is worked off over
- * several runs.
+ * several runs. Only while `audit_retention` is switched on: a flag of its
+ * own, so switching audit search off (`audit`) doesn't stop retention.
  */
 export const archiveAuditLog = async (env: Env): Promise<void> => {
-  if (!featureEnabled(env, "audit")) {
+  if (!featureEnabled(env, "audit_retention")) {
+    // Most likely a deployment that switched the log on before retention
+    // had a flag of its own: events are kept, not archived, until it's on.
+    if (featureEnabled(env, "audit")) {
+      log.warn("audit.retention_off", {});
+    }
     return;
   }
   await archiveExpired(env);

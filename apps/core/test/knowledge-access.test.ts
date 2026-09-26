@@ -14,12 +14,14 @@ import type {
 import type { Role } from "@grasp-os/shared/roles";
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import { appHost } from "../src/durable-objects.ts";
 import type { WorkContext } from "../src/restricted.ts";
 import { workspace } from "../src/workspace.ts";
 import { requestGranted } from "./apps.ts";
+import { allEvents } from "./audit-events.ts";
 import {
   actingFor,
   collectionIn,
@@ -185,6 +187,51 @@ describe("Apps and agents reading Knowledge", () => {
     await expect(everyRead(reader, handbook.noteId)).resolves.toStrictEqual(
       everyReadIs("permission.denied")
     );
+  });
+
+  it("read nothing, and call out to nothing, while Knowledge or connections are switched off", async () => {
+    const admin = await personOf("admin");
+    const agent = newAgent();
+    const handbook = await collectionWithNote(admin, {
+      name: "Handbook",
+      access: "everyone",
+    });
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(agent, handbook.collectionId)
+    );
+    await requestGranted(idp, admin, outlook(agent));
+    const bindings = await envOf(
+      actingFor(agent, admin.userId),
+      await newChat()
+    );
+    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
+    const { FEATURES: features } = env;
+    let whileOff: { reads: string[]; call: string };
+    try {
+      env.FEATURES = { ...on, knowledge: false, connections: false };
+      whileOff = {
+        reads: await everyRead(readerIn(bindings), handbook.noteId),
+        call: await callOutlook(bindings),
+      };
+    } finally {
+      env.FEATURES = features;
+    }
+    // The stubs it holds work again once they are switched on.
+    expect({
+      whileOff,
+      backOn: {
+        reads: await everyRead(readerIn(bindings), handbook.noteId),
+        call: await callOutlook(bindings),
+      },
+    }).toStrictEqual({
+      whileOff: {
+        reads: everyReadIs("feature.disabled"),
+        call: "feature.disabled",
+      },
+      backOn: { reads: everyReadIs("ok"), call: reached },
+    });
   });
 
   it("read only what the person they act for may read too", async () => {
@@ -550,6 +597,121 @@ describe("restricted mode", () => {
     expect({ before, after }).toStrictEqual({
       before: reached,
       after: "permission.restricted",
+    });
+  });
+
+  it("is audited once, when a chat or an App enters it, with what put it there", async () => {
+    const creator = await personOf("admin");
+    const { id } = await creator.api.apps.create({ name: `App ${unique()}` });
+    const appId = appIdSchema.parse(id);
+    const app = { type: "app" as const, appId };
+    const agent = newAgent();
+    const { admin, sensitive, ordinary } = await setUp(agent);
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(app, sensitive.collectionId)
+    );
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(app, ordinary.collectionId, "OTHER")
+    );
+    const chat = await newChat();
+    const inChat = await envOf(actingFor(agent, admin.userId), chat);
+    const inApp = await envOf(actingFor(app, admin.userId), app);
+    // An ordinary read restricts nothing; the first restricted one does, and
+    // the second finds it restricted already.
+    for (const bindings of [inChat, inApp]) {
+      // oxlint-disable-next-line no-await-in-loop -- one context at a time
+      await readerIn(bindings, "OTHER").getDocument(ordinary.noteId);
+      // oxlint-disable-next-line no-await-in-loop -- one context at a time
+      await readerIn(bindings).getDocument(sensitive.noteId);
+      // oxlint-disable-next-line no-await-in-loop -- one context at a time
+      await readerIn(bindings).search("note");
+    }
+    const audited = await vi.waitFor(async () => {
+      const events = await allEvents();
+      const restricted = events.filter(
+        ({ action, target }) =>
+          action === "context.restricted" &&
+          (target?.id === chat.chatId || target?.id === appId)
+      );
+      expect(restricted).toHaveLength(2);
+      return restricted;
+    });
+    expect(
+      audited.map(({ actor, target, provenance, detail }) => ({
+        actor,
+        target,
+        provenance,
+        detail,
+      }))
+    ).toStrictEqual([
+      {
+        actor: {
+          type: "agent",
+          agentId: agent.agentId,
+          onBehalfOf: admin.userId,
+        },
+        target: { type: "chat", id: chat.chatId },
+        provenance: [sensitive.collectionId],
+        detail: { workspace: chat.workspaceId },
+      },
+      {
+        actor: { type: "app", appId, part: "server" },
+        target: { type: "app", id: appId },
+        provenance: [sensitive.collectionId],
+        detail: {},
+      },
+    ]);
+  });
+
+  it("records entering restricted mode before setting it, so a failed record restricts nothing", async () => {
+    const creator = await personOf("admin");
+    const { id } = await creator.api.apps.create({ name: `App ${unique()}` });
+    const appId = appIdSchema.parse(id);
+    const app = { type: "app" as const, appId };
+    const { admin, sensitive } = await setUp();
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(app, sensitive.collectionId)
+    );
+    const inApp = await envOf(actingFor(app, admin.userId), app);
+    // Core's outbox refuses every event, as a failing database would.
+    await env.DB.prepare(
+      "CREATE TRIGGER outbox_unavailable BEFORE INSERT ON audit_outbox BEGIN SELECT RAISE(ABORT, 'outbox unavailable'); END"
+    ).run();
+    let failedRead: unknown;
+    let restrictedAfterFailure: boolean;
+    try {
+      failedRead = await outcome(readerIn(inApp).getDocument(sensitive.noteId));
+      restrictedAfterFailure = await appHost(env, appId).isRestricted();
+    } finally {
+      await env.DB.prepare("DROP TRIGGER outbox_unavailable").run();
+    }
+    // The next restricted read records it, and restricts.
+    await readerIn(inApp).getDocument(sensitive.noteId);
+    const events = await vi.waitFor(async () => {
+      const all = await allEvents();
+      const restricted = all.filter(
+        ({ action, target }) =>
+          action === "context.restricted" && target?.id === appId
+      );
+      expect(restricted).toHaveLength(1);
+      return restricted;
+    });
+    expect({
+      failedRead,
+      restrictedAfterFailure,
+      restrictedNow: await appHost(env, appId).isRestricted(),
+      events: events.length,
+    }).toStrictEqual({
+      failedRead: "internal.unexpected",
+      restrictedAfterFailure: false,
+      restrictedNow: true,
+      events: 1,
     });
   });
 

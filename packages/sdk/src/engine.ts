@@ -93,6 +93,11 @@ export interface EngineStepOptions {
   sideEffect?: boolean;
   /** What the step works on, for run history and dry-run reports. */
   input?: Json;
+  /**
+   * The step opens or asks a decision: an engine may hold it back while
+   * decisions can't be made (Grasp waits while they're switched off).
+   */
+  decision?: boolean;
 }
 
 /**

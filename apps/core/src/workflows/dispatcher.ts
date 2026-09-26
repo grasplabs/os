@@ -20,7 +20,6 @@ import type { Settled, StepError } from "./code.ts";
 import {
   coreStepPrefix,
   fromIsolate,
-  pauseWhileSwitchedOff,
   RunHost,
   settle,
   stepLimitOf,
@@ -33,6 +32,7 @@ import {
   endRun,
   findRun,
   pauseForOwner,
+  recordWaiting,
   resumeRun,
 } from "./runs.ts";
 import type { RunRow, Stopped } from "./runs.ts";
@@ -199,7 +199,6 @@ const runWorkflow = async (
     engineError = { error };
   };
   const step = watchedStep(engineStep, engineStopped, stepLimitOf(env));
-  await pauseWhileSwitchedOff(env, step, runId, "workflows");
   let lastFailed: FailedStep | undefined;
   const stepFailed = (failure: FailedStep): void => {
     lastFailed = failure;
@@ -240,6 +239,9 @@ const runWorkflow = async (
     const host = new RunHost(env, step, run, {
       acting,
       stepFailed,
+      waiting: async (feature) => {
+        await recordWaiting(env, row, feature);
+      },
       callApp: async (caller, method, args) =>
         await callApp(env, run.app, caller, method, args),
     });

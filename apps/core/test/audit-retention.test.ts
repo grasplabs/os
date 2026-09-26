@@ -174,9 +174,18 @@ describe("audit log retention", () => {
     ]);
   });
 
-  it("archives nothing while the feature is off", async () => {
+  it("archives only while retention is switched on, whatever the audit search flag says", async () => {
     const event = await logged();
-    await cronAfter(event, 400, { FEATURES: { audit: false } });
-    await expect(held(event)).resolves.toBeTruthy();
+    await cronAfter(event, 400, {
+      FEATURES: { audit: true, audit_retention: false },
+    });
+    const whileOff = await held(event);
+    await cronAfter(event, 400, {
+      FEATURES: { audit: false, audit_retention: true },
+    });
+    expect({ whileOff, whileOn: await held(event) }).toStrictEqual({
+      whileOff: true,
+      whileOn: false,
+    });
   });
 });

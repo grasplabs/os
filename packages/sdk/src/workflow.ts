@@ -665,7 +665,7 @@ const createRunner = (
         // computes the same waits.
         const { decision, deadline } = await engine.do(
           step,
-          { input: { from } },
+          { input: { from }, decision: true },
           async () =>
             await engine.openDecision({ step, from, description, timeout })
         );
@@ -675,10 +675,19 @@ const createRunner = (
           const askStep = `${step}#${reminder ? "remind" : "ask"}`;
           await engine.do(
             askStep,
-            { sideEffect: true, input: { from, reminder } },
+            { sideEffect: true, input: { from, reminder }, decision: true },
             async () => {
+              const recipients = await engine.decisionRecipients(
+                decision,
+                reminder
+              );
+              // A reminder of a decision that was answered or has closed
+              // (timed out) goes to nobody, so it isn't sent at all.
+              if (reminder && recipients.length === 0) {
+                return;
+              }
               await ask({
-                recipients: await engine.decisionRecipients(decision, reminder),
+                recipients,
                 reminder,
                 idempotencyKey: idempotencyKeyOf(engine, askStep),
               });
