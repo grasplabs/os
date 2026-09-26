@@ -1,6 +1,7 @@
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { PermissionId } from "@grasp-os/shared/ids";
+import { errorFields, log } from "@grasp-os/shared/log";
 import {
   permissionErrors,
   permissionIdInputSchema,
@@ -31,6 +32,7 @@ import { memberRole } from "./auth/identity.ts";
 import { apps, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
+import { appHost } from "./durable-objects.ts";
 
 // Permission records and the one check every server path runs. A person
 // asks for a permission (it allows nothing yet), an admin grants it, and an
@@ -198,6 +200,29 @@ const parseId = (id: unknown): PermissionId => {
   return parsed.data;
 };
 
+/**
+ * An App's server code gets its env when it starts: restarting it after a
+ * grant or revoke gives it an env as the records are now. A revoked stub
+ * it still holds is refused anyway, on its next call. Best effort: the
+ * change stands if the App can't be reached.
+ */
+const restartApp = async (
+  env: Env,
+  subject: PermissionSubject
+): Promise<void> => {
+  if (subject.type !== "app") {
+    return;
+  }
+  try {
+    await appHost(env, subject.appId).restart("Its permissions changed.");
+  } catch (error) {
+    log.error("app.restart_failed", {
+      appId: subject.appId,
+      ...errorFields(error),
+    });
+  }
+};
+
 const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
   await drizzle(env.DB)
     .select()
@@ -355,7 +380,9 @@ export const grantPermission = async (
     throw permissionErrors.create("permission.not_requested");
   }
   await sendAuditOutboxNow(env);
-  return toPermission(granted);
+  const permission = toPermission(granted);
+  await restartApp(env, permission.subject);
+  return permission;
 };
 
 /**
@@ -394,7 +421,9 @@ export const revokePermission = async (
     return toPermission((await findRow(env, found.id)) ?? found);
   }
   await sendAuditOutboxNow(env);
-  return toPermission(revoked);
+  const permission = toPermission(revoked);
+  await restartApp(env, permission.subject);
+  return permission;
 };
 
 /** Every permission, or those of one App or agent, oldest first. */
@@ -433,18 +462,29 @@ const requireActivePerson = async (
   }
 };
 
+/**
+ * The active permissions of an App or agent, whoever it acts for. Only for
+ * building an env whose stubs check the person on every call.
+ */
+export const activePermissions = async (
+  env: Env,
+  subject: PermissionSubject
+): Promise<Permission[]> => {
+  const rows = await drizzle(env.DB)
+    .select()
+    .from(permissions)
+    .where(and(ofSubject(subject), eq(permissions.status, "active")))
+    .orderBy(asc(permissions.requestedAt), asc(permissions.id));
+  return rows.map(toPermission);
+};
+
 /** The active permissions of the App or agent `authority` names. */
 export const grantedPermissions = async (
   env: Env,
   authority: Authority
 ): Promise<Permission[]> => {
   await requireActivePerson(env, authority);
-  const rows = await drizzle(env.DB)
-    .select()
-    .from(permissions)
-    .where(and(ofSubject(authority.subject), eq(permissions.status, "active")))
-    .orderBy(asc(permissions.requestedAt), asc(permissions.id));
-  return rows.map(toPermission);
+  return await activePermissions(env, authority.subject);
 };
 
 /**

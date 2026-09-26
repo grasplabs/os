@@ -37,7 +37,7 @@ interface Statement {
   exportKind?: string | null;
 }
 interface Call {
-  callee: { type: string };
+  callee: { type: string; name?: string };
   arguments: { type: string; value?: unknown }[];
   loc?: { start: { line: number } } | null;
 }
@@ -97,6 +97,22 @@ const namesOf = (statement: Statement): string[] | undefined => {
 
 const isImportCall = (call: Call): boolean => call.callee.type === "Import";
 
+/** `import(x)` as Babel may also parse it: an `ImportExpression` node. */
+interface ImportExpression {
+  source: Call["arguments"][number];
+  loc?: Call["loc"];
+}
+
+/**
+ * An `ImportExpression` as the `import()` call the visitors read. Its
+ * source is the same node, so rewriting the call's argument rewrites it.
+ */
+const asImportCall = ({ source, loc }: ImportExpression): Call => ({
+  callee: { type: "Import" },
+  arguments: [source],
+  loc,
+});
+
 const stringArgument = (call: Call): string | undefined => {
   const [first] = call.arguments;
   return first?.type === "StringLiteral" && typeof first.value === "string"
@@ -109,30 +125,38 @@ const stringArgument = (call: Call): string | undefined => {
  * it reads the top-level statements before anything else runs. Type-only
  * imports are skipped; they are erased.
  */
-export const collectImports = (imports: ImportSite[]) => () => ({
-  visitor: {
-    Program: (path: { node: { body: Statement[] } }) => {
-      for (const statement of path.node.body) {
-        if (isModuleStatement(statement) && !isTypeOnly(statement)) {
-          imports.push({
-            specifier: statement.source?.value,
-            line: statement.loc?.start.line,
-            names: namesOf(statement),
-          });
+export const collectImports = (imports: ImportSite[]) => () => {
+  const collect = (call: Call): void => {
+    if (isImportCall(call)) {
+      imports.push({
+        specifier: stringArgument(call),
+        line: call.loc?.start.line,
+        names: undefined,
+      });
+    }
+  };
+  return {
+    visitor: {
+      Program: (path: { node: { body: Statement[] } }) => {
+        for (const statement of path.node.body) {
+          if (isModuleStatement(statement) && !isTypeOnly(statement)) {
+            imports.push({
+              specifier: statement.source?.value,
+              line: statement.loc?.start.line,
+              names: namesOf(statement),
+            });
+          }
         }
-      }
+      },
+      CallExpression: (path: { node: Call }) => {
+        collect(path.node);
+      },
+      ImportExpression: (path: { node: ImportExpression }) => {
+        collect(asImportCall(path.node));
+      },
     },
-    CallExpression: (path: { node: Call }) => {
-      if (isImportCall(path.node)) {
-        imports.push({
-          specifier: stringArgument(path.node),
-          line: path.node.loc?.start.line,
-          names: undefined,
-        });
-      }
-    },
-  },
-});
+  };
+};
 
 /** How an import may name an App file: as written, or without its extension. */
 const importSuffixes = ["", ".ts", ".tsx", "/index.ts", "/index.tsx"];
@@ -285,6 +309,12 @@ export const rewriteImports =
       }
       return appModuleName(target);
     };
+    const rewriteCall = (call: Call): void => {
+      const [first] = call.arguments;
+      if (isImportCall(call) && typeof first?.value === "string") {
+        first.value = moduleFor(first.value);
+      }
+    };
     const icons = (statement: Statement): Statement[] =>
       valueSpecifiers(statement).map((specifier) =>
         fromIconModule(
@@ -312,10 +342,109 @@ export const rewriteImports =
           path.scope.crawl();
         },
         CallExpression: (path: { node: Call }) => {
-          const [first] = path.node.arguments;
-          if (isImportCall(path.node) && typeof first?.value === "string") {
-            first.value = moduleFor(first.value);
+          rewriteCall(path.node);
+        },
+        ImportExpression: (path: { node: ImportExpression }) => {
+          rewriteCall(asImportCall(path.node));
+        },
+      },
+    };
+  };
+
+/** What server code may import besides its own files: the Workers runtime. */
+const serverRuntimeImports: ReadonlySet<string> = new Set([
+  "cloudflare:workers",
+]);
+
+const javascriptExtension = /\.js$/u;
+
+/**
+ * The server file a relative import names: as `resolveRelative` finds it,
+ * or written with `.js` for the `.ts` file, as TypeScript's own ES module
+ * output wants it.
+ */
+const resolveServerFile = (
+  importer: string,
+  specifier: string,
+  files: ReadonlySet<string>
+): string | undefined =>
+  resolveRelative(importer, specifier, files) ??
+  (specifier.endsWith(".js")
+    ? resolveRelative(
+        importer,
+        specifier.replace(javascriptExtension, ".ts"),
+        files
+      )
+    : undefined);
+
+/** Why a server file's import isn't allowed, or undefined when it is. */
+export const serverImportError = (
+  specifier: string | undefined,
+  file: string,
+  files: ReadonlySet<string>
+): string | undefined => {
+  if (specifier === undefined) {
+    return "import() must name a module in quotes.";
+  }
+  if (isRelative(specifier)) {
+    return resolveServerFile(file, specifier, files) === undefined
+      ? `"${specifier}" is not a file of the App's server (app/).`
+      : undefined;
+  }
+  return serverRuntimeImports.has(specifier)
+    ? undefined
+    : `"${specifier}" can't be imported here. Server code can import its own files in app/ and ${[...serverRuntimeImports].join(", ")}.`;
+};
+
+const isRequireCall = ({ callee }: Call): boolean =>
+  callee.type === "Identifier" && callee.name === "require";
+
+/**
+ * A Babel plugin that points a server module's imports at the flat names
+ * of the App's files. Like `rewriteImports`, it runs on compiled code, so
+ * it also sees imports the source check can't, and throws on anything but
+ * the App's own server files and the runtime, `require()` included.
+ */
+export const rewriteServerImports =
+  (file: string, files: ReadonlySet<string>) => () => {
+    const moduleFor = (specifier: string | undefined): string => {
+      const error = serverImportError(specifier, file, files);
+      if (error !== undefined || specifier === undefined) {
+        throw new Error(error);
+      }
+      const target = isRelative(specifier)
+        ? resolveServerFile(file, specifier, files)
+        : undefined;
+      return target === undefined ? specifier : appModuleName(target);
+    };
+    const rewriteCall = (call: Call): void => {
+      if (isImportCall(call)) {
+        const module = moduleFor(stringArgument(call));
+        const [first] = call.arguments;
+        if (first) {
+          first.value = module;
+        }
+      }
+    };
+    return {
+      visitor: {
+        Program: (path: { node: { body: Statement[] } }) => {
+          for (const statement of path.node.body) {
+            if (isModuleStatement(statement) && statement.source) {
+              statement.source.value = moduleFor(statement.source.value);
+            }
           }
+        },
+        CallExpression: (path: { node: Call }) => {
+          if (isRequireCall(path.node)) {
+            throw new Error(
+              "require() isn't available in server code: use import."
+            );
+          }
+          rewriteCall(path.node);
+        },
+        ImportExpression: (path: { node: ImportExpression }) => {
+          rewriteCall(asImportCall(path.node));
         },
       },
     };

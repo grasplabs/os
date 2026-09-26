@@ -19,8 +19,8 @@ import type ScreenCompiler from "./worker.ts";
 
 export type { Diagnostic } from "./diagnostic.ts";
 export type { KitModules } from "./kit.ts";
-export type { ScreenBuild } from "./worker.ts";
-export { buildFiles, limitErrors } from "./inputs.ts";
+export type { ScreenBuild, ServerBuild } from "./worker.ts";
+export { buildFiles, limitErrors, serverFiles } from "./inputs.ts";
 /** Part of every build's cache key: a new compiler or kit builds again. */
 export { version as compilerVersion } from "#version";
 

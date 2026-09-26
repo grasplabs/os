@@ -99,6 +99,7 @@ export const permissionMaxActions = 16;
  */
 export const platformBindingNames: ReadonlySet<string> = new Set([
   "AI",
+  "APP_CALL_TIMEOUT_MS",
   "APPS",
   "ASSETS",
   "AUDIT_DLQ",

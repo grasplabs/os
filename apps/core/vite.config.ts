@@ -24,11 +24,12 @@ const connectMigrations = await readD1Migrations(
 const capabilitySigningKey = "test-capability-signing-key-of-32-chars-or-more";
 
 /**
- * The screen compiler's tests, which compile whole Apps. They run as their
- * own project (vite.screens.config.ts), after the others, so their long
- * compiles don't starve the light tests of CPU.
+ * The tests that run the compiler on whole Apps: the screen compiler's,
+ * and the App sandbox's, which builds each App's server code. They run as
+ * their own project (vite.screens.config.ts), after the others, so their
+ * long compiles don't starve the light tests of CPU.
  */
-export const screenTests = ["test/screen*.test.ts"];
+export const screenTests = ["test/screen*.test.ts", "test/app-sandbox.test.ts"];
 
 /** Core's Worker test setup, shared by both of core's test projects. */
 export const coreProject = (test: UserWorkspaceConfig["test"]) =>
@@ -57,6 +58,8 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             FEATURES: { apps: true, permissions: true, knowledge: true },
             // workerd doesn't implement Durable Object jurisdictions.
             DURABLE_OBJECT_JURISDICTION: "none",
+            // So the test of a call that never ends doesn't wait a minute.
+            APP_CALL_TIMEOUT_MS: "10000",
             CORE_MIGRATIONS: coreMigrations,
             KNOWLEDGE_MIGRATIONS: knowledgeMigrations,
             CONNECT_MIGRATIONS: connectMigrations,
