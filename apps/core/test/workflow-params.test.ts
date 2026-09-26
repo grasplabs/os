@@ -302,44 +302,49 @@ describe("runs", { timeout: 60_000 }, () => {
     await expect(runLimit(builder, app)).resolves.toBe(900_000);
   });
 
-  it("go by what the version they are pinned to declares, not the current one", async () => {
-    const builder = await personApi("builder");
-    const app = await invoicesApp(builder);
-    // A run pinned to v1, where the limit is money, started just before
-    // workflows were switched off: it waits before its first step, where it
-    // records its values, and is stopped there.
-    const { FEATURES: features } = env;
-    const on = z.record(z.string(), z.boolean()).parse(features);
-    let run: Awaited<ReturnType<typeof startRun>>;
-    try {
-      env.FEATURES = { ...on, workflows: false };
-      run = await startRun(
-        { ...env, FEATURES: on },
-        {
-          app: appIdSchema.parse(app),
-          workflow: workflowIdSchema.parse("invoices"),
-          input: undefined,
-          startedBy: builder.userId,
-          actor: { type: "system" },
-        }
-      );
-      await runEvents(run.id, "workflow.run.waiting");
-      await stopped(run.id);
-    } finally {
-      env.FEATURES = features;
+  // Its waits, at their longest, add up to the describe block's 60 s.
+  it(
+    "go by what the version they are pinned to declares, not the current one",
+    { timeout: 90_000 },
+    async () => {
+      const builder = await personApi("builder");
+      const app = await invoicesApp(builder);
+      // A run pinned to v1, where the limit is money, started just before
+      // workflows were switched off: it waits before its first step, where it
+      // records its values, and is stopped there.
+      const { FEATURES: features } = env;
+      const on = z.record(z.string(), z.boolean()).parse(features);
+      let run: Awaited<ReturnType<typeof startRun>>;
+      try {
+        env.FEATURES = { ...on, workflows: false };
+        run = await startRun(
+          { ...env, FEATURES: on },
+          {
+            app: appIdSchema.parse(app),
+            workflow: workflowIdSchema.parse("invoices"),
+            input: undefined,
+            startedBy: builder.userId,
+            actor: { type: "system" },
+          }
+        );
+        await runEvents(run.id, "workflow.run.waiting");
+        await stopped(run.id);
+      } finally {
+        env.FEATURES = features;
+      }
+      // Meanwhile v2, where the limit is text, is current, with a text value.
+      // The run's next execution reads the values anew.
+      await release(builder, app, textLimitVersion());
+      await builder.api.workflows.params.set(app, "invoices", "limit", "none");
+      await resumed(run.id);
+      expect({
+        pinned: await limitOfRun(builder, run.id),
+        current: await runLimit(builder, app),
+      }).toStrictEqual({
+        // Not money, as v1 declares it: the code's default.
+        pinned: 500_000,
+        current: "none",
+      });
     }
-    // Meanwhile v2, where the limit is text, is current, with a text value.
-    // The run's next execution reads the values anew.
-    await release(builder, app, textLimitVersion());
-    await builder.api.workflows.params.set(app, "invoices", "limit", "none");
-    await resumed(run.id);
-    expect({
-      pinned: await limitOfRun(builder, run.id),
-      current: await runLimit(builder, app),
-    }).toStrictEqual({
-      // Not money, as v1 declares it: the code's default.
-      pinned: 500_000,
-      current: "none",
-    });
-  });
+  );
 });
