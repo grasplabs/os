@@ -484,7 +484,10 @@ export const requireWorkflowTestsPass = async (
       // oxlint-disable-next-line no-await-in-loop -- one isolate at a time
       failures.push(...(await testFailures(env, app, version, id, modules)));
     } else {
-      failures.push(`${id}: has no tests (${workflowPaths(id).tests})`);
+      // Often a helper, not a workflow: say where shared code goes.
+      failures.push(
+        `${id}: has no tests (${workflowPaths(id).tests}). Every file directly in workflows/ is a workflow: put shared code in a folder under it, such as workflows/lib/.`
+      );
     }
   }
   if (failures.length > 0) {
