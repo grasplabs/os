@@ -67,6 +67,49 @@ export const stepDone = async (run: string, step: string): Promise<void> => {
   );
 };
 
+const endedStatuses = new Set(["complete", "errored", "terminated"]);
+
+/** Runs `endLiveRuns` has ended or found ended; it skips them after. */
+const seenEnded = new Set<string>();
+
+/**
+ * Terminates every run a test left waiting, sleeping or paused. The
+ * engine keeps those in the project's one workerd across test files, and
+ * would go on in the background of whatever runs next: a decision's
+ * week-long wait, a run paused for its owner or while a feature was off.
+ * Work that outlives its test is how a test file came to wait forever in
+ * CI (see apps/core/vite.config.ts), so each test ends its runs.
+ */
+export const endLiveRuns = async (): Promise<void> => {
+  const { results } = await env.DB.prepare("SELECT id FROM workflow_runs").all<{
+    id: string;
+  }>();
+  await Promise.all(
+    results
+      .filter(({ id }) => !seenEnded.has(id))
+      .map(async ({ id }) => {
+        // A row whose run never started has no instance; any other
+        // failure is the test's to see.
+        const instance = await env.WORKFLOWS.get(id).catch((error: unknown) => {
+          if (
+            error instanceof Error &&
+            error.message === "instance.not_found"
+          ) {
+            return null;
+          }
+          throw error;
+        });
+        if (instance) {
+          const { status } = await instance.status();
+          if (!endedStatuses.has(status)) {
+            await instance.terminate();
+          }
+        }
+        seenEnded.add(id);
+      })
+  );
+};
+
 /** Where the engine has a run now. */
 export const liveStatus = async (run: string): Promise<string> => {
   const instance = await env.WORKFLOWS.get(run);

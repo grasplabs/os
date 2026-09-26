@@ -2,7 +2,7 @@ import { toBase64Url, fromBase64Url } from "@grasp-os/shared/encoding";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
@@ -10,7 +10,14 @@ import { signDecisionLink } from "../src/decisions/links.ts";
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
-import { finished, liveStatus, resumed, stepDone, stopped } from "./runs.ts";
+import {
+  endLiveRuns,
+  finished,
+  liveStatus,
+  resumed,
+  stepDone,
+  stopped,
+} from "./runs.ts";
 import { acmeTenant } from "./sign-in-config.ts";
 import {
   callAuth,
@@ -248,6 +255,8 @@ const eventsOf = async (decision: string) => {
 };
 
 describe("decisions", { timeout: 60_000 }, () => {
+  afterEach(endLiveRuns);
+
   it("wait durably across a restart and go on with the real answer, audited under the person who decided", async () => {
     const builder = await personApi("builder");
     const decider = await personApi("user");

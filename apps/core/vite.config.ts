@@ -56,6 +56,12 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
       globalSetup: ["./test/global-setup.ts"],
       // Brings the D1 databases up to the committed migrations.
       setupFiles: ["./test/apply-migrations.ts"],
+      // Logs go straight to workerd's output, not to Vitest over RPC. A log
+      // from another request (a workflow run, a queue batch, a Durable
+      // Object) can't use the test's socket, so the pool holds it until the
+      // test next sends something; one logged after the file's last message
+      // was never sent, and the file waited for its reply forever.
+      disableConsoleIntercept: true,
       ...test,
     },
     plugins: [
