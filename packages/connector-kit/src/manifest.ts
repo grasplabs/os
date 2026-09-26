@@ -103,6 +103,31 @@ const namesParameter = (path: string, name: string): boolean =>
     .split("/")
     .some((segment) => parameterSegment.exec(segment)?.groups?.name === name);
 
+/** A query parameter's value an action leaves open: `{name}`, all of it. */
+const queryParameter = /^\{(?<name>[A-Za-z_]\w*)\}$/u;
+
+/** A query parameter's value an action names as it is, such as `drive`. */
+const literalQueryValue = /^[\w.~:@$-]{1,256}$/u;
+
+/** A query parameter's name, as a route declares one. */
+const queryKeySchema = z.string().regex(/^[A-Za-z_$][\w.$-]{0,63}$/u);
+
+/** The names of a path template's parameters. */
+const parametersOf = (path: string): string[] =>
+  path
+    .split("/")
+    .flatMap((segment) => parameterSegment.exec(segment)?.groups?.name ?? []);
+
+/** Whether a route names `name` as a parameter, in its path or its query. */
+const routeNames = (
+  { path, query = {} }: { path: string; query?: Record<string, string> },
+  name: string
+): boolean =>
+  namesParameter(path, name) ||
+  Object.values(query).some(
+    (value) => queryParameter.exec(value)?.groups?.name === name
+  );
+
 /** Whether `path` is a path template: `/` and one or more segments. */
 const isPathTemplate = (path: string): boolean => {
   const [empty, ...segments] = path.split("/");
@@ -155,7 +180,21 @@ export const redirectHostMatches = (
 /**
  * One request an action may send: its method, host and path, where a
  * `{name}` segment stands for any one segment. The query string is the
- * action's own.
+ * action's own, but for the parameters `query` names: each must be sent
+ * exactly once, with the literal value given, or any one value for a
+ * `{name}` (bound, as a path's is, where the call binds `name`). That is
+ * how a route names its resource where the provider takes it in the query
+ * (Google Drive's `driveId`).
+ *
+ * A GET of a resource-scoped action may declare a `check` instead of
+ * naming the resource, where the provider's API has no place for it in
+ * the request (Google Drive addresses a file by its ID alone). Before
+ * the egress sends such a request, it sends the check itself: a GET on
+ * the same host to `check.path`, with the route's parameters as the
+ * request has them and the check's own query, with the token and nothing
+ * of the connector's. It sends the request only if the check's JSON
+ * answer has `check.field` equal to the resource the call is bound to
+ * (`check.equals`, `{resource}`), and refuses it otherwise.
  *
  * A GET may name `redirects`: the hosts connect's egress follows one
  * redirect of its answer to, itself, without the token or any of the
@@ -170,10 +209,45 @@ export const routeSchema = z
     host: hostSchema,
     path: z.string().max(512).refine(isPathTemplate, "Not a path template"),
     redirects: z.array(redirectHostSchema).min(1).max(4).optional(),
+    query: z
+      .record(
+        queryKeySchema,
+        z
+          .string()
+          .refine(
+            (value) =>
+              queryParameter.test(value) || literalQueryValue.test(value),
+            "Not a query value: a literal or {name}"
+          )
+      )
+      .refine((query) => Object.keys(query).length <= 8, "Too many")
+      .optional(),
+    check: z
+      .strictObject({
+        path: z.string().max(512).refine(isPathTemplate, "Not a path template"),
+        query: z
+          .record(queryKeySchema, z.string().regex(literalQueryValue))
+          .optional(),
+        field: z.string().regex(/^[A-Za-z_]\w{0,63}$/u),
+        equals: z.string().regex(queryParameter),
+      })
+      .optional(),
   })
   .refine(
     ({ method, redirects }) => redirects === undefined || method === "GET",
     "Only a GET may follow a redirect"
+  )
+  .refine(
+    ({ method, check }) => check === undefined || method === "GET",
+    "Only a GET may declare a check"
+  )
+  .refine(
+    ({ path, check }) =>
+      check === undefined ||
+      parametersOf(check.path).every((name) =>
+        parametersOf(path).includes(name)
+      ),
+    "A check may use only its route's own path parameters"
   );
 export type Route = z.infer<typeof routeSchema>;
 
@@ -256,10 +330,35 @@ export const connectorManifestSchema = z
       Object.values(actions).every(
         ({ resource, routes }) =>
           resource === null ||
-          routes.every(({ path }) => namesParameter(path, resource))
+          routes.every(
+            (route) =>
+              routeNames(route, resource) ||
+              route.check?.equals === `{${resource}}`
+          )
       ),
-    // So the egress always binds it to the resource a capability names.
-    "Every route of an action with a resource must name it as a {segment}"
+    // So the egress always binds it to the resource a capability names,
+    // or checks it with the provider where the request can't name it.
+    "Every route of an action with a resource must name it as a {segment}, in its path or its query, or check it"
+  )
+  .refine(
+    ({ actions }) =>
+      Object.values(actions).every(
+        ({ resource, routes }) =>
+          resource !== null || routes.every(({ check }) => check === undefined)
+      ),
+    "Only an action with a resource may check it"
+  )
+  .refine(
+    ({ actions }) =>
+      Object.values(actions).every(
+        ({ routes }) =>
+          routes.filter(({ method }) => method !== "GET" && method !== "HEAD")
+            .length <= 1
+      ),
+    // A tool writes at most once, as its last request, so a provider's
+    // "nothing done" (429) for the call holds for all of it (R7): a tool
+    // with two write routes could have written with the first.
+    "An action may declare at most one write (a method other than GET or HEAD)"
   );
 export type ConnectorManifest = z.infer<typeof connectorManifestSchema>;
 
@@ -346,4 +445,144 @@ export const pathMatches = (
       );
     })
   );
+};
+
+// oxlint-disable-next-line no-control-regex -- control characters are the point
+const controlCharacter = /[\u0000-\u001F\u007F]/u;
+
+/**
+ * A query parameter's name as a provider may also read it: Google takes
+ * `drive_id` for `driveId`, and ignores case and punctuation elsewhere.
+ */
+const spellingOf = (key: string): string =>
+  key.toLowerCase().replaceAll(/[^a-z0-9]/gu, "");
+
+/** Letters a provider's alias of a parameter shares with its name (Drive's `corpus` for `corpora`). */
+const stemLength = 4;
+
+/**
+ * Whether another parameter of a query could be read as `key`: the same
+ * name in any spelling (`drive_id`, `driveId[]`, ` driveId`), one that
+ * contains it (Drive's `teamDriveId` for `driveId`), or one with its stem
+ * (Drive's `corpus` for `corpora`).
+ */
+const couldBeReadAs = (other: string, key: string): boolean => {
+  const spelled = spellingOf(other);
+  const name = spellingOf(key);
+  return (
+    spelled.includes(name) ||
+    (spelled.length >= stemLength &&
+      spelled.slice(0, stemLength) === name.slice(0, stemLength))
+  );
+};
+
+/**
+ * Whether a URL's query (`search`, as `URL.search` gives it) has each
+ * parameter the route's `query` names exactly once, and no other
+ * parameter a provider could read as it (see `couldBeReadAs`), with its
+ * literal value, or, for a `{name}`, a non-empty value without control
+ * characters, equal to `values[name]` where that is given. A query that
+ * names parameters has no raw `;`, which some servers split pairs at.
+ * Other parameters are the connector's own.
+ */
+export const queryMatches = (
+  query: Readonly<Record<string, string>> | undefined,
+  search: string,
+  values: Readonly<Record<string, string>> = {}
+): boolean => {
+  const entries = Object.entries(query ?? {});
+  if (entries.length === 0) {
+    return true;
+  }
+  if (search.includes(";")) {
+    return false;
+  }
+  const searchParams = new URLSearchParams(search);
+  const keys = [...searchParams.keys()];
+  return entries.every(([key, expected]) => {
+    const value = searchParams.get(key);
+    const readable = keys.filter((each) => couldBeReadAs(each, key));
+    if (readable.length !== 1 || readable[0] !== key || value === null) {
+      return false;
+    }
+    const name = queryParameter.exec(expected)?.groups?.name;
+    if (name === undefined) {
+      return value === expected;
+    }
+    const bound = Object.hasOwn(values, name) ? values[name] : undefined;
+    return (
+      value !== "" &&
+      !controlCharacter.test(value) &&
+      (bound === undefined || value === bound)
+    );
+  });
+};
+
+/** A route's check, as the egress sends it before the route's request. */
+export interface ResourceCheck {
+  url: URL;
+  field: string;
+  /** The value the check's answer must name: the bound resource. */
+  expected: string;
+}
+
+/**
+ * The check `route` declares for a request to `url` (which matched the
+ * route's path), with the request's own path parameters; `undefined` when
+ * it declares none, or the call binds no resource to check against (as a
+ * path parameter isn't bound then); `null` when the check's URL isn't one
+ * its template allows (a value that becomes a dot segment there, say), so
+ * the request must be refused.
+ */
+export const resourceCheckFor = (
+  route: Route,
+  url: URL,
+  values: Readonly<Record<string, string>>
+): ResourceCheck | undefined | null => {
+  const { check } = route;
+  const name =
+    check === undefined
+      ? undefined
+      : queryParameter.exec(check.equals)?.groups?.name;
+  if (
+    check === undefined ||
+    name === undefined ||
+    !Object.hasOwn(values, name)
+  ) {
+    return undefined;
+  }
+  const given = new Map<string, string>();
+  const actual = url.pathname.split("/");
+  for (const [index, segment] of route.path.split("/").entries()) {
+    const parameter = parameterSegment.exec(segment)?.groups;
+    const raw = actual[index] ?? "";
+    if (parameter?.name !== undefined) {
+      given.set(
+        parameter.name,
+        raw.slice(
+          (parameter.prefix ?? "").length,
+          raw.length - (parameter.suffix ?? "").length
+        )
+      );
+    }
+  }
+  const path = check.path
+    .split("/")
+    .map((segment) => {
+      const parameter = parameterSegment.exec(segment)?.groups;
+      return parameter?.name === undefined
+        ? segment
+        : `${parameter.prefix ?? ""}${given.get(parameter.name) ?? ""}${parameter.suffix ?? ""}`;
+    })
+    .join("/");
+  const checkUrl = new URL(`https://${route.host}${path}`);
+  for (const [key, value] of Object.entries(check.query ?? {})) {
+    checkUrl.searchParams.set(key, value);
+  }
+  // A value allowed inside its route's segment may stand alone in the
+  // check's, where `new URL` resolves `.` and `..` to another path.
+  if (!pathMatches(check.path, checkUrl.pathname)) {
+    return null;
+  }
+  return { url: checkUrl, field: check.field, expected: values[name] ?? "" };
 };

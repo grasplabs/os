@@ -75,9 +75,11 @@ export interface ToolDefinition<
     Record<Extract<keyof z.input<Input>, string>, readonly string[]>
   >;
   /**
-   * The only requests it may send (threat model Q11). A path segment named
-   * after the resource property (`{mailbox}`) must hold the resource a
-   * call's capability names, whenever it names one.
+   * The only requests it may send (threat model Q11). A parameter named
+   * after the resource property (`{mailbox}`), in a path or a route's
+   * `query`, must hold the resource a call's capability names, whenever it
+   * names one. A GET that can't name it declares a `check`, which the
+   * egress sends first. At most one route writes (not GET or HEAD).
    */
   routes: readonly Route[];
   run: (input: z.output<Input>) => Promise<ToolResult<z.input<Output>>>;

@@ -707,6 +707,102 @@ describe("the egress handler", () => {
     expect(api.sent).toStrictEqual([]);
   });
 
+  it("holds the query parameters a route names to their values and the resource", async () => {
+    const egress = exports.ConnectorEgress({
+      props: egressProps({
+        routes: [
+          {
+            method: "GET",
+            host: sampleHost,
+            path: "/v1/probe/ok",
+            query: { corpora: "drive", driveId: "{drive}" },
+          },
+        ],
+        values: { drive: "d-1" },
+      }),
+    });
+    const statuses = await Promise.all(
+      [
+        "corpora=drive&driveId=d-1&q=anything",
+        "corpora=drive&driveId=d-2",
+        "corpora=user&driveId=d-1",
+        "driveId=d-1",
+        // A second copy could be the one the provider reads.
+        "corpora=drive&driveId=d-1&driveId=d-2",
+      ].map(async (query) => {
+        const response = await egress.fetch(`${url}?${query}`);
+        return response.headers.get("grasp-egress") ?? "sent";
+      })
+    );
+    expect(statuses).toStrictEqual([
+      "sent",
+      "refused",
+      "refused",
+      "refused",
+      "refused",
+    ]);
+    expect(api.sent.map(({ path }) => path)).toStrictEqual([
+      "/v1/probe/ok?corpora=drive&driveId=d-1&q=anything",
+    ]);
+  });
+
+  it("sends a request that can't name its resource only once the provider says it is the bound one", async () => {
+    const egress = exports.ConnectorEgress({
+      props: egressProps({
+        routes: [
+          {
+            method: "GET",
+            host: sampleHost,
+            path: "/v1/files/{item}/content",
+            check: {
+              path: "/v1/files/{item}",
+              query: { fields: "driveId" },
+              field: "driveId",
+              equals: "{drive}",
+            },
+          },
+        ],
+        values: { drive: "d-1" },
+      }),
+    });
+    const answers = await Promise.all(
+      ["mine", "theirs", "gone"].map(async (item) => {
+        const response = await egress.fetch(
+          `https://${sampleHost}/v1/files/${item}/content`,
+          { headers: { "x-connector": "own" } }
+        );
+        return {
+          status: response.status,
+          egress: response.headers.get("grasp-egress"),
+        };
+      })
+    );
+    // The bound drive's file goes; another drive's is refused; the
+    // provider's refusal of the check comes back as its own.
+    expect(answers).toStrictEqual([
+      { status: 200, egress: null },
+      { status: 403, egress: "refused" },
+      { status: 404, egress: null },
+    ]);
+    expect(api.sent.map(({ path }) => path).toSorted()).toStrictEqual(
+      [
+        "/v1/files/gone?fields=driveId",
+        "/v1/files/mine/content",
+        "/v1/files/mine?fields=driveId",
+        "/v1/files/theirs?fields=driveId",
+      ].toSorted()
+    );
+    // The check carries the token, and nothing of the connector's.
+    const checks = api.sent.filter(({ path }) => path.includes("fields="));
+    expect(
+      checks.every(
+        ({ headers }) =>
+          headers.authorization === "Bearer a-token-for-one-call" &&
+          headers["x-connector"] === undefined
+      )
+    ).toBeTruthy();
+  });
+
   it("closes when the call's time is up", async () => {
     const egress = exports.ConnectorEgress({
       props: egressProps({ expiresAt: Date.now() - 1 }),

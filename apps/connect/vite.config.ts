@@ -11,8 +11,8 @@ const migrations = await readD1Migrations(
 );
 
 /**
- * The Microsoft 365 live smoke test's tenant (test/microsoft-365.live.test.ts),
- * passed on only when set: without them, it is skipped.
+ * The live smoke tests' tenant and workspace (test/*.live.test.ts), passed
+ * on only when set: without them, they are skipped.
  */
 const smokeBindings = Object.fromEntries(
   [
@@ -21,6 +21,11 @@ const smokeBindings = Object.fromEntries(
     "M365_SMOKE_DRIVE",
     "M365_SMOKE_WRITES",
     "M365_SMOKE_FOREIGN_FOLDER",
+    "GOOGLE_SMOKE_ACCESS_TOKEN",
+    "GOOGLE_SMOKE_MAILBOX",
+    "GOOGLE_SMOKE_CALENDAR",
+    "GOOGLE_SMOKE_DRIVE",
+    "GOOGLE_SMOKE_WRITES",
   ].flatMap((name) => {
     const value = process.env[name];
     return value === undefined || value === "" ? [] : [[name, value]];

@@ -1,7 +1,5 @@
 import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
 import { signCapability } from "@grasp-os/shared/capability";
-import { connectErrors } from "@grasp-os/shared/connect";
-import type { ConnectionPerson, ConnectResult } from "@grasp-os/shared/connect";
 import type { Json } from "@grasp-os/shared/json";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
@@ -17,7 +15,6 @@ import {
   ownAccount,
   someone,
 } from "./connect.ts";
-import type { Call } from "./connect.ts";
 import {
   archiveFolderId,
   foreignFolderId,
@@ -40,6 +37,15 @@ import {
 } from "./fixtures/graph.ts";
 import { fakeGraph } from "./graph-api.ts";
 import { fakeProviders } from "./oauth-provider.ts";
+import {
+  callTool,
+  outputOf,
+  parsedRequests,
+  resultOf,
+  retryable,
+  toolError,
+} from "./tool-calls.ts";
+import type { Connection } from "./tool-calls.ts";
 
 // The Microsoft 365 connector against Graph's recorded answers, through
 // connect's real call path: capability, policy, a fresh isolate, the
@@ -50,11 +56,6 @@ import { fakeProviders } from "./oauth-provider.ts";
 const providers = fakeProviders();
 const graph = fakeGraph();
 
-interface Connection {
-  id: string;
-  person: ConnectionPerson;
-}
-
 /** Someone's Microsoft 365 connection, made through OAuth. */
 const connected = async (): Promise<Connection> => {
   const person = someone();
@@ -62,101 +63,10 @@ const connected = async (): Promise<Connection> => {
   return { id, person };
 };
 
-type Extra = Partial<Omit<Call, "connectionId" | "action" | "input">> & {
-  /** The fields the call's permission masks. */
-  mask?: string[];
-};
-
-/** Calls `action` as an agent's workflow run for the connection's owner. */
-const call = async (
-  connection: Connection,
-  action: string,
-  input: Call["input"],
-  { mask, ...extra }: Extra = {}
-): Promise<ConnectResult> => {
-  const stated = { connectionId: connection.id, action, input, ...extra };
-  const capability = await signCapability(
-    env.CAPABILITY_SIGNING_KEY,
-    agentFor(connection.person.userId),
-    { ...stated, mask }
-  );
-  return await exports.default.call({ ...stated, capability });
-};
-
-/** A call's result, with its output parsed. */
-const resultOf = async (
-  result: Promise<ConnectResult>
-): Promise<{ output: unknown; provenance: string[] }> => {
-  const { output, provenance } = await result;
-  const parsed: unknown = JSON.parse(output);
-  return { output: parsed, provenance };
-};
-
-/** A call's output, parsed. */
-const outputOf = async (result: Promise<ConnectResult>): Promise<unknown> => {
-  const { output } = await resultOf(result);
-  return output;
-};
-
-/** The error a tool reported, as its caller gets it. */
-const toolError = async (promise: Promise<unknown>): Promise<unknown> => {
-  try {
-    await promise;
-  } catch (error) {
-    if (
-      connectErrors.codeOf(error) === "connect.action_failed" &&
-      error instanceof Error &&
-      "details" in error &&
-      typeof error.details === "object" &&
-      error.details !== null &&
-      "output" in error.details &&
-      typeof error.details.output === "string"
-    ) {
-      const output: unknown = JSON.parse(error.details.output);
-      return output;
-    }
-    throw error;
-  }
-  throw new Error("The call didn't fail");
-};
-
-/**
- * How a call ended: `ok`, or its code, with the wait a retryable
- * `connect.server_unavailable` passes on.
- */
-const retryable = async (
-  promise: Promise<unknown>
-): Promise<{ code: string; retryAfterSeconds?: number }> => {
-  try {
-    await promise;
-    return { code: "ok" };
-  } catch (error) {
-    const { details } = z
-      .object({
-        details: z.object({ retryAfterSeconds: z.number() }).optional(),
-      })
-      .parse(error);
-    return {
-      code: connectErrors.codeOf(error) ?? String(error),
-      ...details,
-    };
-  }
-};
+const call = callTool;
 
 /** What left connect, each request with its query and JSON body parsed. */
-const requests = () =>
-  graph.sent.map(({ method, host, path, headers, body }) => {
-    const url = new URL(path, `https://${host}`);
-    const parsed: unknown = body === "" ? undefined : JSON.parse(body);
-    return {
-      method,
-      host,
-      path: url.pathname,
-      query: Object.fromEntries(url.searchParams),
-      headers,
-      body: parsed,
-    };
-  });
+const requests = () => parsedRequests(graph.sent);
 
 /** Graph's requests' paths. */
 const graphPaths = (): string[] =>

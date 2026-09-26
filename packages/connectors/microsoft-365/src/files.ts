@@ -1,10 +1,13 @@
 import { defineTool, ToolError } from "@grasp-os/connector-kit/connector";
+import {
+  checkReadable,
+  contentAs,
+  readAsSchema,
+} from "@grasp-os/connector-kit/content";
 import { z } from "zod";
 
 import {
   atPage,
-  checkReadable,
-  contentAs,
   segmentPattern,
   downloadHosts,
   driveSchema,
@@ -16,7 +19,6 @@ import {
   nextPageOf,
   pageOf,
   pageSchema,
-  readAsSchema,
   segment,
   topSchema,
   v1,
