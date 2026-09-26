@@ -1,7 +1,6 @@
+import { deploymentConfig } from "@grasp-os/shared/config";
 import { featureErrors } from "@grasp-os/shared/errors";
 import { z } from "zod";
-
-import { deploymentConfig } from "./deployment-config.ts";
 
 // Features ship switched off. The console switches one on for a deployment
 // with the `FEATURES` var, e.g. `{"apps": true}`, and switching it off again

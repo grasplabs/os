@@ -1,9 +1,6 @@
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
-import {
-  disconnectPersonalMaxOwners,
-  oauthFlowLifetimeMs,
-} from "@grasp-os/shared/connect";
+import { disconnectPersonalMaxOwners } from "@grasp-os/shared/connect";
 import type { CodedError } from "@grasp-os/shared/errors";
 import { identifierSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -13,7 +10,7 @@ import { isAdmin, roleErrors, roleSchema } from "@grasp-os/shared/roles";
 import type { Role } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
-import { and, asc, eq, gt, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, isNull, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
@@ -62,8 +59,11 @@ const refusal = (by: Identity, error: CodedError): CodedError => {
   return error;
 };
 
-/** Refuses anyone but a member who is an admin. */
-const requireAdmin = (by: Identity): void => {
+/**
+ * Refuses anyone but a member who is an admin: `requireAdmin`
+ * (@grasp-os/shared/roles), but also refusing Grasp staff, and logged.
+ */
+const requireMemberAdmin = (by: Identity): void => {
   if (by.staff || !isAdmin(by.role)) {
     throw refusal(by, roleErrors.create("role.forbidden"));
   }
@@ -123,7 +123,7 @@ const memberEntry = (
 
 /** The organization's members, by name. For admins. */
 const listMembers = async (env: Env, by: Identity): Promise<Member[]> => {
-  requireAdmin(by);
+  requireMemberAdmin(by);
   const rows = await drizzle(env.DB)
     .select({
       userId: members.userId,
@@ -251,7 +251,7 @@ const removeMember = async (
   by: Identity,
   userId: unknown
 ): Promise<{ connectionsDisconnected: number }> => {
-  requireAdmin(by);
+  requireMemberAdmin(by);
   const target = targetOf(by, userId);
   const membership = await membershipOf(env, target);
   if (membership) {
@@ -280,7 +280,7 @@ const revokeMemberSessions = async (
   by: Identity,
   userId: unknown
 ): Promise<void> => {
-  requireAdmin(by);
+  requireMemberAdmin(by);
   const target = targetOf(by, userId);
   const membership = await membershipOf(env, target);
   if (!membership) {
@@ -320,7 +320,7 @@ const setMemberRole = async (
   userId: unknown,
   role: unknown
 ): Promise<void> => {
-  requireAdmin(by);
+  requireMemberAdmin(by);
   const target = identifierSchema.safeParse(userId);
   const parsedRole = roleSchema.safeParse(role);
   if (!parsedRole.success) {
@@ -385,12 +385,11 @@ const disconnectBatchesAtOnce = 4;
 /**
  * Disconnects what is still connected for removed people: everyone whose
  * disconnect hasn't completed yet, however long ago they were removed and
- * however many there are, and everyone removed within the last OAuth flow
- * lifetime, completed or not. A flow the person took back before the
- * removal (taking it needs their session) can still finish into a
- * connection after their disconnect completed; the flow's lifetime bounds
- * that with room to spare. When nobody is pending, it doesn't call
- * connect at all. The cron trigger calls it.
+ * however many there are. A completed one needs nothing more: the removal
+ * deleted the person's sessions, and an OAuth callback without a session
+ * burns its flow, so no flow of theirs can finish into a connection
+ * afterwards. When nobody is pending, it doesn't call connect at all. The
+ * cron trigger calls it.
  */
 export const retryDisconnects = async (env: Env): Promise<void> => {
   const pending = await drizzle(env.DB)
@@ -399,13 +398,7 @@ export const retryDisconnects = async (env: Env): Promise<void> => {
     .where(
       and(
         eq(memberRemovals.organizationId, organizationId),
-        or(
-          isNull(memberRemovals.disconnectedAt),
-          gt(
-            memberRemovals.removedAt,
-            new Date(Date.now() - oauthFlowLifetimeMs)
-          )
-        )
+        isNull(memberRemovals.disconnectedAt)
       )
     )
     .orderBy(asc(memberRemovals.removedAt), asc(memberRemovals.userId));

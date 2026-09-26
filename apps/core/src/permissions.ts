@@ -15,7 +15,11 @@ import type {
   PermissionObject,
   PermissionSubject,
 } from "@grasp-os/shared/permissions";
-import { canBuild, isAdmin, roleErrors } from "@grasp-os/shared/roles";
+import {
+  requireAdmin,
+  requireBuilder,
+  roleErrors,
+} from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
@@ -177,6 +181,10 @@ const auditDetail = ({
  * The audit entry of a change to `permission` by `by`, with `extra` detail
  * such as the approval it went through.
  */
+// Also exported here, for the modules that already import it from this
+// one; new code imports it from @grasp-os/shared/roles.
+export { requireAdmin } from "@grasp-os/shared/roles";
+
 export const changeEntry = (
   by: Identity,
   action: `permission.${
@@ -193,20 +201,6 @@ export const changeEntry = (
   target: { type: "permission", id: permission.id },
   detail: { ...auditDetail(permission), ...extra },
 });
-
-/** Refuses anyone but an admin. */
-export const requireAdmin = (by: Identity): void => {
-  if (!isAdmin(by.role)) {
-    throw roleErrors.create("role.forbidden");
-  }
-};
-
-/** Admins, and builders who build the Apps that need permissions. */
-const requireBuilder = (by: Identity): void => {
-  if (!canBuild(by.role)) {
-    throw roleErrors.create("role.forbidden");
-  }
-};
 
 export const parseId = (id: unknown): PermissionId => {
   const parsed = permissionIdSchema.safeParse(id);

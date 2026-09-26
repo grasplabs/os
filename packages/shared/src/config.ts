@@ -1,7 +1,22 @@
-import { log } from "@grasp-os/shared/log";
 import type { z } from "zod";
 
-import { jsonVar } from "./json-var.ts";
+import { log } from "./log.ts";
+
+/**
+ * The value of a JSON var the console sets. It arrives parsed; one set as
+ * text (`wrangler dev --var NAME:<json>`) is parsed here, and is `undefined`
+ * if it isn't JSON.
+ */
+export const jsonVar = (value: unknown): unknown => {
+  if (typeof value !== "string") {
+    return value;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+};
 
 // Parsed configs by the var's raw value: a Worker's env holds the same
 // values for every request, so each is parsed once per isolate.

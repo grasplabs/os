@@ -14,6 +14,7 @@ import type {
   FullVerification,
   ParsedAuditFilter,
 } from "@grasp-os/shared/audit-log";
+import { deploymentConfig, jsonVar } from "@grasp-os/shared/config";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { DurableObject } from "cloudflare:workers";
@@ -46,9 +47,7 @@ import type {
 import migrations from "./db/audit-log/migrations/migrations.js";
 import { archives, events } from "./db/audit-log/schema.ts";
 import { migrateOnWake } from "./db/migrate.ts";
-import { deploymentConfig } from "./deployment-config.ts";
 import { inJurisdiction } from "./durable-objects.ts";
-import { jsonVar } from "./json-var.ts";
 
 /** How many entries one read returns at most. */
 const pageSize = 500;
@@ -74,8 +73,7 @@ export const archiveStretch = 500;
  * How long archived stretches are kept, in days from when the log received
  * their last event: at least a year, at most ten.
  */
-const archiveRetentionMinDays = 365;
-const archiveRetentionMaxDays = 3650;
+const archiveRetentionSchema = z.int().min(365).max(3650);
 
 /** Days the log keeps an event where admins search it, unless set. */
 const retentionDefaultDays = 180;
@@ -104,25 +102,6 @@ export const auditRetentionDays = (
       );
 
 /**
- * The archive retention schema for each retention: never shorter than it,
- * so an event isn't purged before it was even archived. One per retention,
- * so `deploymentConfig` parses and logs each value once.
- */
-const archiveRetentionSchemas = new Map<number, z.ZodInt>();
-const archiveRetentionSchema = (retention: number): z.ZodInt => {
-  const known = archiveRetentionSchemas.get(retention);
-  if (known) {
-    return known;
-  }
-  const schema = z
-    .int()
-    .min(Math.max(archiveRetentionMinDays, retention))
-    .max(archiveRetentionMaxDays);
-  archiveRetentionSchemas.set(retention, schema);
-  return schema;
-};
-
-/**
  * Days an event is kept in all, archive included, counted from when the
  * log received it: the `AUDIT_ARCHIVE_RETENTION_DAYS` var the console sets
  * per deployment, as the DPA states it (AU7). At least a year and at least
@@ -134,13 +113,24 @@ export const archiveRetentionDays = (
   env: Pick<Env, "AUDIT_ARCHIVE_RETENTION_DAYS" | "AUDIT_RETENTION_DAYS">
 ): number | undefined => {
   const retention = auditRetentionDays(env);
-  return retention === undefined
-    ? undefined
-    : deploymentConfig(
-        archiveRetentionSchema(retention),
-        "AUDIT_ARCHIVE_RETENTION_DAYS",
-        env.AUDIT_ARCHIVE_RETENTION_DAYS
-      );
+  const days = deploymentConfig(
+    archiveRetentionSchema,
+    "AUDIT_ARCHIVE_RETENTION_DAYS",
+    env.AUDIT_ARCHIVE_RETENTION_DAYS
+  );
+  if (retention === undefined || days === undefined) {
+    return undefined;
+  }
+  // Shorter than retention, an event would be purged before it was even
+  // archived.
+  if (days < retention) {
+    log.error("config.invalid", {
+      var: "AUDIT_ARCHIVE_RETENTION_DAYS",
+      paths: "<root>",
+    });
+    return undefined;
+  }
+  return days;
 };
 
 /**

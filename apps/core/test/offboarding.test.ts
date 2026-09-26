@@ -1,7 +1,4 @@
-import {
-  disconnectPersonalMaxOwners,
-  oauthFlowLifetimeMs,
-} from "@grasp-os/shared/connect";
+import { disconnectPersonalMaxOwners } from "@grasp-os/shared/connect";
 import type { DisconnectPersonal } from "@grasp-os/shared/connect";
 import { authErrors } from "@grasp-os/shared/errors";
 import { authoritySchema } from "@grasp-os/shared/permissions";
@@ -15,7 +12,7 @@ import { consentCode } from "./connect-providers.ts";
 import { connectionIn, envOf, reached } from "./contexts.ts";
 import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
-import { acmeTenant, clientOrigin } from "./sign-in-config.ts";
+import { acmeTenant } from "./sign-in-config.ts";
 import {
   auditedDuring,
   callAuth,
@@ -452,40 +449,6 @@ describe("removing a member, while their OAuth flows are open", () => {
     });
     await expect(outcome(finished)).resolves.toBe("connection.flow_invalid");
   });
-
-  it("disconnects a connection that finished anyway, on the next cron run", async () => {
-    const admin = await signedInApi(idp, "admin");
-    const person = await signedInApi(idp, "user");
-    await admin.api.members.remove(person.userId);
-    // A flow already past its spending when the removal ran, finishing
-    // after it: connect itself doesn't know who is a member.
-    const owner = {
-      ...asConnectPerson(person, "user"),
-      accounts: [
-        { provider: "microsoft" as const, subject: String(person.person.oid) },
-      ],
-    };
-    const { url } = await env.CONNECT.startConnection({
-      person: owner,
-      provider: "microsoft",
-      scope: "personal",
-      origin: clientOrigin,
-      tenant: acmeTenant,
-      returnTo: "/",
-    });
-    const authorization = new URL(url);
-    const { connectionId } = await env.CONNECT.finishConnection({
-      person: owner,
-      state: authorization.searchParams.get("state") ?? "",
-      code: consentCode(authorization, acmeTenant, String(person.person.oid)),
-    });
-    await expect(tokensHeld(connectionId)).resolves.toBeGreaterThan(0);
-
-    await runCron();
-
-    await expect(tokensHeld(connectionId)).resolves.toBe(0);
-    await expect(env.CONNECT.listConnections(owner)).resolves.toStrictEqual([]);
-  });
 });
 
 /** Connect as it is, but for its offboarding call, which is `call`. */
@@ -519,17 +482,6 @@ const countingConnect = () => {
     return await env.CONNECT.disconnectPersonal(request);
   });
   return { calls, connect };
-};
-
-/** Past the OAuth flow's lifetime after every removal made so far. */
-const afterFlowsExpire = async (run: () => Promise<void>): Promise<void> => {
-  vi.useFakeTimers({ toFake: ["Date"] });
-  vi.setSystemTime(Date.now() + oauthFlowLifetimeMs + 60_000);
-  try {
-    await run();
-  } finally {
-    vi.useRealTimers();
-  }
 };
 
 const dayMs = 24 * 60 * 60 * 1000;
@@ -576,16 +528,13 @@ describe("the cron trigger's disconnect retry", () => {
       Date.now() - 60 * dayMs
     );
 
-    await afterFlowsExpire(async () => {
-      await runCron();
-    });
+    await runCron();
 
     await expect(tokensHeld(connectionId)).resolves.toBe(0);
-    // Every one of them completed: the next run finds nothing to do.
+    // Every one of them completed: the next run finds nothing to do, even
+    // for a removal made minutes ago.
     const { calls, connect } = countingConnect();
-    await afterFlowsExpire(async () => {
-      await runCron({ CONNECT: connect });
-    });
+    await runCron({ CONNECT: connect });
     expect(calls).toStrictEqual([]);
   });
 
