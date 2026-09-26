@@ -9,6 +9,7 @@
     "./app-limits": "./src/app-limits.ts",
     "./apps": "./src/apps.ts",
     "./audit": "./src/audit.ts",
+    "./audit-log": "./src/audit-log.ts",
     "./capability": "./src/capability.ts",
     "./connect": "./src/connect.ts",
     "./encoding": "./src/encoding.ts",

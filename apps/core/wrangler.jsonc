@@ -49,6 +49,9 @@
   // So are feature flags: the `FEATURES` var (src/features.ts), e.g.
   // `{"apps": true}`. Every feature is off until it names it.
   //
+  // And the audit log's retention: the `AUDIT_RETENTION_DAYS` var
+  // (src/audit-retention.ts), 180 days unless set, at least 30.
+  //
   // Local dev reads none of these from .dev.vars (Wrangler loads only the
   // required secrets and declared vars from it): pass them with
   // `wrangler dev --var NAME:<value>`, as core's dev script does for its own
@@ -101,6 +104,13 @@
       "bucket_name": "grasp-os-files",
       "jurisdiction": "eu",
     },
+    // Audit events past retention, moved out of the AuditLog object as they
+    // were stored (src/audit-log.ts). Only core writes it.
+    {
+      "binding": "AUDIT_ARCHIVE",
+      "bucket_name": "grasp-os-audit-archive",
+      "jurisdiction": "eu",
+    },
   ],
   // Audit events from core and connect, appended to the AuditLog object.
   // Delivery is at least once; events that keep failing land in the dead
@@ -121,7 +131,8 @@
       },
     ],
   },
-  // Sends audit events left in the outbox when their first send failed.
+  // Sends audit events left in the outbox when their first send failed, and
+  // archives audit events past retention (src/index.ts).
   "triggers": { "crons": ["* * * * *"] },
   // The model gateway's transport to AI Gateway (src/models.ts); core never
   // holds a raw provider key.

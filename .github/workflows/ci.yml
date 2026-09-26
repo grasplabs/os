@@ -165,6 +165,11 @@ jobs:
       # a dead letter queue, which is only named in core's consumer config.
       - name: Create the audit dead letter queue
         run: vp exec wrangler queues info grasp-os-audit-dlq || vp exec wrangler queues create grasp-os-audit-dlq
+      # A bucket's jurisdiction, too, is set only when it is created: create
+      # the audit archive (core's AUDIT_ARCHIVE) in the EU before the first
+      # deploy.
+      - name: Create the audit archive bucket in the EU
+        run: vp exec wrangler r2 bucket info grasp-os-audit-archive --jurisdiction eu || vp exec wrangler r2 bucket create grasp-os-audit-archive --jurisdiction eu
       # D1 migrations are additive, so the running code keeps working on the
       # new schema until the deploy after them replaces it. connect first:
       # core's service binding points at it.

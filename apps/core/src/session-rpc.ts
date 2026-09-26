@@ -2,6 +2,7 @@ import type { Identity, SessionApi } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
 import { AppsRpc } from "./apps-rpc.ts";
+import { AuditRpc } from "./audit-rpc.ts";
 import { ConnectionsRpc } from "./connections.ts";
 import { requireFeature } from "./features.ts";
 import type { Feature } from "./features.ts";
@@ -33,6 +34,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #workflows: WorkflowsRpc;
   readonly #screens: ScreensRpc;
   readonly #members: MembersRpc;
+  readonly #audit: AuditRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -57,6 +59,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     // Screens run Apps: the Apps kill switch stops them too.
     this.#screens = new ScreensRpc(env, checkWith("apps", "screens"));
     this.#members = new MembersRpc(env, checkWith("members"));
+    this.#audit = new AuditRpc(env, checkWith("audit"));
   }
 
   get apps(): AppsRpc {
@@ -85,6 +88,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get members(): MembersRpc {
     return this.#members;
+  }
+
+  get audit(): AuditRpc {
+    return this.#audit;
   }
 
   async whoami(): Promise<Identity> {
