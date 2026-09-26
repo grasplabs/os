@@ -63,6 +63,8 @@ export const connections = sqliteTable(
       .where(
         sql`${table.accountId} IS NOT NULL AND ${table.status} <> 'disconnected'`
       ),
+    // Offboarding disconnects a removed person's personal connections.
+    index("connections_owner_user_id_idx").on(table.ownerUserId),
   ]
 );
 
@@ -138,7 +140,11 @@ export const oauthFlows = sqliteTable(
     verifier: text().notNull(),
     expiresAt: timestamp("expires_at").notNull(),
   },
-  (table) => [index("oauth_flows_expires_idx").on(table.expiresAt)]
+  (table) => [
+    index("oauth_flows_expires_idx").on(table.expiresAt),
+    // Offboarding spends a removed person's open flows.
+    index("oauth_flows_user_id_idx").on(table.userId),
+  ]
 );
 
 /**

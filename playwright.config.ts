@@ -29,7 +29,10 @@ export default defineConfig({
       `vp run --filter @grasp-os/core dev --local --port ${port}`,
       devVar("BETTER_AUTH_SECRET", testAuthSecret),
       devVar("SIGN_IN", JSON.stringify(testSignIn)),
-      devVar("FEATURES", JSON.stringify({ apps: true, screens: true })),
+      devVar(
+        "FEATURES",
+        JSON.stringify({ apps: true, screens: true, members: true })
+      ),
     ].join(" "),
     port,
     reuseExistingServer: !ci,

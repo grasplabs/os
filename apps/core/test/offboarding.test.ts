@@ -1,3 +1,8 @@
+import {
+  disconnectPersonalMaxOwners,
+  oauthFlowLifetimeMs,
+} from "@grasp-os/shared/connect";
+import type { DisconnectPersonal } from "@grasp-os/shared/connect";
 import { authErrors } from "@grasp-os/shared/errors";
 import { authoritySchema } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
@@ -502,6 +507,130 @@ describe("removing a member, while their OAuth flows are open", () => {
   });
 });
 
+/** Runs the cron trigger once, with connect as `connect` has it. */
+const runCron = async (connect: Env["CONNECT"] = env.CONNECT) => {
+  await worker.scheduled(createScheduledController(), {
+    ...env,
+    CONNECT: connect,
+  });
+};
+
+/** Connect as it is, but for its offboarding call, which is `call`. */
+const connectWith = (
+  call: (request: DisconnectPersonal) => Promise<{ disconnected: number }>
+): Env["CONNECT"] =>
+  new Proxy(env.CONNECT, {
+    get: (target, key) => {
+      if (key === "disconnectPersonal") {
+        return call;
+      }
+      const value: unknown = Reflect.get(target, key, target);
+      if (typeof value !== "function") {
+        return value;
+      }
+      const bound: unknown = value.bind(target);
+      return bound;
+    },
+  });
+
+/** Connect whose offboarding call fails, as when it can't be reached. */
+const connectDown = connectWith(() => {
+  throw new Error("connect unreachable");
+});
+
+/** Connect as it is, counting its offboarding calls. */
+const countingConnect = () => {
+  const calls: DisconnectPersonal[] = [];
+  const connect = connectWith(async (request) => {
+    calls.push(request);
+    return await env.CONNECT.disconnectPersonal(request);
+  });
+  return { calls, connect };
+};
+
+/** Past the OAuth flow's lifetime after every removal made so far. */
+const afterFlowsExpire = async (run: () => Promise<void>): Promise<void> => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + oauthFlowLifetimeMs + 60_000);
+  try {
+    await run();
+  } finally {
+    vi.useRealTimers();
+  }
+};
+
+const dayMs = 24 * 60 * 60 * 1000;
+
+/** Records `count` people as removed at `removedAt`, as a removal would. */
+const removedLongAgo = async (count: number, removedAt: number) => {
+  const now = Date.now();
+  const ids = Array.from({ length: count }, () => `removed-${unique()}`);
+  await env.DB.batch(
+    ids.flatMap((id) => [
+      env.DB.prepare(
+        "INSERT INTO users (id, name, email, email_verified, created_at, updated_at) VALUES (?, 'Removed', ?, 1, ?, ?)"
+      ).bind(id, `${id}@acme.test`, now, now),
+      env.DB.prepare(
+        "INSERT INTO member_removals (organization_id, user_id, removed_at) VALUES ('organization', ?, ?)"
+      ).bind(id, removedAt),
+    ])
+  );
+};
+
+describe("the cron trigger's disconnect retry", () => {
+  it("retries every removal until its disconnect completes, however many and however old", async () => {
+    const admin = await personWith("admin");
+    const person = await personWith("user");
+    const connectionId = await connectOwnAccount(person);
+    // The removal's own disconnect fails, and so does the next retry.
+    const { core } = await openRpc(admin.session, {
+      coreEnv: { ...env, CONNECT: connectDown },
+    });
+    await expect(
+      outcome(core.authenticate().members.remove(person.userId))
+    ).resolves.toBe("member.connections_pending");
+    await runCron(connectDown);
+    await expect(tokensHeld(connectionId)).resolves.toBeGreaterThan(0);
+    // As if all that was months ago, with more removals still pending
+    // since than one call to connect takes.
+    await env.DB.prepare(
+      "UPDATE member_removals SET removed_at = ? WHERE user_id = ?"
+    )
+      .bind(Date.now() - 90 * dayMs, person.userId)
+      .run();
+    await removedLongAgo(
+      disconnectPersonalMaxOwners + 50,
+      Date.now() - 60 * dayMs
+    );
+
+    await afterFlowsExpire(async () => {
+      await runCron();
+    });
+
+    await expect(tokensHeld(connectionId)).resolves.toBe(0);
+    // Every one of them completed: the next run finds nothing to do.
+    const { calls, connect } = countingConnect();
+    await afterFlowsExpire(async () => {
+      await runCron(connect);
+    });
+    expect(calls).toStrictEqual([]);
+  });
+
+  it("calls connect not at all once nothing is pending", async () => {
+    const admin = await personWith("admin");
+    const person = await personWith("user");
+    await admin.api.members.remove(person.userId);
+    const { calls, connect } = countingConnect();
+
+    // Their disconnect completed, and no flow of theirs can finish now.
+    await afterFlowsExpire(async () => {
+      await runCron(connect);
+    });
+
+    expect(calls).toStrictEqual([]);
+  });
+});
+
 /** How many admins the organization has now. */
 const activeAdmins = async (): Promise<number> => {
   const row = await env.DB.prepare(
@@ -663,6 +792,37 @@ describe("the organization's admins", () => {
         },
       })
     );
+  });
+
+  it("come back only with a record of it: a restore that can't be audited doesn't happen", async () => {
+    const configured = await personWith("admin");
+    const coreEnv = withSignIn({ admins: [configured.person.email] });
+    await env.DB.prepare(
+      "UPDATE members SET role = 'user' WHERE role = 'admin'"
+    ).run();
+    // The audit outbox refuses every write while the restore runs.
+    await env.DB.prepare(
+      "CREATE TRIGGER audit_outbox_down BEFORE INSERT ON audit_outbox BEGIN SELECT RAISE(ABORT, 'outbox down'); END"
+    ).run();
+    try {
+      await outcome(signIn(idp, "microsoft", configured.person, { coreEnv }));
+    } finally {
+      await env.DB.prepare("DROP TRIGGER audit_outbox_down").run();
+    }
+    await expect(activeAdmins()).resolves.toBe(0);
+
+    // Signing in again, with the outbox back, restores and records it.
+    let again = "";
+    const audited = await auditedDuring(async () => {
+      again = await signedIn(idp, "microsoft", configured.person, { coreEnv });
+    });
+    await expect(nowSignedIn(again)).resolves.toBe("admin");
+    expect(
+      audited.filter(
+        ({ action, detail }) =>
+          action === "member.role.updated" && detail?.reason === "no_admin_left"
+      )
+    ).toHaveLength(1);
   });
 
   it("don't come back when removed, configured or not", async () => {

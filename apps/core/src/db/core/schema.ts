@@ -153,6 +153,11 @@ export const memberRemovals = sqliteTable(
       .notNull()
       .references(() => users.id, { onDelete: "cascade" }),
     removedAt: timestamp("removed_at").notNull(),
+    /**
+     * When connect completed disconnecting their personal connections;
+     * until then the cron trigger retries it (`retryDisconnects`).
+     */
+    disconnectedAt: timestamp("disconnected_at"),
   },
   (table) => [primaryKey({ columns: [table.organizationId, table.userId] })]
 );

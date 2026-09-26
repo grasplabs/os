@@ -1,6 +1,7 @@
 import { expect } from "@playwright/test";
 
 import { test } from "./csp.ts";
+import { signedIn, signInTo } from "./people.ts";
 
 test("loads the frontend from core and reaches core over RPC", async ({
   page,
@@ -19,6 +20,48 @@ test("shows only its own words for a refused sign-in, never the link's", async (
     "Sign-in didn't work. Try again, or ask an admin."
   );
   await expect(page.getByText(planted)).toHaveCount(0);
+});
+
+test("names each member's actions for them, and asks before making someone an admin", async ({
+  context,
+  page,
+}) => {
+  // Everyone signed in here has the same name.
+  const { admin, one, two } = await signedIn({
+    admin: "admin",
+    one: "user",
+    two: "user",
+  });
+  await signInTo(context, admin);
+  await page.goto("/members");
+
+  for (const person of [one, two]) {
+    const who = `Person (${person.userId}@acme.test)`;
+    for (const name of [`End sessions for ${who}`, `Remove ${who}`]) {
+      // oxlint-disable-next-line no-await-in-loop -- one control at a time
+      await expect(page.getByRole("button", { name, exact: true })).toHaveCount(
+        1
+      );
+    }
+  }
+  const labels = await page
+    .getByRole("button", { name: /^(?:End sessions for|Remove) /u })
+    .evaluateAll((buttons) =>
+      buttons.map((button) => button.getAttribute("aria-label"))
+    );
+  expect(new Set(labels).size).toBe(labels.length);
+
+  const role = page.getByRole("combobox", {
+    name: `Role of Person (${one.userId}@acme.test)`,
+  });
+  await role.click();
+  await page.getByRole("option", { name: "admin" }).click();
+  await expect(
+    page.getByRole("dialog", { name: "Make Person an admin?" })
+  ).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect(role).toContainText("user");
 });
 
 test("shows the members page only to someone signed in", async ({ page }) => {

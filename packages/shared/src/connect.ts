@@ -118,14 +118,24 @@ export const disconnectSchema = z.strictObject({
 export type Disconnect = z.input<typeof disconnectSchema>;
 
 /**
+ * How long a person has to finish an OAuth flow at the provider. Core also
+ * keeps retrying a removed person's disconnect this long after the
+ * removal, for a flow that was already finishing when it ran.
+ */
+export const oauthFlowLifetimeMs = 10 * 60 * 1000;
+
+/** Most people one `disconnectPersonal` call takes. */
+export const disconnectPersonalMaxOwners = 100;
+
+/**
  * Disconnects every personal connection of the people `ownerUserIds`, who
  * were removed from the organization: for the admin `person` who removed
  * them, or, with `person` null, for core itself, which retries for people
- * removed lately.
+ * whose disconnect hasn't completed yet.
  */
 export const disconnectPersonalSchema = z.strictObject({
   person: connectionPersonSchema.nullable(),
-  ownerUserIds: z.array(identifierSchema).max(100),
+  ownerUserIds: z.array(identifierSchema).max(disconnectPersonalMaxOwners),
 });
 export type DisconnectPersonal = z.input<typeof disconnectPersonalSchema>;
 
