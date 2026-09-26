@@ -584,7 +584,8 @@ describe("a connector's code", () => {
         });
         statuses.push(downloadSchema.parse(JSON.parse(output)).status);
       }
-      // An invalid value is logged, by name only; an unset one isn't.
+      // An invalid value is logged with the paths that are wrong; an unset
+      // one isn't.
       expect(
         logged.mock.calls
           .flat()

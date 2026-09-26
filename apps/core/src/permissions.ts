@@ -177,14 +177,14 @@ const auditDetail = ({
   };
 };
 
+// Also exported here, for approvals.ts, which imports it from this module;
+// new code imports it from @grasp-os/shared/roles.
+export { requireAdmin } from "@grasp-os/shared/roles";
+
 /**
  * The audit entry of a change to `permission` by `by`, with `extra` detail
  * such as the approval it went through.
  */
-// Also exported here, for the modules that already import it from this
-// one; new code imports it from @grasp-os/shared/roles.
-export { requireAdmin } from "@grasp-os/shared/roles";
-
 export const changeEntry = (
   by: Identity,
   action: `permission.${
