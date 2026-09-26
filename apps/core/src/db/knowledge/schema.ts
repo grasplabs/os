@@ -6,6 +6,10 @@
  * those of the current version only, replaced on each save: they are what
  * search indexes and agents read and follow, and an earlier version's are
  * derived from its text again when needed.
+ *
+ * The full-text index (`search_rows`, `search_words`, `search_trigrams` and
+ * the triggers that keep them) is FTS5, which Drizzle can't describe: it
+ * lives in its own migration, `0001_search.sql`.
  */
 import {
   foreignKey,

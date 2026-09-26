@@ -5,6 +5,7 @@ import type {
   DocumentPage,
   DocumentRead,
   HistoryPage,
+  SearchResults,
 } from "@grasp-os/shared/knowledge";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint } from "cloudflare:workers";
@@ -13,6 +14,7 @@ import { forSandbox } from "../bindings.ts";
 import type { WorkContext } from "../restricted.ts";
 import type { Reader } from "./access.ts";
 import { backlinks, getDocument, history, listDocuments } from "./documents.ts";
+import { search } from "./search.ts";
 
 interface CollectionBindingProps {
   authority: Authority;
@@ -76,6 +78,19 @@ export class CollectionBinding
   ): Promise<BacklinkPage> {
     return await this.#read(
       async (reader) => await backlinks(this.env, reader, documentId, options)
+    );
+  }
+
+  async search(query: unknown, options?: unknown): Promise<SearchResults> {
+    return await this.#read(
+      async (reader) =>
+        await search(
+          this.env,
+          reader,
+          query,
+          options,
+          this.ctx.props.collectionId
+        )
     );
   }
 }

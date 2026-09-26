@@ -11,6 +11,8 @@ import type {
   ListDocumentsOptions,
   RestoreInput,
   SaveInput,
+  SearchOptions,
+  SearchResults,
 } from "@grasp-os/shared/knowledge";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
@@ -26,6 +28,7 @@ import {
   restoreVersion,
   saveDocument,
 } from "./documents.ts";
+import { search } from "./search.ts";
 
 /**
  * Knowledge for a signed-in person over `/rpc`. Like the session API, it
@@ -112,6 +115,12 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   ): Promise<BacklinkPage> {
     return await this.#asReader(
       async (reader) => await backlinks(this.#env, reader, documentId, options)
+    );
+  }
+
+  async search(query: string, options?: SearchOptions): Promise<SearchResults> {
+    return await this.#asReader(
+      async (reader) => await search(this.#env, reader, query, options)
     );
   }
 }
