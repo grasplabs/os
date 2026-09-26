@@ -1,9 +1,12 @@
 /**
- * Keeps request URLs and secrets out of Workers Logs (threat model R17).
- * Every Worker's wrangler config must turn off the platform's own line per
- * invocation and redact query strings, which carry OAuth codes and states
- * and bearer links. It must also turn off preview URLs, which would serve
- * every uploaded version, older ones included, at an address of its own.
+ * Every Worker's wrangler config (and any env in it that sets its own):
+ * - turns off the platform's own log line per invocation, and
+ * - redacts query strings, which carry OAuth codes and states and bearer
+ *   links, so request URLs and secrets stay out of Workers Logs (threat
+ *   model R17);
+ * - turns off preview URLs, which would serve every uploaded version,
+ *   older ones included, at an address of its own;
+ * - is wrangler.jsonc, never TOML.
  * Checks every wrangler config in the repo, so a new Worker can't miss it.
  */
 import { execFileSync } from "node:child_process";
