@@ -76,7 +76,7 @@ export const rawMessage = ({
     ...addresses("Cc", cc),
     ...addresses("Bcc", bcc),
     ...addresses("Reply-To", replyTo),
-    `Subject: ${encodedWords(subject)}`,
+    subject === "" ? "Subject: " : `Subject: ${encodedWords(subject)}`,
     "MIME-Version: 1.0",
     `Content-Type: text/${bodyType === "html" ? "html" : "plain"}; charset="UTF-8"`,
     "Content-Transfer-Encoding: base64",

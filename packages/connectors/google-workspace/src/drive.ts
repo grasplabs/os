@@ -26,10 +26,12 @@ import {
 //   the egress binds to the drive a call's capability names: each route
 //   names both parameters (`query`). Only items Google says are in that
 //   drive (`driveId`) are passed on.
-// - A file read addresses the file by its ID alone, where nothing can bind
-//   the drive (the routes are `unbound`). It reads the file's metadata
-//   first and goes no further unless Google says the file is in the bound
-//   drive: its content is read only then.
+// - A file read addresses the file by its ID alone, where the drive can't
+//   be named. Its routes declare a `check`: before each request, the
+//   egress itself asks Google for the file's `driveId` and sends the
+//   request only if that is the bound drive. The tool also reads the
+//   file's metadata first and goes no further unless it is in the bound
+//   drive, not trashed and has content (defence in depth).
 //
 // A person's My Drive isn't a shared drive and has no drive ID to hold a
 // call to, or to check a file against: it is left out. An organization's
@@ -48,6 +50,17 @@ const driveListRoute = {
   host: apisHost,
   path: files,
   query: { corpora: "drive", driveId: "{drive}" },
+} as const;
+
+/**
+ * How the egress checks a file's drive before a request for it: Google's
+ * `driveId` for the file must be the bound drive.
+ */
+const driveCheck = {
+  path: `${files}/{item}`,
+  query: { supportsAllDrives: "true", fields: "driveId" },
+  field: "driveId",
+  equals: "{drive}",
 } as const;
 
 /** A shared drive's ID. */
@@ -76,11 +89,12 @@ const googleFile = z.object({
   webViewLink: z.string().nullish(),
   parents: z.array(z.string()).nullish(),
   driveId: z.string().nullish(),
+  trashed: z.boolean().nullish(),
 });
 type GoogleFile = z.infer<typeof googleFile>;
 
 const fileFields =
-  "id,name,mimeType,size,modifiedTime,webViewLink,parents,driveId";
+  "id,name,mimeType,size,modifiedTime,webViewLink,parents,driveId,trashed";
 
 const itemSchema = z.strictObject({
   drive: z.string(),
@@ -257,15 +271,19 @@ const readFile = defineTool({
   readOnly: true,
   resource: "drive",
   mask: ["content"],
-  // Unbound: a file has no drive in its path. The metadata read comes
-  // first, and nothing more is sent for a file of another drive.
+  // A file has no drive in its path: the egress checks it with Google.
   routes: [
-    { method: "GET", host: apisHost, path: `${files}/{item}`, unbound: true },
+    {
+      method: "GET",
+      host: apisHost,
+      path: `${files}/{item}`,
+      check: driveCheck,
+    },
     {
       method: "GET",
       host: apisHost,
       path: `${files}/{item}/export`,
-      unbound: true,
+      check: driveCheck,
     },
   ],
   run: async ({ drive, item: id, as }) => {
@@ -277,7 +295,7 @@ const readFile = defineTool({
       }),
       googleFile
     );
-    if (file.driveId !== drive || file.id !== id) {
+    if (file.driveId !== drive || file.id !== id || file.trashed === true) {
       throw new ToolError("This drive has no such file", {
         code: "not_found",
       });

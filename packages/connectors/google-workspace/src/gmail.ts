@@ -119,6 +119,33 @@ const labelIdSchema = z
   .max(128)
   .regex(/^[\w-]+$/u);
 
+/** Messages a list returns unless asked for more. */
+const defaultTop = 10;
+
+/** Message reads a list sends at once. */
+const concurrentReads = 5;
+
+/** A message's metadata, or `null` if it's gone since it was listed. */
+const metadataOf = async (
+  mailbox: string,
+  id: string
+): Promise<GmailMessage | null> => {
+  try {
+    return await googleJson(
+      googleUrl(gmailHost, mailboxPath(mailbox, `/messages/${segment(id)}`), {
+        format: "metadata",
+        metadataHeaders: summaryHeaders,
+      }),
+      gmailMessage
+    );
+  } catch (error) {
+    if (error instanceof ToolError && error.details?.code === "not_found") {
+      return null;
+    }
+    throw error;
+  }
+};
+
 const messageList = z.object({
   messages: z.array(z.object({ id: z.string() })).nullish(),
   nextPageToken: z.string().nullish(),
@@ -172,7 +199,7 @@ const listMessages = defineTool({
         gmailHost,
         mailboxPath(mailbox, "/messages"),
         {
-          maxResults: String(top ?? 10),
+          maxResults: String(top ?? defaultTop),
           q: q === "" ? undefined : q,
           labelIds,
         },
@@ -180,22 +207,21 @@ const listMessages = defineTool({
       ),
       messageList
     );
-    const found = await Promise.all(
-      (messages ?? []).map(
-        async ({ id }) =>
-          await googleJson(
-            googleUrl(
-              gmailHost,
-              mailboxPath(mailbox, `/messages/${segment(id)}`),
-              {
-                format: "metadata",
-                metadataHeaders: summaryHeaders,
-              }
-            ),
-            gmailMessage
-          )
-      )
-    );
+    // No more than a page, a few at a time; one deleted since it was
+    // listed (404) is left out.
+    const ids = (messages ?? [])
+      .slice(0, top ?? defaultTop)
+      .map(({ id }) => id);
+    const found: GmailMessage[] = [];
+    for (let start = 0; start < ids.length; start += concurrentReads) {
+      // oxlint-disable-next-line no-await-in-loop -- a few reads at a time
+      const read = await Promise.all(
+        ids
+          .slice(start, start + concurrentReads)
+          .map(async (id) => await metadataOf(mailbox, id))
+      );
+      found.push(...read.filter((message) => message !== null));
+    }
     return {
       output: {
         mailbox,
@@ -400,7 +426,7 @@ const listLabels = defineTool({
 const labelMessage = defineTool({
   name: "mail.label",
   description:
-    "Adds labels to a message of a mailbox and removes others: to label it, mark it read (remove UNREAD) or move it (add a label, remove INBOX to archive).",
+    "Adds labels to a message of a mailbox and removes others: to label it, mark it read (remove UNREAD) or move it (add a label, remove INBOX to archive). Adding SPAM also reports the message to Google as spam.",
   input: z.strictObject({
     mailbox: mailboxSchema,
     message: idSchema,

@@ -32,7 +32,11 @@ import {
   threadId,
 } from "./fixtures/google.ts";
 import { invoicePdf, pdfBase64 } from "./fixtures/graph.ts";
-import { fakeGoogle, spoofedMessageId } from "./google-api.ts";
+import {
+  deletedMessageId,
+  fakeGoogle,
+  spoofedMessageId,
+} from "./google-api.ts";
 import { fakeProviders } from "./oauth-provider.ts";
 import {
   callTool as call,
@@ -148,7 +152,7 @@ describe("the Google Workspace connector's scoping", () => {
     );
     const unbound = routes
       .filter(
-        ({ resource, path, query, unbound: isUnbound }) =>
+        ({ resource, path, query, check }) =>
           !(
             (resource === "mailbox" &&
               path.startsWith("/gmail/v1/users/{mailbox}/")) ||
@@ -157,20 +161,32 @@ describe("the Google Workspace connector's scoping", () => {
             (resource === "drive" &&
               query?.driveId === "{drive}" &&
               query.corpora === "drive")
-          ) && isUnbound !== true
+          ) && check === undefined
       )
       .map(({ name, path }) => `${name} ${path}`);
     expect(unbound).toStrictEqual([]);
     // Only a file read can't name its drive: Drive addresses a file by its
-    // ID alone. It checks the file's drive itself (tested below).
+    // ID alone. The egress checks the file's drive with Google first.
     expect(
       routes
-        .filter(({ unbound: isUnbound }) => isUnbound === true)
-        .map(({ name, method, path }) => `${name} ${method} ${path}`)
-    ).toStrictEqual([
-      "files.read GET /drive/v3/files/{item}",
-      "files.read GET /drive/v3/files/{item}/export",
-    ]);
+        .filter(({ check }) => check !== undefined)
+        .map(({ name, method, path, check }) => ({
+          route: `${name} ${method} ${path}`,
+          check,
+        }))
+    ).toStrictEqual(
+      ["/drive/v3/files/{item}", "/drive/v3/files/{item}/export"].map(
+        (path) => ({
+          route: `files.read GET ${path}`,
+          check: {
+            path: "/drive/v3/files/{item}",
+            query: { supportsAllDrives: "true", fields: "driveId" },
+            field: "driveId",
+            equals: "{drive}",
+          },
+        })
+      )
+    );
     expect(
       Object.keys(manifest.actions).toSorted(),
       "every tool is tested for scoping below"
@@ -356,6 +372,29 @@ describe("the Google Workspace connector's Gmail tools", () => {
         })
       )
     ).resolves.toBe("Invalid input: invalid_format at page");
+  });
+
+  it("list no more than a page, and leave out a message deleted since it was listed", async () => {
+    const connection = await connected();
+    await expect(
+      resultOf(
+        call(connection, "mail.list", {
+          mailbox: invoices,
+          search: "deleted",
+          top: 2,
+        })
+      )
+    ).resolves.toMatchObject({
+      output: { messages: [{ id: messageId(invoices, 1) }] },
+      provenance: [messageId(invoices, 1)],
+    });
+    expect(paths().toSorted()).toStrictEqual(
+      [
+        `${mailboxPath}/messages`,
+        `${mailboxPath}/messages/${messageId(invoices, 1)}`,
+        `${mailboxPath}/messages/${deletedMessageId}`,
+      ].toSorted()
+    );
   });
 
   it("filter by label, unread and time, and search, in one request", async () => {
@@ -875,10 +914,12 @@ describe("the Google Workspace connector's Drive tools", () => {
     const connection = await connected();
     await expect(
       resultOf(
-        call(connection, "files.read", {
-          drive: financeDrive,
-          item: fileIds.report,
-        })
+        call(
+          connection,
+          "files.read",
+          { drive: financeDrive, item: fileIds.report },
+          { resource: financeDrive }
+        )
       )
     ).resolves.toStrictEqual({
       output: {
@@ -893,13 +934,25 @@ describe("the Google Workspace connector's Drive tools", () => {
       },
       provenance: [fileIds.report],
     });
-    expect(requests()).toMatchObject([
+    // The egress asks for the file's drive before each request for it.
+    const driveCheck = {
+      path: `/drive/v3/files/${fileIds.report}`,
+      query: { supportsAllDrives: "true", fields: "driveId" },
+    };
+    expect(
+      requests().map(({ path, query }) => ({ path, query }))
+    ).toStrictEqual([
+      driveCheck,
       {
         path: `/drive/v3/files/${fileIds.report}`,
-        query: { supportsAllDrives: "true" },
+        query: {
+          supportsAllDrives: "true",
+          fields:
+            "id,name,mimeType,size,modifiedTime,webViewLink,parents,driveId,trashed",
+        },
       },
+      driveCheck,
       {
-        host: "www.googleapis.com",
         path: `/drive/v3/files/${fileIds.report}`,
         query: { alt: "media", supportsAllDrives: "true" },
       },
@@ -945,33 +998,51 @@ describe("the Google Workspace connector's Drive tools", () => {
     );
   });
 
-  it("read nothing of another drive's file, a My Drive file, a folder, a form or a file past the limit", async () => {
+  it("read nothing of another drive's file, a My Drive file, a trashed file, a folder, a form, a shortcut or a file past the limit", async () => {
     const connection = await connected();
     const refusals = await Promise.all(
       [
         fileIds.foreign,
         fileIds.myDrive,
+        fileIds.alias,
+        fileIds.trashed,
         fileIds.folder,
         fileIds.form,
+        fileIds.shortcut,
         fileIds.big,
       ].map(
         async (item) =>
           await toolError(
-            call(connection, "files.read", { drive: financeDrive, item })
+            call(
+              connection,
+              "files.read",
+              { drive: financeDrive, item },
+              { resource: financeDrive }
+            )
           )
       )
     );
     expect(refusals).toMatchObject([
+      // The egress's check found another drive, or none: nothing was sent.
+      { error: { code: "egress_refused" } },
+      { error: { code: "egress_refused" } },
+      // Google answered with another file of the drive: the tool refuses.
       { error: { code: "not_found" } },
       { error: { code: "not_found" } },
+      { error: { code: "not_a_file" } },
       { error: { code: "not_a_file" } },
       { error: { code: "not_a_file" } },
       { error: { code: "too_large" } },
     ]);
-    // Each was refused on its metadata: no content was asked for.
+    // Each was refused on its drive or its metadata: no content was asked
+    // for, and nothing but the check for the other drives' files.
     expect(
       requests().filter(
-        ({ path, query }) => query.alt === "media" || path.endsWith("/export")
+        ({ path, query }) =>
+          query.alt === "media" ||
+          path.endsWith("/export") ||
+          ([fileIds.foreign, fileIds.myDrive].some((id) => path.endsWith(id)) &&
+            query.fields !== "driveId")
       )
     ).toStrictEqual([]);
   });

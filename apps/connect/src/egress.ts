@@ -5,9 +5,10 @@ import {
   pathMatches,
   queryMatches,
   redirectHostMatches,
+  resourceCheckFor,
   routeSchema,
 } from "@grasp-os/connector-kit/manifest";
-import type { Route } from "@grasp-os/connector-kit/manifest";
+import type { ResourceCheck, Route } from "@grasp-os/connector-kit/manifest";
 import { log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
@@ -21,7 +22,9 @@ import { z } from "zod";
 // those, over HTTPS, with the token added; anything else is refused before
 // it leaves. Redirects aren't followed, except one from a route that
 // names the hosts it may lead to (a download), which the handler follows
-// itself, without the token. A response is cut off past a size limit. Raw
+// itself, without the token. A request whose route can't name its
+// resource goes only after the handler's own check with the provider says
+// it reaches the bound one. A response is cut off past a size limit. Raw
 // sockets are refused. Connect's
 // `global_fetch_strictly_public` keeps an allowed name that resolves to a
 // private address from being reached (R9).
@@ -183,8 +186,11 @@ const routeFor = (
       route.method === method &&
       route.host === url.hostname &&
       pathMatches(route.path, url.pathname, values) &&
-      queryMatches(route.query, url.searchParams, values)
+      queryMatches(route.query, url.search, values)
   );
+
+/** Largest answer to a resource check the handler reads, in bytes. */
+const maxCheckBytes = 64 * 1024;
 
 /** Redirects a route's `redirects` hosts may be followed for. */
 const followedStatuses: ReadonlySet<number> = new Set([
@@ -301,7 +307,10 @@ const isBodiless = (method: string, status: number): boolean =>
  * The response with its body cut off once it passes the size limit: the
  * connector's read fails there, and nothing past it is held in memory.
  */
-const capped = (response: Response): Response => {
+const capped = (
+  response: Response,
+  maxBytes: number = maxEgressResponseBytes
+): Response => {
   // The body arrives decoded, and its length is counted here.
   const headers = new Headers(response.headers);
   for (const name of responseHeadersDropped) {
@@ -327,7 +336,7 @@ const capped = (response: Response): Response => {
         return;
       }
       bytes += value.byteLength;
-      if (bytes > maxEgressResponseBytes) {
+      if (bytes > maxBytes) {
         await reader.cancel();
         controller.error(new Error("The provider's response is too large"));
         return;
@@ -339,6 +348,80 @@ const capped = (response: Response): Response => {
     },
   });
   return new Response(limited, { status, statusText, headers });
+};
+
+/** Whether a check's JSON answer names `expected` in its `field`. */
+const namesResource = (text: string, { field, expected }: ResourceCheck) => {
+  try {
+    const answer: unknown = JSON.parse(text);
+    return (
+      typeof answer === "object" &&
+      answer !== null &&
+      Object.getOwnPropertyDescriptor(answer, field)?.value === expected
+    );
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * Sends a route's resource check, for a request that can't name its
+ * resource (if its route declares one and the call binds a resource): a
+ * GET with the token and nothing of the connector's. Its answer, when the
+ * provider refused it (a 404, a 429), goes back to the connector in the
+ * request's place; `refused` when it names another resource, or can't be
+ * read; `undefined` when the request may go.
+ */
+const checkResource = async (
+  call: EgressProps,
+  route: Route,
+  url: URL
+): Promise<Response | undefined> => {
+  const check = resourceCheckFor(route, url, call.values);
+  if (check === undefined) {
+    return undefined;
+  }
+  const logged = {
+    connector: call.connector,
+    callId: call.callId,
+    host: check.url.hostname,
+    method: "GET",
+    route: route.check?.path,
+  };
+  let response: Response;
+  try {
+    response = await fetch(check.url, {
+      method: "GET",
+      headers: {
+        accept: "application/json",
+        authorization: `Bearer ${call.token}`,
+      },
+      redirect: "manual",
+      signal: AbortSignal.timeout(Math.max(call.expiresAt - Date.now(), 1)),
+    });
+  } catch {
+    log.warn("egress.failed", logged);
+    return egressAnswer("failed");
+  }
+  log.info("egress.check", { ...logged, status: response.status });
+  if (response.status >= 300 && response.status < 400) {
+    await response.body?.cancel();
+    return egressAnswer("failed");
+  }
+  if (!response.ok) {
+    return capped(response);
+  }
+  let text: string | undefined;
+  try {
+    text = await capped(response, maxCheckBytes).text();
+  } catch {
+    text = undefined;
+  }
+  if (text === undefined || !namesResource(text, check)) {
+    log.warn("egress.refused", { ...logged, reason: "check" });
+    return egressAnswer("refused", "Refused by connect's egress allowlist");
+  }
+  return undefined;
 };
 
 /**
@@ -380,6 +463,12 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
     const route = routeFor(call, method, url);
     if (route === undefined) {
       return refuse(call, "route", url, method);
+    }
+    // A request that can't name its resource goes only once the provider
+    // says the resource it reaches is the bound one.
+    const refusal = await checkResource(call, route, url);
+    if (refusal !== undefined) {
+      return refusal;
     }
 
     const headers = new Headers(request.headers);

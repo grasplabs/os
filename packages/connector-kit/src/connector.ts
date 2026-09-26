@@ -78,8 +78,8 @@ export interface ToolDefinition<
    * The only requests it may send (threat model Q11). A parameter named
    * after the resource property (`{mailbox}`), in a path or a route's
    * `query`, must hold the resource a call's capability names, whenever it
-   * names one. An `unbound` route can't be held to it: the tool must check
-   * the resource in the provider's answer itself.
+   * names one. A GET that can't name it declares a `check`, which the
+   * egress sends first. At most one route writes (not GET or HEAD).
    */
   routes: readonly Route[];
   run: (input: z.output<Input>) => Promise<ToolResult<z.input<Output>>>;

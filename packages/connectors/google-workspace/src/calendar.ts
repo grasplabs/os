@@ -30,13 +30,13 @@ const calendars = "/calendar/v3/calendars/{calendar}";
 
 /**
  * A calendar's ID: one address, and nothing the egress refuses in a path
- * parameter, `#` included.
+ * parameter, `#` and control characters included.
  */
-const calendarSchema = z
-  .string()
-  .min(3)
-  .max(256)
-  .regex(/^[^/\\?#%;:@\s]+@[^/\\?#%;:@\s]+$/u);
+const calendarPattern =
+  // oxlint-disable-next-line no-control-regex -- control characters are refused
+  /^[^/\\?#%;:@\s\u0000-\u001F\u007F]+@[^/\\?#%;:@\s\u0000-\u001F\u007F]+$/u;
+
+const calendarSchema = z.string().min(3).max(256).regex(calendarPattern);
 
 const googleTime = z.object({
   dateTime: z.string().nullish(),

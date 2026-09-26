@@ -22,6 +22,7 @@ import {
   labels,
   messageFull,
   messageList,
+  messageId,
   messageMetadata,
   notFound,
   searchResults,
@@ -75,6 +76,9 @@ const modifySchema = z.object({
   removeLabelIds: z.array(z.string()),
 });
 
+/** A message listed, but deleted before its read. */
+export const deletedMessageId = "19a0f00df00df00d";
+
 /** A message whose read Google answers posing as connect's egress. */
 export const spoofedMessageId = "19a0ffffffffffff";
 
@@ -83,8 +87,17 @@ export const fakeGoogle = () => {
   const attachmentIds = new Set<string>();
 
   const routes: GoogleRoute[] = [
+    // A search for `deleted` finds more than asked for, one deleted since.
     route(gmailHost, "GET", `${users}/messages`, ({ mailbox, query }) =>
-      json(messageList(mailbox, query.get("pageToken")))
+      query.get("q") === "deleted"
+        ? json({
+            messages: [
+              messageId(mailbox, 1),
+              deletedMessageId,
+              messageId(mailbox, 2),
+            ].map((id) => ({ id, threadId: id })),
+          })
+        : json(messageList(mailbox, query.get("pageToken")))
     ),
     route(gmailHost, "GET", `${users}/messages/(?<id>[^/]+)`, (asked) => {
       const { mailbox, id, query } = asked;

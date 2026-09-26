@@ -34,6 +34,28 @@ const itemsPath = /^\/v1\/mailboxes\/(?<mailbox>[^/]+)\/items$/u;
 
 const downloadsPath = /^\/v1\/downloads\/(?<name>[^/]+)$/u;
 
+const filesPath = /^\/v1\/files\/(?<id>[^/]+)(?<content>\/content)?$/u;
+
+/**
+ * Files, each in a drive as its answer says (`mine` in `d-1`, any other
+ * in `d-2`, `gone` in none), and their content.
+ */
+const file = (url: URL): Response | undefined => {
+  const found = filesPath.exec(url.pathname)?.groups;
+  if (found?.id === undefined) {
+    return undefined;
+  }
+  if (found.id === "gone") {
+    return Response.json({ error: "notFound" }, { status: 404 });
+  }
+  return found.content === undefined
+    ? Response.json({
+        id: found.id,
+        driveId: found.id === "mine" ? "d-1" : "d-2",
+      })
+    : new Response("content");
+};
+
 /** Downloads redirect to the provider's storage, as Graph's do. */
 const download = (url: URL): Response | undefined => {
   const name = downloadsPath.exec(url.pathname)?.groups?.name;
@@ -64,7 +86,7 @@ const storage = (url: URL): Response => {
 };
 
 const answer = (method: string, url: URL): Response => {
-  const redirected = download(url);
+  const redirected = download(url) ?? file(url);
   if (redirected !== undefined) {
     return redirected;
   }

@@ -276,6 +276,12 @@ export const fileIds = {
   foreign: "1FoR3iGn5dR7iV9eF1iL3eX5aM7pL9eQ",
   /** A file of someone's My Drive: no drive ID. */
   myDrive: "1MyD5rIv7eF9iL1eX3aM5pL7eQ9wR1tY",
+  /** A shortcut, in the drive, to a file anywhere. */
+  shortcut: "1ShOrTcUt7eF9iL1eX3aM5pL7eQ9wR1tZ",
+  /** A file in the drive's trash. */
+  trashed: "1TrAsHeD7eF9iL1eX3aM5pL7eQ9wR1tYx",
+  /** An ID Google answers with another file of the drive. */
+  alias: "1AlIaS5rIv7eF9iL1eX3aM5pL7eQ9wR1t",
 } as const;
 
 /** The page token Drive hands out after the first page. */
@@ -343,6 +349,18 @@ export const files: Record<string, ReturnType<typeof file>> = {
     size: "80",
     parents: ["0AMyDrIvErOoTfOlDeR"],
     driveId: undefined,
+  }),
+  [fileIds.shortcut]: file(
+    fileIds.shortcut,
+    "Board minutes (shortcut)",
+    "application/vnd.google-apps.shortcut"
+  ),
+  [fileIds.trashed]: file(fileIds.trashed, "Old report.txt", "text/plain", {
+    size: "40",
+    trashed: true,
+  }),
+  [fileIds.alias]: file(fileIds.report, "Month-end report.txt", "text/plain", {
+    size: "40",
   }),
 };
 

@@ -26,14 +26,6 @@ export const gmailHost = "gmail.googleapis.com";
 export const apisHost = "www.googleapis.com";
 
 /**
- * Text as one path segment: nothing the egress refuses in a parameter
- * (path and query delimiters, `%`, `;`, `:`, controls), so a bad value is
- * refused here, with a clear message, before anything goes out.
- */
-// oxlint-disable-next-line no-control-regex -- control characters are refused
-export const segmentPattern = /^[^/\\?#%;:\u0000-\u001F\u007F]+$/u;
-
-/**
  * An ID Google gives a message, a thread, an event, a file or a label:
  * letters, digits, `_` and `-`.
  */
