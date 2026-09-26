@@ -11,7 +11,7 @@ import type { Connection } from "./connections.ts";
 import { nativeAction, nativeServer } from "./connectors.ts";
 import { hashCall, idempotencyStore } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
-import { masked, maskedPaths } from "./mask.ts";
+import { fieldOf, masked, maskedPaths } from "./mask.ts";
 import { McpError } from "./mcp.ts";
 import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
 import { hold } from "./pending.ts";
@@ -106,22 +106,35 @@ const answerOf = (
 /**
  * The output paths to mask for a call, as its capability says: the paths
  * the native action declares maskable whose field the capability names.
- * A remote server's tools declare nothing connect trusts, so nothing of
- * theirs is masked. From the release's manifest alone: nothing is loaded
- * and no token is read.
+ * A mask is a restriction someone set, so it is never silently ignored: a
+ * call connect can't mask for is refused, on a remote server (its tools
+ * declare nothing connect trusts) or with a field no tool of the
+ * connector declares maskable (a slip that would mask nothing). The
+ * check is per connector, not per tool, as a permission's mask covers
+ * every tool of its connection. From the release's manifest alone:
+ * nothing is loaded and no token is read.
  */
 const masksFor = (
   connection: Connection,
   claims: CapabilityClaims,
   action: string
 ): string[] => {
-  if (claims.mask.length === 0 || connection.serverKind !== "native") {
+  if (claims.mask.length === 0) {
     return [];
   }
-  return maskedPaths(
-    claims.mask,
-    nativeAction(connection, action).declared.mask
+  if (connection.serverKind !== "native") {
+    throw connectErrors.create("connect.mask_unsupported");
+  }
+  const { connector, declared } = nativeAction(connection, action);
+  const maskable = new Set(
+    Object.values(connector.manifest.actions).flatMap(({ mask }) =>
+      mask.map(fieldOf)
+    )
   );
+  if (!claims.mask.every((field) => maskable.has(field))) {
+    throw connectErrors.create("connect.mask_unsupported");
+  }
+  return maskedPaths(claims.mask, declared.mask);
 };
 
 /** Finds the action's tool, exactly as named. */
@@ -238,7 +251,7 @@ export const carryOut = async (
     throw connectErrors.create("connect.input_too_large");
   }
   // Before a repeat is answered too: its answer is masked as this
-  // capability says.
+  // capability says, and a mask connect can't apply is refused as ever.
   const masks = masksFor(connection, claims, call.action);
 
   // A repeat of a side effect gets its stored result before anything goes

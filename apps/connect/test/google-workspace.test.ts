@@ -1203,4 +1203,19 @@ describe("the Google Workspace connector's answers", () => {
       files: { items: [{ id: fileIds.folder }, { id: fileIds.report }] },
     });
   });
+
+  it("refuse a mask naming a field no tool of the connector has", async () => {
+    const connection = await connected();
+    await expect(
+      outcome(
+        call(
+          connection,
+          "mail.list",
+          { mailbox: invoices },
+          { mask: ["snippet"] }
+        )
+      )
+    ).resolves.toBe("connect.mask_unsupported");
+    expect(google.sent).toStrictEqual([]);
+  });
 });

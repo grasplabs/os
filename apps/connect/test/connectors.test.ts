@@ -242,10 +242,10 @@ describe("a native connector", () => {
     };
     await expect(send([])).resolves.toMatchObject({ subject: "Paid" });
     await expect(send(["subject"])).resolves.toMatchObject({ subject: null });
-    // A field the tool doesn't declare maskable masks nothing.
-    await expect(send(["nonsense"])).resolves.toMatchObject({
-      subject: "Paid",
-    });
+    // A mask connect can't apply is refused before any repeat is answered.
+    await expect(outcome(send(["nonsense"]))).resolves.toBe(
+      "connect.mask_unsupported"
+    );
     expect(api.sent.map(({ method }) => method)).toStrictEqual(["POST"]);
   });
 
