@@ -9,7 +9,7 @@
   "preview_urls": false,
   // No platform line per invocation, and query strings stay out of logs and
   // traces: the router sees every client's full URLs, OAuth callbacks'
-  // code and state and decision links included (threat model R17, RT2).
+  // code and state included (threat model R17, RT2).
   "observability": {
     "enabled": true,
     "redact_query_string": true,

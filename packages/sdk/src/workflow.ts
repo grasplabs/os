@@ -299,10 +299,10 @@ export interface LlmOptions<Output extends z.ZodType>
  */
 export interface DecisionRequest extends SideEffectContext {
   /**
-   * The people who may answer now, each with a link of their own: send
-   * each one only their own link. A link leads to where they answer once
-   * signed in, and works for nobody else. Empty when nobody fits `from`,
-   * or the decision was answered meanwhile.
+   * The people who may answer now, each with the decision's link. It
+   * leads to where they answer once signed in, and grants nothing: only
+   * the people the decision is from can answer. Empty when nobody fits
+   * `from`, or the decision was answered meanwhile.
    */
   recipients: DecisionRecipient[];
   /** False the first time, true when reminding. */

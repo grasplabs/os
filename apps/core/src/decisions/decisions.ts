@@ -18,7 +18,6 @@ import { and, eq, exists, gt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
-import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
@@ -34,7 +33,6 @@ import {
   workflowRuns,
 } from "../db/core/schema.ts";
 import { requireFeature } from "../features.ts";
-import { signDecisionLink, verifyDecisionLink } from "./links.ts";
 
 // Decisions workflow runs wait for (`step.decision`), and the only ways to
 // answer one. Threat model R3, R8 and WF1 to WF4:
@@ -44,13 +42,10 @@ import { signDecisionLink, verifyDecisionLink } from "./links.ts";
 //   that takes the answer (`mayAnswer`), so someone removed, demoted or
 //   taken out of the team since they were asked can't, even mid-request.
 //   Grasp staff never answer a client's decisions.
-// - Nobody answers their own request (R8): the person who started the run
-//   can't answer its decisions, unless the decision names exactly them
-//   (`person:<them>`), which is their own explicit confirmation. A run a
-//   trigger started has no starter, so its App's owner isn't held back.
-// - A decision link adds conditions and grants nothing: it must be core's,
-//   for this decision, for this person and before the deadline. Someone
-//   else the decision is from may still answer without one.
+// - A decision link is plain (`/decisions/<id>`) and grants nothing: it
+//   only leads there. Whoever opens it must still be signed in and one the
+//   decision is from. The person who started the run may answer when it's
+//   from them; every answer is audited under who gave it (R8).
 // - The first answer is the decision: the same update moves the row from
 //   `open`, only before its deadline and while its run hasn't ended.
 //   A run that stops waiting closes its decision the same way, so an answer
@@ -263,24 +258,14 @@ const decidersCondition = (deciders: string): SQL => {
 
 /**
  * The members who may answer a decision now, as a condition on `members`:
- * active members of the organization its deciders name, but never whoever
- * started its run (R8). A `person:` decision names one person, so it only
- * leaves out its starter by naming someone else; one naming exactly the
- * starter is their own confirmation, and stands. The one place these rules
- * live: who is asked, and who may answer, both go by it.
+ * active members of the organization its deciders name. The one place
+ * these rules live: who is asked, and who may answer, both go by it.
  */
-const eligibleMembers = (deciders: string, runId: string | SQLiteColumn): SQL =>
+const eligibleMembers = (deciders: string): SQL =>
   and(
     eq(members.organizationId, organizationId),
     notRemoved(members.userId),
-    decidersCondition(deciders),
-    decidersOf(deciders).kind === "person"
-      ? undefined
-      : sql`NOT EXISTS (
-          SELECT 1 FROM ${workflowRuns}
-          WHERE ${workflowRuns.id} = ${runId}
-            AND ${workflowRuns.startedBy} = ${members.userId}
-        )`
+    decidersCondition(deciders)
   ) ?? sql`0`;
 
 /**
@@ -298,17 +283,12 @@ const mayAnswer = (
       db
         .select({ one: sql`1` })
         .from(members)
-        .where(
-          and(
-            eq(members.userId, userId),
-            eligibleMembers(deciders, workflowDecisions.runId)
-          )
-        )
+        .where(and(eq(members.userId, userId), eligibleMembers(deciders)))
     )
   ) ?? sql`0`;
 
 /**
- * The people an open decision asks now, each with a link of their own:
+ * The people an open decision asks now, each with the decision's link:
  * the members who may answer it at this moment (`eligibleMembers`). An
  * answered or closed decision asks nobody, and nor does one past its
  * deadline. More than {@link maxDeciders}
@@ -340,7 +320,7 @@ export const decisionRecipients = async (
     .select({ userId: users.id, name: users.name, email: users.email })
     .from(members)
     .innerJoin(users, eq(users.id, members.userId))
-    .where(eligibleMembers(row.deciders, row.runId))
+    .where(eligibleMembers(row.deciders))
     .orderBy(users.name, users.id)
     .limit(maxDeciders + 1);
   if (people.length > maxDeciders) {
@@ -355,19 +335,8 @@ export const decisionRecipients = async (
       provenance: people.map(({ userId }) => userId),
     }),
   ]);
-  return await Promise.all(
-    people.map(async (person) => {
-      const token = await signDecisionLink(
-        env,
-        row.id,
-        person.userId,
-        row.expiresAt.getTime()
-      );
-      const link = new URL(`/decisions/${encodeURIComponent(row.id)}`, origin);
-      link.searchParams.set("link", token);
-      return { ...person, link: link.href };
-    })
-  );
+  const link = new URL(`/decisions/${encodeURIComponent(row.id)}`, origin);
+  return people.map((person) => ({ ...person, link: link.href }));
 };
 
 /**
@@ -473,22 +442,15 @@ const mayAnswerNow = async (
   return found !== undefined;
 };
 
-/**
- * The decision, if `by` may answer it now, and, with a link, one core
- * made for this decision and them, still valid.
- */
+/** The decision, if `by` may answer it now. */
 const allowedDecision = async (
   env: Env,
   by: Identity,
-  decision: unknown,
-  link: unknown
+  decision: unknown
 ): Promise<DecisionWithRun> => {
   const found = await decisionWithRun(env, decision);
   if (!(await mayAnswerNow(env, by, found.decision))) {
     throw decisionErrors.create("decision.forbidden");
-  }
-  if (link !== undefined) {
-    await verifyDecisionLink(env, link, found.decision.id, by.userId);
   }
   return found;
 };
@@ -514,14 +476,11 @@ const toView = ({
       ? "closed"
       : decision.status,
   expiresAt: decision.expiresAt.toISOString(),
-  ...(decision.decidedBy !== null &&
-  decision.decidedAt !== null &&
-  decision.decidedVia !== null
+  ...(decision.decidedBy !== null && decision.decidedAt !== null
     ? {
         decided: {
           by: { userId: decision.decidedBy, name: decidedByName ?? "" },
           at: decision.decidedAt.toISOString(),
-          via: decision.decidedVia,
         },
       }
     : {}),
@@ -531,10 +490,8 @@ const toView = ({
 export const decisionFor = async (
   env: Env,
   by: Identity,
-  decision: unknown,
-  link?: unknown
-): Promise<DecisionView> =>
-  toView(await allowedDecision(env, by, decision, link));
+  decision: unknown
+): Promise<DecisionView> => toView(await allowedDecision(env, by, decision));
 
 /**
  * Wakes the run waiting on the decision. A run that misses it still finds
@@ -565,10 +522,9 @@ export const answerDecision = async (
   env: Env,
   by: Identity,
   decision: unknown,
-  answer: unknown,
-  link?: unknown
+  answer: unknown
 ): Promise<DecisionView> => {
-  const found = await allowedDecision(env, by, decision, link);
+  const found = await allowedDecision(env, by, decision);
   const { approved, payload }: DecisionAnswerInput = decisionErrors.parse(
     "decision.invalid",
     answerSchema,
@@ -590,7 +546,6 @@ export const answerDecision = async (
     version: found.version,
   };
   const status = approved ? "approved" : "rejected";
-  const via = link === undefined ? "rpc" : "link";
   const now = new Date();
   const db = drizzle(env.DB);
   const [[answered]] = await auditedBatch(env, db, [
@@ -600,7 +555,6 @@ export const answerDecision = async (
         status,
         decidedBy: by.userId,
         decidedAt: now,
-        decidedVia: via,
         payload: payload ?? null,
       })
       .where(
@@ -615,9 +569,7 @@ export const answerDecision = async (
       .returning(),
     outboxedIfChanged(
       db,
-      decisionEntry(actorOf(by), `workflow.decision.${status}`, run, row, {
-        via,
-      })
+      decisionEntry(actorOf(by), `workflow.decision.${status}`, run, row)
     ),
   ]);
   if (!answered) {

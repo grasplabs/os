@@ -998,8 +998,8 @@ export class RunHost extends RpcTarget {
   }
 
   /**
-   * The people one of this run's open decisions asks now, each with a
-   * link of their own, inside a step (the one that asks them).
+   * The people one of this run's open decisions asks now, each with the
+   * decision's link, inside a step (the one that asks them).
    */
   async decisionRecipients(
     decision: unknown,

@@ -87,7 +87,7 @@ const askedFor = async (builder: Person, decider: Person) => {
     let link = "";
     await expect(async () => {
       link = linkIn(await api.screens.call(app, "recipients", []));
-      expect(link).toMatch(/\/decisions\/.+\?link=/u);
+      expect(link).toMatch(/\/decisions\/[^?]+$/u);
     }).toPass({ timeout: 30_000 });
     const { pathname, search } = new URL(link);
     return { run: run.id, link: `${pathname}${search}` };
