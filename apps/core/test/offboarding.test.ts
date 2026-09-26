@@ -190,18 +190,13 @@ describe("removing a member", () => {
     await expect(
       env.CONNECT.listConnections(asConnectPerson(person, "user"))
     ).resolves.toStrictEqual([]);
-    // Connect sends its own events, to the same log.
-    const disconnected = await vi.waitFor(async () => {
-      const events = await allEvents();
-      const found = events.find(
-        ({ action, target }) =>
-          action === "connection.disconnect" && target?.id === connectionId
-      );
-      if (found === undefined) {
-        throw new Error("Not logged yet");
-      }
-      return found;
-    });
+    // Connect's own events reach the same log once they're drained from its
+    // outbox, as core's cron trigger does (and `allEvents` does first).
+    const events = await allEvents();
+    const disconnected = events.find(
+      ({ action, target }) =>
+        action === "connection.disconnect" && target?.id === connectionId
+    );
     expect(disconnected).toMatchObject({
       source: "connect",
       actor: { type: "person", userId: admin.userId },
@@ -497,12 +492,10 @@ const connectWith = (
       if (key === "disconnectPersonal") {
         return call;
       }
-      const value: unknown = Reflect.get(target, key, target);
-      if (typeof value !== "function") {
-        return value;
-      }
-      const bound: unknown = value.bind(target);
-      return bound;
+      // Everything else as connect has it: its audit outbox, say, which
+      // the same cron run drains.
+      const value: unknown = Reflect.get(target, key);
+      return value;
     },
   });
 

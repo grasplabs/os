@@ -15,6 +15,13 @@
       "when": 1790381702267,
       "tag": "0001_search",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790455932601,
+      "tag": "0002_audit_outbox_rejected",
+      "breakpoints": true
     }
   ]
 }

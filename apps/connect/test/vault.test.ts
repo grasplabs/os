@@ -314,8 +314,9 @@ describe("refreshing", () => {
     provider.resolve(providers.oauthError("invalid_grant"));
     await expect(refreshing).resolves.toBe(theirs);
     await expect(statusOf(connectionId)).resolves.toBe("active");
+    const audited = await audit.events();
     expect(
-      audit.events.filter(({ action }) => action === "connection.needs_reauth")
+      audited.filter(({ action }) => action === "connection.needs_reauth")
     ).toStrictEqual([]);
   });
 
@@ -329,7 +330,8 @@ describe("refreshing", () => {
     );
     await expect(statusOf(connectionId)).resolves.toBe("needs_reauth");
     await expect(tokenRow(connectionId)).resolves.toBeUndefined();
-    expect(audit.events.at(-1)).toMatchObject({
+    const audited = await audit.events();
+    expect(audited.at(-1)).toMatchObject({
       actor: { type: "system" },
       action: "connection.needs_reauth",
       target: { id: connectionId },
@@ -386,7 +388,8 @@ describe("disconnecting", () => {
       providers.revocations().map(({ form }) => form.get("token"))
     ).toStrictEqual([refreshToken]);
     await expect(tokenRow(connectionId)).resolves.toBeUndefined();
-    expect(audit.events.at(-1)).toMatchObject({
+    const audited = await audit.events();
+    expect(audited.at(-1)).toMatchObject({
       actor: { type: "person", userId: person.userId },
       action: "connection.disconnect",
       target: { type: "connection", id: connectionId },
@@ -452,8 +455,9 @@ describe("disconnecting", () => {
     await expect(
       exports.default.disconnect({ person: admin, connectionId: shared })
     ).resolves.toStrictEqual({ revoked: false });
+    const audited = await audit.events();
     expect(
-      audit.events
+      audited
         .filter(({ action }) => action === "connection.disconnect")
         .map(({ detail }) => detail.outcome)
     ).toStrictEqual(["refused", "refused", "refused", "ok"]);
@@ -529,8 +533,9 @@ describe("when something breaks", () => {
       exports.default.disconnect({ person, connectionId }),
       exports.default.disconnect({ person, connectionId }),
     ]);
+    const audited = await audit.events();
     expect(
-      audit.events.filter(
+      audited.filter(
         ({ action, detail }) =>
           action === "connection.disconnect" && detail.outcome === "ok"
       )

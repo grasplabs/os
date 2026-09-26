@@ -112,8 +112,9 @@ describe("starting a connection", () => {
     await expect(
       outcome(startAs(someone("admin"), { scope: "shared" }))
     ).resolves.toBe("ok");
+    const audited = await audit.events();
     expect(
-      audit.events.find(
+      audited.find(
         ({ actor }) => actor.type === "person" && actor.userId === anna.userId
       )
     ).toMatchObject({
@@ -205,7 +206,8 @@ describe("finishing a connection", () => {
       anna,
       ownAccount(anna)
     );
-    expect(audit.events).toMatchObject([
+    const audited = await audit.events();
+    expect(audited).toMatchObject([
       {
         actor: { type: "person", userId: anna.userId },
         action: "connection.connect",
@@ -213,7 +215,7 @@ describe("finishing a connection", () => {
         detail: { provider: "microsoft", scope: "personal", outcome: "ok" },
       },
     ]);
-    expect(JSON.stringify(audit.events)).not.toContain(anna.email);
+    expect(JSON.stringify(audited)).not.toContain(anna.email);
   });
 
   it("is refused to anyone but the person who started it, and spends the flow (login swap)", async () => {
@@ -236,9 +238,8 @@ describe("finishing a connection", () => {
     expect(results).toStrictEqual(results.map(() => "connection.flow_invalid"));
     expect(providers.tokenRequests("authorization_code")).toStrictEqual([]);
     await expect(ownConnections(anna)).resolves.toStrictEqual([]);
-    expect(
-      audit.events.map(({ actor, detail }) => [actor, detail])
-    ).toMatchObject(
+    const audited = await audit.events();
+    expect(audited.map(({ actor, detail }) => [actor, detail])).toMatchObject(
       [anna, anna, bob].map(({ userId }) => [
         { userId },
         { outcome: "refused", reason: "connection.flow_invalid" },
@@ -431,6 +432,7 @@ describe("tokens", () => {
       person: anna,
       connectionId: finished.connectionId,
     });
+    const audited = await audit.events();
     const seen = JSON.stringify([
       url.href,
       finished,
@@ -438,7 +440,7 @@ describe("tokens", () => {
       listed,
       disconnected,
       lines,
-      audit.events,
+      audited,
     ]);
     expect(
       [...providers.state.issued, code].filter((secret) =>

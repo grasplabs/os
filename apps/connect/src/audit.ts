@@ -1,5 +1,7 @@
 import {
+  auditOutboxTakeMax,
   auditProvenanceMaxItems,
+  auditRejectReasons,
   createAuditEvent,
   delegateActorOf,
 } from "@grasp-os/shared/audit";
@@ -7,86 +9,25 @@ import type {
   AuditActor,
   AuditDetailValue,
   AuditEntry,
-  AuditEvent,
+  OutboxedAuditEvent,
 } from "@grasp-os/shared/audit";
 import type { CapabilityClaims } from "@grasp-os/shared/capability";
+import { connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectCall } from "@grasp-os/shared/connect";
 import { sha256Hex } from "@grasp-os/shared/encoding";
-import { errorFields, log } from "@grasp-os/shared/log";
-import { asc, inArray, sql } from "drizzle-orm";
+import { sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import type { SQLiteTable } from "drizzle-orm/sqlite-core";
+import { z } from "zod";
 
 import { auditOutbox } from "./db/schema.ts";
 
-/** Most events one send takes from the outbox. */
-const sendBatchSize = 100;
-
 /**
- * What goes on the queue for a stored event. One that doesn't parse goes as
- * it is: the queue's consumer refuses it until it lands in the dead letter
- * queue, where it can be looked at, instead of staying here forever.
- */
-const queueBody = (event: string): unknown => {
-  try {
-    return JSON.parse(event);
-  } catch {
-    return event;
-  }
-};
-
-/**
- * Sends events to the audit queue, then removes those sent from the
- * outbox. One that fails stays for the next send; one sent twice has the
- * same ID, and the log keeps it once.
- */
-const send = async (
-  env: Env,
-  events: readonly { id: string; body: unknown }[]
-): Promise<void> => {
-  const results = await Promise.allSettled(
-    events.map(async ({ id, body }) => {
-      await env.AUDIT_QUEUE.send(body);
-      return id;
-    })
-  );
-  const sent: string[] = [];
-  for (const result of results) {
-    if (result.status === "fulfilled") {
-      sent.push(result.value);
-    } else {
-      log.error("audit.outbox.send_failed", errorFields(result.reason));
-    }
-  }
-  if (sent.length > 0) {
-    await drizzle(env.DB)
-      .delete(auditOutbox)
-      .where(inArray(auditOutbox.id, sent));
-  }
-};
-
-/** Sends events just stored; one that fails waits for the cron trigger. */
-const sendStored = async (
-  env: Env,
-  events: readonly AuditEvent[]
-): Promise<void> => {
-  try {
-    await send(
-      env,
-      events.map((event) => ({ id: event.id, body: event }))
-    );
-  } catch (error) {
-    log.error("audit.outbox.send_failed", errorFields(error));
-  }
-};
-
-/**
- * Records events: stored in the outbox first, in one batch with
- * `alongside` (the change they record), so a change is never kept without
- * its events, then sent. A send that fails is logged, not passed on, and
- * the cron trigger sends it again.
+ * Records events: stored in the outbox, in one batch with `alongside` (the
+ * change they record), so a change is never kept without its events. Core
+ * takes them from there (`takeAuditEvents`).
  */
 export const recordEvents = async (
   env: Env,
@@ -105,7 +46,6 @@ export const recordEvents = async (
     throw new Error("Expected an event to record");
   }
   await db.batch([stored, ...alsoStored, ...alongside]);
-  await sendStored(env, events);
 };
 
 /** One change, recorded only if a row of `from` matches `where`. */
@@ -154,16 +94,11 @@ export const recordEventsIf = async (
   const results = await db.batch([first, ...rest]);
   // Each change's event insert comes first among its statements.
   let at = 0;
-  const recorded = changes.map(({ writes }) => {
+  return changes.map(({ writes }) => {
     const inserted: unknown = results[at];
     at += 1 + writes.length;
     return Array.isArray(inserted) && inserted.length > 0;
   });
-  await sendStored(
-    env,
-    events.filter((_, index) => recorded[index] === true)
-  );
-  return recorded;
 };
 
 /**
@@ -306,17 +241,72 @@ export const auditCall = async (
 };
 
 /**
- * Sends the oldest events in the outbox to the audit queue: those whose
- * send failed when their call was made. The cron trigger calls it.
+ * What core acknowledges: the events it appended, and those the log can't
+ * take, with why. At most one take's worth in all.
  */
-export const sendAuditOutbox = async (env: Env): Promise<void> => {
-  const rows = await drizzle(env.DB)
-    .select()
-    .from(auditOutbox)
-    .orderBy(asc(auditOutbox.createdAt), asc(auditOutbox.id))
-    .limit(sendBatchSize);
-  await send(
-    env,
-    rows.map(({ id, event }) => ({ id, body: queueBody(event) }))
+const ackSchema = z
+  .object({
+    appended: z.array(z.uuid()),
+    rejected: z.array(
+      z.object({ id: z.uuid(), reason: z.enum(auditRejectReasons) })
+    ),
+  })
+  .refine(
+    ({ appended, rejected }) =>
+      appended.length + rejected.length <= auditOutboxTakeMax,
+    { message: `At most ${auditOutboxTakeMax} events` }
   );
+
+/**
+ * The oldest events in the outbox, in the order they were stored (SQLite's
+ * rowid, which an insert sets past every row in the table, also for events
+ * stored in one batch, which share their `created_at`), at most
+ * {@link auditOutboxTakeMax}: core takes them, appends them to the audit
+ * log, and only then acknowledges them (`ackAuditEvents`). Taking removes
+ * nothing, so events core took but didn't acknowledge are taken again.
+ */
+export const takeAuditEvents = async (
+  env: Env
+): Promise<OutboxedAuditEvent[]> => {
+  const { results } = await env.DB.prepare(
+    "SELECT id, event, created_at AS createdAt FROM audit_outbox ORDER BY rowid LIMIT ?"
+  )
+    .bind(auditOutboxTakeMax)
+    .all<OutboxedAuditEvent>();
+  return results;
+};
+
+/**
+ * Settles events core took: removes those it appended to the audit log,
+ * and moves those the log can't take to `audit_outbox_rejected`, with why,
+ * in one batch. IDs no longer in the outbox are ignored, so acknowledging
+ * again changes nothing.
+ */
+export const ackAuditEvents = async (
+  env: Env,
+  appended: unknown,
+  rejected: unknown = []
+): Promise<void> => {
+  const parsed = ackSchema.safeParse({ appended, rejected });
+  if (!parsed.success) {
+    throw connectErrors.create("connect.invalid");
+  }
+  const ids = [
+    ...parsed.data.appended,
+    ...parsed.data.rejected.map(({ id }) => id),
+  ];
+  if (ids.length === 0) {
+    return;
+  }
+  const now = Date.now();
+  await env.DB.batch([
+    ...parsed.data.rejected.map(({ id, reason }) =>
+      env.DB.prepare(
+        "INSERT INTO audit_outbox_rejected (id, event, reason, created_at, rejected_at) SELECT id, event, ?, created_at, ? FROM audit_outbox WHERE id = ?"
+      ).bind(reason, now, id)
+    ),
+    env.DB.prepare(
+      `DELETE FROM audit_outbox WHERE id IN (${ids.map(() => "?").join(", ")})`
+    ).bind(...ids),
+  ]);
 };

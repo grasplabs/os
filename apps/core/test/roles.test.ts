@@ -4,7 +4,8 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
-import { runCron, whileQueueDown } from "./cron.ts";
+import { allEvents } from "./audit-events.ts";
+import { runCron, waitingInOutbox, whileLogDown } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import {
   auditedDuring,
@@ -177,23 +178,31 @@ describe("member and team changes", () => {
     ]);
   });
 
-  it("keep their audit event when the audit queue is down, and send it later", async () => {
+  it("keep their audit event when the audit log is down, and append it later", async () => {
     const admin = await signedInAs("admin");
-    const created = await whileQueueDown(
-      async () =>
-        await callAuth("/organization/create-team", admin.session, {
-          name: "Finance",
-        })
-    );
-    expect(created.status).toBe(200);
-    const { id: teamId } = z
-      .object({ id: z.string() })
-      .parse(await created.json());
+    const teamId = await whileLogDown(async () => {
+      const created = await callAuth(
+        "/organization/create-team",
+        admin.session,
+        { name: "Finance" }
+      );
+      expect(created.status).toBe(200);
+      const { id } = z.object({ id: z.string() }).parse(await created.json());
+      // It waits in the outbox while the log is down.
+      await expect(waitingInOutbox(env.DB, "team.created", id)).resolves.toBe(
+        1
+      );
+      return id;
+    });
 
-    const sent = await auditedDuring(runCron);
+    await runCron();
+    const sent = await allEvents();
     expect(
-      sent.map(({ action, target }) => [action, target?.id])
-    ).toContainEqual(["team.created", teamId]);
+      sent.filter(
+        ({ action, target }) =>
+          action === "team.created" && target?.id === teamId
+      )
+    ).toHaveLength(1);
   });
 
   it("aren't audited when refused", async () => {

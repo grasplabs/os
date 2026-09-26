@@ -22,7 +22,7 @@ import { RpcTarget } from "capnweb";
 
 import { actorIdsOf, auditLog } from "./audit-log.ts";
 import type { SearchRange } from "./audit-log.ts";
-import { audit } from "./audit.ts";
+import { appendAuditEvent } from "./audit-outbox.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -69,7 +69,7 @@ const recordRead = async (
   action: "audit.searched" | "audit.exported" | "audit.verified",
   detail: Record<string, AuditDetailValue>
 ): Promise<void> => {
-  await audit(env).log({ actor: actorOf(by), action, detail });
+  await appendAuditEvent(env, { actor: actorOf(by), action, detail });
 };
 
 /**

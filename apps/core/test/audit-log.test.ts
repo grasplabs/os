@@ -146,11 +146,17 @@ describe("AuditLog", () => {
       appended: 1,
       duplicates: 1,
       conflicts: 0,
+      conflictIds: [],
     });
     // The same ID in capitals is the same event.
     await expect(
       log.append([{ ...event, id: event.id.toUpperCase() }])
-    ).resolves.toStrictEqual({ appended: 0, duplicates: 1, conflicts: 0 });
+    ).resolves.toStrictEqual({
+      appended: 0,
+      duplicates: 1,
+      conflicts: 0,
+      conflictIds: [],
+    });
 
     await expect(stored(log)).resolves.toStrictEqual([{ seq: 1, event }]);
   });
@@ -163,7 +169,12 @@ describe("AuditLog", () => {
     const changed = { ...event, action: "knowledge.deleted" };
     await expect(
       log.append([changed, { ...changed, id: event.id.toUpperCase() }])
-    ).resolves.toStrictEqual({ appended: 0, duplicates: 2, conflicts: 2 });
+    ).resolves.toStrictEqual({
+      appended: 0,
+      duplicates: 2,
+      conflicts: 2,
+      conflictIds: [event.id],
+    });
 
     await expect(stored(log)).resolves.toStrictEqual([{ seq: 1, event }]);
     await expect(log.verify()).resolves.toMatchObject({
@@ -364,7 +375,7 @@ const verifyAll = async (log: Log) => {
 const appendMany = async (log: Log, count: number): Promise<void> => {
   const batch = 500;
   for (let done = 0; done < count; done += batch) {
-    // In order, as the queue delivers them.
+    // One batch after another, as an outbox drains.
     // oxlint-disable-next-line no-await-in-loop
     await log.append(
       Array.from({ length: Math.min(batch, count - done) }, () => newEvent())

@@ -43,7 +43,7 @@ const event = (entry: Partial<z.input<typeof auditEventSchema>>): AuditEvent =>
     ...entry,
   });
 
-/** Appends events to the deployment's log, as the audit queue does. */
+/** Appends events to the deployment's log, as draining an outbox does. */
 const logged = async (...events: AuditEvent[]): Promise<AuditEvent[]> => {
   await auditLog(env).append(events);
   return events;
