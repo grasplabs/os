@@ -73,13 +73,15 @@ const recordRead = async (
 };
 
 /**
- * A spreadsheet reads a cell that starts with one of these as a formula,
- * so such a cell is written with a `'` in front (CSV injection). A stored
+ * A spreadsheet reads a cell as a formula when it starts with `=`, `+`,
+ * `-` or `@`, also after whitespace (an ID can start with a space), or
+ * with a tab or carriage return. Such a cell is written with a `'` in
+ * front (CSV injection). A stored
  * event starts with `{`, so the event column holds it exactly; only a
  * stored row that isn't an event can start with one, and gets the `'`.
  * The JSON export is the exact form.
  */
-const formulaStart = /^[=+\-@\t\r]/u;
+const formulaStart = /^\s*[=+\-@]|^[\t\r]/u;
 const csvQuoted = /[",\r\n]/u;
 
 /** One CSV cell (RFC 4180), safe to open in a spreadsheet. */

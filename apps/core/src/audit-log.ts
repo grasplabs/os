@@ -673,11 +673,15 @@ export class AuditLog extends DurableObject<Env> {
     if (days === undefined) {
       return null;
     }
-    const purged = await this.#purgeOldest(
-      new Date(Date.now() - days * dayMs).toISOString()
-    );
-    await this.#deletePurged();
-    return purged;
+    try {
+      return await this.#purgeOldest(
+        new Date(Date.now() - days * dayMs).toISOString()
+      );
+    } finally {
+      // Also when this purge fails, say a read of the stretch's object
+      // throws: the stretches purged before still get their objects deleted.
+      await this.#deletePurged();
+    }
   }
 
   /** Records the purge of the oldest archived stretch received before `cutoff`. */

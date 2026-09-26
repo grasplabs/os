@@ -969,6 +969,34 @@ describe("AuditLog purges", () => {
     await expect(env.AUDIT_ARCHIVE.get(key)).resolves.toBeNull();
   });
 
+  it("deletes a purged stretch's object even when the next purge fails", async () => {
+    const log = newLog();
+    await archiveTwoStretches(log);
+    const key = firstThreeKey(log);
+    const refused = vi
+      .spyOn(env.AUDIT_ARCHIVE, "delete")
+      .mockRejectedValueOnce(new Error("R2 unavailable"));
+    try {
+      await expect(purgeLater(log)).resolves.toMatchObject({ from: 1 });
+    } finally {
+      refused.mockRestore();
+    }
+    await expect(env.AUDIT_ARCHIVE.get(key)).resolves.not.toBeNull();
+
+    // The read of the next stretch's object fails, so it isn't purged,
+    // but the object of the stretch purged before still goes.
+    const unreadable = vi
+      .spyOn(env.AUDIT_ARCHIVE, "get")
+      .mockRejectedValueOnce(new Error("R2 unavailable"));
+    try {
+      await expect(purgeLater(log)).rejects.toThrow("R2 unavailable");
+    } finally {
+      unreadable.mockRestore();
+    }
+    await expect(env.AUDIT_ARCHIVE.get(key)).resolves.toBeNull();
+    await expect(purgeLater(log)).resolves.toMatchObject({ from: 4 });
+  });
+
   it("records a purge once when purges run at the same time", async () => {
     const log = newLog();
     await appendThree(log);
