@@ -67,6 +67,9 @@ test("names each member's actions for them, and asks before making someone an ad
 test("shows the members page only to someone signed in", async ({ page }) => {
   await page.goto("/members");
   await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
-  await expect(page.getByRole("alert")).toHaveText("Sign in to continue.");
+  await expect(
+    page.getByText("Sign in to see your organization's members.")
+  ).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
   await expect(page.getByRole("table")).toHaveCount(0);
 });

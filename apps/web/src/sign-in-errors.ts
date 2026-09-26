@@ -32,3 +32,12 @@ const isKnownCode = (code: string): code is SignInErrorCode =>
 /** The message for a sign-in refused with `code`. */
 export const signInErrorMessage = (code: string): string =>
   isKnownCode(code) ? messages[code] : fallback;
+
+/**
+ * The `error=<code>` a refused sign-in comes back with, picked from a
+ * route's search parameters (for `validateSearch`).
+ */
+export const signInErrorSearch = (
+  search: Record<string, unknown>
+): { error?: string } =>
+  typeof search.error === "string" ? { error: search.error } : {};

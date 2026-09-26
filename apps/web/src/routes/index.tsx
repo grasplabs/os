@@ -1,8 +1,9 @@
 import { Button } from "@grasp-os/ui/components/button";
 import { createFileRoute, Link } from "@tanstack/react-router";
 
-import { loadCoreStatus, signIn, signOut } from "../core.ts";
-import { signInErrorMessage } from "../sign-in-errors.ts";
+import { loadCoreStatus, signOut } from "../core.ts";
+import { signInErrorSearch } from "../sign-in-errors.ts";
+import { SignInOptions } from "../sign-in-options.tsx";
 
 const Chat = () => {
   const { connected, signInOptions, identity } = Route.useLoaderData();
@@ -34,23 +35,7 @@ const Chat = () => {
           </Button>
         </div>
       ) : (
-        <div className="flex flex-col items-center gap-2">
-          {error === undefined ? null : (
-            <p className="text-destructive text-sm" role="alert">
-              {signInErrorMessage(error)}
-            </p>
-          )}
-          {signInOptions.map(({ providerId, label }) => (
-            <Button
-              key={providerId}
-              onClick={() => {
-                void signIn(providerId);
-              }}
-            >
-              Sign in with {label}
-            </Button>
-          ))}
-        </div>
+        <SignInOptions options={signInOptions} error={error} />
       )}
     </main>
   );
@@ -59,7 +44,6 @@ const Chat = () => {
 export const Route = createFileRoute("/")({
   component: Chat,
   // A refused sign-in comes back as `?error=<code>`.
-  validateSearch: (search: Record<string, unknown>): { error?: string } =>
-    typeof search.error === "string" ? { error: search.error } : {},
+  validateSearch: signInErrorSearch,
   loader: loadCoreStatus,
 });

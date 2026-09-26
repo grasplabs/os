@@ -14,8 +14,11 @@ import { Textarea } from "@grasp-os/ui/components/textarea";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
-import { loadCoreStatus, signIn, withSession } from "../core.ts";
-import { signInErrorMessage } from "../sign-in-errors.ts";
+import { loadCoreStatus, withSession } from "../core.ts";
+import { ErrorText } from "../error-text.tsx";
+import { signInErrorSearch } from "../sign-in-errors.ts";
+import { SignInOptions } from "../sign-in-options.tsx";
+import { useCoreAction } from "../use-core-action.ts";
 
 // Where a decision link leads (`/decisions/<id>?link=<token>`). Opening it
 // answers nothing (threat model R8): the person signs in, sees what is
@@ -74,28 +77,20 @@ const Answer = ({
 }) => {
   const [current, setCurrent] = useState(decision);
   const [comment, setComment] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<string>();
+  const { busy, failure, run } = useCoreAction();
   const answer = async (approved: boolean): Promise<void> => {
-    setBusy(true);
-    setFailure(undefined);
     const note = comment.trim();
-    try {
-      const answered = await withSession(
-        async (session) =>
-          await session.decisions.answer(
-            current.id,
-            note === ""
-              ? { approved }
-              : { approved, payload: { comment: note } },
-            link
-          )
-      );
+    const answered = await run(
+      async (session) =>
+        await session.decisions.answer(
+          current.id,
+          note === "" ? { approved } : { approved, payload: { comment: note } },
+          link
+        )
+    );
+    if (answered !== undefined) {
       setCurrent(answered);
-    } catch (error) {
-      setFailure(messageOf(error));
     }
-    setBusy(false);
   };
   return (
     <Card className="w-full max-w-lg">
@@ -126,11 +121,7 @@ const Answer = ({
                   setComment(event.target.value);
                 }}
               />
-              {failure === undefined ? null : (
-                <p className="text-destructive text-sm" role="alert">
-                  {failure}
-                </p>
-              )}
+              <ErrorText>{failure}</ErrorText>
             </div>
           </CardContent>
           <CardFooter>
@@ -169,10 +160,11 @@ const Decision = () => {
   const { link, error } = Route.useSearch();
   if (page.state === "offline") {
     return (
-      <main className="flex min-h-svh items-center justify-center p-6">
-        <p className="text-destructive text-sm" role="alert">
+      <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
+        <h1 className="text-2xl font-medium">Decision</h1>
+        <ErrorText>
           Grasp can&apos;t be reached right now. Try again in a moment.
-        </p>
+        </ErrorText>
       </main>
     );
   }
@@ -183,25 +175,14 @@ const Decision = () => {
         <p className="text-muted-foreground text-sm">
           Only the person this was sent to can answer it.
         </p>
-        {error === undefined ? null : (
-          <p className="text-destructive text-sm" role="alert">
-            {signInErrorMessage(error)}
-          </p>
-        )}
-        {page.signInOptions.map(({ providerId, label }) => (
-          <Button
-            key={providerId}
-            onClick={() => {
-              // Back to this page with its link, and without an earlier error.
-              const back = new URLSearchParams(
-                link === undefined ? {} : { link }
-              );
-              void signIn(providerId, `${window.location.pathname}?${back}`);
-            }}
-          >
-            Sign in with {label}
-          </Button>
-        ))}
+        <SignInOptions
+          options={page.signInOptions}
+          error={error}
+          // Back to this page with its link, and without an earlier error.
+          returnTo={`${window.location.pathname}?${new URLSearchParams(
+            link === undefined ? {} : { link }
+          )}`}
+        />
       </main>
     );
   }
@@ -209,9 +190,10 @@ const Decision = () => {
     <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
       <p className="text-muted-foreground text-sm">Signed in as {page.name}</p>
       {page.state === "refused" ? (
-        <p className="text-destructive text-sm" role="alert">
-          {page.message}
-        </p>
+        <>
+          <h1 className="text-2xl font-medium">Decision</h1>
+          <ErrorText>{page.message}</ErrorText>
+        </>
       ) : (
         <Answer decision={page.decision} link={link} />
       )}
@@ -226,7 +208,7 @@ export const Route = createFileRoute("/decisions/$decision")({
     search: Record<string, unknown>
   ): { link?: string; error?: string } => ({
     ...(typeof search.link === "string" ? { link: search.link } : {}),
-    ...(typeof search.error === "string" ? { error: search.error } : {}),
+    ...signInErrorSearch(search),
   }),
   loaderDeps: ({ search: { link } }) => ({ link }),
   loader: async ({ params, deps }) =>

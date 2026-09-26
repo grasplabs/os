@@ -71,7 +71,7 @@ export const withSession = async <T>(
   }
 };
 
-/** What the start page shows: whether core answers, and who is signed in. */
+/** Whether core answers, how people sign in here, and who is signed in. */
 export interface CoreStatus {
   connected: boolean;
   signInOptions: SignInOption[];
