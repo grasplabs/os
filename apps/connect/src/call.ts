@@ -116,7 +116,7 @@ export const carryOut = async (
     return { ...stored, sideEffect: true, replayed: true };
   }
 
-  const server = serverOf(connection);
+  const server = await serverOf(env, connection, call.action);
   const tool = await toolFor(server, call.action);
   const sideEffect = hasSideEffect(connection.serverKind, tool);
   progress.sideEffect = sideEffect;

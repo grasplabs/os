@@ -1,14 +1,14 @@
 {
   "name": "@grasp-os/connector-microsoft-365",
   "private": true,
-  "description": "Native MCP server for microsoft-365, loaded by connect into its own isolate",
+  "description": "Native Microsoft 365 connector (Graph), loaded by connect into its own isolate",
   "license": "AGPL-3.0-only",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "catalog:"
+    "@grasp-os/connector-kit": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "catalog:"

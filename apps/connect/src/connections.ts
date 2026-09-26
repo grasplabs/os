@@ -3,6 +3,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import { nativeServer } from "./connectors.ts";
 import { connections } from "./db/schema.ts";
 import { mcpServer } from "./mcp.ts";
 import type { McpServer } from "./mcp.ts";
@@ -67,8 +68,12 @@ export const usableConnection = async (
   return connection;
 };
 
-/** The MCP server that carries out the connection's actions. */
-export const serverOf = (connection: Connection): McpServer => {
+/** The MCP server that carries out the connection's `action`. */
+export const serverOf = async (
+  env: Env,
+  connection: Connection,
+  action: string
+): Promise<McpServer> => {
   switch (connection.serverKind) {
     case "composio": {
       const url = composioUrlSchema.safeParse(connection.server);
@@ -78,10 +83,8 @@ export const serverOf = (connection: Connection): McpServer => {
       return mcpServer(url.data, async (request) => await fetch(request));
     }
     case "native": {
-      // Native connectors run in their own isolates, loaded through LOADER
-      // with an egress allowlist. Until that loader exists, a native
-      // connection has no server to reach, and nothing is sent anywhere.
-      throw connectErrors.create("connect.server_unavailable");
+      // In its own isolate, behind the egress allowlist (connectors.ts).
+      return await nativeServer(env, connection, action);
     }
     default: {
       return connection.serverKind satisfies never;

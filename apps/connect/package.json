@@ -4,13 +4,21 @@
   "description": "The connect Worker: connector layer and the only place OAuth tokens live",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "imports": {
+    "#connectors": {
+      "types": "./src/connectors-bundle.d.ts",
+      "default": "./dist/connectors.js"
+    }
+  },
   "scripts": {
-    "deploy": "wrangler deploy",
+    "build": "node build.ts",
+    "deploy": "node build.ts && wrangler deploy",
     "typegen": "wrangler types --include-runtime=false",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "wrangler d1 migrations apply DB --remote"
   },
   "dependencies": {
+    "@grasp-os/connector-kit": "workspace:*",
     "@grasp-os/shared": "workspace:*",
     "drizzle-orm": "catalog:",
     "zod": "catalog:"
@@ -20,6 +28,7 @@
     "@cloudflare/workers-types": "catalog:",
     "@modelcontextprotocol/sdk": "catalog:",
     "drizzle-kit": "catalog:",
+    "vite-plus": "catalog:",
     "wrangler": "catalog:"
   }
 }

@@ -31,6 +31,9 @@ import {
 } from "./oauth.ts";
 import { resealTokens } from "./tokens.ts";
 
+// The egress handler of native connectors' isolates (src/connectors.ts).
+export { ConnectorEgress } from "./egress.ts";
+
 /**
  * The keys a capability may be made with: the current, then the previous.
  *

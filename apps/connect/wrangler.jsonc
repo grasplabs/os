@@ -30,7 +30,8 @@
   // (src/providers.ts). While one is unset, connecting that provider is
   // refused. Their types are in src/env.d.ts.
   "secrets": { "required": ["CAPABILITY_SIGNING_KEY"] },
-  // Loads each native connector into its own isolate.
+  // Loads a native connector into an isolate of its own for each call
+  // (src/connectors.ts); a new connector needs no entry here.
   "worker_loaders": [{ "binding": "LOADER" }],
   "d1_databases": [
     {
