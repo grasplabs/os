@@ -1,8 +1,4 @@
-import type {
-  ScreenBridge,
-  ScreenProblem,
-  Theme,
-} from "@grasp-os/sdk/screen-runtime";
+import type { ScreenBridge, Theme } from "@grasp-os/sdk/screen-runtime";
 import { appErrors } from "@grasp-os/shared/apps";
 import { authErrors, featureErrors } from "@grasp-os/shared/errors";
 import { roleErrors } from "@grasp-os/shared/roles";
@@ -13,7 +9,7 @@ import {
   screenFrameReady,
   screenProblemSchema,
 } from "@grasp-os/shared/screens";
-import type { ScreenBundle } from "@grasp-os/shared/screens";
+import type { ScreenBundle, ScreenProblem } from "@grasp-os/shared/screens";
 import { newMessagePortRpcSession, RpcStub, RpcTarget } from "capnweb";
 
 import { CoreLink } from "./core-link.ts";
@@ -223,7 +219,8 @@ const loadFrame = async (
 /**
  * Runs `screen` of `app` in `frame`: loads it, hands the frame its code and
  * bridge, and watches for a new current version. Tells the page what to
- * show with `onState`, and the App's name with `onOpened`. Returns a function that stops it all.
+ * show with `onState`, and the App's name with `onOpened`. Returns a
+ * function that stops it all.
  */
 export const runScreen = (
   frame: HTMLIFrameElement,

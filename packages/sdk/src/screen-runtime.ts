@@ -9,6 +9,7 @@
  * is the screen's only way out: to its App's server, through the page,
  * which binds it to that one App.
  */
+import type { ScreenProblem } from "@grasp-os/shared/screens";
 import { newMessagePortRpcSession } from "capnweb";
 import type { RpcStub } from "capnweb";
 import { createElement } from "react";
@@ -16,13 +17,6 @@ import type { ComponentType } from "react";
 import { createRoot } from "react-dom/client";
 
 export type Theme = "light" | "dark";
-
-/** A problem in a screen, as the page passes it on to the App's error log. */
-export interface ScreenProblem {
-  kind: "error" | "rejection" | "console";
-  message: string;
-  stack?: string;
-}
 
 /**
  * What the page gives the frame over its port, and nothing else. Answers
