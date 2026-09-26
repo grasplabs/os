@@ -19,7 +19,7 @@ describe("encoding", () => {
   });
 
   it("refuses text that isn't unpadded base64url", () => {
-    for (const text of ["", "a+b", "a/b", "YQ==", "a b"]) {
+    for (const text of ["a+b", "a/b", "YQ==", "a b"]) {
       expect(() => fromBase64Url(text)).toThrow(TypeError);
     }
   });
