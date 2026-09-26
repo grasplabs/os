@@ -14,9 +14,19 @@ import type {
   ParsedAuditFilter,
 } from "@grasp-os/shared/audit-log";
 import { canonicalJson } from "@grasp-os/shared/json";
-import { log } from "@grasp-os/shared/log";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { DurableObject } from "cloudflare:workers";
-import { asc, between, desc, eq, gt } from "drizzle-orm";
+import {
+  and,
+  asc,
+  between,
+  desc,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+} from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
 
@@ -35,6 +45,7 @@ import type {
 import migrations from "./db/audit-log/migrations/migrations.js";
 import { archives, events } from "./db/audit-log/schema.ts";
 import { migrateOnWake } from "./db/migrate.ts";
+import { deploymentConfig } from "./deployment-config.ts";
 import { inJurisdiction } from "./durable-objects.ts";
 import { jsonVar } from "./json-var.ts";
 
@@ -53,6 +64,39 @@ const searchScanMax = 5000;
 
 /** Most entries one archive moves out: a few MB, well within memory. */
 export const archiveStretch = 500;
+
+/**
+ * How long archived stretches are kept, in days from when the log received
+ * their last event: at least a year, at most ten.
+ */
+const archiveRetentionSchema = z.int().min(365).max(3650);
+
+const dayMs = 24 * 60 * 60 * 1000;
+
+/** Most purged objects one purge deletes at once: R2's most per call. */
+const deleteBatchMax = 1000;
+
+/**
+ * Days archived stretches are kept: the `AUDIT_ARCHIVE_RETENTION_DAYS` var
+ * the console sets per deployment, as the DPA states it (AU7). `undefined`
+ * while it's unset, or invalid (logged as `config.invalid`): then nothing
+ * is purged. It's deployment config, so no session can shorten it.
+ */
+export const archiveRetentionDays = (
+  env: Pick<Env, "AUDIT_ARCHIVE_RETENTION_DAYS">
+): number | undefined =>
+  deploymentConfig(
+    archiveRetentionSchema,
+    "AUDIT_ARCHIVE_RETENTION_DAYS",
+    env.AUDIT_ARCHIVE_RETENTION_DAYS
+  );
+
+/**
+ * A receipt time held this far behind the head's is logged: the log holds
+ * its clock at the last receipt time, so one far-future time (a clock that
+ * jumped ahead) pins every later event's.
+ */
+const clockHoldLoggedMs = 5 * 60 * 1000;
 
 /** Where the object keeps the pass of verification under way, and the last. */
 const passKey = "verify.pass";
@@ -103,10 +147,14 @@ interface Incoming {
   event: string;
 }
 
-/** A pass of verification under way: when it began, and how far it got. */
+/**
+ * A pass of verification under way: when it began, how far it got, and the
+ * last position of the purged stretches it went across.
+ */
 interface Pass {
   startedAt: string;
   through: number;
+  purgedThrough?: number;
 }
 
 /** Validates an event and gives its canonical JSON, within the size cap. */
@@ -250,9 +298,10 @@ const entryColumns =
  * of each stretch (`archives`): its positions, the hash before it and its
  * last hash. The chain carries on from there, so it stays one chain that
  * can be verified from its first entry to its last, archived stretches
- * included. Nothing deletes an archived object: deleting one (a purge
- * outside the product) makes verification report its stretch as missing,
- * until the log has a way to record a purge.
+ * included. Only `purge` deletes an archived object, and it records the
+ * purge first: verification then reports the stretch as purged, and the
+ * chain carries on across it. An object deleted any other way (outside the
+ * product) is reported as missing.
  *
  * The log searches only what it holds now, and dedupes only against that:
  * an event redelivered after its first delivery was archived would be
@@ -263,8 +312,8 @@ export class AuditLog extends DurableObject<Env> {
   /**
    * Steps of verification reading held entries right now. They read a page
    * at a time, with hashing awaited in between, so an archive could
-   * otherwise delete entries a step is about to read; archives wait for the
-   * next run instead.
+   * otherwise delete entries a step is about to read; an archive leaves its
+   * stretch for the next run of the cron trigger instead.
    */
   #verifying = 0;
 
@@ -416,7 +465,7 @@ export class AuditLog extends DurableObject<Env> {
       .orderBy(asc(archives.firstSeq))
       .limit(1)
       .get();
-    let result: StretchVerification;
+    let result: StretchVerification & { purged?: true };
     if (after >= head.seq) {
       result = { ok: true, through: head.seq, head: head.hash };
     } else if (archived !== undefined && archived.firstSeq <= after + 1) {
@@ -460,7 +509,11 @@ export class AuditLog extends DurableObject<Env> {
     const first = expired.at(0);
     const last = expired.at(-1);
     const start = this.#lastArchived() ?? chainOrigin;
-    if (first === undefined || last === undefined || this.#verifying > 0) {
+    if (
+      first === undefined ||
+      last === undefined ||
+      this.#deferred(first.seq, last.seq)
+    ) {
       return null;
     }
     const checked = await verifyChain(expired, start);
@@ -469,6 +522,11 @@ export class AuditLog extends DurableObject<Env> {
         brokenAt: checked.brokenAt,
         reason: checked.reason,
       });
+      return null;
+    }
+    // Checked again before writing, so no object is written for a stretch
+    // left for the next run.
+    if (this.#deferred(first.seq, last.seq)) {
       return null;
     }
     const key = this.#archiveKey(first.seq, last.seq);
@@ -487,10 +545,12 @@ export class AuditLog extends DurableObject<Env> {
     );
     // Linking the event needs the head, as an append does.
     const recorded = await this.ctx.blockConcurrencyWhile(async () => {
-      // Another archive moved these meanwhile, or a step is reading them.
+      // Another archive moved these meanwhile, or a step started reading
+      // them while the object was written. In the second case the object
+      // is taken up by the next run if it moves the same stretch.
       if (
         (this.#lastArchived()?.seq ?? 0) !== start.seq ||
-        this.#verifying > 0
+        this.#deferred(first.seq, last.seq)
       ) {
         return false;
       }
@@ -520,6 +580,137 @@ export class AuditLog extends DurableObject<Env> {
   }
 
   /**
+   * Purges the oldest archived stretch kept longer than the deployment's
+   * archive retention ({@link archiveRetentionDays}; nothing while it's
+   * unset): records the purge (the stretch's `purgedAt`, and `audit.purged`
+   * in the chain, in one transaction), then deletes its object.
+   * Verification then reports the stretch as purged, not missing, and the
+   * chain carries on across it from its recorded hashes. Only a stretch
+   * that verifies is purged, so a break is never erased with it, and
+   * purges go oldest first. The log works the cutoff out itself, so its
+   * caller can't purge early. Every purge also deletes the objects of
+   * purged stretches whose delete failed before. The cron trigger calls
+   * it; it isn't on the RPC API, so no session can purge, staff included.
+   */
+  async purge(): Promise<ArchivedStretch | null> {
+    const days = archiveRetentionDays(this.env);
+    if (days === undefined) {
+      return null;
+    }
+    const purged = await this.#purgeOldest(
+      new Date(Date.now() - days * dayMs).toISOString()
+    );
+    await this.#deletePurged();
+    return purged;
+  }
+
+  /** Records the purge of the oldest archived stretch received before `cutoff`. */
+  async #purgeOldest(cutoff: string): Promise<ArchivedStretch | null> {
+    const oldest = this.#db
+      .select()
+      .from(archives)
+      .where(isNull(archives.purgedAt))
+      .orderBy(asc(archives.firstSeq))
+      .limit(1)
+      .get();
+    if (oldest === undefined || oldest.lastReceivedAt >= cutoff) {
+      return null;
+    }
+    const { firstSeq: from, lastSeq: through, key } = oldest;
+    const checked = await this.#verifyArchived(oldest);
+    if (!checked.ok) {
+      log.error("audit.purge_refused", {
+        brokenAt: checked.brokenAt,
+        reason: checked.reason,
+      });
+      return null;
+    }
+    const purgedEvent = prepare(
+      createAuditEvent(
+        {
+          actor: { type: "system" },
+          action: "audit.purged",
+          detail: { from, through, key },
+        },
+        "core"
+      )
+    );
+    const recorded = await this.ctx.blockConcurrencyWhile(async () => {
+      const { entries } = await this.#link([purgedEvent]);
+      return this.#db.transaction((tx) => {
+        // Another purge recorded it meanwhile.
+        const updated = tx
+          .update(archives)
+          .set({ purgedAt: new Date().toISOString() })
+          .where(and(eq(archives.firstSeq, from), isNull(archives.purgedAt)))
+          .returning({ firstSeq: archives.firstSeq })
+          .all();
+        if (updated.length === 0) {
+          return false;
+        }
+        for (const entry of entries) {
+          tx.insert(events).values(entry).run();
+        }
+        return true;
+      });
+    });
+    return recorded ? { from, through, key } : null;
+  }
+
+  /**
+   * Deletes the objects of purged stretches not deleted yet, and records
+   * that they were. One that fails stays for the next purge: R2 deletes
+   * are idempotent, so an object already gone is no failure.
+   */
+  async #deletePurged(): Promise<void> {
+    const pending = this.#db
+      .select({ firstSeq: archives.firstSeq, key: archives.key })
+      .from(archives)
+      .where(and(isNotNull(archives.purgedAt), isNull(archives.deletedAt)))
+      .orderBy(asc(archives.firstSeq))
+      .limit(deleteBatchMax)
+      .all();
+    if (pending.length === 0) {
+      return;
+    }
+    try {
+      await this.env.AUDIT_ARCHIVE.delete(pending.map(({ key }) => key));
+    } catch (error) {
+      log.error("audit.purge_delete_failed", {
+        objects: pending.length,
+        ...errorFields(error),
+      });
+      return;
+    }
+    this.#db
+      .update(archives)
+      .set({ deletedAt: new Date().toISOString() })
+      .where(
+        inArray(
+          archives.firstSeq,
+          pending.map(({ firstSeq }) => firstSeq)
+        )
+      )
+      .run();
+  }
+
+  /**
+   * Whether an archive of the stretch from `from` to `through` must wait
+   * for the next run, as a step of verification is reading held entries.
+   */
+  #deferred(from: number, through: number): boolean {
+    if (this.#verifying === 0) {
+      return false;
+    }
+    log.warn("audit.archive_deferred", {
+      from,
+      through,
+      verifying: this.#verifying,
+    });
+    return true;
+  }
+
+  /**
    * Links events onto the head, each one after the last, skipping IDs the
    * log already holds. Receipt times never go backwards: a clock behind the
    * head's time is held at it. Call only while nothing else can append.
@@ -530,6 +721,10 @@ export class AuditLog extends DurableObject<Env> {
     const tail = this.#tail();
     const now = new Date().toISOString();
     const receivedAt = now > tail.receivedAt ? now : tail.receivedAt;
+    const heldMs = Date.parse(tail.receivedAt) - Date.parse(now);
+    if (heldMs > clockHoldLoggedMs) {
+      log.warn("audit.clock_held", { heldMs, heldAt: tail.receivedAt });
+    }
     // Every event this call has seen, by ID: stored ones and new ones.
     const known = new Map<string, string | undefined>();
     const entries: (ChainEntry & { id: string })[] = [];
@@ -635,20 +830,24 @@ export class AuditLog extends DurableObject<Env> {
     if (pass?.through !== after) {
       return;
     }
+    const purgedThrough =
+      step.ok && step.purged ? step.through : pass.purgedThrough;
     if (step.ok && !step.done) {
-      this.ctx.storage.kv.put(passKey, { ...pass, through: step.through });
+      this.ctx.storage.kv.put(passKey, {
+        ...pass,
+        through: step.through,
+        ...(purgedThrough === undefined ? {} : { purgedThrough }),
+      });
       return;
     }
-    const { startedAt } = pass;
+    const ended = {
+      startedAt: pass.startedAt,
+      finishedAt: now,
+      ...(purgedThrough === undefined ? {} : { purgedThrough }),
+    };
     const last: FullVerification = step.ok
-      ? {
-          startedAt,
-          finishedAt: now,
-          ok: true,
-          through: step.through,
-          head: step.head,
-        }
-      : { startedAt, finishedAt: now, ...step };
+      ? { ...ended, ok: true, through: step.through, head: step.head }
+      : { ...ended, ...step };
     this.ctx.storage.kv.put(lastPassKey, last);
     this.ctx.storage.kv.delete(passKey);
   }
@@ -728,16 +927,44 @@ export class AuditLog extends DurableObject<Env> {
   /**
    * Verifies an archived stretch: that it links to the stretch before it,
    * and that its object holds the entries from its first position to its
-   * last, chained from its first hash to its last. Reads the object as it
-   * arrives.
+   * last, chained from its first hash to its last. A purged stretch has no
+   * object left: it verifies as purged once it links, and the chain carries
+   * on from its last hash. A stretch purged while its object was read is
+   * purged too, not broken.
    */
   async #verifyArchived(
     archived: typeof archives.$inferSelect
-  ): Promise<StretchVerification> {
-    const { firstSeq, lastSeq, prevHash, lastHash, key } = archived;
+  ): Promise<StretchVerification & { purged?: true }> {
+    const { firstSeq, lastSeq, prevHash, lastHash } = archived;
     if (this.#hashAt(firstSeq - 1) !== prevHash) {
       return { ok: false, brokenAt: firstSeq, reason: "unlinked" };
     }
+    const purged = {
+      ok: true,
+      through: lastSeq,
+      head: lastHash,
+      purged: true,
+    } as const;
+    if (archived.purgedAt !== null) {
+      return purged;
+    }
+    const result = await this.#verifyObject(archived);
+    if (result.ok) {
+      return result;
+    }
+    const now = this.#db
+      .select({ purgedAt: archives.purgedAt })
+      .from(archives)
+      .where(eq(archives.firstSeq, firstSeq))
+      .get();
+    return (now?.purgedAt ?? null) === null ? result : purged;
+  }
+
+  /** Reads an archived stretch's object as it arrives, and verifies it. */
+  async #verifyObject(
+    archived: typeof archives.$inferSelect
+  ): Promise<StretchVerification> {
+    const { firstSeq, lastSeq, prevHash, lastHash, key } = archived;
     const object = await this.env.AUDIT_ARCHIVE.get(key);
     if (object === null) {
       return { ok: false, brokenAt: firstSeq, reason: "missing" };

@@ -81,9 +81,10 @@ const recordRead = async (
 
 /**
  * A spreadsheet reads a cell that starts with one of these as a formula,
- * so such a cell is written with a `'` in front (CSV injection). Only
- * convenience columns can start with one: the event column starts with
- * `{`, so it is always exactly the stored event.
+ * so such a cell is written with a `'` in front (CSV injection). A stored
+ * event starts with `{`, so the event column holds it exactly; only a
+ * stored row that isn't an event can start with one, and gets the `'`.
+ * The JSON export is the exact form.
  */
 const formulaStart = /^[=+\-@\t\r]/u;
 const csvQuoted = /[",\r\n]/u;
@@ -145,9 +146,10 @@ const jsonRecord = ({ event: _parsed, ...record }: AuditRecord): string =>
 /**
  * An export, oldest first, as a stream that reads the log a page at a time
  * while the client takes it in: `json` or `csv`, per `AuditApi.export`.
- * Every read checks the session, role and flag again (`recheck`). It reads
- * the positions that matched when it began, up to the head then, so it
- * ends; if retention archives some it hasn't read yet, it stops.
+ * It reads only when the client asks for more, and checks the session, role
+ * and flag again (`recheck`) before every read of the log. It reads the
+ * positions that matched when it began, up to the head then, so it ends;
+ * if retention archives some it hasn't read yet, it stops.
  */
 const exportStream = (
   env: Env,
@@ -217,33 +219,44 @@ const exportStream = (
     return { text: lines.join(""), done: found.next === null };
   };
 
-  return new ReadableStream<Uint8Array>({
-    pull: async (controller) => {
-      try {
-        await recheck();
-        if (range === undefined) {
-          controller.enqueue(encoder.encode(await header()));
-          return;
+  return new ReadableStream<Uint8Array>(
+    {
+      pull: async (controller) => {
+        try {
+          if (range === undefined) {
+            await recheck();
+            controller.enqueue(encoder.encode(await header()));
+            return;
+          }
+          // A page can match nothing: read on until there's something to
+          // send, checking again before each page, as a session can end
+          // while a sparse filter reads through a long stretch.
+          let chunk = { text: "", done: false };
+          while (chunk.text === "" && !chunk.done) {
+            // Pages one after another, each from where the last stopped.
+            // oxlint-disable-next-line no-await-in-loop
+            await recheck();
+            // oxlint-disable-next-line no-await-in-loop
+            chunk = await page(range);
+          }
+          const text = chunk.done
+            ? `${chunk.text}${await footer()}`
+            : chunk.text;
+          if (text !== "") {
+            controller.enqueue(encoder.encode(text));
+          }
+          if (chunk.done) {
+            controller.close();
+          }
+        } catch (error) {
+          controller.error(error);
         }
-        // A page can match nothing: read on until there's something to send.
-        let chunk = { text: "", done: false };
-        while (chunk.text === "" && !chunk.done) {
-          // Pages one after another, each from where the last stopped.
-          // oxlint-disable-next-line no-await-in-loop
-          chunk = await page(range);
-        }
-        const text = chunk.done ? `${chunk.text}${await footer()}` : chunk.text;
-        if (text !== "") {
-          controller.enqueue(encoder.encode(text));
-        }
-        if (chunk.done) {
-          controller.close();
-        }
-      } catch (error) {
-        controller.error(error);
-      }
+      },
     },
-  });
+    // Nothing is read ahead: a pull runs only when the client asks for
+    // more, and checks the session again before each page it reads.
+    { highWaterMark: 0 }
+  );
 };
 
 /**

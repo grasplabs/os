@@ -43,7 +43,8 @@ export const events = sqliteTable(
  * without gaps: each one the entries from `firstSeq` to `lastSeq`, stored as
  * they were, linked to the hash before them (`prevHash`) and ending on
  * `lastHash`, where the next stretch, or the first row of `events`, picks
- * the chain up again.
+ * the chain up again. A stretch purged by retention keeps its row, so the
+ * chain still links across it; only its object is gone.
  */
 export const archives = sqliteTable("archives", {
   firstSeq: integer("first_seq").primaryKey(),
@@ -55,4 +56,15 @@ export const archives = sqliteTable("archives", {
   /** The object in the AUDIT_ARCHIVE bucket that holds the entries. */
   key: text().notNull(),
   archivedAt: text("archived_at").notNull(),
+  /**
+   * When the log purged the stretch (ISO 8601): recorded as `audit.purged`
+   * before its object was deleted. `null` while the object is kept.
+   */
+  purgedAt: text("purged_at"),
+  /**
+   * When the purged stretch's object was deleted (ISO 8601). `null` while
+   * a purged stretch's delete hasn't succeeded yet: the next purge tries
+   * it again.
+   */
+  deletedAt: text("deleted_at"),
 });

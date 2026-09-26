@@ -8,10 +8,12 @@ import { featureEnabled } from "./features.ts";
 // Retention of the audit log: how long the log keeps an event where admins
 // search it. After that the event moves to the archive in R2 (in the EU),
 // as it was stored, and the chain carries on (src/audit-log.ts), so an
-// archived event still counts when the chain is verified. Nothing here
-// deletes an archived event: the archive keeps it for as long as the bucket
-// does. Deleting archived objects (a GDPR purge, say) is done outside the
-// product for now, and verification reports those stretches as missing.
+// archived event still counts when the chain is verified. The archive keeps
+// it until the log purges it, once the deployment's archive retention has
+// passed (`AUDIT_ARCHIVE_RETENTION_DAYS`, worked out by the log itself; see
+// `AuditLog.purge`), and never while that is unset. Verification reports a
+// purged stretch as purged. Deleting archived objects any other way
+// (outside the product) makes verification report them missing.
 //
 // The console sets it per deployment with the `AUDIT_RETENTION_DAYS` var:
 // 180 days unless set, at least 30 (so an admin always has the last month
@@ -48,15 +50,10 @@ const retentionDays = (env: Env): number | undefined =>
         env.AUDIT_RETENTION_DAYS
       );
 
-/**
- * Archives the events the log received longer ago than the deployment's
- * retention, oldest first, a stretch at a time; the log records each
- * stretch as `audit.archived`, in the same transaction. The cron trigger
- * calls it; a backlog is worked off over several runs.
- */
-export const archiveAuditLog = async (env: Env): Promise<void> => {
+/** Archives what is past retention, up to {@link stretchesPerRun} stretches. */
+const archiveExpired = async (env: Env): Promise<void> => {
   const days = retentionDays(env);
-  if (!featureEnabled(env, "audit") || days === undefined) {
+  if (days === undefined) {
     return;
   }
   const cutoff = new Date(Date.now() - days * dayMs).toISOString();
@@ -72,5 +69,29 @@ export const archiveAuditLog = async (env: Env): Promise<void> => {
     if (through - from + 1 < archiveStretch) {
       return;
     }
+  }
+};
+
+/**
+ * Archives the events the log received longer ago than the deployment's
+ * retention, oldest first, a stretch at a time; the log records each
+ * stretch as `audit.archived`, in the same transaction. Then purges the
+ * archived stretches past archive retention, likewise recorded as
+ * `audit.purged`. The cron trigger calls it; a backlog is worked off over
+ * several runs.
+ */
+export const archiveAuditLog = async (env: Env): Promise<void> => {
+  if (!featureEnabled(env, "audit")) {
+    return;
+  }
+  await archiveExpired(env);
+  for (let run = 0; run < stretchesPerRun; run += 1) {
+    // One stretch after another, oldest first.
+    // oxlint-disable-next-line no-await-in-loop
+    const stretch = await auditLog(env).purge();
+    if (stretch === null) {
+      return;
+    }
+    log.info("audit.purged", { from: stretch.from, through: stretch.through });
   }
 };

@@ -125,6 +125,7 @@ export const platformBindingNames: ReadonlySet<string> = new Set([
   "APPS",
   "ASSETS",
   "AUDIT_ARCHIVE",
+  "AUDIT_ARCHIVE_RETENTION_DAYS",
   "AUDIT_DLQ",
   "AUDIT_LOG",
   "AUDIT_QUEUE",

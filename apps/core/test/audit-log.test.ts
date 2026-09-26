@@ -7,6 +7,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { chainHash } from "../src/audit-chain.ts";
+import { archiveRetentionDays } from "../src/audit-log.ts";
 import { oversizedFields } from "./audit-events.ts";
 
 // A fresh log per test; the deployment's own is `auditLog(env)`.
@@ -74,6 +75,33 @@ describe("AuditLog", () => {
     const receivedAt = entry?.receivedAt ?? "";
     expect(receivedAt >= before).toBeTruthy();
     expect(receivedAt <= new Date().toISOString()).toBeTruthy();
+  });
+
+  it("logs a receipt time held far behind the last one, but not a small hold", async () => {
+    const log = newLog();
+    /** Appends with the clock `ms` ahead, then now; whether a hold was logged. */
+    const heldAfterJump = async (ms: number): Promise<boolean> => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + ms);
+      try {
+        await log.append([newEvent()]);
+      } finally {
+        vi.useRealTimers();
+      }
+      const warned = vi.spyOn(console, "warn");
+      try {
+        await log.append([newEvent()]);
+        return warned.mock.calls.some(
+          ([fields]) =>
+            z.object({ event: z.literal("audit.clock_held") }).safeParse(fields)
+              .success
+        );
+      } finally {
+        warned.mockRestore();
+      }
+    };
+    await expect(heldAfterJump(60 * 1000)).resolves.toBeFalsy();
+    await expect(heldAfterJump(60 * 60 * 1000)).resolves.toBeTruthy();
   });
 
   it("verifies an empty log", async () => {
@@ -641,6 +669,41 @@ describe("AuditLog retention", () => {
     });
   });
 
+  it("leaves a stretch for the next run while a verification step reads the entries", async () => {
+    const log = newLog();
+    await appendMany(log, 2000);
+    const cutoff = await cutoffNow();
+    // A step that reads every held entry is under way when the archive
+    // starts: the archive writes nothing and says so, and the step still
+    // sees every entry it reads.
+    const warned = vi.spyOn(console, "warn");
+    try {
+      const [step, stretch] = await runInDurableObject(
+        log,
+        async (instance) =>
+          await Promise.all([instance.verify(), instance.archive(cutoff, 180)])
+      );
+      expect({ step, stretch }).toMatchObject({
+        step: { ok: true, through: 2000, done: true },
+        stretch: null,
+      });
+      expect(warned).toHaveBeenCalledWith(
+        expect.objectContaining({ event: "audit.archive_deferred" })
+      );
+    } finally {
+      warned.mockRestore();
+    }
+    const written = await env.AUDIT_ARCHIVE.list({
+      prefix: `audit-log/${log.id.toString()}/`,
+    });
+    expect(written.objects).toStrictEqual([]);
+    // The next run archives it.
+    await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
+      from: 1,
+      through: 500,
+    });
+  });
+
   it("takes up a stretch an archive wrote but stopped before recording", async () => {
     const log = newLog();
     await appendThree(log);
@@ -751,6 +814,249 @@ describe("AuditLog retention", () => {
       ok: false,
       brokenAt: 4,
       reason: "unlinked",
+    });
+  });
+});
+
+const dayMs = 24 * 60 * 60 * 1000;
+
+/**
+ * Runs `run` with the clock `days` ahead: the log works out what to purge
+ * from its own clock and archive retention (365 days in tests).
+ */
+const inDays = async <T>(days: number, run: () => Promise<T>): Promise<T> => {
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(Date.now() + days * dayMs);
+  try {
+    return await run();
+  } finally {
+    vi.useRealTimers();
+  }
+};
+
+/** Purges as the log would once archive retention has passed. */
+const purgeLater = async (log: Log) =>
+  await inDays(366, async () => await log.purge());
+
+/** Archives what the log holds now, and then a second stretch. */
+const archiveTwoStretches = async (log: Log): Promise<void> => {
+  await appendThree(log);
+  await archivedKey(log);
+  await appendThree(log);
+  await archivedKey(log);
+};
+
+describe("AuditLog purges", () => {
+  it("purges the oldest archived stretch once archive retention has passed, and records it", async () => {
+    const log = newLog();
+    await appendThree(log);
+    const key = await archivedKey(log);
+    await log.append([newEvent("test.d")]);
+
+    // Not before archive retention has passed.
+    await expect(
+      inDays(364, async () => await log.purge())
+    ).resolves.toBeNull();
+    await expect(purgeLater(log)).resolves.toStrictEqual({
+      from: 1,
+      through: 3,
+      key,
+    });
+    await expect(env.AUDIT_ARCHIVE.get(key)).resolves.toBeNull();
+    // The purge is recorded in the chain itself, by the platform.
+    await expect(stored(log)).resolves.toMatchObject([
+      { seq: 4, event: { action: "audit.archived" } },
+      { seq: 5, event: { action: "test.d" } },
+      {
+        seq: 6,
+        event: {
+          actor: { type: "system" },
+          action: "audit.purged",
+          detail: { from: 1, through: 3, key },
+        },
+      },
+    ]);
+  });
+
+  it("works out archive retention from deployment config only, and purges nothing without it", () => {
+    expect(archiveRetentionDays({})).toBeUndefined();
+    // Below the floor, above the ceiling, or not whole days: none.
+    for (const days of ["30", "364", "3651", "400.5", "a year"]) {
+      expect(
+        archiveRetentionDays({ AUDIT_ARCHIVE_RETENTION_DAYS: days })
+      ).toBeUndefined();
+    }
+    expect(archiveRetentionDays({ AUDIT_ARCHIVE_RETENTION_DAYS: "730" })).toBe(
+      730
+    );
+  });
+
+  it("verifies a purged stretch as purged, and the chain across it", async () => {
+    const log = newLog();
+    await appendThree(log);
+    await archivedKey(log);
+    await log.append([newEvent("test.d")]);
+    await purgeLater(log);
+
+    // Reported as purged, not missing, and the chain carries on after it.
+    await expect(log.verify()).resolves.toMatchObject({
+      ok: true,
+      through: 3,
+      purged: true,
+      done: false,
+    });
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: true, through: 6, done: true },
+    });
+    await expect(log.lastFullVerification()).resolves.toMatchObject({
+      ok: true,
+      through: 6,
+      purgedThrough: 3,
+    });
+  });
+
+  it("purges oldest first, one stretch at a time", async () => {
+    const log = newLog();
+    await archiveTwoStretches(log);
+
+    await expect(purgeLater(log)).resolves.toMatchObject({
+      from: 1,
+      through: 3,
+    });
+    await expect(purgeLater(log)).resolves.toMatchObject({
+      from: 4,
+      through: 7,
+    });
+    await expect(purgeLater(log)).resolves.toBeNull();
+    // Two purged stretches, then the entries the log holds.
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: true, done: true },
+      steps: 3,
+    });
+    await expect(log.lastFullVerification()).resolves.toMatchObject({
+      ok: true,
+      purgedThrough: 7,
+    });
+  });
+
+  it("deletes a purged stretch's object on a later purge when its delete failed", async () => {
+    const log = newLog();
+    await appendThree(log);
+    const key = await archivedKey(log);
+
+    const refused = vi
+      .spyOn(env.AUDIT_ARCHIVE, "delete")
+      .mockRejectedValueOnce(new Error("R2 unavailable"));
+    try {
+      await expect(purgeLater(log)).resolves.toMatchObject({ from: 1 });
+    } finally {
+      refused.mockRestore();
+    }
+    // Recorded as purged, but its object is still there.
+    await expect(env.AUDIT_ARCHIVE.get(key)).resolves.not.toBeNull();
+    await expect(log.verify()).resolves.toMatchObject({ purged: true });
+
+    // Nothing more to purge, but the object goes this time.
+    await expect(purgeLater(log)).resolves.toBeNull();
+    await expect(env.AUDIT_ARCHIVE.get(key)).resolves.toBeNull();
+  });
+
+  it("records a purge once when purges run at the same time", async () => {
+    const log = newLog();
+    await appendThree(log);
+    await archivedKey(log);
+
+    const purged = await inDays(
+      366,
+      async () =>
+        await runInDurableObject(
+          log,
+          async (instance) =>
+            await Promise.all([instance.purge(), instance.purge()])
+        )
+    );
+    expect(purged.filter((stretch) => stretch !== null)).toHaveLength(1);
+    const events = await stored(log);
+    expect(
+      events.filter(({ event }) => event.action === "audit.purged")
+    ).toHaveLength(1);
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: true, done: true },
+    });
+  });
+
+  it("reports a stretch purged while a step reads its object as purged, not broken", async () => {
+    const log = newLog();
+    await appendThree(log);
+    const key = await archivedKey(log);
+    // The step's read of the object arrives only after the purge deleted it.
+    const purgedMeanwhile = Promise.withResolvers<null>();
+    const get = env.AUDIT_ARCHIVE.get.bind(env.AUDIT_ARCHIVE);
+    const reads = vi
+      .spyOn(env.AUDIT_ARCHIVE, "get")
+      .mockImplementationOnce(async () => await purgedMeanwhile.promise)
+      .mockImplementation(async (name: string) => await get(name));
+    try {
+      const step = log.verify();
+      await purgeLater(log);
+      await expect(env.AUDIT_ARCHIVE.get(key)).resolves.toBeNull();
+      purgedMeanwhile.resolve(null);
+      await expect(step).resolves.toMatchObject({
+        ok: true,
+        through: 3,
+        purged: true,
+      });
+    } finally {
+      reads.mockRestore();
+    }
+  });
+
+  it("never purges a stretch that doesn't verify, so its break stays found", async () => {
+    const log = newLog();
+    await appendThree(log);
+    const key = await archivedKey(log);
+    const lines = await archivedLines(key);
+    await env.AUDIT_ARCHIVE.put(
+      key,
+      lines.join("\n").replace("test.b", "test.x")
+    );
+
+    await expect(purgeLater(log)).resolves.toBeNull();
+    await expect(env.AUDIT_ARCHIVE.get(key)).resolves.not.toBeNull();
+    await expect(log.verify()).resolves.toStrictEqual({
+      ok: false,
+      brokenAt: 2,
+      reason: "altered",
+    });
+  });
+
+  it("never purges a stretch deleted outside the product, which stays missing", async () => {
+    const log = newLog();
+    await appendThree(log);
+    const key = await archivedKey(log);
+    await env.AUDIT_ARCHIVE.delete(key);
+
+    await expect(purgeLater(log)).resolves.toBeNull();
+    await expect(log.verify()).resolves.toStrictEqual({
+      ok: false,
+      brokenAt: 1,
+      reason: "missing",
+    });
+  });
+
+  it("finds a purged stretch that no longer links to the chain before it", async () => {
+    const log = newLog();
+    await archiveTwoStretches(log);
+    await purgeLater(log);
+    await purgeLater(log);
+    // The second stretch's recorded link, changed after its purge.
+    await tamper(
+      log,
+      `UPDATE archives SET prev_hash = '${"f".repeat(64)}' WHERE first_seq = 4`
+    );
+
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: false, brokenAt: 4, reason: "unlinked" },
     });
   });
 });

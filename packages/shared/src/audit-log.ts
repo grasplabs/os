@@ -52,10 +52,14 @@ const typeRules: readonly {
   { action: "team", type: "config" },
   { action: "workflow.step", type: "action" },
   { action: "platform", type: "platform_update" },
-  // Retention moving events out, then reading the log: searches, exports
-  // and verifications.
+  // The log's own events, each named, so an `audit` action added later has
+  // no type until it gets a rule: retention moving events out and purging
+  // them, then reading the log.
   { action: "audit.archived", type: "action" },
-  { action: "audit", type: "read" },
+  { action: "audit.purged", type: "action" },
+  { action: "audit.searched", type: "read" },
+  { action: "audit.exported", type: "read" },
+  { action: "audit.verified", type: "read" },
 ];
 
 /** Whether `action` is `prefix` or starts with it and a dot. */
@@ -172,14 +176,32 @@ export type ChainBreak = "missing" | "unlinked" | "altered";
  * position where the chain breaks; nothing after it is verified.
  */
 export type ChainVerification =
-  | { ok: true; through: number; head: string; done: boolean }
+  | {
+      ok: true;
+      through: number;
+      head: string;
+      done: boolean;
+      /**
+       * Set when the step's stretch was purged by retention: the log
+       * recorded the purge (`audit.purged`), and the stretch still links
+       * the chain before it to the chain after it, but its entries are gone
+       * and weren't checked.
+       */
+      purged?: true;
+    }
   | { ok: false; brokenAt: number; reason: ChainBreak };
 
 /**
  * The last pass that verified the whole chain, from its first position, in
- * unbroken steps: when it ran, and how it ended.
+ * unbroken steps: when it ran, and how it ended. `purgedThrough` is the
+ * last position of the purged stretches it went across, if any: those it
+ * found linked, but couldn't check.
  */
-export type FullVerification = { startedAt: string; finishedAt: string } & (
+export type FullVerification = {
+  startedAt: string;
+  finishedAt: string;
+  purgedThrough?: number;
+} & (
   | { ok: true; through: number; head: string }
   | { ok: false; brokenAt: number; reason: ChainBreak }
 );
@@ -205,9 +227,10 @@ export interface AuditApi {
    *
    * `csv`: a header and a row per record; its `verified`, `prev_hash` and
    * `hash` columns are the record check. A cell that a spreadsheet would
-   * read as a formula starts with `'`, so the convenience columns are for
-   * reading; the `event` column (never changed: it starts with `{`) is the
-   * authoritative one.
+   * read as a formula starts with `'`, so the CSV is for reading. The
+   * `event` column is the stored event, which starts with `{`, except for a
+   * stored row that isn't an event (`verified` false): it gets the `'` too
+   * when it starts with a formula character. JSON is the exact form.
    *
    * Either way each record carries `eventJson`, its event byte for byte as
    * stored and hashed, so anyone can recompute its hash (see core's
