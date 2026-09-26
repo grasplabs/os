@@ -88,9 +88,7 @@ const retryMs = { first: 1000, most: 30_000 };
  * it subscribes again and again, backing off to every 30 s.
  *
  * Once stopped, the callback rejects whatever the server sends it next, so
- * the server drops it (see above) and core frees its place among the
- * connection's live callbacks. A callback can't be revoked from this side:
- * until the server sends again, it keeps that place.
+ * the server drops it (see above).
  */
 export const live = (
   method: string,

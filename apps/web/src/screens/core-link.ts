@@ -62,9 +62,6 @@ export class CoreLink {
   }
 
   async #connect(): Promise<Session> {
-    if (this.#closed) {
-      throw new Error("The page closed its connection to core.");
-    }
     // A failed attempt's connection, before opening the next.
     this.#drop();
     const core = connectCore();
@@ -72,10 +69,12 @@ export class CoreLink {
     const session = core.authenticate();
     // Core's own answer, never an App's: the session holds, or it ended.
     await session.whoami();
+    const ready = await session;
     this.#delay = reconnectMs.first;
     // Only a connection that worked starts a reconnect when it breaks, and
-    // only once: a failed attempt is retried by the loop that made it.
-    // Registered after the answer, it still hears of a break before it.
+    // only once: a failed attempt is retried by the loop that made it, so
+    // nothing is awaited once this is registered. Registered after the
+    // last answer, it still hears of a break before it.
     core.onRpcBroken(() => {
       if (!this.#closed && this.#core === core) {
         this.#drop();
@@ -84,13 +83,17 @@ export class CoreLink {
         this.#session = next;
       }
     });
-    return await session;
+    return ready;
   }
 
   async #reconnect(): Promise<Session> {
     for (;;) {
       // oxlint-disable-next-line no-await-in-loop -- one attempt at a time
       await wait(this.#delay);
+      if (this.#closed) {
+        // Closed while waiting: a new connection would never be closed.
+        throw new Error("The page closed its connection to core.");
+      }
       this.#delay = Math.min(this.#delay * 2, reconnectMs.most);
       try {
         // oxlint-disable-next-line no-await-in-loop -- one attempt at a time
