@@ -27,7 +27,7 @@ import { z } from "zod";
 export const maxEgressResponseBytes = 10 * 1024 * 1024;
 
 /** The status a refused request gets: it never reached the provider. */
-export const egressRefusedStatus = 403;
+const egressRefusedStatus = 403;
 
 /** The status a response gets when it redirected or was too large. */
 export const egressFailedStatus = 502;

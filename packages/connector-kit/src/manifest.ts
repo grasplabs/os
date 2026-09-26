@@ -101,6 +101,9 @@ export const routeSchema = z.strictObject({
 });
 export type Route = z.infer<typeof routeSchema>;
 
+/** Most requests one action may declare. */
+const maxRoutes = 32;
+
 /**
  * What connect knows of one action (tool) before running it, and decides
  * by before it reads a token: whether it is read-only, the input property
@@ -108,7 +111,7 @@ export type Route = z.infer<typeof routeSchema>;
  * it may send.
  */
 export const actionManifestSchema = z.strictObject({
-  routes: z.array(routeSchema).max(32),
+  routes: z.array(routeSchema).max(maxRoutes),
   readOnly: z.boolean(),
   resource: z
     .string()
@@ -118,10 +121,10 @@ export const actionManifestSchema = z.strictObject({
 });
 export type ActionManifest = z.infer<typeof actionManifestSchema>;
 
-/** Most requests one action may declare, and hosts one connector. */
+/** Most hosts one connector may reach. */
 const maxHosts = 16;
 
-export const connectorNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,62}$/u);
+const connectorNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,62}$/u);
 
 export const connectorManifestSchema = z
   .strictObject({

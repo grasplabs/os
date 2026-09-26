@@ -207,9 +207,9 @@ const loadServer = async (
     });
   }
   const bindings = await appBindings(env, app);
-  // The same generation has the same key, so the
-  // loader may keep its isolate while the host sleeps. Another version, or a
-  // grant or revoke (a new generation), starts a new one.
+  // The same generation has the same key, so the loader may keep its
+  // isolate while the host sleeps. Another version, or a grant or revoke
+  // (a new generation), starts a new one.
   const key = `app:${app}:${version}:${generation}`;
   return env.LOADER.get(key, () => ({
     ...sandbox,
@@ -239,8 +239,9 @@ const forCaller = (
 
 /**
  * One App: the host of its server code (`app/server.ts`, exporting an
- * `App` class), and the keeper of its restricted mode (restricted.ts). Core reaches it through `callApp`; the App's own code
- * reaches it only through its stubs.
+ * `App` class), and the keeper of its restricted mode (restricted.ts).
+ * Core reaches it through `callApp`; the App's own code reaches it only
+ * through its stubs.
  */
 export class App extends DurableObject<Env> {
   /**
