@@ -392,8 +392,6 @@ export const connectErrors = defineErrorFamily({
     "This call reaches beyond the one resource it may use.",
   "connect.mask_unsupported":
     "This permission masks fields this connection's server can't mask, so nothing was done.",
-  "connect.search_masked":
-    "This permission masks fields this search would look through, so the search wasn't run.",
   "connect.idempotency_key_required":
     "This action has a side effect, so it needs an idempotency key.",
   "connect.idempotency_conflict":

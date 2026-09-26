@@ -120,36 +120,26 @@ const driveInputs: Record<string, Input> = {
 };
 
 describe("the Google Workspace connector's scoping", () => {
-  it("binds every route of every tool to its mailbox, calendar or drive", () => {
+  it("binds every Gmail and Calendar route to its mailbox or calendar", () => {
     const routes = Object.entries(manifest.actions).flatMap(
       ([name, { resource, routes: declared }]) =>
         declared.map((route) => ({ name, resource, ...route }))
     );
+    // Drive has no path per drive: its tools hold a call to the drive
+    // themselves (tested below).
     const unbound = routes
       .filter(
-        ({ resource, path, query, check }) =>
+        ({ resource, path }) =>
           !(
             (resource === "mailbox" &&
               path.startsWith("/gmail/v1/users/{mailbox}/")) ||
             (resource === "calendar" &&
               path.startsWith("/calendar/v3/calendars/{calendar}/")) ||
-            (resource === "drive" &&
-              query?.driveId === "{drive}" &&
-              query.corpora === "drive")
-          ) && check === undefined
+            (resource === "drive" && path.startsWith("/drive/v3/files"))
+          )
       )
       .map(({ name, path }) => `${name} ${path}`);
     expect(unbound).toStrictEqual([]);
-    // Only a file read can't name its drive: Drive addresses a file by its
-    // ID alone. The egress checks the file's drive with Google first.
-    expect(
-      routes
-        .filter(({ check }) => check !== undefined)
-        .map(({ name, check }) => ({ name, equals: check?.equals }))
-    ).toStrictEqual([
-      { name: "files.read", equals: "{drive}" },
-      { name: "files.read", equals: "{drive}" },
-    ]);
     expect(
       Object.keys(manifest.actions).toSorted(),
       "every tool is tested for scoping below"
@@ -1012,13 +1002,12 @@ describe("the Google Workspace connector's Drive tools", () => {
       },
       provenance: [fileIds.report],
     });
-    // The egress asks for the file's drive, in shared drives too, before
-    // each request for it.
-    const driveCheck = { fields: "driveId", supportsAllDrives: "true" };
+    // Its metadata first, which says its drive, then its content.
     const sent = requests();
-    expect(
-      sent.map(({ query }) => (query.fields === "driveId" ? query : "request"))
-    ).toStrictEqual([driveCheck, "request", driveCheck, "request"]);
+    expect(sent.map(({ query }) => query.alt ?? "metadata")).toStrictEqual([
+      "metadata",
+      "media",
+    ]);
     expect(
       sent.every(({ path }) => path === `/drive/v3/files/${fileIds.report}`)
     ).toBeTruthy();
@@ -1088,9 +1077,9 @@ describe("the Google Workspace connector's Drive tools", () => {
       )
     );
     expect(refusals).toMatchObject([
-      // The egress's check found another drive, or none: nothing was sent.
-      { error: { code: "egress_refused" } },
-      { error: { code: "egress_refused" } },
+      // Google says it is in another drive, or none: the tool refuses.
+      { error: { code: "not_found" } },
+      { error: { code: "not_found" } },
       // Google answered with another file of the drive: the tool refuses.
       { error: { code: "not_found" } },
       { error: { code: "not_found" } },
@@ -1100,14 +1089,10 @@ describe("the Google Workspace connector's Drive tools", () => {
       { error: { code: "too_large" } },
     ]);
     // Each was refused on its drive or its metadata: no content was asked
-    // for, and nothing but the check for the other drives' files.
+    // for.
     expect(
       requests().filter(
-        ({ path, query }) =>
-          query.alt === "media" ||
-          path.endsWith("/export") ||
-          ([fileIds.foreign, fileIds.myDrive].some((id) => path.endsWith(id)) &&
-            query.fields !== "driveId")
+        ({ path, query }) => query.alt === "media" || path.endsWith("/export")
       )
     ).toStrictEqual([]);
   });
@@ -1217,59 +1202,6 @@ describe("the Google Workspace connector's answers", () => {
       read: { id: fileIds.report, content: null },
       files: { items: [{ id: fileIds.folder }, { id: fileIds.report }] },
     });
-  });
-
-  it("don't search through a masked field", async () => {
-    const connection = await connected();
-    const refusals = await Promise.all([
-      outcome(
-        call(
-          connection,
-          "mail.list",
-          { mailbox: invoices, search: "IBAN NL91" },
-          { mask: ["body"] }
-        )
-      ),
-      outcome(
-        call(
-          connection,
-          "files.search",
-          { drive: financeDrive, query: "IBAN" },
-          { mask: ["content"] }
-        )
-      ),
-    ]);
-    expect(refusals).toStrictEqual([
-      "connect.search_masked",
-      "connect.search_masked",
-    ]);
-    expect(google.sent).toStrictEqual([]);
-    // A filter that isn't a search still runs, and so does a search
-    // through fields the permission doesn't mask.
-    await expect(
-      Promise.all([
-        outcome(
-          call(
-            connection,
-            "mail.list",
-            {
-              mailbox: invoices,
-              label: "INBOX",
-              receivedAfter: "2026-09-01T00:00:00Z",
-            },
-            { mask: ["body"] }
-          )
-        ),
-        outcome(
-          call(
-            connection,
-            "files.search",
-            { drive: financeDrive, query: "invoice" },
-            { mask: ["subject"] }
-          )
-        ),
-      ])
-    ).resolves.toStrictEqual(["ok", "ok"]);
   });
 
   it("refuse a mask naming a field no tool of the connector has", async () => {

@@ -2,6 +2,3 @@
 # Verifies the capability core signs for each call. The same value as in
 # apps/core/.dev.vars; at least 32 characters, e.g. `openssl rand -base64 32`.
 CAPABILITY_SIGNING_KEY=
-# Deployment config isn't read from here: pass it with `wrangler dev --var`,
-# e.g. --var 'DOWNLOAD_HOSTS:["contoso.sharepoint.com","contoso-my.sharepoint.com"]'
-# for the SharePoint hosts downloads may be redirected to (src/egress.ts).

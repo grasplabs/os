@@ -168,26 +168,22 @@ describe("a provider's failed answer", () => {
 
   it("is told from connect's egress's own answer, whatever its status", async () => {
     const codes = await Promise.all(
-      [
-        egressKind.refused,
-        egressKind.failed,
-        egressKind.downloadsOff,
-        "anything else",
-      ].map(async (kind) => {
-        answers(
-          new Response("Refused", {
-            status: 429,
-            headers: { [egressHeader]: kind },
-          })
-        );
-        const { code, notPerformed } = await failureOf();
-        return { code, notPerformed };
-      })
+      [egressKind.refused, egressKind.failed, "anything else"].map(
+        async (kind) => {
+          answers(
+            new Response("Refused", {
+              status: 429,
+              headers: { [egressHeader]: kind },
+            })
+          );
+          const { code, notPerformed } = await failureOf();
+          return { code, notPerformed };
+        }
+      )
     );
     expect(codes).toStrictEqual([
       { code: "egress_refused", notPerformed: false },
       { code: "egress_failed", notPerformed: false },
-      { code: "downloads_unavailable", notPerformed: false },
       { code: "egress_failed", notPerformed: false },
     ]);
   });

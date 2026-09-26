@@ -9,6 +9,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 import {
   addConnection,
   agentFor,
+  auditEvents,
   callAs,
   capabilityFor,
   outcome,
@@ -28,6 +29,8 @@ const server = fakeMcpServer(serverUrl, [
     run: () => ({ output: { messages: [] } }),
   },
 ]);
+
+const { events } = auditEvents();
 
 const anna = agentFor("user-anna");
 
@@ -151,10 +154,13 @@ describe("calls to connect", () => {
     expect(server.requests).toBe(0);
   });
 
-  it("aren't given for a masked permission on a server connect can't mask", async () => {
+  it("aren't given, and are audited as refused, for a masked permission on a server connect can't mask", async () => {
     await expect(outcome(callAs(anna, call, { mask: ["body"] }))).resolves.toBe(
       "connect.mask_unsupported"
     );
     expect(server.requests).toBe(0);
+    expect(events.map(({ detail }) => detail)).toMatchObject([
+      { outcome: "refused", reason: "connect.mask_unsupported" },
+    ]);
   });
 });

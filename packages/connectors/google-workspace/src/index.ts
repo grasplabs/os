@@ -21,8 +21,9 @@ import { apisHost, gmailHost } from "./google.ts";
  * masking all four still shows: senders and recipients, dates, labels,
  * the read and draft flags, thread IDs; attachments' names, types and
  * sizes; events' times, location, organizer and attendees; files' names,
- * types, sizes and folders. It can't search mail or files (their search
- * looks through masked fields).
+ * types, sizes and folders. Mail and file searches still run, and look
+ * through masked fields: which items match can tell something of what
+ * those fields hold.
  */
 export default defineConnector({
   name: "google-workspace",

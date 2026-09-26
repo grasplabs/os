@@ -1,8 +1,8 @@
 /**
  * The Google Workspace connector against a real test workspace: skipped
  * unless the environment names one. It runs connect's whole call path
- * (policy, a fresh isolate, the egress with its allowlist and Drive's
- * query binding) against Google itself, with a token taken as is.
+ * (policy, a fresh isolate, the egress with its allowlist) against Google
+ * itself, with a token taken as is.
  *
  * To run it, get an access token for a test workspace's user with the
  * connector's scopes (gmail.modify, calendar.events.readonly,

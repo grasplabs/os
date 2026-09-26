@@ -741,16 +741,10 @@ describe("the Microsoft 365 connector's file tools", () => {
     ).toStrictEqual([`${drivePath}/items/${itemIds.controls}/content`]);
   });
 
-  it("follow a download's redirect only to the tenant's SharePoint, once", async () => {
+  it("follow a download's redirect only to SharePoint over HTTPS, once", async () => {
     const connection = await connected();
     const outcomes = await Promise.all(
-      [
-        itemIds.elsewhere,
-        itemIds.plain,
-        itemIds.nested,
-        itemIds.otherTenant,
-        itemIds.twice,
-      ].map(
+      [itemIds.elsewhere, itemIds.plain, itemIds.nested, itemIds.twice].map(
         async (item) =>
           await toolError(
             call(connection, "files.read", { drive: financeDrive, item })
@@ -759,7 +753,7 @@ describe("the Microsoft 365 connector's file tools", () => {
     );
     // The egress withholds each answer, and says so.
     expect(outcomes).toMatchObject(
-      Array.from({ length: 5 }, () => ({ error: { code: "egress_failed" } }))
+      Array.from({ length: 4 }, () => ({ error: { code: "egress_failed" } }))
     );
     // Only the one redirect to SharePoint itself was followed; its own
     // redirect was not.
@@ -803,27 +797,6 @@ describe("the Microsoft 365 connector's answers", () => {
         call(connection, "mail.get", { mailbox: invoices, message: spoofedId })
       )
     ).resolves.toMatchObject({ error: { code: "not_found" } });
-  });
-
-  it("say downloads aren't set up while the deployment names no download hosts", async () => {
-    const connection = await connected();
-    const hosts = env.DOWNLOAD_HOSTS;
-    env.DOWNLOAD_HOSTS = undefined;
-    try {
-      await expect(
-        toolError(
-          call(connection, "files.read", {
-            drive: financeDrive,
-            item: itemIds.report,
-          })
-        )
-      ).resolves.toMatchObject({ error: { code: "downloads_unavailable" } });
-    } finally {
-      env.DOWNLOAD_HOSTS = hosts;
-    }
-    expect(graph.sent.map(({ host }) => host)).not.toContain(
-      graph.sharePointHost
-    );
   });
 
   it("free a throttled move's key after its folder lookup, a read", async () => {
@@ -913,42 +886,50 @@ describe("the Microsoft 365 connector's answers", () => {
     });
   });
 
-  it("don't search through a masked field", async () => {
+  it("run a search under a mask, with the masked fields of what it finds null", async () => {
     const connection = await connected();
-    const refusals = await Promise.all([
-      outcome(
+    const metadataOnly = {
+      mask: ["subject", "body", "bodyPreview", "content"],
+    };
+    // Which items match can say something of what a masked field holds:
+    // accepted (threat model CN17). What they hold stays masked.
+    const [mail, files] = await Promise.all([
+      outputOf(
         call(
           connection,
           "mail.list",
-          { mailbox: invoices, search: "body:IBAN NL91" },
-          { mask: ["body"] }
+          { mailbox: invoices, search: "invoice 2026" },
+          metadataOnly
         )
       ),
-      outcome(
-        call(
-          connection,
-          "files.search",
-          { drive: financeDrive, query: "IBAN" },
-          { mask: ["content"] }
-        )
-      ),
-    ]);
-    expect(refusals).toStrictEqual([
-      "connect.search_masked",
-      "connect.search_masked",
-    ]);
-    expect(graph.sent).toStrictEqual([]);
-    // A search through fields the permission doesn't mask still runs.
-    await expect(
-      outcome(
+      outputOf(
         call(
           connection,
           "files.search",
           { drive: financeDrive, query: "invoice" },
-          { mask: ["subject"] }
+          metadataOnly
         )
-      )
-    ).resolves.toBe("ok");
+      ),
+    ]);
+    expect({ mail, files }).toMatchObject({
+      mail: {
+        messages: [
+          {
+            id: messageId(invoices, 1),
+            subject: null,
+            bodyPreview: null,
+            from: { address: "billing@northwind.example.org" },
+          },
+          { id: messageId(invoices, 2), subject: null, bodyPreview: null },
+        ],
+      },
+      // A file search's items have nothing maskable: they come as they are.
+      files: { items: [{ id: itemIds.pdf }] },
+    });
+    // The search went to Graph as asked.
+    expect(
+      requests().some(({ query }) => query.$search === '"invoice 2026"')
+    ).toBeTruthy();
   });
 
   it("refuse a mask naming a field no tool of the connector has", async () => {

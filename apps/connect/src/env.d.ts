@@ -19,11 +19,10 @@ interface __BaseEnv_Env {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   /**
-   * Deployment config the console sets: the exact hosts a connector's
-   * download may be redirected to, as a JSON array, such as the client's
-   * `["contoso.sharepoint.com", "contoso-my.sharepoint.com"]` (and each
-   * Multi-Geo location's, such as `contosoeur.sharepoint.com`). Without
-   * it no download redirect is followed (src/egress.ts).
+   * Deployment config the console used to set: the hosts a connector's
+   * download could be redirected to. No longer read: a download follows
+   * its route's own redirect hosts (src/egress.ts). An existing value is
+   * left alone, and harmless.
    */
   DOWNLOAD_HOSTS?: unknown;
 }

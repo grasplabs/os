@@ -35,28 +35,6 @@ const itemsPath = /^\/v1\/mailboxes\/(?<mailbox>[^/]+)\/items$/u;
 
 const downloadsPath = /^\/v1\/downloads\/(?<name>[^/]+)$/u;
 
-const filesPath = /^\/v1\/files\/(?<id>[^/]+)(?<content>\/content)?$/u;
-
-/**
- * Files, each in a drive as its answer says (`mine` in `d-1`, any other
- * in `d-2`, `gone` in none), and their content.
- */
-const file = (url: URL): Response | undefined => {
-  const found = filesPath.exec(url.pathname)?.groups;
-  if (found?.id === undefined) {
-    return undefined;
-  }
-  if (found.id === "gone") {
-    return Response.json({ error: "notFound" }, { status: 404 });
-  }
-  return found.content === undefined
-    ? Response.json({
-        id: found.id,
-        driveId: found.id === "mine" ? "d-1" : "d-2",
-      })
-    : new Response("content");
-};
-
 /** Downloads redirect to the provider's storage, as Graph's do. */
 const download = (url: URL): Response | undefined => {
   const name = downloadsPath.exec(url.pathname)?.groups?.name;
@@ -65,8 +43,11 @@ const download = (url: URL): Response | undefined => {
   }
   const to = {
     elsewhere: "https://evil.test/file",
-    // One of the storage's hosts, but not the deployment's own.
+    // Another of the storage's hosts.
     others: "https://others.storage.test/file",
+    // A storage host, but on another port, or with credentials.
+    port: `https://${storageHost}:8443/file`,
+    userinfo: `https://u:p@${storageHost}/file`,
   }[name];
   return Response.redirect(to ?? `https://${storageHost}/${name}`, 302);
 };
@@ -87,7 +68,7 @@ const storage = (url: URL): Response => {
 };
 
 const answer = (method: string, url: URL): Response => {
-  const redirected = download(url) ?? file(url);
+  const redirected = download(url);
   if (redirected !== undefined) {
     return redirected;
   }

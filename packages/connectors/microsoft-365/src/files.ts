@@ -160,8 +160,6 @@ const searchFiles = defineTool({
   output: pageOutput,
   readOnly: true,
   resource: "drive",
-  // Graph's search looks through names and contents.
-  searches: { query: ["content"] },
   routes: [get("/root/search(q='{query}')")],
   run: async ({ drive, query, top, page }) => {
     // OData quotes a quote by doubling it.

@@ -667,16 +667,15 @@ describe("a side effect from chat", () => {
     });
   });
 
-  it("frees its key when refused after it was taken but before anything was sent", async () => {
+  it("frees its key when turned away after it was taken but before anything ran", async () => {
     const anna = someone();
     const connectionId = await addConnection();
     const call = mail(connectionId);
     await hold(inChat(anna), call);
     const held = await heldFor(anna);
-    // A mask a Composio server can't apply is refused on the call path.
-    const refused = await outcome(
-      confirm(anna, held, { signed: { mask: ["body"] } })
-    );
+    // The server turns the call away: the tool never ran.
+    server.network = "unauthorised";
+    const refused = await outcome(confirm(anna, held));
     await hold(inChat(anna), call);
     const again = await heldFor(anna);
     await confirm(anna, again);
@@ -685,7 +684,7 @@ describe("a side effect from chat", () => {
       heldAgain: again.id !== held.id,
       ran: server.ran.length,
     }).toStrictEqual({
-      refused: "connect.mask_unsupported",
+      refused: "connect.server_unavailable",
       heldAgain: true,
       ran: 1,
     });

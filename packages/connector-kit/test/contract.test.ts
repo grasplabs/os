@@ -5,9 +5,7 @@ import { defineConnector, defineTool, ToolError } from "../src/connector.ts";
 import {
   connectorManifestSchema,
   pathMatches,
-  queryMatches,
   redirectHostMatches,
-  resourceCheckFor,
 } from "../src/manifest.ts";
 import type { Route } from "../src/manifest.ts";
 
@@ -19,14 +17,6 @@ const route: Route = {
   method: "GET",
   host: "api.example.test",
   path: "/v1/items",
-};
-
-/** A check of an item's mailbox, as a route declares it. */
-const itemCheck = {
-  path: "/v1/items/{item}",
-  query: { fields: "mailbox" },
-  field: "mailbox",
-  equals: "{mailbox}",
 };
 
 const toolWith = (input: z.ZodObject, resource?: string) =>
@@ -52,25 +42,6 @@ const connectorWith = (
     hosts: ["api.example.test"],
     tools: [],
     ...fields,
-  });
-
-/** A manifest with one action searching through `query`, of `input`. */
-const searchingManifest = (input: string[]) =>
-  connectorManifestSchema.parse({
-    name: "example",
-    version: "1.0.0",
-    provider: "microsoft",
-    scopes: [],
-    hosts: ["api.example.test"],
-    actions: {
-      "items.list": {
-        routes: [],
-        readOnly: true,
-        resource: null,
-        input,
-        searches: { query: ["body"] },
-      },
-    },
   });
 
 describe("a tool", () => {
@@ -155,7 +126,7 @@ describe("a tool", () => {
     }
   });
 
-  it("masks only nullable fields its output has, and names its searches", () => {
+  it("masks only nullable fields its output has", () => {
     const withMask = (mask: string[]) =>
       defineTool({
         name: "items.list",
@@ -168,13 +139,11 @@ describe("a tool", () => {
         }),
         readOnly: true,
         mask,
-        searches: { search: ["subject"] },
         routes: [route],
         run: async () => await Promise.resolve({ output: { items: [] } }),
       });
     expect(withMask(["items.subject"]).action).toMatchObject({
       mask: ["items.subject"],
-      searches: { search: ["subject"] },
     });
     for (const path of ["items.body", "subject", "items.subject.x"]) {
       expect(() => withMask([path])).toThrow("to mask");
@@ -286,99 +255,31 @@ describe("a connector", () => {
     }
   });
 
-  it("binds every route of a resource-scoped tool to its resource", () => {
-    const withRoutes = (paths: (string | Partial<Route>)[]) =>
-      connectorWith({
-        tools: [
-          defineTool({
-            name: "items.list",
-            description: "Lists items",
-            input: z.strictObject({ mailbox: z.string() }),
-            output: z.strictObject({}),
+  it("declares each route by its method, host, path and redirects alone", () => {
+    const withRoute = (extra: Record<string, unknown>) =>
+      connectorManifestSchema.parse({
+        name: "example",
+        version: "1.0.0",
+        provider: "microsoft",
+        scopes: [],
+        hosts: ["api.example.test"],
+        actions: {
+          "items.list": {
+            routes: [{ ...route, ...extra }],
             readOnly: true,
-            resource: "mailbox",
-            routes: paths.map((path) =>
-              typeof path === "string"
-                ? { ...route, path }
-                : { ...route, ...path }
-            ),
-            run: async () => await Promise.resolve({ output: {} }),
-          }),
-        ],
+            resource: null,
+            input: [],
+          },
+        },
       });
-    expect(() =>
-      withRoutes(["/v1/users/{mailbox}/messages", "/v1/users/{mailbox}:peek"])
-    ).not.toThrow();
-    for (const paths of [
-      ["/v1/users/{user}/messages"],
-      ["/v1/users/{mailbox}/messages", "/v1/me/messages"],
+    expect(() => withRoute({})).not.toThrow();
+    // Nothing a route declares is silently dropped: the egress holds a
+    // request to its method and path, nothing more.
+    for (const extra of [
+      { query: { driveId: "{drive}" } },
+      { check: { path: "/v1/items/{item}" } },
     ]) {
-      expect(() => withRoutes(paths)).toThrow("must name it");
-    }
-    // In the query, where the provider takes it there; or, for a GET
-    // where it has no place at all, checked with the provider.
-    expect(() =>
-      withRoutes([
-        { query: { box: "{mailbox}", corpora: "drive" } },
-        { path: "/v1/items/{item}/content", check: itemCheck },
-      ])
-    ).not.toThrow();
-    for (const unnamed of [
-      { query: { box: "{user}" } },
-      { query: { box: "mailbox" } },
-      { query: { box: "x{mailbox}" } },
-      { path: "/v1/items/{item}", check: { ...itemCheck, equals: "{user}" } },
-    ]) {
-      expect(() => withRoutes([unnamed])).toThrow(/must name it|Not a query/u);
-    }
-  });
-
-  it("checks a resource only from a GET of a tool with one, with its own parameters", () => {
-    const withTool = (resource: "mailbox" | undefined, extra: Partial<Route>) =>
-      connectorWith({
-        tools: [
-          defineTool({
-            name: "items.read",
-            description: "Reads an item",
-            input: z.strictObject({ mailbox: z.string(), item: z.string() }),
-            output: z.strictObject({}),
-            readOnly: true,
-            resource,
-            routes: [{ ...route, path: "/v1/items/{item}/content", ...extra }],
-            run: async () => await Promise.resolve({ output: {} }),
-          }),
-        ],
-      });
-    expect(() => withTool("mailbox", { check: itemCheck })).not.toThrow();
-    const refusals = [
-      {
-        resource: undefined,
-        extra: { check: itemCheck },
-        error: "Only an action with a resource",
-      },
-      {
-        resource: "mailbox",
-        extra: { method: "POST", check: itemCheck },
-        error: "Only a GET may declare a check",
-      },
-      {
-        resource: "mailbox",
-        extra: { check: { ...itemCheck, path: "/v1/items/{other}" } },
-        error: "only its route's own path parameters",
-      },
-      {
-        resource: "mailbox",
-        extra: { check: { ...itemCheck, path: "/v1/$batch/{item}" } },
-        error: "Not a path template",
-      },
-      {
-        resource: "mailbox",
-        extra: { check: { ...itemCheck, query: { fields: "{mailbox}" } } },
-        error: "Invalid",
-      },
-    ] as const;
-    for (const { resource, extra, error } of refusals) {
-      expect(() => withTool(resource, extra)).toThrow(error);
+      expect(() => withRoute(extra)).toThrow("Unrecognized key");
     }
   });
 
@@ -438,13 +339,6 @@ describe("a connector", () => {
         "Not a redirect host"
       );
     }
-  });
-
-  it("searches only through inputs it has", () => {
-    expect(() => searchingManifest(["query"])).not.toThrow();
-    expect(() => searchingManifest([])).toThrow(
-      "searches must be among its input properties"
-    );
   });
 
   it("has one tool per name", () => {
@@ -570,89 +464,5 @@ describe("a route's path", () => {
     ]) {
       expect(pathMatches(custom, path)).toBeFalsy();
     }
-  });
-});
-
-describe("a route's query", () => {
-  const query = { corpora: "drive", driveId: "{drive}" };
-
-  it("holds each parameter it names exactly once, as declared", () => {
-    expect(queryMatches(query, "?corpora=drive&driveId=d-1&q=x")).toBeTruthy();
-    expect(queryMatches(undefined, "?anything=1")).toBeTruthy();
-    for (const search of [
-      "driveId=d-1",
-      "corpora=user&driveId=d-1",
-      "corpora=drive",
-      "corpora=drive&driveId=",
-      "corpora=drive&driveId=d-1&driveId=d-2",
-      "corpora=drive&corpora=user&driveId=d-1",
-      "corpora=drive&driveId=d%0A1",
-      "corpora=drive&driveId=d-1&drive_id=d-2",
-      "corpora=drive&driveId=d-1&DriveID=d-2",
-      "Corpora=drive&driveId=d-1",
-      // Other spellings a provider could read as a named parameter.
-      "corpora=drive&driveId=d-1&drive-id=d-2",
-      "corpora=drive&driveId=d-1&driveId%5B%5D=d-2",
-      "corpora=drive&driveId=d-1&%20driveId=d-2",
-      "corpora=drive&driveId=d-1&driveId%00=d-2",
-      "corpora=drive&q=x;driveId=d-2&driveId=d-1",
-      "corpora=drive&driveId=d-1&teamDriveId=d-2",
-      "corpora=drive&driveId=d-1&corpus=user",
-    ]) {
-      expect(queryMatches(query, `?${search}`)).toBeFalsy();
-    }
-  });
-
-  it("binds a parameter to a value, where it is given one", () => {
-    const values = { drive: "d-1" };
-    expect(
-      queryMatches(query, "?corpora=drive&driveId=d-1", values)
-    ).toBeTruthy();
-    for (const search of [
-      "corpora=drive&driveId=d-2",
-      "corpora=drive&driveId=D-1",
-      "corpora=drive&driveId=d-1%20",
-    ]) {
-      expect(queryMatches(query, `?${search}`, values)).toBeFalsy();
-    }
-  });
-});
-
-describe("a route's check", () => {
-  it("asks for the request's own item, on its host, with its own query", () => {
-    const checked = {
-      ...route,
-      path: "/v1/items/{item}/content",
-      check: itemCheck,
-    };
-    const url = new URL("https://api.example.test/v1/items/a%20b/content?x=1");
-    expect(
-      resourceCheckFor(checked, url, { mailbox: "a@acme.test" })
-    ).toStrictEqual({
-      url: new URL("https://api.example.test/v1/items/a%20b?fields=mailbox"),
-      field: "mailbox",
-      expected: "a@acme.test",
-    });
-    // A value allowed inside literal text becomes a dot segment on its
-    // own in the check's path: no check can be sent, so none goes.
-    const dotted = {
-      ...route,
-      path: "/v1/x{item}",
-      check: { ...itemCheck, path: "/v1/items/{item}" },
-    };
-    for (const value of [".", ".."]) {
-      expect(
-        resourceCheckFor(
-          dotted,
-          new URL(`https://api.example.test/v1/x${value}`),
-          { mailbox: "a@acme.test" }
-        )
-      ).toBeNull();
-    }
-    // Nothing to check against, or nothing declared: no check.
-    expect(resourceCheckFor(checked, url, {})).toBeUndefined();
-    expect(
-      resourceCheckFor(route, url, { mailbox: "a@acme.test" })
-    ).toBeUndefined();
   });
 });

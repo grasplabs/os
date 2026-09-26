@@ -1,7 +1,4 @@
-import {
-  connectorManifestSchema,
-  egressHeader,
-} from "@grasp-os/connector-kit/manifest";
+import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
 import type { ConnectionPerson } from "@grasp-os/shared/connect";
 import { env, exports } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
@@ -501,10 +498,18 @@ describe("a connector's code", () => {
   });
 
   it("opens no raw socket", async () => {
+    const warned: string[] = [];
+    vi.spyOn(console, "warn").mockImplementation((...args: unknown[]) => {
+      warned.push(JSON.stringify(args));
+    });
     const connection = await connectionTo("sample");
     const { output } = await call(connection, "probe.socket", {});
     // `opened` may resolve first; the first write or read fails.
-    expect(JSON.parse(output)).not.toStrictEqual({ error: null });
+    const { error } = z
+      .object({ error: z.string().nullable() })
+      .parse(JSON.parse(output));
+    expect(error).not.toBeNull();
+    expect(warned.join("\n")).toMatch(/egress\.refused.*socket/u);
   });
 
   it("keeps nothing in the Cache API", async () => {
@@ -595,7 +600,7 @@ describe("a connector's code", () => {
     ]);
   });
 
-  it("follows a download's redirect to the deployment's own storage, once, with nothing of its request", async () => {
+  it("follows a download's redirect to its route's storage hosts, once, with nothing of its request", async () => {
     const connection = await connectionTo("sample");
     const download = async (name: string): Promise<unknown> => {
       const { output } = await call(connection, "probe.download", {
@@ -615,65 +620,36 @@ describe("a connector's code", () => {
       bytes: 4,
       error: null,
     });
-    // Another host, a storage host that isn't the deployment's, and a
-    // second redirect: each withheld.
+    // Any of the route's storage hosts, whatever the deployment's config
+    // (DOWNLOAD_HOSTS, no longer read, names only another).
+    await expect(download("others")).resolves.toMatchObject({ status: 200 });
+    // Another host, a storage host on another port or with credentials in
+    // its URL, and a second redirect: each withheld.
     const withheld = await Promise.all(
-      ["elsewhere", "others", "again"].map(download)
+      ["elsewhere", "port", "userinfo", "again"].map(download)
     );
     expect(withheld).toMatchObject([
       { status: 502 },
       { status: 502 },
       { status: 502 },
+      { status: 502 },
     ]);
     const followed = api.sent.filter(({ host }) => host !== sampleHost);
-    expect(followed.map(({ host, path }) => `${host}${path}`)).toStrictEqual([
-      `${storageHost}/file`,
-      `${storageHost}/again`,
-    ]);
+    expect(
+      followed.map(({ host, path }) => `${host}${path}`).toSorted()
+    ).toStrictEqual(
+      [
+        `${storageHost}/file`,
+        "others.storage.test/file",
+        `${storageHost}/again`,
+      ].toSorted()
+    );
     // Neither the token nor any header of the connector's went there.
     expect(followed.map(({ headers }) => Object.keys(headers))).toStrictEqual([
       [],
       [],
+      [],
     ]);
-  });
-
-  it("follows no download redirect while the deployment names no valid download hosts", async () => {
-    const downloadSchema = z.object({ status: z.number().nullable() });
-    const configInvalidSchema = z.object({
-      event: z.literal("config.invalid"),
-    });
-    const connection = await connectionTo("sample");
-    const hosts = env.DOWNLOAD_HOSTS;
-    const logged = vi.spyOn(console, "error").mockReturnValue();
-    const unset = [undefined, "not json", JSON.stringify(["not a host!"])];
-    const statuses: unknown[] = [];
-    try {
-      for (const value of unset) {
-        env.DOWNLOAD_HOSTS = value;
-        // oxlint-disable-next-line no-await-in-loop -- one setting at a time
-        const { output } = await call(connection, "probe.download", {
-          url: `https://${sampleHost}/v1/downloads/file`,
-        });
-        statuses.push(downloadSchema.parse(JSON.parse(output)).status);
-      }
-      // An invalid value is logged with the paths that are wrong; an unset
-      // one isn't.
-      expect(
-        logged.mock.calls
-          .flat()
-          .filter((line) => configInvalidSchema.safeParse(line).success)
-      ).toStrictEqual([
-        { event: "config.invalid", var: "DOWNLOAD_HOSTS", paths: "<root>" },
-        { event: "config.invalid", var: "DOWNLOAD_HOSTS", paths: "0" },
-      ]);
-    } finally {
-      env.DOWNLOAD_HOSTS = hosts;
-      logged.mockRestore();
-    }
-    expect(statuses).toStrictEqual([502, 502, 502]);
-    expect(api.sent.map(({ host }) => host)).toStrictEqual(
-      unset.map(() => sampleHost)
-    );
   });
 
   it("can't read a download past the size limit, after its redirect", async () => {
@@ -687,16 +663,16 @@ describe("a connector's code", () => {
 
   it("can't read a response past the size limit", async () => {
     const connection = await connectionTo("sample");
-    const flooded = await probe(connection, {
-      url: `https://${sampleHost}/v1/probe/flood`,
-    });
-    expect(flooded.status).toBeNull();
-    expect(flooded.error).not.toBeNull();
-    await expect(
-      probe(connection, {
-        url: `https://${sampleHost}/v1/probe/flood-declared`,
-      })
-    ).resolves.toMatchObject({ status: 502, bytes: 0 });
+    // Counted on the bytes that arrive, whether or not their length is
+    // declared up front.
+    for (const path of ["flood", "flood-declared"]) {
+      // oxlint-disable-next-line no-await-in-loop -- one attempt after another
+      const flooded = await probe(connection, {
+        url: `https://${sampleHost}/v1/probe/${path}`,
+      });
+      expect(flooded).toMatchObject({ status: null, bytes: 0 });
+      expect(flooded.error).not.toBeNull();
+    }
     // A response with no body passes, whatever length it claims.
     await expect(
       probe(connection, { url: `https://${sampleHost}/v1/probe/empty` })
@@ -774,102 +750,6 @@ describe("the egress handler", () => {
       expect(response.status).toBe(403);
     }
     expect(api.sent).toStrictEqual([]);
-  });
-
-  it("holds the query parameters a route names to their values and the resource", async () => {
-    const egress = exports.ConnectorEgress({
-      props: egressProps({
-        routes: [
-          {
-            method: "GET",
-            host: sampleHost,
-            path: "/v1/probe/ok",
-            query: { corpora: "drive", driveId: "{drive}" },
-          },
-        ],
-        values: { drive: "d-1" },
-      }),
-    });
-    const statuses = await Promise.all(
-      [
-        "corpora=drive&driveId=d-1&q=anything",
-        "corpora=drive&driveId=d-2",
-        "corpora=user&driveId=d-1",
-        "driveId=d-1",
-        // A second copy could be the one the provider reads.
-        "corpora=drive&driveId=d-1&driveId=d-2",
-      ].map(async (query) => {
-        const response = await egress.fetch(`${url}?${query}`);
-        return response.headers.get(egressHeader) ?? "sent";
-      })
-    );
-    expect(statuses).toStrictEqual([
-      "sent",
-      "refused",
-      "refused",
-      "refused",
-      "refused",
-    ]);
-    expect(api.sent.map(({ path }) => path)).toStrictEqual([
-      "/v1/probe/ok?corpora=drive&driveId=d-1&q=anything",
-    ]);
-  });
-
-  it("sends a request that can't name its resource only once the provider says it is the bound one", async () => {
-    const egress = exports.ConnectorEgress({
-      props: egressProps({
-        routes: [
-          {
-            method: "GET",
-            host: sampleHost,
-            path: "/v1/files/{item}/content",
-            check: {
-              path: "/v1/files/{item}",
-              query: { fields: "driveId" },
-              field: "driveId",
-              equals: "{drive}",
-            },
-          },
-        ],
-        values: { drive: "d-1" },
-      }),
-    });
-    const answers = await Promise.all(
-      ["mine", "theirs", "gone"].map(async (item) => {
-        const response = await egress.fetch(
-          `https://${sampleHost}/v1/files/${item}/content`,
-          { headers: { "x-connector": "own" } }
-        );
-        return {
-          status: response.status,
-          egress: response.headers.get(egressHeader),
-        };
-      })
-    );
-    // The bound drive's file goes; another drive's is refused; the
-    // provider's refusal of the check comes back as its own.
-    expect(answers).toStrictEqual([
-      { status: 200, egress: null },
-      { status: 403, egress: "refused" },
-      { status: 404, egress: null },
-    ]);
-    expect(api.sent.map(({ path }) => path).toSorted()).toStrictEqual(
-      [
-        "/v1/files/gone?fields=driveId",
-        "/v1/files/mine/content",
-        "/v1/files/mine?fields=driveId",
-        "/v1/files/theirs?fields=driveId",
-      ].toSorted()
-    );
-    // The check carries the token, and nothing of the connector's.
-    const checks = api.sent.filter(({ path }) => path.includes("fields="));
-    expect(
-      checks.every(
-        ({ headers }) =>
-          headers.authorization === "Bearer a-token-for-one-call" &&
-          headers["x-connector"] === undefined
-      )
-    ).toBeTruthy();
   });
 
   it("closes when the call's time is up", async () => {

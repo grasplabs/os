@@ -1,20 +1,12 @@
 import {
   egressHeader,
   egressKind,
-  hostSchema,
   httpMethods,
   pathMatches,
-  queryMatches,
   redirectHostMatches,
-  resourceCheckFor,
   routeSchema,
 } from "@grasp-os/connector-kit/manifest";
-import type {
-  EgressKind,
-  ResourceCheck,
-  Route,
-} from "@grasp-os/connector-kit/manifest";
-import { deploymentConfig } from "@grasp-os/shared/config";
+import type { EgressKind, Route } from "@grasp-os/connector-kit/manifest";
 import { log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
@@ -25,19 +17,20 @@ import { z } from "zod";
 // here. Its props, which only connect sets and the connector can't read,
 // hold this call's token and the requests the called action declares
 // (threat model R9, Q11, EG1 to EG7). A request goes out only to one of
-// those, over HTTPS, with the token added; anything else is refused before
-// it leaves. Redirects aren't followed, except one from a route that
-// names the hosts it may lead to (a download), which the handler follows
-// itself, without the token. A request whose route can't name its
-// resource goes only after the handler's own check with the provider says
-// it reaches the bound one. A response is cut off past a size limit. Raw
-// sockets are refused. Connect's
-// `global_fetch_strictly_public` keeps an allowed name that resolves to a
-// private address from being reached (R9).
+// the connector's hosts, over HTTPS, as a method and path template the
+// action declares, with the connector's credential and method-override
+// headers stripped and the token added; anything else is refused before it
+// leaves. Redirects aren't followed, except one from a route that names
+// the hosts it may lead to (a download), which the handler follows itself,
+// once, without the token or anything of the connector's request. A
+// response is cut off once its bytes pass a size limit. Raw sockets are
+// refused. Connect's `global_fetch_strictly_public` keeps an allowed name
+// that resolves to a private address from being reached (R9).
 //
-// What the allowlist doesn't constrain: the query string (but for the
-// parameters a route names) and the body of an allowed request are the
-// connector's own (threat model EG3).
+// What the allowlist doesn't constrain: the query string and the body of
+// an allowed request are the connector's own (threat model EG3). Where a
+// provider can't name a call's resource in the path (Google Drive), the
+// connector's own code holds the call to it.
 //
 // A provider's 429 goes back to the connector as it is. Whether its call
 // did nothing (`notPerformedMetaKey`) is the connector's to say: this
@@ -54,7 +47,7 @@ export const maxEgressResponseBytes = 10 * 1024 * 1024;
 /** The status a refused request gets: it never reached the provider. */
 const egressRefusedStatus = 403;
 
-/** The status a response gets when it redirected or was too large. */
+/** The status a response gets when it redirected or couldn't be reached. */
 const egressFailedStatus = 502;
 
 /** The handler's own answers, passed on as they are (no provider's is). */
@@ -114,9 +107,8 @@ const egressPropsSchema = z.strictObject({
   /** The requests the called action declares. */
   routes: z.array(routeSchema),
   /**
-   * Parameters (of a path, or a route's query) bound to one value: the
-   * action's resource property, to the resource the call's capability
-   * names.
+   * Path parameters bound to one value: the action's resource property, to
+   * the resource the call's capability names.
    */
   values: z.record(z.string(), z.string()),
   /** The connection's access token, for this call only. */
@@ -152,19 +144,6 @@ const refuse = (
   );
 };
 
-const downloadHostsSchema = z.array(hostSchema).max(32);
-
-/**
- * The deployment's own download hosts, from connect's `DOWNLOAD_HOSTS` var
- * (a JSON array of exact host names, such as the client's
- * `contoso.sharepoint.com` and `contoso-my.sharepoint.com`, set by the
- * console). A download redirect must lead to one of them as well as match
- * its route's pattern: another tenant's SharePoint is never followed.
- * Unset or invalid, no redirect is followed.
- */
-const downloadHostsOf = (raw: unknown): ReadonlySet<string> =>
-  new Set(deploymentConfig(downloadHostsSchema, "DOWNLOAD_HOSTS", raw));
-
 /** The route the request is for, if the call declares it. */
 const routeFor = (
   { routes, values }: Pick<EgressProps, "routes" | "values">,
@@ -175,12 +154,8 @@ const routeFor = (
     (route) =>
       route.method === method &&
       route.host === url.hostname &&
-      pathMatches(route.path, url.pathname, values) &&
-      queryMatches(route.query, url.search, values)
+      pathMatches(route.path, url.pathname, values)
   );
-
-/** Largest answer to a resource check the handler reads, in bytes. */
-const maxCheckBytes = 64 * 1024;
 
 /** Redirects a route's `redirects` hosts may be followed for. */
 const followedStatuses: ReadonlySet<number> = new Set([
@@ -189,12 +164,11 @@ const followedStatuses: ReadonlySet<number> = new Set([
 
 /**
  * Where a redirect from `route` leads, if the route follows it there:
- * HTTPS to one of its redirect hosts that is also one of the deployment's
- * `downloadHosts`, on its own port, without credentials in the URL.
+ * HTTPS to one of its redirect hosts, on its own port, without credentials
+ * in the URL.
  */
 const redirectTarget = (
   route: Route,
-  downloadHosts: ReadonlySet<string>,
   from: URL,
   response: Response
 ): URL | undefined => {
@@ -217,7 +191,6 @@ const redirectTarget = (
     target.username === "" &&
     target.password === "" &&
     target.port === "" &&
-    downloadHosts.has(target.hostname) &&
     route.redirects.some((pattern) =>
       redirectHostMatches(pattern, target.hostname)
     );
@@ -227,8 +200,8 @@ const redirectTarget = (
 /**
  * The file a download's redirect leads to, fetched from its storage host
  * with nothing of the connector's request, or a failure if it can't be.
- * The host is the client's own (its tenant's name): logged as the
- * redirect it was, not by name.
+ * The host may name any tenant a route's pattern matches: it is logged as
+ * the redirect it was, not by name.
  */
 const download = async (
   { connector, callId, expiresAt }: EgressProps,
@@ -256,32 +229,16 @@ const download = async (
 
 /**
  * A route's answer, through its download redirect if it has one: the file
- * the redirect leads to, a refusal saying downloads are off while the
- * deployment names no download hosts, or the answer as it came (a
- * redirect anywhere else is refused after this, as any other is).
+ * the redirect leads to, or the answer as it came (a redirect anywhere
+ * else is refused after this, as any other is).
  */
 const throughDownload = async (
   call: EgressProps,
   route: Route,
-  downloadHosts: ReadonlySet<string>,
   from: URL,
   response: Response
 ): Promise<Response> => {
-  if (route.redirects === undefined || !followedStatuses.has(response.status)) {
-    return response;
-  }
-  if (downloadHosts.size === 0) {
-    await response.body?.cancel();
-    log.warn("egress.refused", {
-      connector: call.connector,
-      callId: call.callId,
-      reason: "downloads_off",
-      host: from.hostname,
-      method: "GET",
-    });
-    return egressAnswer(egressKind.downloadsOff);
-  }
-  const target = redirectTarget(route, downloadHosts, from, response);
+  const target = redirectTarget(route, from, response);
   if (target === undefined) {
     return response;
   }
@@ -289,19 +246,13 @@ const throughDownload = async (
   return await download(call, route, target);
 };
 
-/** Whether a response has no body, whatever its headers say. */
-const isBodiless = (method: string, status: number): boolean =>
-  method === "HEAD" || status === 204 || status === 304;
-
 /**
- * The response with its body cut off once it passes the size limit: the
- * connector's read fails there, and nothing past it is held in memory.
+ * The response with its body cut off once its bytes pass the size limit:
+ * the connector's read fails there, and nothing past it is held in memory.
+ * The bytes are counted as they arrive (decoded), never taken from what
+ * `content-length` claims.
  */
-const capped = (
-  response: Response,
-  maxBytes: number = maxEgressResponseBytes
-): Response => {
-  // The body arrives decoded, and its length is counted here.
+const capped = (response: Response): Response => {
   const headers = new Headers(response.headers);
   for (const name of responseHeadersDropped) {
     headers.delete(name);
@@ -326,7 +277,7 @@ const capped = (
         return;
       }
       bytes += value.byteLength;
-      if (bytes > maxBytes) {
+      if (bytes > maxEgressResponseBytes) {
         await reader.cancel();
         controller.error(new Error("The provider's response is too large"));
         return;
@@ -338,87 +289,6 @@ const capped = (
     },
   });
   return new Response(limited, { status, statusText, headers });
-};
-
-/** Whether a check's JSON answer names `expected` in its `field`. */
-const namesResource = (text: string, { field, expected }: ResourceCheck) => {
-  try {
-    const answer: unknown = JSON.parse(text);
-    return (
-      typeof answer === "object" &&
-      answer !== null &&
-      Object.getOwnPropertyDescriptor(answer, field)?.value === expected
-    );
-  } catch {
-    return false;
-  }
-};
-
-/**
- * Sends a route's resource check, for a request that can't name its
- * resource (if its route declares one and the call binds a resource): a
- * GET with the token and nothing of the connector's. Its answer, when the
- * provider refused it (a 404, a 429), goes back to the connector in the
- * request's place; `refused` when it names another resource, or can't be
- * read, or its URL isn't one its template allows; `undefined` when the
- * request may go.
- */
-const checkResource = async (
-  call: EgressProps,
-  route: Route,
-  url: URL
-): Promise<Response | undefined> => {
-  const check = resourceCheckFor(route, url, call.values);
-  if (check === undefined) {
-    return undefined;
-  }
-  if (check === null) {
-    return refuse(call, "check", url, "GET");
-  }
-  const logged = {
-    connector: call.connector,
-    callId: call.callId,
-    host: check.url.hostname,
-    method: "GET",
-    route: route.check?.path,
-  };
-  let response: Response;
-  try {
-    response = await fetch(check.url, {
-      method: "GET",
-      headers: {
-        accept: "application/json",
-        authorization: `Bearer ${call.token}`,
-      },
-      redirect: "manual",
-      signal: AbortSignal.timeout(Math.max(call.expiresAt - Date.now(), 1)),
-    });
-  } catch {
-    log.warn("egress.failed", logged);
-    return egressAnswer(egressKind.failed);
-  }
-  log.info("egress.check", { ...logged, status: response.status });
-  if (response.status >= 300 && response.status < 400) {
-    await response.body?.cancel();
-    return egressAnswer(egressKind.failed);
-  }
-  if (!response.ok) {
-    return capped(response);
-  }
-  let text: string | undefined;
-  try {
-    text = await capped(response, maxCheckBytes).text();
-  } catch {
-    text = undefined;
-  }
-  if (text === undefined || !namesResource(text, check)) {
-    log.warn("egress.refused", { ...logged, reason: "check" });
-    return egressAnswer(
-      egressKind.refused,
-      "Refused by connect's egress allowlist"
-    );
-  }
-  return undefined;
 };
 
 /**
@@ -461,13 +331,6 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
     if (route === undefined) {
       return refuse(call, "route", url, method);
     }
-    // A request that can't name its resource goes only once the provider
-    // says the resource it reaches is the bound one.
-    const refusal = await checkResource(call, route, url);
-    if (refusal !== undefined) {
-      return refusal;
-    }
-
     const headers = new Headers(request.headers);
     for (const name of connectorHeadersRefused) {
       headers.delete(name);
@@ -509,30 +372,21 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
     // own authority, and isn't the token's audience), and the connector
     // gets only its answer, never the URL. A second redirect is refused
     // below, as any other is.
-    response = await throughDownload(
-      call,
-      route,
-      downloadHostsOf(this.env.DOWNLOAD_HOSTS),
-      url,
-      response
-    );
+    response = await throughDownload(call, route, url, response);
     if (ownAnswers.has(response)) {
       return response;
     }
     // 304 Not Modified goes nowhere; every other 3xx would.
-    const isRedirect =
+    if (
       response.status >= 300 &&
       response.status < 400 &&
-      response.status !== 304;
-    const declaredBytes = isBodiless(method, response.status)
-      ? 0
-      : Number(response.headers.get("content-length"));
-    if (isRedirect || declaredBytes > maxEgressResponseBytes) {
+      response.status !== 304
+    ) {
       await response.body?.cancel();
       log.warn("egress.refused", {
         connector,
         callId,
-        reason: isRedirect ? "redirect" : "too_large",
+        reason: "redirect",
         host: url.hostname,
         method,
       });

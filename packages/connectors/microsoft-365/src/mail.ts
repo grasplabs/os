@@ -186,8 +186,6 @@ const listMessages = defineTool({
   readOnly: true,
   resource: "mailbox",
   mask: ["messages.subject", "messages.bodyPreview"],
-  // Graph's search looks through subjects, bodies and attachments.
-  searches: { search: ["subject", "body", "bodyPreview", "content"] },
   routes: [get("/messages"), get("/mailFolders/{folder}/messages")],
   run: async ({
     mailbox,

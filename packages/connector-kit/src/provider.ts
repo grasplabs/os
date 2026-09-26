@@ -70,12 +70,6 @@ const egressFailure = (kind: string, name: string): ToolError => {
         code: "egress_refused",
       });
     }
-    case egressKind.downloadsOff: {
-      return new ToolError(
-        "Downloads aren't set up for this deployment: its download hosts (DOWNLOAD_HOSTS) aren't configured",
-        { code: "downloads_unavailable" }
-      );
-    }
     default: {
       return new ToolError(`Connect's egress withheld ${name}'s answer`, {
         code: "egress_failed",

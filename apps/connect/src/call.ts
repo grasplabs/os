@@ -104,18 +104,20 @@ const answerOf = (
   maskedAnswer({ result: { output, provenance }, failed: isError }, masks);
 
 /**
- * The output paths to mask for a call, as its capability says. Refuses a
- * call connect can't mask for: on a remote server (its tools declare
- * nothing connect trusts), with a field no tool of the connector declares
- * maskable (a slip that would mask nothing), or searching through a masked
- * field (its hits would tell what the field holds). From the release's
- * manifest alone: nothing is loaded and no token is read.
+ * The output paths to mask for a call, as its capability says: the paths
+ * the native action declares maskable whose field the capability names.
+ * A mask is a restriction someone set, so it is never silently ignored: a
+ * call connect can't mask for is refused, on a remote server (its tools
+ * declare nothing connect trusts) or with a field no tool of the
+ * connector declares maskable (a slip that would mask nothing). The
+ * check is per connector, not per tool, as a permission's mask covers
+ * every tool of its connection. From the release's manifest alone:
+ * nothing is loaded and no token is read.
  */
 const masksFor = (
   connection: Connection,
   claims: CapabilityClaims,
-  action: string,
-  input: Input
+  action: string
 ): string[] => {
   if (claims.mask.length === 0) {
     return [];
@@ -131,14 +133,6 @@ const masksFor = (
   );
   if (!claims.mask.every((field) => maskable.has(field))) {
     throw connectErrors.create("connect.mask_unsupported");
-  }
-  const searchesMasked = Object.entries(declared.searches).some(
-    ([name, fields]) =>
-      Object.hasOwn(input, name) &&
-      fields.some((field) => claims.mask.includes(field))
-  );
-  if (searchesMasked) {
-    throw connectErrors.create("connect.search_masked");
   }
   return maskedPaths(claims.mask, declared.mask);
 };
@@ -258,7 +252,7 @@ export const carryOut = async (
   }
   // Before a repeat is answered too: its answer is masked as this
   // capability says, and a mask connect can't apply is refused as ever.
-  const masks = masksFor(connection, claims, call.action, input);
+  const masks = masksFor(connection, claims, call.action);
 
   // A repeat of a side effect gets its stored result before anything goes
   // out, not even a look at the server's tools.
