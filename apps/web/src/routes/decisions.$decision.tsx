@@ -14,7 +14,12 @@ import { Textarea } from "@grasp-os/ui/components/textarea";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
-import { loadCoreStatus, withSession } from "../core.ts";
+import {
+  CoreTimeoutError,
+  loadCoreStatus,
+  withSession,
+  withTimeout,
+} from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
 import { SignInOptions } from "../sign-in-options.tsx";
@@ -44,11 +49,16 @@ const loadDecision = async (
     return { state: "signed-out", signInOptions };
   }
   try {
+    // A connection that answered the status check can still hang here.
     const found = await withSession(
-      async (session) => await session.decisions.get(decision, link)
+      async (session) =>
+        await withTimeout(session.decisions.get(decision, link))
     );
     return { state: "ready", name: identity.name, decision: found };
   } catch (error) {
+    if (error instanceof CoreTimeoutError) {
+      return { state: "offline" };
+    }
     return { state: "refused", name: identity.name, message: messageOf(error) };
   }
 };

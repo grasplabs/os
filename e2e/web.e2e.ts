@@ -1,6 +1,6 @@
 import { expect } from "@playwright/test";
-import type { Page } from "@playwright/test";
 
+import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
 import { signedIn, signInTo } from "./people.ts";
 
@@ -75,70 +75,13 @@ test("shows the members page only to someone signed in", async ({ page }) => {
   await expect(page.getByRole("table")).toHaveCount(0);
 });
 
-/** How the page's Cap'n Web messages name `members.list`. */
-const membersListCall = '["members","list"]';
-
-type Message = string | Buffer;
-
-/** A page's connection to core, through Playwright. */
-interface Connection {
-  forward: (message: Message) => void;
-  queue: Message[];
-}
-
-/**
- * Holds back the page's requests for the members list, from `hold` until
- * `release`: the message asking for it, and everything after it on that
- * connection, which may build on it.
- */
-const membersListGate = async (page: Page) => {
-  let holding = false;
-  /** The connections held back, each with what it sent since. */
-  const stalled: Connection[] = [];
-  await page.routeWebSocket("**/rpc", (socket) => {
-    const server = socket.connectToServer();
-    const queue: Message[] = [];
-    const connection: Connection = {
-      forward: (message) => {
-        server.send(message);
-      },
-      queue,
-    };
-    socket.onMessage((message) => {
-      const asksForList = String(message).includes(membersListCall);
-      if (holding && asksForList && !stalled.includes(connection)) {
-        stalled.push(connection);
-      }
-      if (stalled.includes(connection)) {
-        connection.queue.push(message);
-      } else {
-        connection.forward(message);
-      }
-    });
-  });
-  return {
-    hold: () => {
-      holding = true;
-    },
-    stalled: () => stalled.length,
-    release: () => {
-      holding = false;
-      for (const connection of stalled.splice(0)) {
-        for (const message of connection.queue.splice(0)) {
-          connection.forward(message);
-        }
-      }
-    },
-  };
-};
-
 test("an admin changes a member's role, and the controls wait for the list to show it", async ({
   context,
   page,
 }) => {
   const { admin, one } = await signedIn({ admin: "admin", one: "user" });
   await signInTo(context, admin);
-  const gate = await membersListGate(page);
+  const gate = await callGate(page, '["members","list"]');
   await page.goto("/members");
   const who = `Person (${one.userId}@acme.test)`;
   const role = page.getByRole("combobox", { name: `Role of ${who}` });
@@ -165,7 +108,7 @@ test("says core can't be reached when the members list never comes", async ({
 }) => {
   const { admin } = await signedIn({ admin: "admin" });
   await signInTo(context, admin);
-  const gate = await membersListGate(page);
+  const gate = await callGate(page, '["members","list"]');
   gate.hold();
   await page.goto("/members");
   await expect(

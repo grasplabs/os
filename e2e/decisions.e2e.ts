@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 
+import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
 import { apiOf, pageOf, release, signedIn, signInTo } from "./people.ts";
 import type { Person } from "./people.ts";
@@ -147,4 +148,18 @@ test("the person a decision link was sent to approves it, and the run goes on", 
   } finally {
     core[Symbol.dispose]();
   }
+});
+
+test("says core can't be reached when a decision never loads", async ({
+  browser,
+}) => {
+  const { decider } = await signedIn({ decider: "user" });
+  const page = await pageOf(browser, decider);
+  const gate = await callGate(page, '["decisions","get"]');
+  gate.hold();
+  await page.goto(`/decisions/${crypto.randomUUID()}`);
+  await expect(
+    page.getByText("Grasp can't be reached right now. Try again in a moment.")
+  ).toBeVisible({ timeout: 15_000 });
+  expect(gate.stalled()).toBe(1);
 });
