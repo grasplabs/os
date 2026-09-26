@@ -241,6 +241,8 @@ export const auditCall = async (
   );
   add("onBehalfOf", claims?.authority.onBehalfOf);
   add("mode", claims?.authority.mode);
+  // Which of the App's versions made the call, for a call from App code.
+  add("appVersion", claims?.authority.appVersion);
   add("sideEffect", sideEffect);
   add("reason", reason);
   add("provenanceCount", provenance.length);

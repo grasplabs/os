@@ -278,6 +278,14 @@ export const authoritySchema = z.strictObject({
   subject: permissionSubjectSchema,
   onBehalfOf: identifierSchema,
   mode: z.enum(["interactive", "workflow"]),
+  /**
+   * For a call from an App's code: the App version whose code made it, set
+   * by the host, so the audit log can trace each call to the code that
+   * made it (threat model SB9). It never decides access. Optional, so a
+   * connect that knows it still accepts the capabilities of a core that
+   * doesn't set it yet; connect deploys first.
+   */
+  appVersion: z.int().positive().optional(),
 });
 export type Authority = z.infer<typeof authoritySchema>;
 

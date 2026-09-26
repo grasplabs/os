@@ -98,6 +98,21 @@ describe("the audit log", () => {
     expect(recorded).not.toContain("Quarterly numbers");
   });
 
+  it("records the App version that made a call, when its capability names one", async () => {
+    const connectionId = await addConnection();
+    const call = write(connectionId, "mail.list");
+    await callAs({ ...appFor("user-anna"), appVersion: 3 }, call);
+    // As an earlier core signs it: without one.
+    await callAs(appFor("user-anna"), call);
+    expect(
+      events.map(({ actor, detail }) => ({ actor, detail }))
+    ).toMatchObject([
+      { actor: { type: "app", appId: "app-crm" }, detail: { appVersion: 3 } },
+      { actor: { type: "app", appId: "app-crm" } },
+    ]);
+    expect(events[1]?.detail).not.toHaveProperty("appVersion");
+  });
+
   it("records every resource a large read touched", async () => {
     const connectionId = await addConnection();
     await callAs(
