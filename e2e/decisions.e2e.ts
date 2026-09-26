@@ -59,7 +59,8 @@ export default workflowTests(approval, [
  * How long a decision page may take to show what core said. It reads core
  * up to twice first (who is signed in, then the decision), each read
  * within 5 seconds of its own (apps/web/src/core.ts), so the default
- * 5-second wait is shorter than the page's.
+ * 5-second wait is shorter than the page's. An answer, on a connection
+ * opened for it, gets the same room.
  */
 const pageRead = { timeout: 15_000 };
 
@@ -137,7 +138,10 @@ test("the person a decision link was sent to approves it, and the run goes on", 
   ).toBeVisible(pageRead);
   await page.getByLabel("Comment (optional)").fill("Matches the PO");
   await page.getByRole("button", { name: "Approve" }).click();
-  await expect(page.getByRole("status")).toHaveText(/^Approved by Person on /u);
+  await expect(page.getByRole("status")).toHaveText(
+    /^Approved by Person on /u,
+    pageRead
+  );
 
   const { core, api } = apiOf(builder);
   try {
@@ -169,6 +173,6 @@ test("says core can't be reached when a decision never loads", async ({
   await page.goto(`/decisions/${crypto.randomUUID()}`);
   await expect(
     page.getByText("Grasp can't be reached right now. Try again in a moment.")
-  ).toBeVisible({ timeout: 15_000 });
+  ).toBeVisible(pageRead);
   expect(gate.stalled()).toBe(1);
 });

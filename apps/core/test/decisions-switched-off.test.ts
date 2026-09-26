@@ -12,6 +12,7 @@ import {
   deadlinePassed,
   linkOf,
   outputOf,
+  reminding,
   server,
   waitingFor,
   week,
@@ -31,15 +32,6 @@ const idp = mockIdp();
 
 const personApi = async (role: Role): Promise<Person> =>
   await signedInApi(idp, role);
-
-/**
- * A decision the tests act on while it waits: its reminder is due five
- * seconds after the ask, its deadline ten seconds after it opened, so what
- * a test does meanwhile fits on a slow runner: seeing the ask, then
- * switching a feature off (or stopping the run) before the reminder is
- * due, and back on before the deadline.
- */
-const reminding = { timeout: 10_000, remindAfter: 5000 };
 
 describe("decisions while switched off", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);

@@ -78,6 +78,15 @@ export default workflowTests(approval, [
 export const week = 7 * 86_400_000;
 
 /**
+ * A decision a test acts on while it waits for the reminder: the reminder
+ * is due five seconds after the ask, which leaves a slow runner room for
+ * what a test does first (change a team, switch a feature off, stop the
+ * run). The deadline, ten seconds after the decision opened, leaves room
+ * to switch back on before it, where a test does that.
+ */
+export const reminding = { timeout: 10_000, remindAfter: 5000 };
+
+/**
  * A new App with the approval workflow, released by `builder`, its server
  * built ahead (`serverBuilt`): the first ask calls it once the decision
  * is open, and a build there would take from the time left before the

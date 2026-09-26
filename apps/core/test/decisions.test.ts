@@ -14,6 +14,7 @@ import {
   asksOf,
   linkOf,
   outputOf,
+  reminding,
   week,
 } from "./decisions.ts";
 import type { Ask, Person } from "./decisions.ts";
@@ -536,8 +537,7 @@ describe("decisions", { timeout: 60_000 }, () => {
     const team = await teamOf(admin, [anna]);
     const { app, run } = await asking(admin, {
       from: `team:${team}`,
-      timeout: 4000,
-      remindAfter: 1000,
+      ...reminding,
     });
     // Ben joins the team before the reminder goes out.
     await joinTeam(admin, team, ben);
