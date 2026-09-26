@@ -2,6 +2,7 @@ import { appLimits } from "@grasp-os/shared/app-limits";
 import { appErrors } from "@grasp-os/shared/apps";
 import type { Role } from "@grasp-os/shared/roles";
 import { roleErrors } from "@grasp-os/shared/roles";
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { mockIdp } from "./idp.ts";
@@ -388,6 +389,37 @@ describe("App code", () => {
     );
     await expect(apps.files.read(app.id)).resolves.toSatisfy(
       (files: Record<string, string>) => Object.keys(files).length === count
+    );
+  });
+
+  it("lets an App over its limits shrink, but not grow", async () => {
+    const { apps, userId } = await appsApi("builder");
+    const app = await newApp(apps);
+    // More files than an App may have now: written when the limits were
+    // higher, straight into its working copy.
+    const count = appLimits.files + 2;
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE apps SET working_revision = 'earlier' WHERE id = ?"
+      ).bind(app.id),
+      ...Array.from({ length: count }, (_, index) =>
+        env.DB.prepare(
+          "INSERT INTO app_working_files (app_id, path, content, revision, written_by, written_at) VALUES (?, ?, 'x', 'earlier', ?, 0)"
+        ).bind(app.id, `components/part-${index}.ts`, userId)
+      ),
+    ]);
+
+    await expect(
+      Promise.all([
+        outcome(apps.files.write(app.id, { "components/new.ts": "x" })),
+        outcome(apps.files.write(app.id, { "components/part-0.ts": "xx" })),
+      ])
+    ).resolves.toStrictEqual(["app.too_large", "app.too_large"]);
+    await expect(
+      outcome(apps.files.write(app.id, { "components/part-0.ts": null }))
+    ).resolves.toBe("ok");
+    await expect(apps.files.read(app.id)).resolves.toSatisfy(
+      (files: Record<string, string>) => Object.keys(files).length === count - 1
     );
   });
 

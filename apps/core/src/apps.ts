@@ -175,6 +175,20 @@ const findVersion = async (
  * revision are read in one batch, so a commit landing in between can't
  * pair a new version with rows it already committed.
  */
+interface Size {
+  files: number;
+  /** Characters in all files together. */
+  length: number;
+}
+
+const sizeOf = (files: ReadonlyMap<string, string>): Size => {
+  let length = 0;
+  for (const content of files.values()) {
+    length += content.length;
+  }
+  return { files: files.size, length };
+};
+
 const workingCopy = async (env: Env, app: AppId) => {
   const db = drizzle(env.DB);
   const [[latest], rows, [registered]] = await db.batch([
@@ -197,6 +211,7 @@ const workingCopy = async (env: Env, app: AppId) => {
   const files = latest
     ? await readTree(env, app, latest.tree)
     : new Map<string, string>();
+  const latestSize = sizeOf(files);
   for (const { path, content } of rows) {
     if (content === null) {
       files.delete(path);
@@ -204,20 +219,33 @@ const workingCopy = async (env: Env, app: AppId) => {
       files.set(path, content);
     }
   }
-  return { latest, rows, files, revision: registered?.revision ?? null };
+  return {
+    latest,
+    latestSize,
+    rows,
+    files,
+    revision: registered?.revision ?? null,
+  };
 };
 
-/** `app.too_large` if `files` are over an App's limits. */
-const checkLimits = (files: ReadonlyMap<string, string>): void => {
-  let length = 0;
-  for (const content of files.values()) {
-    length += content.length;
-  }
-  if (files.size > appLimits.files || length > appLimits.totalLength) {
+/**
+ * `app.too_large` if `files` are over an App's limits and bigger than
+ * `before`. An App that is over them (from before they were lowered) can
+ * still shrink: only growing past them is refused.
+ */
+const checkLimits = (
+  files: ReadonlyMap<string, string>,
+  before: Size
+): void => {
+  const after = sizeOf(files);
+  const over =
+    after.files > appLimits.files || after.length > appLimits.totalLength;
+  const grows = after.files > before.files || after.length > before.length;
+  if (over && grows) {
     throw appErrors.create("app.too_large", {
-      files: files.size,
+      files: after.files,
       maxFiles: appLimits.files,
-      length,
+      length: after.length,
       maxLength: appLimits.totalLength,
     });
   }
@@ -319,6 +347,7 @@ export const writeFiles = async (
   const { id: appId } = await findApp(env, app);
   const changes = Object.entries(parse(fileChangesSchema, input));
   const { files, revision } = await workingCopy(env, appId);
+  const before = sizeOf(files);
   for (const [path, content] of changes) {
     if (content === null) {
       files.delete(path);
@@ -326,7 +355,7 @@ export const writeFiles = async (
       files.set(path, content);
     }
   }
-  checkLimits(files);
+  checkLimits(files, before);
 
   const db = drizzle(env.DB);
   const next = crypto.randomUUID();
@@ -375,11 +404,11 @@ export const commitFiles = async (
   requireBuilder(by);
   const { id: appId } = await findApp(env, app);
   const text = parse(commitMessageSchema, message);
-  const { latest, rows, files } = await workingCopy(env, appId);
+  const { latest, latestSize, rows, files } = await workingCopy(env, appId);
   if (rows.length === 0) {
     throw appErrors.create("app.nothing_to_commit");
   }
-  checkLimits(files);
+  checkLimits(files, latestSize);
   const json = canonicalJson(Object.fromEntries(files));
   const tree = await sha256Hex(json);
   if (tree === latest?.tree) {
