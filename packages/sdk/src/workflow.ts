@@ -313,9 +313,9 @@ export interface DecisionOptions extends StepOptions {
   /**
    * Who decides; only they can answer, signed in, as they are then: a
    * person (`person:<user ID>`), a role (`role:admin`) or a team
-   * (`team:<team ID>`). Whoever started the run is asked, and may answer,
-   * like anyone else `from` names; every answer is audited under who gave
-   * it.
+   * (`team:<team ID>`). Whoever started the run never answers it, and
+   * isn't asked, unless `from` names exactly them; a triggered run has no
+   * starter. Every answer is audited under who gave it.
    */
   from: Person;
   /** Tells them there is something to decide, e.g. by email. */

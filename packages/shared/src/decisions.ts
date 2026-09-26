@@ -38,8 +38,8 @@ export const decisionErrors = defineErrorFamily({
 
 /**
  * The most people one decision asks, so asking stays one email each. It
- * counts everyone who may answer, the run's starter included when `from`
- * names them.
+ * counts only the people who may answer: the run's starter counts only
+ * when `from` is exactly `person:<them>`, never as part of a role or team.
  */
 export const maxDeciders = 50;
 

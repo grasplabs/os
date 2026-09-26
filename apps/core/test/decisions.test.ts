@@ -1,3 +1,4 @@
+import { maxDeciders } from "@grasp-os/shared/decisions";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -5,7 +6,14 @@ import { z } from "zod";
 
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
-import { asking, asksOf, linkOf, outputOf, week } from "./decisions.ts";
+import {
+  approvalApp,
+  asking,
+  asksOf,
+  linkOf,
+  outputOf,
+  week,
+} from "./decisions.ts";
 import type { Ask, Person } from "./decisions.ts";
 import { mockIdp } from "./idp.ts";
 import { endLiveRuns, finished, resumed, stopped } from "./runs.ts";
@@ -73,6 +81,25 @@ const teamOf = async (admin: Person, people: Person[]): Promise<string> => {
     await joinTeam(admin, id, person);
   }
   return id;
+};
+
+/** Adds `count` new members to `team`, as the IdP would bring them in. */
+const addMembers = async (team: string, count: number): Promise<void> => {
+  const now = Date.now();
+  const ids = Array.from({ length: count }, () => `member-${unique()}`);
+  await env.DB.batch(
+    ids.flatMap((id) => [
+      env.DB.prepare(
+        "INSERT INTO users (id, name, email, email_verified, created_at, updated_at) VALUES (?, 'Member', ?, 1, ?, ?)"
+      ).bind(id, `${id}@acme.test`, now, now),
+      env.DB.prepare(
+        "INSERT INTO members (id, organization_id, user_id, role, created_at) VALUES (?, 'organization', ?, 'user', ?)"
+      ).bind(`membership-${id}`, id, now),
+      env.DB.prepare(
+        "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
+      ).bind(`team-member-${id}`, team, id, now),
+    ])
+  );
 };
 
 /** Whom an ask went to, by user ID. */
@@ -329,37 +356,101 @@ describe("decisions", { timeout: 60_000 }, () => {
     ).resolves.toBe("decision.closed");
   });
 
-  it("let whoever started the run answer it when the decision is from them, audited under them", async () => {
+  it("don't let whoever started the run answer it, unless it names exactly them", async () => {
     const admin = await personApi("admin");
     const anna = await personApi("user");
+    const otherAdmin = await personApi("admin");
     const team = await teamOf(admin, [admin, anna]);
     const byTeam = await asking(admin, { from: `team:${team}`, timeout: week });
     const byRole = await asking(admin, { from: "role:admin", timeout: week });
+    const byThemselves = await asking(admin, {
+      from: `person:${admin.userId}`,
+      timeout: week,
+    });
 
     expect({
-      askedTeam: askedTo(byTeam.ask).toSorted(),
-      askedStarter: askedTo(byRole.ask).includes(admin.userId),
-      team: await outcome(
-        admin.api.decisions.answer(byTeam.decision, { approved: true })
-      ),
-      role: await outcome(
-        admin.api.decisions.answer(byRole.decision, { approved: false })
-      ),
+      team: {
+        asked: askedTo(byTeam.ask),
+        starter: await outcome(
+          admin.api.decisions.answer(byTeam.decision, { approved: true })
+        ),
+      },
+      role: {
+        askedStarter: askedTo(byRole.ask).includes(admin.userId),
+        askedOther: askedTo(byRole.ask).includes(otherAdmin.userId),
+        starter: await outcome(
+          admin.api.decisions.answer(byRole.decision, { approved: true })
+        ),
+      },
+      themselves: {
+        asked: askedTo(byThemselves.ask),
+        starter: await outcome(
+          admin.api.decisions.answer(byThemselves.decision, { approved: true })
+        ),
+      },
     }).toStrictEqual({
-      askedTeam: [admin.userId, anna.userId].toSorted(),
-      askedStarter: true,
-      team: "ok",
-      role: "ok",
+      team: { asked: [anna.userId], starter: "decision.forbidden" },
+      role: {
+        askedStarter: false,
+        askedOther: true,
+        starter: "decision.forbidden",
+      },
+      themselves: { asked: [admin.userId], starter: "ok" },
     });
-    await expect(outputOf(admin, byTeam.run.id)).resolves.toMatchObject({
-      approved: true,
-      by: admin.userId,
+    // Anyone else the decision is from still answers, and the audit log
+    // has their answer, never one under the starter.
+    await otherAdmin.api.decisions.answer(byRole.decision, { approved: false });
+    await expect(outputOf(admin, byRole.run.id)).resolves.toMatchObject({
+      approved: false,
+      by: otherAdmin.userId,
     });
-    await vi.waitFor(async () => {
+    const answers = await vi.waitFor(async () => {
       const events = await eventsOf(byRole.decision);
-      expect(events.map(({ action, actor }) => [action, actor])).toContainEqual(
-        ["workflow.decision.rejected", { type: "person", userId: admin.userId }]
+      const decided = events.filter(({ action }) =>
+        ["workflow.decision.approved", "workflow.decision.rejected"].includes(
+          action
+        )
       );
+      expect(decided).toHaveLength(1);
+      return decided;
+    });
+    expect(
+      answers.map(({ action, actor }) => ({ action, actor }))
+    ).toStrictEqual([
+      {
+        action: "workflow.decision.rejected",
+        actor: { type: "person", userId: otherAdmin.userId },
+      },
+    ]);
+  });
+
+  it("count only who may answer toward the cap, so a starter in a team of 51 leaves it within it", async () => {
+    const admin = await personApi("admin");
+    const fits = await teamOf(admin, [admin]);
+    await addMembers(fits, maxDeciders);
+    const tooMany = await teamOf(admin, [admin]);
+    await addMembers(tooMany, maxDeciders + 1);
+
+    const { ask } = await asking(admin, {
+      from: `team:${fits}`,
+      timeout: week,
+    });
+    const app = await approvalApp(admin);
+    const refused = await admin.api.workflows.start(app, "approval", {
+      from: `team:${tooMany}`,
+      timeout: week,
+    });
+    await finished(refused.id);
+    const { status, failure } = await admin.api.workflows.status(refused.id);
+
+    expect({
+      asked: askedTo(ask).length,
+      askedStarter: askedTo(ask).includes(admin.userId),
+      refused: { status, code: failure?.error.code },
+    }).toStrictEqual({
+      asked: maxDeciders,
+      askedStarter: false,
+      refused: { status: "failed", code: "decision.too_many_deciders" },
     });
   });
 
