@@ -64,7 +64,11 @@ export const invoicePdf = new Uint8Array([
   ),
 ]);
 
-export const pdfBase64 = btoa(String.fromCodePoint(...invoicePdf));
+/** Base64 of `bytes`, as the fixtures and tests spell it out. */
+export const base64 = (bytes: Uint8Array): string =>
+  btoa(String.fromCodePoint(...bytes));
+
+export const pdfBase64 = base64(invoicePdf);
 
 const address = (name: string, mailbox: string) => ({
   emailAddress: { name, address: mailbox },

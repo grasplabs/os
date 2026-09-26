@@ -1,13 +1,13 @@
-import { auditIdentifierMaxLength } from "@grasp-os/shared/audit";
 import type { OAuthProvider } from "@grasp-os/shared/connect";
 import { z } from "zod";
 
 import {
   connectorManifestSchema,
   maskMetaKey,
-  maxProvenanceItems,
+  mcpProtocolVersion,
   notPerformedMetaKey,
   provenanceMetaKey,
+  provenanceSchema,
   resourceMetaKey,
 } from "./manifest.ts";
 import type { ActionManifest, ConnectorManifest, Route } from "./manifest.ts";
@@ -121,10 +121,11 @@ export const invalidCode: ToolErrorCode = "invalid";
  * the provider answered 429 to the tool's first and only write. Set it
  * only when that is certain. A write that may have reached the provider
  * (a timeout, a 5xx after sending) is not that, and neither is any failure
- * after an earlier write of the same call went through: so no shared
- * "429 means not performed" helper for tools that write more than once.
- * A read-only tool changes nothing, so it may set it for any failure
- * trying again may fix, such as a provider's 5xx.
+ * after an earlier write of the same call went through. `providerFetch`
+ * sets it for a 429, and a 503 to a read, only because each tool sends at
+ * most one write, as its last request; a tool that writes twice can't rely
+ * on it. A read-only tool changes nothing, so it may set it for any
+ * failure trying again may fix, such as a provider's 5xx.
  */
 export class ToolError extends Error {
   readonly details: ToolErrorDetails | undefined;
@@ -242,10 +243,6 @@ const allowsNull = (node: unknown): boolean =>
   isObject(node) &&
   (typesOf(node).includes("null") ||
     (Array.isArray(node.anyOf) && node.anyOf.some(allowsNull)));
-
-const provenanceSchema = z
-  .array(z.string().min(1).max(auditIdentifierMaxLength))
-  .max(maxProvenanceItems);
 
 /** An error result: its message, its code when it has one, and whether it did nothing. */
 const failure = (
@@ -384,9 +381,6 @@ export interface Connector {
   fetch: (request: Request) => Promise<Response>;
 }
 
-/** The MCP revision the server speaks. */
-const protocolVersion = "2025-06-18";
-
 const requestSchema = z.object({
   jsonrpc: z.literal("2.0"),
   id: z.union([z.string(), z.number()]).optional(),
@@ -444,7 +438,7 @@ export const defineConnector = (definition: ConnectorDefinition): Connector => {
     switch (method) {
       case "initialize": {
         return answer(id, {
-          protocolVersion,
+          protocolVersion: mcpProtocolVersion,
           capabilities: { tools: { listChanged: false } },
           serverInfo: { name: manifest.name, version: manifest.version },
         });

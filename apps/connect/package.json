@@ -26,6 +26,8 @@
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "catalog:",
+    "@grasp-os/connector-google-workspace": "workspace:*",
+    "@grasp-os/connector-microsoft-365": "workspace:*",
     "@modelcontextprotocol/sdk": "catalog:",
     "drizzle-kit": "catalog:",
     "vite-plus": "catalog:",

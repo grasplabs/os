@@ -3,6 +3,8 @@ import {
   invalidCode,
   ToolError,
 } from "@grasp-os/connector-kit/connector";
+import { forbiddenInValue } from "@grasp-os/connector-kit/manifest";
+import { segment } from "@grasp-os/connector-kit/provider";
 import { z } from "zod";
 
 import {
@@ -12,7 +14,6 @@ import {
   idSchema,
   nextPageOf,
   pageSchema,
-  segment,
   topSchema,
 } from "./google.ts";
 
@@ -36,9 +37,10 @@ const calendars = "/calendar/v3/calendars/{calendar}";
  * A calendar's ID: one address, and nothing the egress refuses in a path
  * parameter, `#` and control characters included.
  */
-const calendarPattern =
-  // oxlint-disable-next-line no-control-regex -- control characters are refused
-  /^[^/\\?#%;:@\s\u0000-\u001F\u007F]+@[^/\\?#%;:@\s\u0000-\u001F\u007F]+$/u;
+const calendarPattern = new RegExp(
+  `^[^${forbiddenInValue}@\\s]+@[^${forbiddenInValue}@\\s]+$`,
+  "u"
+);
 
 const calendarSchema = z.string().min(3).max(256).regex(calendarPattern);
 

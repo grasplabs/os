@@ -4,21 +4,25 @@ import { ToolError } from "./connector.ts";
 
 // What connectors share in reading a provider's answers: a file's or an
 // attachment's content as the caller asked for it, within the limits
-// connect reads, and how long a throttled provider asks callers to wait.
+// connect reads.
 
-/** Largest file or attachment a tool reads, in bytes. */
-export const maxReadBytes = 4 * 1024 * 1024;
+/**
+ * Largest file or attachment a tool reads, in bytes; connect's egress lets
+ * a connector read 10 MiB of a provider's answer (`maxEgressResponseBytes`).
+ */
+const maxReadBytes = 4 * 1024 * 1024;
 
 /**
  * Largest content a read returns, in bytes of JSON: base64 of the largest
  * file fits, and so does text, unless escaping (a control character takes
- * six bytes) would make it larger than connect reads.
+ * six bytes) would make it larger than connect reads (16 MiB,
+ * `nativeResponseBytes`).
  */
 const maxContentBytes = 8 * 1024 * 1024;
 
 /** How a caller wants a file's content: as text, or base64 for extraction. */
 export const readAsSchema = z.enum(["text", "base64"]);
-export type ReadAs = z.infer<typeof readAsSchema>;
+type ReadAs = z.infer<typeof readAsSchema>;
 
 /** Base64 of `bytes`, a chunk at a time to spare the call stack. */
 export const toBase64 = (bytes: Uint8Array): string => {
@@ -74,21 +78,4 @@ export const contentAs = (
     });
   }
   return { encoding: as, content };
-};
-
-/** Longest wait a throttled answer passes on, in seconds. */
-const maxRetryAfterSeconds = 3600;
-
-/**
- * The seconds a `retry-after` header asks for, if it gives them: as
- * seconds, or as the HTTP date to wait until; at most an hour.
- */
-export const retryAfterOf = (response: Response): number | undefined => {
-  const value = response.headers.get("retry-after")?.trim() ?? "";
-  const seconds = /^\d+$/u.test(value)
-    ? Number(value)
-    : Math.ceil((Date.parse(value) - Date.now()) / 1000);
-  return Number.isNaN(seconds)
-    ? undefined
-    : Math.min(Math.max(seconds, 0), maxRetryAfterSeconds);
 };

@@ -65,9 +65,9 @@ const isolate = {
 
 /**
  * Largest answer connect reads from a native connector, in bytes: a read
- * of a file or an attachment carries its content, and the Microsoft 365
- * connector keeps that to 8 MiB as JSON (4 MiB of file, in base64 or as
- * escaped text), with room to spare.
+ * of a file or an attachment carries its content, and the connector kit
+ * keeps that to 8 MiB as JSON (4 MiB of file, in base64 or as escaped
+ * text; `contentAs`), with room to spare.
  */
 const nativeResponseBytes = 16 * 1024 * 1024;
 

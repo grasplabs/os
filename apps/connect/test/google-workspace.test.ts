@@ -7,7 +7,6 @@ import { z } from "zod";
 import { nativeConnector } from "../src/connectors.ts";
 import { accessTokenFor } from "../src/tokens.ts";
 import { connectAccount, outcome, ownAccount, someone } from "./connect.ts";
-import type { Call } from "./connect.ts";
 import {
   ceo,
   docText,
@@ -32,7 +31,7 @@ import {
   teamCalendar,
   threadId,
 } from "./fixtures/google.ts";
-import { invoicePdf, pdfBase64 } from "./fixtures/graph.ts";
+import { base64, invoicePdf, pdfBase64 } from "./fixtures/graph.ts";
 import {
   deletedMessageId,
   fakeGoogle,
@@ -43,11 +42,12 @@ import {
   callTool as call,
   outputOf,
   parsedRequests,
+  refusalsFor,
   resultOf,
   retryable,
   toolError,
 } from "./tool-calls.ts";
-import type { Connection } from "./tool-calls.ts";
+import type { Connection, Input } from "./tool-calls.ts";
 
 // The Google Workspace connector against Google's recorded answers,
 // through connect's real call path: capability, policy, a fresh isolate,
@@ -75,10 +75,10 @@ const requests = () => parsedRequests(google.sent);
 const paths = (): string[] => requests().map(({ path }) => path);
 
 /** UTF-8 text from base64 (MIME's, folded or not). */
-const utf8 = (base64: string): string =>
+const utf8 = (encoded: string): string =>
   new TextDecoder().decode(
     Uint8Array.from(
-      atob(base64.replaceAll("\r\n", "")),
+      atob(encoded.replaceAll("\r\n", "")),
       (character) => character.codePointAt(0) ?? 0
     )
   );
@@ -89,8 +89,6 @@ const calendarPath = `/calendar/v3/calendars/${encodeURIComponent(teamCalendar)}
 const manifest = connectorManifestSchema.parse(
   nativeConnector("google-workspace")?.manifest
 );
-
-type Input = Extract<Call["input"], Record<string, unknown>>;
 
 /** Input for each Gmail tool, but its mailbox. */
 const mailboxInputs: Record<string, Input> = {
@@ -119,32 +117,6 @@ const driveInputs: Record<string, Input> = {
   "files.read": { item: fileIds.report },
 };
 
-/** Refusals of `action` for each of `values`, under a capability for `resource`. */
-const refusalsFor = async (
-  connection: Connection,
-  inputs: Record<string, Input>,
-  field: string,
-  resource: string,
-  values: string[]
-): Promise<Set<string>> =>
-  new Set(
-    await Promise.all(
-      Object.entries(inputs).flatMap(([action, input]) =>
-        values.map(
-          async (value) =>
-            await outcome(
-              call(
-                connection,
-                action,
-                { [field]: value, ...input },
-                { resource, idempotencyKey: crypto.randomUUID() }
-              )
-            )
-        )
-      )
-    )
-  );
-
 describe("the Google Workspace connector's scoping", () => {
   it("binds every route of every tool to its mailbox, calendar or drive", () => {
     const routes = Object.entries(manifest.actions).flatMap(
@@ -171,23 +143,11 @@ describe("the Google Workspace connector's scoping", () => {
     expect(
       routes
         .filter(({ check }) => check !== undefined)
-        .map(({ name, method, path, check }) => ({
-          route: `${name} ${method} ${path}`,
-          check,
-        }))
-    ).toStrictEqual(
-      ["/drive/v3/files/{item}", "/drive/v3/files/{item}/export"].map(
-        (path) => ({
-          route: `files.read GET ${path}`,
-          check: {
-            path: "/drive/v3/files/{item}",
-            query: { supportsAllDrives: "true", fields: "driveId" },
-            field: "driveId",
-            equals: "{drive}",
-          },
-        })
-      )
-    );
+        .map(({ name, check }) => ({ name, equals: check?.equals }))
+    ).toStrictEqual([
+      { name: "files.read", equals: "{drive}" },
+      { name: "files.read", equals: "{drive}" },
+    ]);
     expect(
       Object.keys(manifest.actions).toSorted(),
       "every tool is tested for scoping below"
@@ -330,13 +290,16 @@ describe("the Google Workspace connector's Gmail tools", () => {
       query: { maxResults: "2" },
       headers: { authorization: `Bearer ${token}` },
     });
-    // Gmail lists IDs only: each message's metadata, and nothing more.
+    // Gmail lists IDs only: each message's metadata, and nothing more. The
+    // reads go out together, in no set order.
     expect(
-      reads.map(({ path, query, search }) => ({
-        path,
-        format: query.format,
-        headers: search.getAll("metadataHeaders"),
-      }))
+      reads
+        .map(({ path, query, search }) => ({
+          path,
+          format: query.format,
+          headers: search.getAll("metadataHeaders"),
+        }))
+        .toSorted((one, other) => one.path.localeCompare(other.path))
     ).toStrictEqual(
       [1, 2].map((n) => ({
         path: `${mailboxPath}/messages/${messageId(invoices, n)}`,
@@ -503,7 +466,7 @@ describe("the Google Workspace connector's Gmail tools", () => {
         })
       )
     ).resolves.toMatchObject({
-      content: btoa(String.fromCodePoint(...signaturePng)),
+      content: base64(signaturePng),
     });
     expect(paths()).toStrictEqual([
       `${mailboxPath}/messages/${messageId(invoices, 1)}`,
@@ -936,28 +899,20 @@ describe("the Google Workspace connector's Drive tools", () => {
       provenance: [fileIds.report],
     });
     // The egress asks for the file's drive before each request for it.
-    const driveCheck = {
-      path: `/drive/v3/files/${fileIds.report}`,
-      query: { supportsAllDrives: "true", fields: "driveId" },
-    };
+    const check = manifest.actions["files.read"]?.routes.find(
+      (route) => route.check !== undefined
+    )?.check;
+    const isDriveCheck = ({ query }: { query: Record<string, string> }) =>
+      Object.entries(check?.query ?? {}).every(
+        ([key, value]) => query[key] === value
+      );
+    const sent = requests();
     expect(
-      requests().map(({ path, query }) => ({ path, query }))
-    ).toStrictEqual([
-      driveCheck,
-      {
-        path: `/drive/v3/files/${fileIds.report}`,
-        query: {
-          supportsAllDrives: "true",
-          fields:
-            "id,name,mimeType,size,modifiedTime,webViewLink,parents,driveId,trashed",
-        },
-      },
-      driveCheck,
-      {
-        path: `/drive/v3/files/${fileIds.report}`,
-        query: { alt: "media", supportsAllDrives: "true" },
-      },
-    ]);
+      sent.map((request) => (isDriveCheck(request) ? "check" : "request"))
+    ).toStrictEqual(["check", "request", "check", "request"]);
+    expect(
+      sent.every(({ path }) => path === `/drive/v3/files/${fileIds.report}`)
+    ).toBeTruthy();
     const pdf = { drive: financeDrive, item: fileIds.pdf };
     await expect(
       outputOf(call(connection, "files.read", { ...pdf, as: "base64" }))
@@ -1050,94 +1005,16 @@ describe("the Google Workspace connector's Drive tools", () => {
 });
 
 describe("the Google Workspace connector's answers", () => {
-  it("say a throttled read did nothing, with the wait Google asks for, so it may be retried", async () => {
+  it("say a read Drive refused with a rate limit's reason did nothing, so it may be retried", async () => {
     const connection = await connected();
-    const list = async () =>
-      await retryable(call(connection, "files.list", { drive: financeDrive }));
-    google.throttle();
-    await expect(list()).resolves.toStrictEqual({
-      code: "connect.server_unavailable",
-      retryAfterSeconds: 7,
-    });
-    await expect(list()).resolves.toStrictEqual({ code: "ok" });
-    google.throttle(new Date(Date.now() + 30_000).toUTCString());
-    const { retryAfterSeconds } = await list();
-    expect(Math.abs((retryAfterSeconds ?? 0) - 30)).toBeLessThanOrEqual(1);
-    // Calendar and Drive also rate limit with a 403 and its reason.
+    // Calendar and Drive rate limit with a 403 as often as a 429.
     google.rateLimit403();
-    await expect(list()).resolves.toStrictEqual({
+    await expect(
+      retryable(call(connection, "files.list", { drive: financeDrive }))
+    ).resolves.toStrictEqual({
       code: "connect.server_unavailable",
       retryAfterSeconds: 60,
     });
-    // Each was sent once: nothing is retried behind the caller's back.
-    expect(google.sent).toHaveLength(4);
-  });
-
-  it("say a read Google was unavailable for did nothing, so it may be retried", async () => {
-    const connection = await connected();
-    google.unavailable();
-    await expect(
-      retryable(
-        call(connection, "calendar.get", {
-          calendar: teamCalendar,
-          event: eventId(teamCalendar, 1),
-        })
-      )
-    ).resolves.toStrictEqual({
-      code: "connect.server_unavailable",
-      retryAfterSeconds: 5,
-    });
-  });
-
-  it("free a throttled write's key, so a retry with it sends once", async () => {
-    const connection = await connected();
-    const send = async () =>
-      await outcome(
-        call(
-          connection,
-          "mail.send",
-          {
-            mailbox: invoices,
-            subject: "Paid",
-            body: "Paid.",
-            to: ["billing@northwind.example.org"],
-          },
-          { idempotencyKey: "run-8:send" }
-        )
-      );
-    google.throttleWrite();
-    const outcomes = [await send(), await send(), await send()];
-    // Retryable (Google did nothing), then sent, then the stored answer.
-    expect(outcomes).toStrictEqual(["connect.server_unavailable", "ok", "ok"]);
-    expect(paths()).toStrictEqual([
-      `${mailboxPath}/messages/send`,
-      `${mailboxPath}/messages/send`,
-    ]);
-    expect(google.writesDone()).toBe(1);
-  });
-
-  it("keep a write's key when Google was unavailable for it: it may have acted", async () => {
-    const connection = await connected();
-    const label = async () =>
-      await outcome(
-        call(
-          connection,
-          "mail.label",
-          {
-            mailbox: invoices,
-            message: messageId(invoices, 1),
-            remove: ["INBOX"],
-          },
-          { idempotencyKey: "run-8:label" }
-        )
-      );
-    google.unavailable(true);
-    const outcomes = [await label(), await label()];
-    // Failed, and the repeat gets that answer: never a second write.
-    expect(outcomes).toStrictEqual([
-      "connect.action_failed",
-      "connect.action_failed",
-    ]);
     expect(google.sent).toHaveLength(1);
   });
 

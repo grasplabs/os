@@ -1,3 +1,4 @@
+import { auditIdentifierMaxLength } from "@grasp-os/shared/audit";
 import { oauthProviderSchema } from "@grasp-os/shared/connect";
 import {
   maskFieldSchema,
@@ -54,8 +55,27 @@ export const maskMetaKey = "grasp-os/mask";
  */
 export const egressHeader = "grasp-egress";
 
+/** The kinds of answer connect's egress gives itself, as `egressHeader` says. */
+export const egressKind = {
+  refused: "refused",
+  failed: "failed",
+  downloadsOff: "downloads-off",
+} as const;
+export type EgressKind = (typeof egressKind)[keyof typeof egressKind];
+
 /** Most resource IDs one call may report reading. */
 export const maxProvenanceItems = 1000;
+
+/** The IDs of the resources a call read, as a tool reports them. */
+export const provenanceSchema = z
+  .array(z.string().min(1).max(auditIdentifierMaxLength))
+  .max(maxProvenanceItems);
+
+/** The MCP revision connect and the connectors speak. */
+export const mcpProtocolVersion = "2025-06-18";
+
+/** Longest wait a throttled answer passes on, in seconds. */
+export const maxRetryAfterSeconds = 3600;
 
 /** The methods an action may declare. */
 export const httpMethods = [
@@ -154,7 +174,7 @@ export const hostSchema = z.string().regex(hostPattern);
  * one DNS label, such as a SharePoint tenant's `contoso` in
  * `contoso.sharepoint.com`.
  */
-export const redirectHostSchema = z
+const redirectHostSchema = z
   .string()
   .refine(
     (pattern) => pattern.startsWith("*.") && hostPattern.test(pattern.slice(2)),
@@ -260,7 +280,7 @@ const maxRoutes = 32;
  * that selects its resource, its input properties, and the only requests
  * it may send.
  */
-export const actionManifestSchema = z.strictObject({
+const actionManifestSchema = z.strictObject({
   routes: z.array(routeSchema).max(maxRoutes),
   readOnly: z.boolean(),
   resource: z
@@ -371,12 +391,19 @@ const decodedSegment = (segment: string): string | undefined => {
 };
 
 /**
- * Characters a parameter's value may not decode to: path and query
- * delimiters, matrix and custom-method separators (`;`, `:`), a percent
- * sign (so it isn't decoded a second time), a backslash, and controls.
+ * The characters a parameter's value may not decode to, as a regex
+ * character class's contents: path and query delimiters, matrix and
+ * custom-method separators (`;`, `:`), a percent sign (so it isn't decoded
+ * a second time), a backslash, and controls.
  */
-// oxlint-disable-next-line no-control-regex -- control characters are the point
-const forbiddenInValue = /[/\\?#%;:\u0000-\u001F\u007F]/u;
+export const forbiddenInValue = String.raw`/\\?#%;:\u0000-\u001F\u007F`;
+
+/**
+ * A parameter's value, decoded: text with none of `forbiddenInValue`. A
+ * connector checks its path inputs by it, so a bad value is refused with a
+ * clear message before anything goes out.
+ */
+export const segmentValuePattern = new RegExp(`^[^${forbiddenInValue}]+$`, "u");
 
 /** A run of quotes of odd length: one that ends a quoted literal. */
 const unpairedQuote = /(?<!')(?:'')*'(?!')/u;
@@ -393,7 +420,7 @@ const isValueAllowed = (
   prefix: string,
   suffix: string
 ): boolean => {
-  if (decoded === "" || forbiddenInValue.test(decoded)) {
+  if (!segmentValuePattern.test(decoded)) {
     return false;
   }
   if (prefix === "" && suffix === "") {

@@ -5,7 +5,8 @@
   "license": "AGPL-3.0-only",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./google": "./src/google.ts"
   },
   "dependencies": {
     "@grasp-os/connector-kit": "workspace:*",

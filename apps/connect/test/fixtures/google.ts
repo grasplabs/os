@@ -7,7 +7,7 @@
  * (test/google-api.ts) serves them per mailbox, calendar and drive, so a
  * test can tell whose data an answer holds.
  */
-import { invoicePdf } from "./graph.ts";
+import { base64, invoicePdf } from "./graph.ts";
 
 /** A mailbox the tests' Apps use, and its own calendar. */
 export const invoices = "invoices@example.com";
@@ -41,10 +41,7 @@ export const messagePageToken = "08123456789012345678";
 
 /** Base64url, as Gmail sends bodies and attachments. */
 export const base64Url = (bytes: Uint8Array): string =>
-  btoa(String.fromCodePoint(...bytes))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/=+$/u, "");
+  base64(bytes).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 
 const text = (value: string): string =>
   base64Url(new TextEncoder().encode(value));

@@ -9,11 +9,12 @@
  */
 import { beforeEach } from "vite-plus/test";
 
+import { maxEgressResponseBytes } from "../src/egress.ts";
 import { sampleHost, storageHost } from "./fixtures/sample-connector.ts";
 import { fakeInternet } from "./internet.ts";
 
 /** More than the egress handler lets a connector read. */
-const floodBytes = 12 * 1024 * 1024;
+const floodBytes = maxEgressResponseBytes + 2 * 1024 * 1024;
 const floodChunk = new Uint8Array(64 * 1024);
 
 const flood = (): ReadableStream<Uint8Array> => {

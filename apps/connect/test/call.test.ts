@@ -1,4 +1,7 @@
-import { capabilityMaxTtlMs } from "@grasp-os/shared/capability";
+import {
+  capabilityMaxTtlMs,
+  signCapability,
+} from "@grasp-os/shared/capability";
 import { bindingNameSchema } from "@grasp-os/shared/permissions";
 import { env, exports } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vite-plus/test";
@@ -6,6 +9,7 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 import {
   addConnection,
   agentFor,
+  callAs,
   capabilityFor,
   outcome,
   serverUrl,
@@ -134,5 +138,23 @@ describe("calls to connect", () => {
       )
     );
     expect(refused).toStrictEqual(notCalls.map(() => "connect.invalid"));
+  });
+
+  it("take what to mask from the capability alone, never from the call", async () => {
+    const capability = await signCapability(env.CAPABILITY_SIGNING_KEY, anna, {
+      ...call,
+      mask: ["body"],
+    });
+    await expect(callWith(capability, { ...call, mask: [] })).resolves.toBe(
+      "connect.invalid"
+    );
+    expect(server.requests).toBe(0);
+  });
+
+  it("aren't given for a masked permission on a server connect can't mask", async () => {
+    await expect(outcome(callAs(anna, call, { mask: ["body"] }))).resolves.toBe(
+      "connect.mask_unsupported"
+    );
+    expect(server.requests).toBe(0);
   });
 });

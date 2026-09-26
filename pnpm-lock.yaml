@@ -234,6 +234,12 @@ importers:
       '@cloudflare/workers-types':
         specifier: 'catalog:'
         version: 5.20260921.1
+      '@grasp-os/connector-google-workspace':
+        specifier: workspace:*
+        version: link:../../packages/connectors/google-workspace
+      '@grasp-os/connector-microsoft-365':
+        specifier: workspace:*
+        version: link:../../packages/connectors/microsoft-365
       '@modelcontextprotocol/sdk':
         specifier: 'catalog:'
         version: 1.30.0(@cfworker/json-schema@4.1.1)(supports-color@10.2.2)(zod@4.6.5)

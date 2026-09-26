@@ -1,6 +1,7 @@
-import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
-import { signCapability } from "@grasp-os/shared/capability";
-import { connectErrors } from "@grasp-os/shared/connect";
+import {
+  connectorManifestSchema,
+  egressHeader,
+} from "@grasp-os/connector-kit/manifest";
 import type { ConnectionPerson } from "@grasp-os/shared/connect";
 import { env, exports } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
@@ -27,6 +28,7 @@ import { sampleHost, storageHost } from "./fixtures/sample-connector.ts";
 import { fakeProviders } from "./oauth-provider.ts";
 import type { ProviderName } from "./oauth-provider.ts";
 import { fakeSampleApi } from "./sample-api.ts";
+import { callTool as call, toolError } from "./tool-calls.ts";
 
 // Native connectors run in isolates of their own, and reach their provider
 // only through connect's egress handler, which adds the connection's token.
@@ -59,20 +61,6 @@ const connectionTo = async (
     .where(eq(connections.id, id));
   return { id, person };
 };
-
-/** Calls `action` on the connection as an agent acting for its owner. */
-const call = async (
-  connection: { id: string; person: ConnectionPerson },
-  action: string,
-  input: Call["input"],
-  extra: Partial<Call> = {}
-) =>
-  await callAs(agentFor(connection.person.userId), {
-    connectionId: connection.id,
-    action,
-    input,
-    ...extra,
-  });
 
 /** What a probe reports about its attempt. */
 interface Attempt {
@@ -110,23 +98,6 @@ const probe = async (
 
 /** A probe's report of a request the egress handler refused. */
 const refused = { status: 403, error: null };
-
-/** The output an `action_failed` error carries, as JSON text. */
-const failedOutput = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-  } catch (error) {
-    if (
-      connectErrors.codeOf(error) === "connect.action_failed" &&
-      error instanceof Error &&
-      "details" in error
-    ) {
-      return JSON.stringify(error.details);
-    }
-    throw error;
-  }
-  throw new Error("The call didn't fail");
-};
 
 describe("a native connector", () => {
   it("calls its provider through the egress handler, with the connection's token", async () => {
@@ -203,12 +174,11 @@ describe("a native connector", () => {
       idempotencyKey: "run-2:send",
     };
     const send = async (mask: string[]): Promise<unknown> => {
-      const capability = await signCapability(
-        env.CAPABILITY_SIGNING_KEY,
+      const { output } = await callAs(
         agentFor(connection.person.userId),
-        { ...stated, mask }
+        stated,
+        { mask }
       );
-      const { output } = await exports.default.call({ ...stated, capability });
       const parsed: unknown = JSON.parse(output);
       return parsed;
     };
@@ -731,7 +701,7 @@ describe("the egress handler", () => {
         "corpora=drive&driveId=d-1&driveId=d-2",
       ].map(async (query) => {
         const response = await egress.fetch(`${url}?${query}`);
-        return response.headers.get("grasp-egress") ?? "sent";
+        return response.headers.get(egressHeader) ?? "sent";
       })
     );
     expect(statuses).toStrictEqual([
@@ -773,7 +743,7 @@ describe("the egress handler", () => {
         );
         return {
           status: response.status,
-          egress: response.headers.get("grasp-egress"),
+          egress: response.headers.get(egressHeader),
         };
       })
     );
@@ -855,7 +825,7 @@ describe("every native tool", () => {
       const refusals = await Promise.all(
         [...undeclared, ...nested].map(
           async (input) =>
-            await failedOutput(
+            await toolError(
               call(connection, action, input, {
                 idempotencyKey: crypto.randomUUID(),
               })
@@ -865,12 +835,12 @@ describe("every native tool", () => {
       expect(
         refusals
           .slice(0, undeclared.length)
-          .every((text) => text.includes("unrecognized_keys"))
+          .every((text) => String(text).includes("unrecognized_keys"))
       ).toBeTruthy();
       expect(
         refusals
           .slice(undeclared.length)
-          .every((text) => text.includes("Invalid input"))
+          .every((text) => String(text).includes("Invalid input"))
       ).toBeTruthy();
       expect(api.sent).toStrictEqual([]);
     }
