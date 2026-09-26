@@ -39,6 +39,15 @@ const server = fakeMcpServer(serverUrl, [
         : { output: { forwarded: true } },
   },
   {
+    name: "mail.bounce",
+    // Says it did nothing, as only a native connector is believed.
+    run: () => ({
+      output: { error: "Rate limited" },
+      isError: true,
+      notPerformed: true,
+    }),
+  },
+  {
     name: "mail.archive",
     run: async () => {
       await archiveDone;
@@ -173,6 +182,41 @@ describe("a side effect", () => {
       "connect.server_unavailable"
     );
     await expect(outcome(callAs(anna, call))).resolves.toBe("ok");
+    expect(server.ran).toHaveLength(1);
+  });
+
+  it("that a remote server answered 429 is never sent again", async () => {
+    const connectionId = await addConnection();
+    const call = send(connectionId, "run-1:send");
+    // A server of its own making may send its provider's 429 after a
+    // first write: its outcome is unknown.
+    server.network = "rate-limited";
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.outcome_unknown"
+    );
+    const requestsBefore = server.requests;
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.outcome_unknown"
+    );
+    expect(server.requests).toBe(requestsBefore);
+  });
+
+  it("that a remote server's tool says it didn't do is never sent again", async () => {
+    const connectionId = await addConnection();
+    const call = {
+      connectionId,
+      action: "mail.bounce",
+      input: {},
+      idempotencyKey: "run-1:bounce",
+    };
+    // A tool we don't review could say so after acting: its word frees no
+    // key, and its error is the answer to every repeat.
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.action_failed"
+    );
+    await expect(outcome(callAs(anna, call))).resolves.toBe(
+      "connect.action_failed"
+    );
     expect(server.ran).toHaveLength(1);
   });
 

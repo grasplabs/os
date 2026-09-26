@@ -90,7 +90,10 @@ export default defineConnector({
         url.searchParams.set("top", String(top ?? 10));
         const response = await fetch(url);
         if (!response.ok) {
-          throw new ToolError(`The provider answered ${response.status}`);
+          // A read changes nothing: a provider's 5xx may pass.
+          throw new ToolError(`The provider answered ${response.status}`, {
+            notPerformed: response.status >= 500,
+          });
         }
         const { items } = z
           .object({ items: z.array(itemSchema) })
@@ -124,6 +127,11 @@ export default defineConnector({
             body: JSON.stringify({ subject }),
           }
         );
+        // Rate limited: the provider refused its one write, so nothing
+        // happened, and connect may let the call be tried again.
+        if (response.status === 429) {
+          throw new ToolError("The provider is busy", { notPerformed: true });
+        }
         if (!response.ok) {
           throw new ToolError(`The provider answered ${response.status}`);
         }

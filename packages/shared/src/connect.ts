@@ -244,11 +244,11 @@ export const connectErrors = defineErrorFamily({
   "connect.idempotency_conflict":
     "This idempotency key was already used with a different input.",
   "connect.answer_not_kept":
-    "A call with this idempotency key already ran, but its answer is no longer kept, so it won't run again. Use a new key to run it anew.",
+    "A call with this idempotency key already ran, but its answer is no longer kept, so it won't run again.",
   "connect.call_in_progress":
     "A call with this idempotency key is still running. Try again shortly.",
   "connect.outcome_unknown":
-    "A call with this idempotency key was interrupted after it was sent, so it may or may not have taken effect. Check before trying again with a new key.",
+    "A call with this idempotency key was interrupted after it was sent, so it may or may not have taken effect, and it won't be sent again. Check the outside system to see whether it did.",
   "connect.action_failed": "The action reported an error.",
   "connect.server_unavailable":
     "The connection's server didn't take the call, so nothing was done.",

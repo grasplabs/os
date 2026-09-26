@@ -1,4 +1,5 @@
 import type { AiBinding } from "@earendil-works/pi-ai/api/cloudflare-ai-binding";
+import { appErrors } from "@grasp-os/shared/apps";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { PermissionRequest } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
@@ -7,6 +8,7 @@ import { introspectWorkflow, runInDurableObject } from "cloudflare:test";
 import type { WorkflowInstanceIntrospector } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
@@ -15,13 +17,17 @@ import { startRun } from "../src/workflows/runs.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
+import { mailControlUrl, mailServerUrl } from "./mail-server.ts";
+import type { MailAnswer } from "./mail-server.ts";
 import { openRpc, signedInWithRole } from "./sign-in.ts";
+import { connectDb, testBinding } from "./test-env.ts";
 
 // Workflows are code the agent writes, run for real: committed to an App,
 // tested when their version is made current, and run on Cloudflare
 // Workflows by the dispatcher, each in an isolate of its own. Workflows'
-// test helpers skip sleeps and inject events; the model provider behind AI
-// Gateway is the one outside system faked here.
+// test helpers skip sleeps and inject events; the outside systems faked
+// here are the model provider behind AI Gateway, and a mail provider's MCP
+// server behind the real connect (test/mail-server.ts).
 
 const idp = mockIdp();
 
@@ -40,7 +46,7 @@ type Person = Awaited<ReturnType<typeof personApi>>;
  */
 const server = `import { DurableObject } from "cloudflare:workers";
 
-type Caller = { userId: string };
+type Caller = { userId: string; idempotencyKey?: string };
 
 export class App extends DurableObject {
   hit(_caller: Caller, name: string): number {
@@ -62,6 +68,22 @@ export class App extends DurableObject {
   book(caller: Caller, entry: { invoice: string; total: number }, key: string): string {
     this.hit(caller, "book:" + key);
     return "ledger-" + entry.invoice + "-for-" + caller.userId;
+  }
+
+  // Mails the invoice with the caller's key, or with a key of its own.
+  async mail(caller: Caller, ownKey: boolean): Promise<unknown> {
+    const idempotencyKey = ownKey ? crypto.randomUUID() : caller.idempotencyKey;
+    try {
+      const { output } = await (this.env as any).MAIL.call(
+        caller,
+        "mail.send",
+        { to: "ben@acme.test", subject: "Invoice INV-7" },
+        { idempotencyKey }
+      );
+      return JSON.parse(output);
+    } catch (error) {
+      return { refused: (error as { code?: string }).code };
+    }
   }
 }
 `;
@@ -362,6 +384,91 @@ const refusal = async (promise: Promise<unknown>): Promise<unknown> =>
   await promise.then(
     () => "ok",
     (error: unknown) => error
+  );
+
+const isFetcher = (value: unknown): value is Fetcher =>
+  typeof value === "object" && value !== null && "fetch" in value;
+
+/** The outside systems connect reaches (test/connect-providers.ts). */
+const providers = (): Fetcher => {
+  const fetcher = testBinding("CONNECT_PROVIDERS");
+  if (!isFetcher(fetcher)) {
+    throw new TypeError("Expected the providers Worker as CONNECT_PROVIDERS");
+  }
+  return fetcher;
+};
+
+const mailServerStateSchema = z.object({
+  calls: z.number(),
+  sent: z.array(z.object({ to: z.string(), subject: z.string() })),
+});
+
+/**
+ * A shared mail connection in connect's registry, as a Composio toolkit's,
+ * to a mail server of its own that answers its next calls as `plan` says
+ * (then sends mail), and tells what it did.
+ */
+const mailConnection = async (plan: MailAnswer[] = []) => {
+  const name = `mail-${crypto.randomUUID()}`;
+  const id = `connection-${name}`;
+  const now = Date.now();
+  await connectDb()
+    .prepare(
+      "INSERT INTO connections (id, provider, scope, status, server_kind, server, created_at, updated_at) VALUES (?, 'mail', 'shared', 'active', 'composio', ?, ?, ?)"
+    )
+    .bind(id, mailServerUrl(name), now, now)
+    .run();
+  await providers().fetch(mailControlUrl(name), {
+    method: "POST",
+    body: JSON.stringify({ plan }),
+  });
+  return {
+    id,
+    /** What the mail server did: calls that reached its tool, mail sent. */
+    did: async () => {
+      const response = await providers().fetch(mailControlUrl(name));
+      return mailServerStateSchema.parse(await response.json());
+    },
+  };
+};
+
+/** Gives the App `MAIL`, for sending on the connection; an admin grants it. */
+const grantMail = async (
+  admin: Person,
+  requester: Person,
+  app: string,
+  connectionId: string
+): Promise<void> => {
+  const { id } = await requester.api.permissions.request({
+    subject: { type: "app", appId: app },
+    object: { type: "connection", connectionId },
+    actions: ["mail.send"],
+    binding: "MAIL",
+  });
+  await admin.api.permissions.grant(id);
+};
+
+/** The mail each test's workflow sends. */
+const invoiceMail = { to: "ben@acme.test", subject: "Invoice INV-7" };
+
+/**
+ * A workflow `mailer` that sends the invoice mail in its side-effect step
+ * `send`, with the step's idempotency key, with the step's `options`; then
+ * runs `after` in the step, with the connector's answer as `sent`.
+ */
+const mailer = (options: string, after = "") =>
+  workflowFiles(
+    "mailer",
+    `  return await step.do(
+    "send",
+    { description: "Send the invoice", sideEffect: true, input: ${JSON.stringify(invoiceMail)}, ${options} },
+    async ({ idempotencyKey, input: mail }) => {
+      const sent = JSON.parse((await env.MAIL.call("mail.send", mail, { idempotencyKey })).output);
+${after}
+      return sent;
+    }
+  );`,
+    { send: { messageId: "mocked" } }
   );
 
 describe("workflow runs", { timeout: 60_000 }, () => {
@@ -894,11 +1001,13 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       );
       return ofRun;
     });
-    const { status, error } = await admin.api.workflows.status(run.id);
+    const { status, error, failure } = await admin.api.workflows.status(run.id);
     expect({
       status,
       row: await rowStatus(run.id),
       hijack: error?.message.includes("bad: workflow.invalid"),
+      // It failed after the step it caught, outside any step.
+      failure: { step: failure?.step, code: failure?.error.code },
       audited: events
         .filter(({ action }) => action !== "workflow.run.started")
         .map(({ action, detail }) =>
@@ -911,6 +1020,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       status: "failed",
       row: "failed",
       hijack: true,
+      failure: { step: null, code: "workflow.run_failed" },
       audited: [
         "workflow.run.failed  workflow.run_failed",
         "workflow.step.completed $sneaky",
@@ -1042,5 +1152,300 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       { status: "completed", output: undefined },
       { status: "completed", output: "what the starter may read" },
     ]);
+  });
+});
+
+describe("workflow side effects and failures", { timeout: 60_000 }, () => {
+  it("send once when a side-effect step is killed after the mail went out, and retried", async () => {
+    const admin = await personApi("admin");
+    const mail = await mailConnection();
+    const app = await appWith(
+      admin,
+      mailer(
+        `timeout: "1 second", retries: { limit: 1, delay: 10 }`,
+        `      if ((await env.APP.call("hit", "send")) === 1) {
+        // Hangs until the engine gives up on this attempt.
+        await new Promise(() => {});
+      }`
+      )
+    );
+    await grantMail(admin, admin, app, mail.id);
+    const run = await admin.api.workflows.start(app, "mailer");
+    await finished(run.id);
+
+    expect({
+      run: await admin.api.workflows.status(run.id),
+      attempts: await hitsOf(app, admin.userId, "send"),
+      server: await mail.did(),
+    }).toMatchObject({
+      // The retry got the first call's answer, not a second mail.
+      run: { status: "completed", output: { messageId: "message-1" } },
+      attempts: 2,
+      server: { calls: 1, sent: [invoiceMail] },
+    });
+  });
+
+  it("retry a call the connection's server took nothing of, with the step's key, until it goes through", async () => {
+    const admin = await personApi("admin");
+    // As a native connector's 429 comes back from connect: nothing done
+    // (connect's own tests run that end to end).
+    const mail = await mailConnection(["unavailable", "unavailable"]);
+    const app = await appWith(
+      admin,
+      mailer(`retries: { limit: 3, delay: 10, backoff: "constant" }`)
+    );
+    await grantMail(admin, admin, app, mail.id);
+    const run = await admin.api.workflows.start(app, "mailer");
+    await finished(run.id);
+
+    expect({
+      run: await admin.api.workflows.status(run.id),
+      server: await mail.did(),
+    }).toMatchObject({
+      run: { status: "completed", output: { messageId: "message-1" } },
+      server: { calls: 1, sent: [invoiceMail] },
+    });
+  });
+
+  it("take a connection call only inside a step, and with the step's own key", async () => {
+    const admin = await personApi("admin");
+    const mail = await mailConnection();
+    const app = await appWith(
+      admin,
+      workflowFiles(
+        "keys",
+        `  const codeOf = async (key) => {
+    try {
+      await env.MAIL.call("mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: key });
+      return "sent";
+    } catch (error) {
+      return error.code;
+    }
+  };
+  const outside = await codeOf("keys-outside");
+  const inside = await step.do(
+    "send",
+    { description: "Send the invoice", sideEffect: true, input: null },
+    async ({ idempotencyKey }) => ({
+      // A key of each attempt's own would send once per attempt.
+      perAttempt: await codeOf(idempotencyKey + ":attempt-2"),
+      // A constant key would answer every run with the first run's mail.
+      constant: await codeOf("invoice-INV-7"),
+    })
+  );
+  // A step whose last attempt hangs: once it has settled, calls between
+  // steps are refused again.
+  try {
+    await step.do("hang", { description: "Hang", timeout: "1 second", retries: { limit: 0 } }, async () => {
+      await new Promise(() => {});
+    });
+  } catch {}
+  const afterHang = await codeOf("keys-after-hang");
+  return { outside, ...inside, afterHang };`,
+        { send: {}, hang: null }
+      )
+    );
+    await grantMail(admin, admin, app, mail.id);
+    const run = await admin.api.workflows.start(app, "keys");
+    await finished(run.id);
+
+    expect({
+      run: await admin.api.workflows.status(run.id),
+      server: await mail.did(),
+    }).toMatchObject({
+      run: {
+        status: "completed",
+        output: {
+          outside: "workflow.outside_step",
+          perAttempt: "workflow.idempotency_key_invalid",
+          constant: "workflow.idempotency_key_invalid",
+          afterHang: "workflow.outside_step",
+        },
+      },
+      server: { calls: 0, sent: [] },
+    });
+  });
+
+  it("have their App's methods mail with the step's key only, once across a retry", async () => {
+    const admin = await personApi("admin");
+    const mail = await mailConnection();
+    const app = await appWith(
+      admin,
+      workflowFiles(
+        "app-mailer",
+        `  return await step.do(
+    "send",
+    { description: "Send the invoice", sideEffect: true, input: null, timeout: "1 second", retries: { limit: 1, delay: 10 } },
+    async () => {
+      // A key of the method's own would send once per attempt.
+      const ownKey = await env.APP.call("mail", true);
+      const sent = await env.APP.call("mail", false);
+      if ((await env.APP.call("hit", "app-send")) === 1) {
+        // Hangs until the engine gives up on this attempt.
+        await new Promise(() => {});
+      }
+      return { ownKey, sent };
+    }
+  );`,
+        { send: {} }
+      )
+    );
+    await grantMail(admin, admin, app, mail.id);
+    const run = await admin.api.workflows.start(app, "app-mailer");
+    await finished(run.id);
+
+    expect({
+      run: await admin.api.workflows.status(run.id),
+      attempts: await hitsOf(app, admin.userId, "app-send"),
+      server: await mail.did(),
+    }).toMatchObject({
+      run: {
+        status: "completed",
+        output: {
+          ownKey: { refused: "workflow.idempotency_key_invalid" },
+          sent: { messageId: "message-1" },
+        },
+      },
+      attempts: 2,
+      server: { calls: 1, sent: [invoiceMail] },
+    });
+  });
+
+  it("stop at a refused call without retrying it, with a report for the run's owner", async () => {
+    const admin = await personApi("admin");
+    const owner = await personApi("builder");
+    const starter = await personApi("builder");
+    const mail = await mailConnection(["invalid", "invalid"]);
+    const app = await appWith(
+      owner,
+      mailer(`retries: { limit: 3, delay: 10, backoff: "constant" }`)
+    );
+    await grantMail(admin, owner, app, mail.id);
+    // One run a person started, which acts for them; one a trigger
+    // started, which acts for the App's owner.
+    const started = await starter.api.workflows.start(app, "mailer");
+    const byTrigger = await triggered(app, "mailer");
+    await Promise.all([finished(started.id), finished(byTrigger.id)]);
+    const failures = async (person: Person) => {
+      const runs = await person.api.workflows.list(app);
+      const failureOf = (id: string) =>
+        runs.find((run) => run.id === id)?.failure?.run ?? null;
+      const { failure } = await person.api.workflows.status(started.id);
+      return {
+        status: failure?.run,
+        listed: [failureOf(started.id), failureOf(byTrigger.id)],
+      };
+    };
+    const unknownApp = await refusal(
+      starter.api.workflows.list(crypto.randomUUID())
+    );
+    const events = await vi.waitFor(async () => {
+      const all = await allEvents();
+      const failed = all.filter(
+        ({ action, target }) =>
+          action === "workflow.run.failed" && target?.id === started.id
+      );
+      expect(failed).toHaveLength(1);
+      return failed;
+    });
+
+    const seen = {
+      starter: await failures(starter),
+      owner: await failures(owner),
+      admin: await failures(admin),
+    };
+    // A new owner doesn't get to see what the run read for the old one.
+    await env.DB.prepare("UPDATE apps SET owner_id = ? WHERE id = ?")
+      .bind(starter.userId, app)
+      .run();
+    const { listed: starterLists } = await failures(starter);
+    const { listed: ownerLists } = await failures(owner);
+    const afterOwnerChange = { starter: starterLists, owner: ownerLists };
+
+    expect({
+      server: await mail.did(),
+      report: await admin.api.workflows.status(started.id),
+      seen,
+      afterOwnerChange,
+      audited: events.map(({ detail }) => detail.error),
+      unknownApp: appErrors.codeOf(unknownApp),
+    }).toMatchObject({
+      // One call each, never retried: the tool may have acted.
+      server: { calls: 2, sent: [] },
+      report: {
+        status: "failed",
+        failure: {
+          run: started.id,
+          app,
+          workflow: "mailer",
+          version: 1,
+          step: "send",
+          // What the step works on, without the values.
+          input: { to: "string", subject: "string" },
+          error: {
+            code: "connect.action_failed",
+            message: "The action reported an error.",
+          },
+        },
+      },
+      seen: {
+        starter: { status: started.id, listed: [started.id, null] },
+        owner: { status: undefined, listed: [null, byTrigger.id] },
+        admin: { status: started.id, listed: [started.id, byTrigger.id] },
+      },
+      afterOwnerChange: {
+        starter: [started.id, null],
+        owner: [null, byTrigger.id],
+      },
+      audited: ["connect.action_failed"],
+      unknownApp: "app.not_found",
+    });
+  });
+
+  it("stop at an error of the workflow's own without retrying it, reporting its input's shape but none of its data", async () => {
+    const admin = await personApi("admin");
+    const app = await appWith(
+      admin,
+      workflowFiles(
+        "careless",
+        `  await step.do(
+    "check",
+    {
+      description: "Check the customer",
+      input: { customer: "c-1", "anna@example.com": true, "INV-2026-0007": 1, lines: [1, 2], note: null },
+      retries: { limit: 3, delay: 10 },
+    },
+    async () => {
+      await env.APP.call("hit", "check");
+      throw new Error("Customer c-1 is blocked");
+    }
+  );`,
+        { check: null }
+      )
+    );
+    const run = await admin.api.workflows.start(app, "careless");
+    await finished(run.id);
+
+    const { failure } = await admin.api.workflows.status(run.id);
+    expect({
+      failure,
+      attempts: await hitsOf(app, admin.userId, "check"),
+    }).toMatchObject({
+      failure: {
+        step: "check",
+        // No values; no field whose name could be data (an address, an ID).
+        input: {
+          customer: "string",
+          lines: "array",
+          note: "null",
+          "…": "2 more",
+        },
+        error: {
+          code: "workflow.run_failed",
+          message: "Customer c-1 is blocked",
+        },
+      },
+      attempts: 1,
+    });
   });
 });

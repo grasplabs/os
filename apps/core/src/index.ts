@@ -10,7 +10,6 @@ export { AuditLog } from "./audit-log.ts";
 export { AppConnectionBinding } from "./app-bindings.ts";
 export { ConnectionBinding } from "./bindings.ts";
 export { CollectionBinding } from "./knowledge/binding.ts";
-export { RunAppBinding } from "./workflows/app-binding.ts";
 export {
   DynamicWorkflowBinding,
   WorkflowDispatcher,

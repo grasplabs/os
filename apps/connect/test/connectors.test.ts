@@ -162,6 +162,37 @@ describe("a native connector", () => {
     expect(api.sent.map(({ method }) => method)).toStrictEqual(["POST"]);
   });
 
+  it("that says its provider rate limited it frees its key, so a retry writes once", async () => {
+    const connection = await connectionTo("sample");
+    const send = async () =>
+      await outcome(
+        call(
+          connection,
+          "items.send",
+          { mailbox: "invoices@acme.test", subject: "Paid" },
+          { idempotencyKey: "run-1:send" }
+        )
+      );
+    api.rateLimited = 1;
+    const outcomes = [await send(), await send(), await send()];
+    expect({ outcomes, written: api.written }).toStrictEqual({
+      // Retryable, then carried out, then the stored answer.
+      outcomes: ["connect.server_unavailable", "ok", "ok"],
+      written: 1,
+    });
+  });
+
+  it("that says a read failed for a passing cause lets it be retried", async () => {
+    const connection = await connectionTo("sample");
+    const list = async () =>
+      await outcome(
+        call(connection, "items.list", { mailbox: "invoices@acme.test" })
+      );
+    api.failingReads = 1;
+    const outcomes = [await list(), await list()];
+    expect(outcomes).toStrictEqual(["connect.server_unavailable", "ok"]);
+  });
+
   it("is held to the resource its capability names", async () => {
     const connection = await connectionTo("sample");
     await expect(

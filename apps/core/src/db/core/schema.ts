@@ -1,3 +1,4 @@
+import type { RunFailure } from "@grasp-os/shared/workflows";
 /**
  * Core D1 database: identity (Better Auth), permissions and the App registry.
  *
@@ -346,6 +347,9 @@ export const appVersions = sqliteTable(
  * needs to load it again, and lists runs. `status` is where the run was
  * last seen by core: `running` covers waiting too. `owner_waits` counts
  * the times it paused for an owner, which names each of those waits.
+ * `failure` is a failed run's report (JSON): where and why it stopped,
+ * without the values it worked on. `acting_for` is the person it last acted
+ * for, who sees what it read; null on rows from before it was kept.
  */
 export const workflowRuns = sqliteTable(
   "workflow_runs",
@@ -363,6 +367,8 @@ export const workflowRuns = sqliteTable(
     ownerWaits: integer("owner_waits").notNull().default(0),
     createdAt: timestamp("created_at").notNull(),
     endedAt: timestamp("ended_at"),
+    failure: text({ mode: "json" }).$type<RunFailure>(),
+    actingFor: text("acting_for"),
   },
   (table) => [index("workflow_runs_app_idx").on(table.appId, table.createdAt)]
 );

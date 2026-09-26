@@ -18,6 +18,25 @@ export const resourceMetaKey = "grasp-os/resource";
 export const provenanceMetaKey = "grasp-os/provenance";
 
 /**
+ * Result `_meta` key: `true` on an error result (`isError`) says the tool
+ * did nothing at all, so trying again can't do anything twice: its
+ * provider rate limited it, say, before it sent any write. A connector
+ * sets it with `new ToolError(message, { notPerformed: true })`. Connect
+ * then frees the call's idempotency key and answers
+ * `connect.server_unavailable`, which a workflow step retries. Without it,
+ * a tool's error is final: the tool may have acted before it failed, so
+ * its answer is kept for the key.
+ *
+ * Connect takes this only from native connectors, whose code is ours and
+ * reviewed. A Composio or other remote server setting it is ignored: its
+ * tools are code we don't review, and a tool that acted and then claimed
+ * it hadn't would get its side effect run twice. Nor does connect take a
+ * remote server's HTTP 429 as "nothing done": a server of its own making
+ * may send one for its provider's 429 after a first write.
+ */
+export const notPerformedMetaKey = "grasp-os/not-performed";
+
+/**
  * Tool `_meta` key: the paths of the output fields that may be masked, such
  * as a message's body where a permission covers only its metadata.
  */

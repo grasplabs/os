@@ -87,6 +87,9 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
           },
           // Connect's database, as CONNECT_DB, so the setup can migrate it.
           d1Databases: { CONNECT_DB: "grasp-os-connect" },
+          // The outside systems connect reaches, so tests can plan how
+          // they answer and read what they did (test/mail-server.ts).
+          serviceBindings: { CONNECT_PROVIDERS: "connect-providers" },
           // Deliver audit events at once instead of waiting to fill a batch.
           queueConsumers: { "grasp-os-audit": { maxBatchTimeout: 0 } },
           // A stand-in frontend and the screen compiler, written by the

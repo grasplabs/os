@@ -276,24 +276,41 @@ describe("step.do", () => {
     expect(ran).toStrictEqual([]);
   });
 
-  it("retries a failing step as often as asked", async () => {
-    let attempts = 0;
-    const definition = withStep(
-      async (step) =>
-        await step.do(
-          "call",
-          { description: "Call", retries: { limit: 2 } },
-          async () => {
-            attempts += 1;
-            if (attempts < 3) {
-              throw new Error("Flaky");
+  it("retries a step that fails for a passing cause as often as asked, and any other failure never", async () => {
+    const failingWith = (error: () => Error) => {
+      let attempts = 0;
+      return withStep(
+        async (step) =>
+          await step.do(
+            "call",
+            { description: "Call", retries: { limit: 2 } },
+            async () => {
+              attempts += 1;
+              if (attempts < 3) {
+                throw error();
+              }
+              return attempts;
             }
-            return attempts;
-          }
-        )
+          )
+      );
+    };
+    // As a connection's server answers a rate-limited call: nothing done.
+    const rateLimited = failingWith(() =>
+      Object.assign(new Error("Busy"), { code: "connect.server_unavailable" })
     );
+    // As a tool reports bad input: trying again changes nothing.
+    const refused = failingWith(() =>
+      Object.assign(new Error("Refused"), { code: "connect.action_failed" })
+    );
+    const thrown = failingWith(() => new Error("No such customer"));
 
-    await expect(definition.run(createFakeEngine().engine)).resolves.toBe(3);
+    await expect(rateLimited.run(createFakeEngine().engine)).resolves.toBe(3);
+    await expect(refused.run(createFakeEngine().engine)).rejects.toThrow(
+      "Refused"
+    );
+    await expect(thrown.run(createFakeEngine().engine)).rejects.toThrow(
+      "No such customer"
+    );
   });
 
   it("fails a step whose result isn't JSON, which an engine can't store", async () => {

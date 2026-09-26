@@ -42,7 +42,10 @@ export type BindingMethod = (...args: Json[]) => Promise<unknown>;
  * input, { idempotencyKey })`), and its App's own server methods
  * (`env.APP.call(method, ...args)`). Each call is checked against the
  * permissions as they are then, and acts for the person the run acts for.
- * Call them only inside a step: a replay doesn't call them again.
+ * They work only inside a step (a replay doesn't call them again), and a
+ * connection call takes that step's `idempotencyKey` or none. An App
+ * method a step calls gets the same key on its caller
+ * (`caller.idempotencyKey`), the only one its own connection calls take.
  */
 export type WorkflowEnv = Readonly<
   Record<string, Readonly<Record<string, BindingMethod>>>
@@ -108,10 +111,10 @@ export interface WorkflowEngine {
   readonly env: WorkflowEnv;
   /**
    * Runs `fn` as a durable step and records its result. Retries a failing
-   * `fn` as `retries` says and then fails the run with the last error. An
-   * error for which `isNonRetryable` holds is a deterministic failure: fail
-   * at once, without retrying (the Cloudflare adapter throws it on as a
-   * `NonRetryableError`).
+   * `fn` as `retries` says, while it fails with an error for which
+   * `isRetryable` (`@grasp-os/shared/workflows`) holds, and then fails the
+   * step with the last error. Any other error fails the step at once (the
+   * Cloudflare adapter throws it on as a `NonRetryableError`).
    */
   do: <T>(
     name: string,
@@ -152,13 +155,3 @@ export interface WorkflowEngine {
    */
   setState: (key: string, value: Json, idempotencyKey: string) => Promise<void>;
 }
-
-/**
- * Whether an error is a deterministic failure that trying again can't fix:
- * a bad parameter value, say. The SDK marks these with `nonRetryable: true`.
- */
-export const isNonRetryable = (error: unknown): boolean =>
-  typeof error === "object" &&
-  error !== null &&
-  "nonRetryable" in error &&
-  error.nonRetryable === true;

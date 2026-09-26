@@ -415,17 +415,24 @@ export class App extends DurableObject<Env> {
 
   /**
    * Who a stub call acts for: the caller of the running call `token`
-   * names. For the App's stubs (app-bindings.ts) only.
+   * names, and, for a workflow run's step, that step's idempotency key.
+   * For the App's stubs (app-bindings.ts) only.
    */
-  authorityOf(token: string): Authority {
+  callerOf(token: string): {
+    authority: Authority;
+    idempotencyKey: string | undefined;
+  } {
     const caller = this.#calls.get(token);
     if (!caller) {
       throw appErrors.create("app.caller_invalid");
     }
     return {
-      subject: { type: "app", appId: this.#app },
-      onBehalfOf: caller.userId,
-      mode: caller.mode,
+      authority: {
+        subject: { type: "app", appId: this.#app },
+        onBehalfOf: caller.userId,
+        mode: caller.mode,
+      },
+      idempotencyKey: caller.idempotencyKey,
     };
   }
 

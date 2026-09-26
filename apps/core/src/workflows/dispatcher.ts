@@ -8,26 +8,27 @@ import {
 import type { AppId, RunId } from "@grasp-os/shared/ids";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
-import { exports } from "cloudflare:workers";
 import { z } from "zod";
 
+import { callApp } from "../app.ts";
 import { versionFiles } from "../apps.ts";
-import { bindingsFor } from "../bindings.ts";
+import { runBindingsFor } from "../bindings.ts";
 import { featureEnabled } from "../features.ts";
 import { requireActivePerson } from "../permissions.ts";
 import type { WorkContext } from "../restricted.ts";
 import { loadRun } from "./code.ts";
 import type { Settled, StepError } from "./code.ts";
 import { coreStepPrefix, fromIsolate, RunHost, settle } from "./host.ts";
-import type { HostedRun, RunStep } from "./host.ts";
+import type { FailedStep, HostedRun, RunStep } from "./host.ts";
 import {
+  actFor,
   appRecord,
   endRun,
   findRun,
   pauseForOwner,
   resumeRun,
 } from "./runs.ts";
-import type { RunRow } from "./runs.ts";
+import type { RunRow, Stopped } from "./runs.ts";
 
 export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 
@@ -104,6 +105,31 @@ const whileOwnerActs = async <T>(
   const now = (await findRun(env, runIdSchema.parse(row.id))) ?? row;
   await resumeRun(env, now);
   return await whileOwnerActs(env, step, now, attempt);
+};
+
+/**
+ * What a failed run reports: the step it stopped at, when it failed with
+ * the error of the step that failed last (workflow code that caught that
+ * error and failed otherwise, or failed before any step, stopped at none),
+ * and its error's code and message.
+ */
+const stoppedWith = (
+  error: StepError,
+  last: FailedStep | undefined
+): Stopped => {
+  const atStep =
+    last !== undefined &&
+    last.error.name === error.name &&
+    last.error.message === error.message &&
+    last.error.code === error.code;
+  return {
+    step: atStep ? last.step : null,
+    input: atStep ? last.input : null,
+    error: {
+      code: error.code ?? "workflow.run_failed",
+      message: error.message,
+    },
+  };
 };
 
 /** The error a failed run ends with: its own name and message. */
@@ -208,8 +234,12 @@ const runWorkflow = async (
   const engineFailed = (error: unknown): void => {
     engineError = { error };
   };
+  let lastFailed: FailedStep | undefined;
+  const stepFailed = (failure: FailedStep): void => {
+    lastFailed = failure;
+  };
   const result = await settledRun(engineFailed, async () => {
-    const { authority, bindings } = await whileOwnerActs(
+    const { authority, bindings, connections } = await whileOwnerActs(
       env,
       step,
       row,
@@ -217,25 +247,23 @@ const runWorkflow = async (
         const acting = await authorityOf(env, row);
         return {
           authority: acting,
-          bindings: await bindingsFor(
+          ...(await runBindingsFor(
             env,
             acting,
             contextOf(pinned.data.app, runId)
-          ),
+          )),
         };
       }
     );
     await resumeRun(env, row);
-    const run: HostedRun = { ...pinned.data, runId, authority };
+    await actFor(env, row, authority.onBehalfOf);
+    const run: HostedRun = { ...pinned.data, runId, authority, connections };
     const code = loadRun(env, {
       app: run.app,
       version: run.version,
       workflow: run.workflow,
       files: await versionFiles(env, run.app, run.version),
-      env: {
-        ...bindings,
-        APP: exports.RunAppBinding({ props: { app: run.app, authority } }),
-      },
+      env: bindings,
     });
     // Before every step, the person the run acts for must still be there.
     const acting = async (): Promise<void> => {
@@ -243,13 +271,20 @@ const runWorkflow = async (
         await requireActivePerson(env, authority);
       });
     };
-    const host = new RunHost(env, step, run, { acting, engineFailed });
+    const host = new RunHost(env, step, run, {
+      acting,
+      engineFailed,
+      stepFailed,
+      callApp: async (caller, method, args) =>
+        await callApp(env, run.app, caller, method, args),
+    });
     return await code.run(host, {
       runId,
       // Parameter values people set come with the workflow view; until
       // then every run uses the defaults in the code.
       params: {},
       input: event.payload,
+      connections: Object.keys(connections),
     });
   });
   const failed = result.ok ? undefined : result.error;
@@ -259,9 +294,12 @@ const runWorkflow = async (
     const stopped = engineError?.error;
     throw stopped instanceof Error ? stopped : runError(failed);
   }
-  // A step, so a run that ended is recorded and audited once.
+  // A step, so a run that ended is recorded and audited once. A failed
+  // run stops here, whatever failed: the step's retries (only for failures
+  // trying again may fix, host.ts) are behind it.
+  const stopped = failed && stoppedWith(failed, lastFailed);
   await step.do(`${coreStepPrefix}end`, {}, async () => {
-    await endRun(env, row, failed);
+    await endRun(env, row, stopped);
     return null;
   });
   if (failed) {
