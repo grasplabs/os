@@ -96,6 +96,8 @@ export const permissionMaxActions = 16;
  */
 export const platformBindingNames: ReadonlySet<string> = new Set([
   "AI",
+  // A workflow run's own App (its server methods), next to its permissions.
+  "APP",
   "APP_CALL_TIMEOUT_MS",
   "APPS",
   "ASSETS",

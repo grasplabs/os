@@ -28,6 +28,8 @@ import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { actorOf } from "./audit.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
+import { featureEnabled } from "./features.ts";
+import { requireWorkflowTestsPass } from "./workflows/code.ts";
 
 // The App registry and each App's code. The registry, the versions and the
 // working copy (files written since the latest version) are rows in the
@@ -55,7 +57,8 @@ const storedTreeSchema = z.record(z.string(), z.string());
 /** Most versions one `listVersions` call returns. */
 const versionsPerPage = 100;
 
-const requireBuilder = (by: Identity): void => {
+/** Refuses anyone who isn't an admin or a builder. */
+export const requireBuilder = (by: Identity): void => {
   if (!canBuild(by.role)) {
     throw roleErrors.create("role.forbidden");
   }
@@ -633,6 +636,16 @@ export const setCurrentVersion = async (
   const { version: number } = await findVersion(env, appId, version);
   if (found.currentVersion === number) {
     return found;
+  }
+  // Only a version whose workflows pass their tests runs. With workflows
+  // switched off none run, and none are tested.
+  if (featureEnabled(env, "workflows")) {
+    await requireWorkflowTestsPass(
+      env,
+      appId,
+      number,
+      await versionFiles(env, appId, number)
+    );
   }
   const previous = found.currentVersion;
   const db = drizzle(env.DB);

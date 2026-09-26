@@ -460,6 +460,9 @@ importers:
       '@cloudflare/workers-types':
         specifier: 'catalog:'
         version: 5.20260921.1
+      '@grasp-os/sdk':
+        specifier: workspace:*
+        version: link:../sdk
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.2

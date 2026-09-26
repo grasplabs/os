@@ -1,10 +1,10 @@
-import type { AppId, ChatId, WorkspaceId } from "@grasp-os/shared/ids";
+import type { AppId, ChatId, RunId, WorkspaceId } from "@grasp-os/shared/ids";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import { apps } from "./db/core/schema.ts";
+import { apps, workflowRuns } from "./db/core/schema.ts";
 import { appHost } from "./durable-objects.ts";
 import { workspace } from "./workspace.ts";
 
@@ -31,35 +31,57 @@ import { workspace } from "./workspace.ts";
 // on each chat. Whatever adds such a flow adds the flag with it.
 
 /**
- * Where an App or agent works, and keeps its restricted mode: a chat, or
- * an App. The host sets it, like the authority. Workflow runs get theirs
- * with the workflow dispatcher.
+ * Where an App or agent works, and keeps its restricted mode: a chat, an
+ * App, or a run of one of the App's workflows. The host sets it, like the
+ * authority.
+ *
+ * A run keeps its App's flag, not one of its own: a run and its App share
+ * data both ways (the workflow's state is shared by all its runs, and a run
+ * calls its App's methods, whose answers carry the App's data), so a run
+ * starts restricted when its App is, becomes so when its App does, and
+ * restricts its App when it reads restricted data itself.
  */
 export type WorkContext =
   | { type: "chat"; workspaceId: WorkspaceId; chatId: ChatId }
-  | { type: "app"; appId: AppId };
+  | { type: "app"; appId: AppId }
+  | { type: "run"; appId: AppId; runId: RunId };
 
 const contextInvalid = () =>
   permissionErrors.create("permission.context_invalid");
 
 /**
  * Refuses an App context that isn't the App `authority` names, or an App
- * that isn't in the registry, so no App can read or set another's flag.
+ * that isn't in the registry, so no App can read or set another's flag;
+ * for a run, a run that isn't one of that App's.
  */
 const requireOwnApp = async (
   env: Env,
   authority: Authority,
-  appId: AppId
+  context: Extract<WorkContext, { appId: AppId }>
 ): Promise<void> => {
   const { subject } = authority;
+  const { appId } = context;
   if (subject.type !== "app" || subject.appId !== appId) {
     throw contextInvalid();
   }
-  const found = await drizzle(env.DB)
-    .select({ id: apps.id })
-    .from(apps)
-    .where(eq(apps.id, appId))
-    .get();
+  const db = drizzle(env.DB);
+  const found =
+    context.type === "run"
+      ? await db
+          .select({ id: workflowRuns.id })
+          .from(workflowRuns)
+          .where(
+            and(
+              eq(workflowRuns.id, context.runId),
+              eq(workflowRuns.appId, appId)
+            )
+          )
+          .get()
+      : await db
+          .select({ id: apps.id })
+          .from(apps)
+          .where(eq(apps.id, appId))
+          .get();
   if (!found) {
     throw contextInvalid();
   }
@@ -75,8 +97,8 @@ const isRestricted = async (
   authority: Authority,
   context: WorkContext
 ): Promise<boolean> => {
-  if (context.type === "app") {
-    await requireOwnApp(env, authority, context.appId);
+  if (context.type !== "chat") {
+    await requireOwnApp(env, authority, context);
     return await appHost(env, context.appId).isRestricted();
   }
   const restricted = await workspace(env, context.workspaceId).isChatRestricted(
@@ -97,8 +119,8 @@ export const restrict = async (
   authority: Authority,
   context: WorkContext
 ): Promise<void> => {
-  if (context.type === "app") {
-    await requireOwnApp(env, authority, context.appId);
+  if (context.type !== "chat") {
+    await requireOwnApp(env, authority, context);
     await appHost(env, context.appId).restrict();
     return;
   }

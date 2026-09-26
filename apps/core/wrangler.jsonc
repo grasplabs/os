@@ -70,6 +70,10 @@
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Workspace", "App", "AuditLog"] },
   ],
+  // The one dispatcher of every App's workflow runs (src/workflows/): it
+  // loads each run's code by App and pinned version, with an env rebuilt
+  // from permissions on every start and resume. Runs are created with the
+  // `weur` location hint.
   "workflows": [
     {
       "name": "grasp-os-workflows",

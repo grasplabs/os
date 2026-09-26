@@ -8,9 +8,10 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
-import { callApp, sandbox } from "../src/app.ts";
+import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
+import { sandbox } from "../src/sandbox.ts";
 import { buildServer } from "../src/screens.ts";
 import { mockIdp } from "./idp.ts";
 import { outcome, signedInApi } from "./sign-in.ts";

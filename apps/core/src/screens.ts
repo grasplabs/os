@@ -4,11 +4,13 @@ import {
   limitErrors,
   serverFiles,
   startScreenCompiler,
+  workflowFiles,
 } from "@grasp-os/compiler";
 import type {
   ScreenBuild,
   ScreenSource,
   ServerBuild,
+  WorkflowBuild,
 } from "@grasp-os/compiler";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 
@@ -43,7 +45,7 @@ const buildKey = async ({
  */
 const cachedBuild = async <Build>(
   env: Env,
-  kind: "screen" | "server",
+  kind: "screen" | "server" | "workflow",
   source: ScreenSource,
   build: (
     compiler: ReturnType<typeof startScreenCompiler>,
@@ -109,5 +111,26 @@ export const buildServer = async (
     "server",
     { ...source, files },
     async (compiler, sent) => await compiler.buildServer(sent)
+  );
+};
+
+/**
+ * Builds an App's workflows (`workflows/**.ts`) into ES modules, in the
+ * compiler's isolate. A build is cached in R2, like the server's.
+ */
+export const buildWorkflows = async (
+  env: Env,
+  source: ScreenSource
+): Promise<WorkflowBuild> => {
+  const files = workflowFiles(source.files);
+  const tooMuch = limitErrors(files);
+  if (tooMuch.length > 0) {
+    return { ok: false, diagnostics: tooMuch };
+  }
+  return await cachedBuild(
+    env,
+    "workflow",
+    { ...source, files },
+    async (compiler, sent) => await compiler.buildWorkflows(sent)
   );
 };

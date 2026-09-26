@@ -351,19 +351,52 @@ export const rewriteImports =
     };
   };
 
-/** What server code may import besides its own files: the Workers runtime. */
-const serverRuntimeImports: ReadonlySet<string> = new Set([
-  "cloudflare:workers",
-]);
+/**
+ * App code that runs outside the screens: its server (`app/`) or its
+ * workflows (`workflows/`). Each imports its own files and a few of the
+ * platform's modules, by the flat name each is loaded under.
+ */
+export interface CodeKind {
+  /** What the code is, for messages: "Server" or "Workflow". */
+  name: string;
+  folder: string;
+  /** The modules it may import besides its own files, and their flat names. */
+  imports: ReadonlyMap<string, string>;
+}
+
+/** Server code imports its own files and the Workers runtime. */
+export const serverCode: CodeKind = {
+  name: "Server",
+  folder: "app/",
+  imports: new Map([["cloudflare:workers", "cloudflare:workers"]]),
+};
+
+/**
+ * The SDK modules workflow code may import: the workflow SDK and its test
+ * harness, never the engine and never the Workers runtime.
+ */
+export const sdkImports = [
+  "@grasp-os/sdk/workflow",
+  "@grasp-os/sdk/testing",
+] as const;
+
+/** Workflow code imports its own files and the SDK (`sdkImports`). */
+export const workflowCode: CodeKind = {
+  name: "Workflow",
+  folder: "workflows/",
+  imports: new Map(
+    sdkImports.map((specifier) => [specifier, kitModuleName(specifier)])
+  ),
+};
 
 const javascriptExtension = /\.js$/u;
 
 /**
- * The server file a relative import names: as `resolveRelative` finds it,
- * or written with `.js` for the `.ts` file, as TypeScript's own ES module
+ * The file a relative import names: as `resolveRelative` finds it, or
+ * written with `.js` for the `.ts` file, as TypeScript's own ES module
  * output wants it.
  */
-const resolveServerFile = (
+const resolveCodeFile = (
   importer: string,
   specifier: string,
   files: ReadonlySet<string>
@@ -377,8 +410,9 @@ const resolveServerFile = (
       )
     : undefined);
 
-/** Why a server file's import isn't allowed, or undefined when it is. */
-export const serverImportError = (
+/** Why an import in `kind` code isn't allowed, or undefined when it is. */
+export const codeImportError = (
+  kind: CodeKind,
   specifier: string | undefined,
   file: string,
   files: ReadonlySet<string>
@@ -387,35 +421,37 @@ export const serverImportError = (
     return "import() must name a module in quotes.";
   }
   if (isRelative(specifier)) {
-    return resolveServerFile(file, specifier, files) === undefined
-      ? `"${specifier}" is not a file of the App's server (app/).`
+    return resolveCodeFile(file, specifier, files) === undefined
+      ? `"${specifier}" is not a file of the App's ${kind.name.toLowerCase()} (${kind.folder}).`
       : undefined;
   }
-  return serverRuntimeImports.has(specifier)
+  return kind.imports.has(specifier)
     ? undefined
-    : `"${specifier}" can't be imported here. Server code can import its own files in app/ and ${[...serverRuntimeImports].join(", ")}.`;
+    : `"${specifier}" can't be imported here. ${kind.name} code can import its own files in ${kind.folder} and ${[...kind.imports.keys()].join(", ")}.`;
 };
 
 const isRequireCall = ({ callee }: Call): boolean =>
   callee.type === "Identifier" && callee.name === "require";
 
 /**
- * A Babel plugin that points a server module's imports at the flat names
- * of the App's files. Like `rewriteImports`, it runs on compiled code, so
- * it also sees imports the source check can't, and throws on anything but
- * the App's own server files and the runtime, `require()` included.
+ * A Babel plugin that points a module's imports at the flat names of the
+ * App's files and the platform's modules. Like `rewriteImports`, it runs
+ * on compiled code, so it also sees imports the source check can't, and
+ * throws on anything `kind` can't import, `require()` included.
  */
-export const rewriteServerImports =
-  (file: string, files: ReadonlySet<string>) => () => {
+export const rewriteCodeImports =
+  (kind: CodeKind, file: string, files: ReadonlySet<string>) => () => {
     const moduleFor = (specifier: string | undefined): string => {
-      const error = serverImportError(specifier, file, files);
+      const error = codeImportError(kind, specifier, file, files);
       if (error !== undefined || specifier === undefined) {
         throw new Error(error);
       }
       const target = isRelative(specifier)
-        ? resolveServerFile(file, specifier, files)
+        ? resolveCodeFile(file, specifier, files)
         : undefined;
-      return target === undefined ? specifier : appModuleName(target);
+      return target === undefined
+        ? (kind.imports.get(specifier) ?? specifier)
+        : appModuleName(target);
     };
     const rewriteCall = (call: Call): void => {
       if (isImportCall(call)) {
@@ -438,7 +474,7 @@ export const rewriteServerImports =
         CallExpression: (path: { node: Call }) => {
           if (isRequireCall(path.node)) {
             throw new Error(
-              "require() isn't available in server code: use import."
+              `require() isn't available in ${kind.name.toLowerCase()} code: use import.`
             );
           }
           rewriteCall(path.node);

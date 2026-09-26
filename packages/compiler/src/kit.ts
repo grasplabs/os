@@ -56,15 +56,17 @@ export const ownEntry = <T>(
 
 /**
  * Where a release's compiler is among core's static assets, and its files:
- * the compiler's code, what it knows of the kit (`Kit`) and the kit's
- * modules (`KitModules`). The path has the compiler's version in it, so a
- * cache never serves another release's.
+ * the compiler's code, what it knows of the kit (`Kit`), the kit's
+ * modules (`KitModules`) and the workflow SDK's modules, which App
+ * workflows import (`KitModules` too). The path has the compiler's version
+ * in it, so a cache never serves another release's.
  */
 export const compilerAssets = {
   directory: (version: string): string => `/_compiler/${version}`,
   source: "compiler.js",
   kit: "kit.json",
   kitModules: "kit-modules.json",
+  sdkModules: "sdk-modules.json",
 } as const;
 
 /** The name the compiler's isolate has `Kit` under, as a JSON module. */

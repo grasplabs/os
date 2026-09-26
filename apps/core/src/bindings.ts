@@ -177,12 +177,9 @@ export const stubsOf = <Stub>(
  * Throws `permission.person_inactive` when that person has left.
  *
  * That fits an agent or a workflow run, which acts for one person: the
- * dispatcher builds it on every start and resume, so a revoked permission
- * is gone from the next one. An App serves many people at once, and gets
- * `appBindings` instead.
- *
- * Workflows get their stubs with the workflow dispatcher; until then
- * nothing reaches them.
+ * workflow dispatcher (workflows/dispatcher.ts) builds it on every start
+ * and resume, so a revoked permission is gone from the next one. An App
+ * serves many people at once, and gets `appBindings` instead.
  */
 export const bindingsFor = async (
   env: Env,

@@ -23,7 +23,8 @@
     "./router": "./src/router.ts",
     "./rpc": "./src/rpc.ts",
     "./runtime": "./src/runtime.ts",
-    "./sign-in": "./src/sign-in.ts"
+    "./sign-in": "./src/sign-in.ts",
+    "./workflows": "./src/workflows.ts"
   },
   "dependencies": {
     "zod": "catalog:"

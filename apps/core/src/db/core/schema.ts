@@ -334,6 +334,35 @@ export const appVersions = sqliteTable(
 );
 
 /**
+ * Every run of an App's workflow (src/workflows/): the App version it is
+ * pinned to, and who it acts for. A run a person started acts for them
+ * (`started_by`); one a trigger started (`started_by` null) for the App's
+ * owner. Cloudflare Workflows keeps the run's steps; this row is what core
+ * needs to load it again, and lists runs. `status` is where the run was
+ * last seen by core: `running` covers waiting too. `owner_waits` counts
+ * the times it paused for an owner, which names each of those waits.
+ */
+export const workflowRuns = sqliteTable(
+  "workflow_runs",
+  {
+    id: text().primaryKey(),
+    appId: text("app_id")
+      .notNull()
+      .references(() => apps.id),
+    workflowId: text("workflow_id").notNull(),
+    version: integer().notNull(),
+    startedBy: text("started_by"),
+    status: text({
+      enum: ["running", "paused", "completed", "failed", "cancelled"],
+    }).notNull(),
+    ownerWaits: integer("owner_waits").notNull().default(0),
+    createdAt: timestamp("created_at").notNull(),
+    endedAt: timestamp("ended_at"),
+  },
+  (table) => [index("workflow_runs_app_idx").on(table.appId, table.createdAt)]
+);
+
+/**
  * An App's working copy: the files written since its latest version, until
  * they are committed. A null `content` means the file is deleted.
  * `revision` names the write that wrote the row.

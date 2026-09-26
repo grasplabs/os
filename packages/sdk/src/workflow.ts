@@ -4,7 +4,12 @@ import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
 
 import { decisionAnswerSchema } from "./engine.ts";
-import type { Backoff, EngineEvent, WorkflowEngine } from "./engine.ts";
+import type {
+  Backoff,
+  EngineEvent,
+  WorkflowEngine,
+  WorkflowEnv,
+} from "./engine.ts";
 import { currencySchema, paramValueSchemas } from "./params.ts";
 import type { ParamDefault, ParamKind, ParamValue } from "./params.ts";
 import { namePattern, nameRule, stepOptionSchemas } from "./steps.ts";
@@ -32,6 +37,7 @@ import { namePattern, nameRule, stepOptionSchemas } from "./steps.ts";
 // Workflow code imports only this module, so it gets Zod from here too.
 export { z } from "zod";
 export type { ParamKind, ParamValue } from "./params.ts";
+export type { BindingMethod, WorkflowEnv } from "./engine.ts";
 
 const workflowErrorCodes = [
   "workflow.invalid_definition",
@@ -399,6 +405,11 @@ export interface WorkflowContext<P extends Params, Input> {
   input: Input;
   params: ParamValues<P>;
   state: StateStore;
+  /**
+   * The App's connections and other permissions, and its own server
+   * methods, by binding name; call them inside steps (see `WorkflowEnv`).
+   */
+  env: WorkflowEnv;
 }
 
 // Definition
@@ -856,6 +867,7 @@ export const workflow = <
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
         params: Object.freeze(params) as ParamValues<P>,
         state: runner.state,
+        env: engine.env,
       }
     );
   };

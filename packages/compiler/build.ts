@@ -26,6 +26,7 @@ import { z } from "zod";
 
 import { extractCandidates } from "./src/candidates.ts";
 import { compileModule } from "./src/compile.ts";
+import { sdkImports } from "./src/imports.ts";
 import {
   compilerAssets,
   kitModule,
@@ -177,6 +178,30 @@ const chunksOf = (
     .filter((file) => file.type === "chunk");
 
 /**
+ * Built chunks as modules by flat name, importing each other by that name
+ * instead of by relative path, and what each imports.
+ */
+const flatModules = (
+  chunks: Rolldown.OutputChunk[]
+): { code: Record<string, string>; imports: Record<string, string[]> } => {
+  const code: Record<string, string> = {};
+  const imports: Record<string, string[]> = {};
+  for (const chunk of chunks) {
+    let flat = chunk.code;
+    const imported = [...chunk.imports, ...chunk.dynamicImports];
+    for (const name of imported) {
+      flat = flat.replaceAll(`"./${name}"`, `"${name}"`);
+    }
+    if (flat.includes('"./')) {
+      throw new Error(`${chunk.fileName} still imports by relative path`);
+    }
+    code[chunk.fileName] = flat;
+    imports[chunk.fileName] = imported;
+  }
+  return { code, imports };
+};
+
+/**
  * The kit's modules: React, `@grasp-os/ui` and lucide-react's icons, built
  * together so they share one React and one copy of every dependency. Entries
  * and the chunks they share are named flat (`react.js`, `kit~….js`), and
@@ -226,27 +251,60 @@ const buildKitModules = async (
       },
     },
   };
-  const chunks = chunksOf(await build(config));
-  const kitModules: Record<string, string> = {};
-  const imports: Record<string, string[]> = {};
-  for (const chunk of chunks) {
-    let { code } = chunk;
-    const imported = [...chunk.imports, ...chunk.dynamicImports];
-    for (const name of imported) {
-      code = code.replaceAll(`"./${name}"`, `"${name}"`);
-    }
-    if (code.includes('"./')) {
-      throw new Error(`${chunk.fileName} still imports by relative path`);
-    }
-    kitModules[chunk.fileName] = code;
-    imports[chunk.fileName] = imported;
-  }
+  const built = flatModules(chunksOf(await build(config)));
   for (const { specifier } of entries) {
-    if (kitModules[kitModuleName(specifier)] === undefined) {
+    if (built.code[kitModuleName(specifier)] === undefined) {
       throw new Error(`The kit has no module for ${specifier}`);
     }
   }
-  return { code: kitModules, imports };
+  return built;
+};
+
+/**
+ * The workflow SDK's modules, which App workflows import (`sdkImports`):
+ * one module per specifier, named by it (`@grasp-os~sdk~workflow.js`),
+ * and chunks for what they share (Zod), importing each other by flat name
+ * like the kit's modules.
+ */
+const buildSdkModules = async (): Promise<Record<string, string>> => {
+  const sdk = realpathSync(path.join(modules, "@grasp-os/sdk"));
+  const exported = exportsOf(sdk);
+  const config: InlineConfig = {
+    configFile: false,
+    root,
+    logLevel: "warn",
+    mode: "production",
+    resolve: { conditions: ["workerd", "worker"] },
+    build: {
+      write: false,
+      minify: true,
+      target: "es2022",
+      modulePreload: false,
+      copyPublicDir: false,
+      rolldownOptions: {
+        input: Object.fromEntries(
+          sdkImports.map((specifier) => {
+            const target =
+              exported[`.${specifier.slice("@grasp-os/sdk".length)}`];
+            if (typeof target !== "string") {
+              throw new TypeError(`The SDK doesn't export ${specifier}`);
+            }
+            return [
+              kitModuleName(specifier).slice(0, -".js".length),
+              path.join(sdk, target),
+            ];
+          })
+        ),
+        preserveEntrySignatures: "strict",
+        output: {
+          format: "es",
+          entryFileNames: "[name].js",
+          chunkFileNames: "sdk~[name]-[hash].js",
+        },
+      },
+    },
+  };
+  return flatModules(chunksOf(await build(config))).code;
 };
 
 /** The kit's stylesheet and the ones it imports, by their `style` export. */
@@ -514,6 +572,15 @@ const buildCompiler = async (): Promise<string> => {
   return chunk.code;
 };
 
+/** Modules with a version that changes with any change to them. */
+const modulesOf = (code: Record<string, string>): KitModules => ({
+  version: createHash("sha256")
+    .update(JSON.stringify(code))
+    .digest("hex")
+    .slice(0, 16),
+  modules: code,
+});
+
 /** Builds the kit, then the compiler, into dist/. */
 const buildScreenCompiler = async (
   assets = path.join(dist, "assets")
@@ -551,19 +618,15 @@ const buildScreenCompiler = async (
   };
   const kitJson = JSON.stringify(kit);
   const compiler = await buildCompiler();
-  const kitModules: KitModules = {
-    version: createHash("sha256")
-      .update(JSON.stringify(kitCode))
-      .digest("hex")
-      .slice(0, 16),
-    modules: kitCode,
-  };
+  const kitModules = modulesOf(kitCode);
+  const sdkModules = modulesOf(await buildSdkModules());
   // Everything a build depends on: the compiler, what it knows of the kit,
-  // and the kit's modules the App's modules import.
+  // and the kit's and the SDK's modules the App's modules import.
   const version = createHash("sha256")
     .update(compiler)
     .update(kitJson)
     .update(kitModules.version)
+    .update(sdkModules.version)
     .digest("hex")
     .slice(0, 16);
   // Core imports only the version; the rest it reads from its static
@@ -581,6 +644,10 @@ const buildScreenCompiler = async (
   writeFileSync(
     path.join(release, compilerAssets.kitModules),
     JSON.stringify(kitModules)
+  );
+  writeFileSync(
+    path.join(release, compilerAssets.sdkModules),
+    JSON.stringify(sdkModules)
   );
   const kitSize = Object.values(kitCode).join("").length;
   console.info(

@@ -33,6 +33,21 @@ export const decisionAnswerSchema = z.object({
 });
 export type DecisionAnswer = z.infer<typeof decisionAnswerSchema>;
 
+/** A method of a binding: it takes JSON and answers with it. */
+export type BindingMethod = (...args: Json[]) => Promise<unknown>;
+
+/**
+ * What a run reaches outside its own code, by binding name: one binding per
+ * permission of its App (a connection, say: `env.OUTLOOK.call(action,
+ * input, { idempotencyKey })`), and its App's own server methods
+ * (`env.APP.call(method, ...args)`). Each call is checked against the
+ * permissions as they are then, and acts for the person the run acts for.
+ * Call them only inside a step: a replay doesn't call them again.
+ */
+export type WorkflowEnv = Readonly<
+  Record<string, Readonly<Record<string, BindingMethod>>>
+>;
+
 /** How the delay between attempts grows. */
 export type Backoff = "constant" | "linear" | "exponential";
 
@@ -89,6 +104,8 @@ export interface WorkflowEngine {
    * started with even when people change them before it resumes.
    */
   readonly params: Readonly<Record<string, unknown>>;
+  /** The run's bindings, built for this execution of it (see `WorkflowEnv`). */
+  readonly env: WorkflowEnv;
   /**
    * Runs `fn` as a durable step and records its result. Retries a failing
    * `fn` as `retries` says and then fails the run with the last error. An

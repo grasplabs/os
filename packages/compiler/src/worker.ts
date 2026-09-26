@@ -10,8 +10,9 @@
  * type-checked and linted against the kit's design system; then Tailwind
  * compiles the CSS for the classes in the App's and the kit's sources.
  *
- * It also builds an App's server code, which runs in core (see
- * `buildServer`): the same Babel, stripping types only.
+ * It also builds an App's server code and workflows, which run in core
+ * (see `buildServer` and `buildWorkflows`): the same Babel, stripping
+ * types only.
  */
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { compile } from "tailwindcss";
@@ -25,11 +26,13 @@ import type { Diagnostic } from "./diagnostic.ts";
 import {
   collectImports,
   importError,
+  codeImportError,
+  rewriteCodeImports,
   rewriteImports,
-  rewriteServerImports,
-  serverImportError,
+  serverCode,
+  workflowCode,
 } from "./imports.ts";
-import type { ImportSite } from "./imports.ts";
+import type { CodeKind, ImportSite } from "./imports.ts";
 import {
   buildFiles,
   declarationFile,
@@ -37,6 +40,7 @@ import {
   screenFile,
   serverEntry,
   serverFiles,
+  workflowFiles,
 } from "./inputs.ts";
 import { appModuleName, kitStylesheet, ownEntry } from "./kit.ts";
 import { lint } from "./lint.ts";
@@ -307,8 +311,9 @@ export type ServerBuild =
   | { ok: true; mainModule: string; modules: Record<string, string> }
   | { ok: false; diagnostics: Diagnostic[] };
 
-/** Compiles one server file, or says why it can't be. */
-const compileServerFile = (
+/** Compiles one server or workflow file, or says why it can't be. */
+const compileCodeFile = (
+  kind: CodeKind,
   path: string,
   source: string,
   files: ReadonlySet<string>
@@ -326,7 +331,7 @@ const compileServerFile = (
     };
   }
   const errors = imports.flatMap(({ specifier, line }) => {
-    const message = serverImportError(specifier, path, files);
+    const message = codeImportError(kind, specifier, path, files);
     return message === undefined
       ? []
       : [
@@ -343,7 +348,7 @@ const compileServerFile = (
   try {
     return {
       code: transformModule(compiled, path, [
-        rewriteServerImports(path, files),
+        rewriteCodeImports(kind, path, files),
       ]),
     };
   } catch (error) {
@@ -351,6 +356,36 @@ const compileServerFile = (
       errors: [problem("imports", messageIn(path, error), { file: path })],
     };
   }
+};
+
+/**
+ * An App's workflows (`workflows/**.ts`, their tests included) as modules
+ * by flat name; or why they failed. They import the SDK's modules, which
+ * core loads next to them.
+ */
+export type WorkflowBuild =
+  | { ok: true; modules: Record<string, string> }
+  | { ok: false; diagnostics: Diagnostic[] };
+
+/** App code compiled file by file, as modules by flat name. */
+const compileCode = (
+  kind: CodeKind,
+  files: Record<string, string>
+): WorkflowBuild => {
+  const known = new Set(Object.keys(files));
+  const modules: Record<string, string> = {};
+  const errors: Diagnostic[] = [];
+  for (const [path, source] of Object.entries(files)) {
+    const result = compileCodeFile(kind, path, source, known);
+    if ("code" in result) {
+      modules[appModuleName(path)] = result.code;
+    } else {
+      errors.push(...result.errors);
+    }
+  }
+  return errors.length > 0
+    ? { ok: false, diagnostics: errors }
+    : { ok: true, modules };
 };
 
 /**
@@ -375,20 +410,25 @@ export const buildServer = (files: Record<string, string>): ServerBuild => {
       ],
     };
   }
-  const known = new Set(Object.keys(server));
-  const modules: Record<string, string> = {};
-  const errors: Diagnostic[] = [];
-  for (const [path, source] of Object.entries(server)) {
-    const result = compileServerFile(path, source, known);
-    if ("code" in result) {
-      modules[appModuleName(path)] = result.code;
-    } else {
-      errors.push(...result.errors);
-    }
-  }
-  return errors.length > 0
-    ? { ok: false, diagnostics: errors }
-    : { ok: true, mainModule: appModuleName(serverEntry), modules };
+  const built = compileCode(serverCode, server);
+  return built.ok
+    ? { ...built, mainModule: appModuleName(serverEntry) }
+    : built;
+};
+
+/**
+ * Builds an App's workflows: the TypeScript files under `workflows/`.
+ * Types are stripped, not checked; imports reach only those files and the
+ * SDK.
+ */
+export const buildWorkflows = (
+  files: Record<string, string>
+): WorkflowBuild => {
+  const workflows = workflowFiles(files);
+  const tooMuch = limitErrors(workflows);
+  return tooMuch.length > 0
+    ? { ok: false, diagnostics: tooMuch }
+    : compileCode(workflowCode, workflows);
 };
 
 export default class ScreenCompiler extends WorkerEntrypoint {
@@ -402,6 +442,12 @@ export default class ScreenCompiler extends WorkerEntrypoint {
   // oxlint-disable-next-line class-methods-use-this
   buildServer(files: Record<string, string>): ServerBuild {
     return buildServer(files);
+  }
+
+  /** Builds the App's workflows (`buildWorkflows`). */
+  // oxlint-disable-next-line class-methods-use-this
+  buildWorkflows(files: Record<string, string>): WorkflowBuild {
+    return buildWorkflows(files);
   }
 
   /** Only the type check and the lint, without building. */
