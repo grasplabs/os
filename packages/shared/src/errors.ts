@@ -25,6 +25,13 @@ export type CodedError<Code extends string = string> = Error & {
 };
 
 /**
+ * Every code of every family defined: the expected errors, which whoever
+ * made the call may see, a person or App code. A family's module is loaded
+ * before any of its errors can be created, so its codes are here by then.
+ */
+const expectedCodes = new Set<string>();
+
+/**
  * Defines one family of expected errors: a fixed set of codes, each with the
  * message people see. Create errors from it, and read the code back from
  * anything caught, including errors that crossed an RPC boundary.
@@ -33,6 +40,9 @@ export const defineErrorFamily = <Code extends string>(
   messages: Readonly<Record<Code, string>>
 ) => {
   const codes = new Set<unknown>(Object.keys(messages));
+  for (const code of Object.keys(messages)) {
+    expectedCodes.add(code);
+  }
   const isCode = (value: unknown): value is Code => codes.has(value);
 
   return {
@@ -76,3 +86,28 @@ export const featureErrors = defineErrorFamily({
 export const internalErrors = defineErrorFamily({
   "internal.unexpected": "Something went wrong.",
 });
+
+/** Whether `error` is an expected error, of any family. */
+export const isExpectedError = (error: unknown): error is CodedError =>
+  error instanceof Error &&
+  "code" in error &&
+  typeof error.code === "string" &&
+  expectedCodes.has(error.code);
+
+/**
+ * What a caller outside core may see of `error`: an expected error as it is,
+ * anything else replaced by `internal.unexpected` with `details` (such as the
+ * request ID) and no stack, so internals never leave.
+ */
+export const toOpaqueError = (
+  error: unknown,
+  details?: ErrorPayload["details"]
+): Error => {
+  if (isExpectedError(error)) {
+    return error;
+  }
+  const replacement = internalErrors.create("internal.unexpected", details);
+  // Cap'n Web sends a replacement's stack; this one has none to send.
+  replacement.stack = undefined;
+  return replacement;
+};

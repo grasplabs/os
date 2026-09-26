@@ -1,8 +1,10 @@
+import { connectErrors } from "@grasp-os/shared/connect";
 import {
   errorPayloadSchema,
   internalErrors,
   requestErrors,
 } from "@grasp-os/shared/errors";
+import { modelErrors } from "@grasp-os/shared/models";
 import { routerSecretHeader } from "@grasp-os/shared/router";
 import type { CoreApi } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";
@@ -64,8 +66,13 @@ describe("errors sent to the client", () => {
     expect(sent).toMatchObject({ details: { requestId: "request-1" } });
   });
 
-  it("sends an expected error as it is", () => {
-    const expected = requestErrors.create("request.forbidden");
-    expect(toClientError(expected, "request-1")).toBeUndefined();
+  it("sends an expected error of any family as it is", () => {
+    for (const expected of [
+      requestErrors.create("request.forbidden"),
+      modelErrors.create("model.not_allowed"),
+      connectErrors.create("connect.invalid_call"),
+    ]) {
+      expect(toClientError(expected, "request-1")).toBeUndefined();
+    }
   });
 });
