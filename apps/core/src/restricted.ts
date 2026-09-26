@@ -1,8 +1,8 @@
 import { delegateActorOf, runActorOf } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
-import type { AppId, ChatId, RunId, WorkspaceId } from "@grasp-os/shared/ids";
+import type { AppId } from "@grasp-os/shared/ids";
 import { permissionErrors } from "@grasp-os/shared/permissions";
-import type { Authority } from "@grasp-os/shared/permissions";
+import type { Authority, WorkContext } from "@grasp-os/shared/permissions";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
@@ -13,17 +13,21 @@ import { workspace } from "./workspace.ts";
 
 // Restricted mode. Once a chat or an App reads restricted data (in
 // Knowledge: what a sensitive collection holds), it is restricted for good,
-// and from then on takes no action in outside systems, so what it read
-// can't leave through them. The flag is kept where the chat or App lives
-// (its workspace's or its own Durable Object), so it survives restarts, and
-// it is set before the data is returned, so nothing that holds the data
-// runs unrestricted. It is read in the one place core lets a call out:
-// where it makes the capability for connect (bindings.ts), which carries it.
+// and from then on takes no action in outside systems unless the person it
+// acts for confirms it, warned that it may carry what was read. The flag
+// is kept where the chat or App lives (its workspace's or its own Durable
+// Object), so it survives restarts, and it is set before the data is
+// returned, so nothing that holds the data runs unrestricted. It is read
+// in the one place core lets a call out: where it makes the capability for
+// connect (bindings.ts), which carries it.
 //
 // Only connect knows which actions write, so connect enforces it: a
 // restricted context may still call the actions its connector declares as
 // reads (only a native connector's word counts), and every other call is
-// refused there. Knowledge, which stays in the deployment, can be read too.
+// held there for the person (a workflow run waits for their decision). With
+// held actions switched off (`confirmations`), core refuses every call of
+// a restricted context instead (bindings.ts). Knowledge, which stays in
+// the deployment, can be read too.
 //
 // The flag is only as good as the boundaries between contexts: it must
 // follow every way data moves from one to another. A workflow run started
@@ -40,9 +44,9 @@ import { workspace } from "./workspace.ts";
 // the next restricted read records it again.
 
 /**
- * Where an App or agent works, and keeps its restricted mode: a chat, an
- * App, or a run of one of the App's workflows. The host sets it, like the
- * authority.
+ * Where an App or agent works, and keeps its restricted mode
+ * (`workContextSchema`): a chat, an App, or a run of one of the App's
+ * workflows. The host sets it, like the authority.
  *
  * A run keeps its App's flag, not one of its own: a run and its App share
  * data both ways (the workflow's state is shared by all its runs, and a run
@@ -50,10 +54,7 @@ import { workspace } from "./workspace.ts";
  * starts restricted when its App is, becomes so when its App does, and
  * restricts its App when it reads restricted data itself.
  */
-export type WorkContext =
-  | { type: "chat"; workspaceId: WorkspaceId; chatId: ChatId }
-  | { type: "app"; appId: AppId }
-  | { type: "run"; appId: AppId; runId: RunId };
+export type { WorkContext } from "@grasp-os/shared/permissions";
 
 const contextInvalid = () =>
   permissionErrors.create("permission.context_invalid");

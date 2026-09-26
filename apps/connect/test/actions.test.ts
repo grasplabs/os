@@ -7,6 +7,7 @@ import {
   agentFor,
   callAs,
   capabilityFor,
+  chatOrigin,
   outcome,
   serverUrl,
 } from "./connect.ts";
@@ -184,13 +185,18 @@ describe("a call on a connection", () => {
     expect(server.ran).toStrictEqual([]);
   });
 
-  it("refuses every call of a restricted context on a Composio server, whatever the server declares", async () => {
+  it("holds every call of a restricted context on a Composio server, whatever the server declares", async () => {
     const connectionId = await addConnection();
     // `mail.list` says it is read-only, but only a native connector's word
-    // counts: on Composio every tool may act.
+    // counts: on Composio every tool may act, so the person decides.
     await expect(
-      outcome(callAs(anna, write(connectionId), { restricted: true }))
-    ).resolves.toBe("connect.restricted");
+      outcome(
+        callAs(anna, write(connectionId), {
+          restricted: true,
+          origin: chatOrigin,
+        })
+      )
+    ).resolves.toBe("connect.held");
     expect(server.ran).toStrictEqual([]);
   });
 

@@ -16,7 +16,7 @@ import { appHost } from "../src/durable-objects.ts";
 import { ownerEventType } from "../src/workflows/dispatcher.ts";
 import { startRun } from "../src/workflows/runs.ts";
 import { fakeGateway } from "./ai-gateway.ts";
-import { requestGranted, serverBuilt } from "./apps.ts";
+import { release, requestGranted, serverBuilt } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote, readCollection } from "./knowledge.ts";
@@ -31,6 +31,15 @@ import {
   stopped,
 } from "./runs.ts";
 import { openRpc, refusal, signedInWithRole } from "./sign-in.ts";
+import {
+  appWith,
+  grantMail,
+  invoiceMail,
+  mailer,
+  runEvents,
+  server,
+  workflowFiles,
+} from "./workflow-apps.ts";
 
 // Workflows are code the agent writes, run for real: committed to an App,
 // tested when their version is made current, and run on Cloudflare
@@ -48,55 +57,6 @@ const personApi = async (role: Role) => {
   return { ...person, api: core.authenticate() };
 };
 type Person = Awaited<ReturnType<typeof personApi>>;
-
-/**
- * The sample App's server code: purchase orders, a ledger that books each
- * entry once per idempotency key, and counters that show how often a step
- * really ran.
- */
-const server = `import { DurableObject } from "cloudflare:workers";
-
-type Caller = { userId: string; idempotencyKey?: string };
-
-export class App extends DurableObject {
-  hit(_caller: Caller, name: string): number {
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hits (name TEXT PRIMARY KEY, count INTEGER NOT NULL)");
-    this.ctx.storage.sql.exec("INSERT INTO hits VALUES (?, 1) ON CONFLICT (name) DO UPDATE SET count = count + 1", name);
-    return this.hits(_caller, name);
-  }
-
-  hits(_caller: Caller, name: string): number {
-    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS hits (name TEXT PRIMARY KEY, count INTEGER NOT NULL)");
-    const [row] = this.ctx.storage.sql.exec("SELECT count FROM hits WHERE name = ?", name).toArray();
-    return Number(row?.count ?? 0);
-  }
-
-  purchaseOrder(_caller: Caller, number: string): { amount: number } | null {
-    return number === "PO-1" ? { amount: 800_000 } : null;
-  }
-
-  book(caller: Caller, entry: { invoice: string; total: number }, key: string): string {
-    this.hit(caller, "book:" + key);
-    return "ledger-" + entry.invoice + "-for-" + caller.userId;
-  }
-
-  // Mails the invoice with the caller's key, or with a key of its own.
-  async mail(caller: Caller, ownKey: boolean): Promise<unknown> {
-    const idempotencyKey = ownKey ? crypto.randomUUID() : caller.idempotencyKey;
-    try {
-      const { output } = await (this.env as any).MAIL.call(
-        caller,
-        "mail.send",
-        { to: "ben@acme.test", subject: "Invoice INV-7" },
-        { idempotencyKey }
-      );
-      return JSON.parse(output);
-    } catch (error) {
-      return { refused: (error as { code?: string }).code };
-    }
-  }
-}
-`;
 
 /**
  * App server code that reads a collection and calls a connection for its
@@ -208,53 +168,6 @@ export default workflowTests(invoice, [
 ]);
 `;
 
-/**
- * A workflow of the given steps' code, run as `id`, with a test that
- * mocks every step it names, so any workflow passes activation.
- */
-const workflowFiles = (
-  id: string,
-  body: string,
-  mocks: Record<string, unknown> = {}
-): Record<string, string> => ({
-  [`workflows/${id}.ts`]: `import { workflow, z } from "@grasp-os/sdk/workflow";
-
-export default workflow("${id}", { params: {}, input: z.unknown() }, async (step, { env, state, input }) => {
-${body}
-});
-`,
-  [`workflows/${id}.workflow-tests.ts`]: `import { workflowTests } from "@grasp-os/sdk/testing";
-
-import definition from "./${id}.ts";
-
-export default workflowTests(definition, [
-  { name: "runs", mocks: ${JSON.stringify(mocks)}, events: [{ type: "go", payload: null }], expect: {} },
-]);
-`,
-});
-
-/** Commits `files` as the App's next version and makes it current. */
-const release = async (
-  builder: Person,
-  app: string,
-  files: Record<string, string | null>
-): Promise<number> => {
-  await builder.api.apps.files.write(app, files);
-  const { version } = await builder.api.apps.files.commit(app, "Release");
-  await builder.api.apps.versions.setCurrent(app, version);
-  return version;
-};
-
-/** A new App with the sample server and `files`. */
-const appWith = async (
-  builder: Person,
-  files: Record<string, string>
-): Promise<string> => {
-  const { id } = await builder.api.apps.create({ name: "Invoices" });
-  await release(builder, id, { "app/server.ts": server, ...files });
-  return id;
-};
-
 /** Outlook, as a connection the App may be given. */
 const outlook = (app: string): PermissionRequest => ({
   subject: { type: "app", appId: app },
@@ -323,62 +236,12 @@ const triggered = async (app: string, workflow: string) =>
     actor: { type: "system" },
   });
 
-/**
- * A run's audit events, once the log has `last` of them, each as its
- * action and what it says of the step, the reason and the error, sorted.
- */
-const runEvents = async (run: string, last: string): Promise<string[]> =>
-  await vi.waitFor(
-    async () => {
-      const events = await allEvents();
-      const ofRun = events.filter(({ target }) => target?.id === run);
-      expect(ofRun.map(({ action }) => action)).toContain(last);
-      return ofRun
-        .map(({ action, detail }) =>
-          [action, detail.reason, detail.feature, detail.step, detail.error]
-            .filter((part) => part !== undefined)
-            .join(" ")
-        )
-        .toSorted();
-    },
-    { timeout: 10_000, interval: 100 }
-  );
-
-/** Gives the App `MAIL`, for sending on the connection; an admin grants it. */
-const grantMail = async (
-  requester: Person,
-  app: string,
-  connectionId: string
-): Promise<void> => {
-  await requestGranted(idp, requester, {
-    subject: { type: "app", appId: app },
-    object: { type: "connection", connectionId },
-    actions: ["mail.send"],
-    binding: "MAIL",
-  });
-};
-
-/** The mail each test's workflow sends. */
-const invoiceMail = { to: "ben@acme.test", subject: "Invoice INV-7" };
-
-/**
- * A workflow `mailer` that sends the invoice mail in its side-effect step
- * `send`, with the step's idempotency key, with the step's `options`; then
- * runs `after` in the step, with the connector's answer as `sent`.
- */
-const mailer = (options: string, after = "") =>
+/** A workflow `pinned` that waits, then says which version it is. */
+const versioned = (label: number) =>
   workflowFiles(
-    "mailer",
-    `  return await step.do(
-    "send",
-    { description: "Send the invoice", sideEffect: true, input: ${JSON.stringify(invoiceMail)}, ${options} },
-    async ({ idempotencyKey, input: mail }) => {
-      const sent = JSON.parse((await env.MAIL.call("mail.send", mail, { idempotencyKey })).output);
-${after}
-      return sent;
-    }
-  );`,
-    { send: { messageId: "mocked" } }
+    "pinned",
+    `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  return { version: ${label} };`
   );
 
 describe("workflow runs", { timeout: 60_000 }, () => {
@@ -468,12 +331,6 @@ describe("workflow runs", { timeout: 60_000 }, () => {
 
   it("keep the version they started on after a new one is current", async () => {
     const builder = await personApi("builder");
-    const versioned = (label: number) =>
-      workflowFiles(
-        "pinned",
-        `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
-  return { version: ${label} };`
-      );
     const app = await appWith(builder, versioned(1));
     const first = await builder.api.workflows.start(app, "pinned");
     await stopped(first.id);
@@ -790,14 +647,13 @@ ${mailStep("after")}`,
     }).toStrictEqual({ status: "failed", personGone: true });
   });
 
-  it("run with only their App's permissions, no network, and their App's restricted mode", async () => {
+  it("run with only their App's permissions, no network, and reading in their App's restricted mode", async () => {
     const admin = await personApi("admin");
-    const mail = await mailConnection();
     const app = await appWith(
       admin,
       workflowFiles(
         "probe",
-        `  return await step.do("probe", { description: "Probe", sideEffect: true, input: ${JSON.stringify(invoiceMail)} }, async ({ idempotencyKey, input }) => {
+        `  return await step.do("probe", { description: "Probe" }, async () => {
     let fetched;
     try {
       await fetch("https://example.com/");
@@ -805,26 +661,19 @@ ${mailStep("after")}`,
     } catch (error) {
       fetched = String(error);
     }
-    const outcome = async (call) => {
-      try {
-        await call();
-        return "ok";
-      } catch (error) {
-        return error.code;
-      }
-    };
-    return {
-      env: Object.keys(env).toSorted(),
-      fetched,
-      read: await outcome(() => env.OUTLOOK.call("mail.list", {})),
-      sent: await outcome(() => env.MAIL.call("mail.send", input, { idempotencyKey })),
-    };
+    let read;
+    try {
+      await env.OUTLOOK.call("mail.list", {});
+      read = "ok";
+    } catch (error) {
+      read = error.code;
+    }
+    return { env: Object.keys(env).toSorted(), fetched, read };
   });`,
         { probe: null }
       )
     );
     await requestGranted(idp, admin, outlook(app));
-    await grantMail(admin, app, mail.id);
     await appHost(env, appIdSchema.parse(app)).restrict();
     const run = await admin.api.workflows.start(app, "probe");
     await finished(run.id);
@@ -835,18 +684,15 @@ ${mailStep("after")}`,
       offline: JSON.stringify(output).includes(
         "not permitted to access the internet"
       ),
-      server: await mail.did(),
     }).toMatchObject({
       status: "completed",
-      // A read still reaches connect (there is no such connection); the
-      // side effect is refused there, and nothing reached the mail server.
+      // A read still reaches connect (there is no such connection). Side
+      // effects wait for the person (the tests of held side effects).
       output: {
-        env: ["APP", "MAIL", "OUTLOOK"],
+        env: ["APP", "OUTLOOK"],
         read: "connect.connection_not_found",
-        sent: "connect.restricted",
       },
       offline: true,
-      server: { calls: 0, sent: [] },
     });
   });
 
@@ -1415,7 +1261,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
       }`
       )
     );
-    await grantMail(admin, app, mail.id);
+    await grantMail(idp, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "mailer");
     await finished(run.id);
 
@@ -1440,7 +1286,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
       admin,
       mailer(`retries: { limit: 3, delay: 10, backoff: "constant" }`)
     );
-    await grantMail(admin, app, mail.id);
+    await grantMail(idp, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "mailer");
     await finished(run.id);
     // Each attempt is audited with the version whose code made it.
@@ -1503,7 +1349,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
         { send: {}, hang: null }
       )
     );
-    await grantMail(admin, app, mail.id);
+    await grantMail(idp, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "keys");
     await finished(run.id);
 
@@ -1552,7 +1398,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
     // A method that times out fails the run for good, so the App's first
     // call mustn't have to build its code.
     await serverBuilt(app, 1);
-    await grantMail(admin, app, mail.id);
+    await grantMail(idp, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "app-mailer");
     await finished(run.id);
 
@@ -1582,7 +1428,7 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
       owner,
       mailer(`retries: { limit: 3, delay: 10, backoff: "constant" }`)
     );
-    await grantMail(owner, app, mail.id);
+    await grantMail(idp, owner, app, mail.id);
     // One run a person started, which acts for them; one a trigger
     // started, which acts for the App's owner.
     const started = await starter.api.workflows.start(app, "mailer");

@@ -1,6 +1,6 @@
 import type { AppsApi } from "./apps.ts";
 import type { AuditApi } from "./audit-log.ts";
-import type { ConnectionsApi } from "./connect.ts";
+import type { ConnectionsApi, PendingActionsApi } from "./connect.ts";
 import type { DecisionsApi } from "./decisions.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
 import type { MembersApi } from "./members.ts";
@@ -63,6 +63,12 @@ export interface SessionApi {
   readonly members: MembersApi;
   /** The audit log: search, export and chain verification. Admins only. */
   readonly audit: AuditApi;
+  /**
+   * Side effects the person's agents, Apps and runs asked for, held until
+   * the person confirms or declines them: from chat, from a person using
+   * an App, and from any of them once it read restricted data.
+   */
+  readonly pendingActions: PendingActionsApi;
 }
 
 /**

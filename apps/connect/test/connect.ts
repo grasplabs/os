@@ -6,6 +6,7 @@
 import { auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { capabilityErrors, signCapability } from "@grasp-os/shared/capability";
+import type { CapabilityScope } from "@grasp-os/shared/capability";
 import { connectErrors, connectionErrors } from "@grasp-os/shared/connect";
 import type {
   ConnectionPerson,
@@ -55,7 +56,7 @@ export const addConnection = async (
 
 /**
  * An agent acting for `person`: in a workflow run unless `mode` says chat
- * (`interactive`), where connect holds no writes yet.
+ * (`interactive`), where connect holds writes for the person.
  */
 export const agentFor = (
   person: string,
@@ -87,22 +88,34 @@ export const capabilityFor = async (
   now?: number
 ): Promise<string> => await signCapability(key, authority, call, now);
 
+/** What core signs into a capability besides the call itself. */
+export type Signed = Pick<
+  CapabilityScope,
+  "mask" | "restricted" | "origin" | "confirms"
+>;
+
+/** Where a chat's call comes from, as core signs it for connect to hold. */
+export const chatOrigin: NonNullable<Signed["origin"]> = {
+  permissionId: "permission-mail",
+  context: { type: "chat", workspaceId: "workspace-1", chatId: "chat-1" },
+};
+
 /**
- * Makes `call` for `authority`, as core does: with a capability that masks
- * `mask`, the permission's masked fields, and says whether the caller's
- * context is `restricted`, neither of which the call itself names.
+ * Makes `call` for `authority`, as core does: with a capability that also
+ * says what `signed` says (the permission's masked fields, whether the
+ * caller's context is restricted, where it comes from), none of which the
+ * call itself names.
  */
 export const callAs = async (
   authority: Authority,
   call: Call,
-  { mask, restricted }: { mask?: readonly string[]; restricted?: boolean } = {}
+  signed: Signed = {}
 ): Promise<ConnectResult> =>
   await exports.default.call({
     ...call,
     capability: await signCapability(env.CAPABILITY_SIGNING_KEY, authority, {
       ...call,
-      mask,
-      restricted,
+      ...signed,
     }),
   });
 

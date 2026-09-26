@@ -28,6 +28,7 @@ import { apps, workflowRuns } from "../db/core/schema.ts";
 import { appHost } from "../durable-objects.ts";
 import { requireFeature } from "../features.ts";
 import { hasWorkflow } from "./code.ts";
+import type { WaitReason } from "./host.ts";
 
 // Runs of Apps' workflows, as core keeps them: one row each (the App
 // version it is pinned to, who started it, where it was last seen), next
@@ -527,23 +528,19 @@ export const pauseForOwner = async (env: Env, row: RunRow): Promise<number> => {
 };
 
 /**
- * Records that a run waits while `feature` is switched off (host.ts), with
- * nothing else to change: it goes on by itself once it's back on.
+ * Records that a run waits (host.ts), with nothing else to change: while a
+ * feature is switched off (`switched_off`), it goes on by itself once it's
+ * back on; while a side effect of a step waits for the person it acts for
+ * (`held`), once they decided.
  */
 export const recordWaiting = async (
   env: Env,
   row: RunRow,
-  feature: string
+  why: WaitReason
 ): Promise<void> => {
   const db = drizzle(env.DB);
   await auditedBatch(env, db, [
-    outboxed(
-      db,
-      runEntry(runActor(row), "workflow.run.waiting", row, {
-        reason: "switched_off",
-        feature,
-      })
-    ),
+    outboxed(db, runEntry(runActor(row), "workflow.run.waiting", row, why)),
   ]);
 };
 

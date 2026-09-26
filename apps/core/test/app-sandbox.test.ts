@@ -274,8 +274,22 @@ const grantMail = async (admin: Builder, app: string) => {
 const sendFor = async (app: AppId, userId: string): Promise<unknown> =>
   await callApp(env, app, as(userId), "send", [crypto.randomUUID()]);
 
-/** A side effect from a person using an App, until connect holds it. */
-const unconfirmed = "connect.confirmation_required";
+/**
+ * Whether each action held for `person` from `app` comes with the
+ * restricted-data warning.
+ */
+const warningsFor = async (
+  person: Builder,
+  app: string
+): Promise<boolean[]> => {
+  const waiting = await person.api.pendingActions.list();
+  return waiting
+    .filter(({ context }) => context.type === "app" && context.appId === app)
+    .map(({ restricted }) => restricted);
+};
+
+/** A side effect from a person using an App: held for them to confirm. */
+const heldWrite = "ok";
 
 /** A Worker Loader that fails any load: proof that nothing was built. */
 const noLoader: WorkerLoader = {
@@ -541,7 +555,7 @@ describe("App server code", { timeout: 60_000 }, () => {
     }).toStrictEqual({ beforeRelease: [1], afterRelease: [1, 2, 2] });
   });
 
-  it("still reads but takes no action once it is in restricted mode", async () => {
+  it("still reads, and holds its actions with a restricted-data warning, once it is in restricted mode", async () => {
     const admin = await personApi("admin");
     const app = await sampleApp(admin);
     await requestGranted(idp, admin, outlook(app));
@@ -554,9 +568,17 @@ describe("App server code", { timeout: 60_000 }, () => {
     const before = await calls();
     await appHost(env, app).restrict();
     const after = await calls();
-    expect({ before, after, server: await mail.did() }).toStrictEqual({
-      before: [reached, unconfirmed],
-      after: [reached, "connect.restricted"],
+    expect({
+      before,
+      after,
+      warned: await warningsFor(admin, app),
+      server: await mail.did(),
+    }).toStrictEqual({
+      before: [reached, heldWrite],
+      after: [reached, heldWrite],
+      // The one held before and the one after: both would now send from
+      // an App that read restricted data.
+      warned: [true, true],
       server: { calls: 0, sent: [] },
     });
   });
@@ -1040,7 +1062,7 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
     ).resolves.toStrictEqual(everyReadIs("knowledge.not_found"));
   });
 
-  it("is restricted for good by a sensitive read, and then takes no action for anyone", async () => {
+  it("is restricted for good by a sensitive read, and then holds every action for the person it acts for", async () => {
     const admin = await personApi("admin");
     const outsider = await personApi("user");
     const teamId = await newTeam(admin, []);
@@ -1107,15 +1129,19 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
         restricted: false,
       },
       refused: everyReadIs("knowledge.not_found"),
-      before: unconfirmed,
+      before: heldWrite,
       sensitive: {
         collectionIds: [payroll.collectionId],
         sensitive: true,
         restricted: true,
       },
-      after: ["connect.restricted", "connect.restricted"],
+      after: [heldWrite, heldWrite],
       stillReads: everyReadIs("ok"),
     });
+    expect({
+      admin: await warningsFor(admin, app),
+      outsider: await warningsFor(outsider, app),
+    }).toStrictEqual({ admin: [true, true], outsider: [true] });
   });
 
   it("is restricted by every read that reaches a sensitive collection, also one that finds nothing", async () => {
@@ -1142,7 +1168,6 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
     const results = await Promise.all(
       reads.map(async ([method, args]) => {
         const app = await sampleApp(admin);
-        await grantMail(admin, app);
         await requestGranted(
           idp,
           admin,
@@ -1153,17 +1178,17 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
           method,
           args,
         ]);
-        return [read, await sendFor(app, admin.userId)];
+        return [read, await appHost(env, app).isRestricted()];
       })
     );
     expect(results).toStrictEqual([
-      ["ok", "connect.restricted"],
-      ["ok", "connect.restricted"],
-      ["ok", "connect.restricted"],
-      ["ok", "connect.restricted"],
-      ["ok", "connect.restricted"],
-      ["ok", "connect.restricted"],
-      ["knowledge.not_found", "connect.restricted"],
+      ["ok", true],
+      ["ok", true],
+      ["ok", true],
+      ["ok", true],
+      ["ok", true],
+      ["ok", true],
+      ["knowledge.not_found", true],
     ]);
   });
 

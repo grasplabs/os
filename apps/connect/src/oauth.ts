@@ -25,9 +25,15 @@ import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 
 import { recordEventIf, recordEvents } from "./audit.ts";
-import { connections, connectionTokens, oauthFlows } from "./db/schema.ts";
+import {
+  connections,
+  connectionTokens,
+  oauthFlows,
+  pendingActions,
+} from "./db/schema.ts";
 import { exchangeCode, idTokenClaims, revokeToken } from "./oauth-client.ts";
 import type { TokenSet } from "./oauth-client.ts";
+import { dropPendingActions } from "./pending.ts";
 import { providers } from "./providers.ts";
 import type {
   OAuthClientCredentials,
@@ -537,8 +543,9 @@ const revoke = async (
 /**
  * Stops `connection`: revokes the grant where the provider can, then
  * deletes the tokens and marks it disconnected, in one write with its
- * event. Returns whether the provider revoked the grant, and whether this
- * call stopped it (a concurrent one may have first).
+ * event, then drops the actions held for it, which can no longer run.
+ * Returns whether the provider revoked the grant, and whether this call
+ * stopped it (a concurrent one may have first).
  */
 const stop = async (
   env: Env,
@@ -569,6 +576,12 @@ const stop = async (
         .delete(connectionTokens)
         .where(eq(connectionTokens.connectionId, connection.id)),
     ]
+  );
+  await dropPendingActions(
+    env,
+    eq(pendingActions.connectionId, connection.id),
+    "connection.disconnected",
+    person
   );
   return { revoked, stopped };
 };
@@ -616,6 +629,14 @@ export const disconnect = async (
     throw roleErrors.create("role.forbidden");
   }
   if (connection.status === "disconnected") {
+    // Already stopped, maybe by a call that failed before it dropped the
+    // held actions: dropped now.
+    await dropPendingActions(
+      env,
+      eq(pendingActions.connectionId, connection.id),
+      "connection.disconnected",
+      person
+    );
     return { revoked: false };
   }
   const { revoked } = await stop(env, person, connection);
@@ -624,8 +645,9 @@ export const disconnect = async (
 
 /**
  * Disconnects every personal connection of the people `ownerUserIds`, each
- * as `disconnect` does, and spends the OAuth flows they still have open, so
- * none of them finishes into a new connection. For the admin who removed
+ * as `disconnect` does, spends the OAuth flows they still have open, so
+ * none of them finishes into a new connection, and drops every action held
+ * for them. For the admin who removed
  * them, or for core itself (`person` null), which retries until a call
  * completes; core calls it only for people it removed. Staff are
  * refused, as they are for connecting. A flow already past its spending
@@ -676,6 +698,15 @@ export const disconnectPersonal = async (
     });
     disconnected += stopped ? 1 : 0;
   }
+  // Nobody can confirm what waits for them any more, on any connection.
+  // After their connections, so this never keeps one of those live; core
+  // retries the whole call until it completes.
+  await dropPendingActions(
+    env,
+    sql`${pendingActions.onBehalfOf} IN ${owners}`,
+    "person.removed",
+    person
+  );
   return { disconnected };
 };
 

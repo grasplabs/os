@@ -99,6 +99,36 @@ export const coreStepPrefix = "$grasp:";
 /** Core's own events start with this; a workflow can't wait for one. */
 export const coreEventPrefix = "grasp-";
 
+/**
+ * One attempt of a step, while its function runs: whether connect held a
+ * side effect of it (`held`), and whether it called its App's methods.
+ */
+interface StepAttempt {
+  step: string;
+  held: boolean;
+  calledApp: boolean;
+}
+
+/** Why a run waits before a step. */
+export type WaitReason =
+  | { reason: "switched_off"; feature: Feature }
+  | { reason: "held" };
+
+/** The code a held side effect answers a run's call with (connect). */
+const heldCode = "connect.held";
+
+/**
+ * What an attempt of a step answers when a side effect of it was held:
+ * recorded as the step's result, so every execution replays it and waits
+ * again. Workflow code can't return it (`do` refuses it).
+ */
+const heldMarker = { [`${coreStepPrefix}held`]: true };
+
+const isHeldMarker = (value: unknown): boolean =>
+  typeof value === "object" &&
+  value !== null &&
+  Object.hasOwn(value, `${coreStepPrefix}held`);
+
 /** Longest step name taken: a key and a decision's part fit well within. */
 const maxStepName = 256;
 
@@ -344,6 +374,12 @@ const defaultOffWaitMs = 60_000;
 const maxOffWaits = 15;
 
 /**
+ * Tries of one check whether a held side effect still waits, after the
+ * first: a connect that fails that often in a row fails the step.
+ */
+const heldCheckRetries = 5;
+
+/**
  * A short, stable key for the step `name` a wait holds, as the wait's own
  * step names take it: a step's name can be as long as a step name may be.
  */
@@ -499,6 +535,29 @@ const toStepError = (error: StepError): Error => {
   return thrown;
 };
 
+/**
+ * Runs `call` for the step attempt `attempt`, noting when it answered that
+ * a side effect was held, whatever the workflow code does with the error.
+ */
+const heldNoted = async <T>(
+  attempt: { held: boolean },
+  call: () => Promise<T>
+): Promise<T> => {
+  try {
+    return await call();
+  } catch (error) {
+    if (
+      typeof error === "object" &&
+      error !== null &&
+      "code" in error &&
+      error.code === heldCode
+    ) {
+      attempt.held = true;
+    }
+    throw error;
+  }
+};
+
 /** Most fields of a step's input a failure report names. */
 const maxShapeFields = 20;
 
@@ -563,8 +622,11 @@ export interface HostHooks {
   acting: () => Promise<void>;
   /** Hears of each step that failed, with the error it failed with. */
   stepFailed: (failure: FailedStep) => void;
-  /** Records that the run waits while `feature` is switched off. */
-  waiting: (feature: Feature) => Promise<void>;
+  /**
+   * Records that the run waits: while a feature is switched off, or while
+   * a side effect of a step is held for the person it acts for.
+   */
+  waiting: (why: WaitReason) => Promise<void>;
   /** Calls a method of the run's App for `caller` (`callApp`). */
   callApp: (
     caller: AppCallerInput,
@@ -587,7 +649,7 @@ export class RunHost extends RpcTarget {
    * The step whose function runs now, one object per attempt, so an
    * abandoned attempt that ends late can't clear a newer one's.
    */
-  #running: { step: string } | undefined;
+  #running: StepAttempt | undefined;
 
   constructor(env: Env, step: RunStep, run: HostedRun, hooks: HostHooks) {
     super();
@@ -662,38 +724,123 @@ export class RunHost extends RpcTarget {
     name: unknown,
     features: readonly Feature[]
   ): Promise<void> {
-    let key: string | undefined;
-    // Each feature the run waits on is recorded once: with two off, the
-    // run waits on the first, then on the other once the first is on.
-    const recorded = new Set<Feature>();
+    await this.#waitWhile(
+      async () => `${offStepPrefix}${await offKeyOf(name)}`,
+      async () => {
+        const off = features.find(
+          (feature) => !featureEnabled(this.#env, feature)
+        );
+        return await Promise.resolve(
+          off === undefined
+            ? undefined
+            : { reason: "switched_off" as const, feature: off }
+        );
+      }
+    );
+  }
+
+  /**
+   * Waits, before running the step `step` again, while a side effect it
+   * asked for is held for the person the run acts for, as `#waitWhileOff`
+   * waits: the same sleeps, recorded once per hold. But each check is a
+   * step of its own (retried, and replayed without asking connect again),
+   * so the wait takes about twice the step budget per check: about 52 days
+   * at the default limit, against about 104 for a switched-off feature. A
+   * decline or a drop ends the wait too: the step's next run fails with
+   * `connect.declined`.
+   */
+  async #waitWhileHeld(step: string, prefix: string): Promise<void> {
+    await this.#waitWhile(
+      async () => await Promise.resolve(prefix),
+      async (checks) => {
+        // Each check is a step of its own, with retries of its own: its
+        // answer is recorded, so a replay asks connect nothing, and a
+        // failing connect is tried again rather than failing the step.
+        const first = offWaitOf(this.#env);
+        const held = await this.#step.do(
+          `${prefix}:${checks}:check`,
+          {
+            retries: {
+              limit: heldCheckRetries,
+              delay: first,
+              backoff: "exponential",
+            },
+          },
+          async () => await this.#stillHeld(step)
+        );
+        return held === true ? { reason: "held" as const } : undefined;
+      }
+    );
+  }
+
+  /**
+   * `#stillHeld`, or `true` when connect can't say: the step then waits,
+   * and the wait's own checks, which retry, ask again.
+   */
+  async #stillHeldOrUnknown(step: string): Promise<boolean> {
+    try {
+      return await this.#stillHeld(step);
+    } catch (error) {
+      log.warn("workflow.held_check_failed", {
+        runId: this.#run.runId,
+        step,
+        ...errorFields(error),
+      });
+      return true;
+    }
+  }
+
+  /** Whether a side effect of the step `step` waits for the run's person. */
+  async #stillHeld(step: string): Promise<boolean> {
+    return await this.#env.CONNECT.anyPending({
+      onBehalfOf: this.#run.authority.onBehalfOf,
+      idempotencyKey: stepIdempotencyKey(this.#run.runId, step),
+    });
+  }
+
+  /**
+   * Waits while `waitingFor` names a reason: each check a durable sleep, a
+   * minute first (`offWaitOf`), doubling up to 15 minutes, in steps named
+   * after `prefixOf` (asked only once there is a wait). Each reason is
+   * recorded once per wait, in a step of its own.
+   */
+  async #waitWhile(
+    prefixOf: () => Promise<string>,
+    waitingFor: (checks: number) => Promise<WaitReason | undefined>
+  ): Promise<void> {
+    let prefix: string | undefined;
+    // Each reason the run waits on is recorded once: with two features
+    // off, the run waits on the first, then on the other once the first
+    // is on.
+    const recorded = new Set<string>();
     for (let checks = 0; ; checks += 1) {
-      const off = features.find(
-        (feature) => !featureEnabled(this.#env, feature)
-      );
-      if (off === undefined) {
+      // oxlint-disable-next-line no-await-in-loop -- one check at a time
+      const why = await waitingFor(checks);
+      if (why === undefined) {
         return;
       }
       // oxlint-disable-next-line no-await-in-loop -- once per wait
-      key ??= await offKeyOf(name);
-      if (!recorded.has(off)) {
-        recorded.add(off);
-        // oxlint-disable-next-line no-await-in-loop -- once per feature
-        await this.#recordWaiting(`${offStepPrefix}${key}:waiting:${off}`, off);
+      prefix ??= await prefixOf();
+      const name = why.reason === "held" ? "held" : why.feature;
+      if (!recorded.has(name)) {
+        recorded.add(name);
+        // oxlint-disable-next-line no-await-in-loop -- once per reason
+        await this.#recordWaiting(`${prefix}:waiting:${name}`, why);
       }
       const first = offWaitOf(this.#env);
       // oxlint-disable-next-line no-await-in-loop -- one check at a time
       await this.#step.sleep(
-        `${offStepPrefix}${key}:${checks}`,
+        `${prefix}:${checks}`,
         Math.min(first * 2 ** checks, first * maxOffWaits)
       );
     }
   }
 
-  /** Records, once in step `step`, that the run waits while `feature` is off. */
-  async #recordWaiting(step: string, feature: Feature): Promise<void> {
+  /** Records, once in step `step`, that the run waits, and why. */
+  async #recordWaiting(step: string, why: WaitReason): Promise<void> {
     try {
       await this.#step.do(step, {}, async () => {
-        await this.#hooks.waiting(feature);
+        await this.#hooks.waiting(why);
         return null;
       });
     } catch (error) {
@@ -702,7 +849,7 @@ export class RunHost extends RpcTarget {
       }
       log.error("workflow.waiting.audit_failed", {
         runId: this.#run.runId,
-        feature,
+        ...why,
         ...errorFields(error),
       });
     }
@@ -729,7 +876,12 @@ export class RunHost extends RpcTarget {
    * before it starts (options that don't parse, a person who has left) is
    * neither: the run's own failure records it. While `workflows` is
    * switched off, or `decisions` for a step that opens or asks a
-   * decision, the run waits before the step (`#waitWhileOff`).
+   * decision, the run waits before the step (`#waitWhileOff`). When a side
+   * effect of the step is held for the person the run acts for, the step
+   * ends as held, not failed, uses no retries, and the run waits the same
+   * way until the person decided, then runs the step again under the same
+   * key (`#waitWhileHeld`): confirmed, it gets the answer; declined or
+   * dropped, it fails with `connect.declined`.
    */
   async do(
     name: unknown,
@@ -760,11 +912,11 @@ export class RunHost extends RpcTarget {
       sideEffect = parsed.sideEffect === true;
       input = inputShape(parsed.input);
       await this.#hooks.acting();
-      const value = await this.#step.do(step, stepConfig(parsed), async () => {
+      const attemptStep = async (): Promise<unknown> => {
         attempted = true;
         // Only the last attempt's error counts: an earlier one was retried.
         failed = undefined;
-        const attempt = { step };
+        const attempt: StepAttempt = { step, held: false, calledApp: false };
         this.#running = attempt;
         let result: Settled<unknown>;
         // Whether no newer attempt began, and the step didn't end, while
@@ -778,9 +930,33 @@ export class RunHost extends RpcTarget {
             this.#running = undefined;
           }
         }
+        // Connect held a side effect of it for the person the run acts
+        // for: the step ends as held, not failed, whatever the workflow
+        // code made of the answer, and runs again once they decided. The
+        // run's own calls say so; for its App's methods, which may keep
+        // the answer to themselves, connect is asked about the step's key.
+        // (Core can't see whether an App method called out: its calls run
+        // in the App's own object.) Once decided, the rerun's call answers
+        // for good: a decline (`connect.declined`) is an error like any
+        // other, which workflow or App code may catch and carry on from;
+        // it is audited in connect whatever the code does with it.
+        const held =
+          current &&
+          (attempt.held ||
+            (attempt.calledApp && (await this.#stillHeldOrUnknown(step))));
+        if (held) {
+          return heldMarker;
+        }
         if (!result.ok) {
           failed = result.error;
           throw toStepError(result.error);
+        }
+        if (isHeldMarker(result.value)) {
+          failed = {
+            name: "Error",
+            message: `Step "${step}" returned a value core keeps for itself`,
+          };
+          throw toStepError(failed);
         }
         if (!z.json().optional().safeParse(result.value).success) {
           failed = {
@@ -806,7 +982,23 @@ export class RunHost extends RpcTarget {
           await this.#audited(step, "completed", { sideEffect });
         }
         return result.value;
-      });
+      };
+      let value = await this.#step.do(step, stepConfig(parsed), attemptStep);
+      // Held: wait, as for a switched-off feature, until the person decided,
+      // then run the step again under the same key, in a step of its own
+      // each time, so every execution replays the same steps.
+      for (let round = 1; isHeldMarker(value); round += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- one round at a time
+        const prefix = `${offStepPrefix}${await offKeyOf(step)}:held:${round}`;
+        // oxlint-disable-next-line no-await-in-loop -- one round at a time
+        await this.#waitWhileHeld(step, prefix);
+        // oxlint-disable-next-line no-await-in-loop -- one round at a time
+        value = await this.#step.do(
+          `${prefix}:run`,
+          stepConfig(parsed),
+          attemptStep
+        );
+      }
       this.#stepEnded(step);
       return { ok: true, value };
     } catch (error) {
@@ -913,7 +1105,7 @@ export class RunHost extends RpcTarget {
   }
 
   /** The step whose function runs now; refuses a call outside a step. */
-  #requireStep(): { step: string } {
+  #requireStep(): StepAttempt {
     const running = this.#running;
     if (running === undefined) {
       throw workflowErrors.create("workflow.outside_step");
@@ -931,6 +1123,7 @@ export class RunHost extends RpcTarget {
     call: unknown
   ): Promise<Settled<unknown>> {
     return await settle(async () => {
+      const attempt = this.#requireStep();
       const stepKey = this.#stepKey();
       const { connections, authority } = this.#run;
       const name = checked(z.string(), binding);
@@ -940,14 +1133,18 @@ export class RunHost extends RpcTarget {
       if (grant === undefined) {
         throw workflowErrors.create("workflow.invalid");
       }
-      return await runStubCall(
-        this.#env,
-        async (key) => {
-          requireStepKey(key, stepKey);
-          return await Promise.resolve(authority);
-        },
-        grant,
-        checked(z.array(z.unknown()), call)
+      return await heldNoted(
+        attempt,
+        async () =>
+          await runStubCall(
+            this.#env,
+            async (key) => {
+              requireStepKey(key, stepKey);
+              return await Promise.resolve(authority);
+            },
+            grant,
+            checked(z.array(z.unknown()), call)
+          )
       );
     });
   }
@@ -963,13 +1160,21 @@ export class RunHost extends RpcTarget {
    */
   async callApp(method: unknown, args: unknown): Promise<Settled<unknown>> {
     return await settle(async () => {
+      const attempt = this.#requireStep();
+      attempt.calledApp = true;
       const idempotencyKey = this.#stepKey();
       await this.#requirePerson();
       const { authority } = this.#run;
-      return await this.#hooks.callApp(
-        { userId: authority.onBehalfOf, mode: "workflow", idempotencyKey },
-        String(method),
-        checked(z.array(z.unknown()), args)
+      // The App's own connection calls take the step's key: held, they
+      // hold the step as the run's own do (`do` asks connect too).
+      return await heldNoted(
+        attempt,
+        async () =>
+          await this.#hooks.callApp(
+            { userId: authority.onBehalfOf, mode: "workflow", idempotencyKey },
+            String(method),
+            checked(z.array(z.unknown()), args)
+          )
       );
     });
   }

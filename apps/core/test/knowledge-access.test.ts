@@ -135,8 +135,24 @@ const sendMail = async (bindings: Env) => {
   );
 };
 
-/** A side effect from chat, until connect holds it for the person. */
-const unconfirmed = "connect.confirmation_required";
+/**
+ * Whether each action held for `person` from `chat` comes with the
+ * restricted-data warning.
+ */
+const warningsIn = async (
+  person: Person,
+  chat: Extract<WorkContext, { type: "chat" }>
+): Promise<boolean[]> => {
+  const waiting = await person.api.pendingActions.list();
+  return waiting
+    .filter(
+      ({ context }) => context.type === "chat" && context.chatId === chat.chatId
+    )
+    .map(({ restricted }) => restricted);
+};
+
+/** A side effect from chat: held for the person to confirm. */
+const heldWrite = "ok";
 
 describe("Apps and agents reading Knowledge", setUpTime, () => {
   it("read no collection without a granted permission to read it", async () => {
@@ -541,7 +557,7 @@ describe("restricted mode", setUpTime, () => {
     return { admin, subject, sensitive, ordinary, mail };
   };
 
-  it("stops a chat's actions in outside systems for good once it read restricted data", async () => {
+  it("holds a chat's actions with a restricted-data warning for good once it read restricted data", async () => {
     const { admin, subject, sensitive, ordinary, mail } = await setUp();
     const chat = await newChat();
     const otherChat = await newChat();
@@ -562,22 +578,32 @@ describe("restricted mode", setUpTime, () => {
       outcome(readerIn(bindings, "OTHER").getDocument(ordinary.noteId)),
     ]);
     expect({ beforeRestricted, afterRestricted }).toStrictEqual({
-      beforeRestricted: [reached, unconfirmed],
-      afterRestricted: [reached, "connect.restricted", "ok"],
+      beforeRestricted: [reached, heldWrite],
+      // Held for the person like any, and marked restricted.
+      afterRestricted: [reached, heldWrite, "ok"],
     });
 
     // Its workspace restarts, and the chat gets a new env: still restricted.
     await evictDurableObject(workspace(env, chat.workspaceId));
     const rebuilt = await envOf(actingFor(subject, admin.userId), chat);
     const other = await envOf(actingFor(subject, admin.userId), otherChat);
+    const restarted = await Promise.all([
+      callOutlook(rebuilt),
+      sendMail(rebuilt),
+    ]);
+    // Another chat is its own: it read nothing restricted.
+    const otherChatSent = await sendMail(other);
     expect({
-      restarted: await Promise.all([callOutlook(rebuilt), sendMail(rebuilt)]),
-      // Another chat is its own: it read nothing restricted.
-      otherChat: await sendMail(other),
+      restarted,
+      otherChat: otherChatSent,
+      warned: await warningsIn(admin, chat),
+      otherWarned: await warningsIn(admin, otherChat),
       server: await mail.did(),
     }).toStrictEqual({
-      restarted: [reached, "connect.restricted"],
-      otherChat: unconfirmed,
+      restarted: [reached, heldWrite],
+      otherChat: heldWrite,
+      warned: [true, true, true],
+      otherWarned: [false],
       server: { calls: 0, sent: [] },
     });
   });
@@ -601,12 +627,14 @@ describe("restricted mode", setUpTime, () => {
     ];
     const results = await Promise.all(
       reads.map(async (read) => {
-        const bindings = await envOf(actingFor(subject, admin.userId));
+        const chat = await newChat();
+        const bindings = await envOf(actingFor(subject, admin.userId), chat);
         await outcome(read(readerIn(bindings)));
-        return await sendMail(bindings);
+        await sendMail(bindings);
+        return await warningsIn(admin, chat);
       })
     );
-    expect(results).toStrictEqual(reads.map(() => "connect.restricted"));
+    expect(results).toStrictEqual(reads.map(() => [true]));
   });
 
   it("isn't entered by a read that was refused, or one of an ordinary collection that found nothing", async () => {
@@ -633,7 +661,7 @@ describe("restricted mode", setUpTime, () => {
       afterSearch: await sendMail(searched),
     }).toStrictEqual({
       refused: ["knowledge.not_found", "knowledge.not_found"],
-      call: unconfirmed,
+      call: heldWrite,
       found: {
         hits: [],
         provenance: {
@@ -643,11 +671,11 @@ describe("restricted mode", setUpTime, () => {
         },
       },
       noVersion: "knowledge.not_found",
-      afterSearch: unconfirmed,
+      afterSearch: heldWrite,
     });
   });
 
-  it("stops an App's actions in outside systems for good once it read restricted data", async () => {
+  it("holds an App's actions with a restricted-data warning for good once it read restricted data", async () => {
     const creator = await personOf("admin");
     const { id } = await creator.api.apps.create({ name: `App ${unique()}` });
     const appId = appIdSchema.parse(id);
@@ -661,9 +689,17 @@ describe("restricted mode", setUpTime, () => {
     const after = await sendMail(
       await envOf(actingFor(subject, admin.userId), context)
     );
-    expect({ before, after }).toStrictEqual({
-      before: unconfirmed,
-      after: "connect.restricted",
+    const waiting = await admin.api.pendingActions.list();
+    expect({
+      before,
+      after,
+      warned: waiting
+        .filter((held) => held.context.type === "app")
+        .map(({ restricted }) => restricted),
+    }).toStrictEqual({
+      before: heldWrite,
+      after: heldWrite,
+      warned: [true, true],
     });
   });
 

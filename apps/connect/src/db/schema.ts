@@ -1,7 +1,7 @@
 /**
  * Connect D1 schema: the connection registry, OAuth flows under way, the
- * connections' sealed tokens, the stored answers of side effects and the
- * audit outbox. Pending actions join them here.
+ * connections' sealed tokens, the stored answers of side effects, the side
+ * effects held for their person and the audit outbox.
  */
 import { sql } from "drizzle-orm";
 import {
@@ -79,7 +79,9 @@ export const connections = sqliteTable(
  * can't be reused for a different call. `state` is `running` while the call
  * is out, `done` once its result is stored, `failed` once the tool's error
  * is stored (a tool may have acted before it failed, so that is final too),
- * and `unknown` when the call failed after it may have reached the server.
+ * `unknown` when the call failed after it may have reached the server, and
+ * `declined` when a workflow run's held side effect was declined or
+ * dropped (`output` says why): its step's retry fails, never asks again.
  * Rows are never deleted, so no key is ever used twice: past retention, or
  * when too large, an answer's output is dropped and a repeat is refused.
  */
@@ -93,7 +95,9 @@ export const idempotentCalls = sqliteTable(
     action: text().notNull(),
     idempotencyKey: text("idempotency_key").notNull(),
     inputHash: text("input_hash").notNull(),
-    state: text({ enum: ["running", "done", "failed", "unknown"] }).notNull(),
+    state: text({
+      enum: ["running", "done", "failed", "unknown", "declined"],
+    }).notNull(),
     /**
      * Once done or failed: the result as returned to the first call, while
      * it is kept.
@@ -114,6 +118,61 @@ export const idempotentCalls = sqliteTable(
       ],
     }),
     index("idempotent_calls_created_idx").on(table.createdAt),
+  ]
+);
+
+/**
+ * Side effects held until the person they act for confirms them (threat
+ * model R7, R12, CN7, CN15): those from chat or from a person using an
+ * App, and every one of a context that read restricted data. The exact
+ * call, and everything its confirmation is checked against. One per
+ * subject, person, connection, action and idempotency key, like the
+ * answers above, so a repeat of the call finds the same one. A row exists
+ * only while it waits: confirming, declining or dropping it deletes it, in
+ * one batch with its audit event.
+ *
+ * `account_id` is the connection's account when it was held: confirmed on
+ * a connection that reaches another account, it is refused. `input` is the
+ * call's input as JSON, and `input_hash` the SHA-256 of its resource and
+ * input, which the confirmation names. `permission_id` and `context` (JSON)
+ * are what core checks again when the person confirms it.
+ */
+export const pendingActions = sqliteTable(
+  "pending_actions",
+  {
+    id: text().primaryKey(),
+    subjectType: text("subject_type", { enum: ["app", "agent"] }).notNull(),
+    subjectId: text("subject_id").notNull(),
+    onBehalfOf: text("on_behalf_of").notNull(),
+    /** Asked for with the person there (`interactive`), or by a run. */
+    mode: text({ enum: ["interactive", "workflow"] }).notNull(),
+    appVersion: integer("app_version"),
+    connectionId: text("connection_id").notNull(),
+    accountId: text("account_id"),
+    resource: text(),
+    action: text().notNull(),
+    idempotencyKey: text("idempotency_key").notNull(),
+    input: text().notNull(),
+    inputHash: text("input_hash").notNull(),
+    permissionId: text("permission_id").notNull(),
+    context: text().notNull(),
+    /** Asked for by a chat, App or run that had read restricted data. */
+    restricted: integer({ mode: "boolean" }).notNull().default(false),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("pending_actions_call_idx").on(
+      table.subjectType,
+      table.subjectId,
+      table.onBehalfOf,
+      table.connectionId,
+      table.action,
+      table.idempotencyKey
+    ),
+    // A person's list, and dropping theirs when they are removed.
+    index("pending_actions_person_idx").on(table.onBehalfOf),
+    // Dropping a disconnected connection's.
+    index("pending_actions_connection_idx").on(table.connectionId),
   ]
 );
 

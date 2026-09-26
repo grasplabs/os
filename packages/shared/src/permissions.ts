@@ -4,11 +4,14 @@ import { defineErrorFamily } from "./errors.ts";
 import {
   agentIdSchema,
   appIdSchema,
+  chatIdSchema,
   collectionIdSchema,
   connectionIdSchema,
   identifierMaxLength,
   identifierSchema,
+  runIdSchema,
   workflowIdSchema,
+  workspaceIdSchema,
 } from "./ids.ts";
 import type { PermissionId } from "./ids.ts";
 
@@ -295,11 +298,33 @@ export const authoritySchema = z.strictObject({
 });
 export type Authority = z.infer<typeof authoritySchema>;
 
+/**
+ * Where an App or agent works, and keeps its restricted mode: a chat, an
+ * App, or a run of one of the App's workflows. The host sets it, like the
+ * authority.
+ */
+export const workContextSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("chat"),
+    workspaceId: workspaceIdSchema,
+    chatId: chatIdSchema,
+  }),
+  z.strictObject({ type: z.literal("app"), appId: appIdSchema }),
+  z.strictObject({
+    type: z.literal("run"),
+    appId: appIdSchema,
+    runId: runIdSchema,
+  }),
+]);
+export type WorkContext = z.infer<typeof workContextSchema>;
+
 /** Why a permission call was refused. */
 export const permissionErrors = defineErrorFamily({
   "permission.denied": "This App or agent has no permission to do that.",
   "permission.context_invalid":
     "This App or agent can't work in that chat or App, or it doesn't exist.",
+  "permission.restricted":
+    "This chat, App or run has read restricted data, so it can no longer act on or fetch from outside systems.",
   "permission.person_inactive":
     "The person this acts for no longer has access to this deployment.",
   "permission.invalid": "That isn't a valid permission request.",

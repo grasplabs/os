@@ -19,6 +19,7 @@ import { accessTokenFor } from "../src/tokens.ts";
 import {
   agentFor,
   callAs,
+  chatOrigin,
   connectAccount,
   outcome,
   ownAccount,
@@ -137,17 +138,17 @@ describe("a native connector", () => {
     ).toStrictEqual([{ method: "POST", body: '{"subject":"Paid"}' }]);
   });
 
-  it("reads for a restricted context, and refuses its side effects before any token is read", async () => {
+  it("reads for a restricted context, and holds its side effects before any token is read", async () => {
     const connection = await connectionTo("sample");
     // Any read of this token now refreshes it at the provider.
     await drizzle(env.DB)
       .update(connectionTokens)
       .set({ accessExpiresAt: new Date(Date.now() + 1000) })
       .where(eq(connectionTokens.connectionId, connection.id));
-    const restricted = { restricted: true };
+    const restricted = { restricted: true, origin: chatOrigin };
     const agent = agentFor(connection.person.userId);
     const mailbox = "invoices@acme.test";
-    const refusals = await Promise.all([
+    const held = await Promise.all([
       outcome(
         callAs(
           agent,
@@ -174,11 +175,12 @@ describe("a native connector", () => {
       ),
     ]);
     expect({
-      refusals,
+      held,
       refreshed: providers.tokenRequests("refresh_token"),
       sent: api.sent,
     }).toStrictEqual({
-      refusals: ["connect.restricted", "connect.restricted"],
+      // A run's fails retryably; chat's comes back as held.
+      held: ["connect.held", "ok"],
       refreshed: [],
       sent: [],
     });
@@ -280,7 +282,7 @@ describe("a native connector", () => {
     expect(Date.now() - started).toBeLessThan(5000);
   });
 
-  it("reads no token for a call it refuses", async () => {
+  it("reads no token for a call it refuses or holds", async () => {
     const connection = await connectionTo("sample");
     const google = await connectionTo("sample", "google");
     // Any read of these tokens now refreshes them at the provider.
@@ -309,6 +311,19 @@ describe("a native connector", () => {
           idempotencyKey: "chat-1:send",
         })
       ),
+      // Held for the person to confirm: nothing is sent yet.
+      outcome(
+        callAs(
+          chat,
+          {
+            connectionId: connection.id,
+            action: "items.send",
+            input: { mailbox: "invoices@acme.test", subject: "Paid" },
+            idempotencyKey: "chat-2:send",
+          },
+          { origin: chatOrigin }
+        )
+      ),
       outcome(
         call(connection, "items.send", {
           mailbox: "invoices@acme.test",
@@ -321,6 +336,7 @@ describe("a native connector", () => {
     expect(refusals).toStrictEqual([
       "connect.resource_out_of_scope",
       "connect.confirmation_required",
+      "ok",
       "connect.idempotency_key_required",
       "connect.action_not_found",
       "connect.server_unavailable",

@@ -255,8 +255,8 @@ const runWorkflow = async (
     const host = new RunHost(env, step, run, {
       acting,
       stepFailed,
-      waiting: async (feature) => {
-        await recordWaiting(env, row, feature);
+      waiting: async (why) => {
+        await recordWaiting(env, row, why);
       },
       callApp: async (caller, method, args) =>
         await callApp(env, run.app, caller, method, args),

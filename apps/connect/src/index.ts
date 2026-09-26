@@ -3,15 +3,22 @@ import {
   verifyCapability,
 } from "@grasp-os/shared/capability";
 import type { CapabilityClaims } from "@grasp-os/shared/capability";
-import { connectCallSchema, connectErrors } from "@grasp-os/shared/connect";
+import {
+  confirmActionSchema,
+  connectCallSchema,
+  connectErrors,
+  declineActionSchema,
+} from "@grasp-os/shared/connect";
 import type {
   ConnectApi,
+  ConnectCall,
   ConnectionPerson,
   ConnectionSummary,
   ConnectResult,
   Disconnect,
   DisconnectPersonal,
   FinishConnection,
+  PendingAction,
   StartConnection,
 } from "@grasp-os/shared/connect";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -19,7 +26,7 @@ import { WorkerEntrypoint } from "cloudflare:workers";
 
 import { auditCall, sendAuditOutbox } from "./audit.ts";
 import type { CallOutcome, CallRecord } from "./audit.ts";
-import { carryOut } from "./call.ts";
+import { carryOut, connectionFor } from "./call.ts";
 import type { CallDone, CallProgress } from "./call.ts";
 import {
   abandonFlow,
@@ -31,6 +38,18 @@ import {
   resealFlows,
   startConnection,
 } from "./oauth.ts";
+import {
+  anyPending,
+  auditRefusedDecision,
+  callOf,
+  dropForEndedRun,
+  heldFor,
+  listPendingActions,
+  pendingActionFor,
+  refuseConfirmation,
+  take,
+} from "./pending.ts";
+import type { HeldAction } from "./pending.ts";
 import { resealTokens } from "./tokens.ts";
 
 // The egress handler of native connectors' isolates (src/connectors.ts).
@@ -80,12 +99,23 @@ const auditFailure = async (env: Env, record: CallRecord): Promise<void> => {
 };
 
 /** How a call that returned ended, for the audit log. */
-const callOutcome = ({ failed, replayed }: CallDone): CallOutcome => {
+const callOutcome = ({ failed, replayed, pending }: CallDone): CallOutcome => {
+  if (pending !== undefined) {
+    return "held";
+  }
   if (replayed) {
     return "replayed";
   }
   return failed ? "failed" : "ok";
 };
+
+type StatedCall = Omit<ConnectCall, "capability" | "input">;
+
+/** The call as the audit log states it: never its input. */
+const statedOf = ({
+  input: _input,
+  ...stated
+}: Omit<ConnectCall, "capability">): StatedCall => stated;
 
 const codeOf = (error: unknown): string | undefined =>
   connectErrors.codeOf(error) ?? capabilityErrors.codeOf(error);
@@ -163,6 +193,104 @@ export default class Connect
     await abandonFlow(this.env, state);
   }
 
+  // Held actions (src/pending.ts). Core names the person from their
+  // session; only they see and decide what waits for them.
+
+  async listPendingActions(person: ConnectionPerson): Promise<PendingAction[]> {
+    return await listPendingActions(this.env, person);
+  }
+
+  async refuseConfirmation(request: unknown): Promise<void> {
+    await refuseConfirmation(this.env, request);
+  }
+
+  async pendingAction(request: unknown): Promise<PendingAction | null> {
+    return await pendingActionFor(this.env, request);
+  }
+
+  async dropForEndedRun(request: unknown): Promise<void> {
+    await dropForEndedRun(this.env, request);
+  }
+
+  async anyPending(request: unknown): Promise<boolean> {
+    return await anyPending(this.env, request);
+  }
+
+  async declineAction(request: unknown): Promise<void> {
+    const parsed = declineActionSchema.safeParse(request);
+    if (!parsed.success) {
+      throw connectErrors.create("connect.invalid");
+    }
+    const { person, id } = parsed.data;
+    await take(
+      this.env,
+      person,
+      await heldFor(this.env, person, id, "decline"),
+      "decline"
+    );
+  }
+
+  /**
+   * Runs a held action its person confirmed: the stored call, exactly, on
+   * the normal path, once. Only with the capability core signed for
+   * confirming this action for this person, from their session, once it
+   * checked the permission and the context again; and only while the input
+   * is the one they were shown.
+   *
+   * What can still refuse it is checked before it is taken, so a refusal
+   * leaves it waiting and is recorded as refused, not confirmed: the
+   * capability, the input, and the connection (active, the person's to
+   * use, the same account). The call path checks them all
+   * again once it is taken, and those checks are the ones that count.
+   */
+  async confirmAction(request: unknown): Promise<ConnectResult> {
+    const parsed = confirmActionSchema.safeParse(request);
+    if (!parsed.success) {
+      throw connectErrors.create("connect.invalid");
+    }
+    const { capability, person, id, inputHash } = parsed.data;
+    const held = await heldFor(this.env, person, id, "confirm");
+    const call = callOf(held);
+    let claims: CapabilityClaims | undefined;
+    try {
+      claims = await verifyCapability(signingKeys(this.env), capability, call);
+      const { authority } = claims;
+      const subjectId =
+        authority.subject.type === "app"
+          ? authority.subject.appId
+          : authority.subject.agentId;
+      // Not the App version: core signs the one the held action recorded.
+      const forThisAction =
+        claims.confirms === held.id &&
+        authority.mode === held.mode &&
+        authority.onBehalfOf === person.userId &&
+        authority.subject.type === held.subjectType &&
+        subjectId === held.subjectId;
+      if (!forThisAction) {
+        throw capabilityErrors.create("capability.invalid", {
+          reason: "scope",
+        });
+      }
+      if (inputHash !== held.inputHash) {
+        throw connectErrors.create("connect.pending_changed");
+      }
+      await connectionFor(this.env, claims, call.connectionId, held);
+    } catch (error) {
+      await auditRefusedDecision(
+        this.env,
+        person,
+        "confirm",
+        id,
+        codeOf(error) ?? "internal",
+        held,
+        claims?.restricted
+      );
+      throw error;
+    }
+    await take(this.env, person, held, "confirm", claims.restricted);
+    return await this.#carryOutAudited(call, claims, held);
+  }
+
   async call(request: unknown): Promise<ConnectResult> {
     const parsed = connectCallSchema.safeParse(request);
     if (!parsed.success) {
@@ -173,13 +301,42 @@ export default class Connect
       throw connectErrors.create("connect.invalid");
     }
     const { capability, ...call } = parsed.data;
-    const { input: _input, ...stated } = call;
-    let claims: CapabilityClaims | undefined;
+    let claims: CapabilityClaims;
+    try {
+      claims = await verifyCapability(signingKeys(this.env), capability, call);
+      // A confirmation's capability runs a held action through
+      // `confirmAction`, never anything here.
+      if (claims.confirms !== undefined) {
+        throw capabilityErrors.create("capability.invalid", {
+          reason: "scope",
+        });
+      }
+    } catch (error) {
+      const reason = codeOf(error);
+      await auditFailure(this.env, {
+        call: statedOf(call),
+        outcome: outcomeOf(reason),
+        reason: reason ?? "internal",
+      });
+      throw error;
+    }
+    return await this.#carryOutAudited(call, claims);
+  }
+
+  /**
+   * Carries out a call whose capability is verified, or the held action
+   * `held` its person confirmed, and records it, refused ones too.
+   */
+  async #carryOutAudited(
+    call: Omit<ConnectCall, "capability">,
+    claims: CapabilityClaims,
+    held?: HeldAction
+  ): Promise<ConnectResult> {
+    const stated = statedOf(call);
     let done: CallDone;
     const progress: CallProgress = {};
     try {
-      claims = await verifyCapability(signingKeys(this.env), capability, call);
-      done = await carryOut(this.env, claims, call, progress);
+      done = await carryOut(this.env, claims, call, progress, held);
     } catch (error) {
       const reason = codeOf(error);
       await auditFailure(this.env, {
@@ -188,6 +345,7 @@ export default class Connect
         sideEffect: progress.sideEffect,
         outcome: outcomeOf(reason),
         reason: reason ?? "internal",
+        pendingActionId: held?.id,
       });
       throw error;
     }
@@ -202,6 +360,7 @@ export default class Connect
       outcome: callOutcome(done),
       reason: done.failed ? "connect.action_failed" : undefined,
       provenance: done.result.provenance,
+      pendingActionId: done.pending?.id ?? held?.id,
     };
     try {
       await auditCall(
@@ -226,6 +385,18 @@ export default class Connect
         output: done.result.output,
       });
     }
-    return done.result;
+    if (done.pending === undefined) {
+      return done.result;
+    }
+    // A run's step can't carry on with an answer that says "held": it ends
+    // as held, and core waits for the person's decision before running it
+    // again under the same key (workflows/host.ts), which then finds the
+    // answer, or `connect.declined`.
+    if (claims.authority.mode === "workflow") {
+      throw connectErrors.create("connect.held", {
+        pendingActionId: done.pending.id,
+      });
+    }
+    return { ...done.result, pending: done.pending };
   }
 }

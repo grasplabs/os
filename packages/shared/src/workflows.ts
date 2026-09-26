@@ -85,6 +85,19 @@ export const paramDeclarationsSchema = <
 export const stepIdempotencyKey = (runId: string, step: string): string =>
   `${encodeURIComponent(runId)}:${step}`;
 
+/** The run a step's idempotency key (`stepIdempotencyKey`) belongs to. */
+export const runOfStepKey = (key: string): string | undefined => {
+  const end = key.indexOf(":");
+  if (end <= 0) {
+    return undefined;
+  }
+  try {
+    return decodeURIComponent(key.slice(0, end));
+  } catch {
+    return undefined;
+  }
+};
+
 /**
  * Codes of the failures trying again may fix, and can't make happen twice.
  * A connection's server that took nothing (it turned the call away, or its
