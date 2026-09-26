@@ -1,6 +1,8 @@
 import { agentErrors } from "@grasp-os/shared/agent";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
+import { log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
+import { z } from "zod";
 
 import { inJurisdiction } from "./durable-objects.ts";
 
@@ -51,6 +53,8 @@ export const requireOpenRun = async (
     .getByName(workspaceId)
     .isCodeRunOpen(chatId, runId);
   if (!open) {
+    // Code still acting after its run ended: worth seeing in the logs.
+    log.warn("agent.run_ended", { chatId });
     throw agentErrors.create("agent.run_ended");
   }
 };
@@ -75,5 +79,16 @@ chat: {
   stub: (scope) => exports.ChatApi({ props: scope }),
 };
 
+/**
+ * An API's name in `env`: a camelCase JavaScript identifier, and no name
+ * every object has (`constructor`, `toString`), which the code's env
+ * would answer without the API.
+ */
+const apiNameSchema = z
+  .string()
+  .regex(/^[a-z][A-Za-z0-9]{0,63}$/u)
+  .refine((name) => !(name in Object.prototype));
+
 /** The APIs a chat's code gets. */
-export const agentApis = (): readonly AgentApi[] => [chatApi];
+export const agentApis = (): readonly AgentApi[] =>
+  [chatApi].map((api) => ({ ...api, name: apiNameSchema.parse(api.name) }));

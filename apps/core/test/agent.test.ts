@@ -6,10 +6,10 @@ import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import { modelErrors } from "@grasp-os/shared/models";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
-import { env, exports } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { maxSteps } from "../src/agent.ts";
+import { maxRunsPerResponse, maxRunsPerTurn, maxSteps } from "../src/agent.ts";
 import { workspace } from "../src/workspace.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
@@ -25,16 +25,14 @@ import { signedInWithRole } from "./sign-in.ts";
 
 const model = "anthropic/claude-sonnet-4-5";
 
-/** The model calls `executeCode` with `code`. */
-const codeStep = (code: string): GatewayReply => ({
+/** The model calls `executeCode` with `code`, `times` times at once. */
+const codeStep = (code: string, times = 1): GatewayReply => ({
   text: "",
-  toolCalls: [
-    {
-      id: `call_${crypto.randomUUID()}`,
-      name: "executeCode",
-      arguments: { code },
-    },
-  ],
+  toolCalls: Array.from({ length: times }, () => ({
+    id: `call_${crypto.randomUUID()}`,
+    name: "executeCode",
+    arguments: { code },
+  })),
   inputTokens: 200,
   outputTokens: 40,
 });
@@ -118,7 +116,7 @@ const runStep = async (code: string) => {
   return result;
 };
 
-/** The model.call events triggered by `userId`, once `count` have arrived. */
+/** The agent's model.call events for `userId`, once `count` have arrived. */
 const modelCallsBy = async (
   userId: string,
   count: number
@@ -128,8 +126,8 @@ const modelCallsBy = async (
     return events.filter(
       ({ action, actor }) =>
         action === "model.call" &&
-        actor.type === "person" &&
-        actor.userId === userId
+        actor.type === "agent" &&
+        actor.onBehalfOf === userId
     );
   };
   await vi.waitFor(
@@ -193,8 +191,8 @@ describe("chat agent", () => {
     ]);
   });
 
-  it("audits every model request, with the chat's person as who asked", async () => {
-    const { personId, ask } = await newChat(
+  it("audits every model request as the chat's agent, acting for the chat's person", async () => {
+    const { id, chat, personId, ask } = await newChat(
       codeStep("export default async () => 1 + 1;"),
       says("Two.")
     );
@@ -202,6 +200,10 @@ describe("chat agent", () => {
     await ask("What is 1 + 1?");
 
     const events = await modelCallsBy(personId, 2);
+    expect(events.map(({ actor }) => actor)).toStrictEqual([
+      { type: "agent", agentId: `${id}/${chat.id}`, onBehalfOf: personId },
+      { type: "agent", agentId: `${id}/${chat.id}`, onBehalfOf: personId },
+    ]);
     expect(events.map(({ detail }) => detail)).toStrictEqual([
       expect.objectContaining({ purpose: "chat.turn", outcome: "answered" }),
       expect.objectContaining({ purpose: "chat.turn", outcome: "answered" }),
@@ -227,7 +229,7 @@ describe("chat agent", () => {
   });
 
   it("stops at the most steps a turn may take", async () => {
-    const { gateway, ask } = await newChat(
+    const { stub, chat, gateway, ask } = await newChat(
       ...Array.from({ length: maxSteps }, () =>
         codeStep("export default async () => 'again';")
       )
@@ -237,6 +239,71 @@ describe("chat agent", () => {
 
     expect(reply.outcome).toBe("max_steps");
     expect(gateway.requests).toHaveLength(maxSteps);
+    // The last step's code isn't run: nobody would read its result.
+    const results = await codeResults(stub, chat.id);
+    expect(results.at(-1)).toStrictEqual({
+      isError: true,
+      text: "Not run: this turn has reached its last step. Answer with what you have.",
+    });
+    expect(results.filter(({ isError }) => !isError)).toHaveLength(
+      maxSteps - 1
+    );
+  });
+
+  it("runs code at most 5 times per response", async () => {
+    const { stub, chat, ask } = await newChat(
+      codeStep("export default async () => 'ran';", 30),
+      says("Done.")
+    );
+
+    await ask("Run it all.");
+
+    const results = await codeResults(stub, chat.id);
+    expect(results.filter(({ isError }) => !isError)).toHaveLength(
+      maxRunsPerResponse
+    );
+    expect(results.filter(({ isError }) => isError)).toHaveLength(
+      30 - maxRunsPerResponse
+    );
+    expect(results.at(-1)?.text).toMatch(/at most 5 times/u);
+  });
+
+  it("runs code at most 30 times per turn", async () => {
+    const { stub, chat, ask } = await newChat(
+      ...Array.from({ length: 7 }, () =>
+        codeStep("export default async () => 'ran';", maxRunsPerResponse)
+      ),
+      says("Done.")
+    );
+
+    await ask("Run it all.");
+
+    const results = await codeResults(stub, chat.id);
+    expect(results.filter(({ isError }) => !isError)).toHaveLength(
+      maxRunsPerTurn
+    );
+    expect(results.at(-1)?.text).toMatch(/30 times, the most it may/u);
+  });
+
+  it("stops the turn when the person leaves during it", async () => {
+    const { stub, chat, personId, gateway, ask } = await newChat(
+      codeStep(
+        "export default async () => { await scheduler.wait(300); return 'done'; };"
+      ),
+      says("Never asked.")
+    );
+
+    const turn = codeOf(ask("Wait."));
+    await vi.waitFor(async () => {
+      await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
+    });
+    await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
+      .bind(personId)
+      .run();
+
+    await expect(turn).resolves.toBe("permission.person_inactive");
+    // No request for them after they left.
+    expect(gateway.requests).toHaveLength(1);
   });
 });
 
@@ -310,20 +377,55 @@ describe("chat agent sandbox", () => {
     });
   });
 
-  it("gets APIs that stop answering once its run has ended", async () => {
-    const { id, chat, personId, ask } = await newChat(
-      codeStep("export default async (env) => (await env.chat.info()).chatId;"),
+  it("gets APIs that stop answering once its run was cancelled", async () => {
+    const warned = vi.spyOn(console, "warn");
+    const { stub, chat, ask } = await newChat(
+      codeStep(
+        "export default async (env) => { await scheduler.wait(300); return await env.chat.info(); };"
+      )
+    );
+
+    const reply = ask("Wait, then look.");
+    await vi.waitFor(async () => {
+      await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
+    });
+    await stub.cancel(chat.id);
+    await expect(reply).resolves.toMatchObject({ outcome: "cancelled" });
+
+    // The code goes on after its run was cancelled; its API refuses it.
+    await vi.waitFor(() => {
+      expect(warned).toHaveBeenCalledWith(
+        expect.objectContaining({ event: "agent.run_ended", chatId: chat.id })
+      );
+    });
+    warned.mockRestore();
+  });
+
+  it("has no Cache API to hand data to another chat", async () => {
+    await expect(
+      runStep("export default async () => typeof caches;")
+    ).resolves.toStrictEqual({ isError: false, text: "Returned:\nundefined" });
+  });
+
+  it("can't store more than the model reads, even with the language patched", async () => {
+    const { stub, chat, ask } = await newChat(
+      codeStep(
+        "String.prototype.slice = function () { return String(this); }; Array.prototype.push = function (...items) { for (const item of items) this[this.length] = item; return this.length; }; export default async () => { for (let i = 0; i < 5000; i++) console.log('x'.repeat(1000)); return 'y'.repeat(5_000_000); };"
+      ),
       says("Done.")
     );
-    await ask("Which chat?");
 
-    // A stub for a run that is no longer open, as code still running after
-    // its run was cancelled or timed out would hold it.
-    const ended = exports.ChatApi({
-      props: { workspaceId: id, chatId: chat.id, personId, runId: "ended" },
-    });
+    await ask("Flood it.");
 
-    await expect(codeOf(ended.info())).resolves.toBe("agent.run_ended");
+    const [row] = await runInDurableObject(stub, (_instance, state) =>
+      state.storage.sql
+        .exec<{ longest: number }>(
+          "SELECT max(length(message)) AS longest FROM chat_messages WHERE chat_id = ?",
+          chat.id
+        )
+        .toArray()
+    );
+    expect(row?.longest).toBeLessThan(40_000);
   });
 
   it("reports code that doesn't load", async () => {
@@ -415,6 +517,44 @@ describe("chat agent turns", () => {
       "permission.person_inactive"
     );
     expect(gateway.requests).toStrictEqual([]);
+  });
+
+  it("shortens old code results in a long chat, and stops a chat that is too long", async () => {
+    const { stub, chat, gateway, ask } = await newChat(
+      codeStep("export default async () => 'early' + '-result';"),
+      says("Noted."),
+      says("Still here.")
+    );
+    await ask("Remember this.");
+    // A long chat since: questions of 30,000 characters each.
+    const addQuestions = async (count: number) => {
+      await runInDurableObject(stub, (_instance, state) => {
+        const message = JSON.stringify({
+          role: "user",
+          content: "q".repeat(30_000),
+          timestamp: 1,
+        });
+        for (let i = 0; i < count; i += 1) {
+          state.storage.sql.exec(
+            "INSERT INTO chat_messages (chat_id, message, created_at) VALUES (?, ?, ?)",
+            chat.id,
+            message,
+            Date.now()
+          );
+        }
+      });
+    };
+    await addQuestions(40);
+
+    await ask("And now?");
+    const sent = JSON.stringify(gateway.requests.at(-1)?.body);
+    expect({
+      early: sent.includes("early-result"),
+      note: sent.includes("An earlier result, left out of a long chat."),
+    }).toStrictEqual({ early: false, note: true });
+
+    await addQuestions(100);
+    await expect(codeOf(ask("More?"))).resolves.toBe("agent.chat_full");
   });
 
   it.each([

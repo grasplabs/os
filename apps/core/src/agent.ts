@@ -6,6 +6,7 @@ import type {
   Message,
   SystemMessage,
 } from "@earendil-works/pi-ai";
+import { permissionErrors } from "@grasp-os/shared/permissions";
 
 import type { AgentApi, AgentScope } from "./agent-apis.ts";
 import { describeRun, runCode } from "./code-mode.ts";
@@ -25,6 +26,13 @@ import type { AgentModel } from "./models.ts";
 
 /** Most model requests one turn may make before it stops. */
 export const maxSteps = 20;
+
+/**
+ * Most code runs one model response may ask for, and one turn may make:
+ * each run is an isolate, so the model can't make a turn start hundreds.
+ */
+export const maxRunsPerResponse = 5;
+export const maxRunsPerTurn = 30;
 
 const instructions = `You are the Grasp assistant, in a chat with one person. You answer their questions, and you look things up or act for them by writing code.
 
@@ -149,9 +157,11 @@ const executeCode = ({
       // pi hands a thrown error's message to the model as a failed result.
       throw new Error(describeRun(run));
     }
+    // Only the text the model reads is kept: it is bounded, and the run's
+    // own output (which the transcript stores) needn't be.
     return {
       content: [{ type: "text", text: describeRun(run) }],
-      details: run,
+      details: undefined,
     };
   },
 });
@@ -181,6 +191,13 @@ export interface Turn {
   signal: AbortSignal;
   /** Keeps a finished message: called in order, as each one finishes. */
   keep: (message: Message) => void;
+  /**
+   * IDs of the resources the turn has read, which feed every later model
+   * request; the chat's APIs add to it as they read.
+   */
+  provenance: string[];
+  /** Whether the person the agent acts for may still have it act. */
+  stillActing: () => Promise<boolean>;
 }
 
 const messageRoles = new Set<unknown>([
@@ -190,9 +207,46 @@ const messageRoles = new Set<unknown>([
   "toolResult",
 ]);
 
-/** One of pi's own messages, the only kind this loop makes. */
-const isMessage = (message: AgentMessage): message is Message =>
-  messageRoles.has(message.role);
+/** One of pi's own messages, the only kind this loop makes and keeps. */
+export const isMessage = (
+  message: AgentMessage | { role?: unknown }
+): message is Message => messageRoles.has(message.role);
+
+/** What the turn has done so far. */
+interface Progress {
+  /** Model responses. */
+  steps: number;
+  /** Code runs started. */
+  runs: number;
+  last?: AssistantMessage;
+  /** The person left during the turn. */
+  personLeft?: boolean;
+}
+
+/**
+ * Why a code run the model asked for isn't started, if it isn't: too many
+ * in one response or one turn, or its result would never be read.
+ */
+const refusal = (
+  progress: Progress,
+  response: AssistantMessage,
+  callId: string
+): string | undefined => {
+  const position = response.content
+    .filter((block) => block.type === "toolCall")
+    .findIndex(({ id }) => id === callId);
+  if (position >= maxRunsPerResponse) {
+    return `Not run: one response may run code at most ${maxRunsPerResponse} times. Run the rest in your next response.`;
+  }
+  if (progress.runs >= maxRunsPerTurn) {
+    return `Not run: this turn has run code ${maxRunsPerTurn} times, the most it may. Answer with what you have.`;
+  }
+  // This response is the turn's last: nobody would read the result.
+  if (progress.steps + 1 >= maxSteps) {
+    return "Not run: this turn has reached its last step. Answer with what you have.";
+  }
+  return undefined;
+};
 
 const textOf = (message: AssistantMessage | undefined): string =>
   (message?.content ?? [])
@@ -227,14 +281,18 @@ export const runTurn = async ({
   scope,
   runs,
   loader,
-  signal,
+  signal: cancelled,
   keep,
+  stillActing,
 }: Turn): Promise<TurnResult> => {
+  // Cancelled by the caller, or stopped here when the person leaves.
+  const stop = new AbortController();
+  const signal = AbortSignal.any([cancelled, stop.signal]);
   const prompts: Message[] = [
     ...systemUpdates(history, apis),
     { role: "user", content: question, timestamp: Date.now() },
   ];
-  const progress: { steps: number; last?: AssistantMessage } = { steps: 0 };
+  const progress: Progress = { steps: 0, runs: 0 };
   await runAgentLoop(
     prompts,
     {
@@ -246,6 +304,23 @@ export const runTurn = async ({
       // The transcript holds only pi's own messages.
       convertToLlm: (messages) => messages.filter(isMessage),
       toolExecution: "sequential",
+      // The agent acts for its person only while they are a member: checked
+      // again before every model request.
+      prepareRequest: async () => {
+        if (!(await stillActing())) {
+          progress.personLeft = true;
+          stop.abort();
+        }
+      },
+      beforeToolCall: async ({ assistantMessage, toolCall }) => {
+        const reason = refusal(progress, assistantMessage, toolCall.id);
+        if (reason === undefined) {
+          progress.runs += 1;
+        }
+        return await Promise.resolve(
+          reason === undefined ? undefined : { block: true, reason }
+        );
+      },
       finishTurn: ({ message }) => {
         progress.steps += 1;
         progress.last = message;
@@ -262,6 +337,9 @@ export const runTurn = async ({
     signal,
     model.stream
   );
+  if (progress.personLeft === true) {
+    throw permissionErrors.create("permission.person_inactive");
+  }
   const { steps, last } = progress;
   const outcome = outcomeOf(last, steps, signal);
   return {

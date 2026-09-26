@@ -714,6 +714,43 @@ describe("model gateway for agents", () => {
     });
   });
 
+  it("records what fed each request, as the loop has read it by then", async () => {
+    const trigger = newPerson();
+    const { gatewayEnv } = withGateway([answer("One."), answer("Two.")]);
+    const read: string[] = [];
+    const agent = models(gatewayEnv).agent(
+      { model: anthropic, purpose: "chat.turn", trigger },
+      () => read
+    );
+
+    await agent.stream(agent.model, withTool("First.")).result();
+    read.push("doc-policy");
+    await agent.stream(agent.model, withTool("Second.")).result();
+
+    const events = await auditedFor(trigger.userId, 2);
+    expect(events.map(({ provenance }) => provenance)).toStrictEqual(
+      expect.arrayContaining([[], ["doc-policy"]])
+    );
+  });
+
+  it("sends nothing for a request cancelled before it starts", async () => {
+    const { gateway, gatewayEnv } = withGateway([answer("Hi.")]);
+    const agent = models(gatewayEnv).agent({
+      model: anthropic,
+      purpose: "chat.turn",
+      trigger: newPerson(),
+    });
+
+    const final = await agent
+      .stream(agent.model, withTool("Hello."), {
+        signal: AbortSignal.abort(),
+      })
+      .result();
+
+    expect(final.stopReason).toBe("aborted");
+    expect(gateway.requests).toStrictEqual([]);
+  });
+
   it("stops a request its caller cancels, and audits it as cancelled", async () => {
     const trigger = newPerson();
     const { gateway, gatewayEnv } = withGateway([{ hang: true }]);

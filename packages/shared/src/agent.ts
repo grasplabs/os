@@ -8,6 +8,8 @@ export const agentErrors = defineErrorFamily({
   "agent.busy":
     "The agent is still working in this chat. Wait for it, or stop it.",
   "agent.invalid_question": "That isn't a question the agent can take.",
+  "agent.chat_full":
+    "This chat is too long to go on. Start a new chat to ask more.",
   "agent.run_ended":
     "This code run has ended, so its APIs don't answer any more.",
 });

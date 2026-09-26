@@ -38,6 +38,8 @@ import { z } from "zod";
 
 import { outboxed, sendAuditOutboxNow } from "./audit-outbox.ts";
 import { audit } from "./audit.ts";
+import { deadline } from "./deadline.ts";
+import type { Deadline, Stopped } from "./deadline.ts";
 import { jsonVar } from "./json-var.ts";
 
 // The model gateway: every model call in a deployment goes through here, and
@@ -437,7 +439,8 @@ const send = async (
  * pi fails such a request before `onResponse`, so this is the only place
  * the status is.
  */
-const failedStatusPattern = /^[^{]{0,40}?\b(?<status>[1-5]\d{2})\b/u;
+const failedStatusPattern =
+  /^(?:OpenAI API error \()?(?<status>[1-5]\d{2})(?:\):|:)?\s/u;
 
 const errorTypeSchema = z.string().regex(/^[A-Za-z][\w.-]{0,63}$/u);
 
@@ -459,9 +462,6 @@ interface Failure {
    */
   errorType: string | undefined;
 }
-
-/** A request stopped here: it took too long, or its caller cancelled it. */
-type Stopped = "timeout" | "cancelled";
 
 const providerErrorType = (text: string): string | undefined => {
   const start = text.indexOf("{");
@@ -627,6 +627,20 @@ const record = async (
 };
 
 /**
+ * Whether the session's audit event fits the log whatever its requests
+ * end as. One that doesn't (its provenance, say, is too long to record) is
+ * refused before anything is sent and paid for.
+ */
+const fits = (session: Session, ref: ModelRef): boolean => {
+  try {
+    createAuditEvent(auditEntry(session, ref, largestRecord), "core");
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
  * Checks a session against the deployment's config, before anything is
  * sent, and routes it to the model at the gateway.
  */
@@ -642,10 +656,7 @@ const admit = (env: ModelsEnv, session: Session): Route => {
   if (ref === undefined) {
     throw modelErrors.create("model.not_allowed", { model: session.model });
   }
-  try {
-    createAuditEvent(auditEntry(session, ref, largestRecord), "core");
-  } catch {
-    // Its provenance, say, is too long to record.
+  if (!fits(session, ref)) {
     throw modelErrors.create("model.invalid_call");
   }
   return {
@@ -668,40 +679,12 @@ const parseCall = <Schema extends z.ZodType>(
   return parsed.data;
 };
 
-/**
- * Ends a call after `ms`, or when its caller cancels it. Its timer is
- * cleared when the call ends, so none outlives it to keep a Durable Object
- * awake.
- */
-const deadline = (ms: number, caller?: AbortSignal) => {
-  const timer = new AbortController();
-  const handle = setTimeout(() => {
-    timer.abort();
-  }, ms);
-  return {
-    signal:
-      caller === undefined
-        ? timer.signal
-        : AbortSignal.any([caller, timer.signal]),
-    /** Why the call was stopped here, if it was. */
-    stopped: (): Stopped | undefined => {
-      if (caller?.aborted === true) {
-        return "cancelled";
-      }
-      return timer.signal.aborted ? "timeout" : undefined;
-    },
-    clear: () => {
-      clearTimeout(handle);
-    },
-  };
-};
-
 const answerCall = async <Output>(
   env: ModelsEnv,
   route: Route,
   call: Call,
   schema: z.ZodType<Output> | undefined,
-  limit: ReturnType<typeof deadline>
+  limit: Deadline
 ): Promise<ModelAnswer<Output>> => {
   const system =
     schema === undefined
@@ -789,12 +772,28 @@ const callModel = async <Output>(
   }
 };
 
+/** A failed answer in our own words, for a request that got none. */
+const failedAnswer = (
+  route: Route,
+  errorMessage: string
+): AssistantMessage => ({
+  role: "assistant",
+  content: [],
+  api: route.model.api,
+  provider: route.model.provider,
+  model: route.model.id,
+  usage: noUsage,
+  stopReason: "error",
+  errorMessage,
+  timestamp: Date.now(),
+});
+
 const relayEvents = async (
   env: ModelsEnv,
   route: Route,
   { events, response }: ReturnType<typeof open>,
   out: AssistantMessageEventStream,
-  limit: ReturnType<typeof deadline>
+  limit: Deadline
 ): Promise<void> => {
   for await (const event of events) {
     if (event.type === "error") {
@@ -829,9 +828,15 @@ const relayEvents = async (
         1,
         event.reason === "length" ? "truncated" : "answered"
       );
+      out.push(event);
+      return;
     }
     out.push(event);
   }
+  // The adapter ended without a last event: a failure, recorded as one.
+  const answer = failedAnswer(route, "The model call failed.");
+  await record(env, route, { answer, ...response }, 1, "failed");
+  out.push({ type: "error", reason: "error", error: answer });
 };
 
 /**
@@ -846,6 +851,30 @@ const relay = async (
   out: AssistantMessageEventStream,
   caller: AbortSignal | undefined
 ): Promise<void> => {
+  if (caller?.aborted === true) {
+    // Cancelled before it was sent: nothing to record.
+    out.push({
+      type: "error",
+      reason: "aborted",
+      error: {
+        ...failedAnswer(route, "The model call was cancelled."),
+        stopReason: "aborted",
+      },
+    });
+    return;
+  }
+  if (!fits(route.session, route.ref)) {
+    // What the turn read since it began makes its event too large.
+    out.push({
+      type: "error",
+      reason: "error",
+      error: failedAnswer(
+        route,
+        "The model call was refused: it read from too many resources to record."
+      ),
+    });
+    return;
+  }
   const limit = deadline(route.session.timeoutMs ?? defaultTimeoutMs, caller);
   try {
     await relayEvents(
@@ -898,32 +927,28 @@ const relayOrFail = async (
     out.push({
       type: "error",
       reason: "error",
-      error: {
-        role: "assistant",
-        content: [],
-        api: route.model.api,
-        provider: route.model.provider,
-        model: route.model.id,
-        usage: noUsage,
-        stopReason: "error",
-        errorMessage: failureMessage({
-          status: undefined,
-          errorType: undefined,
-        }),
-        timestamp: Date.now(),
-      },
+      error: failedAnswer(route, "The model call failed."),
     });
   }
 };
 
-const agentModel = (env: ModelsEnv, fields: ModelSession): AgentModel => {
+const agentModel = (
+  env: ModelsEnv,
+  fields: ModelSession,
+  provenance: () => readonly string[]
+): AgentModel => {
   const route = admit(env, parseCall(sessionSchema, fields));
   return {
     model: route.model,
     stream: (_model, context, options) => {
       const out = createAssistantMessageEventStream();
+      // What fed this request: whatever the loop has read by now.
+      const request: Route = {
+        ...route,
+        session: { ...route.session, provenance: [...provenance()] },
+      };
       // The loop reads the answer from `out` as it streams in.
-      void relayOrFail(env, route, context, out, options?.signal);
+      void relayOrFail(env, request, context, out, options?.signal);
       return out;
     },
   };
@@ -938,11 +963,15 @@ const agentModel = (env: ModelsEnv, fields: ModelSession): AgentModel => {
  * `models(env).agent({ model, purpose, trigger })` is the same for an agent
  * loop: a model that streams and calls tools, each request refused, sent
  * and audited the same way. It refuses the session up front, before the
- * loop sends anything.
+ * loop sends anything. `provenance` is read for each request: the IDs of
+ * the resources the loop has read by then.
  */
 export const models = (env: ModelsEnv) => ({
   call: async <Output = undefined>(
     call: ModelCall<Output>
   ): Promise<ModelAnswer<Output>> => await callModel(env, call),
-  agent: (session: ModelSession): AgentModel => agentModel(env, session),
+  agent: (
+    session: ModelSession,
+    provenance: () => readonly string[] = () => []
+  ): AgentModel => agentModel(env, session, provenance),
 });

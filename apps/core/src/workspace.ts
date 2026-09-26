@@ -4,12 +4,12 @@ import { chatIdSchema, workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { DurableObject } from "cloudflare:workers";
-import { asc, eq } from "drizzle-orm";
+import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
 
 import { agentApis } from "./agent-apis.ts";
-import { runTurn } from "./agent.ts";
+import { isMessage, runTurn } from "./agent.ts";
 import type { TurnResult } from "./agent.ts";
 import { memberRole } from "./auth/identity.ts";
 import { migrateOnWake } from "./db/migrate.ts";
@@ -34,12 +34,49 @@ export type Question = z.input<typeof questionSchema>;
  * shape is checked as far as telling the roles apart.
  */
 const storedMessageSchema = z.custom<Message>(
-  (value) =>
-    typeof value === "object" &&
-    value !== null &&
-    "role" in value &&
-    ["system", "user", "assistant", "toolResult"].includes(String(value.role))
+  (value) => typeof value === "object" && value !== null && isMessage(value)
 );
+
+/**
+ * Most characters a chat's transcript may hold: a chat past it takes no
+ * more questions, so loading one never parses more than this.
+ */
+export const maxChatChars = 4_000_000;
+
+/**
+ * Most characters of a transcript loaded in full. Older code results are
+ * loaded as a short note instead: the model rarely needs them, and a long
+ * chat stays within what it can read.
+ */
+export const transcriptChars = 1_000_000;
+
+/**
+ * A chat's messages, oldest first, with the code results before the newest
+ * {@link transcriptChars} characters shortened to a note, in SQL, so they
+ * are never parsed whole.
+ */
+const transcriptQuery = `
+  SELECT CASE
+    WHEN newer > ? AND json_extract(message, '$.role') = 'toolResult'
+    THEN json_object(
+      'role', 'toolResult',
+      'toolCallId', json_extract(message, '$.toolCallId'),
+      'toolName', json_extract(message, '$.toolName'),
+      'content', json_array(json_object(
+        'type', 'text',
+        'text', '(An earlier result, left out of a long chat.)'
+      )),
+      'isError', json(CASE WHEN json_extract(message, '$.isError') THEN 'true' ELSE 'false' END),
+      'timestamp', json_extract(message, '$.timestamp')
+    )
+    ELSE message
+  END AS message
+  FROM (
+    SELECT id, message,
+      SUM(length(message)) OVER (ORDER BY id DESC) AS newer
+    FROM chat_messages WHERE chat_id = ?
+  )
+  ORDER BY id`;
 
 /** A person's or team's workspace: chats and the Code Mode agent on Pi. */
 export class Workspace extends DurableObject<Env> {
@@ -125,12 +162,27 @@ export class Workspace extends DurableObject<Env> {
     if (this.#turns.has(chat.id)) {
       throw agentErrors.create("agent.busy");
     }
+    if (this.#storedChars(chat.id) > maxChatChars) {
+      throw agentErrors.create("agent.chat_full");
+    }
+    // The object is named after its workspace (see `workspace`).
+    const workspaceId = workspaceIdSchema.parse(this.ctx.id.name);
+    // What the turn reads; the chat's APIs add to it (see agent.ts).
+    const provenance: string[] = [];
     // Refuses a model the deployment doesn't allow before anything is kept.
-    const model = models(this.env).agent({
-      model: parsed.data.model,
-      purpose: "chat.turn",
-      trigger: { type: "person", userId: personId },
-    });
+    // Audited as this chat's agent, acting for the chat's person.
+    const model = models(this.env).agent(
+      {
+        model: parsed.data.model,
+        purpose: "chat.turn",
+        trigger: {
+          type: "agent",
+          agentId: `${workspaceId}/${chat.id}`,
+          onBehalfOf: personId,
+        },
+      },
+      () => provenance
+    );
     const cancel = new AbortController();
     this.#turns.set(chat.id, cancel);
     try {
@@ -139,12 +191,10 @@ export class Workspace extends DurableObject<Env> {
         question: parsed.data.text,
         model,
         apis: agentApis(),
-        scope: {
-          // The object is named after its workspace (see `workspace`).
-          workspaceId: workspaceIdSchema.parse(this.ctx.id.name),
-          chatId: chat.id,
-          personId,
-        },
+        scope: { workspaceId, chatId: chat.id, personId },
+        provenance,
+        stillActing: async () =>
+          (await memberRole(this.env.DB, personId)) !== undefined,
         runs: {
           open: () => {
             const runId = crypto.randomUUID();
@@ -204,13 +254,20 @@ export class Workspace extends DurableObject<Env> {
     return chat;
   }
 
+  #storedChars(chatId: ChatId): number {
+    const [row] = this.ctx.storage.sql
+      .exec<{ chars: number }>(
+        "SELECT coalesce(sum(length(message)), 0) AS chars FROM chat_messages WHERE chat_id = ?",
+        chatId
+      )
+      .toArray();
+    return row?.chars ?? 0;
+  }
+
   #transcript(chatId: ChatId): Message[] {
-    return this.#db
-      .select({ message: chatMessages.message })
-      .from(chatMessages)
-      .where(eq(chatMessages.chatId, chatId))
-      .orderBy(asc(chatMessages.id))
-      .all()
+    return this.ctx.storage.sql
+      .exec<{ message: string }>(transcriptQuery, transcriptChars, chatId)
+      .toArray()
       .map(({ message }) => storedMessageSchema.parse(JSON.parse(message)));
   }
 }

@@ -2,13 +2,22 @@ import { compatibilityDate } from "@grasp-os/shared/runtime";
 import type { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
 
+import { deadline } from "./deadline.ts";
+
 // Code Mode: the agent acts by writing code against typed APIs, and the
 // code runs here, in a Dynamic Worker of its own that is locked down like
 // every isolate running code the agent or an App wrote. It has no network
 // (`globalOutbound: null`), can't import the parent's env or exports
-// (`disallow_importable_env`), and its env holds only the stubs it is
-// given: loopback entrypoints of core whose props core sets, never a raw
-// binding. What the code returns, logs or throws comes back as data.
+// (`disallow_importable_env`), has no Cache API (a cache shared between
+// runs would let one chat hand data to another), and its env holds only
+// the stubs it is given: loopback entrypoints of core whose props core
+// sets, never a raw binding. What the code returns, logs or throws comes
+// back as data, and core bounds it again: the code runs in the same
+// isolate as the harness, so nothing the harness does is trusted.
+//
+// The CPU limit is enforced by Cloudflare's runtime, not by plain workerd.
+// On-prem (plain workerd) the `agent` feature stays off: without that
+// limit a run could spin forever.
 
 /**
  * How far one run may go: CPU time and calls out of the isolate (its stubs)
@@ -22,44 +31,57 @@ export const codeLimits = {
   timeoutMs: 30_000,
   /** Most characters of logs and result that go back to the model. */
   outputChars: 32 * 1024,
+  /** Most log lines a run may send back. */
+  logLines: 1000,
 } as const;
 
 /**
- * Runs in the isolate: calls the code's default export with the env, and
+ * Most characters of each part of a run that core takes from the isolate:
+ * more than the model reads, so it can be told what was cut.
+ */
+const room = 2 * codeLimits.outputChars;
+
+/**
+ * Runs in the isolate: takes what it needs of the language first, removes
+ * the Cache API, and only then loads the code, which can't change what the
+ * harness already holds. Calls the code's default export with the env, and
  * returns its result, its logs and what it threw. An env name the code
  * wasn't given is refused by name, instead of failing later as `undefined`.
  */
 const harness = `
 import { WorkerEntrypoint } from "cloudflare:workers";
-import code from "code.js";
 
-// More than the model reads, so it can be told what was cut; no more, so
-// a run can't send core more than that.
-const room = ${2 * codeLimits.outputChars};
-
+const room = ${room};
+const lines = ${codeLimits.logLines};
+const slice = Function.prototype.call.bind(String.prototype.slice);
+const stringify = JSON.stringify;
+const toText = String;
+const push = Function.prototype.call.bind(Array.prototype.push);
 const tooLarge = new Error("too large");
+
+Object.defineProperty(globalThis, "caches", { value: undefined });
 
 // A value as text, never much longer than room: serializing stops as soon
 // as it would pass it, instead of building all of a huge value first.
 const show = (value) => {
   if (typeof value === "string") {
-    return value.slice(0, room);
+    return slice(value, 0, room);
   }
   let size = 0;
   try {
     return (
-      JSON.stringify(value, (key, item) => {
+      stringify(value, (key, item) => {
         size += key.length + (typeof item === "string" ? item.length : 8);
         if (size > room) {
           throw tooLarge;
         }
         return item;
-      }) ?? String(value)
+      }) ?? toText(value)
     );
   } catch (error) {
     return error === tooLarge
       ? "(a value too large to show, over " + room + " characters)"
-      : String(value).slice(0, room);
+      : slice(toText(value), 0, room);
   }
 };
 
@@ -68,10 +90,14 @@ export default class extends WorkerEntrypoint {
     const logs = [];
     let left = room;
     const write = (...parts) => {
-      if (left > 0) {
-        const line = parts.map(show).join(" ").slice(0, left);
+      if (left > 0 && logs.length < lines) {
+        let line = "";
+        for (const part of parts) {
+          line = line === "" ? show(part) : line + " " + show(part);
+        }
+        line = slice(line, 0, left);
         left -= line.length + 1;
-        logs.push(line);
+        push(logs, line);
       }
     };
     for (const level of ["log", "info", "warn", "error", "debug"]) {
@@ -90,20 +116,17 @@ export default class extends WorkerEntrypoint {
       },
     });
     try {
+      const { default: code } = await import("code.js");
       if (typeof code !== "function") {
         throw new TypeError("The module's default export must be an async function: export default async (env) => { ... }");
       }
       const value = await code(env);
-      return {
-        ok: true,
-        logs,
-        result: value === undefined ? undefined : show(value).slice(0, room),
-      };
+      return { ok: true, logs, result: value === undefined ? undefined : show(value) };
     } catch (error) {
       return {
         ok: false,
         logs,
-        error: (error instanceof Error ? (error.stack ?? String(error)) : show(error)).slice(0, room),
+        error: error instanceof Error ? show(error.stack ?? toText(error)) : show(error),
       };
     }
   }
@@ -111,14 +134,14 @@ export default class extends WorkerEntrypoint {
 `;
 
 /**
- * What the isolate sends back. It is the agent's code that runs there, so
- * nothing it returns is trusted as more than text.
+ * What the isolate sends back, bounded here whatever the harness did: the
+ * agent's code runs in the same isolate and can change anything there.
  */
 const runSchema = z.object({
   ok: z.boolean(),
-  logs: z.array(z.string()),
-  result: z.string().optional(),
-  error: z.string().optional(),
+  logs: z.array(z.string().max(room)).max(codeLimits.logLines),
+  result: z.string().max(room).optional(),
+  error: z.string().max(room).optional(),
 });
 
 /** One run of the agent's code. */
@@ -134,34 +157,21 @@ interface Harness extends WorkerEntrypoint {
 
 const failed = (error: string): CodeRun => ({ ok: false, logs: [], error });
 
-/**
- * Ends a run that takes too long, or that its caller cancels. Its timer is
- * cleared when the run ends, so none outlives it to keep the object that
- * started the run awake.
- */
-const deadline = (caller: AbortSignal | undefined) => {
-  const ended = Promise.withResolvers<CodeRun>();
-  const cancel = () => {
-    ended.resolve(failed("The run was cancelled."));
+/** A run that was stopped, as it ends: when the deadline passes. */
+const stoppedRun = async (signal: AbortSignal): Promise<never> => {
+  const stopped = Promise.withResolvers<never>();
+  const stop = () => {
+    stopped.reject(signal.reason);
   };
-  const timer = setTimeout(() => {
-    ended.resolve(
-      failed(
-        `The run took longer than ${codeLimits.timeoutMs / 1000} seconds, so it was stopped.`
-      )
-    );
-  }, codeLimits.timeoutMs);
-  if (caller?.aborted === true) {
-    cancel();
+  if (signal.aborted) {
+    stop();
   }
-  caller?.addEventListener("abort", cancel, { once: true });
-  return {
-    ended: ended.promise,
-    clear: () => {
-      clearTimeout(timer);
-      caller?.removeEventListener("abort", cancel);
-    },
-  };
+  signal.addEventListener("abort", stop, { once: true });
+  try {
+    return await stopped.promise;
+  } finally {
+    signal.removeEventListener("abort", stop);
+  }
 };
 
 /**
@@ -187,20 +197,30 @@ export const runCode = async (
     globalOutbound: null,
     limits: { cpuMs: codeLimits.cpuMs, subRequests: codeLimits.subRequests },
   });
-  const limit = deadline(signal);
+  const limit = deadline(codeLimits.timeoutMs, signal);
   try {
     const outcome: unknown = await Promise.race([
       worker.getEntrypoint<Harness>().run(),
-      limit.ended,
+      stoppedRun(limit.signal),
     ]);
     const parsed = runSchema.safeParse(outcome);
     return parsed.success
       ? parsed.data
-      : failed("The run returned something that isn't a result.");
+      : failed("The run returned more than it may, or not a result.");
   } catch (error) {
+    if (limit.stopped() === "cancelled") {
+      return failed("The run was cancelled.");
+    }
+    if (limit.stopped() === "timeout") {
+      return failed(
+        `The run took longer than ${codeLimits.timeoutMs / 1000} seconds, so it was stopped.`
+      );
+    }
     // The code didn't load (a syntax error, say), or the runtime stopped
     // it (CPU time, memory). Its message is about the code, never core.
-    return failed(error instanceof Error ? error.message : String(error));
+    return failed(
+      (error instanceof Error ? error.message : String(error)).slice(0, room)
+    );
   } finally {
     limit.clear();
   }
