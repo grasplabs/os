@@ -9,6 +9,9 @@
  * per release and shared by every App. Once every file compiles, the App is
  * type-checked and linted against the kit's design system; then Tailwind
  * compiles the CSS for the classes in the App's and the kit's sources.
+ *
+ * It also builds an App's server code, which runs in core (see
+ * `buildServer`): the same Babel, stripping types only.
  */
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { compile } from "tailwindcss";
@@ -16,16 +19,24 @@ import { compile } from "tailwindcss";
 import kit from "#kit";
 
 import { extractCandidates } from "./candidates.ts";
-import { compileModule, transformModule } from "./compile.ts";
+import { compileModule, stripTypes, transformModule } from "./compile.ts";
 import { isError } from "./diagnostic.ts";
 import type { Diagnostic } from "./diagnostic.ts";
-import { collectImports, importError, rewriteImports } from "./imports.ts";
+import {
+  collectImports,
+  importError,
+  rewriteImports,
+  rewriteServerImports,
+  serverImportError,
+} from "./imports.ts";
 import type { ImportSite } from "./imports.ts";
 import {
   buildFiles,
   declarationFile,
   limitErrors,
   screenFile,
+  serverEntry,
+  serverFiles,
 } from "./inputs.ts";
 import { appModuleName, kitStylesheet, ownEntry } from "./kit.ts";
 import { lint } from "./lint.ts";
@@ -288,11 +299,109 @@ export const buildScreens = async (
   };
 };
 
+/**
+ * An App's server code as modules by flat name, and the one that exports
+ * its `App` class; or why it failed.
+ */
+export type ServerBuild =
+  | { ok: true; mainModule: string; modules: Record<string, string> }
+  | { ok: false; diagnostics: Diagnostic[] };
+
+/** Compiles one server file, or says why it can't be. */
+const compileServerFile = (
+  path: string,
+  source: string,
+  files: ReadonlySet<string>
+): { code: string } | { errors: Diagnostic[] } => {
+  const imports: ImportSite[] = [];
+  let compiled: string;
+  try {
+    compiled = stripTypes(source, path, [collectImports(imports)]);
+  } catch (error) {
+    const message = messageIn(path, error);
+    return {
+      errors: [
+        problem("compile", message, { file: path, ...locationOf(error) }),
+      ],
+    };
+  }
+  const errors = imports.flatMap(({ specifier, line }) => {
+    const message = serverImportError(specifier, path, files);
+    return message === undefined
+      ? []
+      : [
+          problem(
+            "imports",
+            message,
+            line === undefined ? { file: path } : { file: path, line }
+          ),
+        ];
+  });
+  if (errors.length > 0) {
+    return { errors };
+  }
+  try {
+    return {
+      code: transformModule(compiled, path, [
+        rewriteServerImports(path, files),
+      ]),
+    };
+  } catch (error) {
+    return {
+      errors: [problem("imports", messageIn(path, error), { file: path })],
+    };
+  }
+};
+
+/**
+ * Builds an App's server: `app/server.ts`, which exports its `App` class,
+ * and the other TypeScript files under `app/`. Types are stripped, not
+ * checked; imports reach only those files and the Workers runtime.
+ */
+export const buildServer = (files: Record<string, string>): ServerBuild => {
+  const server = serverFiles(files);
+  const tooMuch = limitErrors(server);
+  if (tooMuch.length > 0) {
+    return { ok: false, diagnostics: tooMuch };
+  }
+  if (!Object.hasOwn(server, serverEntry)) {
+    return {
+      ok: false,
+      diagnostics: [
+        problem(
+          "server",
+          `The App has no server: add ${serverEntry}, exporting its App class.`
+        ),
+      ],
+    };
+  }
+  const known = new Set(Object.keys(server));
+  const modules: Record<string, string> = {};
+  const errors: Diagnostic[] = [];
+  for (const [path, source] of Object.entries(server)) {
+    const result = compileServerFile(path, source, known);
+    if ("code" in result) {
+      modules[appModuleName(path)] = result.code;
+    } else {
+      errors.push(...result.errors);
+    }
+  }
+  return errors.length > 0
+    ? { ok: false, diagnostics: errors }
+    : { ok: true, mainModule: appModuleName(serverEntry), modules };
+};
+
 export default class ScreenCompiler extends WorkerEntrypoint {
   // RPC exposes prototype methods only, so these can't be static.
   // oxlint-disable-next-line class-methods-use-this
   async build(files: Record<string, string>): Promise<ScreenBuild> {
     return await buildScreens(files);
+  }
+
+  /** Builds the App's server code (`buildServer`). */
+  // oxlint-disable-next-line class-methods-use-this
+  buildServer(files: Record<string, string>): ServerBuild {
+    return buildServer(files);
   }
 
   /** Only the type check and the lint, without building. */

@@ -5,7 +5,11 @@ import { isExpectedError, toOpaqueError } from "@grasp-os/shared/errors";
 import type { PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { bindingNameSchema } from "@grasp-os/shared/permissions";
-import type { Authority, PermissionObject } from "@grasp-os/shared/permissions";
+import type {
+  Authority,
+  Permission,
+  PermissionObject,
+} from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
@@ -78,18 +82,50 @@ const stubCallSchema = z.tuple([
     .optional(),
 ]);
 
-interface ConnectionBindingProps {
-  authority: Authority;
+/** A connection permission, as a stub holds it, and where it works. */
+export interface ConnectionGrant {
   context: WorkContext;
   /** The permission the stub was built from: only it counts on each call. */
   permissionId: PermissionId;
   connection: ConnectionObject;
 }
 
-/** A connection, as an App or agent holds it: `await env.OUTLOOK.call(...)`. */
+/**
+ * Runs one stub call for `authority` (or for whoever it resolves to), with
+ * errors as the sandbox sees them.
+ */
+export const runStubCall = async (
+  env: Env,
+  authority: Authority | (() => Promise<Authority>),
+  { context, permissionId, connection }: ConnectionGrant,
+  call: unknown[]
+): Promise<ConnectResult> => {
+  const parsed = stubCallSchema.safeParse(call);
+  if (!parsed.success) {
+    throw connectErrors.create("connect.invalid_call");
+  }
+  const [action, input, options] = parsed.data;
+  try {
+    return await callConnection(
+      env,
+      typeof authority === "function" ? await authority() : authority,
+      context,
+      connection,
+      { action, input, idempotencyKey: options?.idempotencyKey },
+      permissionId
+    );
+  } catch (error) {
+    throw forSandbox(error);
+  }
+};
+
+/**
+ * A connection, as an agent or a workflow run holds it:
+ * `await env.OUTLOOK.call(...)`. It acts for the one person in its props.
+ */
 export class ConnectionBinding extends WorkerEntrypoint<
   Env,
-  ConnectionBindingProps
+  ConnectionGrant & { authority: Authority }
 > {
   /**
    * Runs one of the connection's actions. A side effect needs an
@@ -100,44 +136,50 @@ export class ConnectionBinding extends WorkerEntrypoint<
     input: unknown,
     options?: unknown
   ): Promise<ConnectResult> {
-    const { authority, context, permissionId, connection } = this.ctx.props;
-    const call = stubCallSchema.safeParse([action, input, options]);
-    if (!call.success) {
-      throw connectErrors.create("connect.invalid_call");
-    }
-    const [checkedAction, checkedInput, checkedOptions] = call.data;
-    try {
-      return await callConnection(
-        this.env,
-        authority,
-        context,
-        connection,
-        {
-          action: checkedAction,
-          input: checkedInput,
-          idempotencyKey: checkedOptions?.idempotencyKey,
-        },
-        permissionId
-      );
-    } catch (error) {
-      throw forSandbox(error);
-    }
+    const { authority, ...grant } = this.ctx.props;
+    return await runStubCall(this.env, authority, grant, [
+      action,
+      input,
+      options,
+    ]);
   }
 }
 
 /**
+ * One stub per active permission `stubOf` makes one for, under the
+ * permission's binding name. A name that is no longer valid (say, one the
+ * platform took for itself since) is left out and logged, so the rest
+ * still work.
+ */
+export const stubsOf = <Stub>(
+  permissions: Permission[],
+  stubOf: (permission: Permission) => Stub | undefined
+): Record<string, Stub> => {
+  const stubs: Record<string, Stub> = {};
+  for (const permission of permissions) {
+    const { id, binding } = permission;
+    if (bindingNameSchema.safeParse(binding).success) {
+      const stub = stubOf(permission);
+      if (stub !== undefined) {
+        stubs[binding] = stub;
+      }
+    } else {
+      log.warn("binding.name_invalid", { permissionId: id, binding });
+    }
+  }
+  return stubs;
+};
+
+/**
  * The env for one authority working in `context`, built from the
- * permission records as they are now: one stub per active permission,
- * under the permission's binding name. Every stub acts for
- * `authority.onBehalfOf`, and keeps its restricted mode in `context`.
+ * permission records as they are now, every stub acting for
+ * `authority.onBehalfOf` and keeping its restricted mode in `context`.
  * Throws `permission.person_inactive` when that person has left.
  *
- * That fits a workflow run, which acts for one person: the dispatcher
- * builds it on every start and resume, so a revoked permission is gone from
- * the next one. It doesn't fit an App as is: one App object serves everyone
- * using the App, so an env built once per load would act for whoever loaded
- * it. The App sandbox has to take the person from the host on each call (or
- * give App authority no person); that design is the sandbox's.
+ * That fits an agent or a workflow run, which acts for one person: the
+ * dispatcher builds it on every start and resume, so a revoked permission
+ * is gone from the next one. An App serves many people at once, and gets
+ * `appBindings` instead.
  *
  * Workflows get their stubs with the workflow dispatcher; until then
  * nothing reaches them.
@@ -148,26 +190,20 @@ export const bindingsFor = async (
   context: WorkContext
 ): Promise<
   Record<string, Fetcher<ConnectionBinding> | Fetcher<CollectionBinding>>
-> => {
-  const bindings: Record<
-    string,
-    Fetcher<ConnectionBinding> | Fetcher<CollectionBinding>
-  > = {};
-  for (const { id, binding, object } of await grantedPermissions(
-    env,
-    authority
-  )) {
-    const name = bindingNameSchema.parse(binding);
-    const props = { authority, context, permissionId: id };
-    if (object.type === "connection") {
-      bindings[name] = exports.ConnectionBinding({
-        props: { ...props, connection: object },
-      });
-    } else if (object.type === "collection") {
-      bindings[name] = exports.CollectionBinding({
-        props: { ...props, collectionId: object.collectionId },
-      });
+> =>
+  stubsOf<Fetcher<ConnectionBinding> | Fetcher<CollectionBinding>>(
+    await grantedPermissions(env, authority),
+    ({ id, object }) => {
+      const props = { authority, context, permissionId: id };
+      if (object.type === "connection") {
+        return exports.ConnectionBinding({
+          props: { ...props, connection: object },
+        });
+      }
+      return object.type === "collection"
+        ? exports.CollectionBinding({
+            props: { ...props, collectionId: object.collectionId },
+          })
+        : undefined;
     }
-  }
-  return bindings;
-};
+  );

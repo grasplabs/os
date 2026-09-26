@@ -98,7 +98,7 @@ const callStub = async (
   return stub ? await outcome(stub.call(action, {})) : "no binding";
 };
 
-/** Builds the env as an App load or a workflow resume does, and calls `binding`. */
+/** Builds the env as a workflow start or resume does, and calls `binding`. */
 const callThrough = async (
   authority: Authority,
   binding: string,
@@ -352,6 +352,27 @@ describe("permissions", () => {
 
     const bindings = await envOf(actingFor(app, admin.userId));
     expect(Object.keys(bindings)).toStrictEqual(["OUTLOOK", "POLICIES"]);
+  });
+
+  it("leave a name out of the env once the platform takes it, and keep the rest", async () => {
+    const admin = await permissionApi("admin");
+    const app = await newApp(admin.api);
+    const grant = async (request: PermissionRequest) => {
+      const { id } = await admin.api.requestPermission(request);
+      return await admin.api.grantPermission(id);
+    };
+    await grant(outlook(app));
+    const taken = await grant({ ...outlook(app), binding: "LATER_TAKEN" });
+    // A release that makes the name one of core's own, after it was granted.
+    await env.DB.prepare("UPDATE permissions SET binding = 'DB' WHERE id = ?")
+      .bind(taken.id)
+      .run();
+
+    const bindings = await envOf(actingFor(app, admin.userId));
+    expect({
+      names: Object.keys(bindings),
+      outlook: await callStub(bindings),
+    }).toStrictEqual({ names: ["OUTLOOK"], outlook: reached });
   });
 
   it("are refused when they would reach past a stub's names", async () => {

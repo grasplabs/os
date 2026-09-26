@@ -24,6 +24,22 @@ export const buildFiles = (
     )
   );
 
+/** The App's server code: TypeScript under `app/`, declarations aside. */
+const serverFile = /^app\/(?:[\w-]+\/)*[\w.-]+\.ts$/u;
+
+/** The module that exports the server's `App` class. */
+export const serverEntry = "app/server.ts";
+
+/** The files a server build reads: the App's `app/**.ts`. */
+export const serverFiles = (
+  files: Record<string, string>
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(files).filter(
+      ([path]) => serverFile.test(path) && !path.endsWith(".d.ts")
+    )
+  );
+
 /**
  * The most a build takes, so that it stays well inside its isolate's CPU
  * and memory, and a mistake (or an attack) fails fast and says why.

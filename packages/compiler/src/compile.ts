@@ -42,6 +42,25 @@ export const compileModule = (
   return code ?? "";
 };
 
+/**
+ * Compiles one TypeScript file to a JavaScript module by stripping its
+ * types, nothing else: server code, which has no JSX or React. `plugins`
+ * run first, on the source as written.
+ */
+export const stripTypes = (
+  source: string,
+  filename: string,
+  plugins: unknown[] = []
+): string =>
+  Babel.transform(source, {
+    filename,
+    babelrc: false,
+    configFile: false,
+    sourceType: "module",
+    plugins,
+    presets: [["typescript", { allExtensions: true }]],
+  }).code ?? "";
+
 /** Runs Babel plugins over a JavaScript module, e.g. to rewrite its imports. */
 export const transformModule = (
   code: string,

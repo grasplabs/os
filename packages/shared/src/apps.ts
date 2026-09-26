@@ -179,4 +179,27 @@ export const appErrors = defineErrorFamily({
   "app.too_large": "The App's files would be over its limits.",
   "app.nothing_to_commit": "Nothing was written since the latest version.",
   "app.conflict": "Someone else changed this App at the same time. Try again.",
+  "app.not_running": "The App has no current version to run yet.",
+  "app.build_failed": "The App's server code doesn't build.",
+  "app.method_invalid": "The App's server has no method by that name.",
+  "app.failed": "The App's server code failed.",
+  "app.answer_invalid":
+    "The App's server code answered with something other than plain data.",
+  "app.timed_out": "The App's server code took too long to answer.",
+  "app.caller_invalid":
+    "Pass the caller of the App method this runs in, while that call runs.",
 });
+
+/**
+ * Who calls a method of an App's server code. The platform passes it as
+ * the method's first argument, from the person's session or the workflow
+ * run: App code never chooses it. The App passes it on to its connections
+ * (`env.OUTLOOK.call(caller, ...)`), which then act for that person;
+ * `token` names this one call, and stops working when the call ends.
+ */
+export interface AppCaller {
+  userId: string;
+  /** A person is there (a screen), or a workflow runs on its own. */
+  mode: "interactive" | "workflow";
+  token: string;
+}

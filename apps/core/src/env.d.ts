@@ -15,6 +15,8 @@ interface __BaseEnv_Env {
   FEATURES?: unknown;
   /** `none` where Durable Objects have no jurisdiction (src/durable-objects.ts). */
   DURABLE_OBJECT_JURISDICTION?: string;
+  /** Tests only: a shorter limit for one call into an App (src/app.ts). */
+  APP_CALL_TIMEOUT_MS?: string;
   /** Local dev only (src/router-secret.ts). */
   DEV_SKIP_ROUTER_SECRET?: string;
 }
