@@ -406,14 +406,14 @@ const firstThreeKey = (log: Log) =>
 describe("AuditLog verification in steps", () => {
   it("verifies a long chain over several steps, each from where the last stopped", async () => {
     const log = newLog();
-    await appendMany(log, 10_500);
+    await appendMany(log, 2500);
 
     const { result, steps } = await verifyAll(log);
-    expect(result).toMatchObject({ ok: true, through: 10_500, done: true });
-    expect(steps).toBe(2);
+    expect(result).toMatchObject({ ok: true, through: 2500, done: true });
+    expect(steps).toBe(3);
     await expect(log.lastFullVerification()).resolves.toMatchObject({
       ok: true,
-      through: 10_500,
+      through: 2500,
     });
   });
 
@@ -643,38 +643,30 @@ describe("AuditLog retention", () => {
     });
   });
 
-  it("leaves a stretch for the next run while a verification step reads the entries", async () => {
+  it("verifies what a step read while an archive moves those entries out", async () => {
     const log = newLog();
-    await appendMany(log, 2000);
+    await appendMany(log, 1500);
     const cutoff = await cutoffNow();
-    // A step that reads every held entry is under way when the archive
-    // starts: the archive writes nothing and says so, and the step still
-    // sees every entry it reads.
-    const warned = vi.spyOn(console, "warn");
-    try {
-      const [step, stretch] = await runInDurableObject(
-        log,
-        async (instance) =>
-          await Promise.all([instance.verify(), instance.archive(cutoff, 180)])
-      );
-      expect({ step, stretch }).toMatchObject({
-        step: { ok: true, through: 2000, done: true },
-        stretch: null,
-      });
-      expect(warned).toHaveBeenCalledWith(
-        expect.objectContaining({ event: "audit.archive_deferred" })
-      );
-    } finally {
-      warned.mockRestore();
-    }
-    const written = await env.AUDIT_ARCHIVE.list({
-      prefix: `audit-log/${log.id.toString()}/`,
+    // A step reading held entries is under way when the archive starts:
+    // both go through, and the step checks every entry it read.
+    const [step, stretch] = await runInDurableObject(
+      log,
+      async (instance) =>
+        await Promise.all([instance.verify(), instance.archive(cutoff, 180)])
+    );
+    expect({ step, stretch }).toMatchObject({
+      step: { ok: true, through: 1000, done: false },
+      stretch: { from: 1, through: 500 },
     });
-    expect(written.objects).toStrictEqual([]);
-    // The next run archives it.
-    await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
-      from: 1,
-      through: 500,
+    // The next step carries on from there, and the chain still verifies
+    // across the archived stretch.
+    await expect(log.verify(1000)).resolves.toMatchObject({
+      ok: true,
+      through: 1501,
+      done: true,
+    });
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: true, through: 1501, done: true },
     });
   });
 
