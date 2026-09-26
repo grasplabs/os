@@ -43,8 +43,7 @@ export type Feature =
   /** Reading the audit log: search, export and verify. */
   | "audit"
   /** Archiving and purging the audit log (audit-retention.ts). */
-  | "audit_retention"
-  | "approvals";
+  | "audit_retention";
 
 // Names nobody knows (a flag since removed) are ignored, not an error.
 const featuresSchema = z.record(z.string(), z.boolean());

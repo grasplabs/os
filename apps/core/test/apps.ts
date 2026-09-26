@@ -30,8 +30,8 @@ export const outlook = (
 });
 
 /**
- * Asks for `request` as `requester`, and has another admin, signed in for
- * it, grant it: nobody grants their own request. Returns its ID.
+ * Asks for `request` as `requester`, who may be a builder, and has an
+ * admin, signed in for it, grant it. Returns its ID.
  */
 export const requestGranted = async (
   idp: Idp,
@@ -39,11 +39,11 @@ export const requestGranted = async (
   request: PermissionRequest
 ): Promise<string> => {
   const { id } = await requester.api.permissions.request(request);
-  const approver = await signedInApi(idp, "admin");
+  const admin = await signedInApi(idp, "admin");
   try {
-    await approver.api.permissions.grant(id);
+    await admin.api.permissions.grant(id);
   } finally {
-    approver.core[Symbol.dispose]();
+    admin.core[Symbol.dispose]();
   }
   return id;
 };

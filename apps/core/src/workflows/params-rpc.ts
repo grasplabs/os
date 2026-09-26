@@ -1,5 +1,5 @@
-import type { ParamValue } from "@grasp-os/shared/approvals";
 import type {
+  ParamValue,
   WorkflowParam,
   WorkflowParamsApi,
 } from "@grasp-os/shared/workflows";

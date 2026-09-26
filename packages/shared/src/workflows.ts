@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-import type { ParamValue } from "./approvals.ts";
 import { defineErrorFamily } from "./errors.ts";
 import type { AppId, RunId, WorkflowId } from "./ids.ts";
 import type { Json } from "./json.ts";
@@ -9,6 +8,9 @@ import type { Json } from "./json.ts";
 // workflow SDK. Each run is pinned to the App version it started on, and
 // acts for one person: the one who started it, or the App's owner for a
 // run a trigger started.
+
+/** A workflow parameter's value: a number, or text. */
+export type ParamValue = string | number;
 
 /** Why a workflow call was refused. */
 export const workflowErrors = defineErrorFamily({

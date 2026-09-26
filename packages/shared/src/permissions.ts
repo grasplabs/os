@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-import type { ApproveOptions } from "./approvals.ts";
 import { defineErrorFamily } from "./errors.ts";
 import {
   agentIdSchema,
@@ -14,8 +13,8 @@ import {
 import type { PermissionId } from "./ids.ts";
 
 // Apps and agents start with nothing. Each thing they may use is one
-// permission: a person asks for it, an admin other than them grants it
-// (approvals.ts), and every call checks it again on the server.
+// permission: a person asks for it, an admin grants it (their own request
+// included), and every call checks it again on the server.
 // Everything here names things by ID and stays identifier-sized, because
 // each grant and revoke goes into the audit log with these values.
 
@@ -254,12 +253,14 @@ export interface PermissionsApi {
    */
   request: (request: PermissionRequest) => Promise<Permission>;
   /**
-   * Grants a requested permission, by approving its request. Admins only,
-   * and never the admin who asked, except as the only admin with
-   * `breakGlass`.
+   * Grants a requested permission, the admin's own request included.
+   * Admins only, never Grasp staff; audited.
    */
-  grant: (id: string, options?: ApproveOptions) => Promise<Permission>;
-  /** Revokes a permission; the next call that needs it is refused. Admins only. */
+  grant: (id: string) => Promise<Permission>;
+  /**
+   * Revokes a permission; the next call that needs it is refused. Admins
+   * only, never Grasp staff; audited.
+   */
   revoke: (id: string) => Promise<Permission>;
   /** Every permission, or one App's or agent's. Admins and builders. */
   list: (subject?: PermissionSubjectInput) => Promise<Permission[]>;

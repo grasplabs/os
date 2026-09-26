@@ -1,6 +1,5 @@
-import type { ParamValue } from "@grasp-os/shared/approvals";
 import type { Json } from "@grasp-os/shared/json";
-import type { RunFailure } from "@grasp-os/shared/workflows";
+import type { ParamValue, RunFailure } from "@grasp-os/shared/workflows";
 /**
  * Core D1 database: identity (Better Auth), permissions and the App registry.
  *
@@ -435,19 +434,13 @@ export const appWorkingFiles = sqliteTable(
 );
 
 /**
- * Changes nobody makes alone (src/approvals.ts): each row asks for one, and
- * moves from `pending` once, in one conditional statement that also checks
- * who decides, in the same batch as the change and its audit event. A
- * `permission` row grants the requested permission `permission_id`. A
- * `param` row is legacy: a change of `param` of workflow `workflow_id` of
- * App `app_id` from `previous` to `value` (JSON), asked for at App version
- * `version` when sensitive values needed approval. It is never listed or
- * approved now, and changes nothing. `approvers` names who may approve: `admins`, or
- * `builders` (admins and builders); never `requested_by`, except the only
- * admin approving their own permission request as break-glass, which
- * `break_glass` records. `decision` is a nonce the deciding update sets,
- * which the change it makes in the same batch requires. At most one
- * pending row per permission and per parameter. Never deleted.
+ * Legacy, and a later release drops it: permission grants and workflow
+ * parameter changes that once needed a second person's approval. Admins
+ * grant permissions directly now (src/permissions.ts), and nothing reads or
+ * writes this table. It stays, unchanged, so the release before this one
+ * still runs against it after a rollback: that release opens an approval
+ * for a requested permission that has none when it is granted, and reads
+ * every permission by its own `status`, never by its approval.
  */
 export const approvals = sqliteTable(
   "approvals",
@@ -455,7 +448,6 @@ export const approvals = sqliteTable(
     id: text().primaryKey(),
     kind: text({ enum: ["permission", "param"] }).notNull(),
     permissionId: text("permission_id").references(() => permissions.id),
-    // Apps are never deleted; an approval checks its App is there anyway.
     appId: text("app_id"),
     workflowId: text("workflow_id"),
     param: text(),
@@ -489,8 +481,9 @@ export const approvals = sqliteTable(
 /**
  * The values people set for workflows' parameters, one per App, workflow
  * and parameter; a parameter without one has its code's default. `set_by`
- * set it directly. `approval_id` is legacy: set only by an approval from
- * when sensitive values needed one, and cleared by the next set.
+ * set it directly. `approval_id` is legacy, and a later release drops it
+ * with `approvals`: set only by an approval from when sensitive values
+ * needed one, and cleared by the next set.
  */
 export const workflowParamValues = sqliteTable(
   "workflow_param_values",

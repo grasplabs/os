@@ -1,7 +1,6 @@
 import type { Identity, SessionApi } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
-import { ApprovalsRpc } from "./approvals-rpc.ts";
 import { AppsRpc } from "./apps-rpc.ts";
 import { AuditRpc } from "./audit-rpc.ts";
 import { ConnectionsRpc } from "./connections.ts";
@@ -38,7 +37,6 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #screens: ScreensRpc;
   readonly #members: MembersRpc;
   readonly #audit: AuditRpc;
-  readonly #approvals: ApprovalsRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -69,10 +67,6 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#screens = new ScreensRpc(env, checkWith("apps", "screens"));
     this.#members = new MembersRpc(env, checkWith("members"));
     this.#audit = new AuditRpc(env, checkWith("audit"));
-    // The pending list and deciding by approval ID. Granting a permission
-    // (`permissions.grant`) needs an approval whatever this flag says: the
-    // rule isn't a feature to switch off.
-    this.#approvals = new ApprovalsRpc(env, checkWith("approvals"));
   }
 
   get apps(): AppsRpc {
@@ -109,10 +103,6 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get audit(): AuditRpc {
     return this.#audit;
-  }
-
-  get approvals(): ApprovalsRpc {
-    return this.#approvals;
   }
 
   async whoami(): Promise<Identity> {

@@ -25,7 +25,6 @@ const callsWith = async (features?: unknown) => {
     outcome(session.screens.version("app")),
     outcome(session.members.list()),
     outcome(session.audit.verify()),
-    outcome(session.approvals.list()),
     outcome(session.whoami()),
   ]);
 };
@@ -33,7 +32,6 @@ const callsWith = async (features?: unknown) => {
 describe("feature flags", () => {
   it("refuse every flagged API while no flag is set", async () => {
     await expect(callsWith()).resolves.toStrictEqual([
-      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -52,7 +50,6 @@ describe("feature flags", () => {
       callsWith({ apps: true, permissions: false, unknown: true })
     ).resolves.toStrictEqual([
       "ok",
-      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -98,13 +95,12 @@ describe("feature flags", () => {
         "feature.disabled",
         "feature.disabled",
         "feature.disabled",
-        "feature.disabled",
         "ok",
       ]);
     }
   });
 
-  it("stop workflow parameter values with the workflows flag, whatever the approvals flag says", async () => {
+  it("stop workflow parameter values with the workflows flag", async () => {
     const admin = await signedInWithRole(idp, "admin");
     const valuesWith = async (features: Record<string, boolean>) => {
       const coreEnv: Env = { ...env, FEATURES: features };
@@ -117,7 +113,7 @@ describe("feature flags", () => {
     };
     await expect(
       Promise.all([
-        valuesWith({ approvals: true }),
+        valuesWith({ apps: true, workflows: false }),
         valuesWith({ workflows: true }),
       ])
     ).resolves.toStrictEqual([
@@ -125,26 +121,6 @@ describe("feature flags", () => {
       // Past the flag: this App doesn't exist.
       ["app.not_found", "app.not_found"],
     ]);
-  });
-
-  it("keep permission grants needing an approval with the approvals flag off", async () => {
-    const admin = await signedInWithRole(idp, "admin");
-    const coreEnv: Env = {
-      ...env,
-      FEATURES: { apps: true, permissions: true },
-    };
-    const { core } = await openRpc(admin.session, { coreEnv });
-    const session = core.authenticate();
-    const { id: appId } = await session.apps.create({ name: "Flagged" });
-    const { id } = await session.permissions.request({
-      subject: { type: "app", appId },
-      object: { type: "connection", connectionId: "connection-outlook" },
-      actions: ["mail.list"],
-      binding: "OUTLOOK",
-    });
-    await expect(outcome(session.permissions.grant(id))).resolves.toBe(
-      "approval.self"
-    );
   });
 
   it("stop decisions with the workflows kill switch, whose runs they belong to", async () => {

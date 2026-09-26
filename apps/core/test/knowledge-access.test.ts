@@ -155,8 +155,7 @@ describe("Apps and agents reading Knowledge", () => {
     });
 
     // Granted one collection: that one, and no document of another.
-    const approver = await personOf("admin");
-    await approver.api.permissions.grant(permissionId);
+    await admin.api.permissions.grant(permissionId);
     const reader = readerIn(
       await envOf(actingFor(agent, admin.userId), context)
     );
