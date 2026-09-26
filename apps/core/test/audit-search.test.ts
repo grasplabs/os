@@ -353,7 +353,11 @@ describe("audit log export", () => {
   it("exports CSV that a spreadsheet opens as data", async () => {
     const { api } = await signedInApi(idp, "admin");
     const targetId = `=HYPERLINK("x",${unique()})`;
-    const sent = event({ target: { type: "doc", id: targetId } });
+    const sent = event({
+      // An ID can start with a space, which a spreadsheet skips.
+      actor: { type: "person", userId: ` =HYPERLINK("y")` },
+      target: { type: "doc", id: targetId },
+    });
     await logged(sent);
 
     const csv = await exported(api, { targetId }, "csv");
@@ -362,8 +366,11 @@ describe("audit log export", () => {
       "seq,received_at,at,type,action,actor_type,actor_id,target_type,target_id,source,request_id,verified,version,prev_hash,hash,event"
     );
     expect(rest).toBe("");
-    // A formula becomes text, and its comma and quotes stay in one cell.
-    expect(row).toContain(`"'=HYPERLINK(""x"",`);
+    // A formula becomes text, also after a space, and its comma and quotes
+    // stay in one cell.
+    expect(row).toContain(
+      `,person,"' =HYPERLINK(""y"")",doc,"'=HYPERLINK(""x"",`
+    );
     expect(row).toContain(",true,1,");
     // The last cell is the event as it was hashed.
     expect(
