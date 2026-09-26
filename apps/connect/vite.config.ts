@@ -10,6 +10,23 @@ const migrations = await readD1Migrations(
   `${import.meta.dirname}/src/db/migrations`
 );
 
+/**
+ * The Microsoft 365 live smoke test's tenant (test/microsoft-365.live.test.ts),
+ * passed on only when set: without them, it is skipped.
+ */
+const smokeBindings = Object.fromEntries(
+  [
+    "M365_SMOKE_ACCESS_TOKEN",
+    "M365_SMOKE_MAILBOX",
+    "M365_SMOKE_DRIVE",
+    "M365_SMOKE_WRITES",
+    "M365_SMOKE_FOREIGN_FOLDER",
+  ].flatMap((name) => {
+    const value = process.env[name];
+    return value === undefined || value === "" ? [] : [[name, value]];
+  })
+);
+
 /** Seals the tests' tokens: 32 bytes, in base64, as a real key is. */
 const testTokenKey = btoa("test-token-key-of-exactly-32-b!!");
 
@@ -41,6 +58,13 @@ export default defineProject({
           GOOGLE_CLIENT_ID: "grasp-connect-google",
           GOOGLE_CLIENT_SECRET: "google-connect-secret",
           CONNECT_MIGRATIONS: migrations,
+          // The tenant's own SharePoint, as the fake Graph redirects to it
+          // (test/graph-api.ts), and the sample provider's storage.
+          DOWNLOAD_HOSTS: JSON.stringify([
+            "example.sharepoint.com",
+            "tenant.storage.test",
+          ]),
+          ...smokeBindings,
         },
       },
     }),

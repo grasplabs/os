@@ -61,8 +61,19 @@ export interface ToolDefinition<
    * other property, at any depth, may select a resource.
    */
   resource?: Extract<keyof z.input<Input>, string>;
-  /** Output fields (dotted paths, through arrays) that may be masked. */
+  /**
+   * Output fields (dotted paths, through arrays) that may be masked: each
+   * must allow `null`, which is what a masked field becomes.
+   */
   mask?: readonly string[];
+  /**
+   * Its inputs that search through maskable fields, with those fields'
+   * names: `{ search: ["subject", "body"] }`. Connect refuses a call that
+   * uses one while its permission masks any of those fields.
+   */
+  searches?: Partial<
+    Record<Extract<keyof z.input<Input>, string>, readonly string[]>
+  >;
   /**
    * The only requests it may send (threat model Q11). A path segment named
    * after the resource property (`{mailbox}`) must hold the resource a
@@ -72,8 +83,17 @@ export interface ToolDefinition<
   run: (input: z.output<Input>) => Promise<ToolResult<z.input<Output>>>;
 }
 
+/** What a caller may act on in a tool's error, besides its message. */
+export interface ToolErrorDetails {
+  /** What went wrong, for code to act on, such as `throttled`. */
+  code: string;
+  /** How long the provider asks callers to wait before trying again. */
+  retryAfterSeconds?: number;
+}
+
 /**
- * An error whose message the caller may see, such as "No such message".
+ * An error whose message the caller may see, such as "No such message",
+ * maybe with a code for callers to act on (`code`, `retryAfterSeconds`).
  * Any other error is reported as the action having failed.
  *
  * `notPerformed: true` says the tool did nothing at all, so it may be
@@ -87,15 +107,27 @@ export interface ToolDefinition<
  * trying again may fix, such as a provider's 5xx.
  */
 export class ToolError extends Error {
+  readonly details: ToolErrorDetails | undefined;
   readonly notPerformed: boolean;
 
   constructor(
     message: string,
-    { notPerformed = false }: { notPerformed?: boolean } = {}
+    {
+      notPerformed = false,
+      code,
+      retryAfterSeconds,
+    }: Partial<ToolErrorDetails> & { notPerformed?: boolean } = {}
   ) {
     super(message);
     this.name = "ToolError";
     this.notPerformed = notPerformed;
+    this.details =
+      code === undefined
+        ? undefined
+        : {
+            code,
+            ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+          };
   }
 }
 
@@ -185,12 +217,26 @@ const nodeAt = (schema: unknown, path: string): unknown => {
   return node;
 };
 
+/** Whether a JSON Schema node allows `null`, in any of its branches. */
+const allowsNull = (node: unknown): boolean =>
+  isObject(node) &&
+  (typesOf(node).includes("null") ||
+    (Array.isArray(node.anyOf) && node.anyOf.some(allowsNull)));
+
 const provenanceSchema = z
   .array(z.string().min(1).max(auditIdentifierMaxLength))
   .max(maxProvenanceItems);
 
-const failure = (text: string, notPerformed = false): CallResult => ({
+/** An error result: its message, its code when it has one, and whether it did nothing. */
+const failure = (
+  text: string,
+  details?: ToolErrorDetails,
+  notPerformed = false
+): CallResult => ({
   content: [{ type: "text", text }],
+  ...(details === undefined
+    ? {}
+    : { structuredContent: { error: { message: text, ...details } } }),
   isError: true,
   ...(notPerformed ? { _meta: { [notPerformedMetaKey]: true } } : {}),
 });
@@ -222,8 +268,12 @@ export const defineTool = <
     throw new Error(`${name}: its input must be strict objects throughout`);
   }
   for (const path of definition.mask ?? []) {
-    if (nodeAt(outputSchema, path) === undefined) {
+    const node = nodeAt(outputSchema, path);
+    if (node === undefined) {
       throw new Error(`${name}: its output has no ${path} to mask`);
+    }
+    if (!allowsNull(node)) {
+      throw new Error(`${name}: its ${path} must be nullable to be masked`);
     }
   }
   const resourceProperty: unknown =
@@ -248,6 +298,13 @@ export const defineTool = <
       readOnly,
       resource: resource ?? null,
       input: Object.keys(inputSchema.properties ?? {}),
+      mask: [...(definition.mask ?? [])],
+      searches: Object.fromEntries(
+        Object.entries(definition.searches ?? {}).map(([key, fields]) => [
+          key,
+          [...(fields ?? [])],
+        ])
+      ),
     },
     description: {
       name,
@@ -271,7 +328,7 @@ export const defineTool = <
         result = await definition.run(parsed.data);
       } catch (error) {
         return error instanceof ToolError
-          ? failure(error.message, error.notPerformed)
+          ? failure(error.message, error.details, error.notPerformed)
           : failure("The action failed");
       }
       const checked = output.safeParse(result.output);
@@ -280,8 +337,10 @@ export const defineTool = <
         return failure("The connector's result isn't what it declares");
       }
       const structured: JsonObject = checked.data;
+      // Connect reads structured content only, so the output isn't sent a
+      // second time as text: a file's content would take twice the room.
       return {
-        content: [{ type: "text", text: JSON.stringify(structured) }],
+        content: [],
         structuredContent: structured,
         _meta: { [provenanceMetaKey]: provenance.data },
       };

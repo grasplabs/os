@@ -1,4 +1,5 @@
 import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
+import { signCapability } from "@grasp-os/shared/capability";
 import { connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectionPerson } from "@grasp-os/shared/connect";
 import { env, exports } from "cloudflare:workers";
@@ -22,7 +23,7 @@ import {
   someone,
 } from "./connect.ts";
 import type { Call } from "./connect.ts";
-import { sampleHost } from "./fixtures/sample-connector.ts";
+import { sampleHost, storageHost } from "./fixtures/sample-connector.ts";
 import { fakeProviders } from "./oauth-provider.ts";
 import type { ProviderName } from "./oauth-provider.ts";
 import { fakeSampleApi } from "./sample-api.ts";
@@ -191,6 +192,33 @@ describe("a native connector", () => {
     api.failingReads = 1;
     const outcomes = [await list(), await list()];
     expect(outcomes).toStrictEqual(["connect.server_unavailable", "ok"]);
+  });
+
+  it("masks a repeated side effect's answer as the repeat's capability says", async () => {
+    const connection = await connectionTo("sample");
+    const stated = {
+      connectionId: connection.id,
+      action: "items.send",
+      input: { mailbox: "invoices@acme.test", subject: "Paid" },
+      idempotencyKey: "run-2:send",
+    };
+    const send = async (mask: string[]): Promise<unknown> => {
+      const capability = await signCapability(
+        env.CAPABILITY_SIGNING_KEY,
+        agentFor(connection.person.userId),
+        { ...stated, mask }
+      );
+      const { output } = await exports.default.call({ ...stated, capability });
+      const parsed: unknown = JSON.parse(output);
+      return parsed;
+    };
+    await expect(send([])).resolves.toMatchObject({ subject: "Paid" });
+    await expect(send(["subject"])).resolves.toMatchObject({ subject: null });
+    // A mask connect can't apply is refused before any repeat is answered.
+    await expect(outcome(send(["nonsense"]))).resolves.toBe(
+      "connect.mask_unsupported"
+    );
+    expect(api.sent.map(({ method }) => method)).toStrictEqual(["POST"]);
   });
 
   it("is held to the resource its capability names", async () => {
@@ -520,6 +548,72 @@ describe("a connector's code", () => {
       sampleHost,
       sampleHost,
     ]);
+  });
+
+  it("follows a download's redirect to the deployment's own storage, once, with nothing of its request", async () => {
+    const connection = await connectionTo("sample");
+    const download = async (name: string): Promise<unknown> => {
+      const { output } = await call(connection, "probe.download", {
+        url: `https://${sampleHost}/v1/downloads/${name}`,
+        headers: [
+          ["x-note", "invoice-4200"],
+          ["authorization", "Bearer the-connectors-own"],
+          ["cookie", "session=stolen"],
+          ["range", "bytes=0-10"],
+        ],
+      });
+      const attempt: unknown = JSON.parse(output);
+      return attempt;
+    };
+    await expect(download("file")).resolves.toStrictEqual({
+      status: 200,
+      bytes: 4,
+      error: null,
+    });
+    // Another host, a storage host that isn't the deployment's, and a
+    // second redirect: each withheld.
+    const withheld = await Promise.all(
+      ["elsewhere", "others", "again"].map(download)
+    );
+    expect(withheld).toMatchObject([
+      { status: 502 },
+      { status: 502 },
+      { status: 502 },
+    ]);
+    const followed = api.sent.filter(({ host }) => host !== sampleHost);
+    expect(followed.map(({ host, path }) => `${host}${path}`)).toStrictEqual([
+      `${storageHost}/file`,
+      `${storageHost}/again`,
+    ]);
+    // Neither the token nor any header of the connector's went there.
+    expect(followed.map(({ headers }) => Object.keys(headers))).toStrictEqual([
+      [],
+      [],
+    ]);
+  });
+
+  it("follows no download redirect while the deployment names no download hosts", async () => {
+    const connection = await connectionTo("sample");
+    const hosts = env.DOWNLOAD_HOSTS;
+    env.DOWNLOAD_HOSTS = undefined;
+    try {
+      const { output } = await call(connection, "probe.download", {
+        url: `https://${sampleHost}/v1/downloads/file`,
+      });
+      expect(JSON.parse(output)).toMatchObject({ status: 502 });
+    } finally {
+      env.DOWNLOAD_HOSTS = hosts;
+    }
+    expect(api.sent.map(({ host }) => host)).toStrictEqual([sampleHost]);
+  });
+
+  it("can't read a download past the size limit, after its redirect", async () => {
+    const connection = await connectionTo("sample");
+    const { output } = await call(connection, "probe.download", {
+      url: `https://${sampleHost}/v1/downloads/flood`,
+    });
+    expect(JSON.parse(output)).toMatchObject({ status: null, bytes: 0 });
+    expect(JSON.parse(output)).not.toMatchObject({ error: null });
   });
 
   it("can't read a response past the size limit", async () => {

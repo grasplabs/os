@@ -21,7 +21,7 @@ import { z } from "zod";
 /** The MCP revision connect speaks. */
 const protocolVersion = "2025-06-18";
 
-/** Largest response connect reads from an MCP server, in bytes. */
+/** Largest response connect reads from an MCP server, by default, in bytes. */
 const maxResponseBytes = 1024 * 1024;
 
 /** How long one call may take, all its MCP requests together. */
@@ -192,11 +192,12 @@ const eventReader = (id: number) => {
 /**
  * The answer to request `id`: the JSON body, or the first event carrying it
  * in an event stream (which the server may keep open after it). Reads at
- * most {@link maxResponseBytes}.
+ * most `maxBytes`.
  */
 const readResponse = async (
   response: Response,
-  id: number
+  id: number,
+  maxBytes: number
 ): Promise<RpcResponse | undefined> => {
   const isStream = (response.headers.get("content-type") ?? "").startsWith(
     "text/event-stream"
@@ -225,8 +226,8 @@ const readResponse = async (
         throw new McpError("The response isn't a byte stream");
       }
       bytes += bytesRead.byteLength;
-      if (bytes > maxResponseBytes) {
-        throw new McpError(`The response is over ${maxResponseBytes} bytes`);
+      if (bytes > maxBytes) {
+        throw new McpError(`The response is over ${maxBytes} bytes`);
       }
       const answer = add(decoder.decode(bytesRead, { stream: true }));
       if (answer !== undefined) {
@@ -294,8 +295,15 @@ export interface McpServer {
   call: (name: string, input: Record<string, Json>) => Promise<McpToolResult>;
 }
 
-/** A client for the MCP server at `endpoint`, reached through `send`. */
-export const mcpServer = (endpoint: string, send: McpFetch): McpServer => {
+/**
+ * A client for the MCP server at `endpoint`, reached through `send`,
+ * reading responses of up to `maxBytes`.
+ */
+export const mcpServer = (
+  endpoint: string,
+  send: McpFetch,
+  maxBytes: number = maxResponseBytes
+): McpServer => {
   let nextId = 1;
   let sessionId: string | null = null;
   let version = protocolVersion;
@@ -341,7 +349,7 @@ export const mcpServer = (endpoint: string, send: McpFetch): McpServer => {
       if (method === "initialize") {
         sessionId = response.headers.get("mcp-session-id");
       }
-      message = await readResponse(response, id);
+      message = await readResponse(response, id, maxBytes);
     } catch (error) {
       // A connection that failed or timed out may have delivered the request.
       throw error instanceof McpError

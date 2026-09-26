@@ -279,6 +279,57 @@ describe("permissions", () => {
     ]);
   });
 
+  it("keep the fields they mask, for connect to mask", async () => {
+    const admin = await permissionApi("admin");
+    const app = await newApp(admin.api);
+    const authority = actingFor(app, admin.userId);
+    const metadataOnly = {
+      type: "connection" as const,
+      connectionId: "connection-shared-mail",
+      resource: "finance@acme.test",
+      mask: ["body", "content"],
+    };
+    let id = "";
+    const events = await auditedDuring(async () => {
+      ({ id } = await admin.api.permissions.request({
+        subject: app,
+        object: metadataOnly,
+        actions: ["mail.get"],
+        binding: "FINANCE_METADATA",
+      }));
+    });
+    expect(events[0]?.detail).toMatchObject({ mask: "body content" });
+    const granted = await admin.api.permissions.grant(id);
+    expect(granted.object).toStrictEqual(metadataOnly);
+    await expect(
+      authorize(env, authority, granted.object, "mail.get", granted.id)
+    ).resolves.toStrictEqual({ mask: ["body", "content"] });
+
+    await expect(
+      callThrough(authority, "FINANCE_METADATA", "mail.get")
+    ).resolves.toBe(reached);
+
+    const refused = await Promise.all(
+      [
+        ["body.content"],
+        ["body", "body"],
+        [],
+        Array.from({ length: 17 }, (_, n) => `field${n}`),
+      ].map(
+        async (mask) =>
+          await outcome(
+            admin.api.permissions.request({
+              subject: app,
+              object: { ...metadataOnly, mask },
+              actions: ["mail.get"],
+              binding: "FINANCE_MASKED",
+            })
+          )
+      )
+    );
+    expect(new Set(refused)).toStrictEqual(new Set(["permission.invalid"]));
+  });
+
   it("stop working when the person they act for leaves", async () => {
     const admin = await permissionApi("admin");
     const builder = await permissionApi("builder");

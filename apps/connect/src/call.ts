@@ -9,6 +9,7 @@ import type { Connection } from "./connections.ts";
 import { nativeAction, nativeServer } from "./connectors.ts";
 import { hashCall, idempotencyStore } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
+import { fieldOf, masked, maskedPaths } from "./mask.ts";
 import { McpError } from "./mcp.ts";
 import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
 import { checkResourceScope, didNothing, hasSideEffect } from "./policy.ts";
@@ -40,15 +41,70 @@ const maxInputBytes = 64 * 1024;
 const isInput = (input: Json): input is Input =>
   typeof input === "object" && input !== null && !Array.isArray(input);
 
-/** The tool's answer, as connect stores and returns it. */
-const answerOf = ({
-  output,
-  provenance,
-  isError,
-}: McpToolResult): StoredAnswer => ({
-  result: { output, provenance },
-  failed: isError,
-});
+/** An answer with the fields at `masks` masked (an error has none). */
+const maskedAnswer = (
+  answer: StoredAnswer,
+  masks: readonly string[]
+): StoredAnswer =>
+  answer.failed
+    ? answer
+    : {
+        ...answer,
+        result: {
+          ...answer.result,
+          output: masked(answer.result.output, masks),
+        },
+      };
+
+/**
+ * The tool's answer, as connect stores and returns it, masked. Stored
+ * masked, and masked again as the capability of each repeat says.
+ */
+const answerOf = (
+  { output, provenance, isError }: McpToolResult,
+  masks: readonly string[]
+): StoredAnswer =>
+  maskedAnswer({ result: { output, provenance }, failed: isError }, masks);
+
+/**
+ * The output paths to mask for a call, as its capability says. Refuses a
+ * call connect can't mask for: on a remote server (its tools declare
+ * nothing connect trusts), with a field no tool of the connector declares
+ * maskable (a slip that would mask nothing), or searching through a masked
+ * field (its hits would tell what the field holds). From the release's
+ * manifest alone: nothing is loaded and no token is read.
+ */
+const masksFor = (
+  connection: Connection,
+  claims: CapabilityClaims,
+  action: string,
+  input: Input
+): string[] => {
+  if (claims.mask.length === 0) {
+    return [];
+  }
+  if (connection.serverKind !== "native") {
+    throw connectErrors.create("connect.mask_unsupported");
+  }
+  const { connector, declared } = nativeAction(connection, action);
+  const maskable = new Set(
+    Object.values(connector.manifest.actions).flatMap(({ mask }) =>
+      mask.map(fieldOf)
+    )
+  );
+  if (!claims.mask.every((field) => maskable.has(field))) {
+    throw connectErrors.create("connect.mask_unsupported");
+  }
+  const searchesMasked = Object.entries(declared.searches).some(
+    ([name, fields]) =>
+      Object.hasOwn(input, name) &&
+      fields.some((field) => claims.mask.includes(field))
+  );
+  if (searchesMasked) {
+    throw connectErrors.create("connect.search_masked");
+  }
+  return maskedPaths(claims.mask, declared.mask);
+};
 
 /** Finds the action's tool, exactly as named. */
 const toolFor = async (server: McpServer, action: string): Promise<McpTool> => {
@@ -119,6 +175,9 @@ export const carryOut = async (
   ) {
     throw connectErrors.create("connect.input_too_large");
   }
+  // Before a repeat is answered too: its answer is masked as this
+  // capability says, and a mask connect can't apply is refused as ever.
+  const masks = masksFor(connection, claims, call.action, input);
 
   // A repeat of a side effect gets its stored result before anything goes
   // out, not even a look at the server's tools.
@@ -139,7 +198,7 @@ export const carryOut = async (
   const stored = await store?.replay();
   if (stored !== undefined) {
     progress.sideEffect = true;
-    return { ...stored, sideEffect: true, replayed: true };
+    return { ...maskedAnswer(stored, masks), sideEffect: true, replayed: true };
   }
 
   const { tool, open } = await actionFor(env, connection, claims, call.action);
@@ -170,7 +229,7 @@ export const carryOut = async (
     if (didNothing(connection.serverKind, read)) {
       throw connectErrors.create("connect.server_unavailable");
     }
-    return { ...answerOf(read), sideEffect, replayed: false };
+    return { ...answerOf(read, masks), sideEffect, replayed: false };
   }
 
   if (store === undefined) {
@@ -178,7 +237,7 @@ export const carryOut = async (
   }
   const earlier = await store.claim();
   if (earlier !== undefined) {
-    return { ...earlier, sideEffect, replayed: true };
+    return { ...maskedAnswer(earlier, masks), sideEffect, replayed: true };
   }
   let done: McpToolResult;
   try {
@@ -199,7 +258,7 @@ export const carryOut = async (
     await store.release();
     throw connectErrors.create("connect.server_unavailable");
   }
-  const answer = answerOf(done);
+  const answer = answerOf(done, masks);
   return {
     ...answer,
     sideEffect,

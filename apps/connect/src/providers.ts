@@ -132,6 +132,7 @@ const microsoft: ProviderConfig = {
     "Mail.Send",
     "Mail.Send.Shared",
     "Calendars.Read",
+    "Calendars.Read.Shared",
     "Files.Read.All",
     "Sites.Read.All",
   ],

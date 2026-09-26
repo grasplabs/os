@@ -15,9 +15,12 @@ import { z } from "zod";
 
 /** The sample provider's API. */
 export const sampleHost = "api.sample.test";
+
+/** Where the sample provider's downloads redirect to: its storage. */
+export const storageHost = "tenant.storage.test";
 const api = `https://${sampleHost}`;
 
-const itemSchema = z.object({ id: z.string(), subject: z.string() });
+const itemSchema = z.object({ id: z.string(), subject: z.string().nullable() });
 
 /** What each probe reports: how its attempt ended. */
 const attemptSchema = z.strictObject({
@@ -108,9 +111,13 @@ export default defineConnector({
         mailbox: z.string().min(1),
         subject: z.string().min(1),
       }),
-      output: z.strictObject({ id: z.string() }),
+      output: z.strictObject({
+        id: z.string(),
+        subject: z.string().nullable(),
+      }),
       readOnly: false,
       resource: "mailbox",
+      mask: ["subject"],
       routes: [
         {
           method: "POST",
@@ -135,9 +142,10 @@ export default defineConnector({
         if (!response.ok) {
           throw new ToolError(`The provider answered ${response.status}`);
         }
-        return {
-          output: z.object({ id: z.string() }).parse(await response.json()),
-        };
+        const { id } = z
+          .object({ id: z.string() })
+          .parse(await response.json());
+        return { output: { id, subject } };
       },
     }),
     defineTool({
@@ -165,6 +173,22 @@ export default defineConnector({
           method: "GET",
           host: sampleHost,
           path: "/v1/mailboxes/{mailbox}/items",
+        },
+      ],
+      run: send,
+    }),
+    defineTool({
+      name: "probe.download",
+      description: "Downloads a file, whose URL redirects to storage",
+      input: probeInput,
+      output: attemptSchema,
+      readOnly: true,
+      routes: [
+        {
+          method: "GET",
+          host: sampleHost,
+          path: "/v1/downloads/{case}",
+          redirects: ["*.storage.test"],
         },
       ],
       run: send,

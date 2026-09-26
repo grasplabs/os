@@ -3,7 +3,11 @@ import { z } from "zod";
 import { fromBase64Url, toBase64Url } from "./encoding.ts";
 import { defineErrorFamily } from "./errors.ts";
 import { connectionIdSchema, identifierSchema } from "./ids.ts";
-import { authoritySchema, permissionActionSchema } from "./permissions.ts";
+import {
+  authoritySchema,
+  maskFieldsSchema,
+  permissionActionSchema,
+} from "./permissions.ts";
 import type { Authority } from "./permissions.ts";
 
 // A capability is what lets connect act on a call from core without
@@ -55,6 +59,11 @@ export const capabilityClaimsSchema = z.strictObject({
   action: permissionActionSchema,
   /** A side effect's key; connect stores its result under it. */
   idempotencyKey: identifierSchema.nullable(),
+  /**
+   * The fields of the result connect masks, from the permission. Only the
+   * capability says it, never the call: the caller can't drop it.
+   */
+  mask: maskFieldsSchema.default([]),
 });
 export type CapabilityClaims = z.infer<typeof capabilityClaimsSchema>;
 
@@ -64,6 +73,8 @@ export interface CapabilityScope {
   resource?: string | undefined;
   action: string;
   idempotencyKey?: string | undefined;
+  /** The permission's masked fields: signed, not compared with the call. */
+  mask?: readonly string[] | undefined;
 }
 
 /** Why connect refuses a call before looking at it any further. */
@@ -104,7 +115,8 @@ export const signCapability = async (
   scope: CapabilityScope,
   now: number = Date.now()
 ): Promise<string> => {
-  const claims: CapabilityClaims = capabilityClaimsSchema.parse({
+  const mask = [...(scope.mask ?? [])];
+  const claims = {
     v: 1,
     aud: "connect",
     jti: crypto.randomUUID(),
@@ -115,7 +127,12 @@ export const signCapability = async (
     resource: scope.resource ?? null,
     action: scope.action,
     idempotencyKey: scope.idempotencyKey ?? null,
-  });
+    // Only when there is one: a connect of the release before, which
+    // knows no mask, still takes every other capability while a release
+    // rolls out, and refuses a masked one.
+    ...(mask.length === 0 ? {} : { mask }),
+  };
+  capabilityClaimsSchema.parse(claims);
   const payload = toBase64Url(new TextEncoder().encode(JSON.stringify(claims)));
   const mac = await crypto.subtle.sign(
     "HMAC",

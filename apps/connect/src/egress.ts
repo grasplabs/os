@@ -1,6 +1,9 @@
 import {
+  egressHeader,
+  hostSchema,
   httpMethods,
   pathMatches,
+  redirectHostMatches,
   routeSchema,
 } from "@grasp-os/connector-kit/manifest";
 import type { Route } from "@grasp-os/connector-kit/manifest";
@@ -15,8 +18,10 @@ import { z } from "zod";
 // hold this call's token and the requests the called action declares
 // (threat model R9, Q11, EG1 to EG7). A request goes out only to one of
 // those, over HTTPS, with the token added; anything else is refused before
-// it leaves. Redirects are never followed, and a response is cut off past
-// a size limit. Raw sockets are refused. Connect's
+// it leaves. Redirects aren't followed, except one from a route that
+// names the hosts it may lead to (a download), which the handler follows
+// itself, without the token. A response is cut off past a size limit. Raw
+// sockets are refused. Connect's
 // `global_fetch_strictly_public` keeps an allowed name that resolves to a
 // private address from being reached (R9).
 //
@@ -39,6 +44,20 @@ const egressRefusedStatus = 403;
 export const egressFailedStatus = 502;
 
 /**
+ * The handler's own answer, marked as such (`egressHeader`), so a
+ * connector can tell it from the provider's. The header is dropped from
+ * every provider response, so a provider can't pass one off.
+ */
+const egressAnswer = (
+  kind: "refused" | "failed",
+  body: string | null = null
+): Response =>
+  new Response(body, {
+    status: kind === "refused" ? egressRefusedStatus : egressFailedStatus,
+    headers: { [egressHeader]: kind },
+  });
+
+/**
  * Request headers the connector can't send: credentials (the token is
  * connect's to add); method overrides, which some providers (Google)
  * honour on a POST, turning it into a method the action doesn't declare
@@ -58,7 +77,11 @@ const connectorHeadersRefused = [
 ];
 
 /** Response headers that no longer hold for the body as passed on. */
-const responseHeadersDropped = ["content-encoding", "content-length"];
+const responseHeadersDropped = [
+  "content-encoding",
+  "content-length",
+  egressHeader,
+];
 
 const egressPropsSchema = z.strictObject({
   /** Which connector, for the log: its name and version. */
@@ -101,9 +124,31 @@ const refuse = (
     host: call.hosts.includes(url.hostname) ? url.hostname : "other",
     method: knownMethods.has(method) ? method : "other",
   });
-  return new Response("Refused by connect's egress allowlist", {
-    status: egressRefusedStatus,
-  });
+  return egressAnswer("refused", "Refused by connect's egress allowlist");
+};
+
+/**
+ * The deployment's own download hosts, from connect's `DOWNLOAD_HOSTS` var
+ * (a JSON array of exact host names, such as the client's
+ * `contoso.sharepoint.com` and `contoso-my.sharepoint.com`, set by the
+ * console). A download redirect must lead to one of them as well as match
+ * its route's pattern: another tenant's SharePoint is never followed.
+ * Unset or invalid, no redirect is followed.
+ */
+const downloadHostsOf = (raw: unknown): ReadonlySet<string> => {
+  let value = raw;
+  if (typeof raw === "string") {
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      value = undefined;
+    }
+  }
+  const hosts = z.array(hostSchema).max(32).safeParse(value);
+  if (raw !== undefined && !hosts.success) {
+    log.error("config.invalid", { var: "DOWNLOAD_HOSTS" });
+  }
+  return new Set(hosts.data);
 };
 
 /** The route the request is for, if the call declares it. */
@@ -119,6 +164,78 @@ const routeFor = (
       pathMatches(route.path, url.pathname, values)
   );
 
+/** Redirects a route's `redirects` hosts may be followed for. */
+const followedStatuses: ReadonlySet<number> = new Set([
+  301, 302, 303, 307, 308,
+]);
+
+/**
+ * Where a redirect from `route` leads, if the route follows it there:
+ * HTTPS to one of its redirect hosts that is also one of the deployment's
+ * `downloadHosts`, on its own port, without credentials in the URL.
+ */
+const redirectTarget = (
+  route: Route,
+  downloadHosts: ReadonlySet<string>,
+  from: URL,
+  response: Response
+): URL | undefined => {
+  const location = response.headers.get("location");
+  if (
+    route.redirects === undefined ||
+    location === null ||
+    !followedStatuses.has(response.status)
+  ) {
+    return undefined;
+  }
+  let target: URL;
+  try {
+    target = new URL(location, from);
+  } catch {
+    return undefined;
+  }
+  const allowed =
+    target.protocol === "https:" &&
+    target.username === "" &&
+    target.password === "" &&
+    target.port === "" &&
+    downloadHosts.has(target.hostname) &&
+    route.redirects.some((pattern) =>
+      redirectHostMatches(pattern, target.hostname)
+    );
+  return allowed ? target : undefined;
+};
+
+/**
+ * The file a download's redirect leads to, fetched from its storage host
+ * with nothing of the connector's request, or a failure if it can't be.
+ * The host is the client's own (its tenant's name): logged as the
+ * redirect it was, not by name.
+ */
+const download = async (
+  { connector, callId, expiresAt }: EgressProps,
+  route: Route,
+  target: URL
+): Promise<Response> => {
+  const logged = { connector, callId, host: "redirect", method: "GET" };
+  try {
+    const response = await fetch(target, {
+      method: "GET",
+      redirect: "manual",
+      signal: AbortSignal.timeout(Math.max(expiresAt - Date.now(), 1)),
+    });
+    log.info("egress.request", {
+      ...logged,
+      route: route.path,
+      status: response.status,
+    });
+    return response;
+  } catch {
+    log.warn("egress.failed", { ...logged, route: route.path });
+    return egressAnswer("failed");
+  }
+};
+
 /** Whether a response has no body, whatever its headers say. */
 const isBodiless = (method: string, status: number): boolean =>
   method === "HEAD" || status === 204 || status === 304;
@@ -128,9 +245,14 @@ const isBodiless = (method: string, status: number): boolean =>
  * connector's read fails there, and nothing past it is held in memory.
  */
 const capped = (response: Response): Response => {
-  const { body } = response;
+  // The body arrives decoded, and its length is counted here.
+  const headers = new Headers(response.headers);
+  for (const name of responseHeadersDropped) {
+    headers.delete(name);
+  }
+  const { body, status, statusText } = response;
   if (body === null) {
-    return response;
+    return new Response(null, { status, statusText, headers });
   }
   const reader = body.getReader();
   let bytes = 0;
@@ -159,16 +281,7 @@ const capped = (response: Response): Response => {
       await reader.cancel(reason);
     },
   });
-  // The body arrives decoded, and its length is counted here.
-  const headers = new Headers(response.headers);
-  for (const name of responseHeadersDropped) {
-    headers.delete(name);
-  }
-  return new Response(limited, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
+  return new Response(limited, { status, statusText, headers });
 };
 
 /**
@@ -235,7 +348,7 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
         method,
         route: route.path,
       });
-      return new Response(null, { status: egressFailedStatus });
+      return egressAnswer("failed");
     }
     // Hosts, methods, declared paths and statuses only: never the path as
     // sent, the query, headers or bodies (R17, EG7).
@@ -247,6 +360,22 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
       route: route.path,
       status: response.status,
     });
+    // A download: the provider sends the file's pre-authenticated URL on
+    // its storage host. It is fetched here, once, with nothing of the
+    // connector's request (the token least of all: that URL carries its
+    // own authority, and isn't the token's audience), and the connector
+    // gets only its answer, never the URL. A second redirect is refused
+    // below, as any other is.
+    const target = redirectTarget(
+      route,
+      downloadHostsOf(this.env.DOWNLOAD_HOSTS),
+      url,
+      response
+    );
+    if (target !== undefined) {
+      await response.body?.cancel();
+      response = await download(call, route, target);
+    }
     // 304 Not Modified goes nowhere; every other 3xx would.
     const isRedirect =
       response.status >= 300 &&
@@ -264,7 +393,7 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
         host: url.hostname,
         method,
       });
-      return new Response(null, { status: egressFailedStatus });
+      return egressAnswer("failed");
     }
     return capped(response);
   }

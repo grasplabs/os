@@ -43,6 +43,13 @@
       "when": 1790396920541,
       "tag": "0005_workflow_run_failures",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790398091609,
+      "tag": "0006_permission_mask",
+      "breakpoints": true
     }
   ]
 }
