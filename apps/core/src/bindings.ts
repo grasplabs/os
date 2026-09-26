@@ -14,7 +14,10 @@ import { workflowErrors } from "@grasp-os/shared/workflows";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
-import type { CollectionBinding } from "./knowledge/binding.ts";
+import type {
+  CollectionBinding,
+  CollectionGrant,
+} from "./knowledge/binding.ts";
 import { authorize, grantedPermissions } from "./permissions.ts";
 import { requireUnrestricted } from "./restricted.ts";
 import type { WorkContext } from "./restricted.ts";
@@ -199,27 +202,31 @@ export const stubsOf = <Stub>(
 };
 
 /** A connection permission as its grant in `context`; nothing for any other. */
-const connectionGrantOf =
+export const connectionGrantOf =
   (context: WorkContext) =>
   ({ id, object }: Permission): ConnectionGrant | undefined =>
     object.type === "connection"
       ? { context, permissionId: id, connection: object }
       : undefined;
 
-/** A collection permission's stub; nothing for any other. */
-const collectionStubOf =
-  (authority: Authority, context: WorkContext) =>
-  ({ id, object }: Permission): Fetcher<CollectionBinding> | undefined =>
+/** A collection permission as its grant in `context`; nothing for any other. */
+export const collectionGrantOf =
+  (context: WorkContext) =>
+  ({ id, object }: Permission): CollectionGrant | undefined =>
     object.type === "collection"
-      ? exports.CollectionBinding({
-          props: {
-            authority,
-            context,
-            permissionId: id,
-            collectionId: object.collectionId,
-          },
-        })
+      ? { context, permissionId: id, collectionId: object.collectionId }
       : undefined;
+
+/** A collection permission's stub; nothing for any other. */
+const collectionStubOf = (authority: Authority, context: WorkContext) => {
+  const grantOf = collectionGrantOf(context);
+  return (permission: Permission): Fetcher<CollectionBinding> | undefined => {
+    const grant = grantOf(permission);
+    return grant === undefined
+      ? undefined
+      : exports.CollectionBinding({ props: { ...grant, authority } });
+  };
+};
 
 /**
  * The env for one authority working in `context`, built from the

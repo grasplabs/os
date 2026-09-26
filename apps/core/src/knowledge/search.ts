@@ -315,12 +315,16 @@ export const search = async (
         };
   const db = drizzle(env.KNOWLEDGE);
   const allowed = await allowedCollections(env, db, reader);
-  if (scope !== undefined) {
-    // Refused like any read of a collection the reader can't read.
-    await readableCollection(db, allowed, scope);
-  }
+  // Refused like any read of a collection the reader can't read. A search
+  // in one collection reads from it whatever it finds: that nothing
+  // matches says something of what it holds too. So the collection is
+  // among the read's sources, and a sensitive one restricts the reader
+  // even when nothing is found, or a delegate could probe it word by word
+  // and send out what it learned.
+  const scoped =
+    scope === undefined ? [] : [await readableCollection(db, allowed, scope)];
   if (terms.length === 0) {
-    return { hits: [], provenance: await recordRead(env, reader) };
+    return { hits: [], provenance: await recordRead(env, reader, ...scoped) };
   }
   const now = Date.now();
   const today = new Date(now).toISOString().slice(0, 10);
@@ -389,6 +393,7 @@ export const search = async (
   const provenance = await recordRead(
     env,
     reader,
+    ...scoped,
     ...found.map((row) => ({
       id: row.collectionId,
       sensitive: row.sensitive !== 0,

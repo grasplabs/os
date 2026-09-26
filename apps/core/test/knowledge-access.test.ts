@@ -4,7 +4,6 @@ import {
   workspaceIdSchema,
 } from "@grasp-os/shared/ids";
 import type {
-  CollectionInput,
   CollectionReader,
   KnowledgeApi,
 } from "@grasp-os/shared/knowledge";
@@ -17,7 +16,6 @@ import type { Role } from "@grasp-os/shared/roles";
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import { bindingsFor } from "../src/bindings.ts";
 import { appHost } from "../src/durable-objects.ts";
@@ -25,6 +23,12 @@ import type { WorkContext } from "../src/restricted.ts";
 import { workspace } from "../src/workspace.ts";
 import { collectionIn, connectionIn, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
+import {
+  collectionWithNote,
+  newTeam,
+  readCollection,
+  storedGrant,
+} from "./knowledge.ts";
 import { callAuth, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // Knowledge as Apps and agents reach it, and restricted mode. These tests
@@ -51,85 +55,12 @@ const newAgent = () => ({
   agentId: `agent-${unique()}`,
 });
 
-/** A team with `members`, made by an admin. */
-const newTeam = async (admin: Person, members: Person[]): Promise<string> => {
-  const created = await callAuth("/organization/create-team", admin.session, {
-    name: `Team ${unique()}`,
-  });
-  const { id } = z.object({ id: z.string() }).parse(await created.json());
-  for (const member of members) {
-    // oxlint-disable-next-line no-await-in-loop -- one member at a time
-    await callAuth("/organization/add-team-member", admin.session, {
-      teamId: id,
-      userId: member.userId,
-    });
-  }
-  return id;
-};
-
-/** A collection with one document, `note.md`, that links to itself. */
-const collectionWithNote = async (owner: Person, input: CollectionInput) => {
-  const collection = await owner.knowledge.createCollection(input);
-  const note = await owner.knowledge.saveDocument({
-    collectionId: collection.id,
-    path: "note.md",
-    text: "# Note\nSee [[note.md]] and [[other.md]].",
-    ifVersion: 0,
-  });
-  await owner.knowledge.saveDocument({
-    collectionId: collection.id,
-    path: "other.md",
-    text: "# Other\nBack to [[note.md]].",
-    ifVersion: 0,
-  });
-  return { collectionId: collection.id, noteId: note.id };
-};
-
 /** Asks for and grants `request`; returns the permission's ID. */
 const granted = async (admin: Person, request: PermissionRequest) => {
   const { id } = await admin.api.permissions.request(request);
   await admin.api.permissions.grant(id);
   return id;
 };
-
-/**
- * An active permission stored as it is, past the checks a request and a
- * grant make, as a bug or an old record could leave one: the reads and
- * calls must refuse what it shouldn't allow on their own.
- */
-const storedGrant = async (
-  subject: { type: "app" | "agent"; id: string },
-  object: { type: "collection" | "connection"; id: string },
-  actions: string[],
-  binding: string
-) => {
-  await env.DB.prepare(
-    `INSERT INTO permissions (id, subject_type, subject_id, object_type, object_id,
-      actions, binding, status, requested_by, requested_at, granted_by, granted_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 'test', 0, 'test', 0)`
-  )
-    .bind(
-      crypto.randomUUID(),
-      subject.type,
-      subject.id,
-      object.type,
-      object.id,
-      JSON.stringify(actions),
-      binding
-    )
-    .run();
-};
-
-const readCollection = (
-  subject: PermissionSubjectInput,
-  collectionId: string,
-  binding = "HANDBOOK"
-): PermissionRequest => ({
-  subject,
-  object: { type: "collection", collectionId },
-  actions: ["read"],
-  binding,
-});
 
 const outlook = (subject: PermissionSubjectInput): PermissionRequest => ({
   subject,
@@ -532,8 +463,10 @@ describe("restricted mode", () => {
     });
   });
 
-  it("is entered by listings, history, backlinks and searches too", async () => {
+  it("is entered by listings, history, backlinks and searches too, also those that find nothing", async () => {
     const { admin, subject, sensitive } = await setUp();
+    // What finds nothing in a sensitive collection still tells something
+    // of it: a search for a word, or for a version, candidate by candidate.
     const reads = [
       async (reader: CollectionReader) => await reader.listDocuments(),
       async (reader: CollectionReader) =>
@@ -541,46 +474,56 @@ describe("restricted mode", () => {
       async (reader: CollectionReader) =>
         await reader.backlinks(sensitive.noteId),
       async (reader: CollectionReader) => await reader.search("note"),
+      async (reader: CollectionReader) =>
+        await reader.search(`nothing${unique()}`),
+      async (reader: CollectionReader) => await reader.search(""),
+      async (reader: CollectionReader) =>
+        await reader.getDocument(sensitive.noteId, 99),
     ];
     const results = await Promise.all(
       reads.map(async (read) => {
         const bindings = await envOf(subject, admin.userId, await newChat());
-        await read(readerIn(bindings));
+        await outcome(read(readerIn(bindings)));
         return await callOutlook(bindings);
       })
     );
-    expect(results).toStrictEqual([
-      "permission.restricted",
-      "permission.restricted",
-      "permission.restricted",
-      "permission.restricted",
-    ]);
+    expect(results).toStrictEqual(reads.map(() => "permission.restricted"));
   });
 
-  it("isn't entered by a read that was refused, or a search that found nothing", async () => {
-    const { admin, subject, sensitive } = await setUp();
+  it("isn't entered by a read that was refused, or one of an ordinary collection that found nothing", async () => {
+    const { admin, subject, sensitive, ordinary } = await setUp();
     const outsider = await personOf("user");
     const bindings = await envOf(subject, outsider.userId, await newChat());
     // The permission covers Outlook for the outsider too; Payroll isn't theirs.
-    const refused = await outcome(
-      readerIn(bindings).getDocument(sensitive.noteId)
-    );
+    const refused = await Promise.all([
+      outcome(readerIn(bindings).getDocument(sensitive.noteId)),
+      outcome(readerIn(bindings).search(`nothing${unique()}`)),
+    ]);
     const searched = await envOf(subject, admin.userId, await newChat());
-    const { hits, provenance } = await readerIn(searched).search(
+    const { hits, provenance } = await readerIn(searched, "OTHER").search(
       `nothing${unique()}`
+    );
+    const noVersion = await outcome(
+      readerIn(searched, "OTHER").getDocument(ordinary.noteId, 99)
     );
     expect({
       refused,
       call: await callOutlook(bindings),
       found: { hits, provenance },
+      noVersion,
       afterSearch: await callOutlook(searched),
     }).toStrictEqual({
-      refused: "knowledge.not_found",
+      refused: ["knowledge.not_found", "knowledge.not_found"],
       call: reached,
       found: {
         hits: [],
-        provenance: { collectionIds: [], sensitive: false, restricted: false },
+        provenance: {
+          collectionIds: [ordinary.collectionId],
+          sensitive: false,
+          restricted: false,
+        },
       },
+      noVersion: "knowledge.not_found",
       afterSearch: reached,
     });
   });

@@ -6,17 +6,11 @@ import type {
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import { dutchHandbook } from "./fixtures/dutch-knowledge.ts";
 import { mockIdp } from "./idp.ts";
-import {
-  auditedDuring,
-  callAuth,
-  outcome,
-  signedInApi,
-  unique,
-} from "./sign-in.ts";
+import { newTeam } from "./knowledge.ts";
+import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // Search as people use it: Dutch words find their sections with or without
 // diacritics, by prefix, inside compounds and with a typo; results rank
@@ -259,22 +253,6 @@ describe("ranking", () => {
     }).toStrictEqual({ lang: 3, kort: 1, limited: 2 });
   });
 });
-
-/** Adds `person` to a new team; returns its ID. */
-const newTeam = async (admin: Person, members: Person[]): Promise<string> => {
-  const created = await callAuth("/organization/create-team", admin.session, {
-    name: `Team ${unique()}`,
-  });
-  const { id } = z.object({ id: z.string() }).parse(await created.json());
-  for (const member of members) {
-    // oxlint-disable-next-line no-await-in-loop -- one member at a time
-    await callAuth("/organization/add-team-member", admin.session, {
-      teamId: id,
-      userId: member.userId,
-    });
-  }
-  return id;
-};
 
 describe("search access", () => {
   it("finds, ranks and counts only sections of collections the person may read", async () => {
