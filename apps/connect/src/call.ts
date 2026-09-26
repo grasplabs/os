@@ -3,6 +3,7 @@ import { connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectCall } from "@grasp-os/shared/connect";
 import type { Json } from "@grasp-os/shared/json";
 import type { BatchItem } from "drizzle-orm/batch";
+import { z } from "zod";
 
 import { composioServer, usableConnection } from "./connections.ts";
 import type { Connection } from "./connections.ts";
@@ -13,6 +14,31 @@ import { fieldOf, masked, maskedPaths } from "./mask.ts";
 import { McpError } from "./mcp.ts";
 import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
 import { checkResourceScope, didNothing, hasSideEffect } from "./policy.ts";
+
+const retryAfterSchema = z.object({
+  error: z.object({
+    retryAfterSeconds: z.number().int().nonnegative().max(3600),
+  }),
+});
+
+/**
+ * `connect.server_unavailable` for a call its tool says did nothing, with
+ * the wait the tool passed on, if it did (`{ error: { retryAfterSeconds } }`,
+ * as the connector kit reports a provider's `retry-after`).
+ */
+const notPerformed = ({ output }: McpToolResult): Error => {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(output);
+  } catch {
+    parsed = undefined;
+  }
+  const wait = retryAfterSchema.safeParse(parsed).data?.error.retryAfterSeconds;
+  return connectErrors.create(
+    "connect.server_unavailable",
+    wait === undefined ? undefined : { retryAfterSeconds: wait }
+  );
+};
 
 /**
  * A call connect carried out, or answered from its stored answer: its
@@ -227,7 +253,7 @@ export const carryOut = async (
         : error;
     }
     if (didNothing(connection.serverKind, read)) {
-      throw connectErrors.create("connect.server_unavailable");
+      throw notPerformed(read);
     }
     return { ...answerOf(read, masks), sideEffect, replayed: false };
   }
@@ -256,7 +282,7 @@ export const carryOut = async (
   // the key is free, and the caller may try again.
   if (didNothing(connection.serverKind, done)) {
     await store.release();
-    throw connectErrors.create("connect.server_unavailable");
+    throw notPerformed(done);
   }
   const answer = answerOf(done, masks);
   return {

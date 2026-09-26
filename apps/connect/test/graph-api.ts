@@ -28,6 +28,7 @@ import {
   reportText,
   searchResults,
   sharePointHost,
+  spoofedId,
   throttled,
 } from "./fixtures/graph.ts";
 import { fakeInternet } from "./internet.ts";
@@ -75,6 +76,14 @@ const graphRoutes: GraphRoute[] = [
       json(messagePage(mailbox, Number(query.get("$skip") ?? 0)))
   ),
   route("GET", `${users}/messages/(?<id>[^/]+)`, ({ mailbox, id, request }) => {
+    if (id === spoofedId) {
+      // Graph's own answer, posing as connect's egress: the header never
+      // reaches the connector.
+      return Response.json(notFound, {
+        status: 404,
+        headers: { "grasp-egress": "refused" },
+      });
+    }
     const prefer = request.headers.get("prefer") ?? "";
     return id.includes("Unknown")
       ? json(notFound, 404)
@@ -170,27 +179,23 @@ const sharePointAnswer = (url: URL): Response => {
 
 /** Graph, SharePoint and the rest of the internet, for each test in the file. */
 export const fakeGraph = () => {
-  let throttledRequests = 0;
-  let throttledWrites = 0;
+  /** How Graph fails the next request, or the next write only. */
+  let failure:
+    | { status: number; writesOnly: boolean; retryAfter: string }
+    | undefined;
   let writesDone = 0;
-  let retryAfter = "7";
   beforeEach(() => {
-    throttledRequests = 0;
-    throttledWrites = 0;
+    failure = undefined;
     writesDone = 0;
-    retryAfter = "7";
   });
   const { sent } = fakeInternet(async (request, url) => {
     if (url.hostname === graphHost) {
       const isWrite = request.method !== "GET";
-      if (throttledRequests > 0 || (isWrite && throttledWrites > 0)) {
-        if (isWrite && throttledWrites > 0) {
-          throttledWrites -= 1;
-        } else {
-          throttledRequests -= 1;
-        }
+      if (failure !== undefined && (isWrite || !failure.writesOnly)) {
+        const { status, retryAfter } = failure;
+        failure = undefined;
         return Response.json(throttled, {
-          status: 429,
+          status,
           headers: { "retry-after": retryAfter },
         });
       }
@@ -210,16 +215,19 @@ export const fakeGraph = () => {
       sent
         .filter(({ host }) => host === graphHost)
         .map(({ method, path }) => `${method} ${path}`),
-    /** Makes Graph throttle the next write, and only it. */
-    throttleWrite: () => {
-      throttledWrites = 1;
-    },
     /** The writes Graph carried out. */
     writesDone: () => writesDone,
     /** Makes Graph throttle the next request, asking to wait `wait`. */
     throttle: (wait = "7") => {
-      throttledRequests = 1;
-      retryAfter = wait;
+      failure = { status: 429, writesOnly: false, retryAfter: wait };
+    },
+    /** Makes Graph throttle the next write, and only it. */
+    throttleWrite: () => {
+      failure = { status: 429, writesOnly: true, retryAfter: "7" };
+    },
+    /** Makes Graph answer the next request 503. */
+    unavailable: () => {
+      failure = { status: 503, writesOnly: false, retryAfter: "5" };
     },
     sharePointHost,
   };

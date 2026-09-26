@@ -47,8 +47,10 @@ export const maskMetaKey = "grasp-os/mask";
 
 /**
  * Response header on the answers connect's egress gives itself: `refused`
- * (the request never left) or `failed` (it left, but its answer is
- * withheld: a redirect, too large, unreachable). Never on a provider's.
+ * (the request never left), `failed` (it left, but its answer is
+ * withheld: a redirect, too large, unreachable) or `downloads-off` (a
+ * download's redirect, while the deployment names no download hosts).
+ * Never on a provider's: the egress drops it from theirs.
  */
 export const egressHeader = "grasp-egress";
 

@@ -43,19 +43,25 @@ const egressRefusedStatus = 403;
 /** The status a response gets when it redirected or was too large. */
 export const egressFailedStatus = 502;
 
+/** The handler's own answers, passed on as they are (no provider's is). */
+const ownAnswers = new WeakSet<Response>();
+
 /**
  * The handler's own answer, marked as such (`egressHeader`), so a
  * connector can tell it from the provider's. The header is dropped from
  * every provider response, so a provider can't pass one off.
  */
 const egressAnswer = (
-  kind: "refused" | "failed",
+  kind: "refused" | "failed" | "downloads-off",
   body: string | null = null
-): Response =>
-  new Response(body, {
+): Response => {
+  const answer = new Response(body, {
     status: kind === "refused" ? egressRefusedStatus : egressFailedStatus,
     headers: { [egressHeader]: kind },
   });
+  ownAnswers.add(answer);
+  return answer;
+};
 
 /**
  * Request headers the connector can't send: credentials (the token is
@@ -127,6 +133,11 @@ const refuse = (
   return egressAnswer("refused", "Refused by connect's egress allowlist");
 };
 
+/** The last `DOWNLOAD_HOSTS` value seen, and its hosts. */
+let parsedDownloadHosts:
+  | { raw: unknown; hosts: ReadonlySet<string> }
+  | undefined;
+
 /**
  * The deployment's own download hosts, from connect's `DOWNLOAD_HOSTS` var
  * (a JSON array of exact host names, such as the client's
@@ -136,6 +147,11 @@ const refuse = (
  * Unset or invalid, no redirect is followed.
  */
 const downloadHostsOf = (raw: unknown): ReadonlySet<string> => {
+  // A Worker's env holds the same value for every request: parsed, and an
+  // invalid one logged, once per value and isolate.
+  if (parsedDownloadHosts !== undefined && parsedDownloadHosts.raw === raw) {
+    return parsedDownloadHosts.hosts;
+  }
   let value = raw;
   if (typeof raw === "string") {
     try {
@@ -144,11 +160,13 @@ const downloadHostsOf = (raw: unknown): ReadonlySet<string> => {
       value = undefined;
     }
   }
-  const hosts = z.array(hostSchema).max(32).safeParse(value);
-  if (raw !== undefined && !hosts.success) {
+  const parsed = z.array(hostSchema).max(32).safeParse(value);
+  if (raw !== undefined && !parsed.success) {
     log.error("config.invalid", { var: "DOWNLOAD_HOSTS" });
   }
-  return new Set(hosts.data);
+  const hosts = new Set(parsed.data);
+  parsedDownloadHosts = { raw, hosts };
+  return hosts;
 };
 
 /** The route the request is for, if the call declares it. */
@@ -234,6 +252,41 @@ const download = async (
     log.warn("egress.failed", { ...logged, route: route.path });
     return egressAnswer("failed");
   }
+};
+
+/**
+ * A route's answer, through its download redirect if it has one: the file
+ * the redirect leads to, a refusal saying downloads are off while the
+ * deployment names no download hosts, or the answer as it came (a
+ * redirect anywhere else is refused after this, as any other is).
+ */
+const throughDownload = async (
+  call: EgressProps,
+  route: Route,
+  downloadHosts: ReadonlySet<string>,
+  from: URL,
+  response: Response
+): Promise<Response> => {
+  if (route.redirects === undefined || !followedStatuses.has(response.status)) {
+    return response;
+  }
+  if (downloadHosts.size === 0) {
+    await response.body?.cancel();
+    log.warn("egress.refused", {
+      connector: call.connector,
+      callId: call.callId,
+      reason: "downloads_off",
+      host: from.hostname,
+      method: "GET",
+    });
+    return egressAnswer("downloads-off");
+  }
+  const target = redirectTarget(route, downloadHosts, from, response);
+  if (target === undefined) {
+    return response;
+  }
+  await response.body?.cancel();
+  return await download(call, route, target);
 };
 
 /** Whether a response has no body, whatever its headers say. */
@@ -366,15 +419,15 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
     // own authority, and isn't the token's audience), and the connector
     // gets only its answer, never the URL. A second redirect is refused
     // below, as any other is.
-    const target = redirectTarget(
+    response = await throughDownload(
+      call,
       route,
       downloadHostsOf(this.env.DOWNLOAD_HOSTS),
       url,
       response
     );
-    if (target !== undefined) {
-      await response.body?.cancel();
-      response = await download(call, route, target);
+    if (ownAnswers.has(response)) {
+      return response;
     }
     // 304 Not Modified goes nowhere; every other 3xx would.
     const isRedirect =

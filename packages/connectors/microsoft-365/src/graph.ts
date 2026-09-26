@@ -132,10 +132,16 @@ const retryAfterOf = (response: Response): number | undefined => {
 
 /**
  * The error a Graph answer that isn't a success stands for, with a code
- * callers can act on. Throttling (429) is transient: Graph did nothing,
- * and the caller may try again after the wait it asks for. A 503 is
- * transient too, but may come after Graph acted. Graph's messages aren't
- * passed on, since they can repeat what was sent; its error code is.
+ * callers can act on. Graph's messages aren't passed on, since they can
+ * repeat what was sent; its error code is.
+ *
+ * Throttling (429) means Graph did nothing, and a 503 to a read changes
+ * nothing either: both say the call did nothing (`notPerformed`), so a
+ * write's idempotency key is free again and the caller may try again.
+ * That holds for the whole call because every tool sends at most one
+ * write, as its last request (mail.move's folder lookup before it is a
+ * read): nothing of the call went through before it. A 503 to a write may
+ * come after Graph acted, so it isn't marked.
  */
 const failureOf = async (
   response: Response,
@@ -146,13 +152,27 @@ const failureOf = async (
   const egress = response.headers.get(egressHeader);
   if (egress !== null) {
     await response.body?.cancel();
-    return egress === "refused"
-      ? new ToolError("Connect's egress refused the request", {
+    switch (egress) {
+      case "refused": {
+        return new ToolError("Connect's egress refused the request", {
           code: "egress_refused",
-        })
-      : new ToolError("Connect's egress withheld Microsoft 365's answer", {
-          code: "egress_failed",
         });
+      }
+      case "downloads-off": {
+        return new ToolError(
+          "Downloads aren't set up for this deployment: its SharePoint hosts (DOWNLOAD_HOSTS) aren't configured",
+          { code: "downloads_unavailable" }
+        );
+      }
+      default: {
+        return new ToolError(
+          "Connect's egress withheld Microsoft 365's answer",
+          {
+            code: "egress_failed",
+          }
+        );
+      }
+    }
   }
   const retryAfterSeconds = retryAfterOf(response);
   const graphCode = await errorCodeOf(response);
@@ -164,11 +184,7 @@ const failureOf = async (
         {
           code: "throttled",
           retryAfterSeconds: retryAfterSeconds ?? 60,
-          // A throttled write did nothing, so its idempotency key is free
-          // again. Every tool sends at most one write, as its last request
-          // (mail.move's folder lookup before it is a read), so nothing
-          // of the call went through before it.
-          notPerformed: method !== "GET",
+          notPerformed: true,
         }
       );
     }
@@ -176,6 +192,7 @@ const failureOf = async (
       return new ToolError("Microsoft 365 is unavailable. Try again later.", {
         code: "unavailable",
         ...(retryAfterSeconds === undefined ? {} : { retryAfterSeconds }),
+        notPerformed: method === "GET",
       });
     }
     case 401:

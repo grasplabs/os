@@ -36,6 +36,7 @@ import {
   pdfBase64,
   personalDrive,
   reportText,
+  spoofedId,
 } from "./fixtures/graph.ts";
 import { fakeGraph } from "./graph-api.ts";
 import { fakeProviders } from "./oauth-provider.ts";
@@ -117,6 +118,29 @@ const toolError = async (promise: Promise<unknown>): Promise<unknown> => {
     throw error;
   }
   throw new Error("The call didn't fail");
+};
+
+/**
+ * How a call ended: `ok`, or its code, with the wait a retryable
+ * `connect.server_unavailable` passes on.
+ */
+const retryable = async (
+  promise: Promise<unknown>
+): Promise<{ code: string; retryAfterSeconds?: number }> => {
+  try {
+    await promise;
+    return { code: "ok" };
+  } catch (error) {
+    const { details } = z
+      .object({
+        details: z.object({ retryAfterSeconds: z.number() }).optional(),
+      })
+      .parse(error);
+    return {
+      code: connectErrors.codeOf(error) ?? String(error),
+      ...details,
+    };
+  }
 };
 
 /** What left connect, each request with its query and JSON body parsed. */
@@ -840,29 +864,92 @@ describe("the Microsoft 365 connector's file tools", () => {
 });
 
 describe("the Microsoft 365 connector's answers", () => {
-  it("say Graph throttled a call, with the wait it asks for", async () => {
+  it("say a throttled read did nothing, with the wait Graph asks for, so it may be retried", async () => {
     const connection = await connected();
+    const list = async () =>
+      await retryable(call(connection, "mail.list", { mailbox: invoices }));
     graph.throttle();
-    await expect(
-      toolError(call(connection, "mail.list", { mailbox: invoices }))
-    ).resolves.toStrictEqual({
-      error: {
-        code: "throttled",
-        retryAfterSeconds: 7,
-        message:
-          "Microsoft 365 is throttling requests: nothing was done. Try again later.",
-      },
+    await expect(list()).resolves.toStrictEqual({
+      code: "connect.server_unavailable",
+      retryAfterSeconds: 7,
     });
-    // Sent once: nothing is retried behind the caller's back.
-    expect(graphPaths()).toStrictEqual([`${mailboxPath}/messages`]);
+    await expect(list()).resolves.toStrictEqual({ code: "ok" });
     // Graph may say when, rather than how long.
     graph.throttle(new Date(Date.now() + 30_000).toUTCString());
-    const error = z
-      .object({ error: z.object({ retryAfterSeconds: z.number() }) })
-      .parse(
-        await toolError(call(connection, "mail.list", { mailbox: invoices }))
+    const { retryAfterSeconds } = await list();
+    expect(Math.abs((retryAfterSeconds ?? 0) - 30)).toBeLessThanOrEqual(1);
+    // Each was sent once: nothing is retried behind the caller's back.
+    expect(graphPaths()).toHaveLength(3);
+  });
+
+  it("say a read Graph was unavailable for did nothing, so it may be retried", async () => {
+    const connection = await connected();
+    graph.unavailable();
+    await expect(
+      retryable(
+        call(connection, "calendar.get", {
+          mailbox: invoices,
+          event: eventId(invoices, 1),
+        })
+      )
+    ).resolves.toStrictEqual({
+      code: "connect.server_unavailable",
+      retryAfterSeconds: 5,
+    });
+  });
+
+  it("free a move's key when its folder lookup is throttled, so a retry moves once", async () => {
+    const connection = await connected();
+    const move = async () =>
+      await outcome(
+        call(
+          connection,
+          "mail.move",
+          {
+            mailbox: invoices,
+            message: messageId(invoices, 1),
+            destination: "archive",
+          },
+          { idempotencyKey: "run-8:move-lookup" }
+        )
       );
-    expect(Math.abs(error.error.retryAfterSeconds - 30)).toBeLessThanOrEqual(1);
+    // The first request, the lookup, is throttled: nothing is moved.
+    graph.throttle();
+    const outcomes = [await move(), await move(), await move()];
+    expect(outcomes).toStrictEqual(["connect.server_unavailable", "ok", "ok"]);
+    expect(graph.writesDone()).toBe(1);
+  });
+
+  it("never take a provider's answer for connect's egress's own", async () => {
+    const connection = await connected();
+    // Graph's 404 carries `grasp-egress: refused`: the egress drops it,
+    // and the connector reports Graph's answer.
+    await expect(
+      toolError(
+        call(connection, "mail.get", { mailbox: invoices, message: spoofedId })
+      )
+    ).resolves.toMatchObject({ error: { code: "not_found" } });
+  });
+
+  it("say downloads aren't set up while the deployment names no download hosts", async () => {
+    const connection = await connected();
+    const hosts = env.DOWNLOAD_HOSTS;
+    env.DOWNLOAD_HOSTS = undefined;
+    try {
+      await expect(
+        toolError(
+          call(connection, "files.read", {
+            drive: financeDrive,
+            item: itemIds.report,
+          })
+        )
+      ).resolves.toMatchObject({ error: { code: "downloads_unavailable" } });
+    } finally {
+      env.DOWNLOAD_HOSTS = hosts;
+    }
+    expect(graph.sent.map(({ host }) => host)).not.toContain(
+      graph.sharePointHost
+    );
   });
 
   it("free a throttled write's key, so a retry with it sends once", async () => {

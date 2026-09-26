@@ -418,6 +418,9 @@ export const throttled = {
   },
 };
 
+/** A message Graph answers for with a header only connect's egress sets. */
+export const spoofedId = "AAMkSpoofedEgressHeader=";
+
 /** Graph's answer for an ID it doesn't know. */
 export const notFound = {
   error: {
