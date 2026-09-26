@@ -1,4 +1,5 @@
 import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
 import { decisionErrors, maxDeciders } from "@grasp-os/shared/decisions";
 import type {
   DecisionAnswerInput,
@@ -21,7 +22,6 @@ import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
-import { actorOf } from "../audit.ts";
 import { notRemoved, organizationId } from "../auth/auth.ts";
 import { signInConfig } from "../auth/config.ts";
 import {

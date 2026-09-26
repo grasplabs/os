@@ -1,4 +1,5 @@
 import type { AuditDetailValue } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
 import {
   auditErrors,
   auditExportFormatSchema,
@@ -21,7 +22,7 @@ import { RpcTarget } from "capnweb";
 
 import { actorIdsOf, auditLog } from "./audit-log.ts";
 import type { SearchRange } from "./audit-log.ts";
-import { actorOf, audit } from "./audit.ts";
+import { audit } from "./audit.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 

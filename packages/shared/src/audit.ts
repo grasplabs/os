@@ -7,6 +7,8 @@ import {
   runIdSchema,
   workflowIdSchema,
 } from "./ids.ts";
+import type { Authority } from "./permissions.ts";
+import type { Identity } from "./rpc.ts";
 
 // The audit log is append-only and can't be purged, so every field is bounded
 // to identifier size: an event can name things, never carry their content
@@ -63,6 +65,22 @@ export const auditActorSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("system") }),
 ]);
 export type AuditActor = z.infer<typeof auditActorSchema>;
+
+/** A signed-in person as the audit log names them: staff apart. */
+export const actorOf = ({
+  userId,
+  staff,
+}: Pick<Identity, "userId" | "staff">): AuditActor =>
+  staff ? { type: "staff", userId } : { type: "person", userId };
+
+/** An App or agent, acting for a person, as the audit log names it. */
+export const delegateActorOf = ({
+  subject,
+  onBehalfOf,
+}: Authority): AuditActor =>
+  subject.type === "agent"
+    ? { type: "agent", agentId: subject.agentId, onBehalfOf }
+    : { type: "app", appId: subject.appId, part: "server" };
 
 /** The Workers that send audit events. */
 export const auditSourceSchema = z.enum(["core", "connect"]);

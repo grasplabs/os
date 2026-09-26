@@ -1,3 +1,4 @@
+import { actorOf } from "@grasp-os/shared/audit";
 import { collectionIdSchema } from "@grasp-os/shared/ids";
 import {
   collectionInputSchema,
@@ -12,7 +13,6 @@ import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
-import { actorOf } from "../audit.ts";
 import { organizationId } from "../auth/auth.ts";
 import { teams } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";

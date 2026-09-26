@@ -1,4 +1,5 @@
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -22,7 +23,6 @@ import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
-import { actorOf } from "./audit.ts";
 import { memberRole } from "./auth/identity.ts";
 import { apps, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";

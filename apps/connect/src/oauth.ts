@@ -1,4 +1,5 @@
-import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
+import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import {
   connectErrors,
   connectionCallbackPath,
@@ -53,24 +54,17 @@ import type { Vault } from "./vault.ts";
 // PKCE verifier never leaves connect, so the code alone, which core sees on
 // the callback, is useless (CN3).
 
-/** Who acted: the person core named, or core itself (`null`). */
-const actorOf = (person: ConnectionPerson | null): AuditActor => {
-  if (person === null) {
-    return { type: "system" };
-  }
-  return person.staff
-    ? { type: "staff", userId: person.userId }
-    : { type: "person", userId: person.userId };
-};
-
-/** One connect or disconnect, for the audit log: IDs, never tokens. */
+/**
+ * One connect or disconnect, for the audit log: IDs, never tokens. Its
+ * actor is the person core named, or core itself (`null`).
+ */
 const event = (
   person: ConnectionPerson | null,
   action: "connection.connect" | "connection.disconnect",
   connectionId: string | undefined,
   detail: Record<string, AuditDetailValue>
-) => ({
-  actor: actorOf(person),
+): AuditEntry => ({
+  actor: person === null ? { type: "system" } : actorOf(person),
   action,
   target:
     connectionId === undefined

@@ -1,5 +1,6 @@
 import { sso } from "@better-auth/sso";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
 import { fromBase64Url } from "@grasp-os/shared/encoding";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -25,7 +26,7 @@ import {
   outboxedIfChanged,
   sendAuditOutboxNow,
 } from "../audit-outbox.ts";
-import { actorOf, audit } from "../audit.ts";
+import { audit } from "../audit.ts";
 import {
   accounts,
   invitations,

@@ -1,4 +1,5 @@
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
 import {
   disconnectPersonalMaxOwners,
   oauthFlowLifetimeMs,
@@ -17,7 +18,6 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
-import { actorOf } from "./audit.ts";
 import {
   activeAdminExists,
   isRemoved,

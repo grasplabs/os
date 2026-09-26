@@ -13,6 +13,7 @@ import type {
   FileDiff,
 } from "@grasp-os/shared/apps";
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
@@ -24,7 +25,6 @@ import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
-import { actorOf } from "./audit.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";

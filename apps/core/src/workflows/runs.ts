@@ -1,6 +1,7 @@
 import { wrapWorkflowBinding } from "@cloudflare/dynamic-workflows";
 import { appErrors } from "@grasp-os/shared/apps";
 import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
 import {
   appIdSchema,
   runIdSchema,
@@ -21,7 +22,6 @@ import { z } from "zod";
 
 import { requireBuilder, versionFiles } from "../apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
-import { actorOf } from "../audit.ts";
 import { apps, workflowRuns } from "../db/core/schema.ts";
 import { appHost } from "../durable-objects.ts";
 import { hasWorkflow } from "./code.ts";
