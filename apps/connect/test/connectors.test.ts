@@ -623,9 +623,17 @@ describe("a connector's code", () => {
     // Any of the route's storage hosts, whatever the deployment's config
     // (DOWNLOAD_HOSTS, no longer read, names only another).
     await expect(download("others")).resolves.toMatchObject({ status: 200 });
-    // Another host, and a second redirect: each withheld.
-    const withheld = await Promise.all(["elsewhere", "again"].map(download));
-    expect(withheld).toMatchObject([{ status: 502 }, { status: 502 }]);
+    // Another host, a storage host on another port or with credentials in
+    // its URL, and a second redirect: each withheld.
+    const withheld = await Promise.all(
+      ["elsewhere", "port", "userinfo", "again"].map(download)
+    );
+    expect(withheld).toMatchObject([
+      { status: 502 },
+      { status: 502 },
+      { status: 502 },
+      { status: 502 },
+    ]);
     const followed = api.sent.filter(({ host }) => host !== sampleHost);
     expect(
       followed.map(({ host, path }) => `${host}${path}`).toSorted()

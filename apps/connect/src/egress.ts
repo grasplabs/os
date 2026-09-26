@@ -200,8 +200,8 @@ const redirectTarget = (
 /**
  * The file a download's redirect leads to, fetched from its storage host
  * with nothing of the connector's request, or a failure if it can't be.
- * The host is the client's own (its tenant's name): logged as the
- * redirect it was, not by name.
+ * The host may name any tenant a route's pattern matches: it is logged as
+ * the redirect it was, not by name.
  */
 const download = async (
   { connector, callId, expiresAt }: EgressProps,

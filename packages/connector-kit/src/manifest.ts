@@ -46,8 +46,9 @@ export const maskMetaKey = "grasp-os/mask";
 /**
  * Response header on the answers connect's egress gives itself: `refused`
  * (the request never left) or `failed` (it left, but its answer is
- * withheld: a redirect, too large, unreachable). Never on a provider's:
- * the egress drops it from theirs.
+ * withheld: a redirect, or unreachable). A response past the size limit
+ * isn't one of these: its body fails once the limit is passed. Never on a
+ * provider's: the egress drops it from theirs.
  */
 export const egressHeader = "grasp-egress";
 

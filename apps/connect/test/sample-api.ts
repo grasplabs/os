@@ -45,6 +45,9 @@ const download = (url: URL): Response | undefined => {
     elsewhere: "https://evil.test/file",
     // Another of the storage's hosts.
     others: "https://others.storage.test/file",
+    // A storage host, but on another port, or with credentials.
+    port: `https://${storageHost}:8443/file`,
+    userinfo: `https://u:p@${storageHost}/file`,
   }[name];
   return Response.redirect(to ?? `https://${storageHost}/${name}`, 302);
 };
