@@ -23,6 +23,7 @@ import {
   pauseWhileSwitchedOff,
   RunHost,
   settle,
+  watchedStep,
 } from "./host.ts";
 import type { FailedStep, HostedRun, RunStep } from "./host.ts";
 import {
@@ -153,32 +154,10 @@ const runError = ({ name, message }: StepError): Error => {
  * (its person has left, say, or its code doesn't build).
  */
 const settledRun = async (
-  failedWith: (error: unknown) => void,
   run: () => Promise<unknown>
 ): Promise<Settled<unknown>> => {
-  const outer = await settle(async () => {
-    try {
-      return await run();
-    } catch (error) {
-      failedWith(error);
-      throw error;
-    }
-  });
+  const outer = await settle(run);
   return outer.ok ? fromIsolate(outer.value) : outer;
-};
-
-/** How Cloudflare Workflows has a run it is pausing or stopping. */
-const stoppingStatuses = new Set<InstanceStatus["status"]>([
-  "waitingForPause",
-  "paused",
-  "terminated",
-]);
-
-/** Whether the engine is stopping the run's execution: paused or cancelled. */
-const isStopping = async (env: Env, runId: RunId): Promise<boolean> => {
-  const instance = await env.WORKFLOWS.get(runId);
-  const { status } = await instance.status();
-  return stoppingStatuses.has(status);
 };
 
 /** The run's App, as a context for its restricted mode. */
@@ -193,7 +172,7 @@ const runWorkflow = async (
   env: Env,
   metadata: Record<string, unknown>,
   event: { instanceId: string; payload: unknown },
-  step: RunStep
+  engineStep: RunStep
 ): Promise<unknown> => {
   const pinned = pinnedSchema.safeParse(metadata);
   const runId = runIdSchema.parse(event.instanceId);
@@ -211,18 +190,19 @@ const runWorkflow = async (
   if (row.status === "cancelled" || row.status === "failed") {
     throw new Error(`Run ${runId} has ended: ${row.status}`);
   }
-  await pauseWhileSwitchedOff(env, step, runId, "workflows");
-  // The latest error of the engine's own: the one to end an execution the
-  // engine is stopping with.
+  // The latest error of the engine's own: the engine stopped this
+  // execution, and it is the one to end it with.
   let engineError: { error: unknown } | undefined;
   const engineFailed = (error: unknown): void => {
     engineError = { error };
   };
+  const step = watchedStep(engineStep, engineFailed);
+  await pauseWhileSwitchedOff(env, step, runId, "workflows");
   let lastFailed: FailedStep | undefined;
   const stepFailed = (failure: FailedStep): void => {
     lastFailed = failure;
   };
-  const result = await settledRun(engineFailed, async () => {
+  const result = await settledRun(async () => {
     const { authority, bindings, connections } = await whileOwnerActs(
       env,
       step,
@@ -257,7 +237,6 @@ const runWorkflow = async (
     };
     const host = new RunHost(env, step, run, {
       acting,
-      engineFailed,
       stepFailed,
       callApp: async (caller, method, args) =>
         await callApp(env, run.app, caller, method, args),
@@ -272,10 +251,12 @@ const runWorkflow = async (
     });
   });
   const failed = result.ok ? undefined : result.error;
-  if (failed && (await isStopping(env, runId))) {
+  if (failed && engineError) {
     // The engine stopped this execution, to resume or end it itself: the
-    // run didn't fail, and the engine hears its own error back.
-    const stopped = engineError?.error;
+    // run didn't fail, and the engine hears its own error back. Whether
+    // it has resumed the run meanwhile makes no difference: that is
+    // another execution, which goes on from here.
+    const stopped = engineError.error;
     throw stopped instanceof Error ? stopped : runError(failed);
   }
   // A step, so a run that ended is recorded and audited once. A failed

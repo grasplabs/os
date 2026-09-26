@@ -10,7 +10,7 @@ import { signDecisionLink } from "../src/decisions/links.ts";
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
-import { finished, liveStatus, resumed, stopped } from "./runs.ts";
+import { finished, liveStatus, resumed, stepDone, stopped } from "./runs.ts";
 import { acmeTenant } from "./sign-in-config.ts";
 import {
   callAuth,
@@ -714,13 +714,16 @@ describe("decisions", { timeout: 60_000 }, () => {
     });
   });
 
-  it("pause a waiting run while decisions are switched off, instead of timing it out", async () => {
+  it("pause a waiting run while decisions are switched off, instead of reminding or timing it out", async () => {
     const builder = await personApi("builder");
     const decider = await personApi("user");
-    const { run, decision } = await asking(builder, {
+    const { app, run, decision } = await asking(builder, {
       from: `person:${decider.userId}`,
-      timeout: 1500,
+      timeout: 3000,
+      remindAfter: 1500,
     });
+    // Switched off once it waits for the answer, before it would remind.
+    await stepDone(run.id, "review#asked");
     const { FEATURES: features } = env;
     try {
       env.FEATURES = {
@@ -741,14 +744,23 @@ describe("decisions", { timeout: 60_000 }, () => {
     )
       .bind(decision)
       .first<{ status: string }>();
+    const askedWhileOff = await asksOf(app);
     await resumed(run.id);
+    // Back on: reminded, it ends as the timeout it is, never as an approval.
+    const output = await outputOf(builder, run.id);
+    const asked = await asksOf(app, 2);
 
     expect({
       whileOff: whileOff?.status,
-      // Back on, past the deadline: it ends as the timeout it is, never as
-      // an approval.
-      output: await outputOf(builder, run.id),
-    }).toStrictEqual({ whileOff: "open", output: { timedOut: true } });
+      remindedWhileOff: askedWhileOff.map(({ reminder }) => reminder),
+      output,
+      reminded: asked.map(({ reminder }) => reminder),
+    }).toStrictEqual({
+      whileOff: "open",
+      remindedWhileOff: [false],
+      output: { timedOut: true },
+      reminded: [false, true],
+    });
   });
 
   it("bring the person back to the link's page after signing in, and send it no referrer", async () => {

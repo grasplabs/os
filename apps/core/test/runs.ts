@@ -5,6 +5,8 @@
 import { env } from "cloudflare:workers";
 import { expect, vi } from "vite-plus/test";
 
+import { allEvents } from "./audit-events.ts";
+
 /**
  * Stops a run's execution, as a crash or a deploy does; resuming it runs
  * the workflow again from its start, loaded anew, finished steps replayed.
@@ -44,6 +46,24 @@ export const finished = async (
       expect(["complete", "errored", "terminated"]).toContain(status);
     },
     { timeout: 20_000, interval: 200 }
+  );
+};
+
+/** Once the run's step `step` has completed, as the audit log has it. */
+export const stepDone = async (run: string, step: string): Promise<void> => {
+  await vi.waitFor(
+    async () => {
+      const events = await allEvents();
+      expect(
+        events.some(
+          ({ action, target, detail }) =>
+            action === "workflow.step.completed" &&
+            target?.id === run &&
+            detail.step === step
+        )
+      ).toBeTruthy();
+    },
+    { timeout: 10_000, interval: 100 }
   );
 };
 

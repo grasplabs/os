@@ -20,7 +20,7 @@ import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { mailControlUrl, mailServerUrl } from "./mail-server.ts";
 import type { MailAnswer } from "./mail-server.ts";
-import { finished, liveStatus, resumed, stopped } from "./runs.ts";
+import { finished, liveStatus, resumed, stepDone, stopped } from "./runs.ts";
 import { openRpc, signedInWithRole } from "./sign-in.ts";
 import { connectDb, testBinding } from "./test-env.ts";
 
@@ -259,24 +259,6 @@ const onlyRun = async (
     }
     return instance;
   });
-
-/** Once the run's step `step` has completed, as the audit log has it. */
-const stepDone = async (run: string, step: string): Promise<void> => {
-  await vi.waitFor(
-    async () => {
-      const events = await allEvents();
-      expect(
-        events.some(
-          ({ action, target, detail }) =>
-            action === "workflow.step.completed" &&
-            target?.id === run &&
-            detail.step === step
-        )
-      ).toBeTruthy();
-    },
-    { timeout: 10_000, interval: 100 }
-  );
-};
 
 /** Where core's record has a run now. */
 const rowStatus = async (run: string): Promise<string | undefined> => {
@@ -635,14 +617,20 @@ ${mailStep("after")}`,
     });
   });
 
-  it("go on after a crash without running finished steps again, and retry a step killed mid-way", async () => {
+  it("go on after a crash without running finished steps again, also when resumed at once, and retry a step killed mid-way", async () => {
     const builder = await personApi("builder");
     const app = await appWith(
       builder,
       workflowFiles(
         "durable",
         `  await step.do("before", { description: "Before" }, async () => await env.APP.call("hit", "before"));
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  try {
+    await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  } finally {
+    // Winds down slowly: the stopped execution is still ending when the
+    // run, resumed at once, goes on in the next.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
   const attempt = await step.do(
     "work",
     { description: "Work", sideEffect: true, input: null, timeout: "1 second", retries: { limit: 1, delay: 10 } },

@@ -308,6 +308,71 @@ const isTimeout = (error: unknown): boolean =>
   (error.name === "WorkflowTimeoutError" || timedOut.test(error.message));
 
 /**
+ * Whether the engine threw an attempt's own error back: that error, or
+ * its copy, which has only the message, maybe with the name in front.
+ */
+const isAttemptError = (error: unknown, attempt: unknown): boolean =>
+  error === attempt ||
+  (error instanceof Error &&
+    attempt instanceof Error &&
+    (error.message === attempt.message ||
+      error.message.endsWith(`: ${attempt.message}`)));
+
+/**
+ * `step`, telling `engineFailed` of each error of the engine's own: one a
+ * call threw that is no timeout, and, for a step, not its last attempt's
+ * error. It is how the engine stops an execution (a pause, a cancel)
+ * while the run goes on, or will go on, in another; the dispatcher hands
+ * it back (dispatcher.ts). Errors of core's and of the run's own code
+ * around those calls are never the engine's.
+ */
+export const watchedStep = (
+  step: RunStep,
+  engineFailed: (error: unknown) => void
+): RunStep => {
+  const heard = (error: unknown, attempt?: unknown): void => {
+    if (!(isTimeout(error) || isAttemptError(error, attempt))) {
+      engineFailed(error);
+    }
+  };
+  return {
+    do: async (name, config, fn) => {
+      let attempt: unknown;
+      try {
+        return await step.do(name, config, async () => {
+          attempt = undefined;
+          try {
+            return await fn();
+          } catch (error) {
+            attempt = error;
+            throw error;
+          }
+        });
+      } catch (error) {
+        heard(error, attempt);
+        throw error;
+      }
+    },
+    sleep: async (name, duration) => {
+      try {
+        await step.sleep(name, duration);
+      } catch (error) {
+        heard(error);
+        throw error;
+      }
+    },
+    waitForEvent: async (name, options) => {
+      try {
+        return await step.waitForEvent(name, options);
+      } catch (error) {
+        heard(error);
+        throw error;
+      }
+    },
+  };
+};
+
+/**
  * One of core's errors as the isolate, and the run's own record, may see
  * it: an expected error as it is, a timeout as one, anything else as
  * `internal.unexpected`, with the cause only in the log.
@@ -412,12 +477,6 @@ export interface HostHooks {
    * for is gone.
    */
   acting: () => Promise<void>;
-  /**
-   * Hears of an engine call that failed on the engine's side: when the
-   * engine is stopping the execution, the dispatcher ends it with that
-   * error, which the engine knows as its own.
-   */
-  engineFailed: (error: unknown) => void;
   /** Hears of each step that failed, with the error it failed with. */
   stepFailed: (failure: FailedStep) => void;
   /** Calls a method of the run's App for `caller` (`callApp`). */
@@ -450,21 +509,6 @@ export class RunHost extends RpcTarget {
     this.#step = step;
     this.#run = run;
     this.#hooks = hooks;
-  }
-
-  /**
-   * Runs one of the engine's own calls; a failure that is the engine's
-   * (a pause, say), not the step's, is passed on to the dispatcher as is.
-   */
-  async #engine<T>(call: () => Promise<T>): Promise<T> {
-    try {
-      return await call();
-    } catch (error) {
-      if (!isTimeout(error)) {
-        this.#hooks.engineFailed(error);
-      }
-      throw error;
-    }
   }
 
   get #actor(): AuditActor {
@@ -571,11 +615,6 @@ export class RunHost extends RpcTarget {
       }
       return { ok: true, value };
     } catch (error) {
-      // The last attempt's own error: the engine's copy of it has only
-      // its message, with the name in front. Without one, the engine's.
-      if (failed === undefined && step !== "" && !isTimeout(error)) {
-        this.#hooks.engineFailed(error);
-      }
       this.#stepEnded(step);
       const reported = failed ?? forIsolate(error);
       if (step !== "") {
@@ -593,9 +632,7 @@ export class RunHost extends RpcTarget {
     return await settle(async () => {
       const step = checked(stepNameSchema, name);
       const ms = checked(milliseconds, duration);
-      await this.#engine(async () => {
-        await this.#step.sleep(step, ms);
-      });
+      await this.#step.sleep(step, ms);
       return null;
     });
   }
@@ -611,9 +648,7 @@ export class RunHost extends RpcTarget {
       const step = checked(stepNameSchema, name);
       const { type, timeout } = checked(waitOptionsSchema, options);
       try {
-        const event = await this.#engine(
-          async () => await this.#step.waitForEvent(step, { type, timeout })
-        );
+        const event = await this.#step.waitForEvent(step, { type, timeout });
         return { received: true, payload: event.payload };
       } catch (error) {
         if (isTimeout(error)) {
@@ -683,14 +718,12 @@ export class RunHost extends RpcTarget {
    * engine's, so the dispatcher hands it back to the engine as its own.
    */
   async #pauseWhileDecisionsOff(): Promise<void> {
-    await this.#engine(async () => {
-      await pauseWhileSwitchedOff(
-        this.#env,
-        this.#step,
-        this.#run.runId,
-        "decisions"
-      );
-    });
+    await pauseWhileSwitchedOff(
+      this.#env,
+      this.#step,
+      this.#run.runId,
+      "decisions"
+    );
   }
 
   /** The step whose function runs now; refuses a call outside a step. */
@@ -804,7 +837,8 @@ export class RunHost extends RpcTarget {
    * decision still open is closed, timed out, unless an answer lands
    * first. An answer that came before the wait began is taken at once.
    * While decisions are switched off, the run pauses instead of waiting,
-   * and instead of closing a decision nobody could answer meanwhile.
+   * and again once the wait is over: instead of closing a decision nobody
+   * could answer meanwhile, or of going on to remind people of it.
    */
   async waitForDecision(
     name: unknown,
@@ -825,22 +859,17 @@ export class RunHost extends RpcTarget {
       }
       if (timeout > 0) {
         try {
-          await this.#engine(
-            async () =>
-              await this.#step.waitForEvent(step, {
-                type: decisionEventType(decision),
-                timeout,
-              })
-          );
+          await this.#step.waitForEvent(step, {
+            type: decisionEventType(decision),
+            timeout,
+          });
         } catch (error) {
           if (!isTimeout(error)) {
             throw error;
           }
         }
       }
-      if (last) {
-        await this.#pauseWhileDecisionsOff();
-      }
+      await this.#pauseWhileDecisionsOff();
       return await decisionOutcome(this.#env, this.#run, decision, last);
     });
   }

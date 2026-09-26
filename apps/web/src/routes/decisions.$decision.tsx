@@ -61,6 +61,10 @@ const dateTime = new Intl.DateTimeFormat(undefined, {
 /** How a decision that is no longer open ended. */
 const outcomeOf = (decision: DecisionView): string => {
   const { decided } = decision;
+  // `closed` is only ever an open decision whose run has ended.
+  if (decision.status === "closed") {
+    return "The workflow run that asked this has ended, so this decision has closed.";
+  }
   if (decision.status === "timed_out" || decided === undefined) {
     return "Nobody answered in time, so this decision has closed.";
   }
