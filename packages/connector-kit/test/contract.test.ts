@@ -200,6 +200,33 @@ describe("a connector", () => {
     }
   });
 
+  it("binds every route of a resource-scoped tool to its resource", () => {
+    const withRoutes = (paths: string[]) =>
+      connectorWith({
+        tools: [
+          defineTool({
+            name: "items.list",
+            description: "Lists items",
+            input: z.strictObject({ mailbox: z.string() }),
+            output: z.strictObject({}),
+            readOnly: true,
+            resource: "mailbox",
+            routes: paths.map((path) => ({ ...route, path })),
+            run: async () => await Promise.resolve({ output: {} }),
+          }),
+        ],
+      });
+    expect(() =>
+      withRoutes(["/v1/users/{mailbox}/messages", "/v1/users/{mailbox}:peek"])
+    ).not.toThrow();
+    for (const paths of [
+      ["/v1/users/{user}/messages"],
+      ["/v1/users/{mailbox}/messages", "/v1/me/messages"],
+    ]) {
+      expect(() => withRoutes(paths)).toThrow("must name it");
+    }
+  });
+
   it("has one tool per name", () => {
     const tool = toolWith(z.strictObject({}));
     expect(() => connectorWith({ tools: [tool, tool] })).toThrow("Two tools");
@@ -243,6 +270,9 @@ describe("a route's path", () => {
       "a%23b",
       "a:b",
       "a%3Ab",
+      "batch",
+      "%24batch",
+      "$BATCH",
     ]) {
       expect(
         pathMatches(template, `/v1/users/${segment}/messages`)

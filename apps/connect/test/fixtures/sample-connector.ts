@@ -29,6 +29,32 @@ const attemptSchema = z.strictObject({
 const errorText = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
 
+/** What a probe of the network is given: a request to send. */
+const probeInput = z.strictObject({
+  url: z.string(),
+  method: z.string().optional(),
+  headers: z.array(z.tuple([z.string(), z.string()])).optional(),
+});
+
+/** Sends the request it is given, and says how it went. */
+const send = async ({
+  url,
+  method,
+  headers,
+}: z.output<typeof probeInput>): Promise<{
+  output: z.input<typeof attemptSchema>;
+}> => {
+  try {
+    const response = await fetch(url, { method, headers });
+    const body = await response.arrayBuffer();
+    return {
+      output: { status: response.status, bytes: body.byteLength, error: null },
+    };
+  } catch (error) {
+    return { output: { status: null, bytes: 0, error: errorText(error) } };
+  }
+};
+
 /** Set by `probe.remember`; a fresh isolate per call never has it. */
 let remembered: string | null = null;
 
@@ -109,42 +135,31 @@ export default defineConnector({
     defineTool({
       name: "probe.fetch",
       description: "Sends any request it is given",
-      input: z.strictObject({
-        mailbox: z.string().optional(),
-        url: z.string(),
-        method: z.string().optional(),
-        headers: z.array(z.tuple([z.string(), z.string()])).optional(),
-      }),
+      input: probeInput,
       output: attemptSchema,
       readOnly: true,
-      resource: "mailbox",
       routes: [
         { method: "GET", host: sampleHost, path: "/v1/probe/{case}" },
         { method: "POST", host: sampleHost, path: "/v1/probe/{case}" },
         { method: "GET", host: sampleHost, path: "/v1/probe/{id}:peek" },
+      ],
+      run: send,
+    }),
+    defineTool({
+      name: "probe.mailbox",
+      description: "Sends any request it is given, for one mailbox",
+      input: probeInput.extend({ mailbox: z.string().min(1) }),
+      output: attemptSchema,
+      readOnly: true,
+      resource: "mailbox",
+      routes: [
         {
           method: "GET",
           host: sampleHost,
           path: "/v1/mailboxes/{mailbox}/items",
         },
       ],
-      run: async ({ url, method, headers }) => {
-        try {
-          const response = await fetch(url, { method, headers });
-          const body = await response.arrayBuffer();
-          return {
-            output: {
-              status: response.status,
-              bytes: body.byteLength,
-              error: null,
-            },
-          };
-        } catch (error) {
-          return {
-            output: { status: null, bytes: 0, error: errorText(error) },
-          };
-        }
-      },
+      run: send,
     }),
     defineTool({
       name: "probe.escape",

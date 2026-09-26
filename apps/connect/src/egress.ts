@@ -264,9 +264,13 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
   }
 
   /** Raw TCP (`cloudflare:sockets`) never leaves: only HTTPS requests. */
-  // oxlint-disable-next-line class-methods-use-this -- the runtime's handler
   override connect(): never {
-    log.warn("egress.refused", { reason: "socket" });
+    const props = egressPropsSchema.safeParse(this.ctx.props);
+    log.warn("egress.refused", {
+      connector: props.data?.connector ?? "unknown",
+      callId: props.data?.callId,
+      reason: "socket",
+    });
     throw new Error("Refused by connect's egress allowlist");
   }
 }

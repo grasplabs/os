@@ -98,7 +98,8 @@ const probe = async (
   },
   extra: Partial<Call> = {}
 ): Promise<Attempt> => {
-  const { output } = await call(connection, "probe.fetch", input, extra);
+  const tool = input.mailbox === undefined ? "probe.fetch" : "probe.mailbox";
+  const { output } = await call(connection, tool, input, extra);
   const attempt: unknown = JSON.parse(output);
   if (!isAttempt(attempt)) {
     throw new TypeError("Not a probe's report");
@@ -325,6 +326,8 @@ describe("a connector's code", () => {
         "a%23b",
         "a%3Ab",
         "ok:poke",
+        "batch",
+        "%24BATCH",
       ].map((segment) => ({
         url: `https://${sampleHost}/v1/probe/${segment}`,
       })),
@@ -539,11 +542,12 @@ describe("a connector's code", () => {
       url: `https://${sampleHost}/v1/probe/ok`,
       method: "INVOICE-4200",
     });
+    await call(connection, "probe.socket", {});
     const lines = logged.join("\n");
     expect(lines).toMatch(
       /egress\.request.*callId.*api\.sample\.test.*\/v1\/mailboxes\/\{mailbox\}\/items/u
     );
-    expect(lines).toContain("egress.refused");
+    expect(lines).toMatch(/egress\.refused.*callId.*socket/u);
     expect(lines).not.toContain(token);
     expect(lines).not.toContain("invoice");
   });

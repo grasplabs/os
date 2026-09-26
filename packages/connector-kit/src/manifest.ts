@@ -64,6 +64,12 @@ const isBatchSegment = (segment: string): boolean => {
   return lower === "batch" || lower.startsWith("$batch");
 };
 
+/** Whether a path template has a `{name}` segment (maybe with a suffix). */
+const namesParameter = (path: string, name: string): boolean =>
+  path
+    .split("/")
+    .some((segment) => parameterSegment.exec(segment)?.groups?.name === name);
+
 /** Whether `path` is a path template: `/` and one or more segments. */
 const isPathTemplate = (path: string): boolean => {
   const [empty, ...segments] = path.split("/");
@@ -143,6 +149,16 @@ export const connectorManifestSchema = z
         ({ resource, input }) => resource === null || input.includes(resource)
       ),
     "An action's resource must be one of its input properties"
+  )
+  .refine(
+    ({ actions }) =>
+      Object.values(actions).every(
+        ({ resource, routes }) =>
+          resource === null ||
+          routes.every(({ path }) => namesParameter(path, resource))
+      ),
+    // So the egress always binds it to the resource a capability names.
+    "Every route of an action with a resource must name it as a {segment}"
   );
 export type ConnectorManifest = z.infer<typeof connectorManifestSchema>;
 
@@ -199,6 +215,7 @@ export const pathMatches = (
         decoded !== "." &&
         decoded !== ".." &&
         !forbiddenInValue.test(decoded) &&
+        !isBatchSegment(decoded) &&
         (bound === undefined || decoded === bound)
       );
     })
