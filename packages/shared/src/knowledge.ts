@@ -291,6 +291,59 @@ export interface BacklinkPage {
   provenance: Provenance;
 }
 
+/** Longest search query, in characters. */
+export const searchQueryMaxLength = 500;
+
+/** Most results one search returns. */
+export const searchMaxLimit = 50;
+
+const searchDefaultLimit = 20;
+
+/** A search's words, as someone typed them: no query syntax. */
+export const searchQuerySchema = z.string().max(searchQueryMaxLength);
+
+/** How many results a search on one collection returns, best first. */
+export const collectionSearchOptionsSchema = z
+  .strictObject({
+    limit: z.int().min(1).max(searchMaxLimit).default(searchDefaultLimit),
+  })
+  .default({ limit: searchDefaultLimit });
+export type CollectionSearchOptions = z.input<
+  typeof collectionSearchOptionsSchema
+>;
+
+/** Where to search, and how many results to return, best first. */
+export const searchOptionsSchema = z
+  .strictObject({
+    /** Only this collection; otherwise every one the reader may read. */
+    collectionId: collectionIdInputSchema.optional(),
+    limit: z.int().min(1).max(searchMaxLimit).default(searchDefaultLimit),
+  })
+  .default({ limit: searchDefaultLimit });
+export type SearchOptions = z.input<typeof searchOptionsSchema>;
+
+/** A section that matched a search, with its document. */
+export interface SearchHit {
+  documentId: DocumentId;
+  collectionId: CollectionId;
+  path: string;
+  title: string;
+  type: DocumentType;
+  description: string;
+  /** The section's place in its document, from 0. */
+  section: number;
+  /** The headings above and of the section, outermost first. */
+  headings: string[];
+  /** Plain text from the section, around what matched. */
+  snippet: string;
+}
+
+/** A search's results, best first, and where they come from. */
+export interface SearchResults {
+  hits: SearchHit[];
+  provenance: Provenance;
+}
+
 /**
  * What a signed-in person reaches in Knowledge. Every call checks the
  * session and what the person may see and change, on the server.
@@ -322,6 +375,11 @@ export interface KnowledgeApi {
     documentId: string,
     options?: ListDocumentsOptions
   ) => Promise<BacklinkPage>;
+  /**
+   * Sections that match `query`, best first, from the collections the
+   * person may read, or from one of them.
+   */
+  search: (query: string, options?: SearchOptions) => Promise<SearchResults>;
 }
 
 /**
@@ -345,6 +403,11 @@ export interface CollectionReader {
     documentId: string,
     options?: ListDocumentsOptions
   ) => Promise<BacklinkPage>;
+  /** Sections of the collection that match `query`, best first. */
+  search: (
+    query: string,
+    options?: CollectionSearchOptions
+  ) => Promise<SearchResults>;
 }
 
 /** Why a Knowledge call was refused. */

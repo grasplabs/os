@@ -18,8 +18,7 @@ import type { WorkContext } from "../restricted.ts";
 // The one place Knowledge decides what may be read. Every query that reads
 // collections, documents, versions or links puts `allowedCollections`
 // inside its SQL, never as a filter afterwards, so no path (listing,
-// history, backlinks, and search when it comes) shows more than a read
-// would.
+// history, backlinks, search) shows more than a read would.
 //
 // A person reads a collection for everyone, one of their teams', or one
 // they own. An App or agent reads the collections it has a permission to
@@ -139,8 +138,9 @@ export const allowedCollections = async (
 };
 
 /**
- * Records that `reader` read from `collection`, and returns the read's
- * provenance. Call it after the read and before handing over what it
+ * Records that `reader` read from `sources` (a collection, or those a
+ * search found something in; none when it found nothing), and returns the
+ * read's provenance. Call it after the read and before handing over what it
  * returned: an App or agent that read restricted data puts its chat or App
  * in restricted mode first, so the data never reaches anything that can
  * still call out. If that fails, the read fails.
@@ -148,13 +148,16 @@ export const allowedCollections = async (
 export const recordRead = async (
   env: Env,
   reader: Reader,
-  collection: { id: string; sensitive: boolean }
+  ...sources: { id: string; sensitive: boolean }[]
 ): Promise<Provenance> => {
+  const sensitive = sources.some((source) => source.sensitive);
   const provenance: Provenance = {
-    collectionIds: [collectionIdSchema.parse(collection.id)],
-    sensitive: collection.sensitive,
+    collectionIds: [...new Set(sources.map(({ id }) => id))].map((id) =>
+      collectionIdSchema.parse(id)
+    ),
+    sensitive,
     // A sensitive collection holds restricted data (threat model Q12).
-    restricted: collection.sensitive,
+    restricted: sensitive,
   };
   if (provenance.restricted && reader.type === "delegate") {
     await restrict(env, reader.authority, reader.context);

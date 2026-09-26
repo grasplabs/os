@@ -191,7 +191,10 @@ const outcome = async (promise: Promise<unknown>): Promise<string> => {
   }
 };
 
-/** Every read of a collection stub, on `noteId`. */
+/**
+ * Every read of a collection stub, on `noteId`. The stub's own collection
+ * comes first and last: its listing and a search in it.
+ */
 const everyRead = async (reader: CollectionReader, noteId: string) =>
   await Promise.all([
     outcome(reader.listDocuments()),
@@ -199,7 +202,10 @@ const everyRead = async (reader: CollectionReader, noteId: string) =>
     outcome(reader.getDocument(noteId, 1)),
     outcome(reader.history(noteId)),
     outcome(reader.backlinks(noteId)),
+    outcome(reader.search("note")),
   ]);
+
+const everyReadIs = (code: string) => Array.from({ length: 6 }, () => code);
 
 /** A connection call, a fetch or a side effect, from an env. */
 const callOutlook = async (bindings: Env, sideEffect = false) => {
@@ -258,7 +264,7 @@ describe("Apps and agents reading Knowledge", () => {
     }).toStrictEqual({
       before: [],
       whileRequested: [],
-      writeOnly: Array.from({ length: 5 }, () => "permission.denied"),
+      writeOnly: everyReadIs("permission.denied"),
     });
 
     // Granted one collection: that one, and no document of another.
@@ -268,20 +274,28 @@ describe("Apps and agents reading Knowledge", () => {
       own: await everyRead(reader, handbook.noteId),
       other: await everyRead(reader, other.noteId),
     }).toStrictEqual({
-      own: ["ok", "ok", "ok", "ok", "ok"],
-      other: ["ok", ...Array.from({ length: 4 }, () => "knowledge.not_found")],
+      own: everyReadIs("ok"),
+      other: [
+        "ok",
+        ...Array.from({ length: 4 }, () => "knowledge.not_found"),
+        "ok",
+      ],
     });
+    // Both collections have a `note.md`: only its own is listed or found.
     const listed = await reader.listDocuments();
-    expect(
-      listed.documents.every(
-        ({ collectionId }) => collectionId === handbook.collectionId
-      )
-    ).toBeTruthy();
+    const found = await reader.search("note");
+    expect({
+      listed: listed.documents.map(({ collectionId }) => collectionId),
+      found: found.hits.map(({ collectionId }) => collectionId),
+    }).toStrictEqual({
+      listed: [handbook.collectionId, handbook.collectionId],
+      found: [handbook.collectionId, handbook.collectionId],
+    });
 
     // Revoked: the stub it holds stops at its next call.
     await admin.api.revokePermission(permissionId);
     await expect(everyRead(reader, handbook.noteId)).resolves.toStrictEqual(
-      Array.from({ length: 5 }, () => "permission.denied")
+      everyReadIs("permission.denied")
     );
   });
 
@@ -302,8 +316,8 @@ describe("Apps and agents reading Knowledge", () => {
         readerIn(await envOf(agent, person.userId, await newChat())),
         finance.noteId
       );
-    const allOk = ["ok", "ok", "ok", "ok", "ok"];
-    const noneFound = Array.from({ length: 5 }, () => "knowledge.not_found");
+    const allOk = everyReadIs("ok");
+    const noneFound = everyReadIs("knowledge.not_found");
     expect({
       member: await readsAs(member),
       // The grant alone isn't enough: an agent granted a collection, acting
@@ -365,7 +379,7 @@ describe("Apps and agents reading Knowledge", () => {
       await envOf(app, owner.userId, { type: "app", appId: app.appId }),
       "DIARY"
     );
-    const noneFound = Array.from({ length: 5 }, () => "knowledge.not_found");
+    const noneFound = everyReadIs("knowledge.not_found");
     expect({
       requests,
       inChat: await everyRead(inChat, diary.noteId),
@@ -396,8 +410,10 @@ describe("Apps and agents reading Knowledge", () => {
       outcome(reader.listDocuments()),
       outcome(reader.history(secret.noteId)),
       outcome(reader.backlinks(secret.noteId)),
+      outcome(reader.search("note")),
     ]);
     expect(refused).toStrictEqual([
+      "knowledge.not_found",
       "knowledge.not_found",
       "knowledge.not_found",
       "knowledge.not_found",
@@ -419,11 +435,12 @@ const stubReads = (reader: CollectionReader, noteId: string) => [
   reader.getDocument(noteId),
   reader.history(noteId),
   reader.backlinks(noteId),
+  reader.search("note"),
 ];
 
-/** Four reads' provenance: all from `collectionId`. */
+/** Five reads' provenance: all from `collectionId`. */
 const marked = (collectionId: string, isSensitive: boolean) =>
-  Array.from({ length: 4 }, () => ({
+  Array.from({ length: 5 }, () => ({
     collectionIds: [collectionId],
     sensitive: isSensitive,
     restricted: isSensitive,
@@ -454,6 +471,7 @@ describe("provenance", () => {
       byPerson.getDocument(noteId),
       byPerson.history(noteId),
       byPerson.backlinks(noteId),
+      byPerson.search("note", { collectionId }),
     ];
     expect({
       personSensitive: await provenanceOf(personReads(sensitive)),
@@ -538,7 +556,7 @@ describe("restricted mode", () => {
     });
   });
 
-  it("is entered by listings, history and backlinks too", async () => {
+  it("is entered by listings, history, backlinks and searches too", async () => {
     const { admin, subject, sensitive } = await setUp();
     const reads = [
       async (reader: CollectionReader) => await reader.listDocuments(),
@@ -546,6 +564,7 @@ describe("restricted mode", () => {
         await reader.history(sensitive.noteId),
       async (reader: CollectionReader) =>
         await reader.backlinks(sensitive.noteId),
+      async (reader: CollectionReader) => await reader.search("note"),
     ];
     const results = await Promise.all(
       reads.map(async (read) => {
@@ -558,20 +577,35 @@ describe("restricted mode", () => {
       "permission.restricted",
       "permission.restricted",
       "permission.restricted",
+      "permission.restricted",
     ]);
   });
 
-  it("isn't entered by a read that was refused", async () => {
-    const { subject, sensitive } = await setUp();
+  it("isn't entered by a read that was refused, or a search that found nothing", async () => {
+    const { admin, subject, sensitive } = await setUp();
     const outsider = await personOf("user");
     const bindings = await envOf(subject, outsider.userId, await newChat());
     // The permission covers Outlook for the outsider too; Payroll isn't theirs.
     const refused = await outcome(
       readerIn(bindings).getDocument(sensitive.noteId)
     );
-    expect({ refused, call: await callOutlook(bindings) }).toStrictEqual({
+    const searched = await envOf(subject, admin.userId, await newChat());
+    const { hits, provenance } = await readerIn(searched).search(
+      `nothing${unique()}`
+    );
+    expect({
+      refused,
+      call: await callOutlook(bindings),
+      found: { hits, provenance },
+      afterSearch: await callOutlook(searched),
+    }).toStrictEqual({
       refused: "knowledge.not_found",
       call: reached,
+      found: {
+        hits: [],
+        provenance: { collectionIds: [], sensitive: false, restricted: false },
+      },
+      afterSearch: reached,
     });
   });
 

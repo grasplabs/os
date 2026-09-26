@@ -336,7 +336,8 @@ const writeVersion = async (
   return toSummary(row);
 };
 
-const parseOrInvalid = <Output>(
+/** `input` as `schema` reads it; `knowledge.invalid` if it doesn't. */
+export const parseOrInvalid = <Output>(
   schema: z.ZodType<Output>,
   input: unknown
 ): Output => {
