@@ -14,8 +14,15 @@ import { z } from "zod";
 
 import { chainHash } from "../src/audit-chain.ts";
 import { auditLog } from "../src/audit-log.ts";
+import { exportReader } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
-import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
+import {
+  auditedDuring,
+  outcome,
+  signedInApi,
+  signedInWithRole,
+  unique,
+} from "./sign-in.ts";
 
 // Reading the audit log (threat model section 13, R16): only admins read
 // it, every read is itself recorded, and an export holds exactly what a
@@ -358,6 +365,20 @@ describe("audit log export", () => {
     );
     expect(document.records).toStrictEqual([]);
     expect(document.recordCheck.ok).toBeTruthy();
+  });
+
+  it("stops an export once its reader is no longer an admin", async () => {
+    const { session, userId } = await signedInWithRole(idp, "admin");
+    const targetId = `demoted-${unique()}`;
+    await logged(event({ target: { type: "doc", id: targetId } }));
+    const reader = await exportReader(session, { targetId });
+    // The header: the export has begun.
+    await reader.read();
+
+    await env.DB.prepare("UPDATE members SET role = 'user' WHERE user_id = ?")
+      .bind(userId)
+      .run();
+    await expect(outcome(reader.read())).resolves.toBe("role.forbidden");
   });
 
   it("exports CSV that a spreadsheet opens as data", async () => {

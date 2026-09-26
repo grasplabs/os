@@ -495,6 +495,33 @@ describe("AuditLog search", () => {
     await expect(log.verify()).resolves.toMatchObject({ ok: true });
   });
 
+  it("logs a receipt time held far behind the last one, but not a small hold", async () => {
+    const log = newLog();
+    /** Appends with the clock `ms` ahead, then now; whether a hold was logged. */
+    const heldAfterJump = async (ms: number): Promise<boolean> => {
+      vi.useFakeTimers({ toFake: ["Date"] });
+      vi.setSystemTime(Date.now() + ms);
+      try {
+        await log.append([newEvent()]);
+      } finally {
+        vi.useRealTimers();
+      }
+      const warned = vi.spyOn(console, "warn");
+      try {
+        await log.append([newEvent()]);
+        return warned.mock.calls.some(
+          ([fields]) =>
+            z.object({ event: z.literal("audit.clock_held") }).safeParse(fields)
+              .success
+        );
+      } finally {
+        warned.mockRestore();
+      }
+    };
+    await expect(heldAfterJump(60 * 1000)).resolves.toBeFalsy();
+    await expect(heldAfterJump(60 * 60 * 1000)).resolves.toBeTruthy();
+  });
+
   it("finds the entries in a time range of a large log without reading the rest", async () => {
     const log = newLog();
     await appendMany(log, 12_000);
@@ -641,6 +668,25 @@ describe("AuditLog retention", () => {
     });
   });
 
+  it("archives once a verification step reading the entries has ended", async () => {
+    const log = newLog();
+    await appendMany(log, 2000);
+    const cutoff = await cutoffNow();
+    // A step that reads every held entry is under way when the archive
+    // starts: the archive waits for it instead of leaving it to a later run,
+    // and the step still sees every entry it reads.
+    const [step, stretch] = await runInDurableObject(
+      log,
+      async (instance) =>
+        await Promise.all([instance.verify(), instance.archive(cutoff, 180)])
+    );
+    expect(step).toMatchObject({ ok: true, through: 2000, done: true });
+    expect(stretch).toMatchObject({ from: 1, through: 500 });
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: true, through: 2001, done: true },
+    });
+  });
+
   it("takes up a stretch an archive wrote but stopped before recording", async () => {
     const log = newLog();
     await appendThree(log);
@@ -751,6 +797,165 @@ describe("AuditLog retention", () => {
       ok: false,
       brokenAt: 4,
       reason: "unlinked",
+    });
+  });
+});
+
+/** Archives what the log holds now and a stretch after it, then a cutoff. */
+const archiveTwoStretches = async (log: Log): Promise<string> => {
+  await appendThree(log);
+  await archivedKey(log);
+  await appendThree(log);
+  await archivedKey(log);
+  return await cutoffNow();
+};
+
+describe("AuditLog purges", () => {
+  it("purges the oldest archived stretch, deletes its object and records it", async () => {
+    const log = newLog();
+    const early = new Date(Date.now() - 60_000).toISOString();
+    await appendThree(log);
+    const key = await archivedKey(log);
+    await log.append([newEvent("test.d")]);
+
+    // Nothing the log received after the cutoff.
+    await expect(log.purge(early)).resolves.toBeNull();
+    await expect(log.purge(await cutoffNow())).resolves.toStrictEqual({
+      from: 1,
+      through: 3,
+      key,
+    });
+    await expect(env.AUDIT_ARCHIVE.get(key)).resolves.toBeNull();
+    // The purge is recorded in the chain itself, by the platform.
+    await expect(stored(log)).resolves.toMatchObject([
+      { seq: 4, event: { action: "audit.archived" } },
+      { seq: 5, event: { action: "test.d" } },
+      {
+        seq: 6,
+        event: {
+          actor: { type: "system" },
+          action: "audit.purged",
+          detail: { from: 1, through: 3, key },
+        },
+      },
+    ]);
+  });
+
+  it("verifies a purged stretch as purged, and the chain across it", async () => {
+    const log = newLog();
+    await appendThree(log);
+    await archivedKey(log);
+    await log.append([newEvent("test.d")]);
+    await log.purge(await cutoffNow());
+
+    // Reported as purged, not missing, and the chain carries on after it.
+    await expect(log.verify()).resolves.toMatchObject({
+      ok: true,
+      through: 3,
+      purged: true,
+      done: false,
+    });
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: true, through: 6, done: true },
+    });
+    await expect(log.lastFullVerification()).resolves.toMatchObject({
+      ok: true,
+      through: 6,
+      purgedThrough: 3,
+    });
+  });
+
+  it("purges oldest first, one stretch at a time", async () => {
+    const log = newLog();
+    const cutoff = await archiveTwoStretches(log);
+
+    await expect(log.purge(cutoff)).resolves.toMatchObject({
+      from: 1,
+      through: 3,
+    });
+    await expect(log.purge(cutoff)).resolves.toMatchObject({
+      from: 4,
+      through: 7,
+    });
+    await expect(log.purge(cutoff)).resolves.toBeNull();
+    // Two purged stretches, then the entries the log holds.
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: true, done: true },
+      steps: 3,
+    });
+    await expect(log.lastFullVerification()).resolves.toMatchObject({
+      ok: true,
+      purgedThrough: 7,
+    });
+  });
+
+  it("records a purge once when purges run at the same time", async () => {
+    const log = newLog();
+    await appendThree(log);
+    await archivedKey(log);
+    const cutoff = await cutoffNow();
+
+    const purged = await runInDurableObject(
+      log,
+      async (instance) =>
+        await Promise.all([instance.purge(cutoff), instance.purge(cutoff)])
+    );
+    expect(purged.filter((stretch) => stretch !== null)).toHaveLength(1);
+    const events = await stored(log);
+    expect(
+      events.filter(({ event }) => event.action === "audit.purged")
+    ).toHaveLength(1);
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: true, done: true },
+    });
+  });
+
+  it("never purges a stretch that doesn't verify, so its break stays found", async () => {
+    const log = newLog();
+    await appendThree(log);
+    const key = await archivedKey(log);
+    const lines = await archivedLines(key);
+    await env.AUDIT_ARCHIVE.put(
+      key,
+      lines.join("\n").replace("test.b", "test.x")
+    );
+
+    await expect(log.purge(await cutoffNow())).resolves.toBeNull();
+    await expect(env.AUDIT_ARCHIVE.get(key)).resolves.not.toBeNull();
+    await expect(log.verify()).resolves.toStrictEqual({
+      ok: false,
+      brokenAt: 2,
+      reason: "altered",
+    });
+  });
+
+  it("never purges a stretch deleted outside the product, which stays missing", async () => {
+    const log = newLog();
+    await appendThree(log);
+    const key = await archivedKey(log);
+    await env.AUDIT_ARCHIVE.delete(key);
+
+    await expect(log.purge(await cutoffNow())).resolves.toBeNull();
+    await expect(log.verify()).resolves.toStrictEqual({
+      ok: false,
+      brokenAt: 1,
+      reason: "missing",
+    });
+  });
+
+  it("finds a purged stretch that no longer links to the chain before it", async () => {
+    const log = newLog();
+    const cutoff = await archiveTwoStretches(log);
+    await log.purge(cutoff);
+    await log.purge(cutoff);
+    // The second stretch's recorded link, changed after its purge.
+    await tamper(
+      log,
+      `UPDATE archives SET prev_hash = '${"f".repeat(64)}' WHERE first_seq = 4`
+    );
+
+    await expect(verifyAll(log)).resolves.toMatchObject({
+      result: { ok: false, brokenAt: 4, reason: "unlinked" },
     });
   });
 });

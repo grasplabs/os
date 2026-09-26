@@ -5,10 +5,13 @@ import {
   auditProvenanceMaxItems,
 } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
+import type { AuditFilter } from "@grasp-os/shared/audit-log";
 import { env } from "cloudflare:workers";
 import { vi } from "vite-plus/test";
 
 import { auditLog } from "../src/audit-log.ts";
+import { AuditRpc } from "../src/audit-rpc.ts";
+import { identify } from "../src/auth/identity.ts";
 
 /** The log's events after position `after`, oldest first, with positions. */
 const entriesAfter = async (
@@ -65,6 +68,28 @@ export const loggedEvents = async (
     },
     { timeout: 5000 }
   );
+};
+
+/**
+ * The JSON export `session` asks for, read here in the Worker a chunk at a
+ * time, as a client pulls it: a connection reads ahead, so this is how a
+ * test changes something between two reads. The session is checked on
+ * every read, as a connection checks it.
+ */
+export const exportReader = async (
+  session: string,
+  filter: AuditFilter
+): Promise<ReadableStreamDefaultReader<Uint8Array>> => {
+  const headers = new Headers({ cookie: session });
+  const rpc = new AuditRpc(env, async () => {
+    const identity = await identify(env, headers);
+    if (!identity) {
+      throw new Error("Session ended");
+    }
+    return identity;
+  });
+  const stream = await rpc.export(filter, "json");
+  return stream.getReader();
 };
 
 const full = "r".repeat(auditIdentifierMaxLength);

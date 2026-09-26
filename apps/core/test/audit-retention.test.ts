@@ -6,9 +6,9 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { auditLog } from "../src/audit-log.ts";
 import worker from "../src/index.ts";
-import { allEvents } from "./audit-events.ts";
+import { allEvents, exportReader } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
-import { signedInApi, unique } from "./sign-in.ts";
+import { outcome, signedInApi, signedInWithRole, unique } from "./sign-in.ts";
 
 // Retention: the cron trigger moves events past the deployment's retention
 // out of the log into the archive, and the chain still verifies from its
@@ -138,6 +138,20 @@ describe("audit log retention", () => {
       await cronAfter(event, 400, { AUDIT_RETENTION_DAYS: days });
     }
     await expect(held(event)).resolves.toBeTruthy();
+  });
+
+  it("stops an export that hasn't read the events it archives yet", async () => {
+    const { session } = await signedInWithRole(idp, "admin");
+    const event = await logged();
+    const reader = await exportReader(session, {});
+    // The header fixes the positions the export reads: all of the log.
+    await reader.read();
+
+    await cronAfter(event, 181);
+    await expect(held(event)).resolves.toBeFalsy();
+    await expect(outcome(reader.read())).resolves.toBe(
+      "audit.export_interrupted"
+    );
   });
 
   it("archives nothing while the feature is off", async () => {

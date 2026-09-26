@@ -10,8 +10,10 @@ import { featureEnabled } from "./features.ts";
 // as it was stored, and the chain carries on (src/audit-log.ts), so an
 // archived event still counts when the chain is verified. Nothing here
 // deletes an archived event: the archive keeps it for as long as the bucket
-// does. Deleting archived objects (a GDPR purge, say) is done outside the
-// product for now, and verification reports those stretches as missing.
+// does. The log can record a purge (`AuditLog.purge`), after which
+// verification reports the stretch as purged, but nothing calls it until
+// the DPA sets how long archives are kept. Deleting archived objects any
+// other way (outside the product) makes verification report them missing.
 //
 // The console sets it per deployment with the `AUDIT_RETENTION_DAYS` var:
 // 180 days unless set, at least 30 (so an admin always has the last month
