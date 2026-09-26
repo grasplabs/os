@@ -94,8 +94,36 @@ const reservedMethods = new Set([
   "webSocketMessage",
 ]);
 
-/** Where the host keeps its permissions generation (`restart`). */
-const generationKey = "permissions-generation";
+/** Where the host counts starts on new code or permissions (`#load`, `restart`). */
+const generationKey = "generation";
+
+/** Where the host keeps the version its code last started on. */
+const versionKey = "version";
+
+/**
+ * The names of the runtime's own errors, safe to log. Any other name was
+ * made up by App code, and may hold anything.
+ */
+const runtimeErrorNames = new Set([
+  "AbortError",
+  "DataCloneError",
+  "Error",
+  "EvalError",
+  "RangeError",
+  "ReferenceError",
+  "SyntaxError",
+  "TimeoutError",
+  "TypeError",
+  "URIError",
+]);
+
+/** An error's name for the log: the runtime's, or `custom` for App-made ones. */
+const errorNameOf = (error: unknown): string => {
+  if (!(error instanceof Error)) {
+    return typeof error;
+  }
+  return runtimeErrorNames.has(error.name) ? error.name : "custom";
+};
 
 /** Where the App keeps its restricted mode (see restricted.ts). */
 const restrictedKey = "restricted";
@@ -152,7 +180,7 @@ const currentVersion = async (env: Env, app: AppId): Promise<number> => {
 
 /**
  * The App's server code at `version`, with an env for the permissions of
- * `generation`, as the class its facet runs.
+ * `generation` (see `#load`), as the class its facet runs.
  */
 const loadServer = async (
   env: Env,
@@ -177,8 +205,8 @@ const loadServer = async (
     });
   }
   const bindings = await appBindings(env, app);
-  // The same code with the same permissions has the same key, so the
-  // loader may keep its isolate while the host sleeps. A new version, or a
+  // The same generation has the same key, so the
+  // loader may keep its isolate while the host sleeps. Another version, or a
   // grant or revoke (a new generation), starts a new one.
   const key = `app:${app}:${version}:${generation}`;
   return env.LOADER.get(key, () => ({
@@ -201,7 +229,7 @@ const forCaller = (
       appId: app,
       version,
       method,
-      errorName: error instanceof Error ? error.name : typeof error,
+      errorName: errorNameOf(error),
     });
   }
   return toOpaqueError(error, { version: version ?? null });
@@ -368,13 +396,22 @@ export class App extends DurableObject<Env> {
     return this.#reads;
   }
 
+  /**
+   * The class for `version`. A version other than the one that ran last
+   * (a release, or a rollback to one that ran before) is a new generation
+   * too, so no isolate an earlier run of it kept warm comes back with its
+   * memory. Only a host that woke up on the same code reuses one.
+   */
   async #load(version: number): Promise<DurableObjectClass> {
-    return await loadServer(
-      this.env,
-      this.#app,
-      version,
-      await this.#generation()
-    );
+    let generation = await this.#generation();
+    if ((await this.ctx.storage.get<number>(versionKey)) !== version) {
+      generation += 1;
+      await this.ctx.storage.put({
+        [generationKey]: generation,
+        [versionKey]: version,
+      });
+    }
+    return await loadServer(this.env, this.#app, version, generation);
   }
 
   /**
@@ -430,7 +467,7 @@ export class App extends DurableObject<Env> {
       appId: this.#app,
       version,
       method,
-      errorName: error instanceof Error ? error.name : typeof error,
+      errorName: errorNameOf(error),
     });
     const reported = appErrors.create("app.failed", {
       version,

@@ -135,6 +135,12 @@ export class App extends DurableObject {
     throw new Error("Invoice 7 has no total");
   }
 
+  failNamed(): never {
+    const error = new Error("Named");
+    error.name = "Invoice 7 for Acme";
+    throw error;
+  }
+
   giveFunction(): () => string {
     return () => "called back";
   }
@@ -494,7 +500,10 @@ describe("App server code", { timeout: 60_000 }, () => {
     };
 
     await builder.api.apps.versions.setCurrent(app, 1);
-    const afterRollback = await callApp(env, app, caller, "label");
+    const afterRollback = {
+      label: await callApp(env, app, caller, "label"),
+      count: await callApp(env, app, caller, "count"),
+    };
     expect({ afterRestart, afterRelease, afterRollback }).toStrictEqual({
       afterRestart: { notes: ["before", "restarted"], count: 1 },
       afterRelease: {
@@ -502,7 +511,7 @@ describe("App server code", { timeout: 60_000 }, () => {
         notes: ["before", "restarted", "released"],
         count: 1,
       },
-      afterRollback: "v1",
+      afterRollback: { label: "v1", count: 1 },
     });
   });
 
@@ -550,6 +559,7 @@ describe("App server code", { timeout: 60_000 }, () => {
         () => {},
         (error: unknown) => error
       );
+      await outcome(callApp(env, app, as(builder.userId), "failNamed"));
       logs = JSON.stringify(logged.mock.calls);
     } finally {
       logged.mockRestore();
