@@ -51,6 +51,7 @@ describe("feature flags", () => {
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
+      "feature.disabled",
       "ok",
     ]);
   });
@@ -60,6 +61,7 @@ describe("feature flags", () => {
       callsWith({ apps: true, permissions: false, unknown: true })
     ).resolves.toStrictEqual([
       "ok",
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -95,6 +97,7 @@ describe("feature flags", () => {
     for (const features of ["{not json", '{"apps": "yes"}', "[true]"]) {
       // oxlint-disable-next-line no-await-in-loop -- one config at a time
       await expect(callsWith(features)).resolves.toStrictEqual([
+        "feature.disabled",
         "feature.disabled",
         "feature.disabled",
         "feature.disabled",

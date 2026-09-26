@@ -6,7 +6,7 @@ import { apiOf, signedIn, signInTo } from "./people.ts";
 import type { Person } from "./people.ts";
 
 // A decision a workflow run waits for, answered from the link its ask
-// sent: the person it was sent to opens it signed in and approves, and
+// sent: the person it was sent to opens it, signs in, and approves, and
 // the run goes on with their answer. Anyone else who opens the same link
 // only sees that it isn't for them.
 
@@ -115,7 +115,16 @@ test("the person a decision link was sent to approves it, and the run goes on", 
     "You aren't one of the people who answer this decision."
   );
 
-  const page = await pageOf(browser, decider);
+  // Opened signed out, the link only asks them to sign in. The local stack
+  // has no IdP, so signing in is the session it leaves, and the browser
+  // comes back to the same link.
+  const context = await browser.newContext();
+  const page = await context.newPage();
+  await page.goto(link);
+  await expect(
+    page.getByRole("heading", { name: "Sign in to answer" })
+  ).toBeVisible();
+  await signInTo(context, decider);
   await page.goto(link);
   await expect(
     page.getByRole("heading", { name: "Approve invoice INV-7" })

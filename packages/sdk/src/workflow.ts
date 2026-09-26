@@ -306,7 +306,8 @@ export interface DecisionOptions extends StepOptions {
   /**
    * Who decides; only they can answer, signed in, as they are then: a
    * person (`person:<user ID>`), a role (`role:admin`) or a team
-   * (`team:<team ID>`).
+   * (`team:<team ID>`). Whoever started the run never answers it, and
+   * isn't asked, unless `from` names exactly them.
    */
   from: Person;
   /** Tells them there is something to decide, e.g. by email. */
@@ -320,6 +321,8 @@ export interface DecisionOptions extends StepOptions {
 /**
  * How a decision ended: answered, by whom (their user ID) and with what
  * `payload` they sent (untrusted input, e.g. `{ comment }`), or timed out.
+ * A timeout never means approval: nobody decided, so treat it as a no, or
+ * ask again.
  */
 export type Decision =
   | { timedOut: false; approved: boolean; by: string; payload: Json | null }
@@ -675,7 +678,7 @@ const createRunner = (
             { sideEffect: true, input: { from, reminder } },
             async () => {
               await ask({
-                recipients: await engine.decisionRecipients(decision),
+                recipients: await engine.decisionRecipients(decision, reminder),
                 reminder,
                 idempotencyKey: idempotencyKeyOf(engine, askStep),
               });

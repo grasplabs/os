@@ -10,8 +10,21 @@ import { signDecisionLink } from "../src/decisions/links.ts";
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
-import { finished, resumed, stopped } from "./runs.ts";
-import { callAuth, outcome, signedInApi, unique } from "./sign-in.ts";
+import { finished, liveStatus, resumed, stopped } from "./runs.ts";
+import { acmeTenant } from "./sign-in-config.ts";
+import {
+  callAuth,
+  entraPerson,
+  openRpc,
+  outcome,
+  routed,
+  signedIn,
+  signedInApi,
+  signIn,
+  staffPerson,
+  unique,
+  whoami,
+} from "./sign-in.ts";
 
 // `step.decision`, from its threat model (R8, WF1 to WF4): a run waits for
 // a person's answer, which only the people the decision is from can give,
@@ -224,6 +237,10 @@ const teamOf = async (admin: Person, people: Person[]): Promise<string> => {
   return id;
 };
 
+/** Whom an ask went to, by user ID. */
+const askedTo = (ask: Ask): string[] =>
+  ask.recipients.map(({ userId }) => userId);
+
 /** The audit events about `decision`, in log order. */
 const eventsOf = async (decision: string) => {
   const events = await allEvents();
@@ -285,17 +302,28 @@ describe("decisions", { timeout: 60_000 }, () => {
       );
       return events;
     });
-    const [opened, approved] = audited;
+    const [opened, asked, approved] = audited;
     expect({
       actions: audited.map(({ action }) => action),
       openedBy: opened?.actor,
       opened: opened?.detail,
+      askedBy: asked?.actor,
+      asked: asked?.detail,
+      // Whom the ask went to, by ID: never their names or emails.
+      askedWhom: asked?.provenance,
       approvedBy: approved?.actor,
       approved: approved?.detail,
     }).toMatchObject({
-      actions: ["workflow.decision.opened", "workflow.decision.approved"],
+      actions: [
+        "workflow.decision.opened",
+        "workflow.decision.asked",
+        "workflow.decision.approved",
+      ],
       openedBy: { type: "workflow", runId: run.id },
       opened: { run: run.id, step: "review", from: `person:${decider.userId}` },
+      askedBy: { type: "workflow", runId: run.id },
+      asked: { recipients: 1, reminder: false },
+      askedWhom: [decider.userId],
       approvedBy: { type: "person", userId: decider.userId },
       approved: { run: run.id, step: "review", via: "link" },
     });
@@ -548,9 +576,193 @@ describe("decisions", { timeout: 60_000 }, () => {
     });
     await builder.api.workflows.cancel(run.id);
 
+    const answer = await outcome(
+      decider.api.decisions.answer(decision, { approved: true })
+    );
+    const { status } = await decider.api.decisions.get(decision);
+
+    expect({ answer, status }).toStrictEqual({
+      answer: "decision.closed",
+      status: "closed",
+    });
+  });
+
+  it("refuse an answer past the deadline, even before the run closed the decision", async () => {
+    const builder = await personApi("builder");
+    const decider = await personApi("user");
+    const { decision } = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: week,
+    });
+    // The run hasn't come round to closing it yet; the deadline has passed.
+    await env.DB.prepare(
+      "UPDATE workflow_decisions SET expires_at = ? WHERE id = ?"
+    )
+      .bind(Date.now() - 1000, decision)
+      .run();
+
     await expect(
       outcome(decider.api.decisions.answer(decision, { approved: true }))
     ).resolves.toBe("decision.closed");
+  });
+
+  it("don't let whoever started the run answer it, unless it names exactly them", async () => {
+    const admin = await personApi("admin");
+    const anna = await personApi("user");
+    const otherAdmin = await personApi("admin");
+    const team = await teamOf(admin, [admin, anna]);
+    const byTeam = await asking(admin, { from: `team:${team}`, timeout: week });
+    const byRole = await asking(admin, { from: "role:admin", timeout: week });
+    const byThemselves = await asking(admin, {
+      from: `person:${admin.userId}`,
+      timeout: week,
+    });
+    // A link to the starter, made with core's own key, doesn't help either.
+    const ownLink = await signDecisionLink(
+      env,
+      byTeam.decision,
+      admin.userId,
+      Date.now() + week
+    );
+
+    expect({
+      team: {
+        asked: askedTo(byTeam.ask),
+        starter: await outcome(
+          admin.api.decisions.answer(byTeam.decision, { approved: true })
+        ),
+        starterWithLink: await outcome(
+          admin.api.decisions.answer(
+            byTeam.decision,
+            { approved: true },
+            ownLink
+          )
+        ),
+      },
+      role: {
+        askedStarter: askedTo(byRole.ask).includes(admin.userId),
+        askedOther: askedTo(byRole.ask).includes(otherAdmin.userId),
+        starter: await outcome(
+          admin.api.decisions.answer(byRole.decision, { approved: true })
+        ),
+      },
+      themselves: {
+        asked: askedTo(byThemselves.ask),
+        starter: await outcome(
+          admin.api.decisions.answer(byThemselves.decision, { approved: true })
+        ),
+      },
+    }).toStrictEqual({
+      team: {
+        asked: [anna.userId],
+        starter: "decision.forbidden",
+        starterWithLink: "decision.forbidden",
+      },
+      role: {
+        askedStarter: false,
+        askedOther: true,
+        starter: "decision.forbidden",
+      },
+      themselves: { asked: [admin.userId], starter: "ok" },
+    });
+    // Anyone else the decision is from still answers.
+    await otherAdmin.api.decisions.answer(byRole.decision, { approved: false });
+    await expect(outputOf(admin, byRole.run.id)).resolves.toMatchObject({
+      approved: false,
+      by: otherAdmin.userId,
+    });
+  });
+
+  it("never take an answer from Grasp staff, even on an admins' decision", async () => {
+    const builder = await personApi("builder");
+    const admin = await personApi("admin");
+    const { ask, decision } = await asking(builder, {
+      from: "role:admin",
+      timeout: week,
+    });
+    const staffSession = await signedIn(idp, "grasp-staff", staffPerson());
+    const staff = await whoami(staffSession);
+    const { core } = await openRpc(staffSession);
+    const { decisions } = core.authenticate();
+    const staffLink = await signDecisionLink(
+      env,
+      decision,
+      staff.userId,
+      Date.now() + week
+    );
+
+    expect({
+      role: staff.role,
+      get: await outcome(decisions.get(decision)),
+      answer: await outcome(decisions.answer(decision, { approved: true })),
+      withAdminsLink: await outcome(
+        decisions.answer(
+          decision,
+          { approved: true },
+          linkOf(ask, admin.userId).token
+        )
+      ),
+      withOwnLink: await outcome(
+        decisions.answer(decision, { approved: true }, staffLink)
+      ),
+    }).toStrictEqual({
+      role: "admin",
+      get: "decision.forbidden",
+      answer: "decision.forbidden",
+      withAdminsLink: "decision.forbidden",
+      withOwnLink: "decision.forbidden",
+    });
+  });
+
+  it("pause a waiting run while decisions are switched off, instead of timing it out", async () => {
+    const builder = await personApi("builder");
+    const decider = await personApi("user");
+    const { run, decision } = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: 1500,
+    });
+    const { FEATURES: features } = env;
+    try {
+      env.FEATURES = {
+        ...z.record(z.string(), z.boolean()).parse(features),
+        decisions: false,
+      };
+      await vi.waitFor(
+        async () => {
+          await expect(liveStatus(run.id)).resolves.toBe("paused");
+        },
+        { timeout: 10_000, interval: 100 }
+      );
+    } finally {
+      env.FEATURES = features;
+    }
+    const whileOff = await env.DB.prepare(
+      "SELECT status FROM workflow_decisions WHERE id = ?"
+    )
+      .bind(decision)
+      .first<{ status: string }>();
+    await resumed(run.id);
+
+    expect({
+      whileOff: whileOff?.status,
+      // Back on, past the deadline: it ends as the timeout it is, never as
+      // an approval.
+      output: await outputOf(builder, run.id),
+    }).toStrictEqual({ whileOff: "open", output: { timedOut: true } });
+  });
+
+  it("bring the person back to the link's page after signing in, and send it no referrer", async () => {
+    const page = "/decisions/some-decision?link=some-token";
+    const person = entraPerson(acmeTenant);
+    const { location } = await signIn(idp, "microsoft", person, {
+      callbackURL: page,
+    });
+    const served = await routed(page);
+
+    expect({
+      back: location?.endsWith(page),
+      referrer: served.headers.get("referrer-policy"),
+    }).toStrictEqual({ back: true, referrer: "no-referrer" });
   });
 
   it("remind by asking again, with fresh links for who is in the team then", async () => {

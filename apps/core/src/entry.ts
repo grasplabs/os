@@ -52,7 +52,14 @@ const route = async (
     );
   }
   // The frontend's files; unknown paths get index.html (single-page app).
-  return await env.ASSETS.fetch(request);
+  const asset = await env.ASSETS.fetch(request);
+  if (!isUnder(pathname, "/decisions")) {
+    return asset;
+  }
+  // A decision link's page carries its token in the URL: no referrer.
+  const page = new Response(asset.body, asset);
+  page.headers.set("referrer-policy", "no-referrer");
+  return page;
 };
 
 /** A response, and what the request's log line says about it. */

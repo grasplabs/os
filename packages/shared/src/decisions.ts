@@ -41,8 +41,13 @@ export const decisionErrors = defineErrorFamily({
 /** The most people one decision asks, so asking stays one email each. */
 export const maxDeciders = 50;
 
-/** Where a decision stands. */
-export type DecisionStatus = "open" | "approved" | "rejected" | "timed_out";
+/** Where a decision stands; `closed` once its run ended while it was open. */
+export type DecisionStatus =
+  | "open"
+  | "approved"
+  | "rejected"
+  | "timed_out"
+  | "closed";
 
 /** How an answer reached core: through a decision link, or straight. */
 export type DecisionChannel = "link" | "rpc";

@@ -37,6 +37,8 @@ import type {
   DecisionRecipient,
 } from "../decisions/decisions.ts";
 import { appHost } from "../durable-objects.ts";
+import { featureEnabled } from "../features.ts";
+import type { Feature } from "../features.ts";
 import { models } from "../models.ts";
 import { requireActivePerson } from "../permissions.ts";
 import type { Settled, StepError } from "./code.ts";
@@ -90,6 +92,34 @@ export interface RunStep {
  * workflow's never do, so workflow code can't replay one of them.
  */
 export const coreStepPrefix = "$grasp:";
+
+/**
+ * A kill switch for runs: with `feature` switched off, the run pauses here
+ * and goes on from here when resumed with it on. The dispatcher checks
+ * `workflows` before any step; a decision's wait checks `decisions`, so
+ * switching decisions off never lets a wait end in a timeout nobody could
+ * have prevented. The sleep only holds the execution while the pause
+ * lands; its name is new each time, as no execution comes back to it.
+ * Nothing in core resumes runs yet: once the flag is back on, paused
+ * instances must be resumed (the Workflows API or dashboard).
+ */
+export const pauseWhileSwitchedOff = async (
+  env: Env,
+  step: RunStep,
+  runId: RunId,
+  feature: Feature
+): Promise<void> => {
+  if (featureEnabled(env, feature)) {
+    return;
+  }
+  const instance = await env.WORKFLOWS.get(runId);
+  await instance.pause();
+  await step.sleep(
+    `${coreStepPrefix}switched-off:${crypto.randomUUID()}`,
+    365 * 86_400_000
+  );
+  throw new Error(`${feature} is switched off: the run is paused.`);
+};
 
 /** Core's own events start with this; a workflow can't wait for one. */
 export const coreEventPrefix = "grasp-";
@@ -648,6 +678,21 @@ export class RunHost extends RpcTarget {
     return stepIdempotencyKey(this.#run.runId, this.#requireStep().step);
   }
 
+  /**
+   * Pauses the run while decisions are switched off; the pause is the
+   * engine's, so the dispatcher hands it back to the engine as its own.
+   */
+  async #pauseWhileDecisionsOff(): Promise<void> {
+    await this.#engine(async () => {
+      await pauseWhileSwitchedOff(
+        this.#env,
+        this.#step,
+        this.#run.runId,
+        "decisions"
+      );
+    });
+  }
+
   /** The step whose function runs now; refuses a call outside a step. */
   #requireStep(): { step: string } {
     const running = this.#running;
@@ -738,14 +783,16 @@ export class RunHost extends RpcTarget {
    * link of their own, inside a step (the one that asks them).
    */
   async decisionRecipients(
-    decision: unknown
+    decision: unknown,
+    reminder: unknown
   ): Promise<Settled<DecisionRecipient[]>> {
     return await settle(async () => {
       this.#requireStep();
       return await decisionRecipients(
         this.#env,
         this.#run,
-        checked(identifierSchema, decision)
+        checked(identifierSchema, decision),
+        checked(z.boolean(), reminder)
       );
     });
   }
@@ -756,6 +803,8 @@ export class RunHost extends RpcTarget {
    * event that wakes the run carries nothing it takes. With `last`, a
    * decision still open is closed, timed out, unless an answer lands
    * first. An answer that came before the wait began is taken at once.
+   * While decisions are switched off, the run pauses instead of waiting,
+   * and instead of closing a decision nobody could answer meanwhile.
    */
   async waitForDecision(
     name: unknown,
@@ -764,6 +813,7 @@ export class RunHost extends RpcTarget {
     return await settle(async () => {
       const step = checked(stepNameSchema, name);
       const { decision, timeout, last } = checked(decisionWaitSchema, options);
+      await this.#pauseWhileDecisionsOff();
       const before = await decisionOutcome(
         this.#env,
         this.#run,
@@ -787,6 +837,9 @@ export class RunHost extends RpcTarget {
             throw error;
           }
         }
+      }
+      if (last) {
+        await this.#pauseWhileDecisionsOff();
       }
       return await decisionOutcome(this.#env, this.#run, decision, last);
     });

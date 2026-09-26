@@ -167,7 +167,10 @@ export interface WorkflowEngine {
    * The people an open decision asks now, each with a link of their own;
    * nobody once it's answered. Called inside the step that asks them.
    */
-  decisionRecipients: (decision: string) => Promise<DecisionRecipient[]>;
+  decisionRecipients: (
+    decision: string,
+    reminder: boolean
+  ) => Promise<DecisionRecipient[]>;
   /**
    * Durably waits up to `timeout` milliseconds (0: not at all) for an
    * answer to a decision, and returns how it stands then. With `last`, a

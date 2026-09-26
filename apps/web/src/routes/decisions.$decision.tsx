@@ -15,6 +15,7 @@ import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { loadCoreStatus, signIn, withSession } from "../core.ts";
+import { signInErrorMessage } from "../sign-in-errors.ts";
 
 // Where a decision link leads (`/decisions/<id>?link=<token>`). Opening it
 // answers nothing (threat model R8): the person signs in, sees what is
@@ -165,7 +166,7 @@ const Answer = ({
 
 const Decision = () => {
   const page = Route.useLoaderData();
-  const { link } = Route.useSearch();
+  const { link, error } = Route.useSearch();
   if (page.state === "offline") {
     return (
       <main className="flex min-h-svh items-center justify-center p-6">
@@ -182,14 +183,20 @@ const Decision = () => {
         <p className="text-muted-foreground text-sm">
           Only the person this was sent to can answer it.
         </p>
+        {error === undefined ? null : (
+          <p className="text-destructive text-sm" role="alert">
+            {signInErrorMessage(error)}
+          </p>
+        )}
         {page.signInOptions.map(({ providerId, label }) => (
           <Button
             key={providerId}
             onClick={() => {
-              void signIn(
-                providerId,
-                `${window.location.pathname}${window.location.search}`
+              // Back to this page with its link, and without an earlier error.
+              const back = new URLSearchParams(
+                link === undefined ? {} : { link }
               );
+              void signIn(providerId, `${window.location.pathname}?${back}`);
             }}
           >
             Sign in with {label}
@@ -214,8 +221,13 @@ const Decision = () => {
 
 export const Route = createFileRoute("/decisions/$decision")({
   component: Decision,
-  validateSearch: (search: Record<string, unknown>): { link?: string } =>
-    typeof search.link === "string" ? { link: search.link } : {},
+  // A refused sign-in comes back as `error=<code>`, next to the link.
+  validateSearch: (
+    search: Record<string, unknown>
+  ): { link?: string; error?: string } => ({
+    ...(typeof search.link === "string" ? { link: search.link } : {}),
+    ...(typeof search.error === "string" ? { error: search.error } : {}),
+  }),
   loaderDeps: ({ search: { link } }) => ({ link }),
   loader: async ({ params, deps }) =>
     await loadDecision(params.decision, deps.link),
