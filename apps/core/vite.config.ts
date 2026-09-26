@@ -55,7 +55,12 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             CAPABILITY_SIGNING_KEY: capabilitySigningKey,
             ...testSignIn,
             // Every flagged feature on; features.test.ts switches them off.
-            FEATURES: { apps: true, permissions: true, knowledge: true },
+            FEATURES: {
+              apps: true,
+              permissions: true,
+              knowledge: true,
+              agent: true,
+            },
             // workerd doesn't implement Durable Object jurisdictions.
             DURABLE_OBJECT_JURISDICTION: "none",
             // So the test of a call that never ends doesn't wait a minute.

@@ -4,6 +4,13 @@
  * request went to, and keeps every request it got.
  */
 
+/** A tool call the model makes in a scripted answer. */
+export interface ScriptedToolCall {
+  id: string;
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
 /**
  * A scripted answer; a refusal with an HTTP status and the provider's error
  * type; or no answer at all until the request is aborted.
@@ -11,6 +18,8 @@
 export type GatewayReply =
   | {
       text: string;
+      /** Tool calls after the text; the answer then stops for them. */
+      toolCalls?: ScriptedToolCall[];
       inputTokens: number;
       outputTokens: number;
       /** The model hit its output limit (Anthropic and chat completions). */
@@ -55,61 +64,88 @@ const eventStream = (
 
 type Answer = Extract<GatewayReply, { text: string }>;
 
-const anthropicEvents = ({
-  text,
-  inputTokens,
-  outputTokens,
-  truncated,
-}: Answer) => [
-  {
-    event: "message_start",
-    data: {
-      type: "message_start",
-      message: {
-        id: "msg_1",
-        type: "message",
-        role: "assistant",
-        model: "claude",
-        content: [],
-        stop_reason: null,
-        stop_sequence: null,
-        usage: { input_tokens: inputTokens, output_tokens: 0 },
+/** How the answer stopped, as `[end_turn, max_tokens, tool_use]` name it. */
+const stopOf = (
+  { toolCalls, truncated }: Answer,
+  [stop, length, toolUse]: readonly [string, string, string]
+): string => {
+  if (truncated === true) {
+    return length;
+  }
+  return (toolCalls ?? []).length > 0 ? toolUse : stop;
+};
+
+const anthropicEvents = (answer: Answer) => {
+  const { text, inputTokens, outputTokens } = answer;
+  const blocks = [
+    ...(text === "" ? [] : [{ type: "text" as const, text }]),
+    ...(answer.toolCalls ?? []).map((call) => ({
+      type: "tool_use" as const,
+      ...call,
+    })),
+  ];
+  return [
+    {
+      event: "message_start",
+      data: {
+        type: "message_start",
+        message: {
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude",
+          content: [],
+          stop_reason: null,
+          stop_sequence: null,
+          usage: { input_tokens: inputTokens, output_tokens: 0 },
+        },
       },
     },
-  },
-  {
-    event: "content_block_start",
-    data: {
-      type: "content_block_start",
-      index: 0,
-      content_block: { type: "text", text: "" },
-    },
-  },
-  {
-    event: "content_block_delta",
-    data: {
-      type: "content_block_delta",
-      index: 0,
-      delta: { type: "text_delta", text },
-    },
-  },
-  {
-    event: "content_block_stop",
-    data: { type: "content_block_stop", index: 0 },
-  },
-  {
-    event: "message_delta",
-    data: {
-      type: "message_delta",
-      delta: {
-        stop_reason: truncated === true ? "max_tokens" : "end_turn",
-        stop_sequence: null,
+    ...blocks.flatMap((block, index) => [
+      {
+        event: "content_block_start",
+        data: {
+          type: "content_block_start",
+          index,
+          content_block:
+            block.type === "text"
+              ? { type: "text", text: "" }
+              : { type: "tool_use", id: block.id, name: block.name, input: {} },
+        },
       },
-      usage: { output_tokens: outputTokens },
+      {
+        event: "content_block_delta",
+        data: {
+          type: "content_block_delta",
+          index,
+          delta:
+            block.type === "text"
+              ? { type: "text_delta", text: block.text }
+              : {
+                  type: "input_json_delta",
+                  partial_json: JSON.stringify(block.arguments),
+                },
+        },
+      },
+      {
+        event: "content_block_stop",
+        data: { type: "content_block_stop", index },
+      },
+    ]),
+    {
+      event: "message_delta",
+      data: {
+        type: "message_delta",
+        delta: {
+          stop_reason: stopOf(answer, ["end_turn", "max_tokens", "tool_use"]),
+          stop_sequence: null,
+        },
+        usage: { output_tokens: outputTokens },
+      },
     },
-  },
-  { event: "message_stop", data: { type: "message_stop" } },
-];
+    { event: "message_stop", data: { type: "message_stop" } },
+  ];
+};
 
 const chunk = (fields: object) => ({
   data: {
@@ -121,43 +157,109 @@ const chunk = (fields: object) => ({
   },
 });
 
-const chatCompletionEvents = ({
+const chatCompletionEvents = (answer: Answer) => {
+  const { text, inputTokens, outputTokens } = answer;
+  return [
+    chunk({
+      choices: [
+        {
+          index: 0,
+          delta: { role: "assistant", content: text },
+          finish_reason: null,
+        },
+      ],
+    }),
+    ...(answer.toolCalls ?? []).map((call, index) =>
+      chunk({
+        choices: [
+          {
+            index: 0,
+            delta: {
+              tool_calls: [
+                {
+                  index,
+                  id: call.id,
+                  type: "function",
+                  function: {
+                    name: call.name,
+                    arguments: JSON.stringify(call.arguments),
+                  },
+                },
+              ],
+            },
+            finish_reason: null,
+          },
+        ],
+      })
+    ),
+    chunk({
+      choices: [
+        {
+          index: 0,
+          delta: {},
+          finish_reason: stopOf(answer, ["stop", "length", "tool_calls"]),
+        },
+      ],
+    }),
+    chunk({
+      choices: [],
+      usage: {
+        prompt_tokens: inputTokens,
+        completion_tokens: outputTokens,
+        total_tokens: inputTokens + outputTokens,
+      },
+    }),
+    { data: "[DONE]" },
+  ];
+};
+
+const responsesEvents = ({
   text,
+  toolCalls,
   inputTokens,
   outputTokens,
-  truncated,
-}: Answer) => [
-  chunk({
-    choices: [
-      {
-        index: 0,
-        delta: { role: "assistant", content: text },
-        finish_reason: null,
-      },
-    ],
-  }),
-  chunk({
-    choices: [
-      {
-        index: 0,
-        delta: {},
-        finish_reason: truncated === true ? "length" : "stop",
-      },
-    ],
-  }),
-  chunk({
-    choices: [],
-    usage: {
-      prompt_tokens: inputTokens,
-      completion_tokens: outputTokens,
-      total_tokens: inputTokens + outputTokens,
-    },
-  }),
-  { data: "[DONE]" },
-];
-
-const responsesEvents = ({ text, inputTokens, outputTokens }: Answer) => {
+}: Answer) => {
   const message = { type: "message", id: "msg_1", role: "assistant" };
+  const items = [
+    ...(text === ""
+      ? []
+      : [
+          {
+            added: { ...message, content: [] },
+            deltas: [
+              {
+                type: "response.output_text.delta",
+                content_index: 0,
+                delta: text,
+              },
+            ],
+            done: {
+              ...message,
+              content: [{ type: "output_text", text, annotations: [] }],
+            },
+          },
+        ]),
+    ...(toolCalls ?? []).map((call, index) => {
+      const item = {
+        type: "function_call",
+        id: `fc_${index}`,
+        call_id: call.id,
+        name: call.name,
+      };
+      const args = JSON.stringify(call.arguments);
+      return {
+        added: { ...item, arguments: "" },
+        deltas: [
+          {
+            type: "response.function_call_arguments.delta",
+            item_id: item.id,
+            delta: args,
+          },
+        ],
+        done: { ...item, arguments: args },
+      };
+    }),
+  ];
   return [
     {
       data: {
@@ -165,31 +267,23 @@ const responsesEvents = ({ text, inputTokens, outputTokens }: Answer) => {
         response: { id: "resp_1", status: "in_progress" },
       },
     },
-    {
-      data: {
-        type: "response.output_item.added",
-        output_index: 0,
-        item: { ...message, content: [] },
-      },
-    },
-    {
-      data: {
-        type: "response.output_text.delta",
-        output_index: 0,
-        content_index: 0,
-        delta: text,
-      },
-    },
-    {
-      data: {
-        type: "response.output_item.done",
-        output_index: 0,
-        item: {
-          ...message,
-          content: [{ type: "output_text", text, annotations: [] }],
+    ...items.flatMap(({ added, deltas, done }, index) => [
+      {
+        data: {
+          type: "response.output_item.added",
+          output_index: index,
+          item: added,
         },
       },
-    },
+      ...deltas.map((delta) => ({ data: { ...delta, output_index: index } })),
+      {
+        data: {
+          type: "response.output_item.done",
+          output_index: index,
+          item: done,
+        },
+      },
+    ]),
     {
       data: {
         type: "response.completed",

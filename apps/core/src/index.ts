@@ -4,6 +4,7 @@ import { handleRequest } from "./entry.ts";
 
 export { App } from "./app.ts";
 export { AuditLog } from "./audit-log.ts";
+export { ChatApi } from "./agent-apis.ts";
 export { AppConnectionBinding } from "./app-bindings.ts";
 export { ConnectionBinding } from "./bindings.ts";
 export { CollectionBinding } from "./knowledge/binding.ts";
