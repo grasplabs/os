@@ -44,7 +44,7 @@ jobs:
       - run: vp run check:secrets
       - run: vp run check:docs
       - run: vp run check:migrations
-      - run: vp run check:worker-logs
+      - run: vp run check:wrangler-configs
       # About 5 minutes when it passes. Nothing in Vitest times out a test
       # worker stuck after its tests (see apps/core/vite.config.ts): this
       # step timeout is the only backstop, so a hang fails here after 10

@@ -9,6 +9,11 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-09-15",
   "compatibility_flags": ["nodejs_compat"],
+  // The router reaches core on its workers.dev address, where every request
+  // must carry the router secret. Preview URLs stay off: each would serve an
+  // uploaded version of core, older ones included, at an address of its own.
+  "workers_dev": true,
+  "preview_urls": false,
   // Durable Objects bundle their Drizzle migrations as text.
   "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
   // No platform line per invocation: core logs the events it needs itself
