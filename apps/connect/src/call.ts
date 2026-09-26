@@ -175,6 +175,31 @@ const actionFor = async (
 };
 
 /**
+ * Refuses a side effect its capability doesn't allow. A context that read
+ * restricted data may still read, where the tool is one connect trusts to
+ * be a read, but what it read must not leave through an action (R12); a
+ * repeat of an earlier side effect sends nothing, so it still gets its
+ * stored answer. A side effect from chat waits for the person to confirm
+ * it on a view of the exact input (R7). Until connect holds writes for
+ * that, it refuses them: only workflows, whose code a person reviewed,
+ * write. And every side effect needs an idempotency key.
+ */
+const requireSideEffectAllowed = (
+  { restricted, authority }: CapabilityClaims,
+  hasKey: boolean
+): void => {
+  if (restricted) {
+    throw connectErrors.create("connect.restricted");
+  }
+  if (authority.mode === "interactive") {
+    throw connectErrors.create("connect.confirmation_required");
+  }
+  if (!hasKey) {
+    throw connectErrors.create("connect.idempotency_key_required");
+  }
+};
+
+/**
  * Carries out one call whose capability is verified: `claims` say exactly
  * this connection, resource, action and idempotency key, for this subject
  * and person. Throws a `connect.*` error when it refuses the call or the
@@ -232,14 +257,8 @@ export const carryOut = async (
   const sideEffect = hasSideEffect(connection.serverKind, tool);
   progress.sideEffect = sideEffect;
   checkResourceScope(resource, connection.serverKind, tool, input);
-  // A side effect from chat waits for the person to confirm it on a view of
-  // the exact input (R7). Until connect holds writes for that, it refuses
-  // them: only workflows, whose code a person reviewed, write.
-  if (sideEffect && authority.mode === "interactive") {
-    throw connectErrors.create("connect.confirmation_required");
-  }
-  if (sideEffect && store === undefined) {
-    throw connectErrors.create("connect.idempotency_key_required");
+  if (sideEffect) {
+    requireSideEffectAllowed(claims, store !== undefined);
   }
 
   // Every refusal is behind: only now may a token be read.

@@ -137,6 +137,62 @@ describe("a native connector", () => {
     ).toStrictEqual([{ method: "POST", body: '{"subject":"Paid"}' }]);
   });
 
+  it("reads for a restricted context, and refuses its side effects before any token is read", async () => {
+    const connection = await connectionTo("sample");
+    // Any read of this token now refreshes it at the provider.
+    await drizzle(env.DB)
+      .update(connectionTokens)
+      .set({ accessExpiresAt: new Date(Date.now() + 1000) })
+      .where(eq(connectionTokens.connectionId, connection.id));
+    const restricted = { restricted: true };
+    const agent = agentFor(connection.person.userId);
+    const mailbox = "invoices@acme.test";
+    const refusals = await Promise.all([
+      outcome(
+        callAs(
+          agent,
+          {
+            connectionId: connection.id,
+            action: "items.send",
+            input: { mailbox, subject: "Payroll" },
+            idempotencyKey: "run-1:send",
+          },
+          restricted
+        )
+      ),
+      outcome(
+        callAs(
+          agentFor(connection.person.userId, "agent-chat", "interactive"),
+          {
+            connectionId: connection.id,
+            action: "items.send",
+            input: { mailbox, subject: "Payroll" },
+            idempotencyKey: "chat-1:send",
+          },
+          restricted
+        )
+      ),
+    ]);
+    expect({
+      refusals,
+      refreshed: providers.tokenRequests("refresh_token"),
+      sent: api.sent,
+    }).toStrictEqual({
+      refusals: ["connect.restricted", "connect.restricted"],
+      refreshed: [],
+      sent: [],
+    });
+    // A read the connector declares still goes out.
+    const read = await callAs(
+      agent,
+      { connectionId: connection.id, action: "items.list", input: { mailbox } },
+      restricted
+    );
+    expect(JSON.parse(read.output)).toStrictEqual({
+      items: [{ id: `${mailbox}/item-1`, subject: "Invoice" }],
+    });
+  });
+
   it("that says its provider rate limited it frees its key, so a retry writes once", async () => {
     const connection = await connectionTo("sample");
     const send = async () =>

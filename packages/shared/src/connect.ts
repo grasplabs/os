@@ -237,6 +237,8 @@ export const connectErrors = defineErrorFamily({
   "connect.input_too_large": "This call's input is too large.",
   "connect.confirmation_required":
     "This action has a side effect, and changes from chat need the person to confirm them first.",
+  "connect.restricted":
+    "This chat, App or run has read restricted data, so it can no longer act on outside systems.",
   "connect.resource_out_of_scope":
     "This call reaches beyond the one resource it may use.",
   "connect.mask_unsupported":

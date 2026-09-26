@@ -20,7 +20,7 @@ import type {
   CollectionGrant,
 } from "./knowledge/binding.ts";
 import { authorize, grantedPermissions } from "./permissions.ts";
-import { requireUnrestricted } from "./restricted.ts";
+import { isRestricted } from "./restricted.ts";
 import type { WorkContext } from "./restricted.ts";
 
 // What Apps and agents get in their env: one stub per granted permission,
@@ -34,10 +34,11 @@ type ConnectionObject = Extract<PermissionObject, { type: "connection" }>;
 
 /**
  * Calls an action on a connection for an App or agent working in
- * `context`: checks its permission, `permissionId`, and
- * that `context` isn't in restricted mode, then signs the capability
- * connect needs for exactly this call. Core makes capabilities here and
- * nowhere else, and nothing outside core reaches this function.
+ * `context`: checks its permission, `permissionId`, then signs the
+ * capability connect needs for exactly this call, saying whether `context`
+ * is in restricted mode (connect then refuses its side effects). Core makes
+ * capabilities here and nowhere else, and nothing outside core reaches
+ * this function.
  */
 export const callConnection = async (
   env: Env,
@@ -60,7 +61,7 @@ export const callConnection = async (
     action,
     permissionId
   );
-  await requireUnrestricted(env, authority, context);
+  const restricted = await isRestricted(env, authority, context);
   const scope = {
     connectionId: connection.connectionId,
     resource: connection.resource,
@@ -70,7 +71,7 @@ export const callConnection = async (
   const capability = await signCapability(
     env.CAPABILITY_SIGNING_KEY,
     authority,
-    { ...scope, mask }
+    { ...scope, mask, restricted }
   );
   return await env.CONNECT.call({ capability, ...scope, input });
 };

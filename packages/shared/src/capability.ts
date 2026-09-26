@@ -64,6 +64,12 @@ export const capabilityClaimsSchema = z.strictObject({
    * capability says it, never the call: the caller can't drop it.
    */
   mask: maskFieldsSchema.default([]),
+  /**
+   * The chat, App or run making the call has read restricted data (threat
+   * model R12, Q12): connect lets it read, as a tool declares, and refuses
+   * every side effect. Only the capability says it.
+   */
+  restricted: z.boolean().default(false),
 });
 export type CapabilityClaims = z.infer<typeof capabilityClaimsSchema>;
 
@@ -75,6 +81,8 @@ export interface CapabilityScope {
   idempotencyKey?: string | undefined;
   /** The permission's masked fields: signed, not compared with the call. */
   mask?: readonly string[] | undefined;
+  /** The caller's context is in restricted mode: signed, not compared. */
+  restricted?: boolean | undefined;
 }
 
 /** Why connect refuses a call before looking at it any further. */
@@ -131,6 +139,9 @@ export const signCapability = async (
     // knows no mask, still takes every other capability while a release
     // rolls out, and refuses a masked one.
     ...(mask.length === 0 ? {} : { mask }),
+    // The same for restricted mode: a connect that knows none refuses a
+    // capability that says it, which fails closed.
+    ...(scope.restricted === true ? { restricted: true } : {}),
   };
   capabilityClaimsSchema.parse(claims);
   const payload = toBase64Url(new TextEncoder().encode(JSON.stringify(claims)));

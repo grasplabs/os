@@ -37,6 +37,7 @@ import {
   readCollection,
   storedGrant,
 } from "./knowledge.ts";
+import { mailConnection } from "./mail-connection.ts";
 import {
   auditedDuring,
   callAuth,
@@ -50,7 +51,7 @@ import {
 // permission for, or what the person it acts for can't read (R5); a listing,
 // history or backlink shows something of a collection it can't read (R11);
 // a read of sensitive data comes back unmarked (R12); and a chat or App
-// that read restricted data still reaches outside systems, also after its
+// that read restricted data still acts in outside systems, also after its
 // object restarts (Q12).
 
 const idp = mockIdp();
@@ -110,24 +111,32 @@ const everyRead = async (reader: CollectionReader, noteId: string) =>
 
 const everyReadIs = (code: string) => Array.from({ length: 6 }, () => code);
 
-/** A connection call, a fetch or a side effect, from an env. */
-const callOutlook = async (bindings: Env, sideEffect = false) => {
+/** A fetch from Outlook, from an env. */
+const callOutlook = async (bindings: Env) => {
   const stub = connectionIn(bindings, "OUTLOOK");
   if (!stub) {
     throw new Error("No OUTLOOK binding");
   }
+  return await outcome(stub.call("mail.list", {}));
+};
+
+/** A side effect, a mail sent, from an env. */
+const sendMail = async (bindings: Env) => {
+  const stub = connectionIn(bindings, "MAIL");
+  if (!stub) {
+    throw new Error("No MAIL binding");
+  }
   return await outcome(
-    sideEffect
-      ? stub.call(
-          "mail.send",
-          { to: "x@elsewhere.test" },
-          {
-            idempotencyKey: unique(),
-          }
-        )
-      : stub.call("mail.list", {})
+    stub.call(
+      "mail.send",
+      { to: "x@elsewhere.test", subject: "Payroll" },
+      { idempotencyKey: unique() }
+    )
   );
 };
+
+/** A side effect from chat, until connect holds it for the person. */
+const unconfirmed = "connect.confirmation_required";
 
 describe("Apps and agents reading Knowledge", setUpTime, () => {
   it("read no collection without a granted permission to read it", async () => {
@@ -522,11 +531,18 @@ describe("restricted mode", setUpTime, () => {
       readCollection(subject, ordinary.collectionId, "OTHER")
     );
     await requestGranted(idp, admin, outlook(subject));
-    return { admin, subject, sensitive, ordinary };
+    const mail = await mailConnection();
+    await requestGranted(idp, admin, {
+      subject,
+      object: { type: "connection", connectionId: mail.id },
+      actions: ["mail.send"],
+      binding: "MAIL",
+    });
+    return { admin, subject, sensitive, ordinary, mail };
   };
 
-  it("stops a chat's outside calls for good once it read restricted data", async () => {
-    const { admin, subject, sensitive, ordinary } = await setUp();
+  it("stops a chat's actions in outside systems for good once it read restricted data", async () => {
+    const { admin, subject, sensitive, ordinary, mail } = await setUp();
     const chat = await newChat();
     const otherChat = await newChat();
     const bindings = await envOf(actingFor(subject, admin.userId), chat);
@@ -535,18 +551,19 @@ describe("restricted mode", setUpTime, () => {
     await readerIn(bindings, "OTHER").getDocument(ordinary.noteId);
     const beforeRestricted = await Promise.all([
       callOutlook(bindings),
-      callOutlook(bindings, true),
+      sendMail(bindings),
     ]);
     await readerIn(bindings).getDocument(sensitive.noteId);
     const afterRestricted = await Promise.all([
+      // A fetch still reaches connect, which lets declared reads through.
       callOutlook(bindings),
-      callOutlook(bindings, true),
+      sendMail(bindings),
       // Knowledge stays inside the deployment, so it can still be read.
       outcome(readerIn(bindings, "OTHER").getDocument(ordinary.noteId)),
     ]);
     expect({ beforeRestricted, afterRestricted }).toStrictEqual({
-      beforeRestricted: [reached, reached],
-      afterRestricted: ["permission.restricted", "permission.restricted", "ok"],
+      beforeRestricted: [reached, unconfirmed],
+      afterRestricted: [reached, "connect.restricted", "ok"],
     });
 
     // Its workspace restarts, and the chat gets a new env: still restricted.
@@ -554,15 +571,14 @@ describe("restricted mode", setUpTime, () => {
     const rebuilt = await envOf(actingFor(subject, admin.userId), chat);
     const other = await envOf(actingFor(subject, admin.userId), otherChat);
     expect({
-      restarted: await Promise.all([
-        callOutlook(rebuilt),
-        callOutlook(rebuilt, true),
-      ]),
+      restarted: await Promise.all([callOutlook(rebuilt), sendMail(rebuilt)]),
       // Another chat is its own: it read nothing restricted.
-      otherChat: await callOutlook(other),
+      otherChat: await sendMail(other),
+      server: await mail.did(),
     }).toStrictEqual({
-      restarted: ["permission.restricted", "permission.restricted"],
-      otherChat: reached,
+      restarted: [reached, "connect.restricted"],
+      otherChat: unconfirmed,
+      server: { calls: 0, sent: [] },
     });
   });
 
@@ -587,10 +603,10 @@ describe("restricted mode", setUpTime, () => {
       reads.map(async (read) => {
         const bindings = await envOf(actingFor(subject, admin.userId));
         await outcome(read(readerIn(bindings)));
-        return await callOutlook(bindings);
+        return await sendMail(bindings);
       })
     );
-    expect(results).toStrictEqual(reads.map(() => "permission.restricted"));
+    expect(results).toStrictEqual(reads.map(() => "connect.restricted"));
   });
 
   it("isn't entered by a read that was refused, or one of an ordinary collection that found nothing", async () => {
@@ -611,13 +627,13 @@ describe("restricted mode", setUpTime, () => {
     );
     expect({
       refused,
-      call: await callOutlook(bindings),
+      call: await sendMail(bindings),
       found: { hits, provenance },
       noVersion,
-      afterSearch: await callOutlook(searched),
+      afterSearch: await sendMail(searched),
     }).toStrictEqual({
       refused: ["knowledge.not_found", "knowledge.not_found"],
-      call: reached,
+      call: unconfirmed,
       found: {
         hits: [],
         provenance: {
@@ -627,11 +643,11 @@ describe("restricted mode", setUpTime, () => {
         },
       },
       noVersion: "knowledge.not_found",
-      afterSearch: reached,
+      afterSearch: unconfirmed,
     });
   });
 
-  it("stops an App's outside calls for good once it read restricted data", async () => {
+  it("stops an App's actions in outside systems for good once it read restricted data", async () => {
     const creator = await personOf("admin");
     const { id } = await creator.api.apps.create({ name: `App ${unique()}` });
     const appId = appIdSchema.parse(id);
@@ -639,15 +655,15 @@ describe("restricted mode", setUpTime, () => {
     const context: WorkContext = { type: "app", appId };
     const bindings = await envOf(actingFor(subject, admin.userId), context);
 
-    const before = await callOutlook(bindings);
+    const before = await sendMail(bindings);
     await readerIn(bindings).getDocument(sensitive.noteId);
     await evictDurableObject(appHost(env, appId));
-    const after = await callOutlook(
+    const after = await sendMail(
       await envOf(actingFor(subject, admin.userId), context)
     );
     expect({ before, after }).toStrictEqual({
-      before: reached,
-      after: "permission.restricted",
+      before: unconfirmed,
+      after: "connect.restricted",
     });
   });
 

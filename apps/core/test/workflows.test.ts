@@ -20,8 +20,7 @@ import { requestGranted, serverBuilt } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote, readCollection } from "./knowledge.ts";
-import { mailControlUrl, mailServerUrl } from "./mail-server.ts";
-import type { MailAnswer } from "./mail-server.ts";
+import { mailConnection } from "./mail-connection.ts";
 import {
   endLiveRuns,
   finished,
@@ -32,7 +31,6 @@ import {
   stopped,
 } from "./runs.ts";
 import { openRpc, refusal, signedInWithRole } from "./sign-in.ts";
-import { connectDb, testBinding } from "./test-env.ts";
 
 // Workflows are code the agent writes, run for real: committed to an App,
 // tested when their version is made current, and run on Cloudflare
@@ -345,52 +343,6 @@ const runEvents = async (run: string, last: string): Promise<string[]> =>
     },
     { timeout: 10_000, interval: 100 }
   );
-
-const isFetcher = (value: unknown): value is Fetcher =>
-  typeof value === "object" && value !== null && "fetch" in value;
-
-/** The outside systems connect reaches (test/connect-providers.ts). */
-const providers = (): Fetcher => {
-  const fetcher = testBinding("CONNECT_PROVIDERS");
-  if (!isFetcher(fetcher)) {
-    throw new TypeError("Expected the providers Worker as CONNECT_PROVIDERS");
-  }
-  return fetcher;
-};
-
-const mailServerStateSchema = z.object({
-  calls: z.number(),
-  sent: z.array(z.object({ to: z.string(), subject: z.string() })),
-});
-
-/**
- * A shared mail connection in connect's registry, as a Composio toolkit's,
- * to a mail server of its own that answers its next calls as `plan` says
- * (then sends mail), and tells what it did.
- */
-const mailConnection = async (plan: MailAnswer[] = []) => {
-  const name = `mail-${crypto.randomUUID()}`;
-  const id = `connection-${name}`;
-  const now = Date.now();
-  await connectDb()
-    .prepare(
-      "INSERT INTO connections (id, provider, scope, status, server_kind, server, created_at, updated_at) VALUES (?, 'mail', 'shared', 'active', 'composio', ?, ?, ?)"
-    )
-    .bind(id, mailServerUrl(name), now, now)
-    .run();
-  await providers().fetch(mailControlUrl(name), {
-    method: "POST",
-    body: JSON.stringify({ plan }),
-  });
-  return {
-    id,
-    /** What the mail server did: calls that reached its tool, mail sent. */
-    did: async () => {
-      const response = await providers().fetch(mailControlUrl(name));
-      return mailServerStateSchema.parse(await response.json());
-    },
-  };
-};
 
 /** Gives the App `MAIL`, for sending on the connection; an admin grants it. */
 const grantMail = async (
@@ -840,11 +792,12 @@ ${mailStep("after")}`,
 
   it("run with only their App's permissions, no network, and their App's restricted mode", async () => {
     const admin = await personApi("admin");
+    const mail = await mailConnection();
     const app = await appWith(
       admin,
       workflowFiles(
         "probe",
-        `  return await step.do("probe", { description: "Probe" }, async () => {
+        `  return await step.do("probe", { description: "Probe", sideEffect: true, input: ${JSON.stringify(invoiceMail)} }, async ({ idempotencyKey, input }) => {
     let fetched;
     try {
       await fetch("https://example.com/");
@@ -852,18 +805,26 @@ ${mailStep("after")}`,
     } catch (error) {
       fetched = String(error);
     }
-    let mail;
-    try {
-      await env.OUTLOOK.call("mail.list", {});
-    } catch (error) {
-      mail = error.code;
-    }
-    return { env: Object.keys(env).toSorted(), fetched, mail };
+    const outcome = async (call) => {
+      try {
+        await call();
+        return "ok";
+      } catch (error) {
+        return error.code;
+      }
+    };
+    return {
+      env: Object.keys(env).toSorted(),
+      fetched,
+      read: await outcome(() => env.OUTLOOK.call("mail.list", {})),
+      sent: await outcome(() => env.MAIL.call("mail.send", input, { idempotencyKey })),
+    };
   });`,
         { probe: null }
       )
     );
     await requestGranted(idp, admin, outlook(app));
+    await grantMail(admin, app, mail.id);
     await appHost(env, appIdSchema.parse(app)).restrict();
     const run = await admin.api.workflows.start(app, "probe");
     await finished(run.id);
@@ -874,10 +835,18 @@ ${mailStep("after")}`,
       offline: JSON.stringify(output).includes(
         "not permitted to access the internet"
       ),
+      server: await mail.did(),
     }).toMatchObject({
       status: "completed",
-      output: { env: ["APP", "OUTLOOK"], mail: "permission.restricted" },
+      // A read still reaches connect (there is no such connection); the
+      // side effect is refused there, and nothing reached the mail server.
+      output: {
+        env: ["APP", "MAIL", "OUTLOOK"],
+        read: "connect.connection_not_found",
+        sent: "connect.restricted",
+      },
       offline: true,
+      server: { calls: 0, sent: [] },
     });
   });
 

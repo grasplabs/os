@@ -13,19 +13,17 @@ import { workspace } from "./workspace.ts";
 
 // Restricted mode. Once a chat or an App reads restricted data (in
 // Knowledge: what a sensitive collection holds), it is restricted for good,
-// and from then on makes no calls to outside systems, so what it read can't
-// leave through them. The flag is kept where the chat or App lives (its
-// workspace's or its own Durable Object), so it survives restarts, and it
-// is set before the data is returned, so nothing that holds the data runs
-// unrestricted. It is checked in the one place core lets a call out: where
-// it makes the capability for connect (bindings.ts).
+// and from then on takes no action in outside systems, so what it read
+// can't leave through them. The flag is kept where the chat or App lives
+// (its workspace's or its own Durable Object), so it survives restarts, and
+// it is set before the data is returned, so nothing that holds the data
+// runs unrestricted. It is read in the one place core lets a call out:
+// where it makes the capability for connect (bindings.ts), which carries it.
 //
-// Every call through connect reaches an outside system, and either acts
-// there (a side effect) or fetches from it; a fetch carries its input (a
-// search, an address) out too, and core can't tell one from the other, as
-// only connect knows which actions write. So a restricted chat or App makes
-// no connection calls at all. Knowledge, which stays in the deployment, can
-// still be read.
+// Only connect knows which actions write, so connect enforces it: a
+// restricted context may still call the actions its connector declares as
+// reads (only a native connector's word counts), and every other call is
+// refused there. Knowledge, which stays in the deployment, can be read too.
 //
 // The flag is only as good as the boundaries between contexts: it must
 // follow every way data moves from one to another. A workflow run started
@@ -190,14 +188,12 @@ export const restrict = async (
   }
 };
 
-/** Refuses a call out of a restricted context: `permission.restricted`. */
-export const requireUnrestricted = async (
+/** Whether `context` has read restricted data, as `restrictedState` says. */
+export const isRestricted = async (
   env: Env,
   authority: Authority,
   context: WorkContext
-): Promise<void> => {
+): Promise<boolean> => {
   const { restricted } = await restrictedState(env, authority, context);
-  if (restricted) {
-    throw permissionErrors.create("permission.restricted");
-  }
+  return restricted;
 };

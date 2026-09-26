@@ -184,6 +184,16 @@ describe("a call on a connection", () => {
     expect(server.ran).toStrictEqual([]);
   });
 
+  it("refuses every call of a restricted context on a Composio server, whatever the server declares", async () => {
+    const connectionId = await addConnection();
+    // `mail.list` says it is read-only, but only a native connector's word
+    // counts: on Composio every tool may act.
+    await expect(
+      outcome(callAs(anna, write(connectionId), { restricted: true }))
+    ).resolves.toBe("connect.restricted");
+    expect(server.ran).toStrictEqual([]);
+  });
+
   it("refuses a side effect from chat until the person can confirm it", async () => {
     const connectionId = await addConnection();
     const inChat = agentFor("user-anna", "agent-chat", "interactive");
