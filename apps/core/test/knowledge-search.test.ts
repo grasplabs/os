@@ -108,9 +108,13 @@ describe("searching Dutch documents", () => {
       vergoeding: "financien/reiskosten.md#Reiskosten",
       portaal: "financien/reiskosten.md#Zakelijke reizen",
       schapsverlof: "handboek/verlof.md#Zwangerschapsverlof",
-      // One typo.
+      // A word too short for trigrams still has to be there.
+      "de vergoeding": "financien/reiskosten.md#Reiskosten",
+      "ik vergoeding": "nothing",
+      // One typo; not pieces of the word far apart.
       reiskostenvergoedng: "financien/reiskosten.md#Reiskosten",
       zwangerschapsverlfo: "handboek/verlof.md#Zwangerschapsverlof",
+      zwangerbijzonder: "nothing",
       // Not in the handbook.
       pensioenregeling: "nothing",
     };

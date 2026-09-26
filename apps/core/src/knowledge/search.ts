@@ -83,69 +83,102 @@ const termsOf = (query: string): string[] =>
 /** An FTS5 string: words only, so quoting is all it needs. */
 const quoted = (term: string) => `"${term}"`;
 
-/** A long word as the typo pass asks for it: any two of its three pieces. */
+/**
+ * A long word as the typo pass asks for it: two of its three pieces, close
+ * together, as they are in the word spelled right. Pieces far apart in a
+ * section ("zwang…" and "…zonder" in "bijzonder verlof of zwangerschap")
+ * aren't a typo. FTS5 counts the distance in trigrams: between two pieces
+ * of the word lie at most the middle piece, a typo and two trigrams.
+ */
 const allowingTypo = (letters: string[]): string => {
-  const pieces = Array.from({ length: typoPieces }, (_, index) =>
-    quoted(
-      letters
-        .slice(
-          Math.floor((index * letters.length) / typoPieces),
-          Math.floor(((index + 1) * letters.length) / typoPieces)
-        )
-        .join("")
-    )
+  const bounds = Array.from({ length: typoPieces + 1 }, (_, index) =>
+    Math.floor((index * letters.length) / typoPieces)
   );
+  const pieces = bounds
+    .slice(0, -1)
+    .map((start, index) =>
+      quoted(letters.slice(start, bounds[index + 1]).join(""))
+    );
+  const near = Math.ceil(letters.length / typoPieces) + trigramLength;
   const [first, second, third] = pieces;
-  return `((${first} AND ${second}) OR (${first} AND ${third}) OR (${second} AND ${third}))`;
+  return [
+    [first, second],
+    [first, third],
+    [second, third],
+  ]
+    .map(([one, other]) => `NEAR(${one} ${other}, ${near})`)
+    .join(" OR ");
 };
 
 /** The typo pass: only asked for when the others find nothing. */
 const typoPass = 2;
 
-/** The FTS5 queries of each pass that has one, in order. */
-const passesOf = (terms: string[]) => {
-  const long = terms
-    // Code points, as the trigram tokenizer counts them. Terms are letters
-    // and digits only (`wordPattern`): no emoji or joiners to split.
-    // oxlint-disable-next-line typescript/no-misused-spread -- see above
-    .map((term) => [...term])
-    .filter((letters) => letters.length >= trigramLength);
-  const typo = long.map((letters) =>
-    letters.length < typoLength
-      ? quoted(letters.join(""))
-      : allowingTypo(letters)
-  );
-  return [
-    { table: "search_words", query: terms.map((term) => `${quoted(term)}*`) },
-    {
-      table: "search_trigrams",
-      query: long.map((letters) => quoted(letters.join(""))),
-    },
-    {
-      table: "search_trigrams",
-      query: long.some((letters) => letters.length >= typoLength) ? typo : [],
-    },
-  ].flatMap(({ table, query }, pass) =>
-    query.length === 0 ? [] : [{ table, pass, match: query.join(" AND ") }]
-  );
-};
-
 interface Pass {
   table: string;
   pass: number;
   match: string;
+  /**
+   * Words too short for trigrams, which the section must then have as
+   * words, so that every word of the query still counts.
+   */
+  short?: string;
 }
+
+/** The FTS5 queries of each pass that has one, in order. */
+const passesOf = (terms: string[]): Pass[] => {
+  const words = (list: string[]) =>
+    list.map((term) => `${quoted(term)}*`).join(" AND ");
+  const letters = terms.map((term) => ({
+    term,
+    // Code points, as the trigram tokenizer counts them. Terms are letters
+    // and digits only (`wordPattern`): no emoji or joiners to split.
+    // oxlint-disable-next-line typescript/no-misused-spread -- see above
+    chars: [...term],
+  }));
+  const long = letters.filter(({ chars }) => chars.length >= trigramLength);
+  const short = letters
+    .filter(({ chars }) => chars.length < trigramLength)
+    .map(({ term }) => term);
+  const trigrams = (query: string): Pass | undefined =>
+    long.length === 0
+      ? undefined
+      : {
+          table: "search_trigrams",
+          pass: 0,
+          match: query,
+          ...(short.length === 0 ? {} : { short: words(short) }),
+        };
+  const typo = long.map(({ term, chars }) =>
+    chars.length < typoLength ? quoted(term) : `(${allowingTypo(chars)})`
+  );
+  return [
+    { table: "search_words", pass: 0, match: words(terms) },
+    trigrams(long.map(({ term }) => quoted(term)).join(" AND ")),
+    long.some(({ chars }) => chars.length >= typoLength)
+      ? trigrams(typo.join(" AND "))
+      : undefined,
+  ].flatMap((pass, index) =>
+    pass === undefined ? [] : [{ ...pass, pass: index }]
+  );
+};
 
 /**
  * One pass's matches, with their BM25 score and the score of the section's
  * own headings and text alone.
  */
-const matchesSql = ({ table, pass, match }: Pass): SQL => {
+const matchesSql = ({ table, pass, match, short }: Pass): SQL => {
   const name = sql.identifier(table);
   return sql`SELECT rowid AS row_id, ${pass} AS pass,
       bm25(${name}, ${fieldWeights}) AS score,
       bm25(${name}, ${sectionWeights}) AS own
-    FROM ${name} WHERE ${name} MATCH ${match}`;
+    FROM ${name} WHERE ${name} MATCH ${match}
+    ${
+      short === undefined
+        ? sql``
+        : sql`AND rowid IN (
+            SELECT rowid FROM search_words WHERE search_words MATCH ${short}
+          )`
+    }`;
 };
 
 /**
