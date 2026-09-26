@@ -148,7 +148,7 @@ const argumentsFor = (
 
 /**
  * Calls a method of the App's server for the person: plain data and a
- * screen's callback go in, plain data comes out, whatever it holds. The
+ * screen's callbacks go in, plain data comes out, whatever it holds. The
  * name must be a string before it goes anywhere near the App, so an object
  * can't turn into a different one between the check and the call.
  */

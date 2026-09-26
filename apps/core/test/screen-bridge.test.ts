@@ -58,6 +58,12 @@ export class App extends DurableObject {
     return "not kept";
   }
 
+  keepThenFail(_caller: Caller, first: Watcher, _note: string, second: Watcher): never {
+    first.dup();
+    second.dup();
+    throw new Error("Failed after keeping its callbacks");
+  }
+
   dropWatchers(): void {
     for (const watcher of this.#watchers) {
       watcher[Symbol.dispose]();
@@ -405,8 +411,18 @@ describe("screens", { timeout: 60_000 }, () => {
       Array.from({ length: half }, async () => await call("watchNotes"))
     );
     await builder.api.screens.call(app, "dropWatchers", []);
+    // A call that fails after its App kept both its callbacks, passed in
+    // two places: core releases both.
+    const failed = await outcome(
+      builder.api.screens.call(app, "keepThenFail", [
+        tracked(),
+        "note",
+        tracked(),
+      ])
+    );
+    const expected = 2 * half + 2;
     await vi.waitFor(() => {
-      if (released < 2 * half) {
+      if (released < expected) {
         throw new Error(`${released} released so far`);
       }
     }, 10_000);
@@ -414,11 +430,13 @@ describe("screens", { timeout: 60_000 }, () => {
     expect({
       notKept: notKept.every((result) => result === "ok"),
       keptThenDropped: keptThenDropped.every((result) => result === "ok"),
+      failed,
       released,
     }).toStrictEqual({
       notKept: true,
       keptThenDropped: true,
-      released: 2 * half,
+      failed: "app.failed",
+      released: expected,
     });
   });
 
