@@ -3,7 +3,6 @@ import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { z } from "zod";
 
 import { startRun } from "../src/workflows/runs.ts";
 import { release } from "./apps.ts";
@@ -19,6 +18,7 @@ import {
 } from "./decisions.ts";
 import type { Ask, Person } from "./decisions.ts";
 import { mockIdp } from "./idp.ts";
+import { newTeam } from "./knowledge.ts";
 import { endLiveRuns, finished, resumed, stopped } from "./runs.ts";
 import { acmeTenant } from "./sign-in-config.ts";
 import {
@@ -73,19 +73,6 @@ const leaveTeam = async (
     { teamId, userId: person.userId }
   );
   expect(response.ok).toBeTruthy();
-};
-
-/** A team with `people` in it, made by `admin`. */
-const teamOf = async (admin: Person, people: Person[]): Promise<string> => {
-  const created = await callAuth("/organization/create-team", admin.session, {
-    name: `Team ${unique()}`,
-  });
-  const { id } = z.object({ id: z.string() }).parse(await created.json());
-  for (const person of people) {
-    // oxlint-disable-next-line no-await-in-loop -- one member at a time
-    await joinTeam(admin, id, person);
-  }
-  return id;
 };
 
 /** Adds `count` new members to `team`, as the IdP would bring them in. */
@@ -250,7 +237,7 @@ describe("decisions", { timeout: 60_000 }, () => {
     const admin = await personApi("admin");
     const anna = await personApi("user");
     const ben = await personApi("user");
-    const team = await teamOf(admin, [anna, ben]);
+    const team = await newTeam(admin, [anna, ben]);
     const { run, decision } = await asking(admin, {
       from: `team:${team}`,
       timeout: week,
@@ -365,7 +352,7 @@ describe("decisions", { timeout: 60_000 }, () => {
     const admin = await personApi("admin");
     const anna = await personApi("user");
     const otherAdmin = await personApi("admin");
-    const team = await teamOf(admin, [admin, anna]);
+    const team = await newTeam(admin, [admin, anna]);
     const byTeam = await asking(admin, { from: `team:${team}`, timeout: week });
     const byRole = await asking(admin, { from: "role:admin", timeout: week });
     const byThemselves = await asking(admin, {
@@ -433,7 +420,7 @@ describe("decisions", { timeout: 60_000 }, () => {
     const owner = await personApi("builder");
     const admin = await personApi("admin");
     const anna = await personApi("user");
-    const team = await teamOf(admin, [owner, anna]);
+    const team = await newTeam(admin, [owner, anna]);
     const app = await approvalApp(owner);
     // As a trigger starts it: no starter, and it acts for the App's owner.
     const run = await startRun(env, {
@@ -466,9 +453,9 @@ describe("decisions", { timeout: 60_000 }, () => {
 
   it("count only who may answer toward the cap, so a starter in a team of 51 leaves it within it", async () => {
     const admin = await personApi("admin");
-    const fits = await teamOf(admin, [admin]);
+    const fits = await newTeam(admin, [admin]);
     await addMembers(fits, maxDeciders);
-    const tooMany = await teamOf(admin, [admin]);
+    const tooMany = await newTeam(admin, [admin]);
     await addMembers(tooMany, maxDeciders + 1);
 
     const { ask } = await asking(admin, {
@@ -534,7 +521,7 @@ describe("decisions", { timeout: 60_000 }, () => {
     const admin = await personApi("admin");
     const anna = await personApi("user");
     const ben = await personApi("user");
-    const team = await teamOf(admin, [anna]);
+    const team = await newTeam(admin, [anna]);
     const { app, run } = await asking(admin, {
       from: `team:${team}`,
       ...reminding,
@@ -562,7 +549,7 @@ describe("decisions", { timeout: 60_000 }, () => {
     const admin = await personApi("admin");
     const leaves = await personApi("user");
     const joins = await personApi("user");
-    const team = await teamOf(admin, [leaves]);
+    const team = await newTeam(admin, [leaves]);
     const inTeam = await asking(admin, { from: `team:${team}`, timeout: week });
     const demoted = await personApi("builder");
     const byRole = await asking(admin, { from: "role:builder", timeout: week });

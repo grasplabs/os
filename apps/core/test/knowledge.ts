@@ -19,10 +19,17 @@ export const newTeam = async (
   const { id } = z.object({ id: z.string() }).parse(await created.json());
   for (const member of members) {
     // oxlint-disable-next-line no-await-in-loop -- one member at a time
-    await callAuth("/organization/add-team-member", admin.session, {
-      teamId: id,
-      userId: member.userId,
-    });
+    const added = await callAuth(
+      "/organization/add-team-member",
+      admin.session,
+      {
+        teamId: id,
+        userId: member.userId,
+      }
+    );
+    if (!added.ok) {
+      throw new Error(`Adding ${member.userId} to the team failed`);
+    }
   }
   return id;
 };
