@@ -588,6 +588,34 @@ describe("the cron trigger's disconnect retry", () => {
     });
     expect(calls).toStrictEqual([]);
   });
+
+  it("sends connect a few batches at a time, and still gets through them all", async () => {
+    // Its own removal time, to find these removals by.
+    const removedAt = Date.now() - dayMs - Math.floor(Math.random() * dayMs);
+    await removedLongAgo(disconnectPersonalMaxOwners * 6, removedAt);
+    let inFlight = 0;
+    let mostInFlight = 0;
+    const connect = connectWith(async (request) => {
+      inFlight += 1;
+      mostInFlight = Math.max(mostInFlight, inFlight);
+      try {
+        return await env.CONNECT.disconnectPersonal(request);
+      } finally {
+        inFlight -= 1;
+      }
+    });
+
+    await runCron({ CONNECT: connect });
+
+    expect(mostInFlight).toBeGreaterThan(1);
+    expect(mostInFlight).toBeLessThanOrEqual(4);
+    const pending = await env.DB.prepare(
+      "SELECT count(*) AS count FROM member_removals WHERE removed_at = ? AND disconnected_at IS NULL"
+    )
+      .bind(removedAt)
+      .first<{ count: number }>();
+    expect(pending?.count).toBe(0);
+  });
 });
 
 /** How many admins the organization has now. */
@@ -616,6 +644,38 @@ describe("changing a member's role", () => {
       target: { type: "member" },
       detail: { userId: person.userId, previousRole: "user", role: "builder" },
     });
+  });
+
+  it("records each change against the role it replaced, also when two admins change it at once", async () => {
+    for (const _round of [1, 2, 3]) {
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const [first, second, person] = await Promise.all([
+        signedInApi(idp, "admin"),
+        signedInApi(idp, "admin"),
+        signedInApi(idp, "user"),
+      ]);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const audited = await auditedDuring(async () => {
+        await Promise.all([
+          first.api.members.setRole(person.userId, "builder"),
+          second.api.members.setRole(person.userId, "admin"),
+        ]);
+      });
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const { role } = await person.api.whoami();
+      // Whichever landed first, the other replaced its role.
+      const replaced = role === "admin" ? "builder" : "admin";
+      const changes = audited
+        .filter(({ action }) => action === "member.role.updated")
+        .map(({ detail }) => detail);
+      expect(changes).toHaveLength(2);
+      expect(changes).toStrictEqual(
+        expect.arrayContaining([
+          { userId: person.userId, previousRole: "user", role: replaced },
+          { userId: person.userId, previousRole: replaced, role },
+        ])
+      );
+    }
   });
 
   it("is for admins only, and only to one of Grasp's roles", async () => {

@@ -304,13 +304,68 @@ const revokeMemberSessions = async (
 };
 
 /**
- * Gives the member `userId` `role`, the admin themselves included. One
- * conditional update: it changes the role only while the admin still is
- * one and, unless the new role is admin, someone other than `userId` is an
- * admin too. Every change of membership or role goes through a statement
- * like it (`recordRemoval`), so however they race, the organization keeps
- * an admin.
+ * Changes the role of `userId`, whose membership was read as `membership`,
+ * to `role`. One conditional update: it changes the role only while it
+ * still is `membership.role`, so the event records the role it replaced,
+ * while the admin still is one and, unless the new role is admin, while
+ * someone other than `userId` is an admin too. Every change of membership
+ * or role goes through a statement like it (`recordRemoval`), so however
+ * they race, the organization keeps an admin. When another admin changed
+ * the role in between, it tries once more, against the role they set.
  */
+const changeRole = async (
+  env: Env,
+  by: Identity,
+  userId: string,
+  membership: { id: string; role: string },
+  role: Role,
+  retries = 1
+): Promise<void> => {
+  if (membership.role === role) {
+    return;
+  }
+  const db = drizzle(env.DB);
+  const keepsAnAdmin = role === "admin" ? sql`1` : activeAdminExists(userId);
+  const [[changed]] = await auditedBatch(env, db, [
+    db
+      .update(members)
+      .set({ role })
+      .where(
+        and(
+          currentMembership(userId),
+          eq(members.role, membership.role),
+          isActiveAdmin(by.userId),
+          keepsAnAdmin
+        )
+      )
+      .returning({ id: members.id }),
+    outboxedIfChanged(db, {
+      actor: actorOf(by),
+      action: "member.role.updated",
+      target: { type: "member", id: membership.id },
+      detail: { userId, previousRole: membership.role, role },
+    }),
+  ]);
+  if (changed) {
+    return;
+  }
+  const now = await membershipOf(env, userId);
+  if (!now) {
+    throw refusal(by, memberErrors.create("member.not_found"));
+  }
+  if (!(await stillAdmin(env, by.userId))) {
+    throw refusal(by, roleErrors.create("role.forbidden"));
+  }
+  if (now.role === membership.role) {
+    throw refusal(by, memberErrors.create("member.last_admin"));
+  }
+  if (retries === 0) {
+    throw refusal(by, memberErrors.create("member.role_changed"));
+  }
+  await changeRole(env, by, userId, now, role, retries - 1);
+};
+
+/** Gives the member `userId` `role`, the admin themselves included. */
 const setMemberRole = async (
   env: Env,
   by: Identity,
@@ -329,47 +384,11 @@ const setMemberRole = async (
   if (!(target.success && membership)) {
     throw refusal(by, memberErrors.create("member.not_found"));
   }
-  const newRole = parsedRole.data;
-  if (membership.role === newRole) {
-    return;
-  }
-  const db = drizzle(env.DB);
-  const keepsAnAdmin =
-    newRole === "admin" ? sql`1` : activeAdminExists(target.data);
-  const [[changed]] = await auditedBatch(env, db, [
-    db
-      .update(members)
-      .set({ role: newRole })
-      .where(
-        and(
-          currentMembership(target.data),
-          isActiveAdmin(by.userId),
-          keepsAnAdmin
-        )
-      )
-      .returning({ id: members.id }),
-    outboxedIfChanged(db, {
-      actor: actorOf(by),
-      action: "member.role.updated",
-      target: { type: "member", id: membership.id },
-      detail: {
-        userId: target.data,
-        previousRole: membership.role,
-        role: newRole,
-      },
-    }),
-  ]);
-  if (changed) {
-    return;
-  }
-  if (!(await membershipOf(env, target.data))) {
-    throw refusal(by, memberErrors.create("member.not_found"));
-  }
-  if (!(await stillAdmin(env, by.userId))) {
-    throw refusal(by, roleErrors.create("role.forbidden"));
-  }
-  throw refusal(by, memberErrors.create("member.last_admin"));
+  await changeRole(env, by, target.data, membership, parsedRole.data);
 };
+
+/** Most `disconnectPersonal` batches the cron trigger has in flight at once. */
+const disconnectBatchesAtOnce = 4;
 
 /**
  * Disconnects what is still connected for removed people: everyone whose
@@ -411,18 +430,24 @@ export const retryDisconnects = async (env: Env): Promise<void> => {
     );
   }
   // Each batch on its own, so one that fails doesn't hold up the rest; it
-  // is tried again on the next run.
-  const results = await Promise.allSettled(
-    batches.map(async (ownerUserIds) => {
-      await env.CONNECT.disconnectPersonal({ person: null, ownerUserIds });
-      await markDisconnected(env, ownerUserIds);
-    })
-  );
-  for (const result of results) {
-    if (result.status === "rejected") {
-      log.error("member.disconnect_failed", errorFields(result.reason));
+  // is tried again on the next run. A few at a time, from one shared list,
+  // so a long backlog doesn't send connect every batch at once.
+  const queue = batches.values();
+  const disconnectNext = async (): Promise<void> => {
+    for (const ownerUserIds of queue) {
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one batch at a time per lane
+        await env.CONNECT.disconnectPersonal({ person: null, ownerUserIds });
+        // oxlint-disable-next-line no-await-in-loop -- one batch at a time per lane
+        await markDisconnected(env, ownerUserIds);
+      } catch (error) {
+        log.error("member.disconnect_failed", errorFields(error));
+      }
     }
-  }
+  };
+  await Promise.all(
+    Array.from({ length: disconnectBatchesAtOnce }, disconnectNext)
+  );
 };
 
 /**
