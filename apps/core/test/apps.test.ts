@@ -392,7 +392,7 @@ describe("App code", () => {
     );
   });
 
-  it("lets an App over its limits shrink, but not grow", async () => {
+  it("lets an App over its limits shrink, but not grow or commit", async () => {
     const { apps, userId } = await appsApi("builder");
     const app = await newApp(apps);
     // More files than an App may have now: written when the limits were
@@ -409,18 +409,49 @@ describe("App code", () => {
       ),
     ]);
 
-    await expect(
-      Promise.all([
-        outcome(apps.files.write(app.id, { "components/new.ts": "x" })),
-        outcome(apps.files.write(app.id, { "components/part-0.ts": "xx" })),
-      ])
-    ).resolves.toStrictEqual(["app.too_large", "app.too_large"]);
-    await expect(
-      outcome(apps.files.write(app.id, { "components/part-0.ts": null }))
-    ).resolves.toBe("ok");
-    await expect(apps.files.read(app.id)).resolves.toSatisfy(
-      (files: Record<string, string>) => Object.keys(files).length === count - 1
-    );
+    // One after another: each step depends on the one before.
+    const steps: [string, () => Promise<unknown>][] = [
+      [
+        "add",
+        async () => {
+          await apps.files.write(app.id, { "components/new.ts": "x" });
+        },
+      ],
+      [
+        "grow",
+        async () => {
+          await apps.files.write(app.id, { "components/part-0.ts": "xx" });
+        },
+      ],
+      [
+        "shrink",
+        async () => {
+          await apps.files.write(app.id, { "components/part-0.ts": null });
+        },
+      ],
+      // Still over them: it can't become a version until it's within them.
+      ["commit over", async () => await apps.files.commit(app.id, "Smaller")],
+      [
+        "shrink again",
+        async () => {
+          await apps.files.write(app.id, { "components/part-1.ts": null });
+        },
+      ],
+      ["commit within", async () => await apps.files.commit(app.id, "Fits")],
+    ];
+    const outcomes: [string, string][] = [];
+    for (const [step, run] of steps) {
+      // oxlint-disable-next-line no-await-in-loop -- steps are sequential by design
+      outcomes.push([step, await outcome(run())]);
+    }
+    expect(outcomes).toStrictEqual([
+      ["add", "app.too_large"],
+      ["grow", "app.too_large"],
+      ["shrink", "ok"],
+      ["commit over", "app.too_large"],
+      ["shrink again", "ok"],
+      ["commit within", "ok"],
+    ]);
   });
 
   it("refuses Apps and versions that don't exist", async () => {

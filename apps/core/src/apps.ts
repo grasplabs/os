@@ -211,7 +211,6 @@ const workingCopy = async (env: Env, app: AppId) => {
   const files = latest
     ? await readTree(env, app, latest.tree)
     : new Map<string, string>();
-  const latestSize = sizeOf(files);
   for (const { path, content } of rows) {
     if (content === null) {
       files.delete(path);
@@ -219,28 +218,26 @@ const workingCopy = async (env: Env, app: AppId) => {
       files.set(path, content);
     }
   }
-  return {
-    latest,
-    latestSize,
-    rows,
-    files,
-    revision: registered?.revision ?? null,
-  };
+  return { latest, rows, files, revision: registered?.revision ?? null };
 };
 
 /**
- * `app.too_large` if `files` are over an App's limits and bigger than
- * `before`. An App that is over them (from before they were lowered) can
- * still shrink: only growing past them is refused.
+ * `app.too_large` if `files` are over an App's limits. With `before`, the
+ * working copy's size before a write, only if they also grew: a working
+ * copy that is over them (from before they were lowered) can still shrink.
+ * A version is always within them, so it always fits a build.
  */
 const checkLimits = (
   files: ReadonlyMap<string, string>,
-  before: Size
+  before?: Size
 ): void => {
   const after = sizeOf(files);
   const over =
     after.files > appLimits.files || after.length > appLimits.totalLength;
-  const grows = after.files > before.files || after.length > before.length;
+  const grows =
+    before === undefined ||
+    after.files > before.files ||
+    after.length > before.length;
   if (over && grows) {
     throw appErrors.create("app.too_large", {
       files: after.files,
@@ -404,11 +401,11 @@ export const commitFiles = async (
   requireBuilder(by);
   const { id: appId } = await findApp(env, app);
   const text = parse(commitMessageSchema, message);
-  const { latest, latestSize, rows, files } = await workingCopy(env, appId);
+  const { latest, rows, files } = await workingCopy(env, appId);
   if (rows.length === 0) {
     throw appErrors.create("app.nothing_to_commit");
   }
-  checkLimits(files, latestSize);
+  checkLimits(files);
   const json = canonicalJson(Object.fromEntries(files));
   const tree = await sha256Hex(json);
   if (tree === latest?.tree) {
