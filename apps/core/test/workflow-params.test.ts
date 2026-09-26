@@ -2,14 +2,13 @@ import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import { env } from "cloudflare:workers";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
-import { ownerEventType } from "../src/workflows/dispatcher.ts";
 import { startRun } from "../src/workflows/runs.ts";
 import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import { endLiveRuns, finished, leave } from "./runs.ts";
+import { endLiveRuns, finished, resumed, stopped } from "./runs.ts";
 import {
   auditedDuring,
   openRpc,
@@ -19,6 +18,7 @@ import {
   signedInApi,
   staffPerson,
 } from "./sign-in.ts";
+import { runEvents } from "./workflow-apps.ts";
 
 // The values of workflows' parameters: builders set them directly, audited
 // without the value (R16), and runs read them as the version they are
@@ -302,43 +302,49 @@ describe("runs", { timeout: 60_000 }, () => {
     await expect(runLimit(builder, app)).resolves.toBe(900_000);
   });
 
-  it("go by what the version they are pinned to declares, not the current one", async () => {
-    const builder = await personApi("builder");
-    const app = await invoicesApp(builder);
-    // A triggered run pinned to v1, where the limit is money, waits for its
-    // App's owner before it reads its values.
-    const rejoin = await leave(builder.userId);
-    const run = await startRun(env, {
-      app: appIdSchema.parse(app),
-      workflow: workflowIdSchema.parse("invoices"),
-      input: undefined,
-      startedBy: null,
-      actor: { type: "system" },
-    });
-    await vi.waitFor(
-      async () => {
-        const row = await env.DB.prepare(
-          "SELECT status FROM workflow_runs WHERE id = ?"
-        )
-          .bind(run.id)
-          .first<{ status: string }>();
-        expect(row?.status).toBe("paused");
-      },
-      { timeout: 10_000, interval: 100 }
-    );
-    await rejoin();
-    // Meanwhile v2, where the limit is text, is current, with a text value.
-    await release(builder, app, textLimitVersion());
-    await builder.api.workflows.params.set(app, "invoices", "limit", "none");
-    const waiting = await env.WORKFLOWS.get(run.id);
-    await waiting.sendEvent({ type: ownerEventType, payload: null });
-    expect({
-      pinned: await limitOfRun(builder, run.id),
-      current: await runLimit(builder, app),
-    }).toStrictEqual({
-      // Not money, as v1 declares it: the code's default.
-      pinned: 500_000,
-      current: "none",
-    });
-  });
+  // Its waits, at their longest, add up to the describe block's 60 s.
+  it(
+    "go by what the version they are pinned to declares, not the current one",
+    { timeout: 90_000 },
+    async () => {
+      const builder = await personApi("builder");
+      const app = await invoicesApp(builder);
+      // A run pinned to v1, where the limit is money, started just before
+      // workflows were switched off: it waits before its first step, where it
+      // records its values, and is stopped there.
+      const { FEATURES: features } = env;
+      const on = z.record(z.string(), z.boolean()).parse(features);
+      let run: Awaited<ReturnType<typeof startRun>>;
+      try {
+        env.FEATURES = { ...on, workflows: false };
+        run = await startRun(
+          { ...env, FEATURES: on },
+          {
+            app: appIdSchema.parse(app),
+            workflow: workflowIdSchema.parse("invoices"),
+            input: undefined,
+            startedBy: builder.userId,
+            actor: { type: "system" },
+          }
+        );
+        await runEvents(run.id, "workflow.run.waiting");
+        await stopped(run.id);
+      } finally {
+        env.FEATURES = features;
+      }
+      // Meanwhile v2, where the limit is text, is current, with a text value.
+      // The run's next execution reads the values anew.
+      await release(builder, app, textLimitVersion());
+      await builder.api.workflows.params.set(app, "invoices", "limit", "none");
+      await resumed(run.id);
+      expect({
+        pinned: await limitOfRun(builder, run.id),
+        current: await runLimit(builder, app),
+      }).toStrictEqual({
+        // Not money, as v1 declares it: the code's default.
+        pinned: 500_000,
+        current: "none",
+      });
+    }
+  );
 });

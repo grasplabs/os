@@ -18,7 +18,7 @@ import type {
   RunStatus,
   WorkflowRun,
 } from "@grasp-os/shared/workflows";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -70,19 +70,28 @@ const iso = (date: Date | null): string | null => date?.toISOString() ?? null;
 
 /**
  * Whether `by` sees what a run read, returned and failed with: an admin,
- * or the person it acted for, as its row keeps them (who started it or,
- * for a run a trigger started, the App's owner then), so a later change of
- * owner doesn't move what the run read to someone else. Rows from before
- * the row kept them fall back to who started it, or the App's owner now
- * (`ownerId`). A failed run's report is here: `status`, and `list` for
- * all of an App's runs.
+ * or the person it acts for, who started it or, for a run a trigger
+ * started, the App's owner (`ownerId`, now). A failed run's report is
+ * here: `status`, and `list` for all of an App's runs.
  */
 const seesDetails = (by: Identity, row: RunRow, ownerId: string): boolean =>
-  by.role === "admin" ||
-  by.userId === (row.actingFor ?? row.startedBy ?? ownerId);
+  by.role === "admin" || by.userId === (row.startedBy ?? ownerId);
+
+/** What a run's row holds that its callers see. */
+type RunFields = Pick<
+  RunRow,
+  | "id"
+  | "appId"
+  | "workflowId"
+  | "version"
+  | "startedBy"
+  | "status"
+  | "createdAt"
+  | "endedAt"
+>;
 
 /** A run as its row has it; `status` names what the row last saw. */
-const toRun = (row: RunRow): WorkflowRun => ({
+const toRun = (row: RunFields): WorkflowRun => ({
   id: runIdSchema.parse(row.id),
   app: appIdSchema.parse(row.appId),
   workflow: workflowIdSchema.parse(row.workflowId),
@@ -181,19 +190,17 @@ export const startRun = async (
   if (!hasWorkflow(await versionFiles(env, app, version), workflow)) {
     throw workflowErrors.create("workflow.not_found", { workflow, version });
   }
-  const row: RunRow = {
+  const row = {
     id: crypto.randomUUID(),
     appId: app,
     workflowId: workflow,
     version,
     startedBy,
     status: "running",
-    ownerWaits: 0,
     createdAt: new Date(),
     endedAt: null,
     failure: null,
-    actingFor: null,
-  };
+  } satisfies RunFields & typeof workflowRuns.$inferInsert;
   await auditedBatch(env, db, [
     db.insert(workflowRuns).values(row),
     outboxed(
@@ -498,36 +505,6 @@ export const endRun = async (
 };
 
 /**
- * Marks a run paused until its App has an owner again, and counts the
- * wait; returns the wait's number, which names it.
- */
-export const pauseForOwner = async (env: Env, row: RunRow): Promise<number> => {
-  const db = drizzle(env.DB);
-  const [[paused]] = await auditedBatch(env, db, [
-    db
-      .update(workflowRuns)
-      .set({
-        status: "paused",
-        ownerWaits: sql`${workflowRuns.ownerWaits} + 1`,
-      })
-      .where(
-        and(eq(workflowRuns.id, row.id), inArray(workflowRuns.status, unended))
-      )
-      .returning(),
-    outboxedIfChanged(
-      db,
-      runEntry(runActor(row), "workflow.run.paused", row, {
-        reason: "owner_inactive",
-      })
-    ),
-  ]);
-  if (!paused) {
-    throw new Error(`Run ${row.id} has ended`);
-  }
-  return paused.ownerWaits;
-};
-
-/**
  * Records that a run waits (host.ts), with nothing else to change: while a
  * feature is switched off (`switched_off`), it goes on by itself once it's
  * back on; while a side effect of a step waits for the person it acts for
@@ -541,37 +518,5 @@ export const recordWaiting = async (
   const db = drizzle(env.DB);
   await auditedBatch(env, db, [
     outboxed(db, runEntry(runActor(row), "workflow.run.waiting", row, why)),
-  ]);
-};
-
-/**
- * Keeps whom the run acts for in this execution (`person`) on its row, if
- * it's someone new: who sees what it read (`seesDetails`).
- */
-export const actFor = async (
-  env: Env,
-  row: RunRow,
-  person: string
-): Promise<void> => {
-  if (row.actingFor === person) {
-    return;
-  }
-  await drizzle(env.DB)
-    .update(workflowRuns)
-    .set({ actingFor: person })
-    .where(eq(workflowRuns.id, row.id));
-};
-
-/** Marks a paused run as running again, audited when it was paused. */
-export const resumeRun = async (env: Env, row: RunRow): Promise<void> => {
-  const db = drizzle(env.DB);
-  await auditedBatch(env, db, [
-    db
-      .update(workflowRuns)
-      .set({ status: "running" })
-      .where(
-        and(eq(workflowRuns.id, row.id), eq(workflowRuns.status, "paused"))
-      ),
-    outboxedIfChanged(db, runEntry(runActor(row), "workflow.run.resumed", row)),
   ]);
 };

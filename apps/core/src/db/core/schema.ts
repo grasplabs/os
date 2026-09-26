@@ -348,11 +348,15 @@ export const appVersions = sqliteTable(
  * (`started_by`); one a trigger started (`started_by` null) for the App's
  * owner. Cloudflare Workflows keeps the run's steps; this row is what core
  * needs to load it again, and lists runs. `status` is where the run was
- * last seen by core: `running` covers waiting too. `owner_waits` counts
- * the times it paused for an owner, which names each of those waits.
- * `failure` is a failed run's report (JSON): where and why it stopped,
- * without the values it worked on. `acting_for` is the person it last acted
- * for, who sees what it read; null on rows from before it was kept.
+ * last seen by core: `running` covers waiting too. `failure` is a failed
+ * run's report (JSON): where and why it stopped, without the values it
+ * worked on.
+ *
+ * `owner_waits` and `acting_for`, and the `paused` status, were for a
+ * triggered run that paused while its App had no owner. Nothing reads or
+ * writes them any more; the previous release still may, and copes with
+ * the defaults (0, null) new rows get. They go in a later release
+ * (expand, then contract).
  */
 export const workflowRuns = sqliteTable(
   "workflow_runs",

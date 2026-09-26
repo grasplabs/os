@@ -6,14 +6,12 @@ import {
   workflowIdSchema,
 } from "@grasp-os/shared/ids";
 import type { AppId, RunId } from "@grasp-os/shared/ids";
-import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { z } from "zod";
 
 import { callApp } from "../app.ts";
 import { versionFiles } from "../apps.ts";
 import { runBindingsFor } from "../bindings.ts";
-import { requireActivePerson } from "../permissions.ts";
 import type { WorkContext } from "../restricted.ts";
 import { declaredParams, loadRun } from "./code.ts";
 import type { Settled, StepError } from "./code.ts";
@@ -27,15 +25,7 @@ import {
 } from "./host.ts";
 import type { FailedStep, HostedRun, RunStep } from "./host.ts";
 import { paramValues } from "./params.ts";
-import {
-  actFor,
-  appRecord,
-  endRun,
-  findRun,
-  pauseForOwner,
-  recordWaiting,
-  resumeRun,
-} from "./runs.ts";
+import { appRecord, endRun, findRun, recordWaiting } from "./runs.ts";
 import type { RunRow, Stopped } from "./runs.ts";
 
 export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
@@ -51,9 +41,8 @@ export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 //
 // Who a run acts for (threat model decision Q10): the person who started
 // it, or, for a run a trigger started, the App's owner. A run acts for
-// nobody who has left, checked at every load and before every step: a
-// person's run fails, and a triggered run pauses until its App has an
-// owner again.
+// nobody who has left, checked at every load and before every step: once
+// they have, the run fails, whoever started it.
 //
 // A run's parameter values are the ones people set (params.ts), read as
 // the version it is pinned to declares them, never the current version:
@@ -69,15 +58,6 @@ const pinnedSchema = z.object({
 });
 
 /**
- * The event a run paused for its owner waits for: sent to it when its App
- * has an active owner again.
- */
-export const ownerEventType = "grasp-owner-set";
-
-/** How long a paused run waits for an owner, or for workflows, at a time. */
-const pauseLimit = "365 days";
-
-/**
  * Who a run acts for now: its person, or its App's owner; and the App
  * version whose code it runs, for the audit log.
  */
@@ -90,39 +70,6 @@ const authorityOf = async (env: Env, row: RunRow): Promise<Authority> => {
     mode: "workflow",
     appVersion: row.version,
   };
-};
-
-/**
- * Runs `attempt`, and while it fails because a triggered run's owner has left,
- * waits, paused, for an owner and runs it again. The wait is a step, so a
- * run that resumes from it goes on from here. A person's run fails once
- * they have left. After the wait, the next load acts for whoever owns the
- * App then; until it, the same person must be back.
- */
-const whileOwnerActs = async <T>(
-  env: Env,
-  step: RunStep,
-  row: RunRow,
-  attempt: () => Promise<T>
-): Promise<T> => {
-  try {
-    return await attempt();
-  } catch (error) {
-    const ownerLeft =
-      row.startedBy === null &&
-      permissionErrors.codeOf(error) === "permission.person_inactive";
-    if (!ownerLeft) {
-      throw error;
-    }
-  }
-  const wait = await pauseForOwner(env, row);
-  await step.waitForEvent(`${coreStepPrefix}owner:${wait}`, {
-    type: ownerEventType,
-    timeout: pauseLimit,
-  });
-  const now = (await findRun(env, runIdSchema.parse(row.id))) ?? row;
-  await resumeRun(env, now);
-  return await whileOwnerActs(env, step, now, attempt);
 };
 
 /**
@@ -211,24 +158,12 @@ const runWorkflow = async (
     lastFailed = failure;
   };
   const result = await settledRun(async () => {
-    const { authority, bindings, connections } = await whileOwnerActs(
+    const authority = await authorityOf(env, row);
+    const { bindings, connections } = await runBindingsFor(
       env,
-      step,
-      row,
-      async () => {
-        const acting = await authorityOf(env, row);
-        return {
-          authority: acting,
-          ...(await runBindingsFor(
-            env,
-            acting,
-            contextOf(pinned.data.app, runId)
-          )),
-        };
-      }
+      authority,
+      contextOf(pinned.data.app, runId)
     );
-    await resumeRun(env, row);
-    await actFor(env, row, authority.onBehalfOf);
     const run: HostedRun = { ...pinned.data, runId, authority, connections };
     const files = await versionFiles(env, run.app, run.version);
     // Read on every load, though only the run's first uses them: after
@@ -246,14 +181,7 @@ const runWorkflow = async (
       files,
       env: bindings,
     });
-    // Before every step, the person the run acts for must still be there.
-    const acting = async (): Promise<void> => {
-      await whileOwnerActs(env, step, row, async () => {
-        await requireActivePerson(env, authority);
-      });
-    };
     const host = new RunHost(env, step, run, {
-      acting,
       stepFailed,
       waiting: async (why) => {
         await recordWaiting(env, row, why);

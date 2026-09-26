@@ -351,9 +351,9 @@ const defaultStepLimit = 10_000;
 
 /**
  * Steps kept back for core's own (`$grasp:…`), so the step that records
- * how the run ended always fits: that one, and an owner's wait or two. A
- * run's own steps are refused this far short of the limit; past the
- * limit, the engine would refuse core's end too.
+ * how the run ended always fits, with room to spare. A run's own steps
+ * are refused this far short of the limit; past the limit, the engine
+ * would refuse core's end too.
  */
 const coreStepReserve = 5;
 
@@ -615,11 +615,6 @@ export interface FailedStep {
 
 /** How a host reaches back into the dispatcher (dispatcher.ts). */
 export interface HostHooks {
-  /**
-   * Runs before each step: waits, or throws, while the person the run acts
-   * for is gone.
-   */
-  acting: () => Promise<void>;
   /** Hears of each step that failed, with the error it failed with. */
   stepFailed: (failure: FailedStep) => void;
   /**
@@ -856,11 +851,9 @@ export class RunHost extends RpcTarget {
   }
 
   /**
-   * The person the run acts for must still be there. Inside a step (a
-   * model call, an App call, state), a person who has left fails that
-   * step, and with it the run, even a triggered run, which pauses for its
-   * owner only when the check before a step (`acting`) finds them gone.
-   * Accepted: the window is one step.
+   * The person the run acts for must still be there: checked before every
+   * step, and inside one (a model call, an App call, state). One who has
+   * left fails the step, and with it the run.
    */
   async #requirePerson(): Promise<void> {
     await requireActivePerson(this.#env, this.#run.authority);
@@ -911,7 +904,7 @@ export class RunHost extends RpcTarget {
       const parsed = checked(doOptionsSchema, options);
       sideEffect = parsed.sideEffect === true;
       input = inputShape(parsed.input);
-      await this.#hooks.acting();
+      await this.#requirePerson();
       const attemptStep = async (): Promise<unknown> => {
         attempted = true;
         // Only the last attempt's error counts: an earlier one was retried.
