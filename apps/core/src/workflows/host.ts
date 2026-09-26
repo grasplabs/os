@@ -320,18 +320,44 @@ const isTimeout = (error: unknown): boolean =>
   (error.name === "WorkflowTimeoutError" || timedOut.test(error.message));
 
 /**
- * How the engine stops an execution it will resume or end itself: a
- * pause, a cancel (terminate), a restart. In the local runtime (Miniflare)
- * each is an `Error` whose message starts with "Aborting engine:", maybe
- * with the name in front once it crossed to core. Any other error of the
- * engine's (a step name it refuses, the step limit, a result too large, a
- * storage failure) is a real failure of the run.
+ * How the engine stops an execution it will resume or end itself, when
+ * someone pauses, terminates (cancels), restarts or deletes the run: in
+ * the local runtime (Miniflare), an `Error` "Aborting engine: User called
+ * pause" and so on, maybe with the name in front once it crossed to core.
+ * The engine also aborts with "Aborting engine: …" when it fails a run
+ * itself (a NonRetryableError, a value it can't serialise, the storage
+ * limit): those, like any other error of the engine's (a step name it
+ * refuses, the step limit, a storage failure), are real failures.
  * TODO(GRA-44): confirm that production's engine stops with these same
  * messages.
  */
-const abortMessage = /^(?:\w+: )?Aborting engine: /u;
-const isEngineStop = (error: unknown): boolean =>
-  error instanceof Error && abortMessage.test(error.message);
+const userStop =
+  /^(?:\w+: )?Aborting engine: User called (?:pause|terminate|restart|delete)$/u;
+export const isEngineStop = (error: unknown): boolean =>
+  error instanceof Error && userStop.test(error.message);
+
+/**
+ * The engine's limit on steps in one execution: Cloudflare's default, as
+ * wrangler.jsonc sets no `limits.steps`. Only tests lower it, the
+ * engine's and this one alike (`WORKFLOW_STEP_LIMIT`, vite.config.ts).
+ */
+const defaultStepLimit = 10_000;
+
+/**
+ * Steps kept back for core's own (`$grasp:…`), so the step that records
+ * how the run ended always fits: that one, an owner's wait or two, and a
+ * kill-switch pause. A run's own steps are refused this far short of the
+ * limit; past the limit, the engine would refuse core's end too.
+ */
+const coreStepReserve = 5;
+
+/** The engine's step limit for this deployment. */
+export const stepLimitOf = (env: Env): number => {
+  const set = Number(env.WORKFLOW_STEP_LIMIT);
+  return Number.isInteger(set) && set > 0 && set < defaultStepLimit
+    ? set
+    : defaultStepLimit;
+};
 
 /**
  * Whether the engine threw an attempt's own error back: that error, or
@@ -351,11 +377,26 @@ const isAttemptError = (error: unknown, attempt: unknown): boolean =>
  * The dispatcher hands that error back (dispatcher.ts). A step's own
  * error, from any of its attempts, never counts, even one shaped like a
  * stop: workflow code throws what it likes.
+ *
+ * It counts every call, as the engine may, and refuses the run's own
+ * ones {@link coreStepReserve} short of `stepLimit`, as a failure of that
+ * step.
  */
 export const watchedStep = (
   step: RunStep,
-  engineStopped: (error: unknown) => void
+  engineStopped: (error: unknown) => void,
+  stepLimit: number
 ): RunStep => {
+  let taken = 0;
+  const take = (name: string): void => {
+    taken += 1;
+    if (
+      !name.startsWith(coreStepPrefix) &&
+      taken > stepLimit - coreStepReserve
+    ) {
+      throw workflowErrors.create("workflow.too_many_steps");
+    }
+  };
   const heard = (error: unknown, attempts: ReadonlySet<unknown>): void => {
     const own = [...attempts].some((attempt) => isAttemptError(error, attempt));
     if (isEngineStop(error) && !own) {
@@ -368,6 +409,7 @@ export const watchedStep = (
       // Every attempt's error: an attempt the engine gave up on may still
       // end, late, after the next one began.
       const attempts = new Set<unknown>();
+      take(name);
       try {
         return await step.do(name, config, async () => {
           try {
@@ -383,6 +425,7 @@ export const watchedStep = (
       }
     },
     sleep: async (name, duration) => {
+      take(name);
       try {
         await step.sleep(name, duration);
       } catch (error) {
@@ -391,6 +434,7 @@ export const watchedStep = (
       }
     },
     waitForEvent: async (name, options) => {
+      take(name);
       try {
         return await step.waitForEvent(name, options);
       } catch (error) {

@@ -19,6 +19,11 @@ interface __BaseEnv_Env {
   AUDIT_ARCHIVE_RETENTION_DAYS?: unknown;
   /** `none` where Durable Objects have no jurisdiction (src/durable-objects.ts). */
   DURABLE_OBJECT_JURISDICTION?: string;
+  /**
+   * Tests only: the engine's step limit, when a test lowers it with the
+   * workflow's `stepLimit` (src/workflows/host.ts).
+   */
+  WORKFLOW_STEP_LIMIT?: string;
   /** Tests only: a shorter limit for one call into an App (src/app.ts). */
   APP_CALL_TIMEOUT_MS?: string;
   /** Local dev only (src/router-secret.ts). */

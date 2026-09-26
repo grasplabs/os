@@ -23,6 +23,7 @@ import {
   pauseWhileSwitchedOff,
   RunHost,
   settle,
+  stepLimitOf,
   watchedStep,
 } from "./host.ts";
 import type { FailedStep, HostedRun, RunStep } from "./host.ts";
@@ -197,7 +198,7 @@ const runWorkflow = async (
   const engineStopped = (error: unknown): void => {
     engineError = { error };
   };
-  const step = watchedStep(engineStep, engineStopped);
+  const step = watchedStep(engineStep, engineStopped, stepLimitOf(env));
   await pauseWhileSwitchedOff(env, step, runId, "workflows");
   let lastFailed: FailedStep | undefined;
   const stepFailed = (failure: FailedStep): void => {

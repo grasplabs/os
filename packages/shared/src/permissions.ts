@@ -155,6 +155,7 @@ export const platformBindingNames: ReadonlySet<string> = new Set([
   "SIGN_IN",
   "TOKEN_ENCRYPTION_KEY",
   "TOKEN_ENCRYPTION_KEY_PREVIOUS",
+  "WORKFLOW_STEP_LIMIT",
   "WORKFLOWS",
   "WORKSPACES",
 ]);

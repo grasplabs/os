@@ -1412,4 +1412,31 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
       attempts: 1,
     });
   });
+
+  it("fail, recorded and reported, once a run has taken as many steps as it may", async () => {
+    const admin = await personApi("admin");
+    // More steps than the engine takes in one execution (vite.config.ts).
+    const app = await appWith(
+      admin,
+      workflowFiles(
+        "endless",
+        `  for (let i = 0; i < 100; i++) {
+    await step.do("step-" + i, { description: "One more" }, async () => i);
+  }`
+      )
+    );
+    const run = await admin.api.workflows.start(app, "endless");
+    await finished(run.id);
+
+    const { status, failure } = await admin.api.workflows.status(run.id);
+    expect({
+      status,
+      row: await rowStatus(run.id),
+      failure: failure?.error.code,
+    }).toStrictEqual({
+      status: "failed",
+      row: "failed",
+      failure: "workflow.too_many_steps",
+    });
+  });
 });
