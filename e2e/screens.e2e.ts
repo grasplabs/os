@@ -17,17 +17,21 @@ import { screenAppFiles } from "./screen-app.ts";
 
 declare global {
   interface Window {
-    /** The App names the page's chrome showed, sampled by a test below. */
-    chromeNames: { path: string; name: string }[];
+    /**
+     * What the page showed each frame, sampled by a test below: its
+     * address, the App name in its chrome and its screen frame's address.
+     */
+    chromeNames: { path: string; name: string; frame: string }[];
   }
 }
 
 /**
- * Longer than the page waits between attempts to reconnect after one
- * failed (2 s), twice over: a second round of attempts, running beside the
- * first, shows by then.
+ * How long no further connection may open once the page has reconnected.
+ * A second round of attempts would have tried at the same moment as the
+ * one that held (both wait 2 s after the refused attempt), so it shows
+ * well within this.
  */
-const reconnectsSettledMs = 5000;
+const noMoreConnectionsMs = 2000;
 
 /** Counts every request that reaches it: none should. */
 const serveAttacker = async (): Promise<{
@@ -247,7 +251,8 @@ test("a screen subscribes again after its connection drops, trying one connectio
   ).toBeVisible({ timeout: 20_000 });
   // One refused attempt, then one that holds, and none beside or after it:
   // a failed attempt doesn't start another round of attempts of its own.
-  await page.waitForTimeout(reconnectsSettledMs);
+  await expect.poll(() => afterDrop).toBeGreaterThanOrEqual(2);
+  await page.waitForTimeout(noMoreConnectionsMs);
   expect(afterDrop).toBe(2);
 });
 
@@ -259,7 +264,7 @@ test("moving to another App's screen never shows the App it left in the chrome",
   await openScreen(page, app);
   await expect(page.getByRole("heading", { name: "Notes" })).toBeVisible();
 
-  // Every frame, the App name the chrome shows at the page's address.
+  // Every frame, what the page shows at its address.
   await page.evaluate(() => {
     const names: Window["chromeNames"] = [];
     window.chromeNames = names;
@@ -267,6 +272,7 @@ test("moving to another App's screen never shows the App it left in the chrome",
       names.push({
         path: location.pathname,
         name: document.querySelector("header h1")?.textContent ?? "",
+        frame: document.querySelector("iframe")?.getAttribute("src") ?? "",
       });
       requestAnimationFrame(sample);
     };
@@ -279,23 +285,33 @@ test("moving to another App's screen never shows the App it left in the chrome",
     dispatchEvent(new PopStateEvent("popstate"));
   }, otherPath);
   await expect(page.getByRole("heading", { name: "Tasks" })).toBeVisible();
+  // Until a sample has caught it too, not only the page.
+  await expect
+    .poll(
+      async () =>
+        await page.evaluate(() =>
+          window.chromeNames.some(({ name }) => name === "Tasks")
+        )
+    )
+    .toBeTruthy();
 
   const shown = await page.evaluate(() => window.chromeNames);
-  const atOther = shown
-    .filter(({ path }) => path === otherPath)
-    .map(({ name }) => name);
-  // The address changes a moment before the page renders for it, so the
-  // first samples there may still be the old page. Once it renders, the
-  // chrome starts empty, never with the name of the App it left.
-  const rendered = atOther.slice(
-    Math.max(
-      0,
-      atOther.findIndex((name) => name !== "Notes")
-    )
+  const [first] = shown;
+  // The address changes a moment before the page renders for it. It has
+  // rendered for the new App once its frame is no longer the one it had.
+  const rendered = shown.filter(
+    ({ path, frame }) => path === otherPath && frame !== first?.frame
   );
-  expect(rendered[0]).toBe("");
-  expect(rendered).not.toContain("Notes");
-  expect(rendered).toContain("Tasks");
+  const named = rendered.findIndex(({ name }) => name === "Tasks");
+  expect({
+    renderedWithOldName: rendered.some(({ name }) => name === "Notes"),
+    namedTheNewApp: named !== -1,
+    oldNameAfterNew: rendered.slice(named).some(({ name }) => name === "Notes"),
+  }).toStrictEqual({
+    renderedWithOldName: false,
+    namedTheNewApp: true,
+    oldNameAfterNew: false,
+  });
 });
 
 test("a new current version is offered while the screen is open", async ({
