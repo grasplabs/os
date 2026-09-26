@@ -189,6 +189,8 @@ export class Run extends WorkerEntrypoint {
         waitForEvent: async (name, options) => unwrapped(await host.waitForEvent(name, options)),
         callModel: async (request) => unwrapped(await host.callModel(request)),
         openDecision: async (request) => unwrapped(await host.openDecision(request)),
+        decisionRecipients: async (decision, reminder) => unwrapped(await host.decisionRecipients(decision, reminder)),
+        waitForDecision: async (name, options) => unwrapped(await host.waitForDecision(name, options)),
         getState: async (key) => unwrapped(await host.getState(key)),
         setState: async (key, value, idempotencyKey) => unwrapped(await host.setState(key, value, idempotencyKey)),
       };

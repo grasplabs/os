@@ -128,7 +128,7 @@ describe("step calls", () => {
 
   it("reject options of the wrong type before anything runs", async () => {
     const ran: string[] = [];
-    const withoutAsk = { description: "Approve", from: "anna" };
+    const withoutAsk = { description: "Approve", from: "person:anna" };
     const calls: ((step: StepRunner) => Promise<unknown>)[] = [
       async (step) =>
         await step.do(
@@ -562,7 +562,11 @@ const decisionWorkflow = (
 ) =>
   workflow(
     "decide",
-    { params: { approver: person({ label: "Approver", default: "anna" }) } },
+    {
+      params: {
+        approver: person({ label: "Approver", default: "person:anna" }),
+      },
+    },
     async (step, { params }) =>
       await step.decision("approve", {
         description: "Approve",
@@ -591,9 +595,14 @@ describe("step.decision", () => {
         { timeout: "1 day", remindAfter: "12 hours" },
         slowAsk
       ).run(engine)
-    ).resolves.toStrictEqual({ outcome: "timedOut" });
+    ).resolves.toStrictEqual({ timedOut: true });
     expect(asked).toHaveLength(1);
-    expect(steps.filter(({ type }) => type === "wait")).toStrictEqual([]);
+    // No time is left to wait: the decision is only closed.
+    expect(
+      steps.flatMap((record) =>
+        record.type === "wait" ? [record.timeout] : []
+      )
+    ).toStrictEqual([0]);
   });
 
   it("refuses a decision without a timeout", async () => {
@@ -627,7 +636,9 @@ describe("step.decision", () => {
     await expect(definition.run(crashing)).rejects.toThrow("Engine died");
     await definition.run(crashing);
 
-    expect(decisions).toStrictEqual([{ step: "approve", from: "anna" }]);
+    expect(decisions.map(({ step, from }) => ({ step, from }))).toStrictEqual([
+      { step: "approve", from: "person:anna" },
+    ]);
   });
 
   it("picks up a decision after the run was killed waiting for it, asking once", async () => {
@@ -639,12 +650,14 @@ describe("step.decision", () => {
     // The run is killed while it waits; the answer comes in meanwhile.
     const killedWhileWaiting = {
       ...engine,
-      waitForEvent: async (...wait: Parameters<typeof engine.waitForEvent>) => {
+      waitForDecision: async (
+        ...wait: Parameters<typeof engine.waitForDecision>
+      ) => {
         if (!killed) {
           killed = true;
           throw new Error("Run killed while waiting");
         }
-        return await engine.waitForEvent(...wait);
+        return await engine.waitForDecision(...wait);
       },
     };
     const definition = decisionWorkflow({ timeout: "7 days" }, async () => {
@@ -657,7 +670,12 @@ describe("step.decision", () => {
     const outcome = await definition.run(killedWhileWaiting);
     const replayed = await definition.run(killedWhileWaiting);
 
-    expect(outcome).toStrictEqual({ outcome: "approved", by: "anna" });
+    expect(outcome).toStrictEqual({
+      timedOut: false,
+      approved: true,
+      by: "anna",
+      payload: null,
+    });
     expect(replayed).toStrictEqual(outcome);
     expect(asks).toBe(1);
     expect(decisions).toHaveLength(1);
@@ -671,29 +689,20 @@ describe("step.decision", () => {
     ).rejects.toMatchObject({ code: "workflow.invalid_step_call" });
   });
 
-  it("passes on the comment with the answer", async () => {
+  it("passes on what the person sent with the answer", async () => {
     const { engine } = createFakeEngine({
-      decisions: { approve: { approved: true, by: "anna", comment: "Fine" } },
+      decisions: {
+        approve: { approved: false, by: "anna", payload: { comment: "No" } },
+      },
     });
 
     await expect(
       decisionWorkflow({ timeout: "7 days" }).run(engine)
     ).resolves.toStrictEqual({
-      outcome: "approved",
+      timedOut: false,
+      approved: false,
       by: "anna",
-      comment: "Fine",
-    });
-  });
-
-  it("fails the run on an answer without who gave it", async () => {
-    const { engine } = createFakeEngine({
-      events: [{ type: "decision:approve", payload: { approved: true } }],
-    });
-
-    await expect(
-      decisionWorkflow({ timeout: "7 days" }).run(engine)
-    ).rejects.toMatchObject({
-      code: "workflow.invalid_event",
+      payload: { comment: "No" },
     });
   });
 });
@@ -851,7 +860,11 @@ describe("errors", () => {
     const { engine } = createFakeEngine({ params: { approver: "" } });
     const definition = workflow(
       "coded",
-      { params: { approver: person({ label: "Approver", default: "anna" }) } },
+      {
+        params: {
+          approver: person({ label: "Approver", default: "person:anna" }),
+        },
+      },
       async () => null
     );
 

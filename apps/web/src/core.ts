@@ -100,17 +100,23 @@ export const loadCoreStatus = async (): Promise<CoreStatus> => {
 
 /**
  * Starts signing in with the IdP `providerId`: core answers with the IdP's
- * address, and the IdP sends the person back to this page, signed in or with
- * `?error=<code>`.
+ * address, and the IdP sends the person back to `returnTo` (a path of this
+ * site), signed in or with `error=<code>` added to it. Better Auth keeps
+ * `returnTo` with the sign-in state until the person is back, a decision
+ * link's token included; that is harmless, as the token grants nothing
+ * without the bound person's own session.
  */
-export const signIn = async (providerId: string): Promise<void> => {
+export const signIn = async (
+  providerId: string,
+  returnTo = "/"
+): Promise<void> => {
   const response = await fetch("/api/auth/sign-in/sso", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       providerId,
-      callbackURL: "/",
-      errorCallbackURL: "/",
+      callbackURL: returnTo,
+      errorCallbackURL: returnTo,
     }),
   });
   const body: unknown = await response.json();

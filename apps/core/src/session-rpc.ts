@@ -4,6 +4,7 @@ import { RpcTarget } from "capnweb";
 import { AppsRpc } from "./apps-rpc.ts";
 import { AuditRpc } from "./audit-rpc.ts";
 import { ConnectionsRpc } from "./connections.ts";
+import { DecisionsRpc } from "./decisions/rpc.ts";
 import { requireFeature } from "./features.ts";
 import type { Feature } from "./features.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
@@ -32,6 +33,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #permissions: PermissionsRpc;
   readonly #connections: ConnectionsRpc;
   readonly #workflows: WorkflowsRpc;
+  readonly #decisions: DecisionsRpc;
   readonly #screens: ScreensRpc;
   readonly #members: MembersRpc;
   readonly #audit: AuditRpc;
@@ -56,6 +58,11 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
     this.#connections = new ConnectionsRpc(env, checkWith("connections"));
     this.#workflows = new WorkflowsRpc(env, checkWith("workflows"));
+    // Decisions belong to runs: the workflows kill switch stops them too.
+    this.#decisions = new DecisionsRpc(
+      env,
+      checkWith("workflows", "decisions")
+    );
     // Screens run Apps: the Apps kill switch stops them too.
     this.#screens = new ScreensRpc(env, checkWith("apps", "screens"));
     this.#members = new MembersRpc(env, checkWith("members"));
@@ -80,6 +87,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get workflows(): WorkflowsRpc {
     return this.#workflows;
+  }
+
+  get decisions(): DecisionsRpc {
+    return this.#decisions;
   }
 
   get screens(): ScreensRpc {

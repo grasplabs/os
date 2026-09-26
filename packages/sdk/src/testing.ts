@@ -7,6 +7,7 @@ import { z } from "zod";
 
 import type {
   DecisionAnswer,
+  EngineDecision,
   EngineEvent,
   ModelRequest,
   WorkflowEngine,
@@ -124,8 +125,8 @@ export interface TestEngineOptions {
   model?: (request: ModelRequest) => unknown;
   /**
    * Answers to decisions by the decision's name (as for mocks). A decision
-   * without an answer times out, after its reminder if it has one. Answers
-   * arrive as events of type `decision:<name>`.
+   * without an answer times out, after its reminder if it has one. Each
+   * decision asks one stand-in person, `test-person`.
    */
   decisions?: Readonly<Record<string, DecisionAnswer>>;
   /** Events sent to the run; each goes to the first wait for its type. */
@@ -142,8 +143,6 @@ export interface TestEngineOptions {
    */
   skipTime?: (milliseconds: number) => void;
 }
-
-const decisionEventPrefix = "decision:";
 
 interface StepName {
   /** With the key as the workflow gave it, not as the engine got it. */
@@ -247,7 +246,7 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
   const steps: StepRecord[] = [];
   const modelRequests: ModelRequest[] = [];
   /** The decisions opened, once each. */
-  const decisions: { step: string; from: string }[] = [];
+  const decisions: { step: string; from: string; deadline: number }[] = [];
   const events = [...(options.events ?? [])];
   const state = options.state ?? createTestState();
   const runSideEffects = options.sideEffects === "run";
@@ -264,13 +263,7 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
       const [event] = events.splice(index, 1);
       return { received: true, payload: event?.payload };
     }
-    const answer = type.startsWith(decisionEventPrefix)
-      ? byStepName(
-          options.decisions,
-          stepNameOf(type.slice(decisionEventPrefix.length))
-        )
-      : undefined;
-    return answer ? { received: true, payload: answer } : { received: false };
+    return { received: false };
   };
 
   const engine: WorkflowEngine = {
@@ -370,15 +363,58 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
       return await options.model(request);
     },
     // Idempotent per step, as the engine contract asks: opening a decision
-    // again (a crash before its step was recorded) opens nothing new.
-    openDecision: async ({ step, from }) => {
-      if (!decisions.some((decision) => decision.step === step)) {
-        decisions.push({ step, from });
+    // again (a crash before its step was recorded) opens nothing new. A
+    // decision's ID here is its step.
+    openDecision: async ({ step, from, timeout }) => {
+      let opened = decisions.find((decision) => decision.step === step);
+      if (!opened) {
+        opened = { step, from, deadline: Date.now() + timeout };
+        decisions.push(opened);
       }
       return await Promise.resolve({
-        link: `https://grasp.test/decisions/${step}`,
-        eventType: `${decisionEventPrefix}${step}`,
+        decision: step,
+        deadline: opened.deadline,
       });
+    },
+    decisionRecipients: async (decision) =>
+      await Promise.resolve([
+        {
+          userId: "test-person",
+          name: "Test Person",
+          email: "test-person@grasp.test",
+          link: `https://grasp.test/decisions/${decision}`,
+        },
+      ]),
+    waitForDecision: async (name, { decision, timeout }) => {
+      const replayed = recorded.get(name);
+      if (replayed !== undefined) {
+        // SAFETY: only this method records under a decision wait's name.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+        return replayed as EngineDecision;
+      }
+      const answer = byStepName(options.decisions, stepNameOf(decision));
+      const outcome: EngineDecision = answer
+        ? {
+            answered: true,
+            approved: answer.approved,
+            by: answer.by,
+            payload: answer.payload ?? null,
+          }
+        : { answered: false };
+      recorded.set(name, outcome);
+      log({
+        type: "wait",
+        name: stepNameOf(name).name,
+        eventType: `decision:${stepNameOf(decision).name}`,
+        timeout,
+        event: answer
+          ? { received: true, payload: outcome }
+          : { received: false },
+      });
+      if (!answer) {
+        options.skipTime?.(timeout);
+      }
+      return await Promise.resolve(outcome);
     },
     getState: async (key) => await Promise.resolve(state.values.get(key)),
     setState: async (key, value, idempotencyKey) => {

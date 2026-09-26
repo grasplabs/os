@@ -4,10 +4,10 @@ import type { Json } from "@grasp-os/shared/json";
 import { stepIdempotencyKey } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
-import { decisionAnswerSchema } from "./engine.ts";
 import type {
   Backoff,
-  EngineEvent,
+  DecisionRecipient,
+  EngineDecision,
   WorkflowEngine,
   WorkflowEnv,
 } from "./engine.ts";
@@ -38,7 +38,11 @@ import { namePattern, nameRule, stepOptionSchemas } from "./steps.ts";
 // Workflow code imports only this module, so it gets Zod from here too.
 export { z } from "zod";
 export type { ParamKind, ParamValue } from "./params.ts";
-export type { BindingMethod, WorkflowEnv } from "./engine.ts";
+export type {
+  BindingMethod,
+  DecisionRecipient,
+  WorkflowEnv,
+} from "./engine.ts";
 
 const workflowErrorCodes = [
   "workflow.invalid_definition",
@@ -282,16 +286,29 @@ export interface LlmOptions<Output extends z.ZodType>
   sideEffect?: never;
 }
 
-/** How a person is asked to decide; `step.decision` calls it. */
+/**
+ * How a person is asked to decide; `step.decision` calls it inside a
+ * side-effect step.
+ */
 export interface DecisionRequest extends SideEffectContext {
-  /** Where the person answers. */
-  link: string;
+  /**
+   * The people who may answer now, each with a link of their own: send
+   * each one only their own link. A link leads to where they answer once
+   * signed in, and works for nobody else. Empty when nobody fits `from`,
+   * or the decision was answered meanwhile.
+   */
+  recipients: DecisionRecipient[];
   /** False the first time, true when reminding. */
   reminder: boolean;
 }
 
 export interface DecisionOptions extends StepOptions {
-  /** Who decides; only they can answer. */
+  /**
+   * Who decides; only they can answer, signed in, as they are then: a
+   * person (`person:<user ID>`), a role (`role:admin`) or a team
+   * (`team:<team ID>`). Whoever started the run never answers it, and
+   * isn't asked, unless `from` names exactly them.
+   */
   from: Person;
   /** Tells them there is something to decide, e.g. by email. */
   ask: (request: DecisionRequest) => Promise<void>;
@@ -301,10 +318,15 @@ export interface DecisionOptions extends StepOptions {
   remindAfter?: Duration;
 }
 
-/** How a decision ended. */
+/**
+ * How a decision ended: answered, by whom (their user ID) and with what
+ * `payload` they sent (untrusted input, e.g. `{ comment }`), or timed out.
+ * A timeout never means approval: nobody decided, so treat it as a no, or
+ * ask again.
+ */
 export type Decision =
-  | { outcome: "approved" | "rejected"; by: string; comment?: string }
-  | { outcome: "timedOut" };
+  | { timedOut: false; approved: boolean; by: string; payload: Json | null }
+  | { timedOut: true };
 
 export interface SleepOptions extends StepOptions {
   duration: Duration;
@@ -630,35 +652,33 @@ const createRunner = (
 
     decision: async (name, rawOptions) =>
       await exclusive(`Step "${name}"`, async () => {
-        const { key, from, ask, timeout, remindAfter } = optionsOf(
+        const { key, description, from, ask, timeout, remindAfter } = optionsOf(
           stepOptionSchemas.decision,
           name,
           rawOptions
         );
         const step = start(name, key);
 
-        // Times are taken inside steps, so a replay computes the same waits.
-        // The timeout counts from when the decision opened, so time spent
-        // asking or reminding never pushes the deadline out.
-        const { link, eventType, openedAt } = await engine.do(
+        // The engine sets the deadline when the decision opens, so time
+        // spent asking or reminding never pushes it out, and no answer
+        // counts after it. Other times are taken inside steps, so a replay
+        // computes the same waits.
+        const { decision, deadline } = await engine.do(
           step,
           { input: { from } },
-          async () => ({
-            ...(await engine.openDecision({ step, from })),
-            openedAt: Date.now(),
-          })
+          async () =>
+            await engine.openDecision({ step, from, description, timeout })
         );
-        const deadline = openedAt + timeout;
         // Asking is a side effect, which a dry run doesn't run, so when it
         // finished is a step of its own rather than the ask step's result.
-        const askPerson = async (reminder: boolean): Promise<number> => {
+        const askPeople = async (reminder: boolean): Promise<number> => {
           const askStep = `${step}#${reminder ? "remind" : "ask"}`;
           await engine.do(
             askStep,
             { sideEffect: true, input: { from, reminder } },
             async () => {
               await ask({
-                link,
+                recipients: await engine.decisionRecipients(decision, reminder),
                 reminder,
                 idempotencyKey: idempotencyKeyOf(engine, askStep),
               });
@@ -673,45 +693,42 @@ const createRunner = (
         const waitForAnswer = async (
           waitStep: string,
           since: number,
-          until: number
-        ): Promise<EngineEvent> =>
-          until > since
-            ? await engine.waitForEvent(waitStep, {
-                type: eventType,
-                timeout: until - since,
-              })
-            : { received: false };
+          until: number,
+          last: boolean
+        ): Promise<EngineDecision> =>
+          await engine.waitForDecision(waitStep, {
+            decision,
+            timeout: Math.max(until - since, 0),
+            last,
+          });
 
-        const askedAt = await askPerson(false);
+        const askedAt = await askPeople(false);
         const remindAt =
           remindAfter === undefined ? undefined : askedAt + remindAfter;
         const reminds = remindAt !== undefined && remindAt < deadline;
-        let event = await waitForAnswer(
+        let answer = await waitForAnswer(
           `${step}#answer`,
           askedAt,
-          reminds ? remindAt : deadline
+          reminds ? remindAt : deadline,
+          !reminds
         );
-        if (!event.received && reminds) {
-          const remindedAt = await askPerson(true);
-          event = await waitForAnswer(
+        if (!answer.answered && reminds) {
+          const remindedAt = await askPeople(true);
+          answer = await waitForAnswer(
             `${step}#answer-after-reminder`,
             remindedAt,
-            deadline
+            deadline,
+            true
           );
         }
-        if (!event.received) {
-          return { outcome: "timedOut" };
+        if (!answer.answered) {
+          return { timedOut: true };
         }
-        const answer = parseOrThrow(
-          decisionAnswerSchema,
-          event.payload,
-          "workflow.invalid_event",
-          `Answer to decision "${name}"`
-        );
         return {
-          outcome: answer.approved ? "approved" : "rejected",
+          timedOut: false,
+          approved: answer.approved,
           by: answer.by,
-          ...(answer.comment === undefined ? {} : { comment: answer.comment }),
+          payload: answer.payload,
         };
       }),
 

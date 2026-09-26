@@ -1,5 +1,7 @@
 import type { AuditActor } from "@grasp-os/shared/audit";
+import { decidersSchema } from "@grasp-os/shared/decisions";
 import { isExpectedError } from "@grasp-os/shared/errors";
+import { identifierSchema } from "@grasp-os/shared/ids";
 import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -24,7 +26,19 @@ import type { AppAnswer, AppCallerInput } from "../app.ts";
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
 import { forSandbox, requireStepKey, runStubCall } from "../bindings.ts";
 import type { ConnectionGrant } from "../bindings.ts";
+import {
+  decisionEventType,
+  decisionOutcome,
+  decisionRecipients,
+  openDecision,
+} from "../decisions/decisions.ts";
+import type {
+  DecisionOutcome,
+  DecisionRecipient,
+} from "../decisions/decisions.ts";
 import { appHost } from "../durable-objects.ts";
+import { featureEnabled } from "../features.ts";
+import type { Feature } from "../features.ts";
 import { models } from "../models.ts";
 import { requireActivePerson } from "../permissions.ts";
 import type { Settled, StepError } from "./code.ts";
@@ -78,6 +92,34 @@ export interface RunStep {
  * workflow's never do, so workflow code can't replay one of them.
  */
 export const coreStepPrefix = "$grasp:";
+
+/**
+ * A kill switch for runs: with `feature` switched off, the run pauses here
+ * and goes on from here when resumed with it on. The dispatcher checks
+ * `workflows` before any step; a decision's wait checks `decisions`, so
+ * switching decisions off never lets a wait end in a timeout nobody could
+ * have prevented. The sleep only holds the execution while the pause
+ * lands; its name is new each time, as no execution comes back to it.
+ * Nothing in core resumes runs yet: once the flag is back on, paused
+ * instances must be resumed (the Workflows API or dashboard).
+ */
+export const pauseWhileSwitchedOff = async (
+  env: Env,
+  step: RunStep,
+  runId: RunId,
+  feature: Feature
+): Promise<void> => {
+  if (featureEnabled(env, feature)) {
+    return;
+  }
+  const instance = await env.WORKFLOWS.get(runId);
+  await instance.pause();
+  await step.sleep(
+    `${coreStepPrefix}switched-off:${crypto.randomUUID()}`,
+    365 * 86_400_000
+  );
+  throw new Error(`${feature} is switched off: the run is paused.`);
+};
 
 /** Core's own events start with this; a workflow can't wait for one. */
 export const coreEventPrefix = "grasp-";
@@ -138,7 +180,21 @@ const modelRequestSchema = z.object({
     .refine((schema) => JSON.stringify(schema).length <= maxSchemaLength),
 });
 
-const decisionSchema = z.object({ step: stepNameSchema, from: z.string() });
+const decisionSchema = z.object({
+  step: stepNameSchema,
+  from: decidersSchema,
+  description: z.string().min(1),
+  timeout: milliseconds,
+});
+
+const decisionWaitSchema = z.object({
+  decision: identifierSchema,
+  timeout: z
+    .int()
+    .min(0)
+    .max(365 * 86_400_000),
+  last: z.boolean(),
+});
 
 /** A state key, as the SDK allows one: never with the `:` storage uses. */
 const stateKeySchema = z.string().regex(/^[A-Za-z][\w-]{0,63}$/u);
@@ -619,11 +675,31 @@ export class RunHost extends RpcTarget {
    * key or none (`requireStepKey`).
    */
   #stepKey(): string {
+    return stepIdempotencyKey(this.#run.runId, this.#requireStep().step);
+  }
+
+  /**
+   * Pauses the run while decisions are switched off; the pause is the
+   * engine's, so the dispatcher hands it back to the engine as its own.
+   */
+  async #pauseWhileDecisionsOff(): Promise<void> {
+    await this.#engine(async () => {
+      await pauseWhileSwitchedOff(
+        this.#env,
+        this.#step,
+        this.#run.runId,
+        "decisions"
+      );
+    });
+  }
+
+  /** The step whose function runs now; refuses a call outside a step. */
+  #requireStep(): { step: string } {
     const running = this.#running;
     if (running === undefined) {
       throw workflowErrors.create("workflow.outside_step");
     }
-    return stepIdempotencyKey(this.#run.runId, running.step);
+    return running;
   }
 
   /**
@@ -680,27 +756,93 @@ export class RunHost extends RpcTarget {
   }
 
   /**
-   * Where the person answers a decision, and the event their answer comes
-   * as. Answering, and who may, is the decisions' part; the same step
-   * always gets the same answer here, so opening it again opens nothing new.
+   * Opens this run's decision for a step, inside that step, and answers
+   * its ID and deadline; the same step gets the same decision again, so
+   * opening it again opens nothing new (src/decisions/).
    */
-  openDecision(request: unknown): Settled<{ link: string; eventType: string }> {
-    const parsed = decisionSchema.safeParse(request);
-    if (!parsed.success) {
-      return {
-        ok: false,
-        error: forIsolate(workflowErrors.create("workflow.invalid")),
-      };
-    }
-    const { step } = parsed.data;
-    const { runId } = this.#run;
-    return {
-      ok: true,
-      value: {
-        link: `/workflows/runs/${encodeURIComponent(runId)}/decisions/${encodeURIComponent(step)}`,
-        eventType: `decision:${step}`,
-      },
-    };
+  async openDecision(
+    request: unknown
+  ): Promise<Settled<{ decision: string; deadline: number }>> {
+    return await settle(async () => {
+      this.#requireStep();
+      const { step, from, description, timeout } = checked(
+        decisionSchema,
+        request
+      );
+      return await openDecision(this.#env, this.#run, {
+        step,
+        from,
+        description,
+        timeout,
+      });
+    });
+  }
+
+  /**
+   * The people one of this run's open decisions asks now, each with a
+   * link of their own, inside a step (the one that asks them).
+   */
+  async decisionRecipients(
+    decision: unknown,
+    reminder: unknown
+  ): Promise<Settled<DecisionRecipient[]>> {
+    return await settle(async () => {
+      this.#requireStep();
+      return await decisionRecipients(
+        this.#env,
+        this.#run,
+        checked(identifierSchema, decision),
+        checked(z.boolean(), reminder)
+      );
+    });
+  }
+
+  /**
+   * Waits up to `timeout` for an answer to one of this run's decisions,
+   * and answers how it stands then, read from the decision itself: the
+   * event that wakes the run carries nothing it takes. With `last`, a
+   * decision still open is closed, timed out, unless an answer lands
+   * first. An answer that came before the wait began is taken at once.
+   * While decisions are switched off, the run pauses instead of waiting,
+   * and instead of closing a decision nobody could answer meanwhile.
+   */
+  async waitForDecision(
+    name: unknown,
+    options: unknown
+  ): Promise<Settled<DecisionOutcome>> {
+    return await settle(async () => {
+      const step = checked(stepNameSchema, name);
+      const { decision, timeout, last } = checked(decisionWaitSchema, options);
+      await this.#pauseWhileDecisionsOff();
+      const before = await decisionOutcome(
+        this.#env,
+        this.#run,
+        decision,
+        false
+      );
+      if (before.answered) {
+        return before;
+      }
+      if (timeout > 0) {
+        try {
+          await this.#engine(
+            async () =>
+              await this.#step.waitForEvent(step, {
+                type: decisionEventType(decision),
+                timeout,
+              })
+          );
+        } catch (error) {
+          if (!isTimeout(error)) {
+            throw error;
+          }
+        }
+      }
+      if (last) {
+        await this.#pauseWhileDecisionsOff();
+      }
+      return await decisionOutcome(this.#env, this.#run, decision, last);
+    });
   }
 
   /** A value of the workflow's state, shared by all its runs. */

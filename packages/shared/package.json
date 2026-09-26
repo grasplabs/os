@@ -12,6 +12,7 @@
     "./audit-log": "./src/audit-log.ts",
     "./capability": "./src/capability.ts",
     "./connect": "./src/connect.ts",
+    "./decisions": "./src/decisions.ts",
     "./encoding": "./src/encoding.ts",
     "./errors": "./src/errors.ts",
     "./ids": "./src/ids.ts",

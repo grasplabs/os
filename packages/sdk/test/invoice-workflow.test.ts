@@ -156,7 +156,7 @@ describe("the sample invoice workflow", () => {
         name: "reviewer",
         kind: "person",
         label: "Reviewer",
-        default: "finance-team",
+        default: "team:finance",
         sensitive: false,
       },
       {
@@ -196,7 +196,14 @@ describe("the sample invoice workflow", () => {
     expect(result).toStrictEqual({ status: "booked", entry: "ledger-42" });
     expect(systems.asked).toStrictEqual([
       {
-        link: "https://grasp.test/decisions/review",
+        recipients: [
+          {
+            userId: "test-person",
+            name: "Test Person",
+            email: "test-person@grasp.test",
+            link: "https://grasp.test/decisions/review",
+          },
+        ],
         reminder: false,
         idempotencyKey: "run-1:review#ask",
       },
@@ -208,7 +215,11 @@ describe("the sample invoice workflow", () => {
     const { engine } = createFakeEngine({
       model: modelSays(800_000),
       decisions: {
-        review: { approved: false, by: "anna", comment: "Wrong PO" },
+        review: {
+          approved: false,
+          by: "anna",
+          payload: { comment: "Wrong PO" },
+        },
       },
     });
 

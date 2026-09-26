@@ -34,7 +34,7 @@ import {
 
 const params = {
   threshold: money({ label: "Above", currency: "EUR", default: 500_000 }),
-  reviewer: person({ label: "Reviewer", default: "finance-team" }),
+  reviewer: person({ label: "Reviewer", default: "team:finance" }),
   extractionModel: model({ label: "Model", default: "mistral-large" }),
   reminder: template({ label: "Reminder", default: "invoice-reminder" }),
 };

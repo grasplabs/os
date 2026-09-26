@@ -14,6 +14,7 @@ import { z } from "zod";
 
 import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
 import { actorOf, delegateActorOf } from "../audit.ts";
+import { derivedHmacKey } from "../derived-keys.ts";
 import { allowedCollections, recordRead } from "./access.ts";
 import type { Reader } from "./access.ts";
 import { readableCollection } from "./collections.ts";
@@ -231,25 +232,9 @@ const toHit = (row: z.infer<typeof hitRowSchema>): SearchHit => ({
  * ("ziekmelding jan de vries"), and the audit log can't be purged.
  */
 const queryKey = async (env: Env, terms: string[]): Promise<string> => {
-  const secret = await crypto.subtle.importKey(
-    "raw",
-    new TextEncoder().encode(env.BETTER_AUTH_SECRET),
-    "HKDF",
-    false,
-    ["deriveKey"]
-  );
-  const key = await crypto.subtle.deriveKey(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: new Uint8Array(),
-      info: new TextEncoder().encode("grasp-os knowledge search query key"),
-    },
-    secret,
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
+  const key = await derivedHmacKey(env, "grasp-os knowledge search query key", [
+    "sign",
+  ]);
   const normalized = terms
     .map((term) => term.normalize("NFKD").replaceAll(/\p{M}/gu, ""))
     .toSorted()

@@ -157,7 +157,11 @@ describe("test runs", () => {
   it("answer decisions and deliver events, skip sleeps, and time out any other wait at once", async () => {
     const approvals = workflow(
       "approvals",
-      { params: { approver: person({ label: "Approver", default: "anna" }) } },
+      {
+        params: {
+          approver: person({ label: "Approver", default: "person:anna" }),
+        },
+      },
       async (step, { params }) => {
         await step.sleep("cool-off", {
           description: "Wait",
@@ -194,8 +198,8 @@ describe("test runs", () => {
       status: "completed",
       output: {
         signed: { received: true, payload: { by: "bo" } },
-        first: { outcome: "approved", by: "cas" },
-        second: { outcome: "timedOut" },
+        first: { timedOut: false, approved: true, by: "cas", payload: null },
+        second: { timedOut: true },
       },
     });
     expect(run.sideEffects.map(({ name }) => name)).toStrictEqual([
@@ -251,7 +255,7 @@ describe("dry runs", () => {
     expect(run.report).toContain(
       [
         "Would have changed:",
-        '- review#ask {"from":"finance-team","reminder":false}',
+        '- review#ask {"from":"team:finance","reminder":false}',
         '- book {"invoice":"INV-7","total":800000}',
       ].join("\n")
     );

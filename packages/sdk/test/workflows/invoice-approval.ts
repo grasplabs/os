@@ -42,7 +42,7 @@ export const invoiceWorkflow = (systems: InvoiceSystems) =>
           default: 500_000,
           sensitive: true,
         }),
-        reviewer: person({ label: "Reviewer", default: "finance-team" }),
+        reviewer: person({ label: "Reviewer", default: "team:finance" }),
         extractionModel: model({
           label: "Extraction model",
           default: "mistral-large",
@@ -82,8 +82,11 @@ export const invoiceWorkflow = (systems: InvoiceSystems) =>
           timeout: "7 days",
           remindAfter: "2 days",
         });
-        if (decision.outcome !== "approved") {
-          return { status: decision.outcome };
+        if (decision.timedOut) {
+          return { status: "timedOut" } as const;
+        }
+        if (!decision.approved) {
+          return { status: "rejected" } as const;
         }
       }
 

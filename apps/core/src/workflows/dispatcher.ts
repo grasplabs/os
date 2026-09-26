@@ -13,12 +13,17 @@ import { z } from "zod";
 import { callApp } from "../app.ts";
 import { versionFiles } from "../apps.ts";
 import { runBindingsFor } from "../bindings.ts";
-import { featureEnabled } from "../features.ts";
 import { requireActivePerson } from "../permissions.ts";
 import type { WorkContext } from "../restricted.ts";
 import { loadRun } from "./code.ts";
 import type { Settled, StepError } from "./code.ts";
-import { coreStepPrefix, fromIsolate, RunHost, settle } from "./host.ts";
+import {
+  coreStepPrefix,
+  fromIsolate,
+  pauseWhileSwitchedOff,
+  RunHost,
+  settle,
+} from "./host.ts";
 import type { FailedStep, HostedRun, RunStep } from "./host.ts";
 import {
   actFor,
@@ -176,31 +181,6 @@ const isStopping = async (env: Env, runId: RunId): Promise<boolean> => {
   return stoppingStatuses.has(status);
 };
 
-/**
- * The kill switch: with workflows switched off, a run that starts or
- * resumes pauses at once, before any step, and goes on when resumed with
- * workflows on. The sleep only holds the execution while the pause lands;
- * its name is new each time, as no execution comes back to it. Nothing in
- * core resumes them yet: once the flag is back on, paused instances must be
- * resumed (the Workflows API or dashboard).
- */
-const pauseWhileSwitchedOff = async (
-  env: Env,
-  step: RunStep,
-  runId: RunId
-): Promise<void> => {
-  if (featureEnabled(env, "workflows")) {
-    return;
-  }
-  const instance = await env.WORKFLOWS.get(runId);
-  await instance.pause();
-  await step.sleep(
-    `${coreStepPrefix}switched-off:${crypto.randomUUID()}`,
-    365 * 86_400_000
-  );
-  throw new Error("Workflows are switched off: the run is paused.");
-};
-
 /** The run's App, as a context for its restricted mode. */
 const contextOf = (app: AppId, runId: RunId): WorkContext => ({
   type: "run",
@@ -231,7 +211,7 @@ const runWorkflow = async (
   if (row.status === "cancelled" || row.status === "failed") {
     throw new Error(`Run ${runId} has ended: ${row.status}`);
   }
-  await pauseWhileSwitchedOff(env, step, runId);
+  await pauseWhileSwitchedOff(env, step, runId, "workflows");
   // The latest error of the engine's own: the one to end an execution the
   // engine is stopping with.
   let engineError: { error: unknown } | undefined;

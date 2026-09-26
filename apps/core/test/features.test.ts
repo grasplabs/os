@@ -32,6 +32,7 @@ const callsWith = async (features?: unknown) => {
     outcome(session.knowledge.listCollections()),
     outcome(session.connections.list()),
     outcome(session.workflows.list(crypto.randomUUID())),
+    outcome(session.decisions.get(crypto.randomUUID())),
     outcome(session.screens.version("app")),
     outcome(session.members.list()),
     outcome(session.audit.verify()),
@@ -50,6 +51,7 @@ describe("feature flags", () => {
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
+      "feature.disabled",
       "ok",
     ]);
   });
@@ -59,6 +61,7 @@ describe("feature flags", () => {
       callsWith({ apps: true, permissions: false, unknown: true })
     ).resolves.toStrictEqual([
       "ok",
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -102,8 +105,22 @@ describe("feature flags", () => {
         "feature.disabled",
         "feature.disabled",
         "feature.disabled",
+        "feature.disabled",
         "ok",
       ]);
     }
+  });
+
+  it("stop decisions with the workflows kill switch, whose runs they belong to", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const coreEnv: Env = { ...env, FEATURES: { decisions: true } };
+    const { core } = await openRpc(admin.session, { coreEnv });
+    const { decisions } = core.authenticate();
+    await expect(
+      Promise.all([
+        outcome(decisions.get("decision")),
+        outcome(decisions.answer("decision", { approved: true })),
+      ])
+    ).resolves.toStrictEqual(["feature.disabled", "feature.disabled"]);
   });
 });

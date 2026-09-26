@@ -1,3 +1,4 @@
+import { decidersSchema } from "@grasp-os/shared/decisions";
 import { z } from "zod";
 
 /**
@@ -13,8 +14,11 @@ export const paramValueSchemas = {
   money: z.int(),
   number: z.number(),
   text: z.string(),
-  /** A person or a group of people. */
-  person: z.string().min(1).brand<"Person">(),
+  /**
+   * A person (`person:<user ID>`) or a group of people: everyone with a
+   * role (`role:admin`) or in a team (`team:<team ID>`).
+   */
+  person: decidersSchema.brand<"Person">(),
   /** When something happens, as a cron expression. */
   schedule: z.string().min(1).brand<"Schedule">(),
   /** A model offered by the model gateway. */
