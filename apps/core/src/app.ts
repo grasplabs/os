@@ -246,8 +246,11 @@ export class App extends DurableObject<Env> {
   /** How many times a call has read the current version. */
   #reads = 0;
 
-  /** The calls running now, by token. */
-  readonly #calls = new Map<string, AppCallerInput>();
+  /**
+   * The calls running now, by token, with the version their code runs on
+   * once it started.
+   */
+  readonly #calls = new Map<string, AppCallerInput & { version?: number }>();
 
   get #app(): AppId {
     return appIdSchema.parse(this.ctx.id.name);
@@ -286,6 +289,8 @@ export class App extends DurableObject<Env> {
       if (!this.#calls.has(token)) {
         throw appErrors.create("app.timed_out", { version, method });
       }
+      // What the App's stub calls in this call are audited with.
+      this.#calls.set(token, { ...caller, version });
       // Only the App's own methods: not what every stub has.
       if (method in Object.getPrototypeOf(running.facet)) {
         throw appErrors.create("app.method_invalid", { method });
@@ -415,15 +420,17 @@ export class App extends DurableObject<Env> {
 
   /**
    * Who a stub call acts for: the caller of the running call `token`
-   * names, and, for a workflow run's step, that step's idempotency key.
-   * For the App's stubs (app-bindings.ts) only.
+   * names, with the version of the code the call runs, and, for a
+   * workflow run's step, that step's idempotency key. For the App's stubs
+   * (app-bindings.ts) only. A call whose code hasn't started has handed
+   * its token to no one, so no stub call can come with it.
    */
   callerOf(token: string): {
     authority: Authority;
     idempotencyKey: string | undefined;
   } {
     const caller = this.#calls.get(token);
-    if (!caller) {
+    if (caller?.version === undefined) {
       throw appErrors.create("app.caller_invalid");
     }
     return {
@@ -431,6 +438,7 @@ export class App extends DurableObject<Env> {
         subject: { type: "app", appId: this.#app },
         onBehalfOf: caller.userId,
         mode: caller.mode,
+        appVersion: caller.version,
       },
       idempotencyKey: caller.idempotencyKey,
     };

@@ -63,7 +63,10 @@ export const ownerEventType = "grasp-owner-set";
 /** How long a paused run waits for an owner, or for workflows, at a time. */
 const pauseLimit = "365 days";
 
-/** Who a run acts for now: its person, or its App's owner. */
+/**
+ * Who a run acts for now: its person, or its App's owner; and the App
+ * version whose code it runs, for the audit log.
+ */
 const authorityOf = async (env: Env, row: RunRow): Promise<Authority> => {
   const app = appIdSchema.parse(row.appId);
   const { ownerId } = await appRecord(env, app);
@@ -71,6 +74,7 @@ const authorityOf = async (env: Env, row: RunRow): Promise<Authority> => {
     subject: { type: "app", appId: app },
     onBehalfOf: row.startedBy ?? ownerId,
     mode: "workflow",
+    appVersion: row.version,
   };
 };
 

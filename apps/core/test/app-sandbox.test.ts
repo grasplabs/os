@@ -15,6 +15,7 @@ import { appHost } from "../src/durable-objects.ts";
 import { sandbox } from "../src/sandbox.ts";
 import { buildServer } from "../src/screens.ts";
 import { outlook, release } from "./apps.ts";
+import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import {
   collectionWithNote,
@@ -484,6 +485,43 @@ describe("App server code", { timeout: 60_000 }, () => {
       afterRevoke: ["no binding", []],
       afterNewGrant: reached,
     });
+  });
+
+  it("is audited with the version whose code made each connection call", async () => {
+    const admin = await personApi("admin");
+    const app = await sampleApp(admin, "v1");
+    await granted(admin, outlook(app));
+    /** The versions on the App's connection calls in the log, once `count` are. */
+    const auditedVersions = async (count: number) =>
+      await vi.waitFor(async () => {
+        const events = await allEvents();
+        const calls = events.filter(
+          ({ action, actor }) =>
+            action === "connection.call" &&
+            actor.type === "app" &&
+            actor.appId === app
+        );
+        if (calls.length < count) {
+          throw new Error("Not every call is in the audit log yet");
+        }
+        return calls.map(({ detail }) => detail.appVersion);
+      }, 10_000);
+
+    await callApp(env, app, as(admin.userId), "mail");
+    const beforeRelease = await auditedVersions(1);
+    await release(admin, app, { "app/server.ts": serverCode("v2") });
+    await callApp(env, app, as(admin.userId), "mail");
+    // A workflow run's call into the App, with its step's key.
+    await callApp(
+      env,
+      app,
+      { userId: admin.userId, mode: "workflow", idempotencyKey: "run:step" },
+      "mail"
+    );
+    expect({
+      beforeRelease,
+      afterRelease: await auditedVersions(3),
+    }).toStrictEqual({ beforeRelease: [1], afterRelease: [1, 2, 2] });
   });
 
   it("makes no connection calls once it is in restricted mode", async () => {
