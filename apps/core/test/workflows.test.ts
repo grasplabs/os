@@ -1197,13 +1197,25 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
     await grantMail(admin, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "mailer");
     await finished(run.id);
+    // Each attempt is audited with the version whose code made it.
+    const auditedVersions = await vi.waitFor(async () => {
+      const events = await allEvents();
+      const calls = events.filter(
+        ({ action, target }) =>
+          action === "connection.call" && target?.id === mail.id
+      );
+      expect(calls.map(({ detail }) => detail.outcome)).toContain("ok");
+      return new Set(calls.map(({ detail }) => detail.appVersion));
+    });
 
     expect({
       run: await admin.api.workflows.status(run.id),
       server: await mail.did(),
+      auditedVersions,
     }).toMatchObject({
       run: { status: "completed", output: { messageId: "message-1" } },
       server: { calls: 1, sent: [invoiceMail] },
+      auditedVersions: new Set([1]),
     });
   });
 
