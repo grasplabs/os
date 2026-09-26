@@ -13,6 +13,7 @@ import type { AppCallerInput } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
 import { sandbox } from "../src/sandbox.ts";
 import { buildServer } from "../src/screens.ts";
+import { outlook, release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { outcome, signedInApi } from "./sign-in.ts";
 
@@ -176,18 +177,6 @@ const sampleFiles = (label: string): Record<string, string> => ({
 
 type Builder = Awaited<ReturnType<typeof personApi>>;
 
-/** Commits `files` as the App's next version and makes it current. */
-const release = async (
-  builder: Builder,
-  app: string,
-  files: Record<string, string | null>
-): Promise<number> => {
-  await builder.api.apps.files.write(app, files);
-  const { version } = await builder.api.apps.files.commit(app, "Release");
-  await builder.api.apps.versions.setCurrent(app, version);
-  return version;
-};
-
 /** A new App running the sample server code. */
 const sampleApp = async (builder: Builder, label = "v1"): Promise<AppId> => {
   const { id } = await builder.api.apps.create({ name: "Invoice desk" });
@@ -198,14 +187,6 @@ const sampleApp = async (builder: Builder, label = "v1"): Promise<AppId> => {
 const as = (userId: string): AppCallerInput => ({
   userId,
   mode: "interactive",
-});
-
-/** Outlook, as a connection the App may be given. */
-const outlook = (app: AppId, binding = "OUTLOOK"): PermissionRequest => ({
-  subject: { type: "app", appId: app },
-  object: { type: "connection", connectionId: "connection-outlook" },
-  actions: ["mail.list"],
-  binding,
 });
 
 /** Asks for and grants a permission; returns its ID. */

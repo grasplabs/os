@@ -19,6 +19,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { bindingsFor } from "../src/bindings.ts";
 import worker from "../src/index.ts";
 import { authorize } from "../src/permissions.ts";
+import { outlook } from "./apps.ts";
 import { connectionIn, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
 import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
@@ -40,14 +41,6 @@ const newApp = async (api: Api) => {
   const { id } = await api.apps.create({ name: `App ${unique()}` });
   return { type: "app" as const, appId: id };
 };
-
-/** Outlook, as a connection an App may be given. */
-const outlook = (subject: PermissionSubjectInput): PermissionRequest => ({
-  subject,
-  object: { type: "connection", connectionId: "connection-outlook" },
-  actions: ["mail.list"],
-  binding: "OUTLOOK",
-});
 
 const actingFor = (
   subject: PermissionSubjectInput,
@@ -97,7 +90,7 @@ describe("permissions", () => {
     const authority = actingFor(app, builder.userId);
 
     const before = await callThrough(authority, "OUTLOOK");
-    const requested = await builder.api.permissions.request(outlook(app));
+    const requested = await builder.api.permissions.request(outlook(app.appId));
     const whileRequested = await Promise.all([
       callThrough(authority, "OUTLOOK"),
       outcome(
@@ -126,7 +119,7 @@ describe("permissions", () => {
       const person = await permissionApi(role);
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
       const request = await admin.api.permissions.request({
-        ...outlook(app),
+        ...outlook(app.appId),
         binding: `OUTLOOK_${role.toUpperCase()}`,
       });
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
@@ -139,7 +132,7 @@ describe("permissions", () => {
     const user = await permissionApi("user");
     await expect(
       Promise.all([
-        outcome(user.api.permissions.request(outlook(app))),
+        outcome(user.api.permissions.request(outlook(app.appId))),
         outcome(user.api.permissions.list()),
       ])
     ).resolves.toStrictEqual(["role.forbidden", "role.forbidden"]);
@@ -154,7 +147,7 @@ describe("permissions", () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);
     const authority = actingFor(app, admin.userId);
-    const { id } = await admin.api.permissions.request(outlook(app));
+    const { id } = await admin.api.permissions.request(outlook(app.appId));
     await admin.api.permissions.grant(id);
 
     // A running App or workflow keeps the env it was given.
@@ -181,7 +174,7 @@ describe("permissions", () => {
     const authority = actingFor(app, admin.userId);
     const grant = async (binding: string) => {
       const { id } = await admin.api.permissions.request({
-        ...outlook(app),
+        ...outlook(app.appId),
         binding,
       });
       return await admin.api.permissions.grant(id);
@@ -199,7 +192,7 @@ describe("permissions", () => {
   it("belong to their subject alone: not another App, not an agent with the same ID", async () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);
-    const { id } = await admin.api.permissions.request(outlook(app));
+    const { id } = await admin.api.permissions.request(outlook(app.appId));
     await admin.api.permissions.grant(id);
     const others: PermissionSubjectInput[] = [
       { type: "agent", agentId: app.appId },
@@ -219,7 +212,7 @@ describe("permissions", () => {
             authorize(
               env,
               actingFor(other, admin.userId),
-              permissionObjectSchema.parse(outlook(app).object),
+              permissionObjectSchema.parse(outlook(app.appId).object),
               "mail.list",
               id
             )
@@ -290,7 +283,7 @@ describe("permissions", () => {
     const admin = await permissionApi("admin");
     const builder = await permissionApi("builder");
     const app = await newApp(admin.api);
-    const { id } = await admin.api.permissions.request(outlook(app));
+    const { id } = await admin.api.permissions.request(outlook(app.appId));
     await admin.api.permissions.grant(id);
     const authority = actingFor(app, builder.userId);
     const held = await envOf(authority);
@@ -311,9 +304,9 @@ describe("permissions", () => {
       const { id } = await admin.api.permissions.request(request);
       return await admin.api.permissions.grant(id);
     };
-    await grant(outlook(app));
-    await admin.api.permissions.request({ ...outlook(app), binding: "ASKED" });
-    const gone = await grant({ ...outlook(app), binding: "GONE" });
+    await grant(outlook(app.appId));
+    await admin.api.permissions.request(outlook(app.appId, "ASKED"));
+    const gone = await grant(outlook(app.appId, "GONE"));
     await admin.api.permissions.revoke(gone.id);
     const policies = await admin.api.knowledge.createCollection({
       name: `Policies ${unique()}`,
@@ -325,10 +318,8 @@ describe("permissions", () => {
       actions: ["read"],
       binding: "POLICIES",
     });
-    await grant({
-      ...outlook(await newApp(admin.api)),
-      binding: "SOMEONE_ELSES",
-    });
+    const other = await newApp(admin.api);
+    await grant(outlook(other.appId, "SOMEONE_ELSES"));
 
     const bindings = await envOf(actingFor(app, admin.userId));
     expect(Object.keys(bindings)).toStrictEqual(["OUTLOOK", "POLICIES"]);
@@ -341,8 +332,8 @@ describe("permissions", () => {
       const { id } = await admin.api.permissions.request(request);
       return await admin.api.permissions.grant(id);
     };
-    await grant(outlook(app));
-    const taken = await grant({ ...outlook(app), binding: "LATER_TAKEN" });
+    await grant(outlook(app.appId));
+    const taken = await grant(outlook(app.appId, "LATER_TAKEN"));
     // A release that makes the name one of core's own, after it was granted.
     await env.DB.prepare("UPDATE permissions SET binding = 'DB' WHERE id = ?")
       .bind(taken.id)
@@ -359,14 +350,14 @@ describe("permissions", () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);
     const requests: PermissionRequest[] = [
-      { ...outlook(app), binding: "__proto__" },
-      { ...outlook(app), binding: "constructor" },
-      { ...outlook(app), binding: "outlook" },
+      outlook(app.appId, "__proto__"),
+      outlook(app.appId, "constructor"),
+      outlook(app.appId, "outlook"),
       // Core's own bindings.
-      { ...outlook(app), binding: "DB" },
-      { ...outlook(app), binding: "CONNECT" },
-      { ...outlook(app), actions: [] },
-      { ...outlook(app), actions: ["mail.list", "mail.list"] },
+      outlook(app.appId, "DB"),
+      outlook(app.appId, "CONNECT"),
+      { ...outlook(app.appId), actions: [] },
+      { ...outlook(app.appId), actions: ["mail.list", "mail.list"] },
       {
         subject: app,
         object: { type: "collection", collectionId: "c" },
@@ -399,7 +390,7 @@ describe("permissions", () => {
       binding: "INVOICES",
     });
     const refused = await Promise.all(
-      [outlook(missing), workflowOf(missing.appId)].map(
+      [outlook(missing.appId), workflowOf(missing.appId)].map(
         async (request) => await outcome(admin.api.permissions.request(request))
       )
     );
@@ -426,20 +417,20 @@ describe("permissions", () => {
   it("keep binding names unique while they're live", async () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);
-    const first = await admin.api.permissions.request(outlook(app));
+    const first = await admin.api.permissions.request(outlook(app.appId));
     await expect(
-      outcome(admin.api.permissions.request(outlook(app)))
+      outcome(admin.api.permissions.request(outlook(app.appId)))
     ).resolves.toBe("permission.conflict");
     await admin.api.permissions.revoke(first.id);
     await expect(
-      outcome(admin.api.permissions.request(outlook(app)))
+      outcome(admin.api.permissions.request(outlook(app.appId)))
     ).resolves.toBe("ok");
   });
 
   it("keep their audit event when the audit queue is down, and send it later, once", async () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);
-    const { id } = await admin.api.permissions.request(outlook(app));
+    const { id } = await admin.api.permissions.request(outlook(app.appId));
 
     const down = vi
       .spyOn(env.AUDIT_QUEUE, "send")
@@ -467,7 +458,7 @@ describe("permissions", () => {
   it("keep sending audit events past one that can't be sent or read", async () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);
-    const { id } = await admin.api.permissions.request(outlook(app));
+    const { id } = await admin.api.permissions.request(outlook(app.appId));
     // A stored event that isn't JSON, older than anything else waiting.
     await env.DB.prepare(
       "INSERT INTO audit_outbox (id, event, created_at) VALUES (?, ?, 0)"
@@ -516,7 +507,7 @@ describe("permissions", () => {
     const app = await newApp(admin.api);
     let id = "";
     const events = await auditedDuring(async () => {
-      ({ id } = await builder.api.permissions.request(outlook(app)));
+      ({ id } = await builder.api.permissions.request(outlook(app.appId)));
       await admin.api.permissions.grant(id);
       await admin.api.permissions.revoke(id);
       // Revoking again changes nothing, so it records nothing.

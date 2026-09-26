@@ -305,6 +305,6 @@ export const signedInWithRole = async (idp: Idp, role: Role) => {
 /** Someone signed in with `role`, and their API, on a connection of their own. */
 export const signedInApi = async (idp: Idp, role: Role) => {
   const person = await signedInWithRole(idp, role);
-  const { core } = await openRpc(person.session);
-  return { ...person, api: core.authenticate() };
+  const { core, closed } = await openRpc(person.session);
+  return { ...person, core, closed, api: core.authenticate() };
 };

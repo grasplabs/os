@@ -1,14 +1,11 @@
 import { kitModuleName, screenRuntime } from "@grasp-os/compiler";
-import { appErrors } from "@grasp-os/shared/apps";
-import { authErrors, featureErrors } from "@grasp-os/shared/errors";
-import { roleErrors } from "@grasp-os/shared/roles";
 import type { Role } from "@grasp-os/shared/roles";
-import { screenErrors } from "@grasp-os/shared/screens";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { callbacksPerConnection } from "../src/screens-rpc.ts";
+import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import { openRpc, signedInWithRole } from "./sign-in.ts";
+import { openRpc, outcome, signedInApi } from "./sign-in.ts";
 
 // What the frontend's screen host reaches for an App's screens, taken from
 // the side of the screen: App code nobody reviewed line by line, which the
@@ -122,48 +119,15 @@ const sampleFiles = {
 };
 
 /** A signed-in person's API, on a connection of their own. */
-const personApi = async (role: Role) => {
-  const person = await signedInWithRole(idp, role);
-  const { core, closed } = await openRpc(person.session);
-  return { ...person, core, closed, api: core.authenticate() };
-};
+const personApi = async (role: Role) => await signedInApi(idp, role);
 
 type Person = Awaited<ReturnType<typeof personApi>>;
-
-/** Commits `files` as the App's next version and makes it current. */
-const release = async (
-  builder: Person,
-  app: string,
-  files: Record<string, string>
-): Promise<number> => {
-  await builder.api.apps.files.write(app, files);
-  const { version } = await builder.api.apps.files.commit(app, "Release");
-  await builder.api.apps.versions.setCurrent(app, version);
-  return version;
-};
 
 /** A new App running the sample, released by `builder`. */
 const sampleApp = async (builder: Person): Promise<string> => {
   const { id } = await builder.api.apps.create({ name: "Notes" });
   await release(builder, id, sampleFiles);
   return id;
-};
-
-/** The code a promise was refused with, or "ok" if it wasn't. */
-const outcome = async (promise: Promise<unknown>): Promise<string> => {
-  try {
-    await promise;
-    return "ok";
-  } catch (error) {
-    return (
-      screenErrors.codeOf(error) ??
-      appErrors.codeOf(error) ??
-      roleErrors.codeOf(error) ??
-      authErrors.codeOf(error) ??
-      featureErrors.codeOf(error) ??
-      String(error)
-    );
-  }
 };
 
 /**
