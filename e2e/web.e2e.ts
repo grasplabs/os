@@ -91,13 +91,18 @@ test("an admin changes a member's role, and the controls wait for the list to sh
   await role.click();
   await page.getByRole("option", { name: "builder" }).click();
   // The change went through; the list that shows it hasn't come back yet.
+  // The controls went off before the change was sent, so they're read
+  // right away, then the list is let through, well before the page would
+  // give up on it.
   await expect.poll(gate.stalled).toBe(1);
-  await expect(role).toBeDisabled();
-  await expect(
-    page.getByRole("button", { name: `Remove ${who}`, exact: true })
-  ).toBeDisabled();
-
+  const whileRefreshing = {
+    role: await role.isDisabled(),
+    remove: await page
+      .getByRole("button", { name: `Remove ${who}`, exact: true })
+      .isDisabled(),
+  };
   gate.release();
+  expect(whileRefreshing).toStrictEqual({ role: true, remove: true });
   await expect(role).toBeEnabled();
   await expect(role).toContainText("builder");
 });
