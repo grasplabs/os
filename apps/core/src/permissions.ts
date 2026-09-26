@@ -481,14 +481,13 @@ export const grantedPermissions = async (
 /**
  * The permission check. Every server path that lets an App or agent touch a
  * connection, a collection or a workflow calls it first, on every call:
- * the person it acts for is still a member, and an active permission of
- * that exact subject covers the object and allows the action. A permission
- * for a whole connection covers each resource in it; one for a resource
- * covers only that resource. With `permissionId` (a stub's own permission),
- * only that permission counts, so revoking it stops its stubs even when
- * another permission covers the same thing. Returns the permission that
- * allows it, and throws `permission.denied` or `permission.person_inactive`
- * otherwise.
+ * the person it acts for is still a member, and `permissionId` (the
+ * permission the stub was built from) is active, of that exact subject,
+ * covers the object and allows the action. Only that permission counts, so
+ * revoking it stops its stubs even when another permission covers the same
+ * thing. A permission for a whole connection covers each resource in it;
+ * one for a resource covers only that resource. Throws `permission.denied`
+ * or `permission.person_inactive` otherwise.
  *
  * It doesn't intersect the grant with the person's own access (R5): connect
  * does that for personal connections, and the Knowledge queries for
@@ -499,8 +498,8 @@ export const authorize = async (
   authority: Authority,
   object: PermissionObject,
   action: string,
-  permissionId?: PermissionId
-): Promise<PermissionId> => {
+  permissionId: PermissionId
+): Promise<void> => {
   await requireActivePerson(env, authority);
   const { objectType, objectId, resource } = objectColumns(object);
   const rows = await drizzle(env.DB)
@@ -510,9 +509,7 @@ export const authorize = async (
       and(
         ofSubject(authority.subject),
         eq(permissions.status, "active"),
-        permissionId === undefined
-          ? undefined
-          : eq(permissions.id, permissionId),
+        eq(permissions.id, permissionId),
         eq(permissions.objectType, objectType),
         eq(permissions.objectId, objectId),
         resource === null
@@ -526,5 +523,4 @@ export const authorize = async (
   if (!allowing) {
     throw permissionErrors.create("permission.denied", { action });
   }
-  return permissionIdSchema.parse(allowing.id);
 };

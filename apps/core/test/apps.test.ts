@@ -1,9 +1,11 @@
 import { appLimits } from "@grasp-os/shared/app-limits";
 import { appErrors } from "@grasp-os/shared/apps";
+import { internalErrors } from "@grasp-os/shared/errors";
 import type { Role } from "@grasp-os/shared/roles";
 import { roleErrors } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
+import { z } from "zod";
 
 import { mockIdp } from "./idp.ts";
 import { auditedDuring, openRpc, signedInWithRole } from "./sign-in.ts";
@@ -30,7 +32,29 @@ const outcome = async (promise: Promise<unknown>): Promise<string> => {
     await promise;
     return "ok";
   } catch (error) {
-    return appErrors.codeOf(error) ?? roleErrors.codeOf(error) ?? String(error);
+    return (
+      appErrors.codeOf(error) ??
+      roleErrors.codeOf(error) ??
+      internalErrors.codeOf(error) ??
+      String(error)
+    );
+  }
+};
+
+const refusalSchema = z.object({
+  details: z.object({ issues: z.array(z.string()) }),
+});
+
+/** The issues an `app.invalid` gives, joined, or "ok" if it wasn't refused. */
+const issuesOf = async (promise: Promise<unknown>): Promise<string> => {
+  try {
+    await promise;
+    return "ok";
+  } catch (error) {
+    const refusal = refusalSchema.safeParse(error);
+    return refusal.success
+      ? refusal.data.details.issues.join("; ")
+      : (appErrors.codeOf(error) ?? String(error));
   }
 };
 
@@ -122,6 +146,103 @@ describe("App code", () => {
     await expect(outcome(apps.files.commit(app.id, "Same"))).resolves.toBe(
       "app.nothing_to_commit"
     );
+  });
+
+  it("empties the working copy of what a commit took", async () => {
+    const { apps } = await appsApi("builder");
+    const app = await newApp(apps);
+    await commit(apps, app.id, first);
+    const left = await env.DB.prepare(
+      "SELECT count(*) AS count FROM app_working_files WHERE app_id = ?"
+    )
+      .bind(app.id)
+      .first("count");
+    expect(left).toBe(0);
+  });
+
+  it("fails loudly when a version's files are missing or damaged", async () => {
+    const { apps } = await appsApi("builder");
+    const app = await newApp(apps);
+    const version = await commit(apps, app.id, first);
+    const key = `apps/${app.id}/trees/${version.tree}.json`;
+    const object = await env.FILES.get(key);
+    const stored = (await object?.text()) ?? "";
+
+    await env.FILES.put(key, stored.replace("Inbox", "Outbox"));
+    const damaged = await outcome(apps.files.read(app.id, 1));
+    await env.FILES.delete(key);
+    const missing = await outcome(apps.files.read(app.id, 1));
+    expect({ damaged, missing }).toStrictEqual({
+      damaged: "internal.unexpected",
+      missing: "internal.unexpected",
+    });
+  });
+
+  it("refuses paths that can't both exist: a file and its folder, or names differing only in case", async () => {
+    const { apps } = await appsApi("builder");
+    const app = await newApp(apps);
+    await apps.files.write(app.id, { "components/card.tsx": "x" });
+    const refusals: Record<string, string | null>[] = [
+      { components: "x" },
+      { "components/card.tsx/x.ts": "x" },
+      { "Components/Card.tsx": "x" },
+      { "Components/list.tsx": "x" },
+      { "a/b.ts": "x", a: "x" },
+    ];
+    const outcomes: string[] = [];
+    // One after another, so no write sees another's files.
+    for (const changes of refusals) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential by design
+      outcomes.push(await issuesOf(apps.files.write(app.id, changes)));
+    }
+    // Replacing the file with a folder of its name, in one write, is fine.
+    outcomes.push(
+      await issuesOf(
+        apps.files.write(app.id, {
+          "components/card.tsx": null,
+          "components/card.tsx/index.ts": "x",
+        })
+      )
+    );
+    expect(outcomes).toStrictEqual([
+      "components: A file and a folder of the same name, with components/card.tsx",
+      "components/card.tsx/x.ts: A file and a folder of the same name, with components/card.tsx",
+      "Components/Card.tsx: Differs only in case from components/card.tsx",
+      "Components/list.tsx: Differs only in case from components/card.tsx",
+      "a/b.ts: A file and a folder of the same name, with a",
+      "ok",
+    ]);
+  });
+
+  it("still takes other writes to an App whose paths already collide", async () => {
+    const { apps, userId } = await appsApi("builder");
+    const app = await newApp(apps);
+    // Written before the check existed, straight into its working copy.
+    await env.DB.batch([
+      env.DB.prepare(
+        "UPDATE apps SET working_revision = 'earlier' WHERE id = ?"
+      ).bind(app.id),
+      ...["lib/a.ts", "Lib/b.ts"].map((path) =>
+        env.DB.prepare(
+          "INSERT INTO app_working_files (app_id, path, content, revision, written_by, written_at) VALUES (?, ?, 'x', 'earlier', ?, 0)"
+        ).bind(app.id, path, userId)
+      ),
+    ]);
+    const outcomes: string[] = [];
+    const writes: Record<string, string>[] = [
+      { "other.ts": "x" },
+      { "lib/a.ts": "y" },
+      { "LIB/c.ts": "x" },
+    ];
+    for (const changes of writes) {
+      // oxlint-disable-next-line no-await-in-loop -- sequential by design
+      outcomes.push(await issuesOf(apps.files.write(app.id, changes)));
+    }
+    expect(outcomes).toStrictEqual([
+      "ok",
+      "ok",
+      "LIB/c.ts: Differs only in case from Lib/b.ts",
+    ]);
   });
 
   it("commits the working copy once when two commits race", async () => {

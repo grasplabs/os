@@ -97,8 +97,8 @@ const collectionWithNote = async (owner: Person, input: CollectionInput) => {
 
 /** Asks for and grants `request`; returns the permission's ID. */
 const granted = async (admin: Person, request: PermissionRequest) => {
-  const { id } = await admin.api.requestPermission(request);
-  await admin.api.grantPermission(id);
+  const { id } = await admin.api.permissions.request(request);
+  await admin.api.permissions.grant(id);
   return id;
 };
 
@@ -245,7 +245,7 @@ describe("Apps and agents reading Knowledge", () => {
 
     // Nothing granted, only requested, or only to write: no way to read.
     const before = await envOf(agent, admin.userId, context);
-    const { id: permissionId } = await admin.api.requestPermission(
+    const { id: permissionId } = await admin.api.permissions.request(
       readCollection(agent, handbook.collectionId)
     );
     const whileRequested = await envOf(agent, admin.userId, context);
@@ -268,7 +268,7 @@ describe("Apps and agents reading Knowledge", () => {
     });
 
     // Granted one collection: that one, and no document of another.
-    await admin.api.grantPermission(permissionId);
+    await admin.api.permissions.grant(permissionId);
     const reader = readerIn(await envOf(agent, admin.userId, context));
     expect({
       own: await everyRead(reader, handbook.noteId),
@@ -293,7 +293,7 @@ describe("Apps and agents reading Knowledge", () => {
     });
 
     // Revoked: the stub it holds stops at its next call.
-    await admin.api.revokePermission(permissionId);
+    await admin.api.permissions.revoke(permissionId);
     await expect(everyRead(reader, handbook.noteId)).resolves.toStrictEqual(
       everyReadIs("permission.denied")
     );
@@ -351,10 +351,12 @@ describe("Apps and agents reading Knowledge", () => {
     // Nobody can be asked to give one, nor one that doesn't exist.
     const requests = await Promise.all([
       outcome(
-        admin.api.requestPermission(readCollection(agent, diary.collectionId))
+        admin.api.permissions.request(readCollection(agent, diary.collectionId))
       ),
       outcome(
-        admin.api.requestPermission(readCollection(agent, "no-such-collection"))
+        admin.api.permissions.request(
+          readCollection(agent, "no-such-collection")
+        )
       ),
     ]);
     // A grant that exists anyway reads nothing in a chat or an App, even

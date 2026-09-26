@@ -27,7 +27,7 @@ import { z } from "zod";
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { actorOf } from "./audit.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
-import { isUniqueViolation } from "./db/d1.ts";
+import { inList, isUniqueViolation } from "./db/d1.ts";
 
 // The App registry and each App's code. The registry, the versions and the
 // working copy (files written since the latest version) are rows in the
@@ -169,12 +169,6 @@ const findVersion = async (
   return row;
 };
 
-/**
- * An App's working copy: its latest version's files with the changes
- * written since over them. The version, the rows and the App's working
- * revision are read in one batch, so a commit landing in between can't
- * pair a new version with rows it already committed.
- */
 interface Size {
   files: number;
   /** Characters in all files together. */
@@ -189,6 +183,12 @@ const sizeOf = (files: ReadonlyMap<string, string>): Size => {
   return { files: files.size, length };
 };
 
+/**
+ * An App's working copy: its latest version's files with the changes
+ * written since over them. The version, the rows and the App's working
+ * revision are read in one batch, so a commit landing in between can't
+ * pair a new version with rows it already committed.
+ */
 const workingCopy = async (env: Env, app: AppId) => {
   const db = drizzle(env.DB);
   const [[latest], rows, [registered]] = await db.batch([
@@ -219,6 +219,55 @@ const workingCopy = async (env: Env, app: AppId) => {
     }
   }
   return { latest, rows, files, revision: registered?.revision ?? null };
+};
+
+/**
+ * `app.invalid` if two paths can't both exist on a disk: a file and a
+ * folder of the same name (`a` and `a/b.ts`), or names of files or folders
+ * that differ only in case (`App.ts` and `app.ts`, `components/` and
+ * `Components/`), which a case-insensitive file system, and whoever reads
+ * the code, can't tell apart. Only collisions with a path this write
+ * `added` count, as with the limits: an App whose files already collide
+ * can still be changed, and fixed.
+ */
+const checkPaths = (
+  paths: Iterable<string>,
+  added: ReadonlySet<string>
+): void => {
+  // Every name a path takes, as a file or a folder, by its lowercase form:
+  // the first spelling, and the path that took it. Paths that were there
+  // before come first, so a clash names the one the write adds.
+  const taken = new Map<
+    string,
+    { spelling: string; file: boolean; path: string }
+  >();
+  const issues = new Set<string>();
+  const ordered = [...paths].toSorted(
+    (a, b) => Number(added.has(a)) - Number(added.has(b)) || (a < b ? -1 : 1)
+  );
+  for (const path of ordered) {
+    const segments = path.split("/");
+    for (let depth = 1; depth <= segments.length; depth += 1) {
+      const spelling = segments.slice(0, depth).join("/");
+      const file = depth === segments.length;
+      const first = taken.get(spelling.toLowerCase());
+      if (first === undefined) {
+        taken.set(spelling.toLowerCase(), { spelling, file, path });
+      } else if (
+        (first.spelling !== spelling || first.file || file) &&
+        added.has(path)
+      ) {
+        issues.add(
+          first.file === file
+            ? `${path}: Differs only in case from ${first.path}`
+            : `${path}: A file and a folder of the same name, with ${first.path}`
+        );
+      }
+    }
+  }
+  if (issues.size > 0) {
+    throw appErrors.create("app.invalid", { issues: [...issues] });
+  }
 };
 
 /**
@@ -345,6 +394,11 @@ export const writeFiles = async (
   const changes = Object.entries(parse(fileChangesSchema, input));
   const { files, revision } = await workingCopy(env, appId);
   const before = sizeOf(files);
+  const added = new Set(
+    changes.flatMap(([path, content]) =>
+      content === null || files.has(path) ? [] : [path]
+    )
+  );
   for (const [path, content] of changes) {
     if (content === null) {
       files.delete(path);
@@ -353,6 +407,7 @@ export const writeFiles = async (
     }
   }
   checkLimits(files, before);
+  checkPaths(files.keys(), added);
 
   const db = drizzle(env.DB);
   const next = crypto.randomUUID();
@@ -411,7 +466,8 @@ export const commitFiles = async (
   if (tree === latest?.tree) {
     throw appErrors.create("app.nothing_to_commit");
   }
-  await env.FILES.put(treeKey(appId, tree), json);
+  // R2 checks the upload against its hash, so what's stored is what's named.
+  await env.FILES.put(treeKey(appId, tree), json, { sha256: tree });
 
   const row: VersionRow = {
     appId,
@@ -423,10 +479,9 @@ export const commitFiles = async (
     message: text,
     createdAt: new Date(),
   };
-  // Only the rows this commit read: a row written since has a newer revision.
-  const committed = JSON.stringify(
-    rows.map(({ path, revision }) => `${path}\u0000${revision}`)
-  );
+  // Only the rows this commit read: each write gives the rows it writes a
+  // new revision, so a row written since has one this commit didn't read.
+  const committed = [...new Set(rows.map(({ revision }) => revision))];
   const db = drizzle(env.DB);
   try {
     await auditedBatch(env, db, [
@@ -445,7 +500,7 @@ export const commitFiles = async (
         .where(
           and(
             eq(appWorkingFiles.appId, appId),
-            sql`${appWorkingFiles.path} || char(0) || ${appWorkingFiles.revision} IN (SELECT value FROM json_each(${committed}))`
+            inList(appWorkingFiles.revision, committed)
           )
         ),
     ]);
@@ -504,15 +559,11 @@ export const diffVersions = async (
 ): Promise<FileDiff[]> => {
   requireBuilder(by);
   const { id: appId } = await findApp(env, app);
-  const [before, after] = await Promise.all(
-    [from, to].map(async (version) => {
-      const row = await findVersion(env, appId, version);
-      return await readTree(env, appId, row.tree);
-    })
-  );
-  if (!(before && after)) {
-    throw new Error("Expected two trees");
-  }
+  const treeOf = async (version: unknown) => {
+    const { tree } = await findVersion(env, appId, version);
+    return await readTree(env, appId, tree);
+  };
+  const [before, after] = await Promise.all([treeOf(from), treeOf(to)]);
   const paths = [...new Set([...before.keys(), ...after.keys()])].toSorted();
   return paths.flatMap((path): FileDiff[] => {
     const old = before.get(path);

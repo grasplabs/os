@@ -227,8 +227,8 @@ const granted = async (
   admin: Builder,
   request: PermissionRequest
 ): Promise<string> => {
-  const { id } = await admin.api.requestPermission(request);
-  await admin.api.grantPermission(id);
+  const { id } = await admin.api.permissions.request(request);
+  await admin.api.permissions.grant(id);
   return id;
 };
 
@@ -288,8 +288,8 @@ describe("App server code", { timeout: 60_000 }, () => {
     const admin = await personApi("admin");
     const app = await sampleApp(admin);
     await granted(admin, outlook(app));
-    await admin.api.requestPermission(outlook(app, "ASKED"));
-    await admin.api.revokePermission(
+    await admin.api.permissions.request(outlook(app, "ASKED"));
+    await admin.api.permissions.revoke(
       await granted(admin, outlook(app, "GONE"))
     );
     const other = await sampleApp(admin);
@@ -451,7 +451,7 @@ describe("App server code", { timeout: 60_000 }, () => {
     const permission = await granted(admin, outlook(app));
     const whileGranted = await callApp(env, app, caller, "mail");
 
-    await admin.api.revokePermission(permission);
+    await admin.api.permissions.revoke(permission);
     const afterRevoke = await Promise.all([
       callApp(env, app, caller, "mail"),
       callApp(env, app, caller, "envNames"),

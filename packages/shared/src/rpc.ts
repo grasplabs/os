@@ -1,11 +1,7 @@
 import type { AppsApi } from "./apps.ts";
 import type { ConnectionsApi } from "./connect.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
-import type {
-  Permission,
-  PermissionRequest,
-  PermissionSubjectInput,
-} from "./permissions.ts";
+import type { PermissionsApi } from "./permissions.ts";
 import type { Role } from "./roles.ts";
 
 /** A way to sign in to this deployment, for the sign-in screen. */
@@ -32,22 +28,14 @@ export interface Identity {
 /**
  * What a signed-in person reaches. Every call checks the session again, so
  * one that was revoked or expired stops working at once, and the connection
- * closes.
+ * closes. Each feature is a namespace of its own (`session.apps.list()`),
+ * the same object on every access.
  */
 export interface SessionApi {
   /** The person behind the session, with their current role and teams. */
   whoami: () => Promise<Identity>;
-  /**
-   * Asks for a permission for an App or agent (a `PermissionRequest`);
-   * it allows nothing until an admin grants it. Admins and builders.
-   */
-  requestPermission: (request: PermissionRequest) => Promise<Permission>;
-  /** Grants a requested permission. Admins only. */
-  grantPermission: (id: string) => Promise<Permission>;
-  /** Revokes a permission; the next call that needs it is refused. Admins only. */
-  revokePermission: (id: string) => Promise<Permission>;
-  /** Every permission, or one App's or agent's. Admins and builders. */
-  listPermissions: (subject?: PermissionSubjectInput) => Promise<Permission[]>;
+  /** Permissions of Apps and agents. */
+  readonly permissions: PermissionsApi;
   /** The App registry and each App's code. Admins and builders. */
   readonly apps: AppsApi;
   /** Knowledge: collections, documents and their versions. */

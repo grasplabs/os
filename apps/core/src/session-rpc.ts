@@ -1,8 +1,3 @@
-import type {
-  Permission,
-  PermissionRequest,
-  PermissionSubjectInput,
-} from "@grasp-os/shared/permissions";
 import type { Identity, SessionApi } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
@@ -11,91 +6,64 @@ import { ConnectionsRpc } from "./connections.ts";
 import { requireFeature } from "./features.ts";
 import type { Feature } from "./features.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
-import {
-  grantPermission,
-  listPermissions,
-  requestPermission,
-  revokePermission,
-} from "./permissions.ts";
+import { PermissionsRpc } from "./permissions-rpc.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
 /**
- * What a signed-in person reaches over `/rpc`. It holds no identity: every
- * method runs through `withPerson`, which checks the session first and hands
- * over the identity that check returned, so a method can't reach the person
- * without the check, or use one kept from an earlier call.
+ * What a signed-in person reaches over `/rpc`. Every API here has the same
+ * form: an RpcTarget built once per session with core's env and a session
+ * check, holding no identity. Each method runs through `withPerson`, which
+ * checks the session first and hands over the identity that check returned,
+ * so a method can't reach the person without the check, or use one kept
+ * from an earlier call. A feature's namespace is created with its flag in
+ * the check and handed out as the same object every time. There's no base
+ * class: an RpcTarget's methods, protected ones too, can be called over
+ * RPC, so each keeps its env and check in private fields.
  */
 export class SessionRpc extends RpcTarget implements SessionApi {
-  readonly #env: Env;
   readonly #check: SessionCheck;
+  readonly #apps: AppsRpc;
+  readonly #knowledge: KnowledgeRpc;
+  readonly #permissions: PermissionsRpc;
+  readonly #connections: ConnectionsRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
-    this.#env = env;
     this.#check = check;
-  }
-
-  /**
-   * The session check, refused first while `feature` is switched off. Every
-   * call of a flagged API goes through it, so switching a feature off stops
-   * it at the next call.
-   */
-  #checkWith(feature: Feature): SessionCheck {
-    return async () => {
-      requireFeature(this.#env, feature);
-      return await this.#check();
-    };
+    /**
+     * The session check, refused first while `feature` is switched off, so
+     * switching a feature off stops its API at the next call.
+     */
+    const checkWith =
+      (feature: Feature): SessionCheck =>
+      async () => {
+        requireFeature(env, feature);
+        return await check();
+      };
+    this.#apps = new AppsRpc(env, checkWith("apps"));
+    this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
+    this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
+    this.#connections = new ConnectionsRpc(env, checkWith("connections"));
   }
 
   get apps(): AppsRpc {
-    return new AppsRpc(this.#env, this.#checkWith("apps"));
+    return this.#apps;
   }
 
-  /** Knowledge, whose every method checks the session again. */
   get knowledge(): KnowledgeRpc {
-    return new KnowledgeRpc(this.#env, this.#checkWith("knowledge"));
+    return this.#knowledge;
   }
 
-  /** Connected accounts, whose every method checks the session again. */
+  get permissions(): PermissionsRpc {
+    return this.#permissions;
+  }
+
   get connections(): ConnectionsRpc {
-    return new ConnectionsRpc(this.#env, this.#checkWith("connections"));
+    return this.#connections;
   }
 
   async whoami(): Promise<Identity> {
     return await withPerson(this.#check, (identity) => identity);
-  }
-
-  // Each takes what the client sent as it is: the permission functions
-  // validate it, and check the person's role, on every call.
-
-  async requestPermission(request: PermissionRequest): Promise<Permission> {
-    return await withPerson(
-      this.#checkWith("permissions"),
-      async (identity) => await requestPermission(this.#env, identity, request)
-    );
-  }
-
-  async grantPermission(id: string): Promise<Permission> {
-    return await withPerson(
-      this.#checkWith("permissions"),
-      async (identity) => await grantPermission(this.#env, identity, id)
-    );
-  }
-
-  async revokePermission(id: string): Promise<Permission> {
-    return await withPerson(
-      this.#checkWith("permissions"),
-      async (identity) => await revokePermission(this.#env, identity, id)
-    );
-  }
-
-  async listPermissions(
-    subject?: PermissionSubjectInput
-  ): Promise<Permission[]> {
-    return await withPerson(
-      this.#checkWith("permissions"),
-      async (identity) => await listPermissions(this.#env, identity, subject)
-    );
   }
 }
