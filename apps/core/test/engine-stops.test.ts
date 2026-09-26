@@ -48,6 +48,27 @@ const blocking = workflowFiles(
   { block: "done" }
 );
 
+/** The text the local engine stops an execution with, on a cancel. */
+const stopText = "Aborting engine: User called terminate";
+
+/**
+ * A workflow that fails with {@link stopText}: in a step it catches, and
+ * then itself (with input "fail"), after a wait timed out, so an engine
+ * call threw while nobody stopped the run.
+ */
+const lookalike = workflowFiles(
+  "lookalike",
+  `  await step.do("inside", { description: "Inside", retries: { limit: 0 } }, async () => {
+    throw new Error(${JSON.stringify(stopText)});
+  }).catch(() => null);
+  // Timed out: the engine throws, while nobody stopped the run.
+  await step.waitFor("never", { description: "Never", type: "never", timeout: "1 second" });
+  if (input === "fail") {
+    throw new Error(${JSON.stringify(stopText)});
+  }`,
+  { inside: null }
+);
+
 /** How often the App counted `name`. */
 const hitsOf = async (app: string, userId: string, name: string) =>
   await callApp(
@@ -89,6 +110,17 @@ const runActions = async (run: string): Promise<string[]> => {
     )
     .toSorted();
 };
+
+/** Once the audit log has the run failed; its actions then. */
+const failedActions = async (run: string): Promise<string[]> =>
+  await vi.waitFor(
+    async () => {
+      const actions = await runActions(run);
+      expect(actions).toContain("workflow.run.failed");
+      return actions;
+    },
+    { timeout: 10_000, interval: 100 }
+  );
 
 describe("engine stops", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);
@@ -161,44 +193,32 @@ describe("engine stops", { timeout: 60_000 }, () => {
     await resumed(run.id);
     await finished(run.id);
     const { status, output } = await builder.api.workflows.status(run.id);
-    const actions = await runActions(run.id);
 
+    // The step the pause stopped mid-way isn't recorded as failed: it
+    // completed, and the resumed execution replays it.
     expect({
       status,
       output,
-      failed: actions.includes("workflow.run.failed"),
-    }).toStrictEqual({ status: "completed", output: "done", failed: false });
+      audited: await runActions(run.id),
+    }).toStrictEqual({
+      status: "completed",
+      output: "done",
+      audited: [
+        "workflow.run.completed",
+        "workflow.run.started",
+        "workflow.step.completed $params",
+        "workflow.step.completed block",
+      ],
+    });
   });
 
   it("report a failure whose message reads like the engine stopping as a failure", async () => {
     const builder = await personApi("builder");
-    const stop = "Aborting engine: User called terminate";
-    const app = await appWith(
-      builder,
-      workflowFiles(
-        "lookalike",
-        `  await step.do("inside", { description: "Inside", retries: { limit: 0 } }, async () => {
-    throw new Error(${JSON.stringify(stop)});
-  }).catch(() => null);
-  // Timed out: the engine throws, while nobody stopped the run.
-  await step.waitFor("never", { description: "Never", type: "never", timeout: "1 second" });
-  if (input === "fail") {
-    throw new Error(${JSON.stringify(stop)});
-  }`,
-        { inside: null }
-      )
-    );
+    const app = await appWith(builder, lookalike);
     const run = await builder.api.workflows.start(app, "lookalike", "fail");
     // Not `finished`: the local engine takes a run's error of exactly that
     // text for its own stop, and leaves the instance running.
-    const audited = await vi.waitFor(
-      async () => {
-        const actions = await runActions(run.id);
-        expect(actions).toContain("workflow.run.failed");
-        return actions;
-      },
-      { timeout: 10_000, interval: 100 }
-    );
+    const audited = await failedActions(run.id);
     const { status, failure } = await builder.api.workflows.status(run.id);
 
     expect({
@@ -207,7 +227,7 @@ describe("engine stops", { timeout: 60_000 }, () => {
       audited,
     }).toStrictEqual({
       status: "failed",
-      message: stop,
+      message: stopText,
       audited: [
         "workflow.run.failed",
         "workflow.run.started",
@@ -215,5 +235,34 @@ describe("engine stops", { timeout: 60_000 }, () => {
         "workflow.step.failed inside",
       ],
     });
+  });
+
+  it("record a failure as failed when the engine's status can't be read", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, lookalike);
+    // Workflows can't say where the run is: core counts no stop, and the
+    // run's failure is recorded.
+    const unreachable = vi
+      .spyOn(env.WORKFLOWS, "get")
+      .mockRejectedValue(new Error("Workflows is unavailable"));
+    const logged = vi.spyOn(console, "error");
+    let audited: string[];
+    let logs: string;
+    let run: Awaited<ReturnType<typeof builder.api.workflows.start>>;
+    try {
+      run = await builder.api.workflows.start(app, "lookalike", "fail");
+      audited = await failedActions(run.id);
+      logs = JSON.stringify(logged.mock.calls);
+    } finally {
+      unreachable.mockRestore();
+      logged.mockRestore();
+    }
+    const { status } = await builder.api.workflows.status(run.id);
+
+    expect({
+      status,
+      failed: audited.includes("workflow.run.failed"),
+      statusUnknown: logs.includes("workflow.status_unknown"),
+    }).toStrictEqual({ status: "failed", failed: true, statusUnknown: true });
   });
 });
