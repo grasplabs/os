@@ -3,6 +3,7 @@ import {
   invalidCode,
   ToolError,
 } from "@grasp-os/connector-kit/connector";
+import { segment } from "@grasp-os/connector-kit/provider";
 import { z } from "zod";
 
 import {
@@ -15,7 +16,6 @@ import {
   nextPageOf,
   pageOf,
   pageSchema,
-  segment,
   topSchema,
   v1,
 } from "./graph.ts";

@@ -1,5 +1,6 @@
 import {
   egressHeader,
+  egressKind,
   hostSchema,
   httpMethods,
   pathMatches,
@@ -8,7 +9,11 @@ import {
   resourceCheckFor,
   routeSchema,
 } from "@grasp-os/connector-kit/manifest";
-import type { ResourceCheck, Route } from "@grasp-os/connector-kit/manifest";
+import type {
+  EgressKind,
+  ResourceCheck,
+  Route,
+} from "@grasp-os/connector-kit/manifest";
 import { log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
@@ -39,14 +44,17 @@ import { z } from "zod";
 // request of the same call already wrote, and can't cheaply tell connect's
 // side of the call.
 
-/** Largest provider response a connector may read, in bytes. */
+/**
+ * Largest provider response a connector may read, in bytes: room for the
+ * 4 MiB a tool reads (`checkReadable` in the connector kit).
+ */
 export const maxEgressResponseBytes = 10 * 1024 * 1024;
 
 /** The status a refused request gets: it never reached the provider. */
 const egressRefusedStatus = 403;
 
 /** The status a response gets when it redirected or was too large. */
-export const egressFailedStatus = 502;
+const egressFailedStatus = 502;
 
 /** The handler's own answers, passed on as they are (no provider's is). */
 const ownAnswers = new WeakSet<Response>();
@@ -57,11 +65,12 @@ const ownAnswers = new WeakSet<Response>();
  * every provider response, so a provider can't pass one off.
  */
 const egressAnswer = (
-  kind: "refused" | "failed" | "downloads-off",
+  kind: EgressKind,
   body: string | null = null
 ): Response => {
   const answer = new Response(body, {
-    status: kind === "refused" ? egressRefusedStatus : egressFailedStatus,
+    status:
+      kind === egressKind.refused ? egressRefusedStatus : egressFailedStatus,
     headers: { [egressHeader]: kind },
   });
   ownAnswers.add(answer);
@@ -136,7 +145,10 @@ const refuse = (
     host: call.hosts.includes(url.hostname) ? url.hostname : "other",
     method: knownMethods.has(method) ? method : "other",
   });
-  return egressAnswer("refused", "Refused by connect's egress allowlist");
+  return egressAnswer(
+    egressKind.refused,
+    "Refused by connect's egress allowlist"
+  );
 };
 
 /** The last `DOWNLOAD_HOSTS` value seen, and its hosts. */
@@ -260,7 +272,7 @@ const download = async (
     return response;
   } catch {
     log.warn("egress.failed", { ...logged, route: route.path });
-    return egressAnswer("failed");
+    return egressAnswer(egressKind.failed);
   }
 };
 
@@ -289,7 +301,7 @@ const throughDownload = async (
       host: from.hostname,
       method: "GET",
     });
-    return egressAnswer("downloads-off");
+    return egressAnswer(egressKind.downloadsOff);
   }
   const target = redirectTarget(route, downloadHosts, from, response);
   if (target === undefined) {
@@ -405,12 +417,12 @@ const checkResource = async (
     });
   } catch {
     log.warn("egress.failed", logged);
-    return egressAnswer("failed");
+    return egressAnswer(egressKind.failed);
   }
   log.info("egress.check", { ...logged, status: response.status });
   if (response.status >= 300 && response.status < 400) {
     await response.body?.cancel();
-    return egressAnswer("failed");
+    return egressAnswer(egressKind.failed);
   }
   if (!response.ok) {
     return capped(response);
@@ -423,7 +435,10 @@ const checkResource = async (
   }
   if (text === undefined || !namesResource(text, check)) {
     log.warn("egress.refused", { ...logged, reason: "check" });
-    return egressAnswer("refused", "Refused by connect's egress allowlist");
+    return egressAnswer(
+      egressKind.refused,
+      "Refused by connect's egress allowlist"
+    );
   }
   return undefined;
 };
@@ -498,7 +513,7 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
         method,
         route: route.path,
       });
-      return egressAnswer("failed");
+      return egressAnswer(egressKind.failed);
     }
     // Hosts, methods, declared paths and statuses only: never the path as
     // sent, the query, headers or bodies (R17, EG7).
@@ -543,7 +558,7 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
         host: url.hostname,
         method,
       });
-      return egressAnswer("failed");
+      return egressAnswer(egressKind.failed);
     }
     return capped(response);
   }

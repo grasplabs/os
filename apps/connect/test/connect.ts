@@ -87,14 +87,21 @@ export const capabilityFor = async (
   now?: number
 ): Promise<string> => await signCapability(key, authority, call, now);
 
-/** Makes `call` for `authority`, as core does. */
+/**
+ * Makes `call` for `authority`, as core does: with a capability that masks
+ * `mask`, the permission's masked fields, which the call itself never names.
+ */
 export const callAs = async (
   authority: Authority,
-  call: Call
+  call: Call,
+  { mask }: { mask?: readonly string[] } = {}
 ): Promise<ConnectResult> =>
   await exports.default.call({
     ...call,
-    capability: await capabilityFor(authority, call),
+    capability: await signCapability(env.CAPABILITY_SIGNING_KEY, authority, {
+      ...call,
+      mask,
+    }),
   });
 
 /** The code connect refused or failed with, or "ok" if it didn't. */

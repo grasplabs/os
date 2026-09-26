@@ -41,7 +41,7 @@ const encodedWords = (value: string): string => {
 };
 
 /** What a new message is made of. */
-export interface OutgoingMessage {
+interface OutgoingMessage {
   from: string;
   subject: string;
   body: string;
@@ -228,7 +228,7 @@ export const bodyOf = (
 };
 
 /** An address, as a header names it: `Name <address>`, or the address. */
-export interface Address {
+interface Address {
   name: string | null;
   address: string | null;
 }

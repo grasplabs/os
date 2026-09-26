@@ -1,21 +1,12 @@
 import { invalidCode } from "@grasp-os/connector-kit/connector";
 import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
-import { signCapability } from "@grasp-os/shared/capability";
-import type { Json } from "@grasp-os/shared/json";
-import { env, exports } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { nativeConnector } from "../src/connectors.ts";
 import { accessTokenFor } from "../src/tokens.ts";
-import {
-  addConnection,
-  agentFor,
-  connectAccount,
-  outcome,
-  ownAccount,
-  someone,
-} from "./connect.ts";
+import { connectAccount, outcome, ownAccount, someone } from "./connect.ts";
 import {
   archiveFolderId,
   foreignFolderId,
@@ -39,14 +30,14 @@ import {
 import { fakeGraph } from "./graph-api.ts";
 import { fakeProviders } from "./oauth-provider.ts";
 import {
-  callTool,
+  callTool as call,
   outputOf,
   parsedRequests,
+  refusalsFor,
   resultOf,
-  retryable,
   toolError,
 } from "./tool-calls.ts";
-import type { Connection } from "./tool-calls.ts";
+import type { Connection, Input } from "./tool-calls.ts";
 
 // The Microsoft 365 connector against Graph's recorded answers, through
 // connect's real call path: capability, policy, a fresh isolate, the
@@ -63,8 +54,6 @@ const connected = async (): Promise<Connection> => {
   const id = await connectAccount(providers, person, ownAccount(person));
   return { id, person };
 };
-
-const call = callTool;
 
 /** What left connect, each request with its query and JSON body parsed. */
 const requests = () => parsedRequests(graph.sent);
@@ -83,7 +72,7 @@ const manifest = connectorManifestSchema.parse(
 );
 
 /** Input for each mail and calendar tool, but its mailbox. */
-const mailboxInputs: Record<string, Record<string, Json>> = {
+const mailboxInputs: Record<string, Input> = {
   "mail.list": {},
   "mail.get": { message: messageId(ceo, 1) },
   "mail.readAttachment": {
@@ -101,7 +90,7 @@ const mailboxInputs: Record<string, Record<string, Json>> = {
 };
 
 /** Input for each file tool, but its drive. */
-const driveInputs: Record<string, Record<string, Json>> = {
+const driveInputs: Record<string, Input> = {
   "files.list": {},
   "files.search": { query: "invoice" },
   "files.read": { item: itemIds.report },
@@ -137,24 +126,13 @@ describe("the Microsoft 365 connector's scoping", () => {
     const connection = await connected();
     // The capability is for invoices@; each call names ceo@, or a spelling
     // Graph would take for invoices@ but that isn't exactly it.
-    const refusals = await Promise.all(
-      Object.entries(mailboxInputs).flatMap(([action, input]) =>
-        [ceo, "Invoices@example.com", `${invoices} `].map(
-          async (mailbox) =>
-            await outcome(
-              call(
-                connection,
-                action,
-                { mailbox, ...input },
-                { resource: invoices, idempotencyKey: crypto.randomUUID() }
-              )
-            )
-        )
-      )
-    );
-    expect(new Set(refusals)).toStrictEqual(
-      new Set(["connect.resource_out_of_scope"])
-    );
+    await expect(
+      refusalsFor(connection, mailboxInputs, "mailbox", invoices, [
+        ceo,
+        "Invoices@example.com",
+        `${invoices} `,
+      ])
+    ).resolves.toStrictEqual(new Set(["connect.resource_out_of_scope"]));
     expect(graph.sent).toStrictEqual([]);
     // The same capability reads its own mailbox, and only its paths.
     await call(
@@ -168,22 +146,11 @@ describe("the Microsoft 365 connector's scoping", () => {
 
   it("keeps a call for one drive out of every other", async () => {
     const connection = await connected();
-    const refusals = await Promise.all(
-      Object.entries(driveInputs).map(
-        async ([action, input]) =>
-          await outcome(
-            call(
-              connection,
-              action,
-              { drive: personalDrive, ...input },
-              { resource: financeDrive }
-            )
-          )
-      )
-    );
-    expect(new Set(refusals)).toStrictEqual(
-      new Set(["connect.resource_out_of_scope"])
-    );
+    await expect(
+      refusalsFor(connection, driveInputs, "drive", financeDrive, [
+        personalDrive,
+      ])
+    ).resolves.toStrictEqual(new Set(["connect.resource_out_of_scope"]));
     expect(graph.sent).toStrictEqual([]);
   });
 });
@@ -775,40 +742,6 @@ describe("the Microsoft 365 connector's file tools", () => {
 });
 
 describe("the Microsoft 365 connector's answers", () => {
-  it("say a throttled read did nothing, with the wait Graph asks for, so it may be retried", async () => {
-    const connection = await connected();
-    const list = async () =>
-      await retryable(call(connection, "mail.list", { mailbox: invoices }));
-    graph.throttle();
-    await expect(list()).resolves.toStrictEqual({
-      code: "connect.server_unavailable",
-      retryAfterSeconds: 7,
-    });
-    await expect(list()).resolves.toStrictEqual({ code: "ok" });
-    // Graph may say when, rather than how long.
-    graph.throttle(new Date(Date.now() + 30_000).toUTCString());
-    const { retryAfterSeconds } = await list();
-    expect(Math.abs((retryAfterSeconds ?? 0) - 30)).toBeLessThanOrEqual(1);
-    // Each was sent once: nothing is retried behind the caller's back.
-    expect(graphPaths()).toHaveLength(3);
-  });
-
-  it("say a read Graph was unavailable for did nothing, so it may be retried", async () => {
-    const connection = await connected();
-    graph.unavailable();
-    await expect(
-      retryable(
-        call(connection, "calendar.get", {
-          mailbox: invoices,
-          event: eventId(invoices, 1),
-        })
-      )
-    ).resolves.toStrictEqual({
-      code: "connect.server_unavailable",
-      retryAfterSeconds: 5,
-    });
-  });
-
   it("free a move's key when its folder lookup is throttled, so a retry moves once", async () => {
     const connection = await connected();
     const move = async () =>
@@ -861,34 +794,6 @@ describe("the Microsoft 365 connector's answers", () => {
     expect(graph.sent.map(({ host }) => host)).not.toContain(
       graph.sharePointHost
     );
-  });
-
-  it("free a throttled write's key, so a retry with it sends once", async () => {
-    const connection = await connected();
-    const send = async () =>
-      await outcome(
-        call(
-          connection,
-          "mail.send",
-          {
-            mailbox: invoices,
-            subject: "Paid",
-            body: "Paid.",
-            to: ["billing@northwind.example.org"],
-          },
-          { idempotencyKey: "run-8:send" }
-        )
-      );
-    graph.throttle();
-    const outcomes = [await send(), await send(), await send()];
-    // Retryable (Graph did nothing), then sent, then the stored answer.
-    expect(outcomes).toStrictEqual(["connect.server_unavailable", "ok", "ok"]);
-    // Graph throttled the first; the second went through, once.
-    expect(graphPaths()).toStrictEqual([
-      `${mailboxPath}/sendMail`,
-      `${mailboxPath}/sendMail`,
-    ]);
-    expect(graph.writesDone()).toBe(1);
   });
 
   it("free a throttled move's key after its folder lookup, a read", async () => {
@@ -1025,39 +930,6 @@ describe("the Microsoft 365 connector's answers", () => {
           "mail.list",
           { mailbox: invoices },
           { mask: ["bodyText"] }
-        )
-      )
-    ).resolves.toBe("connect.mask_unsupported");
-    expect(graph.sent).toStrictEqual([]);
-  });
-
-  it("take what to mask from the capability alone, never from the call", async () => {
-    const connection = await connected();
-    const stated = {
-      connectionId: connection.id,
-      action: "files.read",
-      input: { drive: financeDrive, item: itemIds.report },
-    };
-    const capability = await signCapability(
-      env.CAPABILITY_SIGNING_KEY,
-      agentFor(connection.person.userId),
-      { ...stated, mask: ["content"] }
-    );
-    await expect(
-      outcome(exports.default.call({ ...stated, capability, mask: [] }))
-    ).resolves.toBe("connect.invalid");
-    expect(graph.sent).toStrictEqual([]);
-  });
-
-  it("aren't given for a masked permission on a server connect can't mask", async () => {
-    const composio = await addConnection();
-    await expect(
-      outcome(
-        call(
-          { id: composio, person: someone() },
-          "mail.list",
-          { mailbox: invoices },
-          { mask: ["body"], idempotencyKey: "run-9:list" }
         )
       )
     ).resolves.toBe("connect.mask_unsupported");

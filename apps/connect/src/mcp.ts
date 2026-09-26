@@ -1,10 +1,10 @@
 import {
-  maxProvenanceItems,
+  mcpProtocolVersion,
   notPerformedMetaKey,
   provenanceMetaKey,
+  provenanceSchema,
   resourceMetaKey,
 } from "@grasp-os/connector-kit/manifest";
-import { auditIdentifierMaxLength } from "@grasp-os/shared/audit";
 import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
 
@@ -18,10 +18,10 @@ import { z } from "zod";
 // connector in its own isolate. One client makes one call: it starts a
 // fresh session and leaves nothing behind for the next call to trip over.
 
-/** The MCP revision connect speaks. */
-const protocolVersion = "2025-06-18";
-
-/** Largest response connect reads from an MCP server, by default, in bytes. */
+/**
+ * Largest response connect reads from an MCP server, by default, in bytes;
+ * a native connector's may be 16 MiB (`nativeResponseBytes`).
+ */
 const maxResponseBytes = 1024 * 1024;
 
 /** How long one call may take, all its MCP requests together. */
@@ -31,7 +31,7 @@ export const callTimeoutMs = 30_000;
 const maxToolPages = 20;
 
 /** Sends one request to the server. */
-export type McpFetch = (request: Request) => Promise<Response>;
+type McpFetch = (request: Request) => Promise<Response>;
 
 /** A tool, as far as connect decides anything by it. */
 export interface McpTool {
@@ -128,10 +128,7 @@ const callResultSchema = z.object({
   _meta: metaSchema,
 });
 
-const provenanceSchema = z
-  .array(z.string().min(1).max(auditIdentifierMaxLength))
-  .max(maxProvenanceItems)
-  .default([]);
+const reportedProvenanceSchema = provenanceSchema.default([]);
 
 const sseEventEnd = /\r?\n\r?\n/u;
 const sseLine = /\r?\n/u;
@@ -263,7 +260,7 @@ const toolOf = (
 
 const resultOf = (result: unknown): McpToolResult => {
   const parsed = callResultSchema.safeParse(result);
-  const provenance = provenanceSchema.safeParse(
+  const provenance = reportedProvenanceSchema.safeParse(
     parsed.data?._meta?.[provenanceMetaKey]
   );
   if (!parsed.success || !provenance.success) {
@@ -306,7 +303,7 @@ export const mcpServer = (
 ): McpServer => {
   let nextId = 1;
   let sessionId: string | null = null;
-  let version = protocolVersion;
+  let version = mcpProtocolVersion;
   let session: Promise<void> | undefined;
   // One deadline for the whole call, however many requests it takes.
   const deadline = AbortSignal.timeout(callTimeoutMs);
@@ -371,7 +368,7 @@ export const mcpServer = (
   const start = async (): Promise<void> => {
     const initialized = initializeResultSchema.safeParse(
       await request("initialize", {
-        protocolVersion,
+        protocolVersion: mcpProtocolVersion,
         capabilities: {},
         clientInfo: { name: "grasp-os-connect", version: "1.0.0" },
       })

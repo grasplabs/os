@@ -1,3 +1,4 @@
+import { maxRetryAfterSeconds } from "@grasp-os/connector-kit/manifest";
 import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import { connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectCall } from "@grasp-os/shared/connect";
@@ -17,7 +18,7 @@ import { checkResourceScope, didNothing, hasSideEffect } from "./policy.ts";
 
 const retryAfterSchema = z.object({
   error: z.object({
-    retryAfterSeconds: z.number().int().nonnegative().max(3600),
+    retryAfterSeconds: z.number().int().nonnegative().max(maxRetryAfterSeconds),
   }),
 });
 

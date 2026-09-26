@@ -3,9 +3,10 @@
  * connector reaches them through connect's egress, serving the recorded
  * answers in test/fixtures/graph.ts. Any other host takes whatever it is
  * sent, as an attacker's would. `throttle` makes Graph answer the next
- * requests with a 429.
+ * request with a 429, `throttleWrite` the next write.
  */
-import { beforeEach } from "vite-plus/test";
+import { egressHeader } from "@grasp-os/connector-kit/manifest";
+import { graphHost } from "@grasp-os/connector-microsoft-365/graph";
 import { z } from "zod";
 
 import {
@@ -31,31 +32,15 @@ import {
   spoofedId,
   throttled,
 } from "./fixtures/graph.ts";
-import { fakeInternet } from "./internet.ts";
-
-const graphHost = "graph.microsoft.com";
+import { fakeProvider, json, route as routeOn } from "./internet.ts";
+import type { ProviderRoute } from "./internet.ts";
 
 const users = String.raw`^/v1\.0/users/(?<mailbox>[^/]+)`;
 const drives = String.raw`^/v1\.0/drives/(?<drive>[^/]+)`;
 
-/** What a route's answer is made from: its path's parts, and the request. */
-interface Asked {
-  mailbox: string;
-  drive: string;
-  id: string;
-  query: URLSearchParams;
-  request: Request;
-}
+const parts = ["mailbox", "drive", "id"] as const;
 
-/** One of Graph's routes the connector uses, and how Graph answers it. */
-interface GraphRoute {
-  method: string;
-  path: RegExp;
-  answer: (asked: Asked) => Response | Promise<Response>;
-}
-
-const json = (body: unknown, status = 200): Response =>
-  Response.json(body, { status });
+type Part = (typeof parts)[number];
 
 /** The number in a message or event ID of the fixtures. */
 const numberOf = (id: string): number => Number(id.at(-2)) || 1;
@@ -65,10 +50,10 @@ const draftSchema = z.object({ subject: z.string() });
 const route = (
   method: string,
   path: string,
-  answer: GraphRoute["answer"]
-): GraphRoute => ({ method, path: new RegExp(`${path}$`, "u"), answer });
+  answer: ProviderRoute<Part>["answer"]
+): ProviderRoute<Part> => routeOn(graphHost, method, path, answer);
 
-const graphRoutes: GraphRoute[] = [
+const graphRoutes: ProviderRoute<Part>[] = [
   route(
     "GET",
     `${users}(?:/mailFolders/[^/]+)?/messages`,
@@ -81,7 +66,7 @@ const graphRoutes: GraphRoute[] = [
       // reaches the connector.
       return Response.json(notFound, {
         status: 404,
-        headers: { "grasp-egress": "refused" },
+        headers: { [egressHeader]: "refused" },
       });
     }
     const prefer = request.headers.get("prefer") ?? "";
@@ -139,29 +124,6 @@ const graphRoutes: GraphRoute[] = [
   ),
 ];
 
-/** Graph's answer to a request the connector sent. */
-const graphAnswer = async (request: Request, url: URL): Promise<Response> => {
-  for (const { method, path, answer } of graphRoutes) {
-    const found = method === request.method ? path.exec(url.pathname) : null;
-    if (found !== null) {
-      const part = (name: string): string =>
-        decodeURIComponent(found.groups?.[name] ?? "");
-      // oxlint-disable-next-line no-await-in-loop -- the one route that matched
-      return await answer({
-        mailbox: part("mailbox"),
-        drive: part("drive"),
-        id: part("id"),
-        query: url.searchParams,
-        request,
-      });
-    }
-  }
-  return json(
-    { error: { code: "BadRequest", message: "Unsupported request" } },
-    400
-  );
-};
-
 /** SharePoint's answer to a download: the file, or a second redirect. */
 const sharePointAnswer = (url: URL): Response => {
   const id = url.searchParams.get("UniqueId");
@@ -179,55 +141,36 @@ const sharePointAnswer = (url: URL): Response => {
 
 /** Graph, SharePoint and the rest of the internet, for each test in the file. */
 export const fakeGraph = () => {
-  /** How Graph fails the next request, or the next write only. */
-  let failure:
-    | { status: number; writesOnly: boolean; retryAfter: string }
-    | undefined;
-  let writesDone = 0;
-  beforeEach(() => {
-    failure = undefined;
-    writesDone = 0;
-  });
-  const { sent } = fakeInternet(async (request, url) => {
-    if (url.hostname === graphHost) {
-      const isWrite = request.method !== "GET";
-      if (failure !== undefined && (isWrite || !failure.writesOnly)) {
-        const { status, retryAfter } = failure;
-        failure = undefined;
-        return Response.json(throttled, {
-          status,
-          headers: { "retry-after": retryAfter },
-        });
-      }
-      if (isWrite) {
-        writesDone += 1;
-      }
-      return await graphAnswer(request, url);
-    }
-    return url.hostname.endsWith(".sharepoint.com")
-      ? sharePointAnswer(url)
-      : new Response("Taken");
+  const { sent, writesDone, fail } = fakeProvider({
+    hosts: [graphHost],
+    parts,
+    routes: graphRoutes,
+    unmatched: () =>
+      json(
+        { error: { code: "BadRequest", message: "Unsupported request" } },
+        400
+      ),
+    elsewhere: (url) =>
+      url.hostname.endsWith(".sharepoint.com")
+        ? sharePointAnswer(url)
+        : new Response("Taken"),
   });
   return {
     sent,
-    /** Graph's requests only, as `METHOD path?query`. */
-    graphRequests: (): string[] =>
-      sent
-        .filter(({ host }) => host === graphHost)
-        .map(({ method, path }) => `${method} ${path}`),
     /** The writes Graph carried out. */
-    writesDone: () => writesDone,
-    /** Makes Graph throttle the next request, asking to wait `wait`. */
-    throttle: (wait = "7") => {
-      failure = { status: 429, writesOnly: false, retryAfter: wait };
+    writesDone,
+    /** Makes Graph throttle the next request. */
+    throttle: () => {
+      fail({ status: 429, body: throttled, headers: { "retry-after": "7" } });
     },
     /** Makes Graph throttle the next write, and only it. */
     throttleWrite: () => {
-      failure = { status: 429, writesOnly: true, retryAfter: "7" };
-    },
-    /** Makes Graph answer the next request 503. */
-    unavailable: () => {
-      failure = { status: 503, writesOnly: false, retryAfter: "5" };
+      fail({
+        status: 429,
+        body: throttled,
+        headers: { "retry-after": "7" },
+        writesOnly: true,
+      });
     },
     sharePointHost,
   };

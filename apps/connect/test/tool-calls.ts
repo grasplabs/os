@@ -2,13 +2,11 @@
  * Calling a native connector's tools as core does, and reading back what
  * they answered and sent: shared by the connectors' contract tests.
  */
-import { signCapability } from "@grasp-os/shared/capability";
 import { connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectionPerson, ConnectResult } from "@grasp-os/shared/connect";
-import { env, exports } from "cloudflare:workers";
 import { z } from "zod";
 
-import { agentFor } from "./connect.ts";
+import { agentFor, callAs, outcome } from "./connect.ts";
 import type { Call } from "./connect.ts";
 import type { SentRequest } from "./internet.ts";
 
@@ -29,15 +27,44 @@ export const callTool = async (
   action: string,
   input: Call["input"],
   { mask, ...extra }: Extra = {}
-): Promise<ConnectResult> => {
-  const stated = { connectionId: connection.id, action, input, ...extra };
-  const capability = await signCapability(
-    env.CAPABILITY_SIGNING_KEY,
+): Promise<ConnectResult> =>
+  await callAs(
     agentFor(connection.person.userId),
-    { ...stated, mask }
+    { connectionId: connection.id, action, input, ...extra },
+    { mask }
   );
-  return await exports.default.call({ ...stated, capability });
-};
+
+/** A tool's input, as a call carries it. */
+export type Input = Extract<Call["input"], Record<string, unknown>>;
+
+/**
+ * How each tool of `inputs` ends for each of `values` as its `field`,
+ * under a capability for `resource`.
+ */
+export const refusalsFor = async (
+  connection: Connection,
+  inputs: Record<string, Input>,
+  field: string,
+  resource: string,
+  values: readonly string[]
+): Promise<Set<string>> =>
+  new Set(
+    await Promise.all(
+      Object.entries(inputs).flatMap(([action, input]) =>
+        values.map(
+          async (value) =>
+            await outcome(
+              callTool(
+                connection,
+                action,
+                { [field]: value, ...input },
+                { resource, idempotencyKey: crypto.randomUUID() }
+              )
+            )
+        )
+      )
+    )
+  );
 
 /** A call's result, with its output parsed. */
 export const resultOf = async (

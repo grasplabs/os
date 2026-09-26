@@ -4,6 +4,7 @@ import {
   contentAs,
   readAsSchema,
 } from "@grasp-os/connector-kit/content";
+import { segment } from "@grasp-os/connector-kit/provider";
 import { z } from "zod";
 
 import {
@@ -14,7 +15,6 @@ import {
   idSchema,
   nextPageOf,
   pageSchema,
-  segment,
   topSchema,
 } from "./google.ts";
 

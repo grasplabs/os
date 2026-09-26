@@ -8,7 +8,8 @@
   "exports": {
     "./connector": "./src/connector.ts",
     "./content": "./src/content.ts",
-    "./manifest": "./src/manifest.ts"
+    "./manifest": "./src/manifest.ts",
+    "./provider": "./src/provider.ts"
   },
   "dependencies": {
     "@grasp-os/shared": "workspace:*",

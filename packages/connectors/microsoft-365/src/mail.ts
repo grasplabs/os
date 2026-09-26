@@ -9,6 +9,7 @@ import {
   fromBase64,
   readAsSchema,
 } from "@grasp-os/connector-kit/content";
+import { jsonBody, segment } from "@grasp-os/connector-kit/provider";
 import { z } from "zod";
 
 import {
@@ -18,12 +19,10 @@ import {
   graphJson,
   graphUrl,
   idSchema,
-  jsonBody,
   mailboxSchema,
   nextPageOf,
   pageOf,
   pageSchema,
-  segment,
   topSchema,
   v1,
 } from "./graph.ts";

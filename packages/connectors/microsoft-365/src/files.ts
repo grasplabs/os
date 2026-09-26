@@ -4,11 +4,12 @@ import {
   contentAs,
   readAsSchema,
 } from "@grasp-os/connector-kit/content";
+import { segmentValuePattern } from "@grasp-os/connector-kit/manifest";
+import { segment } from "@grasp-os/connector-kit/provider";
 import { z } from "zod";
 
 import {
   atPage,
-  segmentPattern,
   downloadHosts,
   driveSchema,
   graphFetch,
@@ -19,7 +20,6 @@ import {
   nextPageOf,
   pageOf,
   pageSchema,
-  segment,
   topSchema,
   v1,
 } from "./graph.ts";
@@ -145,7 +145,7 @@ const listFolder = defineTool({
  * Search text for Graph's `search(q='...')`, inside one path segment: no
  * character the egress refuses in a parameter.
  */
-const querySchema = z.string().min(1).max(256).regex(segmentPattern);
+const querySchema = z.string().min(1).max(256).regex(segmentValuePattern);
 
 const searchFiles = defineTool({
   name: "files.search",
