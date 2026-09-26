@@ -1,9 +1,11 @@
+import { connectionCallbackPath } from "@grasp-os/shared/connect";
 import { internalErrors, requestErrors } from "@grasp-os/shared/errors";
 import { errorFields, log } from "@grasp-os/shared/log";
 import type { LogFields } from "@grasp-os/shared/log";
 
 import { authBasePath } from "./auth/auth.ts";
 import { handleAuthRequest } from "./auth/routes.ts";
+import { handleConnectionCallback } from "./connections.ts";
 import { errorResponse } from "./errors.ts";
 import { checkRouterSecret } from "./router-secret.ts";
 import { rpcResponse } from "./rpc.ts";
@@ -30,6 +32,12 @@ const route = async (
   }
   if (isUnder(pathname, authBasePath)) {
     return await handleAuthRequest(request, env, requestId);
+  }
+  if (pathname === connectionCallbackPath) {
+    const response = await handleConnectionCallback(request, env);
+    if (response !== undefined) {
+      return response;
+    }
   }
   if (isUnder(pathname, "/api")) {
     return errorResponse(

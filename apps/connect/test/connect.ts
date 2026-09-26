@@ -6,19 +6,24 @@
 import { auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { capabilityErrors, signCapability } from "@grasp-os/shared/capability";
-import { connectErrors } from "@grasp-os/shared/connect";
+import { connectErrors, connectionErrors } from "@grasp-os/shared/connect";
 import type {
+  ConnectionPerson,
   ConnectResult,
+  StartConnection,
   connectCallSchema,
 } from "@grasp-os/shared/connect";
 import { authoritySchema } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
+import { roleErrors } from "@grasp-os/shared/roles";
 import { env, exports } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 import type { z } from "zod";
 
 import { connections } from "../src/db/schema.ts";
+import { acmeDomain, acmeTenant } from "./oauth-provider.ts";
+import type { Account, fakeProviders } from "./oauth-provider.ts";
 
 type ConnectionRow = typeof connections.$inferInsert;
 
@@ -101,9 +106,111 @@ export const outcome = async (promise: Promise<unknown>): Promise<string> => {
     return (
       capabilityErrors.codeOf(error) ??
       connectErrors.codeOf(error) ??
+      connectionErrors.codeOf(error) ??
+      roleErrors.codeOf(error) ??
       String(error)
     );
   }
+};
+
+/**
+ * A new person, as core names them to connect, signed in with Entra: tests
+ * share the database, so each one has people, and accounts, of its own.
+ */
+export const someone = (
+  role: ConnectionPerson["role"] = "user"
+): ConnectionPerson => {
+  const id = crypto.randomUUID();
+  return {
+    userId: `user-${id}`,
+    role,
+    staff: false,
+    email: `person-${id}@acme.test`,
+    accounts: [{ provider: "microsoft", subject: `oid-${id}` }],
+  };
+};
+
+/**
+ * The person's own account at `provider`: the one they sign in with, or,
+ * where they sign in elsewhere, the one with their email.
+ */
+export const ownAccount = (
+  person: ConnectionPerson,
+  provider: Account["provider"] = "microsoft"
+): Account => {
+  const signIn = person.accounts.find((each) => each.provider === provider);
+  return provider === "microsoft"
+    ? {
+        provider,
+        tenant: acmeTenant,
+        subject: signIn?.subject ?? `oid-${person.userId}`,
+        email: person.email,
+      }
+    : {
+        provider,
+        tenant: acmeDomain,
+        subject: signIn?.subject ?? `g-${person.userId}`,
+        email: person.email,
+      };
+};
+
+/** An account nobody signs in with, such as a shared mailbox. */
+export const mailboxAccount = (
+  provider: Account["provider"] = "microsoft"
+): Account => {
+  const id = crypto.randomUUID();
+  return {
+    provider,
+    tenant: provider === "microsoft" ? acmeTenant : acmeDomain,
+    subject: `mailbox-${id}`,
+    email: `mailbox-${id}@acme.test`,
+  };
+};
+
+/** The client's origin, where the provider sends the browser back. */
+export const clientOrigin = "https://acme.grasp.test";
+
+type StartOptions = Partial<Omit<StartConnection, "person">>;
+
+/** Starts connecting, as core does for `person`: the provider URL. */
+export const startAs = async (
+  person: ConnectionPerson,
+  options: StartOptions = {}
+): Promise<URL> => {
+  const provider = options.provider ?? "microsoft";
+  const { url } = await exports.default.startConnection({
+    person,
+    provider,
+    scope: "personal",
+    origin: clientOrigin,
+    tenant: provider === "microsoft" ? acmeTenant : acmeDomain,
+    returnTo: "/connections",
+    ...options,
+  });
+  return new URL(url);
+};
+
+/** The state a started flow carries through the browser. */
+export const stateOf = (url: URL): string =>
+  url.searchParams.get("state") ?? "";
+
+/**
+ * Connects an account end to end, as `person`'s browser and core would:
+ * start, consent at the provider as `account`, come back with the code.
+ */
+export const connectAccount = async (
+  providers: ReturnType<typeof fakeProviders>,
+  person: ConnectionPerson,
+  account: Account,
+  options: StartOptions = {}
+): Promise<string> => {
+  const url = await startAs(person, { provider: account.provider, ...options });
+  const { connectionId } = await exports.default.finishConnection({
+    person,
+    state: stateOf(url),
+    code: providers.authorize(url.href, account),
+  });
+  return connectionId;
 };
 
 /**

@@ -8,6 +8,10 @@ import { defaultExclude, defineProject } from "vite-plus";
 import type { UserWorkspaceConfig } from "vite-plus";
 
 import { connectBundle } from "./test/build-connect.ts";
+import {
+  connectClient,
+  connectProvidersScript,
+} from "./test/connect-providers.ts";
 import { testSignIn } from "./test/sign-in-config.ts";
 
 const coreMigrations = await readD1Migrations(
@@ -55,7 +59,12 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             CAPABILITY_SIGNING_KEY: capabilitySigningKey,
             ...testSignIn,
             // Every flagged feature on; features.test.ts switches them off.
-            FEATURES: { apps: true, permissions: true, knowledge: true },
+            FEATURES: {
+              apps: true,
+              permissions: true,
+              knowledge: true,
+              connections: true,
+            },
             // workerd doesn't implement Durable Object jurisdictions.
             DURABLE_OBJECT_JURISDICTION: "none",
             // So the test of a call that never ends doesn't wait a minute.
@@ -84,9 +93,22 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
                 "nodejs_compat",
                 "global_fetch_strictly_public",
               ],
-              bindings: { CAPABILITY_SIGNING_KEY: capabilitySigningKey },
+              bindings: {
+                CAPABILITY_SIGNING_KEY: capabilitySigningKey,
+                TOKEN_ENCRYPTION_KEY: btoa("test-token-key-of-exactly-32-b!!"),
+                MICROSOFT_CLIENT_ID: connectClient.id,
+                MICROSOFT_CLIENT_SECRET: connectClient.secret,
+              },
               d1Databases: { DB: "grasp-os-connect" },
               queueProducers: { AUDIT_QUEUE: "grasp-os-audit" },
+              // Entra, as connect reaches it (test/connect-providers.ts).
+              outboundService: "connect-providers",
+            },
+            {
+              name: "connect-providers",
+              modules: true,
+              script: connectProvidersScript,
+              compatibilityDate: "2026-09-15",
             },
           ],
         },

@@ -7,6 +7,7 @@ import type { Identity, SessionApi } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
 import { AppsRpc } from "./apps-rpc.ts";
+import { ConnectionsRpc } from "./connections.ts";
 import { requireFeature } from "./features.ts";
 import type { Feature } from "./features.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
@@ -54,6 +55,11 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   /** Knowledge, whose every method checks the session again. */
   get knowledge(): KnowledgeRpc {
     return new KnowledgeRpc(this.#env, this.#checkWith("knowledge"));
+  }
+
+  /** Connected accounts, whose every method checks the session again. */
+  get connections(): ConnectionsRpc {
+    return new ConnectionsRpc(this.#env, this.#checkWith("connections"));
   }
 
   async whoami(): Promise<Identity> {

@@ -4,7 +4,15 @@ import {
 } from "@grasp-os/shared/capability";
 import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import { connectCallSchema, connectErrors } from "@grasp-os/shared/connect";
-import type { ConnectApi, ConnectResult } from "@grasp-os/shared/connect";
+import type {
+  ConnectApi,
+  ConnectionPerson,
+  ConnectionSummary,
+  ConnectResult,
+  Disconnect,
+  FinishConnection,
+  StartConnection,
+} from "@grasp-os/shared/connect";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
@@ -12,20 +20,27 @@ import { auditCall, sendAuditOutbox } from "./audit.ts";
 import type { CallOutcome, CallRecord } from "./audit.ts";
 import { carryOut } from "./call.ts";
 import type { CallDone, CallProgress } from "./call.ts";
+import {
+  abandonFlow,
+  disconnect,
+  finishConnection,
+  listConnections,
+  purgeExpiredFlows,
+  resealFlows,
+  startConnection,
+} from "./oauth.ts";
+import { resealTokens } from "./tokens.ts";
 
 /**
+ * The keys a capability may be made with: the current, then the previous.
+ *
  * Rotating the signing key: set the old one as
  * `CAPABILITY_SIGNING_KEY_PREVIOUS` on connect, then the new one as
  * `CAPABILITY_SIGNING_KEY` on connect and core (core always signs with the
  * current key), then remove the previous one. Optional, so it isn't in
  * `secrets.required`.
  */
-interface ConnectEnv extends Env {
-  CAPABILITY_SIGNING_KEY_PREVIOUS?: string;
-}
-
-/** The keys a capability may be made with: the current, then the previous. */
-const signingKeys = (env: ConnectEnv): string[] =>
+const signingKeys = (env: Env): string[] =>
   [env.CAPABILITY_SIGNING_KEY, env.CAPABILITY_SIGNING_KEY_PREVIOUS].filter(
     (key): key is string => typeof key === "string" && key !== ""
   );
@@ -92,9 +107,49 @@ export default class Connect
     return new Response("Not found", { status: 404 });
   }
 
-  /** Every minute: sends the audit events whose first send failed. */
+  /**
+   * Every minute: sends the audit events whose first send failed, drops
+   * OAuth flows nobody finished, and seals what a rotated key sealed again.
+   */
   override async scheduled(): Promise<void> {
-    await sendAuditOutbox(this.env);
+    const results = await Promise.allSettled([
+      sendAuditOutbox(this.env),
+      purgeExpiredFlows(this.env),
+      resealTokens(this.env),
+      resealFlows(this.env),
+    ]);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        log.error("cron.failed", errorFields(result.reason));
+      }
+    }
+  }
+
+  // Connecting accounts (src/oauth.ts). Core calls these for a signed-in
+  // person, whom it names; none of them returns a token.
+
+  async startConnection(request: StartConnection): Promise<{ url: string }> {
+    return await startConnection(this.env, request);
+  }
+
+  async finishConnection(
+    request: FinishConnection
+  ): Promise<{ connectionId: string; returnTo: string }> {
+    return await finishConnection(this.env, request);
+  }
+
+  async listConnections(
+    person: ConnectionPerson
+  ): Promise<ConnectionSummary[]> {
+    return await listConnections(this.env, person);
+  }
+
+  async disconnect(request: Disconnect): Promise<{ revoked: boolean }> {
+    return await disconnect(this.env, request);
+  }
+
+  async abandonFlow(state: string): Promise<void> {
+    await abandonFlow(this.env, state);
   }
 
   async call(request: unknown): Promise<ConnectResult> {

@@ -1,4 +1,5 @@
 import type { AppsApi } from "./apps.ts";
+import type { ConnectionsApi } from "./connect.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
 import type {
   Permission,
@@ -51,6 +52,11 @@ export interface SessionApi {
   readonly apps: AppsApi;
   /** Knowledge: collections, documents and their versions. */
   readonly knowledge: KnowledgeApi;
+  /**
+   * Accounts connected through OAuth: the person's own, and shared ones
+   * (which only admins connect and disconnect).
+   */
+  readonly connections: ConnectionsApi;
 }
 
 /**
