@@ -11,16 +11,13 @@ import { log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
 import type { AppErrorEntry } from "@grasp-os/shared/screens";
 import { DurableObject } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
 
 import { appBindings } from "./app-bindings.ts";
 import { addToErrorLog, readErrorLog } from "./app-error-log.ts";
-import { versionFiles } from "./apps.ts";
-import { apps } from "./db/core/schema.ts";
+import { findApp, versionFiles } from "./apps.ts";
 import { appHost } from "./durable-objects.ts";
 import { sandbox } from "./sandbox.ts";
-import { buildServer } from "./screens.ts";
+import { buildFailed, buildServer } from "./screens.ts";
 
 // An App's server code runs as a facet of the App's own Durable Object:
 // loaded through the Worker Loader from the App's current version, with a
@@ -137,15 +134,23 @@ const workflowWritePrefix = "workflow-write:";
  */
 export type AppAnswer = Rpc.Serializable<unknown>;
 
+/** Whether a value is plain data, as structured clone carries it. */
+export const isPlainData = (value: unknown): boolean => {
+  try {
+    structuredClone(value);
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /** `answer`, if it is plain data; `app.answer_invalid` if not. */
 const plainAnswer = (
   answer: AppAnswer,
   version: number,
   method: string
 ): AppAnswer => {
-  try {
-    structuredClone(answer);
-  } catch {
+  if (!isPlainData(answer)) {
     throw appErrors.create("app.answer_invalid", { version, method });
   }
   return answer;
@@ -166,18 +171,11 @@ export type AppCallerInput = Omit<AppCaller, "token">;
 
 /** The App's current version: the one that runs. */
 const currentVersion = async (env: Env, app: AppId): Promise<number> => {
-  const row = await drizzle(env.DB)
-    .select({ version: apps.currentVersion })
-    .from(apps)
-    .where(eq(apps.id, app))
-    .get();
-  if (!row) {
-    throw appErrors.create("app.not_found");
-  }
-  if (row.version === null) {
+  const { currentVersion: version } = await findApp(env, app);
+  if (version === null) {
     throw appErrors.create("app.not_running");
   }
-  return row.version;
+  return version;
 };
 
 /**
@@ -197,14 +195,7 @@ const loadServer = async (
     files,
   });
   if (!build.ok) {
-    throw appErrors.create("app.build_failed", {
-      version,
-      diagnostics: build.diagnostics.map(({ file, line, message }) => ({
-        file: file ?? null,
-        line: line ?? null,
-        message,
-      })),
-    });
+    throw appErrors.create("app.build_failed", buildFailed(version, build));
   }
   const bindings = await appBindings(env, app);
   // The same generation has the same key, so the loader may keep its

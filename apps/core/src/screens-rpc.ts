@@ -5,7 +5,6 @@ import {
   screenRuntime,
 } from "@grasp-os/compiler";
 import { appErrors, appVersionSchema } from "@grasp-os/shared/apps";
-import { issuesOf } from "@grasp-os/shared/errors";
 import type { Identity } from "@grasp-os/shared/rpc";
 import {
   screenErrors,
@@ -20,11 +19,11 @@ import type {
 import { RpcStub, RpcTarget } from "capnweb";
 import { z } from "zod";
 
-import { callApp } from "./app.ts";
+import { callApp, isPlainData } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
 import { getApp, getVersion, versionFiles } from "./apps.ts";
 import { appHost } from "./durable-objects.ts";
-import { buildScreens } from "./screens.ts";
+import { buildFailed, buildScreens } from "./screens.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -39,20 +38,6 @@ import type { SessionCheck } from "./session-check.ts";
 // platform roles that build Apps (admins and builders) use their screens,
 // as only they can see Apps at all (apps.ts).
 
-/** `input` as `schema` has it, or `screen.invalid` saying why not. */
-const parse = <Schema extends z.ZodType>(
-  schema: Schema,
-  input: unknown
-): z.output<Schema> => {
-  const parsed = schema.safeParse(input);
-  if (!parsed.success) {
-    throw screenErrors.create("screen.invalid", {
-      issues: issuesOf(parsed.error),
-    });
-  }
-  return parsed.data;
-};
-
 /** A running App's screen, built from its current version. */
 const openScreen = async (
   env: Env,
@@ -65,7 +50,7 @@ const openScreen = async (
     name: appName,
     currentVersion: version,
   } = await getApp(env, by, app);
-  const name = parse(screenNameSchema, screen);
+  const name = screenErrors.parse("screen.invalid", screenNameSchema, screen);
   if (version === null) {
     throw appErrors.create("app.not_running");
   }
@@ -80,14 +65,10 @@ const openScreen = async (
     files,
   });
   if (!build.ok) {
-    throw screenErrors.create("screen.build_failed", {
-      version,
-      diagnostics: build.diagnostics.map(({ file, line, message }) => ({
-        file: file ?? null,
-        line: line ?? null,
-        message,
-      })),
-    });
+    throw screenErrors.create(
+      "screen.build_failed",
+      buildFailed(version, build)
+    );
   }
   const { modules } = await kitModules(env.ASSETS);
   return {
@@ -103,16 +84,6 @@ const openScreen = async (
     ),
     css: build.css,
   };
-};
-
-/** Whether a value is plain data, as structured clone carries it. */
-const isPlain = (value: unknown): boolean => {
-  try {
-    structuredClone(value);
-    return true;
-  } catch {
-    return false;
-  }
 };
 
 /** A function the App gets for a callback the screen passed. */
@@ -157,7 +128,7 @@ const callbackFor = (
   count.live += 1;
   return Object.assign(
     async (value: AppAnswer): Promise<void> => {
-      if (!isPlain(value)) {
+      if (!isPlainData(value)) {
         throw appErrors.create("app.answer_invalid");
       }
       await toScreen(value);
@@ -185,7 +156,7 @@ const argumentsFor = (
 ): { passed: unknown[]; callback?: Disposable } => {
   const last = args.at(-1);
   const data = isStub(last) ? args.slice(0, -1) : args;
-  if (!data.every((arg) => !isStub(arg) && isPlain(arg))) {
+  if (!data.every((arg) => !isStub(arg) && isPlainData(arg))) {
     throw screenErrors.create("screen.invalid");
   }
   if (!isStub(last)) {
@@ -246,14 +217,14 @@ const reportProblem = async (
   at: unknown,
   problem: unknown
 ): Promise<void> => {
-  const where = parse(reportedAtSchema, at);
+  const where = screenErrors.parse("screen.invalid", reportedAtSchema, at);
   // One of the App's versions, or `app.version_not_found`.
   const { app: id } = await getVersion(env, by, app, where.version);
   const entry: AppErrorEntry = {
     at: new Date().toISOString(),
     source: "screen",
     ...where,
-    ...parse(screenProblemSchema, problem),
+    ...screenErrors.parse("screen.invalid", screenProblemSchema, problem),
   };
   await appHost(env, id).logError(entry);
 };

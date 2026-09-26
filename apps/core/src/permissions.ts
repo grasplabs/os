@@ -1,5 +1,4 @@
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
-import { issuesOf } from "@grasp-os/shared/errors";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -298,13 +297,11 @@ export const requestPermission = async (
   input: unknown
 ): Promise<Permission> => {
   requireBuilder(by);
-  const parsed = permissionRequestSchema.safeParse(input);
-  if (!parsed.success) {
-    throw permissionErrors.create("permission.invalid", {
-      issues: issuesOf(parsed.error),
-    });
-  }
-  const { subject, object, actions, binding } = parsed.data;
+  const { subject, object, actions, binding } = permissionErrors.parse(
+    "permission.invalid",
+    permissionRequestSchema,
+    input
+  );
   await requireApps(env, subject, object);
   await requireCollection(env, object);
   const row: Row = {
@@ -424,13 +421,13 @@ export const listPermissions = async (
   requireBuilder(by);
   let filter: SQL | undefined;
   if (subject !== undefined) {
-    const parsed = permissionSubjectSchema.safeParse(subject);
-    if (!parsed.success) {
-      throw permissionErrors.create("permission.invalid", {
-        issues: issuesOf(parsed.error),
-      });
-    }
-    filter = ofSubject(parsed.data);
+    filter = ofSubject(
+      permissionErrors.parse(
+        "permission.invalid",
+        permissionSubjectSchema,
+        subject
+      )
+    );
   }
   const rows = await drizzle(env.DB)
     .select()

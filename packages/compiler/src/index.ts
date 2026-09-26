@@ -32,14 +32,11 @@ export { appModuleName, kitModuleName, screenRuntime } from "./kit.ts";
 /** Part of every build's cache key: a new compiler or kit builds again. */
 export { version as compilerVersion } from "#version";
 
-/** An App's screens at one version. */
-export interface ScreenSource {
+/** An App's files at one version, to build. */
+export interface AppSource {
   app: string;
   version: string;
-  /**
-   * `screens/*.tsx`, `components/` files and declarations at the root
-   * (`*.d.ts`, e.g. the server's types) by path; other files are ignored.
-   */
+  /** By path; each build reads only its own (see inputs.ts). */
   files: Record<string, string>;
 }
 

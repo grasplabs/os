@@ -1,11 +1,11 @@
 import { isolateSettings } from "@grasp-os/compiler";
-import type { Diagnostic, ScreenSource } from "@grasp-os/compiler";
+import type { Diagnostic, AppSource } from "@grasp-os/compiler";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { buildScreens } from "../src/screens.ts";
 
-const app = (files: Record<string, string>): ScreenSource => ({
+const app = (files: Record<string, string>): AppSource => ({
   app: "sandbox",
   version: crypto.randomUUID(),
   files,
