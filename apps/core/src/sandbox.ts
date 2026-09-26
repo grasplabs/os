@@ -1,4 +1,4 @@
-import { compatibilityDate } from "@grasp-os/shared/runtime";
+import { isolateBase } from "@grasp-os/shared/runtime";
 
 /**
  * How App code runs (its server, app.ts, and its workflows,
@@ -7,8 +7,8 @@ import { compatibilityDate } from "@grasp-os/shared/runtime";
  * runtime's limit per isolate). Its env is only what its loader gives it.
  */
 export const sandbox = {
-  compatibilityDate,
-  compatibilityFlags: ["disallow_importable_env"],
+  ...isolateBase,
   globalOutbound: null,
+  // No `subRequests` cap: its only way out is the stubs in its env.
   limits: { cpuMs: 10_000 },
 } satisfies Omit<WorkerLoaderWorkerCode, "mainModule" | "modules">;

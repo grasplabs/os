@@ -9,7 +9,7 @@
  * (`compilerAssets`), read when a build starts an isolate; core itself
  * imports only the version.
  */
-import { compatibilityDate } from "@grasp-os/shared/runtime";
+import { isolateBase } from "@grasp-os/shared/runtime";
 
 import { version } from "#version";
 
@@ -70,7 +70,7 @@ const isKitModules = (value: unknown): value is KitModules =>
   "version" in value &&
   "modules" in value;
 
-const readModules = async (
+const parseModules = async (
   assets: Fetcher,
   file: string
 ): Promise<KitModules> => {
@@ -81,6 +81,30 @@ const readModules = async (
     throw new Error(`${file} is not in the expected shape.`);
   }
   return parsed;
+};
+
+/**
+ * The sets of modules read so far, by file: each is read from the static
+ * assets once per isolate, as every App imports the same set.
+ */
+const modulesRead = new Map<string, Promise<KitModules>>();
+
+/** A set of modules from the static assets; a failed read isn't kept. */
+const readModules = async (
+  assets: Fetcher,
+  file: string
+): Promise<KitModules> => {
+  let read = modulesRead.get(file);
+  if (read === undefined) {
+    read = parseModules(assets, file);
+    modulesRead.set(file, read);
+  }
+  try {
+    return await read;
+  } catch (error) {
+    modulesRead.delete(file);
+    throw error;
+  }
 };
 
 /** The kit's modules, which every App's modules import: one set per release. */
@@ -95,14 +119,14 @@ export const sdkModules = async (assets: Fetcher): Promise<KitModules> =>
   await readModules(assets, compilerAssets.sdkModules);
 
 /**
- * How the compiler's isolate runs: no bindings, no network
- * (`globalOutbound: null` and no subrequests), and at most 20 s of CPU per
- * call, many times what a large App takes. `nodejs_compat` is for the
- * React Compiler, which is written for Node.
+ * How the compiler's isolate runs: no bindings, no importable env, no
+ * network (`globalOutbound: null` and no subrequests), and at most 20 s of
+ * CPU per call, many times what a large App takes. `nodejs_compat` is for
+ * the React Compiler, which is written for Node.
  */
 export const isolateSettings = {
-  compatibilityDate,
-  compatibilityFlags: ["nodejs_compat"],
+  ...isolateBase,
+  compatibilityFlags: [...isolateBase.compatibilityFlags, "nodejs_compat"],
   env: {},
   globalOutbound: null,
   limits: { cpuMs: 20_000, subRequests: 0 },
