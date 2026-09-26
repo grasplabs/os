@@ -9,7 +9,6 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 import {
   addConnection,
   agentFor,
-  callAs,
   capabilityFor,
   outcome,
   serverUrl,
@@ -147,13 +146,6 @@ describe("calls to connect", () => {
     });
     await expect(callWith(capability, { ...call, mask: [] })).resolves.toBe(
       "connect.invalid"
-    );
-    expect(server.requests).toBe(0);
-  });
-
-  it("aren't given for a masked permission on a server connect can't mask", async () => {
-    await expect(outcome(callAs(anna, call, { mask: ["body"] }))).resolves.toBe(
-      "connect.mask_unsupported"
     );
     expect(server.requests).toBe(0);
   });

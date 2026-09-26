@@ -38,8 +38,9 @@ export type PermissionSubjectInput = z.input<typeof permissionSubjectSchema>;
 
 /**
  * A field of a connection's results, by name, such as `body`: a permission
- * that masks it gets every field of that name its connector's tools
- * declare maskable back as `null`.
+ * that masks it gets every field of that name its native connector's tools
+ * declare maskable back as `null`. A remote server's tools declare nothing
+ * connect trusts, so nothing of theirs is masked.
  */
 export const maskFieldSchema = z.string().regex(/^[A-Za-z]\w{0,63}$/u);
 

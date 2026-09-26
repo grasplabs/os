@@ -741,16 +741,10 @@ describe("the Microsoft 365 connector's file tools", () => {
     ).toStrictEqual([`${drivePath}/items/${itemIds.controls}/content`]);
   });
 
-  it("follow a download's redirect only to the tenant's SharePoint, once", async () => {
+  it("follow a download's redirect only to SharePoint over HTTPS, once", async () => {
     const connection = await connected();
     const outcomes = await Promise.all(
-      [
-        itemIds.elsewhere,
-        itemIds.plain,
-        itemIds.nested,
-        itemIds.otherTenant,
-        itemIds.twice,
-      ].map(
+      [itemIds.elsewhere, itemIds.plain, itemIds.nested, itemIds.twice].map(
         async (item) =>
           await toolError(
             call(connection, "files.read", { drive: financeDrive, item })
@@ -759,7 +753,7 @@ describe("the Microsoft 365 connector's file tools", () => {
     );
     // The egress withholds each answer, and says so.
     expect(outcomes).toMatchObject(
-      Array.from({ length: 5 }, () => ({ error: { code: "egress_failed" } }))
+      Array.from({ length: 4 }, () => ({ error: { code: "egress_failed" } }))
     );
     // Only the one redirect to SharePoint itself was followed; its own
     // redirect was not.
@@ -803,27 +797,6 @@ describe("the Microsoft 365 connector's answers", () => {
         call(connection, "mail.get", { mailbox: invoices, message: spoofedId })
       )
     ).resolves.toMatchObject({ error: { code: "not_found" } });
-  });
-
-  it("say downloads aren't set up while the deployment names no download hosts", async () => {
-    const connection = await connected();
-    const hosts = env.DOWNLOAD_HOSTS;
-    env.DOWNLOAD_HOSTS = undefined;
-    try {
-      await expect(
-        toolError(
-          call(connection, "files.read", {
-            drive: financeDrive,
-            item: itemIds.report,
-          })
-        )
-      ).resolves.toMatchObject({ error: { code: "downloads_unavailable" } });
-    } finally {
-      env.DOWNLOAD_HOSTS = hosts;
-    }
-    expect(graph.sent.map(({ host }) => host)).not.toContain(
-      graph.sharePointHost
-    );
   });
 
   it("free a throttled move's key after its folder lookup, a read", async () => {
@@ -911,58 +884,5 @@ describe("the Microsoft 365 connector's answers", () => {
       read: { id: itemIds.report, content: null },
       files: { items: [{ id: itemIds.folder }, { id: itemIds.report }] },
     });
-  });
-
-  it("don't search through a masked field", async () => {
-    const connection = await connected();
-    const refusals = await Promise.all([
-      outcome(
-        call(
-          connection,
-          "mail.list",
-          { mailbox: invoices, search: "body:IBAN NL91" },
-          { mask: ["body"] }
-        )
-      ),
-      outcome(
-        call(
-          connection,
-          "files.search",
-          { drive: financeDrive, query: "IBAN" },
-          { mask: ["content"] }
-        )
-      ),
-    ]);
-    expect(refusals).toStrictEqual([
-      "connect.search_masked",
-      "connect.search_masked",
-    ]);
-    expect(graph.sent).toStrictEqual([]);
-    // A search through fields the permission doesn't mask still runs.
-    await expect(
-      outcome(
-        call(
-          connection,
-          "files.search",
-          { drive: financeDrive, query: "invoice" },
-          { mask: ["subject"] }
-        )
-      )
-    ).resolves.toBe("ok");
-  });
-
-  it("refuse a mask naming a field no tool of the connector has", async () => {
-    const connection = await connected();
-    await expect(
-      outcome(
-        call(
-          connection,
-          "mail.list",
-          { mailbox: invoices },
-          { mask: ["bodyText"] }
-        )
-      )
-    ).resolves.toBe("connect.mask_unsupported");
-    expect(graph.sent).toStrictEqual([]);
   });
 });

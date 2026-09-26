@@ -177,8 +177,6 @@ const listMessages = defineTool({
   readOnly: true,
   resource: "mailbox",
   mask: ["messages.subject", "messages.bodyPreview"],
-  // Gmail's search looks through subjects, bodies and attachments.
-  searches: { search: ["subject", "body", "bodyPreview", "content"] },
   // Gmail lists IDs only; each message's metadata is one more request.
   routes: [get("/messages"), get("/messages/{message}")],
   run: async ({

@@ -193,10 +193,7 @@ export const fakeGoogle = () => {
         if (query.get("alt") === "media") {
           return new Response(contentOf(id, null));
         }
-        // Google answers with the fields asked for: the drive check's only.
-        return json(
-          query.get("fields") === "driveId" ? { driveId: found.driveId } : found
-        );
+        return json(found);
       }
     ),
     route(

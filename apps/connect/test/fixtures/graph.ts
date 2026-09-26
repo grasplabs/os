@@ -302,8 +302,6 @@ export const itemIds = {
   nested: "01BYE5RZ3NESTEDHOSTAAAAAAAAAAAAAAA",
   /** Its download redirects, and SharePoint redirects again. */
   twice: "01BYE5RZ3TWICEAAAAAAAAAAAAAAAAAAAA",
-  /** Its download redirects to another tenant's SharePoint. */
-  otherTenant: "01BYE5RZ3OTHERTENANTAAAAAAAAAAAAAA",
   /** A text file of control characters, much longer once escaped. */
   controls: "01BYE5RZ5CONTROLSAAAAAAAAAAAAAAAAA",
   /** Shared into search results from another drive. */
@@ -425,9 +423,6 @@ export const downloadUrl = (id: string): string => {
     }
     case itemIds.plain: {
       return `http://${sharePointHost}/_layouts/15/download.aspx?UniqueId=${id}&tempauth=v1.eyJ0eXAi`;
-    }
-    case itemIds.otherTenant: {
-      return `https://fabrikam.sharepoint.com/_layouts/15/download.aspx?UniqueId=${id}&tempauth=v1.eyJ0eXAi`;
     }
     case itemIds.nested: {
       return `https://files.example.sharepoint.com/_layouts/15/download.aspx?UniqueId=${id}&tempauth=v1.eyJ0eXAi`;

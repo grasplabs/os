@@ -67,19 +67,11 @@ export interface ToolDefinition<
    */
   mask?: readonly string[];
   /**
-   * Its inputs that search through maskable fields, with those fields'
-   * names: `{ search: ["subject", "body"] }`. Connect refuses a call that
-   * uses one while its permission masks any of those fields.
-   */
-  searches?: Partial<
-    Record<Extract<keyof z.input<Input>, string>, readonly string[]>
-  >;
-  /**
-   * The only requests it may send (threat model Q11). A parameter named
-   * after the resource property (`{mailbox}`), in a path or a route's
-   * `query`, must hold the resource a call's capability names, whenever it
-   * names one. A GET that can't name it declares a `check`, which the
-   * egress sends first. At most one route writes (not GET or HEAD).
+   * The only requests it may send (threat model Q11). A path parameter
+   * named after the resource property (`{mailbox}`) must hold the resource
+   * a call's capability names, whenever it names one. Where the provider
+   * can't name the resource in the path, the tool's own code holds the
+   * call to it. At most one route writes (not GET or HEAD).
    */
   routes: readonly Route[];
   run: (input: z.output<Input>) => Promise<ToolResult<z.input<Output>>>;
@@ -90,7 +82,6 @@ export type ToolErrorCode =
   | "invalid"
   | "egress_refused"
   | "egress_failed"
-  | "downloads_unavailable"
   | "throttled"
   | "unavailable"
   | "access_denied"
@@ -316,12 +307,6 @@ export const defineTool = <
       resource: resource ?? null,
       input: Object.keys(inputSchema.properties ?? {}),
       mask: [...(definition.mask ?? [])],
-      searches: Object.fromEntries(
-        Object.entries(definition.searches ?? {}).map(([key, fields]) => [
-          key,
-          [...(fields ?? [])],
-        ])
-      ),
     },
     description: {
       name,

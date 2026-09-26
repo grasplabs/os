@@ -19,19 +19,16 @@ import {
 } from "./google.ts";
 
 // Drive, one shared drive per call. Google's Drive API has no path per
-// drive: a file is `/drive/v3/files/{id}` whichever drive holds it. So:
+// drive: a file is `/drive/v3/files/{id}` whichever drive holds it, so
+// the egress can't bind a request to the drive, and this code holds each
+// call to it:
 //
 // - Lists and searches ask for the drive's corpus in the query
-//   (`corpora=drive&driveId=...`), which Google holds them to, and which
-//   the egress binds to the drive a call's capability names: each route
-//   names both parameters (`query`). Only items Google says are in that
-//   drive (`driveId`) are passed on.
-// - A file read addresses the file by its ID alone, where the drive can't
-//   be named. Its routes declare a `check`: before each request, the
-//   egress itself asks Google for the file's `driveId` and sends the
-//   request only if that is the bound drive. The tool also reads the
+//   (`corpora=drive&driveId=...`), which Google holds them to. Only items
+//   Google says are in that drive (`driveId`) are passed on.
+// - A file read addresses the file by its ID alone. The tool reads the
 //   file's metadata first and goes no further unless it is in the bound
-//   drive, not trashed and has content (defence in depth).
+//   drive, not trashed and has content.
 //
 // A person's My Drive isn't a shared drive and has no drive ID to hold a
 // call to, or to check a file against: it is left out. An organization's
@@ -44,24 +41,8 @@ import {
 
 const files = "/drive/v3/files";
 
-/** Lists and searches of one shared drive, bound to it in the query. */
-const driveListRoute = {
-  method: "GET",
-  host: apisHost,
-  path: files,
-  query: { corpora: "drive", driveId: "{drive}" },
-} as const;
-
-/**
- * How the egress checks a file's drive before a request for it: Google's
- * `driveId` for the file must be the bound drive.
- */
-const driveCheck = {
-  path: `${files}/{item}`,
-  query: { supportsAllDrives: "true", fields: "driveId" },
-  field: "driveId",
-  equals: "{drive}",
-} as const;
+/** Lists and searches of one shared drive (in the query, `driveId`). */
+const driveListRoute = { method: "GET", host: apisHost, path: files } as const;
 
 /** A shared drive's ID. */
 const driveSchema = z
@@ -236,8 +217,6 @@ const searchFiles = defineTool({
   output: pageOutput,
   readOnly: true,
   resource: "drive",
-  // Drive's full-text search looks through names and contents.
-  searches: { query: ["content"] },
   routes: [driveListRoute],
   run: async ({ drive, query, top, page }) =>
     await itemsOf(
@@ -271,20 +250,10 @@ const readFile = defineTool({
   readOnly: true,
   resource: "drive",
   mask: ["content"],
-  // A file has no drive in its path: the egress checks it with Google.
+  // A file has no drive in its path: `run` checks it before its content.
   routes: [
-    {
-      method: "GET",
-      host: apisHost,
-      path: `${files}/{item}`,
-      check: driveCheck,
-    },
-    {
-      method: "GET",
-      host: apisHost,
-      path: `${files}/{item}/export`,
-      check: driveCheck,
-    },
+    { method: "GET", host: apisHost, path: `${files}/{item}` },
+    { method: "GET", host: apisHost, path: `${files}/{item}/export` },
   ],
   run: async ({ drive, item: id, as }) => {
     const path = `${files}/${segment(id)}`;

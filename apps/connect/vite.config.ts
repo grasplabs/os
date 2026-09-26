@@ -68,12 +68,9 @@ export default defineProject({
           GOOGLE_CLIENT_ID: clients.google.id,
           GOOGLE_CLIENT_SECRET: clients.google.secret,
           CONNECT_MIGRATIONS: migrations,
-          // The tenant's own SharePoint, as the fake Graph redirects to it
-          // (test/graph-api.ts), and the sample provider's storage.
-          DOWNLOAD_HOSTS: JSON.stringify([
-            "example.sharepoint.com",
-            "tenant.storage.test",
-          ]),
+          // As a deployment of an earlier release may still have it: nothing
+          // reads it, and downloads to other hosts go all the same.
+          DOWNLOAD_HOSTS: JSON.stringify(["example.sharepoint.com"]),
           ...smokeBindings,
         },
       },

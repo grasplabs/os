@@ -7,7 +7,7 @@
 // it can't leave anything out of the mask.
 
 /** The field a maskable path (dotted, through arrays) names: its last. */
-export const fieldOf = (path: string): string => path.split(".").at(-1) ?? "";
+const fieldOf = (path: string): string => path.split(".").at(-1) ?? "";
 
 /** The paths of `maskable` that `fields` names. */
 export const maskedPaths = (

@@ -11,9 +11,8 @@ import { z } from "zod";
 // {calendar}/...`, never Google's aliases `me` and `primary`, so the
 // egress binds every request to the mailbox or calendar a call's
 // capability names. Drive has no path of its own per drive: it takes a
-// shared drive in the query (`corpora=drive&driveId=...`), where the
-// egress binds it, and addresses a file by its ID alone, where nothing
-// can bind it (see drive.ts).
+// shared drive in the query (`corpora=drive&driveId=...`) and addresses a
+// file by its ID alone, so drive.ts holds each call to its drive itself.
 //
 // Batch endpoints are never declared, and the egress strips method
 // override headers, which Google honours on a POST. None of the endpoints

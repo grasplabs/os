@@ -30,11 +30,9 @@
   // (src/providers.ts). While one is unset, connecting that provider is
   // refused. Their types are in src/env.d.ts.
   "secrets": { "required": ["CAPABILITY_SIGNING_KEY"] },
-  // The console sets connect's deployment config var through the API:
-  // DOWNLOAD_HOSTS, the client's own SharePoint hosts a connector's
-  // download may be redirected to, as a JSON array (src/egress.ts). Unset,
-  // no download is followed. Without keep_vars every deploy would delete
-  // it. Local dev passes it with `wrangler dev --var`.
+  // Vars the console set through the API survive a deploy (keep_vars),
+  // such as a DOWNLOAD_HOSTS from an earlier release, which nothing reads
+  // any more.
   "keep_vars": true,
   // Loads a native connector into an isolate of its own for each call
   // (src/connectors.ts); a new connector needs no entry here.

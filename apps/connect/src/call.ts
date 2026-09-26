@@ -11,7 +11,7 @@ import type { Connection } from "./connections.ts";
 import { nativeAction, nativeServer } from "./connectors.ts";
 import { hashCall, idempotencyStore } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
-import { fieldOf, masked, maskedPaths } from "./mask.ts";
+import { masked, maskedPaths } from "./mask.ts";
 import { McpError } from "./mcp.ts";
 import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
 import { hold } from "./pending.ts";
@@ -104,43 +104,24 @@ const answerOf = (
   maskedAnswer({ result: { output, provenance }, failed: isError }, masks);
 
 /**
- * The output paths to mask for a call, as its capability says. Refuses a
- * call connect can't mask for: on a remote server (its tools declare
- * nothing connect trusts), with a field no tool of the connector declares
- * maskable (a slip that would mask nothing), or searching through a masked
- * field (its hits would tell what the field holds). From the release's
- * manifest alone: nothing is loaded and no token is read.
+ * The output paths to mask for a call, as its capability says: the paths
+ * the native action declares maskable whose field the capability names.
+ * A remote server's tools declare nothing connect trusts, so nothing of
+ * theirs is masked. From the release's manifest alone: nothing is loaded
+ * and no token is read.
  */
 const masksFor = (
   connection: Connection,
   claims: CapabilityClaims,
-  action: string,
-  input: Input
+  action: string
 ): string[] => {
-  if (claims.mask.length === 0) {
+  if (claims.mask.length === 0 || connection.serverKind !== "native") {
     return [];
   }
-  if (connection.serverKind !== "native") {
-    throw connectErrors.create("connect.mask_unsupported");
-  }
-  const { connector, declared } = nativeAction(connection, action);
-  const maskable = new Set(
-    Object.values(connector.manifest.actions).flatMap(({ mask }) =>
-      mask.map(fieldOf)
-    )
+  return maskedPaths(
+    claims.mask,
+    nativeAction(connection, action).declared.mask
   );
-  if (!claims.mask.every((field) => maskable.has(field))) {
-    throw connectErrors.create("connect.mask_unsupported");
-  }
-  const searchesMasked = Object.entries(declared.searches).some(
-    ([name, fields]) =>
-      Object.hasOwn(input, name) &&
-      fields.some((field) => claims.mask.includes(field))
-  );
-  if (searchesMasked) {
-    throw connectErrors.create("connect.search_masked");
-  }
-  return maskedPaths(claims.mask, declared.mask);
 };
 
 /** Finds the action's tool, exactly as named. */
@@ -257,8 +238,8 @@ export const carryOut = async (
     throw connectErrors.create("connect.input_too_large");
   }
   // Before a repeat is answered too: its answer is masked as this
-  // capability says, and a mask connect can't apply is refused as ever.
-  const masks = masksFor(connection, claims, call.action, input);
+  // capability says.
+  const masks = masksFor(connection, claims, call.action);
 
   // A repeat of a side effect gets its stored result before anything goes
   // out, not even a look at the server's tools.
