@@ -190,13 +190,14 @@ const runWorkflow = async (
   if (row.status === "cancelled" || row.status === "failed") {
     throw new Error(`Run ${runId} has ended: ${row.status}`);
   }
-  // The latest error of the engine's own: the engine stopped this
-  // execution, and it is the one to end it with.
+  // The error the engine stopped this execution with (a pause, a cancel),
+  // once it has: it stays for the rest of the execution, whose every
+  // later engine call stops the same way, and is the one to end it with.
   let engineError: { error: unknown } | undefined;
-  const engineFailed = (error: unknown): void => {
+  const engineStopped = (error: unknown): void => {
     engineError = { error };
   };
-  const step = watchedStep(engineStep, engineFailed);
+  const step = watchedStep(engineStep, engineStopped);
   await pauseWhileSwitchedOff(env, step, runId, "workflows");
   let lastFailed: FailedStep | undefined;
   const stepFailed = (failure: FailedStep): void => {

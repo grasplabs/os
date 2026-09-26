@@ -902,7 +902,7 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
     });
   });
 
-  it("can't replay core's steps, and audit every step with only well-formed error codes", async () => {
+  it("can't replay core's steps or take ones the engine refuses, and audit every step with only well-formed error codes", async () => {
     const admin = await personApi("admin");
     // Written by hand, past the SDK: the host is the boundary, not the SDK.
     const rogue = {
@@ -910,6 +910,14 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
   metadata: { id: "rogue" },
   run: async (engine) => {
     await engine.do("$sneaky", {}, async () => "sneaked");
+    // Steps the engine would refuse, which it fails the whole run for:
+    // caught here, they must fail no more than their step.
+    try {
+      await engine.do("bell\u0007", {}, async () => null);
+    } catch {}
+    try {
+      await engine.do("huge", { retries: { limit: 0 } }, async () => "x".repeat(1_100_000));
+    } catch {}
     let hijack = "ran";
     try {
       await engine.do("$grasp:end", {}, async () => null);
@@ -968,6 +976,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
         "workflow.run.failed  workflow.run_failed",
         "workflow.step.completed $sneaky",
         "workflow.step.failed failing workflow.step_failed",
+        "workflow.step.failed huge workflow.step_failed",
       ],
     });
   });

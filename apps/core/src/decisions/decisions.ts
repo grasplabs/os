@@ -308,7 +308,9 @@ const mayAnswer = (
  * is refused. Who was asked is audited: their IDs, never their emails.
  * While decisions are switched off, nobody is asked: a run pauses before
  * it asks again (`waitForDecision`), so this only refuses a run that got
- * past that just as the switch went.
+ * past that just as the switch went. That refusal fails the ask step, and
+ * with it the run: a run can't pause from inside a step, and the window
+ * is only as wide as the time between that check and this call.
  */
 export const decisionRecipients = async (
   env: Env,

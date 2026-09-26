@@ -127,13 +127,25 @@ export const coreEventPrefix = "grasp-";
 /** Longest step name taken: a key and a decision's part fit well within. */
 const maxStepName = 256;
 
+/** Control characters, which the engine refuses in a step's name. */
+const controlCharacter = /\p{Cc}/u;
+
 const stepNameSchema = z
   .string()
   .min(1)
   .max(maxStepName)
   .refine((name) => !name.startsWith(coreStepPrefix), {
     message: `Step names starting with "${coreStepPrefix}" are core's`,
+  })
+  .refine((name) => !controlCharacter.test(name), {
+    message: "Step names can't hold control characters",
   });
+
+/**
+ * The most a step may return, as JSON in UTF-8: the engine refuses to
+ * record more than 1 MiB, and fails the whole run when it does.
+ */
+const maxStepResultBytes = 1024 * 1024;
 
 const milliseconds = z
   .int()
@@ -308,6 +320,20 @@ const isTimeout = (error: unknown): boolean =>
   (error.name === "WorkflowTimeoutError" || timedOut.test(error.message));
 
 /**
+ * How the engine stops an execution it will resume or end itself: a
+ * pause, a cancel (terminate), a restart. In the local runtime (Miniflare)
+ * each is an `Error` whose message starts with "Aborting engine:", maybe
+ * with the name in front once it crossed to core. Any other error of the
+ * engine's (a step name it refuses, the step limit, a result too large, a
+ * storage failure) is a real failure of the run.
+ * TODO(GRA-44): confirm that production's engine stops with these same
+ * messages.
+ */
+const abortMessage = /^(?:\w+: )?Aborting engine: /u;
+const isEngineStop = (error: unknown): boolean =>
+  error instanceof Error && abortMessage.test(error.message);
+
+/**
  * Whether the engine threw an attempt's own error back: that error, or
  * its copy, which has only the message, maybe with the name in front.
  */
@@ -319,37 +345,40 @@ const isAttemptError = (error: unknown, attempt: unknown): boolean =>
       error.message.endsWith(`: ${attempt.message}`)));
 
 /**
- * `step`, telling `engineFailed` of each error of the engine's own: one a
- * call threw that is no timeout, and, for a step, not its last attempt's
- * error. It is how the engine stops an execution (a pause, a cancel)
- * while the run goes on, or will go on, in another; the dispatcher hands
- * it back (dispatcher.ts). Errors of core's and of the run's own code
- * around those calls are never the engine's.
+ * `step`, telling `engineStopped` when one of its calls throws the error
+ * the engine stops the execution with (`isEngineStop`): a pause or a
+ * cancel, after which the run goes on, or ends, in the engine's hands.
+ * The dispatcher hands that error back (dispatcher.ts). A step's own
+ * error, from any of its attempts, never counts, even one shaped like a
+ * stop: workflow code throws what it likes.
  */
 export const watchedStep = (
   step: RunStep,
-  engineFailed: (error: unknown) => void
+  engineStopped: (error: unknown) => void
 ): RunStep => {
-  const heard = (error: unknown, attempt?: unknown): void => {
-    if (!(isTimeout(error) || isAttemptError(error, attempt))) {
-      engineFailed(error);
+  const heard = (error: unknown, attempts: ReadonlySet<unknown>): void => {
+    const own = [...attempts].some((attempt) => isAttemptError(error, attempt));
+    if (isEngineStop(error) && !own) {
+      engineStopped(error);
     }
   };
+  const none: ReadonlySet<unknown> = new Set();
   return {
     do: async (name, config, fn) => {
-      let attempt: unknown;
+      // Every attempt's error: an attempt the engine gave up on may still
+      // end, late, after the next one began.
+      const attempts = new Set<unknown>();
       try {
         return await step.do(name, config, async () => {
-          attempt = undefined;
           try {
             return await fn();
           } catch (error) {
-            attempt = error;
+            attempts.add(error);
             throw error;
           }
         });
       } catch (error) {
-        heard(error, attempt);
+        heard(error, attempts);
         throw error;
       }
     },
@@ -357,7 +386,7 @@ export const watchedStep = (
       try {
         await step.sleep(name, duration);
       } catch (error) {
-        heard(error);
+        heard(error, none);
         throw error;
       }
     },
@@ -365,7 +394,7 @@ export const watchedStep = (
       try {
         return await step.waitForEvent(name, options);
       } catch (error) {
-        heard(error);
+        heard(error, none);
         throw error;
       }
     },
@@ -603,6 +632,16 @@ export class RunHost extends RpcTarget {
           failed = {
             name: "Error",
             message: `Step "${step}" returned something that isn't JSON`,
+          };
+          throw toStepError(failed);
+        }
+        const recorded = JSON.stringify(result.value) ?? "";
+        if (
+          new TextEncoder().encode(recorded).byteLength > maxStepResultBytes
+        ) {
+          failed = {
+            name: "Error",
+            message: `Step "${step}" returned more than 1 MiB`,
           };
           throw toStepError(failed);
         }
