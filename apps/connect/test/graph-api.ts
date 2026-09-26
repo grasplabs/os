@@ -171,19 +171,31 @@ const sharePointAnswer = (url: URL): Response => {
 /** Graph, SharePoint and the rest of the internet, for each test in the file. */
 export const fakeGraph = () => {
   let throttledRequests = 0;
+  let throttledWrites = 0;
+  let writesDone = 0;
   let retryAfter = "7";
   beforeEach(() => {
     throttledRequests = 0;
+    throttledWrites = 0;
+    writesDone = 0;
     retryAfter = "7";
   });
   const { sent } = fakeInternet(async (request, url) => {
     if (url.hostname === graphHost) {
-      if (throttledRequests > 0) {
-        throttledRequests -= 1;
+      const isWrite = request.method !== "GET";
+      if (throttledRequests > 0 || (isWrite && throttledWrites > 0)) {
+        if (isWrite && throttledWrites > 0) {
+          throttledWrites -= 1;
+        } else {
+          throttledRequests -= 1;
+        }
         return Response.json(throttled, {
           status: 429,
           headers: { "retry-after": retryAfter },
         });
+      }
+      if (isWrite) {
+        writesDone += 1;
       }
       return await graphAnswer(request, url);
     }
@@ -198,6 +210,12 @@ export const fakeGraph = () => {
       sent
         .filter(({ host }) => host === graphHost)
         .map(({ method, path }) => `${method} ${path}`),
+    /** Makes Graph throttle the next write, and only it. */
+    throttleWrite: () => {
+      throttledWrites = 1;
+    },
+    /** The writes Graph carried out. */
+    writesDone: () => writesDone,
     /** Makes Graph throttle the next request, asking to wait `wait`. */
     throttle: (wait = "7") => {
       throttledRequests = 1;

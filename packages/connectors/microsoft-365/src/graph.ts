@@ -137,7 +137,10 @@ const retryAfterOf = (response: Response): number | undefined => {
  * transient too, but may come after Graph acted. Graph's messages aren't
  * passed on, since they can repeat what was sent; its error code is.
  */
-const failureOf = async (response: Response): Promise<ToolError> => {
+const failureOf = async (
+  response: Response,
+  method: string
+): Promise<ToolError> => {
   // Connect's egress, not Graph, answered: a request the connector's
   // routes don't allow (a bug of ours), or a withheld answer.
   const egress = response.headers.get(egressHeader);
@@ -158,7 +161,15 @@ const failureOf = async (response: Response): Promise<ToolError> => {
     case 429: {
       return new ToolError(
         "Microsoft 365 is throttling requests: nothing was done. Try again later.",
-        { code: "throttled", retryAfterSeconds: retryAfterSeconds ?? 60 }
+        {
+          code: "throttled",
+          retryAfterSeconds: retryAfterSeconds ?? 60,
+          // A throttled write did nothing, so its idempotency key is free
+          // again. Every tool sends at most one write, as its last request
+          // (mail.move's folder lookup before it is a read), so nothing
+          // of the call went through before it.
+          notPerformed: method !== "GET",
+        }
       );
     }
     case 503: {
@@ -202,7 +213,7 @@ export const graphFetch = async (
 ): Promise<Response> => {
   const response = await fetch(url, init);
   if (!response.ok) {
-    throw await failureOf(response);
+    throw await failureOf(response, init.method ?? "GET");
   }
   return response;
 };

@@ -853,9 +853,22 @@ describe("the Microsoft 365 connector's answers", () => {
           "Microsoft 365 is throttling requests: nothing was done. Try again later.",
       },
     });
-    graph.throttle();
-    await expect(
-      toolError(
+    // Sent once: nothing is retried behind the caller's back.
+    expect(graphPaths()).toStrictEqual([`${mailboxPath}/messages`]);
+    // Graph may say when, rather than how long.
+    graph.throttle(new Date(Date.now() + 30_000).toUTCString());
+    const error = z
+      .object({ error: z.object({ retryAfterSeconds: z.number() }) })
+      .parse(
+        await toolError(call(connection, "mail.list", { mailbox: invoices }))
+      );
+    expect(Math.abs(error.error.retryAfterSeconds - 30)).toBeLessThanOrEqual(1);
+  });
+
+  it("free a throttled write's key, so a retry with it sends once", async () => {
+    const connection = await connected();
+    const send = async () =>
+      await outcome(
         call(
           connection,
           "mail.send",
@@ -867,21 +880,38 @@ describe("the Microsoft 365 connector's answers", () => {
           },
           { idempotencyKey: "run-8:send" }
         )
-      )
-    ).resolves.toMatchObject({ error: { code: "throttled" } });
-    // Each was sent once: nothing is retried behind the caller's back.
+      );
+    graph.throttle();
+    const outcomes = [await send(), await send(), await send()];
+    // Retryable (Graph did nothing), then sent, then the stored answer.
+    expect(outcomes).toStrictEqual(["connect.server_unavailable", "ok", "ok"]);
+    // Graph throttled the first; the second went through, once.
     expect(graphPaths()).toStrictEqual([
-      `${mailboxPath}/messages`,
+      `${mailboxPath}/sendMail`,
       `${mailboxPath}/sendMail`,
     ]);
-    // Graph may say when, rather than how long.
-    graph.throttle(new Date(Date.now() + 30_000).toUTCString());
-    const error = z
-      .object({ error: z.object({ retryAfterSeconds: z.number() }) })
-      .parse(
-        await toolError(call(connection, "mail.list", { mailbox: invoices }))
+    expect(graph.writesDone()).toBe(1);
+  });
+
+  it("free a throttled move's key after its folder lookup, a read", async () => {
+    const connection = await connected();
+    const move = async () =>
+      await outcome(
+        call(
+          connection,
+          "mail.move",
+          {
+            mailbox: invoices,
+            message: messageId(invoices, 1),
+            destination: "archive",
+          },
+          { idempotencyKey: "run-8:move" }
+        )
       );
-    expect(Math.abs(error.error.retryAfterSeconds - 30)).toBeLessThanOrEqual(1);
+    graph.throttleWrite();
+    const outcomes = [await move(), await move(), await move()];
+    expect(outcomes).toStrictEqual(["connect.server_unavailable", "ok", "ok"]);
+    expect(graph.writesDone()).toBe(1);
   });
 
   it("tell a request connect's egress refused from one Graph refused", async () => {
