@@ -20,7 +20,7 @@ import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { mailControlUrl, mailServerUrl } from "./mail-server.ts";
 import type { MailAnswer } from "./mail-server.ts";
-import { finished, liveStatus, resumed, stopped } from "./runs.ts";
+import { finished, liveStatus, resumed, stepDone, stopped } from "./runs.ts";
 import { openRpc, signedInWithRole } from "./sign-in.ts";
 import { connectDb, testBinding } from "./test-env.ts";
 
@@ -259,24 +259,6 @@ const onlyRun = async (
     }
     return instance;
   });
-
-/** Once the run's step `step` has completed, as the audit log has it. */
-const stepDone = async (run: string, step: string): Promise<void> => {
-  await vi.waitFor(
-    async () => {
-      const events = await allEvents();
-      expect(
-        events.some(
-          ({ action, target, detail }) =>
-            action === "workflow.step.completed" &&
-            target?.id === run &&
-            detail.step === step
-        )
-      ).toBeTruthy();
-    },
-    { timeout: 10_000, interval: 100 }
-  );
-};
 
 /** Where core's record has a run now. */
 const rowStatus = async (run: string): Promise<string | undefined> => {
@@ -635,14 +617,20 @@ ${mailStep("after")}`,
     });
   });
 
-  it("go on after a crash without running finished steps again, and retry a step killed mid-way", async () => {
+  it("go on after a crash without running finished steps again, also when resumed at once, and retry a step killed mid-way", async () => {
     const builder = await personApi("builder");
     const app = await appWith(
       builder,
       workflowFiles(
         "durable",
         `  await step.do("before", { description: "Before" }, async () => await env.APP.call("hit", "before"));
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  try {
+    await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  } finally {
+    // Winds down slowly: the stopped execution is still ending when the
+    // run, resumed at once, goes on in the next.
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
   const attempt = await step.do(
     "work",
     { description: "Work", sideEffect: true, input: null, timeout: "1 second", retries: { limit: 1, delay: 10 } },
@@ -914,7 +902,7 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
     });
   });
 
-  it("can't replay core's steps, and audit every step with only well-formed error codes", async () => {
+  it("can't replay core's steps or take ones the engine refuses, and audit every step with only well-formed error codes", async () => {
     const admin = await personApi("admin");
     // Written by hand, past the SDK: the host is the boundary, not the SDK.
     const rogue = {
@@ -922,6 +910,14 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
   metadata: { id: "rogue" },
   run: async (engine) => {
     await engine.do("$sneaky", {}, async () => "sneaked");
+    // Steps the engine would refuse, which it fails the whole run for:
+    // caught here, they must fail no more than their step.
+    try {
+      await engine.do("bell\u0007", {}, async () => null);
+    } catch {}
+    try {
+      await engine.do("huge", { retries: { limit: 0 } }, async () => "x".repeat(1_100_000));
+    } catch {}
     let hijack = "ran";
     try {
       await engine.do("$grasp:end", {}, async () => null);
@@ -980,6 +976,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
         "workflow.run.failed  workflow.run_failed",
         "workflow.step.completed $sneaky",
         "workflow.step.failed failing workflow.step_failed",
+        "workflow.step.failed huge workflow.step_failed",
       ],
     });
   });
@@ -1413,6 +1410,33 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
         },
       },
       attempts: 1,
+    });
+  });
+
+  it("fail, recorded and reported, once a run has taken as many steps as it may", async () => {
+    const admin = await personApi("admin");
+    // More steps than the engine takes in one execution (vite.config.ts).
+    const app = await appWith(
+      admin,
+      workflowFiles(
+        "endless",
+        `  for (let i = 0; i < 100; i++) {
+    await step.do("step-" + i, { description: "One more" }, async () => i);
+  }`
+      )
+    );
+    const run = await admin.api.workflows.start(app, "endless");
+    await finished(run.id);
+
+    const { status, failure } = await admin.api.workflows.status(run.id);
+    expect({
+      status,
+      row: await rowStatus(run.id),
+      failure: failure?.error.code,
+    }).toStrictEqual({
+      status: "failed",
+      row: "failed",
+      failure: "workflow.too_many_steps",
     });
   });
 });

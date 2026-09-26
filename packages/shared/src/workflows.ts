@@ -18,6 +18,8 @@ export const workflowErrors = defineErrorFamily({
     "A workflow's tests fail, or it has none, so this version can't be made current.",
   "workflow.outside_step":
     "A workflow calls its connections only inside a step: code between steps runs again on every replay.",
+  "workflow.too_many_steps":
+    "This run has taken as many steps as a workflow run may: split the work over more runs.",
   "workflow.idempotency_key_invalid":
     "A workflow's connection calls take their step's own idempotency key (the `idempotencyKey` a side-effect step gets), or none: the platform keeps side effects to once per step and run.",
   "workflow.param_not_found":

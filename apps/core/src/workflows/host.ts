@@ -127,13 +127,25 @@ export const coreEventPrefix = "grasp-";
 /** Longest step name taken: a key and a decision's part fit well within. */
 const maxStepName = 256;
 
+/** Control characters, which the engine refuses in a step's name. */
+const controlCharacter = /\p{Cc}/u;
+
 const stepNameSchema = z
   .string()
   .min(1)
   .max(maxStepName)
   .refine((name) => !name.startsWith(coreStepPrefix), {
     message: `Step names starting with "${coreStepPrefix}" are core's`,
+  })
+  .refine((name) => !controlCharacter.test(name), {
+    message: "Step names can't hold control characters",
   });
+
+/**
+ * The most a step may return, as JSON in UTF-8: the engine refuses to
+ * record more than 1 MiB, and fails the whole run when it does.
+ */
+const maxStepResultBytes = 1024 * 1024;
 
 const milliseconds = z
   .int()
@@ -308,6 +320,132 @@ const isTimeout = (error: unknown): boolean =>
   (error.name === "WorkflowTimeoutError" || timedOut.test(error.message));
 
 /**
+ * How the engine stops an execution it will resume or end itself, when
+ * someone pauses, terminates (cancels), restarts or deletes the run: in
+ * the local runtime (Miniflare), an `Error` "Aborting engine: User called
+ * pause" and so on, maybe with the name in front once it crossed to core.
+ * The engine also aborts with "Aborting engine: …" when it fails a run
+ * itself (a NonRetryableError, a value it can't serialise, the storage
+ * limit): those, like any other error of the engine's (a step name it
+ * refuses, the step limit, a storage failure), are real failures.
+ * TODO(GRA-44): confirm that production's engine stops with these same
+ * messages.
+ */
+const userStop =
+  /^(?:\w+: )?Aborting engine: User called (?:pause|terminate|restart|delete)$/u;
+export const isEngineStop = (error: unknown): boolean =>
+  error instanceof Error && userStop.test(error.message);
+
+/**
+ * The engine's limit on steps in one execution: Cloudflare's default, as
+ * wrangler.jsonc sets no `limits.steps`. Only tests lower it, the
+ * engine's and this one alike (`WORKFLOW_STEP_LIMIT`, vite.config.ts).
+ */
+const defaultStepLimit = 10_000;
+
+/**
+ * Steps kept back for core's own (`$grasp:…`), so the step that records
+ * how the run ended always fits: that one, an owner's wait or two, and a
+ * kill-switch pause. A run's own steps are refused this far short of the
+ * limit; past the limit, the engine would refuse core's end too.
+ */
+const coreStepReserve = 5;
+
+/** The engine's step limit for this deployment. */
+export const stepLimitOf = (env: Env): number => {
+  const set = Number(env.WORKFLOW_STEP_LIMIT);
+  return Number.isInteger(set) && set > 0 && set < defaultStepLimit
+    ? set
+    : defaultStepLimit;
+};
+
+/**
+ * Whether the engine threw an attempt's own error back: that error, or
+ * its copy, which has only the message, maybe with the name in front.
+ */
+const isAttemptError = (error: unknown, attempt: unknown): boolean =>
+  error === attempt ||
+  (error instanceof Error &&
+    attempt instanceof Error &&
+    (error.message === attempt.message ||
+      error.message.endsWith(`: ${attempt.message}`)));
+
+/**
+ * `step`, telling `engineStopped` when one of its calls throws the error
+ * the engine stops the execution with (`isEngineStop`): a pause or a
+ * cancel, after which the run goes on, or ends, in the engine's hands.
+ * The dispatcher hands that error back (dispatcher.ts). A step's own
+ * error, from any of its attempts, never counts, even one shaped like a
+ * stop: workflow code throws what it likes.
+ *
+ * It counts every call, as the engine may, and refuses the run's own
+ * ones {@link coreStepReserve} short of `stepLimit`, as a failure of that
+ * step.
+ */
+export const watchedStep = (
+  step: RunStep,
+  engineStopped: (error: unknown) => void,
+  stepLimit: number
+): RunStep => {
+  let taken = 0;
+  const take = (name: string): void => {
+    taken += 1;
+    if (
+      !name.startsWith(coreStepPrefix) &&
+      taken > stepLimit - coreStepReserve
+    ) {
+      throw workflowErrors.create("workflow.too_many_steps");
+    }
+  };
+  const heard = (error: unknown, attempts: ReadonlySet<unknown>): void => {
+    const own = [...attempts].some((attempt) => isAttemptError(error, attempt));
+    if (isEngineStop(error) && !own) {
+      engineStopped(error);
+    }
+  };
+  const none: ReadonlySet<unknown> = new Set();
+  return {
+    do: async (name, config, fn) => {
+      // Every attempt's error: an attempt the engine gave up on may still
+      // end, late, after the next one began.
+      const attempts = new Set<unknown>();
+      take(name);
+      try {
+        return await step.do(name, config, async () => {
+          try {
+            return await fn();
+          } catch (error) {
+            attempts.add(error);
+            throw error;
+          }
+        });
+      } catch (error) {
+        heard(error, attempts);
+        throw error;
+      }
+    },
+    sleep: async (name, duration) => {
+      take(name);
+      try {
+        await step.sleep(name, duration);
+      } catch (error) {
+        heard(error, none);
+        throw error;
+      }
+    },
+    waitForEvent: async (name, options) => {
+      take(name);
+      try {
+        return await step.waitForEvent(name, options);
+      } catch (error) {
+        heard(error, none);
+        throw error;
+      }
+    },
+  };
+};
+
+/**
  * One of core's errors as the isolate, and the run's own record, may see
  * it: an expected error as it is, a timeout as one, anything else as
  * `internal.unexpected`, with the cause only in the log.
@@ -412,12 +550,6 @@ export interface HostHooks {
    * for is gone.
    */
   acting: () => Promise<void>;
-  /**
-   * Hears of an engine call that failed on the engine's side: when the
-   * engine is stopping the execution, the dispatcher ends it with that
-   * error, which the engine knows as its own.
-   */
-  engineFailed: (error: unknown) => void;
   /** Hears of each step that failed, with the error it failed with. */
   stepFailed: (failure: FailedStep) => void;
   /** Calls a method of the run's App for `caller` (`callApp`). */
@@ -450,21 +582,6 @@ export class RunHost extends RpcTarget {
     this.#step = step;
     this.#run = run;
     this.#hooks = hooks;
-  }
-
-  /**
-   * Runs one of the engine's own calls; a failure that is the engine's
-   * (a pause, say), not the step's, is passed on to the dispatcher as is.
-   */
-  async #engine<T>(call: () => Promise<T>): Promise<T> {
-    try {
-      return await call();
-    } catch (error) {
-      if (!isTimeout(error)) {
-        this.#hooks.engineFailed(error);
-      }
-      throw error;
-    }
   }
 
   get #actor(): AuditActor {
@@ -562,6 +679,16 @@ export class RunHost extends RpcTarget {
           };
           throw toStepError(failed);
         }
+        const recorded = JSON.stringify(result.value) ?? "";
+        if (
+          new TextEncoder().encode(recorded).byteLength > maxStepResultBytes
+        ) {
+          failed = {
+            name: "Error",
+            message: `Step "${step}" returned more than 1 MiB`,
+          };
+          throw toStepError(failed);
+        }
         ran = true;
         return result.value;
       });
@@ -571,11 +698,6 @@ export class RunHost extends RpcTarget {
       }
       return { ok: true, value };
     } catch (error) {
-      // The last attempt's own error: the engine's copy of it has only
-      // its message, with the name in front. Without one, the engine's.
-      if (failed === undefined && step !== "" && !isTimeout(error)) {
-        this.#hooks.engineFailed(error);
-      }
       this.#stepEnded(step);
       const reported = failed ?? forIsolate(error);
       if (step !== "") {
@@ -593,9 +715,7 @@ export class RunHost extends RpcTarget {
     return await settle(async () => {
       const step = checked(stepNameSchema, name);
       const ms = checked(milliseconds, duration);
-      await this.#engine(async () => {
-        await this.#step.sleep(step, ms);
-      });
+      await this.#step.sleep(step, ms);
       return null;
     });
   }
@@ -611,9 +731,7 @@ export class RunHost extends RpcTarget {
       const step = checked(stepNameSchema, name);
       const { type, timeout } = checked(waitOptionsSchema, options);
       try {
-        const event = await this.#engine(
-          async () => await this.#step.waitForEvent(step, { type, timeout })
-        );
+        const event = await this.#step.waitForEvent(step, { type, timeout });
         return { received: true, payload: event.payload };
       } catch (error) {
         if (isTimeout(error)) {
@@ -683,14 +801,12 @@ export class RunHost extends RpcTarget {
    * engine's, so the dispatcher hands it back to the engine as its own.
    */
   async #pauseWhileDecisionsOff(): Promise<void> {
-    await this.#engine(async () => {
-      await pauseWhileSwitchedOff(
-        this.#env,
-        this.#step,
-        this.#run.runId,
-        "decisions"
-      );
-    });
+    await pauseWhileSwitchedOff(
+      this.#env,
+      this.#step,
+      this.#run.runId,
+      "decisions"
+    );
   }
 
   /** The step whose function runs now; refuses a call outside a step. */
@@ -804,7 +920,8 @@ export class RunHost extends RpcTarget {
    * decision still open is closed, timed out, unless an answer lands
    * first. An answer that came before the wait began is taken at once.
    * While decisions are switched off, the run pauses instead of waiting,
-   * and instead of closing a decision nobody could answer meanwhile.
+   * and again once the wait is over: instead of closing a decision nobody
+   * could answer meanwhile, or of going on to remind people of it.
    */
   async waitForDecision(
     name: unknown,
@@ -825,22 +942,17 @@ export class RunHost extends RpcTarget {
       }
       if (timeout > 0) {
         try {
-          await this.#engine(
-            async () =>
-              await this.#step.waitForEvent(step, {
-                type: decisionEventType(decision),
-                timeout,
-              })
-          );
+          await this.#step.waitForEvent(step, {
+            type: decisionEventType(decision),
+            timeout,
+          });
         } catch (error) {
           if (!isTimeout(error)) {
             throw error;
           }
         }
       }
-      if (last) {
-        await this.#pauseWhileDecisionsOff();
-      }
+      await this.#pauseWhileDecisionsOff();
       return await decisionOutcome(this.#env, this.#run, decision, last);
     });
   }
