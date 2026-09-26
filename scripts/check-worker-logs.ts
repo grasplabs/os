@@ -2,8 +2,9 @@
  * Keeps request URLs and secrets out of Workers Logs (threat model R17).
  * Every Worker's wrangler config must turn off the platform's own line per
  * invocation and redact query strings, which carry OAuth codes and states
- * and bearer links. Checks every wrangler config in the repo, so a new
- * Worker can't miss it.
+ * and bearer links. It must also turn off preview URLs, which would serve
+ * every uploaded version, older ones included, at an address of its own.
+ * Checks every wrangler config in the repo, so a new Worker can't miss it.
  */
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -53,6 +54,12 @@ const check = (where: string, observability: unknown): void => {
   }
 };
 
+const checkPreviewUrls = (where: string, previewUrls: unknown): void => {
+  if (previewUrls !== false) {
+    errors.push(`${where}: set preview_urls to false.`);
+  }
+};
+
 for (const file of configs) {
   if (file.endsWith(".toml")) {
     errors.push(`${file}: use wrangler.jsonc, as every Worker here does.`);
@@ -60,19 +67,26 @@ for (const file of configs) {
   }
   const config = parseJsonc(readFileSync(file, "utf-8"));
   check(file, field(config, "observability"));
-  // An environment that sets its own observability replaces the top level's.
+  checkPreviewUrls(file, field(config, "preview_urls"));
+  // An environment that sets its own observability or preview_urls replaces
+  // the top level's.
   const envs = field(config, "env") ?? {};
   for (const name of Object.keys(envs)) {
-    const observability = field(field(envs, name), "observability");
+    const env = field(envs, name);
+    const observability = field(env, "observability");
     if (observability !== undefined) {
       check(`${file} (env ${name})`, observability);
+    }
+    const previewUrls = field(env, "preview_urls");
+    if (previewUrls !== undefined) {
+      checkPreviewUrls(`${file} (env ${name})`, previewUrls);
     }
   }
 }
 
 if (errors.length > 0) {
   console.error(
-    `Workers Logs must not record request URLs (threat model R17):\n${errors.map((line) => `  ${line}`).join("\n")}`
+    `Workers must keep request URLs out of Workers Logs (threat model R17) and serve no preview URLs:\n${errors.map((line) => `  ${line}`).join("\n")}`
   );
   process.exit(1);
 }
