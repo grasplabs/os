@@ -1,7 +1,11 @@
 import { errorFields, log } from "@grasp-os/shared/log";
 
 import { sendAuditOutbox } from "./audit-outbox.ts";
-import { consumeAuditQueue } from "./audit-queue.ts";
+import {
+  auditDeadLetterQueue,
+  consumeAuditQueue,
+  consumeDeadLetters,
+} from "./audit-queue.ts";
 import { archiveAuditLog } from "./audit-retention.ts";
 import { handleRequest } from "./entry.ts";
 import { retryDisconnects } from "./members.ts";
@@ -20,7 +24,12 @@ export { Workspace } from "./workspace.ts";
 
 export default {
   fetch: handleRequest,
-  queue: consumeAuditQueue,
+  // The audit queue, and its dead letter queue (see src/audit-queue.ts).
+  queue: async (batch, env) => {
+    await (batch.queue === auditDeadLetterQueue
+      ? consumeDeadLetters(batch, env)
+      : consumeAuditQueue(batch, env));
+  },
   // Every minute: audit events whose first send failed (see
   // src/audit-outbox.ts), personal connections of removed people still
   // connected (see src/members.ts), and audit events past retention (see

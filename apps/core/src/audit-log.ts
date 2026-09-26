@@ -1,5 +1,6 @@
 import {
   auditEventMaxBytes,
+  auditProvenanceMaxItems,
   auditEventSchema,
   createAuditEvent,
   isAuditEventTooLarge,
@@ -69,7 +70,14 @@ export const archiveStretch = 500;
  * How long archived stretches are kept, in days from when the log received
  * their last event: at least a year, at most ten.
  */
-const archiveRetentionSchema = z.int().min(365).max(3650);
+const archiveRetentionMinDays = 365;
+const archiveRetentionMaxDays = 3650;
+
+/** Days the log keeps an event where admins search it, unless set. */
+const retentionDefaultDays = 180;
+
+/** Days the console may set: at least 30 days, at most ten years. */
+const retentionSchema = z.int().min(30).max(3650);
 
 const dayMs = 24 * 60 * 60 * 1000;
 
@@ -77,19 +85,59 @@ const dayMs = 24 * 60 * 60 * 1000;
 const deleteBatchMax = 1000;
 
 /**
- * Days archived stretches are kept: the `AUDIT_ARCHIVE_RETENTION_DAYS` var
- * the console sets per deployment, as the DPA states it (AU7). `undefined`
- * while it's unset, or invalid (logged as `config.invalid`): then nothing
- * is purged. It's deployment config, so no session can shorten it.
+ * The deployment's retention in days (`AUDIT_RETENTION_DAYS`, see
+ * src/audit-retention.ts), or `undefined` if its config is invalid.
+ */
+export const auditRetentionDays = (
+  env: Pick<Env, "AUDIT_RETENTION_DAYS">
+): number | undefined =>
+  env.AUDIT_RETENTION_DAYS === undefined
+    ? retentionDefaultDays
+    : deploymentConfig(
+        retentionSchema,
+        "AUDIT_RETENTION_DAYS",
+        env.AUDIT_RETENTION_DAYS
+      );
+
+/**
+ * The archive retention schema for each retention: never shorter than it,
+ * so an event isn't purged before it was even archived. One per retention,
+ * so `deploymentConfig` parses and logs each value once.
+ */
+const archiveRetentionSchemas = new Map<number, z.ZodInt>();
+const archiveRetentionSchema = (retention: number): z.ZodInt => {
+  const known = archiveRetentionSchemas.get(retention);
+  if (known) {
+    return known;
+  }
+  const schema = z
+    .int()
+    .min(Math.max(archiveRetentionMinDays, retention))
+    .max(archiveRetentionMaxDays);
+  archiveRetentionSchemas.set(retention, schema);
+  return schema;
+};
+
+/**
+ * Days an event is kept in all, archive included, counted from when the
+ * log received it: the `AUDIT_ARCHIVE_RETENTION_DAYS` var the console sets
+ * per deployment, as the DPA states it (AU7). At least a year and at least
+ * the retention, at most ten years. `undefined` while it's unset, or
+ * invalid (logged as `config.invalid`), or while retention is invalid: then
+ * nothing is purged. It's deployment config, so no session can shorten it.
  */
 export const archiveRetentionDays = (
-  env: Pick<Env, "AUDIT_ARCHIVE_RETENTION_DAYS">
-): number | undefined =>
-  deploymentConfig(
-    archiveRetentionSchema,
-    "AUDIT_ARCHIVE_RETENTION_DAYS",
-    env.AUDIT_ARCHIVE_RETENTION_DAYS
-  );
+  env: Pick<Env, "AUDIT_ARCHIVE_RETENTION_DAYS" | "AUDIT_RETENTION_DAYS">
+): number | undefined => {
+  const retention = auditRetentionDays(env);
+  return retention === undefined
+    ? undefined
+    : deploymentConfig(
+        archiveRetentionSchema(retention),
+        "AUDIT_ARCHIVE_RETENTION_DAYS",
+        env.AUDIT_ARCHIVE_RETENTION_DAYS
+      );
+};
 
 /**
  * A receipt time held this far behind the head's is logged: the log holds
@@ -328,22 +376,50 @@ export class AuditLog extends DurableObject<Env> {
    * appends nothing from its batch.
    */
   async append(batch: readonly AuditEvent[]): Promise<AppendResult> {
-    const incoming = batch.map((event) => prepare(event));
-    // Hashing is async, so another append could otherwise run between
-    // reading the head and writing after it, and fork the chain.
-    return await this.ctx.blockConcurrencyWhile(async () => {
-      const { entries, conflicts } = await this.#link(incoming);
-      this.#db.transaction((tx) => {
-        for (const entry of entries) {
-          tx.insert(events).values(entry).run();
-        }
-      });
-      return {
-        appended: entries.length,
-        duplicates: incoming.length - entries.length,
-        conflicts,
-      };
-    });
+    return await this.#append(batch);
+  }
+
+  /**
+   * Appends events recovered from the audit queue's dead letter queue, as
+   * `append` does, then `audit.gap`, recorded by the platform: how many it
+   * appended late, with their IDs as its provenance, how many dead letters
+   * could never be appended (`lost`), and how many it skipped as conflicts
+   * (an ID the log, or the batch, already has with other content). All in
+   * one transaction, so a recovered event never goes in without its gap.
+   * Records nothing when it appended nothing and nothing was lost or in
+   * conflict: an event the log already holds left no gap. Takes at most
+   * 100 events (the queue's largest batch), as many IDs as an event's
+   * provenance holds.
+   */
+  async recover(
+    batch: readonly AuditEvent[],
+    lost: number
+  ): Promise<AppendResult> {
+    if (!Number.isInteger(lost) || lost < 0) {
+      throw new RangeError(`Lost dead letters must be a count, not ${lost}`);
+    }
+    if (batch.length > auditProvenanceMaxItems) {
+      throw new RangeError(
+        `At most ${auditProvenanceMaxItems} dead letters at a time`
+      );
+    }
+    return await this.#append(batch, (recovered, conflicts) =>
+      recovered.length === 0 && lost === 0 && conflicts === 0
+        ? undefined
+        : prepare(
+            createAuditEvent(
+              {
+                actor: { type: "system" },
+                action: "audit.gap",
+                // The events the gap was made from, as provenance holds
+                // them: IDs, found by a search for any one of them.
+                provenance: [...recovered],
+                detail: { recovered: recovered.length, lost, conflicts },
+              },
+              "core"
+            )
+          )
+    );
   }
 
   /** Entries after position `after`, oldest first, at most one page. */
@@ -711,18 +787,60 @@ export class AuditLog extends DurableObject<Env> {
   }
 
   /**
-   * Links events onto the head, each one after the last, skipping IDs the
-   * log already holds. Receipt times never go backwards: a clock behind the
-   * head's time is held at it. Call only while nothing else can append.
+   * Appends events, skipping IDs the log already holds, and then the event
+   * `after` gives for the IDs it appended, if any, in one transaction.
+   * Validates every event first, so one malformed or oversized event
+   * appends nothing from its batch.
+   */
+  async #append(
+    batch: readonly AuditEvent[],
+    after?: (
+      appended: readonly string[],
+      conflicts: number
+    ) => Incoming | undefined
+  ): Promise<AppendResult> {
+    const incoming = batch.map((event) => prepare(event));
+    // Hashing is async, so another append could otherwise run between
+    // reading the head and writing after it, and fork the chain.
+    return await this.ctx.blockConcurrencyWhile(async () => {
+      const { entries, conflicts } = await this.#link(incoming);
+      const next = after?.(
+        entries.map(({ id }) => id),
+        conflicts
+      );
+      const { entries: then } =
+        next === undefined
+          ? { entries: [] }
+          : await this.#link([next], entries.at(-1));
+      this.#db.transaction((tx) => {
+        for (const entry of [...entries, ...then]) {
+          tx.insert(events).values(entry).run();
+        }
+      });
+      return {
+        appended: entries.length,
+        duplicates: incoming.length - entries.length,
+        conflicts,
+      };
+    });
+  }
+
+  /**
+   * Links events onto the head, or after `tail` (entries linked but not
+   * yet written), each one after the last, skipping IDs the log already
+   * holds. Receipt times never go backwards: a clock behind the head's time
+   * is held at it (logged once, when linking onto the head). Call only
+   * while nothing else can append.
    */
   async #link(
-    incoming: readonly Incoming[]
+    incoming: readonly Incoming[],
+    after?: ChainLink & { receivedAt: string }
   ): Promise<{ entries: (ChainEntry & { id: string })[]; conflicts: number }> {
-    const tail = this.#tail();
+    const tail = after ?? this.#tail();
     const now = new Date().toISOString();
     const receivedAt = now > tail.receivedAt ? now : tail.receivedAt;
     const heldMs = Date.parse(tail.receivedAt) - Date.parse(now);
-    if (heldMs > clockHoldLoggedMs) {
+    if (after === undefined && heldMs > clockHoldLoggedMs) {
       log.warn("audit.clock_held", { heldMs, heldAt: tail.receivedAt });
     }
     // Every event this call has seen, by ID: stored ones and new ones.

@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { ZodError } from "zod";
 
 import {
@@ -52,6 +52,33 @@ describe("audit logger", () => {
     expect(event.id).not.toBe(forged.id);
     expect(event.at).not.toBe(forged.at);
     expect(event.source).toBe("connect");
+  });
+
+  it("logs a send the queue refuses, and passes the failure on to the caller", async () => {
+    const refusing = {
+      send: async () => {
+        await Promise.resolve();
+        throw new Error("Queue unavailable");
+      },
+    };
+    const logged = vi.spyOn(console, "error").mockReturnValue();
+    try {
+      await expect(
+        auditLogger(refusing, "core").log({
+          actor: { type: "system" },
+          action: "test.a",
+        })
+      ).rejects.toThrow("Queue unavailable");
+      expect(logged).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "audit.send_failed",
+          action: "test.a",
+          errorMessage: "Queue unavailable",
+        })
+      );
+    } finally {
+      logged.mockRestore();
+    }
   });
 
   it("refuses a malformed event before it reaches the queue", async () => {

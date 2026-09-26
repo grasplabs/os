@@ -891,6 +891,40 @@ describe("AuditLog purges", () => {
     );
   });
 
+  it("refuses an archive retention shorter than retention, as it's an event's total age", () => {
+    const logged = vi.spyOn(console, "error").mockReturnValue();
+    try {
+      // Events would be purged before they were archived.
+      expect(
+        archiveRetentionDays({
+          AUDIT_RETENTION_DAYS: "800",
+          AUDIT_ARCHIVE_RETENTION_DAYS: "700",
+        })
+      ).toBeUndefined();
+      expect(logged).toHaveBeenCalledWith(
+        expect.objectContaining({
+          event: "config.invalid",
+          var: "AUDIT_ARCHIVE_RETENTION_DAYS",
+        })
+      );
+    } finally {
+      logged.mockRestore();
+    }
+    expect(
+      archiveRetentionDays({
+        AUDIT_RETENTION_DAYS: "800",
+        AUDIT_ARCHIVE_RETENTION_DAYS: "800",
+      })
+    ).toBe(800);
+    // Nor any while retention itself is invalid.
+    expect(
+      archiveRetentionDays({
+        AUDIT_RETENTION_DAYS: "7",
+        AUDIT_ARCHIVE_RETENTION_DAYS: "730",
+      })
+    ).toBeUndefined();
+  });
+
   it("verifies a purged stretch as purged, and the chain across it", async () => {
     const log = newLog();
     await appendThree(log);
