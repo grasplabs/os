@@ -76,10 +76,10 @@ const recordRead = async (
  * A spreadsheet reads a cell as a formula when it starts with `=`, `+`,
  * `-` or `@`, also after whitespace (an ID can start with a space), or
  * with a tab or carriage return. Such a cell is written with a `'` in
- * front (CSV injection). A stored
- * event starts with `{`, so the event column holds it exactly; only a
- * stored row that isn't an event can start with one, and gets the `'`.
- * The JSON export is the exact form.
+ * front (CSV injection). A stored event starts with `{`, so the event
+ * column holds it exactly; only a stored row that isn't an event can
+ * look like a formula, and gets the `'`. The JSON export is the exact
+ * form.
  */
 const formulaStart = /^\s*[=+\-@]|^[\t\r]/u;
 const csvQuoted = /[",\r\n]/u;

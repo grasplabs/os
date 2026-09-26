@@ -664,24 +664,34 @@ export class AuditLog extends DurableObject<Env> {
    * chain carries on across it from its recorded hashes. Only a stretch
    * that verifies is purged, so a break is never erased with it, and
    * purges go oldest first. The log works the cutoff out itself, so its
-   * caller can't purge early. Every purge also deletes the objects of
-   * purged stretches whose delete failed before. The cron trigger calls
-   * it; it isn't on the RPC API, so no session can purge, staff included.
+   * caller can't purge early. Every purge, also one that fails, then
+   * deletes the objects of purged stretches whose delete failed before.
+   * The cron trigger calls it; it isn't on the RPC API, so no session can
+   * purge, staff included.
    */
   async purge(): Promise<ArchivedStretch | null> {
     const days = archiveRetentionDays(this.env);
     if (days === undefined) {
       return null;
     }
+    let purged: ArchivedStretch | null;
     try {
-      return await this.#purgeOldest(
+      purged = await this.#purgeOldest(
         new Date(Date.now() - days * dayMs).toISOString()
       );
-    } finally {
+    } catch (error) {
       // Also when this purge fails, say a read of the stretch's object
       // throws: the stretches purged before still get their objects deleted.
-      await this.#deletePurged();
+      // The purge's error is the one thrown; the deletes' own is logged.
+      try {
+        await this.#deletePurged();
+      } catch (cleanupError) {
+        log.error("audit.purge_cleanup_failed", errorFields(cleanupError));
+      }
+      throw error;
     }
+    await this.#deletePurged();
+    return purged;
   }
 
   /** Records the purge of the oldest archived stretch received before `cutoff`. */
