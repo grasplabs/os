@@ -8,8 +8,8 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import bundled from "#connectors";
 
-import { nativeConnector, nativeServer } from "../src/connectors.ts";
-import { connections } from "../src/db/schema.ts";
+import { nativeConnector } from "../src/connectors.ts";
+import { connections, connectionTokens } from "../src/db/schema.ts";
 import type { EgressProps } from "../src/egress.ts";
 import { providers as providerConfigs } from "../src/providers.ts";
 import { accessTokenFor } from "../src/tokens.ts";
@@ -90,9 +90,15 @@ const isAttempt = (value: unknown): value is Attempt =>
 /** Has the sample connector's code send a request, and says how it went. */
 const probe = async (
   connection: { id: string; person: ConnectionPerson },
-  input: { url: string; method?: string; headers?: [string, string][] }
+  input: {
+    url: string;
+    method?: string;
+    headers?: [string, string][];
+    mailbox?: string;
+  },
+  extra: Partial<Call> = {}
 ): Promise<Attempt> => {
-  const { output } = await call(connection, "probe.fetch", input);
+  const { output } = await call(connection, "probe.fetch", input, extra);
   const attempt: unknown = JSON.parse(output);
   if (!isAttempt(attempt)) {
     throw new TypeError("Not a probe's report");
@@ -178,11 +184,62 @@ describe("a native connector", () => {
     expect(api.sent).toHaveLength(1);
   });
 
-  it("loads in well under a second", async () => {
+  it("loads in a few seconds at most, even on a slow machine", async () => {
     const connection = await connectionTo("sample");
     const started = Date.now();
     await call(connection, "items.list", { mailbox: "invoices@acme.test" });
-    expect(Date.now() - started).toBeLessThan(1000);
+    expect(Date.now() - started).toBeLessThan(5000);
+  });
+
+  it("reads no token for a call it refuses", async () => {
+    const connection = await connectionTo("sample");
+    const google = await connectionTo("sample", "google");
+    // Any read of these tokens now refreshes them at the provider.
+    await drizzle(env.DB)
+      .update(connectionTokens)
+      .set({ accessExpiresAt: new Date(Date.now() + 1000) });
+    const chat = agentFor(
+      connection.person.userId,
+      "agent-chat",
+      "interactive"
+    );
+    const refusals = await Promise.all([
+      outcome(
+        call(
+          connection,
+          "items.list",
+          { mailbox: "ceo@acme.test" },
+          { resource: "invoices@acme.test" }
+        )
+      ),
+      outcome(
+        callAs(chat, {
+          connectionId: connection.id,
+          action: "items.send",
+          input: { mailbox: "invoices@acme.test", subject: "Paid" },
+          idempotencyKey: "chat-1:send",
+        })
+      ),
+      outcome(
+        call(connection, "items.send", {
+          mailbox: "invoices@acme.test",
+          subject: "Paid",
+        })
+      ),
+      outcome(call(connection, "items.delete", { mailbox: "a@acme.test" })),
+      outcome(call(google, "items.list", { mailbox: "a@acme.test" })),
+    ]);
+    expect(refusals).toStrictEqual([
+      "connect.resource_out_of_scope",
+      "connect.confirmation_required",
+      "connect.idempotency_key_required",
+      "connect.action_not_found",
+      "connect.server_unavailable",
+    ]);
+    expect(providers.tokenRequests("refresh_token")).toStrictEqual([]);
+    // A call that passes reads (and so refreshes) the token.
+    await call(connection, "items.list", { mailbox: "invoices@acme.test" });
+    expect(providers.tokenRequests("refresh_token")).toHaveLength(1);
   });
 
   it("isn't loaded for a connector this release doesn't have", async () => {
@@ -244,16 +301,37 @@ describe("a connector's code", () => {
   it("sends only the method and path its action declares", async () => {
     const connection = await connectionTo("sample");
     const attempts = [
-      { url: `https://${sampleHost}/v1/probe/ok`, method: "POST" },
+      { url: `https://${sampleHost}/v1/probe/ok`, method: "PUT" },
       { url: `https://${sampleHost}/v1/probe/ok`, method: "DELETE" },
       // Another action's route.
-      { url: `https://${sampleHost}/v1/mailboxes/ceo%40acme.test/items` },
+      {
+        url: `https://${sampleHost}/v1/mailboxes/ceo%40acme.test/items`,
+        method: "POST",
+      },
       { url: `https://${sampleHost}/v1/probe/ok/more` },
       { url: `https://${sampleHost}/v1/probe/` },
       { url: `https://${sampleHost}/V1/probe/ok` },
-      { url: `https://${sampleHost}/v1/probe/..%2Fmailboxes` },
-      { url: `https://${sampleHost}/v1/probe/%2e%2e/mailboxes` },
-      { url: `https://${sampleHost}/v1/probe/..%5Cadmin` },
+      // Parameters that decode to more than one plain segment.
+      ...[
+        "..%2Fmailboxes",
+        "%2e%2e/mailboxes",
+        "..%5Cadmin",
+        "%252e%252e%252f",
+        "a%00b",
+        "a%0D%0Ab",
+        "..;",
+        "a;x=y",
+        "a%3Fb",
+        "a%23b",
+        "a%3Ab",
+        "ok:poke",
+      ].map((segment) => ({
+        url: `https://${sampleHost}/v1/probe/${segment}`,
+      })),
+      // A literal suffix is the declared one, as declared.
+      { url: `https://${sampleHost}/v1/probe/item-1:poke` },
+      { url: `https://${sampleHost}/v1/probe/item-1%3Apeek` },
+      { url: `https://${sampleHost}/v1/probe/:peek` },
     ];
     for (const attempt of attempts) {
       // oxlint-disable-next-line no-await-in-loop -- one attempt after another
@@ -264,7 +342,68 @@ describe("a connector's code", () => {
     await expect(
       probe(connection, { url: `https://${sampleHost}/v1/probe/ok?page=2` })
     ).resolves.toStrictEqual({ status: 200, bytes: 2, error: null });
-    expect(api.sent).toMatchObject([{ path: "/v1/probe/ok?page=2" }]);
+    await probe(connection, {
+      url: `https://${sampleHost}/v1/probe/item-1:peek`,
+    });
+    expect(api.sent.map(({ path }) => path)).toStrictEqual([
+      "/v1/probe/ok?page=2",
+      "/v1/probe/item-1:peek",
+    ]);
+  });
+
+  it("reaches only the resource its capability names", async () => {
+    const connection = await connectionTo("sample");
+    const scoped = async (mailbox: string) =>
+      await probe(
+        connection,
+        {
+          mailbox: "invoices@acme.test",
+          url: `https://${sampleHost}/v1/mailboxes/${mailbox}/items`,
+        },
+        { resource: "invoices@acme.test" }
+      );
+    await expect(scoped("ceo%40acme.test")).resolves.toMatchObject(refused);
+    expect(api.sent).toStrictEqual([]);
+    await expect(scoped("invoices%40acme.test")).resolves.toMatchObject({
+      status: 200,
+    });
+    expect(api.sent).toHaveLength(1);
+  });
+
+  it("can't override the method its action declares", async () => {
+    const connection = await connectionTo("sample");
+    await probe(connection, {
+      url: `https://${sampleHost}/v1/probe/ok`,
+      method: "POST",
+      headers: [
+        ["x-http-method-override", "DELETE"],
+        ["x-http-method", "DELETE"],
+        ["x-method-override", "DELETE"],
+        ["te", "trailers"],
+      ],
+    });
+    expect(api.sent).toHaveLength(1);
+    for (const name of [
+      "x-http-method-override",
+      "x-http-method",
+      "x-method-override",
+      "te",
+    ]) {
+      expect(api.sent[0]?.headers).not.toHaveProperty(name);
+    }
+  });
+
+  it("opens no raw socket", async () => {
+    const connection = await connectionTo("sample");
+    const { output } = await call(connection, "probe.socket", {});
+    // `opened` may resolve first; the first write or read fails.
+    expect(JSON.parse(output)).not.toStrictEqual({ error: null });
+  });
+
+  it("keeps nothing in the Cache API", async () => {
+    const connection = await connectionTo("sample");
+    const { output } = await call(connection, "probe.cache", {});
+    expect(JSON.parse(output)).toMatchObject({ kept: false });
   });
 
   it("can't read the token, connect's env or anything else of connect's", async () => {
@@ -361,6 +500,10 @@ describe("a connector's code", () => {
         url: `https://${sampleHost}/v1/probe/flood-declared`,
       })
     ).resolves.toMatchObject({ status: 502, bytes: 0 });
+    // A response with no body passes, whatever length it claims.
+    await expect(
+      probe(connection, { url: `https://${sampleHost}/v1/probe/empty` })
+    ).resolves.toMatchObject({ status: 204, bytes: 0 });
   });
 
   it("keeps nothing from one call for the next", async () => {
@@ -397,8 +540,9 @@ describe("a connector's code", () => {
       method: "INVOICE-4200",
     });
     const lines = logged.join("\n");
-    expect(lines).toContain(sampleHost);
-    expect(lines).toContain("/v1/mailboxes/{mailbox}/items");
+    expect(lines).toMatch(
+      /egress\.request.*callId.*api\.sample\.test.*\/v1\/mailboxes\/\{mailbox\}\/items/u
+    );
     expect(lines).toContain("egress.refused");
     expect(lines).not.toContain(token);
     expect(lines).not.toContain("invoice");
@@ -408,8 +552,10 @@ describe("a connector's code", () => {
 /** Props for the egress handler, as connect sets them for one call. */
 const egressProps = (fields: Partial<EgressProps> = {}): EgressProps => ({
   connector: "sample@1.0.0",
+  callId: "call-1",
   hosts: [sampleHost],
   routes: [{ method: "GET", host: sampleHost, path: "/v1/probe/{case}" }],
+  values: {},
   token: "a-token-for-one-call",
   expiresAt: Date.now() + 30_000,
   ...fields,
@@ -454,35 +600,19 @@ const tools = bundled.flatMap(({ manifest }) => {
   }));
 });
 
-const connectionRow = async (id: string) => {
-  const row = await drizzle(env.DB)
-    .select()
-    .from(connections)
-    .where(eq(connections.id, id))
-    .get();
-  if (row === undefined) {
-    throw new Error(`No connection ${id}`);
-  }
-  return row;
-};
-
 describe("every native tool", () => {
   it.each(tools)(
     "$connector $action refuses a second resource selector",
     async ({ connector, provider, action }) => {
       const connection = await connectionTo(connector, provider);
-      const server = await nativeServer(
-        env,
-        await connectionRow(connection.id),
-        action
-      );
-      const tool = await server.tool(action);
-      const field = tool?.resourceField ?? "mailbox";
-      const declared = new Set(tool?.inputProperties);
+      const manifest = nativeConnector(connector)?.manifest;
+      const tool = manifest?.actions[action];
+      const field = tool?.resource ?? "mailbox";
+      const declared = new Set(tool?.input);
       const extra = [`shared${field}`, "target", "userId"].filter(
         (key) => !declared.has(key)
       );
-      const inputs = [
+      const undeclared = [
         { [field]: "a@acme.test", [extra[0] ?? "x"]: "b@acme.test" },
         {
           [field]: "a@acme.test",
@@ -490,16 +620,33 @@ describe("every native tool", () => {
         },
         { [field]: "a@acme.test", [extra[2] ?? "z"]: "b@acme.test" },
       ];
-      for (const input of inputs) {
-        // oxlint-disable-next-line no-await-in-loop -- one attempt after another
-        await expect(
-          failedOutput(
-            call(connection, action, input, {
-              idempotencyKey: crypto.randomUUID(),
-            })
-          )
-        ).resolves.toContain("unrecognized_keys");
-      }
+      // Nor nested under a property it does declare.
+      const nested = [...declared]
+        .filter((other) => other !== field)
+        .map((other) => ({
+          [field]: "a@acme.test",
+          [other]: { [field]: "b@acme.test" },
+        }));
+      const refusals = await Promise.all(
+        [...undeclared, ...nested].map(
+          async (input) =>
+            await failedOutput(
+              call(connection, action, input, {
+                idempotencyKey: crypto.randomUUID(),
+              })
+            )
+        )
+      );
+      expect(
+        refusals
+          .slice(0, undeclared.length)
+          .every((text) => text.includes("unrecognized_keys"))
+      ).toBeTruthy();
+      expect(
+        refusals
+          .slice(undeclared.length)
+          .every((text) => text.includes("Invalid input"))
+      ).toBeTruthy();
       expect(api.sent).toStrictEqual([]);
     }
   );

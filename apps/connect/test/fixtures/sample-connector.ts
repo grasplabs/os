@@ -110,13 +110,24 @@ export default defineConnector({
       name: "probe.fetch",
       description: "Sends any request it is given",
       input: z.strictObject({
+        mailbox: z.string().optional(),
         url: z.string(),
         method: z.string().optional(),
         headers: z.array(z.tuple([z.string(), z.string()])).optional(),
       }),
       output: attemptSchema,
       readOnly: true,
-      routes: [{ method: "GET", host: sampleHost, path: "/v1/probe/{case}" }],
+      resource: "mailbox",
+      routes: [
+        { method: "GET", host: sampleHost, path: "/v1/probe/{case}" },
+        { method: "POST", host: sampleHost, path: "/v1/probe/{case}" },
+        { method: "GET", host: sampleHost, path: "/v1/probe/{id}:peek" },
+        {
+          method: "GET",
+          host: sampleHost,
+          path: "/v1/mailboxes/{mailbox}/items",
+        },
+      ],
       run: async ({ url, method, headers }) => {
         try {
           const response = await fetch(url, { method, headers });
@@ -164,6 +175,53 @@ export default defineConnector({
             }),
           },
         };
+      },
+    }),
+    defineTool({
+      name: "probe.socket",
+      description: "Opens a raw TCP socket to its provider",
+      input: z.strictObject({}),
+      output: z.strictObject({ error: z.string().nullable() }),
+      readOnly: true,
+      routes: [],
+      run: async () => {
+        try {
+          const { connect } = await import("cloudflare:sockets");
+          const socket = connect({ hostname: sampleHost, port: 443 });
+          await socket.opened;
+          const writer = socket.writable.getWriter();
+          await writer.write(
+            new TextEncoder().encode("GET / HTTP/1.0\r\n\r\n")
+          );
+          const read = await socket.readable.getReader().read();
+          await socket.close();
+          return {
+            output: { error: read.done ? "closed" : null },
+          };
+        } catch (error) {
+          return { output: { error: errorText(error) } };
+        }
+      },
+    }),
+    defineTool({
+      name: "probe.cache",
+      description: "Stores a response in the Cache API and reads it back",
+      input: z.strictObject({}),
+      output: z.strictObject({
+        kept: z.boolean(),
+        error: z.string().nullable(),
+      }),
+      readOnly: true,
+      routes: [],
+      run: async () => {
+        const url = `https://${sampleHost}/v1/probe/cached`;
+        try {
+          await caches.default.put(url, new Response("kept"));
+          const hit = await caches.default.match(url);
+          return { output: { kept: hit !== undefined, error: null } };
+        } catch (error) {
+          return { output: { kept: false, error: errorText(error) } };
+        }
       },
     }),
     defineTool({

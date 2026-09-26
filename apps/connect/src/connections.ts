@@ -3,7 +3,6 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { nativeServer } from "./connectors.ts";
 import { connections } from "./db/schema.ts";
 import { mcpServer } from "./mcp.ts";
 import type { McpServer } from "./mcp.ts";
@@ -68,26 +67,11 @@ export const usableConnection = async (
   return connection;
 };
 
-/** The MCP server that carries out the connection's `action`. */
-export const serverOf = async (
-  env: Env,
-  connection: Connection,
-  action: string
-): Promise<McpServer> => {
-  switch (connection.serverKind) {
-    case "composio": {
-      const url = composioUrlSchema.safeParse(connection.server);
-      if (!url.success) {
-        throw connectErrors.create("connect.server_unavailable");
-      }
-      return mcpServer(url.data, async (request) => await fetch(request));
-    }
-    case "native": {
-      // In its own isolate, behind the egress allowlist (connectors.ts).
-      return await nativeServer(env, connection, action);
-    }
-    default: {
-      return connection.serverKind satisfies never;
-    }
+/** The Composio MCP server behind the connection, if its URL is one. */
+export const composioServer = (connection: Connection): McpServer => {
+  const url = composioUrlSchema.safeParse(connection.server);
+  if (!url.success) {
+    throw connectErrors.create("connect.server_unavailable");
   }
+  return mcpServer(url.data, async (request) => await fetch(request));
 };

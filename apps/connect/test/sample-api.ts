@@ -67,6 +67,12 @@ const answer = (method: string, url: URL): Response => {
     case "/v1/probe/flood": {
       return new Response(flood());
     }
+    case "/v1/probe/empty": {
+      return new Response(null, {
+        status: 204,
+        headers: { "content-length": String(floodBytes) },
+      });
+    }
     case "/v1/probe/flood-declared": {
       return new Response(new Uint8Array(floodBytes), {
         headers: { "content-length": String(floodBytes) },

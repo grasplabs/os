@@ -47,8 +47,22 @@ const hostPattern =
 /** A path segment an action names as it is, such as `v1.0` or `$value`. */
 const literalSegment = /^[\w.~$:@()'-]+$/u;
 
-/** A path segment an action leaves open, such as `{mailbox}`. */
-const parameterSegment = /^\{[A-Za-z_]\w*\}$/u;
+/**
+ * A path segment an action leaves open, such as `{mailbox}`, maybe with a
+ * literal suffix after a colon, as Google's custom methods have it:
+ * `{id}:batchUpdate`.
+ */
+const parameterSegment = /^\{(?<name>[A-Za-z_]\w*)\}(?<suffix>:[A-Za-z]\w*)?$/u;
+
+/**
+ * Batch endpoints (Graph's `/$batch`, Google's `/batch/...`) carry any
+ * number of requests to any path in one body, past the path allowlist:
+ * never declared.
+ */
+const isBatchSegment = (segment: string): boolean => {
+  const lower = segment.toLowerCase();
+  return lower === "batch" || lower.startsWith("$batch");
+};
 
 /** Whether `path` is a path template: `/` and one or more segments. */
 const isPathTemplate = (path: string): boolean => {
@@ -59,7 +73,10 @@ const isPathTemplate = (path: string): boolean => {
     segments.every(
       (segment) =>
         parameterSegment.test(segment) ||
-        (literalSegment.test(segment) && segment !== "." && segment !== "..")
+        (literalSegment.test(segment) &&
+          segment !== "." &&
+          segment !== ".." &&
+          !isBatchSegment(segment))
     )
   );
 };
@@ -78,8 +95,24 @@ export const routeSchema = z.strictObject({
 });
 export type Route = z.infer<typeof routeSchema>;
 
+/**
+ * What connect knows of one action (tool) before running it, and decides
+ * by before it reads a token: whether it is read-only, the input property
+ * that selects its resource, its input properties, and the only requests
+ * it may send.
+ */
+export const actionManifestSchema = z.strictObject({
+  routes: z.array(routeSchema).max(32),
+  readOnly: z.boolean(),
+  resource: z
+    .string()
+    .regex(/^[A-Za-z_]\w*$/u)
+    .nullable(),
+  input: z.array(z.string().min(1).max(128)).max(128),
+});
+export type ActionManifest = z.infer<typeof actionManifestSchema>;
+
 /** Most requests one action may declare, and hosts one connector. */
-const maxRoutes = 32;
 const maxHosts = 16;
 
 export const connectorNameSchema = z.string().regex(/^[a-z][a-z0-9-]{0,62}$/u);
@@ -95,10 +128,7 @@ export const connectorManifestSchema = z
     /** Every host it may reach, exactly. */
     hosts: z.array(hostSchema).min(1).max(maxHosts),
     /** Each action (tool) by name, and the only requests it may send. */
-    actions: z.record(
-      permissionActionSchema,
-      z.strictObject({ routes: z.array(routeSchema).max(maxRoutes) })
-    ),
+    actions: z.record(permissionActionSchema, actionManifestSchema),
   })
   .refine(
     ({ hosts, actions }) =>
@@ -106,6 +136,13 @@ export const connectorManifestSchema = z
         routes.every(({ host }) => hosts.includes(host))
       ),
     "Every route's host must be one of the connector's hosts"
+  )
+  .refine(
+    ({ actions }) =>
+      Object.values(actions).every(
+        ({ resource, input }) => resource === null || input.includes(resource)
+      ),
+    "An action's resource must be one of its input properties"
   );
 export type ConnectorManifest = z.infer<typeof connectorManifestSchema>;
 
@@ -118,30 +155,51 @@ const decodedSegment = (segment: string): string | undefined => {
 };
 
 /**
+ * Characters a parameter's value may not decode to: path and query
+ * delimiters, matrix and custom-method separators (`;`, `:`), a percent
+ * sign (so it isn't decoded a second time), a backslash, and controls.
+ */
+// oxlint-disable-next-line no-control-regex -- control characters are the point
+const forbiddenInValue = /[/\\?#%;:\u0000-\u001F\u007F]/u;
+
+/**
  * Whether a URL's path (as `URL.pathname` gives it: dot segments resolved,
  * still percent-encoded) is one the template allows. A `{name}` segment
- * takes any one non-empty segment that doesn't decode to a path of its own
- * (`..`, or one with a slash in it), so a value can't climb out of its
- * place on a server that decodes it.
+ * takes one non-empty value that decodes to plain text: no path of its own
+ * (`..`, a slash), nothing a server could read as a delimiter, and no
+ * percent sign to decode again. Where `values` names a parameter, its
+ * value must decode to exactly that (the resource a capability names).
  */
-export const pathMatches = (template: string, pathname: string): boolean => {
+export const pathMatches = (
+  template: string,
+  pathname: string,
+  values: Readonly<Record<string, string>> = {}
+): boolean => {
   const expected = template.split("/");
   const actual = pathname.split("/");
   return (
     expected.length === actual.length &&
     expected.every((segment, index) => {
       const given = actual[index] ?? "";
-      if (!parameterSegment.test(segment)) {
+      const parameter = parameterSegment.exec(segment);
+      if (parameter === null) {
         return given === segment;
       }
-      const decoded = decodedSegment(given);
+      const { name = "", suffix = "" } = parameter.groups ?? {};
+      if (!given.endsWith(suffix)) {
+        return false;
+      }
+      const decoded = decodedSegment(
+        given.slice(0, given.length - suffix.length)
+      );
+      const bound = Object.hasOwn(values, name) ? values[name] : undefined;
       return (
         decoded !== undefined &&
         decoded !== "" &&
         decoded !== "." &&
         decoded !== ".." &&
-        !decoded.includes("/") &&
-        !decoded.includes("\\")
+        !forbiddenInValue.test(decoded) &&
+        (bound === undefined || decoded === bound)
       );
     })
   );

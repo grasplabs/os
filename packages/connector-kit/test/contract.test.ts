@@ -75,10 +75,35 @@ describe("a tool", () => {
         target: z.union([z.string(), z.object({ mailbox: z.string() })]),
       }),
       z.strictObject({ mailbox: z.string() }).catchall(z.string()),
+      // Anything at all, where a second selector could hide.
+      z.strictObject({ mailbox: z.string(), opts: z.unknown() }),
+      z.strictObject({ mailbox: z.string(), opts: z.any() }),
+      z.strictObject({ mailbox: z.string(), opts: z.array(z.any()) }),
+      z.strictObject({
+        mailbox: z.string(),
+        opts: z.tuple([z.string()]).rest(z.any()),
+      }),
+      z.strictObject({
+        mailbox: z.string(),
+        opts: z.union([z.string(), z.unknown()]),
+      }),
     ];
     for (const input of loose) {
       expect(() => toolWith(input)).toThrow("strict");
     }
+  });
+
+  it("takes closed tuples, literals, enums and nullable values", () => {
+    expect(() =>
+      toolWith(
+        z.strictObject({
+          pair: z.tuple([z.string(), z.number()]),
+          kind: z.enum(["a", "b"]),
+          one: z.literal(1),
+          maybe: z.string().nullable(),
+        })
+      )
+    ).not.toThrow();
   });
 
   it("names as its resource only one of its own string properties", () => {
@@ -94,6 +119,26 @@ describe("a tool", () => {
       "sharedMailbox",
     ]) {
       expect(() => toolWith(input, resource)).toThrow("resource");
+    }
+  });
+
+  it("masks only fields its output has", () => {
+    const withMask = (mask: string[]) =>
+      defineTool({
+        name: "items.list",
+        description: "Lists items",
+        input: z.strictObject({}),
+        output: z.strictObject({
+          items: z.array(z.strictObject({ subject: z.string() })),
+        }),
+        readOnly: true,
+        mask,
+        routes: [route],
+        run: async () => await Promise.resolve({ output: { items: [] } }),
+      });
+    expect(() => withMask(["items.subject"])).not.toThrow();
+    for (const path of ["items.body", "subject", "items.subject.x"]) {
+      expect(() => withMask([path])).toThrow("mask");
     }
   });
 });
@@ -130,6 +175,31 @@ describe("a connector", () => {
     }
   });
 
+  it("declares no batch endpoint", () => {
+    for (const path of [
+      "/v1.0/$batch",
+      "/batch/gmail/v1",
+      "/v1/$BATCH",
+      "/v1/Batch",
+    ]) {
+      expect(() =>
+        connectorWith({
+          tools: [
+            defineTool({
+              name: "items.list",
+              description: "Lists items",
+              input: z.strictObject({}),
+              output: z.strictObject({}),
+              readOnly: true,
+              routes: [{ ...route, path }],
+              run: async () => await Promise.resolve({ output: {} }),
+            }),
+          ],
+        })
+      ).toThrow("Not a path template");
+    }
+  });
+
   it("has one tool per name", () => {
     const tool = toolWith(z.strictObject({}));
     expect(() => connectorWith({ tools: [tool, tool] })).toThrow("Two tools");
@@ -155,11 +225,52 @@ describe("a route's path", () => {
     }
   });
 
-  it("takes no parameter that decodes to a path of its own", () => {
-    for (const segment of ["..", "%2e%2e", "a%2Fb", "a%5Cb", "%", "."]) {
+  it("takes no parameter that decodes to more than plain text", () => {
+    for (const segment of [
+      "..",
+      "%2e%2e",
+      "a%2Fb",
+      "a%5Cb",
+      "%",
+      ".",
+      "%252e%252e%252f",
+      "a%00b",
+      "a%0D%0Ab",
+      "a%7Fb",
+      "..;",
+      "a;x=y",
+      "a%3Fb",
+      "a%23b",
+      "a:b",
+      "a%3Ab",
+    ]) {
       expect(
         pathMatches(template, `/v1/users/${segment}/messages`)
       ).toBeFalsy();
+    }
+  });
+
+  it("binds a parameter to a value, where it is given one", () => {
+    const values = { mailbox: "a@acme.test" };
+    expect(
+      pathMatches(template, "/v1/users/a%40acme.test/messages", values)
+    ).toBeTruthy();
+    expect(
+      pathMatches(template, "/v1/users/b%40acme.test/messages", values)
+    ).toBeFalsy();
+  });
+
+  it("takes a literal suffix only as declared", () => {
+    const custom = "/v1/files/{id}:batchUpdate";
+    expect(pathMatches(custom, "/v1/files/f-1:batchUpdate")).toBeTruthy();
+    for (const path of [
+      "/v1/files/f-1",
+      "/v1/files/f-1:delete",
+      "/v1/files/f-1%3AbatchUpdate",
+      "/v1/files/:batchUpdate",
+      "/v1/files/a:b:batchUpdate",
+    ]) {
+      expect(pathMatches(custom, path)).toBeFalsy();
     }
   });
 });

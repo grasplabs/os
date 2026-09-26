@@ -41,7 +41,12 @@ export const connectorEntries = (): string[] =>
       const manifest = packageSchema.parse(
         JSON.parse(readFileSync(path.join(dir, "package.json"), "utf-8"))
       );
-      return path.join(dir, manifest.exports["."]);
+      const entry = path.resolve(dir, manifest.exports["."]);
+      // A package builds only its own code, never a file outside its folder.
+      if (!entry.startsWith(`${dir}${path.sep}`)) {
+        throw new Error(`${dir}'s entry is outside its folder`);
+      }
+      return entry;
     });
 
 const moduleSchema = z.object({
@@ -110,6 +115,11 @@ const bundle = async (entry: string): Promise<string> => {
  * Builds the connectors at `entries` into `outFile`. Each one's manifest
  * comes from its module (so the manifest and the tools can't drift apart)
  * and must be valid; two connectors may not share a name.
+ *
+ * Reading the manifest runs the connector's module in Node, at build time,
+ * with the build's access (CI's): connector code and its dependencies are
+ * trusted as all of our code is, reviewed, pinned and aged (threat model
+ * EG4, CI2).
  */
 export const buildConnectors = async (
   entries: readonly string[],

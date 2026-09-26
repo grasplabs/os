@@ -16,8 +16,12 @@ import { z } from "zod";
 // (threat model R9, Q11, EG1 to EG7). A request goes out only to one of
 // those, over HTTPS, with the token added; anything else is refused before
 // it leaves. Redirects are never followed, and a response is cut off past
-// a size limit. Connect's `global_fetch_strictly_public` keeps an allowed
-// name that resolves to a private address from being reached (R9).
+// a size limit. Raw sockets are refused. Connect's
+// `global_fetch_strictly_public` keeps an allowed name that resolves to a
+// private address from being reached (R9).
+//
+// What the allowlist doesn't constrain: the query string and the body of
+// an allowed request are the connector's own (threat model EG3).
 
 /** Largest provider response a connector may read, in bytes. */
 export const maxEgressResponseBytes = 10 * 1024 * 1024;
@@ -28,21 +32,42 @@ export const egressRefusedStatus = 403;
 /** The status a response gets when it redirected or was too large. */
 export const egressFailedStatus = 502;
 
-/** Request headers the connector can't set: the token is connect's to add. */
+/**
+ * Request headers the connector can't send: credentials (the token is
+ * connect's to add); method overrides, which some providers (Google)
+ * honour on a POST, turning it into a method the action doesn't declare
+ * (Q11); and hop-by-hop headers that could change the connection itself.
+ */
 const connectorHeadersRefused = [
   "authorization",
   "proxy-authorization",
   "cookie",
   "host",
+  "x-http-method-override",
+  "x-http-method",
+  "x-method-override",
+  "upgrade",
+  "connection",
+  "te",
 ];
+
+/** Response headers that no longer hold for the body as passed on. */
+const responseHeadersDropped = ["content-encoding", "content-length"];
 
 const egressPropsSchema = z.strictObject({
   /** Which connector, for the log: its name and version. */
   connector: z.string().min(1),
+  /** Which call, for the log: its capability's ID. */
+  callId: z.string().min(1),
   /** The connector's hosts. */
   hosts: z.array(z.string().min(1)).min(1),
   /** The requests the called action declares. */
   routes: z.array(routeSchema),
+  /**
+   * Path parameters bound to one value: the action's resource property,
+   * to the resource the call's capability names.
+   */
+  values: z.record(z.string(), z.string()),
   /** The connection's access token, for this call only. */
   token: z.string().min(1),
   /** When this call's egress closes, in ms since the epoch. */
@@ -58,18 +83,16 @@ const knownMethods: ReadonlySet<string> = new Set(httpMethods);
  * data out into the logs.
  */
 const refuse = (
-  connector: string,
+  call: { connector: string; callId?: string; hosts: readonly string[] },
   reason: string,
-  hosts: readonly string[],
-  url: URL | undefined,
+  url: URL,
   method: string
 ): Response => {
-  const host =
-    url !== undefined && hosts.includes(url.hostname) ? url.hostname : "other";
   log.warn("egress.refused", {
-    connector,
+    connector: call.connector,
+    callId: call.callId,
     reason,
-    host,
+    host: call.hosts.includes(url.hostname) ? url.hostname : "other",
     method: knownMethods.has(method) ? method : "other",
   });
   return new Response("Refused by connect's egress allowlist", {
@@ -79,7 +102,7 @@ const refuse = (
 
 /** The route the request is for, if the call declares it. */
 const routeFor = (
-  routes: readonly Route[],
+  { routes, values }: Pick<EgressProps, "routes" | "values">,
   method: string,
   url: URL
 ): Route | undefined =>
@@ -87,8 +110,12 @@ const routeFor = (
     (route) =>
       route.method === method &&
       route.host === url.hostname &&
-      pathMatches(route.path, url.pathname)
+      pathMatches(route.path, url.pathname, values)
   );
+
+/** Whether a response has no body, whatever its headers say. */
+const isBodiless = (method: string, status: number): boolean =>
+  method === "HEAD" || status === 204 || status === 304;
 
 /**
  * The response with its body cut off once it passes the size limit: the
@@ -126,10 +153,15 @@ const capped = (response: Response): Response => {
       await reader.cancel(reason);
     },
   });
+  // The body arrives decoded, and its length is counted here.
+  const headers = new Headers(response.headers);
+  for (const name of responseHeadersDropped) {
+    headers.delete(name);
+  }
   return new Response(limited, {
     status: response.status,
     statusText: response.statusText,
-    headers: response.headers,
+    headers,
   });
 };
 
@@ -145,12 +177,18 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
     const url = new URL(request.url);
     const { method } = request;
     if (!props.success) {
-      return refuse("unknown", "no_call", [], url, method);
+      return refuse(
+        { connector: "unknown", hosts: [] },
+        "no_call",
+        url,
+        method
+      );
     }
-    const { connector, hosts, routes, token, expiresAt } = props.data;
+    const call = props.data;
+    const { connector, callId, hosts, token, expiresAt } = call;
     const remainingMs = expiresAt - Date.now();
     if (remainingMs <= 0) {
-      return refuse(connector, "expired", hosts, url, method);
+      return refuse(call, "expired", url, method);
     }
     // Exactly one of the connector's hosts, over HTTPS on its own port,
     // without credentials in the URL.
@@ -161,11 +199,11 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
       url.port !== "" ||
       !hosts.includes(url.hostname)
     ) {
-      return refuse(connector, "host", hosts, url, method);
+      return refuse(call, "host", url, method);
     }
-    const route = routeFor(routes, method, url);
+    const route = routeFor(call, method, url);
     if (route === undefined) {
-      return refuse(connector, "route", hosts, url, method);
+      return refuse(call, "route", url, method);
     }
 
     const headers = new Headers(request.headers);
@@ -186,6 +224,7 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
     } catch {
       log.warn("egress.failed", {
         connector,
+        callId,
         host: url.hostname,
         method,
         route: route.path,
@@ -196,6 +235,7 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
     // sent, the query, headers or bodies (R17, EG7).
     log.info("egress.request", {
       connector,
+      callId,
       host: url.hostname,
       method,
       route: route.path,
@@ -206,11 +246,14 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
       response.status >= 300 &&
       response.status < 400 &&
       response.status !== 304;
-    const declaredBytes = Number(response.headers.get("content-length"));
+    const declaredBytes = isBodiless(method, response.status)
+      ? 0
+      : Number(response.headers.get("content-length"));
     if (isRedirect || declaredBytes > maxEgressResponseBytes) {
       await response.body?.cancel();
       log.warn("egress.refused", {
         connector,
+        callId,
         reason: isRedirect ? "redirect" : "too_large",
         host: url.hostname,
         method,
@@ -218,5 +261,12 @@ export class ConnectorEgress extends WorkerEntrypoint<Env, EgressProps> {
       return new Response(null, { status: egressFailedStatus });
     }
     return capped(response);
+  }
+
+  /** Raw TCP (`cloudflare:sockets`) never leaves: only HTTPS requests. */
+  // oxlint-disable-next-line class-methods-use-this -- the runtime's handler
+  override connect(): never {
+    log.warn("egress.refused", { reason: "socket" });
+    throw new Error("Refused by connect's egress allowlist");
   }
 }

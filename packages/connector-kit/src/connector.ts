@@ -9,7 +9,7 @@ import {
   provenanceMetaKey,
   resourceMetaKey,
 } from "./manifest.ts";
-import type { ConnectorManifest, Route } from "./manifest.ts";
+import type { ActionManifest, ConnectorManifest, Route } from "./manifest.ts";
 
 // How a native connector is written: its tools, each with what connect
 // decides by (read-only or not, the one resource it acts on, the requests
@@ -40,7 +40,13 @@ export interface ToolDefinition<
   /**
    * Strict all the way down (`z.strictObject`): unknown keys are refused,
    * never dropped, and there are no aliases or case-insensitive keys, so
-   * nothing but `resource` can select a resource.
+   * nothing but `resource` can select a resource. `defineTool` refuses
+   * input whose JSON Schema leaves anything open (`z.unknown()`,
+   * `z.any()`, records, loose objects).
+   *
+   * What it can't see, reviewers must refuse: `z.preprocess` and
+   * `.transform` run before or after the schema it checks, so they can
+   * read a key under another name (an alias), or rename one, unseen.
    */
   input: Input;
   output: Output;
@@ -54,9 +60,13 @@ export interface ToolDefinition<
    * other property, at any depth, may select a resource.
    */
   resource?: Extract<keyof z.input<Input>, string>;
-  /** Output fields (dotted paths) that may be masked. */
+  /** Output fields (dotted paths, through arrays) that may be masked. */
   mask?: readonly string[];
-  /** The only requests it may send (threat model Q11). */
+  /**
+   * The only requests it may send (threat model Q11). A path segment named
+   * after the resource property (`{mailbox}`) must hold the resource a
+   * call's capability names, whenever it names one.
+   */
   routes: readonly Route[];
   run: (input: z.output<Input>) => Promise<ToolResult<z.input<Output>>>;
 }
@@ -84,7 +94,8 @@ interface CallResult {
 /** A tool, as the server lists and calls it. */
 export interface Tool {
   name: string;
-  routes: readonly Route[];
+  /** What connect decides the tool's calls by, before running any. */
+  action: ActionManifest;
   /** As `tools/list` describes it. */
   description: JsonObject;
   call: (args: unknown) => Promise<CallResult>;
@@ -93,29 +104,68 @@ export interface Tool {
 const isObject = (value: unknown): value is JsonObject =>
   typeof value === "object" && value !== null && !Array.isArray(value);
 
+/** The keywords that say what a JSON Schema node allows. */
+const typeKeywords = ["type", "anyOf", "oneOf", "allOf", "const", "enum"];
+
+const typesOf = (schema: JsonObject): unknown[] =>
+  Array.isArray(schema.type) ? schema.type : [schema.type];
+
 /**
- * Whether every object a JSON Schema allows is closed: it names its
- * properties and refuses any other (`additionalProperties: false`), at any
- * depth and in every branch.
+ * Whether a JSON Schema allows only what it spells out, at every depth and
+ * in every branch: each node names its type (an empty schema, as
+ * `z.unknown()` and `z.any()` make, allows anything), each object names
+ * its properties and refuses any other (`additionalProperties: false`),
+ * and each array says what its items are. References and patterns count
+ * as open.
  */
 const isClosed = (schema: unknown): boolean => {
-  if (Array.isArray(schema)) {
-    return schema.every(isClosed);
-  }
-  if (!isObject(schema)) {
+  if (schema === false) {
     return true;
   }
-  const isObjectSchema =
-    schema.type === "object" ||
-    "properties" in schema ||
-    "patternProperties" in schema;
   if (
-    isObjectSchema &&
-    (schema.additionalProperties !== false || "patternProperties" in schema)
+    !isObject(schema) ||
+    !typeKeywords.some((keyword) => keyword in schema) ||
+    ["$ref", "patternProperties", "not", "if", "dependentSchemas"].some(
+      (keyword) => keyword in schema
+    )
   ) {
     return false;
   }
-  return Object.values(schema).every(isClosed);
+  const types = typesOf(schema);
+  const branches = [schema.anyOf, schema.oneOf, schema.allOf].flatMap(
+    (branch): unknown[] => (Array.isArray(branch) ? branch : [])
+  );
+  const isObjectSchema = types.includes("object") || "properties" in schema;
+  const properties = isObject(schema.properties) ? schema.properties : {};
+  const objectClosed =
+    !isObjectSchema ||
+    (schema.additionalProperties === false &&
+      Object.values(properties).every(isClosed));
+  const prefixItems = Array.isArray(schema.prefixItems)
+    ? schema.prefixItems
+    : [];
+  const arrayClosed =
+    !(types.includes("array") || "items" in schema) ||
+    ("items" in schema &&
+      isClosed(schema.items) &&
+      prefixItems.every(isClosed) &&
+      (!("additionalItems" in schema) || isClosed(schema.additionalItems)));
+  return branches.every(isClosed) && objectClosed && arrayClosed;
+};
+
+/** The node of a JSON Schema a dotted path leads to, through arrays. */
+const nodeAt = (schema: unknown, path: string): unknown => {
+  let node = schema;
+  for (const key of path.split(".")) {
+    while (isObject(node) && typesOf(node).includes("array")) {
+      node = node.items;
+    }
+    node =
+      isObject(node) && isObject(node.properties)
+        ? node.properties[key]
+        : undefined;
+  }
+  return node;
 };
 
 const provenanceSchema = z
@@ -153,6 +203,11 @@ export const defineTool = <
   if (!isClosed(inputSchema)) {
     throw new Error(`${name}: its input must be strict objects throughout`);
   }
+  for (const path of definition.mask ?? []) {
+    if (nodeAt(outputSchema, path) === undefined) {
+      throw new Error(`${name}: its output has no ${path} to mask`);
+    }
+  }
   const resourceProperty: unknown =
     resource === undefined ? undefined : inputSchema.properties?.[resource];
   if (
@@ -170,7 +225,12 @@ export const defineTool = <
   }
   return {
     name,
-    routes,
+    action: {
+      routes: [...routes],
+      readOnly,
+      resource: resource ?? null,
+      input: Object.keys(inputSchema.properties ?? {}),
+    },
     description: {
       name,
       description: definition.description,
@@ -275,7 +335,7 @@ export const defineConnector = (definition: ConnectorDefinition): Connector => {
     scopes: definition.scopes,
     hosts: definition.hosts,
     actions: Object.fromEntries(
-      definition.tools.map(({ name, routes }) => [name, { routes }])
+      definition.tools.map(({ name, action }) => [name, action])
     ),
   });
 

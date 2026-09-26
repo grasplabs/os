@@ -1,5 +1,9 @@
 import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
-import type { ConnectorManifest } from "@grasp-os/connector-kit/manifest";
+import type {
+  ActionManifest,
+  ConnectorManifest,
+} from "@grasp-os/connector-kit/manifest";
+import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import { connectErrors } from "@grasp-os/shared/connect";
 import { log } from "@grasp-os/shared/log";
 import { compatibilityDate } from "@grasp-os/shared/runtime";
@@ -10,7 +14,7 @@ import bundled from "#connectors";
 import type { Connection } from "./connections.ts";
 import type { EgressProps } from "./egress.ts";
 import { callTimeoutMs, mcpServer } from "./mcp.ts";
-import type { McpServer } from "./mcp.ts";
+import type { McpServer, McpTool } from "./mcp.ts";
 import { accessTokenFor } from "./tokens.ts";
 
 // Native connectors: our own MCP servers (packages/connectors), shipped in
@@ -62,33 +66,69 @@ const isolate = {
 /** The URL connect's MCP client posts to; the isolate answers any. */
 const connectorEndpoint = "https://connector.internal/mcp";
 
+/** An action of a native connector, as its manifest declares it. */
+export interface NativeAction {
+  connector: NativeConnector;
+  declared: ActionManifest;
+  /** The action as connect's policy reads a tool (policy.ts). */
+  tool: McpTool;
+}
+
 /**
- * The MCP server for one call of `action` on a native `connection`, in a
- * fresh isolate of the connector the connection names. Refuses a
- * connector this release doesn't have, one for another provider than the
+ * The action `action` of the native connector `connection` names, from the
+ * release's manifest alone: nothing is loaded and no token is read. Refuses
+ * a connector this release doesn't have, one for another provider than the
  * connection's (its token must never go to another provider's hosts), and
- * an action the connector doesn't declare, all before a token is read.
+ * an action the connector doesn't declare.
  */
-export const nativeServer = async (
-  env: Env,
+export const nativeAction = (
   connection: Connection,
   action: string
-): Promise<McpServer> => {
+): NativeAction => {
   const connector = nativeConnector(connection.server);
   if (connector?.manifest.provider !== connection.provider) {
     throw connectErrors.create("connect.server_unavailable");
   }
-  const { manifest, code } = connector;
-  const declared = Object.hasOwn(manifest.actions, action)
-    ? manifest.actions[action]
-    : undefined;
+  const { actions } = connector.manifest;
+  const declared = Object.hasOwn(actions, action) ? actions[action] : undefined;
   if (declared === undefined) {
     throw connectErrors.create("connect.action_not_found");
   }
+  return {
+    connector,
+    declared,
+    tool: {
+      name: action,
+      readOnly: declared.readOnly,
+      resourceField: declared.resource ?? undefined,
+      inputProperties: declared.input,
+    },
+  };
+};
+
+/**
+ * The MCP server for one call of a native action, in a fresh isolate of
+ * its connector. Only now is the connection's token read: every policy
+ * check that can refuse the call has passed by then. The egress lets
+ * through only the action's routes, with a path segment named after its
+ * resource property bound to the resource the capability names.
+ */
+export const nativeServer = async (
+  env: Env,
+  connection: Connection,
+  { connector, declared }: NativeAction,
+  claims: Pick<CapabilityClaims, "jti" | "resource">
+): Promise<McpServer> => {
+  const { manifest, code } = connector;
   const props: EgressProps = {
     connector: `${manifest.name}@${manifest.version}`,
+    callId: claims.jti,
     hosts: manifest.hosts,
     routes: declared.routes,
+    values:
+      declared.resource === null || claims.resource === null
+        ? {}
+        : { [declared.resource]: claims.resource },
     token: await accessTokenFor(env, connection.id),
     // The egress closes when connect's MCP client gives up on the call.
     expiresAt: Date.now() + callTimeoutMs,
