@@ -58,6 +58,17 @@ export class App extends DurableObject {
     return "not kept";
   }
 
+  async callBoth(
+    _caller: Caller,
+    first: (value: string) => Promise<void>,
+    note: string,
+    second: (value: string) => Promise<void>
+  ): Promise<string> {
+    await first("first: " + note);
+    await second("second: " + note);
+    return "called both";
+  }
+
   keepThenFail(_caller: Caller, first: Watcher, _note: string, second: Watcher): never {
     first.dup();
     second.dup();
@@ -370,6 +381,15 @@ describe("screens", { timeout: 60_000 }, () => {
     const many = 70;
 
     const ignored = await builder.api.screens.call(app, "ignore", [noop, noop]);
+    // Two callbacks, in two places around plain data, each reaching the
+    // screen with what the App sent it.
+    const first = collector();
+    const second = collector();
+    const calledBoth = await builder.api.screens.call(app, "callBoth", [
+      first.callback,
+      "hello",
+      second.callback,
+    ]);
     await Promise.all(
       Array.from(
         { length: many },
@@ -378,8 +398,17 @@ describe("screens", { timeout: 60_000 }, () => {
     );
     expect({
       ignored,
+      calledBoth,
+      first: first.received,
+      second: second.received,
       watching: await builder.api.screens.call(app, "watching", []),
-    }).toStrictEqual({ ignored: "not kept", watching: many });
+    }).toStrictEqual({
+      ignored: "not kept",
+      calledBoth: "called both",
+      first: ["first: hello"],
+      second: ["second: hello"],
+      watching: many,
+    });
   });
 
   it("frees a connection's callbacks as its Apps let them go", async () => {
