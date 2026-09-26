@@ -10,13 +10,25 @@
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": false,
   "preview_urls": false,
+  // No platform line per invocation: connect logs what it needs itself, and
+  // never tokens, headers or bodies (threat model R17). Query strings stay
+  // out of logs and traces too.
   "observability": {
     "enabled": true,
+    "redact_query_string": true,
+    "logs": { "invocation_logs": false },
     "traces": { "enabled": true },
   },
   // Every secret connect needs: deploys fail while one is unset, and local
   // dev loads only these from .dev.vars. CAPABILITY_SIGNING_KEY is shared
   // with core, which signs a capability for every call connect gets.
+  //
+  // Connecting accounts needs more, set by the console, but connect takes
+  // calls without them, so they aren't required: TOKEN_ENCRYPTION_KEY, which
+  // seals OAuth tokens (src/vault.ts), and each provider's app credentials,
+  // MICROSOFT_CLIENT_ID and _SECRET, GOOGLE_CLIENT_ID and _SECRET
+  // (src/providers.ts). While one is unset, connecting that provider is
+  // refused. Their types are in src/env.d.ts.
   "secrets": { "required": ["CAPABILITY_SIGNING_KEY"] },
   // Loads each native connector into its own isolate.
   "worker_loaders": [{ "binding": "LOADER" }],

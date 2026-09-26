@@ -8,6 +8,9 @@ const migrations = await readD1Migrations(
   `${import.meta.dirname}/src/db/migrations`
 );
 
+/** Seals the tests' tokens: 32 bytes, in base64, as a real key is. */
+const testTokenKey = btoa("test-token-key-of-exactly-32-b!!");
+
 export default defineProject({
   test: {
     // Brings the connect database up to the committed migrations.
@@ -25,6 +28,12 @@ export default defineProject({
           // As while rotating keys.
           CAPABILITY_SIGNING_KEY_PREVIOUS:
             "test-previous-signing-key-of-32-chars-or-more",
+          TOKEN_ENCRYPTION_KEY: testTokenKey,
+          // Grasp's OAuth apps, as test/oauth-provider.ts knows them.
+          MICROSOFT_CLIENT_ID: "grasp-connect-entra",
+          MICROSOFT_CLIENT_SECRET: "entra-connect-secret",
+          GOOGLE_CLIENT_ID: "grasp-connect-google",
+          GOOGLE_CLIENT_SECRET: "google-connect-secret",
           CONNECT_MIGRATIONS: migrations,
         },
       },

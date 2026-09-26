@@ -1,5 +1,6 @@
 import { connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectResult } from "@grasp-os/shared/connect";
+import { sha256Hex } from "@grasp-os/shared/encoding";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Json } from "@grasp-os/shared/json";
 import type { PermissionSubject } from "@grasp-os/shared/permissions";
@@ -79,15 +80,7 @@ const keyOf = (scope: IdempotencyScope) => {
 export const hashCall = async (
   resource: string | null,
   input: Json
-): Promise<string> => {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(canonicalJson({ resource, input }))
-  );
-  return Array.from(new Uint8Array(digest), (byte) =>
-    byte.toString(16).padStart(2, "0")
-  ).join("");
-};
+): Promise<string> => await sha256Hex(canonicalJson({ resource, input }));
 
 /** What a stored row means for a repeat of the call: its answer, or why not. */
 const replay = (

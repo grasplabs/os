@@ -1,7 +1,7 @@
 /**
- * Connect D1 schema: the connection registry, the stored answers of side
- * effects and the audit outbox. OAuth providers, encrypted tokens and
- * pending actions join them here.
+ * Connect D1 schema: the connection registry, OAuth flows under way, the
+ * connections' sealed tokens, the stored answers of side effects and the
+ * audit outbox. Pending actions join them here.
  */
 import { sql } from "drizzle-orm";
 import {
@@ -11,6 +11,7 @@ import {
   primaryKey,
   sqliteTable,
   text,
+  uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
 const timestamp = (name: string) => integer(name, { mode: "timestamp_ms" });
@@ -38,6 +39,15 @@ export const connections = sqliteTable(
     }).notNull(),
     serverKind: text("server_kind", { enum: ["native", "composio"] }).notNull(),
     server: text().notNull(),
+    /**
+     * For an OAuth connection: the organization's tenant at the provider,
+     * the account in it (its stable subject, such as an Entra object ID)
+     * and its name for people (an email address), and who connected it.
+     */
+    tenant: text(),
+    accountId: text("account_id"),
+    accountName: text("account_name"),
+    connectedBy: text("connected_by"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },
@@ -46,6 +56,13 @@ export const connections = sqliteTable(
       "connections_owner_check",
       sql`(${table.scope} = 'personal') = (${table.ownerUserId} IS NOT NULL)`
     ),
+    // One live connection per account at a provider: two would share one
+    // grant, and disconnecting either (which revokes it) would end both.
+    uniqueIndex("connections_account_idx")
+      .on(table.provider, table.accountId)
+      .where(
+        sql`${table.accountId} IS NOT NULL AND ${table.status} <> 'disconnected'`
+      ),
   ]
 );
 
@@ -97,6 +114,56 @@ export const idempotentCalls = sqliteTable(
     index("idempotent_calls_created_idx").on(table.createdAt),
   ]
 );
+
+/**
+ * OAuth flows under way: one row from the moment a person starts
+ * connecting until the provider sends them back, at most ten minutes.
+ * Keyed by the SHA-256 of the flow's `state`, so the state itself, which
+ * travels through the browser, is stored nowhere. A flow is taken (deleted)
+ * the first time its state comes back, whatever happens next, so it is
+ * used at most once. `verifier` is the PKCE code verifier, sealed like a
+ * token (src/vault.ts).
+ */
+export const oauthFlows = sqliteTable(
+  "oauth_flows",
+  {
+    stateHash: text("state_hash").primaryKey(),
+    /** The person who started it: only they can finish it. */
+    userId: text("user_id").notNull(),
+    provider: text().notNull(),
+    scope: text({ enum: ["personal", "shared"] }).notNull(),
+    tenant: text().notNull(),
+    redirectUri: text("redirect_uri").notNull(),
+    returnTo: text("return_to").notNull(),
+    verifier: text().notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+  },
+  (table) => [index("oauth_flows_expires_idx").on(table.expiresAt)]
+);
+
+/**
+ * A connection's OAuth tokens, sealed with AES-GCM (src/vault.ts): nothing
+ * here is readable without the key, which only connect holds. The sealed
+ * value names the key that sealed it, so a rotated key can still open it.
+ * `access_expires_at` is kept in the clear, so a read knows when to
+ * refresh without opening anything.
+ *
+ * `generation` goes up with every write; a write names the generation it
+ * read, so a refresh that finishes after a disconnect or another refresh
+ * changes nothing (it would store stale tokens, or bring deleted ones
+ * back). `refresh_until` is a short lease: while it runs, one refresh is
+ * under way and others wait for its result, across isolates.
+ */
+export const connectionTokens = sqliteTable("connection_tokens", {
+  connectionId: text("connection_id")
+    .primaryKey()
+    .references(() => connections.id),
+  sealed: text().notNull(),
+  accessExpiresAt: timestamp("access_expires_at").notNull(),
+  generation: integer().notNull(),
+  refreshUntil: timestamp("refresh_until"),
+  updatedAt: timestamp("updated_at").notNull(),
+});
 
 /**
  * Audit events not yet on the audit queue. Each call's events are stored

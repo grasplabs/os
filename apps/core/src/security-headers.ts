@@ -31,12 +31,16 @@ const hstsMaxAgeSeconds = 365 * 24 * 60 * 60;
 
 /**
  * Sets the security headers on a response core sends for `url`. HSTS goes
- * only on https, since browsers ignore it over http (local development).
+ * only on https, since browsers ignore it over http (local development). A
+ * route may send a stricter referrer policy of its own, such as
+ * `no-referrer` where its URL carries a secret; it is kept.
  */
 export const setSecurityHeaders = (headers: Headers, url: URL): void => {
   headers.set("content-security-policy", contentSecurityPolicy);
   headers.set("x-content-type-options", "nosniff");
-  headers.set("referrer-policy", "strict-origin-when-cross-origin");
+  if (headers.get("referrer-policy") !== "no-referrer") {
+    headers.set("referrer-policy", "strict-origin-when-cross-origin");
+  }
   if (url.protocol === "https:") {
     headers.set(
       "strict-transport-security",
