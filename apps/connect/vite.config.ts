@@ -5,6 +5,7 @@ import {
 import { defineProject } from "vite-plus";
 
 import { testConnectorsFile } from "./test/global-setup.ts";
+import { clients } from "./test/provider-config.ts";
 
 const migrations = await readD1Migrations(
   `${import.meta.dirname}/src/db/migrations`
@@ -58,10 +59,10 @@ export default defineProject({
             "test-previous-signing-key-of-32-chars-or-more",
           TOKEN_ENCRYPTION_KEY: testTokenKey,
           // Grasp's OAuth apps, as test/oauth-provider.ts knows them.
-          MICROSOFT_CLIENT_ID: "grasp-connect-entra",
-          MICROSOFT_CLIENT_SECRET: "entra-connect-secret",
-          GOOGLE_CLIENT_ID: "grasp-connect-google",
-          GOOGLE_CLIENT_SECRET: "google-connect-secret",
+          MICROSOFT_CLIENT_ID: clients.microsoft.id,
+          MICROSOFT_CLIENT_SECRET: clients.microsoft.secret,
+          GOOGLE_CLIENT_ID: clients.google.id,
+          GOOGLE_CLIENT_SECRET: clients.google.secret,
           CONNECT_MIGRATIONS: migrations,
           // The tenant's own SharePoint, as the fake Graph redirects to it
           // (test/graph-api.ts), and the sample provider's storage.

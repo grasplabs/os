@@ -1,11 +1,10 @@
 import { authErrors } from "@grasp-os/shared/errors";
 import type { Role } from "@grasp-os/shared/roles";
-import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
-import worker from "../src/index.ts";
+import { runCron, whileQueueDown } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import {
   auditedDuring,
@@ -180,27 +179,18 @@ describe("member and team changes", () => {
 
   it("keep their audit event when the audit queue is down, and send it later", async () => {
     const admin = await signedInAs("admin");
-    const down = vi
-      .spyOn(env.AUDIT_QUEUE, "send")
-      .mockRejectedValue(new Error("Queue unavailable"));
-    let teamId = "";
-    try {
-      const created = await callAuth(
-        "/organization/create-team",
-        admin.session,
-        { name: "Finance" }
-      );
-      expect(created.status).toBe(200);
-      ({ id: teamId } = z
-        .object({ id: z.string() })
-        .parse(await created.json()));
-    } finally {
-      down.mockRestore();
-    }
+    const created = await whileQueueDown(
+      async () =>
+        await callAuth("/organization/create-team", admin.session, {
+          name: "Finance",
+        })
+    );
+    expect(created.status).toBe(200);
+    const { id: teamId } = z
+      .object({ id: z.string() })
+      .parse(await created.json());
 
-    const sent = await auditedDuring(async () => {
-      await worker.scheduled(createScheduledController(), env);
-    });
+    const sent = await auditedDuring(runCron);
     expect(
       sent.map(({ action, target }) => [action, target?.id])
     ).toContainEqual(["team.created", teamId]);

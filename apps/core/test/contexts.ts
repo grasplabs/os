@@ -1,8 +1,14 @@
 import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { CollectionReader } from "@grasp-os/shared/knowledge";
+import { authoritySchema } from "@grasp-os/shared/permissions";
+import type {
+  Authority,
+  PermissionSubjectInput,
+} from "@grasp-os/shared/permissions";
 import { env } from "cloudflare:workers";
 
-import type { bindingsFor, ConnectionBinding } from "../src/bindings.ts";
+import { bindingsFor } from "../src/bindings.ts";
+import type { ConnectionBinding } from "../src/bindings.ts";
 import type { WorkContext } from "../src/restricted.ts";
 import { workspace } from "../src/workspace.ts";
 
@@ -15,7 +21,27 @@ export const newChat = async (): Promise<
   return { type: "chat", workspaceId, chatId: id };
 };
 
+/** `subject` acting for `userId`, as a person using it interactively. */
+export const actingFor = (
+  subject: PermissionSubjectInput,
+  userId: string
+): Authority =>
+  authoritySchema.parse({ subject, onBehalfOf: userId, mode: "interactive" });
+
 type Bindings = Awaited<ReturnType<typeof bindingsFor>>;
+
+/** The env an agent or App gets for `authority` in `context`, or a chat of its own. */
+export const envOf = async (
+  authority: Authority,
+  context?: WorkContext
+): Promise<Bindings> =>
+  await bindingsFor(env, authority, context ?? (await newChat()));
+
+/**
+ * Tests register no connection in connect, so a call that ends in this
+ * code passed every check on its way: core's and connect's.
+ */
+export const reached = "connect.connection_not_found";
 
 /** A connection's stub in an env, as App or agent code calls it. */
 export const connectionIn = (

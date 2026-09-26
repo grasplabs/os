@@ -7,13 +7,11 @@
  * test/mail-server.ts says. Imported by vite.config.ts (Node) and the tests
  * (workerd), so it only holds data.
  */
+import { clients } from "../../connect/test/provider-config.ts";
 import { mailServerScript } from "./mail-server.ts";
 
 /** Grasp's Entra app for connections, as set on connect in the tests. */
-export const connectClient = {
-  id: "grasp-connect-entra",
-  secret: "entra-connect-secret",
-};
+export const connectClient = clients.microsoft;
 
 /**
  * The code Entra sends back once `subject` in `tenant` consents at `url`:

@@ -7,7 +7,6 @@ import type {
   CollectionReader,
   KnowledgeApi,
 } from "@grasp-os/shared/knowledge";
-import { authoritySchema } from "@grasp-os/shared/permissions";
 import type {
   PermissionRequest,
   PermissionSubjectInput,
@@ -17,12 +16,18 @@ import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
-import { bindingsFor } from "../src/bindings.ts";
 import { appHost } from "../src/durable-objects.ts";
 import type { WorkContext } from "../src/restricted.ts";
 import { workspace } from "../src/workspace.ts";
 import { requestGranted } from "./apps.ts";
-import { collectionIn, connectionIn, newChat } from "./contexts.ts";
+import {
+  actingFor,
+  collectionIn,
+  connectionIn,
+  envOf,
+  newChat,
+  reached,
+} from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
 import {
   collectionWithNote,
@@ -56,32 +61,12 @@ const newAgent = () => ({
   agentId: `agent-${unique()}`,
 });
 
-/** Asks for `request`, which another admin grants; returns its ID. */
-const granted = async (admin: Person, request: PermissionRequest) =>
-  await requestGranted(idp, admin, request);
-
 const outlook = (subject: PermissionSubjectInput): PermissionRequest => ({
   subject,
   object: { type: "connection", connectionId: "connection-outlook" },
   actions: ["mail.list", "mail.send"],
   binding: "OUTLOOK",
 });
-
-/** The env an agent or App gets, acting for `userId` in `context`. */
-const envOf = async (
-  subject: PermissionSubjectInput,
-  userId: string,
-  context: WorkContext
-) =>
-  await bindingsFor(
-    env,
-    authoritySchema.parse({
-      subject,
-      onBehalfOf: userId,
-      mode: "interactive",
-    }),
-    context
-  );
 
 type Env = Awaited<ReturnType<typeof envOf>>;
 
@@ -129,9 +114,6 @@ const callOutlook = async (bindings: Env, sideEffect = false) => {
   );
 };
 
-/** Reached through connect: the call passed every check core makes. */
-const reached = "connect.connection_not_found";
-
 describe("Apps and agents reading Knowledge", () => {
   it("read no collection without a granted permission to read it", async () => {
     const admin = await personOf("admin");
@@ -147,17 +129,17 @@ describe("Apps and agents reading Knowledge", () => {
     });
 
     // Nothing granted, only requested, or only to write: no way to read.
-    const before = await envOf(agent, admin.userId, context);
+    const before = await envOf(actingFor(agent, admin.userId), context);
     const { id: permissionId } = await admin.api.permissions.request(
       readCollection(agent, handbook.collectionId)
     );
-    const whileRequested = await envOf(agent, admin.userId, context);
-    await granted(admin, {
+    const whileRequested = await envOf(actingFor(agent, admin.userId), context);
+    await requestGranted(idp, admin, {
       ...readCollection(agent, handbook.collectionId, "HANDBOOK_WRITE"),
       actions: ["write"],
     });
     const writeOnly = readerIn(
-      await envOf(agent, admin.userId, context),
+      await envOf(actingFor(agent, admin.userId), context),
       "HANDBOOK_WRITE"
     );
     expect({
@@ -173,7 +155,9 @@ describe("Apps and agents reading Knowledge", () => {
     // Granted one collection: that one, and no document of another.
     const approver = await personOf("admin");
     await approver.api.permissions.grant(permissionId);
-    const reader = readerIn(await envOf(agent, admin.userId, context));
+    const reader = readerIn(
+      await envOf(actingFor(agent, admin.userId), context)
+    );
     expect({
       own: await everyRead(reader, handbook.noteId),
       other: await everyRead(reader, other.noteId),
@@ -214,10 +198,14 @@ describe("Apps and agents reading Knowledge", () => {
       teams: [teamId],
     });
     const agent = newAgent();
-    await granted(admin, readCollection(agent, finance.collectionId));
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(agent, finance.collectionId)
+    );
     const readsAs = async (person: Person) =>
       await everyRead(
-        readerIn(await envOf(agent, person.userId, await newChat())),
+        readerIn(await envOf(actingFor(agent, person.userId))),
         finance.noteId
       );
     const allOk = everyReadIs("ok");
@@ -230,7 +218,7 @@ describe("Apps and agents reading Knowledge", () => {
     }).toStrictEqual({ member: allOk, outsider: noneFound });
 
     // The member leaves the team while the agent holds its stub.
-    const held = readerIn(await envOf(agent, member.userId, await newChat()));
+    const held = readerIn(await envOf(actingFor(agent, member.userId)));
     await callAuth("/organization/remove-team-member", admin.session, {
       teamId,
       userId: member.userId,
@@ -278,11 +266,14 @@ describe("Apps and agents reading Knowledge", () => {
       "DIARY"
     );
     const inChat = readerIn(
-      await envOf(agent, owner.userId, await newChat()),
+      await envOf(actingFor(agent, owner.userId)),
       "DIARY"
     );
     const inApp = readerIn(
-      await envOf(app, owner.userId, { type: "app", appId: app.appId }),
+      await envOf(actingFor(app, owner.userId), {
+        type: "app",
+        appId: app.appId,
+      }),
       "DIARY"
     );
     const noneFound = everyReadIs("knowledge.not_found");
@@ -307,10 +298,12 @@ describe("Apps and agents reading Knowledge", () => {
       teams: [teamId],
     });
     const agent = newAgent();
-    await granted(admin, readCollection(agent, secret.collectionId));
-    const reader = readerIn(
-      await envOf(agent, outsider.userId, await newChat())
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(agent, secret.collectionId)
     );
+    const reader = readerIn(await envOf(actingFor(agent, outsider.userId)));
 
     const refused = await Promise.all([
       outcome(reader.listDocuments()),
@@ -367,9 +360,17 @@ describe("provenance", () => {
       access: "everyone",
     });
     const agent = newAgent();
-    await granted(admin, readCollection(agent, sensitive.collectionId));
-    await granted(admin, readCollection(agent, ordinary.collectionId, "OTHER"));
-    const bindings = await envOf(agent, admin.userId, await newChat());
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(agent, sensitive.collectionId)
+    );
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(agent, ordinary.collectionId, "OTHER")
+    );
+    const bindings = await envOf(actingFor(agent, admin.userId));
 
     const byPerson = admin.knowledge;
     const personReads = ({ collectionId, noteId }: typeof sensitive) => [
@@ -412,12 +413,17 @@ describe("restricted mode", () => {
       name: "Handbook",
       access: "everyone",
     });
-    await granted(admin, readCollection(subject, sensitive.collectionId));
-    await granted(
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(subject, sensitive.collectionId)
+    );
+    await requestGranted(
+      idp,
       admin,
       readCollection(subject, ordinary.collectionId, "OTHER")
     );
-    await granted(admin, outlook(subject));
+    await requestGranted(idp, admin, outlook(subject));
     return { admin, subject, sensitive, ordinary };
   };
 
@@ -425,7 +431,7 @@ describe("restricted mode", () => {
     const { admin, subject, sensitive, ordinary } = await setUp();
     const chat = await newChat();
     const otherChat = await newChat();
-    const bindings = await envOf(subject, admin.userId, chat);
+    const bindings = await envOf(actingFor(subject, admin.userId), chat);
 
     // Reading ordinary Knowledge changes nothing.
     await readerIn(bindings, "OTHER").getDocument(ordinary.noteId);
@@ -447,8 +453,8 @@ describe("restricted mode", () => {
 
     // Its workspace restarts, and the chat gets a new env: still restricted.
     await evictDurableObject(workspace(env, chat.workspaceId));
-    const rebuilt = await envOf(subject, admin.userId, chat);
-    const other = await envOf(subject, admin.userId, otherChat);
+    const rebuilt = await envOf(actingFor(subject, admin.userId), chat);
+    const other = await envOf(actingFor(subject, admin.userId), otherChat);
     expect({
       restarted: await Promise.all([
         callOutlook(rebuilt),
@@ -481,7 +487,7 @@ describe("restricted mode", () => {
     ];
     const results = await Promise.all(
       reads.map(async (read) => {
-        const bindings = await envOf(subject, admin.userId, await newChat());
+        const bindings = await envOf(actingFor(subject, admin.userId));
         await outcome(read(readerIn(bindings)));
         return await callOutlook(bindings);
       })
@@ -492,13 +498,13 @@ describe("restricted mode", () => {
   it("isn't entered by a read that was refused, or one of an ordinary collection that found nothing", async () => {
     const { admin, subject, sensitive, ordinary } = await setUp();
     const outsider = await personOf("user");
-    const bindings = await envOf(subject, outsider.userId, await newChat());
+    const bindings = await envOf(actingFor(subject, outsider.userId));
     // The permission covers Outlook for the outsider too; Payroll isn't theirs.
     const refused = await Promise.all([
       outcome(readerIn(bindings).getDocument(sensitive.noteId)),
       outcome(readerIn(bindings).search(`nothing${unique()}`)),
     ]);
-    const searched = await envOf(subject, admin.userId, await newChat());
+    const searched = await envOf(actingFor(subject, admin.userId));
     const { hits, provenance } = await readerIn(searched, "OTHER").search(
       `nothing${unique()}`
     );
@@ -533,13 +539,13 @@ describe("restricted mode", () => {
     const appId = appIdSchema.parse(id);
     const { admin, subject, sensitive } = await setUp({ type: "app", appId });
     const context: WorkContext = { type: "app", appId };
-    const bindings = await envOf(subject, admin.userId, context);
+    const bindings = await envOf(actingFor(subject, admin.userId), context);
 
     const before = await callOutlook(bindings);
     await readerIn(bindings).getDocument(sensitive.noteId);
     await evictDurableObject(appHost(env, appId));
     const after = await callOutlook(
-      await envOf(subject, admin.userId, context)
+      await envOf(actingFor(subject, admin.userId), context)
     );
     expect({ before, after }).toStrictEqual({
       before: reached,
@@ -556,8 +562,12 @@ describe("restricted mode", () => {
     };
     const [own, other] = await Promise.all([appOf(), appOf()]);
     const app = { type: "app" as const, appId: own };
-    await granted(admin, outlook(app));
-    await granted(admin, readCollection(app, sensitive.collectionId));
+    await requestGranted(idp, admin, outlook(app));
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(app, sensitive.collectionId)
+    );
     const ghost = `app-${unique()}`;
     await storedGrant(
       { type: "app", id: ghost },
@@ -571,7 +581,7 @@ describe("restricted mode", () => {
       context: WorkContext,
       read: boolean
     ) => {
-      const bindings = await envOf(who, admin.userId, context);
+      const bindings = await envOf(actingFor(who, admin.userId), context);
       return [
         await callOutlook(bindings),
         read
@@ -610,7 +620,7 @@ describe("restricted mode", () => {
         appHost(env, own).isRestricted(),
         appHost(env, other).isRestricted(),
         callOutlook(
-          await envOf(app, admin.userId, { type: "app", appId: own })
+          await envOf(actingFor(app, admin.userId), { type: "app", appId: own })
         ),
       ])
     ).resolves.toStrictEqual([false, false, reached]);

@@ -1,26 +1,22 @@
 import { auditEventSchema } from "@grasp-os/shared/audit";
 import { signCapability } from "@grasp-os/shared/capability";
 import {
-  authoritySchema,
   bindingNameSchema,
   permissionObjectSchema,
 } from "@grasp-os/shared/permissions";
 import type {
   Authority,
-  Permission,
   PermissionRequest,
   PermissionSubjectInput,
 } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
-import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { bindingsFor } from "../src/bindings.ts";
-import worker from "../src/index.ts";
 import { authorize } from "../src/permissions.ts";
 import { outlook } from "./apps.ts";
-import { connectionIn, newChat } from "./contexts.ts";
+import { actingFor, connectionIn, envOf, reached } from "./contexts.ts";
+import { runCron, whileQueueDown } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 
@@ -41,16 +37,6 @@ const newApp = async (api: Api) => {
   const { id } = await api.apps.create({ name: `App ${unique()}` });
   return { type: "app" as const, appId: id };
 };
-
-const actingFor = (
-  subject: PermissionSubjectInput,
-  userId: string
-): Authority =>
-  authoritySchema.parse({ subject, onBehalfOf: userId, mode: "interactive" });
-
-/** The env an agent gets for `authority`, in a chat of its own. */
-const envOf = async (authority: Authority) =>
-  await bindingsFor(env, authority, await newChat());
 
 /**
  * What App code gets when it calls the connection stub `binding` from its
@@ -73,14 +59,6 @@ const callThrough = async (
   binding: string,
   action = "mail.list"
 ): Promise<string> => await callStub(await envOf(authority), binding, action);
-
-/** Runs core's cron trigger, as Cloudflare does every minute. */
-const runCron = async () => {
-  await worker.scheduled(createScheduledController(), env);
-};
-
-/** Reached through connect, as a call from an App would be. */
-const reached = "connect.connection_not_found";
 
 describe("permissions", () => {
   it("allow nothing until an admin grants them", async () => {
@@ -498,15 +476,9 @@ describe("permissions", () => {
     const app = await newApp(admin.api);
     const { id } = await admin.api.permissions.request(outlook(app.appId));
 
-    const down = vi
-      .spyOn(env.AUDIT_QUEUE, "send")
-      .mockRejectedValue(new Error("Queue unavailable"));
-    let granted: Permission;
-    try {
-      granted = await approver.api.permissions.grant(id);
-    } finally {
-      down.mockRestore();
-    }
+    const granted = await whileQueueDown(
+      async () => await approver.api.permissions.grant(id)
+    );
 
     const sent = await auditedDuring(runCron);
     const sentAgain = await auditedDuring(runCron);
@@ -533,14 +505,7 @@ describe("permissions", () => {
     )
       .bind(crypto.randomUUID(), "not an event")
       .run();
-    const down = vi
-      .spyOn(env.AUDIT_QUEUE, "send")
-      .mockRejectedValue(new Error("Queue unavailable"));
-    try {
-      await approver.api.permissions.grant(id);
-    } finally {
-      down.mockRestore();
-    }
+    await whileQueueDown(async () => await approver.api.permissions.grant(id));
 
     const send = vi.spyOn(env.AUDIT_QUEUE, "send");
     try {

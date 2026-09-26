@@ -3,10 +3,10 @@ import { createServer } from "node:http";
 import type { Server } from "node:http";
 
 import { expect, test as base } from "@playwright/test";
-import type { Browser, Page } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
 import { test } from "./csp.ts";
-import { apiOf, signedIn, signInTo } from "./people.ts";
+import { apiOf, pageOf, release, signedIn } from "./people.ts";
 import type { Person } from "./people.ts";
 import { screenAppFiles } from "./screen-app.ts";
 
@@ -42,20 +42,11 @@ const releaseApp = async (
   const { core, api } = apiOf(builder);
   try {
     const { id } = await api.apps.create({ name: "Notes" });
-    await api.apps.files.write(id, screenAppFiles(attacker));
-    const { version } = await api.apps.files.commit(id, "Notes");
-    await api.apps.versions.setCurrent(id, version);
+    await release(api, id, screenAppFiles(attacker), "Notes");
     return id;
   } finally {
     core[Symbol.dispose]();
   }
-};
-
-/** A page signed in as `person`, in a browser context of its own. */
-const pageOf = async (browser: Browser, person: Person): Promise<Page> => {
-  const context = await browser.newContext();
-  await signInTo(context, person);
-  return await context.newPage();
 };
 
 const openScreen = async (page: Page, app: string) => {
@@ -238,11 +229,14 @@ test("a new current version is offered while the screen is open", async ({
   await openScreen(page, app);
   const { core, api } = apiOf(one);
   try {
-    await api.apps.files.write(app, {
-      "screens/notes.tsx": `${screenAppFiles(attacker.url)["screens/notes.tsx"]}// v2\n`,
-    });
-    const { version } = await api.apps.files.commit(app, "v2");
-    await api.apps.versions.setCurrent(app, version);
+    await release(
+      api,
+      app,
+      {
+        "screens/notes.tsx": `${screenAppFiles(attacker.url)["screens/notes.tsx"]}// v2\n`,
+      },
+      "v2"
+    );
   } finally {
     core[Symbol.dispose]();
   }

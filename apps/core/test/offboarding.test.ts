@@ -6,16 +6,14 @@ import type { DisconnectPersonal } from "@grasp-os/shared/connect";
 import { authErrors } from "@grasp-os/shared/errors";
 import { authoritySchema } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
-import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { bindingsFor } from "../src/bindings.ts";
-import worker from "../src/index.ts";
 import { sessionEndedCloseCode } from "../src/rpc.ts";
 import { allEvents } from "./audit-events.ts";
 import { consentCode } from "./connect-providers.ts";
-import { connectionIn, newChat } from "./contexts.ts";
+import { connectionIn, envOf, reached } from "./contexts.ts";
+import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { acmeTenant, clientOrigin } from "./sign-in-config.ts";
 import {
@@ -27,7 +25,7 @@ import {
   routed,
   signIn,
   signedIn,
-  signedInWithRole,
+  signedInApi,
   staffPerson,
   unique,
   whoami,
@@ -44,14 +42,7 @@ import { connectDb } from "./test-env.ts";
 
 const idp = mockIdp();
 
-/** Someone signed in with `role`, their open connection and its API. */
-const personWith = async (role: Role) => {
-  const signed = await signedInWithRole(idp, role);
-  const { core, closed } = await openRpc(signed.session);
-  return { ...signed, closed, api: core.authenticate() };
-};
-
-type Person = Awaited<ReturnType<typeof personWith>>;
+type Person = Awaited<ReturnType<typeof signedInApi>>;
 
 /** Who `session` is now, or the code a new connection is refused with. */
 const nowSignedIn = async (session: string) => {
@@ -106,8 +97,8 @@ const tokensHeld = async (connectionId: string): Promise<number> => {
 
 describe("removing a member", () => {
   it("fails their open connection's next call, and closes it", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     await expect(person.api.whoami()).resolves.toMatchObject({ role: "user" });
 
     await admin.api.members.remove(person.userId);
@@ -119,8 +110,8 @@ describe("removing a member", () => {
   });
 
   it("ends every session they have, in every browser", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const otherBrowser = await signedIn(idp, "microsoft", person.person);
     await expect(nowSignedIn(otherBrowser)).resolves.toBe("user");
 
@@ -140,8 +131,8 @@ describe("removing a member", () => {
   });
 
   it("keeps them out: signing in again through SSO gives no session", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("builder");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "builder");
     await admin.api.members.remove(person.userId);
 
     const again = await signIn(idp, "microsoft", person.person);
@@ -151,8 +142,8 @@ describe("removing a member", () => {
   });
 
   it("stops every stub an App or agent holds for them", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("builder");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "builder");
     const { id: appId } = await admin.api.apps.create({
       name: `App ${unique()}`,
     });
@@ -169,26 +160,25 @@ describe("removing a member", () => {
       onBehalfOf: person.userId,
       mode: "workflow",
     });
-    const held = await bindingsFor(env, authority, await newChat());
+    const held = await envOf(authority);
     const call = async () =>
       await outcome(
         connectionIn(held, "OUTLOOK")?.call("mail.list", {}) ??
           Promise.reject(new Error("No binding"))
       );
-    // No such connection in connect: the call passed every check.
-    await expect(call()).resolves.toBe("connect.connection_not_found");
+    await expect(call()).resolves.toBe(reached);
 
     await admin.api.members.remove(person.userId);
 
     await expect(call()).resolves.toBe("permission.person_inactive");
-    await expect(
-      outcome(bindingsFor(env, authority, await newChat()))
-    ).resolves.toBe("permission.person_inactive");
+    await expect(outcome(envOf(authority))).resolves.toBe(
+      "permission.person_inactive"
+    );
   });
 
   it("disconnects their personal connections and deletes the tokens", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const connectionId = await connectOwnAccount(person);
     await expect(tokensHeld(connectionId)).resolves.toBeGreaterThan(0);
 
@@ -221,8 +211,8 @@ describe("removing a member", () => {
   });
 
   it("can be tried again, and is recorded once", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const audited = await auditedDuring(async () => {
       await admin.api.members.remove(person.userId);
       await expect(
@@ -235,8 +225,8 @@ describe("removing a member", () => {
   });
 
   it("is audited with who did it, and identifiers only", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const audited = await auditedDuring(async () => {
       await admin.api.members.remove(person.userId);
     });
@@ -256,8 +246,8 @@ describe("removing a member", () => {
 
 describe("ending a member's sessions", () => {
   it("fails their open connection's next call and closes it, but keeps them a member", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("builder");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "builder");
 
     await admin.api.members.revokeSessions(person.userId);
 
@@ -273,8 +263,8 @@ describe("ending a member's sessions", () => {
   });
 
   it("is audited with who did it, and identifiers only", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const audited = await auditedDuring(async () => {
       await admin.api.members.revokeSessions(person.userId);
     });
@@ -291,10 +281,10 @@ describe("ending a member's sessions", () => {
 
 describe("offboarding", () => {
   it("is for admins only, and refusals change nothing and record nothing", async () => {
-    const target = await personWith("user");
+    const target = await signedInApi(idp, "user");
     for (const role of ["user", "builder"] as const) {
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
-      const caller = await personWith(role);
+      const caller = await signedInApi(idp, role);
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
       const audited = await auditedDuring(async () => {
         await expect(
@@ -315,7 +305,7 @@ describe("offboarding", () => {
   });
 
   it("is refused to Grasp staff, even with the admin role", async () => {
-    const target = await personWith("user");
+    const target = await signedInApi(idp, "user");
     const staff = await signedIn(idp, "grasp-staff", staffPerson());
     const { core } = await openRpc(staff);
     const api = core.authenticate();
@@ -338,7 +328,7 @@ describe("offboarding", () => {
   });
 
   it("can't be turned on the admin themselves", async () => {
-    const admin = await personWith("admin");
+    const admin = await signedInApi(idp, "admin");
     await expect(
       Promise.all([
         outcome(admin.api.members.remove(admin.userId)),
@@ -349,8 +339,8 @@ describe("offboarding", () => {
   });
 
   it("never leaves the organization without an admin, even when two remove each other at once", async () => {
-    const first = await personWith("admin");
-    const second = await personWith("admin");
+    const first = await signedInApi(idp, "admin");
+    const second = await signedInApi(idp, "admin");
     // The two of them are the only admins left.
     await env.DB.prepare(
       "UPDATE members SET role = 'user' WHERE role = 'admin' AND user_id NOT IN (?, ?)"
@@ -372,7 +362,7 @@ describe("offboarding", () => {
   });
 
   it("refuses people who aren't members, staff included", async () => {
-    const admin = await personWith("admin");
+    const admin = await signedInApi(idp, "admin");
     const staff = await signedIn(idp, "grasp-staff", staffPerson());
     const { userId: staffId } = await whoami(staff);
     for (const userId of ["nobody", staffId]) {
@@ -388,8 +378,8 @@ describe("offboarding", () => {
   });
 
   it("lists the members for admins, with their roles", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("builder");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "builder");
     const listed = await admin.api.members.list();
     const member = listed.find(({ userId }) => userId === person.userId);
     expect(member).toMatchObject({
@@ -401,8 +391,8 @@ describe("offboarding", () => {
   });
 
   it("goes only through core's own API, not Better Auth's member route", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const removed = await callAuth(
       "/organization/remove-member",
       admin.session,
@@ -415,9 +405,9 @@ describe("offboarding", () => {
 
 describe("connect's offboarding call", () => {
   it("disconnects someone's personal connections for admins only", async () => {
-    const person = await personWith("user");
+    const person = await signedInApi(idp, "user");
     const connectionId = await connectOwnAccount(person);
-    const colleague = await personWith("builder");
+    const colleague = await signedInApi(idp, "builder");
     await expect(
       Promise.all([
         outcome(
@@ -440,8 +430,8 @@ describe("connect's offboarding call", () => {
 
 describe("removing a member, while their OAuth flows are open", () => {
   it("spends the flows they started, so none finishes into a connection", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const { url } = await person.api.connections.start({
       provider: "microsoft",
       scope: "personal",
@@ -464,8 +454,8 @@ describe("removing a member, while their OAuth flows are open", () => {
   });
 
   it("disconnects a connection that finished anyway, on the next cron run", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     await admin.api.members.remove(person.userId);
     // A flow already past its spending when the removal ran, finishing
     // after it: connect itself doesn't know who is a member.
@@ -491,20 +481,12 @@ describe("removing a member, while their OAuth flows are open", () => {
     });
     await expect(tokensHeld(connectionId)).resolves.toBeGreaterThan(0);
 
-    await worker.scheduled(createScheduledController(), env);
+    await runCron();
 
     await expect(tokensHeld(connectionId)).resolves.toBe(0);
     await expect(env.CONNECT.listConnections(owner)).resolves.toStrictEqual([]);
   });
 });
-
-/** Runs the cron trigger once, with connect as `connect` has it. */
-const runCron = async (connect: Env["CONNECT"] = env.CONNECT) => {
-  await worker.scheduled(createScheduledController(), {
-    ...env,
-    CONNECT: connect,
-  });
-};
 
 /** Connect as it is, but for its offboarding call, which is `call`. */
 const connectWith = (
@@ -570,8 +552,8 @@ const removedLongAgo = async (count: number, removedAt: number) => {
 
 describe("the cron trigger's disconnect retry", () => {
   it("retries every removal until its disconnect completes, however many and however old", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const connectionId = await connectOwnAccount(person);
     // The removal's own disconnect fails, and so does the next retry.
     const { core } = await openRpc(admin.session, {
@@ -580,7 +562,7 @@ describe("the cron trigger's disconnect retry", () => {
     await expect(
       outcome(core.authenticate().members.remove(person.userId))
     ).resolves.toBe("member.connections_pending");
-    await runCron(connectDown);
+    await runCron({ CONNECT: connectDown });
     await expect(tokensHeld(connectionId)).resolves.toBeGreaterThan(0);
     // As if all that was months ago, with more removals still pending
     // since than one call to connect takes.
@@ -602,22 +584,8 @@ describe("the cron trigger's disconnect retry", () => {
     // Every one of them completed: the next run finds nothing to do.
     const { calls, connect } = countingConnect();
     await afterFlowsExpire(async () => {
-      await runCron(connect);
+      await runCron({ CONNECT: connect });
     });
-    expect(calls).toStrictEqual([]);
-  });
-
-  it("calls connect not at all once nothing is pending", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
-    await admin.api.members.remove(person.userId);
-    const { calls, connect } = countingConnect();
-
-    // Their disconnect completed, and no flow of theirs can finish now.
-    await afterFlowsExpire(async () => {
-      await runCron(connect);
-    });
-
     expect(calls).toStrictEqual([]);
   });
 });
@@ -633,8 +601,8 @@ const activeAdmins = async (): Promise<number> => {
 
 describe("changing a member's role", () => {
   it("applies on their next call, and is audited with identifiers only", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const audited = await auditedDuring(async () => {
       await admin.api.members.setRole(person.userId, "builder");
     });
@@ -651,8 +619,8 @@ describe("changing a member's role", () => {
   });
 
   it("is for admins only, and only to one of Grasp's roles", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("builder");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "builder");
     await expect(
       Promise.all([
         outcome(person.api.members.setRole(person.userId, "admin")),
@@ -680,8 +648,8 @@ describe("changing a member's role", () => {
   });
 
   it("goes only through core's own API, not Better Auth's member route", async () => {
-    const admin = await personWith("admin");
-    const person = await personWith("user");
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
     const changed = await callAuth(
       "/organization/update-member-role",
       admin.session,
@@ -694,7 +662,7 @@ describe("changing a member's role", () => {
 
 describe("the organization's admins", () => {
   it("can't all be demoted: the last admin stays one", async () => {
-    const admin = await personWith("admin");
+    const admin = await signedInApi(idp, "admin");
     await onlyAdmins(admin.userId);
     await expect(
       outcome(admin.api.members.setRole(admin.userId, "user"))
@@ -706,8 +674,8 @@ describe("the organization's admins", () => {
     for (const _round of [1, 2, 3]) {
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
       const [first, second] = await Promise.all([
-        personWith("admin"),
-        personWith("admin"),
+        signedInApi(idp, "admin"),
+        signedInApi(idp, "admin"),
       ]);
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
       await onlyAdmins(first.userId, second.userId);
@@ -726,8 +694,8 @@ describe("the organization's admins", () => {
     for (const _round of [1, 2, 3]) {
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
       const [first, second] = await Promise.all([
-        personWith("admin"),
-        personWith("admin"),
+        signedInApi(idp, "admin"),
+        signedInApi(idp, "admin"),
       ]);
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
       await onlyAdmins(first.userId, second.userId);
@@ -743,8 +711,8 @@ describe("the organization's admins", () => {
   });
 
   it("come back through the deployment's configured admins when none is left", async () => {
-    const configured = await personWith("admin");
-    const other = await personWith("admin");
+    const configured = await signedInApi(idp, "admin");
+    const other = await signedInApi(idp, "admin");
     const coreEnv = withSignIn({ admins: [configured.person.email] });
     // Demoted while someone else is an admin: signing in keeps the role.
     await other.api.members.setRole(configured.userId, "user");
@@ -775,7 +743,7 @@ describe("the organization's admins", () => {
   });
 
   it("come back only with a record of it: a restore that can't be audited doesn't happen", async () => {
-    const configured = await personWith("admin");
+    const configured = await signedInApi(idp, "admin");
     const coreEnv = withSignIn({ admins: [configured.person.email] });
     await env.DB.prepare(
       "UPDATE members SET role = 'user' WHERE role = 'admin'"
@@ -806,8 +774,8 @@ describe("the organization's admins", () => {
   });
 
   it("don't come back when removed, configured or not", async () => {
-    const configured = await personWith("admin");
-    const admin = await personWith("admin");
+    const configured = await signedInApi(idp, "admin");
+    const admin = await signedInApi(idp, "admin");
     await admin.api.members.remove(configured.userId);
     await env.DB.prepare(
       "UPDATE members SET role = 'user' WHERE role = 'admin'"

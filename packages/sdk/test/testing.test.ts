@@ -8,15 +8,11 @@ import {
   workflowTests,
 } from "../src/testing.ts";
 import { person, workflow, z } from "../src/workflow.ts";
+import { invoice } from "./fakes.ts";
 import { invoiceWorkflow } from "./workflows/invoice-approval.ts";
 import type { InvoiceSystems } from "./workflows/invoice-approval.ts";
 import invoiceTests from "./workflows/invoice-approval.workflow-tests.ts";
 
-const invoice = {
-  number: "INV-7",
-  purchaseOrder: "PO-1",
-  text: "Total €8,000",
-};
 const unusedSystems: InvoiceSystems = {
   findPurchaseOrder: async () => null,
   book: async () => "unused",
