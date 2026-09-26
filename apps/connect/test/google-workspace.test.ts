@@ -1,4 +1,3 @@
-import { invalidCode } from "@grasp-os/connector-kit/connector";
 import { connectorManifestSchema } from "@grasp-os/connector-kit/manifest";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
@@ -547,7 +546,7 @@ describe("the Google Workspace connector's Gmail tools", () => {
     ]);
     await expect(
       toolError(label("run-7:nothing", { add: [], remove: [] }))
-    ).resolves.toMatchObject({ error: { code: invalidCode } });
+    ).resolves.toMatchObject({ error: { code: "invalid" } });
     expect(google.writesDone()).toBe(1);
   });
 
@@ -736,7 +735,7 @@ describe("the Google Workspace connector's Calendar tools", () => {
       toolError(
         call(connection, "calendar.list", { ...range, end: range.start })
       )
-    ).resolves.toMatchObject({ error: { code: invalidCode } });
+    ).resolves.toMatchObject({ error: { code: "invalid" } });
   });
 
   it("get an event with its description and attendees, and an all-day one", async () => {
@@ -898,18 +897,13 @@ describe("the Google Workspace connector's Drive tools", () => {
       },
       provenance: [fileIds.report],
     });
-    // The egress asks for the file's drive before each request for it.
-    const check = manifest.actions["files.read"]?.routes.find(
-      (route) => route.check !== undefined
-    )?.check;
-    const isDriveCheck = ({ query }: { query: Record<string, string> }) =>
-      Object.entries(check?.query ?? {}).every(
-        ([key, value]) => query[key] === value
-      );
+    // The egress asks for the file's drive, in shared drives too, before
+    // each request for it.
+    const driveCheck = { fields: "driveId", supportsAllDrives: "true" };
     const sent = requests();
     expect(
-      sent.map((request) => (isDriveCheck(request) ? "check" : "request"))
-    ).toStrictEqual(["check", "request", "check", "request"]);
+      sent.map(({ query }) => (query.fields === "driveId" ? query : "request"))
+    ).toStrictEqual([driveCheck, "request", driveCheck, "request"]);
     expect(
       sent.every(({ path }) => path === `/drive/v3/files/${fileIds.report}`)
     ).toBeTruthy();
