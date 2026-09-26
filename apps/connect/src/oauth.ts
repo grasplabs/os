@@ -4,6 +4,7 @@ import {
   connectionCallbackPath,
   connectionErrors,
   connectionPersonSchema,
+  disconnectPersonalSchema,
   disconnectSchema,
   finishConnectionSchema,
   oauthProviderSchema,
@@ -17,7 +18,7 @@ import type {
 import { randomToken, sha256Hex, toBase64Url } from "@grasp-os/shared/encoding";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { isAdmin, roleErrors } from "@grasp-os/shared/roles";
-import { and, desc, eq, like, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, like, lte, ne, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import type { z } from "zod";
@@ -55,14 +56,19 @@ import type { Vault } from "./vault.ts";
 /** How long a person has to finish at the provider. */
 const flowLifetimeMs = 10 * 60 * 1000;
 
-const actorOf = (person: ConnectionPerson): AuditActor =>
-  person.staff
+/** Who acted: the person core named, or core itself (`null`). */
+const actorOf = (person: ConnectionPerson | null): AuditActor => {
+  if (person === null) {
+    return { type: "system" };
+  }
+  return person.staff
     ? { type: "staff", userId: person.userId }
     : { type: "person", userId: person.userId };
+};
 
 /** One connect or disconnect, for the audit log: IDs, never tokens. */
 const event = (
-  person: ConnectionPerson,
+  person: ConnectionPerson | null,
   action: "connection.connect" | "connection.disconnect",
   connectionId: string | undefined,
   detail: Record<string, AuditDetailValue>
@@ -541,9 +547,47 @@ const revoke = async (
 };
 
 /**
- * Disconnects: revokes the grant where the provider can, then deletes the
- * tokens and stops the connection, in one write with its event. A
- * personal connection only by its owner, a shared one only by an admin.
+ * Stops `connection`: revokes the grant where the provider can, then
+ * deletes the tokens and marks it disconnected, in one write with its
+ * event. Returns whether the provider revoked the grant, and whether this
+ * call stopped it (a concurrent one may have first).
+ */
+const stop = async (
+  env: Env,
+  person: ConnectionPerson | null,
+  connection: typeof connections.$inferSelect,
+  detail: Record<string, AuditDetailValue> = {}
+): Promise<{ revoked: boolean; stopped: boolean }> => {
+  const db = drizzle(env.DB);
+  const revoked = await revoke(env, connection);
+  // Recorded only by the disconnect that stops it, if two run at once.
+  const stillConnected = sql`${connections.id} = ${connection.id} AND ${connections.status} <> 'disconnected'`;
+  const stopped = await recordEventIf(
+    env,
+    event(person, "connection.disconnect", connection.id, {
+      ...detail,
+      provider: connection.provider,
+      scope: connection.scope,
+      outcome: "ok",
+      revoked,
+    }),
+    { from: connections, where: stillConnected },
+    [
+      db
+        .update(connections)
+        .set({ status: "disconnected", updatedAt: new Date() })
+        .where(stillConnected),
+      db
+        .delete(connectionTokens)
+        .where(eq(connectionTokens.connectionId, connection.id)),
+    ]
+  );
+  return { revoked, stopped };
+};
+
+/**
+ * Disconnects: stops the connection (see `stop`). A personal connection
+ * only by its owner, a shared one only by an admin.
  */
 export const disconnect = async (
   env: Env,
@@ -582,29 +626,58 @@ export const disconnect = async (
   if (connection.status === "disconnected") {
     return { revoked: false };
   }
-  const revoked = await revoke(env, connection);
-  // Recorded only by the disconnect that stops it, if two run at once.
-  const stillConnected = sql`${connections.id} = ${connectionId} AND ${connections.status} <> 'disconnected'`;
-  await recordEventIf(
-    env,
-    event(person, "connection.disconnect", connectionId, {
-      provider: connection.provider,
-      scope: connection.scope,
-      outcome: "ok",
-      revoked,
-    }),
-    { from: connections, where: stillConnected },
-    [
-      db
-        .update(connections)
-        .set({ status: "disconnected", updatedAt: new Date() })
-        .where(stillConnected),
-      db
-        .delete(connectionTokens)
-        .where(eq(connectionTokens.connectionId, connectionId)),
-    ]
-  );
+  const { revoked } = await stop(env, person, connection);
   return { revoked };
+};
+
+/**
+ * Disconnects every personal connection of the people `ownerUserIds`, each
+ * as `disconnect` does, and spends the OAuth flows they still have open, so
+ * none of them finishes into a new connection. For the admin who removed
+ * them, or for core itself (`person` null), which retries for people it
+ * removed lately; core calls it only for people it removed. Staff are
+ * refused, as they are for connecting. A flow already past its spending
+ * when this runs can still finish; core's retry catches that connection.
+ * Returns how many connections this call stopped.
+ */
+export const disconnectPersonal = async (
+  env: Env,
+  request: unknown
+): Promise<{ disconnected: number }> => {
+  const { person, ownerUserIds } = parse(disconnectPersonalSchema, request);
+  if (person !== null && (person.staff || !isAdmin(person.role))) {
+    await auditRefusal(env, person, "connection.disconnect", {
+      outcome: "refused",
+      reason: "role.forbidden",
+    });
+    throw roleErrors.create("role.forbidden");
+  }
+  if (ownerUserIds.length === 0) {
+    return { disconnected: 0 };
+  }
+  const db = drizzle(env.DB);
+  await db.delete(oauthFlows).where(inArray(oauthFlows.userId, ownerUserIds));
+  const owned = await db
+    .select()
+    .from(connections)
+    .where(
+      and(
+        eq(connections.scope, "personal"),
+        inArray(connections.ownerUserId, ownerUserIds),
+        ne(connections.status, "disconnected")
+      )
+    );
+  let disconnected = 0;
+  // One at a time: each revokes at its provider, and the first failure
+  // stops the rest, for a later try to pick up.
+  for (const connection of owned) {
+    // oxlint-disable-next-line no-await-in-loop -- one connection at a time
+    const { stopped } = await stop(env, person, connection, {
+      ownerUserId: connection.ownerUserId,
+    });
+    disconnected += stopped ? 1 : 0;
+  }
+  return { disconnected };
 };
 
 /**

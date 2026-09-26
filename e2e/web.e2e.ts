@@ -20,3 +20,10 @@ test("shows only its own words for a refused sign-in, never the link's", async (
   );
   await expect(page.getByText(planted)).toHaveCount(0);
 });
+
+test("shows the members page only to someone signed in", async ({ page }) => {
+  await page.goto("/members");
+  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveText("Sign in to continue.");
+  await expect(page.getByRole("table")).toHaveCount(0);
+});

@@ -1,3 +1,8 @@
+// Routes split into chunks of their own share this module, so the bundler
+// moves it, with Zod and the shared schemas, into a chunk that runs before
+// main.tsx does. Importing this first keeps Zod jitless before any of them
+// builds a schema, whichever chunk they land in.
+import "./zod-jitless.ts";
 import { authErrors } from "@grasp-os/shared/errors";
 import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";
@@ -44,6 +49,25 @@ const signedInAs = async (
       return undefined;
     }
     throw error;
+  }
+};
+
+/** The signed-in person's API, as a connection hands it out. */
+export type Session = ReturnType<RpcStub<CoreApi>["authenticate"]>;
+
+/**
+ * Runs `run` with the signed-in person's API, on a connection opened just
+ * for it and closed after.
+ */
+export const withSession = async <T>(
+  run: (session: Session) => Promise<T>
+): Promise<T> => {
+  const core = connectCore();
+  try {
+    using session = core.authenticate();
+    return await run(session);
+  } finally {
+    core[Symbol.dispose]();
   }
 };
 

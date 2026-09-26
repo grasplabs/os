@@ -3,7 +3,6 @@ import type { AuditEntry } from "@grasp-os/shared/audit";
 import { fromBase64Url } from "@grasp-os/shared/encoding";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { roleSchema } from "@grasp-os/shared/roles";
 import type { SignInRefusal } from "@grasp-os/shared/sign-in";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import {
@@ -14,9 +13,10 @@ import {
 import { betterAuth } from "better-auth/minimal";
 import { organization } from "better-auth/plugins/organization";
 import { defaultAc } from "better-auth/plugins/organization/access";
-import { eq, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
 import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
@@ -55,10 +55,15 @@ const sessionMs = 12 * hour;
 const staffSessionMs = hour;
 
 /**
- * Roles as the organization plugin checks them. Admins manage members and
- * teams; builders and users manage nothing here. Admin is also the plugin's
- * creator role, which the plugin allows everything it offers; the route
- * allowlist (`routes.ts`) decides what that is.
+ * Roles as the organization plugin checks them. Admins manage teams (the
+ * plugin asks for `member: update` and `member: delete` to put someone on
+ * a team or take them off); builders and users manage nothing here.
+ * Memberships and roles aren't the plugin's: core changes them
+ * (`members.ts`), each in one statement that keeps the organization an
+ * admin, which the plugin's read-then-write routes can't, so those routes
+ * are off. Admin is also the plugin's creator role, which the plugin
+ * allows everything it offers; the route allowlist (`routes.ts`) decides
+ * what that is.
  */
 const roles = {
   admin: defaultAc.newRole({
@@ -91,17 +96,21 @@ const authLogger = {
 };
 
 /**
- * That an admin hasn't removed `userId` from the organization, as a SQL
- * condition. A removal is kept after the membership goes, so every read and
- * write of a membership checks it: nothing brings a removed person back.
+ * That an admin hasn't removed `userId` (an ID, or the column holding one)
+ * from the organization, as a SQL condition. A removal is kept after the
+ * membership goes, so every read and write of a membership checks it:
+ * nothing brings a removed person back.
  */
-export const notRemoved = (userId: string): SQL => sql`NOT EXISTS (
+export const notRemoved = (
+  userId: string | SQLiteColumn
+): SQL => sql`NOT EXISTS (
   SELECT 1 FROM ${memberRemovals}
   WHERE ${memberRemovals.organizationId} = ${organizationId}
     AND ${memberRemovals.userId} = ${userId}
 )`;
 
-const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
+/** Whether an admin removed `userId` from the organization. */
+export const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
   const row = await drizzle(env.DB).get<{ member: number }>(
     sql`SELECT ${notRemoved(userId)} AS member`
   );
@@ -109,16 +118,84 @@ const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
 };
 
 /**
+ * That the organization has an admin now, other than `except` when given,
+ * as a SQL condition.
+ */
+export const activeAdminExists = (except?: string): SQL => sql`EXISTS (
+  SELECT 1 FROM ${members}
+  WHERE ${members.organizationId} = ${organizationId}
+    AND ${members.role} = 'admin'
+    AND ${notRemoved(members.userId)}
+    ${except === undefined ? sql`` : sql`AND ${members.userId} <> ${except}`}
+)`;
+
+/**
+ * Records a change Better Auth has made: its event goes into the audit
+ * outbox, in the same database, and is sent from there, again by the cron
+ * trigger if sending fails now. Better Auth commits the change itself, so
+ * the event can't join its batch. If storing it fails, the event goes to
+ * the audit queue directly; if that fails too, it is written to the logs,
+ * so a change is never left without a record. A failed request wouldn't
+ * undo the change, so none of this fails the request.
+ */
+const record = async (env: Env, entry: AuditEntry): Promise<void> => {
+  try {
+    await outboxed(drizzle(env.DB), entry);
+  } catch (outboxError) {
+    log.error("audit.outbox.store_failed", errorFields(outboxError));
+    try {
+      await audit(env).log(entry);
+    } catch (queueError) {
+      log.error("audit.lost", {
+        ...errorFields(queueError),
+        entry: canonicalJson(entry),
+      });
+    }
+    return;
+  }
+  await sendAuditOutboxNow(env);
+};
+
+/**
+ * Makes a configured admin (deployment config, from the console) an admin
+ * again when the organization has none left, so a deployment can always
+ * be recovered by signing in. Never someone removed. Audited.
+ */
+const restoreAdmin = async (env: Env, userId: string): Promise<void> => {
+  const [restored] = await drizzle(env.DB)
+    .update(members)
+    .set({ role: "admin" })
+    .where(
+      and(
+        eq(members.organizationId, organizationId),
+        eq(members.userId, userId),
+        notRemoved(userId),
+        sql`NOT ${activeAdminExists()}`
+      )
+    )
+    .returning({ id: members.id });
+  if (restored) {
+    await record(env, {
+      actor: { type: "system" },
+      action: "member.role.updated",
+      target: { type: "member", id: restored.id },
+      detail: { userId, role: "admin", reason: "no_admin_left" },
+    });
+  }
+};
+
+/**
  * Makes someone signing in from the client's IdP a member of the deployment's
  * organization, creating it on the first sign-in, unless an admin removed
  * them. Runs on every sign-in, so a membership whose creation failed is
- * created next time; an existing one, and its role, is kept. Returns whether
- * they are a member.
+ * created next time; an existing one, and its role, is kept, except that a
+ * configured admin is made admin again when nobody else is one. Returns
+ * whether they are a member.
  *
  * The removal check is part of the insert itself, one statement: a removal
- * records its marker before it deletes the membership, so an insert racing
- * it either lands first and is deleted, or sees the marker and inserts
- * nothing.
+ * records its marker before it deletes the membership (`members.ts`), so
+ * an insert racing it either lands first and is deleted, or sees the
+ * marker and inserts nothing.
  */
 const ensureMember = async (
   env: Env,
@@ -148,6 +225,9 @@ const ensureMember = async (
     SELECT ${crypto.randomUUID()}, ${organizationId}, ${userId}, ${role}, ${now.getTime()}
     WHERE ${notRemoved(userId)}
     ON CONFLICT DO NOTHING`);
+  if (role === "admin") {
+    await restoreAdmin(env, userId);
+  }
   return !(await isRemoved(env, userId));
 };
 
@@ -219,46 +299,25 @@ const withoutTokens = <T extends Record<string, unknown>>(account: T) => ({
 
 /** The ids a member or team change names; nothing else is recorded. */
 const changeSchema = z.looseObject({
-  memberId: z.string().optional(),
-  memberIdOrEmail: z.string().optional(),
   teamId: z.string().optional(),
   userId: z.string().optional(),
-  role: z.union([z.string(), z.array(z.string())]).optional(),
 });
-const returnedSchema = z.looseObject({
-  id: z.string().optional(),
-  member: z.looseObject({ id: z.string(), userId: z.string() }).optional(),
-});
+const returnedSchema = z.looseObject({ id: z.string().optional() });
 
 type Change = z.infer<typeof changeSchema>;
 type Returned = z.infer<typeof returnedSchema>;
 
 /**
- * The member and team changes that are audited (R16): what each records,
- * from the request and what the route returned. Identifiers and role names
- * only.
+ * The team changes that are audited (R16): what each records, from the
+ * request and what the route returned. Identifiers only.
  */
 const auditedChanges: Record<
   string,
   (
     change: Change,
-    returned: Returned,
-    previousRole: string | undefined
+    returned: Returned
   ) => Pick<AuditEntry, "action" | "target" | "detail">
 > = {
-  "/organization/update-member-role": (change, _returned, previousRole) => ({
-    action: "member.role.updated",
-    target: { type: "member", id: change.memberId ?? "unknown" },
-    detail: {
-      previousRole: previousRole ?? null,
-      role: [change.role ?? []].flat().join(","),
-    },
-  }),
-  "/organization/remove-member": (_change, returned) => ({
-    action: "member.removed",
-    target: { type: "member", id: returned.member?.id ?? "unknown" },
-    detail: { userId: returned.member?.userId ?? null },
-  }),
   "/organization/create-team": (_change, returned) => ({
     action: "team.created",
     target: { type: "team", id: returned.id ?? "unknown" },
@@ -282,36 +341,6 @@ const auditedChanges: Record<
     detail: { userId: change.userId ?? null },
   }),
 };
-
-/**
- * Records a change Better Auth has made: its event goes into the audit
- * outbox, in the same database, and is sent from there, again by the cron
- * trigger if sending fails now. Better Auth commits the change itself, so
- * the event can't join its batch. If storing it fails, the event goes to
- * the audit queue directly; if that fails too, it is written to the logs,
- * so a change is never left without a record. A failed request wouldn't
- * undo the change, so none of this fails the request.
- */
-const record = async (env: Env, entry: AuditEntry): Promise<void> => {
-  try {
-    await outboxed(drizzle(env.DB), entry);
-  } catch (outboxError) {
-    log.error("audit.outbox.store_failed", errorFields(outboxError));
-    try {
-      await audit(env).log(entry);
-    } catch (queueError) {
-      log.error("audit.lost", {
-        ...errorFields(queueError),
-        entry: canonicalJson(entry),
-      });
-    }
-    return;
-  }
-  await sendAuditOutboxNow(env);
-};
-
-/** A member's role before a change, from the request's before hook to its after hook. */
-const previousRoles = new WeakMap<object, string>();
 
 const createAuth = (
   env: Env,
@@ -434,17 +463,6 @@ const createAuth = (
         if (caller && (await isRemoved(env, caller.user.id))) {
           throw new APIError("FORBIDDEN", { message: "Not a member." });
         }
-        if (context.path !== "/organization/update-member-role") {
-          return;
-        }
-        const { memberId } = changeSchema.parse(context.body);
-        const [member] = await db
-          .select({ role: members.role })
-          .from(members)
-          .where(eq(members.id, memberId ?? ""));
-        if (member) {
-          previousRoles.set(context.context, member.role);
-        }
       }),
       after: createAuthMiddleware(async (context) => {
         const describe = auditedChanges[context.path];
@@ -463,8 +481,7 @@ const createAuth = (
           }),
           ...describe(
             changeSchema.parse(context.body ?? {}),
-            returnedSchema.safeParse(returned).data ?? {},
-            previousRoles.get(context.context)
+            returnedSchema.safeParse(returned).data ?? {}
           ),
         });
       }),
@@ -476,28 +493,6 @@ const createAuth = (
         allowUserToCreateOrganization: false,
         disableOrganizationDeletion: true,
         teams: { enabled: true },
-        organizationHooks: {
-          // The plugin also accepts its own default roles (owner, member)
-          // and lists of roles; a member has exactly one of ours.
-          // oxlint-disable-next-line require-await
-          beforeUpdateMemberRole: async ({ newRole }) => {
-            if (!roleSchema.safeParse(newRole).success) {
-              throw new APIError("BAD_REQUEST", { message: "Unknown role." });
-            }
-          },
-          // Recorded before the membership goes, so signing in again can't
-          // bring it back even if the removal itself fails halfway.
-          beforeRemoveMember: async ({ member }) => {
-            await db
-              .insert(memberRemovals)
-              .values({
-                organizationId,
-                userId: member.userId,
-                removedAt: new Date(),
-              })
-              .onConflictDoNothing();
-          },
-        },
       }),
       sso({
         // Providers come only from deployment config, never from the

@@ -117,6 +117,18 @@ export const disconnectSchema = z.strictObject({
 });
 export type Disconnect = z.input<typeof disconnectSchema>;
 
+/**
+ * Disconnects every personal connection of the people `ownerUserIds`, who
+ * were removed from the organization: for the admin `person` who removed
+ * them, or, with `person` null, for core itself, which retries for people
+ * removed lately.
+ */
+export const disconnectPersonalSchema = z.strictObject({
+  person: connectionPersonSchema.nullable(),
+  ownerUserIds: z.array(identifierSchema).max(100),
+});
+export type DisconnectPersonal = z.input<typeof disconnectPersonalSchema>;
+
 /** One connection, as people see it: never its tokens. */
 export interface ConnectionSummary {
   id: string;
@@ -165,6 +177,15 @@ export interface ConnectApi {
    * can (`revoked`); the connection takes no more calls.
    */
   disconnect: (request: Disconnect) => Promise<{ revoked: boolean }>;
+  /**
+   * Disconnects every personal connection of someone an admin removed from
+   * the organization, as `disconnect` does each one, and spends the flows
+   * they still have open. Admins only, or core itself (`person` null); core
+   * calls it only for people it removed. Returns how many it stopped.
+   */
+  disconnectPersonal: (
+    request: DisconnectPersonal
+  ) => Promise<{ disconnected: number }>;
   /**
    * Spends a flow that came back but can't finish (no session, say), so its
    * code can't be brought back to finish it later.

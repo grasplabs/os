@@ -6,6 +6,7 @@ import { ConnectionsRpc } from "./connections.ts";
 import { requireFeature } from "./features.ts";
 import type { Feature } from "./features.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
+import { MembersRpc } from "./members.ts";
 import { PermissionsRpc } from "./permissions-rpc.ts";
 import { ScreensRpc } from "./screens-rpc.ts";
 import { withPerson } from "./session-check.ts";
@@ -31,6 +32,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #connections: ConnectionsRpc;
   readonly #workflows: WorkflowsRpc;
   readonly #screens: ScreensRpc;
+  readonly #members: MembersRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -54,6 +56,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#workflows = new WorkflowsRpc(env, checkWith("workflows"));
     // Screens run Apps: the Apps kill switch stops them too.
     this.#screens = new ScreensRpc(env, checkWith("apps", "screens"));
+    this.#members = new MembersRpc(env, checkWith("members"));
   }
 
   get apps(): AppsRpc {
@@ -78,6 +81,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get screens(): ScreensRpc {
     return this.#screens;
+  }
+
+  get members(): MembersRpc {
+    return this.#members;
   }
 
   async whoami(): Promise<Identity> {

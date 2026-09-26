@@ -8,8 +8,11 @@ import { signInConfig } from "./config.ts";
  * The Better Auth routes core serves; everything else under `/api/auth` is
  * not found. Better Auth and its plugins bring many more (password sign-up,
  * registering SSO providers, creating organizations, invitations), and an
- * allowlist keeps each one off until we choose it. Role and team changes go
- * through the organization plugin's own permission checks (`auth.ts`).
+ * allowlist keeps each one off until we choose it. Team changes go through
+ * the organization plugin's own permission checks (`auth.ts`). Removing
+ * members and changing roles go only through core's own API
+ * (`members.ts`), which keeps the organization an admin: no route here
+ * may change a membership or a role.
  */
 const allowedRoutes = new Set([
   "POST /sign-in/sso",
@@ -21,8 +24,6 @@ const allowedRoutes = new Set([
   "POST /revoke-other-sessions",
   "GET /organization/get-full-organization",
   "GET /organization/list-members",
-  "POST /organization/update-member-role",
-  "POST /organization/remove-member",
   "GET /organization/list-teams",
   "POST /organization/create-team",
   "POST /organization/update-team",

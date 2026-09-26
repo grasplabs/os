@@ -676,6 +676,27 @@ ${mailStep("after")}`,
     ]);
   });
 
+  it("pause a triggered run once an admin removes its App's owner", async () => {
+    const admin = await personApi("admin");
+    const owner = await personApi("builder");
+    const app = await appWith(
+      owner,
+      workflowFiles(
+        "triggered",
+        `  return await step.do("first", { description: "First" }, async () => await env.APP.call("hit", "first"));`,
+        { first: 1 }
+      )
+    );
+    await admin.api.members.remove(owner.userId);
+    const run = await triggered(app, "triggered");
+    await vi.waitFor(
+      async () => {
+        await expect(rowStatus(run.id)).resolves.toBe("paused");
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+  });
+
   it("fail a person's run once they have left, at its next load", async () => {
     const admin = await personApi("admin");
     const leaver = await personApi("builder");
@@ -689,9 +710,8 @@ ${mailStep("after")}`,
     );
     const run = await leaver.api.workflows.start(app, "waiting");
     await stopped(run.id);
-    await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
-      .bind(leaver.userId)
-      .run();
+    // Offboarded by an admin, as in the product.
+    await admin.api.members.remove(leaver.userId);
     await resumed(run.id);
     await finished(run.id, { type: "go", payload: null });
     const { status, error } = await admin.api.workflows.status(run.id);

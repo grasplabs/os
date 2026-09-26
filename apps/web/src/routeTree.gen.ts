@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as KitRouteImport } from './routes/kit'
+import { Route as MembersRouteImport } from './routes/members'
 import { Route as AppsAppScreensScreenRouteImport } from './routes/apps.$app.screens.$screen'
 
 const IndexRoute = IndexRouteImport.update({
@@ -23,6 +24,11 @@ const KitRoute = KitRouteImport.update({
   path: '/kit',
   getParentRoute: () => rootRouteImport,
 } as any)
+const MembersRoute = MembersRouteImport.update({
+  id: '/members',
+  path: '/members',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const AppsAppScreensScreenRoute = AppsAppScreensScreenRouteImport.update({
   id: '/apps/$app/screens/$screen',
   path: '/apps/$app/screens/$screen',
@@ -32,30 +38,34 @@ const AppsAppScreensScreenRoute = AppsAppScreensScreenRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/kit': typeof KitRoute
+  '/members': typeof MembersRoute
   '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/kit': typeof KitRoute
+  '/members': typeof MembersRoute
   '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/kit': typeof KitRoute
+  '/members': typeof MembersRoute
   '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/kit' | '/apps/$app/screens/$screen'
+  fullPaths: '/' | '/kit' | '/members' | '/apps/$app/screens/$screen'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/kit' | '/apps/$app/screens/$screen'
-  id: '__root__' | '/' | '/kit' | '/apps/$app/screens/$screen'
+  to: '/' | '/kit' | '/members' | '/apps/$app/screens/$screen'
+  id: '__root__' | '/' | '/kit' | '/members' | '/apps/$app/screens/$screen'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   KitRoute: typeof KitRoute
+  MembersRoute: typeof MembersRoute
   AppsAppScreensScreenRoute: typeof AppsAppScreensScreenRoute
 }
 
@@ -75,6 +85,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof KitRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/members': {
+      id: '/members'
+      path: '/members'
+      fullPath: '/members'
+      preLoaderRoute: typeof MembersRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/apps/$app/screens/$screen': {
       id: '/apps/$app/screens/$screen'
       path: '/apps/$app/screens/$screen'
@@ -88,6 +105,7 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   KitRoute: KitRoute,
+  MembersRoute: MembersRoute,
   AppsAppScreensScreenRoute: AppsAppScreensScreenRoute,
 }
 export const routeTree = rootRouteImport
