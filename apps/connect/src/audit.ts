@@ -108,11 +108,67 @@ export const recordEvents = async (
   await sendStored(env, events);
 };
 
+/** One change, recorded only if a row of `from` matches `where`. */
+export interface GuardedChange {
+  entry: AuditEntry;
+  from: SQLiteTable;
+  where: SQL;
+  /** The change: statements the same condition guards. */
+  writes: readonly BatchItem<"sqlite">[];
+}
+
+/**
+ * Records each change's event only if a row of its `from` matches its
+ * `where`, all in one transaction with the changes' `writes`, which the
+ * same conditions guard: an event is kept exactly when its change is made,
+ * so a change that a concurrent one made first isn't recorded twice.
+ * Whether each was.
+ */
+export const recordEventsIf = async (
+  env: Env,
+  changes: readonly [GuardedChange, ...GuardedChange[]]
+): Promise<boolean[]> => {
+  const db = drizzle(env.DB);
+  const events = changes.map(({ entry }) => createAuditEvent(entry, "connect"));
+  const statements = changes.flatMap(({ from, where, writes }, index) => [
+    db
+      .insert(auditOutbox)
+      .select(
+        db
+          .select({
+            id: sql<string>`${events[index]?.id}`.as("id"),
+            event: sql<string>`${JSON.stringify(events[index])}`.as("event"),
+            createdAt: sql<Date>`${Date.now()}`.as("created_at"),
+          })
+          .from(from)
+          .where(where)
+          .limit(1)
+      )
+      .returning({ id: auditOutbox.id }),
+    ...writes,
+  ]);
+  const [first, ...rest] = statements;
+  if (first === undefined) {
+    return [];
+  }
+  const results = await db.batch([first, ...rest]);
+  // Each change's event insert comes first among its statements.
+  let at = 0;
+  const recorded = changes.map(({ writes }) => {
+    const inserted: unknown = results[at];
+    at += 1 + writes.length;
+    return Array.isArray(inserted) && inserted.length > 0;
+  });
+  await sendStored(
+    env,
+    events.filter((_, index) => recorded[index] === true)
+  );
+  return recorded;
+};
+
 /**
  * Records one event only if a row of `from` matches `where`, in the same
- * transaction as `writes`, which the same condition guards: the event is
- * kept exactly when its change is made, so a change that a concurrent one
- * made first isn't recorded twice. Whether it was.
+ * transaction as `writes` (`recordEventsIf`). Whether it was.
  */
 export const recordEventIf = async (
   env: Env,
@@ -120,36 +176,24 @@ export const recordEventIf = async (
   { from, where }: { from: SQLiteTable; where: SQL },
   writes: readonly BatchItem<"sqlite">[]
 ): Promise<boolean> => {
-  const event = createAuditEvent(entry, "connect");
-  const db = drizzle(env.DB);
-  const insert = db
-    .insert(auditOutbox)
-    .select(
-      db
-        .select({
-          id: sql<string>`${event.id}`.as("id"),
-          event: sql<string>`${JSON.stringify(event)}`.as("event"),
-          createdAt: sql<Date>`${Date.now()}`.as("created_at"),
-        })
-        .from(from)
-        .where(where)
-        .limit(1)
-    )
-    .returning({ id: auditOutbox.id });
-  const [inserted] = await db.batch([insert, ...writes]);
-  if (inserted.length === 0) {
-    return false;
-  }
-  await sendStored(env, [event]);
-  return true;
+  const [recorded = false] = await recordEventsIf(env, [
+    { entry, from, where, writes },
+  ]);
+  return recorded;
 };
 
 /**
- * How a call ended: done, answered from its stored result, refused before
- * anything was sent, failed without an effect, or failed after it may have
- * had one.
+ * How a call ended: done, answered from its stored result, held for its
+ * person to confirm, refused before anything was sent, failed without an
+ * effect, or failed after it may have had one.
  */
-export type CallOutcome = "ok" | "replayed" | "refused" | "failed" | "unknown";
+export type CallOutcome =
+  | "ok"
+  | "replayed"
+  | "held"
+  | "refused"
+  | "failed"
+  | "unknown";
 
 /** One call, as far as connect got with it. */
 export interface CallRecord {
@@ -164,6 +208,8 @@ export interface CallRecord {
   reason?: string;
   /** The IDs of the resources it read. */
   provenance?: readonly string[];
+  /** The held action it made, or the one its person confirmed. */
+  pendingActionId?: string;
 }
 
 /**
@@ -237,7 +283,10 @@ export const auditCall = async (
   // Which of the App's versions made the call, for a call from App code.
   add("appVersion", claims?.authority.appVersion);
   add("sideEffect", sideEffect);
+  // Only when it is: from a context that had read restricted data.
+  add("restricted", claims?.restricted === true ? true : undefined);
   add("reason", reason);
+  add("pendingActionId", record.pendingActionId);
   add("provenanceCount", provenance.length);
 
   const [first = [], ...rest] = provenanceGroups(provenance);

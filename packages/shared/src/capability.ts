@@ -2,11 +2,16 @@ import { z } from "zod";
 
 import { fromBase64Url, toBase64Url } from "./encoding.ts";
 import { defineErrorFamily } from "./errors.ts";
-import { connectionIdSchema, identifierSchema } from "./ids.ts";
+import {
+  connectionIdSchema,
+  identifierSchema,
+  permissionIdSchema,
+} from "./ids.ts";
 import {
   authoritySchema,
   maskFieldsSchema,
   permissionActionSchema,
+  workContextSchema,
 } from "./permissions.ts";
 import type { Authority } from "./permissions.ts";
 
@@ -42,6 +47,12 @@ export const capabilityKeyMinLength = 32;
 /** Keeps a MAC made here from ever passing as one made for anything else. */
 const macContext = "grasp-os capability v1\n";
 
+/** Where a call a person is there for comes from (`origin`). */
+const originSchema = z.strictObject({
+  permissionId: permissionIdSchema,
+  context: workContextSchema,
+});
+
 /** What a capability says. Unknown fields make it invalid. */
 export const capabilityClaimsSchema = z.strictObject({
   v: z.literal(1),
@@ -64,6 +75,24 @@ export const capabilityClaimsSchema = z.strictObject({
    * capability says it, never the call: the caller can't drop it.
    */
   mask: maskFieldsSchema.default([]),
+  /**
+   * The chat, App or run making the call has read restricted data (threat
+   * model R12, Q12): connect lets it read, as a tool declares, and holds
+   * every side effect for the person. Only the capability says it.
+   */
+  restricted: z.boolean().default(false),
+  /**
+   * What core checks again if connect holds the call and the person
+   * confirms it: the permission that allowed it and the context it came
+   * from. Connect holds nothing without (a core of the release before).
+   */
+  origin: originSchema.optional(),
+  /**
+   * Only on the capability core signs once the person confirmed a held
+   * action, from their own session: that action's ID. Connect runs a held
+   * action only with it, and takes it nowhere else.
+   */
+  confirms: z.uuid().optional(),
 });
 export type CapabilityClaims = z.infer<typeof capabilityClaimsSchema>;
 
@@ -75,6 +104,12 @@ export interface CapabilityScope {
   idempotencyKey?: string | undefined;
   /** The permission's masked fields: signed, not compared with the call. */
   mask?: readonly string[] | undefined;
+  /** The caller's context is in restricted mode: signed, not compared. */
+  restricted?: boolean | undefined;
+  /** What core checks again when a held call is confirmed: signed. */
+  origin?: z.input<typeof originSchema> | undefined;
+  /** The held action the person confirmed: signed, not compared. */
+  confirms?: string | undefined;
 }
 
 /** Why connect refuses a call before looking at it any further. */
@@ -131,6 +166,11 @@ export const signCapability = async (
     // knows no mask, still takes every other capability while a release
     // rolls out, and refuses a masked one.
     ...(mask.length === 0 ? {} : { mask }),
+    // The same for restricted mode: a connect that knows none refuses a
+    // capability that says it, which fails closed.
+    ...(scope.restricted === true ? { restricted: true } : {}),
+    ...(scope.origin === undefined ? {} : { origin: scope.origin }),
+    ...(scope.confirms === undefined ? {} : { confirms: scope.confirms }),
   };
   capabilityClaimsSchema.parse(claims);
   const payload = toBase64Url(new TextEncoder().encode(JSON.stringify(claims)));

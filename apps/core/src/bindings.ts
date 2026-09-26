@@ -4,7 +4,10 @@ import type { ConnectCall, ConnectResult } from "@grasp-os/shared/connect";
 import { isExpectedError, toOpaqueError } from "@grasp-os/shared/errors";
 import type { PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { bindingNameSchema } from "@grasp-os/shared/permissions";
+import {
+  bindingNameSchema,
+  permissionErrors,
+} from "@grasp-os/shared/permissions";
 import type {
   Authority,
   Permission,
@@ -14,13 +17,13 @@ import { workflowErrors } from "@grasp-os/shared/workflows";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
-import { requireFeature } from "./features.ts";
+import { featureEnabled, requireFeature } from "./features.ts";
 import type {
   CollectionBinding,
   CollectionGrant,
 } from "./knowledge/binding.ts";
 import { authorize, grantedPermissions } from "./permissions.ts";
-import { requireUnrestricted } from "./restricted.ts";
+import { isRestricted } from "./restricted.ts";
 import type { WorkContext } from "./restricted.ts";
 
 // What Apps and agents get in their env: one stub per granted permission,
@@ -32,12 +35,72 @@ import type { WorkContext } from "./restricted.ts";
 
 type ConnectionObject = Extract<PermissionObject, { type: "connection" }>;
 
+/** Who calls a connection, where, and by which permission. */
+export interface CallGrant {
+  authority: Authority;
+  context: WorkContext;
+  connection: ConnectionObject;
+  permissionId: PermissionId;
+}
+
+/**
+ * Checks the permission of an App or agent working in `context` for one
+ * call, then signs the capability connect needs for exactly this call,
+ * saying whether `context` is in restricted mode (connect then holds its
+ * side effects for the person) and the permission and context to check
+ * again should connect hold it for them. `confirms` is the held action a
+ * person confirmed (pending-actions.ts). Core makes capabilities here and
+ * nowhere else, and nothing outside core reaches this function.
+ *
+ * With held actions switched off (`confirmations`), the release before's
+ * behaviour: a restricted context makes no connection calls at all
+ * (`permission.restricted`), and no origin is signed, so connect holds
+ * nothing and refuses side effects from chat (`confirmation_required`).
+ */
+export const signedCall = async (
+  env: Env,
+  { authority, context, connection, permissionId }: CallGrant,
+  { action, idempotencyKey }: Pick<ConnectCall, "action" | "idempotencyKey">,
+  confirms?: string
+) => {
+  // The mask comes from the permission's record as it is now, and goes
+  // only into the signed capability: connect masks by it.
+  const { mask } = await authorize(
+    env,
+    authority,
+    connection,
+    action,
+    permissionId
+  );
+  const restricted = await isRestricted(env, authority, context);
+  const holds = featureEnabled(env, "confirmations");
+  if (restricted && !holds) {
+    throw permissionErrors.create("permission.restricted");
+  }
+  const scope = {
+    connectionId: connection.connectionId,
+    resource: connection.resource,
+    action,
+    idempotencyKey,
+  };
+  const capability = await signCapability(
+    env.CAPABILITY_SIGNING_KEY,
+    authority,
+    {
+      ...scope,
+      mask,
+      restricted,
+      origin: holds ? { permissionId, context } : undefined,
+      confirms,
+    }
+  );
+  return { capability, scope };
+};
+
 /**
  * Calls an action on a connection for an App or agent working in
- * `context`: checks its permission, `permissionId`, and
- * that `context` isn't in restricted mode, then signs the capability
- * connect needs for exactly this call. Core makes capabilities here and
- * nowhere else, and nothing outside core reaches this function.
+ * `context`, by its permission `permissionId`, with the capability
+ * `signedCall` makes for it.
  */
 export const callConnection = async (
   env: Env,
@@ -51,26 +114,10 @@ export const callConnection = async (
   }: Pick<ConnectCall, "action" | "input" | "idempotencyKey">,
   permissionId: PermissionId
 ): Promise<ConnectResult> => {
-  // The mask comes from the permission's record as it is now, and goes
-  // only into the signed capability: connect masks by it.
-  const { mask } = await authorize(
+  const { capability, scope } = await signedCall(
     env,
-    authority,
-    connection,
-    action,
-    permissionId
-  );
-  await requireUnrestricted(env, authority, context);
-  const scope = {
-    connectionId: connection.connectionId,
-    resource: connection.resource,
-    action,
-    idempotencyKey,
-  };
-  const capability = await signCapability(
-    env.CAPABILITY_SIGNING_KEY,
-    authority,
-    { ...scope, mask }
+    { authority, context, connection, permissionId },
+    { action, idempotencyKey }
   );
   return await env.CONNECT.call({ capability, ...scope, input });
 };
@@ -165,6 +212,11 @@ export class ConnectionBinding extends WorkerEntrypoint<
   /**
    * Runs one of the connection's actions. A side effect needs an
    * `idempotencyKey`: repeating the call with it returns the first result.
+   * A side effect of an agent working for a person (and every one once its
+   * chat read restricted data) is held for the person to confirm instead:
+   * the answer then has `pending` set, `output` is the JSON text `"null"`
+   * and `provenance` is empty; repeating the call later returns the
+   * action's result once it ran.
    */
   async call(
     action: unknown,

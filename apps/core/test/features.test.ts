@@ -25,6 +25,7 @@ const callsWith = async (features?: unknown) => {
     outcome(session.screens.version("app")),
     outcome(session.members.list()),
     outcome(session.audit.verify()),
+    outcome(session.pendingActions.list()),
     outcome(session.whoami()),
   ]);
 };
@@ -32,6 +33,7 @@ const callsWith = async (features?: unknown) => {
 describe("feature flags", () => {
   it("refuse every flagged API while no flag is set", async () => {
     await expect(callsWith()).resolves.toStrictEqual([
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -50,6 +52,7 @@ describe("feature flags", () => {
       callsWith({ apps: true, permissions: false, unknown: true })
     ).resolves.toStrictEqual([
       "ok",
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -95,6 +98,7 @@ describe("feature flags", () => {
         "feature.disabled",
         "feature.disabled",
         "feature.disabled",
+        "feature.disabled",
         "ok",
       ]);
     }
@@ -120,6 +124,30 @@ describe("feature flags", () => {
       ["feature.disabled", "feature.disabled"],
       // Past the flag: this App doesn't exist.
       ["app.not_found", "app.not_found"],
+    ]);
+  });
+
+  it("stop held actions with either the connections or the confirmations flag", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const callsWithFlags = async (features: Record<string, boolean>) => {
+      const coreEnv: Env = { ...env, FEATURES: features };
+      const { core } = await openRpc(admin.session, { coreEnv });
+      const { pendingActions } = core.authenticate();
+      const id = crypto.randomUUID();
+      return await Promise.all([
+        outcome(pendingActions.list()),
+        outcome(pendingActions.confirm(id, "0".repeat(64))),
+        outcome(pendingActions.decline(id)),
+      ]);
+    };
+    await expect(
+      Promise.all([
+        callsWithFlags({ connections: true }),
+        callsWithFlags({ confirmations: true }),
+      ])
+    ).resolves.toStrictEqual([
+      Array.from({ length: 3 }, () => "feature.disabled"),
+      Array.from({ length: 3 }, () => "feature.disabled"),
     ]);
   });
 

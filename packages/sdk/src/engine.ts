@@ -60,6 +60,18 @@ export type BindingMethod = (...args: Json[]) => Promise<unknown>;
  * connection call takes that step's `idempotencyKey` or none. An App
  * method a step calls gets the same key on its caller
  * (`caller.idempotencyKey`), the only one its own connection calls take.
+ *
+ * Once the run's App has read restricted data, each side effect waits for
+ * the person the run acts for to confirm it (where the deployment has held
+ * actions on; elsewhere it is refused), and the run waits with it, using
+ * none of the step's retries. After their decision the step's
+ * function runs again from the top, so work before the call repeats:
+ * keep it idempotent. Confirmed, the call answers as it would have; a
+ * decline, or a drop (its connection disconnected, the person removed),
+ * fails the call with `connect.declined`, which isn't retried: a final
+ * answer, which the step's code (or the App's) may catch and handle like
+ * any other error, as its own choice; uncaught, it fails the step. A run
+ * that ended meanwhile gets nothing (`connect.run_ended`, for the person).
  */
 export type WorkflowEnv = Readonly<
   Record<string, Readonly<Record<string, BindingMethod>>>

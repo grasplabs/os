@@ -93,6 +93,11 @@ const replay = (
   if (row.inputHash !== inputHash) {
     throw connectErrors.create("connect.idempotency_conflict");
   }
+  if (row.state === "declined") {
+    throw connectErrors.create("connect.declined", {
+      reason: row.output ?? "declined",
+    });
+  }
   const answered = row.state === "done" || row.state === "failed";
   const expired = now - row.createdAt.getTime() > retentionMs;
   if (answered && (expired || row.output === null)) {

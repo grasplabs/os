@@ -4,11 +4,14 @@ import { defineErrorFamily } from "./errors.ts";
 import {
   agentIdSchema,
   appIdSchema,
+  chatIdSchema,
   collectionIdSchema,
   connectionIdSchema,
   identifierMaxLength,
   identifierSchema,
+  runIdSchema,
   workflowIdSchema,
+  workspaceIdSchema,
 } from "./ids.ts";
 import type { PermissionId } from "./ids.ts";
 
@@ -294,6 +297,26 @@ export const authoritySchema = z.strictObject({
   appVersion: z.int().positive().optional(),
 });
 export type Authority = z.infer<typeof authoritySchema>;
+
+/**
+ * Where an App or agent works, and keeps its restricted mode: a chat, an
+ * App, or a run of one of the App's workflows. The host sets it, like the
+ * authority.
+ */
+export const workContextSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("chat"),
+    workspaceId: workspaceIdSchema,
+    chatId: chatIdSchema,
+  }),
+  z.strictObject({ type: z.literal("app"), appId: appIdSchema }),
+  z.strictObject({
+    type: z.literal("run"),
+    appId: appIdSchema,
+    runId: runIdSchema,
+  }),
+]);
+export type WorkContext = z.infer<typeof workContextSchema>;
 
 /** Why a permission call was refused. */
 export const permissionErrors = defineErrorFamily({

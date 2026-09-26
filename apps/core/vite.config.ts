@@ -43,6 +43,7 @@ export const screenTests = [
   "test/screen*.test.ts",
   "test/app-sandbox.test.ts",
   "test/workflows.test.ts",
+  "test/held-runs.test.ts",
   "test/decisions.test.ts",
   "test/decisions-switched-off.test.ts",
   "test/workflow-params.test.ts",
@@ -92,6 +93,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               members: true,
               audit: true,
               audit_retention: true,
+              confirmations: true,
             },
             // The gateway runs call the model through; tests fake the AI binding.
             MODEL_GATEWAY: {

@@ -9,6 +9,7 @@ import { requireFeature } from "./features.ts";
 import type { Feature } from "./features.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
 import { MembersRpc } from "./members.ts";
+import { PendingActionsRpc } from "./pending-actions.ts";
 import { PermissionsRpc } from "./permissions-rpc.ts";
 import { ScreensRpc } from "./screens-rpc.ts";
 import { withPerson } from "./session-check.ts";
@@ -37,6 +38,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #screens: ScreensRpc;
   readonly #members: MembersRpc;
   readonly #audit: AuditRpc;
+  readonly #pendingActions: PendingActionsRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -67,6 +69,13 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#screens = new ScreensRpc(env, checkWith("apps", "screens"));
     this.#members = new MembersRpc(env, checkWith("members"));
     this.#audit = new AuditRpc(env, checkWith("audit"));
+    // Held actions are calls on connections: that kill switch stops them
+    // too. With the flag off, connect still holds side effects, and nobody
+    // can confirm them: nothing runs without the person.
+    this.#pendingActions = new PendingActionsRpc(
+      env,
+      checkWith("connections", "confirmations")
+    );
   }
 
   get apps(): AppsRpc {
@@ -103,6 +112,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get audit(): AuditRpc {
     return this.#audit;
+  }
+
+  get pendingActions(): PendingActionsRpc {
+    return this.#pendingActions;
   }
 
   async whoami(): Promise<Identity> {

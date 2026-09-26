@@ -3,6 +3,7 @@ import { z } from "zod";
 import { defineErrorFamily } from "./errors.ts";
 import { connectionIdSchema, identifierSchema } from "./ids.ts";
 import { permissionActionSchema } from "./permissions.ts";
+import type { PermissionSubject, WorkContext } from "./permissions.ts";
 import { roleSchema } from "./roles.ts";
 
 /**
@@ -34,6 +35,22 @@ export interface ConnectResult {
    * output. Empty when the connector names none.
    */
   provenance: string[];
+  /**
+   * Set when connect held the call for the person it acts for to confirm
+   * (a side effect from chat, from a person using an App, or from a context
+   * that read restricted data): nothing was done yet, so `output` is the
+   * JSON text `"null"` and `provenance` is empty. A repeat with the same
+   * idempotency key finds the same held action until it is decided, and
+   * the action's answer once it ran. A workflow run's call is never
+   * answered so: it fails with `connect.held`, and core waits for the
+   * person's decision before running the step again.
+   */
+  pending?: PendingReference;
+}
+
+/** A held action, as the call connect held returns it. */
+export interface PendingReference {
+  id: string;
 }
 
 // Connecting accounts. A person starts and finishes the OAuth flow in their
@@ -171,6 +188,109 @@ export interface ConnectionsApi {
   disconnect: (connectionId: string) => Promise<{ revoked: boolean }>;
 }
 
+// Side effects held for their person (threat model R7, R12). Connect
+// holds a side effect from chat, from a person using an App, or from any
+// context that read restricted data, until the person it acts for confirms
+// it on a view of the exact input it will run with; confirming runs that
+// input, once; declining drops it. Core names the person from their
+// session, as for connecting accounts, and signs the confirmed call's
+// capability after checking the permission and the context again.
+
+/** A held action, as the person it waits for sees it. */
+export interface PendingAction {
+  id: string;
+  /** The App or agent that asked for it. */
+  subject: PermissionSubject;
+  /** For an App's code: the version that asked. */
+  appVersion: number | null;
+  /** Asked for with the person there, or by a workflow run. */
+  mode: "interactive" | "workflow";
+  /** The chat, App or run it came from. */
+  context: WorkContext;
+  /**
+   * Asked for by a chat, App or run that had read restricted data, or, as
+   * core lists it, from one that has read restricted data by now: what it
+   * sends out may carry that data. Show the person a warning; the
+   * confirmation and its events record it.
+   */
+  restricted: boolean;
+  /** The permission that allowed it. */
+  permissionId: string;
+  connectionId: string;
+  resource: string | null;
+  action: string;
+  /** The key its answer is kept under: a repeat of the call gets it. */
+  idempotencyKey: string;
+  /** The exact input it runs with once confirmed, as JSON text. */
+  input: string;
+  /**
+   * SHA-256 of its resource and input: confirming names it, so only what
+   * the person was shown runs.
+   */
+  inputHash: string;
+  /** ISO 8601. */
+  requestedAt: string;
+}
+
+const inputHashSchema = z.string().regex(/^[0-9a-f]{64}$/u);
+
+/** Runs a held action its person confirmed, with core's capability for it. */
+export const confirmActionSchema = z.strictObject({
+  capability: z.unknown(),
+  person: connectionPersonSchema,
+  id: z.uuid(),
+  inputHash: inputHashSchema,
+});
+export type ConfirmAction = z.input<typeof confirmActionSchema>;
+
+/** Drops a held action its person declined. */
+export const declineActionSchema = z.strictObject({
+  person: connectionPersonSchema,
+  id: z.uuid(),
+});
+export type DeclineAction = z.input<typeof declineActionSchema>;
+
+/** One held action, for the person it waits for. */
+export const heldRequestSchema = z.strictObject({
+  person: connectionPersonSchema,
+  id: z.uuid(),
+});
+export type HeldRequest = z.input<typeof heldRequestSchema>;
+
+/** A confirmation core refused, with why, for the audit log. */
+export const refuseConfirmationSchema = z.strictObject({
+  person: connectionPersonSchema,
+  id: z.uuid(),
+  /** An error code, such as `permission.denied`: never free text. */
+  reason: z
+    .string()
+    .regex(/^[a-z][a-z_]*(?:\.[a-z][a-z_]*)+$/u)
+    .max(64),
+});
+export type RefuseConfirmation = z.input<typeof refuseConfirmationSchema>;
+
+/** The held side effects of one workflow run's step, by the step's key. */
+export const pendingKeySchema = z.strictObject({
+  onBehalfOf: identifierSchema,
+  idempotencyKey: identifierSchema,
+});
+export type PendingKey = z.input<typeof pendingKeySchema>;
+
+/**
+ * The held actions waiting for a signed-in person, over `/rpc`: only
+ * their own. Grasp staff have none, and decide none.
+ */
+export interface PendingActionsApi {
+  list: () => Promise<PendingAction[]>;
+  /**
+   * Runs the held action `id`, with the input whose hash is `inputHash`,
+   * once: its answer, as the call would have had it.
+   */
+  confirm: (id: string, inputHash: string) => Promise<ConnectResult>;
+  /** Drops the held action `id`: it never runs. */
+  decline: (id: string) => Promise<void>;
+}
+
 /** What core reaches in connect, over the `CONNECT` service binding. */
 export interface ConnectApi {
   call: (call: ConnectCall) => Promise<ConnectResult>;
@@ -201,6 +321,37 @@ export interface ConnectApi {
    * code can't be brought back to finish it later.
    */
   abandonFlow: (state: string) => Promise<void>;
+  /**
+   * The held actions waiting for `person`, newest first (at most 200):
+   * none for Grasp staff.
+   */
+  listPendingActions: (person: ConnectionPerson) => Promise<PendingAction[]>;
+  /** One held action waiting for the person, or `null`. */
+  pendingAction: (request: HeldRequest) => Promise<PendingAction | null>;
+  /**
+   * Drops a workflow run's held action whose run has ended, found when its
+   * person came to confirm it.
+   */
+  dropForEndedRun: (request: HeldRequest) => Promise<void>;
+  /**
+   * Runs a held action its person confirmed: only with the capability core
+   * signed for confirming it, and only for that person.
+   */
+  confirmAction: (request: ConfirmAction) => Promise<ConnectResult>;
+  /** Drops a held action its person declined. */
+  declineAction: (request: DeclineAction) => Promise<void>;
+  /**
+   * Whether any side effect with idempotency key `idempotencyKey`, acting
+   * for `onBehalfOf`, still waits for that person: a workflow run waits
+   * before running a step whose side effect was held again.
+   */
+  anyPending: (request: PendingKey) => Promise<boolean>;
+  /**
+   * Records a confirmation core refused before it reached connect (the
+   * permission is gone, the person has left, the context is invalid): the
+   * held action keeps waiting.
+   */
+  refuseConfirmation: (request: RefuseConfirmation) => Promise<void>;
 }
 
 /** Why connecting or disconnecting an account didn't work. */
@@ -254,6 +405,18 @@ export const connectErrors = defineErrorFamily({
   "connect.outcome_unknown":
     "A call with this idempotency key was interrupted after it was sent, so it may or may not have taken effect, and it won't be sent again. Check the outside system to see whether it did.",
   "connect.action_failed": "The action reported an error.",
+  "connect.pending_not_found":
+    "There's no such action waiting for you: it was confirmed or declined, or it isn't yours.",
+  "connect.pending_changed":
+    "This isn't the action you were shown, so nothing was done. Look at it again.",
+  "connect.held":
+    "This action waits for the person it acts for to confirm it. Try again once they have.",
+  "connect.run_ended":
+    "The workflow run this action was held for has ended, so it was dropped and won't run.",
+  "connect.declined":
+    "The person this action acts for declined it, or it was dropped when its connection or person went, so it won't run.",
+  "connect.connection_changed":
+    "This connection now reaches another account than when the action was asked for, so it wasn't run.",
   "connect.server_unavailable":
     "The connection's server didn't take the call, so nothing was done.",
 });

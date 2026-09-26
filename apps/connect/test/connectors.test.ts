@@ -19,6 +19,7 @@ import { accessTokenFor } from "../src/tokens.ts";
 import {
   agentFor,
   callAs,
+  chatOrigin,
   connectAccount,
   outcome,
   ownAccount,
@@ -137,6 +138,63 @@ describe("a native connector", () => {
     ).toStrictEqual([{ method: "POST", body: '{"subject":"Paid"}' }]);
   });
 
+  it("reads for a restricted context, and holds its side effects before any token is read", async () => {
+    const connection = await connectionTo("sample");
+    // Any read of this token now refreshes it at the provider.
+    await drizzle(env.DB)
+      .update(connectionTokens)
+      .set({ accessExpiresAt: new Date(Date.now() + 1000) })
+      .where(eq(connectionTokens.connectionId, connection.id));
+    const restricted = { restricted: true, origin: chatOrigin };
+    const agent = agentFor(connection.person.userId);
+    const mailbox = "invoices@acme.test";
+    const held = await Promise.all([
+      outcome(
+        callAs(
+          agent,
+          {
+            connectionId: connection.id,
+            action: "items.send",
+            input: { mailbox, subject: "Payroll" },
+            idempotencyKey: "run-1:send",
+          },
+          restricted
+        )
+      ),
+      outcome(
+        callAs(
+          agentFor(connection.person.userId, "agent-chat", "interactive"),
+          {
+            connectionId: connection.id,
+            action: "items.send",
+            input: { mailbox, subject: "Payroll" },
+            idempotencyKey: "chat-1:send",
+          },
+          restricted
+        )
+      ),
+    ]);
+    expect({
+      held,
+      refreshed: providers.tokenRequests("refresh_token"),
+      sent: api.sent,
+    }).toStrictEqual({
+      // A run's fails retryably; chat's comes back as held.
+      held: ["connect.held", "ok"],
+      refreshed: [],
+      sent: [],
+    });
+    // A read the connector declares still goes out.
+    const read = await callAs(
+      agent,
+      { connectionId: connection.id, action: "items.list", input: { mailbox } },
+      restricted
+    );
+    expect(JSON.parse(read.output)).toStrictEqual({
+      items: [{ id: `${mailbox}/item-1`, subject: "Invoice" }],
+    });
+  });
+
   it("that says its provider rate limited it frees its key, so a retry writes once", async () => {
     const connection = await connectionTo("sample");
     const send = async () =>
@@ -224,7 +282,7 @@ describe("a native connector", () => {
     expect(Date.now() - started).toBeLessThan(5000);
   });
 
-  it("reads no token for a call it refuses", async () => {
+  it("reads no token for a call it refuses or holds", async () => {
     const connection = await connectionTo("sample");
     const google = await connectionTo("sample", "google");
     // Any read of these tokens now refreshes them at the provider.
@@ -253,6 +311,19 @@ describe("a native connector", () => {
           idempotencyKey: "chat-1:send",
         })
       ),
+      // Held for the person to confirm: nothing is sent yet.
+      outcome(
+        callAs(
+          chat,
+          {
+            connectionId: connection.id,
+            action: "items.send",
+            input: { mailbox: "invoices@acme.test", subject: "Paid" },
+            idempotencyKey: "chat-2:send",
+          },
+          { origin: chatOrigin }
+        )
+      ),
       outcome(
         call(connection, "items.send", {
           mailbox: "invoices@acme.test",
@@ -265,6 +336,7 @@ describe("a native connector", () => {
     expect(refusals).toStrictEqual([
       "connect.resource_out_of_scope",
       "connect.confirmation_required",
+      "ok",
       "connect.idempotency_key_required",
       "connect.action_not_found",
       "connect.server_unavailable",

@@ -23,6 +23,7 @@ import {
   readCollection,
   storedGrant,
 } from "./knowledge.ts";
+import { mailConnection } from "./mail-connection.ts";
 import { outcome, signedInApi } from "./sign-in.ts";
 
 // An App's server code is written by the agent and runs for everyone who
@@ -115,6 +116,16 @@ export class App extends DurableObject {
       return "no binding";
     }
     return await outcome(outlook.call(as === undefined ? caller : as, "mail.list", {}));
+  }
+
+  async send(caller: Caller, key: string): Promise<string> {
+    const mail = (this.env as Record<string, any>).MAIL;
+    if (!mail) {
+      return "no binding";
+    }
+    return await outcome(
+      mail.call(caller, "mail.send", { to: "ben@acme.test", subject: "Hello" }, { idempotencyKey: key })
+    );
   }
 
   async mailLater(caller: Caller, wait: (caller: Caller) => Promise<void>): Promise<string> {
@@ -246,6 +257,39 @@ const inRun = (userId: string): AppCallerInput => ({
   mode: "workflow",
   idempotencyKey: `${crypto.randomUUID()}:step`,
 });
+
+/** Gives the App `MAIL`, a mail connection to send on; an admin grants it. */
+const grantMail = async (admin: Builder, app: string) => {
+  const mail = await mailConnection();
+  await requestGranted(idp, admin, {
+    subject: { type: "app", appId: app },
+    object: { type: "connection", connectionId: mail.id },
+    actions: ["mail.send"],
+    binding: "MAIL",
+  });
+  return mail;
+};
+
+/** The App's mail, sent for `userId` with a new idempotency key. */
+const sendFor = async (app: AppId, userId: string): Promise<unknown> =>
+  await callApp(env, app, as(userId), "send", [crypto.randomUUID()]);
+
+/**
+ * Whether each action held for `person` from `app` comes with the
+ * restricted-data warning.
+ */
+const warningsFor = async (
+  person: Builder,
+  app: string
+): Promise<boolean[]> => {
+  const waiting = await person.api.pendingActions.list();
+  return waiting
+    .filter(({ context }) => context.type === "app" && context.appId === app)
+    .map(({ restricted }) => restricted);
+};
+
+/** A side effect from a person using an App: held for them to confirm. */
+const heldWrite = "ok";
 
 /** A Worker Loader that fails any load: proof that nothing was built. */
 const noLoader: WorkerLoader = {
@@ -511,17 +555,31 @@ describe("App server code", { timeout: 60_000 }, () => {
     }).toStrictEqual({ beforeRelease: [1], afterRelease: [1, 2, 2] });
   });
 
-  it("makes no connection calls once it is in restricted mode", async () => {
+  it("still reads, and holds its actions with a restricted-data warning, once it is in restricted mode", async () => {
     const admin = await personApi("admin");
     const app = await sampleApp(admin);
     await requestGranted(idp, admin, outlook(app));
+    const mail = await grantMail(admin, app);
     const caller = as(admin.userId);
-    const before = await callApp(env, app, caller, "mail");
+    const calls = async () => [
+      await callApp(env, app, caller, "mail"),
+      await sendFor(app, admin.userId),
+    ];
+    const before = await calls();
     await appHost(env, app).restrict();
-    const after = await callApp(env, app, caller, "mail");
-    expect({ before, after }).toStrictEqual({
-      before: reached,
-      after: "permission.restricted",
+    const after = await calls();
+    expect({
+      before,
+      after,
+      warned: await warningsFor(admin, app),
+      server: await mail.did(),
+    }).toStrictEqual({
+      before: [reached, heldWrite],
+      after: [reached, heldWrite],
+      // The one held before and the one after: both would now send from
+      // an App that read restricted data.
+      warned: [true, true],
+      server: { calls: 0, sent: [] },
     });
   });
 
@@ -1004,7 +1062,7 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
     ).resolves.toStrictEqual(everyReadIs("knowledge.not_found"));
   });
 
-  it("is restricted for good by a sensitive read, and then makes no connection calls for anyone", async () => {
+  it("is restricted for good by a sensitive read, and then holds every action for the person it acts for", async () => {
     const admin = await personApi("admin");
     const outsider = await personApi("user");
     const teamId = await newTeam(admin, []);
@@ -1022,7 +1080,7 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
     ]);
     const app = await sampleApp(admin);
     const subject = { type: "app" as const, appId: app };
-    await requestGranted(idp, admin, outlook(app));
+    const mail = await grantMail(admin, app);
     await requestGranted(
       idp,
       admin,
@@ -1033,8 +1091,7 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
       admin,
       readCollection(subject, handbook.collectionId, "OTHER")
     );
-    const mail = async (userId: string) =>
-      await callApp(env, app, as(userId), "mail");
+    const send = async (userId: string) => await sendFor(app, userId);
 
     // Ordinary reads, and a sensitive read that was refused, change nothing.
     const ordinary = await callApp(env, app, as(admin.userId), "provenance", [
@@ -1045,7 +1102,7 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
       "HANDBOOK",
       payroll.noteId,
     ]);
-    const before = await mail(admin.userId);
+    const before = await send(admin.userId);
 
     const sensitive = await callApp(env, app, as(admin.userId), "provenance", [
       "HANDBOOK",
@@ -1053,32 +1110,38 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
     ]);
     await appHost(env, app).restart("A test restarts it.");
     expect({
+      server: await mail.did(),
       ordinary,
       refused,
       before,
       sensitive,
-      after: [await mail(admin.userId), await mail(outsider.userId)],
+      after: [await send(admin.userId), await send(outsider.userId)],
       // Knowledge stays inside the deployment, so it can still be read.
       stillReads: await callApp(env, app, as(admin.userId), "reads", [
         "OTHER",
         handbook.noteId,
       ]),
     }).toStrictEqual({
+      server: { calls: 0, sent: [] },
       ordinary: {
         collectionIds: [handbook.collectionId],
         sensitive: false,
         restricted: false,
       },
       refused: everyReadIs("knowledge.not_found"),
-      before: reached,
+      before: heldWrite,
       sensitive: {
         collectionIds: [payroll.collectionId],
         sensitive: true,
         restricted: true,
       },
-      after: ["permission.restricted", "permission.restricted"],
+      after: [heldWrite, heldWrite],
       stillReads: everyReadIs("ok"),
     });
+    expect({
+      admin: await warningsFor(admin, app),
+      outsider: await warningsFor(outsider, app),
+    }).toStrictEqual({ admin: [true, true], outsider: [true] });
   });
 
   it("is restricted by every read that reaches a sensitive collection, also one that finds nothing", async () => {
@@ -1105,7 +1168,6 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
     const results = await Promise.all(
       reads.map(async ([method, args]) => {
         const app = await sampleApp(admin);
-        await requestGranted(idp, admin, outlook(app));
         await requestGranted(
           idp,
           admin,
@@ -1116,17 +1178,17 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
           method,
           args,
         ]);
-        return [read, await callApp(env, app, as(admin.userId), "mail")];
+        return [read, await appHost(env, app).isRestricted()];
       })
     );
     expect(results).toStrictEqual([
-      ["ok", "permission.restricted"],
-      ["ok", "permission.restricted"],
-      ["ok", "permission.restricted"],
-      ["ok", "permission.restricted"],
-      ["ok", "permission.restricted"],
-      ["ok", "permission.restricted"],
-      ["knowledge.not_found", "permission.restricted"],
+      ["ok", true],
+      ["ok", true],
+      ["ok", true],
+      ["ok", true],
+      ["ok", true],
+      ["ok", true],
+      ["knowledge.not_found", true],
     ]);
   });
 
