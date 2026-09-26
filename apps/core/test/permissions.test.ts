@@ -407,6 +407,7 @@ describe("permissions", () => {
       "KNOWLEDGE_MIGRATIONS",
       "CONNECT_DB",
       "CONNECT_MIGRATIONS",
+      "CONNECT_PROVIDERS",
     ]);
     const own = Object.keys(env).filter((name) => !testOnly.has(name));
     expect(

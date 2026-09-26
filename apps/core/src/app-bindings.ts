@@ -4,7 +4,7 @@ import type { AppId } from "@grasp-os/shared/ids";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
-import { runStubCall, stubsOf } from "./bindings.ts";
+import { requireStepKey, runStubCall, stubsOf } from "./bindings.ts";
 import type { ConnectionGrant } from "./bindings.ts";
 import { appHost } from "./durable-objects.ts";
 import { activePermissions } from "./permissions.ts";
@@ -18,7 +18,9 @@ const callerSchema = z.object({ token: z.string().min(1).max(100) });
  * everyone using it, so the stub acts for no one on its own: each call
  * passes the caller of the App method it runs in, and the App's host says
  * who that is, while that method runs (see app.ts). App code can't name
- * anyone else.
+ * anyone else. For a workflow run's caller, the only key a call takes is
+ * the one on the caller (`caller.idempotencyKey`, its step's), as for the
+ * run's own connection calls.
  */
 export class AppConnectionBinding extends WorkerEntrypoint<
   Env,
@@ -38,7 +40,16 @@ export class AppConnectionBinding extends WorkerEntrypoint<
     }
     return await runStubCall(
       this.env,
-      async () => await appHost(this.env, app).authorityOf(parsed.data.token),
+      async (key) => {
+        const { authority, idempotencyKey } = await appHost(
+          this.env,
+          app
+        ).callerOf(parsed.data.token);
+        if (authority.mode === "workflow") {
+          requireStepKey(key, idempotencyKey);
+        }
+        return authority;
+      },
       grant,
       [action, input, options]
     );

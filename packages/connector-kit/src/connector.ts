@@ -6,6 +6,7 @@ import {
   connectorManifestSchema,
   maskMetaKey,
   maxProvenanceItems,
+  notPerformedMetaKey,
   provenanceMetaKey,
   resourceMetaKey,
 } from "./manifest.ts";
@@ -74,11 +75,27 @@ export interface ToolDefinition<
 /**
  * An error whose message the caller may see, such as "No such message".
  * Any other error is reported as the action having failed.
+ *
+ * `notPerformed: true` says the tool did nothing at all, so it may be
+ * tried again with the same idempotency key (`notPerformedMetaKey`): say,
+ * the provider answered 429 to the tool's first and only write. Set it
+ * only when that is certain. A write that may have reached the provider
+ * (a timeout, a 5xx after sending) is not that, and neither is any failure
+ * after an earlier write of the same call went through: so no shared
+ * "429 means not performed" helper for tools that write more than once.
+ * A read-only tool changes nothing, so it may set it for any failure
+ * trying again may fix, such as a provider's 5xx.
  */
 export class ToolError extends Error {
-  constructor(message: string) {
+  readonly notPerformed: boolean;
+
+  constructor(
+    message: string,
+    { notPerformed = false }: { notPerformed?: boolean } = {}
+  ) {
     super(message);
     this.name = "ToolError";
+    this.notPerformed = notPerformed;
   }
 }
 
@@ -172,9 +189,10 @@ const provenanceSchema = z
   .array(z.string().min(1).max(auditIdentifierMaxLength))
   .max(maxProvenanceItems);
 
-const failure = (text: string): CallResult => ({
+const failure = (text: string, notPerformed = false): CallResult => ({
   content: [{ type: "text", text }],
   isError: true,
+  ...(notPerformed ? { _meta: { [notPerformedMetaKey]: true } } : {}),
 });
 
 /** Where input didn't parse, without the values that were sent. */
@@ -252,9 +270,9 @@ export const defineTool = <
       try {
         result = await definition.run(parsed.data);
       } catch (error) {
-        return failure(
-          error instanceof ToolError ? error.message : "The action failed"
-        );
+        return error instanceof ToolError
+          ? failure(error.message, error.notPerformed)
+          : failure("The action failed");
       }
       const checked = output.safeParse(result.output);
       const provenance = provenanceSchema.safeParse(result.provenance ?? []);

@@ -11,7 +11,7 @@ import { hashCall, idempotencyStore } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
 import { McpError } from "./mcp.ts";
 import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
-import { checkResourceScope, hasSideEffect } from "./policy.ts";
+import { checkResourceScope, didNothing, hasSideEffect } from "./policy.ts";
 
 /**
  * A call connect carried out, or answered from its stored answer: its
@@ -159,17 +159,18 @@ export const carryOut = async (
   // Every refusal is behind: only now may a token be read.
   const server = await open();
   if (!sideEffect) {
+    let read: McpToolResult;
     try {
-      return {
-        ...answerOf(await server.call(tool.name, input)),
-        sideEffect,
-        replayed: false,
-      };
+      read = await server.call(tool.name, input);
     } catch (error) {
       throw error instanceof McpError
         ? connectErrors.create("connect.server_unavailable")
         : error;
     }
+    if (didNothing(connection.serverKind, read)) {
+      throw connectErrors.create("connect.server_unavailable");
+    }
+    return { ...answerOf(read), sideEffect, replayed: false };
   }
 
   if (store === undefined) {
@@ -179,9 +180,9 @@ export const carryOut = async (
   if (earlier !== undefined) {
     return { ...earlier, sideEffect, replayed: true };
   }
-  let answer: StoredAnswer;
+  let done: McpToolResult;
   try {
-    answer = answerOf(await server.call(tool.name, input));
+    done = await server.call(tool.name, input);
   } catch (error) {
     // Only a server that turned the call away frees the key. A tool that
     // reports an error may have acted first, so its answer is kept below.
@@ -192,6 +193,13 @@ export const carryOut = async (
     await store.spend();
     throw connectErrors.create("connect.outcome_unknown");
   }
+  // ...unless the tool is one connect trusts to say it did nothing: then
+  // the key is free, and the caller may try again.
+  if (didNothing(connection.serverKind, done)) {
+    await store.release();
+    throw connectErrors.create("connect.server_unavailable");
+  }
+  const answer = answerOf(done);
   return {
     ...answer,
     sideEffect,

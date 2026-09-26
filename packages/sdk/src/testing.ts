@@ -2,9 +2,9 @@ import { messageOf } from "@grasp-os/shared/errors";
 import { runIdSchema } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Json } from "@grasp-os/shared/json";
+import { isRetryable } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
-import { isNonRetryable } from "./engine.ts";
 import type {
   DecisionAnswer,
   EngineEvent,
@@ -180,7 +180,8 @@ const byStepName = <T>(
 
 /**
  * Runs `fn`, and again up to `retries` times while it fails with an error
- * that trying again may fix. Delays and timeouts aren't simulated.
+ * that trying again may fix (`isRetryable`), as a real run does. Delays
+ * and timeouts aren't simulated.
  */
 const attempt = async <T>(
   retries: number,
@@ -193,7 +194,7 @@ const attempt = async <T>(
       return await fn();
     } catch (error) {
       lastError = error;
-      if (isNonRetryable(error)) {
+      if (!isRetryable(error)) {
         break;
       }
     }

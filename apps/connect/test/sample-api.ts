@@ -4,7 +4,9 @@
  * out lands here, where tests read it back. The provider answers what the
  * sample connector asks, and the probes' special cases (a redirect, a flood
  * of bytes); any other host takes whatever it is sent, as an attacker's
- * would. OAuth requests go on to the fake providers (test/oauth-provider.ts).
+ * would. Tests can have it rate limit its next writes (`rateLimited`), and
+ * fail its next reads (`failingReads`). OAuth requests go on to the fake
+ * providers (test/oauth-provider.ts).
  */
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 
@@ -87,8 +89,36 @@ const answer = (method: string, url: URL): Response => {
 /** The sample provider and the rest of the internet, for each test in the file. */
 export const fakeSampleApi = () => {
   const sent: SentRequest[] = [];
+  const state = {
+    sent,
+    /** How many of the next item writes it answers 429, doing nothing. */
+    rateLimited: 0,
+    /** The item writes it carried out. */
+    written: 0,
+    /** How many of the next item reads it answers 503. */
+    failingReads: 0,
+  };
+  const answerWrite = (method: string, url: URL): Response => {
+    const isItems = itemsPath.test(url.pathname);
+    const isWrite = method === "POST" && isItems;
+    if (isWrite && state.rateLimited > 0) {
+      state.rateLimited -= 1;
+      return new Response("Too Many Requests", { status: 429 });
+    }
+    if (method === "GET" && isItems && state.failingReads > 0) {
+      state.failingReads -= 1;
+      return new Response("Service Unavailable", { status: 503 });
+    }
+    if (isWrite) {
+      state.written += 1;
+    }
+    return answer(method, url);
+  };
   beforeEach(() => {
     sent.length = 0;
+    state.rateLimited = 0;
+    state.written = 0;
+    state.failingReads = 0;
     // A second spy on fetch replaces the first one's implementation: keep
     // the OAuth providers' (registered first) to hand their requests to.
     const passThrough =
@@ -107,12 +137,12 @@ export const fakeSampleApi = () => {
       });
       await request.body?.cancel();
       return url.hostname === sampleHost
-        ? answer(request.method, url)
+        ? answerWrite(request.method, url)
         : new Response("Taken");
     });
   });
   afterEach(() => {
     vi.restoreAllMocks();
   });
-  return { sent };
+  return state;
 };

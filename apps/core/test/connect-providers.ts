@@ -1,11 +1,13 @@
 /**
- * Entra ID's token endpoint as the connect Worker reaches it in core's
- * tests: a Worker of its own, set as connect's outbound service in
- * vite.config.ts, so the real connect runs unchanged behind core. It checks
+ * The outside systems the connect Worker reaches in core's tests: a Worker
+ * of its own, set as connect's outbound service in vite.config.ts, so the
+ * real connect runs unchanged behind core. Entra ID's token endpoint checks
  * PKCE and Grasp's client secret as Entra does, and issues tokens for the
- * account the code names. Imported by vite.config.ts (Node) and the tests
+ * account the code names; a mail provider's MCP server answers as
+ * test/mail-server.ts says. Imported by vite.config.ts (Node) and the tests
  * (workerd), so it only holds data.
  */
+import { mailServerScript } from "./mail-server.ts";
 
 /** Grasp's Entra app for connections, as set on connect in the tests. */
 export const connectClient = {
@@ -28,6 +30,7 @@ export const tokensFor = (subject: string): string[] => [
 ];
 
 export const connectProvidersScript = `
+${mailServerScript}
 const base64Url = (bytes) =>
   btoa(String.fromCharCode(...bytes))
     .replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
@@ -37,6 +40,9 @@ const encoded = (value) =>
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.hostname === "backend.composio.dev" || url.hostname === "mail-control.test") {
+      return await mailServer(request, url);
+    }
     if (request.method !== "POST" || url.hostname !== "login.microsoftonline.com") {
       return new Response("Not found", { status: 404 });
     }

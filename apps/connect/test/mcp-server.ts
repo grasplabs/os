@@ -6,6 +6,7 @@
  * what they return, and how the network between them fails, and read back
  * which tools actually ran.
  */
+import { notPerformedMetaKey } from "@grasp-os/connector-kit/manifest";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
 import { afterEach, beforeEach, vi } from "vite-plus/test";
@@ -29,12 +30,15 @@ export interface FakeResult {
   provenance?: string[];
   /** It failed, and says so in its result. */
   isError?: boolean;
+  /** Its failed result says it did nothing (`notPerformedMetaKey`). */
+  notPerformed?: boolean;
 }
 
 /**
  * How the next `tools/call` fares on the way: `ok`; `drop` (it reaches the
  * server and runs, but the answer is lost); `unauthorised` (the server
- * turns it away with a 401 before running it); `no-method` (a JSON-RPC
+ * turns it away with a 401 before running it); `rate-limited` (a 429,
+ * before running it); `no-method` (a JSON-RPC
  * "method not found", before running it); or `invalid-params` (the tool
  * runs, then the server answers with a JSON-RPC "invalid params" error).
  */
@@ -42,6 +46,7 @@ export type Network =
   | "ok"
   | "drop"
   | "unauthorised"
+  | "rate-limited"
   | "no-method"
   | "invalid-params";
 
@@ -112,17 +117,20 @@ const serverWith = (tools: readonly FakeTool[], ran: Ran[]): McpServer => {
       },
       async (input: Record<string, unknown>) => {
         ran.push({ tool: tool.name, input });
-        const { output, content, provenance, isError } = await tool.run(input);
+        const { output, content, provenance, isError, notPerformed } =
+          await tool.run(input);
         return {
           content: content ?? [
             { type: "text" as const, text: JSON.stringify(output) },
           ],
           structuredContent: content === undefined ? output : undefined,
           isError,
-          _meta:
-            provenance === undefined
-              ? undefined
-              : { "grasp-os/provenance": provenance },
+          _meta: {
+            ...(provenance === undefined
+              ? {}
+              : { "grasp-os/provenance": provenance }),
+            ...(notPerformed === true ? { [notPerformedMetaKey]: true } : {}),
+          },
         };
       }
     );
@@ -165,6 +173,9 @@ export const fakeMcpServer = (
     }
     if (network === "unauthorised") {
       return new Response("Unauthorized", { status: 401 });
+    }
+    if (network === "rate-limited") {
+      return new Response("Too Many Requests", { status: 429 });
     }
     if (network === "no-method") {
       return rpcError(body, -32_601);

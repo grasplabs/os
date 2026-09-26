@@ -45,8 +45,6 @@ export interface StepError {
   message: string;
   /** An expected error's code, such as `permission.denied`. */
   code?: string;
-  /** Trying again can't fix it (the SDK's `nonRetryable`). */
-  nonRetryable?: boolean;
 }
 
 /** How a call across the isolate's boundary ended. */
@@ -56,12 +54,14 @@ export type Settled<T> =
 
 /**
  * What the run's main module takes from core: the run, the parameter
- * values people set, and its input.
+ * values people set, its input, and the binding names of its connections,
+ * which it calls through the host (host.ts).
  */
 export interface RunStart {
   runId: RunId;
   params: Record<string, string | number>;
   input: unknown;
+  connections: string[];
 }
 
 /** The run's main module, as core calls it. */
@@ -110,7 +110,6 @@ const settling = `
 const described = (error) => ({
   name: String(error?.name ?? "Error"),
   message: String(error?.message ?? error),
-  nonRetryable: error?.nonRetryable === true,
   ...(typeof error?.code === "string" ? { code: error.code } : {}),
 });
 const settled = async (run) => {
@@ -125,7 +124,8 @@ const settled = async (run) => {
 /**
  * The main module of a run of workflow `id`: the engine the SDK runs on,
  * each of its calls sent to core's host (host.ts), and each error in plain
- * data both ways. A binding the run doesn't have (a permission revoked
+ * data both ways. Its connections and its App go through the host too,
+ * which knows the step running. A binding the run doesn't have (a permission revoked
  * since, or never granted) fails with a permission error, not `undefined`.
  */
 const runMain = (
@@ -142,7 +142,6 @@ const unwrapped = (result) => {
   if (result.error.code !== undefined) {
     error.code = result.error.code;
   }
-  error.nonRetryable = result.error.nonRetryable === true;
   throw error;
 };
 
@@ -159,8 +158,24 @@ const bindings = (env) =>
     },
   });
 
+const withConnections = (env, host, connections) => ({
+  ...env,
+  APP: {
+    call: async (method, ...args) => unwrapped(await host.callApp(method, args)),
+  },
+  ...Object.fromEntries(
+    connections.map((name) => [
+      name,
+      {
+        call: async (action, input, options) =>
+          unwrapped(await host.callConnection(name, [action, input, options])),
+      },
+    ])
+  ),
+});
+
 export class Run extends WorkerEntrypoint {
-  async run(host, { runId, params, input }) {
+  async run(host, { runId, params, input, connections }) {
     return await settled(async () => {
       if (definition?.metadata?.id !== ${JSON.stringify(id)} || typeof definition.run !== "function") {
         throw new Error(${JSON.stringify(`workflows/${id}.ts must export the workflow "${id}" as its default export.`)});
@@ -168,7 +183,7 @@ export class Run extends WorkerEntrypoint {
       const engine = {
         runId,
         params,
-        env: bindings(this.env),
+        env: bindings(withConnections(this.env, host, connections)),
         do: async (name, options, fn) => unwrapped(await host.do(name, options, async () => await settled(fn))),
         sleep: async (name, milliseconds) => unwrapped(await host.sleep(name, milliseconds)),
         waitForEvent: async (name, options) => unwrapped(await host.waitForEvent(name, options)),

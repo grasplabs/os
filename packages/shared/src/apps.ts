@@ -181,4 +181,12 @@ export interface AppCaller {
   /** A person is there (a screen), or a workflow runs on its own. */
   mode: "interactive" | "workflow";
   token: string;
+  /**
+   * For a workflow run's step: that step's idempotency key. The App's
+   * connection calls for this caller take this key and no other
+   * (`env.OUTLOOK.call(caller, action, input, { idempotencyKey:
+   * caller.idempotencyKey })`), so a side effect happens once per step
+   * and run however often the step is retried.
+   */
+  idempotencyKey?: string;
 }

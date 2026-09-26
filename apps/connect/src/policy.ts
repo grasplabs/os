@@ -2,7 +2,7 @@ import { connectErrors } from "@grasp-os/shared/connect";
 import type { Json } from "@grasp-os/shared/json";
 
 import type { Connection } from "./connections.ts";
-import type { McpTool } from "./mcp.ts";
+import type { McpTool, McpToolResult } from "./mcp.ts";
 
 // What connect takes from an MCP server's description of its own tools.
 // Only native connectors are ours, so only their word counts: for anything
@@ -53,3 +53,12 @@ export const checkResourceScope = (
     throw connectErrors.create("connect.resource_out_of_scope");
   }
 };
+
+/**
+ * Whether a tool's error result means the call did nothing at all
+ * (`notPerformedMetaKey`), so its idempotency key is free again. Only a
+ * native connector is taken at its word: a remote server's tool that acted
+ * and then said it hadn't would have its side effect run twice.
+ */
+export const didNothing = (kind: ServerKind, result: McpToolResult): boolean =>
+  kind === "native" && result.notPerformed;

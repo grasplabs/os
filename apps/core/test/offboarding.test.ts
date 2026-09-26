@@ -32,6 +32,7 @@ import {
   whoami,
   withSignIn,
 } from "./sign-in.ts";
+import { connectDb } from "./test-env.ts";
 
 // Offboarding (threat model ID4, SC7, PM8, R15, R16): an admin removes
 // someone, or ends their sessions. These tests start from the ways it can
@@ -91,20 +92,9 @@ const connectOwnAccount = async (person: Person): Promise<string> => {
   return connection.id;
 };
 
-const isDatabase = (value: unknown): value is D1Database =>
-  typeof value === "object" &&
-  value !== null &&
-  "prepare" in value &&
-  "batch" in value;
-
 /** How many tokens connect's vault holds for `connectionId`. */
 const tokensHeld = async (connectionId: string): Promise<number> => {
-  // Connect's database, which the tests bind to core as well.
-  const connectDb: unknown = Reflect.get(env, "CONNECT_DB");
-  if (!isDatabase(connectDb)) {
-    throw new TypeError("Expected connect's database as CONNECT_DB");
-  }
-  const row = await connectDb
+  const row = await connectDb()
     .prepare(
       "SELECT count(*) AS count FROM connection_tokens WHERE connection_id = ?"
     )

@@ -1,5 +1,6 @@
 import {
   maxProvenanceItems,
+  notPerformedMetaKey,
   provenanceMetaKey,
   resourceMetaKey,
 } from "@grasp-os/connector-kit/manifest";
@@ -56,15 +57,22 @@ export interface McpToolResult {
   provenance: string[];
   /** The tool reported an error instead of a result. */
   isError: boolean;
+  /**
+   * The tool says it reported an error without doing anything
+   * (`notPerformedMetaKey`). Only a server connect trusts is taken at its
+   * word on this (policy.ts).
+   */
+  notPerformed: boolean;
 }
 
 /**
  * A request to the server failed. `declined` is true only when the request
  * provably never reached a tool: the server refused it as unauthorised
  * (401, 403), couldn't parse it, or has no such method. Anything else, a
- * dropped connection, an unreadable reply, or a JSON-RPC error a tool may
- * throw after acting (such as invalid params), leaves open whether the call
- * ran.
+ * dropped connection, an unreadable reply, a 429 (a server of its own
+ * making may send one for its provider's, after a write), or a JSON-RPC
+ * error a tool may throw after acting (such as invalid params), leaves
+ * open whether the call ran.
  */
 export class McpError extends Error {
   readonly declined: boolean;
@@ -79,7 +87,11 @@ export class McpError extends Error {
 /** JSON-RPC errors raised before any tool runs: parse error, no such method. */
 const refusedRequestCodes: ReadonlySet<number> = new Set([-32_700, -32_601]);
 
-/** HTTP statuses that mean the server didn't act on the request. */
+/**
+ * HTTP statuses that mean the server didn't act on the request. This
+ * assumes a server sends them only before any tool runs, as its transport
+ * does: a tool's own answer, error or not, comes in a 200.
+ */
 const isDeclinedStatus = (status: number): boolean =>
   status === 401 || status === 403;
 
@@ -256,7 +268,7 @@ const resultOf = (result: unknown): McpToolResult => {
   if (!parsed.success || !provenance.success) {
     throw new McpError("The tool's result isn't one connect can read");
   }
-  const { structuredContent, content, isError } = parsed.data;
+  const { structuredContent, content, isError, _meta: meta } = parsed.data;
   const texts = content.map((block) =>
     block.type === "text" && typeof block.text === "string"
       ? block.text
@@ -270,6 +282,7 @@ const resultOf = (result: unknown): McpToolResult => {
     output: JSON.stringify(structuredContent ?? text ?? content),
     provenance: provenance.data,
     isError,
+    notPerformed: isError && meta?.[notPerformedMetaKey] === true,
   };
 };
 

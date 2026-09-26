@@ -22,6 +22,12 @@ import { z } from "zod";
 //
 // What the allowlist doesn't constrain: the query string and the body of
 // an allowed request are the connector's own (threat model EG3).
+//
+// A provider's 429 goes back to the connector as it is. Whether its call
+// did nothing (`notPerformedMetaKey`) is the connector's to say: this
+// handler sees one request at a time, can't tell whether an earlier
+// request of the same call already wrote, and can't cheaply tell connect's
+// side of the call.
 
 /** Largest provider response a connector may read, in bytes. */
 export const maxEgressResponseBytes = 10 * 1024 * 1024;

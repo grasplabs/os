@@ -17,7 +17,9 @@ import { idempotentCalls } from "./db/schema.ts";
 // again. A call that fails after it may have reached the server spends the
 // key: nobody can tell whether the effect happened, so a repeat is refused
 // rather than risk doing it twice. Only a server that turned the call away
-// frees the key again.
+// (401, 403, a JSON-RPC parse error or no such method), or a native
+// connector that says it did nothing (`notPerformedMetaKey`), frees the
+// key again.
 
 /**
  * How long a claim holds before connect stops waiting for its call: well

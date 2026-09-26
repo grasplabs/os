@@ -1,11 +1,16 @@
 import type { AuditActor } from "@grasp-os/shared/audit";
 import { isExpectedError } from "@grasp-os/shared/errors";
 import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
+import type { Json } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
-import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
-import { workflowErrors } from "@grasp-os/shared/workflows";
+import {
+  isRetryable,
+  stepIdempotencyKey,
+  workflowErrors,
+} from "@grasp-os/shared/workflows";
+import type { InputShape } from "@grasp-os/shared/workflows";
 import { RpcTarget } from "cloudflare:workers";
 import type {
   WorkflowStepConfig,
@@ -15,8 +20,10 @@ import { NonRetryableError } from "cloudflare:workflows";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import type { AppAnswer, AppCallerInput } from "../app.ts";
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
-import { forSandbox } from "../bindings.ts";
+import { forSandbox, requireStepKey, runStubCall } from "../bindings.ts";
+import type { ConnectionGrant } from "../bindings.ts";
 import { appHost } from "../durable-objects.ts";
 import { models } from "../models.ts";
 import { requireActivePerson } from "../permissions.ts";
@@ -44,6 +51,8 @@ export interface HostedRun {
   runId: RunId;
   /** Who the run acts for in this execution. */
   authority: Authority;
+  /** Its connection permissions, by binding name (`runBindingsFor`). */
+  connections: Record<string, ConnectionGrant>;
 }
 
 /**
@@ -99,6 +108,7 @@ const doOptionsSchema = z.object({
     .optional(),
   timeout: milliseconds.optional(),
   sideEffect: z.boolean().optional(),
+  input: z.json().optional(),
 });
 
 const waitOptionsSchema = z.object({
@@ -161,15 +171,13 @@ const isolateErrorSchema = z
     name: z.string(),
     message: z.string(),
     code: z.unknown().optional(),
-    nonRetryable: z.boolean().optional(),
   })
-  .transform(({ name, message, code, nonRetryable }): StepError => {
+  .transform(({ name, message, code }): StepError => {
     const kept = auditableCode(code);
     return {
       name: name.slice(0, maxErrorName),
       message: message.slice(0, maxErrorMessage),
       ...(kept === undefined ? {} : { code: kept }),
-      ...(nonRetryable === true ? { nonRetryable } : {}),
     };
   });
 
@@ -270,29 +278,76 @@ export const settle = async <T>(run: () => Promise<T>): Promise<Settled<T>> => {
 };
 
 /**
- * Codes of errors trying again can't fix: a permission the run doesn't
- * have (any more), or a model the deployment doesn't allow. Failure classes
- * beyond these belong to the failure handling of workflows.
- */
-const isPermanent = (code: string | undefined): boolean =>
-  permissionErrors.codeOf({ code }) !== undefined ||
-  code === "model.not_allowed" ||
-  code === "model.unconfigured" ||
-  code === "model.invalid_call";
-
-/**
- * A step's error as the engine gets it: non-retryable when it is so. The
- * engine knows one by its name, so it keeps that name; the step's own
- * error is reported from what the isolate sent (`do`).
+ * A step's error as the engine gets it: retried, with the step's retry
+ * settings, only when trying again may fix it (`isRetryable`: a rate
+ * limit, a server that took nothing, a timeout); anything else is
+ * non-retryable, and stops the run. The engine knows a non-retryable error
+ * by its name, so it keeps that name; the step's own error is reported
+ * from what the isolate sent (`do`).
  */
 const toStepError = (error: StepError): Error => {
-  if (error.nonRetryable === true || isPermanent(error.code)) {
+  if (!isRetryable(error)) {
     return new NonRetryableError(error.message);
   }
   const thrown = new Error(error.message);
   thrown.name = error.name;
   return thrown;
 };
+
+/** Most fields of a step's input a failure report names. */
+const maxShapeFields = 20;
+
+/**
+ * A field name a failure report may show: letters, `_` and `-` only, and
+ * short, like the names code gives fields; so never an email address, an
+ * ID or other data used as a key.
+ */
+const fieldNamePattern = /^[A-Za-z_][A-Za-z_-]{0,31}$/u;
+
+const typeOf = (value: Json | undefined): string => {
+  if (value === null) {
+    return "null";
+  }
+  return Array.isArray(value) ? "array" : typeof value;
+};
+
+/**
+ * What a failure report keeps of a step's input (`InputShape`): its type,
+ * and for an object the names and types of the fields `fieldNamePattern`
+ * lets through, no values. The input can hold anything the run read (a
+ * message's text, a person's details), and the report outlives the run.
+ */
+const inputShape = (input: Json | undefined): InputShape | null => {
+  if (input === undefined) {
+    return null;
+  }
+  if (typeof input !== "object" || input === null || Array.isArray(input)) {
+    return typeOf(input);
+  }
+  const shape: Record<string, string> = {};
+  let shown = 0;
+  let others = 0;
+  for (const [field, value] of Object.entries(input)) {
+    if (shown < maxShapeFields && fieldNamePattern.test(field)) {
+      shape[field] = typeOf(value);
+      shown += 1;
+    } else {
+      others += 1;
+    }
+  }
+  // No field name takes this form, so it can't stand for a field.
+  if (others > 0) {
+    shape["…"] = `${others} more`;
+  }
+  return shape;
+};
+
+/** A step that failed in an execution, as its failure report names it. */
+export interface FailedStep {
+  step: string;
+  input: InputShape | null;
+  error: StepError;
+}
 
 /** How a host reaches back into the dispatcher (dispatcher.ts). */
 export interface HostHooks {
@@ -307,6 +362,14 @@ export interface HostHooks {
    * error, which the engine knows as its own.
    */
   engineFailed: (error: unknown) => void;
+  /** Hears of each step that failed, with the error it failed with. */
+  stepFailed: (failure: FailedStep) => void;
+  /** Calls a method of the run's App for `caller` (`callApp`). */
+  callApp: (
+    caller: AppCallerInput,
+    method: string,
+    args: unknown[]
+  ) => Promise<AppAnswer>;
 }
 
 /**
@@ -319,8 +382,11 @@ export class RunHost extends RpcTarget {
   readonly #step: RunStep;
   readonly #run: HostedRun;
   readonly #hooks: HostHooks;
-  /** Whether a step's function runs now. */
-  #inStep = false;
+  /**
+   * The step whose function runs now, one object per attempt, so an
+   * abandoned attempt that ends late can't clear a newer one's.
+   */
+  #running: { step: string } | undefined;
 
   constructor(env: Env, step: RunStep, run: HostedRun, hooks: HostHooks) {
     super();
@@ -409,18 +475,25 @@ export class RunHost extends RpcTarget {
     let ran = false;
     let step = "";
     let sideEffect = false;
+    let input: InputShape | null = null;
     try {
       step = checked(stepNameSchema, name);
       const parsed = checked(doOptionsSchema, options);
       sideEffect = parsed.sideEffect === true;
+      input = inputShape(parsed.input);
       await this.#hooks.acting();
       const value = await this.#step.do(step, stepConfig(parsed), async () => {
-        this.#inStep = true;
+        // Only the last attempt's error counts: an earlier one was retried.
+        failed = undefined;
+        const attempt = { step };
+        this.#running = attempt;
         let result: Settled<unknown>;
         try {
           result = fromIsolate(await fn());
         } finally {
-          this.#inStep = false;
+          if (this.#running === attempt) {
+            this.#running = undefined;
+          }
         }
         if (!result.ok) {
           failed = result.error;
@@ -430,13 +503,13 @@ export class RunHost extends RpcTarget {
           failed = {
             name: "Error",
             message: `Step "${step}" returned something that isn't JSON`,
-            nonRetryable: true,
           };
           throw toStepError(failed);
         }
         ran = true;
         return result.value;
       });
+      this.#stepEnded(step);
       if (ran) {
         await this.#audited(step, "completed", { sideEffect });
       }
@@ -447,8 +520,10 @@ export class RunHost extends RpcTarget {
       if (failed === undefined && step !== "" && !isTimeout(error)) {
         this.#hooks.engineFailed(error);
       }
+      this.#stepEnded(step);
       const reported = failed ?? forIsolate(error);
       if (step !== "") {
+        this.#hooks.stepFailed({ step, input, error: reported });
         await this.#audited(step, "failed", {
           sideEffect,
           errorCode: reported.code ?? "workflow.step_failed",
@@ -501,7 +576,7 @@ export class RunHost extends RpcTarget {
    */
   async callModel(request: unknown): Promise<Settled<unknown>> {
     return await settle(async () => {
-      if (!this.#inStep) {
+      if (this.#running === undefined) {
         throw workflowErrors.create("workflow.invalid");
       }
       await this.#requirePerson();
@@ -524,6 +599,83 @@ export class RunHost extends RpcTarget {
         trigger: this.#actor,
       });
       return answer.output;
+    });
+  }
+
+  /**
+   * Once a step has settled, no attempt of it runs any more, one that hung
+   * too: calls between steps are refused again.
+   */
+  #stepEnded(step: string): void {
+    if (this.#running?.step === step) {
+      this.#running = undefined;
+    }
+  }
+
+  /**
+   * The idempotency key of the step whose function runs now; refuses a
+   * call outside a step. Core holds the key to a run's side effects: its
+   * connection calls, and those of its App's methods it calls, take this
+   * key or none (`requireStepKey`).
+   */
+  #stepKey(): string {
+    const running = this.#running;
+    if (running === undefined) {
+      throw workflowErrors.create("workflow.outside_step");
+    }
+    return stepIdempotencyKey(this.#run.runId, running.step);
+  }
+
+  /**
+   * Calls an action on one of the run's connections (`binding`), with
+   * `call` as a connection stub takes it: `[action, input, options]`, only
+   * inside a step, and with that step's key or none.
+   */
+  async callConnection(
+    binding: unknown,
+    call: unknown
+  ): Promise<Settled<unknown>> {
+    return await settle(async () => {
+      const stepKey = this.#stepKey();
+      const { connections, authority } = this.#run;
+      const name = checked(z.string(), binding);
+      const grant = Object.hasOwn(connections, name)
+        ? connections[name]
+        : undefined;
+      if (grant === undefined) {
+        throw workflowErrors.create("workflow.invalid");
+      }
+      return await runStubCall(
+        this.#env,
+        async (key) => {
+          requireStepKey(key, stepKey);
+          return await Promise.resolve(authority);
+        },
+        grant,
+        checked(z.array(z.unknown()), call)
+      );
+    });
+  }
+
+  /**
+   * Calls a method of the run's own App (`env.APP.call(method, ...args)`)
+   * for the person the run acts for, in workflow mode, only inside a step.
+   * The caller the method gets carries the step's key, the only one its
+   * connection calls take (app-bindings.ts). Within one App no permission
+   * is needed, but the person must still be there. The answer is plain
+   * data (`callApp`), and whatever it holds of the App's data is covered by
+   * the run's restricted mode, which is the App's (restricted.ts).
+   */
+  async callApp(method: unknown, args: unknown): Promise<Settled<unknown>> {
+    return await settle(async () => {
+      const idempotencyKey = this.#stepKey();
+      await this.#requirePerson();
+      const { authority } = this.#run;
+      return await this.#hooks.callApp(
+        { userId: authority.onBehalfOf, mode: "workflow", idempotencyKey },
+        String(method),
+        checked(z.array(z.unknown()), args)
+      );
     });
   }
 

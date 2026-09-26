@@ -1,6 +1,7 @@
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { RunId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
+import { stepIdempotencyKey } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import { decisionAnswerSchema } from "./engine.ts";
@@ -62,24 +63,19 @@ const errorNamePattern = /^WorkflowError\((?<code>[\w.]+)\)$/u;
 export class WorkflowError extends Error {
   /** Stable and machine-readable; branch on this, never on the message. */
   readonly code: WorkflowErrorCode;
-  /**
-   * Trying again can't fix it, so the engine doesn't retry the step it
-   * failed. Only a model's answer that doesn't fit may be retried.
-   */
-  readonly nonRetryable: boolean;
 
-  constructor(
-    code: WorkflowErrorCode,
-    message: string,
-    { nonRetryable = true }: { nonRetryable?: boolean } = {}
-  ) {
+  /**
+   * Trying again can't fix one, so the engine doesn't retry the step it
+   * failed; only a model's answer that doesn't fit is asked for again
+   * (`isRetryable` in `@grasp-os/shared/workflows`).
+   */
+  constructor(code: WorkflowErrorCode, message: string) {
     super(message);
     // Not just the class name: the code rides in the name, which every
     // engine keeps with the message.
     // oxlint-disable-next-line unicorn/custom-error-definition -- see above
     this.name = `WorkflowError(${code})`;
     this.code = code;
-    this.nonRetryable = nonRetryable;
   }
 
   /**
@@ -107,16 +103,11 @@ const parseOrThrow = <Schema extends z.ZodType>(
   schema: Schema,
   value: unknown,
   code: WorkflowErrorCode,
-  what: string,
-  options?: { nonRetryable: boolean }
+  what: string
 ): z.output<Schema> => {
   const result = schema.safeParse(value);
   if (!result.success) {
-    throw new WorkflowError(
-      code,
-      `${what}: ${z.prettifyError(result.error)}`,
-      options
-    );
+    throw new WorkflowError(code, `${what}: ${z.prettifyError(result.error)}`);
   }
   return result.data;
 };
@@ -217,8 +208,13 @@ interface StepOptions {
 /**
  * How often to try a failing step again. `limit` counts retries, not
  * attempts (as in Cloudflare Workflows): `limit: 2` is three attempts in
- * all. Missing, the engine's defaults apply (Cloudflare Workflows: 5 retries,
- * 10 seconds apart, backing off exponentially).
+ * all. Only failures trying again may fix are retried: a connection's
+ * server that didn't take the call, a rate limit, a model or App that
+ * failed or ran out of time. Any other error (a refusal, a tool's own
+ * error, one the workflow throws) fails the step at once, and stops the
+ * run unless the workflow catches it. Missing, the engine's defaults apply
+ * (Cloudflare Workflows: 5 retries, 10 seconds apart, backing off
+ * exponentially).
  */
 export interface Retries {
   limit: number;
@@ -508,9 +504,9 @@ const resolveParams = (
     ])
   );
 
-// Both parts encoded, so no run ID and step name make another's key.
+// Core requires exactly this key on the step's connection calls.
 const idempotencyKeyOf = (engine: WorkflowEngine, step: string): string =>
-  `${encodeURIComponent(engine.runId)}:${step}`;
+  stepIdempotencyKey(engine.runId, step);
 
 /** A step call's options, checked against its method's schema. */
 const optionsOf = <Schema extends z.ZodType>(
@@ -619,8 +615,7 @@ const createRunner = (
               schema,
               raw,
               "workflow.invalid_model_output",
-              `Answer to step "${name}"`,
-              { nonRetryable: false }
+              `Answer to step "${name}"`
             );
             return raw;
           }
