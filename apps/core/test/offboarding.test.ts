@@ -588,6 +588,34 @@ describe("the cron trigger's disconnect retry", () => {
     });
     expect(calls).toStrictEqual([]);
   });
+
+  it("sends connect a few batches at a time, and still gets through them all", async () => {
+    // Its own removal time, to find these removals by.
+    const removedAt = Date.now() - dayMs - Math.floor(Math.random() * dayMs);
+    await removedLongAgo(disconnectPersonalMaxOwners * 6, removedAt);
+    let inFlight = 0;
+    let mostInFlight = 0;
+    const connect = connectWith(async (request) => {
+      inFlight += 1;
+      mostInFlight = Math.max(mostInFlight, inFlight);
+      try {
+        return await env.CONNECT.disconnectPersonal(request);
+      } finally {
+        inFlight -= 1;
+      }
+    });
+
+    await runCron({ CONNECT: connect });
+
+    expect(mostInFlight).toBeGreaterThan(1);
+    expect(mostInFlight).toBeLessThanOrEqual(4);
+    const pending = await env.DB.prepare(
+      "SELECT count(*) AS count FROM member_removals WHERE removed_at = ? AND disconnected_at IS NULL"
+    )
+      .bind(removedAt)
+      .first<{ count: number }>();
+    expect(pending?.count).toBe(0);
+  });
 });
 
 /** How many admins the organization has now. */
@@ -616,6 +644,63 @@ describe("changing a member's role", () => {
       target: { type: "member" },
       detail: { userId: person.userId, previousRole: "user", role: "builder" },
     });
+  });
+
+  it("records each change against the role it replaced, and refuses one that another admin's change overtook", async () => {
+    const [first, second, person] = await Promise.all([
+      signedInApi(idp, "admin"),
+      signedInApi(idp, "admin"),
+      signedInApi(idp, "user"),
+    ]);
+    // The second admin's change lands after the first admin's change read
+    // the role, just before it writes.
+    let overtaken = false;
+    const overtakingDb = new Proxy(env.DB, {
+      get: (target, key) => {
+        if (key === "batch") {
+          return async (statements: D1PreparedStatement[]) => {
+            if (!overtaken) {
+              overtaken = true;
+              await second.api.members.setRole(person.userId, "builder");
+            }
+            return await target.batch(statements);
+          };
+        }
+        const value: unknown = Reflect.get(target, key, target);
+        if (typeof value !== "function") {
+          return value;
+        }
+        const bound: unknown = value.bind(target);
+        return bound;
+      },
+    });
+    const { core } = await openRpc(first.session, {
+      coreEnv: { ...env, DB: overtakingDb },
+    });
+
+    const audited = await auditedDuring(async () => {
+      await expect(
+        outcome(core.authenticate().members.setRole(person.userId, "admin"))
+      ).resolves.toBe("member.role_changed");
+    });
+    await expect(person.api.whoami()).resolves.toMatchObject({
+      role: "builder",
+    });
+    expect(
+      audited
+        .filter(({ action }) => action === "member.role.updated")
+        .map(({ detail }) => detail)
+    ).toStrictEqual([
+      { userId: person.userId, previousRole: "user", role: "builder" },
+    ]);
+
+    // Trying again changes it from the role it has now.
+    const again = await auditedDuring(async () => {
+      await core.authenticate().members.setRole(person.userId, "admin");
+    });
+    expect(again.map(({ detail }) => detail)).toStrictEqual([
+      { userId: person.userId, previousRole: "builder", role: "admin" },
+    ]);
   });
 
   it("is for admins only, and only to one of Grasp's roles", async () => {
