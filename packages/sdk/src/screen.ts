@@ -19,7 +19,8 @@
  * keeps it, calls it with the current value, and calls it again whenever
  * the value changes, for everyone who has the screen open. The callback in
  * the arguments ends with the call, so the server keeps a duplicate, and
- * drops it once calling it fails (the screen is gone):
+ * drops it once calling it fails (the screen is gone, or stopped
+ * listening):
  *
  * ```ts
  * export class App extends DurableObject {
@@ -85,6 +86,9 @@ const retryMs = { first: 1000, most: 30_000 };
  * The method must keep its callback (`onChange.dup()`, see above). One
  * that lets it go releases it, which this reads as a dropped connection:
  * it subscribes again and again, backing off to every 30 s.
+ *
+ * Once stopped, the callback rejects whatever the server sends it next, so
+ * the server drops it (see above).
  */
 export const live = (
   method: string,
@@ -93,20 +97,27 @@ export const live = (
 ): (() => void) => {
   let stopped = false;
   let delay = retryMs.first;
+  let retry: ReturnType<typeof setTimeout> | undefined;
   const subscribe = async (): Promise<void> => {
+    retry = undefined;
+    if (stopped) {
+      return;
+    }
     // Cap'n Web disposes a callback once nothing can call it any more: the
-    // connection to core dropped, or the subscription failed.
+    // connection to core dropped, the subscription failed, or the server
+    // dropped it after it rejected a value.
     const callback = Object.assign(
       (value: unknown): void => {
-        delay = retryMs.first;
-        if (!stopped) {
-          onChange(value);
+        if (stopped) {
+          throw new Error(`The subscription to ${method} has stopped.`);
         }
+        delay = retryMs.first;
+        onChange(value);
       },
       {
         [Symbol.dispose]: (): void => {
           if (!stopped) {
-            setTimeout(() => {
+            retry = setTimeout(() => {
               void subscribe();
             }, delay);
             delay = Math.min(delay * 2, retryMs.most);
@@ -124,6 +135,7 @@ export const live = (
   void subscribe();
   return () => {
     stopped = true;
+    clearTimeout(retry);
   };
 };
 
