@@ -47,7 +47,15 @@ export const callConnection = async (
   }: Pick<ConnectCall, "action" | "input" | "idempotencyKey">,
   permissionId: PermissionId
 ): Promise<ConnectResult> => {
-  await authorize(env, authority, connection, action, permissionId);
+  // The mask comes from the permission's record as it is now, and goes
+  // only into the signed capability: connect masks by it.
+  const { mask } = await authorize(
+    env,
+    authority,
+    connection,
+    action,
+    permissionId
+  );
   await requireUnrestricted(env, authority, context);
   const scope = {
     connectionId: connection.connectionId,
@@ -58,7 +66,7 @@ export const callConnection = async (
   const capability = await signCapability(
     env.CAPABILITY_SIGNING_KEY,
     authority,
-    scope
+    { ...scope, mask }
   );
   return await env.CONNECT.call({ capability, ...scope, input });
 };

@@ -273,6 +273,8 @@ export const permissions = sqliteTable(
     objectId: text("object_id").notNull(),
     resource: text(),
     actions: text().notNull(),
+    /** A connection permission's masked fields, as a JSON array. */
+    mask: text(),
     binding: text().notNull(),
     status: text({ enum: ["requested", "active", "revoked"] }).notNull(),
     requestedBy: text("requested_by").notNull(),

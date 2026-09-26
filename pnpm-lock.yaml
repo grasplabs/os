@@ -478,9 +478,6 @@ importers:
       '@cloudflare/workers-types':
         specifier: 'catalog:'
         version: 5.20260921.1
-      '@grasp-os/sdk':
-        specifier: workspace:*
-        version: link:../sdk
       '@types/node':
         specifier: 'catalog:'
         version: 26.6.2
@@ -524,6 +521,9 @@ importers:
       '@grasp-os/connector-kit':
         specifier: workspace:*
         version: link:../../connector-kit
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.5
     devDependencies:
       '@cloudflare/workers-types':
         specifier: 'catalog:'

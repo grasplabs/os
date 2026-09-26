@@ -1,8 +1,12 @@
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
-import { defineConnector, defineTool } from "../src/connector.ts";
-import { pathMatches } from "../src/manifest.ts";
+import { defineConnector, defineTool, ToolError } from "../src/connector.ts";
+import {
+  connectorManifestSchema,
+  pathMatches,
+  redirectHostMatches,
+} from "../src/manifest.ts";
 import type { Route } from "../src/manifest.ts";
 
 // The connector contract, as a connector is defined: input parsed strictly
@@ -38,6 +42,25 @@ const connectorWith = (
     hosts: ["api.example.test"],
     tools: [],
     ...fields,
+  });
+
+/** A manifest with one action searching through `query`, of `input`. */
+const searchingManifest = (input: string[]) =>
+  connectorManifestSchema.parse({
+    name: "example",
+    version: "1.0.0",
+    provider: "microsoft",
+    scopes: [],
+    hosts: ["api.example.test"],
+    actions: {
+      "items.list": {
+        routes: [],
+        readOnly: true,
+        resource: null,
+        input,
+        searches: { query: ["body"] },
+      },
+    },
   });
 
 describe("a tool", () => {
@@ -122,24 +145,75 @@ describe("a tool", () => {
     }
   });
 
-  it("masks only fields its output has", () => {
+  it("masks only nullable fields its output has, and names its searches", () => {
     const withMask = (mask: string[]) =>
       defineTool({
         name: "items.list",
         description: "Lists items",
-        input: z.strictObject({}),
+        input: z.strictObject({ search: z.string().optional() }),
         output: z.strictObject({
-          items: z.array(z.strictObject({ subject: z.string() })),
+          items: z.array(
+            z.strictObject({ subject: z.string().nullable(), id: z.string() })
+          ),
         }),
         readOnly: true,
         mask,
+        searches: { search: ["subject"] },
         routes: [route],
         run: async () => await Promise.resolve({ output: { items: [] } }),
       });
-    expect(() => withMask(["items.subject"])).not.toThrow();
+    expect(withMask(["items.subject"]).action).toMatchObject({
+      mask: ["items.subject"],
+      searches: { search: ["subject"] },
+    });
     for (const path of ["items.body", "subject", "items.subject.x"]) {
-      expect(() => withMask([path])).toThrow("mask");
+      expect(() => withMask([path])).toThrow("to mask");
     }
+    // Masked, a field becomes null: one that can't be isn't maskable.
+    expect(() => withMask(["items.id"])).toThrow("must be nullable");
+  });
+
+  it("reports an error with a code callers can act on, when it has one", async () => {
+    const failing = (error: Error) =>
+      defineTool({
+        name: "items.list",
+        description: "Lists items",
+        input: z.strictObject({}),
+        output: z.strictObject({}),
+        readOnly: true,
+        routes: [route],
+        run: () => {
+          throw error;
+        },
+      });
+    await expect(
+      failing(
+        new ToolError("Throttled", { code: "throttled", retryAfterSeconds: 7 })
+      ).call({})
+    ).resolves.toStrictEqual({
+      content: [{ type: "text", text: "Throttled" }],
+      structuredContent: {
+        error: {
+          message: "Throttled",
+          code: "throttled",
+          retryAfterSeconds: 7,
+        },
+      },
+      isError: true,
+    });
+    await expect(
+      failing(new ToolError("No such item")).call({})
+    ).resolves.toStrictEqual({
+      content: [{ type: "text", text: "No such item" }],
+      isError: true,
+    });
+    // Any other error says nothing of itself.
+    await expect(
+      failing(new Error("token=abc")).call({})
+    ).resolves.toStrictEqual({
+      content: [{ type: "text", text: "The action failed" }],
+      isError: true,
+    });
   });
 });
 
@@ -181,6 +255,8 @@ describe("a connector", () => {
       "/batch/gmail/v1",
       "/v1/$BATCH",
       "/v1/Batch",
+      "/v1/$batch{id}",
+      "/v1/batch{id}",
     ]) {
       expect(() =>
         connectorWith({
@@ -227,9 +303,70 @@ describe("a connector", () => {
     }
   });
 
+  it("follows a redirect only from a GET, to hosts one label under a named one", () => {
+    const withRoute = (extra: Partial<Route>) =>
+      connectorWith({
+        tools: [
+          defineTool({
+            name: "items.read",
+            description: "Reads an item",
+            input: z.strictObject({}),
+            output: z.strictObject({}),
+            readOnly: true,
+            routes: [{ ...route, ...extra }],
+            run: async () => await Promise.resolve({ output: {} }),
+          }),
+        ],
+      });
+    expect(() => withRoute({ redirects: ["*.sharepoint.com"] })).not.toThrow();
+    expect(() =>
+      withRoute({ method: "POST", redirects: ["*.sharepoint.com"] })
+    ).toThrow("Only a GET");
+    for (const pattern of [
+      "sharepoint.com",
+      "*.com",
+      "*.*.sharepoint.com",
+      "*.SharePoint.com",
+      "*sharepoint.com",
+      "*.sharepoint.com:443",
+    ]) {
+      expect(() => withRoute({ redirects: [pattern] })).toThrow(
+        "Not a redirect host"
+      );
+    }
+  });
+
+  it("searches only through inputs it has", () => {
+    expect(() => searchingManifest(["query"])).not.toThrow();
+    expect(() => searchingManifest([])).toThrow(
+      "searches must be among its input properties"
+    );
+  });
+
   it("has one tool per name", () => {
     const tool = toolWith(z.strictObject({}));
     expect(() => connectorWith({ tools: [tool, tool] })).toThrow("Two tools");
+  });
+});
+
+describe("a redirect host", () => {
+  it("stands for exactly one DNS label under its host", () => {
+    for (const host of [
+      "example.sharepoint.com",
+      "example-my.sharepoint.com",
+    ]) {
+      expect(redirectHostMatches("*.sharepoint.com", host)).toBeTruthy();
+    }
+    for (const host of [
+      "sharepoint.com",
+      ".sharepoint.com",
+      "evilsharepoint.com",
+      "a.b.sharepoint.com",
+      "example.sharepoint.com.evil.test",
+      "-example.sharepoint.com",
+    ]) {
+      expect(redirectHostMatches("*.sharepoint.com", host)).toBeFalsy();
+    }
   });
 });
 
@@ -288,6 +425,33 @@ describe("a route's path", () => {
     expect(
       pathMatches(template, "/v1/users/b%40acme.test/messages", values)
     ).toBeFalsy();
+  });
+
+  it("takes a parameter inside literal text only as declared", () => {
+    const search = "/v1/drives/{drive}/root/search(q='{query}')";
+    // Inside literal text, a value is neither a dot segment nor a batch
+    // endpoint, so those words may be searched for.
+    for (const query of ["invoice", "invoice%202026", "it''s", "batch", ".."]) {
+      expect(
+        pathMatches(search, `/v1/drives/d-1/root/search(q='${query}')`)
+      ).toBeTruthy();
+    }
+    for (const segment of [
+      "search(q='')",
+      "search(q='a%2Fb')",
+      "search(q='a:b')",
+      "search(q='a%25')",
+      // A quote only comes doubled, as OData escapes it.
+      "search(q='a'')",
+      "search(q='a'%20or%20'b')",
+      "search(q='%27')",
+      "search(q=a)",
+      "search(q='a')x",
+      "find(q='a')",
+      "search(q=')",
+    ]) {
+      expect(pathMatches(search, `/v1/drives/d-1/root/${segment}`)).toBeFalsy();
+    }
   });
 
   it("takes a literal suffix only as declared", () => {

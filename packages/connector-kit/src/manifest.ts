@@ -1,5 +1,8 @@
 import { oauthProviderSchema } from "@grasp-os/shared/connect";
-import { permissionActionSchema } from "@grasp-os/shared/permissions";
+import {
+  maskFieldSchema,
+  permissionActionSchema,
+} from "@grasp-os/shared/permissions";
 import { z } from "zod";
 
 // A native connector's manifest: what connect knows of it without running
@@ -42,6 +45,15 @@ export const notPerformedMetaKey = "grasp-os/not-performed";
  */
 export const maskMetaKey = "grasp-os/mask";
 
+/**
+ * Response header on the answers connect's egress gives itself: `refused`
+ * (the request never left), `failed` (it left, but its answer is
+ * withheld: a redirect, too large, unreachable) or `downloads-off` (a
+ * download's redirect, while the deployment names no download hosts).
+ * Never on a provider's: the egress drops it from theirs.
+ */
+export const egressHeader = "grasp-egress";
+
 /** Most resource IDs one call may report reading. */
 export const maxProvenanceItems = 1000;
 
@@ -67,11 +79,13 @@ const hostPattern =
 const literalSegment = /^[\w.~$:@()'-]+$/u;
 
 /**
- * A path segment an action leaves open, such as `{mailbox}`, maybe with a
- * literal suffix after a colon, as Google's custom methods have it:
- * `{id}:batchUpdate`.
+ * A path segment an action leaves open, such as `{mailbox}`, maybe inside
+ * literal text: a suffix after a colon, as Google's custom methods have it
+ * (`{id}:batchUpdate`), or an OData function call around it, as Graph's
+ * search has it (`search(q='{query}')`). One parameter per segment.
  */
-const parameterSegment = /^\{(?<name>[A-Za-z_]\w*)\}(?<suffix>:[A-Za-z]\w*)?$/u;
+const parameterSegment =
+  /^(?<prefix>[\w.~$@()'=-]*)\{(?<name>[A-Za-z_]\w*)\}(?<suffix>[\w.~$:@()'=-]*)$/u;
 
 /**
  * Batch endpoints (Graph's `/$batch`, Google's `/batch/...`) carry any
@@ -95,29 +109,72 @@ const isPathTemplate = (path: string): boolean => {
   return (
     empty === "" &&
     segments.length > 0 &&
-    segments.every(
-      (segment) =>
-        parameterSegment.test(segment) ||
-        (literalSegment.test(segment) &&
-          segment !== "." &&
-          segment !== ".." &&
-          !isBatchSegment(segment))
-    )
+    segments.every((segment) => {
+      const parameter = parameterSegment.exec(segment);
+      // A parameter's literal text is never a batch endpoint's either.
+      return parameter === null
+        ? literalSegment.test(segment) &&
+            segment !== "." &&
+            segment !== ".." &&
+            !isBatchSegment(segment)
+        : !isBatchSegment(parameter.groups?.prefix ?? "");
+    })
   );
 };
 
 export const hostSchema = z.string().regex(hostPattern);
 
 /**
+ * Hosts a redirect may lead to, as `*.<host>`: the `*` stands for exactly
+ * one DNS label, such as a SharePoint tenant's `contoso` in
+ * `contoso.sharepoint.com`.
+ */
+export const redirectHostSchema = z
+  .string()
+  .refine(
+    (pattern) => pattern.startsWith("*.") && hostPattern.test(pattern.slice(2)),
+    "Not a redirect host: *.<host>"
+  );
+
+/** One DNS label, as a redirect host's `*` stands for. */
+const dnsLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+
+/** Whether `hostname` (lowercase, as a URL has it) is one `pattern` allows. */
+export const redirectHostMatches = (
+  pattern: string,
+  hostname: string
+): boolean => {
+  const base = `.${pattern.slice(2)}`;
+  return (
+    pattern.startsWith("*.") &&
+    hostname.endsWith(base) &&
+    dnsLabel.test(hostname.slice(0, -base.length))
+  );
+};
+
+/**
  * One request an action may send: its method, host and path, where a
  * `{name}` segment stands for any one segment. The query string is the
  * action's own.
+ *
+ * A GET may name `redirects`: the hosts connect's egress follows one
+ * redirect of its answer to, itself, without the token or any of the
+ * connector's headers, and never a second one. That is how a download
+ * works where the provider answers with a redirect to a pre-authenticated
+ * URL on its storage hosts (Graph to SharePoint). Every other redirect is
+ * refused.
  */
-export const routeSchema = z.strictObject({
-  method: z.enum(httpMethods),
-  host: hostSchema,
-  path: z.string().max(512).refine(isPathTemplate, "Not a path template"),
-});
+export const routeSchema = z
+  .strictObject({
+    method: z.enum(httpMethods),
+    host: hostSchema,
+    path: z.string().max(512).refine(isPathTemplate, "Not a path template"),
+    redirects: z.array(redirectHostSchema).min(1).max(4).optional(),
+  })
+  .refine(
+    ({ method, redirects }) => redirects === undefined || method === "GET",
+    "Only a GET may follow a redirect"
+  );
 export type Route = z.infer<typeof routeSchema>;
 
 /** Most requests one action may declare. */
@@ -137,6 +194,21 @@ export const actionManifestSchema = z.strictObject({
     .regex(/^[A-Za-z_]\w*$/u)
     .nullable(),
   input: z.array(z.string().min(1).max(128)).max(128),
+  /**
+   * The output fields (dotted paths, through arrays) that may be masked. A
+   * permission masks fields by name: each of these whose last segment is
+   * one of its names.
+   */
+  mask: z.array(z.string().min(1).max(256)).max(64).default([]),
+  /**
+   * Inputs that search through fields that may be masked, each with those
+   * fields' names, such as `{ search: ["body"] }`: a search's hits would
+   * tell what a masked field holds, so connect refuses a call that uses
+   * one while its permission masks any of them.
+   */
+  searches: z
+    .record(z.string().min(1).max(128), z.array(maskFieldSchema).max(16))
+    .default({}),
 });
 export type ActionManifest = z.infer<typeof actionManifestSchema>;
 
@@ -174,6 +246,13 @@ export const connectorManifestSchema = z
   )
   .refine(
     ({ actions }) =>
+      Object.values(actions).every(({ searches, input }) =>
+        Object.keys(searches).every((name) => input.includes(name))
+      ),
+    "An action's searches must be among its input properties"
+  )
+  .refine(
+    ({ actions }) =>
       Object.values(actions).every(
         ({ resource, routes }) =>
           resource === null ||
@@ -200,6 +279,31 @@ const decodedSegment = (segment: string): string | undefined => {
 // oxlint-disable-next-line no-control-regex -- control characters are the point
 const forbiddenInValue = /[/\\?#%;:\u0000-\u001F\u007F]/u;
 
+/** A run of quotes of odd length: one that ends a quoted literal. */
+const unpairedQuote = /(?<!')(?:'')*'(?!')/u;
+
+/**
+ * Whether a parameter's decoded value is plain text where it stands. On
+ * its own in a segment, the value is the segment, so it may not be a dot
+ * segment or a batch endpoint; inside literal text it is neither. Inside
+ * quotes (OData's `'...'`), a quote may only come doubled, as OData
+ * escapes it, so the value can't end the literal early.
+ */
+const isValueAllowed = (
+  decoded: string,
+  prefix: string,
+  suffix: string
+): boolean => {
+  if (decoded === "" || forbiddenInValue.test(decoded)) {
+    return false;
+  }
+  if (prefix === "" && suffix === "") {
+    return decoded !== "." && decoded !== ".." && !isBatchSegment(decoded);
+  }
+  const quoted = prefix.endsWith("'") && suffix.startsWith("'");
+  return !(quoted && unpairedQuote.test(decoded));
+};
+
 /**
  * Whether a URL's path (as `URL.pathname` gives it: dot segments resolved,
  * still percent-encoded) is one the template allows. A `{name}` segment
@@ -223,21 +327,21 @@ export const pathMatches = (
       if (parameter === null) {
         return given === segment;
       }
-      const { name = "", suffix = "" } = parameter.groups ?? {};
-      if (!given.endsWith(suffix)) {
+      const { prefix = "", name = "", suffix = "" } = parameter.groups ?? {};
+      if (
+        given.length < prefix.length + suffix.length ||
+        !given.startsWith(prefix) ||
+        !given.endsWith(suffix)
+      ) {
         return false;
       }
       const decoded = decodedSegment(
-        given.slice(0, given.length - suffix.length)
+        given.slice(prefix.length, given.length - suffix.length)
       );
       const bound = Object.hasOwn(values, name) ? values[name] : undefined;
       return (
         decoded !== undefined &&
-        decoded !== "" &&
-        decoded !== "." &&
-        decoded !== ".." &&
-        !forbiddenInValue.test(decoded) &&
-        !isBatchSegment(decoded) &&
+        isValueAllowed(decoded, prefix, suffix) &&
         (bound === undefined || decoded === bound)
       );
     })

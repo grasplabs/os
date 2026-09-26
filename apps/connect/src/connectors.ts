@@ -63,6 +63,14 @@ const isolate = {
   limits: { cpuMs: 10_000, subRequests: 50 },
 } satisfies Omit<WorkerLoaderWorkerCode, "mainModule" | "modules">;
 
+/**
+ * Largest answer connect reads from a native connector, in bytes: a read
+ * of a file or an attachment carries its content, and the Microsoft 365
+ * connector keeps that to 8 MiB as JSON (4 MiB of file, in base64 or as
+ * escaped text), with room to spare.
+ */
+const nativeResponseBytes = 16 * 1024 * 1024;
+
 /** The URL connect's MCP client posts to; the isolate answers any. */
 const connectorEndpoint = "https://connector.internal/mcp";
 
@@ -143,6 +151,7 @@ export const nativeServer = async (
   const entrypoint = worker.getEntrypoint();
   return mcpServer(
     connectorEndpoint,
-    async (request) => await entrypoint.fetch(request)
+    async (request) => await entrypoint.fetch(request),
+    nativeResponseBytes
   );
 };

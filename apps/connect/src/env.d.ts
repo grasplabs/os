@@ -18,4 +18,12 @@ interface __BaseEnv_Env {
   /** Grasp's Google OAuth client for connections (src/providers.ts). */
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
+  /**
+   * Deployment config the console sets: the exact hosts a connector's
+   * download may be redirected to, as a JSON array, such as the client's
+   * `["contoso.sharepoint.com", "contoso-my.sharepoint.com"]` (and each
+   * Multi-Geo location's, such as `contosoeur.sharepoint.com`). Without
+   * it no download redirect is followed (src/egress.ts).
+   */
+  DOWNLOAD_HOSTS?: unknown;
 }

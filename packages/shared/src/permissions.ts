@@ -34,6 +34,24 @@ export type PermissionSubject = z.infer<typeof permissionSubjectSchema>;
 export type PermissionSubjectInput = z.input<typeof permissionSubjectSchema>;
 
 /**
+ * A field of a connection's results, by name, such as `body`: a permission
+ * that masks it gets every field of that name its connector's tools
+ * declare maskable back as `null`.
+ */
+export const maskFieldSchema = z.string().regex(/^[A-Za-z]\w{0,63}$/u);
+
+/** Most fields one permission masks. */
+export const permissionMaxMaskFields = 16;
+
+/** The fields a permission masks, each once. */
+export const maskFieldsSchema = z
+  .array(maskFieldSchema)
+  .max(permissionMaxMaskFields)
+  .refine((fields) => new Set(fields).size === fields.length, {
+    message: "Each field once",
+  });
+
+/**
  * What a permission gives access to: a connection (all of it, or one
  * resource in it, such as one mailbox), a Knowledge collection, or one
  * workflow of an App.
@@ -44,6 +62,11 @@ export const permissionObjectSchema = z.discriminatedUnion("type", [
     connectionId: connectionIdSchema,
     /** One resource in the connection; absent means the whole connection. */
     resource: identifierSchema.optional(),
+    /**
+     * Fields of its results masked for this permission, such as `body`
+     * and `content` for one that may see metadata only.
+     */
+    mask: maskFieldsSchema.min(1).optional(),
   }),
   z.strictObject({
     type: z.literal("collection"),
@@ -111,6 +134,7 @@ export const platformBindingNames: ReadonlySet<string> = new Set([
   "CONNECT",
   "DB",
   "DEV_SKIP_ROUTER_SECRET",
+  "DOWNLOAD_HOSTS",
   "DURABLE_OBJECT_JURISDICTION",
   "EMAIL",
   "FEATURES",
@@ -173,6 +197,15 @@ export const permissionRequestSchema = z
         code: "custom",
         path: ["actions"],
         message: "Too many actions for one permission",
+      });
+    }
+    // And the masked fields too.
+    const mask = object.type === "connection" ? (object.mask ?? []) : [];
+    if (mask.join(" ").length > identifierMaxLength) {
+      context.addIssue({
+        code: "custom",
+        path: ["object", "mask"],
+        message: "Too many masked fields for one permission",
       });
     }
   });

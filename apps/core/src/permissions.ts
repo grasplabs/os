@@ -40,7 +40,11 @@ import { appHost } from "./durable-objects.ts";
 
 type Row = typeof permissions.$inferSelect;
 
-const actionsSchema = z.array(z.string());
+const stringListSchema = z.array(z.string());
+
+/** A stored mask: a connection permission's masked fields, if any. */
+const maskOf = (row: Pick<Row, "mask">): string[] =>
+  row.mask === null ? [] : stringListSchema.parse(JSON.parse(row.mask));
 
 /** How a subject is stored. */
 const subjectColumns = (subject: PermissionSubject) =>
@@ -56,6 +60,7 @@ const objectColumns = (object: PermissionObject) => {
         objectType: object.type,
         objectId: object.connectionId,
         resource: object.resource ?? null,
+        mask: object.mask === undefined ? null : JSON.stringify(object.mask),
       };
     }
     case "collection": {
@@ -63,6 +68,7 @@ const objectColumns = (object: PermissionObject) => {
         objectType: object.type,
         objectId: object.collectionId,
         resource: null,
+        mask: null,
       };
     }
     case "workflow": {
@@ -70,6 +76,7 @@ const objectColumns = (object: PermissionObject) => {
         objectType: object.type,
         objectId: object.appId,
         resource: object.workflowId,
+        mask: null,
       };
     }
     default: {
@@ -83,10 +90,12 @@ const objectOf = (row: Row): PermissionObject => {
   const resource = row.resource ?? undefined;
   switch (row.objectType) {
     case "connection": {
+      const mask = maskOf(row);
       return permissionObjectSchema.parse({
         type: row.objectType,
         connectionId: row.objectId,
         ...(resource === undefined ? {} : { resource }),
+        ...(mask.length === 0 ? {} : { mask }),
       });
     }
     case "collection": {
@@ -119,7 +128,7 @@ const toPermission = (row: Row): Permission => ({
   id: permissionIdSchema.parse(row.id),
   subject: subjectOf(row),
   object: objectOf(row),
-  actions: actionsSchema.parse(JSON.parse(row.actions)),
+  actions: stringListSchema.parse(JSON.parse(row.actions)),
   binding: row.binding,
   status: row.status,
   requestedBy: row.requestedBy,
@@ -147,14 +156,17 @@ const auditDetail = ({
   binding,
 }: Permission): Record<string, AuditDetailValue> => {
   // The object's IDs by name: connectionId and resource, collectionId, or
-  // appId and workflowId.
+  // appId and workflowId; a connection's masked fields as one
+  // identifier-sized value, as the actions are.
   const { type: objectType, ...objectIds } = object;
   const { subjectType, subjectId } = subjectColumns(subject);
+  const { mask, ...ids } = { mask: undefined, ...objectIds };
   return {
     subjectType,
     subjectId,
     objectType,
-    ...objectIds,
+    ...ids,
+    ...(mask === undefined ? {} : { mask: mask.join(" ") }),
     actions: actions.join(" "),
     binding,
   };
@@ -484,7 +496,8 @@ export const grantedPermissions = async (
  * revoking it stops its stubs even when another permission covers the same
  * thing. A permission for a whole connection covers each resource in it;
  * one for a resource covers only that resource. Throws `permission.denied`
- * or `permission.person_inactive` otherwise.
+ * or `permission.person_inactive` otherwise. Returns the fields that
+ * permission masks in a connection's results (none for other objects).
  *
  * It doesn't intersect the grant with the person's own access (R5): connect
  * does that for personal connections, and the Knowledge queries for
@@ -496,11 +509,15 @@ export const authorize = async (
   object: PermissionObject,
   action: string,
   permissionId: PermissionId
-): Promise<void> => {
+): Promise<{ mask: string[] }> => {
   await requireActivePerson(env, authority);
   const { objectType, objectId, resource } = objectColumns(object);
   const rows = await drizzle(env.DB)
-    .select({ id: permissions.id, actions: permissions.actions })
+    .select({
+      id: permissions.id,
+      actions: permissions.actions,
+      mask: permissions.mask,
+    })
     .from(permissions)
     .where(
       and(
@@ -515,9 +532,10 @@ export const authorize = async (
       )
     );
   const allowing = rows.find((row) =>
-    actionsSchema.parse(JSON.parse(row.actions)).includes(action)
+    stringListSchema.parse(JSON.parse(row.actions)).includes(action)
   );
   if (!allowing) {
     throw permissionErrors.create("permission.denied", { action });
   }
+  return { mask: maskOf(allowing) };
 };
