@@ -3,6 +3,7 @@ import {
   approveOptionsSchema,
 } from "@grasp-os/shared/approvals";
 import type { Approval } from "@grasp-os/shared/approvals";
+import { actorOf } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import type { CodedError } from "@grasp-os/shared/errors";
 import { identifierSchema } from "@grasp-os/shared/ids";
@@ -18,7 +19,6 @@ import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 
 import { requireBuilder } from "./apps.ts";
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
-import { actorOf } from "./audit.ts";
 import {
   activeAdminExists,
   activeMember,

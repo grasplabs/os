@@ -1,6 +1,7 @@
 import { paramValueSchemas } from "@grasp-os/sdk/params";
 import { approvalErrors } from "@grasp-os/shared/approvals";
 import type { ParamValue } from "@grasp-os/shared/approvals";
+import { actorOf } from "@grasp-os/shared/audit";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
 import { roleErrors } from "@grasp-os/shared/roles";
@@ -13,7 +14,6 @@ import { drizzle } from "drizzle-orm/d1";
 import { toApproval } from "../approvals.ts";
 import { findApp, requireBuilder, versionFiles } from "../apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
-import { actorOf } from "../audit.ts";
 import { apps, approvals, workflowParamValues } from "../db/core/schema.ts";
 import { isUniqueViolation } from "../db/d1.ts";
 import { declaredParams, hasWorkflow } from "./code.ts";
