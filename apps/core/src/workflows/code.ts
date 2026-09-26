@@ -110,7 +110,23 @@ const declaredParamsSchema = z
       currency: z.string().max(3).optional(),
     })
   )
-  .max(100);
+  .max(100)
+  .superRefine((params, context) => {
+    // Each name once: two declarations of one name would let the one read
+    // decide whether the other is sensitive.
+    const names = new Set(params.map(({ name }) => name));
+    if (names.size !== params.length) {
+      context.addIssue({ code: "custom", message: "Each name once" });
+    }
+    for (const param of params) {
+      if (!paramValueSchemas[param.kind].safeParse(param.default).success) {
+        context.addIssue({
+          code: "custom",
+          message: `The default of ${param.name} isn't a ${param.kind}`,
+        });
+      }
+    }
+  });
 
 /** A parameter as a workflow's code declares it. */
 export type DeclaredParam = z.infer<typeof declaredParamsSchema>[number];

@@ -64,6 +64,11 @@ export type Approval = ApprovalFields &
         app: string;
         workflow: string;
         param: string;
+        /**
+         * The App version it was asked against: approving it once another
+         * version is current is refused.
+         */
+        version: number;
         /** The value when it was asked for; null while the default applied. */
         from: ParamValue | null;
         to: ParamValue;
@@ -105,7 +110,7 @@ export const approvalErrors = defineErrorFamily({
     "Another admin can approve this, so it can't be approved as break-glass.",
   "approval.closed": "This approval was already decided or withdrawn.",
   "approval.stale":
-    "What this approval asks for no longer applies: the person who asked has left or lost the role to ask, or what it changes is gone.",
+    "What this approval asks for no longer applies: the person who asked has left or lost the role to ask, what it changes is gone, or the App version it was asked against is no longer current.",
   "approval.conflict":
     "A change of this value is already waiting for approval.",
 });

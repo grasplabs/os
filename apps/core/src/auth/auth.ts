@@ -40,6 +40,7 @@ import {
   users,
   verifications,
 } from "../db/core/schema.ts";
+import { inList } from "../db/d1.ts";
 import { checkClaims } from "./claims.ts";
 import { oidcProviders, providerIds, staffWindowOpen } from "./config.ts";
 import type { OidcProvider, SignInConfig } from "./config.ts";
@@ -133,6 +134,21 @@ export const activeAdminExists = (except?: string): SQL => sql`EXISTS (
     AND ${members.role} = 'admin'
     AND ${notRemoved(members.userId)}
     ${except === undefined ? sql`` : sql`AND ${members.userId} <> ${except}`}
+)`;
+
+/**
+ * That `userId` (an ID, or a column holding one) is an active member of
+ * the organization now, with one of `roles` if given, as a SQL condition.
+ */
+export const activeMember = (
+  userId: string | SQLiteColumn,
+  withRoles?: readonly string[]
+): SQL => sql`EXISTS (
+  SELECT 1 FROM ${members}
+  WHERE ${members.organizationId} = ${organizationId}
+    AND ${members.userId} = ${userId}
+    ${withRoles === undefined ? sql`` : sql`AND ${inList(members.role, withRoles)}`}
+    AND ${notRemoved(userId)}
 )`;
 
 /**

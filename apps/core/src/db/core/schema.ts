@@ -437,11 +437,14 @@ export const appWorkingFiles = sqliteTable(
  * who decides, in the same batch as the change and its audit event. A
  * `permission` row grants the requested permission `permission_id`; a
  * `param` row sets `param` of workflow `workflow_id` of App `app_id` from
- * `previous` (null: the code's default) to `value` (JSON). `approvers`
- * names who may approve: `admins`, or `builders` (admins and builders);
- * never `requested_by`, except the only admin approving their own
- * permission request as break-glass, which `break_glass` records. At most
- * one pending row per permission and per parameter. Never deleted.
+ * `previous` (null: the code's default) to `value` (JSON), as App
+ * version `version` declares it: approving it once another version is
+ * current is refused. `approvers` names who may approve: `admins`, or
+ * `builders` (admins and builders); never `requested_by`, except the only
+ * admin approving their own permission request as break-glass, which
+ * `break_glass` records. `decision` is a nonce the deciding update sets,
+ * which the change it makes in the same batch requires. At most one
+ * pending row per permission and per parameter. Never deleted.
  */
 export const approvals = sqliteTable(
   "approvals",
@@ -466,6 +469,8 @@ export const approvals = sqliteTable(
     breakGlass: integer("break_glass", { mode: "boolean" })
       .notNull()
       .default(false),
+    version: integer(),
+    decision: text(),
   },
   (table) => [
     uniqueIndex("approvals_pending_permission_idx")

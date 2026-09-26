@@ -14,6 +14,8 @@ CREATE TABLE `approvals` (
 	`decided_by` text,
 	`decided_at` integer,
 	`break_glass` integer DEFAULT false NOT NULL,
+	`version` integer,
+	`decision` text,
 	FOREIGN KEY (`permission_id`) REFERENCES `permissions`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint

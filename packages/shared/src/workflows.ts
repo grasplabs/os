@@ -24,7 +24,7 @@ export const workflowErrors = defineErrorFamily({
     "The workflow has no such parameter in the App's current version.",
   "workflow.param_invalid": "That isn't a valid value for this parameter.",
   "workflow.param_conflict":
-    "The App's current version changed while the value was set; try again.",
+    "The value changed hands while it was set: the App's current version changed, or an approval set it, which only another approval changes. Try again.",
 });
 
 /**

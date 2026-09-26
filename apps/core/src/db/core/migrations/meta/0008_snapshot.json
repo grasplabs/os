@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "f8dd8301-e92a-4a93-80d2-fdab0a935087",
+  "id": "69c0c43e-29fe-4c7e-8df3-cb7ee9e56a0a",
   "prevId": "9ee6221e-e843-4ed6-bfaa-826d681f3431",
   "tables": {
     "accounts": {
@@ -412,6 +412,20 @@
           "notNull": true,
           "autoincrement": false,
           "default": false
+        },
+        "version": {
+          "name": "version",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "decision": {
+          "name": "decision",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {

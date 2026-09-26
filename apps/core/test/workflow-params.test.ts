@@ -22,22 +22,31 @@ const idp = mockIdp();
 const personApi = async (role: Role) => await signedInApi(idp, role);
 type Person = Awaited<ReturnType<typeof personApi>>;
 
-/** A workflow with a sensitive limit and a reviewer who isn't, and its test. */
-const invoiceFiles = {
+/**
+ * The invoice workflow and its test: a limit and a reviewer, each
+ * sensitive as `sensitive` says (the limit is by default, the reviewer
+ * isn't). `extra` goes after the definition, to change what it exports.
+ */
+const invoiceVersion = (
+  sensitive: { limit?: boolean; reviewer?: boolean } = {},
+  extra = ""
+): Record<string, string> => ({
   "workflows/invoices.ts": `import { money, person, workflow, z } from "@grasp-os/sdk/workflow";
 
-export default workflow(
+const definition = workflow(
   "invoices",
   {
     input: z.unknown(),
     params: {
-      limit: money({ label: "Review invoices above", currency: "EUR", default: 500_000, sensitive: true }),
-      reviewer: person({ label: "Reviewer", default: "role:admin" }),
+      limit: money({ label: "Review invoices above", currency: "EUR", default: 500_000, sensitive: ${String(sensitive.limit ?? true)} }),
+      reviewer: person({ label: "Reviewer", default: "role:admin", sensitive: ${String(sensitive.reviewer ?? false)} }),
     },
   },
   async (step, { params }) =>
     await step.do("limit", { description: "Read the limit" }, async () => params.limit)
 );
+${extra}
+export default definition;
 `,
   "workflows/invoices.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
 
@@ -45,7 +54,9 @@ import definition from "./invoices.ts";
 
 export default workflowTests(definition, [{ name: "runs", mocks: { limit: 1 }, expect: { output: 1 } }]);
 `,
-};
+});
+
+const invoiceFiles = invoiceVersion();
 
 /** A new App with the invoice workflow as its current version. */
 const invoicesApp = async (builder: Person): Promise<string> => {
@@ -241,7 +252,7 @@ describe("sensitive values", () => {
     });
   });
 
-  it("are never approved by users or Grasp staff", async () => {
+  it("are never approved by users or Grasp staff, and never asked for by staff", async () => {
     const builder = await personApi("builder");
     const user = await personApi("user");
     const app = await invoicesApp(builder);
@@ -254,10 +265,15 @@ describe("sensitive values", () => {
       await outcome(user.api.approvals.approve(pending.id)),
       await outcome(staff.approvals.approve(pending.id)),
       await outcome(staff.approvals.decline(pending.id)),
+      // Nor do they ask for changes.
+      await outcome(
+        staff.workflows.params.set(app, "invoices", "reviewer", "role:user")
+      ),
     ]).toStrictEqual([
       "approval.forbidden",
       "approval.forbidden",
       "approval.forbidden",
+      "role.forbidden",
     ]);
     await expect(paramOf(builder, app, "limit")).resolves.toMatchObject({
       value: null,
@@ -347,5 +363,98 @@ describe("sensitive values", () => {
     await expect(paramOf(admin, app, "limit")).resolves.toMatchObject({
       value: null,
     });
+  });
+
+  it("never take an unapproved value, whatever another version declared", async () => {
+    const builder = await personApi("builder");
+    const { id: app } = await builder.api.apps.create({ name: "Invoices" });
+    // v1 declares both sensitive; v2 declares neither.
+    const v1 = await release(
+      builder,
+      app,
+      invoiceVersion({ limit: true, reviewer: true })
+    );
+    await release(
+      builder,
+      app,
+      invoiceVersion({ limit: false, reviewer: false })
+    );
+    // Set directly under v2, then v1 made current again.
+    const set = await Promise.all([
+      builder.api.workflows.params.set(app, "invoices", "limit", 1),
+      builder.api.workflows.params.set(
+        app,
+        "invoices",
+        "reviewer",
+        "role:user"
+      ),
+    ]);
+    await builder.api.apps.versions.setCurrent(app, v1);
+    const afterSwitchingBack = await builder.api.workflows.params.list(
+      app,
+      "invoices"
+    );
+    expect({
+      underV2: set.map(({ value }) => value),
+      underV1: afterSwitchingBack.map(({ value }) => value),
+    }).toStrictEqual({
+      underV2: [1, "role:user"],
+      // The code's defaults: nobody approved those values.
+      underV1: [null, null],
+    });
+  });
+
+  it("keep an approved value until another approval, whatever a later version declares", async () => {
+    const builder = await personApi("builder");
+    const other = await personApi("builder");
+    const app = await invoicesApp(builder);
+    const approval = await limitChange(builder, app, 900_000);
+    await other.api.approvals.approve(approval.id);
+    await release(builder, app, invoiceVersion({ limit: false }));
+    // Not sensitive now, but its value came from an approval: a change
+    // still waits for one.
+    const set = await builder.api.workflows.params.set(
+      app,
+      "invoices",
+      "limit",
+      1
+    );
+    expect(set).toMatchObject({
+      sensitive: false,
+      value: 900_000,
+      pending: { from: 900_000, to: 1, requestedBy: builder.userId },
+    });
+  });
+
+  it("aren't approved once another App version is current", async () => {
+    const builder = await personApi("builder");
+    const other = await personApi("builder");
+    const app = await invoicesApp(builder);
+    const pending = await limitChange(builder, app, 900_000);
+    await release(builder, app, invoiceVersion({ limit: true }, "// v2"));
+    expect({
+      approve: await outcome(other.api.approvals.approve(pending.id)),
+      param: await paramOf(builder, app, "limit"),
+    }).toMatchObject({
+      approve: "approval.stale",
+      param: { value: null },
+    });
+  });
+
+  it("are refused from code that declares a parameter twice", async () => {
+    const builder = await personApi("builder");
+    const app = await invoicesApp(builder);
+    // Hand-made metadata: the limit again, not sensitive this time.
+    await release(
+      builder,
+      app,
+      invoiceVersion(
+        {},
+        `definition.metadata.params.push({ ...definition.metadata.params[0], sensitive: false });`
+      )
+    );
+    await expect(
+      outcome(builder.api.workflows.params.list(app, "invoices"))
+    ).resolves.toBe("workflow.invalid");
   });
 });

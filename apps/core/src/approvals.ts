@@ -19,15 +19,20 @@ import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { requireBuilder } from "./apps.ts";
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import { actorOf } from "./audit.ts";
-import { activeAdminExists, notRemoved, organizationId } from "./auth/auth.ts";
+import {
+  activeAdminExists,
+  activeMember,
+  organizationId,
+} from "./auth/auth.ts";
+import { signInConfig } from "./auth/config.ts";
 import {
   approvals,
   apps,
-  members,
+  memberRemovals,
   permissions,
+  users,
   workflowParamValues,
 } from "./db/core/schema.ts";
-import { inList } from "./db/d1.ts";
 import {
   changeEntry,
   findRow,
@@ -57,10 +62,17 @@ import {
 // - Break-glass: a deployment with exactly one active admin can't have a
 //   second person grant a permission, so that admin may approve their own
 //   permission request, but only when they ask for it explicitly, only
-//   while no other active admin exists (checked in the same update), and
-//   audited with `breakGlass: true`. Sensitive values have no break-glass:
-//   a builder is a second person too.
+//   while no other admin exists (checked in the same update), and audited
+//   with `breakGlass: true`. Another admin is an active admin, or anyone
+//   the deployment config names as one who hasn't been removed, signed in
+//   or not. Accepted residual: an admin who demotes every other admin can
+//   then break the glass; both steps are audited. Sensitive values have no
+//   break-glass: a builder is a second person too.
+// - A sensitive value change is asked for against the App version current
+//   then; once another version is current, it is stale.
 // - Who decided comes from the session, never from the request.
+// - Builders see pending changes with their values (`list`), as they see
+//   and set the values themselves: by design.
 
 type ApprovalRow = typeof approvals.$inferSelect;
 type PermissionRow = typeof permissions.$inferSelect;
@@ -74,22 +86,10 @@ const maxListed = 200;
 /** The roles that may ask for approvals, and approve sensitive values. */
 const buildRoles: readonly Role[] = ["admin", "builder"];
 
-/** That `userId` is an active member with one of `roles`, as SQL. */
-const memberWithRole = (
-  userId: string | SQLiteColumn,
-  roles: readonly Role[]
-): SQL => sql`EXISTS (
-  SELECT 1 FROM ${members}
-  WHERE ${members.organizationId} = ${organizationId}
-    AND ${members.userId} = ${userId}
-    AND ${inList(members.role, roles)}
-    AND ${notRemoved(userId)}
-)`;
-
 /** That `userId` may decide the approval its approvers name, now. */
 const isApprover = (userId: string): SQL => sql`CASE ${approvals.approvers}
-  WHEN 'admins' THEN ${memberWithRole(userId, ["admin"])}
-  WHEN 'builders' THEN ${memberWithRole(userId, buildRoles)}
+  WHEN 'admins' THEN ${activeMember(userId, ["admin"])}
+  WHEN 'builders' THEN ${activeMember(userId, buildRoles)}
   ELSE 0 END`;
 
 /**
@@ -97,7 +97,7 @@ const isApprover = (userId: string): SQL => sql`CASE ${approvals.approvers}
  * builder. Someone who left, or lost the role, has no request to approve.
  */
 const requesterActive = (): SQL =>
-  memberWithRole(approvals.requestedBy, buildRoles);
+  activeMember(approvals.requestedBy, buildRoles);
 
 /** An App that exists, by the ID `id` holds. */
 const appExists = (id: SQLiteColumn): SQL =>
@@ -105,7 +105,8 @@ const appExists = (id: SQLiteColumn): SQL =>
 
 /**
  * That what the approval changes is still there: a permission still
- * requested, with the Apps it names; a parameter's App.
+ * requested, with the Apps it names; a parameter's App, still at the
+ * version the change was asked against.
  */
 const changeLive = (): SQL => sql`CASE ${approvals.kind}
   WHEN 'permission' THEN EXISTS (
@@ -115,31 +116,57 @@ const changeLive = (): SQL => sql`CASE ${approvals.kind}
       AND (${permissions.subjectType} <> 'app' OR ${appExists(permissions.subjectId)})
       AND (${permissions.objectType} <> 'workflow' OR ${appExists(permissions.objectId)})
   )
-  WHEN 'param' THEN ${appExists(approvals.appId)}
+  WHEN 'param' THEN EXISTS (
+    SELECT 1 FROM ${apps}
+    WHERE ${apps.id} = ${approvals.appId}
+      AND ${apps.currentVersion} = ${approvals.version}
+  )
   ELSE 0 END`;
+
+/**
+ * That an admin other than `by` exists: an active one, or one the
+ * deployment config names who hasn't been removed, signed in yet or not.
+ */
+const otherAdminExists = (env: Env, by: Identity): SQL => {
+  const email = by.email.toLowerCase();
+  const configured = (signInConfig(env)?.admins ?? []).filter(
+    (admin) => admin !== email
+  );
+  return sql`(${activeAdminExists(by.userId)} OR EXISTS (
+    SELECT 1 FROM json_each(${JSON.stringify(configured)}) AS configured
+    WHERE NOT EXISTS (
+      SELECT 1 FROM ${users}
+      INNER JOIN ${memberRemovals} ON ${memberRemovals.userId} = ${users.id}
+        AND ${memberRemovals.organizationId} = ${organizationId}
+      WHERE lower(${users.email}) = configured.value
+    )
+  ))`;
+};
 
 /**
  * Nobody approves their own request. With `breakGlass`, the only admin may
  * approve their own permission request: `isApprover` already requires them
- * to be an admin, and this that no other active admin exists.
+ * to be an admin, and this that no other admin exists.
  */
-const notOwn = (userId: string, breakGlass: boolean): SQL =>
+const notOwn = (env: Env, by: Identity, breakGlass: boolean): SQL =>
   or(
-    ne(approvals.requestedBy, userId),
+    ne(approvals.requestedBy, by.userId),
     breakGlass
       ? and(
           eq(approvals.kind, "permission"),
-          sql`NOT ${activeAdminExists(userId)}`
+          sql`NOT ${otherAdminExists(env, by)}`
         )
       : undefined
   ) ?? sql`0`;
 
 /** Who may end a pending approval with `verdict`, as SQL on its row. */
 const mayDecide = (
-  userId: string,
+  env: Env,
+  by: Identity,
   verdict: Verdict,
   breakGlass: boolean
 ): SQL => {
+  const { userId } = by;
   const pending = eq(approvals.status, "pending");
   switch (verdict) {
     case "approved": {
@@ -149,7 +176,7 @@ const mayDecide = (
           isApprover(userId),
           requesterActive(),
           changeLive(),
-          notOwn(userId, breakGlass)
+          notOwn(env, by, breakGlass)
         ) ?? sql`0`
       );
     }
@@ -186,7 +213,8 @@ export const toApproval = (row: ApprovalRow): Approval => {
     row.appId !== null &&
     row.workflowId !== null &&
     row.param !== null &&
-    row.value !== null
+    row.value !== null &&
+    row.version !== null
   ) {
     return {
       ...fields,
@@ -194,6 +222,7 @@ export const toApproval = (row: ApprovalRow): Approval => {
       app: row.appId,
       workflow: row.workflowId,
       param: row.param,
+      version: row.version,
       from: row.previous,
       to: row.value,
     };
@@ -239,7 +268,7 @@ const refusal = async (
       approver: sql<number>`${isApprover(by.userId)}`,
       requesterActive: sql<number>`${requesterActive()}`,
       live: sql<number>`${changeLive()}`,
-      otherAdmin: sql<number>`${activeAdminExists(by.userId)}`,
+      otherAdmin: sql<number>`${otherAdminExists(env, by)}`,
     })
     .from(approvals)
     .where(eq(approvals.id, row.id))
@@ -285,7 +314,10 @@ const decisionEntry = (
           requestedBy: row.requestedBy,
           breakGlass,
         })
-      : changeEntry(by, `permission.${verdict}`, permission, { approval });
+      : changeEntry(by, `permission.${verdict}`, permission, {
+          approval,
+          requestedBy: row.requestedBy,
+        });
   }
   // Names the parameter, never its values (R16).
   return {
@@ -304,6 +336,8 @@ const decisionEntry = (
 /**
  * The change an approval makes when it ends with `verdict`, as statements
  * that run only if `decided` holds: that this very decision was stored.
+ * An approved value is kept with its approval, which makes it count where
+ * a version declares the parameter sensitive (workflows/params.ts).
  */
 const changesOf = (
   db: DrizzleD1Database,
@@ -390,12 +424,11 @@ const decide = async (
   }
   const at = new Date();
   const ownApproval = verdict === "approved" && row.requestedBy === by.userId;
+  // This decision's own nonce: the change runs only if this update stored it.
+  const nonce = crypto.randomUUID();
   const decided = sql`EXISTS (
     SELECT 1 FROM ${approvals}
-    WHERE ${approvals.id} = ${row.id}
-      AND ${approvals.status} = ${verdict}
-      AND ${approvals.decidedBy} = ${by.userId}
-      AND ${approvals.decidedAt} = ${at.getTime()}
+    WHERE ${approvals.id} = ${row.id} AND ${approvals.decision} = ${nonce}
   )`;
   const db = drizzle(env.DB);
   const [[changed]] = await auditedBatch(env, db, [
@@ -406,9 +439,10 @@ const decide = async (
         decidedBy: by.userId,
         decidedAt: at,
         breakGlass: ownApproval,
+        decision: nonce,
       })
       .where(
-        and(eq(approvals.id, row.id), mayDecide(by.userId, verdict, breakGlass))
+        and(eq(approvals.id, row.id), mayDecide(env, by, verdict, breakGlass))
       )
       .returning(),
     outboxedIfChanged(

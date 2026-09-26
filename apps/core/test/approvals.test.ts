@@ -13,6 +13,7 @@ import {
   signedInApi,
   staffPerson,
   unique,
+  withSignIn,
 } from "./sign-in.ts";
 
 // Nobody grants a permission alone (threat model R4, R8, PM1, WF5): a
@@ -118,7 +119,7 @@ describe("permission requests", () => {
     });
   });
 
-  it("are never approved by builders, users or Grasp staff", async () => {
+  it("are never approved by builders, users or Grasp staff, and never asked for by staff", async () => {
     const builder = await personApi("builder");
     const admin = await personApi("admin");
     const user = await personApi("user");
@@ -149,6 +150,10 @@ describe("permission requests", () => {
           staffApi.permissions.grant(permission.id, { breakGlass: true })
         ),
         await outcome(staffApi.approvals.decline(approval.id)),
+        // Nor do they ask.
+        await outcome(
+          staffApi.permissions.request({ ...outlook(app), binding: "STAFF" })
+        ),
       ],
     }).toStrictEqual({
       builder: ["approval.forbidden", "role.forbidden", "approval.forbidden"],
@@ -158,6 +163,7 @@ describe("permission requests", () => {
         "approval.forbidden",
         "approval.forbidden",
         "approval.forbidden",
+        "role.forbidden",
       ],
     });
     await expect(statusOf(admin, app, permission.id)).resolves.toBe(
@@ -169,16 +175,31 @@ describe("permission requests", () => {
     const admin = await personApi("admin");
     await onlyAdmins(admin.userId);
     const { app, permission, approval } = await requested(admin);
+    // The deployment config names an admin who hasn't signed in yet: they
+    // are another admin, so the glass stays whole.
+    const whileConfigured = await outcome(
+      admin.api.permissions.grant(permission.id, { breakGlass: true })
+    );
+    // With the config naming only this admin, they are the only one.
+    const { core } = await openRpc(admin.session, {
+      coreEnv: withSignIn({ admins: [admin.person.email] }),
+    });
+    const alone = core.authenticate();
     const withoutBreakGlass = await outcome(
-      admin.api.permissions.grant(permission.id)
+      alone.permissions.grant(permission.id)
     );
     const events = await auditedDuring(async () => {
-      await admin.api.permissions.grant(permission.id, { breakGlass: true });
+      await alone.permissions.grant(permission.id, { breakGlass: true });
     });
     expect({
+      whileConfigured,
       withoutBreakGlass,
       status: await statusOf(admin, app, permission.id),
-    }).toStrictEqual({ withoutBreakGlass: "approval.self", status: "active" });
+    }).toStrictEqual({
+      whileConfigured: "approval.break_glass_refused",
+      withoutBreakGlass: "approval.self",
+      status: "active",
+    });
     expect(events).toMatchObject([
       {
         actor: { type: "person", userId: admin.userId },
@@ -195,9 +216,7 @@ describe("permission requests", () => {
     const second = await personApi("admin");
     const next = await requested(admin);
     await expect(
-      outcome(
-        admin.api.approvals.approve(next.approval.id, { breakGlass: true })
-      )
+      outcome(alone.approvals.approve(next.approval.id, { breakGlass: true }))
     ).resolves.toBe("approval.break_glass_refused");
     await expect(
       second.api.approvals.approve(next.approval.id)
@@ -272,7 +291,7 @@ describe("permission requests", () => {
       {
         action: "permission.declined",
         target: { type: "permission", id: permission.id },
-        detail: { approval: approval.id },
+        detail: { approval: approval.id, requestedBy: builder.userId },
       },
     ]);
     expect({
@@ -295,6 +314,7 @@ describe("permission requests", () => {
       {
         actor: { type: "person", userId: builder.userId },
         action: "permission.withdrawn",
+        detail: { approval: approval.id, requestedBy: builder.userId },
       },
     ]);
     expect({

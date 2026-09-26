@@ -20,6 +20,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import {
   activeAdminExists,
+  activeMember,
   isRemoved,
   notRemoved,
   organizationId,
@@ -103,13 +104,7 @@ const membershipOf = async (
 };
 
 /** That `userId` is an admin of the organization now, as a SQL condition. */
-const isActiveAdmin = (userId: string): SQL => sql`EXISTS (
-  SELECT 1 FROM ${members}
-  WHERE ${members.organizationId} = ${organizationId}
-    AND ${members.userId} = ${userId}
-    AND ${members.role} = 'admin'
-    AND ${notRemoved(userId)}
-)`;
+const isActiveAdmin = (userId: string): SQL => activeMember(userId, ["admin"]);
 
 /** Whether `userId` is an admin of the organization now. */
 const stillAdmin = async (env: Env, userId: string): Promise<boolean> => {
@@ -118,14 +113,6 @@ const stillAdmin = async (env: Env, userId: string): Promise<boolean> => {
   );
   return row.admin === 1;
 };
-
-/** That `userId` is a member now, as a SQL condition. */
-const isActiveMember = (userId: string): SQL => sql`EXISTS (
-  SELECT 1 FROM ${members}
-  WHERE ${members.organizationId} = ${organizationId}
-    AND ${members.userId} = ${userId}
-    AND ${notRemoved(userId)}
-)`;
 
 const memberEntry = (
   by: Identity,
@@ -194,7 +181,7 @@ const recordRemoval = async (
       .insert(memberRemovals)
       .select(
         sql`SELECT ${organizationId}, ${userId}, ${Date.now()}, NULL
-          WHERE ${isActiveMember(userId)} AND ${isActiveAdmin(by.userId)}`
+          WHERE ${activeMember(userId)} AND ${isActiveAdmin(by.userId)}`
       )
       .onConflictDoNothing()
       .returning({ userId: memberRemovals.userId }),

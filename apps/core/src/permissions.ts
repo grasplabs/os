@@ -326,7 +326,8 @@ export const openPermissionApproval = (
     .select(
       sql`SELECT ${approval}, 'permission', ${permissions.id},
           NULL, NULL, NULL, NULL, NULL, 'admins', 'pending',
-          ${permissions.requestedBy}, ${permissions.requestedAt}, NULL, NULL, 0
+          ${permissions.requestedBy}, ${permissions.requestedAt}, NULL, NULL, 0,
+          NULL, NULL
         FROM ${permissions}
         WHERE ${permissions.id} = ${id} AND ${permissions.status} = 'requested'`
     )
@@ -342,6 +343,10 @@ export const requestPermission = async (
   input: unknown
 ): Promise<Permission> => {
   requireBuilder(by);
+  if (by.staff) {
+    // Grasp staff neither ask for nor decide a client's approvals.
+    throw roleErrors.create("role.forbidden");
+  }
   const { subject, object, actions, binding } = permissionErrors.parse(
     "permission.invalid",
     permissionRequestSchema,
