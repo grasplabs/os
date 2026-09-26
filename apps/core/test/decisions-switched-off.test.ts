@@ -32,6 +32,15 @@ const idp = mockIdp();
 const personApi = async (role: Role): Promise<Person> =>
   await signedInApi(idp, role);
 
+/**
+ * A decision the tests act on while it waits: its reminder is due five
+ * seconds after the ask, its deadline ten seconds after it opened, so what
+ * a test does meanwhile fits on a slow runner: seeing the ask, then
+ * switching a feature off (or stopping the run) before the reminder is
+ * due, and back on before the deadline.
+ */
+const reminding = { timeout: 10_000, remindAfter: 5000 };
+
 describe("decisions while switched off", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);
 
@@ -40,8 +49,7 @@ describe("decisions while switched off", { timeout: 60_000 }, () => {
     const decider = await personApi("user");
     const { app, run, decision } = await asking(builder, {
       from: `person:${decider.userId}`,
-      timeout: 3000,
-      remindAfter: 1500,
+      ...reminding,
     });
     // Switched off once it waits for the answer, past the time to remind.
     await stepDone(run.id, "review#asked");
@@ -232,8 +240,7 @@ export default workflowTests(definition, [{ name: "runs", events: [{ type: "gate
     const decider = await personApi("user");
     const { app, run, decision } = await asking(builder, {
       from: `person:${decider.userId}`,
-      timeout: 3000,
-      remindAfter: 1500,
+      ...reminding,
     });
     await stepDone(run.id, "review#asked");
     // Stopped while it waits for the answer, and resumed with workflows
@@ -252,7 +259,7 @@ export default workflowTests(definition, [{ name: "runs", events: [{ type: "gate
         async () => {
           await expect(deadlinePassed(decision)).resolves.toBeTruthy();
         },
-        { timeout: 10_000, interval: 100 }
+        { timeout: 2 * reminding.timeout, interval: 100 }
       );
     } finally {
       env.FEATURES = features;
