@@ -19,8 +19,16 @@ import type ScreenCompiler from "./worker.ts";
 
 export type { Diagnostic } from "./diagnostic.ts";
 export type { KitModules } from "./kit.ts";
-export type { ScreenBuild, ServerBuild } from "./worker.ts";
-export { buildFiles, limitErrors, serverFiles } from "./inputs.ts";
+export type { ScreenBuild, ServerBuild, WorkflowBuild } from "./worker.ts";
+export {
+  buildFiles,
+  limitErrors,
+  serverFiles,
+  workflowFiles,
+  workflowIdOf,
+  workflowPaths,
+} from "./inputs.ts";
+export { appModuleName, kitModuleName } from "./kit.ts";
 /** Part of every build's cache key: a new compiler or kit builds again. */
 export { version as compilerVersion } from "#version";
 
@@ -62,16 +70,29 @@ const isKitModules = (value: unknown): value is KitModules =>
   "version" in value &&
   "modules" in value;
 
-/** The kit's modules, which every App's modules import: one set per release. */
-export const kitModules = async (assets: Fetcher): Promise<KitModules> => {
+const readModules = async (
+  assets: Fetcher,
+  file: string
+): Promise<KitModules> => {
   const parsed: unknown = JSON.parse(
-    await readCompilerFile(assets, compilerAssets.kitModules, "json")
+    await readCompilerFile(assets, file, "json")
   );
   if (!isKitModules(parsed)) {
-    throw new Error("The kit's modules are not in the expected shape.");
+    throw new Error(`${file} is not in the expected shape.`);
   }
   return parsed;
 };
+
+/** The kit's modules, which every App's modules import: one set per release. */
+export const kitModules = async (assets: Fetcher): Promise<KitModules> =>
+  await readModules(assets, compilerAssets.kitModules);
+
+/**
+ * The workflow SDK's modules, which every App's workflows import
+ * (`sdkImports`): one set per release.
+ */
+export const sdkModules = async (assets: Fetcher): Promise<KitModules> =>
+  await readModules(assets, compilerAssets.sdkModules);
 
 /**
  * How the compiler's isolate runs: no bindings, no network

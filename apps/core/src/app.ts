@@ -9,7 +9,6 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
-import { compatibilityDate } from "@grasp-os/shared/runtime";
 import { DurableObject } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -18,6 +17,7 @@ import { appBindings } from "./app-bindings.ts";
 import { versionFiles } from "./apps.ts";
 import { apps } from "./db/core/schema.ts";
 import { appHost } from "./durable-objects.ts";
+import { sandbox } from "./sandbox.ts";
 import { buildServer } from "./screens.ts";
 
 // An App's server code runs as a facet of the App's own Durable Object:
@@ -38,18 +38,6 @@ import { buildServer } from "./screens.ts";
 
 /** The facet the App's server code runs in. */
 const facetName = "server";
-
-/**
- * How App server code runs: no network, no importable env, and a CPU limit
- * per call, enforced by the runtime (a busy loop ends there; memory is the
- * runtime's limit per isolate). Its env is only what `loadServer` gives it.
- */
-export const sandbox = {
-  compatibilityDate,
-  compatibilityFlags: ["disallow_importable_env"],
-  globalOutbound: null,
-  limits: { cpuMs: 10_000 },
-} satisfies Omit<WorkerLoaderWorkerCode, "mainModule" | "modules">;
 
 /**
  * How long one call may take in all, starting the code and waiting
@@ -131,6 +119,14 @@ const errorNameOf = (error: unknown): string => {
 
 /** Where the App keeps its restricted mode (see restricted.ts). */
 const restrictedKey = "restricted";
+
+/**
+ * Where the App keeps its workflows' state, by workflow and key, and the
+ * idempotency keys of the writes it applied. Workflow IDs and state keys
+ * have no `:`, so no two of them share a storage key.
+ */
+const workflowStatePrefix = "workflow-state:";
+const workflowWritePrefix = "workflow-write:";
 
 /**
  * What an App method answers: plain data, as structured clone carries it.
@@ -358,6 +354,59 @@ export class App extends DurableObject<Env> {
   /** Puts the App in restricted mode, for good. */
   async restrict(): Promise<void> {
     await this.ctx.storage.put(restrictedKey, true);
+  }
+
+  /**
+   * A value of the App's workflow `workflow`'s state, shared by all its
+   * runs (`state.get` in workflow code, through workflows/host.ts): JSON
+   * text, as the host checked it when it was written, or undefined.
+   */
+  async workflowState(
+    workflow: string,
+    key: string
+  ): Promise<string | undefined> {
+    return await this.ctx.storage.get<string>(
+      `${workflowStatePrefix}${workflow}:${key}`
+    );
+  }
+
+  /**
+   * Writes a value of workflow `workflow`'s state, once per idempotency
+   * key: a write a run repeats after a crash is ignored, so it can't
+   * overwrite a newer value. The check and the write happen together,
+   * as nothing else runs in this object between them.
+   */
+  async setWorkflowState(
+    workflow: string,
+    run: string,
+    key: string,
+    json: string,
+    idempotencyKey: string
+  ): Promise<void> {
+    const write = `${workflowWritePrefix}${workflow}:${run}:${idempotencyKey}`;
+    if ((await this.ctx.storage.get(write)) !== undefined) {
+      return;
+    }
+    await this.ctx.storage.put({
+      [write]: true,
+      [`${workflowStatePrefix}${workflow}:${key}`]: json,
+    });
+  }
+
+  /**
+   * Forgets the writes run `run` applied, once it has ended: an ended run
+   * is never replayed, so its writes can't come again.
+   */
+  async forgetWorkflowWrites(workflow: string, run: string): Promise<void> {
+    const writes = await this.ctx.storage.list({
+      prefix: `${workflowWritePrefix}${workflow}:${run}:`,
+    });
+    const keys = [...writes.keys()];
+    // Storage deletes at most 128 keys at a time.
+    for (let start = 0; start < keys.length; start += 128) {
+      // oxlint-disable-next-line no-await-in-loop -- one batch at a time
+      await this.ctx.storage.delete(keys.slice(start, start + 128));
+    }
   }
 
   /**

@@ -210,6 +210,40 @@ describe("step.do", () => {
     ]);
   });
 
+  it("reaches the run's bindings from inside a step", async () => {
+    const sent: unknown[] = [];
+    const env = {
+      OUTLOOK: {
+        call: async (...args: unknown[]) => {
+          sent.push(args);
+          return "sent";
+        },
+      },
+    };
+    const definition = workflow(
+      "mailer",
+      { params: noParams },
+      async (step, context) =>
+        await step.do(
+          "mail",
+          { description: "Mail", sideEffect: true, input: { to: "anna" } },
+          async ({ idempotencyKey, input }) =>
+            String(
+              await context.env.OUTLOOK?.call?.("mail.send", input, {
+                idempotencyKey,
+              })
+            )
+        )
+    );
+
+    const output = await definition.run(createFakeEngine({ env }).engine);
+
+    expect({ output, sent }).toStrictEqual({
+      output: "sent",
+      sent: [["mail.send", { to: "anna" }, { idempotencyKey: "run-1:mail" }]],
+    });
+  });
+
   it("rejects a side effect without input, or input that isn't JSON, before it runs", async () => {
     const ran: string[] = [];
     const definitions = [

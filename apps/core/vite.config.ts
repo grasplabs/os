@@ -33,7 +33,11 @@ const capabilitySigningKey = "test-capability-signing-key-of-32-chars-or-more";
  * their own project (vite.screens.config.ts), after the others, so their
  * long compiles don't starve the light tests of CPU.
  */
-export const screenTests = ["test/screen*.test.ts", "test/app-sandbox.test.ts"];
+export const screenTests = [
+  "test/screen*.test.ts",
+  "test/app-sandbox.test.ts",
+  "test/workflows.test.ts",
+];
 
 /** Core's Worker test setup, shared by both of core's test projects. */
 export const coreProject = (test: UserWorkspaceConfig["test"]) =>
@@ -64,6 +68,12 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               permissions: true,
               knowledge: true,
               connections: true,
+              workflows: true,
+            },
+            // The gateway runs call the model through; tests fake the AI binding.
+            MODEL_GATEWAY: {
+              gateway: "grasp-os-test",
+              models: ["workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
             },
             // workerd doesn't implement Durable Object jurisdictions.
             DURABLE_OBJECT_JURISDICTION: "none",

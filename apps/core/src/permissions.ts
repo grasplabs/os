@@ -444,7 +444,7 @@ export const listPermissions = async (
  * The person an App or agent acts for must still be in the organization:
  * nothing works for someone who has left or was removed.
  */
-const requireActivePerson = async (
+export const requireActivePerson = async (
   env: Env,
   authority: Authority
 ): Promise<void> => {

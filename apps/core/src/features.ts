@@ -14,7 +14,12 @@ import { deploymentConfig } from "./deployment-config.ts";
 // flags, until it closes (at the latest when its session ends).
 
 /** Every feature behind a flag. */
-export type Feature = "apps" | "permissions" | "knowledge" | "connections";
+export type Feature =
+  | "apps"
+  | "permissions"
+  | "knowledge"
+  | "connections"
+  | "workflows";
 
 // Names nobody knows (a flag since removed) are ignored, not an error.
 const featuresSchema = z.record(z.string(), z.boolean());

@@ -10,6 +10,7 @@ import type {
   EngineEvent,
   ModelRequest,
   WorkflowEngine,
+  WorkflowEnv,
 } from "./engine.ts";
 import { durationUnits, engineStepPattern } from "./steps.ts";
 import type { WorkflowDefinition } from "./workflow.ts";
@@ -104,6 +105,11 @@ export interface TestEngineOptions {
   runId?: string;
   /** Parameter values people set, by name; missing ones use the default. */
   params?: Record<string, unknown>;
+  /**
+   * Stand-ins for the run's bindings (`env.OUTLOOK`), for steps that run;
+   * none when missing, and mocked steps don't need them.
+   */
+  env?: WorkflowEnv;
   /**
    * Step results by step name, instead of running the step. A keyed step
    * takes the mock for `name:key` (the key as the workflow gives it), or
@@ -269,6 +275,7 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
   const engine: WorkflowEngine = {
     runId: runIdSchema.parse(options.runId ?? "run-1"),
     params: options.params ?? {},
+    env: options.env ?? {},
     do: async (name, { retries, sideEffect = false, input }, fn) => {
       if (results.has(name)) {
         // SAFETY: only `do` stores under a name, with the result of the same

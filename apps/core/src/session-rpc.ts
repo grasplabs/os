@@ -9,6 +9,7 @@ import { KnowledgeRpc } from "./knowledge/rpc.ts";
 import { PermissionsRpc } from "./permissions-rpc.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
+import { WorkflowsRpc } from "./workflows/rpc.ts";
 
 /**
  * What a signed-in person reaches over `/rpc`. Every API here has the same
@@ -27,6 +28,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #knowledge: KnowledgeRpc;
   readonly #permissions: PermissionsRpc;
   readonly #connections: ConnectionsRpc;
+  readonly #workflows: WorkflowsRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -45,6 +47,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
     this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
     this.#connections = new ConnectionsRpc(env, checkWith("connections"));
+    this.#workflows = new WorkflowsRpc(env, checkWith("workflows"));
   }
 
   get apps(): AppsRpc {
@@ -61,6 +64,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get connections(): ConnectionsRpc {
     return this.#connections;
+  }
+
+  get workflows(): WorkflowsRpc {
+    return this.#workflows;
   }
 
   async whoami(): Promise<Identity> {

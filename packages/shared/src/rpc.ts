@@ -3,6 +3,7 @@ import type { ConnectionsApi } from "./connect.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
 import type { PermissionsApi } from "./permissions.ts";
 import type { Role } from "./roles.ts";
+import type { WorkflowsApi } from "./workflows.ts";
 
 /** A way to sign in to this deployment, for the sign-in screen. */
 export interface SignInOption {
@@ -45,6 +46,8 @@ export interface SessionApi {
    * (which only admins connect and disconnect).
    */
   readonly connections: ConnectionsApi;
+  /** Runs of Apps' workflows. Admins and builders. */
+  readonly workflows: WorkflowsApi;
 }
 
 /**

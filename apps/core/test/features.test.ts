@@ -31,6 +31,7 @@ const callsWith = async (features?: unknown) => {
     outcome(session.permissions.list()),
     outcome(session.knowledge.listCollections()),
     outcome(session.connections.list()),
+    outcome(session.workflows.list(crypto.randomUUID())),
     outcome(session.whoami()),
   ]);
 };
@@ -38,6 +39,7 @@ const callsWith = async (features?: unknown) => {
 describe("feature flags", () => {
   it("refuse every flagged API while no flag is set", async () => {
     await expect(callsWith()).resolves.toStrictEqual([
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -54,6 +56,7 @@ describe("feature flags", () => {
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
+      "feature.disabled",
       "ok",
     ]);
   });
@@ -62,6 +65,7 @@ describe("feature flags", () => {
     for (const features of ["{not json", '{"apps": "yes"}', "[true]"]) {
       // oxlint-disable-next-line no-await-in-loop -- one config at a time
       await expect(callsWith(features)).resolves.toStrictEqual([
+        "feature.disabled",
         "feature.disabled",
         "feature.disabled",
         "feature.disabled",

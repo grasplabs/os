@@ -42,6 +42,36 @@ export const serverFiles = (
     )
   );
 
+/** The App's workflows and their tests: TypeScript under `workflows/`. */
+const workflowFile = /^workflows\/(?:[\w-]+\/)*[\w.-]+\.ts$/u;
+
+/** The files a workflow build reads: the App's `workflows/**.ts`. */
+export const workflowFiles = (
+  files: Record<string, string>
+): Record<string, string> =>
+  Object.fromEntries(
+    Object.entries(files).filter(
+      ([path]) => workflowFile.test(path) && !path.endsWith(".d.ts")
+    )
+  );
+
+/**
+ * Where a workflow's code is, and its tests: `workflows/<id>.ts`, whose
+ * default export is the workflow, and `workflows/<id>.workflow-tests.ts`
+ * beside it, whose default export is its tests (`workflowTests`).
+ */
+export const workflowPaths = (
+  id: string
+): { workflow: string; tests: string } => ({
+  workflow: `workflows/${id}.ts`,
+  tests: `workflows/${id}.workflow-tests.ts`,
+});
+
+/** A workflow's ID, from its file's path; undefined for any other file. */
+const workflowPath = /^workflows\/(?<id>[A-Za-z][\w-]{0,63})\.ts$/u;
+export const workflowIdOf = (path: string): string | undefined =>
+  workflowPath.exec(path)?.groups?.id;
+
 /**
  * The most a build takes: as much as an App holds, so any App fits, and a
  * mistake (or an attack) fails fast and says why.
