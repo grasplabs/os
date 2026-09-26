@@ -21,9 +21,10 @@ import {
   uniqueIndex,
 } from "drizzle-orm/sqlite-core";
 
-// The outbox of audit events for changes to this database, with the same
-// shape as the core database's (see src/audit-outbox.ts).
-export { auditOutbox } from "../core/schema.ts";
+// The outbox of audit events for changes to this database, and the rows
+// moved out of it, with the same shape as the core database's (see
+// src/audit-outbox.ts).
+export { auditOutbox, auditOutboxRejected } from "../core/schema.ts";
 
 const timestamp = (name: string) => integer(name, { mode: "timestamp_ms" });
 

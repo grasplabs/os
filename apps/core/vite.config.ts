@@ -59,7 +59,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
       // Brings the D1 databases up to the committed migrations.
       setupFiles: ["./test/apply-migrations.ts"],
       // Logs go straight to workerd's output, not to Vitest over RPC. A log
-      // from another request (a workflow run, a queue batch, a Durable
+      // from another request (a workflow run, a cron run, a Durable
       // Object) can't use the test's socket, so the pool holds it until the
       // test next sends something; one logged after the file's last message
       // was never sent, and the file waited for its reply forever.
@@ -127,8 +127,6 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
           // The outside systems connect reaches, so tests can plan how
           // they answer and read what they did (test/mail-server.ts).
           serviceBindings: { CONNECT_PROVIDERS: "connect-providers" },
-          // Deliver audit events at once instead of waiting to fill a batch.
-          queueConsumers: { "grasp-os-audit": { maxBatchTimeout: 0 } },
           // A stand-in frontend and the screen compiler, written by the
           // global setup.
           assets: { directory: "./dist/test-assets" },
@@ -152,7 +150,6 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
                 MICROSOFT_CLIENT_SECRET: connectClient.secret,
               },
               d1Databases: { DB: "grasp-os-connect" },
-              queueProducers: { AUDIT_QUEUE: "grasp-os-audit" },
               // Entra, as connect reaches it (test/connect-providers.ts).
               outboundService: "connect-providers",
             },

@@ -1,4 +1,3 @@
-import { auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 /**
  * Drives sign-in the way a browser on the client's page does, through the
@@ -9,11 +8,10 @@ import { routerSecretHeader } from "@grasp-os/shared/router";
 import type { CoreApi } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";
 import { env } from "cloudflare:workers";
-import { vi } from "vite-plus/test";
 import { z } from "zod";
 
 import worker from "../src/index.ts";
-import { loggedEvents, logHead } from "./audit-events.ts";
+import { eventsAfter, logHead } from "./audit-events.ts";
 import type { Claims, Idp } from "./idp.ts";
 import {
   acmeTenant,
@@ -236,22 +234,17 @@ export const outcome = async (promise: Promise<unknown>): Promise<string> => {
 };
 
 /**
- * The audit events core sent while `run` ran, as the audit log stored them,
- * in log order: waits for the log to have each of them, by ID.
+ * The audit events from core the log appended while `run` ran, in log
+ * order. The outboxes are drained before and after, so earlier events
+ * aren't counted and this run's are all in.
  */
 export const auditedDuring = async (
   run: () => Promise<unknown>
 ): Promise<AuditEvent[]> => {
   const after = await logHead();
-  const sent = vi.spyOn(env.AUDIT_QUEUE, "send");
-  let ids: string[];
-  try {
-    await run();
-    ids = sent.mock.calls.map(([event]) => auditEventSchema.parse(event).id);
-  } finally {
-    sent.mockRestore();
-  }
-  return await loggedEvents(ids, after);
+  await run();
+  const events = await eventsAfter(after);
+  return events.filter(({ source }) => source === "core");
 };
 
 /** A short random name part, so tests don't share people or things. */

@@ -1,7 +1,7 @@
 import {
   auditEventMaxBytes,
-  auditProvenanceMaxItems,
   auditEventSchema,
+  auditProvenanceMaxItems,
   createAuditEvent,
   isAuditEventTooLarge,
 } from "@grasp-os/shared/audit";
@@ -153,6 +153,8 @@ export interface AppendResult {
   appended: number;
   duplicates: number;
   conflicts: number;
+  /** The IDs of the conflicts, each once (lowercased, as the log keeps them). */
+  conflictIds: string[];
 }
 
 /** A stretch one archive moved out: the positions `from` to `through`. */
@@ -346,8 +348,9 @@ const entryColumns =
  * product) is reported as missing.
  *
  * The log searches only what it holds now, and dedupes only against that:
- * an event redelivered after its first delivery was archived would be
- * appended again (the queue gives up long before retention).
+ * an event delivered again after its first delivery was archived would be
+ * appended again (an outbox removes an event once the log has it, long
+ * before retention).
  */
 export class AuditLog extends DurableObject<Env> {
   readonly #db = drizzle(this.ctx.storage);
@@ -376,7 +379,8 @@ export class AuditLog extends DurableObject<Env> {
    * Records nothing when it appended nothing and nothing was lost or in
    * conflict: an event the log already holds left no gap. Takes at most
    * 100 events (the queue's largest batch), as many IDs as an event's
-   * provenance holds.
+   * provenance holds. Only for dead letters an older release left
+   * (src/audit-queue-leftovers.ts): remove it with the queues.
    */
   async recover(
     batch: readonly AuditEvent[],
@@ -758,10 +762,9 @@ export class AuditLog extends DurableObject<Env> {
   }
 
   /**
-   * Appends events, skipping IDs the log already holds, and then the event
-   * `after` gives for the IDs it appended, if any, in one transaction.
-   * Validates every event first, so one malformed or oversized event
-   * appends nothing from its batch.
+   * Appends events, skipping IDs the log already holds, in one
+   * transaction. Validates every event first, so one malformed or oversized
+   * event appends nothing from its batch.
    */
   async #append(
     batch: readonly AuditEvent[],
@@ -774,7 +777,7 @@ export class AuditLog extends DurableObject<Env> {
     // Hashing is async, so another append could otherwise run between
     // reading the head and writing after it, and fork the chain.
     return await this.ctx.blockConcurrencyWhile(async () => {
-      const { entries, conflicts } = await this.#link(incoming);
+      const { entries, conflicts, conflictIds } = await this.#link(incoming);
       const next = after?.(
         entries.map(({ id }) => id),
         conflicts
@@ -792,6 +795,7 @@ export class AuditLog extends DurableObject<Env> {
         appended: entries.length,
         duplicates: incoming.length - entries.length,
         conflicts,
+        conflictIds,
       };
     });
   }
@@ -806,7 +810,11 @@ export class AuditLog extends DurableObject<Env> {
   async #link(
     incoming: readonly Incoming[],
     after?: ChainLink & { receivedAt: string }
-  ): Promise<{ entries: (ChainEntry & { id: string })[]; conflicts: number }> {
+  ): Promise<{
+    entries: (ChainEntry & { id: string })[];
+    conflicts: number;
+    conflictIds: string[];
+  }> {
     const tail = after ?? this.#tail();
     const now = new Date().toISOString();
     const receivedAt = now > tail.receivedAt ? now : tail.receivedAt;
@@ -818,6 +826,7 @@ export class AuditLog extends DurableObject<Env> {
     const known = new Map<string, string | undefined>();
     const entries: (ChainEntry & { id: string })[] = [];
     let conflicts = 0;
+    const conflictIds = new Set<string>();
     let prevHash = tail.hash;
     let { seq } = tail;
     for (const { id, event } of incoming) {
@@ -841,10 +850,11 @@ export class AuditLog extends DurableObject<Env> {
         entries.push({ ...link, id, hash: prevHash });
       } else if (existing !== event) {
         conflicts += 1;
+        conflictIds.add(id);
         log.warn("audit.conflicting_duplicate", { eventId: id });
       }
     }
-    return { entries, conflicts };
+    return { entries, conflicts, conflictIds: [...conflictIds] };
   }
 
   /** The last entry, held or archived: its position, hash and receipt time. */
@@ -1121,6 +1131,12 @@ export class AuditLog extends DurableObject<Env> {
   }
 }
 
+/** What reaching the audit log needs. */
+export type AuditLogEnv = Pick<
+  Env,
+  "AUDIT_LOG" | "DURABLE_OBJECT_JURISDICTION"
+>;
+
 /** The deployment's single audit log. */
-export const auditLog = (env: Env): DurableObjectStub<AuditLog> =>
+export const auditLog = (env: AuditLogEnv): DurableObjectStub<AuditLog> =>
   inJurisdiction(env, env.AUDIT_LOG).getByName("audit-log");
