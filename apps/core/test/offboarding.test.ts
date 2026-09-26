@@ -654,27 +654,35 @@ describe("changing a member's role", () => {
         signedInApi(idp, "admin"),
         signedInApi(idp, "user"),
       ]);
+      let outcomes: string[] = [];
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
       const audited = await auditedDuring(async () => {
-        await Promise.all([
-          first.api.members.setRole(person.userId, "builder"),
-          second.api.members.setRole(person.userId, "admin"),
+        outcomes = await Promise.all([
+          outcome(first.api.members.setRole(person.userId, "builder")),
+          outcome(second.api.members.setRole(person.userId, "admin")),
         ]);
       });
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
       const { role } = await person.api.whoami();
-      // Whichever landed first, the other replaced its role.
+      // A change that raced the other applies after it, or is refused.
       const replaced = role === "admin" ? "builder" : "admin";
+      const expected = outcomes.includes("member.role_changed")
+        ? [{ userId: person.userId, previousRole: "user", role }]
+        : [
+            { userId: person.userId, previousRole: "user", role: replaced },
+            { userId: person.userId, previousRole: replaced, role },
+          ];
+      expect(outcomes).toContain("ok");
+      expect(
+        outcomes.filter(
+          (each) => each !== "ok" && each !== "member.role_changed"
+        )
+      ).toStrictEqual([]);
       const changes = audited
         .filter(({ action }) => action === "member.role.updated")
         .map(({ detail }) => detail);
-      expect(changes).toHaveLength(2);
-      expect(changes).toStrictEqual(
-        expect.arrayContaining([
-          { userId: person.userId, previousRole: "user", role: replaced },
-          { userId: person.userId, previousRole: replaced, role },
-        ])
-      );
+      expect(changes).toHaveLength(expected.length);
+      expect(changes).toStrictEqual(expect.arrayContaining(expected));
     }
   });
 

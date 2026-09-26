@@ -304,68 +304,16 @@ const revokeMemberSessions = async (
 };
 
 /**
- * Changes the role of `userId`, whose membership was read as `membership`,
- * to `role`. One conditional update: it changes the role only while it
- * still is `membership.role`, so the event records the role it replaced,
- * while the admin still is one and, unless the new role is admin, while
- * someone other than `userId` is an admin too. Every change of membership
- * or role goes through a statement like it (`recordRemoval`), so however
- * they race, the organization keeps an admin. When another admin changed
- * the role in between, it tries once more, against the role they set.
+ * Gives the member `userId` `role`, the admin themselves included. One
+ * conditional update: it changes the role only while it still is the one
+ * read here, so the event records the role it replaced, while the admin
+ * still is one and, unless the new role is admin, while someone other than
+ * `userId` is an admin too. Every change of membership or role goes through
+ * a statement like it (`recordRemoval`), so however they race, the
+ * organization keeps an admin. When another admin changed the role in
+ * between, it changes nothing and says so: the admin sees the new role and
+ * can try again.
  */
-const changeRole = async (
-  env: Env,
-  by: Identity,
-  userId: string,
-  membership: { id: string; role: string },
-  role: Role,
-  retries = 1
-): Promise<void> => {
-  if (membership.role === role) {
-    return;
-  }
-  const db = drizzle(env.DB);
-  const keepsAnAdmin = role === "admin" ? sql`1` : activeAdminExists(userId);
-  const [[changed]] = await auditedBatch(env, db, [
-    db
-      .update(members)
-      .set({ role })
-      .where(
-        and(
-          currentMembership(userId),
-          eq(members.role, membership.role),
-          isActiveAdmin(by.userId),
-          keepsAnAdmin
-        )
-      )
-      .returning({ id: members.id }),
-    outboxedIfChanged(db, {
-      actor: actorOf(by),
-      action: "member.role.updated",
-      target: { type: "member", id: membership.id },
-      detail: { userId, previousRole: membership.role, role },
-    }),
-  ]);
-  if (changed) {
-    return;
-  }
-  const now = await membershipOf(env, userId);
-  if (!now) {
-    throw refusal(by, memberErrors.create("member.not_found"));
-  }
-  if (!(await stillAdmin(env, by.userId))) {
-    throw refusal(by, roleErrors.create("role.forbidden"));
-  }
-  if (now.role === membership.role) {
-    throw refusal(by, memberErrors.create("member.last_admin"));
-  }
-  if (retries === 0) {
-    throw refusal(by, memberErrors.create("member.role_changed"));
-  }
-  await changeRole(env, by, userId, now, role, retries - 1);
-};
-
-/** Gives the member `userId` `role`, the admin themselves included. */
 const setMemberRole = async (
   env: Env,
   by: Identity,
@@ -384,7 +332,51 @@ const setMemberRole = async (
   if (!(target.success && membership)) {
     throw refusal(by, memberErrors.create("member.not_found"));
   }
-  await changeRole(env, by, target.data, membership, parsedRole.data);
+  const newRole = parsedRole.data;
+  if (membership.role === newRole) {
+    return;
+  }
+  const db = drizzle(env.DB);
+  const keepsAnAdmin =
+    newRole === "admin" ? sql`1` : activeAdminExists(target.data);
+  const [[changed]] = await auditedBatch(env, db, [
+    db
+      .update(members)
+      .set({ role: newRole })
+      .where(
+        and(
+          currentMembership(target.data),
+          eq(members.role, membership.role),
+          isActiveAdmin(by.userId),
+          keepsAnAdmin
+        )
+      )
+      .returning({ id: members.id }),
+    outboxedIfChanged(db, {
+      actor: actorOf(by),
+      action: "member.role.updated",
+      target: { type: "member", id: membership.id },
+      detail: {
+        userId: target.data,
+        previousRole: membership.role,
+        role: newRole,
+      },
+    }),
+  ]);
+  if (changed) {
+    return;
+  }
+  const now = await membershipOf(env, target.data);
+  if (!now) {
+    throw refusal(by, memberErrors.create("member.not_found"));
+  }
+  if (!(await stillAdmin(env, by.userId))) {
+    throw refusal(by, roleErrors.create("role.forbidden"));
+  }
+  if (now.role !== membership.role) {
+    throw refusal(by, memberErrors.create("member.role_changed"));
+  }
+  throw refusal(by, memberErrors.create("member.last_admin"));
 };
 
 /** Most `disconnectPersonal` batches the cron trigger has in flight at once. */

@@ -44,7 +44,7 @@ export const memberErrors = defineErrorFamily({
     "They're removed, but not all their personal connections could be disconnected yet. This is retried automatically, or remove them again.",
   "member.role_invalid": "That isn't a role here.",
   "member.role_changed":
-    "Other admins changed their role at the same time. Check it, and try again.",
+    "Another admin changed their role at the same time. Check it, and try again.",
   "member.last_admin":
     "The organization needs at least one admin. Make someone else an admin first.",
 });
