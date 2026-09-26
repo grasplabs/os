@@ -806,9 +806,22 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
       await setCurrent({ "app/server.ts": server, ...failing }),
       await setCurrent({ "workflows/failing.workflow-tests.ts": null }),
     ];
+    // Also while workflows are switched off: switching them on runs
+    // nothing untested.
+    const { FEATURES: features } = env;
+    try {
+      env.FEATURES = { apps: true };
+      outcomes.push(await setCurrent({ "workflows/other.ts": "export {};\n" }));
+    } finally {
+      env.FEATURES = features;
+    }
     expect(
       outcomes.map((outcome) => workflowErrors.codeOf(outcome))
-    ).toStrictEqual(["workflow.tests_failed", "workflow.tests_failed"]);
+    ).toStrictEqual([
+      "workflow.tests_failed",
+      "workflow.tests_failed",
+      "workflow.tests_failed",
+    ]);
     await expect(builder.api.apps.get(app)).resolves.toMatchObject({
       currentVersion: null,
     });

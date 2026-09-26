@@ -28,7 +28,6 @@ import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { actorOf } from "./audit.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
-import { featureEnabled } from "./features.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";
 
 // The App registry and each App's code. The registry, the versions and the
@@ -637,16 +636,13 @@ export const setCurrentVersion = async (
   if (found.currentVersion === number) {
     return found;
   }
-  // Only a version whose workflows pass their tests runs. With workflows
-  // switched off none run, and none are tested.
-  if (featureEnabled(env, "workflows")) {
-    await requireWorkflowTestsPass(
-      env,
-      appId,
-      number,
-      await versionFiles(env, appId, number)
-    );
-  }
+  // Tested whatever the workflows flag says, so switching it on never runs untested code.
+  await requireWorkflowTestsPass(
+    env,
+    appId,
+    number,
+    await versionFiles(env, appId, number)
+  );
   const previous = found.currentVersion;
   const db = drizzle(env.DB);
   // Only over the current version read above, so the event's `previous`
