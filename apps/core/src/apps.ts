@@ -27,7 +27,7 @@ import { z } from "zod";
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { actorOf } from "./audit.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
-import { isUniqueViolation } from "./db/d1.ts";
+import { inList, isUniqueViolation } from "./db/d1.ts";
 
 // The App registry and each App's code. The registry, the versions and the
 // working copy (files written since the latest version) are rows in the
@@ -222,6 +222,36 @@ const workingCopy = async (env: Env, app: AppId) => {
 };
 
 /**
+ * `app.invalid` if two paths can't both exist on a disk: a file and a
+ * folder of the same name (`a` and `a/b.ts`), or names that differ only in
+ * case (`App.ts` and `app.ts`), which a case-insensitive file system, and
+ * whoever reads the code, can't tell apart.
+ */
+const checkPaths = (paths: Iterable<string>): void => {
+  const seen = new Set<string>();
+  const issues: string[] = [];
+  const lowered = [...paths].map((path) => path.toLowerCase());
+  for (const path of lowered) {
+    if (seen.has(path)) {
+      issues.push(`${path}: Another path differs from it only in case`);
+    }
+    seen.add(path);
+  }
+  for (const path of lowered) {
+    const segments = path.split("/");
+    for (let depth = 1; depth < segments.length; depth += 1) {
+      const folder = segments.slice(0, depth).join("/");
+      if (seen.has(folder)) {
+        issues.push(`${folder}: A file, and the folder of ${path}`);
+      }
+    }
+  }
+  if (issues.length > 0) {
+    throw appErrors.create("app.invalid", { issues: [...new Set(issues)] });
+  }
+};
+
+/**
  * `app.too_large` if `files` are over an App's limits. With `before`, the
  * working copy's size before a write, only if they also grew: a working
  * copy that is over them (from before they were lowered) can still shrink.
@@ -353,6 +383,7 @@ export const writeFiles = async (
     }
   }
   checkLimits(files, before);
+  checkPaths(files.keys());
 
   const db = drizzle(env.DB);
   const next = crypto.randomUUID();
@@ -411,7 +442,8 @@ export const commitFiles = async (
   if (tree === latest?.tree) {
     throw appErrors.create("app.nothing_to_commit");
   }
-  await env.FILES.put(treeKey(appId, tree), json);
+  // R2 checks the upload against its hash, so what's stored is what's named.
+  await env.FILES.put(treeKey(appId, tree), json, { sha256: tree });
 
   const row: VersionRow = {
     appId,
@@ -423,10 +455,9 @@ export const commitFiles = async (
     message: text,
     createdAt: new Date(),
   };
-  // Only the rows this commit read: a row written since has a newer revision.
-  const committed = JSON.stringify(
-    rows.map(({ path, revision }) => `${path}\u0000${revision}`)
-  );
+  // Only the rows this commit read: each write gives the rows it writes a
+  // new revision, so a row written since has one this commit didn't read.
+  const committed = [...new Set(rows.map(({ revision }) => revision))];
   const db = drizzle(env.DB);
   try {
     await auditedBatch(env, db, [
@@ -445,7 +476,7 @@ export const commitFiles = async (
         .where(
           and(
             eq(appWorkingFiles.appId, appId),
-            sql`${appWorkingFiles.path} || char(0) || ${appWorkingFiles.revision} IN (SELECT value FROM json_each(${committed}))`
+            inList(appWorkingFiles.revision, committed)
           )
         ),
     ]);
@@ -504,15 +535,11 @@ export const diffVersions = async (
 ): Promise<FileDiff[]> => {
   requireBuilder(by);
   const { id: appId } = await findApp(env, app);
-  const [before, after] = await Promise.all(
-    [from, to].map(async (version) => {
-      const row = await findVersion(env, appId, version);
-      return await readTree(env, appId, row.tree);
-    })
-  );
-  if (!(before && after)) {
-    throw new Error("Expected two trees");
-  }
+  const treeOf = async (version: unknown) => {
+    const { tree } = await findVersion(env, appId, version);
+    return await readTree(env, appId, tree);
+  };
+  const [before, after] = await Promise.all([treeOf(from), treeOf(to)]);
   const paths = [...new Set([...before.keys(), ...after.keys()])].toSorted();
   return paths.flatMap((path): FileDiff[] => {
     const old = before.get(path);

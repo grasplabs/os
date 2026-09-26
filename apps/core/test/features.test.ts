@@ -28,7 +28,7 @@ const callsWith = async (features?: unknown) => {
   const session = core.authenticate();
   return await Promise.all([
     outcome(session.apps.list()),
-    outcome(session.listPermissions()),
+    outcome(session.permissions.list()),
     outcome(session.knowledge.listCollections()),
     outcome(session.connections.list()),
     outcome(session.whoami()),

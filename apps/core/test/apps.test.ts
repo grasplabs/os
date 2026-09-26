@@ -1,5 +1,6 @@
 import { appLimits } from "@grasp-os/shared/app-limits";
 import { appErrors } from "@grasp-os/shared/apps";
+import { internalErrors } from "@grasp-os/shared/errors";
 import type { Role } from "@grasp-os/shared/roles";
 import { roleErrors } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
@@ -30,7 +31,12 @@ const outcome = async (promise: Promise<unknown>): Promise<string> => {
     await promise;
     return "ok";
   } catch (error) {
-    return appErrors.codeOf(error) ?? roleErrors.codeOf(error) ?? String(error);
+    return (
+      appErrors.codeOf(error) ??
+      roleErrors.codeOf(error) ??
+      internalErrors.codeOf(error) ??
+      String(error)
+    );
   }
 };
 
@@ -122,6 +128,66 @@ describe("App code", () => {
     await expect(outcome(apps.files.commit(app.id, "Same"))).resolves.toBe(
       "app.nothing_to_commit"
     );
+  });
+
+  it("empties the working copy of what a commit took", async () => {
+    const { apps } = await appsApi("builder");
+    const app = await newApp(apps);
+    await apps.files.write(app.id, first);
+    await apps.files.write(app.id, { "AGENTS.md": null });
+    await apps.files.commit(app.id, "First");
+
+    const left = await env.DB.prepare(
+      "SELECT count(*) AS count FROM app_working_files WHERE app_id = ?"
+    )
+      .bind(app.id)
+      .first("count");
+    expect(left).toBe(0);
+  });
+
+  it("fails loudly when a version's files are missing or damaged", async () => {
+    const { apps } = await appsApi("builder");
+    const app = await newApp(apps);
+    const version = await commit(apps, app.id, first);
+    const key = `apps/${app.id}/trees/${version.tree}.json`;
+    const object = await env.FILES.get(key);
+    const stored = (await object?.text()) ?? "";
+
+    await env.FILES.put(key, stored.replace("Inbox", "Outbox"));
+    const damaged = await outcome(apps.files.read(app.id, 1));
+    await env.FILES.delete(key);
+    const missing = await outcome(apps.files.read(app.id, 1));
+    expect({ damaged, missing }).toStrictEqual({
+      damaged: "internal.unexpected",
+      missing: "internal.unexpected",
+    });
+  });
+
+  it("refuses paths that can't both exist: a file and its folder, or names differing only in case", async () => {
+    const { apps } = await appsApi("builder");
+    const app = await newApp(apps);
+    await apps.files.write(app.id, { "components/card.tsx": "x" });
+    await expect(
+      Promise.all([
+        outcome(apps.files.write(app.id, { components: "x" })),
+        outcome(apps.files.write(app.id, { "components/card.tsx/x.ts": "x" })),
+        outcome(apps.files.write(app.id, { "Components/Card.tsx": "x" })),
+        outcome(apps.files.write(app.id, { "a/b.ts": "x", a: "x" })),
+        // Replacing the file with a folder of its name, in one write, is fine.
+        outcome(
+          apps.files.write(app.id, {
+            "components/card.tsx": null,
+            "components/card.tsx/index.ts": "x",
+          })
+        ),
+      ])
+    ).resolves.toStrictEqual([
+      "app.invalid",
+      "app.invalid",
+      "app.invalid",
+      "app.invalid",
+      "ok",
+    ]);
   });
 
   it("commits the working copy once when two commits race", async () => {

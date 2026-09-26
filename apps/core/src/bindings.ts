@@ -29,7 +29,7 @@ type ConnectionObject = Extract<PermissionObject, { type: "connection" }>;
 
 /**
  * Calls an action on a connection for an App or agent working in
- * `context`: checks the permission (only `permissionId`, when given) and
+ * `context`: checks its permission, `permissionId`, and
  * that `context` isn't in restricted mode, then signs the capability
  * connect needs for exactly this call. Core makes capabilities here and
  * nowhere else, and nothing outside core reaches this function.
@@ -44,7 +44,7 @@ export const callConnection = async (
     input,
     idempotencyKey,
   }: Pick<ConnectCall, "action" | "input" | "idempotencyKey">,
-  permissionId?: PermissionId
+  permissionId: PermissionId
 ): Promise<ConnectResult> => {
   await authorize(env, authority, connection, action, permissionId);
   await requireUnrestricted(env, authority, context);

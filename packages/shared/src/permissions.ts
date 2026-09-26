@@ -206,6 +206,24 @@ export interface Permission {
 }
 
 /**
+ * A signed-in person's permissions, over `/rpc`: every call checks the
+ * session and the person's role again.
+ */
+export interface PermissionsApi {
+  /**
+   * Asks for a permission for an App or agent; it allows nothing until an
+   * admin grants it. Admins and builders.
+   */
+  request: (request: PermissionRequest) => Promise<Permission>;
+  /** Grants a requested permission. Admins only. */
+  grant: (id: string) => Promise<Permission>;
+  /** Revokes a permission; the next call that needs it is refused. Admins only. */
+  revoke: (id: string) => Promise<Permission>;
+  /** Every permission, or one App's or agent's. Admins and builders. */
+  list: (subject?: PermissionSubjectInput) => Promise<Permission[]>;
+}
+
+/**
  * How a call reaches for access: which App or agent makes it, the person it
  * acts for, and whether a person is there (interactive) or a workflow runs
  * on its own. The host sets it, from the session or the run; never the code
