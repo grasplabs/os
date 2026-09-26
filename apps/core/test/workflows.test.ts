@@ -809,6 +809,48 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
     });
   });
 
+  it("take shared code from a folder under workflows/, and say that a file directly in it is a workflow", async () => {
+    const builder = await personApi("builder");
+    const { id: app } = await builder.api.apps.create({ name: "Shared" });
+    const helper = `export const greeting = (name) => \`Hello, \${name}\`;\n`;
+    const greet = workflowFiles("greet", `  return greeting("Anna");`);
+    const importing = (from: string) =>
+      `import { greeting } from "${from}";\n${greet["workflows/greet.ts"]}`;
+    const setCurrent = async (files: Record<string, string | null>) => {
+      await builder.api.apps.files.write(app, files);
+      const { version } = await builder.api.apps.files.commit(app, "Try");
+      return await refusal(builder.api.apps.versions.setCurrent(app, version));
+    };
+
+    const directly = await setCurrent({
+      "app/server.ts": server,
+      ...greet,
+      "workflows/greet.ts": importing("./greeting.ts"),
+      "workflows/greeting.ts": helper,
+    });
+    const inFolder = await setCurrent({
+      "workflows/greet.ts": importing("./lib/greeting.ts"),
+      "workflows/greeting.ts": null,
+      "workflows/lib/greeting.ts": helper,
+    });
+    const run = await builder.api.workflows.start(app, "greet");
+    await finished(run.id);
+
+    expect({
+      directly: z
+        .object({ details: z.object({ failures: z.array(z.string()) }) })
+        .parse(directly).details.failures,
+      inFolder,
+      run: await builder.api.workflows.status(run.id),
+    }).toMatchObject({
+      directly: [
+        "greeting: has no tests (workflows/greeting.workflow-tests.ts). Every file directly in workflows/ is a workflow: put shared code in a folder under it, such as workflows/lib/.",
+      ],
+      inFolder: "ok",
+      run: { status: "completed", output: "Hello, Anna" },
+    });
+  });
+
   it("can't replay core's steps or take ones the engine refuses, and audit every step with only well-formed error codes", async () => {
     const admin = await personApi("admin");
     // Written by hand, past the SDK: the host is the boundary, not the SDK.
