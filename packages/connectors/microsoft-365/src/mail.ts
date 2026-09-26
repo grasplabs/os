@@ -282,10 +282,38 @@ const attachmentSchema = z.strictObject({
 /** Attachment fields without their content. */
 const attachmentFields = "id,name,contentType,size,isInline";
 
+/** How many pages of a message's attachments mail.get reads at most. */
+const attachmentPageLimit = 10;
+
+/**
+ * The attachments of the message at `path`, without their content, page
+ * by page up to `attachmentPageLimit`, and whether Graph has more past
+ * that. Each next page is asked for on the tool's own route with only
+ * its position taken from Graph's `@odata.nextLink`, as mail.list does:
+ * the link is never followed as a URL.
+ */
+const attachmentsOf = async (path: string) => {
+  const attachments: z.infer<typeof graphAttachment>[] = [];
+  let page: string | null | undefined;
+  for (let read = 0; read < attachmentPageLimit && page !== null; read += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- each page's position is in the one before
+    const { value, "@odata.nextLink": nextLink } = await graphJson(
+      atPage(
+        graphUrl(`${path}/attachments`, { $select: attachmentFields }),
+        page
+      ),
+      pageOf(graphAttachment)
+    );
+    attachments.push(...value);
+    page = nextPageOf(nextLink);
+  }
+  return { attachments, moreAttachments: page !== null };
+};
+
 const getMessage = defineTool({
   name: "mail.get",
   description:
-    "Gets one message of a mailbox with its body, and its attachments' names, types and sizes (read one with mail.readAttachment).",
+    "Gets one message of a mailbox with its body, and its attachments' names, types and sizes (read one with mail.readAttachment). moreAttachments is true when the message has more attachments than are listed.",
   input: z.strictObject({
     mailbox: mailboxSchema,
     message: idSchema,
@@ -299,6 +327,7 @@ const getMessage = defineTool({
       bcc: z.array(addressSchema),
       replyTo: z.array(addressSchema),
       attachments: z.array(attachmentSchema),
+      moreAttachments: z.boolean(),
     }),
   }),
   readOnly: true,
@@ -314,10 +343,7 @@ const getMessage = defineTool({
       graphMessage,
       { headers: preferBody(bodyType ?? "text") }
     );
-    const { value: attachments } = await graphJson(
-      graphUrl(`${path}/attachments`, { $select: attachmentFields }),
-      pageOf(graphAttachment)
-    );
+    const { attachments, moreAttachments } = await attachmentsOf(path);
     return {
       output: {
         message: {
@@ -333,6 +359,7 @@ const getMessage = defineTool({
             isInline: attachment.isInline ?? false,
             kind: kindOf(attachment["@odata.type"]),
           })),
+          moreAttachments,
         },
       },
       provenance: [message.id],

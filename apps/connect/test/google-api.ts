@@ -16,7 +16,12 @@ import { z } from "zod";
 import {
   allDayEvent,
   attachmentBody,
+  bodyAttachment,
+  cancelledOccurrence,
+  cancelledOccurrenceId,
   contentOf,
+  detachedBody,
+  detachedMessageFull,
   draftId,
   eventDetail,
   eventPage,
@@ -24,12 +29,17 @@ import {
   files,
   googleError,
   labelled,
+  htmlBody,
+  incompleteEvent,
+  incompleteEventId,
   labels,
   messageFull,
   messageList,
   messageId,
   messageMetadata,
   notFound,
+  overLimitAttachment,
+  plainBody,
   searchResults,
   sentId,
 } from "./fixtures/google.ts";
@@ -58,8 +68,8 @@ export const deletedMessageId = "19a0f00df00df00d";
 export const spoofedMessageId = "19a0ffffffffffff";
 
 export const fakeGoogle = () => {
-  /** The attachment IDs each message's reads gave out. */
-  const attachmentIds = new Set<string>();
+  /** The attachment IDs each message's reads gave out, and their content. */
+  const attachments = new Map<string, { size: number; data: string }>();
 
   const routes: ProviderRoute<Part>[] = [
     // A search for `deleted` finds more than asked for, one deleted since.
@@ -90,17 +100,29 @@ export const fakeGoogle = () => {
       }
       // Each read gives the attachments new IDs, as Gmail's do.
       const attachmentId = `ANGjdJ_${crypto.randomUUID().replaceAll("-", "")}`;
-      attachmentIds.add(`${id}/${attachmentId}`);
-      return json(messageFull(mailbox, numberOf(id), attachmentId));
+      attachments.set(`${id}/${attachmentId}`, attachmentBody);
+      attachments.set(`${id}/${attachmentId}text`, bodyAttachment(plainBody));
+      attachments.set(`${id}/${attachmentId}html`, bodyAttachment(htmlBody));
+      const n = numberOf(id);
+      if (n === detachedBody.understated) {
+        attachments.set(`${id}/${attachmentId}huge`, overLimitAttachment);
+      }
+      return json(
+        Object.values(detachedBody).some((each) => each === n)
+          ? detachedMessageFull(mailbox, n, attachmentId)
+          : messageFull(mailbox, n, attachmentId)
+      );
     }),
     route(
       gmailHost,
       "GET",
       `${users}/messages/(?<message>[^/]+)/attachments/(?<id>[^/]+)`,
-      ({ message, id }) =>
-        attachmentIds.has(`${message}/${id}`)
-          ? json(attachmentBody)
-          : json(googleError(400, "INVALID_ARGUMENT", "invalidArgument"), 400)
+      ({ message, id }) => {
+        const found = attachments.get(`${message}/${id}`);
+        return found === undefined
+          ? json(googleError(400, "INVALID_ARGUMENT", "invalidArgument"), 400)
+          : json(found);
+      }
     ),
     route(gmailHost, "GET", `${users}/labels`, () => json(labels)),
     route(
@@ -138,12 +160,19 @@ export const fakeGoogle = () => {
       apisHost,
       "GET",
       `${calendars}/events/(?<id>[^/]+)`,
-      ({ calendar, id }) =>
-        json(
+      ({ calendar, id }) => {
+        if (id === cancelledOccurrenceId(calendar)) {
+          return json(cancelledOccurrence(calendar));
+        }
+        if (id === incompleteEventId(calendar)) {
+          return json(incompleteEvent(calendar));
+        }
+        return json(
           id.endsWith("3")
             ? allDayEvent(calendar)
             : eventDetail(calendar, numberOf(id))
-        )
+        );
+      }
     ),
     route(apisHost, "GET", String.raw`^/drive/v3/files`, ({ query }) =>
       json(
@@ -182,7 +211,7 @@ export const fakeGoogle = () => {
   ];
 
   beforeEach(() => {
-    attachmentIds.clear();
+    attachments.clear();
   });
   const { sent, writesDone, fail } = fakeProvider({
     hosts: [gmailHost, apisHost],

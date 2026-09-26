@@ -1,4 +1,4 @@
-import { fromBase64, toBase64 } from "@grasp-os/connector-kit/content";
+import { toBase64 } from "@grasp-os/connector-kit/content";
 import { z } from "zod";
 
 // Mail as Gmail sends and stores it: RFC 5322 messages. Gmail takes a new
@@ -193,9 +193,8 @@ const charsetOf = (part: Part): string => {
   );
 };
 
-/** Text of a part's inline data, in its charset (UTF-8 if unknown). */
-const textOf = (part: Part, data: string): string => {
-  const bytes = fromBase64(data);
+/** Text of a part's bytes, in its charset (UTF-8 if unknown). */
+export const textOf = (part: Part, bytes: Uint8Array): string => {
   try {
     return new TextDecoder(charsetOf(part)).decode(bytes);
   } catch {
@@ -204,25 +203,24 @@ const textOf = (part: Part, data: string): string => {
 };
 
 /**
- * A message's body: its text part, or its HTML part, whichever `prefer`
- * names if it has both; the other if it has only one; `null` if neither
- * (or the body is too large for Gmail to send inline).
+ * A message's body part: its text part, or its HTML part, whichever
+ * `prefer` names if it has both; the other if it has only one; `null` if
+ * neither. Its data is inline, or, for a part too large for Gmail to send
+ * inline, behind its `attachmentId`.
  */
-export const bodyOf = (
+export const bodyPartOf = (
   payload: Part | undefined,
   prefer: "text" | "html"
-): { contentType: "text" | "html"; content: string } | null => {
+): { contentType: "text" | "html"; part: Part } | null => {
   const bodies = partsOf(payload).filter(
     ({ filename, body }) =>
-      (filename === undefined || filename === "") && body?.data !== undefined
+      (filename === undefined || filename === "") &&
+      (body?.data !== undefined || body?.attachmentId !== undefined)
   );
   const find = (type: "text" | "html") => {
     const mimeType = type === "html" ? "text/html" : "text/plain";
     const part = bodies.find((each) => each.mimeType === mimeType);
-    const data = part?.body?.data;
-    return part === undefined || data === undefined
-      ? null
-      : { contentType: type, content: textOf(part, data) };
+    return part === undefined ? null : { contentType: type, part };
   };
   return find(prefer) ?? find(prefer === "text" ? "html" : "text");
 };

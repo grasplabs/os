@@ -8,6 +8,8 @@ import { accessTokenFor } from "../src/tokens.ts";
 import { connectAccount, outcome, ownAccount, someone } from "./connect.ts";
 import {
   archiveFolderId,
+  attachmentsSkipToken,
+  endlessAttachments,
   foreignFolderId,
   bigAttachmentId,
   childrenSkipToken,
@@ -296,14 +298,28 @@ describe("the Microsoft 365 connector's mail tools", () => {
             },
             { id: itemAttachmentId, kind: "item" },
           ],
+          moreAttachments: false,
         },
       },
       provenance: [messageId(invoices, 1)],
     });
-    expect(requests()).toMatchObject([
-      { headers: { prefer: 'outlook.body-content-type="text"' } },
-      // Attachments are listed without their content.
-      { query: { $select: "id,name,contentType,size,isInline" } },
+    // Attachments are listed without their content, every page on the
+    // tool's own route: Graph's next link, naming the user and message its
+    // own way, is never followed.
+    const attachmentsPath = `${mailboxPath}/messages/${encodeURIComponent(messageId(invoices, 1))}/attachments`;
+    const [got, first, second, ...rest] = requests();
+    expect({ got, first, second, rest }).toMatchObject({
+      got: { headers: { prefer: 'outlook.body-content-type="text"' } },
+      first: { path: attachmentsPath },
+      second: { path: attachmentsPath },
+      rest: [],
+    });
+    expect([first?.query, second?.query]).toStrictEqual([
+      { $select: "id,name,contentType,size,isInline" },
+      {
+        $select: "id,name,contentType,size,isInline",
+        $skiptoken: attachmentsSkipToken,
+      },
     ]);
     await expect(
       toolError(
@@ -318,6 +334,21 @@ describe("the Microsoft 365 connector's mail tools", () => {
         message: "Microsoft 365 has no such item (ErrorItemNotFound)",
       },
     });
+  });
+
+  it("list a message's attachments up to a bound, and say there are more", async () => {
+    const connection = await connected();
+    await expect(
+      outputOf(
+        call(connection, "mail.get", {
+          mailbox: invoices,
+          message: messageId(invoices, endlessAttachments),
+        })
+      )
+    ).resolves.toMatchObject({ message: { moreAttachments: true } });
+    expect(
+      graphPaths().filter((path) => path.endsWith("/attachments"))
+    ).toHaveLength(10);
   });
 
   it("read a file attachment as base64, and only a file", async () => {

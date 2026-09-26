@@ -7,7 +7,9 @@ import { nativeConnector } from "../src/connectors.ts";
 import { accessTokenFor } from "../src/tokens.ts";
 import { connectAccount, outcome, ownAccount, someone } from "./connect.ts";
 import {
+  cancelledOccurrenceId,
   ceo,
+  detachedBody,
   docText,
   draftId,
   eventId,
@@ -17,6 +19,7 @@ import {
   financeDrive,
   holidayCalendar,
   htmlBody,
+  incompleteEventId,
   invoices,
   messageId,
   messagePageToken,
@@ -434,6 +437,88 @@ describe("the Google Workspace connector's Gmail tools", () => {
     });
   });
 
+  it("get a message's body that Gmail doesn't send inline by its attachment ID", async () => {
+    const connection = await connected();
+    const id = messageId(invoices, detachedBody.readable);
+    const input = { mailbox: invoices, message: id };
+    await expect(
+      outputOf(call(connection, "mail.get", input))
+    ).resolves.toMatchObject({
+      message: {
+        body: { contentType: "text", content: plainBody },
+        attachments: [{ id: "9", name: "Invoice-2026-0041.pdf" }],
+      },
+    });
+    await expect(
+      outputOf(call(connection, "mail.get", { ...input, bodyType: "html" }))
+    ).resolves.toMatchObject({
+      message: { body: { contentType: "html", content: htmlBody } },
+    });
+    // Each read fetches only the body asked for, on the attachments route.
+    const messagePath = `${mailboxPath}/messages/${id}`;
+    expect(
+      paths().map((path) =>
+        path.startsWith(`${messagePath}/attachments/`)
+          ? `attachment ${path.slice(-4)}`
+          : path
+      )
+    ).toStrictEqual([
+      messagePath,
+      "attachment text",
+      messagePath,
+      "attachment html",
+    ]);
+  });
+
+  it("read no body past the limit", async () => {
+    const connection = await connected();
+    await expect(
+      toolError(
+        call(connection, "mail.get", {
+          mailbox: invoices,
+          message: messageId(invoices, detachedBody.tooLarge),
+        })
+      )
+    ).resolves.toMatchObject({ error: { code: "too_large" } });
+    expect(paths()).toStrictEqual([
+      `${mailboxPath}/messages/${messageId(invoices, detachedBody.tooLarge)}`,
+    ]);
+  });
+
+  it("read no body or attachment past the limit that Gmail said was small", async () => {
+    const connection = await connected();
+    const message = messageId(invoices, detachedBody.understated);
+    const refused = await Promise.all([
+      toolError(call(connection, "mail.get", { mailbox: invoices, message })),
+      toolError(
+        call(connection, "mail.readAttachment", {
+          mailbox: invoices,
+          message,
+          attachment: "9",
+        })
+      ),
+    ]);
+    expect(refused).toMatchObject([
+      { error: { code: "too_large" } },
+      { error: { code: "too_large" } },
+    ]);
+  });
+
+  it("get a message with no body part as one without a body", async () => {
+    const connection = await connected();
+    await expect(
+      outputOf(
+        call(connection, "mail.get", {
+          mailbox: invoices,
+          message: messageId(invoices, detachedBody.none),
+        })
+      )
+    ).resolves.toMatchObject({
+      message: { body: null, attachments: [{ id: "9" }] },
+    });
+    expect(paths()).toHaveLength(1);
+  });
+
   it("read an attachment by its part, with the ID Gmail gives it on that read", async () => {
     const connection = await connected();
     const input = {
@@ -785,6 +870,36 @@ describe("the Google Workspace connector's Calendar tools", () => {
     expect(paths()[0]).toBe(
       `${calendarPath}/events/${eventId(teamCalendar, 1)}`
     );
+  });
+
+  it("get a cancelled occurrence without a start or end, and no other event", async () => {
+    const connection = await connected();
+    // A cancelled occurrence has only the start it had, and no end.
+    await expect(
+      outputOf(
+        call(connection, "calendar.get", {
+          calendar: teamCalendar,
+          event: cancelledOccurrenceId(teamCalendar),
+        })
+      )
+    ).resolves.toMatchObject({
+      event: {
+        start: "2026-10-06T09:00:00Z",
+        end: "",
+        isAllDay: false,
+        isCancelled: true,
+        recurringEventId: eventId(teamCalendar, 1),
+        attendees: [],
+      },
+    });
+    await expect(
+      outcome(
+        call(connection, "calendar.get", {
+          calendar: teamCalendar,
+          event: incompleteEventId(teamCalendar),
+        })
+      )
+    ).resolves.toBe("connect.action_failed");
   });
 });
 
