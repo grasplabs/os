@@ -1,5 +1,6 @@
 import {
   auditEventMaxBytes,
+  auditProvenanceMaxItems,
   auditEventSchema,
   createAuditEvent,
   isAuditEventTooLarge,
@@ -334,27 +335,39 @@ export class AuditLog extends DurableObject<Env> {
   /**
    * Appends events recovered from the audit queue's dead letter queue, as
    * `append` does, then `audit.gap`, recorded by the platform: how many it
-   * appended late, with their IDs as its provenance, and how many dead
-   * letters could never be appended (`lost`). All in one transaction, so a
-   * recovered event never goes in without its gap. Records nothing when it
-   * appended nothing and nothing was lost: an event the log already holds
-   * left no gap. A batch holds at most 100 events (the queue's largest),
-   * as many IDs as an event's provenance holds.
+   * appended late, with their IDs as its provenance, how many dead letters
+   * could never be appended (`lost`), and how many it skipped as conflicts
+   * (an ID the log, or the batch, already has with other content). All in
+   * one transaction, so a recovered event never goes in without its gap.
+   * Records nothing when it appended nothing and nothing was lost or in
+   * conflict: an event the log already holds left no gap. Takes at most
+   * 100 events (the queue's largest batch), as many IDs as an event's
+   * provenance holds.
    */
   async recover(
     batch: readonly AuditEvent[],
     lost: number
   ): Promise<AppendResult> {
-    return await this.#append(batch, (recovered) =>
-      recovered.length === 0 && lost === 0
+    if (!Number.isInteger(lost) || lost < 0) {
+      throw new RangeError(`Lost dead letters must be a count, not ${lost}`);
+    }
+    if (batch.length > auditProvenanceMaxItems) {
+      throw new RangeError(
+        `At most ${auditProvenanceMaxItems} dead letters at a time`
+      );
+    }
+    return await this.#append(batch, (recovered, conflicts) =>
+      recovered.length === 0 && lost === 0 && conflicts === 0
         ? undefined
         : prepare(
             createAuditEvent(
               {
                 actor: { type: "system" },
                 action: "audit.gap",
+                // The events the gap was made from, as provenance holds
+                // them: IDs, found by a search for any one of them.
                 provenance: [...recovered],
-                detail: { recovered: recovered.length, lost },
+                detail: { recovered: recovered.length, lost, conflicts },
               },
               "core"
             )
@@ -734,14 +747,20 @@ export class AuditLog extends DurableObject<Env> {
    */
   async #append(
     batch: readonly AuditEvent[],
-    after?: (appended: readonly string[]) => Incoming | undefined
+    after?: (
+      appended: readonly string[],
+      conflicts: number
+    ) => Incoming | undefined
   ): Promise<AppendResult> {
     const incoming = batch.map((event) => prepare(event));
     // Hashing is async, so another append could otherwise run between
     // reading the head and writing after it, and fork the chain.
     return await this.ctx.blockConcurrencyWhile(async () => {
       const { entries, conflicts } = await this.#link(incoming);
-      const next = after?.(entries.map(({ id }) => id));
+      const next = after?.(
+        entries.map(({ id }) => id),
+        conflicts
+      );
       const { entries: then } =
         next === undefined
           ? { entries: [] }
@@ -763,16 +782,18 @@ export class AuditLog extends DurableObject<Env> {
    * Links events onto the head, or after `tail` (entries linked but not
    * yet written), each one after the last, skipping IDs the log already
    * holds. Receipt times never go backwards: a clock behind the head's time
-   * is held at it. Call only while nothing else can append.
+   * is held at it (logged once, when linking onto the head). Call only
+   * while nothing else can append.
    */
   async #link(
     incoming: readonly Incoming[],
-    tail: ChainLink & { receivedAt: string } = this.#tail()
+    after?: ChainLink & { receivedAt: string }
   ): Promise<{ entries: (ChainEntry & { id: string })[]; conflicts: number }> {
+    const tail = after ?? this.#tail();
     const now = new Date().toISOString();
     const receivedAt = now > tail.receivedAt ? now : tail.receivedAt;
     const heldMs = Date.parse(tail.receivedAt) - Date.parse(now);
-    if (heldMs > clockHoldLoggedMs) {
+    if (after === undefined && heldMs > clockHoldLoggedMs) {
       log.warn("audit.clock_held", { heldMs, heldAt: tail.receivedAt });
     }
     // Every event this call has seen, by ID: stored ones and new ones.

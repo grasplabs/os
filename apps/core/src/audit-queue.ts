@@ -9,9 +9,18 @@ import type { AppendResult } from "./audit-log.ts";
 /** The audit queue's dead letter queue, as wrangler.jsonc names it. */
 export const auditDeadLetterQueue = "grasp-os-audit-dlq";
 
+/**
+ * The dead letter queue consumer's `max_retries` in wrangler.jsonc: a
+ * message is delivered once more than that, then dropped.
+ */
+const deadLetterMaxRetries = 100;
+
 /** First retry delay; doubles with each attempt. */
 const retryBaseSeconds = 10;
-/** Longest retry delay, so ten attempts span hours rather than days. */
+/**
+ * Longest retry delay: the audit queue's ten retries span hours, and the
+ * dead letter queue's hundred about two days.
+ */
 const retryMaxSeconds = 30 * 60;
 
 /** Retries a message later, backing off as its attempts add up. */
@@ -85,20 +94,25 @@ const refuseOversized = async (
  * event when it is one. Those the log can take are appended late, and an
  * `audit.gap` after them records how many and which; those it never can
  * (malformed, too large) are counted in the gap as lost, their content
- * kept out of the chain and the logs alike. Only once the gap is recorded
+ * kept out of the chain and the logs alike, and so are conflicts: events
+ * whose ID the log (or the batch) already has with other content. Only once the gap is recorded
  * is the batch acknowledged: while the log can't take it, it is retried,
- * so nothing leaves the dead letter queue unrecorded. A batch redelivered
- * after it was recorded counts its lost ones again, never none.
+ * so nothing leaves the dead letter queue unrecorded, until its last
+ * attempt: a message that fails then is dropped by the queue, and logged
+ * as `audit.dead_letter_dropped`. A batch redelivered after it was
+ * recorded counts its lost ones again, never none.
  */
 export const consumeDeadLetters = async (
   batch: MessageBatch,
   env: Env
 ): Promise<void> => {
   const recovered: AuditEvent[] = [];
+  const eventIds = new Map<Message, string | undefined>();
   let lost = 0;
   for (const message of batch.messages) {
     const parsed = auditEventSchema.safeParse(message.body);
     const event = parsed.success ? parsed.data : undefined;
+    eventIds.set(message, event?.id);
     log.error("audit.dead_lettered", {
       messageId: message.id,
       attempts: message.attempts,
@@ -121,6 +135,12 @@ export const consumeDeadLetters = async (
       ...errorFields(error),
     });
     for (const message of batch.messages) {
+      if (message.attempts > deadLetterMaxRetries) {
+        log.error("audit.dead_letter_dropped", {
+          messageId: message.id,
+          eventId: eventIds.get(message),
+        });
+      }
       retryLater(message);
     }
   }

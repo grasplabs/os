@@ -1,11 +1,13 @@
 import { auditLogger } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { auditEventTypeOf } from "@grasp-os/shared/audit-log";
+import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { auditLog } from "../src/audit-log.ts";
+import { auditDeadLetterQueue } from "../src/audit-queue.ts";
 import { audit } from "../src/audit.ts";
 import worker from "../src/index.ts";
 import {
@@ -19,7 +21,6 @@ import {
 // events they sent.
 
 const queueName = "grasp-os-audit";
-const deadLetterQueueName = "grasp-os-audit-dlq";
 
 const newEvent = (): AuditEvent => ({
   id: crypto.randomUUID(),
@@ -96,7 +97,7 @@ const deliver = async (...bodies: unknown[]): Promise<Outcome[]> =>
  * gave up on after its retries, or moved there as too large.
  */
 const deliverDeadLetters = async (...bodies: unknown[]): Promise<Outcome[]> =>
-  await deliverFrom(deadLetterQueueName, env, 1, ...bodies);
+  await deliverFrom(auditDeadLetterQueue, env, 1, ...bodies);
 
 /** One structured log line, as `log` writes it. */
 const logFieldsSchema = z.record(z.string(), z.unknown());
@@ -324,7 +325,7 @@ describe("audit dead letter queue consumer", () => {
         actor: { type: "system" },
         action: "audit.gap",
         provenance: [],
-        detail: { recovered: 0, lost: 3 },
+        detail: { recovered: 0, lost: 3, conflicts: 0 },
       })
     );
     expect(
@@ -352,6 +353,73 @@ describe("audit dead letter queue consumer", () => {
     expect(gap && auditEventTypeOf(gap)).toBe("action");
   });
 
+  it("counts a dead letter whose ID the log holds with other content as a conflict in the gap", async () => {
+    const held = newEvent();
+    await deliver(held);
+    const after = await logHead();
+    const changed = { ...held, action: "connection.action.forged" };
+
+    await expect(deliverDeadLetters(changed)).resolves.toStrictEqual(["acked"]);
+    const events = await eventsAfter(after);
+    // Skipped, never appended over the first: but not silently.
+    expect(events.filter(({ id }) => id === held.id)).toStrictEqual([]);
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        action: "audit.gap",
+        provenance: [],
+        detail: { recovered: 0, lost: 0, conflicts: 1 },
+      })
+    );
+  });
+
+  it("counts two dead letters with one ID and other content as one appended and one conflict", async () => {
+    const after = await logHead();
+    const first = newEvent();
+    const second = { ...first, action: "connection.action.forged" };
+
+    await expect(deliverDeadLetters(first, second)).resolves.toStrictEqual([
+      "acked",
+      "acked",
+    ]);
+    await expect(recordedFor(after, first.id)).resolves.toMatchObject([
+      first,
+      {
+        action: "audit.gap",
+        provenance: [first.id],
+        detail: { recovered: 1, lost: 0, conflicts: 1 },
+      },
+    ]);
+  });
+
+  it("logs a dead letter the queue drops after its last attempt", async () => {
+    const event = newEvent();
+    const unreachable = { ...env, DURABLE_OBJECT_JURISDICTION: undefined };
+    const droppedAt = async (attempts: number) => {
+      const errors = await errorsDuring(async () => {
+        await deliverFrom(auditDeadLetterQueue, unreachable, attempts, event);
+      });
+      return errors
+        .filter(({ event: name }) => name === "audit.dead_letter_dropped")
+        .map(({ eventId }) => eventId);
+    };
+    // A hundred retries: the 101st delivery is the last.
+    await expect(droppedAt(100)).resolves.toStrictEqual([]);
+    await expect(droppedAt(101)).resolves.toStrictEqual([event.id]);
+  });
+
+  it("refuses to recover a lost count that isn't one, or more than a batch", async () => {
+    await runInDurableObject(auditLog(env), async (instance) => {
+      await expect(instance.recover([], -1)).rejects.toThrow(RangeError);
+      await expect(instance.recover([], 0.5)).rejects.toThrow(RangeError);
+      await expect(
+        instance.recover(
+          Array.from({ length: 101 }, () => newEvent()),
+          0
+        )
+      ).rejects.toThrow(RangeError);
+    });
+  });
+
   it("keeps dead letters while the log can't take them, and records them once it can", async () => {
     const after = await logHead();
     const event = newEvent();
@@ -360,7 +428,7 @@ describe("audit dead letter queue consumer", () => {
 
     const errors = await errorsDuring(async () => {
       await expect(
-        deliverFrom(deadLetterQueueName, unreachable, 1, event, "not an event")
+        deliverFrom(auditDeadLetterQueue, unreachable, 1, event, "not an event")
       ).resolves.toStrictEqual([{ retryAfter: 10 }, { retryAfter: 10 }]);
     });
     expect(errors.map(({ event: name }) => name)).toContain(
