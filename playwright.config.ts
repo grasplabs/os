@@ -31,7 +31,13 @@ export default defineConfig({
       devVar("SIGN_IN", JSON.stringify(testSignIn)),
       devVar(
         "FEATURES",
-        JSON.stringify({ apps: true, screens: true, members: true })
+        JSON.stringify({
+          apps: true,
+          screens: true,
+          members: true,
+          workflows: true,
+          decisions: true,
+        })
       ),
     ].join(" "),
     port,

@@ -1,7 +1,7 @@
 // The engine adapter's entry point (`@grasp-os/sdk/engine`); workflow code never imports it.
 import type { RunId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
-import { z } from "zod";
+import type { z } from "zod";
 
 /** What a durable wait ends with: the event, or nothing before the timeout. */
 export type EngineEvent =
@@ -21,17 +21,31 @@ export interface ModelRequest {
   outputSchema: z.core.JSONSchema.JSONSchema;
 }
 
-/**
- * A decision is answered with an event carrying this payload. The runtime
- * checks that the person answering is allowed to before it sends the event.
- */
-export const decisionAnswerSchema = z.object({
-  approved: z.boolean(),
+/** An answer to a decision, as a test gives it (`@grasp-os/sdk/testing`). */
+export interface DecisionAnswer {
+  approved: boolean;
   /** The person who answered. */
-  by: z.string().min(1),
-  comment: z.string().optional(),
-});
-export type DecisionAnswer = z.infer<typeof decisionAnswerSchema>;
+  by: string;
+  /** Anything more they sent, e.g. `{ comment }`. */
+  payload?: Json;
+}
+
+/**
+ * How a decision stands when a wait for it ends: answered, by a person
+ * the runtime checked may answer it, or not (yet).
+ */
+export type EngineDecision =
+  | { answered: true; approved: boolean; by: string; payload: Json | null }
+  | { answered: false };
+
+/** A person a decision asks, and where they answer it. */
+export interface DecisionRecipient {
+  userId: string;
+  name: string;
+  email: string;
+  /** Leads them, once signed in, to the decision; theirs alone. */
+  link: string;
+}
 
 /** A method of a binding: it takes JSON and answers with it. */
 export type BindingMethod = (...args: Json[]) => Promise<unknown>;
@@ -93,8 +107,9 @@ export interface EngineStepOptions {
  * from the start at any time: every method that takes a step name must return
  * the recorded outcome when that name already completed in this run.
  *
- * The SDK reads `params` and calls `callModel`, `openDecision`, `getState`
- * and `setState` only inside `do`, so they need not be durable themselves.
+ * The SDK reads `params` and calls `callModel`, `openDecision`,
+ * `decisionRecipients`, `getState` and `setState` only inside `do`, so they
+ * need not be durable themselves.
  *
  * Engines may keep only a failed step's error name and message (Cloudflare
  * Workflows does); the SDK puts what it needs to recover into both.
@@ -134,18 +149,35 @@ export interface WorkflowEngine {
   /** Calls the model gateway and returns the model's JSON answer. */
   callModel: (request: ModelRequest) => Promise<unknown>;
   /**
-   * Records that `from` is asked to decide on `step` in this run. Returns
-   * where they answer, and the event type their answer arrives as.
+   * Opens a decision on `step` in this run, answered only by the people
+   * `from` names, for `timeout` milliseconds. Returns its ID and its
+   * deadline (milliseconds since the epoch), which the engine sets.
    *
    * Idempotent per run and step: the SDK calls it inside a step, which a
    * crash before the step is recorded runs again, so a second call for the
-   * same `step` returns what the first did and opens nothing new. (Closing a
-   * decision once it's answered or times out belongs to the decisions work.)
+   * same `step` returns what the first did and opens nothing new.
    */
   openDecision: (request: {
     step: string;
     from: string;
-  }) => Promise<{ link: string; eventType: string }>;
+    description: string;
+    timeout: number;
+  }) => Promise<{ decision: string; deadline: number }>;
+  /**
+   * The people an open decision asks now, each with a link of their own;
+   * nobody once it's answered. Called inside the step that asks them.
+   */
+  decisionRecipients: (decision: string) => Promise<DecisionRecipient[]>;
+  /**
+   * Durably waits up to `timeout` milliseconds (0: not at all) for an
+   * answer to a decision, and returns how it stands then. With `last`, a
+   * decision still unanswered is closed, so no answer counts after it. A
+   * replay returns what the wait returned.
+   */
+  waitForDecision: (
+    name: string,
+    options: { decision: string; timeout: number; last: boolean }
+  ) => Promise<EngineDecision>;
   /** Reads the workflow's key-value state, shared by all its runs. */
   getState: (key: string) => Promise<Json | undefined>;
   /**

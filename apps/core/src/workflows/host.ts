@@ -1,5 +1,7 @@
 import type { AuditActor } from "@grasp-os/shared/audit";
+import { decidersSchema } from "@grasp-os/shared/decisions";
 import { isExpectedError } from "@grasp-os/shared/errors";
+import { identifierSchema } from "@grasp-os/shared/ids";
 import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -24,6 +26,16 @@ import type { AppAnswer, AppCallerInput } from "../app.ts";
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
 import { forSandbox, requireStepKey, runStubCall } from "../bindings.ts";
 import type { ConnectionGrant } from "../bindings.ts";
+import {
+  decisionEventType,
+  decisionOutcome,
+  decisionRecipients,
+  openDecision,
+} from "../decisions/decisions.ts";
+import type {
+  DecisionOutcome,
+  DecisionRecipient,
+} from "../decisions/decisions.ts";
 import { appHost } from "../durable-objects.ts";
 import { models } from "../models.ts";
 import { requireActivePerson } from "../permissions.ts";
@@ -138,7 +150,21 @@ const modelRequestSchema = z.object({
     .refine((schema) => JSON.stringify(schema).length <= maxSchemaLength),
 });
 
-const decisionSchema = z.object({ step: stepNameSchema, from: z.string() });
+const decisionSchema = z.object({
+  step: stepNameSchema,
+  from: decidersSchema,
+  description: z.string().min(1),
+  timeout: milliseconds,
+});
+
+const decisionWaitSchema = z.object({
+  decision: identifierSchema,
+  timeout: z
+    .int()
+    .min(0)
+    .max(365 * 86_400_000),
+  last: z.boolean(),
+});
 
 /** A state key, as the SDK allows one: never with the `:` storage uses. */
 const stateKeySchema = z.string().regex(/^[A-Za-z][\w-]{0,63}$/u);
@@ -619,11 +645,16 @@ export class RunHost extends RpcTarget {
    * key or none (`requireStepKey`).
    */
   #stepKey(): string {
+    return stepIdempotencyKey(this.#run.runId, this.#requireStep().step);
+  }
+
+  /** The step whose function runs now; refuses a call outside a step. */
+  #requireStep(): { step: string } {
     const running = this.#running;
     if (running === undefined) {
       throw workflowErrors.create("workflow.outside_step");
     }
-    return stepIdempotencyKey(this.#run.runId, running.step);
+    return running;
   }
 
   /**
@@ -680,27 +711,85 @@ export class RunHost extends RpcTarget {
   }
 
   /**
-   * Where the person answers a decision, and the event their answer comes
-   * as. Answering, and who may, is the decisions' part; the same step
-   * always gets the same answer here, so opening it again opens nothing new.
+   * Opens this run's decision for a step, inside that step, and answers
+   * its ID and deadline; the same step gets the same decision again, so
+   * opening it again opens nothing new (src/decisions/).
    */
-  openDecision(request: unknown): Settled<{ link: string; eventType: string }> {
-    const parsed = decisionSchema.safeParse(request);
-    if (!parsed.success) {
-      return {
-        ok: false,
-        error: forIsolate(workflowErrors.create("workflow.invalid")),
-      };
-    }
-    const { step } = parsed.data;
-    const { runId } = this.#run;
-    return {
-      ok: true,
-      value: {
-        link: `/workflows/runs/${encodeURIComponent(runId)}/decisions/${encodeURIComponent(step)}`,
-        eventType: `decision:${step}`,
-      },
-    };
+  async openDecision(
+    request: unknown
+  ): Promise<Settled<{ decision: string; deadline: number }>> {
+    return await settle(async () => {
+      this.#requireStep();
+      const { step, from, description, timeout } = checked(
+        decisionSchema,
+        request
+      );
+      return await openDecision(this.#env, this.#run, {
+        step,
+        from,
+        description,
+        timeout,
+      });
+    });
+  }
+
+  /**
+   * The people one of this run's open decisions asks now, each with a
+   * link of their own, inside a step (the one that asks them).
+   */
+  async decisionRecipients(
+    decision: unknown
+  ): Promise<Settled<DecisionRecipient[]>> {
+    return await settle(async () => {
+      this.#requireStep();
+      return await decisionRecipients(
+        this.#env,
+        this.#run,
+        checked(identifierSchema, decision)
+      );
+    });
+  }
+
+  /**
+   * Waits up to `timeout` for an answer to one of this run's decisions,
+   * and answers how it stands then, read from the decision itself: the
+   * event that wakes the run carries nothing it takes. With `last`, a
+   * decision still open is closed, timed out, unless an answer lands
+   * first. An answer that came before the wait began is taken at once.
+   */
+  async waitForDecision(
+    name: unknown,
+    options: unknown
+  ): Promise<Settled<DecisionOutcome>> {
+    return await settle(async () => {
+      const step = checked(stepNameSchema, name);
+      const { decision, timeout, last } = checked(decisionWaitSchema, options);
+      const before = await decisionOutcome(
+        this.#env,
+        this.#run,
+        decision,
+        false
+      );
+      if (before.answered) {
+        return before;
+      }
+      if (timeout > 0) {
+        try {
+          await this.#engine(
+            async () =>
+              await this.#step.waitForEvent(step, {
+                type: decisionEventType(decision),
+                timeout,
+              })
+          );
+        } catch (error) {
+          if (!isTimeout(error)) {
+            throw error;
+          }
+        }
+      }
+      return await decisionOutcome(this.#env, this.#run, decision, last);
+    });
   }
 
   /** A value of the workflow's state, shared by all its runs. */

@@ -100,16 +100,19 @@ export const loadCoreStatus = async (): Promise<CoreStatus> => {
 
 /**
  * Starts signing in with the IdP `providerId`: core answers with the IdP's
- * address, and the IdP sends the person back to this page, signed in or with
- * `?error=<code>`.
+ * address, and the IdP sends the person back, signed in, to `returnTo` (a
+ * path of this site), or to the start page with `?error=<code>`.
  */
-export const signIn = async (providerId: string): Promise<void> => {
+export const signIn = async (
+  providerId: string,
+  returnTo = "/"
+): Promise<void> => {
   const response = await fetch("/api/auth/sign-in/sso", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
       providerId,
-      callbackURL: "/",
+      callbackURL: returnTo,
       errorCallbackURL: "/",
     }),
   });

@@ -16,7 +16,7 @@ const matched = { "match-po": { amount: 800_000 }, book: "ledger-42" };
 const extracted = (total: number) => ({ total, currency: "EUR" });
 const asked = {
   name: "review#ask",
-  input: { from: "finance-team", reminder: false },
+  input: { from: "team:finance", reminder: false },
 };
 const booked = (total: number) => ({
   name: "book",
@@ -54,7 +54,11 @@ export default workflowTests(
       input: invoice,
       mocks: { ...matched, extract: extracted(800_000) },
       decisions: {
-        review: { approved: false, by: "anna", comment: "Wrong PO" },
+        review: {
+          approved: false,
+          by: "anna",
+          payload: { comment: "Wrong PO" },
+        },
       },
       expect: { output: { status: "rejected" }, sideEffects: [asked] },
     },

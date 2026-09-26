@@ -19,6 +19,7 @@ import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { mailControlUrl, mailServerUrl } from "./mail-server.ts";
 import type { MailAnswer } from "./mail-server.ts";
+import { finished, liveStatus, resumed, stopped } from "./runs.ts";
 import { openRpc, signedInWithRole } from "./sign-in.ts";
 import { connectDb, testBinding } from "./test-env.ts";
 
@@ -103,7 +104,7 @@ export default workflow(
     input: z.object({ number: z.string(), purchaseOrder: z.string(), text: z.string() }),
     params: {
       threshold: money({ label: "Review invoices above", currency: "EUR", default: 500_000, sensitive: true }),
-      reviewer: person({ label: "Reviewer", default: "finance-team" }),
+      reviewer: person({ label: "Reviewer", default: "role:admin" }),
       extractionModel: model({ label: "Extraction model", default: "${extractionModel}", sensitive: true }),
     },
   },
@@ -131,8 +132,8 @@ export default workflow(
         ask: async () => {},
         timeout: "7 days",
       });
-      if (decision.outcome !== "approved") {
-        return { status: decision.outcome };
+      if (decision.timedOut || !decision.approved) {
+        return { status: decision.timedOut ? "timedOut" : "rejected" };
       }
     }
     const entry = await step.do(
@@ -168,7 +169,7 @@ export default workflowTests(invoice, [
     input,
     mocks: { "match-po": { amount: 800_000 }, extract: { total: 800_000, currency: "EUR" } },
     decisions: { review: { approved: false, by: "anna" } },
-    expect: { output: { status: "rejected" }, sideEffects: [{ name: "review#ask", input: { from: "finance-team", reminder: false } }] },
+    expect: { output: { status: "rejected" }, sideEffects: [{ name: "review#ask", input: { from: "role:admin", reminder: false } }] },
   },
 ]);
 `;
@@ -258,30 +259,6 @@ const onlyRun = async (
     return instance;
   });
 
-/**
- * Stops a run's execution, as a crash or a deploy does; resuming it runs
- * the workflow again from its start, loaded anew, finished steps replayed.
- * Workflows lets a run stop between steps, here while it waits.
- */
-const stopped = async (run: string): Promise<void> => {
-  const instance = await env.WORKFLOWS.get(run);
-  await vi.waitFor(
-    async () => {
-      await instance.pause();
-      await expect(instance.status()).resolves.toMatchObject({
-        status: "paused",
-      });
-    },
-    { timeout: 10_000, interval: 100 }
-  );
-};
-
-/** Resumes a run `stopped` stopped. */
-const resumed = async (run: string): Promise<void> => {
-  const instance = await env.WORKFLOWS.get(run);
-  await instance.resume();
-};
-
 /** Once the run's step `step` has completed, as the audit log has it. */
 const stepDone = async (run: string, step: string): Promise<void> => {
   await vi.waitFor(
@@ -298,31 +275,6 @@ const stepDone = async (run: string, step: string): Promise<void> => {
     },
     { timeout: 10_000, interval: 100 }
   );
-};
-
-/** Sends `event` until the run ends: it may not wait for it yet. */
-const finished = async (
-  run: string,
-  event?: { type: string; payload: unknown }
-): Promise<void> => {
-  const instance = await env.WORKFLOWS.get(run);
-  await vi.waitFor(
-    async () => {
-      if (event) {
-        await instance.sendEvent(event);
-      }
-      const { status } = await instance.status();
-      expect(["complete", "errored", "terminated"]).toContain(status);
-    },
-    { timeout: 20_000, interval: 200 }
-  );
-};
-
-/** Where the engine has a run now. */
-const liveStatus = async (run: string): Promise<string> => {
-  const instance = await env.WORKFLOWS.get(run);
-  const { status } = await instance.status();
-  return status;
 };
 
 /** Where core's record has a run now. */
@@ -474,6 +426,7 @@ ${after}
 describe("workflow runs", { timeout: 60_000 }, () => {
   it("run the sample invoice workflow end to end, and audit it", async () => {
     const builder = await personApi("builder");
+    const reviewer = await personApi("admin");
     const app = await appWith(builder, {
       "workflows/invoice-approval.ts": invoiceWorkflow,
       "workflows/invoice-approval.workflow-tests.ts": invoiceTests,
@@ -484,10 +437,6 @@ describe("workflow runs", { timeout: 60_000 }, () => {
         { name: "extract" },
         { total: 800_000, currency: "EUR" }
       );
-      await modifier.mockEvent({
-        type: "decision:review",
-        payload: { approved: true, by: "anna" },
-      });
     });
     const invoice = {
       number: "INV-7",
@@ -500,6 +449,19 @@ describe("workflow runs", { timeout: 60_000 }, () => {
       invoice
     );
     const instance = await onlyRun(introspector);
+    // An admin, as the reviewer parameter says, approves.
+    const decision = await vi.waitFor(async () => {
+      const opened = await env.DB.prepare(
+        "SELECT id FROM workflow_decisions WHERE run_id = ?"
+      )
+        .bind(run.id)
+        .first<{ id: string }>();
+      if (!opened) {
+        throw new Error("No decision yet");
+      }
+      return opened.id;
+    });
+    await reviewer.api.decisions.answer(decision, { approved: true });
     await instance.waitForStatus("complete");
     const audited = await vi.waitFor(async () => {
       const events = await allEvents();

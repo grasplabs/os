@@ -1,0 +1,740 @@
+import { toBase64Url, fromBase64Url } from "@grasp-os/shared/encoding";
+import { appIdSchema } from "@grasp-os/shared/ids";
+import type { Role } from "@grasp-os/shared/roles";
+import { env } from "cloudflare:workers";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
+
+import { callApp } from "../src/app.ts";
+import { signDecisionLink } from "../src/decisions/links.ts";
+import { release } from "./apps.ts";
+import { allEvents } from "./audit-events.ts";
+import { mockIdp } from "./idp.ts";
+import { finished, resumed, stopped } from "./runs.ts";
+import { callAuth, outcome, signedInApi, unique } from "./sign-in.ts";
+
+// `step.decision`, from its threat model (R8, WF1 to WF4): a run waits for
+// a person's answer, which only the people the decision is from can give,
+// signed in, as they are when they answer. A decision link only leads them
+// there. Each case below is a way it could go wrong, most of them on
+// purpose: someone else answering, with or without a link, a link
+// forwarded, forged, reused or out of date, two answers, a late one,
+// people who changed since they were asked, and workflow code or anyone
+// with the Workflows API trying to answer in their place.
+
+const idp = mockIdp();
+
+type Person = Awaited<ReturnType<typeof signedInApi>>;
+
+const personApi = async (role: Role): Promise<Person> =>
+  await signedInApi(idp, role);
+
+/**
+ * The App's server: it keeps whom each ask went to, with their links, as
+ * a workflow that mails them would.
+ */
+const server = `import { DurableObject } from "cloudflare:workers";
+
+export class App extends DurableObject {
+  #table() {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS asks (n INTEGER PRIMARY KEY AUTOINCREMENT, body TEXT NOT NULL)");
+  }
+
+  remember(_caller, recipients, reminder) {
+    this.#table();
+    this.ctx.storage.sql.exec("INSERT INTO asks (body) VALUES (?)", JSON.stringify({ recipients, reminder }));
+  }
+
+  asks(_caller) {
+    this.#table();
+    return this.ctx.storage.sql.exec("SELECT body FROM asks ORDER BY n").toArray().map((row) => JSON.parse(row.body));
+  }
+}
+`;
+
+/** A workflow that waits for one decision and returns how it ended. */
+const approval = `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "approval",
+  {
+    params: {},
+    input: z.object({ from: z.string(), timeout: z.number(), remindAfter: z.number().optional() }),
+  },
+  async (step, { input, env }) =>
+    await step.decision("review", {
+      description: "Approve the invoice",
+      from: input.from,
+      ask: async ({ recipients, reminder }) => {
+        await env.APP.call("remember", recipients, reminder);
+      },
+      timeout: input.timeout,
+      ...(input.remindAfter === undefined ? {} : { remindAfter: input.remindAfter }),
+    })
+);
+`;
+
+const approvalTests = `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import approval from "./approval.ts";
+
+export default workflowTests(approval, [
+  {
+    name: "ends with the answer",
+    input: { from: "role:admin", timeout: 1000 },
+    decisions: { review: { approved: true, by: "anna" } },
+    expect: { output: { timedOut: false, approved: true, by: "anna", payload: null } },
+  },
+]);
+`;
+
+const week = 7 * 86_400_000;
+
+/** A new App with the approval workflow, released by `builder`. */
+const approvalApp = async (builder: Person): Promise<string> => {
+  const { id } = await builder.api.apps.create({ name: "Approvals" });
+  await release(builder, id, {
+    "app/server.ts": server,
+    "workflows/approval.ts": approval,
+    "workflows/approval.workflow-tests.ts": approvalTests,
+  });
+  return id;
+};
+
+const askSchema = z.array(
+  z.object({
+    recipients: z.array(
+      z.object({
+        userId: z.string(),
+        name: z.string(),
+        email: z.string(),
+        link: z.url(),
+      })
+    ),
+    reminder: z.boolean(),
+  })
+);
+type Ask = z.infer<typeof askSchema>[number];
+
+/** The asks the App's server kept, once there are `count` of them. */
+const asksOf = async (app: string, count = 1): Promise<Ask[]> =>
+  await vi.waitFor(
+    async () => {
+      const asks = askSchema.parse(
+        await callApp(
+          env,
+          appIdSchema.parse(app),
+          { userId: "test", mode: "interactive" },
+          "asks",
+          []
+        )
+      );
+      if (asks.length < count) {
+        throw new Error(`${asks.length} of ${count} asks so far`);
+      }
+      return asks;
+    },
+    { timeout: 20_000, interval: 100 }
+  );
+
+/** A decision link's decision and token, as its page reads them. */
+const readLink = (link: string): { decision: string; token: string } => {
+  const url = new URL(link);
+  const decision = decodeURIComponent(url.pathname.split("/").at(-1) ?? "");
+  return { decision, token: url.searchParams.get("link") ?? "" };
+};
+
+/** The link the ask sent to `userId`. */
+const linkOf = (ask: Ask | undefined, userId: string) => {
+  const recipient = ask?.recipients.find((person) => person.userId === userId);
+  if (!recipient) {
+    throw new Error(`The ask went to ${JSON.stringify(ask?.recipients)}`);
+  }
+  return readLink(recipient.link);
+};
+
+/** Starts the approval workflow and waits until it has asked. */
+const asking = async (
+  builder: Person,
+  input: { from: string; timeout: number; remindAfter?: number }
+) => {
+  const app = await approvalApp(builder);
+  const run = await builder.api.workflows.start(app, "approval", input);
+  const [ask] = await asksOf(app);
+  if (!ask) {
+    throw new Error("No ask");
+  }
+  const decision = await vi.waitFor(async () => {
+    const row = await env.DB.prepare(
+      "SELECT id FROM workflow_decisions WHERE run_id = ?"
+    )
+      .bind(run.id)
+      .first<{ id: string }>();
+    if (!row) {
+      throw new Error("No decision yet");
+    }
+    return row.id;
+  });
+  return { app, run, ask, decision };
+};
+
+/** What the run returned, once it has ended. */
+const outputOf = async (builder: Person, run: string): Promise<unknown> => {
+  await finished(run);
+  const { output } = await builder.api.workflows.status(run);
+  return output;
+};
+
+const joinTeam = async (
+  admin: Person,
+  teamId: string,
+  person: Person
+): Promise<void> => {
+  const response = await callAuth(
+    "/organization/add-team-member",
+    admin.session,
+    { teamId, userId: person.userId }
+  );
+  expect(response.ok).toBeTruthy();
+};
+
+const leaveTeam = async (
+  admin: Person,
+  teamId: string,
+  person: Person
+): Promise<void> => {
+  const response = await callAuth(
+    "/organization/remove-team-member",
+    admin.session,
+    { teamId, userId: person.userId }
+  );
+  expect(response.ok).toBeTruthy();
+};
+
+/** A team with `people` in it, made by `admin`. */
+const teamOf = async (admin: Person, people: Person[]): Promise<string> => {
+  const created = await callAuth("/organization/create-team", admin.session, {
+    name: `Team ${unique()}`,
+  });
+  const { id } = z.object({ id: z.string() }).parse(await created.json());
+  for (const person of people) {
+    // oxlint-disable-next-line no-await-in-loop -- one member at a time
+    await joinTeam(admin, id, person);
+  }
+  return id;
+};
+
+/** The audit events about `decision`, in log order. */
+const eventsOf = async (decision: string) => {
+  const events = await allEvents();
+  return events.filter(({ target }) => target?.id === decision);
+};
+
+describe("decisions", { timeout: 60_000 }, () => {
+  it("wait durably across a restart and go on with the real answer, audited under the person who decided", async () => {
+    const builder = await personApi("builder");
+    const decider = await personApi("user");
+    const { run, ask, decision } = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: week,
+    });
+    const { token } = linkOf(ask, decider.userId);
+    const seen = await decider.api.decisions.get(decision, token);
+    // The run is stopped while it waits, as a deploy or a crash does, and
+    // the answer comes in while it's down, days before the deadline.
+    await stopped(run.id);
+    const answered = await decider.api.decisions.answer(
+      decision,
+      { approved: true, payload: { comment: "Matches the PO" } },
+      token
+    );
+    await resumed(run.id);
+
+    expect({
+      recipients: ask.recipients.map(({ userId, email }) => ({
+        userId,
+        email,
+      })),
+      seen,
+      answered,
+      output: await outputOf(builder, run.id),
+    }).toMatchObject({
+      recipients: [{ userId: decider.userId, email: decider.person.email }],
+      seen: {
+        id: decision,
+        run: run.id,
+        workflow: "approval",
+        description: "Approve the invoice",
+        status: "open",
+      },
+      answered: {
+        status: "approved",
+        decided: { by: { userId: decider.userId }, via: "link" },
+      },
+      output: {
+        timedOut: false,
+        approved: true,
+        by: decider.userId,
+        payload: { comment: "Matches the PO" },
+      },
+    });
+    const audited = await vi.waitFor(async () => {
+      const events = await eventsOf(decision);
+      expect(events.map(({ action }) => action)).toContain(
+        "workflow.decision.approved"
+      );
+      return events;
+    });
+    const [opened, approved] = audited;
+    expect({
+      actions: audited.map(({ action }) => action),
+      openedBy: opened?.actor,
+      opened: opened?.detail,
+      approvedBy: approved?.actor,
+      approved: approved?.detail,
+    }).toMatchObject({
+      actions: ["workflow.decision.opened", "workflow.decision.approved"],
+      openedBy: { type: "workflow", runId: run.id },
+      opened: { run: run.id, step: "review", from: `person:${decider.userId}` },
+      approvedBy: { type: "person", userId: decider.userId },
+      approved: { run: run.id, step: "review", via: "link" },
+    });
+    // Who and how, never what they wrote (R16).
+    expect(Object.keys(approved?.detail ?? {}).toSorted()).toStrictEqual([
+      "app",
+      "run",
+      "step",
+      "version",
+      "via",
+      "workflow",
+    ]);
+  });
+
+  it("refuse anyone the decision isn't from, with the decider's link too", async () => {
+    const builder = await personApi("builder");
+    const decider = await personApi("user");
+    const outsider = await personApi("admin");
+    const { run, ask, decision } = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: week,
+    });
+    const { token } = linkOf(ask, decider.userId);
+
+    await expect(
+      Promise.all([
+        outcome(outsider.api.decisions.get(decision)),
+        outcome(outsider.api.decisions.get(decision, token)),
+        outcome(outsider.api.decisions.answer(decision, { approved: true })),
+        outcome(
+          outsider.api.decisions.answer(decision, { approved: true }, token)
+        ),
+        // The run's own starter is no decider either.
+        outcome(builder.api.decisions.answer(decision, { approved: true })),
+      ])
+    ).resolves.toStrictEqual(
+      Array.from({ length: 5 }, () => "decision.forbidden")
+    );
+    // Still open: the decider answers.
+    await decider.api.decisions.answer(decision, { approved: false });
+    await expect(outputOf(builder, run.id)).resolves.toMatchObject({
+      approved: false,
+      by: decider.userId,
+    });
+  });
+
+  it("refuse a link forwarded to someone else, even someone the decision is also from", async () => {
+    const admin = await personApi("admin");
+    const anna = await personApi("user");
+    const ben = await personApi("user");
+    const team = await teamOf(admin, [anna, ben]);
+    const { ask, decision } = await asking(admin, {
+      from: `team:${team}`,
+      timeout: week,
+    });
+    const annasLink = linkOf(ask, anna.userId).token;
+
+    expect({
+      recipients: ask.recipients.map(({ userId }) => userId).toSorted(),
+      bensWithAnnasLink: await outcome(
+        ben.api.decisions.answer(decision, { approved: true }, annasLink)
+      ),
+      bensGetWithAnnasLink: await outcome(
+        ben.api.decisions.get(decision, annasLink)
+      ),
+    }).toStrictEqual({
+      recipients: [anna.userId, ben.userId].toSorted(),
+      bensWithAnnasLink: "decision.link_invalid",
+      bensGetWithAnnasLink: "decision.link_invalid",
+    });
+  });
+
+  it("refuse a link that was tampered with, is out of date, belongs to another decision or isn't one", async () => {
+    const builder = await personApi("builder");
+    const decider = await personApi("user");
+    const first = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: week,
+    });
+    const other = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: week,
+    });
+    const { token } = linkOf(first.ask, decider.userId);
+    const [payload = "", mac = ""] = token.split(".");
+    const claims: unknown = JSON.parse(
+      new TextDecoder().decode(fromBase64Url(payload))
+    );
+    const reencoded = (changes: Record<string, unknown>): string =>
+      `${toBase64Url(
+        new TextEncoder().encode(
+          JSON.stringify({
+            ...z.record(z.string(), z.unknown()).parse(claims),
+            ...changes,
+          })
+        )
+      )}.${mac}`;
+    const flipped = `${payload}.${mac.startsWith("A") ? "B" : "A"}${mac.slice(1)}`;
+    // Made with core's own key, so only its date is wrong.
+    const expired = await signDecisionLink(
+      env,
+      first.decision,
+      decider.userId,
+      Date.now() - 1
+    );
+    const links = {
+      flipped,
+      longerDeadline: reencoded({ exp: Date.now() + 10 * week }),
+      otherPerson: reencoded({ p: builder.userId }),
+      expired,
+      otherDecision: linkOf(other.ask, decider.userId).token,
+      garbage: "not-a-link",
+      huge: `${"a".repeat(5000)}.${mac}`,
+    };
+    const results = Object.fromEntries(
+      await Promise.all(
+        Object.entries(links).map(
+          async ([name, link]): Promise<[string, string]> => [
+            name,
+            await outcome(
+              decider.api.decisions.answer(
+                first.decision,
+                { approved: true },
+                link
+              )
+            ),
+          ]
+        )
+      )
+    );
+
+    expect(results).toStrictEqual(
+      Object.fromEntries(
+        Object.keys(links).map((name) => [name, "decision.link_invalid"])
+      )
+    );
+    // The real link still works: nothing above used the decision up.
+    await expect(
+      outcome(
+        decider.api.decisions.answer(first.decision, { approved: true }, token)
+      )
+    ).resolves.toBe("ok");
+  });
+
+  it("take the first answer only, whether someone answers twice or two people at once", async () => {
+    const admin = await personApi("admin");
+    const anna = await personApi("user");
+    const ben = await personApi("user");
+    const team = await teamOf(admin, [anna, ben]);
+    const { run, ask, decision } = await asking(admin, {
+      from: `team:${team}`,
+      timeout: week,
+    });
+    const racing = await Promise.all([
+      outcome(
+        anna.api.decisions.answer(
+          decision,
+          { approved: true },
+          linkOf(ask, anna.userId).token
+        )
+      ),
+      outcome(ben.api.decisions.answer(decision, { approved: false })),
+    ]);
+    const winner = racing[0] === "ok" ? anna : ben;
+    const again = await Promise.all([
+      outcome(anna.api.decisions.answer(decision, { approved: true })),
+      outcome(ben.api.decisions.answer(decision, { approved: true })),
+      // The link, used once, answers nothing more.
+      outcome(
+        anna.api.decisions.answer(
+          decision,
+          { approved: false },
+          linkOf(ask, anna.userId).token
+        )
+      ),
+    ]);
+    const output = await outputOf(admin, run.id);
+    const answers = await vi.waitFor(async () => {
+      const events = await eventsOf(decision);
+      const decided = events.filter(({ action }) =>
+        ["workflow.decision.approved", "workflow.decision.rejected"].includes(
+          action
+        )
+      );
+      expect(decided).toHaveLength(1);
+      return decided;
+    });
+
+    expect({
+      racing: racing.toSorted(),
+      again,
+      output,
+      auditedBy: answers.map(({ actor }) => actor),
+    }).toStrictEqual({
+      racing: ["decision.closed", "ok"],
+      again: ["decision.closed", "decision.closed", "decision.closed"],
+      output: {
+        timedOut: false,
+        approved: winner === anna,
+        by: winner.userId,
+        payload: null,
+      },
+      auditedBy: [{ type: "person", userId: winner.userId }],
+    });
+  });
+
+  it("time out, and refuse an answer after the timeout", async () => {
+    const builder = await personApi("builder");
+    const decider = await personApi("user");
+    const { run, ask, decision } = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: 1500,
+    });
+    const output = await outputOf(builder, run.id);
+
+    expect({
+      output,
+      late: await outcome(
+        decider.api.decisions.answer(decision, { approved: true })
+      ),
+      // A link lasts until the decision's deadline, and no longer.
+      lateWithLink: await outcome(
+        decider.api.decisions.answer(
+          decision,
+          { approved: true },
+          linkOf(ask, decider.userId).token
+        )
+      ),
+      seen: await decider.api.decisions.get(decision),
+    }).toMatchObject({
+      output: { timedOut: true },
+      late: "decision.closed",
+      lateWithLink: "decision.link_invalid",
+      seen: { status: "timed_out" },
+    });
+    await vi.waitFor(async () => {
+      const events = await eventsOf(decision);
+      expect(
+        events.map(({ action, actor }) => [action, actor.type])
+      ).toContainEqual(["workflow.decision.timed_out", "workflow"]);
+    });
+  });
+
+  it("refuse an answer once the run is cancelled", async () => {
+    const builder = await personApi("builder");
+    const decider = await personApi("user");
+    const { run, decision } = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: week,
+    });
+    await builder.api.workflows.cancel(run.id);
+
+    await expect(
+      outcome(decider.api.decisions.answer(decision, { approved: true }))
+    ).resolves.toBe("decision.closed");
+  });
+
+  it("remind by asking again, with fresh links for who is in the team then", async () => {
+    const admin = await personApi("admin");
+    const anna = await personApi("user");
+    const ben = await personApi("user");
+    const team = await teamOf(admin, [anna]);
+    const { app, run } = await asking(admin, {
+      from: `team:${team}`,
+      timeout: 4000,
+      remindAfter: 1000,
+    });
+    // Ben joins the team before the reminder goes out.
+    await joinTeam(admin, team, ben);
+    const asks = await asksOf(app, 2);
+
+    expect({
+      asks: asks.map(({ recipients, reminder }) => ({
+        reminder,
+        to: recipients.map(({ userId }) => userId).toSorted(),
+      })),
+      output: await outputOf(admin, run.id),
+    }).toStrictEqual({
+      asks: [
+        { reminder: false, to: [anna.userId] },
+        { reminder: true, to: [anna.userId, ben.userId].toSorted() },
+      ],
+      output: { timedOut: true },
+    });
+  });
+
+  it("check who may answer as they are when they answer, not when they were asked", async () => {
+    const admin = await personApi("admin");
+    const leaves = await personApi("user");
+    const joins = await personApi("user");
+    const team = await teamOf(admin, [leaves]);
+    const inTeam = await asking(admin, { from: `team:${team}`, timeout: week });
+    const demoted = await personApi("builder");
+    const byRole = await asking(admin, { from: "role:builder", timeout: week });
+    const removed = await personApi("user");
+    const byPerson = await asking(admin, {
+      from: `person:${removed.userId}`,
+      timeout: week,
+    });
+
+    await leaveTeam(admin, team, leaves);
+    await joinTeam(admin, team, joins);
+    await admin.api.members.setRole(demoted.userId, "user");
+    await admin.api.members.remove(removed.userId);
+
+    expect({
+      leftTheTeam: await outcome(
+        leaves.api.decisions.answer(
+          inTeam.decision,
+          { approved: true },
+          linkOf(inTeam.ask, leaves.userId).token
+        )
+      ),
+      demoted: await outcome(
+        demoted.api.decisions.answer(
+          byRole.decision,
+          { approved: true },
+          linkOf(byRole.ask, demoted.userId).token
+        )
+      ),
+      removed: await outcome(
+        removed.api.decisions.answer(
+          byPerson.decision,
+          { approved: true },
+          linkOf(byPerson.ask, removed.userId).token
+        )
+      ),
+      // Asked before they joined, so they have no link, but may answer.
+      joinedTheTeam: await outcome(
+        joins.api.decisions.answer(inTeam.decision, { approved: true })
+      ),
+    }).toStrictEqual({
+      leftTheTeam: "decision.forbidden",
+      demoted: "decision.forbidden",
+      removed: "auth.unauthenticated",
+      joinedTheTeam: "ok",
+    });
+    await expect(outputOf(admin, inTeam.run.id)).resolves.toMatchObject({
+      by: joins.userId,
+    });
+  });
+
+  it("don't take an answer from workflow code or from an event sent to the run", async () => {
+    const builder = await personApi("builder");
+    const decider = await personApi("user");
+    // Workflow code can't wait for core's decision events.
+    const { id: rogue } = await builder.api.apps.create({ name: "Rogue" });
+    await release(builder, rogue, {
+      "workflows/rogue.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow("rogue", { params: {}, input: z.unknown() }, async (step) => {
+  try {
+    await step.waitFor("forge", { description: "Forge", type: "grasp-decision-x", timeout: 1000 });
+    return "waited";
+  } catch (error) {
+    return error.code;
+  }
+});
+`,
+      "workflows/rogue.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+import rogue from "./rogue.ts";
+export default workflowTests(rogue, [{ name: "runs", expect: {} }]);
+`,
+    });
+    const rogueRun = await builder.api.workflows.start(rogue, "rogue");
+    // Approving events sent straight to a waiting run, again and again
+    // until it ends, as anyone with the Workflows API could send them,
+    // wake it, but answer nothing.
+    const { run, decision } = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: 3000,
+    });
+    await finished(run.id, {
+      type: `grasp-decision-${decision}`,
+      payload: { answered: true, approved: true, by: builder.userId },
+    });
+
+    const { output } = await builder.api.workflows.status(run.id);
+
+    expect({
+      rogue: await outputOf(builder, rogueRun.id),
+      output,
+    }).toStrictEqual({
+      rogue: "workflow.invalid",
+      output: { timedOut: true },
+    });
+  });
+
+  it("refuse an answer that is too large or not of the right shape", async () => {
+    const builder = await personApi("builder");
+    const decider = await personApi("user");
+    const { run, decision } = await asking(builder, {
+      from: `person:${decider.userId}`,
+      timeout: week,
+    });
+    const answer = async (value: unknown, link?: unknown) =>
+      await outcome(
+        decider.api.decisions.answer(
+          decision,
+          // SAFETY: invalid on purpose: anything a client can send, as Cap'n
+          // Web checks no types, so core must.
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+          value as never,
+          // SAFETY: as above.
+          // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+          link as never
+        )
+      );
+
+    expect({
+      tooLarge: await answer({
+        approved: true,
+        payload: { note: "x".repeat(5000) },
+      }),
+      // Who answers comes from the session, never from the request.
+      naming: await answer({ approved: true, by: builder.userId }),
+      notYesOrNo: await answer({ approved: "yes" }),
+      missing: await answer({}),
+      notAnObject: await answer("approve"),
+      badLink: await answer({ approved: true }, 42),
+      unknownDecision: await outcome(
+        decider.api.decisions.answer(crypto.randomUUID(), { approved: true })
+      ),
+    }).toStrictEqual({
+      tooLarge: "decision.invalid",
+      naming: "decision.invalid",
+      notYesOrNo: "decision.invalid",
+      missing: "decision.invalid",
+      notAnObject: "decision.invalid",
+      badLink: "decision.link_invalid",
+      unknownDecision: "decision.not_found",
+    });
+    // None of it counted: the decision is still open.
+    await decider.api.decisions.answer(decision, {
+      approved: true,
+      payload: ["a", 1, null, { nested: true }],
+    });
+    await expect(outputOf(builder, run.id)).resolves.toMatchObject({
+      payload: ["a", 1, null, { nested: true }],
+    });
+  });
+});

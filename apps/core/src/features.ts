@@ -20,6 +20,7 @@ export type Feature =
   | "knowledge"
   | "connections"
   | "workflows"
+  | "decisions"
   | "screens"
   | "members"
   | "audit";

@@ -1,3 +1,4 @@
+import type { Json } from "@grasp-os/shared/json";
 import type { RunFailure } from "@grasp-os/shared/workflows";
 /**
  * Core D1 database: identity (Better Auth), permissions and the App registry.
@@ -373,6 +374,40 @@ export const workflowRuns = sqliteTable(
     actingFor: text("acting_for"),
   },
   (table) => [index("workflow_runs_app_idx").on(table.appId, table.createdAt)]
+);
+
+/**
+ * Every decision a workflow run waits for (`step.decision`, src/decisions/),
+ * one per run and step: who answers it (`deciders`: `person:<id>`,
+ * `role:<role>` or `team:<id>`), until when (`expires_at`), and how it
+ * ended. `status` moves from `open` once, in one conditional update, to an
+ * answer (`approved`, `rejected`) or `timed_out`, so the first answer is
+ * the only one. An answer keeps who gave it, when, through which channel
+ * (`link` or `rpc`) and the payload they sent (JSON), which the run gets.
+ */
+export const workflowDecisions = sqliteTable(
+  "workflow_decisions",
+  {
+    id: text().primaryKey(),
+    runId: text("run_id")
+      .notNull()
+      .references(() => workflowRuns.id),
+    step: text().notNull(),
+    deciders: text().notNull(),
+    description: text().notNull(),
+    status: text({
+      enum: ["open", "approved", "rejected", "timed_out"],
+    }).notNull(),
+    openedAt: timestamp("opened_at").notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+    decidedBy: text("decided_by"),
+    decidedAt: timestamp("decided_at"),
+    decidedVia: text("decided_via", { enum: ["link", "rpc"] }),
+    payload: text({ mode: "json" }).$type<Json>(),
+  },
+  (table) => [
+    uniqueIndex("workflow_decisions_run_step_idx").on(table.runId, table.step),
+  ]
 );
 
 /**

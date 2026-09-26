@@ -37,6 +37,7 @@ export const screenTests = [
   "test/screen*.test.ts",
   "test/app-sandbox.test.ts",
   "test/workflows.test.ts",
+  "test/decisions.test.ts",
 ];
 
 /** Core's Worker test setup, shared by both of core's test projects. */
@@ -69,6 +70,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               knowledge: true,
               connections: true,
               workflows: true,
+              decisions: true,
               screens: true,
               members: true,
               audit: true,

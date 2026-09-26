@@ -1,6 +1,7 @@
 import type { AppsApi } from "./apps.ts";
 import type { AuditApi } from "./audit-log.ts";
 import type { ConnectionsApi } from "./connect.ts";
+import type { DecisionsApi } from "./decisions.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
 import type { MembersApi } from "./members.ts";
 import type { PermissionsApi } from "./permissions.ts";
@@ -51,6 +52,11 @@ export interface SessionApi {
   readonly connections: ConnectionsApi;
   /** Runs of Apps' workflows. Admins and builders. */
   readonly workflows: WorkflowsApi;
+  /**
+   * Decisions workflow runs wait for, answered by the people they are
+   * from, whatever their role.
+   */
+  readonly decisions: DecisionsApi;
   /** Apps' screens: their builds, their servers and their error logs. */
   readonly screens: ScreensApi;
   /** The organization's members: offboarding. Admins only. */
