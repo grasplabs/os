@@ -91,7 +91,7 @@ const summarySchema = z.strictObject({
   subject: z.string().nullable(),
   /**
    * A time in UTC, or a date for an all-day event; empty when Google gave
-   * none (a cancelled occurrence's end).
+   * none (a cancelled occurrence has no end).
    */
   start: z.string(),
   end: z.string(),

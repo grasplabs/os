@@ -179,48 +179,70 @@ export const messageFull = (
 });
 
 /**
- * The number of the message whose body is too large for Gmail to send
- * inline, and whose headers carry RFC 2047 encoded words.
+ * The numbers of the messages whose bodies Gmail doesn't send inline: one
+ * whose text and HTML bodies are behind attachment IDs, one whose body is
+ * past the read limit, and one with no body part at all.
  */
-export const largeMessage = 4;
+export const detachedBody = { readable: 4, tooLarge: 5, none: 6 } as const;
+
+/** A body part whose data is behind `attachmentId`. */
+const detachedPart = (
+  partId: string,
+  mimeType: string,
+  attachmentId: string,
+  size: number
+) => ({
+  partId,
+  mimeType,
+  filename: "",
+  headers: [header("Content-Type", `${mimeType}; charset="UTF-8"`)],
+  body: { attachmentId, size },
+});
 
 /**
- * Message `largeMessage` of `mailbox`, as `format=full` returns it: its
- * text and HTML bodies as attachment IDs, without their data, and its
- * subject and names encoded as mail clients send them: `Q` and `B` words,
- * charsets in any case, a character split across two words, and a word in
- * a charset nobody knows.
+ * Message `n` of `detachedBody`, as `format=full` returns it. A body part's
+ * attachment ID is this read's, with `text` or `html` after it.
  */
-export const largeMessageFull = (mailbox: string, attachmentId: string) => ({
-  ...messageMetadata(mailbox, largeMessage),
-  payload: {
-    partId: "",
-    mimeType: "multipart/alternative",
-    filename: "",
-    headers: [
-      header(
-        "Subject",
-        "Re: =?UTF-8?Q?Factuur_2026-0044_=E2=80=94_=E2=82?= =?utf-8?Q?=AC_1.250,00?="
-      ),
-      header(
-        "From",
-        "=?ISO-8859-1?Q?Andr=E9_M=FCller?= <andre@northwind.example.org>"
-      ),
-      header("To", "=?x-unknown?B?SGk=?= <jane@example.com>"),
-      header(
-        "Reply-To",
-        "=?UTF-8?B?Tm9vcmR3aW5kIELDvGNoZXI=?= <accounts@northwind.example.org>"
-      ),
+export const detachedMessageFull = (
+  mailbox: string,
+  n: number,
+  attachmentId: string
+) => {
+  const bodies = {
+    [detachedBody.readable]: [
+      detachedPart("0", "text/plain", `${attachmentId}text`, plainBody.length),
+      detachedPart("1", "text/html", `${attachmentId}html`, htmlBody.length),
     ],
-    body: { size: 0 },
-    parts: ["text/plain", "text/html"].map((mimeType, index) => ({
-      partId: String(index),
-      mimeType,
+    [detachedBody.tooLarge]: [
+      detachedPart("0", "text/plain", `${attachmentId}text`, 5 * 1024 * 1024),
+    ],
+  }[n];
+  return {
+    ...messageMetadata(mailbox, n),
+    payload: {
+      partId: "",
+      mimeType: "multipart/mixed",
       filename: "",
-      headers: [header("Content-Type", `${mimeType}; charset="UTF-8"`)],
-      body: { attachmentId: `${attachmentId}${index}`, size: 3 * 1024 * 1024 },
-    })),
-  },
+      headers: headersOf(mailbox, n),
+      body: { size: 0 },
+      parts: [
+        ...(bodies ?? []),
+        {
+          partId: "9",
+          mimeType: "application/pdf",
+          filename: "Invoice-2026-0041.pdf",
+          headers: [header("Content-Disposition", "attachment")],
+          body: { attachmentId, size: invoicePdf.byteLength },
+        },
+      ],
+    },
+  };
+};
+
+/** A detached body part's content, as `GET .../attachments/{id}` returns it. */
+export const bodyAttachment = (content: string) => ({
+  size: content.length,
+  data: text(content),
 });
 
 /** An attachment's content, as `GET .../attachments/{id}` returns it. */
@@ -305,6 +327,10 @@ export const allDayEvent = (calendar: string) => ({
   end: { date: "2026-10-02" },
 });
 
+/** An occurrence's ID, as Google shapes them: its event's, and its start. */
+export const cancelledOccurrenceId = (calendar: string): string =>
+  `${eventId(calendar, 1)}_20261006T090000Z`;
+
 /**
  * A cancelled occurrence of a recurring event, as `GET /events/{id}`
  * returns one: no start or end, only the start it had.
@@ -312,7 +338,7 @@ export const allDayEvent = (calendar: string) => ({
 export const cancelledOccurrence = (calendar: string) => ({
   kind: "calendar#event",
   etag: '"3341784200000000"',
-  id: `${eventId(calendar, 1)}_20261006T090000Z`,
+  id: cancelledOccurrenceId(calendar),
   status: "cancelled",
   recurringEventId: eventId(calendar, 1),
   originalStartTime: { dateTime: "2026-10-06T09:00:00Z", timeZone: "UTC" },

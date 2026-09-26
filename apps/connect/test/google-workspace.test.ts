@@ -7,6 +7,7 @@ import { nativeConnector } from "../src/connectors.ts";
 import { accessTokenFor } from "../src/tokens.ts";
 import { connectAccount, outcome, ownAccount, someone } from "./connect.ts";
 import {
+  cancelledOccurrenceId,
   ceo,
   docText,
   draftId,
@@ -18,7 +19,7 @@ import {
   holidayCalendar,
   htmlBody,
   invoices,
-  largeMessage,
+  detachedBody,
   messageId,
   messagePageToken,
   otherDrive,
@@ -435,43 +436,67 @@ describe("the Google Workspace connector's Gmail tools", () => {
     });
   });
 
-  it("get a message whose body isn't inline with no body, and its encoded subject and names decoded", async () => {
+  it("get a message's body that Gmail doesn't send inline by its attachment ID", async () => {
     const connection = await connected();
-    const input = {
-      mailbox: invoices,
-      message: messageId(invoices, largeMessage),
-    };
-    const [text, html] = await Promise.all([
-      outputOf(call(connection, "mail.get", input)),
-      outputOf(call(connection, "mail.get", { ...input, bodyType: "html" })),
-    ]);
-    expect({ text, html }).toMatchObject({
-      text: {
-        message: {
-          subject: "Re: Factuur 2026-0044 — € 1.250,00",
-          from: {
-            name: "André Müller",
-            address: "andre@northwind.example.org",
-          },
-          // A word in a charset nobody knows is left as it came.
-          to: [{ name: "=?x-unknown?B?SGk=?=", address: "jane@example.com" }],
-          replyTo: [
-            {
-              name: "Noordwind Bücher",
-              address: "accounts@northwind.example.org",
-            },
-          ],
-          body: null,
-          attachments: [],
-        },
+    const id = messageId(invoices, detachedBody.readable);
+    const input = { mailbox: invoices, message: id };
+    await expect(
+      outputOf(call(connection, "mail.get", input))
+    ).resolves.toMatchObject({
+      message: {
+        body: { contentType: "text", content: plainBody },
+        attachments: [{ id: "9", name: "Invoice-2026-0041.pdf" }],
       },
-      html: { message: { body: null } },
     });
-    // The body parts' attachment IDs aren't followed.
-    expect(paths()).toStrictEqual([
-      `${mailboxPath}/messages/${messageId(invoices, largeMessage)}`,
-      `${mailboxPath}/messages/${messageId(invoices, largeMessage)}`,
+    await expect(
+      outputOf(call(connection, "mail.get", { ...input, bodyType: "html" }))
+    ).resolves.toMatchObject({
+      message: { body: { contentType: "html", content: htmlBody } },
+    });
+    // Each read fetches only the body asked for, on the attachments route.
+    const messagePath = `${mailboxPath}/messages/${id}`;
+    expect(
+      paths().map((path) =>
+        path.startsWith(`${messagePath}/attachments/`)
+          ? `attachment ${path.slice(-4)}`
+          : path
+      )
+    ).toStrictEqual([
+      messagePath,
+      "attachment text",
+      messagePath,
+      "attachment html",
     ]);
+  });
+
+  it("read no body past the limit", async () => {
+    const connection = await connected();
+    await expect(
+      toolError(
+        call(connection, "mail.get", {
+          mailbox: invoices,
+          message: messageId(invoices, detachedBody.tooLarge),
+        })
+      )
+    ).resolves.toMatchObject({ error: { code: "too_large" } });
+    expect(paths()).toStrictEqual([
+      `${mailboxPath}/messages/${messageId(invoices, detachedBody.tooLarge)}`,
+    ]);
+  });
+
+  it("get a message with no body part as one without a body", async () => {
+    const connection = await connected();
+    await expect(
+      outputOf(
+        call(connection, "mail.get", {
+          mailbox: invoices,
+          message: messageId(invoices, detachedBody.none),
+        })
+      )
+    ).resolves.toMatchObject({
+      message: { body: null, attachments: [{ id: "9" }] },
+    });
+    expect(paths()).toHaveLength(1);
   });
 
   it("read an attachment by its part, with the ID Gmail gives it on that read", async () => {
@@ -827,7 +852,7 @@ describe("the Google Workspace connector's Calendar tools", () => {
       outputOf(
         call(connection, "calendar.get", {
           calendar: teamCalendar,
-          event: `${eventId(teamCalendar, 1)}_20261006T090000Z`,
+          event: cancelledOccurrenceId(teamCalendar),
         })
       )
     ).resolves.toMatchObject({

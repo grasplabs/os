@@ -24,12 +24,13 @@ import {
 import {
   addressesOf,
   attachmentsOf,
-  bodyOf,
-  decodeHeader,
+  bodyPartOf,
   headerOf,
   partSchema,
   rawMessage,
+  textOf,
 } from "./mime.ts";
+import type { Part } from "./mime.ts";
 
 // Gmail, one mailbox per call, always as `/gmail/v1/users/{mailbox}` with
 // the mailbox's address, never `me`, so a call's capability binds every
@@ -99,14 +100,13 @@ const summaryOf = (
   const headers = message.payload?.headers;
   const labelIds = message.labelIds ?? [];
   const [from] = addressesOf(headerOf(headers, "From"));
-  const subject = headerOf(headers, "Subject");
   return {
     mailbox,
     id: message.id,
     threadId: message.threadId ?? null,
     labelIds,
     internetMessageId: headerOf(headers, "Message-ID") ?? null,
-    subject: subject === undefined ? null : decodeHeader(subject),
+    subject: headerOf(headers, "Subject") ?? null,
     bodyPreview: message.snippet ?? null,
     from: from ?? null,
     to: addressesOf(headerOf(headers, "To")),
@@ -258,10 +258,42 @@ const fullMessage = async (mailbox: string, id: string) =>
     gmailMessage
   );
 
+const gmailAttachment = z.object({
+  size: z.number().int().nonnegative().nullish(),
+  data: z.string(),
+});
+
+/**
+ * A part's data (base64url): inline, or fetched by the attachment ID this
+ * read of the message gave it, if it is readable.
+ */
+const partData = async (
+  mailbox: string,
+  message: string,
+  part: Part
+): Promise<string> => {
+  const { attachmentId, data, size } = part.body ?? {};
+  if (data !== undefined) {
+    return data;
+  }
+  checkReadable(size ?? 0);
+  const fetched = await googleJson(
+    googleUrl(
+      gmailHost,
+      mailboxPath(
+        mailbox,
+        `/messages/${segment(message)}/attachments/${segment(attachmentId ?? "")}`
+      )
+    ),
+    gmailAttachment
+  );
+  return fetched.data;
+};
+
 const getMessage = defineTool({
   name: "mail.get",
   description:
-    "Gets one message of a mailbox with its body, and its attachments' names, types and sizes (read one with mail.readAttachment). The body is null when the message has no text or HTML body Gmail sends inline.",
+    "Gets one message of a mailbox with its body, and its attachments' names, types and sizes (read one with mail.readAttachment). The body is null when the message has no text or HTML body.",
   input: z.strictObject({
     mailbox: mailboxSchema,
     message: idSchema,
@@ -280,15 +312,31 @@ const getMessage = defineTool({
   readOnly: true,
   resource: "mailbox",
   mask: ["message.subject", "message.bodyPreview", "message.body"],
-  routes: [get("/messages/{message}")],
+  routes: [
+    get("/messages/{message}"),
+    get("/messages/{message}/attachments/{attachment}"),
+  ],
   run: async ({ mailbox, message: id, bodyType }) => {
     const message = await fullMessage(mailbox, id);
     const headers = message.payload?.headers;
+    // A body too large for Gmail to send inline is fetched as its
+    // attachments are, up to the same limit.
+    const found = bodyPartOf(message.payload ?? undefined, bodyType ?? "text");
+    const body =
+      found === null
+        ? null
+        : {
+            contentType: found.contentType,
+            content: textOf(
+              found.part,
+              await partData(mailbox, id, found.part)
+            ),
+          };
     return {
       output: {
         message: {
           ...summaryOf(mailbox, message),
-          body: bodyOf(message.payload ?? undefined, bodyType ?? "text"),
+          body,
           bcc: addressesOf(headerOf(headers, "Bcc")),
           replyTo: addressesOf(headerOf(headers, "Reply-To")),
           attachments: attachmentsOf(message.payload ?? undefined).map(
@@ -299,11 +347,6 @@ const getMessage = defineTool({
       provenance: [message.id],
     };
   },
-});
-
-const gmailAttachment = z.object({
-  size: z.number().int().nonnegative().nullish(),
-  data: z.string(),
 });
 
 const readAttachment = defineTool({
@@ -349,21 +392,7 @@ const readAttachment = defineTool({
       });
     }
     checkReadable(found.size);
-    const { attachmentId, data: inline } = found.part.body ?? {};
-    const fetched =
-      inline === undefined
-        ? await googleJson(
-            googleUrl(
-              gmailHost,
-              mailboxPath(
-                mailbox,
-                `/messages/${segment(id)}/attachments/${segment(attachmentId ?? "")}`
-              )
-            ),
-            gmailAttachment
-          )
-        : undefined;
-    const bytes = fromBase64(inline ?? fetched?.data ?? "");
+    const bytes = fromBase64(await partData(mailbox, id, found.part));
     return {
       output: {
         mailbox,
