@@ -301,8 +301,9 @@ export interface DecisionRequest extends SideEffectContext {
   /**
    * The people who may answer now, each with the decision's link. It
    * leads to where they answer once signed in, and grants nothing: only
-   * the people the decision is from can answer. Empty when nobody fits
-   * `from`, or the decision was answered meanwhile.
+   * the people the decision is from can answer, never the run's starter
+   * unless `from` is exactly `person:<them>` (see `DecisionOptions.from`).
+   * Empty when nobody fits `from`, or the decision was answered meanwhile.
    */
   recipients: DecisionRecipient[];
   /** False the first time, true when reminding. */
@@ -313,9 +314,9 @@ export interface DecisionOptions extends StepOptions {
   /**
    * Who decides; only they can answer, signed in, as they are then: a
    * person (`person:<user ID>`), a role (`role:admin`) or a team
-   * (`team:<team ID>`). Whoever started the run is asked, and may answer,
-   * like anyone else `from` names; every answer is audited under who gave
-   * it.
+   * (`team:<team ID>`). Whoever started the run never answers it, and
+   * isn't asked, unless `from` names exactly them; a triggered run has no
+   * starter. Every answer is audited under who gave it.
    */
   from: Person;
   /** Tells them there is something to decide, e.g. by email. */

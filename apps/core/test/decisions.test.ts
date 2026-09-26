@@ -1,11 +1,21 @@
+import { maxDeciders } from "@grasp-os/shared/decisions";
+import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { startRun } from "../src/workflows/runs.ts";
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
-import { asking, asksOf, linkOf, outputOf, week } from "./decisions.ts";
+import {
+  approvalApp,
+  asking,
+  asksOf,
+  linkOf,
+  outputOf,
+  week,
+} from "./decisions.ts";
 import type { Ask, Person } from "./decisions.ts";
 import { mockIdp } from "./idp.ts";
 import { endLiveRuns, finished, resumed, stopped } from "./runs.ts";
@@ -25,11 +35,13 @@ import {
 
 // `step.decision`, from its threat model (R8, WF1 to WF4): a run waits for
 // a person's answer, which only the people the decision is from can give,
-// signed in, as they are when they answer. A decision link only leads them
-// there. Each case below is a way it could go wrong, most of them on
-// purpose: someone else answering, two answers, a late one, people who
-// changed since they were asked, and workflow code or anyone with the
-// Workflows API trying to answer in their place.
+// signed in, as they are when they answer, and never the run's starter,
+// unless `from` is exactly `person:<them>`. A decision link only leads
+// them there. Each case below is a way it could go wrong, most of them on
+// purpose: someone else answering, the starter answering their own
+// request, two answers, a late one, people who changed since they were
+// asked, and workflow code or anyone with the Workflows API trying to
+// answer in their place.
 
 const idp = mockIdp();
 
@@ -73,6 +85,25 @@ const teamOf = async (admin: Person, people: Person[]): Promise<string> => {
     await joinTeam(admin, id, person);
   }
   return id;
+};
+
+/** Adds `count` new members to `team`, as the IdP would bring them in. */
+const addMembers = async (team: string, count: number): Promise<void> => {
+  const now = Date.now();
+  const ids = Array.from({ length: count }, () => `member-${unique()}`);
+  await env.DB.batch(
+    ids.flatMap((id) => [
+      env.DB.prepare(
+        "INSERT INTO users (id, name, email, email_verified, created_at, updated_at) VALUES (?, 'Member', ?, 1, ?, ?)"
+      ).bind(id, `${id}@acme.test`, now, now),
+      env.DB.prepare(
+        "INSERT INTO members (id, organization_id, user_id, role, created_at) VALUES (?, 'organization', ?, 'user', ?)"
+      ).bind(`membership-${id}`, id, now),
+      env.DB.prepare(
+        "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
+      ).bind(`team-member-${id}`, team, id, now),
+    ])
+  );
 };
 
 /** Whom an ask went to, by user ID. */
@@ -329,37 +360,136 @@ describe("decisions", { timeout: 60_000 }, () => {
     ).resolves.toBe("decision.closed");
   });
 
-  it("let whoever started the run answer it when the decision is from them, audited under them", async () => {
+  it("don't let whoever started the run answer it, unless it names exactly them", async () => {
     const admin = await personApi("admin");
     const anna = await personApi("user");
+    const otherAdmin = await personApi("admin");
     const team = await teamOf(admin, [admin, anna]);
     const byTeam = await asking(admin, { from: `team:${team}`, timeout: week });
     const byRole = await asking(admin, { from: "role:admin", timeout: week });
+    const byThemselves = await asking(admin, {
+      from: `person:${admin.userId}`,
+      timeout: week,
+    });
 
     expect({
-      askedTeam: askedTo(byTeam.ask).toSorted(),
-      askedStarter: askedTo(byRole.ask).includes(admin.userId),
-      team: await outcome(
-        admin.api.decisions.answer(byTeam.decision, { approved: true })
-      ),
-      role: await outcome(
-        admin.api.decisions.answer(byRole.decision, { approved: false })
+      team: {
+        asked: askedTo(byTeam.ask),
+        starter: await outcome(
+          admin.api.decisions.answer(byTeam.decision, { approved: true })
+        ),
+      },
+      role: {
+        askedStarter: askedTo(byRole.ask).includes(admin.userId),
+        askedOther: askedTo(byRole.ask).includes(otherAdmin.userId),
+        starter: await outcome(
+          admin.api.decisions.answer(byRole.decision, { approved: true })
+        ),
+      },
+      themselves: {
+        asked: askedTo(byThemselves.ask),
+        starter: await outcome(
+          admin.api.decisions.answer(byThemselves.decision, { approved: true })
+        ),
+      },
+    }).toStrictEqual({
+      team: { asked: [anna.userId], starter: "decision.forbidden" },
+      role: {
+        askedStarter: false,
+        askedOther: true,
+        starter: "decision.forbidden",
+      },
+      themselves: { asked: [admin.userId], starter: "ok" },
+    });
+    // Anyone else the decision is from still answers, and the audit log
+    // has their answer, never one under the starter.
+    await otherAdmin.api.decisions.answer(byRole.decision, { approved: false });
+    await expect(outputOf(admin, byRole.run.id)).resolves.toMatchObject({
+      approved: false,
+      by: otherAdmin.userId,
+    });
+    const answers = await vi.waitFor(async () => {
+      const events = await eventsOf(byRole.decision);
+      const decided = events.filter(({ action }) =>
+        ["workflow.decision.approved", "workflow.decision.rejected"].includes(
+          action
+        )
+      );
+      expect(decided).toHaveLength(1);
+      return decided;
+    });
+    expect(
+      answers.map(({ action, actor }) => ({ action, actor }))
+    ).toStrictEqual([
+      {
+        action: "workflow.decision.rejected",
+        actor: { type: "person", userId: otherAdmin.userId },
+      },
+    ]);
+  });
+
+  it("hold back nobody on a run a trigger started, so its App's owner is asked and answers", async () => {
+    const owner = await personApi("builder");
+    const admin = await personApi("admin");
+    const anna = await personApi("user");
+    const team = await teamOf(admin, [owner, anna]);
+    const app = await approvalApp(owner);
+    // As a trigger starts it: no starter, and it acts for the App's owner.
+    const run = await startRun(env, {
+      app: appIdSchema.parse(app),
+      workflow: workflowIdSchema.parse("approval"),
+      input: { from: `team:${team}`, timeout: week },
+      startedBy: null,
+      actor: { type: "system" },
+    });
+    const [ask] = await asksOf(app);
+    if (!ask) {
+      throw new Error("No ask");
+    }
+    const { decision } = linkOf(ask, owner.userId);
+
+    expect({
+      asked: askedTo(ask).toSorted(),
+      answer: await outcome(
+        owner.api.decisions.answer(decision, { approved: true })
       ),
     }).toStrictEqual({
-      askedTeam: [admin.userId, anna.userId].toSorted(),
-      askedStarter: true,
-      team: "ok",
-      role: "ok",
+      asked: [owner.userId, anna.userId].toSorted(),
+      answer: "ok",
     });
-    await expect(outputOf(admin, byTeam.run.id)).resolves.toMatchObject({
+    await expect(outputOf(owner, run.id)).resolves.toMatchObject({
       approved: true,
-      by: admin.userId,
+      by: owner.userId,
     });
-    await vi.waitFor(async () => {
-      const events = await eventsOf(byRole.decision);
-      expect(events.map(({ action, actor }) => [action, actor])).toContainEqual(
-        ["workflow.decision.rejected", { type: "person", userId: admin.userId }]
-      );
+  });
+
+  it("count only who may answer toward the cap, so a starter in a team of 51 leaves it within it", async () => {
+    const admin = await personApi("admin");
+    const fits = await teamOf(admin, [admin]);
+    await addMembers(fits, maxDeciders);
+    const tooMany = await teamOf(admin, [admin]);
+    await addMembers(tooMany, maxDeciders + 1);
+
+    const { ask } = await asking(admin, {
+      from: `team:${fits}`,
+      timeout: week,
+    });
+    const app = await approvalApp(admin);
+    const refused = await admin.api.workflows.start(app, "approval", {
+      from: `team:${tooMany}`,
+      timeout: week,
+    });
+    await finished(refused.id);
+    const { status, failure } = await admin.api.workflows.status(refused.id);
+
+    expect({
+      asked: askedTo(ask).length,
+      askedStarter: askedTo(ask).includes(admin.userId),
+      refused: { status, code: failure?.error.code },
+    }).toStrictEqual({
+      asked: maxDeciders,
+      askedStarter: false,
+      refused: { status: "failed", code: "decision.too_many_deciders" },
     });
   });
 

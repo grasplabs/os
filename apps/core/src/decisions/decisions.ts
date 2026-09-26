@@ -18,6 +18,7 @@ import { and, eq, exists, gt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
+import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
@@ -42,10 +43,13 @@ import { requireFeature } from "../features.ts";
 //   that takes the answer (`mayAnswer`), so someone removed, demoted or
 //   taken out of the team since they were asked can't, even mid-request.
 //   Grasp staff never answer a client's decisions.
+// - Nobody answers their own request (R8): the person who started the run
+//   can't answer its decisions, unless the decision names exactly them
+//   (`person:<them>`), which is their own explicit confirmation. A run a
+//   trigger started has no starter, so its App's owner isn't held back.
 // - A decision link is plain (`/decisions/<id>`) and grants nothing: it
-//   only leads there. Whoever opens it must still be signed in and one the
-//   decision is from. The person who started the run may answer when it's
-//   from them; every answer is audited under who gave it (R8).
+//   only leads there. Whoever opens it must still be signed in and one who
+//   may answer. Every answer is audited under who gave it.
 // - The first answer is the decision: the same update moves the row from
 //   `open`, only before its deadline and while its run hasn't ended.
 //   A run that stops waiting closes its decision the same way, so an answer
@@ -258,14 +262,25 @@ const decidersCondition = (deciders: string): SQL => {
 
 /**
  * The members who may answer a decision now, as a condition on `members`:
- * active members of the organization its deciders name. The one place
- * these rules live: who is asked, and who may answer, both go by it.
+ * active members of the organization its deciders name, but never whoever
+ * started its run (R8). A `person:` decision names one person, so it only
+ * leaves out its starter by naming someone else; one naming exactly the
+ * starter is their own confirmation, and stands. The one place these rules
+ * live: who is asked, who counts toward the cap, and who may answer all go
+ * by it.
  */
-const eligibleMembers = (deciders: string): SQL =>
+const eligibleMembers = (deciders: string, runId: string | SQLiteColumn): SQL =>
   and(
     eq(members.organizationId, organizationId),
     notRemoved(members.userId),
-    decidersCondition(deciders)
+    decidersCondition(deciders),
+    decidersOf(deciders).kind === "person"
+      ? undefined
+      : sql`NOT EXISTS (
+          SELECT 1 FROM ${workflowRuns}
+          WHERE ${workflowRuns.id} = ${runId}
+            AND ${workflowRuns.startedBy} = ${members.userId}
+        )`
   ) ?? sql`0`;
 
 /**
@@ -283,7 +298,12 @@ const mayAnswer = (
       db
         .select({ one: sql`1` })
         .from(members)
-        .where(and(eq(members.userId, userId), eligibleMembers(deciders)))
+        .where(
+          and(
+            eq(members.userId, userId),
+            eligibleMembers(deciders, workflowDecisions.runId)
+          )
+        )
     )
   ) ?? sql`0`;
 
@@ -291,8 +311,10 @@ const mayAnswer = (
  * The people an open decision asks now, each with the decision's link:
  * the members who may answer it at this moment (`eligibleMembers`). An
  * answered or closed decision asks nobody, and nor does one past its
- * deadline. More than {@link maxDeciders} (everyone who may answer, the
- * run's starter included) is refused. Who was asked is audited: their IDs, never their emails.
+ * deadline. More than {@link maxDeciders} of them is refused; the run's
+ * starter counts only when the decision names exactly them, as only then
+ * may they answer. Who was asked is audited: their IDs, never their
+ * emails.
  * While decisions are switched off, nobody is asked: the run waits
  * before the step that asks (host.ts), and a call that got past that just
  * as the switch went is refused with `feature.disabled`, which the ask
@@ -320,7 +342,7 @@ export const decisionRecipients = async (
     .select({ userId: users.id, name: users.name, email: users.email })
     .from(members)
     .innerJoin(users, eq(users.id, members.userId))
-    .where(eligibleMembers(row.deciders))
+    .where(eligibleMembers(row.deciders, row.runId))
     .orderBy(users.name, users.id)
     .limit(maxDeciders + 1);
   if (people.length > maxDeciders) {
