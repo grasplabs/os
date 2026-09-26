@@ -1,5 +1,6 @@
 import { expect } from "@playwright/test";
 
+import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
 import { signedIn, signInTo } from "./people.ts";
 
@@ -71,5 +72,52 @@ test("shows the members page only to someone signed in", async ({ page }) => {
     page.getByText("Sign in to see your organization's members.")
   ).toBeVisible();
   await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByRole("table")).toHaveCount(0);
+});
+
+test("an admin changes a member's role, and the controls wait for the list to show it", async ({
+  context,
+  page,
+}) => {
+  const { admin, one } = await signedIn({ admin: "admin", one: "user" });
+  await signInTo(context, admin);
+  const gate = await callGate(page, '["members","list"]');
+  await page.goto("/members");
+  const who = `Person (${one.userId}@acme.test)`;
+  const role = page.getByRole("combobox", { name: `Role of ${who}` });
+  await expect(role).toContainText("user");
+
+  gate.hold();
+  await role.click();
+  await page.getByRole("option", { name: "builder" }).click();
+  // The change went through; the list that shows it hasn't come back yet.
+  // The controls went off before the change was sent, so they're read
+  // right away, then the list is let through, well before the page would
+  // give up on it.
+  await expect.poll(gate.stalled).toBe(1);
+  const whileRefreshing = {
+    role: await role.isDisabled(),
+    remove: await page
+      .getByRole("button", { name: `Remove ${who}`, exact: true })
+      .isDisabled(),
+  };
+  gate.release();
+  expect(whileRefreshing).toStrictEqual({ role: true, remove: true });
+  await expect(role).toBeEnabled();
+  await expect(role).toContainText("builder");
+});
+
+test("says core can't be reached when the members list never comes", async ({
+  context,
+  page,
+}) => {
+  const { admin } = await signedIn({ admin: "admin" });
+  await signInTo(context, admin);
+  const gate = await callGate(page, '["members","list"]');
+  gate.hold();
+  await page.goto("/members");
+  await expect(
+    page.getByText("Grasp can't be reached right now. Try again in a moment.")
+  ).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("table")).toHaveCount(0);
 });

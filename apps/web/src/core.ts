@@ -19,15 +19,30 @@ export const connectCore = () => {
   return newWebSocketRpcSession<CoreApi>(url.href);
 };
 
+/** How long a read from core may take before core counts as unreachable. */
 const timeoutMs = 5000;
 
-/** Rejects when `promise` hasn't settled within `ms`. */
-const withTimeout = async <T>(promise: Promise<T>, ms: number): Promise<T> => {
+/** Core didn't answer in time: a hanging connection, not a refusal. */
+export class CoreTimeoutError extends Error {
+  constructor(ms: number) {
+    super(`Timed out after ${ms} ms`);
+    this.name = "CoreTimeoutError";
+  }
+}
+
+/**
+ * Rejects with a `CoreTimeoutError` when `promise` hasn't settled within
+ * `ms`, a few seconds unless given.
+ */
+export const withTimeout = async <T>(
+  promise: Promise<T>,
+  ms = timeoutMs
+): Promise<T> => {
   let timer: ReturnType<typeof setTimeout> | undefined;
   // oxlint-disable-next-line promise/avoid-new -- setTimeout has no promise form in browsers
   const timeout = new Promise<never>((_resolve, reject) => {
     timer = setTimeout(() => {
-      reject(new Error(`Timed out after ${ms} ms`));
+      reject(new CoreTimeoutError(ms));
     }, ms);
   });
   try {
@@ -87,8 +102,7 @@ export const loadCoreStatus = async (): Promise<CoreStatus> => {
   const core = connectCore();
   try {
     const [pong, signInOptions, identity] = await withTimeout(
-      Promise.all([core.ping(), core.signInOptions(), signedInAs(core)]),
-      timeoutMs
+      Promise.all([core.ping(), core.signInOptions(), signedInAs(core)])
     );
     return { connected: pong === "pong", signInOptions, identity };
   } catch {
