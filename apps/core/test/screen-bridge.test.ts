@@ -2,7 +2,6 @@ import { kitModuleName, screenRuntime } from "@grasp-os/compiler";
 import type { Role } from "@grasp-os/shared/roles";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { callbacksPerConnection } from "../src/screens-rpc.ts";
 import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { openRpc, outcome, signedInApi } from "./sign-in.ts";
@@ -359,49 +358,22 @@ describe("screens", { timeout: 60_000 }, () => {
     });
   });
 
-  it("takes one callback a call, as the last argument, and only so many a connection", async () => {
+  it("takes a screen's callbacks in any argument, and keeps as many as its App holds", async () => {
     const builder = await personApi("builder");
     const app = await sampleApp(builder);
+    const many = 70;
 
-    const misplaced = await Promise.all([
-      outcome(builder.api.screens.call(app, "watchNotes", [noop, noop])),
-      outcome(builder.api.screens.call(app, "addNote", [noop, "note"])),
-      outcome(
-        builder.api.screens.call(
-          app,
-          "watchNotes",
-          Array.from({ length: 1000 }, () => noop)
-        )
-      ),
-    ]);
-    const kept = await Promise.all(
+    const ignored = await builder.api.screens.call(app, "ignore", [noop, noop]);
+    await Promise.all(
       Array.from(
-        { length: callbacksPerConnection },
-        async () =>
-          await outcome(builder.api.screens.call(app, "watchNotes", [noop]))
+        { length: many },
+        async () => await builder.api.screens.call(app, "watchNotes", [noop])
       )
     );
-    const beyond = await outcome(
-      builder.api.screens.call(app, "watchNotes", [noop])
-    );
-    // A new connection (a screen after a reconnect) starts afresh.
-    const { core } = await openRpc(builder.session);
-    const afresh = await outcome(
-      core.authenticate().screens.call(app, "watchNotes", [noop])
-    );
     expect({
-      misplaced,
-      kept: kept.every((result) => result === "ok"),
-      beyond,
-      afresh,
-      notes: await builder.api.screens.call(app, "notes", []),
-    }).toStrictEqual({
-      misplaced: ["screen.invalid", "screen.invalid", "screen.invalid"],
-      kept: true,
-      beyond: "screen.invalid",
-      afresh: "ok",
-      notes: [],
-    });
+      ignored,
+      watching: await builder.api.screens.call(app, "watching", []),
+    }).toStrictEqual({ ignored: "not kept", watching: many });
   });
 
   it("frees a connection's callbacks as its Apps let them go", async () => {
@@ -420,7 +392,7 @@ describe("screens", { timeout: 60_000 }, () => {
           },
         }
       );
-    const half = callbacksPerConnection / 2;
+    const half = 8;
     const call = async (method: string) =>
       await outcome(builder.api.screens.call(app, method, [tracked()]));
 
@@ -434,32 +406,19 @@ describe("screens", { timeout: 60_000 }, () => {
     );
     await builder.api.screens.call(app, "dropWatchers", []);
     await vi.waitFor(() => {
-      if (released < callbacksPerConnection) {
+      if (released < 2 * half) {
         throw new Error(`${released} released so far`);
       }
     }, 10_000);
 
-    // So a full set fits again, and no more.
-    const again = await Promise.all(
-      Array.from(
-        { length: callbacksPerConnection },
-        async () =>
-          await outcome(builder.api.screens.call(app, "watchNotes", [noop]))
-      )
-    );
-    const beyond = await outcome(
-      builder.api.screens.call(app, "watchNotes", [noop])
-    );
     expect({
       notKept: notKept.every((result) => result === "ok"),
       keptThenDropped: keptThenDropped.every((result) => result === "ok"),
-      again: again.every((result) => result === "ok"),
-      beyond,
+      released,
     }).toStrictEqual({
       notKept: true,
       keptThenDropped: true,
-      again: true,
-      beyond: "screen.invalid",
+      released: 2 * half,
     });
   });
 

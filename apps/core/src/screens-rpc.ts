@@ -90,20 +90,6 @@ const openScreen = async (
 type Callback = (value: AppAnswer) => Promise<void>;
 
 /**
- * How many callbacks one connection may have with its Apps at once. The
- * runtime releases one when the App lets it go (right after a call that
- * didn't keep it, or when the App drops it later) or when the connection
- * ends, so this bounds what a screen can pile up in core; a screen needs
- * one per live subscription.
- */
-export const callbacksPerConnection = 64;
-
-/** The callbacks a connection's Apps hold now. */
-export interface CallbackCount {
-  live: number;
-}
-
-/**
  * A stub of the frame's: a function (or object) of the screen's, which the
  * App may only call.
  */
@@ -114,18 +100,14 @@ const isStub = (value: unknown): value is RpcStub<Callback> =>
  * The screen's callback `stub` as a function the App can keep and call
  * later: it passes on plain data only, never a way into the App (a stub or
  * a function of its own), and gives the App nothing back from the screen.
- * It counts in `count` until it is released, once, whoever releases it:
- * the runtime when the App lets it go, or `callServer` after a failure.
+ * It's released by the runtime when the App lets it go (right after a
+ * call that didn't keep it, or when the App drops it later), or by
+ * `callServer` after a failure; releasing a stub twice does nothing.
  * Releasing it releases the screen's callback too, which tells the screen
  * to subscribe again.
  */
-const callbackFor = (
-  stub: RpcStub<Callback>,
-  count: CallbackCount
-): Callback & Disposable => {
+const callbackFor = (stub: RpcStub<Callback>): Callback & Disposable => {
   const toScreen = stub.dup();
-  let released = false;
-  count.live += 1;
   return Object.assign(
     async (value: AppAnswer): Promise<void> => {
       if (!isPlainData(value)) {
@@ -135,40 +117,33 @@ const callbackFor = (
     },
     {
       [Symbol.dispose]: () => {
-        if (!released) {
-          released = true;
-          count.live -= 1;
-          toScreen[Symbol.dispose]();
-        }
+        toScreen[Symbol.dispose]();
       },
     }
   );
 };
 
 /**
- * The arguments for the App: plain data, and at most one callback of the
- * screen's, as the last argument (how `live` in @grasp-os/sdk/screen
- * subscribes).
+ * The arguments for the App: plain data, and callbacks of the screen's
+ * (how `live` in @grasp-os/sdk/screen subscribes), each as a function the
+ * App can only call.
  */
 const argumentsFor = (
-  args: unknown[],
-  count: CallbackCount
-): { passed: unknown[]; callback?: Disposable } => {
-  const last = args.at(-1);
-  const data = isStub(last) ? args.slice(0, -1) : args;
-  if (!data.every((arg) => !isStub(arg) && isPlainData(arg))) {
+  args: unknown[]
+): { passed: unknown[]; callbacks: Disposable[] } => {
+  if (!args.every((arg) => isStub(arg) || isPlainData(arg))) {
     throw screenErrors.create("screen.invalid");
   }
-  if (!isStub(last)) {
-    return { passed: data };
-  }
-  if (count.live >= callbacksPerConnection) {
-    throw screenErrors.create("screen.invalid", {
-      issues: [`At most ${callbacksPerConnection} live callbacks`],
-    });
-  }
-  const callback = callbackFor(last, count);
-  return { passed: [...data, callback], callback };
+  const callbacks: Disposable[] = [];
+  const passed = args.map((arg) => {
+    if (!isStub(arg)) {
+      return arg;
+    }
+    const callback = callbackFor(arg);
+    callbacks.push(callback);
+    return callback;
+  });
+  return { passed, callbacks };
 };
 
 /**
@@ -180,14 +155,13 @@ const argumentsFor = (
 const callServer = async (
   env: Env,
   by: Identity,
-  count: CallbackCount,
   { app, method, args }: { app: unknown; method: unknown; args: unknown }
 ): Promise<AppAnswer> => {
   const { id } = await getApp(env, by, app);
   if (typeof method !== "string" || !Array.isArray(args)) {
     throw screenErrors.create("screen.invalid");
   }
-  const { passed, callback } = argumentsFor(args, count);
+  const { passed, callbacks } = argumentsFor(args);
   try {
     return await callApp(
       env,
@@ -197,9 +171,10 @@ const callServer = async (
       passed
     );
   } catch (error) {
-    // A failed call keeps no callback. Releasing is idempotent, so the
-    // runtime releasing it as well counts once.
-    callback?.[Symbol.dispose]();
+    // A failed call keeps no callback.
+    for (const callback of callbacks) {
+      callback[Symbol.dispose]();
+    }
     throw error;
   }
 };
@@ -246,8 +221,6 @@ const errorLog = async (
 export class ScreensRpc extends RpcTarget implements ScreensApi {
   readonly #env: Env;
   readonly #check: SessionCheck;
-  /** Built once per connection, so this counts the connection's callbacks. */
-  readonly #callbacks: CallbackCount = { live: 0 };
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -265,8 +238,7 @@ export class ScreensRpc extends RpcTarget implements ScreensApi {
   async call(app: string, method: string, args: unknown[]): Promise<unknown> {
     return await withPerson(
       this.#check,
-      async (by) =>
-        await callServer(this.#env, by, this.#callbacks, { app, method, args })
+      async (by) => await callServer(this.#env, by, { app, method, args })
     );
   }
 
