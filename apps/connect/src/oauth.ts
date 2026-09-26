@@ -7,6 +7,7 @@ import {
   disconnectPersonalSchema,
   disconnectSchema,
   finishConnectionSchema,
+  oauthFlowLifetimeMs,
   oauthProviderSchema,
   startConnectionSchema,
 } from "@grasp-os/shared/connect";
@@ -18,7 +19,7 @@ import type {
 import { randomToken, sha256Hex, toBase64Url } from "@grasp-os/shared/encoding";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { isAdmin, roleErrors } from "@grasp-os/shared/roles";
-import { and, desc, eq, inArray, like, lte, ne, or, sql } from "drizzle-orm";
+import { and, desc, eq, like, lte, ne, or, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import type { z } from "zod";
@@ -52,9 +53,6 @@ import type { Vault } from "./vault.ts";
 // bits, single-use and valid for ten minutes; only its hash is stored. The
 // PKCE verifier never leaves connect, so the code alone, which core sees on
 // the callback, is useless (CN3).
-
-/** How long a person has to finish at the provider. */
-const flowLifetimeMs = 10 * 60 * 1000;
 
 /** Who acted: the person core named, or core itself (`null`). */
 const actorOf = (person: ConnectionPerson | null): AuditActor => {
@@ -242,7 +240,7 @@ export const startConnection = async (
       redirectUri,
       returnTo,
       verifier: await vault.seal(verifier, flowContext(stateHash)),
-      expiresAt: new Date(Date.now() + flowLifetimeMs),
+      expiresAt: new Date(Date.now() + oauthFlowLifetimeMs),
     });
 
   const url = new URL(provider.authorizationEndpoint(tenant));
@@ -634,8 +632,8 @@ export const disconnect = async (
  * Disconnects every personal connection of the people `ownerUserIds`, each
  * as `disconnect` does, and spends the OAuth flows they still have open, so
  * none of them finishes into a new connection. For the admin who removed
- * them, or for core itself (`person` null), which retries for people it
- * removed lately; core calls it only for people it removed. Staff are
+ * them, or for core itself (`person` null), which retries until a call
+ * completes; core calls it only for people it removed. Staff are
  * refused, as they are for connecting. A flow already past its spending
  * when this runs can still finish; core's retry catches that connection.
  * Returns how many connections this call stopped.
@@ -656,14 +654,17 @@ export const disconnectPersonal = async (
     return { disconnected: 0 };
   }
   const db = drizzle(env.DB);
-  await db.delete(oauthFlows).where(inArray(oauthFlows.userId, ownerUserIds));
+  // The IDs as one JSON parameter: D1 binds at most 100 to a statement,
+  // and a full list of owners is that many on its own.
+  const owners = sql`(SELECT value FROM json_each(${JSON.stringify(ownerUserIds)}))`;
+  await db.delete(oauthFlows).where(sql`${oauthFlows.userId} IN ${owners}`);
   const owned = await db
     .select()
     .from(connections)
     .where(
       and(
         eq(connections.scope, "personal"),
-        inArray(connections.ownerUserId, ownerUserIds),
+        sql`${connections.ownerUserId} IN ${owners}`,
         ne(connections.status, "disconnected")
       )
     );

@@ -19,7 +19,12 @@ import { drizzle } from "drizzle-orm/d1";
 import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
-import { outboxed, sendAuditOutboxNow } from "../audit-outbox.ts";
+import {
+  auditedBatch,
+  outboxed,
+  outboxedIfChanged,
+  sendAuditOutboxNow,
+} from "../audit-outbox.ts";
 import { actorOf, audit } from "../audit.ts";
 import {
   accounts,
@@ -159,29 +164,41 @@ const record = async (env: Env, entry: AuditEntry): Promise<void> => {
 /**
  * Makes a configured admin (deployment config, from the console) an admin
  * again when the organization has none left, so a deployment can always
- * be recovered by signing in. Never someone removed. Audited.
+ * be recovered by signing in. Never someone removed. The change and its
+ * audit event are one batch: both are kept, or neither.
  */
 const restoreAdmin = async (env: Env, userId: string): Promise<void> => {
-  const [restored] = await drizzle(env.DB)
-    .update(members)
-    .set({ role: "admin" })
+  const db = drizzle(env.DB);
+  const [membership] = await db
+    .select({ id: members.id })
+    .from(members)
     .where(
       and(
         eq(members.organizationId, organizationId),
-        eq(members.userId, userId),
-        notRemoved(userId),
-        sql`NOT ${activeAdminExists()}`
+        eq(members.userId, userId)
       )
-    )
-    .returning({ id: members.id });
-  if (restored) {
-    await record(env, {
+    );
+  if (!membership) {
+    return;
+  }
+  await auditedBatch(env, db, [
+    db
+      .update(members)
+      .set({ role: "admin" })
+      .where(
+        and(
+          eq(members.id, membership.id),
+          notRemoved(userId),
+          sql`NOT ${activeAdminExists()}`
+        )
+      ),
+    outboxedIfChanged(db, {
       actor: { type: "system" },
       action: "member.role.updated",
-      target: { type: "member", id: restored.id },
+      target: { type: "member", id: membership.id },
       detail: { userId, role: "admin", reason: "no_admin_left" },
-    });
-  }
+    }),
+  ]);
 };
 
 /**

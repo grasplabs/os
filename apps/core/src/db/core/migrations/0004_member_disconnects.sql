@@ -1,0 +1,1 @@
+ALTER TABLE `member_removals` ADD `disconnected_at` integer;

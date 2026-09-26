@@ -1,4 +1,8 @@
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import {
+  disconnectPersonalMaxOwners,
+  oauthFlowLifetimeMs,
+} from "@grasp-os/shared/connect";
 import type { CodedError } from "@grasp-os/shared/errors";
 import { identifierSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -8,7 +12,7 @@ import { isAdmin, roleErrors, roleSchema } from "@grasp-os/shared/roles";
 import type { Role } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
-import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
+import { and, asc, eq, gt, isNull, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
@@ -28,6 +32,7 @@ import {
   teamMembers,
   users,
 } from "./db/core/schema.ts";
+import { inList } from "./db/d1.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -188,7 +193,7 @@ const recordRemoval = async (
     db
       .insert(memberRemovals)
       .select(
-        sql`SELECT ${organizationId}, ${userId}, ${Date.now()}
+        sql`SELECT ${organizationId}, ${userId}, ${Date.now()}, NULL
           WHERE ${isActiveMember(userId)} AND ${isActiveAdmin(by.userId)}`
       )
       .onConflictDoNothing()
@@ -210,6 +215,27 @@ const recordRemoval = async (
 };
 
 /**
+ * Records that connect completed disconnecting `userIds`, so the cron
+ * trigger stops retrying them once a flow can no longer finish
+ * (`retryDisconnects`).
+ */
+const markDisconnected = async (
+  env: Env,
+  userIds: readonly string[]
+): Promise<void> => {
+  await drizzle(env.DB)
+    .update(memberRemovals)
+    .set({ disconnectedAt: new Date() })
+    .where(
+      and(
+        eq(memberRemovals.organizationId, organizationId),
+        inList(memberRemovals.userId, userIds),
+        isNull(memberRemovals.disconnectedAt)
+      )
+    );
+};
+
+/**
  * Disconnects the personal connections of someone removed, in connect,
  * which revokes each grant at its provider where it can, deletes the
  * tokens and spends their open OAuth flows. Their connections take no
@@ -227,6 +253,7 @@ const disconnectPersonal = async (
       person: await personOf(env, by),
       ownerUserIds: [userId],
     });
+    await markDisconnected(env, [userId]);
     return disconnected;
   } catch (error) {
     log.error("member.disconnect_failed", errorFields(error));
@@ -367,36 +394,58 @@ export const setMemberRole = async (
   throw refusal(by, memberErrors.create("member.last_admin"));
 };
 
-/** How far back the cron trigger retries disconnecting removed people. */
-const retryWindowMs = 30 * 24 * 60 * 60 * 1000;
-/** Most removed people one retry takes. */
-const retryBatchSize = 100;
-
 /**
- * Disconnects what is still connected for people removed in the last 30
- * days: a removal whose disconnect failed, or an OAuth flow that finished
- * while they were being removed. Connect finds nothing to do for everyone
- * else. The cron trigger calls it.
+ * Disconnects what is still connected for removed people: everyone whose
+ * disconnect hasn't completed yet, however long ago they were removed and
+ * however many there are, and everyone removed within the last OAuth flow
+ * lifetime, completed or not. A flow the person took back before the
+ * removal (taking it needs their session) can still finish into a
+ * connection after their disconnect completed; the flow's lifetime bounds
+ * that with room to spare. When nobody is pending, it doesn't call
+ * connect at all. The cron trigger calls it.
  */
 export const retryDisconnects = async (env: Env): Promise<void> => {
-  const removed = await drizzle(env.DB)
+  const pending = await drizzle(env.DB)
     .select({ userId: memberRemovals.userId })
     .from(memberRemovals)
     .where(
       and(
         eq(memberRemovals.organizationId, organizationId),
-        gt(memberRemovals.removedAt, new Date(Date.now() - retryWindowMs))
+        or(
+          isNull(memberRemovals.disconnectedAt),
+          gt(
+            memberRemovals.removedAt,
+            new Date(Date.now() - oauthFlowLifetimeMs)
+          )
+        )
       )
     )
-    .orderBy(desc(memberRemovals.removedAt))
-    .limit(retryBatchSize);
-  if (removed.length === 0) {
-    return;
+    .orderBy(asc(memberRemovals.removedAt), asc(memberRemovals.userId));
+  const batches: string[][] = [];
+  for (
+    let start = 0;
+    start < pending.length;
+    start += disconnectPersonalMaxOwners
+  ) {
+    batches.push(
+      pending
+        .slice(start, start + disconnectPersonalMaxOwners)
+        .map(({ userId }) => userId)
+    );
   }
-  await env.CONNECT.disconnectPersonal({
-    person: null,
-    ownerUserIds: removed.map(({ userId }) => userId),
-  });
+  // Each batch on its own, so one that fails doesn't hold up the rest; it
+  // is tried again on the next run.
+  const results = await Promise.allSettled(
+    batches.map(async (ownerUserIds) => {
+      await env.CONNECT.disconnectPersonal({ person: null, ownerUserIds });
+      await markDisconnected(env, ownerUserIds);
+    })
+  );
+  for (const result of results) {
+    if (result.status === "rejected") {
+      log.error("member.disconnect_failed", errorFields(result.reason));
+    }
+  }
 };
 
 /**

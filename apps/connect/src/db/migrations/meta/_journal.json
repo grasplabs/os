@@ -15,6 +15,13 @@
       "when": 1790383967881,
       "tag": "0001_oauth_vault",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1790394962917,
+      "tag": "0002_owner_indexes",
+      "breakpoints": true
     }
   ]
 }
