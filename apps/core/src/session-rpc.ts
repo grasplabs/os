@@ -26,6 +26,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #apps: AppsRpc;
   readonly #knowledge: KnowledgeRpc;
   readonly #permissions: PermissionsRpc;
+  readonly #connections: ConnectionsRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -43,6 +44,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#apps = new AppsRpc(env, checkWith("apps"));
     this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
     this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
+    this.#connections = new ConnectionsRpc(env, checkWith("connections"));
   }
 
   get apps(): AppsRpc {
@@ -57,9 +59,8 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     return this.#permissions;
   }
 
-  /** Connected accounts, whose every method checks the session again. */
   get connections(): ConnectionsRpc {
-    return new ConnectionsRpc(this.#env, this.#checkWith("connections"));
+    return this.#connections;
   }
 
   async whoami(): Promise<Identity> {
