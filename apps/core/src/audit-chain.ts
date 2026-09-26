@@ -1,3 +1,4 @@
+import type { ChainBreak } from "@grasp-os/shared/audit-log";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 
 /**
@@ -49,25 +50,39 @@ export const chainHash = async (
 };
 
 /**
- * Why the chain breaks at a position: an entry is missing there, its link
- * doesn't match the hash before it, or its content doesn't match its hash.
+ * Whether an entry's hash matches its content. Only one format exists, so
+ * an entry claiming another was altered.
  */
-type ChainBreak = "missing" | "unlinked" | "altered";
+export const hashMatches = async (entry: ChainEntry): Promise<boolean> =>
+  entry.version === chainVersion && (await chainHash(entry)) === entry.hash;
 
-export type ChainVerification =
-  | { ok: true; length: number; head: string }
+/** A position in the chain and the hash of the entry there. */
+export interface ChainLink {
+  seq: number;
+  hash: string;
+}
+
+/** Before the first entry: where the whole chain starts. */
+export const chainOrigin: ChainLink = { seq: 0, hash: genesisHash };
+
+/** How a stretch of the chain checked out: how far it got, or where it broke. */
+export type StretchVerification =
+  | { ok: true; through: number; head: string }
   | { ok: false; brokenAt: number; reason: ChainBreak };
 
 /**
- * Checks a chain from its first entry to its last, given in position order,
- * and reports the first position where it breaks. Stops there: everything
- * after a break is unverified.
+ * Checks a stretch of the chain, given in position order, that follows on
+ * from `start` (by default the whole chain), and reports the first position
+ * where it breaks: an entry is missing there, its link doesn't match the
+ * hash before it, or its content doesn't match its hash. Stops there:
+ * everything after a break is unverified.
  */
 export const verifyChain = async (
-  entries: Iterable<ChainEntry> | AsyncIterable<ChainEntry>
-): Promise<ChainVerification> => {
-  let expected = 1;
-  let prevHash = genesisHash;
+  entries: Iterable<ChainEntry> | AsyncIterable<ChainEntry>,
+  start: ChainLink = chainOrigin
+): Promise<StretchVerification> => {
+  let expected = start.seq + 1;
+  let prevHash = start.hash;
   for await (const entry of entries) {
     // Entries come in position order, so one that doesn't follow on means
     // the entry expected here is gone.
@@ -77,15 +92,11 @@ export const verifyChain = async (
     if (entry.prevHash !== prevHash) {
       return { ok: false, brokenAt: expected, reason: "unlinked" };
     }
-    // Only one format exists, so an entry claiming another was altered.
-    if (
-      entry.version !== chainVersion ||
-      (await chainHash(entry)) !== entry.hash
-    ) {
+    if (!(await hashMatches(entry))) {
       return { ok: false, brokenAt: expected, reason: "altered" };
     }
     prevHash = entry.hash;
     expected += 1;
   }
-  return { ok: true, length: expected - 1, head: prevHash };
+  return { ok: true, through: expected - 1, head: prevHash };
 };

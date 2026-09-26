@@ -71,6 +71,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               workflows: true,
               screens: true,
               members: true,
+              audit: true,
             },
             // The gateway runs call the model through; tests fake the AI binding.
             MODEL_GATEWAY: {

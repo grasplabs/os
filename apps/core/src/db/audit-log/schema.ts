@@ -3,9 +3,18 @@
  * itself on first wake-up after a release.
  */
 import { sql } from "drizzle-orm";
-import { check, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+  check,
+  index,
+  integer,
+  sqliteTable,
+  text,
+} from "drizzle-orm/sqlite-core";
 
-/** The chain: one row per event, never updated or deleted (src/audit-chain.ts). */
+/**
+ * The chain as the log holds it: one row per event, never updated. Rows
+ * leave only when retention archives them, oldest first (`archives`).
+ */
 export const events = sqliteTable(
   "events",
   {
@@ -22,5 +31,28 @@ export const events = sqliteTable(
     prevHash: text("prev_hash").notNull(),
     hash: text().notNull(),
   },
-  (table) => [check("events_seq_positive", sql`${table.seq} >= 1`)]
+  (table) => [
+    check("events_seq_positive", sql`${table.seq} >= 1`),
+    // Searches by time turn their range into positions with it.
+    index("events_received_at_idx").on(table.receivedAt),
+  ]
 );
+
+/**
+ * Stretches of the chain moved out to R2 by retention, oldest first and
+ * without gaps: each one the entries from `firstSeq` to `lastSeq`, stored as
+ * they were, linked to the hash before them (`prevHash`) and ending on
+ * `lastHash`, where the next stretch, or the first row of `events`, picks
+ * the chain up again.
+ */
+export const archives = sqliteTable("archives", {
+  firstSeq: integer("first_seq").primaryKey(),
+  lastSeq: integer("last_seq").notNull().unique(),
+  prevHash: text("prev_hash").notNull(),
+  lastHash: text("last_hash").notNull(),
+  /** When the log received the stretch's last event (ISO 8601). */
+  lastReceivedAt: text("last_received_at").notNull(),
+  /** The object in the AUDIT_ARCHIVE bucket that holds the entries. */
+  key: text().notNull(),
+  archivedAt: text("archived_at").notNull(),
+});

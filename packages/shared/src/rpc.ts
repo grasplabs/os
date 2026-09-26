@@ -1,4 +1,5 @@
 import type { AppsApi } from "./apps.ts";
+import type { AuditApi } from "./audit-log.ts";
 import type { ConnectionsApi } from "./connect.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
 import type { MembersApi } from "./members.ts";
@@ -54,6 +55,8 @@ export interface SessionApi {
   readonly screens: ScreensApi;
   /** The organization's members: offboarding. Admins only. */
   readonly members: MembersApi;
+  /** The audit log: search, export and chain verification. Admins only. */
+  readonly audit: AuditApi;
 }
 
 /**

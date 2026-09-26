@@ -13,6 +13,8 @@ interface __BaseEnv_Env {
   MODEL_GATEWAY?: unknown;
   /** Feature flags (src/features.ts): JSON. */
   FEATURES?: unknown;
+  /** Days the audit log keeps events before archiving (src/audit-retention.ts). */
+  AUDIT_RETENTION_DAYS?: unknown;
   /** `none` where Durable Objects have no jurisdiction (src/durable-objects.ts). */
   DURABLE_OBJECT_JURISDICTION?: string;
   /** Tests only: a shorter limit for one call into an App (src/app.ts). */
