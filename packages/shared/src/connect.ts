@@ -118,12 +118,14 @@ export const disconnectSchema = z.strictObject({
 export type Disconnect = z.input<typeof disconnectSchema>;
 
 /**
- * Disconnects every personal connection of `ownerUserId`, for the admin
- * `person` who just removed them from the organization.
+ * Disconnects every personal connection of the people `ownerUserIds`, who
+ * were removed from the organization: for the admin `person` who removed
+ * them, or, with `person` null, for core itself, which retries for people
+ * removed lately.
  */
 export const disconnectPersonalSchema = z.strictObject({
-  person: connectionPersonSchema,
-  ownerUserId: identifierSchema,
+  person: connectionPersonSchema.nullable(),
+  ownerUserIds: z.array(identifierSchema).max(100),
 });
 export type DisconnectPersonal = z.input<typeof disconnectPersonalSchema>;
 
@@ -177,8 +179,9 @@ export interface ConnectApi {
   disconnect: (request: Disconnect) => Promise<{ revoked: boolean }>;
   /**
    * Disconnects every personal connection of someone an admin removed from
-   * the organization, as `disconnect` does each one. Admins only; core
-   * calls it only when removing someone.
+   * the organization, as `disconnect` does each one, and spends the flows
+   * they still have open. Admins only, or core itself (`person` null); core
+   * calls it only for people it removed. Returns how many it stopped.
    */
   disconnectPersonal: (
     request: DisconnectPersonal

@@ -1,16 +1,18 @@
 import { authErrors } from "@grasp-os/shared/errors";
 import { authoritySchema } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
+import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { bindingsFor } from "../src/bindings.ts";
+import worker from "../src/index.ts";
 import { sessionEndedCloseCode } from "../src/rpc.ts";
 import { allEvents } from "./audit-events.ts";
 import { consentCode } from "./connect-providers.ts";
 import { connectionIn, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
-import { acmeTenant } from "./sign-in-config.ts";
+import { acmeTenant, clientOrigin } from "./sign-in-config.ts";
 import {
   auditedDuring,
   callAuth,
@@ -23,6 +25,7 @@ import {
   staffPerson,
   unique,
   whoami,
+  withSignIn,
 } from "./sign-in.ts";
 
 // Offboarding (threat model ID4, SC7, PM8, R15, R16): an admin removes
@@ -424,17 +427,255 @@ describe("connect's offboarding call", () => {
         outcome(
           env.CONNECT.disconnectPersonal({
             person: asConnectPerson(colleague, "builder"),
-            ownerUserId: person.userId,
+            ownerUserIds: [person.userId],
           })
         ),
         outcome(
           env.CONNECT.disconnectPersonal({
             person: asConnectPerson(colleague, "admin", true),
-            ownerUserId: person.userId,
+            ownerUserIds: [person.userId],
           })
         ),
       ])
     ).resolves.toStrictEqual(["role.forbidden", "role.forbidden"]);
     await expect(tokensHeld(connectionId)).resolves.toBeGreaterThan(0);
+  });
+});
+
+describe("removing a member, while their OAuth flows are open", () => {
+  it("spends the flows they started, so none finishes into a connection", async () => {
+    const admin = await personWith("admin");
+    const person = await personWith("user");
+    const { url } = await person.api.connections.start({
+      provider: "microsoft",
+      scope: "personal",
+    });
+    const authorization = new URL(url);
+
+    await admin.api.members.remove(person.userId);
+
+    const finished = env.CONNECT.finishConnection({
+      person: {
+        ...asConnectPerson(person, "user"),
+        accounts: [
+          { provider: "microsoft", subject: String(person.person.oid) },
+        ],
+      },
+      state: authorization.searchParams.get("state") ?? "",
+      code: consentCode(authorization, acmeTenant, String(person.person.oid)),
+    });
+    await expect(outcome(finished)).resolves.toBe("connection.flow_invalid");
+  });
+
+  it("disconnects a connection that finished anyway, on the next cron run", async () => {
+    const admin = await personWith("admin");
+    const person = await personWith("user");
+    await admin.api.members.remove(person.userId);
+    // A flow already past its spending when the removal ran, finishing
+    // after it: connect itself doesn't know who is a member.
+    const owner = {
+      ...asConnectPerson(person, "user"),
+      accounts: [
+        { provider: "microsoft" as const, subject: String(person.person.oid) },
+      ],
+    };
+    const { url } = await env.CONNECT.startConnection({
+      person: owner,
+      provider: "microsoft",
+      scope: "personal",
+      origin: clientOrigin,
+      tenant: acmeTenant,
+      returnTo: "/",
+    });
+    const authorization = new URL(url);
+    const { connectionId } = await env.CONNECT.finishConnection({
+      person: owner,
+      state: authorization.searchParams.get("state") ?? "",
+      code: consentCode(authorization, acmeTenant, String(person.person.oid)),
+    });
+    await expect(tokensHeld(connectionId)).resolves.toBeGreaterThan(0);
+
+    await worker.scheduled(createScheduledController(), env);
+
+    await expect(tokensHeld(connectionId)).resolves.toBe(0);
+    await expect(env.CONNECT.listConnections(owner)).resolves.toStrictEqual([]);
+  });
+});
+
+/** How many admins the organization has now. */
+const activeAdmins = async (): Promise<number> => {
+  const row = await env.DB.prepare(
+    `SELECT count(*) AS count FROM members
+     WHERE role = 'admin' AND user_id NOT IN (SELECT user_id FROM member_removals)`
+  ).first<{ count: number }>();
+  return row?.count ?? 0;
+};
+
+/** Makes `admins` the organization's only admins. */
+const onlyAdmins = async (...admins: Person[]): Promise<void> => {
+  const ids = admins.map(({ userId }) => userId);
+  await env.DB.prepare(
+    `UPDATE members SET role = 'user'
+     WHERE role = 'admin' AND user_id NOT IN (${ids.map(() => "?").join(", ")})`
+  )
+    .bind(...ids)
+    .run();
+};
+
+describe("changing a member's role", () => {
+  it("applies on their next call, and is audited with identifiers only", async () => {
+    const admin = await personWith("admin");
+    const person = await personWith("user");
+    const audited = await auditedDuring(async () => {
+      await admin.api.members.setRole(person.userId, "builder");
+    });
+    await expect(person.api.whoami()).resolves.toMatchObject({
+      role: "builder",
+    });
+    expect(audited).toHaveLength(1);
+    expect(audited[0]).toMatchObject({
+      actor: { type: "person", userId: admin.userId },
+      action: "member.role.updated",
+      target: { type: "member" },
+      detail: { userId: person.userId, previousRole: "user", role: "builder" },
+    });
+  });
+
+  it("is for admins only, and only to one of Grasp's roles", async () => {
+    const admin = await personWith("admin");
+    const person = await personWith("builder");
+    await expect(
+      Promise.all([
+        outcome(person.api.members.setRole(person.userId, "admin")),
+        ...["owner", "member", "admin,builder"].map(
+          async (role) =>
+            await outcome(
+              admin.api.members.setRole(
+                person.userId,
+                // SAFETY: not a role at all: what a client could send anyway.
+                // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+                role as Role
+              )
+            )
+        ),
+      ])
+    ).resolves.toStrictEqual([
+      "role.forbidden",
+      "member.role_invalid",
+      "member.role_invalid",
+      "member.role_invalid",
+    ]);
+    await expect(person.api.whoami()).resolves.toMatchObject({
+      role: "builder",
+    });
+  });
+
+  it("goes only through core's own API, not Better Auth's member route", async () => {
+    const admin = await personWith("admin");
+    const person = await personWith("user");
+    const changed = await callAuth(
+      "/organization/update-member-role",
+      admin.session,
+      { memberId: person.userId, role: "admin" }
+    );
+    expect(changed.status).toBe(404);
+    await expect(person.api.whoami()).resolves.toMatchObject({ role: "user" });
+  });
+});
+
+describe("the organization's admins", () => {
+  it("can't all be demoted: the last admin stays one", async () => {
+    const admin = await personWith("admin");
+    await onlyAdmins(admin);
+    await expect(
+      outcome(admin.api.members.setRole(admin.userId, "user"))
+    ).resolves.toBe("member.last_admin");
+    await expect(admin.api.whoami()).resolves.toMatchObject({ role: "admin" });
+  });
+
+  it("keep one when two admins demote themselves at once", async () => {
+    for (const _round of [1, 2, 3]) {
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const [first, second] = await Promise.all([
+        personWith("admin"),
+        personWith("admin"),
+      ]);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      await onlyAdmins(first, second);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const outcomes = await Promise.all([
+        outcome(first.api.members.setRole(first.userId, "user")),
+        outcome(second.api.members.setRole(second.userId, "user")),
+      ]);
+      expect(outcomes.filter((each) => each === "ok")).toHaveLength(1);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      await expect(activeAdmins()).resolves.toBe(1);
+    }
+  });
+
+  it("keep one when an admin removes another who demotes them at once", async () => {
+    for (const _round of [1, 2, 3]) {
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const [first, second] = await Promise.all([
+        personWith("admin"),
+        personWith("admin"),
+      ]);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      await onlyAdmins(first, second);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const outcomes = await Promise.all([
+        outcome(first.api.members.remove(second.userId)),
+        outcome(second.api.members.setRole(first.userId, "user")),
+      ]);
+      expect(outcomes.filter((each) => each === "ok")).toHaveLength(1);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      await expect(activeAdmins()).resolves.toBe(1);
+    }
+  });
+
+  it("come back through the deployment's configured admins when none is left", async () => {
+    const configured = await personWith("admin");
+    const other = await personWith("admin");
+    const coreEnv = withSignIn({ admins: [configured.person.email] });
+    // Demoted while someone else is an admin: signing in keeps the role.
+    await other.api.members.setRole(configured.userId, "user");
+    await signedIn(idp, "microsoft", configured.person, { coreEnv });
+    await expect(nowSignedIn(configured.session)).resolves.toBe("user");
+
+    // No admin left (as after a D1 edit): signing in restores them.
+    await env.DB.prepare(
+      "UPDATE members SET role = 'user' WHERE role = 'admin'"
+    ).run();
+    await expect(activeAdmins()).resolves.toBe(0);
+    let again = "";
+    const audited = await auditedDuring(async () => {
+      again = await signedIn(idp, "microsoft", configured.person, { coreEnv });
+    });
+    await expect(nowSignedIn(again)).resolves.toBe("admin");
+    expect(audited).toContainEqual(
+      expect.objectContaining({
+        actor: { type: "system" },
+        action: "member.role.updated",
+        detail: {
+          userId: configured.userId,
+          role: "admin",
+          reason: "no_admin_left",
+        },
+      })
+    );
+  });
+
+  it("don't come back when removed, configured or not", async () => {
+    const configured = await personWith("admin");
+    const admin = await personWith("admin");
+    await admin.api.members.remove(configured.userId);
+    await env.DB.prepare(
+      "UPDATE members SET role = 'user' WHERE role = 'admin'"
+    ).run();
+    const again = await signIn(idp, "microsoft", configured.person, {
+      coreEnv: withSignIn({ admins: [configured.person.email] }),
+    });
+    expect(again.session).toBeUndefined();
+    await expect(activeAdmins()).resolves.toBe(0);
   });
 });

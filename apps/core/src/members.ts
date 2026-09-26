@@ -1,18 +1,25 @@
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import type { CodedError } from "@grasp-os/shared/errors";
 import { identifierSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { memberErrors } from "@grasp-os/shared/members";
 import type { Member, MembersApi } from "@grasp-os/shared/members";
 import { isAdmin, roleErrors, roleSchema } from "@grasp-os/shared/roles";
+import type { Role } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
-import { and, asc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
+import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import { actorOf } from "./audit.ts";
-import { isRemoved, notRemoved, organizationId } from "./auth/auth.ts";
+import {
+  activeAdminExists,
+  isRemoved,
+  notRemoved,
+  organizationId,
+} from "./auth/auth.ts";
 import { personOf } from "./connections.ts";
 import {
   memberRemovals,
@@ -36,11 +43,22 @@ import type { SessionCheck } from "./session-check.ts";
 //
 // Only the client's own admins offboard: Grasp staff are no members, and
 // who works for the client is the client's decision.
+//
+// The organization always keeps an admin: every change of a membership or
+// a role is one conditional statement here that also requires the admin
+// making it still to be one. Better Auth's member routes are off
+// (`routes.ts`), since they read, then write.
+
+/** Logs a refusal, IDs only, and hands back the error to throw. */
+const refusal = (by: Identity, error: CodedError): CodedError => {
+  log.warn("member.refused", { actor: by.userId, reason: error.code });
+  return error;
+};
 
 /** Refuses anyone but a member who is an admin. */
 const requireAdmin = (by: Identity): void => {
   if (by.staff || !isAdmin(by.role)) {
-    throw roleErrors.create("role.forbidden");
+    throw refusal(by, roleErrors.create("role.forbidden"));
   }
 };
 
@@ -53,10 +71,10 @@ const requireAdmin = (by: Identity): void => {
 const targetOf = (by: Identity, userId: unknown): string => {
   const parsed = identifierSchema.safeParse(userId);
   if (!parsed.success) {
-    throw memberErrors.create("member.not_found");
+    throw refusal(by, memberErrors.create("member.not_found"));
   }
   if (parsed.data === by.userId) {
-    throw memberErrors.create("member.self");
+    throw refusal(by, memberErrors.create("member.self"));
   }
   return parsed.data;
 };
@@ -65,9 +83,9 @@ const targetOf = (by: Identity, userId: unknown): string => {
 const membershipOf = async (
   env: Env,
   userId: string
-): Promise<{ id: string } | undefined> => {
+): Promise<{ id: string; role: string } | undefined> => {
   const [membership] = await drizzle(env.DB)
-    .select({ id: members.id })
+    .select({ id: members.id, role: members.role })
     .from(members)
     .where(
       and(
@@ -87,6 +105,14 @@ const isActiveAdmin = (userId: string): SQL => sql`EXISTS (
     AND ${members.role} = 'admin'
     AND ${notRemoved(userId)}
 )`;
+
+/** Whether `userId` is an admin of the organization now. */
+const stillAdmin = async (env: Env, userId: string): Promise<boolean> => {
+  const row = await drizzle(env.DB).get<{ admin: number }>(
+    sql`SELECT ${isActiveAdmin(userId)} AS admin`
+  );
+  return row.admin === 1;
+};
 
 /** That `userId` is a member now, as a SQL condition. */
 const isActiveMember = (userId: string): SQL => sql`EXISTS (
@@ -144,9 +170,10 @@ export const listMembers = async (
  * Records that `userId` is removed and deletes their membership, their team
  * memberships and every session they have, with the audit event, in one
  * batch. The marker goes in only while they are a member and the admin
- * still is one, checked in the same statement: of two admins removing each
- * other at once, only the first removal happens, so the organization keeps
- * an admin. Everything after it runs only once the marker is there.
+ * still is one, checked in the same statement, so a removal racing any
+ * other change of membership or role (see `setMemberRole`) never leaves
+ * the organization without an admin: the admin making it is never the one
+ * removed. Everything after it runs only once the marker is there.
  * Returns whether this call removed them.
  */
 const recordRemoval = async (
@@ -184,9 +211,11 @@ const recordRemoval = async (
 
 /**
  * Disconnects the personal connections of someone removed, in connect,
- * which revokes each grant at its provider where it can and deletes the
- * tokens. Their connections take no calls for them anyway (they are no
- * longer a member); this takes the tokens out of the vault.
+ * which revokes each grant at its provider where it can, deletes the
+ * tokens and spends their open OAuth flows. Their connections take no
+ * calls for them anyway (they are no longer a member); this takes the
+ * tokens out of the vault. What fails here, the cron trigger retries
+ * (`retryDisconnects`).
  */
 const disconnectPersonal = async (
   env: Env,
@@ -196,7 +225,7 @@ const disconnectPersonal = async (
   try {
     const { disconnected } = await env.CONNECT.disconnectPersonal({
       person: await personOf(env, by),
-      ownerUserId: userId,
+      ownerUserIds: [userId],
     });
     return disconnected;
   } catch (error) {
@@ -209,7 +238,7 @@ const disconnectPersonal = async (
  * Removes `userId` from the organization for good (see `recordRemoval`),
  * then disconnects their personal connections. Removing someone already
  * removed only does the second part again, so a removal whose disconnect
- * failed is finished by trying again.
+ * failed can also be finished by trying again.
  */
 export const removeMember = async (
   env: Env,
@@ -224,10 +253,10 @@ export const removeMember = async (
     // Someone else's removal of them may have landed first; otherwise the
     // admin stopped being one since their session was checked.
     if (!(removedNow || (await isRemoved(env, target)))) {
-      throw roleErrors.create("role.forbidden");
+      throw refusal(by, roleErrors.create("role.forbidden"));
     }
   } else if (!(await isRemoved(env, target))) {
-    throw memberErrors.create("member.not_found");
+    throw refusal(by, memberErrors.create("member.not_found"));
   }
   return {
     connectionsDisconnected: await disconnectPersonal(env, by, target),
@@ -236,7 +265,9 @@ export const removeMember = async (
 
 /**
  * Ends every session of the member `userId`: their next call fails and
- * its connection closes. They stay a member and may sign in again.
+ * its connection closes. They stay a member and may sign in again. The
+ * sessions go only while the admin still is one, checked in the same
+ * statement as the delete.
  */
 export const revokeMemberSessions = async (
   env: Env,
@@ -247,16 +278,125 @@ export const revokeMemberSessions = async (
   const target = targetOf(by, userId);
   const membership = await membershipOf(env, target);
   if (!membership) {
-    throw memberErrors.create("member.not_found");
+    throw refusal(by, memberErrors.create("member.not_found"));
   }
   const db = drizzle(env.DB);
-  await auditedBatch(env, db, [
-    db.delete(sessions).where(eq(sessions.userId, target)),
-    outboxed(
+  const [ended] = await auditedBatch(env, db, [
+    db
+      .delete(sessions)
+      .where(and(eq(sessions.userId, target), isActiveAdmin(by.userId)))
+      .returning({ id: sessions.id }),
+    outboxedIfChanged(
       db,
       memberEntry(by, "member.sessions.revoked", membership.id, target)
     ),
   ]);
+  // Nothing ended: they had no session, or the admin no longer is one.
+  if (ended.length === 0 && !(await stillAdmin(env, by.userId))) {
+    throw refusal(by, roleErrors.create("role.forbidden"));
+  }
+};
+
+/**
+ * Gives the member `userId` `role`, the admin themselves included. One
+ * conditional update: it changes the role only while the admin still is
+ * one and, unless the new role is admin, someone other than `userId` is an
+ * admin too. Every change of membership or role goes through a statement
+ * like it (`recordRemoval`), so however they race, the organization keeps
+ * an admin.
+ */
+export const setMemberRole = async (
+  env: Env,
+  by: Identity,
+  userId: unknown,
+  role: unknown
+): Promise<void> => {
+  requireAdmin(by);
+  const target = identifierSchema.safeParse(userId);
+  const parsedRole = roleSchema.safeParse(role);
+  if (!parsedRole.success) {
+    throw refusal(by, memberErrors.create("member.role_invalid"));
+  }
+  const membership = target.success
+    ? await membershipOf(env, target.data)
+    : undefined;
+  if (!(target.success && membership)) {
+    throw refusal(by, memberErrors.create("member.not_found"));
+  }
+  const newRole = parsedRole.data;
+  if (membership.role === newRole) {
+    return;
+  }
+  const db = drizzle(env.DB);
+  const keepsAnAdmin =
+    newRole === "admin" ? sql`1` : activeAdminExists(target.data);
+  const [[changed]] = await auditedBatch(env, db, [
+    db
+      .update(members)
+      .set({ role: newRole })
+      .where(
+        and(
+          eq(members.organizationId, organizationId),
+          eq(members.userId, target.data),
+          notRemoved(target.data),
+          isActiveAdmin(by.userId),
+          keepsAnAdmin
+        )
+      )
+      .returning({ id: members.id }),
+    outboxedIfChanged(db, {
+      actor: actorOf(by),
+      action: "member.role.updated",
+      target: { type: "member", id: membership.id },
+      detail: {
+        userId: target.data,
+        previousRole: membership.role,
+        role: newRole,
+      },
+    }),
+  ]);
+  if (changed) {
+    return;
+  }
+  if (!(await membershipOf(env, target.data))) {
+    throw refusal(by, memberErrors.create("member.not_found"));
+  }
+  if (!(await stillAdmin(env, by.userId))) {
+    throw refusal(by, roleErrors.create("role.forbidden"));
+  }
+  throw refusal(by, memberErrors.create("member.last_admin"));
+};
+
+/** How far back the cron trigger retries disconnecting removed people. */
+const retryWindowMs = 30 * 24 * 60 * 60 * 1000;
+/** Most removed people one retry takes. */
+const retryBatchSize = 100;
+
+/**
+ * Disconnects what is still connected for people removed in the last 30
+ * days: a removal whose disconnect failed, or an OAuth flow that finished
+ * while they were being removed. Connect finds nothing to do for everyone
+ * else. The cron trigger calls it.
+ */
+export const retryDisconnects = async (env: Env): Promise<void> => {
+  const removed = await drizzle(env.DB)
+    .select({ userId: memberRemovals.userId })
+    .from(memberRemovals)
+    .where(
+      and(
+        eq(memberRemovals.organizationId, organizationId),
+        gt(memberRemovals.removedAt, new Date(Date.now() - retryWindowMs))
+      )
+    )
+    .orderBy(desc(memberRemovals.removedAt))
+    .limit(retryBatchSize);
+  if (removed.length === 0) {
+    return;
+  }
+  await env.CONNECT.disconnectPersonal({
+    person: null,
+    ownerUserIds: removed.map(({ userId }) => userId),
+  });
 };
 
 /**
@@ -290,6 +430,12 @@ export class MembersRpc extends RpcTarget implements MembersApi {
   async revokeSessions(userId: string): Promise<void> {
     await withPerson(this.#check, async (person) => {
       await revokeMemberSessions(this.#env, person, userId);
+    });
+  }
+
+  async setRole(userId: string, role: Role): Promise<void> {
+    await withPerson(this.#check, async (person) => {
+      await setMemberRole(this.#env, person, userId, role);
     });
   }
 }

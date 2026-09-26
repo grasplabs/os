@@ -11,6 +11,7 @@ import {
   auditedDuring,
   callAuth,
   openRpc,
+  outcome,
   signedIn,
   signedInWithRole,
   whoami,
@@ -19,21 +20,6 @@ import {
 const idp = mockIdp();
 
 const signedInAs = async (role: Role) => await signedInWithRole(idp, role);
-
-const membersSchema = z.object({
-  members: z.array(z.object({ id: z.string(), userId: z.string() })),
-});
-
-/** The membership id Better Auth's member routes take, for `userId`. */
-const memberIdOf = async (adminSession: string, userId: string) => {
-  const response = await callAuth("/organization/list-members", adminSession);
-  const { members } = membersSchema.parse(await response.json());
-  const member = members.find((candidate) => candidate.userId === userId);
-  if (!member) {
-    throw new Error("Not a member");
-  }
-  return member.id;
-};
 
 describe("roles and teams", () => {
   it("are read on every call, so changes apply without reconnecting", async () => {
@@ -46,13 +32,9 @@ describe("roles and teams", () => {
       teams: [],
     });
 
-    const memberId = await memberIdOf(admin.session, person.userId);
-    const promoted = await callAuth(
-      "/organization/update-member-role",
-      admin.session,
-      { memberId, role: "builder" }
-    );
-    expect(promoted.status).toBe(200);
+    const { core: adminCore } = await openRpc(admin.session);
+    using adminSession = adminCore.authenticate();
+    await adminSession.members.setRole(person.userId, "builder");
     const created = await callAuth("/organization/create-team", admin.session, {
       name: "Finance",
     });
@@ -71,19 +53,16 @@ describe("roles and teams", () => {
   });
 
   it("can't be raised by anyone but an admin, not even their own", async () => {
-    const admin = await signedInAs("admin");
     for (const role of ["user", "builder"] as const) {
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
       const person = await signedInAs(role);
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
-      const memberId = await memberIdOf(admin.session, person.userId);
+      const { core } = await openRpc(person.session);
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
-      const raised = await callAuth(
-        "/organization/update-member-role",
-        person.session,
-        { memberId, role: "admin" }
+      const raised = await outcome(
+        core.authenticate().members.setRole(person.userId, "admin")
       );
-      expect(raised.status).toBe(403);
+      expect(raised).toBe("role.forbidden");
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
       const team = await callAuth("/organization/create-team", person.session, {
         name: `${role}'s own team`,
@@ -92,27 +71,6 @@ describe("roles and teams", () => {
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
       await expect(whoami(person.session)).resolves.toMatchObject({ role });
     }
-  });
-
-  it("are only ever one of Grasp's roles", async () => {
-    const admin = await signedInAs("admin");
-    const person = await signedInAs("user");
-    const memberId = await memberIdOf(admin.session, person.userId);
-    const refused = await Promise.all(
-      ["owner", "member", "admin,builder", ["admin", "user"]].map(
-        async (role) =>
-          await callAuth("/organization/update-member-role", admin.session, {
-            memberId,
-            role,
-          })
-      )
-    );
-    expect(refused.map((response) => response.status)).toStrictEqual([
-      400, 400, 400, 400,
-    ]);
-    await expect(whoami(person.session)).resolves.toMatchObject({
-      role: "user",
-    });
   });
 
   it("give no access with a role that isn't ours", async () => {
@@ -163,13 +121,8 @@ describe("member and team changes", () => {
   it("are audited with who made them, and identifiers only", async () => {
     const admin = await signedInAs("admin");
     const person = await signedInAs("user");
-    const memberId = await memberIdOf(admin.session, person.userId);
     let teamId = "";
     const audited = await auditedDuring(async () => {
-      await callAuth("/organization/update-member-role", admin.session, {
-        memberId,
-        role: "builder",
-      });
       const created = await callAuth(
         "/organization/create-team",
         admin.session,
@@ -195,12 +148,6 @@ describe("member and team changes", () => {
 
     const actor = { type: "person", userId: admin.userId };
     expect(audited).toStrictEqual([
-      expect.objectContaining({
-        actor,
-        action: "member.role.updated",
-        target: { type: "member", id: memberId },
-        detail: { previousRole: "user", role: "builder" },
-      }),
       expect.objectContaining({
         actor,
         action: "team.created",
@@ -233,18 +180,20 @@ describe("member and team changes", () => {
 
   it("keep their audit event when the audit queue is down, and send it later", async () => {
     const admin = await signedInAs("admin");
-    const person = await signedInAs("user");
-    const memberId = await memberIdOf(admin.session, person.userId);
     const down = vi
       .spyOn(env.AUDIT_QUEUE, "send")
       .mockRejectedValue(new Error("Queue unavailable"));
+    let teamId = "";
     try {
-      const changed = await callAuth(
-        "/organization/update-member-role",
+      const created = await callAuth(
+        "/organization/create-team",
         admin.session,
-        { memberId, role: "builder" }
+        { name: "Finance" }
       );
-      expect(changed.status).toBe(200);
+      expect(created.status).toBe(200);
+      ({ id: teamId } = z
+        .object({ id: z.string() })
+        .parse(await created.json()));
     } finally {
       down.mockRestore();
     }
@@ -254,7 +203,7 @@ describe("member and team changes", () => {
     });
     expect(
       sent.map(({ action, target }) => [action, target?.id])
-    ).toContainEqual(["member.role.updated", memberId]);
+    ).toContainEqual(["team.created", teamId]);
   });
 
   it("aren't audited when refused", async () => {
