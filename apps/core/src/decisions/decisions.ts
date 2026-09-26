@@ -555,6 +555,10 @@ export const answerDecision = async (
         status,
         decidedBy: by.userId,
         decidedAt: now,
+        // Only so the previous release, which shows an answer only with a
+        // channel, still reads this row as answered after a rollback. It
+        // goes with the column in the contract release.
+        decidedVia: "rpc",
         payload: payload ?? null,
       })
       .where(

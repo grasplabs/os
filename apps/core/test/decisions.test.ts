@@ -169,7 +169,7 @@ describe("decisions", { timeout: 60_000 }, () => {
       approvedBy: { type: "person", userId: decider.userId },
       approved: { run: run.id, step: "review" },
     });
-    // Who and how, never what they wrote (R16).
+    // Who, never what they wrote (R16).
     expect(Object.keys(approved?.detail ?? {}).toSorted()).toStrictEqual([
       "app",
       "run",
@@ -177,6 +177,14 @@ describe("decisions", { timeout: 60_000 }, () => {
       "version",
       "workflow",
     ]);
+    // The row still names a channel, so the release before this one reads
+    // it as answered after a rollback.
+    const row = await env.DB.prepare(
+      "SELECT decided_via FROM workflow_decisions WHERE id = ?"
+    )
+      .bind(decision)
+      .first<{ decided_via: string | null }>();
+    expect(row?.decided_via).toBe("rpc");
   });
 
   it("refuse anyone the decision isn't from", async () => {
