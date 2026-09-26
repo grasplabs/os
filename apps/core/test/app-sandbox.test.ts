@@ -1,6 +1,7 @@
 import type { AppCaller } from "@grasp-os/shared/apps";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
+import type { KnowledgeApi } from "@grasp-os/shared/knowledge";
 import type { PermissionRequest } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
 import { runInDurableObject } from "cloudflare:test";
@@ -15,6 +16,12 @@ import { sandbox } from "../src/sandbox.ts";
 import { buildServer } from "../src/screens.ts";
 import { outlook, release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
+import {
+  collectionWithNote,
+  newTeam,
+  readCollection,
+  storedGrant,
+} from "./knowledge.ts";
 import { outcome, signedInApi } from "./sign-in.ts";
 
 // An App's server code is written by the agent and runs for everyone who
@@ -128,6 +135,41 @@ export class App extends DurableObject {
     return await this.mail(caller, kept);
   }
 
+  async reads(caller: Caller, binding: string, documentId: string, as?: unknown): Promise<string[]> {
+    const collection = (this.env as Record<string, any>)[binding];
+    if (!collection) {
+      return ["no binding"];
+    }
+    const who = as === undefined ? caller : as;
+    return await Promise.all([
+      outcome(collection.listDocuments(who)),
+      outcome(collection.getDocument(who, documentId)),
+      outcome(collection.history(who, documentId)),
+      outcome(collection.backlinks(who, documentId)),
+      outcome(collection.search(who, "note")),
+    ]);
+  }
+
+  async readLater(
+    caller: Caller,
+    wait: (caller: Caller) => Promise<void>,
+    binding: string,
+    documentId: string
+  ): Promise<string[]> {
+    await wait(caller);
+    return await this.reads(caller, binding, documentId);
+  }
+
+  async readAsKept(caller: Caller, binding: string, documentId: string): Promise<string[]> {
+    return await this.reads(caller, binding, documentId, kept);
+  }
+
+  async provenance(caller: Caller, binding: string, documentId: string): Promise<unknown> {
+    const collection = (this.env as Record<string, any>)[binding];
+    const { provenance } = await collection.getDocument(caller, documentId);
+    return provenance;
+  }
+
   fail(): never {
     throw new Error("Invoice 7 has no total");
   }
@@ -187,6 +229,13 @@ const sampleApp = async (builder: Builder, label = "v1"): Promise<AppId> => {
 const as = (userId: string): AppCallerInput => ({
   userId,
   mode: "interactive",
+});
+
+/** The caller a workflow run's host passes when a step calls its App. */
+const inRun = (userId: string): AppCallerInput => ({
+  userId,
+  mode: "workflow",
+  idempotencyKey: `${crypto.randomUUID()}:step`,
 });
 
 /** Asks for and grants a permission; returns its ID. */
@@ -709,6 +758,294 @@ export default class extends WorkerEntrypoint {
       },
       again: false,
       unknownApp: "app.not_found",
+    });
+  });
+});
+
+/** Someone's Knowledge, as they reach it in the product. */
+const knowledgeOf = (person: Builder): { knowledge: KnowledgeApi } => {
+  const knowledge: KnowledgeApi = person.api.knowledge;
+  return { knowledge };
+};
+
+/** What each of the sample App's reads (`reads`) ended with. */
+const everyReadIs = (code: string) => Array.from({ length: 5 }, () => code);
+
+// The same App serves everyone, so what it reads from Knowledge must be
+// what the person whose call it runs in may read, and no more (R5): the
+// App's grant intersected with that person's access, never a personal
+// collection (those never enter a shared context), and never for someone
+// App code names itself (R3, SB4). A sensitive read restricts the App for
+// good, before the data reaches its code (Q12).
+describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
+  /**
+   * An App granted a team's collection (`HANDBOOK`), a member of the team
+   * and someone outside it, and a collection the App wasn't granted.
+   */
+  const setUp = async () => {
+    const admin = await personApi("admin");
+    const member = await personApi("user");
+    const outsider = await personApi("user");
+    const teamId = await newTeam(admin, [member]);
+    const [finance, other] = await Promise.all([
+      collectionWithNote(knowledgeOf(admin), {
+        name: "Finance",
+        access: "teams",
+        teams: [teamId],
+      }),
+      collectionWithNote(knowledgeOf(admin), {
+        name: "Other",
+        access: "everyone",
+      }),
+    ]);
+    const app = await sampleApp(admin);
+    const permission = await granted(
+      admin,
+      readCollection({ type: "app", appId: app }, finance.collectionId)
+    );
+    return { admin, member, outsider, app, permission, finance, other };
+  };
+
+  it("reads a granted collection for the calling person, and nothing they or it can't read", async () => {
+    const { admin, member, outsider, app, permission, finance, other } =
+      await setUp();
+    const readsAs = async (userId: string, noteId = finance.noteId) =>
+      await callApp(env, app, as(userId), "reads", ["HANDBOOK", noteId]);
+
+    expect({
+      envNames: await callApp(env, app, as(member.userId), "envNames"),
+      member: await readsAs(member.userId),
+      // The App's grant alone isn't enough.
+      outsider: await readsAs(outsider.userId),
+      // Only its own collection, also for someone who can read another.
+      other: await readsAs(member.userId, other.noteId),
+    }).toStrictEqual({
+      envNames: ["HANDBOOK"],
+      member: everyReadIs("ok"),
+      outsider: everyReadIs("knowledge.not_found"),
+      other: [
+        "ok",
+        "knowledge.not_found",
+        "knowledge.not_found",
+        "knowledge.not_found",
+        "ok",
+      ],
+    });
+
+    await admin.api.permissions.revoke(permission);
+    await expect(readsAs(member.userId)).resolves.toStrictEqual(["no binding"]);
+  });
+
+  it("reads for each caller of the App, when two people read at once", async () => {
+    const { member, outsider, app, finance } = await setUp();
+    await callApp(env, app, as(member.userId), "label");
+    const readArgs = ["HANDBOOK", finance.noteId];
+
+    // Each waits in the App while the other one reads, in both orders.
+    const first = gate();
+    const memberFirst = callApp(env, app, as(member.userId), "readLater", [
+      first.wait,
+      ...readArgs,
+    ]);
+    await first.entered;
+    const outsiderMeanwhile = await callApp(
+      env,
+      app,
+      as(outsider.userId),
+      "reads",
+      readArgs
+    );
+    first.release();
+
+    const second = gate();
+    const outsiderFirst = callApp(env, app, as(outsider.userId), "readLater", [
+      second.wait,
+      ...readArgs,
+    ]);
+    await second.entered;
+    const memberMeanwhile = await callApp(
+      env,
+      app,
+      as(member.userId),
+      "reads",
+      readArgs
+    );
+    second.release();
+
+    expect({
+      member: [await memberFirst, memberMeanwhile],
+      outsider: [outsiderMeanwhile, await outsiderFirst],
+    }).toStrictEqual({
+      member: [everyReadIs("ok"), everyReadIs("ok")],
+      outsider: [
+        everyReadIs("knowledge.not_found"),
+        everyReadIs("knowledge.not_found"),
+      ],
+    });
+  });
+
+  it("can't read with a made-up caller, one whose call ended, or another App's", async () => {
+    const { admin, member, app, finance } = await setUp();
+    const theirs = await sampleApp(admin);
+    await granted(
+      admin,
+      readCollection({ type: "app", appId: theirs }, finance.collectionId)
+    );
+    const caller = as(member.userId);
+    const readArgs = ["HANDBOOK", finance.noteId];
+
+    const madeUp = await Promise.all(
+      [
+        { userId: member.userId, token: crypto.randomUUID() },
+        { userId: member.userId },
+        member.userId,
+        null,
+      ].map(
+        async (forged) =>
+          await callApp(env, app, caller, "reads", [...readArgs, forged])
+      )
+    );
+    await callApp(env, app, caller, "keep");
+    const afterItEnded = await callApp(
+      env,
+      app,
+      caller,
+      "readAsKept",
+      readArgs
+    );
+
+    const held = gate();
+    const theirCall = callApp(env, theirs, caller, "readLater", [
+      held.wait,
+      ...readArgs,
+    ]);
+    const theirCaller = await held.entered;
+    const withTheirCaller = await callApp(env, app, caller, "reads", [
+      ...readArgs,
+      theirCaller,
+    ]);
+    held.release();
+    expect({
+      madeUp,
+      afterItEnded,
+      withTheirCaller,
+      theirOwn: await theirCall,
+    }).toStrictEqual({
+      madeUp: Array.from({ length: 4 }, () =>
+        everyReadIs("app.caller_invalid")
+      ),
+      afterItEnded: everyReadIs("app.caller_invalid"),
+      withTheirCaller: everyReadIs("app.caller_invalid"),
+      theirOwn: everyReadIs("ok"),
+    });
+  });
+
+  it("never reads a personal collection, not even for its owner", async () => {
+    const owner = await personApi("user");
+    const diary = await collectionWithNote(knowledgeOf(owner), {
+      name: "Diary",
+      access: "me",
+    });
+    const app = await sampleApp(await personApi("builder"));
+    // Nobody can grant one; a grant that exists anyway reads nothing.
+    await storedGrant(
+      { type: "app", id: app },
+      { type: "collection", id: diary.collectionId },
+      ["read"],
+      "DIARY"
+    );
+    await expect(
+      callApp(env, app, as(owner.userId), "reads", ["DIARY", diary.noteId])
+    ).resolves.toStrictEqual(everyReadIs("knowledge.not_found"));
+  });
+
+  it("is restricted for good by a sensitive read, and then makes no connection calls for anyone", async () => {
+    const admin = await personApi("admin");
+    const outsider = await personApi("user");
+    const teamId = await newTeam(admin, []);
+    const [payroll, handbook] = await Promise.all([
+      collectionWithNote(knowledgeOf(admin), {
+        name: "Payroll",
+        access: "teams",
+        teams: [teamId],
+        sensitive: true,
+      }),
+      collectionWithNote(knowledgeOf(admin), {
+        name: "Handbook",
+        access: "everyone",
+      }),
+    ]);
+    const app = await sampleApp(admin);
+    const subject = { type: "app" as const, appId: app };
+    await granted(admin, outlook(app));
+    await granted(admin, readCollection(subject, payroll.collectionId));
+    await granted(
+      admin,
+      readCollection(subject, handbook.collectionId, "OTHER")
+    );
+    const mail = async (userId: string) =>
+      await callApp(env, app, as(userId), "mail");
+
+    // Ordinary reads, and a sensitive read that was refused, change nothing.
+    const ordinary = await callApp(env, app, as(admin.userId), "provenance", [
+      "OTHER",
+      handbook.noteId,
+    ]);
+    const refused = await callApp(env, app, as(outsider.userId), "reads", [
+      "HANDBOOK",
+      payroll.noteId,
+    ]);
+    const before = await mail(admin.userId);
+
+    const sensitive = await callApp(env, app, as(admin.userId), "provenance", [
+      "HANDBOOK",
+      payroll.noteId,
+    ]);
+    await appHost(env, app).restart("A test restarts it.");
+    expect({
+      ordinary,
+      refused,
+      before,
+      sensitive,
+      after: [await mail(admin.userId), await mail(outsider.userId)],
+      // Knowledge stays inside the deployment, so it can still be read.
+      stillReads: await callApp(env, app, as(admin.userId), "reads", [
+        "OTHER",
+        handbook.noteId,
+      ]),
+    }).toStrictEqual({
+      ordinary: {
+        collectionIds: [handbook.collectionId],
+        sensitive: false,
+        restricted: false,
+      },
+      refused: everyReadIs("knowledge.not_found"),
+      before: reached,
+      sensitive: {
+        collectionIds: [payroll.collectionId],
+        sensitive: true,
+        restricted: true,
+      },
+      after: ["permission.restricted", "permission.restricted"],
+      stillReads: everyReadIs("ok"),
+    });
+  });
+
+  it("reads for the person a workflow run acts for, when the run calls it", async () => {
+    const { member, outsider, app, finance } = await setUp();
+    const readArgs = ["HANDBOOK", finance.noteId];
+    expect({
+      member: await callApp(env, app, inRun(member.userId), "reads", readArgs),
+      outsider: await callApp(
+        env,
+        app,
+        inRun(outsider.userId),
+        "reads",
+        readArgs
+      ),
+    }).toStrictEqual({
+      member: everyReadIs("ok"),
+      outsider: everyReadIs("knowledge.not_found"),
     });
   });
 });

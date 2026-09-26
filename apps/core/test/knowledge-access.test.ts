@@ -4,7 +4,6 @@ import {
   workspaceIdSchema,
 } from "@grasp-os/shared/ids";
 import type {
-  CollectionInput,
   CollectionReader,
   KnowledgeApi,
 } from "@grasp-os/shared/knowledge";
@@ -17,7 +16,6 @@ import type { Role } from "@grasp-os/shared/roles";
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import { bindingsFor } from "../src/bindings.ts";
 import { appHost } from "../src/durable-objects.ts";
@@ -25,6 +23,12 @@ import type { WorkContext } from "../src/restricted.ts";
 import { workspace } from "../src/workspace.ts";
 import { collectionIn, connectionIn, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
+import {
+  collectionWithNote,
+  newTeam,
+  readCollection,
+  storedGrant,
+} from "./knowledge.ts";
 import { callAuth, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // Knowledge as Apps and agents reach it, and restricted mode. These tests
@@ -51,85 +55,12 @@ const newAgent = () => ({
   agentId: `agent-${unique()}`,
 });
 
-/** A team with `members`, made by an admin. */
-const newTeam = async (admin: Person, members: Person[]): Promise<string> => {
-  const created = await callAuth("/organization/create-team", admin.session, {
-    name: `Team ${unique()}`,
-  });
-  const { id } = z.object({ id: z.string() }).parse(await created.json());
-  for (const member of members) {
-    // oxlint-disable-next-line no-await-in-loop -- one member at a time
-    await callAuth("/organization/add-team-member", admin.session, {
-      teamId: id,
-      userId: member.userId,
-    });
-  }
-  return id;
-};
-
-/** A collection with one document, `note.md`, that links to itself. */
-const collectionWithNote = async (owner: Person, input: CollectionInput) => {
-  const collection = await owner.knowledge.createCollection(input);
-  const note = await owner.knowledge.saveDocument({
-    collectionId: collection.id,
-    path: "note.md",
-    text: "# Note\nSee [[note.md]] and [[other.md]].",
-    ifVersion: 0,
-  });
-  await owner.knowledge.saveDocument({
-    collectionId: collection.id,
-    path: "other.md",
-    text: "# Other\nBack to [[note.md]].",
-    ifVersion: 0,
-  });
-  return { collectionId: collection.id, noteId: note.id };
-};
-
 /** Asks for and grants `request`; returns the permission's ID. */
 const granted = async (admin: Person, request: PermissionRequest) => {
   const { id } = await admin.api.permissions.request(request);
   await admin.api.permissions.grant(id);
   return id;
 };
-
-/**
- * An active permission stored as it is, past the checks a request and a
- * grant make, as a bug or an old record could leave one: the reads and
- * calls must refuse what it shouldn't allow on their own.
- */
-const storedGrant = async (
-  subject: { type: "app" | "agent"; id: string },
-  object: { type: "collection" | "connection"; id: string },
-  actions: string[],
-  binding: string
-) => {
-  await env.DB.prepare(
-    `INSERT INTO permissions (id, subject_type, subject_id, object_type, object_id,
-      actions, binding, status, requested_by, requested_at, granted_by, granted_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, 'active', 'test', 0, 'test', 0)`
-  )
-    .bind(
-      crypto.randomUUID(),
-      subject.type,
-      subject.id,
-      object.type,
-      object.id,
-      JSON.stringify(actions),
-      binding
-    )
-    .run();
-};
-
-const readCollection = (
-  subject: PermissionSubjectInput,
-  collectionId: string,
-  binding = "HANDBOOK"
-): PermissionRequest => ({
-  subject,
-  object: { type: "collection", collectionId },
-  actions: ["read"],
-  binding,
-});
 
 const outlook = (subject: PermissionSubjectInput): PermissionRequest => ({
   subject,
