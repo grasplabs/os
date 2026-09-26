@@ -51,23 +51,39 @@ export class CoreLink {
 
   close(): void {
     this.#closed = true;
-    this.#core?.[Symbol.dispose]();
+    this.#drop();
+  }
+
+  /** Lets go of the current connection, which no longer counts as ours. */
+  #drop(): void {
+    const core = this.#core;
+    this.#core = undefined;
+    core?.[Symbol.dispose]();
   }
 
   async #connect(): Promise<Session> {
+    if (this.#closed) {
+      throw new Error("The page closed its connection to core.");
+    }
+    // A failed attempt's connection, before opening the next.
+    this.#drop();
     const core = connectCore();
     this.#core = core;
     const session = core.authenticate();
+    // Core's own answer, never an App's: the session holds, or it ended.
+    await session.whoami();
+    this.#delay = reconnectMs.first;
+    // Only a connection that worked starts a reconnect when it breaks, and
+    // only once: a failed attempt is retried by the loop that made it.
+    // Registered after the answer, it still hears of a break before it.
     core.onRpcBroken(() => {
       if (!this.#closed && this.#core === core) {
+        this.#drop();
         const next = this.#reconnect();
         void settled(next);
         this.#session = next;
       }
     });
-    // Core's own answer, never an App's: the session holds, or it ended.
-    await session.whoami();
-    this.#delay = reconnectMs.first;
     return await session;
   }
 

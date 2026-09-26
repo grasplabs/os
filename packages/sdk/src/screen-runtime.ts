@@ -45,6 +45,12 @@ export const bridge = (): RpcStub<ScreenBridge> => {
   return connected;
 };
 
+/** Connects the frame to the page's bridge over `port`. */
+export const connectBridge = (port: MessagePort): RpcStub<ScreenBridge> => {
+  connected = newMessagePortRpcSession<ScreenBridge>(port);
+  return connected;
+};
+
 /** An error's message and stack, as far as it has them, never throwing. */
 const describe = (value: unknown): Pick<ScreenProblem, "message" | "stack"> => {
   if (value instanceof Error) {
@@ -104,12 +110,12 @@ export const runScreen = async (
   port: MessagePort,
   screen: string
 ): Promise<void> => {
-  connected = newMessagePortRpcSession<ScreenBridge>(port);
+  const page = connectBridge(port);
   reportProblems();
   const root = document.createElement("div");
   document.body.append(root);
   try {
-    await connected.theme((theme) => {
+    await page.theme((theme) => {
       document.documentElement.classList.toggle("dark", theme === "dark");
     });
     const loaded: unknown = await import(screen);

@@ -463,6 +463,75 @@ describe("screens", { timeout: 60_000 }, () => {
     });
   });
 
+  it("frees the callbacks a screen stopped, as the App drops them for rejecting, so subscribing again never runs out", async () => {
+    const builder = await personApi("builder");
+    const app = await sampleApp(builder);
+    let released = 0;
+    // A screen's callback as `live` makes it: once stopped, it rejects
+    // what it gets, and it notes when core lets go of it.
+    const subscription = () => {
+      let stopped = false;
+      const callback = Object.assign(
+        (): void => {
+          if (stopped) {
+            throw new Error("Stopped");
+          }
+        },
+        {
+          [Symbol.dispose]: () => {
+            released += 1;
+          },
+        }
+      );
+      return {
+        callback,
+        stop: () => {
+          stopped = true;
+        },
+      };
+    };
+    const releasedAtLeast = async (count: number): Promise<void> => {
+      await vi.waitFor(() => {
+        if (released < count) {
+          throw new Error(`${released} released so far`);
+        }
+      }, 10_000);
+    };
+
+    // Twice as many as a connection may hold at once: each new
+    // subscription replaces the last, as when a screen's arguments change,
+    // and the App's next change reaches the stopped one.
+    const cycles = callbacksPerConnection * 2;
+    const outcomes: string[] = [];
+    let current = subscription();
+    outcomes.push(
+      await outcome(
+        builder.api.screens.call(app, "watchNotes", [current.callback])
+      )
+    );
+    for (let cycle = 1; cycle <= cycles; cycle += 1) {
+      const next = subscription();
+      outcomes.push(
+        // oxlint-disable-next-line no-await-in-loop -- one after the other, as a screen does
+        await outcome(
+          builder.api.screens.call(app, "watchNotes", [next.callback])
+        )
+      );
+      current.stop();
+      current = next;
+      // oxlint-disable-next-line no-await-in-loop -- one after the other, as a screen does
+      await builder.api.screens.call(app, "addNote", [`Change ${cycle}`]);
+      // oxlint-disable-next-line no-await-in-loop -- one after the other, as a screen does
+      await releasedAtLeast(cycle);
+    }
+
+    expect({
+      subscribed: outcomes.length,
+      all: outcomes.every((result) => result === "ok"),
+      watching: await builder.api.screens.call(app, "watching", []),
+    }).toStrictEqual({ subscribed: cycles + 1, all: true, watching: 1 });
+  });
+
   it("never hands a screen a way into the App, or the App one back", async () => {
     const builder = await personApi("builder");
     const app = await sampleApp(builder);

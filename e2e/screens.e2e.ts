@@ -15,6 +15,20 @@ import { screenAppFiles } from "./screen-app.ts";
 // through its server, sees another person's changes live, and reports its
 // errors; and, as code nobody reviewed line by line, it gets nowhere else.
 
+declare global {
+  interface Window {
+    /** The App names the page's chrome showed, sampled by a test below. */
+    chromeNames: { path: string; name: string }[];
+  }
+}
+
+/**
+ * Longer than the page waits between attempts to reconnect after one
+ * failed (2 s), twice over: a second round of attempts, running beside the
+ * first, shows by then.
+ */
+const reconnectsSettledMs = 5000;
+
 /** Counts every request that reaches it: none should. */
 const serveAttacker = async (): Promise<{
   url: string;
@@ -34,15 +48,16 @@ const serveAttacker = async (): Promise<{
   return { url: `http://127.0.0.1:${address.port}`, hits, server };
 };
 
-/** A new App running the sample, released by `builder`. */
+/** A new App named `name` running the sample, released by `builder`. */
 const releaseApp = async (
   builder: Person,
-  attacker: string
+  attacker: string,
+  name = "Notes"
 ): Promise<string> => {
   const { core, api } = apiOf(builder);
   try {
-    const { id } = await api.apps.create({ name: "Notes" });
-    await release(api, id, screenAppFiles(attacker), "Notes");
+    const { id } = await api.apps.create({ name });
+    await release(api, id, screenAppFiles(attacker), name);
     return id;
   } finally {
     core[Symbol.dispose]();
@@ -190,16 +205,28 @@ base(
   }
 );
 
-test("a screen subscribes again after its connection drops", async ({
+test("a screen subscribes again after its connection drops, trying one connection at a time", async ({
   browser,
 }) => {
   const page = await pageOf(browser, one);
   let drop: (() => Promise<void>) | undefined;
-  let connections = 0;
-  await page.routeWebSocket("**/rpc", (socket) => {
-    connections += 1;
+  let dropped = false;
+  let afterDrop = 0;
+  // After the drop, core is out of reach for the next attempt.
+  let refuse = 0;
+  await page.routeWebSocket("**/rpc", async (socket) => {
+    if (dropped) {
+      afterDrop += 1;
+    }
+    if (refuse > 0) {
+      refuse -= 1;
+      await socket.close();
+      return;
+    }
     socket.connectToServer();
     drop = async () => {
+      dropped = true;
+      refuse = 1;
       await socket.close();
     };
   });
@@ -218,7 +245,47 @@ test("a screen subscribes again after its connection drops", async ({
       .getByRole("list", { name: "Notes" })
       .getByText(`After the drop by ${two.userId}`)
   ).toBeVisible({ timeout: 20_000 });
-  expect(connections).toBeGreaterThanOrEqual(2);
+  // One refused attempt, then one that holds, and none beside or after it:
+  // a failed attempt doesn't start another round of attempts of its own.
+  await page.waitForTimeout(reconnectsSettledMs);
+  expect(afterDrop).toBe(2);
+});
+
+test("moving to another App's screen never shows the App it left in the chrome", async ({
+  browser,
+}) => {
+  const other = await releaseApp(one, attacker.url, "Tasks");
+  const page = await pageOf(browser, one);
+  await openScreen(page, app);
+  await expect(page.getByRole("heading", { name: "Notes" })).toBeVisible();
+
+  // Every frame, the App name the chrome shows at the page's address.
+  await page.evaluate(() => {
+    const names: Window["chromeNames"] = [];
+    window.chromeNames = names;
+    const sample = () => {
+      names.push({
+        path: location.pathname,
+        name: document.querySelector("header h1")?.textContent ?? "",
+      });
+      requestAnimationFrame(sample);
+    };
+    sample();
+  });
+  // Within the page, as a link would: a new document would start afresh.
+  const otherPath = `/apps/${other}/screens/notes`;
+  await page.evaluate((path) => {
+    history.pushState(null, "", path);
+    dispatchEvent(new PopStateEvent("popstate"));
+  }, otherPath);
+  await expect(page.getByRole("heading", { name: "Tasks" })).toBeVisible();
+
+  const shown = await page.evaluate(() => window.chromeNames);
+  const atOther = new Set(
+    shown.filter(({ path }) => path === otherPath).map(({ name }) => name)
+  );
+  expect(atOther.has("Notes")).toBeFalsy();
+  expect(atOther.has("Tasks")).toBeTruthy();
 });
 
 test("a new current version is offered while the screen is open", async ({
