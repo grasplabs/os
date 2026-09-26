@@ -633,6 +633,22 @@ describe("a route's check", () => {
       field: "mailbox",
       expected: "a@acme.test",
     });
+    // A value allowed inside literal text becomes a dot segment on its
+    // own in the check's path: no check can be sent, so none goes.
+    const dotted = {
+      ...route,
+      path: "/v1/x{item}",
+      check: { ...itemCheck, path: "/v1/items/{item}" },
+    };
+    for (const value of [".", ".."]) {
+      expect(
+        resourceCheckFor(
+          dotted,
+          new URL(`https://api.example.test/v1/x${value}`),
+          { mailbox: "a@acme.test" }
+        )
+      ).toBeNull();
+    }
     // Nothing to check against, or nothing declared: no check.
     expect(resourceCheckFor(checked, url, {})).toBeUndefined();
     expect(

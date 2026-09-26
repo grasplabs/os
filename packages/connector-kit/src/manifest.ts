@@ -528,14 +528,17 @@ export interface ResourceCheck {
 
 /**
  * The check `route` declares for a request to `url` (which matched the
- * route's path), with the request's own path parameters, or `undefined`
- * when it declares none, or the call binds no resource to check against.
+ * route's path), with the request's own path parameters; `undefined` when
+ * it declares none, or the call binds no resource to check against (as a
+ * path parameter isn't bound then); `null` when the check's URL isn't one
+ * its template allows (a value that becomes a dot segment there, say), so
+ * the request must be refused.
  */
 export const resourceCheckFor = (
   route: Route,
   url: URL,
   values: Readonly<Record<string, string>>
-): ResourceCheck | undefined => {
+): ResourceCheck | undefined | null => {
   const { check } = route;
   const name =
     check === undefined
@@ -575,6 +578,11 @@ export const resourceCheckFor = (
   const checkUrl = new URL(`https://${route.host}${path}`);
   for (const [key, value] of Object.entries(check.query ?? {})) {
     checkUrl.searchParams.set(key, value);
+  }
+  // A value allowed inside its route's segment may stand alone in the
+  // check's, where `new URL` resolves `.` and `..` to another path.
+  if (!pathMatches(check.path, checkUrl.pathname)) {
+    return null;
   }
   return { url: checkUrl, field: check.field, expected: values[name] ?? "" };
 };

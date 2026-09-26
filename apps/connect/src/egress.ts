@@ -370,7 +370,8 @@ const namesResource = (text: string, { field, expected }: ResourceCheck) => {
  * GET with the token and nothing of the connector's. Its answer, when the
  * provider refused it (a 404, a 429), goes back to the connector in the
  * request's place; `refused` when it names another resource, or can't be
- * read; `undefined` when the request may go.
+ * read, or its URL isn't one its template allows; `undefined` when the
+ * request may go.
  */
 const checkResource = async (
   call: EgressProps,
@@ -380,6 +381,9 @@ const checkResource = async (
   const check = resourceCheckFor(route, url, call.values);
   if (check === undefined) {
     return undefined;
+  }
+  if (check === null) {
+    return refuse(call, "check", url, "GET");
   }
   const logged = {
     connector: call.connector,
