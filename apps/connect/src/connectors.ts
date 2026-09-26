@@ -6,7 +6,7 @@ import type {
 import type { CapabilityClaims } from "@grasp-os/shared/capability";
 import { connectErrors } from "@grasp-os/shared/connect";
 import { log } from "@grasp-os/shared/log";
-import { compatibilityDate } from "@grasp-os/shared/runtime";
+import { isolateBase } from "@grasp-os/shared/runtime";
 import { exports } from "cloudflare:workers";
 
 import bundled from "#connectors";
@@ -55,11 +55,11 @@ export const nativeConnector = (name: string): NativeConnector | undefined =>
 /**
  * How a connector's isolate runs: no importable env, and limits per call,
  * enforced by the runtime. Its env is empty; its one way out is the egress
- * handler.
+ * handler, its `globalOutbound`, set per call (see `nativeServer`).
  */
 const isolate = {
-  compatibilityDate,
-  compatibilityFlags: ["disallow_importable_env"],
+  ...isolateBase,
+  // Unlike App code, it calls a provider's API, a bounded number of times.
   limits: { cpuMs: 10_000, subRequests: 50 },
 } satisfies Omit<WorkerLoaderWorkerCode, "mainModule" | "modules">;
 

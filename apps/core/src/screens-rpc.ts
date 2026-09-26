@@ -4,7 +4,6 @@ import {
   kitModules,
   screenRuntime,
 } from "@grasp-os/compiler";
-import type { KitModules } from "@grasp-os/compiler";
 import { appErrors, appVersionSchema } from "@grasp-os/shared/apps";
 import { issuesOf } from "@grasp-os/shared/errors";
 import type { Identity } from "@grasp-os/shared/rpc";
@@ -54,22 +53,6 @@ const parse = <Schema extends z.ZodType>(
   return parsed.data;
 };
 
-/**
- * This release's kit modules, read from the static assets once per isolate:
- * every screen of every App loads from the same set.
- */
-let kit: Promise<KitModules> | undefined;
-
-const kitOf = async (env: Env): Promise<KitModules> => {
-  kit ??= kitModules(env.ASSETS);
-  try {
-    return await kit;
-  } catch (error) {
-    kit = undefined;
-    throw error;
-  }
-};
-
 /** A running App's screen, built from its current version. */
 const openScreen = async (
   env: Env,
@@ -106,7 +89,7 @@ const openScreen = async (
       })),
     });
   }
-  const { modules } = await kitOf(env);
+  const { modules } = await kitModules(env.ASSETS);
   return {
     app: id,
     name: appName,
