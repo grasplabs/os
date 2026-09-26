@@ -174,7 +174,7 @@ export interface RunFailure {
 
 /**
  * Where a run is: running (a step, or a sleep), waiting for an event or a
- * decision, paused until its App has an owner again, or ended.
+ * decision, paused (its engine instance is), or ended.
  */
 export type RunStatus =
   | "running"

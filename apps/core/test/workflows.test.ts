@@ -13,7 +13,6 @@ import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
-import { ownerEventType } from "../src/workflows/dispatcher.ts";
 import { startRun } from "../src/workflows/runs.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import { release, requestGranted, serverBuilt } from "./apps.ts";
@@ -546,7 +545,8 @@ ${mailStep("after")}`,
     ]);
   });
 
-  it("pause a triggered run while its App's owner is gone, at its start or mid-way, and go on with an owner", async () => {
+  it("fail a triggered run once its App's owner has left, at its start or before its next step", async () => {
+    const admin = await personApi("admin");
     const owner = await personApi("builder");
     const app = await appWith(
       owner,
@@ -554,71 +554,39 @@ ${mailStep("after")}`,
         "triggered",
         `  await step.do("first", { description: "First" }, async () => await env.APP.call("hit", "first"));
   await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
-  return await step.do("book", { description: "Book" }, async () => await env.APP.call("book", { invoice: "INV-9", total: 1 }, "key"));`,
-        { first: 1, book: "booked" }
+  return await step.do("book", { description: "Book" }, async () => await env.APP.call("hit", "book"));`,
+        { first: 1, book: 1 }
       )
     );
-    const pausedUntilRejoined = async (
-      run: string,
-      rejoin: () => Promise<void>
-    ) => {
-      await vi.waitFor(
-        async () => {
-          await expect(rowStatus(run)).resolves.toBe("paused");
-        },
-        { timeout: 10_000, interval: 100 }
-      );
-      await rejoin();
-      const waiting = await env.WORKFLOWS.get(run);
-      await waiting.sendEvent({ type: ownerEventType, payload: null });
-    };
 
-    // Gone before the run starts.
-    const rejoinBefore = await leave(owner.userId);
-    const atStart = await triggered(app, "triggered");
-    await pausedUntilRejoined(atStart.id, rejoinBefore);
-    await finished(atStart.id, { type: "go", payload: null });
-
-    // Gone while the run waits between two steps.
+    // Gone while the run waits between two steps: the next one doesn't run.
     const midWay = await triggered(app, "triggered");
     await stepDone(midWay.id, "first");
-    const rejoinMidWay = await leave(owner.userId);
-    const instance = await env.WORKFLOWS.get(midWay.id);
-    await instance.sendEvent({ type: "go", payload: null });
-    await pausedUntilRejoined(midWay.id, rejoinMidWay);
-    await finished(midWay.id);
+    const rejoin = await leave(owner.userId);
+    await finished(midWay.id, { type: "go", payload: null });
+    await rejoin();
+    const booked = await hitsOf(app, owner.userId, "book");
+
+    // Offboarded by an admin before the run starts.
+    await admin.api.members.remove(owner.userId);
+    const atStart = await triggered(app, "triggered");
+    await finished(atStart.id);
 
     const outcomes = await Promise.all(
-      [atStart, midWay].map(async ({ id }) => ({
-        live: await liveStatus(id),
-        row: await rowStatus(id),
-      }))
+      [midWay, atStart].map(async ({ id }) => {
+        const { status, failure } = await admin.api.workflows.status(id);
+        return { status, step: failure?.step, code: failure?.error.code };
+      })
     );
-    expect(outcomes).toStrictEqual([
-      { live: "complete", row: "completed" },
-      { live: "complete", row: "completed" },
-    ]);
-  });
-
-  it("pause a triggered run once an admin removes its App's owner", async () => {
-    const admin = await personApi("admin");
-    const owner = await personApi("builder");
-    const app = await appWith(
-      owner,
-      workflowFiles(
-        "triggered",
-        `  return await step.do("first", { description: "First" }, async () => await env.APP.call("hit", "first"));`,
-        { first: 1 }
-      )
-    );
-    await admin.api.members.remove(owner.userId);
-    const run = await triggered(app, "triggered");
-    await vi.waitFor(
-      async () => {
-        await expect(rowStatus(run.id)).resolves.toBe("paused");
-      },
-      { timeout: 10_000, interval: 100 }
-    );
+    const failed = {
+      step: null,
+      status: "failed",
+      code: "permission.person_inactive",
+    };
+    expect({ booked, outcomes }).toStrictEqual({
+      booked: 0,
+      outcomes: [failed, failed],
+    });
   });
 
   it("fail a person's run once they have left, at its next load", async () => {
@@ -1462,7 +1430,8 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
       owner: await failures(owner),
       admin: await failures(admin),
     };
-    // A new owner doesn't get to see what the run read for the old one.
+    // A triggered run's report goes with its App: once someone else owns
+    // it, they see it, and the old owner no longer does.
     await env.DB.prepare("UPDATE apps SET owner_id = ? WHERE id = ?")
       .bind(starter.userId, app)
       .run();
@@ -1502,8 +1471,8 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
         admin: { status: started.id, listed: [started.id, byTrigger.id] },
       },
       afterOwnerChange: {
-        starter: [started.id, null],
-        owner: [null, byTrigger.id],
+        starter: [started.id, byTrigger.id],
+        owner: [null, null],
       },
       audited: ["connect.action_failed"],
       unknownApp: "app.not_found",

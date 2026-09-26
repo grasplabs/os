@@ -76,7 +76,7 @@ const seenEnded = new Set<string>();
  * Terminates every run a test left waiting, sleeping or paused. The
  * engine keeps those in the project's one workerd across test files, and
  * would go on in the background of whatever runs next: a decision's
- * week-long wait, a run paused for its owner or while a feature was off.
+ * week-long wait, a run paused, or one waiting while a feature was off.
  * Work that outlives its test is how a test file came to wait forever in
  * CI (see apps/core/vite.config.ts), so each test ends its runs.
  */
