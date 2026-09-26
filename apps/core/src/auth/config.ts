@@ -1,4 +1,5 @@
-import { roleSchema } from "@grasp-os/shared";
+import { roleSchema } from "@grasp-os/shared/roles";
+import { loopbackHosts } from "@grasp-os/shared/router";
 import { z } from "zod";
 
 import { deploymentConfig } from "../deployment-config.ts";
@@ -12,8 +13,6 @@ import { deploymentConfig } from "../deployment-config.ts";
 const domainSchema = z
   .string()
   .regex(/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u, "a lowercase domain, e.g. acme.com");
-
-const loopbackHosts = new Set(["localhost", "127.0.0.1", "[::1]"]);
 
 /** An HTTPS origin, or plain HTTP on this machine for local development. */
 const isOrigin = (value: string): boolean => {

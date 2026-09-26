@@ -1,4 +1,10 @@
+import { z } from "zod";
+
 import { defineErrorFamily } from "./errors.ts";
+
+/** Roles a person can have inside a deployment (from Better Auth). */
+export const roleSchema = z.enum(["admin", "builder", "user"]);
+export type Role = z.infer<typeof roleSchema>;
 
 // What each role may do, as allow-lists: a role not named here, such as
 // one added later or one a membership row holds by mistake, gets nothing.

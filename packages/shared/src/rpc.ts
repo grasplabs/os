@@ -1,11 +1,11 @@
 import type { AppsApi } from "./apps.ts";
-import type { Role } from "./index.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
 import type {
   Permission,
   PermissionRequest,
   PermissionSubjectInput,
 } from "./permissions.ts";
+import type { Role } from "./roles.ts";
 
 /** A way to sign in to this deployment, for the sign-in screen. */
 export interface SignInOption {

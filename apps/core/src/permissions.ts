@@ -1,10 +1,10 @@
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
+import { issuesOf } from "@grasp-os/shared/errors";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
   permissionErrors,
-  permissionIdInputSchema,
   permissionObjectSchema,
   permissionRequestSchema,
   permissionSubjectSchema,
@@ -22,11 +22,7 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import {
-  outboxed,
-  outboxedIfChanged,
-  sendAuditOutboxNow,
-} from "./audit-outbox.ts";
+import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { actorOf } from "./audit.ts";
 import { memberRole } from "./auth/identity.ts";
 import { apps, permissions } from "./db/core/schema.ts";
@@ -120,8 +116,6 @@ const subjectOf = (row: Row): PermissionSubject =>
       : { type: row.subjectType, agentId: row.subjectId }
   );
 
-const iso = (date: Date | null): string | null => date?.toISOString() ?? null;
-
 const toPermission = (row: Row): Permission => ({
   id: permissionIdSchema.parse(row.id),
   subject: subjectOf(row),
@@ -132,9 +126,9 @@ const toPermission = (row: Row): Permission => ({
   requestedBy: row.requestedBy,
   requestedAt: row.requestedAt.toISOString(),
   grantedBy: row.grantedBy,
-  grantedAt: iso(row.grantedAt),
+  grantedAt: row.grantedAt?.toISOString() ?? null,
   revokedBy: row.revokedBy,
-  revokedAt: iso(row.revokedAt),
+  revokedAt: row.revokedAt?.toISOString() ?? null,
 });
 
 /** Rows of `subject`, as a condition. */
@@ -193,7 +187,7 @@ const requireBuilder = (by: Identity): void => {
 };
 
 const parseId = (id: unknown): PermissionId => {
-  const parsed = permissionIdInputSchema.safeParse(id);
+  const parsed = permissionIdSchema.safeParse(id);
   if (!parsed.success) {
     throw permissionErrors.create("permission.not_found");
   }
@@ -307,9 +301,7 @@ export const requestPermission = async (
   const parsed = permissionRequestSchema.safeParse(input);
   if (!parsed.success) {
     throw permissionErrors.create("permission.invalid", {
-      issues: parsed.error.issues.map(
-        ({ path, message }) => `${path.map(String).join(".")}: ${message}`
-      ),
+      issues: issuesOf(parsed.error),
     });
   }
   const { subject, object, actions, binding } = parsed.data;
@@ -332,7 +324,7 @@ export const requestPermission = async (
   const permission = toPermission(row);
   const db = drizzle(env.DB);
   try {
-    await db.batch([
+    await auditedBatch(env, db, [
       db.insert(permissions).values(row),
       outboxed(db, changeEntry(by, "permission.requested", permission)),
     ]);
@@ -342,7 +334,6 @@ export const requestPermission = async (
     }
     throw error;
   }
-  await sendAuditOutboxNow(env);
   return permission;
 };
 
@@ -363,7 +354,7 @@ export const grantPermission = async (
   const db = drizzle(env.DB);
   // A conditional update, so a grant can't race a revoke back to life, and
   // its audit event, stored only if the update changed the row.
-  const [[granted]] = await db.batch([
+  const [[granted]] = await auditedBatch(env, db, [
     db
       .update(permissions)
       .set({ status: "active", grantedBy: by.userId, grantedAt: new Date() })
@@ -379,7 +370,6 @@ export const grantPermission = async (
   if (!granted) {
     throw permissionErrors.create("permission.not_requested");
   }
-  await sendAuditOutboxNow(env);
   const permission = toPermission(granted);
   await restartApp(env, permission.subject);
   return permission;
@@ -400,7 +390,7 @@ export const revokePermission = async (
     throw permissionErrors.create("permission.not_found");
   }
   const db = drizzle(env.DB);
-  const [[revoked]] = await db.batch([
+  const [[revoked]] = await auditedBatch(env, db, [
     db
       .update(permissions)
       .set({ status: "revoked", revokedBy: by.userId, revokedAt: new Date() })
@@ -420,7 +410,6 @@ export const revokePermission = async (
     // Already revoked: nothing changed, and nothing is recorded.
     return toPermission((await findRow(env, found.id)) ?? found);
   }
-  await sendAuditOutboxNow(env);
   const permission = toPermission(revoked);
   await restartApp(env, permission.subject);
   return permission;
@@ -437,7 +426,9 @@ export const listPermissions = async (
   if (subject !== undefined) {
     const parsed = permissionSubjectSchema.safeParse(subject);
     if (!parsed.success) {
-      throw permissionErrors.create("permission.invalid");
+      throw permissionErrors.create("permission.invalid", {
+        issues: issuesOf(parsed.error),
+      });
     }
     filter = ofSubject(parsed.data);
   }

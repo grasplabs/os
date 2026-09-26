@@ -1,8 +1,8 @@
 import { z } from "zod";
 
-import { auditIdentifierMaxLength } from "./audit.ts";
+import { appLimits } from "./app-limits.ts";
 import { defineErrorFamily } from "./errors.ts";
-import { appIdSchema } from "./ids.ts";
+import { identifierSchema } from "./ids.ts";
 import type { AppId } from "./ids.ts";
 
 // An App's code is a tree of text files, versioned as a whole: builders
@@ -10,20 +10,6 @@ import type { AppId } from "./ids.ts";
 // and commit it as the next version. Versions never change once committed.
 // One version is current, the one that runs; another can be pending, put
 // up for review before a builder makes it current.
-
-/** The most an App's files take, checked on every write and commit. */
-export const appLimits = {
-  files: 500,
-  /** Characters in one file. */
-  fileLength: 200_000,
-  /** Characters in all of an App's files together. */
-  totalLength: 2_000_000,
-  pathLength: 200,
-  pathDepth: 8,
-  nameLength: 100,
-  descriptionLength: 1000,
-  messageLength: 1000,
-} as const;
 
 /**
  * One folder or file name: letters, digits, `_`, `-` and `.`, not starting
@@ -60,19 +46,12 @@ export const appPathSchema = z
 /** A version of an App: 1 for its first commit, then 2, 3, … */
 export const appVersionSchema = z.int().min(1);
 
-/** An App's ID, as the API takes it. */
-export const appIdInputSchema = z
-  .string()
-  .min(1)
-  .max(auditIdentifierMaxLength)
-  .pipe(appIdSchema);
-
 /** What a builder gives to create an App. */
 export const newAppSchema = z.strictObject({
   name: z.string().trim().min(1).max(appLimits.nameLength),
   description: z.string().max(appLimits.descriptionLength).default(""),
   /** The blueprint the App was made from, if any. */
-  blueprint: z.string().min(1).max(auditIdentifierMaxLength).optional(),
+  blueprint: identifierSchema.optional(),
 });
 export type NewApp = z.input<typeof newAppSchema>;
 

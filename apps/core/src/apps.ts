@@ -1,7 +1,6 @@
+import { appLimits } from "@grasp-os/shared/app-limits";
 import {
   appErrors,
-  appIdInputSchema,
-  appLimits,
   appVersionSchema,
   commitMessageSchema,
   fileChangesSchema,
@@ -14,6 +13,8 @@ import type {
   FileDiff,
 } from "@grasp-os/shared/apps";
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
+import { sha256Hex } from "@grasp-os/shared/encoding";
+import { issuesOf } from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
@@ -23,11 +24,7 @@ import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import {
-  outboxed,
-  outboxedIfChanged,
-  sendAuditOutboxNow,
-} from "./audit-outbox.ts";
+import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { actorOf } from "./audit.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
@@ -72,22 +69,10 @@ const parse = <Schema extends z.ZodType>(
   const parsed = schema.safeParse(input);
   if (!parsed.success) {
     throw appErrors.create("app.invalid", {
-      issues: parsed.error.issues.map(
-        ({ path, message }) => `${path.map(String).join(".")}: ${message}`
-      ),
+      issues: issuesOf(parsed.error),
     });
   }
   return parsed.data;
-};
-
-const sha256 = async (text: string): Promise<string> => {
-  const digest = await crypto.subtle.digest(
-    "SHA-256",
-    new TextEncoder().encode(text)
-  );
-  return [...new Uint8Array(digest)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
 };
 
 const treeKey = (app: AppId, tree: string): string =>
@@ -102,13 +87,11 @@ const readTree = async (
   const key = treeKey(app, tree);
   const object = await env.FILES.get(key);
   const text = await object?.text();
-  if (text === undefined || (await sha256(text)) !== tree) {
+  if (text === undefined || (await sha256Hex(text)) !== tree) {
     throw new Error(`App tree ${key} is missing or damaged`);
   }
   return new Map(Object.entries(storedTreeSchema.parse(JSON.parse(text))));
 };
-
-const iso = (date: Date): string => date.toISOString();
 
 const toApp = (row: AppRow): App => ({
   id: appIdSchema.parse(row.id),
@@ -118,7 +101,7 @@ const toApp = (row: AppRow): App => ({
   blueprint: row.blueprint,
   currentVersion: row.currentVersion,
   pendingVersion: row.pendingVersion,
-  createdAt: iso(row.createdAt),
+  createdAt: row.createdAt.toISOString(),
 });
 
 const toVersion = (row: VersionRow): AppVersion => ({
@@ -129,7 +112,7 @@ const toVersion = (row: VersionRow): AppVersion => ({
   files: row.files,
   author: row.authorId,
   message: row.message,
-  createdAt: iso(row.createdAt),
+  createdAt: row.createdAt.toISOString(),
 });
 
 /** The audit entry of a change to `app` by `by`: identifiers only. */
@@ -151,7 +134,7 @@ const changeEntry = (
 
 /** The App `input` names, which must exist. */
 const findApp = async (env: Env, input: unknown): Promise<App> => {
-  const id = appIdInputSchema.safeParse(input);
+  const id = appIdSchema.safeParse(input);
   const row = id.success
     ? await drizzle(env.DB)
         .select()
@@ -271,14 +254,13 @@ export const createApp = async (
   };
   const app = toApp(row);
   const db = drizzle(env.DB);
-  await db.batch([
+  await auditedBatch(env, db, [
     db.insert(apps).values(row),
     outboxed(
       db,
       changeEntry(by, "app.created", app.id, { blueprint: row.blueprint })
     ),
   ]);
-  await sendAuditOutboxNow(env);
   return app;
 };
 
@@ -399,7 +381,7 @@ export const commitFiles = async (
   }
   checkLimits(files);
   const json = canonicalJson(Object.fromEntries(files));
-  const tree = await sha256(json);
+  const tree = await sha256Hex(json);
   if (tree === latest?.tree) {
     throw appErrors.create("app.nothing_to_commit");
   }
@@ -421,7 +403,7 @@ export const commitFiles = async (
   );
   const db = drizzle(env.DB);
   try {
-    await db.batch([
+    await auditedBatch(env, db, [
       db.insert(appVersions).values(row),
       outboxed(
         db,
@@ -447,7 +429,6 @@ export const commitFiles = async (
     }
     throw error;
   }
-  await sendAuditOutboxNow(env);
   return toVersion(row);
 };
 
@@ -534,7 +515,7 @@ export const proposeVersion = async (
   const appId = found.id;
   const { version: number } = await findVersion(env, appId, version);
   const db = drizzle(env.DB);
-  const [[proposed]] = await db.batch([
+  const [[proposed]] = await auditedBatch(env, db, [
     db
       .update(apps)
       .set({ pendingVersion: number })
@@ -555,7 +536,6 @@ export const proposeVersion = async (
     // Pending or current already: nothing changed, nothing is recorded.
     return await findApp(env, appId);
   }
-  await sendAuditOutboxNow(env);
   return toApp(proposed);
 };
 
@@ -581,7 +561,7 @@ export const setCurrentVersion = async (
   const db = drizzle(env.DB);
   // Only over the current version read above, so the event's `previous`
   // is the version this replaced.
-  const [[changed]] = await db.batch([
+  const [[changed]] = await auditedBatch(env, db, [
     db
       .update(apps)
       .set({
@@ -603,6 +583,5 @@ export const setCurrentVersion = async (
   if (!changed) {
     throw appErrors.create("app.conflict");
   }
-  await sendAuditOutboxNow(env);
   return toApp(changed);
 };

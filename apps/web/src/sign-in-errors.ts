@@ -1,9 +1,13 @@
+import type { SignInErrorCode } from "@grasp-os/shared/sign-in";
+
 /**
  * What a refused sign-in says, by the code core sends back in `?error=`.
  * Anyone can put anything in that parameter of a link, so the page shows
  * only these fixed messages and never the value itself.
  */
-const messages: Readonly<Record<string, string>> = {
+const messages: Readonly<Record<SignInErrorCode, string>> = {
+  provider_unknown: "That way of signing in isn't set up here.",
+  method_not_allowed: "Sign in with your organization's account.",
   tenant_mismatch: "That account isn't part of your organization.",
   guest_not_allowed:
     "Guest accounts can't sign in. Use your organization's own account.",
@@ -22,6 +26,9 @@ const messages: Readonly<Record<string, string>> = {
 
 const fallback = "Sign-in didn't work. Try again, or ask an admin.";
 
+const isKnownCode = (code: string): code is SignInErrorCode =>
+  Object.hasOwn(messages, code);
+
 /** The message for a sign-in refused with `code`. */
 export const signInErrorMessage = (code: string): string =>
-  Object.hasOwn(messages, code) ? (messages[code] ?? fallback) : fallback;
+  isKnownCode(code) ? messages[code] : fallback;

@@ -1,16 +1,17 @@
 import { z } from "zod";
 
-import { auditIdentifierMaxLength } from "./audit.ts";
 import { defineErrorFamily } from "./errors.ts";
-import { collectionIdSchema, documentIdSchema } from "./ids.ts";
+import {
+  collectionIdSchema,
+  documentIdSchema,
+  identifierSchema,
+} from "./ids.ts";
 import type { CollectionId, DocumentId } from "./ids.ts";
 
 // Knowledge: Markdown documents with typed frontmatter, in collections. A
 // save never overwrites: it adds a version, and names the version it was
 // edited from, so two people editing at once get a conflict instead of
 // losing a change.
-
-const identifier = () => z.string().min(1).max(auditIdentifierMaxLength);
 
 /**
  * Who may read a collection: everyone in the organization, the members of
@@ -51,7 +52,7 @@ export const collectionInputSchema = z
     access: collectionAccessSchema,
     /** The teams that may read it; only for `teams` access. */
     teams: z
-      .array(identifier())
+      .array(identifierSchema)
       .max(collectionMaxTeams)
       .default([])
       .transform((teams) => [...new Set(teams)]),
@@ -152,7 +153,7 @@ const versionSchema = z.int().min(1);
  * document has moved past that version, nothing is saved.
  */
 export const saveInputSchema = z.strictObject({
-  collectionId: identifier().pipe(collectionIdSchema),
+  collectionId: collectionIdSchema,
   path: documentPathSchema,
   text: z.string(),
   ifVersion: z.int().min(0),
@@ -163,14 +164,18 @@ export type SaveInput = z.input<typeof saveInputSchema>;
 
 /** A restore: an earlier version's text becomes the next version. */
 export const restoreInputSchema = z.strictObject({
-  documentId: identifier().pipe(documentIdSchema),
+  documentId: documentIdSchema,
   version: versionSchema,
   ifVersion: versionSchema,
 });
 export type RestoreInput = z.input<typeof restoreInputSchema>;
 
-export const documentIdInputSchema = identifier().pipe(documentIdSchema);
-export const collectionIdInputSchema = identifier().pipe(collectionIdSchema);
+// The ID schemas themselves now bound an ID's length; these names stay
+// until Knowledge's code (in flight) uses those directly.
+export {
+  collectionIdSchema as collectionIdInputSchema,
+  documentIdSchema as documentIdInputSchema,
+} from "./ids.ts";
 export const versionInputSchema = versionSchema;
 
 /** Most entries one page of a listing holds. */

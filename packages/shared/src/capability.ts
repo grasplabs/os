@@ -1,8 +1,8 @@
 import { z } from "zod";
 
-import { auditIdentifierMaxLength } from "./audit.ts";
+import { fromBase64Url, toBase64Url } from "./encoding.ts";
 import { defineErrorFamily } from "./errors.ts";
-import { connectionIdSchema } from "./ids.ts";
+import { connectionIdSchema, identifierSchema } from "./ids.ts";
 import { authoritySchema, permissionActionSchema } from "./permissions.ts";
 import type { Authority } from "./permissions.ts";
 
@@ -38,8 +38,6 @@ export const capabilityKeyMinLength = 32;
 /** Keeps a MAC made here from ever passing as one made for anything else. */
 const macContext = "grasp-os capability v1\n";
 
-const identifier = () => z.string().min(1).max(auditIdentifierMaxLength);
-
 /** What a capability says. Unknown fields make it invalid. */
 export const capabilityClaimsSchema = z.strictObject({
   v: z.literal(1),
@@ -51,12 +49,12 @@ export const capabilityClaimsSchema = z.strictObject({
   iat: z.int().nonnegative(),
   exp: z.int().nonnegative(),
   authority: authoritySchema,
-  connectionId: identifier().pipe(connectionIdSchema),
+  connectionId: connectionIdSchema,
   /** The one resource in the connection it covers, or the whole connection. */
-  resource: identifier().nullable(),
+  resource: identifierSchema.nullable(),
   action: permissionActionSchema,
   /** A side effect's key; connect stores its result under it. */
-  idempotencyKey: identifier().nullable(),
+  idempotencyKey: identifierSchema.nullable(),
 });
 export type CapabilityClaims = z.infer<typeof capabilityClaimsSchema>;
 
@@ -76,22 +74,7 @@ export const capabilityErrors = defineErrorFamily({
 
 type MacUsage = "sign" | "verify";
 
-const base64UrlPattern = /^[A-Za-z0-9_-]+$/u;
 const tokenPattern = /^(?<payload>[A-Za-z0-9_-]+)\.(?<mac>[A-Za-z0-9_-]+)$/u;
-
-const toBase64Url = (bytes: Uint8Array): string =>
-  btoa(String.fromCodePoint(...bytes))
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replace(/[=]+$/u, "");
-
-const fromBase64Url = (text: string): Uint8Array<ArrayBuffer> => {
-  if (!base64UrlPattern.test(text)) {
-    throw new TypeError("Not base64url");
-  }
-  const binary = atob(text.replaceAll("-", "+").replaceAll("_", "/"));
-  return Uint8Array.from(binary, (char) => char.codePointAt(0) ?? 0);
-};
 
 const macKey = async (secret: string, usage: MacUsage): Promise<CryptoKey> => {
   if (secret.length < capabilityKeyMinLength) {

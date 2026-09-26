@@ -3,9 +3,6 @@ import type { RunId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
 
-/** A value that survives being recorded by the engine and read back. */
-export type JsonValue = Json;
-
 /** What a durable wait ends with: the event, or nothing before the timeout. */
 export type EngineEvent =
   | { received: true; payload: unknown }
@@ -19,7 +16,7 @@ export interface ModelRequest {
   /** What the model is asked to do. */
   instructions: string;
   /** What it works on. */
-  input: JsonValue;
+  input: Json;
   /** The model must answer with JSON that matches this schema. */
   outputSchema: z.core.JSONSchema.JSONSchema;
 }
@@ -63,7 +60,7 @@ export interface EngineStepOptions {
    */
   sideEffect?: boolean;
   /** What the step works on, for run history and dry-run reports. */
-  input?: JsonValue;
+  input?: Json;
 }
 
 /**
@@ -130,17 +127,13 @@ export interface WorkflowEngine {
     from: string;
   }) => Promise<{ link: string; eventType: string }>;
   /** Reads the workflow's key-value state, shared by all its runs. */
-  getState: (key: string) => Promise<JsonValue | undefined>;
+  getState: (key: string) => Promise<Json | undefined>;
   /**
    * Writes the workflow's key-value state, shared by all its runs. Applies
    * each idempotency key once and ignores a repeat, so a step that wrote but
    * crashed before it was recorded can't overwrite a newer value on replay.
    */
-  setState: (
-    key: string,
-    value: JsonValue,
-    idempotencyKey: string
-  ) => Promise<void>;
+  setState: (key: string, value: Json, idempotencyKey: string) => Promise<void>;
 }
 
 /**

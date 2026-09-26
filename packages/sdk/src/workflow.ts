@@ -1,14 +1,10 @@
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { RunId, WorkflowId } from "@grasp-os/shared/ids";
+import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
 
 import { decisionAnswerSchema } from "./engine.ts";
-import type {
-  Backoff,
-  EngineEvent,
-  JsonValue,
-  WorkflowEngine,
-} from "./engine.ts";
+import type { Backoff, EngineEvent, WorkflowEngine } from "./engine.ts";
 import { currencySchema, paramValueSchemas } from "./params.ts";
 import type { ParamDefault, ParamKind, ParamValue } from "./params.ts";
 import { namePattern, nameRule, stepOptionSchemas } from "./steps.ts";
@@ -199,7 +195,7 @@ export type Duration =
 
 /** What a step returns: JSON, which the engine records, or nothing. */
 // oxlint-disable-next-line typescript/no-invalid-void-type -- a step may return nothing
-export type StepResult = JsonValue | undefined | void;
+export type StepResult = Json | undefined | void;
 
 /** Options every step takes. */
 interface StepOptions {
@@ -237,7 +233,7 @@ interface AttemptOptions {
 }
 
 /** What a step works on: JSON, or nothing. */
-export type StepInput = JsonValue | undefined;
+export type StepInput = Json | undefined;
 
 export interface DoOptions<Input extends StepInput = StepInput>
   extends StepOptions, AttemptOptions {
@@ -276,7 +272,7 @@ export interface LlmOptions<Output extends z.ZodType>
   /** What the model is asked to do: the prompt. */
   instructions: string;
   /** What the model works on, e.g. the text of an invoice. */
-  input: JsonValue;
+  input: Json;
   /** The shape the answer must have. */
   schema: Output;
   /** A model is involved, so an AI step is never locked. */
@@ -338,7 +334,7 @@ export interface StepRunner {
    * returns the recorded result instead of running the code again.
    */
   do: {
-    <T extends StepResult, Input extends JsonValue>(
+    <T extends StepResult, Input extends Json>(
       name: string,
       options: DoOptions<Input> & { sideEffect: true; input: Input },
       fn: (context: SideEffectContext & { input: Input }) => Promise<T>
@@ -393,8 +389,8 @@ interface UntypedStepRunner {
  * between steps, never while one runs.
  */
 export interface StateStore {
-  get: (key: string) => Promise<JsonValue | undefined>;
-  set: (key: string, value: JsonValue) => Promise<void>;
+  get: (key: string) => Promise<Json | undefined>;
+  set: (key: string, value: Json) => Promise<void>;
 }
 
 /** Everything a workflow reads besides its steps. */

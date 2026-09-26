@@ -1,5 +1,6 @@
-import type { Role } from "@grasp-os/shared";
-import { appErrors, appLimits } from "@grasp-os/shared/apps";
+import { appLimits } from "@grasp-os/shared/app-limits";
+import { appErrors } from "@grasp-os/shared/apps";
+import type { Role } from "@grasp-os/shared/roles";
 import { roleErrors } from "@grasp-os/shared/roles";
 import { describe, expect, it } from "vite-plus/test";
 

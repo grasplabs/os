@@ -1,9 +1,9 @@
-import type { Role } from "@grasp-os/shared";
 import { appErrors } from "@grasp-os/shared/apps";
 import type { AppCaller } from "@grasp-os/shared/apps";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import type { PermissionRequest } from "@grasp-os/shared/permissions";
+import type { Role } from "@grasp-os/shared/roles";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";

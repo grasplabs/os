@@ -1,3 +1,5 @@
+import { sha256Hex } from "@grasp-os/shared/encoding";
+
 /**
  * The audit log's hash chain. Each entry's hash covers the hash format
  * version, its position, the hash of the entry before it, the time the log
@@ -37,20 +39,13 @@ export interface ChainEntry {
   hash: string;
 }
 
-const hex = (bytes: ArrayBuffer): string =>
-  Array.from(new Uint8Array(bytes), (byte) =>
-    byte.toString(16).padStart(2, "0")
-  ).join("");
-
 /** The hash an entry must have. */
 export const chainHash = async (
   entry: Omit<ChainEntry, "hash">
 ): Promise<string> => {
   const { version, seq, prevHash, receivedAt, event } = entry;
   const input = `v${version}\n${seq}\n${prevHash}\n${receivedAt}\n${event}`;
-  return hex(
-    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(input))
-  );
+  return await sha256Hex(input);
 };
 
 /**

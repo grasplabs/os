@@ -1,10 +1,10 @@
+import { auditEventSchema } from "@grasp-os/shared/audit";
+import type { AuditEvent } from "@grasp-os/shared/audit";
 /**
  * Drives sign-in the way a browser on the client's page does, through the
  * router: requests go to core's own address with the router secret.
  */
-import type { Role } from "@grasp-os/shared";
-import { auditEventSchema } from "@grasp-os/shared/audit";
-import type { AuditEvent } from "@grasp-os/shared/audit";
+import type { Role } from "@grasp-os/shared/roles";
 import { routerSecretHeader } from "@grasp-os/shared/router";
 import type { CoreApi } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";

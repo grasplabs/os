@@ -8,7 +8,7 @@ Built on Cloudflare Workers with TypeScript, React and Vite+.
 
 | Path | What it is |
 | --- | --- |
-| `apps/core` | Core Worker: sign-in, knowledge, Apps, workflows, audit |
+| `apps/core` | Core Worker: sign-in, knowledge, Apps, workflows, model gateway, audit |
 | `apps/connect` | Connector Worker: access to outside systems |
 | `apps/web` | The frontend |
 | `apps/console` | Internal console for deployments and releases |

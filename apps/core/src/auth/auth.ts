@@ -1,8 +1,10 @@
 import { sso } from "@better-auth/sso";
-import { roleSchema } from "@grasp-os/shared";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { fromBase64Url } from "@grasp-os/shared/encoding";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
+import { roleSchema } from "@grasp-os/shared/roles";
+import type { SignInRefusal } from "@grasp-os/shared/sign-in";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import {
   APIError,
@@ -12,7 +14,8 @@ import {
 import { betterAuth } from "better-auth/minimal";
 import { organization } from "better-auth/plugins/organization";
 import { defaultAc } from "better-auth/plugins/organization/access";
-import { and, eq, sql } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -87,17 +90,22 @@ const authLogger = {
   },
 };
 
+/**
+ * That an admin hasn't removed `userId` from the organization, as a SQL
+ * condition. A removal is kept after the membership goes, so every read and
+ * write of a membership checks it: nothing brings a removed person back.
+ */
+export const notRemoved = (userId: string): SQL => sql`NOT EXISTS (
+  SELECT 1 FROM ${memberRemovals}
+  WHERE ${memberRemovals.organizationId} = ${organizationId}
+    AND ${memberRemovals.userId} = ${userId}
+)`;
+
 const isRemoved = async (env: Env, userId: string): Promise<boolean> => {
-  const [removal] = await drizzle(env.DB)
-    .select({ userId: memberRemovals.userId })
-    .from(memberRemovals)
-    .where(
-      and(
-        eq(memberRemovals.organizationId, organizationId),
-        eq(memberRemovals.userId, userId)
-      )
-    );
-  return removal !== undefined;
+  const row = await drizzle(env.DB).get<{ member: number }>(
+    sql`SELECT ${notRemoved(userId)} AS member`
+  );
+  return row.member === 0;
 };
 
 /**
@@ -138,10 +146,7 @@ const ensureMember = async (
   await db.run(sql`
     INSERT INTO ${members} (id, organization_id, user_id, role, created_at)
     SELECT ${crypto.randomUUID()}, ${organizationId}, ${userId}, ${role}, ${now.getTime()}
-    WHERE NOT EXISTS (
-      SELECT 1 FROM ${memberRemovals}
-      WHERE organization_id = ${organizationId} AND user_id = ${userId}
-    )
+    WHERE ${notRemoved(userId)}
     ON CONFLICT DO NOTHING`);
   return !(await isRemoved(env, userId));
 };
@@ -190,7 +195,7 @@ const oidOf = (idToken: unknown): string | null => {
     return null;
   }
   try {
-    const json = atob(payload.replaceAll("-", "+").replaceAll("_", "/"));
+    const json = new TextDecoder().decode(fromBase64Url(payload));
     return idTokenClaimsSchema.parse(JSON.parse(json)).oid ?? null;
   } catch {
     return null;
@@ -367,7 +372,7 @@ const createAuth = (
       // is created or linked, and again on every sign-in.
       validateUserInfo: ({ source }) => {
         const provider = source.sso?.providerId;
-        const refusal =
+        const refusal: SignInRefusal | undefined =
           source.method === "sso-oidc" && provider !== undefined
             ? checkClaims(
                 config,

@@ -1,13 +1,13 @@
 import { z } from "zod";
 
-import { auditIdentifierMaxLength } from "./audit.ts";
 import { defineErrorFamily } from "./errors.ts";
 import {
   agentIdSchema,
   appIdSchema,
   collectionIdSchema,
   connectionIdSchema,
-  permissionIdSchema,
+  identifierMaxLength,
+  identifierSchema,
   workflowIdSchema,
 } from "./ids.ts";
 import type { PermissionId } from "./ids.ts";
@@ -18,18 +18,15 @@ import type { PermissionId } from "./ids.ts";
 // stays identifier-sized, because each grant and revoke goes into the audit
 // log with these values.
 
-/** An ID as permissions store it: non-empty and identifier-sized. */
-const identifier = () => z.string().min(1).max(auditIdentifierMaxLength);
-
 /** Who a permission is for: an App, or an agent. Never a person. */
 export const permissionSubjectSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("app"),
-    appId: identifier().pipe(appIdSchema),
+    appId: appIdSchema,
   }),
   z.strictObject({
     type: z.literal("agent"),
-    agentId: identifier().pipe(agentIdSchema),
+    agentId: agentIdSchema,
   }),
 ]);
 export type PermissionSubject = z.infer<typeof permissionSubjectSchema>;
@@ -44,18 +41,18 @@ export type PermissionSubjectInput = z.input<typeof permissionSubjectSchema>;
 export const permissionObjectSchema = z.discriminatedUnion("type", [
   z.strictObject({
     type: z.literal("connection"),
-    connectionId: identifier().pipe(connectionIdSchema),
+    connectionId: connectionIdSchema,
     /** One resource in the connection; absent means the whole connection. */
-    resource: identifier().optional(),
+    resource: identifierSchema.optional(),
   }),
   z.strictObject({
     type: z.literal("collection"),
-    collectionId: identifier().pipe(collectionIdSchema),
+    collectionId: collectionIdSchema,
   }),
   z.strictObject({
     type: z.literal("workflow"),
-    appId: identifier().pipe(appIdSchema),
-    workflowId: identifier().pipe(workflowIdSchema),
+    appId: appIdSchema,
+    workflowId: workflowIdSchema,
   }),
 ]);
 export type PermissionObject = z.infer<typeof permissionObjectSchema>;
@@ -168,7 +165,7 @@ export const permissionRequestSchema = z
       }
     }
     // The audit log records the actions as one identifier-sized value.
-    if (actions.join(" ").length > auditIdentifierMaxLength) {
+    if (actions.join(" ").length > identifierMaxLength) {
       context.addIssue({
         code: "custom",
         path: ["actions"],
@@ -207,9 +204,6 @@ export interface Permission {
   revokedAt: string | null;
 }
 
-/** A permission's ID, as the API takes it. */
-export const permissionIdInputSchema = identifier().pipe(permissionIdSchema);
-
 /**
  * How a call reaches for access: which App or agent makes it, the person it
  * acts for, and whether a person is there (interactive) or a workflow runs
@@ -226,7 +220,7 @@ export const permissionIdInputSchema = identifier().pipe(permissionIdSchema);
  */
 export const authoritySchema = z.strictObject({
   subject: permissionSubjectSchema,
-  onBehalfOf: identifier(),
+  onBehalfOf: identifierSchema,
   mode: z.enum(["interactive", "workflow"]),
 });
 export type Authority = z.infer<typeof authoritySchema>;

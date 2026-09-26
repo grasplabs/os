@@ -1,4 +1,3 @@
-import type { Role } from "@grasp-os/shared";
 import { connectErrors } from "@grasp-os/shared/connect";
 import { internalErrors } from "@grasp-os/shared/errors";
 import {
@@ -20,6 +19,7 @@ import type {
   PermissionRequest,
   PermissionSubjectInput,
 } from "@grasp-os/shared/permissions";
+import type { Role } from "@grasp-os/shared/roles";
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
