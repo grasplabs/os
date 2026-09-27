@@ -65,6 +65,8 @@ const core :Workerd.Worker = (
   bindings = [
     (name = "ROUTER_SECRET", text = "${ROUTER_SECRET}"),
     (name = "DURABLE_OBJECT_JURISDICTION", text = "none"),
+    # No LOADER and no WORKFLOWS: Code Mode and workflows stay off on-prem
+    # (apps/core/src/workflows/engine.ts).
   ],
   durableObjectNamespaces = [
     (className = "Workspace", uniqueKey = "workspace", enableSql = true),

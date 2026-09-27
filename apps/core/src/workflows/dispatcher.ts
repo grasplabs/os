@@ -28,8 +28,6 @@ import { paramValues } from "./params.ts";
 import { appRecord, endRun, findRun, recordWaiting } from "./runs.ts";
 import type { RunRow, Stopped } from "./runs.ts";
 
-export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
-
 // The one Workflow of a deployment (`WORKFLOWS` in wrangler.jsonc). Every
 // run of every App's workflow is an instance of it, tagged with its App,
 // workflow and App version (runs.ts). Each time Cloudflare Workflows runs
