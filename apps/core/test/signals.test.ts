@@ -27,11 +27,17 @@ type Person = Awaited<ReturnType<typeof signedInApi>>;
 const dayMs = 24 * 60 * 60 * 1000;
 const hourMs = 60 * 60 * 1000;
 
-/** Each computation's day: a day after the last test's, from tomorrow on. */
+/**
+ * Each computation's day: a day after the last test's, from tomorrow on, at
+ * noon UTC. Signals are computed per UTC day, so a test that moves an hour
+ * or so on from `now` stays on its day whatever time the suite runs.
+ */
 let days = 0;
 const nextDay = (): Date => {
   days += 1;
-  return new Date(Date.now() + days * dayMs);
+  const today = new Date();
+  today.setUTCHours(12, 0, 0, 0);
+  return new Date(today.getTime() + days * dayMs);
 };
 
 /** A builder with an App of their own. */
