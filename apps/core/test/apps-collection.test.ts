@@ -605,7 +605,7 @@ describe("who finds an App", setUpTime, () => {
 });
 
 describe("read-only", setUpTime, () => {
-  it("refuses saves, restores and purges in the Apps collection, an admin's too, saying where to change an entry", async () => {
+  it("refuses saves and restores in the Apps collection, an admin's too, and purges until the App has a version without the term", async () => {
     const admin = await personOf("admin");
     const owner = await personOf("builder");
     const word = term();
@@ -644,22 +644,22 @@ describe("read-only", setUpTime, () => {
         "knowledge.read_only",
       ]);
     }
-    // A purge would last only until the App's next version made the entry
-    // again from its AGENTS.md, which the purge can't reach.
+    // While the entry holds the term, a purge would last only until the
+    // next indexing made it again from the App's AGENTS.md, which the
+    // purge can't reach.
+    const input = {
+      type: "content" as const,
+      documentIds: [id],
+      terms: [word],
+      reason: "erasure_request" as const,
+    };
     await expect(
-      refusal(
-        admin.knowledge.preparePurge({
-          type: "content",
-          documentIds: [id],
-          terms: [word],
-          reason: "erasure_request",
-        })
-      )
+      refusal(admin.knowledge.preparePurge(input))
     ).resolves.toMatchObject({
       code: "knowledge.read_only",
       details: {
         issues: [
-          `documentIds: document ${id} is an App's entry in the Apps collection, made from the App's AGENTS.md: edit that AGENTS.md and publish a new version of the App instead`,
+          `documentIds: document ${id} is an App's entry in the Apps collection, made from the App's AGENTS.md, and still holds a term: publish a new version of the App without it, then purge`,
         ],
       },
     });
@@ -669,5 +669,21 @@ describe("read-only", setUpTime, () => {
     await expect(entriesFound(owner.knowledge, word)).resolves.toStrictEqual([
       entryPath(app.id),
     ]);
+
+    // Once a version of the App leaves it out, the purge rewrites the
+    // entry's history.
+    await release(owner, app.id, { "AGENTS.md": agentsMd(term()) });
+    const plan = await admin.knowledge.preparePurge(input);
+    const result = await admin.knowledge.purge(input, plan.token);
+    const { results } = await env.KNOWLEDGE.prepare(
+      "SELECT text FROM versions WHERE document_id = ?"
+    )
+      .bind(id)
+      .all<{ text: string }>();
+    expect({
+      planned: plan.versions,
+      purged: result.versions,
+      holding: results.filter(({ text }) => text.includes(word)).length,
+    }).toStrictEqual({ planned: 1, purged: 1, holding: 0 });
   });
 });

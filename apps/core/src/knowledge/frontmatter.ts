@@ -52,10 +52,12 @@ const fileSchema = baseSchema.extend({
 // The Playbook's records. The structure is here; what a person reads is
 // the Markdown after it: the title names the record, the body says the
 // rest. A record names others by their path in the Playbook, as `[[links]]`
-// do; a purge leaves those paths as they are (`recordPathRanges`), as it
-// leaves every path. Wherever else a name can be, a value is plain text,
-// so a purge that replaces a name with its marker leaves a record that
-// still fits its type.
+// do. Wherever a name can be, a value is plain text, so a purge that
+// replaces a name with its marker leaves a record that still fits its
+// type. A path that holds a name is purged like any text, and the path
+// then names no document, but for a snapshot's frozen workflow paths,
+// which a purge leaves (`frozenPathRanges`): the snapshot must name
+// versions the Playbook has.
 
 /** A short value a person writes: a name, a role, a tool. */
 const shortText = z.string().trim().min(1).max(200);
@@ -184,20 +186,6 @@ const planItemSchema = baseSchema.extend({
   due: z.iso.date().optional(),
   workflow: recordPath.optional(),
 });
-
-/**
- * The fields of each record type that hold a `recordPath`, as keys from
- * the top of the frontmatter, through lists: `workflows.path` is the
- * `path` of each of a snapshot's `workflows`. Kept with the schemas above.
- */
-const recordPathFields: Partial<Record<DocumentType, readonly string[][]>> = {
-  person: [["team"]],
-  source: [["person"]],
-  statement: [["source"]],
-  workflow: [["team"]],
-  snapshot: [["workflows", "path"]],
-  "plan-item": [["workflow"]],
-};
 
 /** The frontmatter schema of each type. */
 const frontmatterSchemas = {
@@ -338,29 +326,13 @@ export const withFrontmatter = (
 const openingFence = /^\uFEFF?---[ \t]*\r?\n/u;
 const closingFence = /^---[ \t]*\r?$/mu;
 
-/** The scalars at `keys` under `node`, through lists, as [start, end). */
-const scalarRanges = (
-  node: unknown,
-  keys: readonly string[]
-): [number, number][] => {
-  if (isSeq(node)) {
-    return node.items.flatMap((item) => scalarRanges(item, keys));
-  }
-  const [key, ...rest] = keys;
-  if (key === undefined) {
-    const range = isScalar(node) ? node.range : undefined;
-    return range ? [[range[0], range[1]]] : [];
-  }
-  return isMap(node) ? scalarRanges(node.get(key, true), rest) : [];
-};
-
 /**
- * Where the frontmatter of a record in `text` names other records by
- * their path (`recordPathFields`), as [start, end) offsets in `text`, a
- * value's quotes included. None when `text` has no frontmatter, or none
- * of a record type; frontmatter that doesn't read gives what it can.
+ * Where a snapshot in `text` names the workflow versions it froze by
+ * their path (`workflows[].path`), as [start, end) offsets in `text`, a
+ * value's quotes included. None when `text` has no frontmatter or isn't
+ * a snapshot; frontmatter that doesn't read gives what it can.
  */
-export const recordPathRanges = (text: string): [number, number][] => {
+export const frozenPathRanges = (text: string): [number, number][] => {
   const opening = openingFence.exec(text);
   if (!opening) {
     return [];
@@ -374,11 +346,13 @@ export const recordPathRanges = (text: string): [number, number][] => {
   const document = parseDocument(rest.slice(0, closing.index), {
     logLevel: "error",
   });
-  const type = documentTypeSchema.safeParse(document.get("type"));
-  const fields = type.success ? recordPathFields[type.data] : undefined;
-  return (fields ?? []).flatMap((keys) =>
-    scalarRanges(document.contents, keys).map(
-      ([from, to]): [number, number] => [start + from, start + to]
-    )
-  );
+  const workflows = document.get("workflows", true);
+  if (document.get("type") !== "snapshot" || !isSeq(workflows)) {
+    return [];
+  }
+  return workflows.items.flatMap((entry): [number, number][] => {
+    const path = isMap(entry) ? entry.get("path", true) : undefined;
+    const range = isScalar(path) ? path.range : undefined;
+    return range ? [[start + range[0], start + range[1]]] : [];
+  });
 };

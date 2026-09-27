@@ -27,10 +27,11 @@ import { appMemoryPath } from "./memory-files.ts";
 // which every save and restore refuses (collections.ts
 // `requireWritable`). The indexer's writes go through the save pipeline,
 // as `system`, so each is a version with its audit event. A purge naming
-// an entry is refused too (purge.ts `documentsNamed`): the App's next
-// version would make it again from the App's own AGENTS.md, which lives
-// in the App's versions, out of a purge's reach. What an entry says
-// changes with a new version of the App.
+// an entry is refused while the entry's current version holds a term
+// (purge.ts `requireSavable`): the next indexing would make it again from
+// the App's own AGENTS.md, which lives in the App's versions, out of a
+// purge's reach. Once a new version of the App leaves the term out, the
+// purge rewrites the entry's history like any document's.
 //
 // The App registry is in the core database and the collection in
 // Knowledge's, so no batch holds both. Making a version current indexes

@@ -30,10 +30,7 @@ import {
 // which can't be purged, carries the text it removed; a purge reaches
 // documents it wasn't aimed at; someone other than the client's admins
 // purges, or purges without confirming, or confirms a purge other than the
-// one prepared; and a purge leaves a document that can't be read, or
-// breaks the paths documents name each other by. Where a purge can't
-// reach (the Grasp skills, the Apps collection) it refuses, in
-// skills.test.ts and apps-collection.test.ts.
+// one prepared; and a purge leaves a document that can't be read.
 
 const idp = mockIdp();
 
@@ -611,7 +608,7 @@ describe("a purge of content", setUpTime, () => {
     });
   });
 
-  it("leaves frontmatter that still reads, where a name is the title, owner, a tag or a field of its own", async () => {
+  it("leaves frontmatter that still reads, where a name is the title, owner or a tag", async () => {
     const admin = await personOf("admin");
     const name = `Visser${unique()}`;
     const email = `${name.toLowerCase()}@acme.test`;
@@ -623,7 +620,7 @@ describe("a purge of content", setUpTime, () => {
       admin,
       handbook.id,
       "person.md",
-      `---\ntitle: ${name}\nowner: ${email}\ntags: [${name}, hr]\nperson: people/${name}/cv.md\n---\n# Profile\n${name} works in HR.`
+      `---\ntitle: ${name}\nowner: ${email}\ntags: [${name}, hr]\n---\n# Profile\n${name} works in HR.`
     );
     await purged(admin, {
       type: "content",
@@ -641,9 +638,7 @@ describe("a purge of content", setUpTime, () => {
       title: "(removed)",
       owner: "(removed)",
       tags: ["(removed)", "hr"],
-      // Not a record: its own `person` field names no document, so it is
-      // text like any other.
-      text: "---\ntitle: (removed)\nowner: (removed)\ntags: [(removed), hr]\nperson: people/(removed)/cv.md\n---\n# Profile\n(removed) works in HR.",
+      text: "---\ntitle: (removed)\nowner: (removed)\ntags: [(removed), hr]\n---\n# Profile\n(removed) works in HR.",
     });
   });
 

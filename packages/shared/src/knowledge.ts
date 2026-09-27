@@ -599,9 +599,9 @@ const purgeTermSchema = z
  *   "Tom2", "tomVisser" for "Tom") must be a term of its own; the plan
  *   counts where a term still starts a longer word (`inLongerWords`).
  *   In scripts written without spaces (Chinese, Japanese, Thai, Lao,
- *   Khmer, Burmese) a term is found inside running text. Paths stay: a
- *   document's own, a `[[link]]`'s and a Playbook record's field naming
- *   another record keep a term inside them.
+ *   Khmer, Burmese) a term is found inside running text. A document's
+ *   own path stays, and so do a snapshot's frozen workflow paths; links
+ *   and other fields naming a document are rewritten like any text.
  */
 export const purgeInputSchema = z.discriminatedUnion("type", [
   z.strictObject({
@@ -635,8 +635,9 @@ export interface PurgePlan {
    * leaves of the documents named: every version, the one it saves too,
    * and every memory proposal ("Toms", "Tomin", "tomVisser" or
    * "tom.visser@acme.test.evil" for "Tom" or the address; not "automated"
-   * or "custom", where it is inside or ends one), outside paths. List the
-   * forms to remove as terms of their own. Always 0 for `personal`.
+   * or "custom", where it is inside or ends one), outside a snapshot's
+   * frozen workflow paths. List the forms to remove as terms of their
+   * own. Always 0 for `personal`.
    */
   inLongerWords: number;
   /** Confirms exactly this purge, by the admin who prepared it. */
@@ -710,11 +711,11 @@ export interface KnowledgeApi {
   copySkill: (input: CopySkillInput) => Promise<DocumentSummary>;
   /**
    * What a purge would remove, and a token to confirm it with. Admins
-   * only, whatever the collection, but for those only the platform writes
-   * (`knowledge.read_only`, saying why): the Grasp skills, the release's
-   * text, and the Apps collection, whose entries come from each App's
-   * AGENTS.md, changed by publishing a new version of the App. Nothing
-   * changes yet.
+   * only, whatever the collection, but for the Grasp skills, the
+   * release's text, and an App's entry in the Apps collection while its
+   * current version holds a term (`knowledge.read_only`, saying why): the
+   * entry comes from the App's AGENTS.md, so publish a new version of the
+   * App without it, then purge. Nothing changes yet.
    */
   preparePurge: (input: PurgeInput) => Promise<PurgePlan>;
   /**

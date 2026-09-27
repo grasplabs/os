@@ -40,8 +40,8 @@ import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 // admin changes the Playbook; a link names a workflow that isn't there, or
 // a snapshot a version that isn't; a link or save runs while the feature
 // is off; and a purge can't remove a person's name from their record, or
-// rewrites the paths records name each other by, which breaks them and
-// makes a snapshot name a workflow version the Playbook doesn't have.
+// rewrites a snapshot's frozen workflow paths, which makes it name a
+// workflow version the Playbook doesn't have and fails the purge.
 
 const idp = mockIdp();
 
@@ -1043,24 +1043,26 @@ describe("Playbook records", () => {
   );
 
   it(
-    "hold personal data a content purge removes from every version, leaving the paths that name records",
+    "hold personal data a content purge removes from every version, paths too, but for a snapshot's frozen ones",
     setUpTime,
     async () => {
       const admin = await personOf("admin");
       const name = `Kowalczyk${unique()}`;
       const folder = unique();
-      // Paths holding the name, which a purge leaves: rewriting them would
-      // break the references, and a snapshot's frozen path would name a
-      // workflow the Playbook doesn't have. In the team's path the name
-      // starts a longer word, which a purge counts elsewhere, but not in a
-      // path.
-      const team = `teams/${name}s.md`;
-      const profile = `people/${name}/profile.md`;
-      const onboarding = `${folder}/${name.toLowerCase()}-onboarding.md`;
+      // A path is text a person writes, a name and more (`[[Anna Visser]]`):
+      // links and record fields naming a document lose the name like any
+      // text. Only a snapshot's frozen workflow path is left, name and
+      // longer forms of it alike, uncounted: rewritten, it would name a
+      // workflow the Playbook doesn't have, and the purge would fail.
+      const onboarding = `${folder}/${name}/${name}s-onboarding.md`;
       const path = `${folder}/person.md`;
       const person = await save(admin, {
         path,
-        record: { ...records.person.record, title: `Anna ${name}`, team },
+        record: {
+          ...records.person.record,
+          title: `Anna ${name}`,
+          team: `teams/${name}/finance.md`,
+        },
         body: `${name} approves payments.`,
       });
       await save(admin, {
@@ -1070,18 +1072,18 @@ describe("Playbook records", () => {
           ...records.person.record,
           title: `Anna ${name}`,
           role: `Controller, reports to ${name} senior`,
-          team,
+          team: `teams/${name}/finance.md`,
         },
-        body: `${name} approves payments; see [[${profile}|${name}]] and [[people/${name}#${name}]].`,
+        body: `${name} approves payments; see [[${name} Visser, Keizersgracht 12]] and [[people/${name}|${name}]].`,
       });
       const source = await save(admin, {
         path: `${folder}/source.md`,
         record: {
           ...records.source.record,
           title: `Interview with ${name}`,
-          person: profile,
+          person: `${name} Visser`,
         },
-        body: `Notes from ${name}, see [[${profile}]].`,
+        body: `Notes from ${name}.`,
       });
       await save(admin, { path: onboarding, ...records.workflow });
       const snapshot = await save(admin, {
@@ -1106,13 +1108,6 @@ describe("Playbook records", () => {
       )
         .bind(person.id, source.id, snapshot.id)
         .all<{ text: string }>();
-      const outsidePaths = (text: string) => {
-        let left = text;
-        for (const kept of [team, profile, `people/${name}#`, onboarding]) {
-          left = left.replaceAll(kept, "");
-        }
-        return left;
-      };
       const read = async (id: string) => {
         const current = await admin.api.knowledge.getDocument(id);
         const { frontmatter, body } = parseFrontmatter(
@@ -1124,8 +1119,9 @@ describe("Playbook records", () => {
       expect({
         plan: plan.versions,
         inLongerWords: plan.inLongerWords,
-        holding: results.filter(({ text }) => outsidePaths(text).includes(name))
-          .length,
+        holding: results.filter(({ text }) =>
+          text.replaceAll(onboarding, "").includes(name)
+        ).length,
         person: await read(person.id),
         source: await read(source.id),
         snapshot: await read(snapshot.id),
@@ -1138,14 +1134,14 @@ describe("Playbook records", () => {
           title: "Anna (removed)",
           frontmatter: {
             role: "Controller, reports to (removed) senior",
-            team,
+            team: "teams/(removed)/finance.md",
           },
-          body: `(removed) approves payments; see [[${profile}|(removed)]] and [[people/${name}#(removed)]].`,
+          body: "(removed) approves payments; see [[(removed) Visser, Keizersgracht 12]] and [[people/(removed)|(removed)]].",
         },
         source: {
           title: "Interview with (removed)",
-          frontmatter: { person: profile },
-          body: `Notes from (removed), see [[${profile}]].`,
+          frontmatter: { person: "(removed) Visser" },
+          body: "Notes from (removed).",
         },
         snapshot: {
           title: "Onboarding (removed)",
