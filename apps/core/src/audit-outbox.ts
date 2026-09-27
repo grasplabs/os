@@ -377,8 +377,10 @@ export const outboxedWhere = (
  * purge, or anything in `writeVersion`'s `also`): FTS5 flushes its index
  * when the next statement opens a savepoint, and that flush sets
  * `changes()` to 1, so this would record an event for a change that
- * didn't happen. There, use `outboxedWhere` with an `EXISTS` on the row's
- * new state.
+ * didn't happen. There, use `outboxedWhere` with a condition on what the
+ * change left behind: `EXISTS` on the row's new state after an insert or
+ * update, `NOT EXISTS` on the row after a delete, or no condition when
+ * the batch always makes the change.
  */
 export const outboxedIfChanged = (db: DrizzleD1Database, entry: AuditEntry) =>
   outboxedWhere(db, entry, sql`changes() > 0`);
