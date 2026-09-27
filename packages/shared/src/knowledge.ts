@@ -172,6 +172,25 @@ export const restoreInputSchema = z.strictObject({
 });
 export type RestoreInput = z.input<typeof restoreInputSchema>;
 
+/**
+ * A Grasp skill to copy into the client's skills, to adapt there: its
+ * `SKILL.md`, at the same path.
+ */
+export const copySkillInputSchema = z.strictObject({
+  documentId: documentIdSchema,
+});
+export type CopySkillInput = z.input<typeof copySkillInputSchema>;
+
+/**
+ * Where skills are: the Grasp skills, which ship with each release and
+ * only Grasp changes, and the client's own, which its admins write. `null`
+ * while one doesn't exist yet.
+ */
+export interface SkillCollections {
+  grasp: CollectionId | null;
+  client: CollectionId | null;
+}
+
 export const versionInputSchema = versionSchema;
 
 /** Most entries one page of a listing holds. */
@@ -674,8 +693,20 @@ export interface KnowledgeApi {
   /** A document's links and backlinks, and for a skill, its files. */
   follow: KnowledgeTools["follow"];
   /**
+   * The Grasp skills and the client's skills collections, creating the
+   * client's when an admin asks and it doesn't exist yet.
+   */
+  skillCollections: () => Promise<SkillCollections>;
+  /**
+   * Copies a Grasp skill into the client's skills, as a new document at
+   * the same path: admins only. `knowledge.conflict` when the client's
+   * skills have that path already.
+   */
+  copySkill: (input: CopySkillInput) => Promise<DocumentSummary>;
+  /**
    * What a purge would remove, and a token to confirm it with. Admins
-   * only, whatever the collection; nothing changes yet.
+   * only, whatever the collection (but the Grasp skills, which hold no
+   * personal data); nothing changes yet.
    */
   preparePurge: (input: PurgeInput) => Promise<PurgePlan>;
   /**

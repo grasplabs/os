@@ -14,8 +14,15 @@
   // uploaded version of core, older ones included, at an address of its own.
   "workers_dev": true,
   "preview_urls": false,
-  // Durable Objects bundle their Drizzle migrations as text.
-  "rules": [{ "type": "Text", "globs": ["**/*.sql"], "fallthrough": true }],
+  // Durable Objects bundle their Drizzle migrations as text, and the Grasp
+  // skills (skills/, src/knowledge/grasp-skills.ts) ship as text too.
+  "rules": [
+    {
+      "type": "Text",
+      "globs": ["**/*.sql", "**/SKILL.md"],
+      "fallthrough": true,
+    },
+  ],
   // No platform line per invocation: core logs the events it needs itself
   // (@grasp-os/shared/log), never headers or bodies (threat model R17).
   // Query strings stay out of logs and traces: the OAuth callback's carries

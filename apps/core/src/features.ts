@@ -17,8 +17,9 @@ import { z } from "zod";
 // stubs (`knowledge`), an agent's memory and its saves of it (`memory`,
 // which gives every context no memory while off), purging Knowledge
 // (`knowledge_purge`), the Playbook's collection and record saves
-// (`playbook`), connection calls (`connections`), Composio's toolkits in
-// the catalog and connecting them (`composio`), App methods
+// (`playbook`), syncing and copying skills (`skills`), connection calls
+// (`connections`), Composio's toolkits in the catalog and connecting them
+// (`composio`), App methods
 // (`apps`), starting runs and every step of one (`workflows`), and opening
 // or asking a decision (`decisions`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist.
@@ -62,6 +63,14 @@ export type Feature =
    * searched and purged like any document.
    */
   | "playbook"
+  /**
+   * Skills (knowledge/grasp-skills.ts): the release's Grasp skills synced
+   * into their collection, the client's own skills collection, and
+   * copying a Grasp skill into it; needs `knowledge` on too. While off,
+   * nothing is synced, created or copied; what the collections hold is
+   * still read and searched like any document.
+   */
+  | "skills"
   | "connections"
   /**
    * Composio's toolkits in the catalog, and starting and finishing
