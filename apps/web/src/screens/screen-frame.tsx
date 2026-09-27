@@ -55,6 +55,8 @@ interface ScreenFrameOptions extends ScreenFrameProps {
    * name is a second-level heading, not the page's.
    */
   embedded?: boolean;
+  /** Also called when the person loads the screen again. */
+  onReload?: () => void;
 }
 
 interface FrameProps extends ScreenFrameProps {
@@ -94,6 +96,7 @@ export const ScreenFrame = ({
   app,
   screen,
   embedded = false,
+  onReload,
 }: ScreenFrameOptions) => {
   const Title = embedded ? "h2" : "h1";
   const [state, setState] = useState<ScreenState>({ status: "loading" });
@@ -102,6 +105,7 @@ export const ScreenFrame = ({
   const reload = () => {
     setState({ status: "loading" });
     setAttempt(attempt + 1);
+    onReload?.();
   };
   return (
     <div className="flex flex-1 flex-col">

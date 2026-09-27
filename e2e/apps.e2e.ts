@@ -1,5 +1,7 @@
 import { expect } from "@playwright/test";
+import type { Page } from "@playwright/test";
 
+import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
 import { apiOf, origin, pageOf, release, signedIn } from "./people.ts";
 import type { Person } from "./people.ts";
@@ -67,35 +69,63 @@ import tally from "./tally.ts";
 export default workflowTests(tally, [{ name: "counts", mocks: { count: 1 }, expect: { output: 1 } }]);
 `;
 
-/** A new App named `name` with a counter screen and a workflow, released. */
-const releaseApp = async (builder: Person, name: string): Promise<string> => {
-  const { core, api } = apiOf(builder);
+/** The counter App's files: a screen and a workflow. */
+const counterFiles = {
+  "app/server.ts": server,
+  "screens/counter.tsx": screen,
+  "workflows/tally.ts": tally,
+  "workflows/tally.workflow-tests.ts": tallyTests,
+};
+
+/** Runs `run` with `person`'s API over `/rpc`, closed after. */
+const withApi = async <T>(
+  person: Person,
+  run: (api: ReturnType<typeof apiOf>["api"]) => Promise<T>
+): Promise<T> => {
+  const { core, api } = apiOf(person);
   try {
-    const { id } = await api.apps.create({
-      name,
-      description: "Counts clicks",
-    });
-    await release(
-      api,
-      id,
-      {
-        "app/server.ts": server,
-        "screens/counter.tsx": screen,
-        "workflows/tally.ts": tally,
-        "workflows/tally.workflow-tests.ts": tallyTests,
-      },
-      "First version"
-    );
-    return id;
+    return await run(api);
   } finally {
     core[Symbol.dispose]();
   }
+};
+
+/**
+ * A new App named `appName`, released with `files` unless there are none.
+ * Returns its ID.
+ */
+const newApp = async (
+  person: Person,
+  appName: string,
+  files: Record<string, string> = counterFiles
+): Promise<string> =>
+  await withApi(person, async (api) => {
+    const { id } = await api.apps.create({
+      name: appName,
+      description: "Counts clicks",
+    });
+    if (Object.keys(files).length > 0) {
+      await release(api, id, files, "First version");
+    }
+    return id;
+  });
+
+/** A counter screen on the page, once it has built. */
+const counterScreen = async (page: Page, title = "counter screen") => {
+  const frame = page.frameLocator(`iframe[title="${title}"]`);
+  // The first open builds the screen, which on a loaded machine takes a
+  // while (screens.e2e.ts).
+  await expect(frame.getByRole("heading", { name: "Counter" })).toBeVisible({
+    timeout: 20_000,
+  });
+  return frame;
 };
 
 let builder: Person;
 let user: Person;
 let admin: Person;
 let name: string;
+let app: string;
 
 test.beforeAll(async () => {
   ({ builder, user, admin } = await signedIn({
@@ -105,7 +135,7 @@ test.beforeAll(async () => {
   }));
   // Builders see every App, other tests' too: this one's name is its own.
   name = `Counter ${crypto.randomUUID()}`;
-  await releaseApp(builder, name);
+  app = await newApp(builder, name);
 });
 
 test("a builder finds an App in the list, opens it and uses its screen with live data", async ({
@@ -128,12 +158,7 @@ test("a builder finds an App in the list, opens it and uses its screen with live
 
   await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
   await expect(page.getByText("Version 1")).toBeVisible();
-  // The first open builds the screen, which on a loaded machine takes a
-  // while (screens.e2e.ts).
-  const counter = page.frameLocator('iframe[title="counter screen"]');
-  await expect(counter.getByRole("heading", { name: "Counter" })).toBeVisible({
-    timeout: 20_000,
-  });
+  const counter = await counterScreen(page);
   // One page heading: the screen's chrome names the App a level below it.
   await expect(page.getByRole("heading", { level: 2, name })).toBeVisible();
   await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
@@ -207,4 +232,95 @@ test("signing in goes back to the page asked for, and only to a page of this sit
     await expect(page.getByRole("heading", { name: "Chat" })).toBeVisible();
     expect(page.url()).toBe(`${origin}/`);
   }
+});
+
+test("an App whose contents can't be read keeps its row, and the others theirs", async ({
+  browser,
+}) => {
+  const brokenName = `Broken ${crypto.randomUUID()}`;
+  const broken = await newApp(builder, brokenName, {});
+  const page = await pageOf(browser, builder);
+  // The page asks core for this App's contents as for an App core doesn't
+  // have, which core refuses.
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const toCore = socket.connectToServer();
+    socket.onMessage((message) => {
+      const text = String(message);
+      toCore.send(
+        text.includes('"contents"') ? text.replaceAll(broken, "missing") : text
+      );
+    });
+  });
+  await page.goto("/apps");
+
+  await expect(
+    page.getByRole("row").filter({ hasText: brokenName }).getByRole("cell")
+  ).toHaveText([
+    brokenName,
+    "Counts clicks",
+    "Contents unavailable",
+    "Contents unavailable",
+    "Contents unavailable",
+  ]);
+  await expect(
+    page.getByRole("row").filter({ hasText: name }).getByRole("cell")
+  ).toHaveText([name, "Counts clicks", "1", "counter", "tally"]);
+  await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("a runs read that never comes leaves the App usable, and says so in its tab", async ({
+  browser,
+}) => {
+  const page = await pageOf(browser, builder);
+  const gate = await callGate(page, '["workflows","list"]');
+  gate.hold();
+  await page.goto(`/apps/${app}`);
+
+  const counter = await counterScreen(page);
+  await expect(counter.getByRole("button", { name: "Add one" })).toBeEnabled();
+  await page.getByRole("tab", { name: "Workflows" }).click();
+  await expect(
+    page.getByRole("list", { name: "Workflows" }).getByRole("listitem")
+  ).toHaveText(["tally"]);
+  await expect(
+    page.getByText("Grasp can't be reached right now. Try again in a moment.")
+  ).toBeVisible({ timeout: 15_000 });
+  gate.release();
+});
+
+test("loading a screen again after a new version shows that version, and its first screen when the one open is gone", async ({
+  browser,
+}) => {
+  const swapped = await newApp(builder, `Swap ${crypto.randomUUID()}`, {
+    "app/server.ts": server,
+    "screens/counter.tsx": screen,
+  });
+  const page = await pageOf(browser, builder);
+  await page.clock.install();
+  await page.goto(`/apps/${swapped}`);
+  await counterScreen(page);
+
+  await withApi(builder, async (api) => {
+    await release(
+      api,
+      swapped,
+      { "screens/counter.tsx": null, "screens/tally.tsx": screen },
+      "Rename the screen"
+    );
+  });
+  // The frame asks for a new version every 30 seconds.
+  await page.clock.fastForward(30_000);
+  await expect(
+    page.getByText("A new version of this App is available.")
+  ).toBeVisible();
+  await page.getByRole("button", { name: "Reload" }).click();
+
+  await expect(page.getByText("Version 2")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "tally", exact: true })
+  ).toHaveAttribute("aria-pressed", "true");
+  await expect(
+    page.getByRole("button", { name: "counter", exact: true })
+  ).toHaveCount(0);
+  await counterScreen(page, "tally screen");
 });

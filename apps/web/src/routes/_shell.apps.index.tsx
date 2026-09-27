@@ -18,7 +18,8 @@ import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
 interface ListedApp {
   app: App;
-  contents: AppContents;
+  /** Undefined when core didn't answer for this App. */
+  contents?: AppContents;
 }
 
 /**
@@ -39,13 +40,27 @@ const openableApps = async (session: Session): Promise<App[]> => {
 
 const listApps = async (session: Session): Promise<ListedApp[]> => {
   const apps = await openableApps(session);
-  return await Promise.all(
-    apps.map(async (app) => ({
-      app,
-      contents: await session.apps.contents(app.id),
-    }))
+  // One App whose contents can't be read (a damaged version) still
+  // leaves the others, and its own row.
+  const contents = await Promise.allSettled(
+    apps.map(async (app) => await session.apps.contents(app.id))
   );
+  return apps.map((app, index) => {
+    const read = contents[index];
+    return read?.status === "fulfilled"
+      ? { app, contents: read.value }
+      : { app };
+  });
 };
+
+/** A cell of an App's contents, or a note that core didn't answer. */
+const contentsCell = (
+  contents: AppContents | undefined,
+  show: (read: AppContents) => string
+): string => (contents === undefined ? "Contents unavailable" : show(contents));
+
+const versionOf = ({ version }: AppContents): string =>
+  version === null ? "Not released" : String(version);
 
 /** Names as a list for a table cell, or a dash for none. */
 const listed = (names: string[]): string =>
@@ -83,13 +98,13 @@ const AppsTable = ({ apps }: { apps: ListedApp[] }) => {
               </Link>
             </TableCell>
             <TableCell>{app.description}</TableCell>
+            <TableCell>{contentsCell(contents, versionOf)}</TableCell>
             <TableCell>
-              {contents.version === null
-                ? "Not released"
-                : String(contents.version)}
+              {contentsCell(contents, ({ screens }) => listed(screens))}
             </TableCell>
-            <TableCell>{listed(contents.screens)}</TableCell>
-            <TableCell>{listed(contents.workflows)}</TableCell>
+            <TableCell>
+              {contentsCell(contents, ({ workflows }) => listed(workflows))}
+            </TableCell>
           </TableRow>
         ))}
       </TableBody>

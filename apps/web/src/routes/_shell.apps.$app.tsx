@@ -1,5 +1,4 @@
 import type { App, AppContents } from "@grasp-os/shared/apps";
-import { messageOf } from "@grasp-os/shared/errors";
 import type { WorkflowRun } from "@grasp-os/shared/workflows";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -16,41 +15,39 @@ import {
   TabsList,
   TabsTrigger,
 } from "@grasp-os/ui/components/tabs";
-import { createFileRoute, Link } from "@tanstack/react-router";
+import {
+  Await,
+  createFileRoute,
+  Link,
+  useRouter,
+} from "@tanstack/react-router";
 import { useState } from "react";
 
 import type { Session } from "../core.ts";
-import { ErrorText } from "../error-text.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
+import type { Loaded } from "../load-from-core.tsx";
 import { ScreenFrame } from "../screens/screen-frame.tsx";
 
 // One App: its screens, running in their frames, its workflows with their
 // latest runs, and who can open it.
 
-/** The App's runs, or why core didn't list them (workflows switched off). */
-type Runs = { runs: WorkflowRun[] } | { failure: string };
-
-const runsOf = async (session: Session, app: string): Promise<Runs> => {
-  try {
-    return { runs: await session.workflows.list(app) };
-  } catch (error) {
-    return { failure: messageOf(error) };
-  }
-};
+/**
+ * The App's runs, read on a connection of their own: a read that hangs or
+ * is refused (workflows switched off) only leaves the Workflows tab empty.
+ */
+type Runs = Promise<Loaded<WorkflowRun[]>>;
 
 interface AppPage {
   app: App;
   contents: AppContents;
-  runs: Runs;
 }
 
 const loadApp = async (session: Session, app: string): Promise<AppPage> => {
-  const [found, contents, runs] = await Promise.all([
+  const [found, contents] = await Promise.all([
     session.apps.get(app),
     session.apps.contents(app),
-    runsOf(session, app),
   ]);
-  return { app: found, contents, runs };
+  return { app: found, contents };
 };
 
 const dateTime = new Intl.DateTimeFormat(undefined, {
@@ -59,8 +56,12 @@ const dateTime = new Intl.DateTimeFormat(undefined, {
 });
 
 const Screens = ({ app, contents }: { app: string; contents: AppContents }) => {
+  const router = useRouter();
   const [first] = contents.screens;
-  const [selected, setSelected] = useState(first);
+  const [chosen, setChosen] = useState(first);
+  // A new version can remove the screen chosen: then the first one shows.
+  const selected =
+    chosen !== undefined && contents.screens.includes(chosen) ? chosen : first;
   if (contents.version === null) {
     return (
       <p className="text-muted-foreground text-sm">
@@ -83,7 +84,7 @@ const Screens = ({ app, contents }: { app: string; contents: AppContents }) => {
             aria-pressed={screen === selected}
             key={screen}
             onClick={() => {
-              setSelected(screen);
+              setChosen(screen);
             }}
             size="sm"
             variant={screen === selected ? "secondary" : "ghost"}
@@ -100,11 +101,47 @@ const Screens = ({ app, contents }: { app: string; contents: AppContents }) => {
         </Link>
       </div>
       <div className="flex min-h-96 flex-1 flex-col rounded-lg border">
-        <ScreenFrame app={app} embedded key={selected} screen={selected} />
+        <ScreenFrame
+          app={app}
+          embedded
+          key={selected}
+          // Loading the screen again reads the App's current version again
+          // too: its screens may have changed with it.
+          onReload={() => {
+            void router.invalidate();
+          }}
+          screen={selected}
+        />
       </div>
     </div>
   );
 };
+
+const RunsTable = ({ runs }: { runs: WorkflowRun[] }) =>
+  runs.length === 0 ? (
+    <p className="text-muted-foreground text-sm">No runs yet.</p>
+  ) : (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Workflow</TableHead>
+          <TableHead>Status</TableHead>
+          <TableHead>Version</TableHead>
+          <TableHead>Started</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {runs.map((run) => (
+          <TableRow key={run.id}>
+            <TableCell>{run.workflow}</TableCell>
+            <TableCell>{run.status}</TableCell>
+            <TableCell>{run.version}</TableCell>
+            <TableCell>{dateTime.format(new Date(run.createdAt))}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
 
 const Workflows = ({
   contents,
@@ -127,34 +164,20 @@ const Workflows = ({
     )}
     <section className="flex flex-col gap-2">
       <h2 className="font-medium">Runs</h2>
-      {"failure" in runs ? <ErrorText>{runs.failure}</ErrorText> : null}
-      {"runs" in runs && runs.runs.length === 0 ? (
-        <p className="text-muted-foreground text-sm">No runs yet.</p>
-      ) : null}
-      {"runs" in runs && runs.runs.length > 0 ? (
-        <Table>
-          <TableHeader>
-            <TableRow>
-              <TableHead>Workflow</TableHead>
-              <TableHead>Status</TableHead>
-              <TableHead>Version</TableHead>
-              <TableHead>Started</TableHead>
-            </TableRow>
-          </TableHeader>
-          <TableBody>
-            {runs.runs.map((run) => (
-              <TableRow key={run.id}>
-                <TableCell>{run.workflow}</TableCell>
-                <TableCell>{run.status}</TableCell>
-                <TableCell>{run.version}</TableCell>
-                <TableCell>
-                  {dateTime.format(new Date(run.createdAt))}
-                </TableCell>
-              </TableRow>
-            ))}
-          </TableBody>
-        </Table>
-      ) : null}
+      <Await
+        fallback={
+          <p className="text-muted-foreground text-sm">Loading runs…</p>
+        }
+        promise={runs}
+      >
+        {(loaded) =>
+          loaded.state === "ready" ? (
+            <RunsTable runs={loaded.data} />
+          ) : (
+            <NotLoaded page={loaded} />
+          )
+        }
+      </Await>
     </section>
   </div>
 );
@@ -179,8 +202,8 @@ const Members = ({ app }: { app: App }) => {
   );
 };
 
-const AppView = ({ page }: { page: AppPage }) => {
-  const { app, contents, runs } = page;
+const AppView = ({ page, runs }: { page: AppPage; runs: Runs }) => {
+  const { app, contents } = page;
   return (
     <>
       <div className="flex flex-col gap-1">
@@ -215,11 +238,11 @@ const AppView = ({ page }: { page: AppPage }) => {
 };
 
 const AppPageView = () => {
-  const page = Route.useLoaderData();
+  const { page, runs } = Route.useLoaderData();
   return (
     <main className="flex flex-1 flex-col gap-4 p-6">
       {page.state === "ready" ? (
-        <AppView key={page.data.app.id} page={page.data} />
+        <AppView key={page.data.app.id} page={page.data} runs={runs} />
       ) : (
         <>
           <h1 className="text-2xl font-medium">App</h1>
@@ -232,6 +255,13 @@ const AppPageView = () => {
 
 export const Route = createFileRoute("/_shell/apps/$app")({
   component: AppPageView,
-  loader: async ({ params }) =>
-    await loadFromCore(async (session) => await loadApp(session, params.app)),
+  loader: async ({ params }) => ({
+    // Not awaited: the Workflows tab waits for it, nothing else does.
+    runs: loadFromCore(
+      async (session) => await session.workflows.list(params.app)
+    ),
+    page: await loadFromCore(
+      async (session) => await loadApp(session, params.app)
+    ),
+  }),
 });
