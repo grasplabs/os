@@ -77,12 +77,13 @@ const Connections = () => {
       : []
   );
   const listed = connections.state === "ready" ? connections.data : [];
+  // Only a connection the page lists: anyone can put an ID in a link.
+  const connected =
+    connection !== undefined && listed.some(({ id }) => id === connection);
   return (
     <main className="flex max-w-4xl flex-col gap-8 p-6">
       <h1 className="text-2xl font-medium">Connections</h1>
-      {connection === undefined ? null : (
-        <output className="text-sm">Connected.</output>
-      )}
+      {connected ? <output className="text-sm">Connected.</output> : null}
       {connectionError === undefined ? null : (
         <ErrorText>{connectionErrorMessage(connectionError)}</ErrorText>
       )}

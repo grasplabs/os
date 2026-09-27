@@ -25,6 +25,7 @@ import {
 import { Input } from "@grasp-os/ui/components/input";
 import { Switch } from "@grasp-os/ui/components/switch";
 import { useId, useState } from "react";
+import type { ReactNode } from "react";
 
 import { ErrorText } from "../error-text.tsx";
 import { useCoreAction } from "../use-core-action.ts";
@@ -244,12 +245,15 @@ const CatalogItem = ({
 }) => {
   const admin = isAdmin(identity.role);
   const provider = oauthProviderSchema.safeParse(entry.id);
-  let connect = (
+  let connect: ReactNode = (
     <p className="text-muted-foreground text-sm">
       An admin connects this for everyone.
     </p>
   );
-  if (entry.source === "native" && provider.success) {
+  if (identity.staff) {
+    // Core refuses staff every connection; the catalog says so once.
+    connect = null;
+  } else if (entry.source === "native" && provider.success) {
     connect = (
       <NativeConnect entry={entry} provider={provider.data} admin={admin} />
     );
@@ -298,6 +302,12 @@ export const Catalog = ({
           }}
         />
       </div>
+      {identity.staff ? (
+        <p className="text-muted-foreground text-sm">
+          Grasp staff can&apos;t connect accounts or change what is offered
+          here: that is for the organization&apos;s own people.
+        </p>
+      ) : null}
       {catalog.composio === "unavailable" ? (
         <p className="text-muted-foreground text-sm">
           Composio&apos;s toolkits can&apos;t be listed right now. Try again

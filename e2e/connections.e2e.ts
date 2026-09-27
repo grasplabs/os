@@ -37,6 +37,12 @@ test("a person comes back from connecting Microsoft 365, sees it with its scope,
   const { user } = peopleIn("connections");
   const { mine, expired } = seededConnections();
   const page = await pageOf(browser, user);
+  // A link can name any ID: only a connection the page lists is news.
+  await page.goto(`/connections?connection=${crypto.randomUUID()}`);
+  await expect(
+    sectionOf(page, "My connections").getByRole("listitem").first()
+  ).toBeVisible();
+  await expect(page.getByRole("status")).toHaveCount(0);
   // Where core's callback sends the browser once a flow finished.
   await page.goto(`/connections?connection=${mine.id}`);
   await expect(page.getByRole("status")).toHaveText("Connected.");
