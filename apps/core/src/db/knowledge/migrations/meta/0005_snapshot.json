@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "87f9c26f-7427-46bb-9694-a2f67cb546eb",
+  "id": "bff75c44-d6bd-43de-90bc-1ca55b19055f",
   "prevId": "aea9f184-751a-4670-b6d1-2888f2155f90",
   "tables": {
     "app_entries": {
@@ -643,6 +643,13 @@
           "name": "key",
           "type": "text",
           "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "upload_id": {
+          "name": "upload_id",
+          "type": "text",
+          "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },

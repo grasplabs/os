@@ -640,6 +640,13 @@ export interface PurgePlan {
    * own. Always 0 for `personal`.
    */
   inLongerWords: number;
+  /**
+   * Originals of uploaded files it deletes (and the uploads it forgets):
+   * those of the collection (`personal`), or every one uploaded as a
+   * document named (`content`), whether or not a term is in its text, as
+   * a file can hold one where extraction never read it.
+   */
+  originals: number;
   /** Confirms exactly this purge, by the admin who prepared it. */
   token: string;
   /** ISO 8601. */

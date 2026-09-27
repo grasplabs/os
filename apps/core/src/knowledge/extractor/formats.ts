@@ -335,9 +335,22 @@ const sheetRows = (sheet: string, shared: string[]): string[][] => {
   });
 };
 
-/** Where a workbook part points: a path in the archive, from `xl/`. */
-const partPath = (target: string): string =>
-  target.startsWith("/") ? target.slice(1) : `xl/${target}`;
+/**
+ * Where a workbook's relationship points: a path in the archive, from
+ * the root for an absolute target (`/xl/worksheets/sheet1.xml`), else from
+ * `xl/`, with `.` and `..` resolved (`./worksheets/…`, `../xl/…`).
+ */
+const partPath = (target: string): string => {
+  const segments = target.startsWith("/") ? [] : ["xl"];
+  for (const segment of target.split("/")) {
+    if (segment === "..") {
+      segments.pop();
+    } else if (segment !== "" && segment !== ".") {
+      segments.push(segment);
+    }
+  }
+  return segments.join("/");
+};
 
 /**
  * An Excel workbook, a section per sheet, each as a table: numbers as

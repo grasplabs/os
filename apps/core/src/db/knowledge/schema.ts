@@ -256,13 +256,19 @@ export const uploads = sqliteTable(
 );
 
 /**
- * Originals to delete from R2 (knowledge/uploads.ts), by key, recorded in
- * the same batch as what made them unneeded: an upload that failed, a
- * purge. Cleared once deleted; the cron trigger finishes what a failure
- * left.
+ * Originals to delete from R2 (knowledge/uploads.ts), by key: recorded
+ * with the upload, before its original is stored, and cleared once it is
+ * saved; recorded again by a purge. Deleted by the failure that makes one
+ * unneeded, or by the cron trigger once its upload is gone or failed.
  */
 export const uploadCleanups = sqliteTable("upload_cleanups", {
   /** The original's key in R2. */
   key: text().primaryKey(),
+  /** The upload whose original it is. */
+  uploadId: text("upload_id").notNull(),
+  /**
+   * When its original may have been written, at the latest: the upload's
+   * creation, or 0 for one known to be written already.
+   */
   createdAt: timestamp("created_at").notNull(),
 });

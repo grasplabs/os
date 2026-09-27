@@ -17,7 +17,9 @@ import { extractorAsset } from "../src/knowledge/extractor/asset.ts";
 import {
   extractUpload,
   extractionRunId,
+  failUpload,
   originalKey,
+  uploadFile,
 } from "../src/knowledge/uploads.ts";
 import { runEngine } from "../src/workflows/engine.ts";
 import { allEvents } from "./audit-events.ts";
@@ -141,6 +143,12 @@ const leftPending = async (
       createdAt,
       createdAt
     )
+    .run();
+  // Its cleanup, recorded with it, as core records one with each upload.
+  await env.KNOWLEDGE.prepare(
+    "INSERT INTO upload_cleanups (key, upload_id, created_at) VALUES (?, ?, ?)"
+  )
+    .bind(originalKey(person.collectionId, id), id, createdAt)
     .run();
   return id;
 };
@@ -620,6 +628,175 @@ describe("uploads", { timeout: 60_000 }, () => {
       malformed: "upload.unreadable",
       oversized: "knowledge.too_large",
       unknownReason: "upload.unreadable",
+    });
+  });
+
+  it("read a workbook whose parts point at their sheets by relative and absolute paths", async () => {
+    const person = await personWithCollection();
+    const upload = await uploaded(person, "offices-relative.xlsx");
+    const headingsOf = async (query: string) => {
+      const { hits } = await person.api.knowledge.search(query, {
+        collectionId: person.collectionId,
+      });
+      return hits.map(({ headings }) => headings);
+    };
+
+    expect({
+      status: upload.status,
+      offices: await headingsOf("Utrecht"),
+      contacts: await headingsOf("upkeep"),
+    }).toStrictEqual({
+      status: "ready",
+      offices: [["Offices"]],
+      contacts: [["Contacts"]],
+    });
+  });
+
+  it("save a document that is only a heading", async () => {
+    const person = await personWithCollection();
+    const upload = await person.api.uploads.upload({
+      collectionId: person.collectionId,
+      name: "title.docx",
+      bytes: wordFile(
+        '<w:document><w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Only a title</w:t></w:r></w:p></w:body></w:document>',
+        '<w:styles><w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style></w:styles>'
+      ),
+    });
+    const read = await ended(person.api, upload.id);
+    const document = await person.api.knowledge.getDocument(
+      read.documentId ?? ""
+    );
+
+    expect({
+      status: read.status,
+      failure: read.failure,
+      heading: document.version.text.includes("# Only a title"),
+    }).toStrictEqual({ status: "ready", failure: null, heading: true });
+  });
+
+  it("keep the original of an upload that became ready while it was being failed", async () => {
+    const person = await personWithCollection();
+    const id = await leftPending(person, "travel-policy.docx", {
+      createdAt: Date.now(),
+    });
+    // Its extraction saves it after the failure read it, before the
+    // failure's batch lands.
+    const racing = racingKnowledge(async () => {
+      await env.KNOWLEDGE.batch([
+        env.KNOWLEDGE.prepare(
+          "UPDATE uploads SET status = 'ready' WHERE id = ?"
+        ).bind(id),
+        env.KNOWLEDGE.prepare(
+          "DELETE FROM upload_cleanups WHERE upload_id = ?"
+        ).bind(id),
+      ]);
+    });
+    await failUpload({ ...env, KNOWLEDGE: racing }, id, "internal.unexpected");
+    await runCron();
+    const cleanups = await env.KNOWLEDGE.prepare(
+      "SELECT count(*) AS n FROM upload_cleanups WHERE upload_id = ?"
+    )
+      .bind(id)
+      .first<{ n: number }>();
+    const events = await allEvents();
+
+    expect({
+      upload: await statusOf(id),
+      stored: await originalStored(person.collectionId, id),
+      cleanups: cleanups?.n,
+      failed: events.some(
+        ({ action, target }) =>
+          action === "knowledge.upload.failed" && target?.id === id
+      ),
+    }).toStrictEqual({
+      upload: { status: "ready", failure: null },
+      stored: true,
+      cleanups: 0,
+      failed: false,
+    });
+  });
+
+  it("delete the original of an upload a purge forgot while it was being stored", async () => {
+    const person = await personWithCollection();
+    const admin = await signedInApi(idp, "admin");
+    const saved = await uploaded(person, "offices.xlsx");
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [saved.documentId ?? ""],
+      terms: ["facilities@example.com"],
+      reason: "erasure_request",
+    };
+    const { token } = await admin.api.knowledge.preparePurge(input);
+    const uploader = await person.api.whoami();
+    // The purge lands while the next upload's original is being stored.
+    const purgeThenPut = async (
+      ...args: Parameters<R2Bucket["put"]>
+    ): ReturnType<R2Bucket["put"]> => {
+      await admin.api.knowledge.purge(input, token);
+      return await env.FILES.put(...args);
+    };
+    const files = new Proxy(env.FILES, {
+      get: (target, property) => {
+        if (property === "put") {
+          return purgeThenPut;
+        }
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === "function"
+          ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
+          : value;
+      },
+    });
+    const again = await uploadFile({ ...env, FILES: files }, uploader, {
+      collectionId: person.collectionId,
+      name: "offices.xlsx",
+      bytes: await fixture("offices.xlsx"),
+    });
+    const storedAtFirst = await originalStored(person.collectionId, again.id);
+    // Once nothing can still be storing it, the cron trigger deletes it.
+    await env.KNOWLEDGE.prepare(
+      "UPDATE upload_cleanups SET created_at = 0 WHERE upload_id = ?"
+    )
+      .bind(again.id)
+      .run();
+    await runCron();
+
+    expect({
+      upload: await outcome(person.api.uploads.get(again.id)),
+      storedAtFirst,
+      stored: await originalStored(person.collectionId, again.id),
+      savedStored: await originalStored(person.collectionId, saved.id),
+    }).toStrictEqual({
+      upload: "upload.not_found",
+      storedAtFirst: true,
+      stored: false,
+      savedStored: false,
+    });
+  });
+
+  it("delete a document's originals in a content purge that finds nothing in its text", async () => {
+    const person = await personWithCollection();
+    const admin = await signedInApi(idp, "admin");
+    const upload = await uploaded(person, "travel-policy.docx");
+    // Only in the file, where extraction never read it: an image, say.
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [upload.documentId ?? ""],
+      terms: ["Zanzibar"],
+      reason: "erasure_request",
+    };
+    const plan = await admin.api.knowledge.preparePurge(input);
+    const result = await admin.api.knowledge.purge(input, plan.token);
+
+    expect({
+      planned: [plan.documents, plan.originals],
+      rewritten: result.documents,
+      stored: await originalStored(person.collectionId, upload.id),
+      upload: await outcome(person.api.uploads.get(upload.id)),
+    }).toStrictEqual({
+      planned: [0, 1],
+      rewritten: 0,
+      stored: false,
+      upload: "upload.not_found",
     });
   });
 

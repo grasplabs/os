@@ -1,5 +1,6 @@
 CREATE TABLE `upload_cleanups` (
 	`key` text PRIMARY KEY NOT NULL,
+	`upload_id` text NOT NULL,
 	`created_at` integer NOT NULL
 );
 --> statement-breakpoint

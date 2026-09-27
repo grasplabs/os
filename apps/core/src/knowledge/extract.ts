@@ -100,11 +100,24 @@ const extractedSchema = z.discriminatedUnion("ok", [
   }),
 ]);
 
+/**
+ * The extractor's module, read once per isolate from each assets binding:
+ * it is the release's, as the static assets are. Only a module read is
+ * kept, never a failure.
+ */
+const sources = new WeakMap<Fetcher, string>();
+
+const cachedSource = async (assets: Fetcher): Promise<string> => {
+  const source = sources.get(assets) ?? (await extractorSource(assets));
+  sources.set(assets, source);
+  return source;
+};
+
 /** Extracts in a fresh sandbox, whatever the file's collection. */
 export const localExtractor =
   (env: Pick<Env, "ASSETS" | "LOADER">): Extractor =>
   async ({ mediaType, bytes }) => {
-    const source = await extractorSource(env.ASSETS);
+    const source = await cachedSource(env.ASSETS);
     const worker = env.LOADER.load({
       ...isolateSettings,
       mainModule: "extractor.js",

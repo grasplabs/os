@@ -13,6 +13,7 @@ import { errorFields, log } from "@grasp-os/shared/log";
 import { isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, count, eq, gt, inArray, lte, or, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type { z } from "zod";
@@ -61,8 +62,12 @@ import { cleanUpOriginals, forgetUploads } from "./uploads.ts";
 //
 // Both delete the originals of the files uploaded as the documents they
 // purge (uploads.ts), and forget those uploads: an original holds the data
-// too. Recorded in the purge's batch, and deleted from R2 right after, or
-// by the cron trigger when that fails.
+// too. A content purge does so for every document it names, whether or
+// not it finds a term in the text, since a file can hold one where
+// extraction never read it (an image in a PDF). Preparing one says how
+// many originals it deletes (`originals`). Recorded in the purge's batch,
+// and deleted from R2 right after, or by the cron trigger when that fails
+// or an upload may still be storing its original.
 //
 // Then the search index is rebuilt from what it holds now: FTS5 keeps a
 // deleted row's terms in its index pages, where they can't be found by a
@@ -872,6 +877,30 @@ const countDocument = async (
 };
 
 /**
+ * The uploads under a document's name, whose originals a content purge
+ * deletes, whatever it finds in the text: the files may hold the terms
+ * where extraction never read them (an image in a PDF, say). One still
+ * being extracted too: forgotten, it isn't saved.
+ */
+const uploadsNamed = (document: DocumentRow) =>
+  and(
+    eq(uploads.collectionId, document.collectionId),
+    eq(uploads.path, document.path)
+  );
+
+/** How many uploaded originals `where` names, which a purge deletes. */
+const originalsOf = async (
+  db: DrizzleD1Database,
+  where: SQL | undefined
+): Promise<number> => {
+  const [found] = await db
+    .select({ count: count() })
+    .from(uploads)
+    .where(where);
+  return found?.count ?? 0;
+};
+
+/**
  * Purges the terms from `named`, as `person`: rewrites the earlier
  * versions that hold one in place, a page at a time; then, if anything
  * held one, saves the current text, without them, as the next version
@@ -903,73 +932,71 @@ const purgeDocument = async (
   const current = await versionOf(db, document, at);
   const changed = current && rewritten(current, matcher);
   const changedVersions = earlier.changed + (changed === undefined ? 0 : 1);
-  if (current !== undefined && changedVersions + updates.length > 0) {
-    await writeVersion(env, personWriter(person), {
-      collection,
-      path: document.path,
-      text: changed?.text ?? current.text,
-      ifVersion: at,
-      message: "Personal data removed",
-      restoredFrom: null,
-      also: [
-        ...(changed === undefined
-          ? []
-          : [
-              db
-                .update(versions)
-                .set(changed)
-                .where(
-                  and(
-                    eq(versions.documentId, document.id),
-                    eq(versions.number, at)
-                  )
-                ),
-            ]),
-        ...updates,
-        // The files uploaded under its name hold the terms too, one
-        // still being extracted as well: forgotten, it isn't saved.
-        ...forgetUploads(
-          db,
-          and(
-            eq(uploads.collectionId, document.collectionId),
-            eq(uploads.path, document.path)
-          )
-        ),
-        // A proposal made from version N after they were read would wait
-        // on it with text this purge never saw: the batch fails, as a
-        // conflict, and running the purge again rewrites it too.
-        failBatchIfProposals(
-          db,
-          and(
-            eq(memoryProposals.collectionId, document.collectionId),
-            eq(memoryProposals.path, document.path),
-            eq(memoryProposals.status, "pending"),
-            eq(memoryProposals.baseVersion, at),
-            notInList(memoryProposals.id, pendingIds)
-          )
-        ),
-        ...(pendingIds.length === 0
-          ? []
-          : [
-              db
-                .update(memoryProposals)
-                .set({ baseVersion: at + 1 })
-                .where(
-                  and(
-                    inList(memoryProposals.id, pendingIds),
-                    eq(memoryProposals.status, "pending"),
-                    eq(memoryProposals.baseVersion, at)
-                  )
-                ),
-            ]),
-      ],
-    });
-  }
-  return {
+  const counts: Counts = {
     documents: changedVersions + updates.length > 0 ? 1 : 0,
     versions: changedVersions,
     proposals: updates.length,
   };
+  if (current === undefined || counts.documents === 0) {
+    // Nothing in its text, but maybe in a file uploaded as it (a term in
+    // an image in a PDF, which extraction never read): its originals go
+    // all the same.
+    await db.batch(forgetUploads(db, uploadsNamed(document)));
+    return counts;
+  }
+  await writeVersion(env, personWriter(person), {
+    collection,
+    path: document.path,
+    text: changed?.text ?? current.text,
+    ifVersion: at,
+    message: "Personal data removed",
+    restoredFrom: null,
+    also: [
+      ...(changed === undefined
+        ? []
+        : [
+            db
+              .update(versions)
+              .set(changed)
+              .where(
+                and(
+                  eq(versions.documentId, document.id),
+                  eq(versions.number, at)
+                )
+              ),
+          ]),
+      ...updates,
+      ...forgetUploads(db, uploadsNamed(document)),
+      // A proposal made from version N after they were read would wait
+      // on it with text this purge never saw: the batch fails, as a
+      // conflict, and running the purge again rewrites it too.
+      failBatchIfProposals(
+        db,
+        and(
+          eq(memoryProposals.collectionId, document.collectionId),
+          eq(memoryProposals.path, document.path),
+          eq(memoryProposals.status, "pending"),
+          eq(memoryProposals.baseVersion, at),
+          notInList(memoryProposals.id, pendingIds)
+        )
+      ),
+      ...(pendingIds.length === 0
+        ? []
+        : [
+            db
+              .update(memoryProposals)
+              .set({ baseVersion: at + 1 })
+              .where(
+                and(
+                  inList(memoryProposals.id, pendingIds),
+                  eq(memoryProposals.status, "pending"),
+                  eq(memoryProposals.baseVersion, at)
+                )
+              ),
+          ]),
+    ],
+  });
+  return counts;
 };
 
 /**
@@ -1053,12 +1080,21 @@ export const preparePurge = async (
   const db = drizzle(env.KNOWLEDGE);
   let scope: { collectionId?: string; documentIds: string[] };
   let counts: Counts;
+  let originals: number;
   // A personal purge deletes whole documents: nothing is left in a word.
   let joined = 0;
   if (parsed.type === "personal") {
     ({ counts, ...scope } = await personalScope(db, parsed));
+    originals = await originalsOf(
+      db,
+      eq(uploads.collectionId, scope.collectionId ?? "")
+    );
   } else {
     const named = await documentsNamed(db, parsed);
+    originals = await originalsOf(
+      db,
+      or(...named.map(({ document }) => uploadsNamed(document)))
+    );
     scope = { documentIds: named.map(({ document }) => document.id) };
     ({ counts, joined } = await contentCounts(
       env,
@@ -1079,6 +1115,7 @@ export const preparePurge = async (
   return {
     ...counts,
     inLongerWords: joined,
+    originals,
     ...(await tokenFor(env, person, parsed)),
   };
 };

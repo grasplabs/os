@@ -59,10 +59,13 @@ import { ExtractorUnavailableError, localExtractor } from "./extract.ts";
 //
 // Each upload has an original of its own, kept while the upload is: for
 // downloading the original of a document's version, which comes as an
-// attachment only (threat model R20). The original of a failed upload is
-// deleted, outbox-style: the delete is recorded in the batch that fails the
-// upload (`upload_cleanups`), done, then cleared; the cron trigger finishes
-// one a failure interrupted.
+// attachment only (threat model R20). Its delete is recorded outbox-style
+// (`upload_cleanups`) in the batch that records the upload, before the
+// original is stored, and cleared in the batch that makes the upload
+// ready. So an original is deleted whenever its upload doesn't end ready:
+// by the failure that fails it, or by the cron trigger once its upload is
+// gone (a purge forgot it, say, while its original was still being
+// stored) or failed, and old enough that nothing is still storing it.
 
 /** The key of an upload's original in R2: its collection and its ID. */
 export const originalKey = (collectionId: string, uploadId: string): string =>
@@ -136,6 +139,12 @@ const requireUploads = (env: Env): void => {
 const uploadsOn = (env: Env): boolean =>
   featureEnabled(env, "knowledge") && featureEnabled(env, "knowledge_uploads");
 
+/**
+ * How long after an upload is recorded its original may still be being
+ * stored: far more than storing 10 MB and starting a run take.
+ */
+const storingMs = 10 * 60_000;
+
 /** Deletes the original at `key` from R2, then clears its cleanup. */
 const cleanUp = async (
   env: Env,
@@ -148,8 +157,9 @@ const cleanUp = async (
 
 /**
  * Fails the upload with `code`, unless it is ready or failed already: in
- * one batch with its audit event and the cleanup of its original, which
- * then runs.
+ * one batch with its audit event and its cleanup, then deletes its
+ * original. Only if this batch failed it: an upload that became ready
+ * meanwhile keeps its original.
  */
 export const failUpload = async (
   env: Env,
@@ -166,6 +176,8 @@ export const failUpload = async (
     return;
   }
   const now = new Date();
+  // Whether this batch failed it: failed, at the time it stamped.
+  const failedNow = sql`EXISTS (SELECT 1 FROM ${uploads} WHERE ${uploads.id} = ${uploadId} AND ${uploads.status} = 'failed' AND ${uploads.updatedAt} = ${now.getTime()})`;
   await auditedBatch(env, db, [
     db
       .update(uploads)
@@ -176,7 +188,6 @@ export const failUpload = async (
           inArray(uploads.status, ["pending", "extracting"])
         )
       ),
-    // Recorded only if this batch failed it: by the time it stamped.
     outboxedWhere(
       db,
       {
@@ -185,14 +196,23 @@ export const failUpload = async (
         target: { type: "upload", id: uploadId },
         detail: { collectionId: row.collectionId, reason: code },
       },
-      sql`EXISTS (SELECT 1 FROM ${uploads} WHERE ${uploads.id} = ${uploadId} AND ${uploads.status} = 'failed' AND ${uploads.updatedAt} = ${now.getTime()})`
+      failedNow
     ),
     db
       .insert(uploadCleanups)
-      .values({ key: originalKey(row.collectionId, row.id), createdAt: now })
+      .select(
+        sql`SELECT ${originalKey(row.collectionId, row.id)}, ${uploadId}, 0 WHERE ${failedNow}`
+      )
       .onConflictDoNothing(),
   ]);
-  await cleanUp(env, db, originalKey(row.collectionId, row.id));
+  const failed = await db
+    .select({ id: uploads.id })
+    .from(uploads)
+    .where(and(eq(uploads.id, uploadId), failedNow))
+    .get();
+  if (failed !== undefined) {
+    await cleanUp(env, db, originalKey(row.collectionId, row.id));
+  }
 };
 
 /**
@@ -251,6 +271,13 @@ export const uploadFile = async (
   };
   await auditedBatch(env, db, [
     db.insert(uploads).values(row),
+    // Before the original is stored: if the upload never ends ready, its
+    // original is deleted, however far storing it got.
+    db.insert(uploadCleanups).values({
+      key: originalKey(collection.id, row.id),
+      uploadId: row.id,
+      createdAt: now,
+    }),
     outboxed(db, {
       actor,
       action: "knowledge.upload.received",
@@ -326,15 +353,18 @@ const documentText = (row: UploadRow, markdown: string): string =>
     mediaType: row.mediaType,
   })}---\n\n${markdown}\n`;
 
-const headingLine = /^#{1,6}\s/u;
+const headingMarks = /^#{1,6}\s/gmu;
 const tableSyntax = /[\s|-]/gu;
+const pageHeading = /^#{1,6} Page \d+$/gmu;
 
-/** Whether Markdown holds any text beyond headings and table rules. */
+/**
+ * Whether Markdown holds any text: a heading's counts, table rules and
+ * the page headings a PDF's sections get don't.
+ */
 const hasText = (markdown: string): boolean =>
   markdown
-    .split("\n")
-    .filter((line) => !headingLine.test(line))
-    .join("")
+    .replaceAll(pageHeading, "")
+    .replaceAll(headingMarks, "")
     .replaceAll(tableSyntax, "") !== "";
 
 /**
@@ -536,8 +566,12 @@ export const extractUpload = async (
         db
           .insert(uploadCleanups)
           .select(
-            sql`SELECT NULL, NULL WHERE NOT EXISTS (SELECT 1 FROM ${uploads} WHERE ${uploads.id} = ${uploadId} AND ${uploads.status} = 'ready' AND ${uploads.version} = ${ifVersion + 1})`
+            sql`SELECT NULL, NULL, NULL WHERE NOT EXISTS (SELECT 1 FROM ${uploads} WHERE ${uploads.id} = ${uploadId} AND ${uploads.status} = 'ready' AND ${uploads.version} = ${ifVersion + 1})`
           ),
+        // Ready, so its original stays.
+        db
+          .delete(uploadCleanups)
+          .where(eq(uploadCleanups.key, originalKey(row.collectionId, row.id))),
       ],
     }
   );
@@ -561,7 +595,14 @@ export const forgetUploads = (db: DrizzleD1Database, where: SQL | undefined) =>
             key: sql<string>`'knowledge/' || ${uploads.collectionId} || '/' || ${uploads.id}`.as(
               "key"
             ),
-            createdAt: sql<Date>`${Date.now()}`.as("created_at"),
+            uploadId: uploads.id,
+            // One that ended has its original written: deleted at once.
+            // One still pending may still be storing it: its cleanup
+            // waits until it can't be.
+            createdAt:
+              sql<Date>`CASE WHEN ${uploads.status} IN ('ready', 'failed') THEN 0 ELSE ${uploads.createdAt} END`.as(
+                "created_at"
+              ),
           })
           .from(uploads)
           .where(where)
@@ -571,16 +612,23 @@ export const forgetUploads = (db: DrizzleD1Database, where: SQL | undefined) =>
   ] as const;
 
 /**
- * Deletes the originals recorded for deleting, a few at a time, and clears
- * each once done. Never throws: whoever recorded them has committed
+ * Deletes the originals recorded for deleting whose upload is gone or
+ * failed, and that nothing can still be storing, a few at a time, and
+ * clears each once done. Never throws: whoever recorded them has committed
  * already, and the cron trigger deletes what's left.
  */
 export const cleanUpOriginals = async (env: Env): Promise<void> => {
   const db = drizzle(env.KNOWLEDGE);
   try {
     const cleanups = await db
-      .select()
+      .select({ key: uploadCleanups.key })
       .from(uploadCleanups)
+      .where(
+        and(
+          lt(uploadCleanups.createdAt, new Date(Date.now() - storingMs)),
+          sql`NOT EXISTS (SELECT 1 FROM ${uploads} WHERE ${uploads.id} = ${uploadCleanups.uploadId} AND ${uploads.status} != 'failed')`
+        )
+      )
       .orderBy(asc(uploadCleanups.createdAt))
       .limit(sweepBatch);
     for (const { key } of cleanups) {
