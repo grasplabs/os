@@ -187,8 +187,9 @@ describe("a call on a connection", () => {
 
   it("holds every call of a restricted context on a Composio server, whatever the server declares", async () => {
     const connectionId = await addConnection();
-    // `mail.list` says it is read-only, but only a native connector's word
-    // counts: on Composio every tool may act, so the person decides.
+    // `mail.list` says it is read-only, but a server's word counts for
+    // nothing: the admin allowed it by name alone, so it may act, and the
+    // person decides.
     await expect(
       outcome(
         callAs(anna, write(connectionId), {

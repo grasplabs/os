@@ -1,0 +1,253 @@
+import { composioConsentText } from "@grasp-os/shared/connect";
+import type { ComposioToolRule } from "@grasp-os/shared/connect";
+import { exports } from "cloudflare:workers";
+import { describe, expect, it } from "vite-plus/test";
+
+import { fakeComposioApi } from "./composio-api.ts";
+import {
+  addConnection,
+  agentFor,
+  auditEvents,
+  callAs,
+  chatOrigin,
+  clientOrigin,
+  outcome,
+  someone,
+} from "./connect.ts";
+import type { Call } from "./connect.ts";
+
+// The admin's allowlist for a Composio connection (threat model CN16):
+// which of its tools only read, and which input property names the one
+// resource a call acts on. Connect goes by it, never by what Composio's
+// server declares about its own tools: a tool is a read only if the admin
+// said so, and held to one resource only by the property the admin named.
+// The ways that could fail come first: a server declaring a write
+// read-only, or naming a resource property of its own; an admin's rule
+// naming a property the tool doesn't take.
+
+const composio = fakeComposioApi(
+  [
+    {
+      slug: "hubspot",
+      name: "HubSpot",
+      tools: [
+        { slug: "HUBSPOT_LIST_CONTACTS", inputs: ["owner_id", "limit"] },
+        { slug: "HUBSPOT_GET_CONTACT", inputs: ["contact_id"] },
+        { slug: "HUBSPOT_CREATE_CONTACT", inputs: ["owner_id", "email"] },
+      ],
+    },
+  ],
+  {
+    mcpTools: [
+      {
+        name: "HUBSPOT_LIST_CONTACTS",
+        inputs: ["owner_id", "limit"],
+        run: ({ owner_id: owner }) => ({ output: { owner, contacts: [] } }),
+      },
+      {
+        // The server says it only reads, and where its resource is.
+        name: "HUBSPOT_GET_CONTACT",
+        readOnly: true,
+        resourceField: "contact_id",
+        inputs: ["contact_id"],
+        run: ({ contact_id: id }) => ({ output: { id } }),
+      },
+      {
+        name: "HUBSPOT_CREATE_CONTACT",
+        inputs: ["owner_id", "email"],
+        run: () => ({ output: { id: "contact-3" } }),
+      },
+    ],
+  }
+);
+
+const { events } = auditEvents();
+
+/** The admin's allowlist for the connections here. */
+const rules: (string | ComposioToolRule)[] = [
+  { name: "HUBSPOT_LIST_CONTACTS", read: true, resource: "owner_id" },
+  // Allowed by name alone: a side effect, never held to one resource.
+  "HUBSPOT_GET_CONTACT",
+  { name: "HUBSPOT_CREATE_CONTACT", resource: "owner_id" },
+];
+
+/** A HubSpot connection allowing `rules`, as the flow leaves it. */
+const hubspot = async (): Promise<string> =>
+  await addConnection({
+    provider: "hubspot",
+    server: `https://backend.composio.dev/v3/mcp/${crypto.randomUUID()}?connected_account_id=ca_1`,
+    tools: JSON.stringify(rules),
+  });
+
+const owner = "owner-7";
+
+/** A call without an idempotency key. */
+const read = (
+  connectionId: string,
+  action: string,
+  input: Call["input"] = {}
+): Call => ({ connectionId, action, input });
+
+describe("a Composio tool the admin marked as a read", () => {
+  it("runs without an idempotency key, from chat too, without waiting for anyone", async () => {
+    const connectionId = await hubspot();
+    const inChat = agentFor("user-anna", "agent-chat", "interactive");
+    const result = await callAs(
+      inChat,
+      read(connectionId, "HUBSPOT_LIST_CONTACTS", { limit: "5" }),
+      { origin: chatOrigin }
+    );
+    expect(JSON.parse(result.output)).toStrictEqual({ contacts: [] });
+    const [call] = await events();
+    expect(call?.detail).toMatchObject({ sideEffect: false, outcome: "ok" });
+  });
+
+  it("goes on in a restricted context", async () => {
+    const connectionId = await hubspot();
+    await expect(
+      outcome(
+        callAs(
+          agentFor("user-anna"),
+          read(connectionId, "HUBSPOT_LIST_CONTACTS"),
+          {
+            restricted: true,
+            origin: chatOrigin,
+          }
+        )
+      )
+    ).resolves.toBe("ok");
+  });
+
+  it("is held to one resource by the input property the admin named", async () => {
+    const connectionId = await hubspot();
+    const forOwner = (input: Call["input"]) => ({
+      ...read(connectionId, "HUBSPOT_LIST_CONTACTS", input),
+      resource: owner,
+    });
+    const inputs: Call["input"][] = [
+      { owner_id: owner, limit: "5" },
+      { owner_id: "owner-8" },
+      {},
+      // A property the tool's schema doesn't take.
+      { owner_id: owner, ownerId: "owner-8" },
+    ];
+    const ends = await Promise.all(
+      inputs.map(
+        async (input) =>
+          await outcome(callAs(agentFor("user-anna"), forOwner(input)))
+      )
+    );
+    expect(ends).toStrictEqual([
+      "ok",
+      "connect.resource_out_of_scope",
+      "connect.resource_out_of_scope",
+      "connect.resource_out_of_scope",
+    ]);
+    expect(composio.state.mcp.ran).toStrictEqual([
+      { tool: "HUBSPOT_LIST_CONTACTS", input: { owner_id: owner, limit: "5" } },
+    ]);
+  });
+});
+
+describe("a Composio tool the admin didn't mark as a read", () => {
+  it("is a side effect even when its server declares it read-only", async () => {
+    const connectionId = await hubspot();
+    await expect(
+      outcome(
+        callAs(
+          agentFor("user-anna"),
+          read(connectionId, "HUBSPOT_GET_CONTACT", { contact_id: "c-1" })
+        )
+      )
+    ).resolves.toBe("connect.idempotency_key_required");
+    expect(composio.state.mcp.ran).toStrictEqual([]);
+  });
+
+  it("isn't held to the resource property its server names, only to one the admin named", async () => {
+    const connectionId = await hubspot();
+    const call = {
+      ...read(connectionId, "HUBSPOT_GET_CONTACT", { contact_id: "c-1" }),
+      resource: "c-1",
+      idempotencyKey: crypto.randomUUID(),
+    };
+    await expect(outcome(callAs(agentFor("user-anna"), call))).resolves.toBe(
+      "connect.resource_out_of_scope"
+    );
+    // A write the admin held to a property runs for that resource only.
+    const create = {
+      ...read(connectionId, "HUBSPOT_CREATE_CONTACT", {
+        owner_id: owner,
+        email: "new@acme.test",
+      }),
+      resource: owner,
+      idempotencyKey: crypto.randomUUID(),
+    };
+    await expect(outcome(callAs(agentFor("user-anna"), create))).resolves.toBe(
+      "ok"
+    );
+    expect(composio.state.mcp.ran.map(({ tool }) => tool)).toStrictEqual([
+      "HUBSPOT_CREATE_CONTACT",
+    ]);
+  });
+});
+
+/** Starts connecting HubSpot with `tools`, for an admin. */
+const start = async (tools: (string | ComposioToolRule)[]) =>
+  await exports.default.startToolkitConnection({
+    person: someone("admin"),
+    composio: true,
+    toolkit: "hubspot",
+    tools,
+    consent: composioConsentText,
+    origin: clientOrigin,
+    returnTo: "/connections",
+  });
+
+describe("the admin's allowlist, when they connect", () => {
+  it("is kept with the flow, rules and all, and counted in the consent", async () => {
+    await start(rules);
+    const [consent] = await events();
+    expect(consent?.detail).toMatchObject({ toolCount: 3, readCount: 1 });
+  });
+
+  it("names only the tools' own input properties as resources, and each tool once", async () => {
+    const refused = [
+      [{ name: "HUBSPOT_GET_CONTACT", read: true, resource: "owner_id" }],
+      [{ name: "HUBSPOT_GET_CONTACT", resource: "contact.id" }],
+      [{ name: "HUBSPOT_EXPORT", read: true }],
+      ["HUBSPOT_GET_CONTACT", { name: "HUBSPOT_GET_CONTACT", read: true }],
+    ];
+    const ends = await Promise.all(
+      refused.map(async (tools) => await outcome(start(tools)))
+    );
+    expect(ends).toStrictEqual(refused.map(() => "connection.invalid"));
+    expect(
+      composio.state.requests.filter(({ method }) => method !== "GET")
+    ).toStrictEqual([]);
+  });
+
+  it("gives Composio's server the allowed tools by name", async () => {
+    const admin = someone("admin");
+    const { url } = await exports.default.startToolkitConnection({
+      person: admin,
+      composio: true,
+      toolkit: "hubspot",
+      tools: rules,
+      consent: composioConsentText,
+      origin: clientOrigin,
+      returnTo: "/connections",
+    });
+    const { state } = composio.authorize(url);
+    await exports.default.finishConnection({
+      person: admin,
+      state,
+      composio: true,
+    });
+    const [server] = composio.state.holds.servers.values();
+    expect(server?.allowedTools).toStrictEqual([
+      "HUBSPOT_LIST_CONTACTS",
+      "HUBSPOT_GET_CONTACT",
+      "HUBSPOT_CREATE_CONTACT",
+    ]);
+  });
+});

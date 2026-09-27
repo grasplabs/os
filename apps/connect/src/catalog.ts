@@ -187,6 +187,10 @@ const categorySchema = z.object({ name: z.string().min(1).max(128) });
 const toolSchema = z.object({
   slug: z.string().min(1).max(256),
   description: z.string().max(4096).nullish(),
+  /** Its input's JSON Schema, of which only the property names are read. */
+  input_parameters: z
+    .object({ properties: z.record(z.string(), z.unknown()).optional() })
+    .nullish(),
 });
 
 /**
@@ -305,9 +309,10 @@ const toolsOf = async (
     toolSchema,
     toolPaging
   );
-  return tools.map(({ slug, description }) => ({
+  return tools.map(({ slug, description, input_parameters: input }) => ({
     name: slug,
     description: description ?? null,
+    inputs: Object.keys(input?.properties ?? {}),
   }));
 };
 
@@ -359,10 +364,9 @@ export const catalogTools = async (
     if (connector === undefined) {
       throw connectErrors.create("connect.catalog_entry_not_found");
     }
-    return Object.keys(connector.manifest.actions).map((name) => ({
-      name,
-      description: null,
-    }));
+    return Object.entries(connector.manifest.actions).map(
+      ([name, { input }]) => ({ name, description: null, inputs: input })
+    );
   }
   const key = composioKey(env);
   const toolkit = composioToolkitSchema.safeParse(id);

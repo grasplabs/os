@@ -3,10 +3,15 @@ import type { Json } from "@grasp-os/shared/json";
 import { describe, expect, it } from "vite-plus/test";
 
 import type { McpTool } from "../src/mcp.ts";
-import { checkResourceScope, hasSideEffect } from "../src/policy.ts";
+import {
+  checkResourceScope,
+  composioTool,
+  hasSideEffect,
+} from "../src/policy.ts";
 
-// What connect takes from a server's description of its tools, as pure
-// logic: native connectors can't be loaded yet, so no call reaches one.
+// What connect takes a tool to be, as pure logic: a native connector's
+// tool as its manifest declares it, a Composio server's as the admin's
+// rule for it says, whatever the server declares.
 
 const readMailbox: McpTool = {
   name: "mail.read",
@@ -20,25 +25,42 @@ const resource = "anna@acme.test";
 /** The code a scope check refuses with, or "ok". */
 const scope = (
   input: Record<string, Json>,
-  tool: McpTool = readMailbox,
-  kind: "native" | "composio" = "native"
+  tool: McpTool = readMailbox
 ): string => {
   try {
-    checkResourceScope(resource, kind, tool, input);
+    checkResourceScope(resource, tool, input);
     return "ok";
   } catch (error) {
     return connectErrors.codeOf(error) ?? String(error);
   }
 };
 
+/** What a Composio server says of its tool, whatever the truth. */
+const serverSays: McpTool = { ...readMailbox };
+
 describe("a tool", () => {
-  it("is a read only on a native server that declares it read-only", () => {
-    const write = { ...readMailbox, readOnly: false };
+  it("is a read only when declared read-only", () => {
     expect([
-      hasSideEffect("native", readMailbox),
-      hasSideEffect("native", write),
-      hasSideEffect("composio", readMailbox),
-    ]).toStrictEqual([false, true, true]);
+      hasSideEffect(readMailbox),
+      hasSideEffect({ ...readMailbox, readOnly: false }),
+    ]).toStrictEqual([false, true]);
+  });
+
+  it("on a Composio server is what the admin's rule says, whatever the server declares", () => {
+    const byName = composioTool(serverSays, {
+      read: false,
+      resource: undefined,
+    });
+    const asRead = composioTool(
+      { ...serverSays, readOnly: false, resourceField: "query" },
+      { read: true, resource: "sharedMailbox" }
+    );
+    expect([
+      hasSideEffect(byName),
+      byName.resourceField,
+      hasSideEffect(asRead),
+      asRead.resourceField,
+    ]).toStrictEqual([true, undefined, false, "sharedMailbox"]);
   });
 });
 
@@ -82,17 +104,27 @@ describe("a call for one resource", () => {
     );
   });
 
-  it("is refused on a server that isn't ours", () => {
-    expect(scope({ mailbox: resource }, readMailbox, "composio")).toBe(
+  it("is refused on a Composio tool whose rule names no resource, whatever the server declares", () => {
+    const tool = composioTool(serverSays, { read: true, resource: undefined });
+    expect(scope({ mailbox: resource }, tool)).toBe(
       "connect.resource_out_of_scope"
     );
   });
 
+  it("goes through on a Composio tool held by the property its rule names", () => {
+    const tool = composioTool(
+      { ...serverSays, resourceField: undefined },
+      { read: true, resource: "mailbox" }
+    );
+    expect([
+      scope({ mailbox: resource }, tool),
+      scope({ mailbox: "ceo@acme.test" }, tool),
+    ]).toStrictEqual(["ok", "connect.resource_out_of_scope"]);
+  });
+
   it("isn't restricted when the capability covers the whole connection", () => {
     expect(() => {
-      checkResourceScope(null, "composio", readMailbox, {
-        mailbox: "ceo@acme.test",
-      });
+      checkResourceScope(null, readMailbox, { mailbox: "ceo@acme.test" });
     }).not.toThrow();
   });
 });

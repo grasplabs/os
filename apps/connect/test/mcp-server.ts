@@ -20,6 +20,8 @@ export interface FakeTool {
   readOnly?: boolean;
   /** Declared as the input property naming the resource it acts on. */
   resourceField?: string;
+  /** The properties its input schema declares. */
+  inputs?: string[];
   /** What running it with `input` returns. */
   run: (input: Record<string, unknown>) => FakeResult | Promise<FakeResult>;
 }
@@ -110,7 +112,11 @@ const serverWith = (tools: readonly FakeTool[], ran: Ran[]): McpServer => {
     server.registerTool(
       tool.name,
       {
-        inputSchema: z.looseObject({}),
+        inputSchema: z.looseObject(
+          Object.fromEntries(
+            (tool.inputs ?? []).map((input) => [input, z.string().optional()])
+          )
+        ),
         annotations: { readOnlyHint: tool.readOnly ?? false },
         _meta:
           tool.resourceField === undefined

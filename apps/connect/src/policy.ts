@@ -1,14 +1,14 @@
 import { connectErrors } from "@grasp-os/shared/connect";
 import type { Json } from "@grasp-os/shared/json";
 
-import type { Connection } from "./connections.ts";
+import type { Connection, ToolRule } from "./connections.ts";
 import type { McpTool, McpToolResult } from "./mcp.ts";
 
-// What connect takes from an MCP server's description of its own tools.
-// Only native connectors are ours, so only their word counts: for anything
-// else, every tool is a side effect and no tool can be held to one
-// resource, until the admin's per-tool allowlist for Composio toolkits
-// replaces the server's word.
+// What connect takes a tool to be. A native connector's tool is what its
+// manifest says: the manifest is ours, reviewed. A Composio server's tool
+// is what the admin's allowlist says (`composioTool`, threat model CN16),
+// whatever the server declares about it: a read only if the admin said so,
+// and held to one resource only by the input property the admin named.
 
 type ServerKind = Connection["serverKind"];
 
@@ -16,11 +16,21 @@ type ServerKind = Connection["serverKind"];
 const resourceFieldPattern = /^[A-Za-z_]\w*$/u;
 
 /**
- * Whether a call of `tool` may change something. Only a native connector's
- * tool that declares itself read-only (`readOnlyHint: true`) is a read.
+ * A Composio server's tool as the admin's rule for it says: the server's
+ * own `readOnlyHint` and resource `_meta` count for nothing. Only the
+ * input properties its schema declares are kept, to hold a call to them.
  */
-export const hasSideEffect = (kind: ServerKind, tool: McpTool): boolean =>
-  kind !== "native" || !tool.readOnly;
+export const composioTool = (tool: McpTool, rule: ToolRule): McpTool => ({
+  ...tool,
+  readOnly: rule.read,
+  resourceField: rule.resource,
+});
+
+/**
+ * Whether a call of `tool`, as connect takes it to be (above), may change
+ * something: anything not declared read-only is a side effect.
+ */
+export const hasSideEffect = (tool: McpTool): boolean => !tool.readOnly;
 
 /**
  * Keeps a call for one resource on that resource. The capability names the
@@ -33,7 +43,6 @@ export const hasSideEffect = (kind: ServerKind, tool: McpTool): boolean =>
  */
 export const checkResourceScope = (
   resource: string | null,
-  kind: ServerKind,
   tool: McpTool,
   input: Readonly<Record<string, Json>>
 ): void => {
@@ -43,7 +52,6 @@ export const checkResourceScope = (
   const { resourceField, inputProperties } = tool;
   const declared = new Set(inputProperties);
   const inScope =
-    kind === "native" &&
     resourceField !== undefined &&
     resourceFieldPattern.test(resourceField) &&
     declared.has(resourceField) &&

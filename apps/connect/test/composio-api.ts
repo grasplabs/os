@@ -18,6 +18,8 @@ import { testComposioKey } from "./provider-config.ts";
 export interface FakeComposioTool {
   slug: string;
   description?: string;
+  /** The properties its input takes. */
+  inputs?: string[];
 }
 
 export interface FakeToolkit {
@@ -483,12 +485,17 @@ export const fakeComposioApi = (
         ({ slug }) => slug === url.searchParams.get("toolkit_slug")
       );
       return page(
-        (toolkit?.tools ?? []).map(({ slug, description }) => ({
+        (toolkit?.tools ?? []).map(({ slug, description, inputs = [] }) => ({
           slug,
           name: slug,
           description,
           toolkit: { slug: toolkit?.slug, name: toolkit?.name },
-          input_parameters: { type: "object", properties: {} },
+          input_parameters: {
+            type: "object",
+            properties: Object.fromEntries(
+              inputs.map((input) => [input, { type: "string" }])
+            ),
+          },
           tags: [],
         })),
         cursor

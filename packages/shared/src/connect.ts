@@ -229,7 +229,8 @@ export interface ConnectionsApi {
    */
   connectToolkit: (request: {
     toolkit: string;
-    tools: string[];
+    /** The tools the admin allows, each by name or with its rule. */
+    tools: (string | ComposioToolRule)[];
     /** Exactly {@link composioConsentText}, as the admin was shown it. */
     consent: string;
     returnTo?: string;
@@ -279,6 +280,11 @@ export interface CatalogTool {
   /** The action a call names, exactly. */
   name: string;
   description: string | null;
+  /**
+   * The properties its input takes, as its provider declares them: the
+   * input property that names a Composio tool's resource is one of these.
+   */
+  inputs: string[];
 }
 
 /**
@@ -294,16 +300,47 @@ export const composioConsentText =
 export const composioToolsMax = 1000;
 
 /**
- * The tools an admin allows on a Composio connection: names a call can
- * name as its action, once each.
+ * What the admin says about one tool they allow on a Composio connection,
+ * in place of anything its server declares (threat model CN16): whether a
+ * call of it only reads (`read`; otherwise it is a side effect, held for
+ * its person as every write is), and which input property names the one
+ * resource a call of it acts on (`resource`; otherwise it can't be called
+ * for one resource).
+ */
+export const composioToolRuleSchema = z.strictObject({
+  name: permissionActionSchema,
+  read: z.boolean().optional(),
+  /** A plain property name, one the tool's input takes. */
+  resource: z
+    .string()
+    .regex(/^[A-Za-z_]\w{0,127}$/u)
+    .optional(),
+});
+export type ComposioToolRule = z.infer<typeof composioToolRuleSchema>;
+
+/** One allowed tool: by name alone (a side effect, no resource), or its rule. */
+const composioToolSchema = z.union([
+  permissionActionSchema,
+  composioToolRuleSchema,
+]);
+
+/** The name of an allowed tool, however it was given. */
+export const composioToolName = (
+  tool: z.infer<typeof composioToolSchema>
+): string => (typeof tool === "string" ? tool : tool.name);
+
+/**
+ * The tools an admin allows on a Composio connection, once each: names a
+ * call can name as its action, each alone or with its rule.
  */
 export const composioToolsSchema = z
-  .array(permissionActionSchema)
+  .array(composioToolSchema)
   .min(1)
   .max(composioToolsMax)
-  .refine((tools) => new Set(tools).size === tools.length, {
-    message: "Each tool once",
-  });
+  .refine(
+    (tools) => new Set(tools.map(composioToolName)).size === tools.length,
+    { message: "Each tool once" }
+  );
 
 /**
  * Starts connecting a Composio toolkit as a shared connection, for an

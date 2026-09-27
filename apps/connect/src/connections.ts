@@ -1,4 +1,6 @@
 import {
+  composioToolName,
+  composioToolsSchema,
   connectErrors,
   connectionOwnersSchema,
 } from "@grasp-os/shared/connect";
@@ -76,26 +78,43 @@ export const usableConnection = async (
 export const isComposioServerUrl = (url: string): boolean =>
   composioUrlSchema.safeParse(url).success;
 
-const toolsSchema = z.array(z.string());
+/**
+ * What the admin said about a tool they allowed on a Composio connection
+ * (`ComposioToolRule`): whether it only reads, and which input property
+ * names its resource.
+ */
+export interface ToolRule {
+  read: boolean;
+  resource: string | undefined;
+}
 
 /**
- * Whether the admin allowed `action` on a Composio connection. One whose
- * tools aren't recorded, or can't be read, allows none.
+ * The admin's rule for `action` on a Composio connection, if they allowed
+ * it. One whose tools aren't recorded, or can't be read, allows none. A
+ * tool allowed by name alone is a side effect with no resource.
  */
-export const isAllowedTool = (
+export const allowedTool = (
   connection: Connection,
   action: string
-): boolean => {
+): ToolRule | undefined => {
   if (connection.tools === null) {
-    return false;
+    return undefined;
   }
-  let tools: unknown;
+  let stored: unknown;
   try {
-    tools = JSON.parse(connection.tools);
+    stored = JSON.parse(connection.tools);
   } catch {
-    return false;
+    return undefined;
   }
-  return toolsSchema.safeParse(tools).data?.includes(action) === true;
+  const tool = composioToolsSchema
+    .safeParse(stored)
+    .data?.find((each) => composioToolName(each) === action);
+  if (tool === undefined) {
+    return undefined;
+  }
+  return typeof tool === "string"
+    ? { read: false, resource: undefined }
+    : { read: tool.read === true, resource: tool.resource };
 };
 
 /**
