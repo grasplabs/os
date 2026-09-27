@@ -6,6 +6,7 @@ import type {
 } from "@grasp-os/shared/permissions";
 import { RpcTarget } from "capnweb";
 
+import { appsReadableBy } from "./app-access.ts";
 import { appFor, appsListedFor } from "./apps.ts";
 import { featureEnabled } from "./features.ts";
 import {
@@ -65,15 +66,31 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
   }
 
   async list(subject?: PermissionSubjectInput): Promise<Permission[]> {
-    return await withPerson(
-      this.#check,
-      async (person) =>
-        await listPermissions(
-          this.#env,
-          person,
-          subject,
-          appsListedFor(this.#env, person)
-        )
-    );
+    return await withPerson(this.#check, async (person) => {
+      const listed = await listPermissions(
+        this.#env,
+        person,
+        subject,
+        appsListedFor(this.#env, person)
+      );
+      if (!featureEnabled(this.#env, "app_sharing")) {
+        return listed;
+      }
+      // Of the Apps open to them, only those they may open now: one that
+      // read what they can't read (app.unreadable) shows none of its
+      // permissions either. Each App named is checked once.
+      const named = listed.flatMap(({ subject: of, object }) => [
+        ...(of.type === "app" ? [of.appId] : []),
+        ...(object.type === "workflow" ? [object.appId] : []),
+      ]);
+      const readable = await appsReadableBy(this.#env, person, [
+        ...new Set(named),
+      ]);
+      return listed.filter(
+        ({ subject: of, object }) =>
+          (of.type !== "app" || readable.has(of.appId)) &&
+          (object.type !== "workflow" || readable.has(object.appId))
+      );
+    });
   }
 }

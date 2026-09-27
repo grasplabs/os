@@ -1,5 +1,9 @@
-import { connectErrors } from "@grasp-os/shared/connect";
-import { eq } from "drizzle-orm";
+import {
+  connectErrors,
+  connectionOwnersSchema,
+} from "@grasp-os/shared/connect";
+import type { ConnectionOwner } from "@grasp-os/shared/connect";
+import { eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -74,4 +78,27 @@ export const composioServer = (connection: Connection): McpServer => {
     throw connectErrors.create("connect.server_unavailable");
   }
   return mcpServer(url.data, async (request) => await fetch(request));
+};
+
+/**
+ * Whose each connection `request` names is (`ConnectApi.connectionOwners`),
+ * disconnected ones too: what an App read through a connection before it
+ * was disconnected is still its owner's alone. Unknown IDs are left out.
+ */
+export const connectionOwners = async (
+  db: D1Database,
+  request: unknown
+): Promise<ConnectionOwner[]> => {
+  const ids = connectErrors.parse(
+    "connect.invalid",
+    connectionOwnersSchema,
+    request
+  );
+  if (ids.length === 0) {
+    return [];
+  }
+  return await drizzle(db)
+    .select({ id: connections.id, ownerUserId: connections.ownerUserId })
+    .from(connections)
+    .where(inArray(connections.id, ids));
 };

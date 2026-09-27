@@ -10,22 +10,36 @@ import type {
   AppMembersApi,
   NewAppMember,
 } from "@grasp-os/shared/apps";
-import { actorOf } from "@grasp-os/shared/audit";
+import { actorOf, auditProvenanceMaxItems } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { canBuild, roleErrors } from "@grasp-os/shared/roles";
+import {
+  canBuild,
+  isAdmin,
+  roleErrors,
+  roleSchema,
+} from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 import { and, asc, eq, isNotNull, ne, or } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
+import { hasSources, sourcesOf, unreadableBy } from "./app-provenance.ts";
 import { appFor } from "./apps.ts";
-import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
-import { activeMember, organizationId } from "./auth/auth.ts";
+import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
+import { activeMember, notRemoved, organizationId } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
-import { appMembers, teams, users } from "./db/core/schema.ts";
+import {
+  appMembers,
+  members,
+  teamMembers,
+  teams,
+  users,
+} from "./db/core/schema.ts";
+import { inList } from "./db/d1.ts";
 import { appHost } from "./durable-objects.ts";
+import type { PersonAccess } from "./knowledge/access.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -182,6 +196,119 @@ const closeScreens = async (env: Env, app: App): Promise<void> => {
   }
 };
 
+/**
+ * Whom sharing `app` with `member` reaches now, as far as provenance goes:
+ * the person, or each of the team's people, with their teams. The App's
+ * owner and admins aren't checked, nor anyone no longer in the
+ * organization, who reaches nothing. A few queries, whatever the team's
+ * size.
+ */
+const checkedPeople = async (
+  env: Env,
+  app: App,
+  member: AppMemberRef
+): Promise<PersonAccess[]> => {
+  const db = drizzle(env.DB);
+  const inTeam =
+    member.type === "person"
+      ? []
+      : await db
+          .select({ userId: teamMembers.userId })
+          .from(teamMembers)
+          .where(eq(teamMembers.teamId, member.id));
+  const people =
+    member.type === "person" ? [member.id] : inTeam.map(({ userId }) => userId);
+  const others = people.filter((userId) => userId !== app.owner);
+  if (others.length === 0) {
+    return [];
+  }
+  const [roles, memberships] = await db.batch([
+    db
+      .select({ userId: members.userId, role: members.role })
+      .from(members)
+      .where(
+        and(
+          eq(members.organizationId, organizationId),
+          inList(members.userId, others),
+          notRemoved(members.userId)
+        )
+      ),
+    db
+      .select({ userId: teamMembers.userId, teamId: teamMembers.teamId })
+      .from(teamMembers)
+      .innerJoin(teams, eq(teams.id, teamMembers.teamId))
+      .where(
+        and(
+          inList(teamMembers.userId, others),
+          eq(teams.organizationId, organizationId)
+        )
+      ),
+  ]);
+  const teamsByPerson = new Map<string, string[]>();
+  for (const { userId, teamId } of memberships) {
+    const teamIds = teamsByPerson.get(userId) ?? [];
+    teamIds.push(teamId);
+    teamsByPerson.set(userId, teamIds);
+  }
+  return roles.flatMap(({ userId, role }) => {
+    // A role that isn't one of ours is no access, as auth/identity.ts has it.
+    const known = roleSchema.safeParse(role);
+    if (!known.success || isAdmin(known.data)) {
+      return [];
+    }
+    return [{ userId, teamIds: teamsByPerson.get(userId) ?? [] }];
+  });
+};
+
+/**
+ * Refuses sharing `app` with `member` when anyone it would reach now can't
+ * read everything the App has read where it comes from, with
+ * `app.share_unreadable` naming the sources and the people. The refusal
+ * is audited, with those sources as its provenance. Whoever joins a team
+ * later is checked on each call instead (app-access.ts).
+ */
+const requireReadable = async (
+  env: Env,
+  by: Identity,
+  app: App,
+  member: NewAppMember
+): Promise<void> => {
+  const sources = await sourcesOf(env, app.id);
+  if (!hasSources(sources)) {
+    return;
+  }
+  const people = await checkedPeople(env, app, member);
+  const refused = people
+    .map(({ userId, teamIds }) => ({
+      userId,
+      sources: unreadableBy(sources, { userId, teamIds }),
+    }))
+    .filter(({ sources: ids }) => ids.length > 0);
+  if (refused.length === 0) {
+    return;
+  }
+  const ids = [...new Set(refused.flatMap(({ sources: of }) => of))];
+  const db = drizzle(env.DB);
+  await auditedBatch(env, db, [
+    outboxed(db, {
+      actor: actorOf(by),
+      action: "app.member.refused",
+      target: { type: "app", id: app.id },
+      provenance: ids.slice(0, auditProvenanceMaxItems),
+      detail: {
+        memberType: member.type,
+        member: member.id,
+        role: member.role,
+        reason: "app.share_unreadable",
+      },
+    }),
+  ]);
+  throw appErrors.create("app.share_unreadable", {
+    sources: ids,
+    people: refused.map(({ userId }) => userId),
+  });
+};
+
 /** Whom an App is shared with, in the order they were shared or changed. */
 export const listMembers = async (
   env: Env,
@@ -207,6 +334,7 @@ export const addMember = async (
   requireNotStaff(by);
   const member = appErrors.parse("app.invalid", newAppMemberSchema, input);
   await requireSharable(env, found, member);
+  await requireReadable(env, by, found, member);
   const db = drizzle(env.DB);
   const row: Row = {
     appId: found.id,
