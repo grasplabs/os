@@ -1,7 +1,8 @@
+import { staffWindowOpen } from "@grasp-os/shared/deployment-config";
+import type { SignInConfig } from "@grasp-os/shared/deployment-config";
 import type { SignInRefusal } from "@grasp-os/shared/sign-in";
 
-import { providerIds, staffWindowOpen } from "./config.ts";
-import type { SignInConfig } from "./config.ts";
+import { providerIds } from "./config.ts";
 
 /** Why a verified ID token doesn't get someone in. Shown to them as a code. */
 type ClaimsRefusal = Exclude<SignInRefusal, "method_not_allowed">;

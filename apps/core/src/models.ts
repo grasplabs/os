@@ -29,6 +29,11 @@ import {
 } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { jsonVar } from "@grasp-os/shared/config";
+import {
+  modelGatewayConfigSchema as gatewayConfigSchema,
+  modelRulesConfigSchema as rulesConfigSchema,
+} from "@grasp-os/shared/deployment-config";
+import type { ModelRules } from "@grasp-os/shared/deployment-config";
 import { connectionIdSchema } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
@@ -49,8 +54,8 @@ import {
   checkBudgets,
 } from "./model-budgets.ts";
 import type { Budgeted } from "./model-budgets.ts";
-import { judgeCall, modelRulesShape } from "./model-rules.ts";
-import type { Judged, ModelRules, Refusal } from "./model-rules.ts";
+import { judgeCall } from "./model-rules.ts";
+import type { Judged, Refusal } from "./model-rules.ts";
 
 // The model gateway: every model call in a deployment goes through here, and
 // from here through the deployment's AI Gateway, never straight to a
@@ -151,21 +156,14 @@ const parseModelRef = (ref: string): ModelRef | undefined => {
   return model === undefined ? undefined : { provider, id, catalog: model };
 };
 
-/** An AI Gateway ID: lowercase letters, digits and dashes. */
-const gatewayIdPattern = /^[a-z0-9][a-z0-9-]{0,63}$/u;
-
 const modelRefSchema = z
   .string()
   .refine((ref) => parseModelRef(ref) !== undefined, {
     message: "A <provider>/<model> the gateway offers",
   });
 
-const modelGatewayConfigSchema = z.object({
-  /** The deployment's AI Gateway, in the deployment's own account. */
-  gateway: z.string().regex(gatewayIdPattern),
-  /** The models this deployment allows; every other model is refused. */
-  models: z.array(modelRefSchema).min(1),
-});
+/** The allowlist in the `MODEL_GATEWAY` var, by the models pi offers. */
+const modelGatewayConfigSchema = gatewayConfigSchema(modelRefSchema);
 type ModelGatewayConfig = z.infer<typeof modelGatewayConfigSchema>;
 
 /**
@@ -174,25 +172,7 @@ type ModelGatewayConfig = z.infer<typeof modelGatewayConfigSchema>;
  * doesn't parse never stops the calls the kill switch leaves to the
  * allowlist, and while the rules are on, it refuses every call.
  */
-const modelRulesConfigSchema = z
-  .object({
-    models: z.array(z.string()),
-    ...modelRulesShape(modelRefSchema),
-  })
-  .refine(
-    ({ models: allowed, eu }) =>
-      eu === undefined || eu.models.every((ref) => allowed.includes(ref)),
-    { message: "EU models are allowed models", path: ["eu", "models"] }
-  )
-  .refine(
-    ({ models: allowed, sensitive }) =>
-      sensitive === undefined ||
-      sensitive.models.every((ref) => allowed.includes(ref)),
-    {
-      message: "Models for sensitive data are allowed models",
-      path: ["sensitive", "models"],
-    }
-  );
+const modelRulesConfigSchema = rulesConfigSchema(modelRefSchema);
 
 /**
  * Core's env, with the AI binding as pi describes it. It is absent on plain

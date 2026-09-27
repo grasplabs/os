@@ -1,25 +1,15 @@
 import type { AuditActor } from "@grasp-os/shared/audit";
-import {
-  appIdSchema,
-  connectionIdSchema,
-  workflowIdSchema,
-} from "@grasp-os/shared/ids";
+import type { ModelRules } from "@grasp-os/shared/deployment-config";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { and, eq, inArray, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { z } from "zod";
 
 import type { OutboxEnv } from "./audit-outbox.ts";
 import { inList } from "./db/d1.ts";
 import { collections, documents } from "./db/knowledge/schema.ts";
 import { featureEnabled } from "./features.ts";
-import {
-  budgetMonth,
-  budgetsFor,
-  checkBudgets,
-  budgetsSchema,
-} from "./model-budgets.ts";
+import { budgetMonth, budgetsFor, checkBudgets } from "./model-budgets.ts";
 import type { Budgeted } from "./model-budgets.ts";
 import { isRestricted } from "./restricted.ts";
 import type { RestrictedEnv, WorkContext } from "./restricted.ts";
@@ -57,40 +47,6 @@ import type { RestrictedEnv, WorkContext } from "./restricted.ts";
 //
 // And budgets: a call is refused once one of its budgets is used up for
 // the month (model-budgets.ts).
-
-/**
- * The rules' part of the gateway config: `modelRef` checks one
- * `<provider>/<model>` the gateway offers.
- */
-export const modelRulesShape = (modelRef: z.ZodType<string>) => ({
-  eu: z
-    .strictObject({
-      /** The allowed models hosted in the EU. */
-      models: z.array(modelRef).min(1),
-      /** Every call of the deployment must stay in the EU. */
-      deployment: z.boolean().default(false),
-      /** Workflows whose AI steps must stay in the EU. */
-      workflows: z
-        .array(z.strictObject({ app: appIdSchema, workflow: workflowIdSchema }))
-        .default([]),
-      /** Connections whose data must stay in the EU. */
-      connections: z.array(connectionIdSchema).default([]),
-    })
-    .optional(),
-  sensitive: z
-    .strictObject({
-      /** The allowed models that may take sensitive data. */
-      models: z.array(modelRef).min(1),
-      /** Connections whose data is sensitive. */
-      connections: z.array(connectionIdSchema).default([]),
-    })
-    .optional(),
-  budgets: budgetsSchema,
-});
-
-export type ModelRules = z.output<
-  z.ZodObject<ReturnType<typeof modelRulesShape>>
->;
 
 /** What the rules judge a call by. */
 export interface RulesInput {

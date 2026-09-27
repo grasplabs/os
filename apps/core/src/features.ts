@@ -1,6 +1,6 @@
 import { deploymentConfig } from "@grasp-os/shared/config";
+import { featuresSchema } from "@grasp-os/shared/deployment-config";
 import { featureErrors } from "@grasp-os/shared/errors";
-import { z } from "zod";
 
 // Features ship switched off. The console switches one on for a deployment
 // with the `FEATURES` var, e.g. `{"apps": true}`, and switching it off again
@@ -138,9 +138,6 @@ export type Feature =
    * the cron trigger, which the install would not undo.
    */
   | "builtins";
-
-// Names nobody knows (a flag since removed) are ignored, not an error.
-const featuresSchema = z.record(z.string(), z.boolean());
 
 /** Whether `feature` is switched on for this deployment. */
 export const featureEnabled = (

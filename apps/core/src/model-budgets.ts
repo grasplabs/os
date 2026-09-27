@@ -1,4 +1,5 @@
 import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
+import type { budgetsSchema } from "@grasp-os/shared/deployment-config";
 import { errorFields, log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { and, eq, or, sql } from "drizzle-orm";
@@ -43,24 +44,6 @@ import { modelBudgetAlerts, modelSpend } from "./db/core/schema.ts";
 /** Millionths of a US dollar, which the spend is counted in. */
 const microsPerDollar = 1_000_000;
 
-const budgetSchema = z.strictObject({
-  /** US dollars a month: a cent at least, and well within an integer. */
-  limit: z.number().min(0.01).max(1_000_000_000),
-  /** The percent of the limit at which admins are alerted. */
-  alertAt: z.int().min(1).max(99).default(80),
-});
-
-/** The budgets' part of the gateway config. */
-export const budgetsSchema = z
-  .strictObject({
-    /** All the deployment's calls together. */
-    deployment: budgetSchema.optional(),
-    /** Each workflow's AI steps, each workflow on its own. */
-    workflow: budgetSchema.optional(),
-    /** The calls made by or for each person, each on their own. */
-    user: budgetSchema.optional(),
-  })
-  .optional();
 type Budgets = z.output<typeof budgetsSchema>;
 
 /** Whose spend a budget counts. */

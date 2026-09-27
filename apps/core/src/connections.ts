@@ -20,6 +20,7 @@ import type {
   OAuthProvider,
   OfferedCatalog,
 } from "@grasp-os/shared/connect";
+import type { SignInConfig } from "@grasp-os/shared/deployment-config";
 import { authErrors } from "@grasp-os/shared/errors";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { isAdmin, requireAdmin, roleErrors } from "@grasp-os/shared/roles";
@@ -35,7 +36,6 @@ import {
   outboxedIfChanged,
 } from "./audit-outbox.ts";
 import { providerIds, signInConfig } from "./auth/config.ts";
-import type { SignInConfig } from "./auth/config.ts";
 import { identify } from "./auth/identity.ts";
 import { accounts, hiddenConnectors, users } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";

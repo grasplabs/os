@@ -1,6 +1,8 @@
 import { sso } from "@better-auth/sso";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
+import { staffWindowOpen } from "@grasp-os/shared/deployment-config";
+import type { SignInConfig } from "@grasp-os/shared/deployment-config";
 import { fromBase64Url } from "@grasp-os/shared/encoding";
 import { log } from "@grasp-os/shared/log";
 import type { SignInRefusal } from "@grasp-os/shared/sign-in";
@@ -39,13 +41,8 @@ import {
 } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { checkClaims } from "./claims.ts";
-import {
-  devIdpOrigin,
-  oidcProviders,
-  providerIds,
-  staffWindowOpen,
-} from "./config.ts";
-import type { OidcProvider, SignInConfig } from "./config.ts";
+import { devIdpOrigin, oidcProviders, providerIds } from "./config.ts";
+import type { OidcProvider } from "./config.ts";
 
 /** Better Auth's routes, under core's API. */
 export const authBasePath = "/api/auth";
