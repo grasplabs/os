@@ -58,7 +58,9 @@ export const workflowFiles = (
 /**
  * Where a workflow's code is, and its tests: `workflows/<id>.ts`, whose
  * default export is the workflow, and `workflows/<id>.workflow-tests.ts`
- * beside it, whose default export is its tests (`workflowTests`).
+ * beside it, whose default export is its tests (`workflowTests`). Only
+ * `workflows/<id>.ts` (an id without dots) is a workflow: put shared code
+ * in a folder under workflows/, such as workflows/lib/.
  */
 export const workflowPaths = (
   id: string
