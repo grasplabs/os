@@ -743,8 +743,9 @@ describe("restricted mode", setUpTime, () => {
       await readerIn(bindings).search("note");
     }
     // Entering restricted mode is recorded before it is set (the next
-    // test), and \`allEvents\` drains the outboxes before it reads: once the
-    // reads are done, their events are there to read, without a wait.
+    // test), and the read awaits that record before it returns. `allEvents`
+    // drains the outboxes before it reads: once the reads are done, their
+    // events are there to read, without a wait.
     const logged = await allEvents();
     const audited = logged.filter(
       ({ action, target }) =>
