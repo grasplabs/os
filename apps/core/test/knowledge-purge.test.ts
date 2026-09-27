@@ -638,6 +638,86 @@ describe("a purge of content", setUpTime, () => {
     });
   });
 
+  it("removes a term as a whole word, in any case and next to punctuation, never inside a longer word", async () => {
+    const admin = await personOf("admin");
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const document = await saveOver(
+      admin,
+      handbook.id,
+      "team.md",
+      "# Team\nTom planned it, tom automated it (Tom). Ask Tom, then Tomas or Ann's team.\nMail tom.visser@acme.test or Tom.Visser@ACME.test, not atom.visser@acme.test."
+    );
+    await purged(admin, {
+      type: "content",
+      documentIds: [document.id],
+      terms: ["Tom", "Ann", "tom.visser@acme.test"],
+      reason: "offboarding",
+    });
+    const purgedText =
+      "# Team\n(removed) planned it, (removed) automated it ((removed)). Ask (removed), then Tomas or (removed)'s team.\nMail (removed) or (removed), not atom.visser@acme.test.";
+    // The version saved, and the one saved as the purge's.
+    await expect(versionTexts(document.id)).resolves.toStrictEqual([
+      purgedText,
+      purgedText,
+    ]);
+  });
+
+  it("finds whole words in any script, with accents as part of the word", async () => {
+    const admin = await personOf("admin");
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    // "José" twice: once with its accent as one character, which only a
+    // Unicode-aware boundary keeps from ending "Jos", and once as an e and
+    // a combining accent, which is part of the word, so "Jose" isn't all
+    // of it.
+    const decomposed = `Jose${String.fromCodePoint(0x3_01)}`;
+    const document = await saveOver(
+      admin,
+      handbook.id,
+      "team.md",
+      `# Team\nRené, rené and RENÉ left; Renée stays.\nJos and Jose left; José and ${decomposed} stay.`
+    );
+    await purged(admin, {
+      type: "content",
+      documentIds: [document.id],
+      terms: ["René", "Jos", "Jose"],
+      reason: "offboarding",
+    });
+    const read = await admin.api.knowledge.getDocument(document.id);
+    expect(read.version.text).toBe(
+      `# Team\n(removed), (removed) and (removed) left; Renée stays.\n(removed) and (removed) left; José and ${decomposed} stay.`
+    );
+  });
+
+  it("leaves frontmatter values that hold a term inside a word, so it can purge the document", async () => {
+    const admin = await personOf("admin");
+    const decisions = await admin.api.knowledge.createCollection({
+      name: "Decisions",
+      access: "everyone",
+    });
+    const document = await saveOver(
+      admin,
+      decisions.id,
+      "tooling.md",
+      "---\ntype: decision\nstatus: accepted\n---\n# Tooling\nTed accepted it, as Ann planned."
+    );
+    await purged(admin, {
+      type: "content",
+      documentIds: [document.id],
+      terms: ["Ted", "Ann"],
+      reason: "offboarding",
+    });
+    const read = await admin.api.knowledge.getDocument(document.id);
+    expect(read.version.text).toBe(
+      "---\ntype: decision\nstatus: accepted\n---\n# Tooling\n(removed) accepted it, as (removed) planned."
+    );
+  });
+
   it("rewrites every version, however many there are", async () => {
     const admin = await personOf("admin");
     const name = `Bakker${unique()}`;

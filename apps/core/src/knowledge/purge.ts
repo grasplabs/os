@@ -44,7 +44,8 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 //   and search row, and so are the memory proposals their agents made,
 //   which hold text from their chats. One batch, with its audit event.
 // - `content`: every occurrence of some terms (a name, an email address, a
-//   passage) is replaced with `purgedMarker` in every version of the
+//   passage), in any case and as a whole word (never inside a longer
+//   word), is replaced with `purgedMarker` in every version of the
 //   documents named, and in their memory proposals. Whenever anything
 //   changed, the current text is also saved as the next version, which
 //   makes its sections, links, search rows and the document's title and
@@ -67,9 +68,11 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 //
 // What a purge doesn't reach: paths (a document named after someone keeps
 // its name), collection names and descriptions, other documents that
-// quote the text, a term split by Markdown or a line break, memory already
-// cached in a running isolate (never served again, gone once evicted),
-// D1's own point-in-time recovery, and anything outside Knowledge.
+// quote the text, a term split by Markdown or a line break, a term
+// spelled otherwise (a variant, an accent left out or encoded otherwise,
+// a word joined to it, as in "Toms"), memory already cached in a running
+// isolate (never served again, gone once evicted), D1's own point-in-time
+// recovery, and anything outside Knowledge.
 
 /** How long an admin has to confirm a purge they prepared. */
 const tokenLifetimeMs = 10 * 60 * 1000;
@@ -318,14 +321,37 @@ const literal = (term: string): string =>
   term.replaceAll(/[$()*+./?[\\\]^{|}]/gu, "\\$&");
 
 /**
- * The terms, in any case, longest first, so a term inside a longer one
- * doesn't leave the rest of the longer one behind.
+ * A character that is part of a word, in any script: a letter, a digit,
+ * an underscore, or a combining mark (an accent written as its own code
+ * point stays part of its letter's word). `\b` knows only ASCII, so it
+ * would split "José" after the "Jos".
+ */
+const wordCharacter = String.raw`[\p{L}\p{M}\p{N}_]`;
+const startsWithWord = new RegExp(`^${wordCharacter}`, "u");
+const endsWithWord = new RegExp(`${wordCharacter}$`, "u");
+
+/**
+ * A term as a pattern that matches it as a whole word: never inside a
+ * longer one, so "Tom" leaves "automated" and "Ann" leaves "planned" (and
+ * frontmatter keys and values) alone. A side of the term that is not a
+ * word character (the dot ending a passage, the bracket of "(Tom)") needs
+ * nothing next to it, as there is no word there to be part of.
+ */
+const wholeWord = (term: string): string => {
+  const before = startsWithWord.test(term) ? `(?<!${wordCharacter})` : "";
+  const after = endsWithWord.test(term) ? `(?!${wordCharacter})` : "";
+  return `${before}${literal(term)}${after}`;
+};
+
+/**
+ * The terms as whole words, in any case, longest first, so a term inside a
+ * longer one doesn't leave the rest of the longer one behind.
  */
 const matcherOf = (terms: string[]): RegExp =>
   new RegExp(
     terms
       .toSorted((one, other) => other.length - one.length)
-      .map(literal)
+      .map(wholeWord)
       .join("|"),
     "giu"
   );

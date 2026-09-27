@@ -567,8 +567,9 @@ const purgeTermSchema = z
  * - `personal`: the person's Personal collection, with their USER.md, all
  *   its versions, and the memory proposals their agents made;
  * - `content`: every occurrence of the `terms` (a name, an email address,
- *   a passage), in any case, from the documents named, which stay: each
- *   becomes {@link purgedMarker}.
+ *   a passage), in any case and as a whole word (never inside a longer
+ *   word), from the documents named, which stay: each becomes
+ *   {@link purgedMarker}.
  */
 export const purgeInputSchema = z.discriminatedUnion("type", [
   z.strictObject({
