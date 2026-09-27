@@ -29,7 +29,9 @@ import {
 // finding it, its text, or its name through search, a read, a listing,
 // its history or a link, or still finding it once unshared; an agent
 // finding more than the person it acts for, or anything without a grant;
-// and anyone, admins too, writing the collection through Knowledge.
+// an App given the collection, keeping another App's AGENTS.md for
+// whoever it is shared with; and anyone, admins too, writing the
+// collection through Knowledge.
 
 const idp = mockIdp();
 
@@ -540,6 +542,64 @@ describe("who finds an App", setUpTime, () => {
     await expect(
       entriesFound(await toolsFor(other), word)
     ).resolves.toStrictEqual([]);
+  });
+
+  it("is never given to an App, which would keep what it found for whoever it is shared with", async () => {
+    const admin = await personOf("admin");
+    const owner = await personOf("builder");
+    // Indexed, so the collection is there.
+    await releasedApp(owner, agentsMd(term()));
+    const { id: app } = await owner.api.apps.create({ name: `X ${term()}` });
+    const subject = { type: "app" as const, appId: app };
+    // Asked for before requests were refused: the grant refuses it.
+    const old = await storedGrant(
+      { type: "app", id: app },
+      { type: "collection", id: appsCollection },
+      ["read"],
+      "APPS",
+      "requested"
+    );
+
+    await expect(
+      Promise.all([
+        outcome(
+          owner.api.permissions.request(readCollection(subject, appsCollection))
+        ),
+        outcome(admin.api.permissions.grant(old)),
+      ])
+    ).resolves.toStrictEqual(["permission.invalid", "permission.invalid"]);
+    await expect(admin.api.permissions.list(subject)).resolves.toMatchObject([
+      { id: old, status: "requested" },
+    ]);
+  });
+
+  it("keeps an App granted it before from being shared, as what it read there can't be placed", async () => {
+    const owner = await personOf("builder");
+    const anna = await personOf("user");
+    await releasedApp(owner, agentsMd(term()));
+    const { id: app } = await owner.api.apps.create({ name: `X ${term()}` });
+    // Granted before grants were refused.
+    await storedGrant(
+      { type: "app", id: app },
+      { type: "collection", id: appsCollection },
+      ["read"],
+      "APPS"
+    );
+
+    let refused: unknown;
+    try {
+      await owner.api.apps.members.add(app, {
+        type: "person",
+        id: anna.userId,
+        role: "user",
+      });
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toMatchObject({
+      code: "app.share_unreadable",
+      details: { sources: [`collection:${appsCollection}`] },
+    });
   });
 });
 

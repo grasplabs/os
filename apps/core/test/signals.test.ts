@@ -692,7 +692,22 @@ describe("improvement signals", () => {
       Array.from({ length: 30 }, async () => await run("filing"))
     );
     const unlinked = await run("chat");
+    // Started before the window, calling a model within it: neither the
+    // runs nor their cost count, and none is the costliest. More of them
+    // than one page of lookups holds.
+    const older = Array.from(
+      { length: 600 },
+      (_, index) => `older-${unique()}-${index}`
+    );
+    await env.DB.batch(
+      older.map((id) =>
+        env.DB.prepare(
+          "INSERT INTO workflow_runs (id, app_id, workflow_id, version, status, created_at) VALUES (?, ?, 'invoices', 1, 'running', ?)"
+        ).bind(id, app, ago(40 * dayMs).getTime())
+      )
+    );
     await logged(
+      ...older.map((id) => modelCall(app, "invoices", id, 2)),
       modelCall(app, "invoices", first, 0.5),
       modelCall(app, "invoices", second, 0.125),
       modelCall(app, "invoices", second, 0.125),

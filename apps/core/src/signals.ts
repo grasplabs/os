@@ -33,6 +33,7 @@ import {
   workflowDecisions,
   workflowRuns,
 } from "./db/core/schema.ts";
+import { inList } from "./db/d1.ts";
 import { documents, versions } from "./db/knowledge/schema.ts";
 import { featureEnabled } from "./features.ts";
 import { parseFrontmatter } from "./knowledge/frontmatter.ts";
@@ -350,6 +351,36 @@ const runsSince = async (
   return new Map(
     rows.map((row) => [workflowKey(row.appId, row.workflowId), row])
   );
+};
+
+/**
+ * Of the runs `ids`, those started before `from`: looked up by ID, a page
+ * at a time. Only runs that made model calls in the window are asked
+ * about, which the audit tally holds already, so this holds no more.
+ */
+const startedBefore = async (
+  db: DrizzleD1Database,
+  from: Date,
+  ids: readonly string[]
+): Promise<Set<string>> => {
+  const before = new Set<string>();
+  for (let start = 0; start < ids.length; start += pageRows) {
+    // One page after another, so a large tally never floods D1.
+    // oxlint-disable-next-line no-await-in-loop
+    const found = await db
+      .select({ id: workflowRuns.id })
+      .from(workflowRuns)
+      .where(
+        and(
+          inList(workflowRuns.id, ids.slice(start, start + pageRows)),
+          lt(workflowRuns.createdAt, from)
+        )
+      );
+    for (const { id } of found) {
+      before.add(id);
+    }
+  }
+  return before;
 };
 
 /**
@@ -748,19 +779,27 @@ const minutesSaved = (
 
 /**
  * Cost per run against minutes saved, for each App workflow with runs
- * started in the window: its model calls' cost over them, and the minutes
- * a run saves by its Playbook record, from its automated steps' minutes
- * (times the people each took), or else its weekly gain over the runs a
- * week it had.
+ * started in the window: the cost of those runs' model calls in the
+ * window, over them, and the minutes a run saves by its Playbook record,
+ * from its automated steps' minutes (times the people each took), or else
+ * its weekly gain over the runs a week it had.
+ *
+ * A run started before the window counts neither as a run nor for what it
+ * spent, so the cost and `costliest` name the same runs. The window rolls
+ * (the last `signalWindowDays` days), while model budgets
+ * (model-budgets.ts) count a UTC calendar month: the two don't match.
  */
 const costSignals = (
   { costs }: AuditTotals,
   saved: ReadonlyMap<string, Saving>,
-  runs: ReadonlyMap<string, Started>
+  runs: ReadonlyMap<string, Started>,
+  before: ReadonlySet<string>
 ): SignalRow[] =>
   [...runs].map(([key, { appId, workflowId, runs: started }]) => {
-    const spent = costs.get(key);
-    const cost = spent?.cost ?? 0;
+    const perRun = new Map(
+      [...(costs.get(key)?.perRun ?? [])].filter(([run]) => !before.has(run))
+    );
+    const cost = [...perRun.values()].reduce((sum, amount) => sum + amount, 0);
     const costPerRun = cost / started;
     const saving = saved.get(key);
     const { minutesSavedPerRun, savedFrom } = minutesSaved(saving, started);
@@ -779,7 +818,7 @@ const costSignals = (
           minutesSavedPerRun === null || minutesSavedPerRun <= 0
             ? null
             : dollars(costPerRun / (minutesSavedPerRun / 60)),
-        costliest: mostFirst(spent?.perRun ?? new Map())
+        costliest: mostFirst(perRun)
           .slice(0, samples)
           .map(([run, amount]) => ({
             run: runIdSchema.parse(run),
@@ -842,11 +881,16 @@ const computeSignals = async (env: Env, now: Date): Promise<SignalRow[]> => {
     auditTotals(env, window),
     savings(env),
   ]);
+  const before = await startedBefore(
+    db,
+    from,
+    [...totals.costs.values()].flatMap(({ perRun }) => [...perRun.keys()])
+  );
   return [
     ...waiting,
     ...failing,
     ...corrections,
-    ...costSignals(totals, saved, runs),
+    ...costSignals(totals, saved, runs, before),
     ...unansweredSignals(totals),
   ];
 };
