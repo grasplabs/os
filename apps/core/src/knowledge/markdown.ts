@@ -122,3 +122,44 @@ export const extractLinks = (markdown: string): Link[] => {
   }
   return [...found.values()];
 };
+
+const lineBreaks = /\r?\n/gu;
+
+/** Each line of `text`, and the offset in `text` it starts at. */
+const linesWithOffsets = (text: string): { line: string; start: number }[] => {
+  const lines: { line: string; start: number }[] = [];
+  let start = 0;
+  for (const { index, 0: separator } of text.matchAll(lineBreaks)) {
+    lines.push({ line: text.slice(start, index), start });
+    start = index + separator.length;
+  }
+  lines.push({ line: text.slice(start), start });
+  return lines;
+};
+
+/**
+ * Where the `[[links]]` in Markdown name their path, as [start, end)
+ * offsets: each link `extractLinks` reads, from after its `[[` to its
+ * `#heading`, `|label` or `]]`, whichever comes first.
+ */
+export const linkPathRanges = (markdown: string): [number, number][] => {
+  const ranges: [number, number][] = [];
+  const inCode = fenceTracker();
+  for (const { line, start } of linesWithOffsets(markdown)) {
+    if (!inCode(line)) {
+      // Inline code blanked rather than removed, so offsets stay.
+      const blanked = line.replaceAll(inlineCode, (code) =>
+        " ".repeat(code.length)
+      );
+      for (const { index, groups } of blanked.matchAll(wikiLink)) {
+        const [target = ""] = (groups?.inner ?? "").split("|");
+        const [path = ""] = target.split("#");
+        if (linkPath(target) !== undefined) {
+          const from = start + index + "[[".length;
+          ranges.push([from, from + path.length]);
+        }
+      }
+    }
+  }
+  return ranges;
+};

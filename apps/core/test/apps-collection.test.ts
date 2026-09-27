@@ -18,6 +18,7 @@ import {
   auditedDuring,
   openRpc,
   outcome,
+  refusal,
   signedInApi,
   unique,
 } from "./sign-in.ts";
@@ -604,10 +605,11 @@ describe("who finds an App", setUpTime, () => {
 });
 
 describe("read-only", setUpTime, () => {
-  it("refuses saves and restores in the Apps collection, an admin's too", async () => {
+  it("refuses saves, restores and purges in the Apps collection, an admin's too, saying where to change an entry", async () => {
     const admin = await personOf("admin");
     const owner = await personOf("builder");
-    const app = await releasedApp(owner, agentsMd(term()));
+    const word = term();
+    const app = await releasedApp(owner, agentsMd(word));
     const { id } = await entryOf(owner, app.id);
     for (const person of [owner, admin]) {
       // oxlint-disable-next-line no-await-in-loop -- one person at a time
@@ -642,8 +644,30 @@ describe("read-only", setUpTime, () => {
         "knowledge.read_only",
       ]);
     }
+    // A purge would last only until the App's next version made the entry
+    // again from its AGENTS.md, which the purge can't reach.
+    await expect(
+      refusal(
+        admin.knowledge.preparePurge({
+          type: "content",
+          documentIds: [id],
+          terms: [word],
+          reason: "erasure_request",
+        })
+      )
+    ).resolves.toMatchObject({
+      code: "knowledge.read_only",
+      details: {
+        issues: [
+          `documentIds: document ${id} is an App's entry in the Apps collection, made from the App's AGENTS.md: edit that AGENTS.md and publish a new version of the App instead`,
+        ],
+      },
+    });
     await expect(entryOf(owner, app.id)).resolves.toMatchObject({
       currentVersion: 1,
     });
+    await expect(entriesFound(owner.knowledge, word)).resolves.toStrictEqual([
+      entryPath(app.id),
+    ]);
   });
 });

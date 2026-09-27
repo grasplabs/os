@@ -39,8 +39,9 @@ import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 // save from an old version carries an old link; someone other than an
 // admin changes the Playbook; a link names a workflow that isn't there, or
 // a snapshot a version that isn't; a link or save runs while the feature
-// is off; and a purge can't
-// remove a person's name from their record.
+// is off; and a purge can't remove a person's name from their record, or
+// rewrites the paths records name each other by, which breaks them and
+// makes a snapshot name a workflow version the Playbook doesn't have.
 
 const idp = mockIdp();
 
@@ -1042,15 +1043,24 @@ describe("Playbook records", () => {
   );
 
   it(
-    "hold personal data a content purge removes from every version",
+    "hold personal data a content purge removes from every version, leaving the paths that name records",
     setUpTime,
     async () => {
       const admin = await personOf("admin");
       const name = `Kowalczyk${unique()}`;
-      const path = `${unique()}/person.md`;
+      const folder = unique();
+      // Paths holding the name, which a purge leaves: rewriting them would
+      // break the references, and a snapshot's frozen path would name a
+      // workflow the Playbook doesn't have. In the team's path the name
+      // starts a longer word, which a purge counts elsewhere, but not in a
+      // path.
+      const team = `teams/${name}s.md`;
+      const profile = `people/${name}/profile.md`;
+      const onboarding = `${folder}/${name.toLowerCase()}-onboarding.md`;
+      const path = `${folder}/person.md`;
       const person = await save(admin, {
         path,
-        record: { ...records.person.record, title: `Anna ${name}` },
+        record: { ...records.person.record, title: `Anna ${name}`, team },
         body: `${name} approves payments.`,
       });
       await save(admin, {
@@ -1060,35 +1070,88 @@ describe("Playbook records", () => {
           ...records.person.record,
           title: `Anna ${name}`,
           role: `Controller, reports to ${name} senior`,
+          team,
         },
-        body: `${name} approves payments.`,
+        body: `${name} approves payments; see [[${profile}|${name}]] and [[people/${name}#${name}]].`,
+      });
+      const source = await save(admin, {
+        path: `${folder}/source.md`,
+        record: {
+          ...records.source.record,
+          title: `Interview with ${name}`,
+          person: profile,
+        },
+        body: `Notes from ${name}, see [[${profile}]].`,
+      });
+      await save(admin, { path: onboarding, ...records.workflow });
+      const snapshot = await save(admin, {
+        path: `${folder}/snapshot.md`,
+        record: {
+          ...records.snapshot.record,
+          title: `Onboarding ${name}`,
+          workflows: [{ path: onboarding, version: 1 }],
+        },
+        body: `Taken with ${name}.`,
       });
       const input = {
         type: "content" as const,
-        documentIds: [person.id],
+        documentIds: [person.id, source.id, snapshot.id],
         terms: [name],
         reason: "erasure_request" as const,
       };
       const plan = await admin.api.knowledge.preparePurge(input);
       await admin.api.knowledge.purge(input, plan.token);
       const { results } = await env.KNOWLEDGE.prepare(
-        "SELECT text FROM versions WHERE document_id = ? ORDER BY number"
+        "SELECT text FROM versions WHERE document_id IN (?, ?, ?)"
       )
-        .bind(person.id)
+        .bind(person.id, source.id, snapshot.id)
         .all<{ text: string }>();
-      const current = await admin.api.knowledge.getDocument(person.id);
+      const outsidePaths = (text: string) => {
+        let left = text;
+        for (const kept of [team, profile, `people/${name}#`, onboarding]) {
+          left = left.replaceAll(kept, "");
+        }
+        return left;
+      };
+      const read = async (id: string) => {
+        const current = await admin.api.knowledge.getDocument(id);
+        const { frontmatter, body } = parseFrontmatter(
+          current.path,
+          current.version.text
+        );
+        return { type: current.type, title: current.title, frontmatter, body };
+      };
       expect({
         plan: plan.versions,
-        holding: results.filter(({ text }) => text.includes(name)).length,
-        type: current.type,
-        title: current.title,
-        role: parseFrontmatter(path, current.version.text).frontmatter,
+        inLongerWords: plan.inLongerWords,
+        holding: results.filter(({ text }) => outsidePaths(text).includes(name))
+          .length,
+        person: await read(person.id),
+        source: await read(source.id),
+        snapshot: await read(snapshot.id),
       }).toMatchObject({
-        plan: 2,
+        plan: 4,
+        inLongerWords: 0,
         holding: 0,
-        type: "person",
-        title: "Anna (removed)",
-        role: { role: "Controller, reports to (removed) senior" },
+        person: {
+          type: "person",
+          title: "Anna (removed)",
+          frontmatter: {
+            role: "Controller, reports to (removed) senior",
+            team,
+          },
+          body: `(removed) approves payments; see [[${profile}|(removed)]] and [[people/${name}#(removed)]].`,
+        },
+        source: {
+          title: "Interview with (removed)",
+          frontmatter: { person: profile },
+          body: `Notes from (removed), see [[${profile}]].`,
+        },
+        snapshot: {
+          title: "Onboarding (removed)",
+          frontmatter: { workflows: [{ path: onboarding, version: 1 }] },
+          body: "Taken with (removed).",
+        },
       });
     }
   );

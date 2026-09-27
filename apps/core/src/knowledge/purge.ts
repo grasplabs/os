@@ -7,6 +7,7 @@ import {
   purgeInputSchema,
   purgeMaxDocuments,
   purgedMarker,
+  readOnlySources,
 } from "@grasp-os/shared/knowledge";
 import type { PurgePlan, PurgeResult } from "@grasp-os/shared/knowledge";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -32,6 +33,8 @@ import { requireFeature } from "../features.ts";
 import type { CollectionRow } from "./collections.ts";
 import { checkedText, personWriter, writeVersion } from "./documents.ts";
 import type { DocumentRow } from "./documents.ts";
+import { recordPathRanges } from "./frontmatter.ts";
+import { linkPathRanges } from "./markdown.ts";
 import { personalCollectionId } from "./memory-files.ts";
 import { failBatchIfProposals } from "./memory-proposals.ts";
 
@@ -70,13 +73,20 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 // trying terms one by one leaves a trace.
 //
 // What a purge doesn't reach: paths (a document named after someone keeps
-// its name), collection names and descriptions, other documents that
-// quote the text, a term split by Markdown or a line break, a term
-// spelled otherwise (a variant, an accent left out or encoded otherwise),
-// a term joined to more of a word ("Toms", "tomVisser": not removed,
-// only counted when it starts the word), memory already cached in a
-// running isolate (never served again, gone once evicted), D1's own
-// point-in-time recovery, and anything outside Knowledge. And it reaches too far where a name is an
+// its name, and so does every `[[link]]` to it and every record field
+// that names it by its path: a term inside one is left, and not counted),
+// the Grasp skills (the release's text, which the next sync puts back),
+// the Apps collection (each entry is made from its App's AGENTS.md, which
+// lives in the App's versions; only a new version of the App changes it,
+// and the entry's earlier versions keep what they said, as the App's do):
+// a purge naming a Grasp skill or an App's entry is refused, saying so.
+// Nor collection names and descriptions, other documents that quote the
+// text, a term split by Markdown or a line break, a term spelled otherwise
+// (a variant, an accent left out or encoded otherwise), a term joined to
+// more of a word ("Toms", "tomVisser": not removed, only counted when it
+// starts the word), memory already cached in a running isolate (never
+// served again, gone once evicted), D1's own point-in-time recovery, and
+// anything outside Knowledge. And it reaches too far where a name is an
 // ordinary word too (Will, Mark, May): every "will" goes.
 
 /** How long an admin has to confirm a purge they prepared. */
@@ -439,12 +449,31 @@ const matcherOf = (
 };
 
 /**
+ * The matches of `pattern` (global) in `text` that aren't inside a path
+ * `text` names a document by: a `[[link]]`'s, or a record's field that
+ * holds one. A purge leaves paths as they are, as it does a document's
+ * own: rewriting one would break the reference, and a snapshot would
+ * name a workflow version the Playbook doesn't have, which fails the
+ * purge. A match reaching past a path, a passage around a link, is not
+ * inside it.
+ */
+const outsidePaths = (text: string, pattern: RegExp): RegExpExecArray[] => {
+  const paths = [...linkPathRanges(text), ...recordPathRanges(text)];
+  return [...text.matchAll(pattern)].filter(
+    ({ index, 0: found }) =>
+      !paths.some(([from, to]) => index >= from && index + found.length <= to)
+  );
+};
+
+/**
  * `text` with every term replaced by the marker, until none is left: a
  * term that ends or starts with a dot or an at sign, once replaced, can
  * leave a term next to it no longer joined ("Tom." and "Ann" in
  * "Tom.Ann"), which one pass would leave to a purge run again. It ends:
  * a term can't overlap the marker (`purgeTermSchema`), so each pass
  * replaces text outside the markers, or markers with fewer of them.
+ * Terms inside paths are left (`outsidePaths`), so a pass that finds
+ * only those changes nothing, and the loop ends.
  */
 const without = (text: string, matcher: Matcher): string => {
   if (!matcher.anywhere.test(text)) {
@@ -452,7 +481,13 @@ const without = (text: string, matcher: Matcher): string => {
   }
   let current = text;
   for (;;) {
-    const next = current.replaceAll(matcher.remove, purgedMarker);
+    let next = "";
+    let end = 0;
+    for (const { index, 0: found } of outsidePaths(current, matcher.remove)) {
+      next += `${current.slice(end, index)}${purgedMarker}`;
+      end = index + found.length;
+    }
+    next += current.slice(end);
     if (next === current) {
       return current;
     }
@@ -472,7 +507,7 @@ const joinedIn = (texts: (string | null)[], matcher: Matcher): number => {
   let total = 0;
   for (const text of texts) {
     if (text !== null && anywhere.test(text)) {
-      total += text.match(joined)?.length ?? 0;
+      total += outsidePaths(text, joined).length;
     }
   }
   return total;
@@ -496,10 +531,24 @@ interface Named {
 }
 
 /**
+ * Why a purge can't change a document in a collection only the platform
+ * writes, and where its text comes from instead.
+ */
+const readOnlyIssue = (documentId: string, source: string): string =>
+  source === "apps"
+    ? `documentIds: document ${documentId} is an App's entry in the Apps collection, made from the App's AGENTS.md: edit that AGENTS.md and publish a new version of the App instead`
+    : `documentIds: document ${documentId} is a Grasp skill, which is read-only: it holds the release's text, and the next sync would put back anything changed`;
+
+/**
  * The documents a content purge names, in ID order. Refuses with
  * `knowledge.not_found`, naming the ones that don't exist, rather than
  * skipping them: a mistyped ID would otherwise leave the text it was meant
- * for where it is, with a purge recorded as done.
+ * for where it is, with a purge recorded as done. Refuses with
+ * `knowledge.read_only`, saying why for each, the ones in a collection
+ * only the platform writes (`readOnlySources`): the Grasp skills, whose
+ * text the next sync puts back, and the Apps collection, whose entries
+ * the App's next version makes again from its AGENTS.md, which a purge
+ * can't reach.
  */
 const documentsNamed = async (
   db: DrizzleD1Database,
@@ -516,6 +565,16 @@ const documentsNamed = async (
   if (missing.length > 0) {
     throw knowledgeErrors.create("knowledge.not_found", {
       documentIds: missing,
+    });
+  }
+  const readOnly = found.filter(({ collection }) =>
+    readOnlySources.has(collection.source)
+  );
+  if (readOnly.length > 0) {
+    throw knowledgeErrors.create("knowledge.read_only", {
+      issues: readOnly.map(({ document, collection }) =>
+        readOnlyIssue(document.id, collection.source)
+      ),
     });
   }
   return found;
