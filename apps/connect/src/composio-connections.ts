@@ -34,7 +34,7 @@ import { composioCleanups, composioFlows, connections } from "./db/schema.ts";
 // to the tools the admin allows. Composio holds its tokens, in its cloud,
 // so an admin connects it only after consenting to exactly that
 // (`composioConsentText`), and their consent goes into the audit log with
-// who gave it (threat model CN18).
+// who gave it (threat model CN19).
 //
 // Starting makes, at Composio, an auth config for the toolkit (Composio's
 // own app for it) and a connected account for this deployment's Composio
