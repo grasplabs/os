@@ -49,7 +49,8 @@ import {
 // An agent's memory: the files it always has in its context, by where it
 // works. The agent loop calls `forContext` for the memory of each turn,
 // and `saveUserMemory` when the agent changes what it knows about its
-// person. What each context gets:
+// person; shared memory files it only proposes changes to
+// (memory-proposals.ts). What each context gets:
 //
 // - a person's own chat: the company's AGENTS.md and MEMORY.md, their
 //   USER.md, and the App's AGENTS.md when they're working on one;

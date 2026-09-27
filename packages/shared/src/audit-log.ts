@@ -44,6 +44,9 @@ const typeRules: readonly {
   { action: "knowledge.search", type: "read" },
   { action: "knowledge.read", type: "read" },
   { action: "knowledge.collection", type: "config" },
+  // An owner deciding on a proposed change to a shared memory file.
+  { action: "knowledge.proposal.approved", type: "decision" },
+  { action: "knowledge.proposal.declined", type: "decision" },
   { action: "knowledge", type: "action" },
   { action: "model", type: "model_call" },
   { action: "permission", type: "permission" },

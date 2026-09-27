@@ -204,7 +204,7 @@ const conflict = (existing: DocumentRow | undefined) =>
     latestVersion: existing?.currentVersion ?? 0,
   });
 
-const findByPath = async (
+export const findByPath = async (
   db: DrizzleD1Database,
   collectionId: string,
   path: string
@@ -260,6 +260,11 @@ export interface Write {
   ifVersion: number;
   message: string | null;
   restoredFrom: number | null;
+  /**
+   * More statements for the same batch, such as marking the proposal the
+   * version comes from approved: they commit with it or not at all.
+   */
+  also?: BatchItem<"sqlite">[];
 }
 
 /**
@@ -273,6 +278,7 @@ export const writeVersion = async (
   write: Write
 ): Promise<DocumentSummary> => {
   const { collection, path, text, ifVersion, message, restoredFrom } = write;
+  const { also = [] } = write;
   const prepared = await checkedText(env, collection, path, text);
   const db = drizzle(env.KNOWLEDGE);
   const existing = await findByPath(db, collection.id, path);
@@ -344,6 +350,7 @@ export const writeVersion = async (
       }))
     ).map((chunk) => db.insert(links).values(chunk)),
     outboxed(db, entry),
+    ...also,
   ];
   // A new document's row goes first: its version refers to it.
   const document = existing
