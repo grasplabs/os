@@ -23,8 +23,11 @@ import {
   endLiveRuns,
   finished,
   leave,
+  listening,
   liveStatus,
   resumed,
+  failingGoingOn,
+  sleepingOnceResumed,
   stepDone,
   stopped,
 } from "./runs.ts";
@@ -932,49 +935,94 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       workflowFiles(
         "held",
         `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
-  return await step.do("work", { description: "Work" }, async () => await env.APP.call("hit", "work"));`,
-        { work: 1 }
+  await step.do("work", { description: "Work" }, async () => await env.APP.call("hit", "work"));
+  await step.waitFor("again", { description: "Wait again", type: "again", timeout: "1 day" });
+  return await step.do("more", { description: "More" }, async () => await env.APP.call("hit", "more"));`,
+        { work: 1, more: 1 }
       )
     );
     const run = await builder.api.workflows.start(app, "held");
+    // Past a step before it waits, as a run mostly is: the new execution
+    // below replays that step first.
+    await stepDone(run.id, "$params");
+    const instance = await env.WORKFLOWS.get(run.id);
     const { FEATURES: features } = env;
+    const off = {
+      ...z.record(z.string(), z.boolean()).parse(features),
+      workflows: false,
+    };
     let whileOff: unknown;
+    let whileUnkept: unknown;
+    // The database fails to keep that a wait is over, until mended below;
+    // nothing is kept so before the run first waits.
+    const broken = failingGoingOn();
     try {
-      env.FEATURES = {
-        ...z.record(z.string(), z.boolean()).parse(features),
-        workflows: false,
-      };
-      const instance = await env.WORKFLOWS.get(run.id);
-      await instance.sendEvent({ type: "go", payload: null });
-      await runEvents(run.id, "workflow.run.waiting");
-      // Stopped and resumed while it waits: the new execution replays the
-      // wait so far, records nothing new, and waits on.
-      await stopped(run.id);
-      await resumed(run.id);
-      // Nothing marks the replay (that is the point), so give the new
-      // execution a few of the test's checks (WORKFLOW_OFF_WAIT_MS) to
-      // replay the wait and record any second event.
-      await scheduler.wait(1000);
-      whileOff = await hitsOf(app, builder.userId, "work");
+      try {
+        env.FEATURES = off;
+        await instance.sendEvent({ type: "go", payload: null });
+        await runEvents(run.id, "workflow.run.waiting");
+        // Stopped and resumed while it waits, as a deploy or a crash does:
+        // the new execution waits on, before the first step it replays,
+        // and records nothing new. Once it sleeps between checks, it has.
+        await stopped(run.id);
+        await resumed(run.id);
+        await sleepingOnceResumed(run.id, "$grasp:off:");
+        whileOff = await hitsOf(app, builder.userId, "work");
+      } finally {
+        env.FEATURES = features;
+      }
+      // Back on: nobody resumes it; it checks again, and goes on. But not
+      // while the database fails to keep that the wait is over: it checks
+      // again (twice here), and goes on only once that is kept, so the
+      // next wait is recorded.
+      await vi.waitFor(
+        () => {
+          expect(broken.failures()).toBeGreaterThanOrEqual(2);
+        },
+        { timeout: 10_000, interval: 100 }
+      );
+      whileUnkept = await hitsOf(app, builder.userId, "work");
+    } finally {
+      broken.mend();
+    }
+    // Switched off again later, it waits again: a new wait, recorded too.
+    await listening(run.id, "again");
+    try {
+      env.FEATURES = off;
+      await instance.sendEvent({ type: "again", payload: null });
+      await vi.waitFor(
+        async () => {
+          const waits = await runEvents(run.id, "workflow.run.waiting");
+          expect(
+            waits.filter((event) => event.startsWith("workflow.run.waiting"))
+          ).toHaveLength(2);
+        },
+        { timeout: 10_000, interval: 100 }
+      );
     } finally {
       env.FEATURES = features;
     }
-    // Back on: nobody resumes it; it checks again, and goes on.
     await finished(run.id);
     expect({
       whileOff,
+      whileUnkept,
       live: await liveStatus(run.id),
       work: await hitsOf(app, builder.userId, "work"),
+      more: await hitsOf(app, builder.userId, "more"),
       audited: await runEvents(run.id, "workflow.run.completed"),
     }).toStrictEqual({
       whileOff: 0,
+      whileUnkept: 0,
       live: "complete",
       work: 1,
+      more: 1,
       audited: [
         "workflow.run.completed",
         "workflow.run.started",
         "workflow.run.waiting switched_off workflows",
+        "workflow.run.waiting switched_off workflows",
         "workflow.step.completed $params",
+        "workflow.step.completed more",
         "workflow.step.completed work",
       ],
     });

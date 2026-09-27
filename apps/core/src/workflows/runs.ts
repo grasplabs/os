@@ -16,7 +16,7 @@ import type {
   RunStatus,
   WorkflowRun,
 } from "@grasp-os/shared/workflows";
-import { and, desc, eq, inArray } from "drizzle-orm";
+import { and, desc, eq, inArray, isNull, ne, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -25,6 +25,7 @@ import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
 import { apps, workflowRuns } from "../db/core/schema.ts";
 import { appHost } from "../durable-objects.ts";
 import { requireFeature } from "../features.ts";
+import type { Feature } from "../features.ts";
 import { hasWorkflow } from "./code.ts";
 import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
@@ -502,10 +503,26 @@ export const endRun = async (
 };
 
 /**
- * Records that a run waits (host.ts), with nothing else to change: while a
- * feature is switched off (`switched_off`), it goes on by itself once it's
- * back on; while a side effect of a step waits for the person it acts for
- * (`held`), once they decided.
+ * Records that a run waits (host.ts): while a feature is switched off
+ * (`switched_off`), it goes on by itself once it's back on; while a side
+ * effect of a step waits for the person it acts for (`held`), once they
+ * decided.
+ *
+ * A held wait is recorded in a step named after the step it holds, which
+ * every execution replays, so it is recorded once. A switched-off wait
+ * can't count on that: an execution that starts while the feature is off
+ * (a deploy, a crash, a resume) waits before the first step it replays,
+ * not where the run was waiting, in steps of its own. So the run's row
+ * keeps the feature it waits on (`waiting_for`), and the wait is recorded
+ * only when that changes: once per wait, whatever the executions, until
+ * the run goes on (`recordGoingOn`).
+ *
+ * A run already waiting when `waiting_for` was added has it empty, so if
+ * it restarts during that wait, the wait is recorded once more. That is
+ * accepted rather than backfilled: it happens at most once, only to runs
+ * waiting across that deploy, and only adds an entry, never loses one.
+ * (Backfilling would mean reading each run's open wait back out of the
+ * audit log.)
  */
 export const recordWaiting = async (
   env: Env,
@@ -513,7 +530,44 @@ export const recordWaiting = async (
   why: WaitReason
 ): Promise<void> => {
   const db = drizzle(env.DB);
+  const entry = runEntry(runActor(row), "workflow.run.waiting", row, why);
+  if (why.reason === "held") {
+    await auditedBatch(env, db, [outboxed(db, entry)]);
+    return;
+  }
   await auditedBatch(env, db, [
-    outboxed(db, runEntry(runActor(row), "workflow.run.waiting", row, why)),
+    db
+      .update(workflowRuns)
+      .set({ waitingFor: why.feature })
+      .where(
+        and(
+          eq(workflowRuns.id, row.id),
+          or(
+            isNull(workflowRuns.waitingFor),
+            ne(workflowRuns.waitingFor, why.feature)
+          )
+        )
+      ),
+    outboxedIfChanged(db, entry),
   ]);
+};
+
+/**
+ * Records that a run goes on past a wait for `features`, none of them off
+ * now: the next time one holds it is a new wait (`recordWaiting`).
+ */
+export const recordGoingOn = async (
+  env: Env,
+  row: RunRow,
+  features: readonly Feature[]
+): Promise<void> => {
+  await drizzle(env.DB)
+    .update(workflowRuns)
+    .set({ waitingFor: null })
+    .where(
+      and(
+        eq(workflowRuns.id, row.id),
+        inArray(workflowRuns.waitingFor, [...features])
+      )
+    );
 };
