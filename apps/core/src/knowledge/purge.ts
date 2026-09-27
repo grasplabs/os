@@ -47,9 +47,9 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 //   passage), in any case and as a whole word (never inside a longer
 //   word, except in scripts written without spaces), is replaced with
 //   `purgedMarker` in every version of the documents named, and in their
-//   memory proposals. Preparing one also counts how often a term would be
-//   left inside a longer word, so the admin can add those forms as terms
-//   of their own. Whenever anything changed, the current text is also
+//   memory proposals. Preparing one also counts how often a term would
+//   still start a longer word ("Toms"), so the admin can add those forms
+//   as terms of their own. Whenever anything changed, the current text is also
 //   saved as the next version, which makes its sections, links, search
 //   rows and the document's title and description again, and fails for
 //   anyone who saved meanwhile from text not yet purged.
@@ -64,18 +64,19 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 //
 // The audit log can't be purged, so what it records of a purge is who,
 // when, why (a reason from a fixed list), which documents and how many
-// versions: never the terms or the text removed. Preparing is recorded
-// too: its counts tell whether text is in a collection the admin can't
-// read, so trying terms one by one leaves a trace.
+// versions (and, when preparing, how often a term starts a longer word):
+// never the terms or the text removed. Preparing is recorded too: its
+// counts tell whether text is in a collection the admin can't read, so
+// trying terms one by one leaves a trace.
 //
 // What a purge doesn't reach: paths (a document named after someone keeps
 // its name), collection names and descriptions, other documents that
 // quote the text, a term split by Markdown or a line break, a term
 // spelled otherwise (a variant, an accent left out or encoded otherwise),
-// a term joined to more of a word ("Toms", "tomVisser": counted, not
-// removed), memory already cached in a running isolate (never served
-// again, gone once evicted), D1's own point-in-time recovery, and
-// anything outside Knowledge. And it reaches too far where a name is an
+// a term joined to more of a word ("Toms", "tomVisser": not removed,
+// only counted when it starts the word), memory already cached in a
+// running isolate (never served again, gone once evicted), D1's own
+// point-in-time recovery, and anything outside Knowledge. And it reaches too far where a name is an
 // ordinary word too (Will, Mark, May): every "will" goes.
 
 /** How long an admin has to confirm a purge they prepared. */
@@ -217,7 +218,7 @@ const purgeEntry = (
   action: "knowledge.purge.prepared" | "knowledge.purged",
   input: PurgeInput,
   scope: { collectionId?: string; documentIds: string[] },
-  counts: Partial<Counts>,
+  counts: Partial<Counts> & { inLongerWords?: number },
   purgeId?: string
 ): AuditEntry => ({
   actor: actorOf(person),
@@ -334,12 +335,14 @@ const unspacedScripts = String.raw`[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\
 /**
  * A character that makes a word longer, in any script written with
  * spaces: a letter, a digit, an underscore, a combining mark (an accent
- * written as its own code point stays part of its letter's word), or an
- * invisible format character (a soft hyphen, a zero-width joiner or
- * non-joiner, which sit inside words). `\b` knows only ASCII, so it would
- * split "José" after the "Jos".
+ * written as its own code point stays part of its letter's word), or one
+ * of the invisible characters that sit inside words: a soft hyphen, a
+ * zero-width non-joiner or joiner, a word joiner. Not the other invisible
+ * ones (bidi marks and isolates, a byte order mark), which wrap a name
+ * rather than join it. `\b` knows only ASCII, so it would split "José"
+ * after the "Jos".
  */
-const joining = String.raw`(?!${unspacedScripts})[\p{L}\p{M}\p{N}\p{Cf}_]`;
+const joining = String.raw`(?!${unspacedScripts})[\p{L}\p{M}\p{N}_\u00AD\u200C\u200D\u2060]`;
 const startsJoining = new RegExp(`^${joining}`, "u");
 const endsJoining = new RegExp(`${joining}$`, "u");
 
@@ -355,30 +358,34 @@ const sidesOf = (term: string) => ({
 });
 
 /**
- * A term as a pattern that matches it as a whole word: never inside a
- * longer one, so "Tom" leaves "automated" and "Ann" leaves "planned", and
- * frontmatter keys and values that merely contain a term stay as they
- * are. The pattern finds the term first and only then looks behind it
- * for a joining character, so that check costs only where the term is.
+ * A term, and no joining character before it, where its start joins. The
+ * check before comes after the term's own characters (looking behind them
+ * and it), so it runs only where the whole term matched rather than at
+ * every position: on text made to be slow, over twice as fast.
  */
-const wholeWord = (term: string): string => {
-  const { before, after } = sidesOf(term);
+const startingWord = (term: string): string => {
   const itself = literal(term);
-  return `${itself}${before ? `(?<!${joining}${itself})` : ""}${after ? `(?!${joining})` : ""}`;
+  return sidesOf(term).before ? `${itself}(?<!${joining}${itself})` : itself;
 };
 
 /**
- * A term as a pattern that matches it only where it is part of a longer
- * word, which the purge leaves; none for a term no character can join.
+ * A term as a pattern that matches it as a whole word: never inside a
+ * longer one, so "Tom" leaves "automated" and "Ann" leaves "planned", and
+ * frontmatter keys and values that merely contain a term stay as they
+ * are.
  */
-const partOfWord = (term: string): string[] => {
-  const { before, after } = sidesOf(term);
-  const itself = literal(term);
-  return [
-    ...(before ? [`${itself}(?<=${joining}${itself})`] : []),
-    ...(after ? [`${itself}(?=${joining})`] : []),
-  ];
-};
+const wholeWord = (term: string): string =>
+  `${startingWord(term)}${sidesOf(term).after ? `(?!${joining})` : ""}`;
+
+/**
+ * A term as a pattern that matches it only where it starts a longer word
+ * ("Toms", "Tomin", "tomVisser" for "Tom"): the forms of a name an admin
+ * would add as terms. Not inside or at the end of one ("automated",
+ * "custom"), which are other words. None for a term whose end no
+ * character can join.
+ */
+const startOfWord = (term: string): string[] =>
+  sidesOf(term).after ? [`${startingWord(term)}(?=${joining})`] : [];
 
 /** Alternatives in any case, as one pattern; one that never matches if none. */
 const anyOf = (alternatives: string[]): RegExp =>
@@ -388,38 +395,59 @@ const anyOf = (alternatives: string[]): RegExp =>
   );
 
 /**
- * The terms to remove, as whole words, and where they are part of a longer
- * word, which the purge leaves but counts. Longest first, so a term inside
- * a longer one doesn't leave the rest of the longer one behind.
+ * The terms: `anywhere` finds them in any case, as themselves, which is
+ * cheap and tells whether a text needs the other patterns at all;
+ * `remove` finds them as whole words; `joined`, only when preparing a
+ * purge, where they start a longer word, which the purge leaves but
+ * counts. Longest first, so a term inside a longer one doesn't leave the
+ * rest of the longer one behind.
  */
 interface Matcher {
+  anywhere: RegExp;
   remove: RegExp;
-  joined: RegExp;
+  joined?: RegExp;
 }
 
-const matcherOf = (terms: string[]): Matcher => {
+const matcherOf = (
+  terms: string[],
+  { countJoined }: { countJoined: boolean }
+): Matcher => {
   const longestFirst = terms.toSorted(
     (one, other) => other.length - one.length
   );
   return {
+    // Not global: `test` would carry `lastIndex` from one text to the next.
+    anywhere: new RegExp(longestFirst.map(literal).join("|"), "iu"),
     remove: anyOf(longestFirst.map(wholeWord)),
-    joined: anyOf(longestFirst.flatMap(partOfWord)),
+    ...(countJoined
+      ? { joined: anyOf(longestFirst.flatMap(startOfWord)) }
+      : {}),
   };
 };
 
 /** `text` with every term replaced by the marker. */
 const without = (text: string, matcher: Matcher): string =>
-  text.replaceAll(matcher.remove, purgedMarker);
+  matcher.anywhere.test(text)
+    ? text.replaceAll(matcher.remove, purgedMarker)
+    : text;
 
 /**
- * How often a term is still in `texts`, once rewritten, as part of a
- * longer word: "Toms" or "tomVisser" for "Tom", but also "automated".
+ * How often a term still starts a longer word in `texts`, once rewritten
+ * ("Toms" for "Tom"); 0 unless the matcher counts them.
  */
-const joinedIn = (texts: (string | null)[], matcher: Matcher): number =>
-  texts.reduce(
-    (total, text) => total + (text?.match(matcher.joined)?.length ?? 0),
-    0
-  );
+const joinedIn = (texts: (string | null)[], matcher: Matcher): number => {
+  const { anywhere, joined } = matcher;
+  if (joined === undefined) {
+    return 0;
+  }
+  let total = 0;
+  for (const text of texts) {
+    if (text !== null && anywhere.test(text)) {
+      total += text.match(joined)?.length ?? 0;
+    }
+  }
+  return total;
+};
 
 /** A version's or proposal's text and message, rewritten if they change. */
 const rewritten = (
@@ -537,8 +565,8 @@ const requireStorable = (
 /**
  * Rewrites the versions of `document` up to `upTo` that hold a term, in
  * place, a page at a time; only counts them unless `write`. Returns how
- * many hold one and, when only counting, how often a term is left in them
- * as part of a longer word (`joinedIn`). Refuses with `knowledge.invalid`
+ * many hold one and how often a term still starts a longer word in them
+ * (`joinedIn`). Refuses with `knowledge.invalid`
  * when one would be too large to store (`requireStorable`): a purge scans
  * them all first, so one that can't be finished changes nothing.
  */
@@ -570,15 +598,13 @@ const rewriteVersions = async (
       .orderBy(asc(versions.number))
       .limit(versionsPerPage);
     const rows = page.map((row) => ({ row, changed: rewritten(row, matcher) }));
-    if (!write) {
-      joined += joinedIn(
-        rows.flatMap(({ row, changed }) => {
-          const { text, message } = changed ?? row;
-          return [text, message];
-        }),
-        matcher
-      );
-    }
+    joined += joinedIn(
+      rows.flatMap(({ row, changed }) => {
+        const { text, message } = changed ?? row;
+        return [text, message];
+      }),
+      matcher
+    );
     const updates = rows.flatMap(({ row, changed }) => {
       if (changed !== undefined) {
         requireStorable(document, row.number, changed);
@@ -614,8 +640,8 @@ const rewriteVersions = async (
 /**
  * Updates of `document`'s memory proposals that hold a term, the IDs of
  * those waiting that were read (only those, rewritten or not, move to the
- * version a purge saves), and how often a term is left in them as part of
- * a longer word (`joinedIn`).
+ * version a purge saves), and how often a term still starts a longer word
+ * in them (`joinedIn`).
  */
 const proposalRewrites = async (
   db: DrizzleD1Database,
@@ -658,7 +684,7 @@ const proposalRewrites = async (
 
 /**
  * What purging the terms from `named` would change, and how often a term
- * would be left as part of a longer word; checks it can.
+ * would still start a longer word; checks it can.
  */
 const countDocument = async (
   env: Env,
@@ -779,8 +805,9 @@ const purgeDocument = async (
 };
 
 /**
- * What a content purge would change, and how often it would leave a term
- * as part of a longer word, checking every document first.
+ * What a content purge would change, and how often a term would still
+ * start a longer word (when `matcher` counts them), checking every
+ * document first.
  */
 const contentCounts = async (
   env: Env,
@@ -814,7 +841,7 @@ const purgeContent = async (
 ): Promise<PurgeResult> => {
   const db = drizzle(env.KNOWLEDGE);
   const named = await documentsNamed(db, input);
-  const matcher = matcherOf(input.terms);
+  const matcher = matcherOf(input.terms, { countJoined: false });
   await contentCounts(env, db, named, matcher);
   const purgeId = crypto.randomUUID();
   // Recorded before anything changes, so no purge goes unrecorded however
@@ -868,13 +895,16 @@ export const preparePurge = async (
       env,
       db,
       named,
-      matcherOf(parsed.terms)
+      matcherOf(parsed.terms, { countJoined: true })
     ));
   }
   await auditedBatch(env, db, [
     outboxed(
       db,
-      purgeEntry(person, "knowledge.purge.prepared", parsed, scope, counts)
+      purgeEntry(person, "knowledge.purge.prepared", parsed, scope, {
+        ...counts,
+        ...(parsed.type === "content" ? { inLongerWords: joined } : {}),
+      })
     ),
   ]);
   return {

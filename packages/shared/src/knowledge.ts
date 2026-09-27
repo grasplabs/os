@@ -575,9 +575,9 @@ const purgeTermSchema = z
  *   word), from the documents named, which stay: each becomes
  *   {@link purgedMarker}. A form joined to more letters or digits ("Toms",
  *   "Tom2", "tomVisser" for "Tom") must be a term of its own; the plan
- *   counts how many are left (`inLongerWords`). In scripts written without
- *   spaces (Chinese, Japanese, Thai, Lao, Khmer, Burmese) a term is found
- *   inside running text.
+ *   counts where a term still starts a longer word (`inLongerWords`).
+ *   In scripts written without spaces (Chinese, Japanese, Thai, Lao,
+ *   Khmer, Burmese) a term is found inside running text.
  */
 export const purgeInputSchema = z.discriminatedUnion("type", [
   z.strictObject({
@@ -607,10 +607,11 @@ export interface PurgePlan {
   /** Memory proposals it deletes or rewrites. */
   proposals: number;
   /**
-   * How often a term would be left as part of a longer word, in every
-   * version and memory proposal of the documents named ("Toms" or
-   * "automated" for "Tom"): list the forms to remove as terms of their
-   * own. Always 0 for `personal`.
+   * How often a term would still start a longer word, in every version
+   * and memory proposal of the documents named ("Toms", "Tomin" or
+   * "tomVisser" for "Tom"; not "automated" or "custom", where it is
+   * inside or ends one): list the forms to remove as terms of their own.
+   * Always 0 for `personal`.
    */
   inLongerWords: number;
   /** Confirms exactly this purge, by the admin who prepared it. */
