@@ -100,6 +100,14 @@ export interface ApiCall {
    * an assets upload session's. Kept out of errors like the account's.
    */
   bearer?: string;
+  /**
+   * Whether sending it twice does no more than sending it once, which
+   * decides whether it's retried after a server error or no answer. By
+   * default, what its method says: a content-addressed upload is a POST that
+   * may be retried, a script upload with a Durable Object migration a PUT
+   * that mustn't.
+   */
+  idempotent?: boolean;
 }
 
 /** A result, with the page of a list it is. */
@@ -188,7 +196,8 @@ export const cloudflareApi = ({
     // not have been applied.
     const retryable =
       status === 429 ||
-      ((status === 0 || status >= 500) && idempotentMethods.has(call.method));
+      ((status === 0 || status >= 500) &&
+        (call.idempotent ?? idempotentMethods.has(call.method)));
     if (!retryable || attempt + 1 >= maxAttempts) {
       throw new CloudflareApiError(
         call.method,
