@@ -5,18 +5,34 @@ import { uploadErrors } from "@grasp-os/shared/uploads";
 import type { UploadMediaType } from "@grasp-os/shared/uploads";
 import { z } from "zod";
 
+import { deploymentStaysInEu } from "../models.ts";
+import type { ModelsEnv } from "../models.ts";
 import { extractorAsset } from "./extractor/asset.ts";
 import type ExtractorWorker from "./extractor/worker.ts";
 
-// Extracting an uploaded file's text as Markdown. The extractor
-// (extractor/worker.ts, with the parsers in extractor/formats.ts) never
-// runs in core's isolate: core starts a Dynamic Worker for each
-// extraction, with its code from core's static assets
-// (build-extractor.ts), no bindings, no network and a CPU limit, and calls
-// it over RPC. A file crafted to exhaust a parser (a PDF whose one stream
-// inflates to gigabytes, an archive of millions of tags) kills that
-// isolate, and the upload fails for good as `upload.too_complex`; core,
-// and whatever else it runs, carry on.
+// Extracting an uploaded file's text as Markdown, by one of two
+// extractors, which `extractorFor` picks:
+//
+// - Workers AI's document conversion (`toMarkdown`, over the AI binding)
+//   for a file in a normal collection. Cloudflare documents converting
+//   PDF, Word and Excel files as free, running no model (only images go
+//   through models, and images can't be uploaded), so it isn't a model
+//   call and doesn't go through the model gateway; but it sends the file
+//   out of the Worker, to a service that isn't pinned to the EU.
+// - The local extractor for a file in a sensitive collection (the flag the
+//   gateway's data rule reads too), for every file of a deployment whose
+//   config keeps everything in the EU, and wherever there is no AI binding
+//   (plain workerd, on-prem). So a sensitive file's content never leaves
+//   the deployment's own Workers.
+//
+// The local extractor (extractor/worker.ts, with the parsers in
+// extractor/formats.ts) never runs in core's isolate: core starts a
+// Dynamic Worker for each extraction, with its code from core's static
+// assets (build-extractor.ts), no bindings, no network and a CPU limit,
+// and calls it over RPC. A file crafted to exhaust a parser (a PDF whose
+// one stream inflates to gigabytes, an archive of millions of tags) kills
+// that isolate, and the upload fails for good as `upload.too_complex`;
+// core, and whatever else it runs, carry on.
 
 /** A file to extract: its name, its type (by its extension) and itself. */
 export interface ExtractInput {
@@ -151,3 +167,46 @@ export const localExtractor =
     }
     throw new Error("The extractor couldn't read the file");
   };
+
+/** Workers AI's document conversion, over the AI binding. */
+const workersAiExtractor =
+  (ai: Ai): Extractor =>
+  async ({ name, mediaType, bytes }) => {
+    let converted: ConversionResponse;
+    try {
+      converted = await ai.toMarkdown({
+        name,
+        blob: new Blob([new Uint8Array(bytes)], { type: mediaType }),
+      });
+    } catch (error) {
+      throw new ExtractorUnavailableError({ cause: error });
+    }
+    if (converted.format === "error") {
+      throw new Error("Workers AI couldn't convert the file");
+    }
+    return converted.data;
+  };
+
+/** Which extractor an upload got, as its audit events name it. */
+export type ExtractorName = "workers-ai" | "local";
+
+/**
+ * The extractor for a file in `collection`: Workers AI's conversion for a
+ * normal collection; the local one for a sensitive collection, for a
+ * deployment whose config keeps everything in the EU, and without an AI
+ * binding (on-prem).
+ */
+export const extractorFor = (
+  env: Omit<ModelsEnv, "AI"> & { AI?: Ai } & Pick<Env, "ASSETS" | "LOADER">,
+  collection: { sensitive: boolean }
+): { name: ExtractorName; extract: Extractor } => {
+  const ai = env.AI;
+  if (
+    collection.sensitive ||
+    deploymentStaysInEu(env) ||
+    typeof ai?.toMarkdown !== "function"
+  ) {
+    return { name: "local", extract: localExtractor(env) };
+  }
+  return { name: "workers-ai", extract: workersAiExtractor(ai) };
+};

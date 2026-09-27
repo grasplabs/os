@@ -11,7 +11,7 @@ import type { Upload } from "@grasp-os/shared/uploads";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { zipSync } from "fflate";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 import { extractorAsset } from "../src/knowledge/extractor/asset.ts";
 import {
@@ -46,6 +46,9 @@ import {
 // ever downloaded as an attachment, by those who may read its document.
 
 const idp = mockIdp();
+
+/** The one model the tests' gateway allows (vite.config.ts). */
+const testModel = "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 /** A test file, from the fixtures the test assets serve. */
 const fixture = async (name: string): Promise<Uint8Array> => {
@@ -264,6 +267,23 @@ const wordFile = (document: string, styles: string): Uint8Array => {
 // Vitest's default five seconds on a loaded runner. Sixty fits the
 // longest, with room for signing in.
 describe("uploads", { timeout: 60_000 }, () => {
+  // Every test here runs as a deployment whose config keeps everything in
+  // the EU, so each file is extracted in the sandbox, whatever its
+  // collection. Which extractor a file gets is upload-routing.test.ts's.
+  let gatewayBefore: unknown;
+  beforeAll(() => {
+    gatewayBefore = env.MODEL_GATEWAY;
+    env.MODEL_GATEWAY = {
+      gateway: "grasp-os-test",
+      models: [testModel],
+      eu: { models: [testModel], deployment: true },
+    };
+  });
+
+  afterAll(() => {
+    env.MODEL_GATEWAY = gatewayBefore;
+  });
+
   it("make a PDF, a Word file and a workbook searchable by section", async () => {
     const person = await personWithCollection();
     const [pdf, docx, xlsx] = await Promise.all([

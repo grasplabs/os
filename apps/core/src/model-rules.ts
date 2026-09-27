@@ -36,7 +36,10 @@ import type { RestrictedEnv, WorkContext } from "./restricted.ts";
 // never read while they don't.
 //
 // They apply while `model_rules` is on; switching it off is the kill
-// switch, which leaves only the allowlist.
+// switch, which leaves only the allowlist. The rule that keeps the whole
+// deployment in the EU also keeps uploads' text extraction in the Worker,
+// off Workers AI, and uploads read it whatever `model_rules` says
+// (knowledge/extract.ts): it is what the client agreed to.
 //
 // "Hosted in the EU" is the config's word for a model: the client's
 // provider serves it in the EU (its EU data residency, with the keys AI
