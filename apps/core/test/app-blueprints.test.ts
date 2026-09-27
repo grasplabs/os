@@ -6,6 +6,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { createFromBlueprint } from "../src/app-blueprints.ts";
 import { outlook, release, requestGranted, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
+import { storedGrant } from "./knowledge.ts";
 import { mailConnection } from "./mail-connection.ts";
 import {
   auditedDuring,
@@ -414,6 +415,56 @@ describe("blueprints", () => {
     expect({ refused, created: created?.count }).toStrictEqual({
       refused: "app.not_found",
       created: 0,
+    });
+  });
+
+  it("are taken back when the App read what the caller can't while it was being copied", async () => {
+    const owner = await personApi("builder");
+    const maker = await personApi("builder");
+    const source = await notesApp(owner);
+    await share(owner, source, maker, "user");
+    await owner.api.apps.blueprints.mark(source, 1);
+    const by = await maker.api.whoami();
+    const mailbox = await mailboxOf(owner);
+    // The owner's mailbox granted to the App just before the batch that
+    // creates the copy lands, once: the copy's taking back is a batch too.
+    let granted = false;
+    const racing = racingDb(async () => {
+      if (!granted) {
+        granted = true;
+        await storedGrant(
+          { type: "app", id: source },
+          { type: "connection", id: mailbox },
+          ["mail.list"],
+          "MAILBOX"
+        );
+      }
+    });
+
+    let refused = "";
+    const events = await auditedDuring(async () => {
+      refused = await outcome(
+        createFromBlueprint({ ...env, DB: racing }, by, source, 1, {
+          name: `Unreadable ${unique()}`,
+        })
+      );
+    });
+    const owned = await env.DB.prepare(
+      "SELECT count(*) AS count FROM apps WHERE owner_id = ?"
+    )
+      .bind(maker.userId)
+      .first<{ count: number }>();
+    const revoked = events.find(
+      ({ action }) => action === "app.blueprint.revoked"
+    );
+    expect({
+      refused,
+      owned: owned?.count,
+      revoked: revoked?.detail,
+    }).toStrictEqual({
+      refused: "app.unreadable",
+      owned: 0,
+      revoked: { fromApp: source, reason: "app.unreadable" },
     });
   });
 

@@ -178,6 +178,51 @@ export const unmarkBlueprint = async (
 };
 
 /**
+ * After a copy committed: checks `by` may still open the source App
+ * (`appFor`, with what it read, which the batch's guard can't express),
+ * and if not, takes the copy back at once, in one audited batch, and
+ * refuses as the check did. The copy is brand new and `by`'s own, so
+ * nobody else has touched it: its requests, its version and its row go.
+ * Its tree stays in R2, named by nothing, as a refused commit's does.
+ */
+const requireStillOpen = async (
+  env: Env,
+  by: Identity,
+  source: AppId,
+  copy: AppId
+): Promise<void> => {
+  try {
+    await appFor(env, by, source, "user");
+  } catch (error) {
+    const reason = appErrors.codeOf(error) ?? roleErrors.codeOf(error);
+    if (reason === undefined) {
+      throw error;
+    }
+    const db = drizzle(env.DB);
+    await auditedBatch(env, db, [
+      db
+        .delete(permissions)
+        .where(
+          and(
+            eq(permissions.subjectType, "app"),
+            eq(permissions.subjectId, copy)
+          )
+        ),
+      db.delete(appVersions).where(eq(appVersions.appId, copy)),
+      db.delete(apps).where(eq(apps.id, copy)),
+      outboxed(
+        db,
+        changeEntry(by, "app.blueprint.revoked", copy, {
+          fromApp: source,
+          reason,
+        })
+      ),
+    ]);
+    throw error;
+  }
+};
+
+/**
  * Creates an App of `by`'s own from the blueprint of App `app` at
  * `version`: the code at that version as its first version, and requests
  * for what that App was given or asked for. All of it lands in one batch,
@@ -311,6 +356,7 @@ export const createFromBlueprint = async (
     await appFor(env, by, source.id, "user");
     throw error;
   }
+  await requireStillOpen(env, by, source.id, id);
   return {
     app: toApp(appRow),
     version: toVersion(versionRow),
