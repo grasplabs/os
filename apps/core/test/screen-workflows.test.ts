@@ -2,6 +2,7 @@ import type { ScreenRun } from "@grasp-os/shared/screens";
 import type { RunStatus, WorkflowRun } from "@grasp-os/shared/workflows";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import { toScreenRun } from "../src/workflows/screen-runs.ts";
 import { allEvents } from "./audit-events.ts";
@@ -379,33 +380,41 @@ describe("workflows from screens", { timeout: 60_000 }, () => {
     });
   });
 
-  it("refuse to answer on a screen while decisions are off, and leave following runs on", async () => {
-    const admin = await signedInWithRole(idp, "admin");
-    const { core } = await openRpc(admin.session, {
-      coreEnv: {
-        ...env,
-        FEATURES: {
-          apps: true,
-          screens: true,
-          workflows: true,
-          screen_workflows: true,
-          decisions: false,
-        },
-      },
-    });
-    const session = core.authenticate();
-    const app = crypto.randomUUID();
+  it("refuse to answer on a screen while decisions are off, show no decision open, and leave following runs on", async () => {
+    const builder = await personApi("builder");
+    const app = await approvalApp(builder);
+    const { id: run } = await builder.api.screens.startRun(
+      app,
+      "approval",
+      byAdmins
+    );
+    await waiting(builder, app, run);
+    const { FEATURES: features } = env;
+    let whileOff: Record<string, unknown>;
+    try {
+      env.FEATURES = {
+        ...z.record(z.string(), z.boolean()).parse(features),
+        decisions: false,
+      };
+      whileOff = {
+        decide: await outcome(
+          builder.api.screens.decide(app, run, "review", { approved: true })
+        ),
+        run: await builder.api.screens.run(app, run),
+        runs: await builder.api.screens.runs(app, "approval"),
+      };
+    } finally {
+      env.FEATURES = features;
+    }
 
-    expect({
-      decide: await outcome(
-        session.screens.decide(app, "run", "review", { approved: true })
-      ),
-      runs: await outcome(session.screens.runs(app, "approval")),
-    }).toStrictEqual({
+    expect(whileOff).toMatchObject({
       decide: "feature.disabled",
-      // Past the flags: there's no such App.
-      runs: "app.not_found",
+      // Nobody can answer the open decision, so it isn't shown.
+      run: { id: run, status: "running", waitingFor: [] },
+      runs: [{ id: run, status: "running", waitingFor: [] }],
     });
+    // Back on, it shows again.
+    await waiting(builder, app, run);
   });
 });
 

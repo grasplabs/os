@@ -94,7 +94,8 @@ export interface WaitingDecision {
 /**
  * A run as its App's screens see it: `waiting` exactly while a decision of
  * it is open, with the decisions it waits for; `running` while it waits
- * on anything else; none once it has ended.
+ * on anything else; none once it has ended. While decisions are switched
+ * off, it waits for none, as nobody can answer one.
  */
 export interface ScreenRun extends WorkflowRun {
   waitingFor: WaitingDecision[];

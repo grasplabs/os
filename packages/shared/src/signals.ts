@@ -89,7 +89,12 @@ const correctionSchema = z.object({
   }),
 });
 
-/** What a workflow's runs cost in model calls, against the time it saves. */
+/**
+ * What a workflow's runs cost in model calls, against the time it saves:
+ * the runs started in the window, and what they spent in it. The window
+ * rolls (the last `signalWindowDays` days), while model budgets count a
+ * UTC calendar month, so the two don't match.
+ */
 const costSchema = z.object({
   kind: z.literal("cost_per_run"),
   /** US dollars of model calls per run. */
@@ -97,7 +102,7 @@ const costSchema = z.object({
   evidence: z.object({
     /** Runs of the workflow started in the window. */
     runs: z.int(),
-    /** US dollars its runs' model calls cost in the window. */
+    /** US dollars those runs' model calls cost in the window. */
     cost: z.number(),
     /**
      * Minutes each run saves, by the Playbook workflow record linked to

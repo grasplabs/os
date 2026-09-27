@@ -237,8 +237,13 @@ export interface ConnectionsApi {
   /**
    * Offers a catalog entry, or stops offering it: nobody starts connecting
    * an entry that isn't offered (`connection.not_offered`), admins
-   * included, while connections already made go on. Every entry is offered
-   * until an admin says otherwise. Admins only, never Grasp staff; audited.
+   * included, while connections already made go on, and permissions on
+   * them are still requested and granted (blueprint copies' too). One that
+   * needs reconnecting (`needs_reauth`) can't be until the entry is offered
+   * again. Hiding a Composio toolkit needs Composio to list it, so it is
+   * `connection.provider_unavailable` while the `composio` flag is off.
+   * Every entry is offered until an admin says otherwise. Admins only,
+   * never Grasp staff; audited.
    */
   setOffered: (
     source: CatalogSource,

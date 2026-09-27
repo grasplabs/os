@@ -28,6 +28,16 @@ import type { CollectionAccess, PersonAccess } from "./knowledge/access.ts";
 // closed: nobody reads it but the App's owner and admins, who aren't
 // checked, since what the App read of it can't be placed.
 //
+// An App's code is treated as free of provenance, but for its AGENTS.md:
+// that is written from what the App's agents read, and is read only by
+// those who may open the App (its builders, and its users through the
+// Apps collection), so it is under the App's sources like its data. Any
+// other file is taken to hold no data, which nothing checks: builders
+// must not put data into code. A blueprint copy (app-blueprints.ts)
+// doesn't inherit its source's provenance: it has no sources until an
+// admin grants its requests, and its code is the source's, which is why
+// its AGENTS.md isn't copied but starts as a stub.
+//
 // The sources are read once, and each person is decided in memory
 // (`unreadableBy`), so checking a whole team costs a few queries, not a
 // few per person.

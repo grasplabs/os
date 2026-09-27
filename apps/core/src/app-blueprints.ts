@@ -41,6 +41,7 @@ import {
   permissions,
 } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
+import { appMemoryPath } from "./knowledge/memory-files.ts";
 import { blueprintRequests, toPermission } from "./permissions.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
@@ -49,14 +50,23 @@ import type { SessionCheck } from "./session-check.ts";
 // blueprint; whoever has a role in the App (app-access.ts) and builds
 // (an admin or builder in the organization) creates an App of their own
 // from it. The new App is theirs. Its first version is the blueprint's
-// code, exactly, and it asks for what the blueprint's App was given or
-// asked for, each request waiting for an admin (permissions.ts), but for
-// someone else's personal connections, which only their owner's calls
-// could use, and connections connect doesn't know: those are left out,
-// and recorded. Nothing
-// else comes with it: none of the App's data (its storage, its workflows'
-// state, its runs), settings (parameter values), members or error log.
-// A version never changes, so neither does a blueprint's code.
+// code, but for its AGENTS.md, and it asks for what the blueprint's App
+// was given or asked for, each request waiting for an admin
+// (permissions.ts), but for someone else's personal connections, which
+// only their owner's calls could use, and connections connect doesn't
+// know: those are left out, and recorded. Nothing else comes with it:
+// none of the App's data (its storage, its workflows' state, its runs),
+// settings (parameter values), members or error log. A version never
+// changes, so neither does a blueprint's code.
+//
+// The copy doesn't inherit what its source may have read
+// (app-provenance.ts): it has no sources until an admin grants its
+// requests, so whoever it is shared with meanwhile passes the check. So
+// its AGENTS.md, which the source's agents write from what they read, is
+// not copied but a stub naming the blueprint, for the copy's builders and
+// agents to write their own. Every other file a builder stored in the
+// code is copied as it is, taken to hold no data: builders must not put
+// data into code.
 //
 // Marking, unmarking and creating are audited, each in the same batch as
 // its change. Grasp staff neither mark, unmark nor create from blueprints:
@@ -64,6 +74,10 @@ import type { SessionCheck } from "./session-check.ts";
 // permissions, which staff never do for a client.
 
 type Row = typeof appBlueprints.$inferSelect;
+
+/** A copy's AGENTS.md in place of its blueprint's (see above). */
+const copiedMemory = (name: string, version: number): string =>
+  `Created from the blueprint of ${name}, version ${version}. Write what this App does here.\n`;
 
 /**
  * Refuses Grasp staff: which of a client's Apps others copy, and copying
@@ -296,11 +310,11 @@ export const sweepPendingCopies = async (env: Env): Promise<void> => {
 
 /**
  * Creates an App of `by`'s own from the blueprint of App `app` at
- * `version`: the code at that version as its first version, and requests
- * for what that App was given or asked for. All of it lands in one batch,
- * or none of it (the version's files, stored first, are only named once
- * it lands), and only while the version is still a blueprint and `by`
- * still has a role in its App. It lands pending, found by nothing, and is
+ * `version`: the code at that version as its first version (its AGENTS.md
+ * a stub), and requests for what that App was given or asked for. All of
+ * it lands in one batch, or none of it (the version's files, stored
+ * first, are only named once it lands), and only while the version is
+ * still a blueprint and `by` still has a role in its App. It lands pending, found by nothing, and is
  * activated only once `by` passes the source App's check again, what it
  * read included (`activateCopy`).
  */
@@ -326,6 +340,10 @@ export const createFromBlueprint = async (
   const files = new Map(
     Object.entries(await versionFiles(env, source.id, number))
   );
+  // Replaced, not added: the copy has as many files as the blueprint.
+  if (files.has(appMemoryPath)) {
+    files.set(appMemoryPath, copiedMemory(source.name, number));
+  }
   const id = appIdSchema.parse(crypto.randomUUID());
   const tree = await versionTree(files);
   await storeTree(env, id, tree);

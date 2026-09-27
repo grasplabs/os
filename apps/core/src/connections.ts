@@ -150,6 +150,11 @@ const onOrigin = (origin: string, path: string): URL | undefined => {
 // flow at connect: a hidden entry isn't listed to anyone but admins, and
 // starting to connect it is refused and recorded, whoever asks. Hiding
 // never touches a connection already made; disconnecting it is separate.
+// Such a connection goes on as before: permissions on it are still
+// requested and granted (a blueprint copy's requests included), since
+// hiding is about what people connect, not what is connected. But one that
+// needs reconnecting (`needs_reauth`) can't be until the entry is offered
+// again, as reconnecting starts a flow.
 
 /** One catalog entry an admin offers or hides, as it came over the wire. */
 const offerSchema = z.discriminatedUnion("source", [
@@ -234,11 +239,15 @@ const requireOffered = async (
 /**
  * Refuses to hide the Composio toolkit `slug` unless Composio lists it: a
  * misspelled slug would otherwise be hidden without a word, while the
- * toolkit meant stays offered. Offering one again needs no check, so an
- * entry hidden before Composio dropped it can always be let go.
+ * toolkit meant stays offered. While `composio` is off, Composio isn't
+ * asked, and hiding is refused as unavailable. Offering one again needs no
+ * check, so an entry hidden before Composio dropped it can always be let
+ * go.
  */
 const requireListedToolkit = async (env: Env, slug: string): Promise<void> => {
-  const catalog = await env.CONNECT.catalog({ composio: true });
+  const catalog = await env.CONNECT.catalog({
+    composio: featureEnabled(env, "composio"),
+  });
   if (catalog.composio !== "listed") {
     throw connectionErrors.create("connection.provider_unavailable");
   }

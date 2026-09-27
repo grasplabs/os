@@ -692,7 +692,15 @@ describe("improvement signals", () => {
       Array.from({ length: 30 }, async () => await run("filing"))
     );
     const unlinked = await run("chat");
+    // Started before the window, calling a model within it: neither the
+    // run nor its cost counts, and it's never the costliest.
+    const older = await seedRun(app, {
+      workflow: "invoices",
+      status: "running",
+      createdAt: ago(40 * dayMs),
+    });
     await logged(
+      modelCall(app, "invoices", older, 2),
       modelCall(app, "invoices", first, 0.5),
       modelCall(app, "invoices", second, 0.125),
       modelCall(app, "invoices", second, 0.125),

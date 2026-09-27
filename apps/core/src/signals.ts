@@ -11,7 +11,6 @@ import type { ImprovementSignal, SignalKind } from "@grasp-os/shared/signals";
 import {
   and,
   asc,
-  count,
   desc,
   eq,
   gt,
@@ -331,25 +330,53 @@ interface Started {
   appId: string;
   workflowId: string;
   runs: number;
+  /** Their IDs, so costs count only these runs. */
+  ids: Set<string>;
 }
 
-/** How many runs of each App workflow started since `from`. */
+/** The runs of each App workflow started since `from`, a page at a time. */
 const runsSince = async (
   db: DrizzleD1Database,
   from: Date
 ): Promise<Map<string, Started>> => {
-  const rows = await db
-    .select({
-      appId: workflowRuns.appId,
-      workflowId: workflowRuns.workflowId,
-      runs: count(),
-    })
-    .from(workflowRuns)
-    .where(gte(workflowRuns.createdAt, from))
-    .groupBy(workflowRuns.appId, workflowRuns.workflowId);
-  return new Map(
-    rows.map((row) => [workflowKey(row.appId, row.workflowId), row])
+  const started = new Map<string, Started>();
+  await eachPage(
+    async (after: { id: string; createdAt: Date } | undefined) =>
+      await db
+        .select({
+          id: workflowRuns.id,
+          appId: workflowRuns.appId,
+          workflowId: workflowRuns.workflowId,
+          createdAt: workflowRuns.createdAt,
+        })
+        .from(workflowRuns)
+        .where(
+          and(
+            gte(workflowRuns.createdAt, from),
+            pastCursor(
+              workflowRuns.createdAt,
+              workflowRuns.id,
+              after && { at: after.createdAt, id: after.id },
+              "asc"
+            )
+          )
+        )
+        .orderBy(asc(workflowRuns.createdAt), asc(workflowRuns.id))
+        .limit(pageRows),
+    ({ id, appId, workflowId }) => {
+      const key = workflowKey(appId, workflowId);
+      const found = started.get(key) ?? {
+        appId,
+        workflowId,
+        runs: 0,
+        ids: new Set<string>(),
+      };
+      found.runs += 1;
+      found.ids.add(id);
+      started.set(key, found);
+    }
   );
+  return started;
 };
 
 /**
@@ -748,19 +775,26 @@ const minutesSaved = (
 
 /**
  * Cost per run against minutes saved, for each App workflow with runs
- * started in the window: its model calls' cost over them, and the minutes
- * a run saves by its Playbook record, from its automated steps' minutes
- * (times the people each took), or else its weekly gain over the runs a
- * week it had.
+ * started in the window: the cost of those runs' model calls in the
+ * window, over them, and the minutes a run saves by its Playbook record,
+ * from its automated steps' minutes (times the people each took), or else
+ * its weekly gain over the runs a week it had.
+ *
+ * A run started before the window counts neither as a run nor for what it
+ * spent, so the cost and `costliest` name the same runs. The window rolls
+ * (the last `signalWindowDays` days), while model budgets
+ * (model-budgets.ts) count a UTC calendar month: the two don't match.
  */
 const costSignals = (
   { costs }: AuditTotals,
   saved: ReadonlyMap<string, Saving>,
   runs: ReadonlyMap<string, Started>
 ): SignalRow[] =>
-  [...runs].map(([key, { appId, workflowId, runs: started }]) => {
-    const spent = costs.get(key);
-    const cost = spent?.cost ?? 0;
+  [...runs].map(([key, { appId, workflowId, runs: started, ids }]) => {
+    const perRun = new Map(
+      [...(costs.get(key)?.perRun ?? [])].filter(([run]) => ids.has(run))
+    );
+    const cost = [...perRun.values()].reduce((sum, amount) => sum + amount, 0);
     const costPerRun = cost / started;
     const saving = saved.get(key);
     const { minutesSavedPerRun, savedFrom } = minutesSaved(saving, started);
@@ -779,7 +813,7 @@ const costSignals = (
           minutesSavedPerRun === null || minutesSavedPerRun <= 0
             ? null
             : dollars(costPerRun / (minutesSavedPerRun / 60)),
-        costliest: mostFirst(spent?.perRun ?? new Map())
+        costliest: mostFirst(perRun)
           .slice(0, samples)
           .map(([run, amount]) => ({
             run: runIdSchema.parse(run),

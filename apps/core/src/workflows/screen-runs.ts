@@ -14,7 +14,7 @@ import { z } from "zod";
 import { appFor } from "../apps.ts";
 import { workflowDecisions, workflowRuns } from "../db/core/schema.ts";
 import { answerableBy, answerDecision } from "../decisions/decisions.ts";
-import { requireFeature } from "../features.ts";
+import { featureEnabled, requireFeature } from "../features.ts";
 import {
   findRun,
   runFor,
@@ -44,7 +44,7 @@ import type { RunRow } from "./runs.ts";
 // `workflow.run_not_found`, and a decision of one `decision.not_found`,
 // whatever the person may do in that other App, exactly as a run or
 // decision there isn't. Behind `screen_workflows`, besides `workflows`
-// (and `decisions` to answer one).
+// (and `decisions` to show or answer one).
 
 /** A decision's name, as the workflow gives it (`step.decision(name)`). */
 const decisionNameSchema = z.string().min(1).max(256);
@@ -110,7 +110,8 @@ const openNow = (now: Date): SQL | undefined =>
  * description is written by workflow code, and can hold what the run read
  * for its person, so it goes only to whoever sees the run's details
  * (`seesDetails`) or may answer the decision; everyone else gets its name
- * and deadline.
+ * and deadline. None while `decisions` is off: nobody can answer one on a
+ * screen then (`decideScreenRun`), so a run shows as running.
  */
 const waitingFor = async (
   env: Env,
@@ -119,6 +120,9 @@ const waitingFor = async (
   runs: readonly RunRow[],
   open: readonly OpenDecision[]
 ): Promise<Map<string, WaitingDecision[]>> => {
+  if (!featureEnabled(env, "decisions")) {
+    return new Map();
+  }
   const detailed = new Set(
     runs.filter((row) => seesDetails(by, row, owner)).map(({ id }) => id)
   );

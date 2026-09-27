@@ -244,7 +244,9 @@ export type FromBlueprint = z.input<typeof fromBlueprintSchema>;
 
 /**
  * An App created from a blueprint: its first version holds the code at
- * the blueprint's version, and `permissions` are requests, waiting for an
+ * the blueprint's version, but for its AGENTS.md, a stub naming the
+ * blueprint (the blueprint's was written from what its App read, which
+ * the copy may not have read), and `permissions` are requests, waiting for an
  * admin, for the connections, collections and workflows the blueprint's
  * App was given or asked for, but for someone else's personal
  * connections, which only their owner's calls could use, and connections

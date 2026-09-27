@@ -304,16 +304,26 @@ const requireApps = async (
  * A collection a permission names must exist, and not be someone's
  * personal collection: Apps and agents never read those (see
  * knowledge/access.ts), so nobody can be asked to grant one.
+ *
+ * Nor is an App given the Apps collection (knowledge/apps-collection.ts).
+ * It is open to everyone as a collection, but Knowledge shows each entry
+ * only to whoever may open its App, and provenance (app-provenance.ts)
+ * judges a collection by the collection's access alone. So an App that
+ * read it could hold another App's AGENTS.md, and be shared with someone
+ * who may not open that App, and both provenance checks would pass. An
+ * agent acts for its person, who may read what they find there, and keeps
+ * nothing to share: it may be given it.
  */
 const requireCollection = async (
   env: Env,
+  subject: PermissionSubject,
   object: PermissionObject
 ): Promise<void> => {
   if (object.type !== "collection") {
     return;
   }
   const found = await drizzle(env.KNOWLEDGE)
-    .select({ access: collections.access })
+    .select({ access: collections.access, source: collections.source })
     .from(collections)
     .where(eq(collections.id, object.collectionId))
     .get();
@@ -326,6 +336,13 @@ const requireCollection = async (
     throw permissionErrors.create("permission.invalid", {
       issues: [
         "object.collectionId: A personal collection can't be given to an App or agent.",
+      ],
+    });
+  }
+  if (found.source === "apps" && subject.type === "app") {
+    throw permissionErrors.create("permission.invalid", {
+      issues: [
+        "object.collectionId: The Apps collection can't be given to an App.",
       ],
     });
   }
@@ -366,7 +383,7 @@ export const requestPermission = async (
     await requireAppRole(object.appId, "user");
   }
   await requireApps(env, subject, object);
-  await requireCollection(env, object);
+  await requireCollection(env, subject, object);
   const row: Row = {
     id: crypto.randomUUID(),
     ...subjectColumns(subject),
@@ -500,9 +517,9 @@ export const grantPermission = async (
   if (!found) {
     throw permissionErrors.create("permission.not_found");
   }
-  // No grant ever names a missing or personal collection, however old its
-  // request.
-  await requireCollection(env, objectOf(found));
+  // No grant ever names a missing or personal collection, nor gives an App
+  // the Apps collection, however old its request.
+  await requireCollection(env, subjectOf(found), objectOf(found));
   const db = drizzle(env.DB);
   const [[granted]] = await auditedBatch(env, db, [
     db

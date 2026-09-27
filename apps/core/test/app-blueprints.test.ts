@@ -24,7 +24,7 @@ import { connectDb } from "./test-env.ts";
 // whoever has a role in the App and builds creates an App of their own
 // from it: the same code, none of the data, and requests for what the App
 // was given. The ways this could go wrong, tried below: data, settings or
-// people coming along, a grant coming along instead of a request, a
+// people coming along (the source's AGENTS.md too), a grant coming along instead of a request, a
 // blueprint made of a version nobody marked, someone without a role in
 // the App (or who doesn't build, or staff) copying it, and a change
 // nobody recorded.
@@ -55,6 +55,7 @@ export class App extends DurableObject {
 }
 `;
 
+/** A copy has every file of it but AGENTS.md, which starts as a stub. */
 const v1 = {
   "app/server.ts": serverCode,
   "screens/notes.tsx": "export default () => <p>Notes</p>;\n",
@@ -271,6 +272,7 @@ describe("blueprints", { timeout: 60_000 }, () => {
     const theirs = await maker.api.apps.list();
     await maker.api.apps.versions.setCurrent(app.id, 1);
     await serverBuilt(app.id, 1);
+    const { name: sourceName } = await owner.api.apps.get(source);
     expect({
       listed: theirs.some(({ id }) => id === app.id),
       files: await maker.api.apps.files.read(app.id, 1),
@@ -279,8 +281,12 @@ describe("blueprints", { timeout: 60_000 }, () => {
       forOwner: await outcome(owner.api.apps.get(app.id)),
     }).toStrictEqual({
       listed: true,
-      // The same code.
-      files: v1,
+      // The same code, but for AGENTS.md: the source's agents wrote it
+      // from what the source read, which the copy has no sources for.
+      files: {
+        ...v1,
+        "AGENTS.md": `Created from the blueprint of ${sourceName}, version 1. Write what this App does here.\n`,
+      },
       notes: [],
       members: [],
       forOwner: "app.not_found",

@@ -216,7 +216,9 @@ const findFiles = async (
       }
       continue;
     }
-    // Whoever reads the App's code: one of its builders (app-access.ts).
+    // Read here only by one of the App's builders (app-access.ts), as they
+    // read its code (`readFiles`). Its users read it too, through
+    // Knowledge: the Apps collection shows it to whoever may open the App.
     const person = {
       userId,
       role,

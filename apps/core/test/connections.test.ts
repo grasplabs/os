@@ -2,6 +2,7 @@ import { composioConsentText } from "@grasp-os/shared/connect";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { requestGranted } from "./apps.ts";
 import { consentCode, tokensFor } from "./connect-providers.ts";
 import { mockIdp } from "./idp.ts";
 import { acmeTenant, clientOrigin, otherTenant } from "./sign-in-config.ts";
@@ -11,6 +12,7 @@ import {
   outcome,
   routed,
   signedIn,
+  signedInApi,
   signedInWithRole,
   staffPerson,
 } from "./sign-in.ts";
@@ -410,12 +412,18 @@ describe("connecting a Composio toolkit", () => {
     });
   });
 
-  it("isn't offered while the composio flag is off, nor finished if it goes off meanwhile", async () => {
+  it("isn't offered or hidden while the composio flag is off, nor finished if it goes off meanwhile", async () => {
     const off = await adminWith({ connections: true });
     await expect(
       outcome(off.connections.connectToolkit(request))
     ).resolves.toBe("connection.provider_unavailable");
+    // Composio isn't asked whether it lists the toolkit, so nothing is hidden.
+    await expect(
+      outcome(off.connections.setOffered("composio", "hubspot", false))
+    ).resolves.toBe("connection.provider_unavailable");
     const on = await adminWith({ connections: true, composio: true });
+    const { entries } = await on.connections.catalog();
+    expect(entries.find(({ id }) => id === "hubspot")?.offered).toBeTruthy();
     const { url } = await on.connections.connectToolkit(request);
     const response = await backFromProvider(
       on.session,
@@ -455,9 +463,20 @@ describe("offering catalog entries", () => {
     consent: composioConsentText,
   };
 
-  it("hides an entry from everyone but admins, refuses and records starting it, and offers it again", async () => {
+  it("hides an entry from everyone but admins, refuses and records starting it, keeps what is connected, and offers it again", async () => {
     const admin = await person("admin");
     const anna = await person();
+    // Connected before it is hidden.
+    const { url } = await admin.connections.connectToolkit(toolkitRequest);
+    const back = await backFromProvider(admin.session, {
+      state: new URL(url).searchParams.get("state") ?? "",
+      status: "success",
+    });
+    const connectionId =
+      new URL(
+        back.headers.get("location") ?? "",
+        clientOrigin
+      ).searchParams.get("connection") ?? "";
     const hidden = await auditedDuring(async () => {
       await admin.connections.setOffered("native", "google", false);
       await admin.connections.setOffered("composio", "hubspot", false);
@@ -482,6 +501,27 @@ describe("offering catalog entries", () => {
       await expect(
         outcome(admin.connections.connectToolkit(toolkitRequest))
       ).resolves.toBe("connection.not_offered");
+    });
+    // What was connected goes on: still active, and an App is still asked
+    // for it and granted it.
+    const builder = await signedInApi(idp, "builder");
+    const { id: app } = await builder.api.apps.create({ name: "CRM" });
+    const granted = await requestGranted(idp, builder, {
+      subject: { type: "app", appId: app },
+      object: { type: "connection", connectionId },
+      actions: ["HUBSPOT_LIST_CONTACTS"],
+      binding: "HUBSPOT",
+    });
+    const [connected, asked] = await Promise.all([
+      admin.connections.list(),
+      builder.api.permissions.list({ type: "app", appId: app }),
+    ]);
+    expect({
+      connection: connected.find(({ id }) => id === connectionId)?.status,
+      permissions: asked.map(({ id, status }) => ({ id, status })),
+    }).toStrictEqual({
+      connection: "active",
+      permissions: [{ id: granted, status: "active" }],
     });
     const offered = await auditedDuring(async () => {
       await admin.connections.setOffered("native", "google", true);
