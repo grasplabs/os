@@ -15,7 +15,8 @@ import { featureEnabled } from "./features.ts";
 // The rules are deployment config, part of the `MODEL_GATEWAY` var the
 // console sets, like the allowlist: they are what the client agreed to, so
 // no admin session can loosen them in the product. A config whose rules
-// don't parse counts as none, and every call is refused (models.ts).
+// don't parse refuses every call while they apply (models.ts), and is
+// never read while they don't.
 //
 // They apply while `model_rules` is on; switching it off is the kill
 // switch, which leaves only the allowlist.
@@ -48,7 +49,9 @@ export const modelRulesShape = (modelRef: z.ZodType<string>) => ({
     .optional(),
 });
 
-type ModelRules = z.output<z.ZodObject<ReturnType<typeof modelRulesShape>>>;
+export type ModelRules = z.output<
+  z.ZodObject<ReturnType<typeof modelRulesShape>>
+>;
 
 /** What the rules judge a call by. */
 export interface RulesInput {

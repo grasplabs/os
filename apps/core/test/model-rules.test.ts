@@ -174,9 +174,52 @@ describe("model rules", () => {
           reason: "model.not_allowed",
           because: null,
           model: "anthropic/claude-opus-4-1",
+          provenanceDropped: 0,
         },
       },
     ]);
+  });
+
+  it("record a refusal whose provenance is too large for the audit log, with as much of it as fits", async () => {
+    const { call } = withRules({});
+    // A hundred identifiers of 256 three-byte characters: 77 KB.
+    const provenance = Array.from({ length: 100 }, (_, index) =>
+      `${index}`.padEnd(256, "€")
+    );
+    const refused = hello("anthropic/claude-opus-4-1", { provenance });
+
+    await expect(outcome(call(refused))).resolves.toBe("model.not_allowed");
+    const [event, ...more] = await eventsOf(refused.trigger);
+    const kept = event?.provenance.length ?? 0;
+    expect({
+      more: more.length,
+      kept: kept > 0 && kept < 100,
+      provenance: event?.provenance,
+      dropped: event?.detail.provenanceDropped,
+    }).toStrictEqual({
+      more: 0,
+      kept: true,
+      provenance: provenance.slice(0, kept),
+      dropped: 100 - kept,
+    });
+  });
+
+  it("read the rules only while model_rules is on: a malformed rule refuses every call then, and none while it's off", async () => {
+    const malformed = { eu: { models: "all of them" } };
+    const off = withRules(malformed, {
+      ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
+      model_rules: false,
+    });
+    const on = withRules(malformed);
+
+    await expect(
+      Promise.all([
+        outcome(off.call(hello(anthropic))),
+        outcome(off.call(hello("openai/gpt-4o-mini"))),
+        outcome(on.call(hello(anthropic))),
+      ])
+    ).resolves.toStrictEqual(["ok", "model.not_allowed", "model.unconfigured"]);
+    expect(on.fake.requests).toStrictEqual([]);
   });
 
   it("leave only the allowlist while model_rules is switched off: the kill switch", async () => {

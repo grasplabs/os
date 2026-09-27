@@ -36,8 +36,9 @@ import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { keepAuditEvent } from "./audit-outbox.ts";
+import { featureEnabled } from "./features.ts";
 import { judgeCall, modelRulesShape } from "./model-rules.ts";
-import type { Judged, Refusal } from "./model-rules.ts";
+import type { Judged, ModelRules, Refusal } from "./model-rules.ts";
 
 // The model gateway: every model call in a deployment goes through here, and
 // from here through the deployment's AI Gateway, never straight to a
@@ -147,12 +148,23 @@ const modelRefSchema = z
     message: "A <provider>/<model> the gateway offers",
   });
 
-const modelGatewayConfigSchema = z
+const modelGatewayConfigSchema = z.object({
+  /** The deployment's AI Gateway, in the deployment's own account. */
+  gateway: z.string().regex(gatewayIdPattern),
+  /** The models this deployment allows; every other model is refused. */
+  models: z.array(modelRefSchema).min(1),
+});
+type ModelGatewayConfig = z.infer<typeof modelGatewayConfigSchema>;
+
+/**
+ * The client's other rules, in the same var (model-rules.ts). Parsed apart
+ * from the allowlist, and only while `model_rules` is on: so a rule that
+ * doesn't parse never stops the calls the kill switch leaves to the
+ * allowlist, and while the rules are on, it refuses every call.
+ */
+const modelRulesConfigSchema = z
   .object({
-    /** The deployment's AI Gateway, in the deployment's own account. */
-    gateway: z.string().regex(gatewayIdPattern),
-    /** The models this deployment allows; every other model is refused. */
-    models: z.array(modelRefSchema).min(1),
+    models: z.array(z.string()),
     ...modelRulesShape(modelRefSchema),
   })
   .refine(
@@ -160,7 +172,6 @@ const modelGatewayConfigSchema = z
       eu === undefined || eu.models.every((ref) => allowed.includes(ref)),
     { message: "EU models are allowed models", path: ["eu", "models"] }
   );
-type ModelGatewayConfig = z.infer<typeof modelGatewayConfigSchema>;
 
 /**
  * Core's env, with the AI binding as pi describes it. It is absent on plain
@@ -182,6 +193,24 @@ const modelGatewayConfig = (env: ModelsEnv): ModelGatewayConfig | undefined => {
   const parsed = modelGatewayConfigSchema.safeParse(jsonVar(env.MODEL_GATEWAY));
   if (!parsed.success) {
     log.error("model.config_invalid", {
+      paths: parsed.error.issues.map(({ path }) => path.join(".")).join(" "),
+    });
+    return undefined;
+  }
+  return parsed.data;
+};
+
+/**
+ * The deployment's rules while `model_rules` is on; none while it's off.
+ * `undefined` for rules that don't parse: every call then fails closed.
+ */
+const modelRules = (env: ModelsEnv): ModelRules | undefined => {
+  if (!featureEnabled(env, "model_rules")) {
+    return {};
+  }
+  const parsed = modelRulesConfigSchema.safeParse(jsonVar(env.MODEL_GATEWAY));
+  if (!parsed.success) {
+    log.error("model.rules_invalid", {
       paths: parsed.error.issues.map(({ path }) => path.join(".")).join(" "),
     });
     return undefined;
@@ -587,32 +616,57 @@ const record = async (
   );
 };
 
+/** Whether `entry` makes an event the audit log takes. */
+const fitsAuditLog = (entry: AuditEntry): boolean => {
+  try {
+    createAuditEvent(entry, "core");
+    return true;
+  } catch {
+    return false;
+  }
+};
+
 /**
- * Records a call the deployment's rules refused, with the reason, and
- * refuses it. Its event is smaller than the one its call would have had,
- * whose size `admit` checks first.
+ * The audit entry of a refused call, with as much of its provenance as
+ * fits the audit log (`provenanceDropped` says how much didn't), so a
+ * refusal is always recorded: a refused call, unlike a sent one, never
+ * had its event's size checked.
  */
-const refuse = async (
-  env: ModelsEnv,
-  call: Call,
-  { code, because }: Refusal
-): Promise<never> => {
+const refusedEntry = (call: Call, { code, because }: Refusal): AuditEntry => {
   // Never a model name so long that the event would be refused.
   const model =
     call.model.length <= auditIdentifierMaxLength ? call.model : null;
-  log.warn("model.refused", { reason: code, because });
-  await keepAuditEvent(env, drizzle(env.DB), {
+  const entryKeeping = (kept: number): AuditEntry => ({
     actor: call.trigger,
     action: "model.refused",
     requestId: call.requestId,
-    provenance: call.provenance,
+    provenance: call.provenance.slice(0, kept),
     detail: {
       purpose: call.purpose,
       reason: code,
       because: because ?? null,
       model,
+      provenanceDropped: call.provenance.length - kept,
     },
   });
+  // Halved until it fits: the rest of the event is identifiers and small
+  // values, well within the limit.
+  let kept = call.provenance.length;
+  while (kept > 0 && !fitsAuditLog(entryKeeping(kept))) {
+    kept = Math.floor(kept / 2);
+  }
+  return entryKeeping(kept);
+};
+
+/** Records a call the deployment's rules refused, with the reason, and refuses it. */
+const refuse = async (
+  env: ModelsEnv,
+  call: Call,
+  refusal: Refusal
+): Promise<never> => {
+  const { code, because } = refusal;
+  log.warn("model.refused", { reason: code, because });
+  await keepAuditEvent(env, drizzle(env.DB), refusedEntry(call, refusal));
   throw modelErrors.create(
     code,
     because === undefined
@@ -633,7 +687,12 @@ const admit = async (
   const call = parsed.data;
   const config = modelGatewayConfig(env);
   // Plain workerd (on-prem) has no AI binding, so no gateway either.
-  if (config === undefined || typeof env.AI?.fetch !== "function") {
+  const rules = modelRules(env);
+  if (
+    config === undefined ||
+    rules === undefined ||
+    typeof env.AI?.fetch !== "function"
+  ) {
     throw modelErrors.create("model.unconfigured");
   }
   const ref = config.models.includes(call.model)
@@ -651,7 +710,7 @@ const admit = async (
     // Its provenance, say, is too long to record.
     throw modelErrors.create("model.invalid_call");
   }
-  const verdict = judgeCall(env, config, call);
+  const verdict = judgeCall(env, rules, call);
   if (!verdict.ok) {
     return await refuse(env, call, verdict);
   }
