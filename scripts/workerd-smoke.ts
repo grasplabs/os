@@ -9,12 +9,13 @@ import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 
 import { routerSecretHeader } from "../packages/shared/src/router.ts";
+import { coreStarted } from "./workerd-smoke-start.ts";
 
 const ROUTER_SECRET = "smoke-router-secret";
 const ATTEMPTS = 50;
+const RETRY_DELAY_MS = 100;
 const core = path.join(import.meta.dirname, "../apps/core");
 const out = mkdtempSync(path.join(tmpdir(), "grasp-os-workerd-"));
 
@@ -79,45 +80,14 @@ const server = spawn("workerd", ["serve", path.join(out, "config.capnp")], {
   stdio: "inherit",
 });
 
-// workerd exits at once when it can't start, e.g. when its port is taken:
-// the smoke fails then, rather than polling whatever else listens there.
-const exited = async (): Promise<string> => {
-  await once(server, "exit");
-  const how = server.signalCode ?? server.exitCode;
-  return `workerd exited (${String(how)}) before core answered`;
-};
-
-// Core's own health answer: exactly `{"ok":true}`, with the request ID core
-// puts on every response.
-const isCore = async (response: Response): Promise<boolean> =>
-  response.ok &&
-  response.headers.has("x-request-id") &&
-  (await response.text()) === JSON.stringify({ ok: true });
-
-// Polls until workerd is listening; attempts are sequential by design.
-const waitForCore = async (attempt = 0): Promise<string | undefined> => {
-  if (attempt >= ATTEMPTS) {
-    return "core did not answer on workerd";
-  }
-  let response: Response;
-  try {
-    response = await fetch(`http://127.0.0.1:${PORT}/health`, {
-      headers: { [routerSecretHeader]: ROUTER_SECRET },
-    });
-  } catch {
-    await sleep(100);
-    return await waitForCore(attempt + 1);
-  }
-  return (await isCore(response))
-    ? undefined
-    : `something other than core answers on port ${PORT}`;
-};
-
 try {
-  const failure = await Promise.race([waitForCore(), exited()]);
-  if (failure !== undefined) {
-    throw new Error(failure);
-  }
+  await coreStarted(server, {
+    url: `http://127.0.0.1:${PORT}/health`,
+    headers: { [routerSecretHeader]: ROUTER_SECRET },
+    fetch,
+    attempts: ATTEMPTS,
+    retryDelayMs: RETRY_DELAY_MS,
+  });
   console.info("core runs on workerd");
 } finally {
   server.kill();
