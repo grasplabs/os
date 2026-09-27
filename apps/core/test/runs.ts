@@ -73,6 +73,28 @@ export const sleeping = async (run: string, step: string): Promise<void> => {
   );
 };
 
+/**
+ * Once the engine reports that the run began waiting for an event in
+ * `step`, from its event stream as `sleeping` reads it: the local
+ * engine's status says `running` then too.
+ */
+export const listening = async (run: string, step: string): Promise<void> => {
+  const instance = await env.WORKFLOWS.get(run);
+  using events = await instance.subscribe({ filter: ["wait_started"] });
+  await vi.waitFor(
+    async () => {
+      const { done, value } = await events.next();
+      if (done === true) {
+        throw new Error(`Run ${run} ended before it waited in ${step}`);
+      }
+      expect(
+        value.type === "wait_started" && value.stepName.startsWith(step)
+      ).toBeTruthy();
+    },
+    { timeout: 10_000, interval: 100 }
+  );
+};
+
 /** Once the run's step `step` has completed, as the audit log has it. */
 export const stepDone = async (run: string, step: string): Promise<void> => {
   await vi.waitFor(
