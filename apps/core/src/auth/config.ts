@@ -138,10 +138,11 @@ const microsoftOrigin = "https://login.microsoftonline.com";
  * Where a stand-in for Entra answers instead of Microsoft, if anywhere:
  * local development and the end-to-end tests sign in through one on this
  * machine (`DEV_IDP_ORIGIN`, set with `wrangler dev --var`, never in
- * wrangler.jsonc; apps/core/test/idp-worker.ts). It applies only while the
- * deployment's own origin is on this machine too, which no deployment's
- * is: no IdP could send anyone back to it. So it can't be turned on in
- * production, even by setting the var.
+ * wrangler.jsonc; apps/core/test/idp-worker.ts). It applies only while
+ * both it and the deployment's own origin (`SIGN_IN.origin`) are on this
+ * machine. A deployment's origin is its public hostname, set by the
+ * console, so setting the var alone does nothing there; and whoever can set
+ * both already controls sign-in.
  */
 export const devIdpOrigin = (
   env: Env,

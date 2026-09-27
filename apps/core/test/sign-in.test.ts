@@ -567,6 +567,39 @@ describe("local development's stand-in for Entra", () => {
     });
   });
 
+  it("never trusts the stand-in's origin on a deployment, whatever the var says", async () => {
+    const deployed: Env = { ...env, DEV_IDP_ORIGIN: standInOrigin };
+    /**
+     * Better Auth's answer to a browser starting a sign-in from `origin`,
+     * back to `callbackURL`. The browser has a cookie for the site, as any
+     * visitor does: Better Auth checks the origin of requests with one.
+     */
+    const started = async (origin: string, callbackURL: string) => {
+      const response = await routed(
+        "/api/auth/sign-in/sso",
+        {
+          method: "POST",
+          headers: {
+            origin,
+            cookie: "visited=1",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ providerId: "microsoft", callbackURL }),
+        },
+        deployed
+      );
+      return response.status;
+    };
+    // A page on the stand-in's origin can't start one...
+    await expect(started(standInOrigin, "/")).resolves.toBe(403);
+    // ...nor can a sign-in be sent back there.
+    await expect(
+      started(clientOrigin, `${standInOrigin}/landing`)
+    ).resolves.toBe(403);
+    // The same sign-in from the client's own page, back to it, starts.
+    await expect(started(clientOrigin, "/")).resolves.toBe(200);
+  });
+
   it("never sends a local stack's sign-in to a stand-in off this machine", async () => {
     const started = await startSignIn("microsoft", {
       coreEnv: localEnv("https://idp.attacker.test"),

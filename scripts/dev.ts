@@ -38,7 +38,11 @@ const children = [
   ]),
 ];
 
+/** Set once everything is being stopped: exits from then on are expected. */
+let stopping = false;
+
 const stopAll = (): void => {
+  stopping = true;
   for (const { pid } of children) {
     if (pid !== undefined) {
       try {
@@ -50,11 +54,31 @@ const stopAll = (): void => {
   }
 };
 
+/**
+ * One that fails to start (not installed, say) takes the others down too,
+ * so none is left holding its port.
+ */
+const failedToStart = (error: Error): void => {
+  console.error(`A dev process failed to start: ${error.message}`);
+  process.exitCode = 1;
+  stopAll();
+};
+
+/**
+ * One that stops by itself fails the whole with its code, or 1 when a
+ * signal from elsewhere ended it; the rest, stopped here, don't count, so
+ * a clean Ctrl+C exits 0.
+ */
+const exited = (code: number | null): void => {
+  if (!stopping) {
+    process.exitCode = code ?? 1;
+  }
+  stopAll();
+};
+
 for (const child of children) {
-  child.on("exit", (code) => {
-    process.exitCode ??= code ?? 1;
-    stopAll();
-  });
+  child.on("error", failedToStart);
+  child.on("exit", exited);
 }
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
   process.on(signal, stopAll);
