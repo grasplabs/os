@@ -7,7 +7,7 @@ import { and, eq, exists, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import { sourcesOf, unreadableBy } from "./app-provenance.ts";
+import { sourcesOf, sourcesOfApps, unreadableBy } from "./app-provenance.ts";
 import { apps, appMembers } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
 
@@ -126,7 +126,7 @@ export const requireAppRole = async (
  * other only while they can read everything it read. That they have a
  * role in each is for the caller to have checked (`appsOpenTo`). For
  * listing what belongs to many Apps at once, as `requireAppRole` decides
- * for one.
+ * for one: a few queries and connect calls, whatever the number of Apps.
  */
 export const appsReadableBy = async (
   env: Env,
@@ -144,16 +144,19 @@ export const appsReadableBy = async (
     userId: by.userId,
     teamIds: by.teams.map(({ id }) => id),
   };
-  const readable = await Promise.all(
-    rows.map(async ({ id, owner }) => {
-      if (owner === by.userId) {
-        return [id];
-      }
-      const sources = await sourcesOf(env, appIdSchema.parse(id));
-      return unreadableBy(sources, reader).length === 0 ? [id] : [];
-    })
-  );
-  return new Set(readable.flat());
+  const own = rows.filter(({ owner }) => owner === by.userId);
+  const shared = rows
+    .filter(({ owner }) => owner !== by.userId)
+    .map(({ id }) => appIdSchema.parse(id));
+  // All the shared Apps' sources at once, each decided in memory.
+  const sources = await sourcesOfApps(env, shared);
+  return new Set([
+    ...own.map(({ id }) => id),
+    ...shared.filter((id) => {
+      const of = sources.get(id);
+      return of !== undefined && unreadableBy(of, reader).length === 0;
+    }),
+  ]);
 };
 
 /**

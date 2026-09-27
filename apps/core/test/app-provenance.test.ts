@@ -88,6 +88,9 @@ const collectionFor = async (
  */
 const teamSize = 120;
 
+/** Apps enough that checking each on its own would add up. */
+const manyApps = 30;
+
 const refusalSchema = z.object({
   code: z.literal("app.share_unreadable"),
   details: z.object({
@@ -478,5 +481,56 @@ describe("sharing an App", () => {
       owner: [true, true],
       ownersMailbox: true,
     });
+  });
+
+  it("decides the permissions of many Apps shared with someone at once", async () => {
+    const [owner, anna] = await Promise.all([
+      personApi("builder"),
+      personApi("builder"),
+    ]);
+    const [mail, mailbox] = await Promise.all([
+      mailConnection(),
+      mailboxOf(owner),
+    ]);
+    const apps = await Promise.all(
+      Array.from({ length: manyApps }, async () => await newApp(owner))
+    );
+    // Every App reads the shared mail; every other one the owner's mailbox.
+    const kept: string[] = [];
+    for (const [index, app] of apps.entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- one App at a time
+      await owner.api.apps.members.add(app, {
+        type: "person",
+        id: anna.userId,
+        role: "builder",
+      });
+      // oxlint-disable-next-line no-await-in-loop -- one App at a time
+      const grant = await storedGrant(
+        { type: "app", id: app },
+        { type: "connection", id: mail.id },
+        ["mail.list"],
+        "MAIL"
+      );
+      if (index % 2 === 0) {
+        kept.push(grant);
+      } else {
+        // oxlint-disable-next-line no-await-in-loop -- one App at a time
+        await storedGrant(
+          { type: "app", id: app },
+          { type: "connection", id: mailbox },
+          ["mail.list"],
+          "MAILBOX"
+        );
+      }
+    }
+
+    const all = await anna.api.permissions.list();
+    const listed = all
+      .filter(
+        ({ subject }) => subject.type === "app" && apps.includes(subject.appId)
+      )
+      .map(({ id }) => id);
+    // Only the Apps that read nothing she can't: their mail, nothing else.
+    expect(new Set(listed)).toStrictEqual(new Set(kept));
   });
 });

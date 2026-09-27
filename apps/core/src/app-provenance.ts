@@ -1,5 +1,6 @@
 import { connectionOwnersMax } from "@grasp-os/shared/connect";
 import type { ConnectionOwner } from "@grasp-os/shared/connect";
+import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -97,45 +98,97 @@ const accessOf = async (
   }));
 };
 
-/** The sources `app` may have read, as they are now. */
-export const sourcesOf = async (env: Env, app: AppId): Promise<AppSources> => {
-  const rows = await drizzle(env.DB)
-    .select({
-      type: permissions.objectType,
-      id: permissions.objectId,
-      actions: permissions.actions,
-    })
-    .from(permissions)
-    .where(
-      and(
-        eq(permissions.subjectType, "app"),
-        eq(permissions.subjectId, app),
-        isNotNull(permissions.grantedAt),
-        inArray(permissions.objectType, ["connection", "collection"])
-      )
-    );
-  const connectionIds = new Set<string>();
-  const collectionIds = new Set<string>();
-  for (const { type, id, actions } of rows) {
+/**
+ * The sources each of the Apps `apps` may have read, as they are now, in
+ * a few queries whatever their number: one for all their permissions, one
+ * series of pages to connect for all their connections, and one Knowledge
+ * batch for all their collections.
+ */
+export const sourcesOfApps = async (
+  env: Env,
+  apps: readonly AppId[]
+): Promise<Map<AppId, AppSources>> => {
+  const rows =
+    apps.length === 0
+      ? []
+      : await drizzle(env.DB)
+          .select({
+            app: permissions.subjectId,
+            type: permissions.objectType,
+            id: permissions.objectId,
+            actions: permissions.actions,
+          })
+          .from(permissions)
+          .where(
+            and(
+              eq(permissions.subjectType, "app"),
+              inList(permissions.subjectId, apps),
+              isNotNull(permissions.grantedAt),
+              inArray(permissions.objectType, ["connection", "collection"])
+            )
+          );
+  const granted = new Map(
+    apps.map((app) => [
+      app,
+      { connected: new Set<string>(), read: new Set<string>() },
+    ])
+  );
+  for (const { app, type, id, actions } of rows) {
+    const of = granted.get(appIdSchema.parse(app));
     if (type === "connection") {
-      connectionIds.add(id);
+      of?.connected.add(id);
     } else if (actionsSchema.parse(JSON.parse(actions)).includes("read")) {
-      collectionIds.add(id);
+      of?.read.add(id);
     }
   }
-  const [connections, readable] = await Promise.all([
-    connectionIds.size === 0 ? [] : ownersOf(env, [...connectionIds]),
-    collectionIds.size === 0 ? [] : accessOf(env, [...collectionIds]),
+  const connectionIds = [
+    ...new Set(
+      [...granted.values()].flatMap(({ connected }) => [...connected])
+    ),
+  ];
+  const collectionIds = [
+    ...new Set([...granted.values()].flatMap(({ read }) => [...read])),
+  ];
+  const [owners, readable] = await Promise.all([
+    connectionIds.length === 0 ? [] : ownersOf(env, connectionIds),
+    collectionIds.length === 0 ? [] : accessOf(env, collectionIds),
   ]);
-  const resolved = new Set([
-    ...connections.map(({ id }) => sourceId("connection", id)),
-    ...readable.map(({ id }) => sourceId("collection", id)),
-  ]);
-  const unresolved = [
-    ...[...connectionIds].map((id) => sourceId("connection", id)),
-    ...[...collectionIds].map((id) => sourceId("collection", id)),
-  ].filter((id) => !resolved.has(id));
-  return { connections, collections: readable, unresolved };
+  const ownerOf = new Map(owners.map((owner) => [owner.id, owner]));
+  const accessById = new Map(readable.map((access) => [access.id, access]));
+  return new Map(
+    [...granted].map(([app, { connected, read }]) => {
+      const sources: AppSources = {
+        connections: [],
+        collections: [],
+        unresolved: [],
+      };
+      for (const id of connected) {
+        const owner = ownerOf.get(id);
+        if (owner === undefined) {
+          sources.unresolved.push(sourceId("connection", id));
+        } else {
+          sources.connections.push(owner);
+        }
+      }
+      for (const id of read) {
+        const access = accessById.get(id);
+        if (access === undefined) {
+          sources.unresolved.push(sourceId("collection", id));
+        } else {
+          sources.collections.push(access);
+        }
+      }
+      return [app, sources];
+    })
+  );
+};
+
+/** The sources `app` may have read, as they are now. */
+export const sourcesOf = async (env: Env, app: AppId): Promise<AppSources> => {
+  const sources = await sourcesOfApps(env, [app]);
+  return (
+    sources.get(app) ?? { connections: [], collections: [], unresolved: [] }
+  );
 };
 
 /** Whether an App has read from anything at all. */
