@@ -135,10 +135,10 @@ export const allowedCollections = async (
   return (
     and(
       inList(collections.id, granted),
-      // A personal collection is read only in its owner's own context, and
-      // no context is one yet: an App is shared, and workspaces have no
-      // owner. Once a workspace has one, allow its owner's personal
-      // collections in its chats here.
+      // A personal collection is never read under a grant: an App is
+      // shared, and a grant isn't the person's own. What an agent reads of
+      // its person's own collection (their USER.md) it reads as memory,
+      // through `readableForPerson`.
       ne(collections.access, "me"),
       readableBy(db, {
         userId: authority.onBehalfOf,

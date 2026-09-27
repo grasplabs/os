@@ -235,24 +235,33 @@ const findFiles = async (
 /**
  * Assembled memory by the versions of its files and their limits.
  * Versions never change, so an entry is right for as long as it is kept,
- * and a new version of any file is a new key. Per isolate, kept to the
- * latest {@link cacheMaxEntries}.
+ * and a new version of any file is a new key. Per isolate, most recently
+ * used last, kept to {@link cacheMaxCharacters} of text in all: a few MB
+ * of an isolate's 128 MB, however large the limits are set.
  */
 const assembled = new Map<string, { files: MemoryFile[]; text: string }>();
 
-const cacheMaxEntries = 100;
+const cacheMaxCharacters = 4_000_000;
+
+let cachedCharacters = 0;
 
 const remember = (
   key: string,
   entry: { files: MemoryFile[]; text: string }
 ): void => {
-  assembled.delete(key);
+  const previous = assembled.get(key);
+  if (previous) {
+    assembled.delete(key);
+    cachedCharacters -= previous.text.length;
+  }
   assembled.set(key, entry);
-  for (const oldest of assembled.keys()) {
-    if (assembled.size <= cacheMaxEntries) {
+  cachedCharacters += entry.text.length;
+  for (const [oldest, { text }] of assembled) {
+    if (cachedCharacters <= cacheMaxCharacters) {
       break;
     }
     assembled.delete(oldest);
+    cachedCharacters -= text.length;
   }
 };
 
@@ -352,8 +361,8 @@ const assemble = async (
  * `context` (`memoryContextSchema`): the files that context gets, as they
  * are now, that exist and that the person it acts for may read, each cut
  * to its limit. Throws `knowledge.invalid` for a context that isn't one,
- * `permission.context_invalid` for an agent's context (a direct message or
- * a channel) that isn't an agent's, `permission.person_inactive` when the
+ * `permission.context_invalid` for anyone but an agent (outside a
+ * workflow step, which gets nothing), `permission.person_inactive` when the
  * person has left, and, for an App's AGENTS.md, `role.forbidden` when they
  * can't build Apps and `app.not_found` for one that doesn't exist. No
  * memory while `memory` (or `knowledge`) is switched off.
@@ -369,6 +378,12 @@ export const forContext = async (
     memoryContextSchema,
     input
   );
+  // Memory is an agent's: an App serves many people, and would carry one
+  // person's USER.md to the others. A workflow step, whoever runs it, gets
+  // none anyway.
+  if (authority.subject.type !== "agent" && context.type !== "workflow") {
+    throw contextInvalid();
+  }
   const switchedOn =
     featureEnabled(env, "knowledge") && featureEnabled(env, "memory");
   const wanted = switchedOn ? await wantedFor(authority, context) : [];
@@ -391,20 +406,28 @@ export const forContext = async (
   const sources = found.flatMap(({ collection }) =>
     collection === null ? [] : [collection]
   );
+  const app = found.find(({ documentId }) => documentId === null);
+  const appId = app && "appId" in app.wanted.at ? app.wanted.at.appId : null;
   // Before anyone gets the text: an agent that reads something sensitive
-  // is restricted first, and every read is recorded, cached or not.
+  // is restricted first, and every read is recorded, cached or not, an
+  // App's AGENTS.md too (by the App and its version, in its provenance).
   const provenance =
-    sources.length === 0
+    found.length === 0
       ? noProvenance
       : await noteProvenance(
           env,
           { type: "delegate", authority, context: work },
           {
             action: "knowledge.read",
-            documentIds: found.flatMap(({ documentId }) =>
-              documentId === null ? [] : [documentId]
+            documentIds: found.map(
+              ({ documentId }) => documentId ?? appId ?? ""
             ),
-            detail: { read: "memory", context: context.type },
+            detail: {
+              read: "memory",
+              context: context.type,
+              appId,
+              appVersion: app?.version ?? null,
+            },
           },
           ...sources
         );

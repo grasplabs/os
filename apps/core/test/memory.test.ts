@@ -259,8 +259,11 @@ describe("memory for a context", setUpTime, () => {
       Promise.all([
         outcome(forContext(env, asAgent, work, { type: "group" })),
         outcome(forContext(env, asAgent, work, { type: "own", extra: 1 })),
+        // An App serves many people: it never gets anyone's memory.
+        outcome(forContext(env, asApp, work, { type: "own" })),
         outcome(forContext(env, asApp, work, { type: "direct" })),
         outcome(forContext(env, asApp, work, { type: "channel" })),
+        outcome(forContext(env, asApp, work, { type: "workflow" })),
         // Only people who can read an App's code work on it.
         outcome(
           forContext(env, asAgent, work, { type: "own", appId: "some-app" })
@@ -276,6 +279,8 @@ describe("memory for a context", setUpTime, () => {
       "knowledge.invalid",
       "permission.context_invalid",
       "permission.context_invalid",
+      "permission.context_invalid",
+      "ok",
       "role.forbidden",
       "permission.person_inactive",
     ]);
@@ -357,14 +362,18 @@ describe("memory for a context", setUpTime, () => {
     const asAgent = actingFor(agent, admin.userId);
     await saveOver(admin, memory, "AGENTS.md", `Agents ${unique()}`);
     const saved = await userMemory(asAgent, work, "Prefers Dutch.");
+    const { id: appId } = await admin.api.apps.create({ name: "Desk" });
+    const appVersion = await release(admin, appId, { "AGENTS.md": "App" });
+    const onApp = { type: "own", appId } as const;
     let found: Memory | undefined;
     const events = await auditedDuring(async () => {
-      await forContext(env, asAgent, work, { type: "own" });
-      found = await forContext(env, asAgent, work, { type: "own" });
+      await forContext(env, asAgent, work, onApp);
+      found = await forContext(env, asAgent, work, onApp);
       // A workflow step reads nothing, so nothing is recorded.
       await forContext(env, asAgent, work, { type: "workflow" });
     });
-    const documentIds = found?.files.map(({ documentId }) => documentId) ?? [];
+    const documentIds =
+      found?.files.map(({ documentId }) => documentId ?? appId) ?? [];
     const read = {
       actor: {
         type: "agent",
@@ -373,10 +382,17 @@ describe("memory for a context", setUpTime, () => {
       },
       action: "knowledge.read",
       provenance: [memory, saved.collectionId, ...documentIds],
-      detail: { read: "memory", context: "own", sensitive: false },
+      detail: {
+        read: "memory",
+        context: "own",
+        appId,
+        appVersion,
+        sensitive: false,
+      },
     };
     expect({
-      documentIds: documentIds.includes(saved.id),
+      documentIds:
+        documentIds.includes(saved.id) && documentIds.includes(appId),
       events: events.map(({ actor, action, provenance, detail }) => ({
         actor,
         action,
