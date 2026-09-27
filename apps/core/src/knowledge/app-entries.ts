@@ -46,6 +46,14 @@ export const appsCollectionId: CollectionId = collectionIdSchema.parse("apps");
 /** Where the entry of the App `appId` is in the Apps collection. */
 export const appEntryPath = (appId: string): string => `${appId}/AGENTS.md`;
 
+/** The App whose entry is at `path`, or `undefined` if it's no entry's. */
+export const appOfEntry = (path: string): string | undefined => {
+  const [appId, file, ...rest] = path.split("/");
+  const isEntry =
+    file === "AGENTS.md" && rest.length === 0 && appId !== undefined;
+  return isEntry && appId !== "" ? appId : undefined;
+};
+
 /** What a reader may read. */
 export interface Allowed {
   /** The collections they may read, as a condition on `collections`. */

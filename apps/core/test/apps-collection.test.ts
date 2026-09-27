@@ -2,6 +2,7 @@ import type { KnowledgeApi, KnowledgeTools } from "@grasp-os/shared/knowledge";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
+import { z } from "zod";
 
 import { indexApps } from "../src/knowledge/apps-collection.ts";
 import { release, requestGranted } from "./apps.ts";
@@ -604,6 +605,43 @@ describe("who finds an App", setUpTime, () => {
   });
 });
 
+/** A content purge of `word` from the document `id`. */
+const purgeOf = (id: string, word: string) => ({
+  type: "content" as const,
+  documentIds: [id],
+  terms: [word],
+  reason: "erasure_request" as const,
+});
+
+const readOnlySchema = z.object({
+  code: z.literal("knowledge.read_only"),
+  details: z.object({ issues: z.array(z.string()) }),
+});
+
+/** The issues `admin` preparing `input` was refused with, as read-only. */
+const purgeRefusal = async (
+  admin: Person,
+  input: ReturnType<typeof purgeOf>
+): Promise<string[]> =>
+  readOnlySchema.parse(await refusal(admin.knowledge.preparePurge(input)))
+    .details.issues;
+
+/** The version the entry of `app` is at. */
+const entryVersion = async (owner: Person, app: string): Promise<number> => {
+  const { currentVersion } = await entryOf(owner, app);
+  return currentVersion;
+};
+
+/** How many versions of the document `id` hold `word`. */
+const versionsHolding = async (id: string, word: string): Promise<number> => {
+  const { results } = await env.KNOWLEDGE.prepare(
+    "SELECT text FROM versions WHERE document_id = ?"
+  )
+    .bind(id)
+    .all<{ text: string }>();
+  return results.filter(({ text }) => text.includes(word)).length;
+};
+
 describe("read-only", setUpTime, () => {
   it("refuses saves and restores in the Apps collection, an admin's too, and purges until the App has a version without the term", async () => {
     const admin = await personOf("admin");
@@ -644,46 +682,77 @@ describe("read-only", setUpTime, () => {
         "knowledge.read_only",
       ]);
     }
-    // While the entry holds the term, a purge would last only until the
-    // next indexing made it again from the App's AGENTS.md, which the
-    // purge can't reach.
-    const input = {
-      type: "content" as const,
-      documentIds: [id],
-      terms: [word],
-      reason: "erasure_request" as const,
-    };
-    await expect(
-      refusal(admin.knowledge.preparePurge(input))
-    ).resolves.toMatchObject({
-      code: "knowledge.read_only",
-      details: {
-        issues: [
-          `documentIds: document ${id} is an App's entry in the Apps collection, made from the App's AGENTS.md, and still holds a term: publish a new version of the App without it, then purge`,
-        ],
-      },
+    // While the App holds the term, a purge would last only until the next
+    // indexing made the entry again from the App, which the purge can't
+    // reach.
+    const input = purgeOf(id, word);
+    const inAgentsMd = `documentIds: document ${id} is an App's entry in the Apps collection, made from the App itself: a term is in the App's AGENTS.md: publish a version without it; then purge`;
+    expect({
+      issues: await purgeRefusal(admin, input),
+      entry: await entryVersion(owner, app.id),
+      found: await entriesFound(owner.knowledge, word),
+    }).toStrictEqual({
+      issues: [inAgentsMd],
+      entry: 1,
+      found: [entryPath(app.id)],
     });
-    await expect(entryOf(owner, app.id)).resolves.toMatchObject({
-      currentVersion: 1,
-    });
-    await expect(entriesFound(owner.knowledge, word)).resolves.toStrictEqual([
-      entryPath(app.id),
-    ]);
 
-    // Once a version of the App leaves it out, the purge rewrites the
+    // Indexing lags: the entry is of a clean version still, but the App's
+    // current version holds the term again, which the next indexing writes.
+    await release(owner, app.id, { "AGENTS.md": agentsMd(term()) });
+    await withIndexingOff(owner, async (api) => {
+      await release({ api }, app.id, { "AGENTS.md": agentsMd(word) });
+    });
+    expect({
+      entry: await entryVersion(owner, app.id),
+      issues: await purgeRefusal(admin, input),
+    }).toStrictEqual({
+      entry: 2,
+      issues: [inAgentsMd],
+    });
+
+    // Once the App's current version leaves it out, the purge rewrites the
     // entry's history.
     await release(owner, app.id, { "AGENTS.md": agentsMd(term()) });
     const plan = await admin.knowledge.preparePurge(input);
     const result = await admin.knowledge.purge(input, plan.token);
-    const { results } = await env.KNOWLEDGE.prepare(
-      "SELECT text FROM versions WHERE document_id = ?"
-    )
-      .bind(id)
-      .all<{ text: string }>();
     expect({
       planned: plan.versions,
       purged: result.versions,
-      holding: results.filter(({ text }) => text.includes(word)).length,
+      holding: await versionsHolding(id, word),
     }).toStrictEqual({ planned: 1, purged: 1, holding: 0 });
+  });
+
+  it("refuses to purge an App's entry while the App's name holds the term, until it is changed, and while the App can't be read", async () => {
+    const admin = await personOf("admin");
+    const owner = await personOf("builder");
+    const word = term();
+    const { id: appId } = await owner.api.apps.create({
+      name: `Leave ${word}`,
+      description: "Leave requests, from request to approval.",
+    });
+    await release(owner, appId, { "AGENTS.md": agentsMd(term()) });
+    const { id } = await entryOf(owner, appId);
+    const input = purgeOf(id, word);
+    await expect(purgeRefusal(admin, input)).resolves.toStrictEqual([
+      `documentIds: document ${id} is an App's entry in the Apps collection, made from the App itself: a term is in the App's name or description: change it; then purge`,
+    ]);
+
+    // No API renames an App yet: the name changes where the App keeps it.
+    await env.DB.prepare("UPDATE apps SET name = ? WHERE id = ?")
+      .bind("Leave requests", appId)
+      .run();
+    const plan = await admin.knowledge.preparePurge(input);
+    await admin.knowledge.purge(input, plan.token);
+    await expect(versionsHolding(id, word)).resolves.toBe(0);
+
+    // An App whose current version can't be read can't be checked: the
+    // purge is refused rather than trusted.
+    await env.DB.prepare("UPDATE apps SET current_version = ? WHERE id = ?")
+      .bind(999, appId)
+      .run();
+    await expect(purgeRefusal(admin, input)).resolves.toStrictEqual([
+      `documentIds: document ${id} is an App's entry in the Apps collection, made from the App itself: the App or its current version can't be read, so it can't be checked for the terms; try again later`,
+    ]);
   });
 });

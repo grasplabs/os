@@ -712,10 +712,10 @@ export interface KnowledgeApi {
   /**
    * What a purge would remove, and a token to confirm it with. Admins
    * only, whatever the collection, but for the Grasp skills, the
-   * release's text, and an App's entry in the Apps collection while its
-   * current version holds a term (`knowledge.read_only`, saying why): the
-   * entry comes from the App's AGENTS.md, so publish a new version of the
-   * App without it, then purge. Nothing changes yet.
+   * release's text, and an App's entry in the Apps collection while the
+   * App holds a term (`knowledge.read_only`, saying where): the entry is
+   * made from the App's name, description and current version's
+   * AGENTS.md, so change the App first, then purge. Nothing changes yet.
    */
   preparePurge: (input: PurgeInput) => Promise<PurgePlan>;
   /**

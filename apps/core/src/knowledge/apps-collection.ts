@@ -27,11 +27,11 @@ import { appMemoryPath } from "./memory-files.ts";
 // which every save and restore refuses (collections.ts
 // `requireWritable`). The indexer's writes go through the save pipeline,
 // as `system`, so each is a version with its audit event. A purge naming
-// an entry is refused while the entry's current version holds a term
-// (purge.ts `requireSavable`): the next indexing would make it again from
-// the App's own AGENTS.md, which lives in the App's versions, out of a
-// purge's reach. Once a new version of the App leaves the term out, the
-// purge rewrites the entry's history like any document's.
+// an entry is refused while what indexing would write now (`entryNow`:
+// the App's name, description and current version's AGENTS.md) holds a
+// term (purge.ts `requireSavable`): the next indexing would put it back,
+// from the App itself, out of a purge's reach. Once the App no longer
+// holds it, the purge rewrites the entry's history like any document's.
 //
 // The App registry is in the core database and the collection in
 // Knowledge's, so no batch holds both. Making a version current indexes
@@ -96,6 +96,55 @@ interface IndexedApp {
 const entryText = (app: IndexedApp, body: string): string =>
   `---\n${stringify({ title: app.name, description: app.description, app: app.id })}---\n${body}`;
 
+/** The App `appId`, unless it isn't in use (a pending copy). */
+const appInUse = async (env: Env, appId: string) =>
+  await drizzle(env.DB)
+    .select({
+      id: apps.id,
+      name: apps.name,
+      description: apps.description,
+      currentVersion: apps.currentVersion,
+    })
+    .from(apps)
+    .where(and(eq(apps.id, appId), isNull(apps.pendingSince)))
+    .get();
+
+/** The AGENTS.md of version `version` of the App `appId`, as indexed. */
+const agentsOf = async (
+  env: Env,
+  appId: string,
+  version: number
+): Promise<string> => {
+  const files = await versionFiles(env, appIdSchema.parse(appId), version);
+  return files[appMemoryPath] ?? "This App has no AGENTS.md.";
+};
+
+/**
+ * What indexing would write for the App `appId` now: its entry's text,
+ * as `entryText` makes it from the App's name and description and its
+ * current version's AGENTS.md, and those parts. `undefined` when the App
+ * isn't in use or has no current version. Throws what failed to read.
+ */
+export const entryNow = async (
+  env: Env,
+  appId: string
+): Promise<
+  | { text: string; name: string; description: string; agents: string }
+  | undefined
+> => {
+  const app = await appInUse(env, appId);
+  if (app === undefined || app.currentVersion === null) {
+    return undefined;
+  }
+  const agents = await agentsOf(env, appId, app.currentVersion);
+  return {
+    text: entryText(app, agents),
+    name: app.name,
+    description: app.description,
+    agents,
+  };
+};
+
 /** Sets the version the App's entry holds, in the entry's batch. */
 const noteVersion = (
   db: DrizzleD1Database,
@@ -149,25 +198,12 @@ const indexApp = async (env: Env, appId: string): Promise<void> => {
         )
       ),
   ]);
-  const app = await drizzle(env.DB)
-    .select({
-      id: apps.id,
-      name: apps.name,
-      description: apps.description,
-      currentVersion: apps.currentVersion,
-    })
-    .from(apps)
-    .where(and(eq(apps.id, appId), isNull(apps.pendingSince)))
-    .get();
+  const app = await appInUse(env, appId);
   const version = app?.currentVersion ?? null;
   if (app === undefined || version === null || noted?.version === version) {
     return;
   }
-  const files = await versionFiles(env, appIdSchema.parse(appId), version);
-  const text = entryText(
-    app,
-    files[appMemoryPath] ?? "This App has no AGENTS.md."
-  );
+  const text = entryText(app, await agentsOf(env, appId, version));
   const ifVersion = stored?.version ?? 0;
   if (stored?.text === text) {
     // The same text: only the version it holds, while it is as read.

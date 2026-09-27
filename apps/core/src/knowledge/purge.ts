@@ -29,6 +29,8 @@ import {
 } from "../db/knowledge/schema.ts";
 import { derivedHmacKey } from "../derived-keys.ts";
 import { requireFeature } from "../features.ts";
+import { appOfEntry } from "./app-entries.ts";
+import { entryNow } from "./apps-collection.ts";
 import type { CollectionRow } from "./collections.ts";
 import { checkedText, personWriter, writeVersion } from "./documents.ts";
 import type { DocumentRow } from "./documents.ts";
@@ -75,12 +77,13 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 // any text, and then names no document), a snapshot's frozen workflow
 // paths (left as they are, and not counted: the snapshot must name
 // versions the Playbook has), the Grasp skills (the release's text,
-// which the next sync puts back: a purge naming one is refused), an App's
-// own AGENTS.md (in the App's versions: a purge naming the App's entry in
-// the Apps collection is refused while the entry's current version holds
-// a term, which the next indexing would put back; once the App has a
-// version without it, the purge rewrites the entry's history, until the
-// App is set back to a version that holds it), collection names and
+// which the next sync puts back: a purge naming one is refused), the App
+// itself (its name, description and versions' AGENTS.md: a purge naming
+// the App's entry in the Apps collection is refused while what indexing
+// would write now holds a term, or when the App can't be read to tell;
+// once the App no longer holds it, the purge rewrites the entry's
+// history, until the App is set back to a version that holds it or given
+// it again), collection names and
 // descriptions, other documents that quote the text, a term split by
 // Markdown or a line break, a term spelled otherwise (a variant, an
 // accent left out or encoded otherwise), a term joined to more of a word
@@ -585,15 +588,67 @@ const versionOf = async (
     .get();
 
 /**
+ * Refuses with `knowledge.read_only` a purge of an App's entry while what
+ * indexing would write now (`entryNow`) holds a term, saying where: the
+ * next indexing (a version made current, the cron catching up) makes the
+ * entry from the App itself, out of a purge's reach, and would put it
+ * back, even when the entry is still of an older version without it.
+ * Refuses too, failing closed, when the App or its current version can't
+ * be read.
+ */
+const requireIndexedWithout = async (
+  env: Env,
+  document: DocumentRow,
+  matcher: Matcher
+): Promise<void> => {
+  const refuse = (why: string) =>
+    knowledgeErrors.create("knowledge.read_only", {
+      issues: [
+        `documentIds: document ${document.id} is an App's entry in the Apps collection, made from the App itself: ${why}`,
+      ],
+    });
+  const appId = appOfEntry(document.path);
+  let now: Awaited<ReturnType<typeof entryNow>>;
+  try {
+    now = appId === undefined ? undefined : await entryNow(env, appId);
+  } catch (error) {
+    log.error("knowledge.purge.app_unreadable", {
+      documentId: document.id,
+      ...errorFields(error),
+    });
+    now = undefined;
+  }
+  if (now === undefined) {
+    throw refuse(
+      "the App or its current version can't be read, so it can't be checked for the terms; try again later"
+    );
+  }
+  if (without(now.text, matcher) === now.text) {
+    return;
+  }
+  const holds = (text: string) => without(text, matcher) !== text;
+  const where = [
+    ...(holds(now.agents)
+      ? ["a term is in the App's AGENTS.md: publish a version without it"]
+      : []),
+    ...(holds(now.name) || holds(now.description)
+      ? ["a term is in the App's name or description: change it"]
+      : []),
+  ];
+  throw refuse(
+    `${where.length > 0 ? where.join("; ") : "a term is in what indexing writes for it"}; then purge`
+  );
+};
+
+/**
  * Refuses with `knowledge.invalid` unless the current version of `named`,
  * with the terms removed, can be saved as its next version: its
  * frontmatter still fits its type, and it is within a document's limits
  * and a memory file's. Checked for every document named, whether or not
  * its current text holds a term (a purge saves it again when an earlier
  * version does), before a purge changes anything, so one that can't be
- * finished changes nothing. Refuses with `knowledge.read_only` an App's
- * entry whose current version holds a term. Returns the text it would
- * save.
+ * finished changes nothing. Refuses an App's entry while the App holds a
+ * term (`requireIndexedWithout`). Returns the text it would save.
  */
 const requireSavable = async (
   env: Env,
@@ -605,18 +660,10 @@ const requireSavable = async (
   if (current === undefined) {
     return undefined;
   }
-  const text = rewritten(current, matcher)?.text ?? current.text;
-  // An App's entry is made from the App's own AGENTS.md, out of a purge's
-  // reach: while its current version holds a term, the next indexing
-  // (a version made current, the cron healing the entry) would put it
-  // back. Once the App has a version without it, the history is purged.
-  if (collection.source === "apps" && text !== current.text) {
-    throw knowledgeErrors.create("knowledge.read_only", {
-      issues: [
-        `documentIds: document ${document.id} is an App's entry in the Apps collection, made from the App's AGENTS.md, and still holds a term: publish a new version of the App without it, then purge`,
-      ],
-    });
+  if (collection.source === "apps") {
+    await requireIndexedWithout(env, document, matcher);
   }
+  const text = rewritten(current, matcher)?.text ?? current.text;
   try {
     await checkedText(env, collection, document.path, text);
   } catch (error) {
