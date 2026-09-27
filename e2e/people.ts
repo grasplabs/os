@@ -42,15 +42,26 @@ const quoted = (value: string): string => `'${value.replaceAll("'", "''")}'`;
 const busyAttempts = 5;
 const firstBusyWaitMs = 200;
 
+/**
+ * What wrangler prints when another connection held the file: SQLite's
+ * "database is locked: SQLITE_BUSY", also when its runtime can't start
+ * while another process recovers the file, or workerd's opaque "internal
+ * error; reference = …" when the batch fails under the same contention.
+ * Any other error, a constraint failing say, is the test's to see.
+ */
+const busyErrors = ["SQLITE_BUSY", "internal error; reference ="];
+
 const isBusy = (error: unknown): boolean =>
   error instanceof Error &&
   "stderr" in error &&
-  String(error.stderr).includes("SQLITE_BUSY");
+  busyErrors.some((text) => String(error.stderr).includes(text));
 
 /**
  * Runs SQL on core's local database, the one the stack's dev server uses.
- * Wrangler runs the statements as one batch, which SQLite undoes whole
- * when another connection holds the lock, so a busy batch is tried again.
+ * Wrangler runs the statements as one batch in one transaction, which
+ * SQLite undoes whole when it can't finish, so a busy batch is tried
+ * again. Should one ever commit and still report failure, trying it again
+ * inserts the same keys and fails on them, rather than writing twice.
  */
 const execute = async (sql: string): Promise<void> => {
   for (let attempt = 1; ; attempt += 1) {
