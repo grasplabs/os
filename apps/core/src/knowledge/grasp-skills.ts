@@ -29,7 +29,9 @@ import type { CollectionRow } from "./collections.ts";
 import { personWriter, readableDocument, writeVersion } from "./documents.ts";
 import type { Writer } from "./documents.ts";
 
-// Skills in two collections, both in every agent's catalog:
+// Skills in two collections, both in every person's catalog, and in an
+// agent's once it is granted read of each, as for any collection (agents
+// start with access to nothing):
 //
 // - the Grasp skills: how Grasp works (a baseline, a workflow, the board
 //   page), in apps/core/skills/, bundled with each release as text, and
