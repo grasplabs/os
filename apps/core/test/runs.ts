@@ -49,6 +49,30 @@ export const finished = async (
   );
 };
 
+/**
+ * Once the engine reports that the run began its sleep `step`, from the
+ * run's own event stream (Workflows' `subscribe`), which the engine
+ * writes as the sleep begins. The local engine's status says `running`
+ * while a run sleeps, so the status can't tell.
+ */
+export const sleeping = async (run: string, step: string): Promise<void> => {
+  const instance = await env.WORKFLOWS.get(run);
+  using events = await instance.subscribe({ filter: ["sleep_started"] });
+  await vi.waitFor(
+    async () => {
+      const { done, value } = await events.next();
+      if (done === true) {
+        throw new Error(`Run ${run} ended before it slept in ${step}`);
+      }
+      // The engine names a sleep after its step, with a count behind.
+      expect(
+        value.type === "sleep_started" && value.stepName.startsWith(step)
+      ).toBeTruthy();
+    },
+    { timeout: 10_000, interval: 100 }
+  );
+};
+
 /** Once the run's step `step` has completed, as the audit log has it. */
 export const stepDone = async (run: string, step: string): Promise<void> => {
   await vi.waitFor(

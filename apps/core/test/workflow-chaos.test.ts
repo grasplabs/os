@@ -15,6 +15,7 @@ import {
   finished,
   liveStatus,
   resumed,
+  sleeping,
   stepDone,
   stopped,
 } from "./runs.ts";
@@ -328,10 +329,9 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       )
     );
     const run = await builder.api.workflows.start(app, "sleeper");
-    await stepDone(run.id, "before");
-    // Stopped past its first step, with nothing between it and the day's
-    // sleep: a stop that lands before the sleep begins ends the sleep's
-    // first moment. `asleep` shows the sleep hadn't ended.
+    // Stopped once the engine says the run is asleep; `asleep` shows the
+    // sleep hadn't ended.
+    await sleeping(run.id, "nap");
     await stopped(run.id);
     const asleep = await hitsOf(app, builder.userId, "after");
     // The sleep is cut short while the run is stopped (whether the engine
@@ -580,16 +580,20 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     const run = await admin.api.workflows.start(app, "patient");
     // The first attempt timed out with its call held at the server, and a
     // retry has come and found it still out.
-    await vi.waitFor(
-      async () => {
-        await expect(mail.holding()).resolves.toBeTruthy();
-        await expect(
-          hitsOf(app, admin.userId, "send")
-        ).resolves.toBeGreaterThan(1);
-      },
-      { timeout: 15_000, interval: 100 }
-    );
-    await mail.release();
+    try {
+      await vi.waitFor(
+        async () => {
+          await expect(mail.holding()).resolves.toBeTruthy();
+          await expect(
+            hitsOf(app, admin.userId, "send")
+          ).resolves.toBeGreaterThan(1);
+        },
+        { timeout: 15_000, interval: 100 }
+      );
+    } finally {
+      // Released whatever the wait saw, so no call stays held.
+      await mail.release();
+    }
     await finished(run.id);
 
     expect({
