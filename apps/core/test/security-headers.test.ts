@@ -1,4 +1,5 @@
 import { routerSecretHeader } from "@grasp-os/shared/router";
+import { createExecutionContext } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -103,7 +104,8 @@ describe("security headers on the frontend", () => {
     const local = { ...env, ROUTER_SECRET: "", DEV_SKIP_ROUTER_SECRET: "true" };
     const response = await worker.fetch(
       new Request("http://localhost:8787/"),
-      local
+      local,
+      createExecutionContext()
     );
     expect(response.status).toBe(200);
     expect(response.headers.has("strict-transport-security")).toBeFalsy();

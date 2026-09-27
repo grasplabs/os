@@ -1,5 +1,6 @@
 import { errorPayloadSchema } from "@grasp-os/shared/errors";
 import { routerSecretHeader } from "@grasp-os/shared/router";
+import { createExecutionContext } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -89,7 +90,8 @@ describe("router secret", () => {
         async (presented) =>
           await worker.fetch(
             presenting("https://core/health", presented),
-            unconfigured
+            unconfigured,
+            createExecutionContext()
           )
       )
     );
@@ -102,13 +104,15 @@ describe("router secret", () => {
     const local = { ...env, ROUTER_SECRET: "", DEV_SKIP_ROUTER_SECRET: "true" };
     const fromHere = await worker.fetch(
       new Request("http://localhost:8787/health"),
-      local
+      local,
+      createExecutionContext()
     );
     expect(fromHere.status).toBe(200);
 
     const fromElsewhere = await worker.fetch(
       new Request("https://core.example.com/health"),
-      local
+      local,
+      createExecutionContext()
     );
     expect(fromElsewhere.status).toBe(403);
   });
@@ -120,7 +124,8 @@ describe("router secret", () => {
         const local = { ...env, DEV_SKIP_ROUTER_SECRET: flag };
         return await worker.fetch(
           new Request("http://localhost:8787/health"),
-          local
+          local,
+          createExecutionContext()
         );
       })
     );
@@ -138,7 +143,11 @@ describe("router secret", () => {
     const request = new Request("https://core/index.html", {
       headers: { [routerSecretHeader]: env.ROUTER_SECRET, accept: "text/html" },
     });
-    const response = await worker.fetch(request, { ...env, ASSETS: assets });
+    const response = await worker.fetch(
+      request,
+      { ...env, ASSETS: assets },
+      createExecutionContext()
+    );
 
     expect(response.status).toBe(200);
     expect(seen).toHaveLength(1);
@@ -189,7 +198,11 @@ describe("routing", () => {
       throw new Error("Bucket grasp-internal unreachable at /srv/assets.ts:12");
     });
     const request = presenting("https://core/", env.ROUTER_SECRET);
-    const response = await worker.fetch(request, { ...env, ASSETS: assets });
+    const response = await worker.fetch(
+      request,
+      { ...env, ASSETS: assets },
+      createExecutionContext()
+    );
 
     const body = await response.clone().text();
     expect(body).not.toContain("grasp-internal");

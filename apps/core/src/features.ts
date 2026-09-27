@@ -26,7 +26,9 @@ import { z } from "zod";
 // or asking a decision (`decisions`), and screens' calls on their App's
 // runs (`screen_workflows`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist, and
-// `improvement_signals` the daily signals and reading them.
+// `improvement_signals` the daily signals and reading them. `builtins`
+// moves installing what ships with the release (builtins.ts) from the
+// cron trigger to the first request.
 //
 // `workflows` and `decisions` never fail a run. Before each step, sleep
 // and wait, while `workflows` is off (or `decisions`, before a step that
@@ -126,7 +128,16 @@ export type Feature =
    * Improvement signals (signals.ts): computing them daily, and reading
    * them. While off, nothing is computed and nobody reads what was.
    */
-  | "improvement_signals";
+  | "improvement_signals"
+  /**
+   * What ships with the release, the Grasp skills, installed once per
+   * release on the first request (builtins.ts) instead of synced by the
+   * cron trigger every minute. Switched off, the cron trigger syncs them
+   * as before. Switch it on only once a release that has it is fully
+   * rolled out: a release from before it still syncs its own skills on
+   * the cron trigger, which the install would not undo.
+   */
+  | "builtins";
 
 // Names nobody knows (a flag since removed) are ignored, not an error.
 const featuresSchema = z.record(z.string(), z.boolean());

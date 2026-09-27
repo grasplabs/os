@@ -131,6 +131,7 @@ const platformBindingNames: ReadonlySet<string> = new Set([
   "AUDIT_LOG",
   "AUDIT_RETENTION_DAYS",
   "BETTER_AUTH_SECRET",
+  "BUILTINS",
   "CAPABILITY_SIGNING_KEY",
   "CAPABILITY_SIGNING_KEY_PREVIOUS",
   "COMPOSIO_API_KEY",
