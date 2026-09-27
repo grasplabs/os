@@ -135,5 +135,10 @@ jobs:
       # the new schema until the deploy after them replaces it.
       - if: ${{ !inputs.secrets-only }}
         run: vp run --filter @grasp-os/console db:migrate
+      # Console first, each on its own: the router's deploy needs the
+      # account's Secrets Store (scripts/wrangler-deploy.ts), and an account
+      # not set up for it yet mustn't hold back the console.
       - if: ${{ !inputs.secrets-only }}
-        run: vp run --filter @grasp-os/console --filter @grasp-os/router deploy
+        run: vp run --filter @grasp-os/console deploy
+      - if: ${{ !inputs.secrets-only }}
+        run: vp run --filter @grasp-os/router deploy

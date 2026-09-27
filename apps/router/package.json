@@ -6,8 +6,11 @@
   "type": "module",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "node ../../scripts/wrangler-deploy.ts",
     "typegen": "wrangler types --include-runtime=false"
+  },
+  "dependencies": {
+    "@grasp-os/shared": "workspace:*"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "catalog:",

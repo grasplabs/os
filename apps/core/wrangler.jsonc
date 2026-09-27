@@ -47,8 +47,9 @@
   // would delete them, as Wrangler deletes the vars it doesn't find here.
   "keep_vars": true,
   // Every secret core needs: deploys fail while one is unset, and local dev
-  // loads only these from .dev.vars. ROUTER_SECRET is shared with the router,
-  // which sends it on every request; while it rotates, core also accepts
+  // loads only these from .dev.vars. ROUTER_SECRET is the one the router
+  // sends on every request, which it derives from its key for this client
+  // (@grasp-os/shared/router); while it rotates, core also accepts
   // ROUTER_SECRET_PREVIOUS (optional, src/router-secret.ts).
   // BETTER_AUTH_SECRET signs session cookies
   // and encrypts sign-in state. CAPABILITY_SIGNING_KEY is shared with

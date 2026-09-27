@@ -385,6 +385,10 @@ importers:
         version: 4.136.0(@cloudflare/workers-types@5.20260921.1)(@types/node@26.6.2)
 
   apps/router:
+    dependencies:
+      '@grasp-os/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: 'catalog:'
