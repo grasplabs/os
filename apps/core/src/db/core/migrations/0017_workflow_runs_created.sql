@@ -1,1 +1,0 @@
-CREATE INDEX `workflow_runs_created_idx` ON `workflow_runs` (`created_at`,`id`);

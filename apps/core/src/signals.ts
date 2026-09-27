@@ -11,6 +11,7 @@ import type { ImprovementSignal, SignalKind } from "@grasp-os/shared/signals";
 import {
   and,
   asc,
+  count,
   desc,
   eq,
   gt,
@@ -32,6 +33,7 @@ import {
   workflowDecisions,
   workflowRuns,
 } from "./db/core/schema.ts";
+import { inList } from "./db/d1.ts";
 import { documents, versions } from "./db/knowledge/schema.ts";
 import { featureEnabled } from "./features.ts";
 import { parseFrontmatter } from "./knowledge/frontmatter.ts";
@@ -330,53 +332,55 @@ interface Started {
   appId: string;
   workflowId: string;
   runs: number;
-  /** Their IDs, so costs count only these runs. */
-  ids: Set<string>;
 }
 
-/** The runs of each App workflow started since `from`, a page at a time. */
+/** How many runs of each App workflow started since `from`. */
 const runsSince = async (
   db: DrizzleD1Database,
   from: Date
 ): Promise<Map<string, Started>> => {
-  const started = new Map<string, Started>();
-  await eachPage(
-    async (after: { id: string; createdAt: Date } | undefined) =>
-      await db
-        .select({
-          id: workflowRuns.id,
-          appId: workflowRuns.appId,
-          workflowId: workflowRuns.workflowId,
-          createdAt: workflowRuns.createdAt,
-        })
-        .from(workflowRuns)
-        .where(
-          and(
-            gte(workflowRuns.createdAt, from),
-            pastCursor(
-              workflowRuns.createdAt,
-              workflowRuns.id,
-              after && { at: after.createdAt, id: after.id },
-              "asc"
-            )
-          )
-        )
-        .orderBy(asc(workflowRuns.createdAt), asc(workflowRuns.id))
-        .limit(pageRows),
-    ({ id, appId, workflowId }) => {
-      const key = workflowKey(appId, workflowId);
-      const found = started.get(key) ?? {
-        appId,
-        workflowId,
-        runs: 0,
-        ids: new Set<string>(),
-      };
-      found.runs += 1;
-      found.ids.add(id);
-      started.set(key, found);
-    }
+  const rows = await db
+    .select({
+      appId: workflowRuns.appId,
+      workflowId: workflowRuns.workflowId,
+      runs: count(),
+    })
+    .from(workflowRuns)
+    .where(gte(workflowRuns.createdAt, from))
+    .groupBy(workflowRuns.appId, workflowRuns.workflowId);
+  return new Map(
+    rows.map((row) => [workflowKey(row.appId, row.workflowId), row])
   );
-  return started;
+};
+
+/**
+ * Of the runs `ids`, those started before `from`: looked up by ID, a page
+ * at a time. Only runs that made model calls in the window are asked
+ * about, which the audit tally holds already, so this holds no more.
+ */
+const startedBefore = async (
+  db: DrizzleD1Database,
+  from: Date,
+  ids: readonly string[]
+): Promise<Set<string>> => {
+  const before = new Set<string>();
+  for (let start = 0; start < ids.length; start += pageRows) {
+    // One page after another, so a large tally never floods D1.
+    // oxlint-disable-next-line no-await-in-loop
+    const found = await db
+      .select({ id: workflowRuns.id })
+      .from(workflowRuns)
+      .where(
+        and(
+          inList(workflowRuns.id, ids.slice(start, start + pageRows)),
+          lt(workflowRuns.createdAt, from)
+        )
+      );
+    for (const { id } of found) {
+      before.add(id);
+    }
+  }
+  return before;
 };
 
 /**
@@ -788,11 +792,12 @@ const minutesSaved = (
 const costSignals = (
   { costs }: AuditTotals,
   saved: ReadonlyMap<string, Saving>,
-  runs: ReadonlyMap<string, Started>
+  runs: ReadonlyMap<string, Started>,
+  before: ReadonlySet<string>
 ): SignalRow[] =>
-  [...runs].map(([key, { appId, workflowId, runs: started, ids }]) => {
+  [...runs].map(([key, { appId, workflowId, runs: started }]) => {
     const perRun = new Map(
-      [...(costs.get(key)?.perRun ?? [])].filter(([run]) => ids.has(run))
+      [...(costs.get(key)?.perRun ?? [])].filter(([run]) => !before.has(run))
     );
     const cost = [...perRun.values()].reduce((sum, amount) => sum + amount, 0);
     const costPerRun = cost / started;
@@ -876,11 +881,16 @@ const computeSignals = async (env: Env, now: Date): Promise<SignalRow[]> => {
     auditTotals(env, window),
     savings(env),
   ]);
+  const before = await startedBefore(
+    db,
+    from,
+    [...totals.costs.values()].flatMap(({ perRun }) => [...perRun.keys()])
+  );
   return [
     ...waiting,
     ...failing,
     ...corrections,
-    ...costSignals(totals, saved, runs),
+    ...costSignals(totals, saved, runs, before),
     ...unansweredSignals(totals),
   ];
 };

@@ -693,14 +693,21 @@ describe("improvement signals", () => {
     );
     const unlinked = await run("chat");
     // Started before the window, calling a model within it: neither the
-    // run nor its cost counts, and it's never the costliest.
-    const older = await seedRun(app, {
-      workflow: "invoices",
-      status: "running",
-      createdAt: ago(40 * dayMs),
-    });
+    // runs nor their cost count, and none is the costliest. More of them
+    // than one page of lookups holds.
+    const older = Array.from(
+      { length: 600 },
+      (_, index) => `older-${unique()}-${index}`
+    );
+    await env.DB.batch(
+      older.map((id) =>
+        env.DB.prepare(
+          "INSERT INTO workflow_runs (id, app_id, workflow_id, version, status, created_at) VALUES (?, ?, 'invoices', 1, 'running', ?)"
+        ).bind(id, app, ago(40 * dayMs).getTime())
+      )
+    );
     await logged(
-      modelCall(app, "invoices", older, 2),
+      ...older.map((id) => modelCall(app, "invoices", id, 2)),
       modelCall(app, "invoices", first, 0.5),
       modelCall(app, "invoices", second, 0.125),
       modelCall(app, "invoices", second, 0.125),
