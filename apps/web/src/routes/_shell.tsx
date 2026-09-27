@@ -3,12 +3,17 @@ import type { Identity } from "@grasp-os/shared/rpc";
 import { Button, buttonVariants } from "@grasp-os/ui/components/button";
 import {
   createFileRoute,
+  ErrorComponent,
   Link,
   Outlet,
   redirect,
+  useRouter,
+  useRouterState,
 } from "@tanstack/react-router";
+import type { ErrorComponentProps } from "@tanstack/react-router";
 
 import { loadCoreStatus, signOut } from "../core.ts";
+import { ErrorText } from "../error-text.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
 
 // The signed-in product: a nav of its sections beside the page. Everyone
@@ -102,11 +107,56 @@ const Shell = () => {
   );
 };
 
+/** Core failed or stayed out of reach while the shell asked who is in. */
+class CoreUnreachableError extends Error {
+  constructor() {
+    super("Grasp can't be reached right now.");
+    this.name = "CoreUnreachableError";
+  }
+}
+
+/**
+ * Says core can't be reached, with a way to ask again; any other error as
+ * the router shows it.
+ */
+const ShellError = ({ error }: ErrorComponentProps) => {
+  const router = useRouter();
+  const trying = useRouterState({ select: (state) => state.isLoading });
+  if (!(error instanceof CoreUnreachableError)) {
+    return <ErrorComponent error={error} />;
+  }
+  return (
+    <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
+      <h1 className="text-2xl font-medium">Grasp</h1>
+      {/* Gone while trying, so the alert is announced again if it fails. */}
+      {trying ? null : (
+        <ErrorText>
+          Grasp can&apos;t be reached right now. Try again in a moment.
+        </ErrorText>
+      )}
+      <Button
+        variant="outline"
+        disabled={trying}
+        onClick={() => {
+          void router.invalidate();
+        }}
+      >
+        {trying ? "Trying again…" : "Try again"}
+      </Button>
+    </main>
+  );
+};
+
 export const Route = createFileRoute("/_shell")({
   // Before any page's loader, so each runs for someone signed in, with
   // their identity in its context.
   beforeLoad: async ({ location }) => {
-    const { identity } = await loadCoreStatus();
+    const { connected, identity } = await loadCoreStatus();
+    if (!connected) {
+      // Nobody can tell who is signed in: sending them to sign in again
+      // would say they were signed out.
+      throw new CoreUnreachableError();
+    }
     if (identity === undefined) {
       // oxlint-disable-next-line typescript/only-throw-error -- the router redirects on a thrown redirect
       throw redirect({
@@ -121,4 +171,5 @@ export const Route = createFileRoute("/_shell")({
     return { identity };
   },
   component: Shell,
+  errorComponent: ShellError,
 });

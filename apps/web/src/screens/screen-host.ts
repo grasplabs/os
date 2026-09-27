@@ -249,8 +249,9 @@ export const runScreen = (
 
   const start = async (): Promise<void> => {
     const ready = loadFrame(frame, stopped.signal);
-    const session = await link.session();
-    const bundle = await session.screens.open(app, screen);
+    const bundle = await link.retrying(
+      async (session) => await session.screens.open(app, screen)
+    );
     await ready;
     if (stopped.signal.aborted) {
       return;

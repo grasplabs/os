@@ -3,7 +3,7 @@
 // main.tsx does. Importing this first keeps Zod jitless before any of them
 // builds a schema, whichever chunk they land in.
 import "./zod-jitless.ts";
-import { authErrors } from "@grasp-os/shared/errors";
+import { authErrors, internalErrors } from "@grasp-os/shared/errors";
 import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";
 import type { RpcStub } from "capnweb";
@@ -52,6 +52,61 @@ export const withTimeout = async <T>(
   }
 };
 
+/** Resolves after `ms`. */
+export const wait = async (ms: number): Promise<void> => {
+  // oxlint-disable-next-line promise/avoid-new -- setTimeout has no promise form in browsers
+  await new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+};
+
+/**
+ * Whether `error` may pass when core is asked again: core out of reach or
+ * failing, never a refusal it meant. Told by the error's shape alone, so a
+ * code from a family this chunk hasn't loaded still counts as an answer.
+ * A connection that failed or broke rejects with an error that has no
+ * string `code` (a browser sees a refused upgrade, even a 500, only as a
+ * closed socket), and anything core didn't plan for arrives as
+ * `internal.unexpected`, such as a busy database. Any other coded error
+ * (nobody signed in, not found, forbidden) is core's answer.
+ */
+export const isTransient = (error: unknown): boolean => {
+  if (internalErrors.codeOf(error) !== undefined) {
+    return true;
+  }
+  const coded =
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string";
+  return !coded;
+};
+
+/**
+ * Runs `attempt`, and again after each of `delaysMs` for as long as it
+ * fails in a way `retries` (`isTransient` unless given) says may pass.
+ * Rejects with the last failure once there is no delay left.
+ */
+export const retrying = async <T>(
+  attempt: () => Promise<T>,
+  delaysMs: readonly number[],
+  retries: (error: unknown) => boolean = isTransient
+): Promise<T> => {
+  for (const delay of delaysMs) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- one attempt at a time
+      return await attempt();
+    } catch (error) {
+      if (!retries(error)) {
+        throw error;
+      }
+    }
+    // oxlint-disable-next-line no-await-in-loop -- backing off between attempts
+    await wait(delay);
+  }
+  return await attempt();
+};
+
 /** Who is signed in on this connection, or `undefined` for nobody. */
 const signedInAs = async (
   core: RpcStub<CoreApi>
@@ -93,22 +148,39 @@ export interface CoreStatus {
   identity?: Identity;
 }
 
-/**
- * Asks core over RPC, within a few seconds, whether it answers, how people
- * sign in here and who is signed in. Opens a session just for this; a
- * hanging connection counts as no answer.
- */
-export const loadCoreStatus = async (): Promise<CoreStatus> => {
+/** Asks core once, on a connection opened just for it. */
+const askCoreStatus = async (): Promise<CoreStatus> => {
   const core = connectCore();
   try {
     const [pong, signInOptions, identity] = await withTimeout(
       Promise.all([core.ping(), core.signInOptions(), signedInAs(core)])
     );
     return { connected: pong === "pong", signInOptions, identity };
-  } catch {
-    return { connected: false, signInOptions: [] };
   } finally {
     core[Symbol.dispose]();
+  }
+};
+
+/** How long to wait before asking core for its status again, each time. */
+const statusRetryMs = [250, 500, 1000] as const;
+
+/**
+ * Asks core over RPC whether it answers, how people sign in here and who is
+ * signed in. Core failing or out of reach is asked again a few times, with
+ * a growing pause, before it counts as unreachable: one failed request must
+ * not look like nobody being signed in. A connection that hangs past the
+ * timeout counts as unreachable at once; it has had its few seconds.
+ */
+export const loadCoreStatus = async (): Promise<CoreStatus> => {
+  try {
+    return await retrying(
+      askCoreStatus,
+      statusRetryMs,
+      (failure) =>
+        isTransient(failure) && !(failure instanceof CoreTimeoutError)
+    );
+  } catch {
+    return { connected: false, signInOptions: [] };
   }
 };
 

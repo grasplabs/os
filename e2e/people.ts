@@ -126,6 +126,7 @@ const cast = {
   memberActions: { admin: "admin", one: "user", two: "user" },
   roleChange: { admin: "admin", one: "user" },
   membersUnreachable: { admin: "admin" },
+  membersRecover: { admin: "admin" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;

@@ -1,6 +1,6 @@
 import { authErrors } from "@grasp-os/shared/errors";
 
-import { connectCore } from "../core.ts";
+import { connectCore, isTransient, retrying, wait } from "../core.ts";
 
 /** A signed-in session's API, as a connection to core gives it. */
 type Session = Awaited<
@@ -10,12 +10,19 @@ type Session = Awaited<
 /** How long to wait before connecting again, at first and at most. */
 const reconnectMs = { first: 1000, most: 30_000 };
 
-const wait = async (ms: number): Promise<void> => {
-  // oxlint-disable-next-line promise/avoid-new -- setTimeout has no promise form in browsers
-  await new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
-};
+/**
+ * The pauses before trying again what a page needs to start: its first
+ * connection, or its first call. The same growing pauses as reconnecting,
+ * but only a few, so a page whose core stays out of reach says so.
+ */
+const startRetryMs = [
+  reconnectMs.first,
+  reconnectMs.first * 2,
+  reconnectMs.first * 4,
+] as const;
+
+const closedError = (): Error =>
+  new Error("The page closed its connection to core.");
 
 /** Waits for `promise` to settle, whichever way. */
 const settled = async (promise: Promise<unknown>): Promise<void> => {
@@ -41,12 +48,48 @@ export class CoreLink {
 
   constructor(onSignedOut: () => void) {
     this.#onSignedOut = onSignedOut;
-    this.#session = this.#connect();
+    // Core failing or out of reach is tried again on the first connection
+    // too, a few times: only a connection that worked reconnects when it
+    // breaks. A refusal, such as the session having ended, is core's answer.
+    this.#session = retrying(
+      async () => {
+        if (this.#closed) {
+          // Closed while waiting: a new connection would never be closed.
+          throw closedError();
+        }
+        return await this.#connect();
+      },
+      startRetryMs,
+      (failure) => !this.#closed && isTransient(failure)
+    );
+    void settled(this.#session);
   }
 
   /** The signed-in session, once connected. */
   async session(): Promise<Session> {
     return await this.#session;
+  }
+
+  /**
+   * Runs `run` on the signed-in session, and a few times again, with a
+   * growing pause, while it fails in a way that may pass: core failing, or
+   * the connection breaking. After a break, the next try waits for the new
+   * connection, and a connection that once worked reconnects for as long
+   * as it takes, so that wait has no bound. Not connecting at all fails at
+   * once: the first connection has tried again already.
+   */
+  async retrying<T>(run: (session: Session) => Promise<T>): Promise<T> {
+    let connected = false;
+    return await retrying(
+      async () => {
+        connected = false;
+        const session = await this.session();
+        connected = true;
+        return await run(session);
+      },
+      startRetryMs,
+      (failure) => connected && !this.#closed && isTransient(failure)
+    );
   }
 
   close(): void {
@@ -92,7 +135,7 @@ export class CoreLink {
       await wait(this.#delay);
       if (this.#closed) {
         // Closed while waiting: a new connection would never be closed.
-        throw new Error("The page closed its connection to core.");
+        throw closedError();
       }
       this.#delay = Math.min(this.#delay * 2, reconnectMs.most);
       try {

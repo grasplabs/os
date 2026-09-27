@@ -216,16 +216,23 @@ base(
   }
 );
 
-test("a screen subscribes again after its connection drops, trying one connection at a time", async ({
+test("a screen opens through core failing at first, subscribes again after its connection drops, and tries one connection at a time", async ({
   browser,
 }) => {
   const page = await pageOf(browser, one);
   let drop: (() => Promise<void>) | undefined;
   let dropped = false;
+  let connections = 0;
   let afterDrop = 0;
-  // After the drop, core is out of reach for the next attempt.
-  let refuse = 0;
+  // Core is out of reach for the first attempt, and again for the next
+  // attempt after the drop.
+  let refuse = 1;
+  // Core fails the first open, on whichever connection it comes, by
+  // closing that connection instead of passing the open on.
+  let failOpens = 1;
+  let failedOpens = 0;
   await page.routeWebSocket("**/rpc", async (socket) => {
+    connections += 1;
     if (dropped) {
       afterDrop += 1;
     }
@@ -234,7 +241,16 @@ test("a screen subscribes again after its connection drops, trying one connectio
       await socket.close();
       return;
     }
-    socket.connectToServer();
+    const server = socket.connectToServer();
+    socket.onMessage(async (message) => {
+      if (failOpens > 0 && String(message).includes('["screens","open"]')) {
+        failOpens -= 1;
+        failedOpens += 1;
+        await socket.close();
+        return;
+      }
+      server.send(message);
+    });
     drop = async () => {
       dropped = true;
       refuse = 1;
@@ -242,6 +258,11 @@ test("a screen subscribes again after its connection drops, trying one connectio
     };
   });
   const screen = await openScreen(page, app);
+  // The page opens no connection but the screen's own (this route has no
+  // shell): the refused first attempt, the one whose open failed, and the
+  // one the screen opened on.
+  expect(failedOpens).toBe(1);
+  expect(connections).toBe(3);
   await drop?.();
 
   // Only a new subscription, on the page's new connection, can bring it.
