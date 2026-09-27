@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { auditProvenanceMaxItems } from "./audit.ts";
 import { defineErrorFamily } from "./errors.ts";
 import {
   collectionIdSchema,
@@ -11,7 +12,8 @@ import type { CollectionId, DocumentId } from "./ids.ts";
 // Knowledge: Markdown documents with typed frontmatter, in collections. A
 // save never overwrites: it adds a version, and names the version it was
 // edited from, so two people editing at once get a conflict instead of
-// losing a change.
+// losing a change. Only a purge rewrites versions: an admin erasing
+// personal data from all of them.
 
 /**
  * Who may read a collection: everyone in the organization, the members of
@@ -467,6 +469,122 @@ export interface KnowledgeTools {
 }
 
 /**
+ * Why personal data is purged. The audit log records it and can't be
+ * purged itself, so it's one of these, never free text that could name
+ * the person.
+ */
+export const purgeReasonSchema = z.enum([
+  "offboarding",
+  "erasure_request",
+  "other",
+]);
+export type PurgeReason = z.infer<typeof purgeReasonSchema>;
+
+/**
+ * Most documents one purge of content names: as many as one audit event
+ * names as provenance.
+ */
+export const purgeMaxDocuments = auditProvenanceMaxItems;
+
+/** Most terms one purge of content removes. */
+export const purgeMaxTerms = 20;
+
+/** Longest term, in characters: a passage of a few sentences. */
+export const purgeTermMaxLength = 1000;
+
+/**
+ * What each purged term becomes: a plain scalar in YAML frontmatter and
+ * plain text in Markdown, so a purged document still reads as one.
+ */
+export const purgedMarker = "(removed)";
+
+/**
+ * Whether `term` could be found again once replaced by the marker, in any
+ * case: the marker holds it, it starts with how the marker ends, or it
+ * ends with how the marker starts (the marker and the text next to it
+ * would make it again).
+ */
+const overlapsMarker = (term: string): boolean => {
+  const marker = purgedMarker.toLowerCase();
+  const lower = term.toLowerCase();
+  if (marker.includes(lower)) {
+    return true;
+  }
+  for (let length = 1; length <= marker.length; length += 1) {
+    if (
+      lower.startsWith(marker.slice(-length)) ||
+      lower.endsWith(marker.slice(0, length))
+    ) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * A term to purge: none that overlaps the marker, or a purge would find it
+ * again next to or in its own marker, and never finish finding it.
+ */
+const purgeTermSchema = z
+  .string()
+  .trim()
+  .min(2)
+  .max(purgeTermMaxLength)
+  .refine((term) => !overlapsMarker(term), {
+    message: `A term can't be part of "${purgedMarker}", start with its end or end with its start`,
+  });
+
+/**
+ * What a purge removes, for good, from every version:
+ * - `personal`: the person's Personal collection, with their USER.md, all
+ *   its versions, and the memory proposals their agents made;
+ * - `content`: every occurrence of the `terms` (a name, an email address,
+ *   a passage), in any case, from the documents named, which stay: each
+ *   becomes {@link purgedMarker}.
+ */
+export const purgeInputSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("personal"),
+    userId: identifierSchema,
+    reason: purgeReasonSchema,
+  }),
+  z.strictObject({
+    type: z.literal("content"),
+    documentIds: z
+      .array(documentIdSchema)
+      .min(1)
+      .max(purgeMaxDocuments)
+      .transform((ids) => [...new Set(ids)]),
+    terms: z.array(purgeTermSchema).min(1).max(purgeMaxTerms),
+    reason: purgeReasonSchema,
+  }),
+]);
+export type PurgeInput = z.input<typeof purgeInputSchema>;
+
+/** What a purge would remove, to confirm with `token` before it expires. */
+export interface PurgePlan {
+  /** Documents it deletes (`personal`) or rewrites (`content`). */
+  documents: number;
+  /** Versions of them it deletes or rewrites. */
+  versions: number;
+  /** Memory proposals it deletes or rewrites. */
+  proposals: number;
+  /** Confirms exactly this purge, by the admin who prepared it. */
+  token: string;
+  /** ISO 8601. */
+  expiresAt: string;
+}
+
+/** What a confirmed purge removed. */
+export interface PurgeResult {
+  /** Names the purge in the audit log. */
+  purgeId: string;
+  documents: number;
+  versions: number;
+  proposals: number;
+}
+
+/**
  * What a signed-in person reaches in Knowledge. Every call checks the
  * session and what the person may see and change, on the server, and
  * every read of documents is recorded in the audit log.
@@ -509,6 +627,18 @@ export interface KnowledgeApi {
   read: KnowledgeTools["read"];
   /** A document's links and backlinks, and for a skill, its files. */
   follow: KnowledgeTools["follow"];
+  /**
+   * What a purge would remove, and a token to confirm it with. Admins
+   * only, whatever the collection; nothing changes yet.
+   */
+  preparePurge: (input: PurgeInput) => Promise<PurgePlan>;
+  /**
+   * Runs the purge `preparePurge` returned `token` for, with the same
+   * input, by the same admin, before it expires; else
+   * `knowledge.purge_expired`. The audit log records who purged what and
+   * why, never what was removed.
+   */
+  purge: (input: PurgeInput, token: string) => Promise<PurgeResult>;
 }
 
 /**
@@ -565,4 +695,8 @@ export const knowledgeErrors = defineErrorFamily({
     "This agent has too many proposals waiting. Approve or decline some first.",
   "knowledge.conflict":
     "This document changed since you opened it. Load the latest version and apply your change to it.",
+  "knowledge.purge_expired":
+    "This purge wasn't confirmed in time, or isn't the one prepared. Prepare it again.",
+  "knowledge.purge_index_pending":
+    "The data is deleted, but the search index isn't cleaned up yet. Run the purge again to finish.",
 });

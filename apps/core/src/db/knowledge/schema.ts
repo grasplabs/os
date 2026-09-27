@@ -2,8 +2,9 @@
  * Knowledge D1 database: collections, documents, versions (text in the row),
  * sections, links and the full-text index (unicode61 plus trigram).
  *
- * Versions keep every text a document ever had. Sections and links are
- * those of the current version only, replaced on each save: they are what
+ * Versions keep every text a document ever had, but for what a purge
+ * removed (knowledge/purge.ts). Sections and links are those of the
+ * current version only, replaced on each save and purge: they are what
  * search indexes and agents read and follow, and an earlier version's are
  * derived from its text again when needed.
  *
@@ -92,9 +93,9 @@ export const documents = sqliteTable(
 );
 
 /**
- * Every version of every document, with its whole text. The primary key is
- * also the edit check: two saves from the same version both write the next
- * number, and the second one fails.
+ * Every version of every document, with its whole text, which only a purge
+ * rewrites. The primary key is also the edit check: two saves from the
+ * same version both write the next number, and the second one fails.
  */
 export const versions = sqliteTable(
   "versions",

@@ -12,6 +12,9 @@ import type {
   KnowledgeCatalog,
   KnowledgeRead,
   ListDocumentsOptions,
+  PurgeInput,
+  PurgePlan,
+  PurgeResult,
   ReadOptions,
   RestoreInput,
   SaveInput,
@@ -32,6 +35,7 @@ import {
   restoreVersion,
   saveDocument,
 } from "./documents.ts";
+import { preparePurge, purge } from "./purge.ts";
 import { search } from "./search.ts";
 import { catalog, follow, read } from "./tools.ts";
 
@@ -147,6 +151,20 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   async follow(documentId: string): Promise<FollowResult> {
     return await this.#asReader(
       async (reader) => await follow(this.#env, reader, documentId)
+    );
+  }
+
+  async preparePurge(input: PurgeInput): Promise<PurgePlan> {
+    return await withPerson(
+      this.#check,
+      async (person) => await preparePurge(this.#env, person, input)
+    );
+  }
+
+  async purge(input: PurgeInput, token: string): Promise<PurgeResult> {
+    return await withPerson(
+      this.#check,
+      async (person) => await purge(this.#env, person, input, token)
     );
   }
 }

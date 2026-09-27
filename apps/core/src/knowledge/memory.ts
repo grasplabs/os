@@ -235,8 +235,11 @@ const findFiles = async (
 
 /**
  * Assembled memory by the versions of its files and their limits.
- * Versions never change, so an entry is right for as long as it is kept,
- * and a new version of any file is a new key. Per isolate, most recently
+ * Versions change only when a purge rewrites them in place (purge.ts),
+ * and a purge also saves the rewritten text as a new version, so an entry
+ * is right for as long as it is kept, a new version of any file is a new
+ * key, and an entry made before a purge is never served again (it stays
+ * until evicted). Per isolate, most recently
  * used last, kept to {@link cacheMaxCharacters} of text in all: a few MB
  * of an isolate's 128 MB, however large the limits are set.
  */
