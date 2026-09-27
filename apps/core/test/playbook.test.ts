@@ -7,11 +7,13 @@ import type {
   PlaybookRecordType,
 } from "@grasp-os/shared/knowledge";
 import type { Role } from "@grasp-os/shared/roles";
+import type { Identity } from "@grasp-os/shared/rpc";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { stringify } from "yaml";
 import { z } from "zod";
 
+import { listCollections } from "../src/knowledge/collections.ts";
 import {
   getDocument,
   restoreVersion,
@@ -232,6 +234,18 @@ const appWithWorkflow = async (builder: Person): Promise<string> => {
     "workflows/pay.workflow-tests.ts": workflowTestsFile,
   });
   return id;
+};
+
+/** Whether the Playbook is listed as one `identity` may change. */
+const listedWritable = async (
+  on: Env,
+  identity: Identity
+): Promise<boolean | undefined> => {
+  const listed = await listCollections(on, {
+    type: "person",
+    person: identity,
+  });
+  return listed.find(({ id }) => id === playbookCollectionId)?.writable;
 };
 
 describe("Playbook record schemas", () => {
@@ -515,6 +529,10 @@ describe("Playbook records", () => {
       };
       expect({
         user: await outcome(save(user, input)),
+        // The list says so, by the same rule.
+        userListed: await listedWritable(env, user.identity),
+        adminListed: await listedWritable(env, admin.identity),
+        adminListedOff: await listedWritable(off, admin.identity),
         off: await outcome(
           saveRecord(off, admin.identity, { ...input, ifVersion: 0 })
         ),
@@ -558,6 +576,9 @@ describe("Playbook records", () => {
         ),
       }).toStrictEqual({
         user: "knowledge.forbidden",
+        userListed: false,
+        adminListed: true,
+        adminListedOff: false,
         off: "feature.disabled",
         linkOff: "feature.disabled",
         saveDocumentOff: "feature.disabled",

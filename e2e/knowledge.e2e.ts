@@ -1,3 +1,7 @@
+import { fileURLToPath } from "node:url";
+
+import { pageMaxLimit } from "@grasp-os/shared/knowledge";
+import { uploadErrors, uploadMaxBytes } from "@grasp-os/shared/uploads";
 import { expect } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
@@ -7,8 +11,18 @@ import { apiOf, pageOf, peopleIn } from "./people.ts";
 // The Knowledge page: a person finds a document by searching, reads it
 // rendered (nothing in it runs, its `[[links]]` open here) with what links
 // to it, edits it into a new version, meets an edit saved since in another
-// tab instead of overwriting it, and restores an earlier version. Search
-// and versions themselves are core's tests.
+// tab instead of overwriting it, and restores an earlier version; and
+// uploads files, following each until it is ready or failed. Search,
+// versions and extraction themselves are core's tests.
+
+/** A file from core's upload fixtures. */
+const fixture = (name: string): string =>
+  fileURLToPath(
+    new URL(
+      `../apps/core/test/fixtures/assets/uploads/${name}`,
+      import.meta.url
+    )
+  );
 
 /** The history table's row for `version`. */
 const versionRow = (page: Page, version: number) =>
@@ -191,4 +205,191 @@ test("a person searches, edits a document, meets a newer version instead of over
   } finally {
     mine.core[Symbol.dispose]();
   }
+});
+
+test("a person uploads a file and follows it through core failing for a moment until it is ready, while one too large is refused, one core refuses to report on says why, one past the listed files opens from its row, and one without text fails, each with the reason", async ({
+  browser,
+}) => {
+  const { one } = peopleIn("knowledgeUploads");
+  const { core, api } = apiOf(one);
+  let collectionId: string;
+  try {
+    ({ id: collectionId } = await api.knowledge.createCollection({
+      name: `Policies ${crypto.randomUUID()}`,
+      access: "me",
+    }));
+    // A full first page of files between "expense-policy.pdf" and
+    // "offices.xlsx", so the one lands on it and the other past it.
+    await Promise.all(
+      Array.from({ length: pageMaxLimit }, async (_, index) => {
+        await api.knowledge.saveDocument({
+          collectionId,
+          path: `m-${String(index).padStart(3, "0")}.md`,
+          text: `# Note ${index}`,
+          ifVersion: 0,
+        });
+      })
+    );
+  } finally {
+    core[Symbol.dispose]();
+  }
+  const page = await pageOf(browser, one);
+  // The page's asks for an upload's status (`uploads.get`): the next
+  // `dropping` fail as core out of reach does (a closed socket), and while
+  // `refusing`, each asks for an upload core doesn't have, which it refuses.
+  let dropping = 0;
+  let refusing = false;
+  const statusCall = '["uploads","get"]';
+  const uploadId = /[\da-f]{8}(?:-[\da-f]{4}){3}-[\da-f]{12}/gu;
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const toCore = socket.connectToServer();
+    socket.onMessage(async (message) => {
+      const text = String(message);
+      if (text.includes(statusCall) && dropping > 0) {
+        dropping -= 1;
+        await socket.close();
+        return;
+      }
+      toCore.send(
+        text.includes(statusCall) && refusing
+          ? text.replaceAll(uploadId, crypto.randomUUID())
+          : text
+      );
+    });
+  });
+  await page.goto(`/knowledge/${collectionId}`);
+  const uploads = page.getByRole("region", { name: "Upload" });
+  const input = uploads.getByLabel("Upload a PDF, Word or Excel file");
+
+  // A file over the limit is refused with core's reason, before it's sent.
+  await input.setInputFiles({
+    name: "too-large.pdf",
+    mimeType: "application/pdf",
+    buffer: Buffer.alloc(uploadMaxBytes + 1),
+  });
+  await expect(uploads.getByRole("alert")).toHaveText(
+    uploadErrors.create("upload.too_large").message
+  );
+  await expect(uploads.getByRole("listitem")).toHaveCount(0);
+
+  // Core out of reach for its first two asks only costs those turns.
+  dropping = 2;
+  await input.setInputFiles(fixture("expense-policy.pdf"));
+  const ready = uploads
+    .getByRole("listitem")
+    .filter({ hasText: "expense-policy.pdf" });
+  // Extraction runs on the engine, in its own isolate.
+  await expect(ready.getByRole("status")).toHaveText("Ready", {
+    timeout: 30_000,
+  });
+  expect(dropping).toBe(0);
+  await expect(ready.getByRole("alert")).toHaveCount(0);
+  await expect(ready.getByText(/past the first/u)).toHaveCount(0);
+  // The file list shows the new document.
+  await expect(
+    page
+      .getByRole("region", { name: "Files" })
+      .getByRole("link", { name: "expense-policy.pdf" })
+  ).toBeVisible();
+  // The original comes back as an attachment, never shown in the page.
+  const href = await ready
+    .getByRole("link", { name: "Download expense-policy.pdf" })
+    .getAttribute("href");
+  expect(href).toMatch(/^\/api\/knowledge\/uploads\/[\w-]+\/original$/u);
+  const original = await page.request.get(href ?? "");
+  expect(original.headers()["content-disposition"]).toMatch(/^attachment/u);
+  await ready.getByRole("link", { name: "Open expense-policy.pdf" }).click();
+  await expect(
+    page.getByRole("heading", { level: 2, name: "expense-policy" })
+  ).toBeVisible();
+
+  // A refusal ends the following, with core's reason.
+  refusing = true;
+  await input.setInputFiles(fixture("travel-policy.docx"));
+  await expect(
+    uploads
+      .getByRole("listitem")
+      .filter({ hasText: "travel-policy.docx" })
+      .getByRole("alert")
+  ).toHaveText("There's no such upload, or you can't see it.");
+  refusing = false;
+
+  // A name that sorts past the listed files opens from its row, and says so.
+  await input.setInputFiles(fixture("offices.xlsx"));
+  const past = uploads
+    .getByRole("listitem")
+    .filter({ hasText: "offices.xlsx" });
+  await expect(past.getByRole("status")).toHaveText("Ready", {
+    timeout: 30_000,
+  });
+  await expect(past).toContainText(
+    `It's past the first ${pageMaxLimit} files listed: open it from here.`
+  );
+  await expect(
+    page
+      .getByRole("region", { name: "Files" })
+      .getByRole("link", { name: "offices.xlsx" })
+  ).toHaveCount(0);
+  await past.getByRole("link", { name: "Open offices.xlsx" }).click();
+  await expect(
+    page.getByRole("heading", { level: 2, name: "offices", exact: true })
+  ).toBeVisible();
+
+  await input.setInputFiles(fixture("scan.pdf"));
+  await expect(
+    uploads
+      .getByRole("listitem")
+      .filter({ hasText: "scan.pdf" })
+      .getByRole("status")
+  ).toHaveText(
+    "Failed: The file has no text to read: a scan without a text layer has none.",
+    { timeout: 30_000 }
+  );
+});
+
+test("someone who may only read a collection is offered no upload, edit or restore", async ({
+  browser,
+}) => {
+  const { admin, reader } = peopleIn("knowledgeReader");
+  const { core, api } = apiOf(admin);
+  let collectionId: string;
+  let documentId: string;
+  try {
+    ({ id: collectionId } = await api.knowledge.createCollection({
+      name: `Handbook ${crypto.randomUUID()}`,
+      access: "everyone",
+    }));
+    const first = await api.knowledge.saveDocument({
+      collectionId,
+      path: "leave.md",
+      text: "# Leave\n\nSixteen weeks.\n",
+      ifVersion: 0,
+    });
+    documentId = first.id;
+    await api.knowledge.saveDocument({
+      collectionId,
+      path: "leave.md",
+      text: "# Leave\n\nTwenty weeks.\n",
+      ifVersion: 1,
+    });
+  } finally {
+    core[Symbol.dispose]();
+  }
+
+  // Its owner, an admin, may change it.
+  const owner = await pageOf(browser, admin);
+  await owner.goto(`/knowledge/${collectionId}?doc=${documentId}`);
+  await expect(owner.getByRole("button", { name: "Edit" })).toBeVisible();
+  await expect(
+    owner.getByRole("button", { name: "Restore version 1" })
+  ).toBeVisible();
+  await expect(owner.getByRole("region", { name: "Upload" })).toBeVisible();
+
+  // Anyone else reads it, and is offered nothing core would refuse.
+  const page = await pageOf(browser, reader);
+  await page.goto(`/knowledge/${collectionId}?doc=${documentId}`);
+  await expect(page.getByText("Twenty weeks.")).toBeVisible();
+  await expect(page.getByRole("button", { name: "Edit" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: /^Restore/u })).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Upload" })).toHaveCount(0);
 });

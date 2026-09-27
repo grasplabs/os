@@ -10,7 +10,7 @@ const accessLabels: Readonly<Record<CollectionAccess, string>> = {
 };
 
 /** Whether nobody may change `collection` here: Grasp or an App writes it. */
-export const isReadOnly = ({ source }: Collection): boolean =>
+const isReadOnly = ({ source }: Collection): boolean =>
   readOnlySources.has(source);
 
 /** Who may read a collection, and whether it is sensitive or read-only. */

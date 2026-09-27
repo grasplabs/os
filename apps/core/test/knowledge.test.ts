@@ -607,10 +607,16 @@ describe("collections", () => {
         );
       })
     );
-    expect(refused).toStrictEqual([
-      "knowledge.read_only",
-      "knowledge.read_only",
-    ]);
+    const listed = await admin.api.listCollections();
+    expect({
+      refused,
+      writable: listed
+        .filter(({ source }) => source === "grasp" || source === "apps")
+        .some(({ writable }) => writable),
+    }).toStrictEqual({
+      refused: ["knowledge.read_only", "knowledge.read_only"],
+      writable: false,
+    });
   });
 
   it("that are personal are invisible to everyone but their owner", async () => {
@@ -675,6 +681,7 @@ describe("collections", () => {
       const listed = await api.listCollections();
       return listed.some(({ id }) => id === collection.id);
     };
+    const memberListed = await member.api.listCollections();
     expect({
       collection: {
         teams: collection.teams,
@@ -684,6 +691,8 @@ describe("collections", () => {
       // Its owner isn't in the team, and still sees it.
       ownerSees: await sees(admin.api),
       memberSees: await sees(member.api),
+      memberMayChange: memberListed.find(({ id }) => id === collection.id)
+        ?.writable,
       outsiderSees: await sees(outsider.api),
       outsiderReads: await outcome(outsider.api.getDocument(saved.id)),
       outsiderWrites: await outcome(
@@ -698,6 +707,7 @@ describe("collections", () => {
       collection: { teams: [teamId], sensitive: true, source: "here" },
       ownerSees: true,
       memberSees: true,
+      memberMayChange: true,
       outsiderSees: false,
       outsiderReads: "knowledge.not_found",
       outsiderWrites: "knowledge.not_found",
@@ -730,7 +740,17 @@ describe("collections", () => {
       );
 
     const read = await person.api.getDocument(id);
+    const mayChange = async (api: KnowledgeApi) => {
+      const listed = await api.listCollections();
+      return listed.find((collection) => collection.id === collectionId)
+        ?.writable;
+    };
     expect({
+      listed: {
+        owner: await mayChange(admin.api),
+        otherAdmin: await mayChange(otherAdmin.api),
+        person: await mayChange(person.api),
+      },
       read: read.title,
       personWrites: await save(person.api, 1),
       personRestores: await outcome(
@@ -738,6 +758,7 @@ describe("collections", () => {
       ),
       otherAdminWrites: await save(otherAdmin.api, 1),
     }).toStrictEqual({
+      listed: { owner: true, otherAdmin: true, person: false },
       read: "Leave policy",
       personWrites: "knowledge.forbidden",
       personRestores: "knowledge.forbidden",
