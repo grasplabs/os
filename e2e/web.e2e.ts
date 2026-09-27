@@ -2,7 +2,7 @@ import { expect } from "@playwright/test";
 
 import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
-import { signedIn, signInTo } from "./people.ts";
+import { peopleIn, signInTo } from "./people.ts";
 
 test("loads the frontend from core, reaches core over RPC, and asks whoever isn't signed in to sign in", async ({
   page,
@@ -31,11 +31,7 @@ test("names each member's actions for them, and asks before making someone an ad
   page,
 }) => {
   // Everyone signed in here has the same name.
-  const { admin, one, two } = await signedIn({
-    admin: "admin",
-    one: "user",
-    two: "user",
-  });
+  const { admin, one, two } = peopleIn("memberActions");
   await signInTo(context, admin);
   await page.goto("/members");
 
@@ -81,7 +77,7 @@ test("an admin changes a member's role, and the controls wait for the list to sh
   context,
   page,
 }) => {
-  const { admin, one } = await signedIn({ admin: "admin", one: "user" });
+  const { admin, one } = peopleIn("roleChange");
   await signInTo(context, admin);
   const gate = await callGate(page, '["members","list"]');
   await page.goto("/members");
@@ -113,7 +109,7 @@ test("says core can't be reached when the members list never comes", async ({
   context,
   page,
 }) => {
-  const { admin } = await signedIn({ admin: "admin" });
+  const { admin } = peopleIn("membersUnreachable");
   await signInTo(context, admin);
   const gate = await callGate(page, '["members","list"]');
   gate.hold();

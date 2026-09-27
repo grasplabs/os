@@ -6,7 +6,7 @@ import { expect, test as base } from "@playwright/test";
 import type { Page } from "@playwright/test";
 
 import { test } from "./csp.ts";
-import { apiOf, pageOf, release, signedIn } from "./people.ts";
+import { apiOf, pageOf, peopleIn, release } from "./people.ts";
 import type { Person } from "./people.ts";
 import { screenAppFiles } from "./screen-app.ts";
 
@@ -89,7 +89,7 @@ let app: string;
 
 test.beforeAll(async () => {
   attacker = await serveAttacker();
-  ({ one, two } = await signedIn({ one: "builder", two: "builder" }));
+  ({ one, two } = peopleIn("screens"));
   app = await releaseApp(one, attacker.url);
 });
 

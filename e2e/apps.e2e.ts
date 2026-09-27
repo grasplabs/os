@@ -3,7 +3,7 @@ import type { Page } from "@playwright/test";
 
 import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
-import { apiOf, origin, pageOf, release, signedIn } from "./people.ts";
+import { apiOf, origin, pageOf, peopleIn, release } from "./people.ts";
 import type { Person } from "./people.ts";
 
 // Reaching Apps from the product: sign in, find an App in the Apps list,
@@ -128,11 +128,7 @@ let name: string;
 let app: string;
 
 test.beforeAll(async () => {
-  ({ builder, user, admin } = await signedIn({
-    builder: "builder",
-    user: "user",
-    admin: "admin",
-  }));
+  ({ builder, user, admin } = peopleIn("apps"));
   // Builders see every App, other tests' too: this one's name is its own.
   name = `Counter ${crypto.randomUUID()}`;
   app = await newApp(builder, name);

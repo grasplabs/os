@@ -2,7 +2,7 @@ import { expect } from "@playwright/test";
 
 import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
-import { apiOf, pageOf, release, signedIn, signInTo } from "./people.ts";
+import { apiOf, pageOf, peopleIn, release, signInTo } from "./people.ts";
 import type { Person } from "./people.ts";
 
 // A decision a workflow run waits for, answered from the link its ask
@@ -108,11 +108,7 @@ const askedFor = async (builder: Person, decider: Person) => {
 test("the person a decision link was sent to approves it, and the run goes on", async ({
   browser,
 }) => {
-  const { builder, decider, other } = await signedIn({
-    builder: "builder",
-    decider: "user",
-    other: "admin",
-  });
+  const { builder, decider, other } = peopleIn("decisionAnswered");
   const { run, link } = await askedFor(builder, decider);
 
   const forwarded = await pageOf(browser, other);
@@ -166,7 +162,7 @@ test("the person a decision link was sent to approves it, and the run goes on", 
 test("says core can't be reached when a decision never loads", async ({
   browser,
 }) => {
-  const { decider } = await signedIn({ decider: "user" });
+  const { decider } = peopleIn("decisionUnreachable");
   const page = await pageOf(browser, decider);
   const gate = await callGate(page, '["decisions","get"]');
   gate.hold();
