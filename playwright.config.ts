@@ -52,6 +52,10 @@ export default defineConfig({
           "FEATURES",
           JSON.stringify({
             apps: true,
+            app_sharing: true,
+            app_blueprints: true,
+            builtins: true,
+            playbook: true,
             screens: true,
             screen_workflows: true,
             members: true,

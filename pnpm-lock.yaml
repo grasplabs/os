@@ -383,12 +383,21 @@ importers:
       '@grasp-os/connect':
         specifier: workspace:*
         version: link:../connect
+      '@grasp-os/ui':
+        specifier: workspace:*
+        version: link:../../packages/ui
       '@grasp-os/web':
         specifier: workspace:*
         version: link:../web
+      '@types/react':
+        specifier: 'catalog:'
+        version: 19.3.0
       drizzle-kit:
         specifier: 'catalog:'
         version: 0.31.11
+      react:
+        specifier: 'catalog:'
+        version: 19.3.0
       vite-plus:
         specifier: 'catalog:'
         version: 0.3.3(@types/node@26.6.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(typescript@7.0.2)(yaml@2.9.1)

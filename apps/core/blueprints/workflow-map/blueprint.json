@@ -1,0 +1,11 @@
+{
+  "name": "Workflow map",
+  "description": "Draws the company's workflows as steps with numbers, designs how they should run, and shows the hours each would save. Its workflows live in the Playbook.",
+  "permissions": [
+    {
+      "object": { "type": "collection", "collectionId": "playbook" },
+      "actions": ["read", "write"],
+      "binding": "PLAYBOOK"
+    }
+  ]
+}
