@@ -149,6 +149,7 @@ export interface Person {
 const cast = {
   apps: { builder: "builder", user: "user", admin: "admin" },
   screens: { one: "builder", two: "builder" },
+  screenWorkflows: { builder: "builder", admin: "admin" },
   decisionAnswered: { builder: "builder", decider: "user", other: "admin" },
   decisionUnreachable: { decider: "user" },
   memberActions: { admin: "admin", one: "user", two: "user" },

@@ -321,6 +321,45 @@ describe("run status on screens", { timeout: 60_000 }, () => {
     });
   });
 
+  it("frees a subscription's slot once the screen releases it, and pushes nothing more to it", async () => {
+    const builder = await personApi("builder");
+    const app = await approvalApp(builder);
+    const screens = Array.from({ length: 20 }, () => follower());
+    const subscriptions = await Promise.all(
+      screens.map(
+        async ({ callback }) =>
+          await builder.api.screens.watchRuns(app, "approval", callback)
+      )
+    );
+    const full = await outcome(
+      builder.api.screens.watchRuns(app, "approval", follower().callback)
+    );
+    const [released] = screens;
+    await subscriptions[0]?.release();
+    // Released again, or once more by the screen letting go: nothing more.
+    await subscriptions[0]?.release();
+    const latest = follower();
+    const freed = await outcome(
+      builder.api.screens.watchRuns(app, "approval", latest.callback)
+    );
+    await nudge(app);
+    await pushedAfter(latest.received, 0);
+
+    expect({
+      full,
+      freed,
+      releasedLetGo: released?.state.released,
+      releasedGot: released?.received.length,
+      latestGot: latest.received.length,
+    }).toStrictEqual({
+      full: "screen.too_many_subscriptions",
+      freed: "ok",
+      releasedLetGo: true,
+      releasedGot: 0,
+      latestGot: 1,
+    });
+  });
+
   it("refuses to follow runs without a role in the App, of a name that isn't a workflow, or more than a screen needs", async () => {
     const builder = await personApi("builder");
     const stranger = await personApi("builder");

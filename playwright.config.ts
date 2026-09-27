@@ -45,6 +45,7 @@ export default defineConfig({
         JSON.stringify({
           apps: true,
           screens: true,
+          screen_workflows: true,
           members: true,
           workflows: true,
           decisions: true,
