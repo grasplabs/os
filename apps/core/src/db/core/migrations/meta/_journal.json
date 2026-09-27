@@ -71,6 +71,13 @@
       "when": 1790455931110,
       "tag": "0009_audit_outbox_rejected",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1790488334799,
+      "tag": "0010_app_members",
+      "breakpoints": true
     }
   ]
 }

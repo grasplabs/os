@@ -252,7 +252,7 @@ describe("screens", { timeout: 60_000 }, () => {
     ]);
   });
 
-  it("is refused to people whose role doesn't use Apps, and to nobody signed in", async () => {
+  it("is refused to people without a role in the App, and to nobody signed in", async () => {
     const builder = await personApi("builder");
     const app = await sampleApp(builder);
     const user = await personApi("user");
@@ -275,12 +275,13 @@ describe("screens", { timeout: 60_000 }, () => {
       core.authenticate().screens.call(app, "whoami", [])
     );
     expect({ asUser, signedOut }).toStrictEqual({
+      // As for an App that isn't there (app-roles.test.ts).
       asUser: [
-        "role.forbidden",
-        "role.forbidden",
-        "role.forbidden",
-        "role.forbidden",
-        "role.forbidden",
+        "app.not_found",
+        "app.not_found",
+        "app.not_found",
+        "app.not_found",
+        "app.not_found",
       ],
       signedOut: "auth.unauthenticated",
     });
@@ -338,6 +339,11 @@ describe("screens", { timeout: 60_000 }, () => {
     const one = await personApi("builder");
     const two = await personApi("builder");
     const app = await sampleApp(one);
+    await one.api.apps.members.add(app, {
+      type: "person",
+      id: two.userId,
+      role: "user",
+    });
     const watching = collector();
 
     await one.api.screens.call(app, "watchNotes", [watching.callback]);
@@ -354,6 +360,11 @@ describe("screens", { timeout: 60_000 }, () => {
     const one = await personApi("builder");
     const two = await personApi("builder");
     const app = await sampleApp(one);
+    await one.api.apps.members.add(app, {
+      type: "person",
+      id: two.userId,
+      role: "user",
+    });
     const watching = collector();
     await one.api.screens.call(app, "watchNotes", [watching.callback]);
     await waitFor(() => watching.received[0]);

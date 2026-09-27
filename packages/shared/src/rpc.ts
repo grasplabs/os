@@ -42,7 +42,10 @@ export interface SessionApi {
   whoami: () => Promise<Identity>;
   /** Permissions of Apps and agents. */
   readonly permissions: PermissionsApi;
-  /** The App registry and each App's code. Admins and builders. */
+  /**
+   * The App registry and each App's code: the Apps the person owns or that
+   * are shared with them, and every App for admins.
+   */
   readonly apps: AppsApi;
   /** Knowledge: collections, documents and their versions. */
   readonly knowledge: KnowledgeApi;
@@ -53,7 +56,7 @@ export interface SessionApi {
    * (which only admins connect and disconnect).
    */
   readonly connections: ConnectionsApi;
-  /** Runs of Apps' workflows. Admins and builders. */
+  /** Runs of Apps' workflows, for those with a role in the App. */
   readonly workflows: WorkflowsApi;
   /**
    * Decisions workflow runs wait for, answered by the people they are

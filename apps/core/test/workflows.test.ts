@@ -1318,6 +1318,11 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
         { read: "x" }
       )
     );
+    await starter.api.apps.members.add(app, {
+      type: "person",
+      id: other.userId,
+      role: "user",
+    });
     const run = await starter.api.workflows.start(app, "private");
     await finished(run.id);
     const seen = await Promise.all(
@@ -1517,6 +1522,11 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
       mailer(`retries: { limit: 3, delay: 10, backoff: "constant" }`)
     );
     await grantMail(idp, owner, app, mail.id);
+    await owner.api.apps.members.add(app, {
+      type: "person",
+      id: starter.userId,
+      role: "user",
+    });
     // One run a person started, which acts for them; one a trigger
     // started, which acts for the App's owner.
     const started = await starter.api.workflows.start(app, "mailer");
@@ -1551,6 +1561,12 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
     await env.DB.prepare("UPDATE apps SET owner_id = ? WHERE id = ?")
       .bind(starter.userId, app)
       .run();
+    // Still sharing it, now as a user.
+    await starter.api.apps.members.add(app, {
+      type: "person",
+      id: owner.userId,
+      role: "user",
+    });
     const { listed: starterLists } = await failures(starter);
     const { listed: ownerLists } = await failures(owner);
     const afterOwnerChange = { starter: starterLists, owner: ownerLists };

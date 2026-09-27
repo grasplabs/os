@@ -208,8 +208,9 @@ export interface WorkflowRun {
 }
 
 /**
- * A signed-in person's workflows. Admins and builders; every call checks
- * the session and the person's role again.
+ * A signed-in person's workflows. Anyone with a role in the App
+ * (`AppsApi`) starts and follows its runs, and its builders cancel them;
+ * every call checks the session and the person's role again.
  */
 export interface WorkflowsApi {
   /**
@@ -256,7 +257,7 @@ export interface WorkflowParam {
 }
 
 /**
- * The values of workflows' parameters. Admins and builders set them
+ * The values of workflows' parameters. The App's builders set them
  * directly, sensitive or not, audited without the value.
  */
 export interface WorkflowParamsApi {

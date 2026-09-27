@@ -1,7 +1,7 @@
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
-import type { PermissionId } from "@grasp-os/shared/ids";
+import type { AppId, PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
   permissionErrors,
@@ -238,10 +238,11 @@ const parseId = (id: unknown): PermissionId => {
 /**
  * An App's server code gets its env when it starts: restarting it after a
  * grant or revoke gives it an env as the records are now. A revoked stub
- * it still holds is refused anyway, on its next call. Best effort: the
- * change stands if the App can't be reached.
+ * it still holds is refused anyway, on its next call. Unsharing an App
+ * restarts it too (app-members.ts). Best effort: the change stands if the
+ * App can't be reached.
  */
-const restartApp = async (
+export const restartApp = async (
   env: Env,
   subject: PermissionSubject
 ): Promise<void> => {
@@ -331,12 +332,15 @@ const requireCollection = async (
 
 /**
  * Asks for a permission for an App or agent. It allows nothing until an
- * admin grants it.
+ * admin grants it. For an App, only its builders ask: `requireAppBuilder` refuses
+ * anyone else (`appFor` in apps.ts, passed in because apps.ts depends on
+ * this module, through workflow code and its bindings).
  */
 export const requestPermission = async (
   env: Env,
   by: Identity,
-  input: unknown
+  input: unknown,
+  requireAppBuilder: (app: AppId) => Promise<unknown>
 ): Promise<Permission> => {
   requireBuilder(by);
   if (by.staff) {
@@ -349,6 +353,9 @@ export const requestPermission = async (
     input
   );
   await requireApps(env, subject, object);
+  if (subject.type === "app") {
+    await requireAppBuilder(subject.appId);
+  }
   await requireCollection(env, object);
   const row: Row = {
     id: crypto.randomUUID(),

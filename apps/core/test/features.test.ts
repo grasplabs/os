@@ -88,6 +88,33 @@ describe("feature flags", () => {
     );
   });
 
+  it("stop sharing Apps with its own flag, and with the Apps kill switch", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const sharingWith = async (features: Record<string, boolean>) => {
+      const coreEnv: Env = { ...env, FEATURES: features };
+      const { core } = await openRpc(admin.session, { coreEnv });
+      const { members } = core.authenticate().apps;
+      const member = { type: "team", id: "team" } as const;
+      return await Promise.all([
+        outcome(members.list("app")),
+        outcome(members.add("app", { ...member, role: "user" })),
+        outcome(members.remove("app", member)),
+      ]);
+    };
+    await expect(
+      Promise.all([
+        sharingWith({ apps: true }),
+        sharingWith({ app_sharing: true }),
+        sharingWith({ apps: true, app_sharing: true }),
+      ])
+    ).resolves.toStrictEqual([
+      Array.from({ length: 3 }, () => "feature.disabled"),
+      Array.from({ length: 3 }, () => "feature.disabled"),
+      // Past the flags: this App doesn't exist.
+      Array.from({ length: 3 }, () => "app.not_found"),
+    ]);
+  });
+
   it("switch everything off when the var doesn't parse", async () => {
     for (const features of ["{not json", '{"apps": "yes"}', "[true]"]) {
       // oxlint-disable-next-line no-await-in-loop -- one config at a time

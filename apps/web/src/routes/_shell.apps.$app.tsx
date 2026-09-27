@@ -1,4 +1,4 @@
-import type { App, AppContents } from "@grasp-os/shared/apps";
+import type { App, AppContents, AppMember } from "@grasp-os/shared/apps";
 import type { WorkflowRun } from "@grasp-os/shared/workflows";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -36,6 +36,12 @@ import { ScreenFrame } from "../screens/screen-frame.tsx";
  * is refused (workflows switched off) only leaves the Workflows tab empty.
  */
 type Runs = Promise<Loaded<WorkflowRun[]>>;
+
+/**
+ * Whom the App is shared with, read the same way: refused while sharing
+ * Apps is switched off, which leaves only the Members tab without them.
+ */
+type MemberList = Promise<Loaded<AppMember[]>>;
 
 interface AppPage {
   app: App;
@@ -182,27 +188,68 @@ const Workflows = ({
   </div>
 );
 
+const MembersTable = ({ members }: { members: AppMember[] }) =>
+  members.length === 0 ? (
+    <p className="text-muted-foreground">It isn&apos;t shared with anyone.</p>
+  ) : (
+    <Table>
+      <TableHeader>
+        <TableRow>
+          <TableHead>Shared with</TableHead>
+          <TableHead>Role</TableHead>
+        </TableRow>
+      </TableHeader>
+      <TableBody>
+        {members.map((member) => (
+          <TableRow key={`${member.type}:${member.id}`}>
+            <TableCell>
+              {member.name ?? member.id}
+              {member.type === "team" ? " (team)" : ""}
+            </TableCell>
+            <TableCell>{member.role}</TableCell>
+          </TableRow>
+        ))}
+      </TableBody>
+    </Table>
+  );
+
 /**
- * Who opens the App. Apps have no members or roles of their own yet:
- * core opens every App to admins and builders, and none to anyone else.
+ * Who opens the App: its owner and the admins, who build it, and the
+ * people and teams it is shared with, each as a user or a builder.
  */
-const Members = ({ app }: { app: App }) => {
+const Members = ({ app, members }: { app: App; members: MemberList }) => {
   const { identity } = Route.useRouteContext();
   return (
     <div className="flex flex-col gap-2 text-sm">
       <p>
-        Apps don&apos;t have members of their own yet. Everyone with the admin
-        or builder role opens every App; the user role opens none.
-      </p>
-      <p>
         Created by{" "}
         {app.owner === identity.userId ? "you" : `the member ${app.owner}`}.
       </p>
+      <Await
+        fallback={<p className="text-muted-foreground">Loading members…</p>}
+        promise={members}
+      >
+        {(loaded) =>
+          loaded.state === "ready" ? (
+            <MembersTable members={loaded.data} />
+          ) : (
+            <NotLoaded page={loaded} />
+          )
+        }
+      </Await>
     </div>
   );
 };
 
-const AppView = ({ page, runs }: { page: AppPage; runs: Runs }) => {
+const AppView = ({
+  page,
+  runs,
+  members,
+}: {
+  page: AppPage;
+  runs: Runs;
+  members: MemberList;
+}) => {
   const { app, contents } = page;
   return (
     <>
@@ -230,7 +277,7 @@ const AppView = ({ page, runs }: { page: AppPage; runs: Runs }) => {
           <Workflows contents={contents} runs={runs} />
         </TabsContent>
         <TabsContent value="members">
-          <Members app={app} />
+          <Members app={app} members={members} />
         </TabsContent>
       </Tabs>
     </>
@@ -238,11 +285,16 @@ const AppView = ({ page, runs }: { page: AppPage; runs: Runs }) => {
 };
 
 const AppPageView = () => {
-  const { page, runs } = Route.useLoaderData();
+  const { page, runs, members } = Route.useLoaderData();
   return (
     <main className="flex flex-1 flex-col gap-4 p-6">
       {page.state === "ready" ? (
-        <AppView key={page.data.app.id} page={page.data} runs={runs} />
+        <AppView
+          key={page.data.app.id}
+          members={members}
+          page={page.data}
+          runs={runs}
+        />
       ) : (
         <>
           <h1 className="text-2xl font-medium">App</h1>
@@ -256,9 +308,12 @@ const AppPageView = () => {
 export const Route = createFileRoute("/_shell/apps/$app")({
   component: AppPageView,
   loader: async ({ params }) => ({
-    // Not awaited: the Workflows tab waits for it, nothing else does.
+    // Not awaited: only their tabs wait for them.
     runs: loadFromCore(
       async (session) => await session.workflows.list(params.app)
+    ),
+    members: loadFromCore(
+      async (session) => await session.apps.members.list(params.app)
     ),
     page: await loadFromCore(
       async (session) => await loadApp(session, params.app)

@@ -176,6 +176,12 @@ describe("workflow parameters", () => {
     const builder = await personApi("builder");
     const user = await personApi("user");
     const app = await invoicesApp(builder);
+    // A user of the App: its settings are its builders'.
+    await builder.api.apps.members.add(app, {
+      type: "person",
+      id: user.userId,
+      role: "user",
+    });
     const { core } = await openRpc(
       await signedIn(idp, "grasp-staff", staffPerson())
     );

@@ -21,7 +21,7 @@ import { z } from "zod";
 
 import { callApp, isPlainData } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
-import { getApp, getVersion, versionFiles } from "./apps.ts";
+import { appFor, findVersion, getApp, versionFiles } from "./apps.ts";
 import { appHost } from "./durable-objects.ts";
 import { buildFailed, buildScreens } from "./screens.ts";
 import { withPerson } from "./session-check.ts";
@@ -34,9 +34,9 @@ import type { SessionCheck } from "./session-check.ts";
 // here takes the frame's input as untrusted and checks the person's
 // session and role on every call.
 //
-// Apps have no members or roles of their own yet: until they do, only the
-// platform roles that build Apps (admins and builders) use their screens,
-// as only they can see Apps at all (apps.ts).
+// Anyone with a role in the App (app-access.ts) uses its screens: opens
+// them, calls its server and reports problems. Only its builders read its
+// error log.
 
 /** A running App's screen, built from its current version. */
 const openScreen = async (
@@ -193,8 +193,9 @@ const reportProblem = async (
   problem: unknown
 ): Promise<void> => {
   const where = screenErrors.parse("screen.invalid", reportedAtSchema, at);
+  const { id } = await getApp(env, by, app);
   // One of the App's versions, or `app.version_not_found`.
-  const { app: id } = await getVersion(env, by, app, where.version);
+  await findVersion(env, id, where.version);
   const entry: AppErrorEntry = {
     at: new Date().toISOString(),
     source: "screen",
@@ -209,7 +210,7 @@ const errorLog = async (
   by: Identity,
   app: unknown
 ): Promise<AppErrorEntry[]> => {
-  const { id } = await getApp(env, by, app);
+  const { id } = await appFor(env, by, app, "builder");
   return await appHost(env, id).errors();
 };
 

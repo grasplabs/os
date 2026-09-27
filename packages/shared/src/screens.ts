@@ -75,7 +75,10 @@ export interface AppErrorEntry extends ScreenProblem {
   screen: string;
 }
 
-/** A signed-in person's way to an App's screens. Admins and builders. */
+/**
+ * A signed-in person's way to an App's screens: for anyone with a role in
+ * the App (`AppsApi`); its error log for its builders only.
+ */
 export interface ScreensApi {
   /** A screen of the App, built from its current version. */
   open: (app: string, screen: string) => Promise<ScreenBundle>;

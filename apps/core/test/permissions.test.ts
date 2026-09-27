@@ -76,7 +76,7 @@ describe("permissions", () => {
   it("allow nothing until an admin grants them", async () => {
     const admin = await permissionApi("admin");
     const builder = await permissionApi("builder");
-    const app = await newApp(admin.api);
+    const app = await newApp(builder.api);
     const authority = actingFor(app, builder.userId);
 
     const before = await callThrough(authority, "OUTLOOK");
@@ -200,7 +200,7 @@ describe("permissions", () => {
   it("are neither granted nor revoked by an admin demoted after their session was checked", async () => {
     const admin = await permissionApi("admin");
     const builder = await permissionApi("builder");
-    const app = await newApp(admin.api);
+    const app = await newApp(builder.api);
     const requested = await builder.api.permissions.request(outlook(app.appId));
     const active = await builder.api.permissions.request(
       outlook(app.appId, "ACTIVE")
@@ -237,7 +237,7 @@ describe("permissions", () => {
   it("are granted directly with an approval still pending from the release before", async () => {
     const admin = await permissionApi("admin");
     const builder = await permissionApi("builder");
-    const app = await newApp(admin.api);
+    const app = await newApp(builder.api);
     const { id } = await builder.api.permissions.request(outlook(app.appId));
     // The approval the release before opened with each request.
     await env.DB.prepare(
@@ -620,7 +620,7 @@ describe("permissions", () => {
   it("are audited when requested, granted and revoked, by who did it", async () => {
     const admin = await permissionApi("admin");
     const builder = await permissionApi("builder");
-    const app = await newApp(admin.api);
+    const app = await newApp(builder.api);
     let id = "";
     const events = await auditedDuring(async () => {
       ({ id } = await builder.api.permissions.request(outlook(app.appId)));

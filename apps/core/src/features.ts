@@ -35,6 +35,12 @@ import { z } from "zod";
 /** Every feature behind a flag. */
 export type Feature =
   | "apps"
+  /**
+   * App roles and sharing (app-access.ts). While off, admins and builders
+   * build every App and users none, as before Apps had roles, and nobody
+   * shares one.
+   */
+  | "app_sharing"
   | "permissions"
   | "knowledge"
   /** Memory files (knowledge/memory.ts); needs `knowledge` on too. */

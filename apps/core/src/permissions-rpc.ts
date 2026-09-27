@@ -6,6 +6,7 @@ import type {
 } from "@grasp-os/shared/permissions";
 import { RpcTarget } from "capnweb";
 
+import { appFor } from "./apps.ts";
 import {
   grantPermission,
   listPermissions,
@@ -33,7 +34,13 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
   async request(request: PermissionRequest): Promise<Permission> {
     return await withPerson(
       this.#check,
-      async (person) => await requestPermission(this.#env, person, request)
+      async (person) =>
+        await requestPermission(
+          this.#env,
+          person,
+          request,
+          async (app) => await appFor(this.#env, person, app, "builder")
+        )
     );
   }
 

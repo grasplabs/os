@@ -84,6 +84,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             // Every flagged feature on; features.test.ts switches them off.
             FEATURES: {
               apps: true,
+              app_sharing: true,
               permissions: true,
               knowledge: true,
               memory: true,

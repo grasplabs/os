@@ -2,28 +2,32 @@ import type { App, AppContents, AppsApi, NewApp } from "@grasp-os/shared/apps";
 import { RpcTarget } from "capnweb";
 
 import { AppFilesRpc } from "./app-files-rpc.ts";
+import { AppMembersRpc } from "./app-members.ts";
 import { AppVersionsRpc } from "./app-versions-rpc.ts";
 import { appContents, createApp, getApp, listApps } from "./apps.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
 /**
- * A signed-in person's `apps`, with `apps.files` and `apps.versions`, in
- * SessionRpc's form. The App functions check the person's role and
- * validate what the client sent.
+ * A signed-in person's `apps`, with `apps.files`, `apps.versions` and
+ * `apps.members`, in SessionRpc's form. The App functions check the
+ * person's role in the App and validate what the client sent.
  */
 export class AppsRpc extends RpcTarget implements AppsApi {
   readonly #env: Env;
   readonly #check: SessionCheck;
   readonly #files: AppFilesRpc;
   readonly #versions: AppVersionsRpc;
+  readonly #members: AppMembersRpc;
 
-  constructor(env: Env, check: SessionCheck) {
+  /** `sharing` is the check for `members`, which sharing Apps turns on. */
+  constructor(env: Env, check: SessionCheck, sharing: SessionCheck) {
     super();
     this.#env = env;
     this.#check = check;
     this.#files = new AppFilesRpc(env, check);
     this.#versions = new AppVersionsRpc(env, check);
+    this.#members = new AppMembersRpc(env, sharing);
   }
 
   get files(): AppFilesRpc {
@@ -32,6 +36,10 @@ export class AppsRpc extends RpcTarget implements AppsApi {
 
   get versions(): AppVersionsRpc {
     return this.#versions;
+  }
+
+  get members(): AppMembersRpc {
+    return this.#members;
   }
 
   async create(app: NewApp): Promise<App> {
