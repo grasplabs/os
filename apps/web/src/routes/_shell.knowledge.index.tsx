@@ -41,7 +41,10 @@ const memoryFilePaths = new Set<string>(memoryFileNames);
  * written so far: the files at the root of the two collections by those
  * names. An agent's own AGENTS.md sits deeper, and only that agent gets it.
  * They are on the first page: in path order, names in capitals come before
- * the folders (`agents/…`) the Memory collection has.
+ * the folders (`agents/…`) the Memory collection has. Asking for the
+ * collections creates what doesn't exist yet: the person's Personal
+ * collection on their first visit, and the company's Memory collection
+ * when an admin opens the page before it is set up.
  */
 const loadMemory = async (session: Session): Promise<MemoryFiles> => {
   const { memory, personal } = await session.memory.collections();

@@ -1,4 +1,8 @@
-import type { DocumentRead, VersionSummary } from "@grasp-os/shared/knowledge";
+import type {
+  Backlink,
+  DocumentRead,
+  VersionSummary,
+} from "@grasp-os/shared/knowledge";
 import { Button } from "@grasp-os/ui/components/button";
 import { Input } from "@grasp-os/ui/components/input";
 import {
@@ -10,7 +14,7 @@ import {
   TableRow,
 } from "@grasp-os/ui/components/table";
 import { Textarea } from "@grasp-os/ui/components/textarea";
-import { useRouter } from "@tanstack/react-router";
+import { Link, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { changeThenRefresh } from "../change-then-refresh.ts";
@@ -18,11 +22,13 @@ import { ErrorText } from "../error-text.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import { DocumentMarkdown } from "./markdown.tsx";
 import { saveOrNewer } from "./save.ts";
+import type { ResolveLink } from "./wiki-links.ts";
 
-// One document: its details, its text rendered, and, where the person may
-// change it, an editor and its history to restore from. Every save names
-// the version it was edited from, so a save that would overwrite someone
-// else's shows their version instead.
+// One document: its details (with the documents that link to it), its
+// text rendered, and, where the person may change it, an editor and its
+// history to restore from. Every save names the version it was edited
+// from, so a save that would overwrite one made since, in another tab or
+// by someone else, shows that version instead.
 
 const dateTime = new Intl.DateTimeFormat(undefined, {
   dateStyle: "medium",
@@ -33,7 +39,34 @@ const dateTime = new Intl.DateTimeFormat(undefined, {
 const savedBy = (author: string, me: string): string =>
   author === me ? "You" : author;
 
-const Details = ({ doc }: { doc: DocumentRead }) => (
+/** The documents that link to this one, each opening where it is. */
+const UsedBy = ({ backlinks }: { backlinks: Backlink[] }) =>
+  backlinks.length === 0 ? (
+    "–"
+  ) : (
+    <ul className="flex flex-col gap-1">
+      {backlinks.map((backlink) => (
+        <li key={backlink.documentId}>
+          <Link
+            className="underline"
+            params={{ collection: backlink.collectionId }}
+            search={{ doc: backlink.documentId }}
+            to="/knowledge/$collection"
+          >
+            {backlink.title}
+          </Link>
+        </li>
+      ))}
+    </ul>
+  );
+
+const Details = ({
+  doc,
+  backlinks,
+}: {
+  doc: DocumentRead;
+  backlinks: Backlink[];
+}) => (
   <dl className="grid grid-cols-2 gap-x-4 gap-y-1 text-sm sm:grid-cols-4">
     <dt className="text-muted-foreground">Path</dt>
     <dd>{doc.path}</dd>
@@ -45,14 +78,20 @@ const Details = ({ doc }: { doc: DocumentRead }) => (
     <dd>{doc.reviewDate ?? "–"}</dd>
     <dt className="text-muted-foreground">When to use</dt>
     <dd className="col-span-1 sm:col-span-3">{doc.description || "–"}</dd>
+    <dt className="text-muted-foreground">Used by</dt>
+    <dd className="col-span-1 sm:col-span-3">
+      <UsedBy backlinks={backlinks} />
+    </dd>
   </dl>
 );
 
 const Editor = ({
   doc,
+  resolve,
   onClose,
 }: {
   doc: DocumentRead;
+  resolve: ResolveLink;
   onClose: () => void;
 }) => {
   const router = useRouter();
@@ -108,7 +147,7 @@ const Editor = ({
           >
             {`This document changed since you opened it. Version ${newer.currentVersion} is below; your text is kept. Apply your change to it, then save again.`}
           </p>
-          <DocumentMarkdown text={newer.version.text} />
+          <DocumentMarkdown resolve={resolve} text={newer.version.text} />
           <Button
             className="self-start"
             onClick={() => {
@@ -244,11 +283,16 @@ const History = ({
 export const DocumentView = ({
   doc,
   versions,
+  backlinks,
+  resolve,
   me,
   writable,
 }: {
   doc: DocumentRead;
   versions: VersionSummary[];
+  backlinks: Backlink[];
+  /** The collection's document at a `[[link]]`'s path, if the page has it. */
+  resolve: ResolveLink;
   me: string;
   writable: boolean;
 }) => {
@@ -271,16 +315,17 @@ export const DocumentView = ({
           </Button>
         ) : null}
       </div>
-      <Details doc={doc} />
+      <Details backlinks={backlinks} doc={doc} />
       {editing ? (
         <Editor
           doc={doc}
+          resolve={resolve}
           onClose={() => {
             setEditing(false);
           }}
         />
       ) : (
-        <DocumentMarkdown text={doc.version.text} />
+        <DocumentMarkdown resolve={resolve} text={doc.version.text} />
       )}
       <History doc={doc} me={me} versions={versions} writable={writable} />
     </section>

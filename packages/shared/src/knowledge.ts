@@ -142,6 +142,31 @@ export const documentPathProblem = (path: string): string | undefined => {
   return undefined;
 };
 
+/**
+ * A `[[link]]` in Markdown: `inner` is its target, then its label after
+ * any `|`. Global, for `matchAll`.
+ */
+export const wikiLinkPattern = /\[\[(?<inner>[^[\]\n]+)\]\]/gu;
+
+const extension = /\.[^./]+$/u;
+
+/**
+ * The path a `[[link]]` names, from its target (the part before any `|`):
+ * relative to the collection, with `.md` added when it names no
+ * extension. `undefined` when it isn't a document path. Core indexes
+ * links by it, and the web app resolves them by it.
+ */
+export const linkPath = (target: string): string | undefined => {
+  const [withoutHeading = ""] = target.split("#");
+  const trimmed = withoutHeading.trim();
+  if (trimmed === "") {
+    // A link to a heading in the same document.
+    return undefined;
+  }
+  const path = extension.test(trimmed) ? trimmed : `${trimmed}.md`;
+  return documentPathProblem(path) === undefined ? path : undefined;
+};
+
 export const documentPathSchema = z.string().superRefine((path, context) => {
   const problem = documentPathProblem(path);
   if (problem !== undefined) {

@@ -1,4 +1,4 @@
-import { documentPathProblem } from "@grasp-os/shared/knowledge";
+import { linkPath, wikiLinkPattern } from "@grasp-os/shared/knowledge";
 
 // How a document's Markdown becomes sections and links. Line based, and
 // deliberately small: ATX headings (`# Title`) start sections, `[[links]]`
@@ -24,8 +24,6 @@ const atxHeading =
   /^ {0,3}(?<marks>#{1,6})(?:[ \t]+(?<title>.*?))?(?:[ \t]+#+)?[ \t]*$/u;
 const fenceOpening = /^ {0,3}(?<fence>`{3,}|~{3,})/u;
 const inlineCode = /(?<ticks>`+)[^`]*?\k<ticks>/gu;
-const wikiLink = /\[\[(?<inner>[^[\]\n]+)\]\]/gu;
-const extension = /\.[^./]+$/u;
 
 /** Tracks fenced code blocks line by line. */
 const fenceTracker = () => {
@@ -84,21 +82,6 @@ export const splitSections = (markdown: string): Section[] => {
 };
 
 /**
- * The path a link names: relative to the collection, with `.md` added when
- * it names no extension. `undefined` when it isn't a document path.
- */
-const linkPath = (target: string): string | undefined => {
-  const [withoutHeading = ""] = target.split("#");
-  const trimmed = withoutHeading.trim();
-  if (trimmed === "") {
-    // A link to a heading in the same document.
-    return undefined;
-  }
-  const path = extension.test(trimmed) ? trimmed : `${trimmed}.md`;
-  return documentPathProblem(path) === undefined ? path : undefined;
-};
-
-/**
  * The `[[links]]` in Markdown, once per path, in order: `[[path]]`,
  * `[[path|label]]` or `[[path#heading]]`. A link that doesn't name a valid
  * path isn't one.
@@ -110,7 +93,7 @@ export const extractLinks = (markdown: string): Link[] => {
     if (!inCode(line)) {
       for (const { groups } of line
         .replaceAll(inlineCode, "")
-        .matchAll(wikiLink)) {
+        .matchAll(wikiLinkPattern)) {
         const [target = "", ...rest] = (groups?.inner ?? "").split("|");
         const path = linkPath(target);
         const label = rest.join("|").trim();

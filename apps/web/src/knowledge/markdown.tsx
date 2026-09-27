@@ -1,6 +1,18 @@
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@grasp-os/ui/components/table";
+import { Link } from "@tanstack/react-router";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
+
+import { remarkWikiLinks } from "./wiki-links.ts";
+import type { ResolveLink } from "./wiki-links.ts";
 
 // A Knowledge document, rendered. Its text is whatever anyone who may
 // change the collection wrote, or whatever an uploaded file held, so
@@ -9,13 +21,27 @@ import remarkGfm from "remark-gfm";
 // few more; react-markdown's `defaultUrlTransform` empties any other, such
 // as `javascript:`), and opens in a tab of its own without this page as
 // its opener. Images show their alt text: loading one would tell its host
-// who read the document, and when.
+// who read the document, and when. A `[[link]]` to a document of the
+// collection opens it here (wiki-links.ts).
 
 /** YAML frontmatter at the start of a document: its fields, not its prose. */
 const frontmatter = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/u;
 
 /** A document's Markdown without its frontmatter. */
 export const bodyOf = (text: string): string => text.replace(frontmatter, "");
+
+/** A resolved `[[link]]`'s address (`documentHref`), or one written so. */
+const documentLink = /^\?doc=[^&#]+$/u;
+
+/**
+ * The document a link on this page opens, if it is one. Read with
+ * `URLSearchParams`, which never throws on a malformed escape, as
+ * `decodeURIComponent` would, in the middle of rendering.
+ */
+const documentOf = (href: string): string | undefined =>
+  documentLink.test(href)
+    ? (new URLSearchParams(href.slice(1)).get("doc") ?? undefined)
+    : undefined;
 
 const components: Components = {
   h1: ({ children }) => <h1 className="text-2xl font-medium">{children}</h1>,
@@ -37,18 +63,31 @@ const components: Components = {
     </pre>
   ),
   code: ({ children }) => <code className="font-mono text-sm">{children}</code>,
-  table: ({ children }) => (
-    <table className="w-full border-collapse text-sm">{children}</table>
-  ),
-  th: ({ children }) => (
-    <th className="border px-2 py-1 text-left font-medium">{children}</th>
-  ),
-  td: ({ children }) => <td className="border px-2 py-1">{children}</td>,
-  // An address the transform emptied was unsafe: the text stays, as text.
-  a: ({ href, children }) =>
-    href === undefined || href === "" ? (
-      <span>{children}</span>
-    ) : (
+  table: ({ children }) => <Table>{children}</Table>,
+  thead: ({ children }) => <TableHeader>{children}</TableHeader>,
+  tbody: ({ children }) => <TableBody>{children}</TableBody>,
+  tr: ({ children }) => <TableRow>{children}</TableRow>,
+  th: ({ children }) => <TableHead>{children}</TableHead>,
+  td: ({ children }) => <TableCell>{children}</TableCell>,
+  a: ({ href, children }) => {
+    // An address the transform emptied was unsafe: the text stays, as text.
+    if (href === undefined || href === "") {
+      return <span>{children}</span>;
+    }
+    const documentId = documentOf(href);
+    if (documentId !== undefined) {
+      return (
+        <Link
+          className="underline"
+          from="/knowledge/$collection"
+          search={{ doc: documentId }}
+        >
+          {children}
+        </Link>
+      );
+    }
+    // Any other, a `#heading` too, opens apart from this page.
+    return (
       <a
         className="underline"
         href={href}
@@ -57,13 +96,23 @@ const components: Components = {
       >
         {children}
       </a>
-    ),
+    );
+  },
   img: ({ alt }) =>
     alt === undefined || alt === "" ? null : <span>{alt}</span>,
 };
 
-/** A document's text, frontmatter left out, as safe rendered Markdown. */
-export const DocumentMarkdown = ({ text }: { text: string }) => {
+/**
+ * A document's text, frontmatter left out, as safe rendered Markdown, its
+ * `[[links]]` resolved by `resolve`.
+ */
+export const DocumentMarkdown = ({
+  text,
+  resolve,
+}: {
+  text: string;
+  resolve: ResolveLink;
+}) => {
   const body = bodyOf(text).trim();
   if (body === "") {
     return (
@@ -72,7 +121,11 @@ export const DocumentMarkdown = ({ text }: { text: string }) => {
   }
   return (
     <article className="flex flex-col gap-3">
-      <Markdown components={components} remarkPlugins={[remarkGfm]} skipHtml>
+      <Markdown
+        components={components}
+        remarkPlugins={[remarkGfm, [remarkWikiLinks, { resolve }]]}
+        skipHtml
+      >
         {body}
       </Markdown>
     </article>

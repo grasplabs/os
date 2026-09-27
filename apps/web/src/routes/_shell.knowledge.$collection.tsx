@@ -1,5 +1,6 @@
 import { knowledgeErrors, pageMaxLimit } from "@grasp-os/shared/knowledge";
 import type {
+  Backlink,
   Collection,
   DocumentRead,
   DocumentSummary,
@@ -28,6 +29,8 @@ interface CollectionPage {
 interface OpenDocument {
   doc: DocumentRead;
   versions: VersionSummary[];
+  /** The first page of the documents that link to it. */
+  backlinks: Backlink[];
 }
 
 /** The collection, if the person may read it, and its first page of files. */
@@ -46,22 +49,26 @@ const loadCollection = async (
   return { collection, documents: page.documents };
 };
 
-/** The document `documentId`, if it is in this collection, and its history. */
+/**
+ * The document `documentId`, if it is in this collection, with its history
+ * and what links to it.
+ */
 const loadDocument = async (
   session: Session,
   collectionId: string,
   documentId: string
 ): Promise<OpenDocument> => {
-  const [doc, history] = await Promise.all([
+  const [doc, history, links] = await Promise.all([
     session.knowledge.getDocument(documentId),
     session.knowledge.history(documentId),
+    session.knowledge.backlinks(documentId),
   ]);
   // A link can name any document: only one of this collection opens here,
   // beside its files, and with this collection's controls.
   if (doc.collectionId !== collectionId) {
     throw knowledgeErrors.create("knowledge.not_found");
   }
-  return { doc, versions: history.versions };
+  return { doc, versions: history.versions, backlinks: links.backlinks };
 };
 
 const FileList = ({
@@ -111,6 +118,13 @@ const CollectionView = () => {
   const { identity } = Route.useRouteContext();
   const writable =
     collection.state === "ready" && !isReadOnly(collection.data.collection);
+  // `[[links]]` name paths in the collection: those in the file list open
+  // here; any other stays as written.
+  const paths = new Map(
+    collection.state === "ready"
+      ? collection.data.documents.map(({ path, id }) => [path, id])
+      : []
+  );
   return (
     <main className="flex max-w-6xl flex-col gap-6 p-6">
       <Link className="text-sm underline" to="/knowledge">
@@ -145,8 +159,10 @@ const CollectionView = () => {
                 <DocumentView
                   // A new document starts with its editor closed.
                   key={open.data.doc.id}
+                  backlinks={open.data.backlinks}
                   doc={open.data.doc}
                   me={identity.userId}
+                  resolve={(path) => paths.get(path)}
                   versions={open.data.versions}
                   writable={writable}
                 />

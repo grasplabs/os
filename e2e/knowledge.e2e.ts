@@ -5,9 +5,10 @@ import { test } from "./csp.ts";
 import { apiOf, pageOf, peopleIn } from "./people.ts";
 
 // The Knowledge page: a person finds a document by searching, reads it
-// rendered (nothing in it runs), edits it into a new version, meets
-// someone else's edit instead of overwriting it, and restores an earlier
-// version. Search and versions themselves are core's tests.
+// rendered (nothing in it runs, its `[[links]]` open here) with what links
+// to it, edits it into a new version, meets an edit saved since in another
+// tab instead of overwriting it, and restores an earlier version. Search
+// and versions themselves are core's tests.
 
 /** The history table's row for `version`. */
 const versionRow = (page: Page, version: number) =>
@@ -31,6 +32,8 @@ test("a person searches, edits a document, meets a newer version instead of over
     `Everyone gets sixteen weeks of ${word} leave.`,
     "",
     "[Run this](javascript:alert(1)) and [the law](https://example.com/law).",
+    "",
+    "Paid as in [[handbook/pay|the pay policy]]; [back to the top](#leave).",
     "",
     '<img src="https://example.com/pixel.png" onerror="alert(1)">',
     "",
@@ -56,6 +59,12 @@ test("a person searches, edits a document, meets a newer version instead of over
       collectionId,
       path: "handbook/leave.md",
       text: original,
+      ifVersion: 0,
+    });
+    await mine.api.knowledge.saveDocument({
+      collectionId,
+      path: "handbook/pay.md",
+      text: "# Pay\n\nLeave is paid; see [[handbook/leave]].\n",
       ifVersion: 0,
     });
   } finally {
@@ -89,15 +98,37 @@ test("a person searches, edits a document, meets a newer version instead of over
       article.getByRole("heading", { name: "Parental leave" })
     ).toBeVisible();
     // Nothing in the text runs or loads: the unsafe link is text, the safe
-    // one opens apart from this page, and raw HTML is dropped.
+    // ones (a `#heading` too) open apart from this page, and raw HTML is
+    // dropped.
     await expect(article.getByText("Run this")).toBeVisible();
     await expect(article.getByRole("link", { name: "Run this" })).toHaveCount(
       0
     );
-    await expect(
-      article.getByRole("link", { name: "the law" })
-    ).toHaveAttribute("rel", "noopener noreferrer");
+    for (const name of ["the law", "back to the top"]) {
+      const link = article.getByRole("link", { name });
+      // oxlint-disable-next-line no-await-in-loop -- one link at a time
+      await expect(link).toHaveAttribute("rel", "noopener noreferrer");
+      // oxlint-disable-next-line no-await-in-loop -- one link at a time
+      await expect(link).toHaveAttribute("target", "_blank");
+    }
     await expect(article.locator("img")).toHaveCount(0);
+
+    // A `[[link]]` opens the document it names here, and each lists the
+    // other as using it.
+    await article.getByRole("link", { name: "the pay policy" }).click();
+    await expect(
+      page.getByRole("heading", { level: 2, name: "Pay" })
+    ).toBeVisible();
+    await page
+      .getByRole("definition")
+      .getByRole("link", { name: "Leave", exact: true })
+      .click();
+    await expect(
+      page.getByRole("heading", { level: 2, name: "Leave", exact: true })
+    ).toBeVisible();
+    await expect(
+      page.getByRole("definition").getByRole("link", { name: "Pay" })
+    ).toBeVisible();
 
     // An edit is a new version, with what changed.
     await page.getByRole("button", { name: "Edit" }).click();
@@ -111,8 +142,8 @@ test("a person searches, edits a document, meets a newer version instead of over
     await expect(article.getByText(/twenty weeks/u)).toBeVisible();
     await expect(versionRow(page, 2)).toContainText("Longer leave");
 
-    // Someone saves while the editor is open: saving shows their version,
-    // keeps this text, and saving again builds on theirs.
+    // A save from another tab while the editor is open: saving shows that
+    // version, keeps this text, and saving again builds on it.
     await page.getByRole("button", { name: "Edit" }).click();
     await mine.api.knowledge.saveDocument({
       collectionId,
