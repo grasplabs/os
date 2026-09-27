@@ -29,6 +29,13 @@
       "when": 1790416384959,
       "tag": "0003_held_actions",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1790455933286,
+      "tag": "0004_audit_outbox_rejected",
+      "breakpoints": true
     }
   ]
 }

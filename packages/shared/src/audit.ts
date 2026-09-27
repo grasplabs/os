@@ -7,7 +7,6 @@ import {
   runIdSchema,
   workflowIdSchema,
 } from "./ids.ts";
-import { errorFields, log } from "./log.ts";
 import type { Authority } from "./permissions.ts";
 import type { Identity } from "./rpc.ts";
 
@@ -132,17 +131,17 @@ export const auditDetailValueSchema = z.union([
 export type AuditDetailValue = z.infer<typeof auditDetailValueSchema>;
 
 /**
- * One audit event, sent by core and connect through the audit queue and
- * appended to the hash chain by the AuditLog object. Messages outlive a
- * release while they wait in the queue, so this schema only ever expands:
- * add optional fields, never rename or remove, never tighten a bound.
+ * One audit event, stored by core and connect in an outbox and appended to
+ * the hash chain by the AuditLog object. Stored events outlive a release
+ * while they wait in an outbox, so this schema only ever expands: add
+ * optional fields, never rename or remove, never tighten a bound.
  *
  * Events carry identifiers, never secrets or content: the log is
  * append-only, so nothing in it can be purged.
  */
 export const auditEventSchema = z.object({
   /**
-   * Unique per event; the queue delivers at least once, the log dedupes.
+   * Unique per event; an outbox delivers at least once, the log dedupes.
    * Lowercased, so a redelivery can't dodge the dedupe by changing case.
    */
   id: z.uuid().toLowerCase(),
@@ -180,14 +179,33 @@ export type AuditEntry = Omit<
   "id" | "at" | "source"
 >;
 
-/** The audit queue's producer binding, as far as the logger needs it. */
-export interface AuditQueue {
-  send: (event: AuditEvent) => Promise<unknown>;
+/**
+ * Most events one take from an outbox returns: core and Knowledge's own,
+ * and connect's, which core takes over RPC (`ConnectApi.takeAuditEvents`).
+ */
+export const auditOutboxTakeMax = 100;
+
+/**
+ * An event waiting in an outbox: its row's ID, the event as stored JSON,
+ * and when it was stored (milliseconds since the epoch).
+ */
+export interface OutboxedAuditEvent {
+  id: string;
+  event: string;
+  createdAt: number;
 }
 
-/** Records audit events for one Worker. */
-export interface AuditLogger {
-  log: (entry: AuditEntry) => Promise<AuditEvent>;
+/**
+ * Why a drain moved a row out of an outbox, to `audit_outbox_rejected`:
+ * the log can never take it (`refused`: not an event to that release, or
+ * over the size cap), or holds its ID with other content (`conflict`).
+ */
+export const auditRejectReasons = ["refused", "conflict"] as const;
+
+/** A row a drain moves out of an outbox, and why. */
+export interface OutboxRejected {
+  id: string;
+  reason: (typeof auditRejectReasons)[number];
 }
 
 /** Whether an event's JSON is over {@link auditEventMaxBytes}. */
@@ -210,7 +228,7 @@ export const createAuditEvent = (
     at: new Date().toISOString(),
     source,
   });
-  // The log refuses it too; failing here keeps it out of the DLQ.
+  // The log refuses it too; failing here keeps it out of the outbox.
   // (Canonical JSON only reorders keys, so its size is the same.)
   if (isAuditEventTooLarge(JSON.stringify(event))) {
     throw new RangeError(
@@ -219,32 +237,3 @@ export const createAuditEvent = (
   }
   return event;
 };
-
-/**
- * The audit logger for one Worker: `audit.log({ actor, action, ... })`. It
- * gives each event a new ID, the time and the Worker it comes from (never the
- * caller's), validates it and checks its size, so a malformed or oversized
- * event fails where it is made instead of in the dead letter queue, and
- * sends it to the audit queue. A send the queue refuses is logged and
- * thrown to the caller: an action whose event can't be recorded must not
- * look recorded.
- */
-export const auditLogger = (
-  queue: AuditQueue,
-  source: AuditSource
-): AuditLogger => ({
-  log: async (entry) => {
-    const event = createAuditEvent(entry, source);
-    try {
-      await queue.send(event);
-    } catch (error) {
-      log.error("audit.send_failed", {
-        eventId: event.id,
-        action: event.action,
-        ...errorFields(error),
-      });
-      throw error;
-    }
-    return event;
-  },
-});

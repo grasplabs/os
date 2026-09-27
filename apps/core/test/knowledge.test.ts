@@ -6,7 +6,8 @@ import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { createCollection } from "../src/knowledge/collections.ts";
-import { runCron, whileQueueDown } from "./cron.ts";
+import { allEvents } from "./audit-events.ts";
+import { runCron, waitingInOutbox, whileLogDown } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { newTeam } from "./knowledge.ts";
 import {
@@ -451,22 +452,30 @@ describe("saving a document", () => {
     ]);
   });
 
-  it("keeps its audit event when the audit queue is down, and sends it later", async () => {
+  it("keeps its audit event when the audit log is down, and appends it later", async () => {
     const { api } = await knowledgeOf("user");
     const { id: collectionId } = await api.createCollection(personal());
-    const { id: documentId } = await whileQueueDown(
-      async () =>
-        await api.saveDocument({
-          collectionId,
-          path: "leave.md",
-          text: leaveV1,
-          ifVersion: 0,
-        })
-    );
-    const sent = await auditedDuring(runCron);
+    const { id: documentId } = await whileLogDown(async () => {
+      const saved = await api.saveDocument({
+        collectionId,
+        path: "leave.md",
+        text: leaveV1,
+        ifVersion: 0,
+      });
+      // It waits in the Knowledge outbox while the log is down.
+      await expect(
+        waitingInOutbox(env.KNOWLEDGE, "knowledge.document.saved", saved.id)
+      ).resolves.toBe(1);
+      return saved;
+    });
+    await runCron();
+    const sent = await allEvents();
     expect(
-      sent.map(({ action, target }) => [action, target?.id])
-    ).toContainEqual(["knowledge.document.saved", documentId]);
+      sent.filter(
+        ({ action, target }) =>
+          action === "knowledge.document.saved" && target?.id === documentId
+      )
+    ).toHaveLength(1);
   });
 });
 

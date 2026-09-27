@@ -1,3 +1,4 @@
+import { auditRejectReasons } from "@grasp-os/shared/audit";
 /**
  * Connect D1 schema: the connection registry, OAuth flows under way, the
  * connections' sealed tokens, the stored answers of side effects, the side
@@ -231,13 +232,36 @@ export const connectionTokens = sqliteTable("connection_tokens", {
 });
 
 /**
- * Audit events not yet on the audit queue. Each call's events are stored
- * here first, with the call's own result where it has one, then sent; what
- * didn't go out is sent again by the cron trigger. `event` is the event as
- * JSON.
+ * Audit events core hasn't appended to the audit log yet. Each call's
+ * events are stored here, with the call's own result where it has one;
+ * core's cron trigger takes them and acknowledges those it appended
+ * (src/audit.ts). `event` is the event as JSON.
  */
 export const auditOutbox = sqliteTable("audit_outbox", {
   id: text().primaryKey(),
   event: text().notNull(),
   createdAt: timestamp("created_at").notNull(),
 });
+
+/**
+ * Outbox rows a drain moved out because the audit log can't take them:
+ * `refused` (not an event to the release that drained it, or over the size
+ * cap) or `conflict` (the log holds its ID with other content, a bug or a
+ * forgery). Kept as they were, for someone to look at; the chain records
+ * each with an `audit.gap` naming its ID and reason (src/audit-outbox.ts in
+ * core). Nothing reads them.
+ */
+export const auditOutboxRejected = sqliteTable(
+  "audit_outbox_rejected",
+  {
+    // Its own key, so a second row with the same event ID is kept too.
+    seq: integer().primaryKey(),
+    id: text().notNull(),
+    event: text().notNull(),
+    reason: text({ enum: auditRejectReasons }).notNull(),
+    /** When the row was stored in the outbox. */
+    createdAt: timestamp("created_at").notNull(),
+    rejectedAt: timestamp("rejected_at").notNull(),
+  },
+  (table) => [index("audit_outbox_rejected_id").on(table.id)]
+);

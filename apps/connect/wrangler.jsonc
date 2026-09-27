@@ -47,9 +47,7 @@
       "migrations_dir": "src/db/migrations",
     },
   ],
-  // Sends the audit events whose first send failed.
+  // Drops OAuth flows nobody finished, and seals what a rotated key sealed
+  // again (src/index.ts).
   "triggers": { "crons": ["* * * * *"] },
-  "queues": {
-    "producers": [{ "binding": "AUDIT_QUEUE", "queue": "grasp-os-audit" }],
-  },
 }

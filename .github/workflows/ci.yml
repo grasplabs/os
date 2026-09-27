@@ -168,10 +168,6 @@ jobs:
               exit 1
             fi
           done
-      # Deploy creates the queues bound as producers (grasp-os-audit), but not
-      # a dead letter queue, which is only named in core's consumer config.
-      - name: Create the audit dead letter queue
-        run: vp exec wrangler queues info grasp-os-audit-dlq || vp exec wrangler queues create grasp-os-audit-dlq
       # A bucket's jurisdiction, too, is set only when it is created: create
       # the audit archive (core's AUDIT_ARCHIVE) in the EU before the first
       # deploy.

@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 import { ZodError } from "zod";
 
 import {
@@ -6,39 +6,27 @@ import {
   auditEventMaxBytes,
   auditEventSchema,
   auditIdentifierMaxLength,
-  auditLogger,
   auditProvenanceMaxItems,
+  createAuditEvent,
 } from "../src/audit.ts";
-import type { AuditEvent } from "../src/audit.ts";
 
-/** A queue that keeps what it was sent. */
-const memoryQueue = () => {
-  const sent: AuditEvent[] = [];
-  return {
-    sent,
-    send: async (event: AuditEvent) => {
-      await Promise.resolve();
-      sent.push(event);
-    },
-  };
-};
+describe("creating an audit event", () => {
+  it("stamps a valid event with a new ID, the time and its own Worker", () => {
+    const first = createAuditEvent(
+      { actor: { type: "system" }, action: "test.a" },
+      "connect"
+    );
+    const second = createAuditEvent(
+      { actor: { type: "system" }, action: "test.b" },
+      "connect"
+    );
 
-describe("audit logger", () => {
-  it("sends a valid event stamped with a new ID, the time and its own Worker", async () => {
-    const queue = memoryQueue();
-    const { log } = auditLogger(queue, "connect");
-
-    const first = await log({ actor: { type: "system" }, action: "test.a" });
-    const second = await log({ actor: { type: "system" }, action: "test.b" });
-
-    expect(queue.sent).toStrictEqual([first, second]);
     expect(auditEventSchema.parse(first)).toStrictEqual(first);
     expect(first.source).toBe("connect");
     expect(first.id).not.toBe(second.id);
   });
 
-  it("ignores an ID, time or source the caller tries to set", async () => {
-    const queue = memoryQueue();
+  it("ignores an ID, time or source the caller tries to set", () => {
     const forged = {
       actor: { type: "system" },
       action: "test.a",
@@ -47,82 +35,63 @@ describe("audit logger", () => {
       source: "core",
     } as const;
 
-    const event = await auditLogger(queue, "connect").log(forged);
+    const event = createAuditEvent(forged, "connect");
 
     expect(event.id).not.toBe(forged.id);
     expect(event.at).not.toBe(forged.at);
     expect(event.source).toBe("connect");
   });
 
-  it("logs a send the queue refuses, and passes the failure on to the caller", async () => {
-    const refusing = {
-      send: async () => {
-        await Promise.resolve();
-        throw new Error("Queue unavailable");
-      },
-    };
-    const logged = vi.spyOn(console, "error").mockReturnValue();
-    try {
-      await expect(
-        auditLogger(refusing, "core").log({
+  it("refuses a malformed event", () => {
+    expect(() =>
+      createAuditEvent(
+        {
           actor: { type: "system" },
-          action: "test.a",
-        })
-      ).rejects.toThrow("Queue unavailable");
-      expect(logged).toHaveBeenCalledWith(
-        expect.objectContaining({
-          event: "audit.send_failed",
-          action: "test.a",
-          errorMessage: "Queue unavailable",
-        })
-      );
-    } finally {
-      logged.mockRestore();
-    }
+          action: "model.call",
+          cost: { amount: -1, currency: "usd" },
+        },
+        "core"
+      )
+    ).toThrow(ZodError);
   });
 
-  it("refuses a malformed event before it reaches the queue", async () => {
-    const queue = memoryQueue();
-    await expect(
-      auditLogger(queue, "core").log({
-        actor: { type: "system" },
+  it("takes an event naming a large retrieval: a full provenance of identifier-sized IDs", () => {
+    const provenance = Array.from({ length: auditProvenanceMaxItems }, () =>
+      "r".repeat(auditIdentifierMaxLength)
+    );
+    const event = createAuditEvent(
+      {
+        actor: { type: "person", userId: "user-1" },
         action: "model.call",
-        cost: { amount: -1, currency: "usd" },
-      })
-    ).rejects.toThrow(ZodError);
-    expect(queue.sent).toStrictEqual([]);
+        provenance,
+      },
+      "core"
+    );
+    expect(event.provenance).toStrictEqual(provenance);
   });
 
-  it("sends an event naming a large retrieval: a full provenance of identifier-sized IDs", async () => {
-    const queue = memoryQueue();
-    const event = await auditLogger(queue, "core").log({
-      actor: { type: "person", userId: "user-1" },
-      action: "model.call",
-      provenance: Array.from({ length: auditProvenanceMaxItems }, () =>
-        "r".repeat(auditIdentifierMaxLength)
-      ),
-    });
-    expect(queue.sent).toStrictEqual([event]);
-  });
-
-  it("refuses an event over the log's size cap before it reaches the queue", async () => {
-    const queue = memoryQueue();
+  it("refuses an event over the log's size cap", () => {
     // Every field within its bound, the whole over the cap.
     const full = "r".repeat(auditIdentifierMaxLength);
-    await expect(
-      auditLogger(queue, "core").log({
-        actor: { type: "system" },
-        action: "model.call",
-        provenance: Array.from({ length: auditProvenanceMaxItems }, () => full),
-        detail: Object.fromEntries(
-          Array.from({ length: auditDetailMaxKeys }, (_, i) => [
-            `key${i}`,
-            full,
-          ])
-        ),
-      })
-    ).rejects.toThrow(`over ${auditEventMaxBytes} bytes`);
-    expect(queue.sent).toStrictEqual([]);
+    expect(() =>
+      createAuditEvent(
+        {
+          actor: { type: "system" },
+          action: "model.call",
+          provenance: Array.from(
+            { length: auditProvenanceMaxItems },
+            () => full
+          ),
+          detail: Object.fromEntries(
+            Array.from({ length: auditDetailMaxKeys }, (_, i) => [
+              `key${i}`,
+              full,
+            ])
+          ),
+        },
+        "core"
+      )
+    ).toThrow(`over ${auditEventMaxBytes} bytes`);
   });
 });
 

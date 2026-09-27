@@ -1,3 +1,4 @@
+import type { OutboxedAuditEvent } from "@grasp-os/shared/audit";
 import {
   capabilityErrors,
   verifyCapability,
@@ -24,7 +25,7 @@ import type {
 import { errorFields, log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
-import { auditCall, sendAuditOutbox } from "./audit.ts";
+import { ackAuditEvents, auditCall, takeAuditEvents } from "./audit.ts";
 import type { CallOutcome, CallRecord } from "./audit.ts";
 import { carryOut, connectionFor } from "./call.ts";
 import type { CallDone, CallProgress } from "./call.ts";
@@ -143,12 +144,11 @@ export default class Connect
   }
 
   /**
-   * Every minute: sends the audit events whose first send failed, drops
-   * OAuth flows nobody finished, and seals what a rotated key sealed again.
+   * Every minute: drops OAuth flows nobody finished, and seals what a
+   * rotated key sealed again.
    */
   override async scheduled(): Promise<void> {
     const results = await Promise.allSettled([
-      sendAuditOutbox(this.env),
       purgeExpiredFlows(this.env),
       resealTokens(this.env),
       resealFlows(this.env),
@@ -158,6 +158,18 @@ export default class Connect
         log.error("cron.failed", errorFields(result.reason));
       }
     }
+  }
+
+  // The audit outbox (src/audit.ts). Core's cron trigger takes the events
+  // connect recorded, appends them to the audit log, then acknowledges them,
+  // with those the log can't take, which connect moves aside.
+
+  async takeAuditEvents(): Promise<OutboxedAuditEvent[]> {
+    return await takeAuditEvents(this.env);
+  }
+
+  async ackAuditEvents(appended: unknown, rejected?: unknown): Promise<void> {
+    await ackAuditEvents(this.env, appended, rejected);
   }
 
   // Connecting accounts (src/oauth.ts). Core calls these for a signed-in

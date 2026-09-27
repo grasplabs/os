@@ -12,11 +12,11 @@ import type {
 } from "@grasp-os/shared/audit-log";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { vi } from "vite-plus/test";
 
 import { chainHash } from "../src/audit-chain.ts";
 import type { AuditLog } from "../src/audit-log.ts";
 import { auditLog } from "../src/audit-log.ts";
+import { drainAuditOutboxes } from "../src/audit-outbox.ts";
 import { AuditRpc } from "../src/audit-rpc.ts";
 import { identify } from "../src/auth/identity.ts";
 
@@ -38,49 +38,42 @@ const entriesAfter = async (
   return entries;
 };
 
+/**
+ * Every event in the deployment's log, oldest first, as it is: without
+ * draining the outboxes into it first.
+ */
+export const loggedEvents = async (): Promise<AuditEvent[]> => {
+  const entries = await entriesAfter();
+  return entries.map(({ event }) => event);
+};
+
+/**
+ * Drains every outbox into the log, connect's included, as the cron trigger
+ * does. A change drains its own outbox in the background, so a test that
+ * reads the log drains first rather than wait for that.
+ */
+const drained = async (): Promise<void> => {
+  await drainAuditOutboxes(env);
+};
+
 /** The events the deployment's log appended after position `after`. */
 export const eventsAfter = async (after: number): Promise<AuditEvent[]> => {
+  await drained();
   const entries = await entriesAfter(after);
   return entries.map(({ event }) => event);
 };
 
-/** Every event in the deployment's log, oldest first. */
+/** Every event in the deployment's log, oldest first, outboxes drained. */
 export const allEvents = async (): Promise<AuditEvent[]> => {
-  const entries = await entriesAfter();
-  return entries.map(({ event }) => event);
+  await drained();
+  return await loggedEvents();
 };
 
-/** The position of the log's latest event: 0 while it's empty. */
+/** The position of the log's latest event, outboxes drained: 0 while empty. */
 export const logHead = async (): Promise<number> => {
+  await drained();
   const entries = await entriesAfter();
   return entries.at(-1)?.seq ?? 0;
-};
-
-/**
- * The events with these IDs as the audit log stored them, in log order,
- * once it has all of them: the queue delivers them a moment after they're
- * sent. Reads only what the log appended after position `after`.
- */
-export const loggedEvents = async (
-  ids: readonly string[],
-  after = 0
-): Promise<AuditEvent[]> => {
-  if (ids.length === 0) {
-    return [];
-  }
-  return await vi.waitFor(
-    async () => {
-      const entries = await entriesAfter(after);
-      const logged = entries
-        .map(({ event }) => event)
-        .filter(({ id }) => ids.includes(id));
-      if (logged.length < new Set(ids).size) {
-        throw new Error(`${logged.length} of ${ids.length} events logged`);
-      }
-      return logged;
-    },
-    { timeout: 5000 }
-  );
 };
 
 /**

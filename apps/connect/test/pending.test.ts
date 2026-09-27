@@ -178,14 +178,16 @@ const leftFor = async (connectionId: string) => {
 };
 
 /** The events about `connectionId`, by action and outcome. */
-const eventsFor = (connectionId: string) =>
-  audit.events
+const eventsFor = async (connectionId: string) => {
+  const events = await audit.events();
+  return events
     .filter(({ target }) => target?.id === connectionId)
     .map(({ action, actor, detail }) => ({
       action,
       actor: actor.type,
       outcome: detail.outcome ?? detail.reason ?? null,
     }));
+};
 
 describe("a side effect from chat", () => {
   it("is held, not run, and its person sees the exact call", async () => {
@@ -217,7 +219,7 @@ describe("a side effect from chat", () => {
       hash: /^[0-9a-f]{64}$/u.test(inputHash),
       requested: Number.isNaN(Date.parse(requestedAt)),
     }).toStrictEqual({ hash: true, requested: false });
-    expect(eventsFor(connectionId)).toStrictEqual([
+    await expect(eventsFor(connectionId)).resolves.toStrictEqual([
       { action: "connection.call", actor: "agent", outcome: "held" },
     ]);
   });
@@ -264,15 +266,16 @@ describe("a side effect from chat", () => {
       waiting: [],
       again: "connect.pending_not_found",
     });
-    expect(eventsFor(connectionId)).toStrictEqual([
+    await expect(eventsFor(connectionId)).resolves.toStrictEqual([
       { action: "connection.call", actor: "agent", outcome: "held" },
       { action: "connection.action.confirmed", actor: "person", outcome: null },
       { action: "connection.call", actor: "agent", outcome: "ok" },
       { action: "connection.call", actor: "agent", outcome: "replayed" },
     ]);
     // The second confirmation found nothing left to name but its ID.
+    const audited = await audit.events();
     expect(
-      audit.events
+      audited
         .filter(({ action }) => action === "connection.action.confirm_refused")
         .map(({ detail }) => detail)
     ).toStrictEqual([
@@ -345,8 +348,9 @@ describe("a side effect from chat", () => {
       stillWaiting: [held.id],
     });
     // Every attempt is recorded, under whoever made it.
+    const audited = await audit.events();
     expect(
-      audit.events
+      audited
         .filter(({ action }) => action === "connection.action.confirm_refused")
         .map(({ actor }) => actor.type)
         .toSorted()
@@ -470,10 +474,9 @@ describe("a side effect from chat", () => {
       ran: [],
       left: { held: [], answers: [] },
     });
+    const events = await eventsFor(connectionId);
     expect(
-      eventsFor(connectionId).filter(
-        ({ action }) => action === "connection.action.declined"
-      )
+      events.filter(({ action }) => action === "connection.action.declined")
     ).toStrictEqual([
       { action: "connection.action.declined", actor: "person", outcome: null },
     ]);
@@ -509,12 +512,13 @@ describe("a side effect from chat", () => {
       moved: await outcome(confirm(anna, heldOn(moved))),
     };
     const stillWaiting = await waitingFor(anna);
+    const audited = await audit.events();
     expect({
       ...refused,
       ran: server.ran,
       // Refused before they were taken: they keep waiting, not confirmed.
       stillWaiting: stillWaiting.length,
-      events: audit.events
+      events: audited
         .filter(({ action }) => action.startsWith("connection.action."))
         .map(({ action, detail }) => `${action} ${String(detail.reason)}`)
         .toSorted(),
@@ -583,7 +587,8 @@ describe("a side effect from chat", () => {
     }
     await db.batch([one, ...more]);
     await exports.default.disconnect({ person: admin, connectionId });
-    const dropped = audit.events.filter(
+    const audited = await audit.events();
+    const dropped = audited.filter(
       ({ action, target }) =>
         action === "connection.action.dropped" && target?.id === connectionId
     );
@@ -613,11 +618,12 @@ describe("a side effect from chat", () => {
       person: null,
       ownerUserIds: [anna.userId],
     });
+    const audited = await audit.events();
     expect({
       afterDisconnect: afterDisconnect.map(({ connectionId }) => connectionId),
       afterRemoval: await waitingFor(anna),
       left: [await leftFor(shared), await leftFor(other)],
-      dropped: audit.events
+      dropped: audited
         .filter(({ action }) => action === "connection.action.dropped")
         .map(({ actor, target, detail }) => ({
           actor: actor.type,
@@ -700,11 +706,12 @@ describe("a side effect from chat", () => {
     const confirmed = await confirm(anna, held, {
       signed: { restricted: true },
     });
+    const audited = await audit.events();
     expect({
       held: { pending: result.pending?.id, restricted: held.restricted },
       confirmed: confirmed.output,
       ran: server.ran.length,
-      events: audit.events
+      events: audited
         .filter(({ target }) => target?.id === connectionId)
         .map(({ action, detail }) => ({
           action,
@@ -728,10 +735,11 @@ describe("a side effect from chat", () => {
     await hold(inChat(anna), mail(connectionId));
     const held = await heldFor(anna);
     await confirm(anna, held, { signed: { restricted: true } });
+    const audited = await audit.events();
     expect({
       heldRestricted: held.restricted,
       ran: server.ran.length,
-      confirmed: audit.events.find(
+      confirmed: audited.find(
         ({ action }) => action === "connection.action.confirmed"
       )?.detail.restricted,
     }).toStrictEqual({ heldRestricted: false, ran: 1, confirmed: true });

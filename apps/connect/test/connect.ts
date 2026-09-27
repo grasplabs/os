@@ -19,7 +19,7 @@ import type { Authority } from "@grasp-os/shared/permissions";
 import { roleErrors } from "@grasp-os/shared/roles";
 import { env, exports } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
-import { afterEach, beforeEach, vi } from "vite-plus/test";
+import { beforeEach } from "vite-plus/test";
 import type { z } from "zod";
 
 import { connections } from "../src/db/schema.ts";
@@ -236,33 +236,24 @@ export const connectAccount = async (
 };
 
 /**
- * The audit queue, as far as connect reaches it: the events it takes in
- * each test of the file, and `refuseNext` to make it refuse the next send.
+ * Connect's audit outbox, emptied before each test of the file: `events()`
+ * gives every event the test recorded so far, in the order core takes them.
  */
 export const auditEvents = () => {
-  const events: AuditEvent[] = [];
-  let refuse = false;
-  beforeEach(() => {
-    events.length = 0;
-    refuse = false;
-    vi.spyOn(env.AUDIT_QUEUE, "send").mockImplementation(async (event) => {
-      if (refuse) {
-        refuse = false;
-        throw new Error("Queue unavailable");
-      }
-      events.push(auditEventSchema.parse(event));
-      return await Promise.resolve({
-        metadata: { metrics: { backlogCount: 0, backlogBytes: 0 } },
-      });
-    });
-  });
-  afterEach(() => {
-    vi.restoreAllMocks();
+  beforeEach(async () => {
+    await env.DB.batch([
+      env.DB.prepare("DELETE FROM audit_outbox"),
+      env.DB.prepare("DELETE FROM audit_outbox_rejected"),
+    ]);
   });
   return {
-    events,
-    refuseNext: () => {
-      refuse = true;
+    events: async (): Promise<AuditEvent[]> => {
+      const { results } = await env.DB.prepare(
+        "SELECT event FROM audit_outbox ORDER BY rowid"
+      ).all<{ event: string }>();
+      return results.map(({ event }) =>
+        auditEventSchema.parse(JSON.parse(event))
+      );
     },
   };
 };

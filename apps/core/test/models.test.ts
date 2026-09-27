@@ -4,12 +4,12 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
-import { sendAuditOutbox } from "../src/audit-outbox.ts";
 import { models } from "../src/models.ts";
 import type { ModelCall, ModelsEnv } from "../src/models.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { allEvents } from "./audit-events.ts";
+import { runCron } from "./cron.ts";
 import { outcome } from "./sign-in.ts";
 
 // AI Gateway is the outside system here: a fake behind the AI binding
@@ -67,9 +67,9 @@ const auditedFor = async (
   return await mine();
 };
 
-/** A queue or database that is down. */
+/** A database or audit log that is down. */
 const refuse = (): never => {
-  throw new Error("Queue unavailable");
+  throw new Error("Unavailable");
 };
 
 describe("model gateway", () => {
@@ -533,32 +533,28 @@ describe("model gateway", () => {
     ]);
   });
 
-  it("keeps a paid answer when the audit queue is down, and delivers its event later", async () => {
+  it("keeps a paid answer when the audit log is down, and appends its event later", async () => {
     const trigger = newPerson();
     const { gatewayEnv } = withGateway([answer("Hello, Ada.")]);
-    const queueDown: Env["AUDIT_QUEUE"] = {
-      send: refuse,
-      sendBatch: refuse,
-      metrics: refuse,
-    };
+    const logDown = new Proxy(env.AUDIT_LOG, {
+      get: () => refuse,
+    });
 
-    const result = await models({ ...gatewayEnv, AUDIT_QUEUE: queueDown }).call(
-      {
-        model: anthropic,
-        input: "Say hello.",
-        purpose: "chat.turn",
-        trigger,
-      }
-    );
+    const result = await models({ ...gatewayEnv, AUDIT_LOG: logDown }).call({
+      model: anthropic,
+      input: "Say hello.",
+      purpose: "chat.turn",
+      trigger,
+    });
 
     expect(result.text).toBe("Hello, Ada.");
-    // The cron trigger sends what the queue refused.
-    await sendAuditOutbox(env);
+    // The cron trigger drains what the log couldn't take.
+    await runCron();
     const [event] = await auditedFor(trigger.userId, 1);
     expect(event).toMatchObject({ action: "model.call", actor: trigger });
   });
 
-  it("keeps a paid answer when the database refuses its audit event, and sends the event straight to the queue", async () => {
+  it("keeps a paid answer when the database refuses its audit event, and appends the event straight to the log", async () => {
     const trigger = newPerson();
     const { gatewayEnv } = withGateway([answer("Hello, Ada.")]);
     const databaseDown = new Proxy(env.DB, {

@@ -52,8 +52,7 @@ const server = fakeMcpServer(serverUrl, [
   },
 ]);
 
-const queue = auditEvents();
-const { events } = queue;
+const audit = auditEvents();
 
 const anna = agentFor("user-anna");
 
@@ -76,8 +75,9 @@ describe("the audit log", () => {
       anna,
       write(connectionId, "mail.list", { query: "secret project" })
     );
-    expect(events).toHaveLength(1);
-    expect(events[0]).toMatchObject({
+    const audited = await audit.events();
+    expect(audited).toHaveLength(1);
+    expect(audited[0]).toMatchObject({
       source: "connect",
       actor: { type: "agent", agentId: "agent-chat", onBehalfOf: "user-anna" },
       action: "connection.call",
@@ -93,7 +93,7 @@ describe("the audit log", () => {
       },
     });
     // Nothing of the input or the output.
-    const recorded = JSON.stringify(events);
+    const recorded = JSON.stringify(audited);
     expect(recorded).not.toContain("secret project");
     expect(recorded).not.toContain("Quarterly numbers");
   });
@@ -104,8 +104,9 @@ describe("the audit log", () => {
     await callAs({ ...appFor("user-anna"), appVersion: 3 }, call);
     // As an earlier core signs it: without one.
     await callAs(appFor("user-anna"), call);
+    const audited = await audit.events();
     expect(
-      events.map(({ action, actor, detail }) => ({ action, actor, detail }))
+      audited.map(({ action, actor, detail }) => ({ action, actor, detail }))
     ).toMatchObject([
       {
         action: "connection.call",
@@ -118,7 +119,7 @@ describe("the audit log", () => {
         detail: { action: "mail.list" },
       },
     ]);
-    expect(events[1]?.detail).not.toHaveProperty("appVersion");
+    expect(audited[1]?.detail).not.toHaveProperty("appVersion");
   });
 
   it("records every resource a large read touched", async () => {
@@ -127,7 +128,8 @@ describe("the audit log", () => {
       appFor("user-anna"),
       write(connectionId, "mail.list", { many: true })
     );
-    const [first, ...rest] = events;
+    const audited = await audit.events();
+    const [first, ...rest] = audited;
     expect(first).toMatchObject({
       actor: { type: "app", appId: "app-crm", part: "server" },
       action: "connection.call",
@@ -141,8 +143,13 @@ describe("the audit log", () => {
         target: first?.target,
       });
     }
-    expect(events.flatMap((event) => event.provenance)).toStrictEqual(
+    // In the order they were stored, which is the order core takes them in.
+    expect(audited.flatMap((event) => event.provenance)).toStrictEqual(
       manyMessages
+    );
+    const taken = await exports.default.takeAuditEvents();
+    expect(taken.map(({ id }) => id)).toStrictEqual(
+      audited.map(({ id }) => id)
     );
   });
 
@@ -156,7 +163,8 @@ describe("the audit log", () => {
     };
     await callAs(anna, call);
     await callAs(anna, call);
-    const [first, repeat] = events.map((event) => event.detail);
+    const audited = await audit.events();
+    const [first, repeat] = audited.map((event) => event.detail);
     expect([first, repeat]).toMatchObject([
       { sideEffect: true, outcome: "ok" },
       { sideEffect: true, outcome: "replayed" },
@@ -164,7 +172,7 @@ describe("the audit log", () => {
     // App code chooses keys: the log gets a hash, never the key.
     expect(first?.idempotencyKeyHash).toMatch(/^[0-9a-f]{64}$/u);
     expect(repeat?.idempotencyKeyHash).toBe(first?.idempotencyKeyHash);
-    expect(JSON.stringify(events)).not.toContain("run-1:send");
+    expect(JSON.stringify(audited)).not.toContain("run-1:send");
     expect(server.ran).toHaveLength(1);
   });
 
@@ -199,8 +207,9 @@ describe("the audit log", () => {
       "connect.idempotency_key_required",
       "connect.invalid",
     ]);
+    const audited = await audit.events();
     expect(
-      events.map(({ actor, target, detail }) => ({
+      audited.map(({ actor, target, detail }) => ({
         actor: actor.type,
         target: target?.id,
         outcome: detail.outcome,
@@ -251,7 +260,8 @@ describe("the audit log", () => {
     await expect(outcome(callAs(anna, call))).resolves.toBe(
       "connect.action_failed"
     );
-    expect(events).toMatchObject([
+    const audited = await audit.events();
+    expect(audited).toMatchObject([
       {
         provenance: ["message-9"],
         detail: { outcome: "failed", reason: "connect.action_failed" },
@@ -283,23 +293,99 @@ describe("the audit log", () => {
       "connect.outcome_unknown"
     );
     expect(server.ran).toHaveLength(1);
-    expect(events.map((event) => event.detail)).toMatchObject([
+    const audited = await audit.events();
+    expect(audited.map((event) => event.detail)).toMatchObject([
       { outcome: "unknown", reason: "connect.outcome_unknown" },
       { outcome: "unknown", reason: "connect.outcome_unknown" },
     ]);
   });
 
-  it("keeps an event the queue refused, and sends it on the next cron run", async () => {
+  it("keeps its events until core acknowledges them, and removes only those", async () => {
     const connectionId = await addConnection();
-    queue.refuseNext();
-    await expect(
-      outcome(callAs(anna, write(connectionId, "mail.list")))
-    ).resolves.toBe("ok");
-    expect(events).toStrictEqual([]);
-    await exports.default.scheduled();
-    expect(events).toMatchObject([
-      { action: "connection.call", target: { id: connectionId } },
+    await callAs(anna, write(connectionId, "mail.list"));
+    await callAs(anna, write(connectionId, "mail.list"));
+    const taken = await exports.default.takeAuditEvents();
+    const ids = taken.map(({ id }) => id);
+    expect(ids).toHaveLength(2);
+
+    // Taking removes nothing.
+    await expect(exports.default.takeAuditEvents()).resolves.toStrictEqual(
+      taken
+    );
+    await exports.default.ackAuditEvents(ids.slice(0, 1));
+    // Acknowledging again, or an ID it never had, changes nothing.
+    await exports.default.ackAuditEvents([
+      ...ids.slice(0, 1),
+      crypto.randomUUID(),
     ]);
+    const left = await exports.default.takeAuditEvents();
+    expect(left.map(({ id }) => id)).toStrictEqual(ids.slice(1));
+  });
+
+  it("moves events core rejects out of the outbox, with why, as it acknowledges the rest", async () => {
+    const connectionId = await addConnection();
+    await callAs(anna, write(connectionId, "mail.list"));
+    await callAs(anna, write(connectionId, "mail.list"));
+    await callAs(anna, write(connectionId, "mail.list"));
+    const [appended, refused, conflicting] =
+      await exports.default.takeAuditEvents();
+
+    await exports.default.ackAuditEvents(
+      [appended?.id ?? crypto.randomUUID()],
+      [
+        { id: refused?.id ?? crypto.randomUUID(), reason: "refused" },
+        { id: conflicting?.id ?? crypto.randomUUID(), reason: "conflict" },
+      ]
+    );
+
+    const { results } = await env.DB.prepare(
+      "SELECT id, event, reason FROM audit_outbox_rejected ORDER BY reason DESC"
+    ).all();
+    expect({
+      left: await exports.default.takeAuditEvents(),
+      rejected: results,
+    }).toStrictEqual({
+      left: [],
+      rejected: [
+        { id: refused?.id, event: refused?.event, reason: "refused" },
+        { id: conflicting?.id, event: conflicting?.event, reason: "conflict" },
+      ],
+    });
+  });
+
+  it("refuses an acknowledgement that isn't a list of event IDs", async () => {
+    await expect(
+      outcome(exports.default.ackAuditEvents("everything"))
+    ).resolves.toBe("connect.invalid");
+    await expect(
+      outcome(exports.default.ackAuditEvents(["not-an-event"]))
+    ).resolves.toBe("connect.invalid");
+    await expect(
+      outcome(
+        exports.default.ackAuditEvents(
+          Array.from({ length: 101 }, () => crypto.randomUUID())
+        )
+      )
+    ).resolves.toBe("connect.invalid");
+    await expect(
+      outcome(
+        exports.default.ackAuditEvents(
+          [],
+          [{ id: crypto.randomUUID(), reason: "unwanted" }]
+        )
+      )
+    ).resolves.toBe("connect.invalid");
+    await expect(
+      outcome(
+        exports.default.ackAuditEvents(
+          Array.from({ length: 60 }, () => crypto.randomUUID()),
+          Array.from({ length: 41 }, () => ({
+            id: crypto.randomUUID(),
+            reason: "refused",
+          }))
+        )
+      )
+    ).resolves.toBe("connect.invalid");
   });
 
   it("records a side effect whose outcome is unknown as such", async () => {
@@ -313,7 +399,8 @@ describe("the audit log", () => {
         idempotencyKey: "run-1:send",
       })
     );
-    expect(events.map((event) => event.detail)).toMatchObject([
+    const audited = await audit.events();
+    expect(audited.map((event) => event.detail)).toMatchObject([
       { outcome: "unknown", reason: "connect.outcome_unknown" },
     ]);
   });

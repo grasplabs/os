@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import type { OutboxedAuditEvent, OutboxRejected } from "./audit.ts";
 import { defineErrorFamily } from "./errors.ts";
 import { connectionIdSchema, identifierSchema } from "./ids.ts";
 import { permissionActionSchema } from "./permissions.ts";
@@ -352,6 +353,23 @@ export interface ConnectApi {
    * held action keeps waiting.
    */
   refuseConfirmation: (request: RefuseConfirmation) => Promise<void>;
+  /**
+   * The oldest audit events connect recorded that core hasn't acknowledged,
+   * in the order they were stored, at most `auditOutboxTakeMax`. Taking
+   * removes nothing: events core took but didn't acknowledge are taken
+   * again, so core appends each at least once, and the log keeps it once.
+   */
+  takeAuditEvents: () => Promise<OutboxedAuditEvent[]>;
+  /**
+   * Settles taken events by ID: removes those core appended to the audit
+   * log, and moves those the log can't take to `audit_outbox_rejected`,
+   * with why. At most `auditOutboxTakeMax` in all; IDs already settled are
+   * ignored.
+   */
+  ackAuditEvents: (
+    appended: readonly string[],
+    rejected?: readonly OutboxRejected[]
+  ) => Promise<void>;
 }
 
 /** Why connecting or disconnecting an account didn't work. */

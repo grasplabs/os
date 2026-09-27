@@ -44,7 +44,7 @@ import { keepAuditEvent } from "./audit-outbox.ts";
 // either. Every request is audited as metadata only: who or what asked, why,
 // the model, tokens and cost, never the prompt or the answer. The event goes
 // through the audit outbox, so a request that was answered (and paid for)
-// is recorded even when the queue refuses it for a moment.
+// is recorded even when the audit log can't take it for a moment.
 //
 // Only providers whose pi adapter takes a custom fetch can ride the binding.
 // Google's refuses one, so Google models would need a gateway token over

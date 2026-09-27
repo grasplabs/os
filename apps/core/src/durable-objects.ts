@@ -9,7 +9,7 @@ import type { AppId } from "@grasp-os/shared/ids";
  */
 /** The namespace to get an object from, in the EU unless turned off. */
 export const inJurisdiction = <T extends Rpc.DurableObjectBranded | undefined>(
-  env: Env,
+  env: Pick<Env, "DURABLE_OBJECT_JURISDICTION">,
   namespace: DurableObjectNamespace<T>
 ): DurableObjectNamespace<T> =>
   env.DURABLE_OBJECT_JURISDICTION === "none"

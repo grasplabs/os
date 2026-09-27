@@ -30,7 +30,7 @@ const server = fakeMcpServer(serverUrl, [
   },
 ]);
 
-const { events } = auditEvents();
+const audit = auditEvents();
 
 const anna = agentFor("user-anna");
 
@@ -159,6 +159,7 @@ describe("calls to connect", () => {
       "connect.mask_unsupported"
     );
     expect(server.requests).toBe(0);
+    const events = await audit.events();
     expect(events.map(({ detail }) => detail)).toMatchObject([
       { outcome: "refused", reason: "connect.mask_unsupported" },
     ]);

@@ -1,4 +1,3 @@
-import { auditEventSchema } from "@grasp-os/shared/audit";
 import { signCapability } from "@grasp-os/shared/capability";
 import {
   bindingNameSchema,
@@ -11,7 +10,7 @@ import type {
 } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 
 import {
   authorize,
@@ -19,8 +18,9 @@ import {
   revokePermission,
 } from "../src/permissions.ts";
 import { outlook } from "./apps.ts";
+import { allEvents } from "./audit-events.ts";
 import { actingFor, connectionIn, envOf, reached } from "./contexts.ts";
-import { runCron, whileQueueDown } from "./cron.ts";
+import { runCron, waitingInOutbox, whileLogDown } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import {
   auditedDuring,
@@ -585,65 +585,31 @@ describe("permissions", () => {
     ).resolves.toBe("ok");
   });
 
-  it("keep their audit event when the audit queue is down, and send it later, once", async () => {
+  it("keep their audit event when the audit log is down, and append it later, once", async () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);
     const { id } = await admin.api.permissions.request(outlook(app.appId));
 
-    const granted = await whileQueueDown(
-      async () => await admin.api.permissions.grant(id)
-    );
+    const granted = await whileLogDown(async () => {
+      const result = await admin.api.permissions.grant(id);
+      // It waits in the outbox while the log is down.
+      await expect(
+        waitingInOutbox(env.DB, "permission.granted", id)
+      ).resolves.toBe(1);
+      return result;
+    });
+    await runCron();
+    await runCron();
 
-    const sent = await auditedDuring(runCron);
-    const sentAgain = await auditedDuring(runCron);
+    const events = await allEvents();
     expect({
       status: granted.status,
-      sent: sent.map(({ action, target }) => [action, target?.id]),
-      sentAgain,
-    }).toStrictEqual({
-      status: "active",
-      sent: [["permission.granted", id]],
-      sentAgain: [],
-    });
-  });
-
-  it("keep sending audit events past one that can't be sent or read", async () => {
-    const admin = await permissionApi("admin");
-    const app = await newApp(admin.api);
-    const { id } = await admin.api.permissions.request(outlook(app.appId));
-    // A stored event that isn't JSON, older than anything else waiting.
-    await env.DB.prepare(
-      "INSERT INTO audit_outbox (id, event, created_at) VALUES (?, ?, 0)"
-    )
-      .bind(crypto.randomUUID(), "not an event")
-      .run();
-    await whileQueueDown(async () => await admin.api.permissions.grant(id));
-
-    const send = vi.spyOn(env.AUDIT_QUEUE, "send");
-    try {
-      // The queue refuses the oldest one once: the rest still go.
-      send.mockRejectedValueOnce(new Error("Queue unavailable"));
-      await runCron();
-      const first = send.mock.calls.slice(1).map(([body]) => body);
-      send.mockClear();
-      await runCron();
-      const second = send.mock.calls.map(([body]) => body);
-      const waiting = await env.DB.prepare(
-        "SELECT count(*) AS waiting FROM audit_outbox"
-      ).first("waiting");
-      expect({
-        first: first.map((body) => auditEventSchema.parse(body).action),
-        second,
-        waiting,
-      }).toStrictEqual({
-        first: ["permission.granted"],
-        // Sent as it is, for the queue's consumer to dead-letter.
-        second: ["not an event"],
-        waiting: 0,
-      });
-    } finally {
-      send.mockRestore();
-    }
+      logged: events.filter(
+        ({ action, target }) =>
+          action === "permission.granted" && target?.id === id
+      ).length,
+      waiting: await waitingInOutbox(env.DB, "permission.granted", id),
+    }).toStrictEqual({ status: "active", logged: 1, waiting: 0 });
   });
 
   it("are audited when requested, granted and revoked, by who did it", async () => {
