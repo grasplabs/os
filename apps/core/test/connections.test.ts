@@ -6,6 +6,7 @@ import { consentCode, tokensFor } from "./connect-providers.ts";
 import { mockIdp } from "./idp.ts";
 import { acmeTenant, clientOrigin, otherTenant } from "./sign-in-config.ts";
 import {
+  auditedDuring,
   openRpc,
   outcome,
   routed,
@@ -420,5 +421,168 @@ describe("connecting a Composio toolkit", () => {
         })
       )
     ).resolves.toBe("connection.invalid");
+  });
+});
+
+/** The catalog `connections` lists, each entry as `source:id`. */
+const listed = async (connections: {
+  catalog: () => Promise<{ entries: { source: string; id: string }[] }>;
+}): Promise<string[]> => {
+  const { entries } = await connections.catalog();
+  return entries.map(({ source, id }) => `${source}:${id}`);
+};
+
+describe("offering catalog entries", () => {
+  const toolkitRequest = {
+    toolkit: "hubspot",
+    tools: ["HUBSPOT_LIST_CONTACTS"],
+    consent: composioConsentText,
+  };
+
+  it("hides an entry from everyone but admins, refuses and records starting it, and offers it again", async () => {
+    const admin = await person("admin");
+    const anna = await person();
+    const hidden = await auditedDuring(async () => {
+      await admin.connections.setOffered("native", "google", false);
+      await admin.connections.setOffered("composio", "hubspot", false);
+      // Hiding what is hidden changes nothing, and records nothing.
+      await admin.connections.setOffered("native", "google", false);
+    });
+    const { entries } = await admin.connections.catalog();
+    expect({
+      admin: entries.map(({ id, offered }) => `${id}:${offered}`),
+      anna: await listed(anna.connections),
+    }).toStrictEqual({
+      admin: ["microsoft:true", "google:false", "hubspot:false"],
+      anna: ["native:microsoft"],
+    });
+    const refused = await auditedDuring(async () => {
+      await expect(
+        outcome(
+          anna.connections.start({ provider: "google", scope: "personal" })
+        )
+      ).resolves.toBe("connection.not_offered");
+      // Admins included: hidden is hidden, until an admin offers it again.
+      await expect(
+        outcome(admin.connections.connectToolkit(toolkitRequest))
+      ).resolves.toBe("connection.not_offered");
+    });
+    const offered = await auditedDuring(async () => {
+      await admin.connections.setOffered("native", "google", true);
+      await admin.connections.setOffered("composio", "hubspot", true);
+    });
+    const byAdmin = { type: "person", userId: admin.userId };
+    expect(
+      [...hidden, ...refused, ...offered].map(({ actor, action, detail }) => ({
+        actor,
+        action,
+        detail,
+      }))
+    ).toStrictEqual([
+      {
+        actor: byAdmin,
+        action: "connection.offer_changed",
+        detail: { source: "native", provider: "google", offered: false },
+      },
+      {
+        actor: byAdmin,
+        action: "connection.offer_changed",
+        detail: { source: "composio", provider: "hubspot", offered: false },
+      },
+      {
+        actor: { type: "person", userId: anna.userId },
+        action: "connection.connect",
+        detail: {
+          source: "native",
+          provider: "google",
+          scope: "personal",
+          outcome: "refused",
+          reason: "connection.not_offered",
+        },
+      },
+      {
+        actor: byAdmin,
+        action: "connection.connect",
+        detail: {
+          source: "composio",
+          provider: "hubspot",
+          scope: "shared",
+          outcome: "refused",
+          reason: "connection.not_offered",
+        },
+      },
+      {
+        actor: byAdmin,
+        action: "connection.offer_changed",
+        detail: { source: "native", provider: "google", offered: true },
+      },
+      {
+        actor: byAdmin,
+        action: "connection.offer_changed",
+        detail: { source: "composio", provider: "hubspot", offered: true },
+      },
+    ]);
+    await expect(listed(anna.connections)).resolves.toStrictEqual([
+      "native:microsoft",
+      "native:google",
+      "composio:hubspot",
+    ]);
+    await expect(
+      outcome(admin.connections.connectToolkit(toolkitRequest))
+    ).resolves.toBe("ok");
+  });
+
+  it("keeps a hidden entry's tools from everyone but admins, as for an entry there isn't", async () => {
+    const admin = await person("admin");
+    const anna = await person();
+    await admin.connections.setOffered("native", "google", false);
+    await admin.connections.setOffered("composio", "hubspot", false);
+    const hidden = await Promise.all(
+      [anna, admin].flatMap(({ connections }) => [
+        outcome(connections.catalogTools("native", "google")),
+        outcome(connections.catalogTools("composio", "hubspot")),
+      ])
+    );
+    await admin.connections.setOffered("native", "google", true);
+    await admin.connections.setOffered("composio", "hubspot", true);
+    expect(hidden).toStrictEqual([
+      "connect.catalog_entry_not_found",
+      "connect.catalog_entry_not_found",
+      "ok",
+      "ok",
+    ]);
+    await expect(
+      anna.connections.catalogTools("composio", "hubspot")
+    ).resolves.toHaveLength(2);
+  });
+
+  it("is changed by the organization's admins only, never by staff, and only for entries there can be", async () => {
+    const admin = await person("admin");
+    const anna = await person();
+    const staffSession = await signedIn(idp, "grasp-staff", staffPerson());
+    const { core: staffCore } = await openRpc(staffSession);
+    const staff = staffCore.authenticate().connections;
+    await expect(
+      Promise.all([
+        outcome(anna.connections.setOffered("native", "microsoft", false)),
+        outcome(staff.setOffered("native", "microsoft", false)),
+        outcome(admin.connections.setOffered("native", "hubspot", false)),
+        outcome(admin.connections.setOffered("composio", "Not A Slug", false)),
+        // A slug, but of no toolkit Composio lists: a typo hides nothing.
+        outcome(admin.connections.setOffered("composio", "hubsopt", false)),
+        // SAFETY: a source no catalog has, as a client could send it.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+        outcome(admin.connections.setOffered("other" as never, "x", false)),
+      ])
+    ).resolves.toStrictEqual([
+      "role.forbidden",
+      "role.forbidden",
+      "connection.invalid",
+      "connection.invalid",
+      "connection.invalid",
+      "connection.invalid",
+    ]);
+    const { entries } = await admin.connections.catalog();
+    expect(entries.every(({ offered }) => offered)).toBeTruthy();
   });
 });

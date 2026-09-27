@@ -217,10 +217,26 @@ export interface ConnectionsApi {
   disconnect: (connectionId: string) => Promise<{ revoked: boolean }>;
   /**
    * What can be connected: the native providers, and, while the
-   * `composio` flag is on, Composio's toolkits.
+   * `composio` flag is on, Composio's toolkits. Admins see every entry,
+   * each saying whether it is offered; everyone else only the offered ones.
    */
-  catalog: () => Promise<Catalog>;
-  /** The tools of one catalog entry, as `catalog` lists it. */
+  catalog: () => Promise<OfferedCatalog>;
+  /**
+   * Offers a catalog entry, or stops offering it: nobody starts connecting
+   * an entry that isn't offered (`connection.not_offered`), admins
+   * included, while connections already made go on. Every entry is offered
+   * until an admin says otherwise. Admins only, never Grasp staff; audited.
+   */
+  setOffered: (
+    source: CatalogSource,
+    id: string,
+    offered: boolean
+  ) => Promise<void>;
+  /**
+   * The tools of one catalog entry, as `catalog` lists it: an entry that
+   * isn't offered has none but for admins (`connect.catalog_entry_not_found`,
+   * as for an entry there isn't).
+   */
   catalogTools: (source: CatalogSource, id: string) => Promise<CatalogTool[]>;
   /**
    * Starts connecting a Composio toolkit, for an admin who consented: the
@@ -273,6 +289,11 @@ export interface CatalogEntry {
 export interface Catalog {
   entries: CatalogEntry[];
   composio: "listed" | "off" | "unavailable";
+}
+
+/** The catalog as core hands it out: each entry says whether it is offered. */
+export interface OfferedCatalog extends Catalog {
+  entries: (CatalogEntry & { offered: boolean })[];
 }
 
 /** One tool of a catalog entry. */
@@ -609,6 +630,8 @@ export const connectionErrors = defineErrorFamily({
     "A personal connection must be to your own account, the one you sign in with.",
   "connection.staff_not_allowed":
     "Grasp staff can't connect accounts in a client's deployment.",
+  "connection.not_offered":
+    "Your organization doesn't offer this connection. An admin can offer it.",
 });
 
 /** Why connect refused or couldn't finish a call, other than its capability. */
