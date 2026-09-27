@@ -1,5 +1,6 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import type { App, AppRole } from "@grasp-os/shared/apps";
+import { appIdSchema } from "@grasp-os/shared/ids";
 import { canBuild, isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, eq, exists, or, sql } from "drizzle-orm";
@@ -117,6 +118,42 @@ export const requireAppRole = async (
     }
   }
   return role;
+};
+
+/**
+ * Of the Apps `ids`, those `by` may open now as far as what each App read
+ * goes (app-provenance.ts): every one for an admin, their own, and any
+ * other only while they can read everything it read. That they have a
+ * role in each is for the caller to have checked (`appsOpenTo`). For
+ * listing what belongs to many Apps at once, as `requireAppRole` decides
+ * for one.
+ */
+export const appsReadableBy = async (
+  env: Env,
+  by: Person,
+  ids: readonly string[]
+): Promise<Set<string>> => {
+  if (isAdmin(by.role) || ids.length === 0) {
+    return new Set(ids);
+  }
+  const rows = await drizzle(env.DB)
+    .select({ id: apps.id, owner: apps.ownerId })
+    .from(apps)
+    .where(inList(apps.id, ids));
+  const reader = {
+    userId: by.userId,
+    teamIds: by.teams.map(({ id }) => id),
+  };
+  const readable = await Promise.all(
+    rows.map(async ({ id, owner }) => {
+      if (owner === by.userId) {
+        return [id];
+      }
+      const sources = await sourcesOf(env, appIdSchema.parse(id));
+      return unreadableBy(sources, reader).length === 0 ? [id] : [];
+    })
+  );
+  return new Set(readable.flat());
 };
 
 /**

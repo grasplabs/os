@@ -430,4 +430,53 @@ describe("sharing an App", () => {
       after,
     }).toStrictEqual({ before: new Set([cannot, removed]), after: "ok" });
   });
+
+  it("hides the App's permissions from someone it reaches once it read what they can't", async () => {
+    const [owner, anna, admin] = await Promise.all([
+      personApi("builder"),
+      personApi("builder"),
+      personApi("admin"),
+    ]);
+    const app = await newApp(owner);
+    await owner.api.apps.members.add(app, {
+      type: "person",
+      id: anna.userId,
+      role: "builder",
+    });
+    const mail = await mailConnection();
+    const shared = await grantConnection(owner, app, mail.id);
+    // An agent's permission names the App too, as a workflow's.
+    const { id: agents } = await admin.api.permissions.request({
+      subject: { type: "agent", agentId: `agent-${unique()}` },
+      object: { type: "workflow", appId: app, workflowId: "report" },
+      actions: ["start"],
+      binding: "REPORT",
+    });
+    const sees = async (person: Person) => {
+      const listed = await person.api.permissions.list();
+      return [shared, agents].map((wanted) =>
+        listed.some(({ id }) => id === wanted)
+      );
+    };
+
+    const before = await sees(anna);
+    const mailbox = await grantConnection(owner, app, await mailboxOf(owner));
+    const after = await anna.api.permissions.list();
+    const ownerLists = await owner.api.permissions.list();
+    expect({
+      before,
+      after: after.filter(
+        ({ subject, object }) =>
+          (subject.type === "app" && subject.appId === app) ||
+          (object.type === "workflow" && object.appId === app)
+      ),
+      owner: await sees(owner),
+      ownersMailbox: ownerLists.some(({ id }) => id === mailbox),
+    }).toStrictEqual({
+      before: [true, true],
+      after: [],
+      owner: [true, true],
+      ownersMailbox: true,
+    });
+  });
 });
