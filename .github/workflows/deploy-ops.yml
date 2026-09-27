@@ -70,7 +70,9 @@ jobs:
       # on stdin, never as an argument or in a log line, and are written
       # every run: Secrets Store never reads a value back to compare.
       # The API token reaches curl through its config on stdin, not argv.
-      # One page of 100 covers the store: it holds only fixed secrets.
+      # The store holds only fixed secrets (these, the deployer token and the
+      # router key), never one per client, so one page normally covers it;
+      # the list is still read page by page up to `total_pages`.
       - name: Copy the shared secrets to Secrets Store
         env:
           ENTRA_CLIENT_SECRET: ${{ steps.shared.outputs.ENTRA_CLIENT_SECRET }}
@@ -79,15 +81,25 @@ jobs:
           COMPOSIO_API_KEY: ${{ steps.shared.outputs.COMPOSIO_API_KEY }}
         run: |
           set -euo pipefail
-          existing=$(printf 'header = "Authorization: Bearer %s"\n' "$CLOUDFLARE_API_TOKEN" |
-            curl --silent --show-error --fail-with-body --config - \
-              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/secrets_store/stores/$SECRETS_STORE_ID/secrets?per_page=100")
+          existing='[]'
+          page=1
+          while :; do
+            response=$(printf 'header = "Authorization: Bearer %s"\n' "$CLOUDFLARE_API_TOKEN" |
+              curl --silent --show-error --fail-with-body --config - \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/secrets_store/stores/$SECRETS_STORE_ID/secrets?per_page=100&page=$page")
+            existing=$(jq -c --argjson page "$(jq -c '[.result[] | {name, id}]' <<< "$response")" '. + $page' <<< "$existing")
+            total=$(jq -r '.result_info.total_pages // 1' <<< "$response")
+            if [ "$page" -ge "$total" ]; then
+              break
+            fi
+            page=$((page + 1))
+          done
           for name in ENTRA_CLIENT_SECRET MICROSOFT_CLIENT_SECRET GOOGLE_CLIENT_SECRET COMPOSIO_API_KEY; do
             if [ -z "${!name}" ]; then
               echo "::error::The 1Password field shared/$name is empty"
               exit 1
             fi
-            id=$(jq -r --arg name "$name" '.result[] | select(.name == $name) | .id' <<< "$existing")
+            id=$(jq -r --arg name "$name" '.[] | select(.name == $name) | .id' <<< "$existing")
             if [ -z "$id" ]; then
               printf '%s' "${!name}" | vp exec wrangler secrets-store secret create "$SECRETS_STORE_ID" --name "$name" --scopes workers --remote
             else
