@@ -380,7 +380,17 @@ describe("a native connector", () => {
   });
 });
 
-describe("a connector's code", () => {
+// Each call loads the connector into a fresh isolate, so a test's cost
+// grows with its calls: on a loaded CI runner a call took up to ten times
+// as long as locally, and the method and path test, with its 25 calls made
+// one after another, timed out at Vitest's default five seconds. Attempts
+// that don't depend on each other now go out together, so no test makes
+// more than four calls in a row. Nothing here polls or sleeps: the only
+// wait is connect's 30-second deadline on each call (`callTimeoutMs`),
+// which ends a call that hangs, and a hung call fails its test anyway.
+// Sixty seconds is room for a slow runner, not for a hang, as the core
+// tests that release Apps give theirs.
+describe("a connector's code", { timeout: 60_000 }, () => {
   it("reaches no host its manifest doesn't list", async () => {
     const connection = await connectionTo("sample");
     const urls = [
@@ -393,10 +403,10 @@ describe("a connector's code", () => {
       "https://127.0.0.1/v1/probe/ok",
       "https://[::1]/v1/probe/ok",
     ];
-    for (const url of urls) {
-      // oxlint-disable-next-line no-await-in-loop -- one attempt after another
-      await expect(probe(connection, { url })).resolves.toMatchObject(refused);
-    }
+    const attempts = await Promise.all(
+      urls.map(async (url) => await probe(connection, { url }))
+    );
+    expect(attempts).toMatchObject(urls.map(() => refused));
     expect(api.sent).toStrictEqual([]);
   });
 
@@ -437,22 +447,25 @@ describe("a connector's code", () => {
       { url: `https://${sampleHost}/v1/probe/item-1%3Apeek` },
       { url: `https://${sampleHost}/v1/probe/:peek` },
     ];
-    for (const attempt of attempts) {
-      // oxlint-disable-next-line no-await-in-loop -- one attempt after another
-      await expect(probe(connection, attempt)).resolves.toMatchObject(refused);
-    }
-    expect(api.sent).toStrictEqual([]);
-    // What it declares goes out, with its query.
-    await expect(
-      probe(connection, { url: `https://${sampleHost}/v1/probe/ok?page=2` })
-    ).resolves.toStrictEqual({ status: 200, bytes: 2, error: null });
-    await probe(connection, {
-      url: `https://${sampleHost}/v1/probe/item-1:peek`,
-    });
-    expect(api.sent.map(({ path }) => path)).toStrictEqual([
-      "/v1/probe/ok?page=2",
-      "/v1/probe/item-1:peek",
+    // What it declares goes out, with its query, alongside the attempts.
+    const declared = [
+      { url: `https://${sampleHost}/v1/probe/ok?page=2` },
+      { url: `https://${sampleHost}/v1/probe/item-1:peek` },
+    ];
+    const [refusals, sent] = await Promise.all([
+      Promise.all(
+        attempts.map(async (attempt) => await probe(connection, attempt))
+      ),
+      Promise.all(
+        declared.map(async (attempt) => await probe(connection, attempt))
+      ),
     ]);
+    expect(refusals).toMatchObject(attempts.map(() => refused));
+    expect(sent[0]).toStrictEqual({ status: 200, bytes: 2, error: null });
+    // Only those two went out.
+    expect(api.sent.map(({ path }) => path).toSorted()).toStrictEqual(
+      ["/v1/probe/ok?page=2", "/v1/probe/item-1:peek"].toSorted()
+    );
   });
 
   it("reaches only the resource its capability names", async () => {
@@ -774,7 +787,11 @@ const tools = bundled.flatMap(({ manifest }) => {
   }));
 });
 
-describe("every native tool", () => {
+// Each tool makes several calls at once, each in a fresh isolate: on a
+// loaded CI runner the slowest took a third of Vitest's default five
+// seconds. The calls go out together and nothing polls or sleeps, so
+// sixty seconds is room for a slow runner, as above.
+describe("every native tool", { timeout: 60_000 }, () => {
   it.each(tools)(
     "$connector $action refuses a second resource selector",
     async ({ connector, provider, action }) => {
