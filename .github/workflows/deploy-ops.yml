@@ -81,6 +81,19 @@ jobs:
           COMPOSIO_API_KEY: ${{ steps.shared.outputs.COMPOSIO_API_KEY }}
         run: |
           set -euo pipefail
+          names=(ENTRA_CLIENT_SECRET MICROSOFT_CLIENT_SECRET GOOGLE_CLIENT_SECRET COMPOSIO_API_KEY)
+          # Every value is checked before any is written, so an empty field
+          # never leaves the store half updated. Only names are reported.
+          empty=()
+          for name in "${names[@]}"; do
+            if [ -z "${!name}" ]; then
+              empty+=("shared/$name")
+            fi
+          done
+          if [ "${#empty[@]}" -gt 0 ]; then
+            echo "::error::Empty 1Password fields, nothing written: ${empty[*]}"
+            exit 1
+          fi
           existing='[]'
           page=1
           while :; do
@@ -94,11 +107,7 @@ jobs:
             fi
             page=$((page + 1))
           done
-          for name in ENTRA_CLIENT_SECRET MICROSOFT_CLIENT_SECRET GOOGLE_CLIENT_SECRET COMPOSIO_API_KEY; do
-            if [ -z "${!name}" ]; then
-              echo "::error::The 1Password field shared/$name is empty"
-              exit 1
-            fi
+          for name in "${names[@]}"; do
             id=$(jq -r --arg name "$name" '.[] | select(.name == $name) | .id' <<< "$existing")
             if [ -z "$id" ]; then
               printf '%s' "${!name}" | vp exec wrangler secrets-store secret create "$SECRETS_STORE_ID" --name "$name" --scopes workers --remote
