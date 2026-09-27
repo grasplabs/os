@@ -4,16 +4,18 @@
  * ready: only platform APIs that also run on workerd.
  */
 import { execFileSync, spawn } from "node:child_process";
+import { once } from "node:events";
 import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { setTimeout as sleep } from "node:timers/promises";
 
 import { routerSecretHeader } from "../packages/shared/src/router.ts";
+import { coreStarted } from "./workerd-smoke-start.ts";
 
-const PORT = 8790;
 const ROUTER_SECRET = "smoke-router-secret";
 const ATTEMPTS = 50;
+const RETRY_DELAY_MS = 100;
 const core = path.join(import.meta.dirname, "../apps/core");
 const out = mkdtempSync(path.join(tmpdir(), "grasp-os-workerd-"));
 
@@ -23,6 +25,21 @@ execFileSync("wrangler", ["deploy", "--dry-run", "--outdir", out], {
   cwd: core,
   stdio: "inherit",
 });
+
+// A port nothing listens on now, picked by the OS and closed again for
+// workerd to take, so no other server answers the health check.
+const freePort = async (): Promise<number> => {
+  const probe = createServer().listen(0, "127.0.0.1");
+  await once(probe, "listening");
+  const address = probe.address();
+  probe.close();
+  await once(probe, "close");
+  if (address === null || typeof address === "string") {
+    throw new Error("no free port for workerd");
+  }
+  return address.port;
+};
+const PORT = await freePort();
 
 // Durable Object migrations are bundled next to index.js as text modules.
 const modules = [
@@ -63,26 +80,14 @@ const server = spawn("workerd", ["serve", path.join(out, "config.capnp")], {
   stdio: "inherit",
 });
 
-// Polls until workerd is listening; attempts are sequential by design.
-const waitForCore = async (attempt = 0): Promise<boolean> => {
-  if (attempt >= ATTEMPTS) {
-    return false;
-  }
-  try {
-    const response = await fetch(`http://127.0.0.1:${PORT}/health`, {
-      headers: { [routerSecretHeader]: ROUTER_SECRET },
-    });
-    return response.ok;
-  } catch {
-    await sleep(100);
-    return await waitForCore(attempt + 1);
-  }
-};
-
 try {
-  if (!(await waitForCore())) {
-    throw new Error("core did not answer on workerd");
-  }
+  await coreStarted(server, {
+    url: `http://127.0.0.1:${PORT}/health`,
+    headers: { [routerSecretHeader]: ROUTER_SECRET },
+    fetch,
+    attempts: ATTEMPTS,
+    retryDelayMs: RETRY_DELAY_MS,
+  });
   console.info("core runs on workerd");
 } finally {
   server.kill();
