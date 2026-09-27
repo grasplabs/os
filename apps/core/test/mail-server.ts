@@ -19,10 +19,11 @@ export const mailControlUrl = (name: string): string =>
 /**
  * How the server answers its next call: `unavailable` (a 503 to the call's
  * look at its tools, before anything is sent); or, to the call itself,
- * `sent` (it sends the mail) or `invalid` (the tool refuses the input and
- * says so in its result).
+ * `sent` (it sends the mail), `invalid` (the tool refuses the input and
+ * says so in its result) or `slow` (it holds the call, as a server that
+ * takes its time does, until the test lets it go; then sends the mail).
  */
-export type MailAnswer = "sent" | "unavailable" | "invalid";
+export type MailAnswer = "sent" | "unavailable" | "invalid" | "slow";
 
 /** The server, as script for the `connect-providers` Worker. */
 export const mailServerScript = `
@@ -30,7 +31,7 @@ const mailServers = new Map();
 const mailServerNamed = (name) => {
   let server = mailServers.get(name);
   if (!server) {
-    server = { plan: [], calls: 0, sent: [] };
+    server = { plan: [], calls: 0, sent: [], holding: false, released: false };
     mailServers.set(name, server);
   }
   return server;
@@ -41,10 +42,15 @@ const mailServer = async (request, url) => {
   if (url.hostname === "mail-control.test") {
     const server = mailServerNamed(url.pathname.slice(1));
     if (request.method === "POST") {
-      server.plan = (await request.json()).plan;
+      const control = await request.json();
+      if (control.release) {
+        server.released = true;
+      } else {
+        server.plan = control.plan;
+      }
       return new Response(null, { status: 204 });
     }
-    return Response.json({ calls: server.calls, sent: server.sent });
+    return Response.json({ calls: server.calls, sent: server.sent, holding: server.holding });
   }
   const server = mailServerNamed(url.pathname.split("/").at(-1));
   const { id, method, params } = await request.json();
@@ -69,6 +75,14 @@ const mailServer = async (request, url) => {
   }
   const answer = server.plan.shift() ?? "sent";
   server.calls += 1;
+  if (answer === "slow") {
+    // Checks on a timer, so the runtime sees the call waiting on something.
+    server.holding = true;
+    while (!server.released) {
+      await scheduler.wait(20);
+    }
+    server.holding = false;
+  }
   if (answer === "invalid") {
     return rpcResult(id, { content: [{ type: "text", text: "Invalid recipient" }], isError: true });
   }

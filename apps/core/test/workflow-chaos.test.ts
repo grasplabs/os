@@ -40,11 +40,12 @@ import {
 //   then resume, which runs the workflow again from its start, loaded
 //   anew, finished steps replayed (`stopped`, test/runs.ts);
 // - an isolate killed mid-step: an attempt that hangs until the engine
-//   gives up on it at the step's timeout and tries again;
+//   gives up on it at the step's timeout and tries again; with the call
+//   still out, the mail server holds it until the test lets it go;
 // - the engine losing a finished step's record: the engine's restart from
 //   that step, which runs it again from scratch;
-// - a long sleep: a day's sleep, whose day passes while the run is
-//   stopped (the engine's test introspection);
+// - a long sleep: a day's sleep, cut short while the run is stopped (the
+//   engine's test introspection);
 // - an event or a start delivered twice: the engine's own `sendEvent`, and
 //   a second create of the run's instance under its ID (triggers aren't in
 //   yet; a trigger's duplicate events are for its own tests);
@@ -53,9 +54,10 @@ import {
 // error) stop a run at once: workflows.test.ts has them, with the report
 // the run's owner sees.
 //
-// The tests wait on conditions (a step done, a status reached), never for
-// a set time. A step's timeout is the engine's to keep: the attempt it
-// cuts off hangs for good, so nothing races it.
+// The tests wait on conditions (a step done, a status reached, a counter
+// moved), never for a set time. Step timeouts only cut off attempts made
+// to hang, and give a good attempt ample time; the App's code is built
+// before such a run, so a first call doesn't spend an attempt building it.
 
 const idp = mockIdp();
 
@@ -82,6 +84,13 @@ const eventsOf = async (action: string, target: string) => {
   );
 };
 
+/**
+ * How long each attempt of a step that hangs gets before the engine gives
+ * up on it: well past what a good attempt takes, a round trip through
+ * connect included.
+ */
+const attemptTimeout = "3 seconds";
+
 /** A step that hangs on its first attempt until the engine gives up on it. */
 const hangOnFirst = (
   counter: string
@@ -89,14 +98,17 @@ const hangOnFirst = (
         await new Promise(() => {});
       }`;
 
-/** A side-effect step `name` that mails `subject`, with `body` around the call. */
+/**
+ * A side-effect step `name` that mails `subject`, with `before` and
+ * `after` around the call, and one retry.
+ */
 const mailStep = (
   name: string,
   subject: string,
   { before = "", after = "" }: { before?: string; after?: string }
 ) => `  const ${name} = await step.do(
     "${name}",
-    { description: "Send", sideEffect: true, input: { to: "ben@acme.test", subject: "${subject}" }, timeout: "1 second", retries: { limit: 1, delay: 10 } },
+    { description: "Send", sideEffect: true, input: { to: "ben@acme.test", subject: "${subject}" }, timeout: "${attemptTimeout}", retries: { limit: 1, delay: 10 } },
     async ({ idempotencyKey, input: mail }) => {
       ${before}
       const sent = JSON.parse((await env.MAIL.call("mail.send", mail, { idempotencyKey })).output);
@@ -121,6 +133,9 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
         { early: {}, late: {} }
       )
     );
+    // Built before the run, so building it on the first call doesn't use
+    // up an attempt's time.
+    await serverBuilt(app, 1);
     await grantMail(idp, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "killed");
     await finished(run.id);
@@ -266,7 +281,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
   }
   const attempt = await step.do(
     "work",
-    { description: "Work", sideEffect: true, input: null, timeout: "1 second", retries: { limit: 1, delay: 10 } },
+    { description: "Work", sideEffect: true, input: null, timeout: "${attemptTimeout}", retries: { limit: 1, delay: 10 } },
     async ({ idempotencyKey }) => {
       const attempt = await env.APP.call("hit", "work:" + idempotencyKey);
       if (attempt === 1) {
@@ -300,7 +315,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     });
   });
 
-  it("sleep durably across a crash, without running finished steps again", async () => {
+  it("go on past a sleep after a crash during it, without running finished steps again", async () => {
     const builder = await personApi("builder");
     const app = await appWith(
       builder,
@@ -319,7 +334,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     // first moment. `asleep` shows the sleep hadn't ended.
     await stopped(run.id);
     const asleep = await hitsOf(app, builder.userId, "after");
-    // The day passes while the run is stopped: the resumed execution
+    // The sleep is cut short while the run is stopped (whether the engine
+    // keeps its deadline is the engine's to test): the resumed execution
     // replays the sleep it began, which then ends at once. Not disposed:
     // disposing deletes the run's instance.
     const instance = await introspectWorkflowInstance(env.WORKFLOWS, run.id);
@@ -439,7 +455,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     ]);
   });
 
-  it("take an event delivered twice once, and send once", async () => {
+  it("take an event delivered twice once, send once, and leave the copy for a later wait of its type", async () => {
     const admin = await personApi("admin");
     const mail = await mailConnection();
     const app = await appWith(
@@ -455,13 +471,17 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       return JSON.parse((await env.MAIL.call("mail.send", mail, { idempotencyKey })).output);
     }
   );
-  return { approval: approval.received && approval.payload, sent };`,
+  // A later wait for the same type, which the copy answers.
+  const again = await step.waitFor("again", { description: "Wait again", type: "approved", timeout: 500 });
+  return { approval: approval.received && approval.payload, again: again.received, sent };`,
         { send: { messageId: "mocked" } }
       )
     );
     await grantMail(idp, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "approved");
-    // Delivered twice at once, as an event source that retries may.
+    // Delivered twice at once, as an event source that retries may. The
+    // engine keeps each copy for a wait of its type: events carry no ID to
+    // tell a copy by. A workflow that waits twice needs a type per wait.
     const instance = await env.WORKFLOWS.get(run.id);
     const event = { type: "approved", payload: { by: "anna" } };
     await Promise.all([instance.sendEvent(event), instance.sendEvent(event)]);
@@ -474,7 +494,11 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     }).toMatchObject({
       run: {
         status: "completed",
-        output: { approval: { by: "anna" }, sent: { messageId: "message-1" } },
+        output: {
+          approval: { by: "anna" },
+          again: true,
+          sent: { messageId: "message-1" },
+        },
       },
       attempts: 1,
       server: { calls: 1, sent: [invoiceMail] },
@@ -504,16 +528,16 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     await grantMail(idp, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "started");
     await stepDone(run.id, "send");
-    // The same start again, under the run's ID: Cloudflare refuses an ID
-    // it has, the local engine takes it as the run it already has. Either
-    // way, no second run and no second mail.
-    await runEngine(env)
-      .create({
+    // The same start again, under the run's ID. The local engine takes it
+    // as the run it already has; Cloudflare refuses an ID it has instead.
+    // Either way: no second run and no second mail.
+    await expect(
+      runEngine(env).create({
         id: run.id,
         pinned: { app: run.app, workflow: run.workflow, version: run.version },
         input: null,
       })
-      .catch(() => null);
+    ).resolves.toBeUndefined();
     await finished(run.id, { type: "go", payload: null });
     const completed = await eventsOf("workflow.run.completed", run.id);
 
@@ -526,6 +550,52 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       run: { status: "completed", output: { messageId: "message-1" } },
       attempts: 1,
       completed: 1,
+      server: { calls: 1, sent: [invoiceMail] },
+    });
+  });
+
+  it("send once when a side-effect step is killed while its call is still out, and retried until that call's answer is in", async () => {
+    const admin = await personApi("admin");
+    const mail = await mailConnection(["slow"]);
+    const app = await appWith(
+      admin,
+      workflowFiles(
+        "patient",
+        `  return await step.do(
+    "send",
+    // Retried while the first call is still out: each retry is told so
+    // (connect.call_in_progress), until the answer is in.
+    { description: "Send the invoice", sideEffect: true, input: ${JSON.stringify(invoiceMail)}, timeout: "${attemptTimeout}", retries: { limit: 40, delay: 250, backoff: "constant" } },
+    async ({ idempotencyKey, input: mail }) => {
+      await env.APP.call("hit", "send");
+      return JSON.parse((await env.MAIL.call("mail.send", mail, { idempotencyKey })).output);
+    }
+  );`,
+        { send: { messageId: "mocked" } }
+      )
+    );
+    await serverBuilt(app, 1);
+    await grantMail(idp, admin, app, mail.id);
+    const run = await admin.api.workflows.start(app, "patient");
+    // The first attempt timed out with its call held at the server, and a
+    // retry has come and found it still out.
+    await vi.waitFor(
+      async () => {
+        await expect(mail.holding()).resolves.toBeTruthy();
+        await expect(
+          hitsOf(app, admin.userId, "send")
+        ).resolves.toBeGreaterThan(1);
+      },
+      { timeout: 15_000, interval: 100 }
+    );
+    await mail.release();
+    await finished(run.id);
+
+    expect({
+      run: await admin.api.workflows.status(run.id),
+      server: await mail.did(),
+    }).toMatchObject({
+      run: { status: "completed", output: { messageId: "message-1" } },
       server: { calls: 1, sent: [invoiceMail] },
     });
   });
