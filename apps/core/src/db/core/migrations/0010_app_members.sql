@@ -9,5 +9,4 @@ CREATE TABLE `app_members` (
 	FOREIGN KEY (`app_id`) REFERENCES `apps`(`id`) ON UPDATE no action ON DELETE no action
 );
 --> statement-breakpoint
-CREATE INDEX `app_members_member_idx` ON `app_members` (`member_type`,`member_id`);--> statement-breakpoint
-ALTER TABLE `apps` ADD `screens_restart_due` integer;
+CREATE INDEX `app_members_member_idx` ON `app_members` (`member_type`,`member_id`);

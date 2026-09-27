@@ -5,6 +5,9 @@ import {
   screenRuntime,
 } from "@grasp-os/compiler";
 import { appErrors, appVersionSchema } from "@grasp-os/shared/apps";
+import { isExpectedError } from "@grasp-os/shared/errors";
+import type { AppId } from "@grasp-os/shared/ids";
+import { errorFields, log } from "@grasp-os/shared/log";
 import type { Identity } from "@grasp-os/shared/rpc";
 import {
   screenErrors,
@@ -22,6 +25,7 @@ import { z } from "zod";
 import { callApp, isPlainData } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
 import { appFor, findVersion, getApp, versionFiles } from "./apps.ts";
+import { memberRole, teamsOf } from "./auth/identity.ts";
 import { appHost } from "./durable-objects.ts";
 import { buildFailed, buildScreens } from "./screens.ts";
 import { withPerson } from "./session-check.ts";
@@ -37,6 +41,20 @@ import type { SessionCheck } from "./session-check.ts";
 // Anyone with a role in the App (app-access.ts) uses its screens: opens
 // them, calls its server and reports problems. Only its builders read its
 // error log.
+//
+// A callback the App keeps (a screen's subscription) outlives the call
+// that passed it, so each push through it checks again that the person
+// still has a role in the App (`stillOpen`), at most every
+// `recheckMs` per App and connection. Once they don't (unshared, a team
+// left, a role changed, a source they can't read), the callback is
+// released and forwards nothing more: losing access stops a screen within
+// a few seconds, whatever the App does.
+
+/** How long one answer to whether the person may still use an App holds. */
+const recheckMs = 5000;
+
+/** Whether the person may still use the App, as a push through a callback asks. */
+type StillOpen = () => Promise<boolean>;
 
 /** A running App's screen, built from its current version. */
 const openScreen = async (
@@ -104,14 +122,23 @@ const isStub = (value: unknown): value is RpcStub<Callback> =>
  * call that didn't keep it, or when the App drops it later), or by
  * `callServer` after a failure; releasing a stub twice does nothing.
  * Releasing it releases the screen's callback too, which tells the screen
- * to subscribe again.
+ * to subscribe again. Before each push, `stillOpen` checks the person may
+ * still use the App; once they may not, it releases itself and refuses
+ * the push, and every one after.
  */
-const callbackFor = (stub: RpcStub<Callback>): Callback & Disposable => {
+const callbackFor = (
+  stub: RpcStub<Callback>,
+  stillOpen: StillOpen
+): Callback & Disposable => {
   const toScreen = stub.dup();
   return Object.assign(
     async (value: AppAnswer): Promise<void> => {
       if (!isPlainData(value)) {
         throw appErrors.create("app.answer_invalid");
+      }
+      if (!(await stillOpen())) {
+        toScreen[Symbol.dispose]();
+        throw appErrors.create("app.not_found");
       }
       await toScreen(value);
     },
@@ -129,7 +156,8 @@ const callbackFor = (stub: RpcStub<Callback>): Callback & Disposable => {
  * App can only call.
  */
 const argumentsFor = (
-  args: unknown[]
+  args: unknown[],
+  stillOpen: StillOpen
 ): { passed: unknown[]; callbacks: Disposable[] } => {
   if (!args.every((arg) => isStub(arg) || isPlainData(arg))) {
     throw screenErrors.create("screen.invalid");
@@ -139,7 +167,7 @@ const argumentsFor = (
     if (!isStub(arg)) {
       return arg;
     }
-    const callback = callbackFor(arg);
+    const callback = callbackFor(arg, stillOpen);
     callbacks.push(callback);
     return callback;
   });
@@ -155,13 +183,14 @@ const argumentsFor = (
 const callServer = async (
   env: Env,
   by: Identity,
-  { app, method, args }: { app: unknown; method: unknown; args: unknown }
+  { app, method, args }: { app: unknown; method: unknown; args: unknown },
+  stillOpenFor: (app: AppId) => StillOpen
 ): Promise<AppAnswer> => {
   const { id } = await getApp(env, by, app);
   if (typeof method !== "string" || !Array.isArray(args)) {
     throw screenErrors.create("screen.invalid");
   }
-  const { passed, callbacks } = argumentsFor(args);
+  const { passed, callbacks } = argumentsFor(args, stillOpenFor(id));
   try {
     return await callApp(
       env,
@@ -176,6 +205,36 @@ const callServer = async (
       callback[Symbol.dispose]();
     }
     throw error;
+  }
+};
+
+/**
+ * Whether `userId` still has a role in `app`, read now: their role in the
+ * organization and their teams as they are, and the App's rules
+ * (`appFor`). Anything that goes wrong on the way is a no: a callback
+ * must not outlive access because a check failed.
+ */
+const hasRole = async (
+  env: Env,
+  userId: string,
+  app: AppId
+): Promise<boolean> => {
+  try {
+    const role = await memberRole(env.DB, userId);
+    if (role === undefined) {
+      return false;
+    }
+    const teams = await teamsOf(env.DB, userId);
+    await appFor(env, { userId, role, teams }, app, "user");
+    return true;
+  } catch (error) {
+    if (!isExpectedError(error)) {
+      log.error("screen.access_check_failed", {
+        appId: app,
+        ...errorFields(error),
+      });
+    }
+    return false;
   }
 };
 
@@ -223,10 +282,34 @@ export class ScreensRpc extends RpcTarget implements ScreensApi {
   readonly #env: Env;
   readonly #check: SessionCheck;
 
+  /** The latest answer to whether the person may use each App, and until when it holds. */
+  readonly #access = new Map<
+    AppId,
+    { open: Promise<boolean>; until: number }
+  >();
+
   constructor(env: Env, check: SessionCheck) {
     super();
     this.#env = env;
     this.#check = check;
+  }
+
+  /**
+   * Whether `userId` may still use `app`, for this connection's callbacks:
+   * read again at most every `recheckMs`, and shared by every push
+   * meanwhile.
+   */
+  #stillOpen(userId: string, app: AppId): StillOpen {
+    return async () => {
+      const now = Date.now();
+      const cached = this.#access.get(app);
+      if (cached !== undefined && cached.until > now) {
+        return await cached.open;
+      }
+      const open = hasRole(this.#env, userId, app);
+      this.#access.set(app, { open, until: now + recheckMs });
+      return await open;
+    };
   }
 
   async open(app: string, screen: string): Promise<ScreenBundle> {
@@ -239,7 +322,10 @@ export class ScreensRpc extends RpcTarget implements ScreensApi {
   async call(app: string, method: string, args: unknown[]): Promise<unknown> {
     return await withPerson(
       this.#check,
-      async (by) => await callServer(this.#env, by, { app, method, args })
+      async (by) =>
+        await callServer(this.#env, by, { app, method, args }, (id) =>
+          this.#stillOpen(by.userId, id)
+        )
     );
   }
 

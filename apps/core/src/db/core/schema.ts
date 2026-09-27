@@ -341,12 +341,6 @@ export const apps = sqliteTable("apps", {
   /** The latest write to the working copy (`app_working_files.revision`). */
   workingRevision: text("working_revision"),
   createdAt: timestamp("created_at").notNull(),
-  /**
-   * Since when the App's server code must restart to let go of the screens
-   * of someone it is no longer shared with (src/app-members.ts); null
-   * once it has.
-   */
-  screensRestartDue: timestamp("screens_restart_due"),
 });
 
 /**

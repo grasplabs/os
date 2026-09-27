@@ -1,6 +1,5 @@
 import { errorFields, log } from "@grasp-os/shared/log";
 
-import { retryScreenRestarts } from "./app-members.ts";
 import { drainAuditOutboxes } from "./audit-outbox.ts";
 import { consumeLeftoverAuditQueue } from "./audit-queue-leftovers.ts";
 import { archiveAuditLog } from "./audit-retention.ts";
@@ -28,14 +27,12 @@ export default {
   },
   // Every minute: audit events waiting in core's outboxes and connect's
   // (see src/audit-outbox.ts), personal connections of removed people still
-  // connected (see src/members.ts), Apps still to restart for someone
-  // they are no longer shared with (see src/app-members.ts), and audit
-  // events past retention (see src/audit-retention.ts).
+  // connected (see src/members.ts), and audit events past retention (see
+  // src/audit-retention.ts).
   scheduled: async (_controller, env) => {
     const results = await Promise.allSettled([
       drainAuditOutboxes(env),
       retryDisconnects(env),
-      retryScreenRestarts(env),
       archiveAuditLog(env),
     ]);
     for (const result of results) {

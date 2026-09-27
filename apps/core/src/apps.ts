@@ -356,7 +356,6 @@ export const createApp = async (
     currentVersion: null,
     pendingVersion: null,
     workingRevision: null,
-    screensRestartDue: null,
     createdAt: new Date(),
   };
   const app = toApp(row);

@@ -5,7 +5,6 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { removeMember } from "../src/app-members.ts";
 import { release } from "./apps.ts";
-import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { openRpc, outcome, signedInApi } from "./sign-in.ts";
 
@@ -359,7 +358,7 @@ describe("screens", { timeout: 60_000 }, () => {
     expect(watching.received[0]).toStrictEqual([]);
   });
 
-  it("closes someone's screens within a minute when unsharing can't reach the App's host", async () => {
+  it("stops pushing to someone unshared within seconds, even when the App's host can't be reached", async () => {
     const owner = await personApi("builder");
     const member = await personApi("builder");
     const app = await sampleApp(owner);
@@ -368,7 +367,7 @@ describe("screens", { timeout: 60_000 }, () => {
     const watching = collector();
     await member.api.screens.call(app, "watchNotes", [watching.callback]);
     await waitFor(() => watching.received[0]);
-    // Core, with the App's host out of reach for this one call.
+    // Core, with the App's host out of reach for the restart.
     const unreachable = new Proxy(env.APPS, {
       get: (target, property) => {
         if (property === "getByName") {
@@ -393,27 +392,35 @@ describe("screens", { timeout: 60_000 }, () => {
         them
       )
     );
-    // Removed, but the App still holds their subscription, until the cron
-    // trigger, every minute, restarts it.
-    const stillWatching = await owner.api.screens.call(app, "watching", []);
-    await runCron();
-    const left = await vi.waitFor(async () => {
-      const count = await owner.api.screens.call(app, "watching", []);
-      if (count !== 0) {
-        throw new Error("Still watching");
-      }
-      return count;
-    }, 10_000);
+    // The App wasn't restarted, so it still holds their subscription: the
+    // next push after their access was checked again releases it, and the
+    // App lets it go.
+    const left = await vi.waitFor(
+      async () => {
+        await owner.api.screens.call(app, "addNote", ["Meanwhile"]);
+        const count = await owner.api.screens.call(app, "watching", []);
+        if (count !== 0) {
+          throw new Error("Still watching");
+        }
+        return count;
+      },
+      { timeout: 15_000, interval: 1000 }
+    );
+    const received = watching.received.length;
+    await owner.api.screens.call(app, "addNote", ["After it was released"]);
     expect({
       removed,
-      stillWatching,
-      opens: await outcome(member.api.apps.get(app)),
       left,
+      // Nothing more reaches them.
+      after: await owner.api.screens.call(app, "watching", []),
+      more: watching.received.length - received,
+      opens: await outcome(member.api.apps.get(app)),
     }).toStrictEqual({
       removed: "ok",
-      stillWatching: 1,
-      opens: "app.not_found",
       left: 0,
+      after: 0,
+      more: 0,
+      opens: "app.not_found",
     });
   });
 
@@ -435,7 +442,6 @@ describe("screens", { timeout: 60_000 }, () => {
       type: "person",
       id: `user-${crypto.randomUUID()}`,
     });
-    await runCron();
     await owner.api.screens.call(app, "addNote", ["Still here"]);
     await expect(waitFor(() => watching.received[1])).resolves.toStrictEqual([
       "Still here",

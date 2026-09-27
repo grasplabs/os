@@ -199,8 +199,8 @@ export interface AppMembersApi {
   /** Shares the App, or changes the role of someone it is shared with. */
   add: (app: string, member: NewAppMember) => Promise<AppMember>;
   /**
-   * Stops sharing the App with them. Their open screens of it close right
-   * away, or within a minute if the App's host is briefly out of reach.
+   * Stops sharing the App with them. Their open screens of it stop at
+   * once, or within a few seconds, as every push checks their role again.
    */
   remove: (app: string, member: AppMemberRef) => Promise<void>;
 }
