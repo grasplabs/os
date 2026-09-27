@@ -87,6 +87,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               permissions: true,
               knowledge: true,
               memory: true,
+              knowledge_purge: true,
               connections: true,
               workflows: true,
               decisions: true,

@@ -73,7 +73,7 @@ const maxBoundParameters = 100;
 export type DocumentRow = typeof documents.$inferSelect;
 
 /** What a save writes, read from the text. */
-interface Prepared {
+export interface Prepared {
   type: DocumentType;
   title: string;
   description: string;
@@ -98,7 +98,7 @@ const fileTitle = (path: string): string => {
  * keeps. Its title is the frontmatter's, else a skill's name, else its
  * first heading, else its file name.
  */
-const prepare = (path: string, text: string): Prepared => {
+export const prepareText = (path: string, text: string): Prepared => {
   const bytes = new TextEncoder().encode(text).byteLength;
   if (bytes > documentMaxBytes) {
     throw knowledgeErrors.create("knowledge.too_large", {
@@ -159,6 +159,38 @@ const inChunks = <Row extends object>(rows: Row[]): Row[][] => {
   }
   return chunks;
 };
+
+/**
+ * Statements that replace the sections and links of `document` with those
+ * of `prepared`, the text of its version `number`: the search index
+ * follows the sections (`0001_search.sql`).
+ */
+export const replaceDerived = (
+  db: DrizzleD1Database,
+  document: { id: string; collectionId: string },
+  number: number,
+  prepared: Prepared
+): BatchItem<"sqlite">[] => [
+  db.delete(sections).where(eq(sections.documentId, document.id)),
+  ...inChunks(
+    prepared.sections.map((section, position) => ({
+      documentId: document.id,
+      version: number,
+      position,
+      headings: JSON.stringify(section.headings),
+      text: section.text,
+    }))
+  ).map((chunk) => db.insert(sections).values(chunk)),
+  db.delete(links).where(eq(links.fromDocumentId, document.id)),
+  ...inChunks(
+    prepared.links.map((link) => ({
+      fromDocumentId: document.id,
+      toCollectionId: document.collectionId,
+      toPath: link.path,
+      label: link.label,
+    }))
+  ).map((chunk) => db.insert(links).values(chunk)),
+];
 
 const tagsSchema = z.array(z.string());
 
@@ -228,7 +260,7 @@ export const checkedText = async (
   path: string,
   text: string
 ): Promise<Prepared> => {
-  const prepared = prepare(path, text);
+  const prepared = prepareText(path, text);
   const memoryFile = await memoryFileOf(collection, path);
   if (memoryFile !== undefined) {
     requireWithinLimit(env, memoryFile, text);
@@ -330,25 +362,12 @@ export const writeVersion = async (
       restoredFrom,
       createdAt: now,
     }),
-    db.delete(sections).where(eq(sections.documentId, documentId)),
-    ...inChunks(
-      prepared.sections.map((section, position) => ({
-        documentId,
-        version: number,
-        position,
-        headings: JSON.stringify(section.headings),
-        text: section.text,
-      }))
-    ).map((chunk) => db.insert(sections).values(chunk)),
-    db.delete(links).where(eq(links.fromDocumentId, documentId)),
-    ...inChunks(
-      prepared.links.map((link) => ({
-        fromDocumentId: documentId,
-        toCollectionId: collection.id,
-        toPath: link.path,
-        label: link.label,
-      }))
-    ).map((chunk) => db.insert(links).values(chunk)),
+    ...replaceDerived(
+      db,
+      { id: documentId, collectionId: collection.id },
+      number,
+      prepared
+    ),
     outboxed(db, entry),
     ...also,
   ];

@@ -154,6 +154,11 @@ interface Found {
   documentId: string | null;
   collection: { id: string; sensitive: boolean } | null;
   version: number;
+  /**
+   * When the document last changed, in ms: a purge rewrites a version in
+   * place, and sets it. `null` for an App.
+   */
+  updatedAt: number | null;
 }
 
 /**
@@ -181,6 +186,7 @@ const findFiles = async (
             collectionId: documents.collectionId,
             path: documents.path,
             version: documents.currentVersion,
+            updatedAt: documents.updatedAt,
             sensitive: collections.sensitive,
           })
           .from(documents)
@@ -212,6 +218,7 @@ const findFiles = async (
           documentId: row.id,
           collection: { id: row.collectionId, sensitive: row.sensitive },
           version: row.version,
+          updatedAt: row.updatedAt.getTime(),
         });
       }
       continue;
@@ -227,6 +234,7 @@ const findFiles = async (
         documentId: null,
         collection: null,
         version: app.currentVersion,
+        updatedAt: null,
       });
     }
   }
@@ -235,8 +243,11 @@ const findFiles = async (
 
 /**
  * Assembled memory by the versions of its files and their limits.
- * Versions never change, so an entry is right for as long as it is kept,
- * and a new version of any file is a new key. Per isolate, most recently
+ * Versions change only when purged (purge.ts), which also sets the
+ * document's updated time, part of the key too: so an entry is right for
+ * as long as it is kept, and a new version of any file, or a purge of
+ * one, is a new key. What a purge removed stays in an entry under the
+ * old key, never served again, until it is evicted. Per isolate, most recently
  * used last, kept to {@link cacheMaxCharacters} of text in all: a few MB
  * of an isolate's 128 MB, however large the limits are set.
  */
@@ -394,12 +405,15 @@ export const forContext = async (
       : await findFiles(env, authority.onBehalfOf, wanted);
   const key = await sha256Hex(
     JSON.stringify(
-      found.map(({ wanted: { source, name, at }, documentId, version }) => [
-        source,
-        documentId ?? ("appId" in at ? at.appId : ""),
-        version,
-        memoryLimit(env, name),
-      ])
+      found.map(
+        ({ wanted: { source, name, at }, documentId, version, updatedAt }) => [
+          source,
+          documentId ?? ("appId" in at ? at.appId : ""),
+          version,
+          updatedAt,
+          memoryLimit(env, name),
+        ]
+      )
     )
   );
   const entry = assembled.get(key) ?? (await assemble(env, found));

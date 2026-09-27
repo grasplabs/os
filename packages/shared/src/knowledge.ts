@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { auditProvenanceMaxItems } from "./audit.ts";
 import { defineErrorFamily } from "./errors.ts";
 import {
   collectionIdSchema,
@@ -11,7 +12,8 @@ import type { CollectionId, DocumentId } from "./ids.ts";
 // Knowledge: Markdown documents with typed frontmatter, in collections. A
 // save never overwrites: it adds a version, and names the version it was
 // edited from, so two people editing at once get a conflict instead of
-// losing a change.
+// losing a change. Only a purge rewrites versions: an admin erasing
+// personal data from all of them.
 
 /**
  * Who may read a collection: everyone in the organization, the members of
@@ -467,6 +469,82 @@ export interface KnowledgeTools {
 }
 
 /**
+ * Why personal data is purged. The audit log records it and can't be
+ * purged itself, so it's one of these, never free text that could name
+ * the person.
+ */
+export const purgeReasonSchema = z.enum([
+  "offboarding",
+  "erasure_request",
+  "other",
+]);
+export type PurgeReason = z.infer<typeof purgeReasonSchema>;
+
+/**
+ * Most documents one purge of content names: as many as one audit event
+ * names as provenance.
+ */
+export const purgeMaxDocuments = auditProvenanceMaxItems;
+
+/** Most terms one purge of content removes. */
+export const purgeMaxTerms = 20;
+
+/** Longest term, in characters: a passage of a few sentences. */
+export const purgeTermMaxLength = 1000;
+
+/**
+ * What a purge removes, for good, from every version:
+ * - `personal`: the person's Personal collection, with their USER.md, all
+ *   its versions, and the memory proposals their agents made;
+ * - `content`: every occurrence of the `terms` (a name, an email address,
+ *   a passage), in any case, from the documents named, which stay.
+ */
+export const purgeInputSchema = z.discriminatedUnion("type", [
+  z.strictObject({
+    type: z.literal("personal"),
+    userId: identifierSchema,
+    reason: purgeReasonSchema,
+  }),
+  z.strictObject({
+    type: z.literal("content"),
+    documentIds: z
+      .array(documentIdSchema)
+      .min(1)
+      .max(purgeMaxDocuments)
+      .transform((ids) => [...new Set(ids)]),
+    terms: z
+      .array(z.string().trim().min(2).max(purgeTermMaxLength))
+      .min(1)
+      .max(purgeMaxTerms),
+    reason: purgeReasonSchema,
+  }),
+]);
+export type PurgeInput = z.input<typeof purgeInputSchema>;
+
+/** What a purge would remove, to confirm with `token` before it expires. */
+export interface PurgePlan {
+  /** Documents it deletes (`personal`) or rewrites (`content`). */
+  documents: number;
+  /** Versions of them it deletes or rewrites. */
+  versions: number;
+  /** Memory proposals it deletes or rewrites. */
+  proposals: number;
+  /** Confirms exactly this purge, by the admin who prepared it. */
+  token: string;
+  /** ISO 8601. */
+  expiresAt: string;
+}
+
+/** What a confirmed purge removed. */
+export interface PurgeResult {
+  /** Names the purge in the audit log. */
+  purgeId: string;
+  documents: number;
+  versions: number;
+  proposals: number;
+}
+
+/**
  * What a signed-in person reaches in Knowledge. Every call checks the
  * session and what the person may see and change, on the server, and
  * every read of documents is recorded in the audit log.
@@ -509,6 +587,18 @@ export interface KnowledgeApi {
   read: KnowledgeTools["read"];
   /** A document's links and backlinks, and for a skill, its files. */
   follow: KnowledgeTools["follow"];
+  /**
+   * What a purge would remove, and a token to confirm it with. Admins
+   * only, whatever the collection; nothing changes yet.
+   */
+  preparePurge: (input: PurgeInput) => Promise<PurgePlan>;
+  /**
+   * Runs the purge `preparePurge` returned `token` for, with the same
+   * input, by the same admin, before it expires; else
+   * `knowledge.purge_expired`. The audit log records who purged what and
+   * why, never what was removed.
+   */
+  purge: (input: PurgeInput, token: string) => Promise<PurgeResult>;
 }
 
 /**
@@ -565,4 +655,6 @@ export const knowledgeErrors = defineErrorFamily({
     "This agent has too many proposals waiting. Approve or decline some first.",
   "knowledge.conflict":
     "This document changed since you opened it. Load the latest version and apply your change to it.",
+  "knowledge.purge_expired":
+    "This purge wasn't confirmed in time, or isn't the one prepared. Prepare it again.",
 });
