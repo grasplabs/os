@@ -114,15 +114,10 @@ describe("audit log retention", () => {
       ok: true,
       done: true,
     });
-    // The archive is recorded in the log, by the platform.
-    const archived = await vi.waitFor(async () => {
-      const events = await allEvents();
-      const found = events.find(({ action }) => action === "audit.archived");
-      if (!found) {
-        throw new Error("Not recorded yet");
-      }
-      return found;
-    });
+    // The archive is recorded in the log, by the platform, in the same
+    // transaction that archived: it is there once the cron has run.
+    const events = await allEvents();
+    const archived = events.find(({ action }) => action === "audit.archived");
     expect(archived).toMatchObject({
       actor: { type: "system" },
       detail: { retentionDays: 180 },
