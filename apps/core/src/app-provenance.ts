@@ -1,7 +1,7 @@
 import type { ConnectionOwner } from "@grasp-os/shared/connect";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
-import { and, eq, inArray, isNotNull } from "drizzle-orm";
+import { and, eq, inArray, isNotNull, ne } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -26,7 +26,11 @@ import type { CollectionAccess, PersonAccess } from "./knowledge/access.ts";
 // people from then on. A granted source that doesn't resolve (connect
 // doesn't know the connection, Knowledge has no such collection) fails
 // closed: nobody reads it but the App's owner and admins, who aren't
-// checked, since what the App read of it can't be placed.
+// checked, since what the App read of it can't be placed. So does the
+// Apps collection: it is open to everyone, but Knowledge shows each entry
+// only to whoever may open its App, so its access says nothing of what
+// the App read there. No App is given it now (permissions.ts
+// `requireCollection`); one granted it before counts it unresolved.
 //
 // An App's code is treated as free of provenance, but for its AGENTS.md:
 // that is written from what the App's agents read, and is read only by
@@ -65,7 +69,12 @@ export interface AppSources {
 
 const actionsSchema = z.array(z.string());
 
-/** Who may read each of the collections `ids` now, as `mayRead` needs it. */
+/**
+ * Who may read each of the collections `ids` now, as `mayRead` needs it.
+ * The Apps collection is left out, so it doesn't resolve: its readers are
+ * decided per entry, not by its access, so what an App granted it (before
+ * permissions.ts refused that) read there can't be placed.
+ */
 const accessOf = async (
   env: Env,
   ids: string[]
@@ -79,7 +88,7 @@ const accessOf = async (
         owner: collections.owner,
       })
       .from(collections)
-      .where(inList(collections.id, ids)),
+      .where(and(inList(collections.id, ids), ne(collections.source, "apps"))),
     db
       .select()
       .from(collectionTeams)

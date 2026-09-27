@@ -33,7 +33,9 @@ import type { Reader } from "./access.ts";
 // `apps_collection` is off (access.ts hides the collection then), not for
 // a read scoped to another collection, not for an App or agent without a
 // permission to read the Apps collection (only agents are given one:
-// permissions.ts `requireCollection`), and not for those who may open
+// permissions.ts `requireCollection`; an App granted it before counts it
+// as a source that doesn't resolve, app-provenance.ts, so the App reaches
+// nobody but its owner and admins), and not for those who may open
 // every App (admins; admins and builders while `app_sharing` is off),
 // who find every entry. Entries exist only for Apps in use: a pending copy
 // is never indexed, and Apps are never deleted once in use.

@@ -470,13 +470,15 @@ export const workflowRuns = sqliteTable(
       table.createdAt
     ),
     // The improvement signals (src/signals.ts): runs that failed in a
-    // window, latest first. Runs started in one are counted per App
-    // workflow by the index above.
+    // window, latest first.
     index("workflow_runs_status_ended_idx").on(
       table.status,
       table.endedAt,
       table.id
     ),
+    // The improvement signals: every App's runs started in a window, a
+    // page at a time in (created_at, id) order.
+    index("workflow_runs_created_idx").on(table.createdAt, table.id),
   ]
 );
 

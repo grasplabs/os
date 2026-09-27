@@ -572,6 +572,35 @@ describe("who finds an App", setUpTime, () => {
       { id: old, status: "requested" },
     ]);
   });
+
+  it("keeps an App granted it before from being shared, as what it read there can't be placed", async () => {
+    const owner = await personOf("builder");
+    const anna = await personOf("user");
+    await releasedApp(owner, agentsMd(term()));
+    const { id: app } = await owner.api.apps.create({ name: `X ${term()}` });
+    // Granted before grants were refused.
+    await storedGrant(
+      { type: "app", id: app },
+      { type: "collection", id: appsCollection },
+      ["read"],
+      "APPS"
+    );
+
+    let refused: unknown;
+    try {
+      await owner.api.apps.members.add(app, {
+        type: "person",
+        id: anna.userId,
+        role: "user",
+      });
+    } catch (error) {
+      refused = error;
+    }
+    expect(refused).toMatchObject({
+      code: "app.share_unreadable",
+      details: { sources: [`collection:${appsCollection}`] },
+    });
+  });
 });
 
 describe("read-only", setUpTime, () => {
