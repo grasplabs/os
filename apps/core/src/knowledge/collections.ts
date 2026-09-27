@@ -18,6 +18,7 @@ import { organizationId } from "../auth/auth.ts";
 import { teams } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
+import { requireFeature } from "../features.ts";
 import { allowedCollections, canCreate, canWrite } from "./access.ts";
 import type { Reader } from "./access.ts";
 
@@ -88,12 +89,18 @@ export const readableCollection = async (
 
 /**
  * Refuses a change to `collection` that `person` may not make: one to a
- * collection only the platform writes, or one their access doesn't allow.
+ * collection only the platform writes, one their access doesn't allow, or
+ * one to the Playbook while its flag is off (a purge, which doesn't come
+ * through here, still reaches it).
  */
 export const requireWritable = (
+  env: Env,
   person: Identity,
   collection: CollectionRow
 ): void => {
+  if (collection.source === "playbook") {
+    requireFeature(env, "playbook");
+  }
   if (readOnlySources.has(collection.source)) {
     throw knowledgeErrors.create("knowledge.read_only");
   }

@@ -1,7 +1,11 @@
 import { issuesOf } from "@grasp-os/shared/errors";
-import { documentTypeSchema } from "@grasp-os/shared/knowledge";
+import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
+import {
+  documentPathSchema,
+  documentTypeSchema,
+} from "@grasp-os/shared/knowledge";
 import type { DocumentType } from "@grasp-os/shared/knowledge";
-import { parse } from "yaml";
+import { parse, parseDocument } from "yaml";
 import { z } from "zod";
 
 // A document's frontmatter: the YAML block between `---` lines at its top.
@@ -45,6 +49,140 @@ const fileSchema = baseSchema.extend({
   mediaType: z.string().trim().min(1).max(128).optional(),
 });
 
+// The Playbook's records. The structure is here; what a person reads is
+// the Markdown after it: the title names the record, the body says the
+// rest. A record names others by their path in the Playbook, as `[[links]]`
+// do. Wherever a name can be, a value is plain text, so a purge that
+// replaces a name with its marker leaves a record that still fits its type.
+
+/** A short value a person writes: a name, a role, a tool. */
+const shortText = z.string().trim().min(1).max(200);
+
+/** Another record, by its path in the Playbook: `people/anna.md`. */
+const recordPath = documentPathSchema;
+
+/** A person, with their role and team. Their name is the title. */
+const personSchema = baseSchema.extend({
+  role: shortText.optional(),
+  team: recordPath.optional(),
+});
+
+/** A tool the company uses, and who makes it. */
+const toolSchema = baseSchema.extend({
+  vendor: shortText.optional(),
+});
+
+/** Where statements come from: an interview, a chat, a document. */
+const sourceSchema = baseSchema.extend({
+  medium: z.enum(["interview", "chat", "document", "other"]).optional(),
+  date: z.iso.date().optional(),
+  /** Who it is from. */
+  person: recordPath.optional(),
+});
+
+/** A claim from a source, and what it is about. */
+const statementSchema = baseSchema.extend({
+  source: recordPath,
+  topic: z.enum(["goal", "blocker", "time_sink", "handover", "tool", "rule"]),
+});
+
+/** Largest number a workflow step has: frequency, minutes or people. */
+const stepNumberMax = 10_000;
+
+/** A number, and whether it was estimated or observed (in runs). */
+const stepNumber = z.strictObject({
+  value: z.number().min(0).max(stepNumberMax),
+  basis: z.enum(["estimated", "observed"]),
+});
+
+/** One step of a workflow: who does it, with what, and how often. */
+const stepSchema = z.strictObject({
+  name: shortText,
+  who: shortText.optional(),
+  tool: shortText.optional(),
+  /** Whether the work passes to someone else after this step. */
+  handover: z.boolean().default(false),
+  /** How a designed step is done. */
+  kind: z.enum(["automated", "ai_checked", "tool", "instruction"]).optional(),
+  numbers: z
+    .strictObject({
+      /** Times a week. */
+      frequency: stepNumber.optional(),
+      /** Minutes each time. */
+      minutes: stepNumber.optional(),
+      /** People each time. */
+      people: stepNumber.optional(),
+    })
+    .optional(),
+});
+
+/** Most steps one workflow has. */
+const workflowMaxSteps = 100;
+
+/** Most parameters one workflow has. */
+const workflowMaxParameters = 50;
+
+/** Most hours a week a workflow is expected to save. */
+const gainMaxHoursPerWeek = 100_000;
+
+/**
+ * A workflow as it runs now (`drawn`) or as it should (`designed`). Once
+ * built, a designed one names the App workflow that runs it, by IDs only
+ * (playbook.ts links it).
+ */
+const workflowSchema = baseSchema
+  .extend({
+    state: z.enum(["drawn", "designed"]),
+    team: recordPath.optional(),
+    steps: z.array(stepSchema).max(workflowMaxSteps).default([]),
+    /** What can be set for it, such as a threshold. */
+    parameters: z
+      .array(
+        z.strictObject({
+          name: shortText,
+          value: z.string().trim().max(1000).optional(),
+        })
+      )
+      .max(workflowMaxParameters)
+      .default([]),
+    /** What it is expected to save. */
+    gain: z
+      .strictObject({
+        hoursPerWeek: z.number().min(0).max(gainMaxHoursPerWeek),
+      })
+      .optional(),
+    app: z
+      .strictObject({ appId: appIdSchema, workflowId: workflowIdSchema })
+      .optional(),
+  })
+  .refine(({ state, app }) => app === undefined || state === "designed", {
+    path: ["app"],
+    message: "Only a designed workflow links to an App workflow",
+  });
+
+/** Most workflows one snapshot holds. */
+const snapshotMaxWorkflows = 500;
+
+/**
+ * A dated freeze of the Playbook: the workflow records at the versions it
+ * was taken from, which later saves don't change, and the maturity then.
+ */
+const snapshotSchema = baseSchema.extend({
+  date: z.iso.date(),
+  maturity: z.int().min(0).max(5).optional(),
+  workflows: z
+    .array(z.strictObject({ path: recordPath, version: z.int().min(1) }))
+    .max(snapshotMaxWorkflows)
+    .default([]),
+});
+
+/** A step of the plan, and where it stands. */
+const planItemSchema = baseSchema.extend({
+  status: z.enum(["planned", "doing", "done", "dropped"]).default("planned"),
+  due: z.iso.date().optional(),
+  workflow: recordPath.optional(),
+});
+
 /** The frontmatter schema of each type. */
 const frontmatterSchemas = {
   doc: baseSchema,
@@ -52,6 +190,16 @@ const frontmatterSchemas = {
   memory: baseSchema,
   decision: decisionSchema,
   file: fileSchema,
+  vision: baseSchema,
+  team: baseSchema,
+  person: personSchema,
+  tool: toolSchema,
+  source: sourceSchema,
+  statement: statementSchema,
+  workflow: workflowSchema,
+  snapshot: snapshotSchema,
+  "plan-item": planItemSchema,
+  "rulebook-entry": baseSchema,
 } as const satisfies Record<DocumentType, z.ZodType>;
 
 type Frontmatter = z.infer<(typeof frontmatterSchemas)[DocumentType]>;
@@ -152,4 +300,21 @@ export const parseFrontmatter = (
     throw new FrontmatterError(issuesOf(parsed.error, "frontmatter"));
   }
   return { type: type.data, frontmatter: parsed.data, body };
+};
+
+/**
+ * `text` with `fields` set in its frontmatter, and everything else as it
+ * was: its other keys and comments, and the Markdown after it. Only for
+ * text `parseFrontmatter` read.
+ */
+export const withFrontmatter = (
+  text: string,
+  fields: Record<string, unknown>
+): string => {
+  const { yaml, body } = splitFrontmatter(text);
+  const document = parseDocument(yaml ?? "", { logLevel: "error" });
+  for (const [key, value] of Object.entries(fields)) {
+    document.set(key, value);
+  }
+  return `---\n${document.toString()}---\n${body}`;
 };

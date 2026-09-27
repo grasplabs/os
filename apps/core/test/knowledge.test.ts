@@ -354,7 +354,9 @@ describe("saving a document", () => {
     }).toStrictEqual({
       frontmatter: {
         code: "knowledge.invalid",
-        issues: ["frontmatter.type: one of doc, skill, memory, decision, file"],
+        issues: [
+          "frontmatter.type: one of doc, skill, memory, decision, file, vision, team, person, tool, source, statement, workflow, snapshot, plan-item, rulebook-entry",
+        ],
       },
       path: {
         code: "knowledge.invalid",

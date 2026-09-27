@@ -6,6 +6,7 @@ import {
   historyOptionsSchema,
   knowledgeErrors,
   listDocumentsOptionsSchema,
+  playbookRecordTypes,
   restoreInputSchema,
   saveInputSchema,
   versionInputSchema,
@@ -83,6 +84,10 @@ interface Prepared {
   sections: Section[];
   links: Link[];
 }
+
+const recordTypes: ReadonlySet<string> = new Set(playbookRecordTypes);
+
+const isPlaybookRecord = (type: DocumentType): boolean => recordTypes.has(type);
 
 const invalid = (issues: string[]) =>
   knowledgeErrors.create("knowledge.invalid", { issues });
@@ -220,7 +225,8 @@ export const findByPath = async (
 /**
  * Reads `text` for the document at `path` in `collection`, refused as a
  * save would refuse it: over a document's limits, frontmatter that doesn't
- * fit its type, or, for a memory file, over that file's size limit.
+ * fit its type, a Playbook record outside a Playbook collection, or, for a
+ * memory file, over that file's size limit.
  */
 export const checkedText = async (
   env: Env,
@@ -229,6 +235,15 @@ export const checkedText = async (
   text: string
 ): Promise<Prepared> => {
   const prepared = prepare(path, text);
+  // Records live in the Playbook collection, which only exists once the
+  // `playbook` flag is on (playbook.ts): until then no text of a record
+  // type is saved anywhere, and code from before record types, which
+  // can't read them, still reads everything that is.
+  if (isPlaybookRecord(prepared.type) && collection.source !== "playbook") {
+    throw invalid([
+      `frontmatter.type: a ${prepared.type} record belongs in the Playbook collection`,
+    ]);
+  }
   const memoryFile = await memoryFileOf(collection, path);
   if (memoryFile !== undefined) {
     requireWithinLimit(env, memoryFile, text);
@@ -413,7 +428,7 @@ export const saveDocument = async (
     await allowedCollections(env, db, { type: "person", person }),
     collectionId
   );
-  requireWritable(person, collection);
+  requireWritable(env, person, collection);
   return await writeVersion(env, personWriter(person), {
     collection,
     path,
@@ -441,7 +456,7 @@ export const restoreVersion = async (
     await allowedCollections(env, db, { type: "person", person }),
     documentId
   );
-  requireWritable(person, collection);
+  requireWritable(env, person, collection);
   const restored = await db
     .select({ text: versions.text })
     .from(versions)

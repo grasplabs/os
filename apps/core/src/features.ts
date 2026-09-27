@@ -16,8 +16,9 @@ import { z } from "zod";
 // (session-rpc.ts), and what App and workflow code reach of it: collection
 // stubs (`knowledge`), an agent's memory and its saves of it (`memory`,
 // which gives every context no memory while off), purging Knowledge
-// (`knowledge_purge`), connection calls (`connections`), Composio's
-// toolkits in the catalog (`composio`), App methods
+// (`knowledge_purge`), the Playbook's collection and record saves
+// (`playbook`), connection calls (`connections`), Composio's toolkits in
+// the catalog (`composio`), App methods
 // (`apps`), starting runs and every step of one (`workflows`), and opening
 // or asking a decision (`decisions`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist.
@@ -49,6 +50,13 @@ export type Feature =
   | "memory"
   /** Purging personal data (knowledge/purge.ts); needs `knowledge` on too. */
   | "knowledge_purge"
+  /**
+   * The Playbook collection and saving its records (knowledge/playbook.ts);
+   * needs `knowledge` on too. While off, nothing is saved to the Playbook,
+   * by these helpers or any other save; what it holds is still read,
+   * searched and purged like any document.
+   */
+  | "playbook"
   | "connections"
   /**
    * Composio's toolkits in the catalog; needs `connections` on too.

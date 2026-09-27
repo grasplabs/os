@@ -1,0 +1,825 @@
+import { knowledgeErrors } from "@grasp-os/shared/knowledge";
+import type {
+  DocumentSummary,
+  PlaybookRecordType,
+} from "@grasp-os/shared/knowledge";
+import type { Role } from "@grasp-os/shared/roles";
+import { env } from "cloudflare:workers";
+import { describe, expect, it } from "vite-plus/test";
+import { stringify } from "yaml";
+import { z } from "zod";
+
+import {
+  getDocument,
+  restoreVersion,
+  saveDocument,
+} from "../src/knowledge/documents.ts";
+import {
+  FrontmatterError,
+  parseFrontmatter,
+  withFrontmatter,
+} from "../src/knowledge/frontmatter.ts";
+import {
+  linkWorkflow,
+  playbookCollectionId,
+  saveRecord,
+} from "../src/knowledge/playbook.ts";
+import type { LinkInput } from "../src/knowledge/playbook.ts";
+import { preparePurge, purge } from "../src/knowledge/purge.ts";
+import { release } from "./apps.ts";
+import { mockIdp } from "./idp.ts";
+import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
+
+// The Playbook's records: typed documents in the Playbook collection.
+// These tests start from the ways records can fail: a record that doesn't
+// fit its type is saved anyway, or its structure makes its text unreadable
+// or breaks out of its frontmatter; a record lands outside the Playbook,
+// where code from before record types would read it; a workflow loses its
+// history or its link on the way from drawn to designed to built; someone
+// links a workflow to an App they can't use, or to a workflow that isn't
+// there; a link or save runs while the feature is off; and a purge can't
+// remove a person's name from their record.
+
+const idp = mockIdp();
+
+/** Signing people in and releasing Apps can be slow on CI. */
+const setUpTime = { timeout: 60_000 };
+
+const personOf = async (role: Role) => {
+  const person = await signedInApi(idp, role);
+  return { ...person, identity: await person.api.whoami() };
+};
+
+type Person = Awaited<ReturnType<typeof personOf>>;
+
+/** One record of each type, as the Playbook Apps would write them. */
+const records: Record<
+  PlaybookRecordType | "decision",
+  { record: Record<string, unknown>; body: string }
+> = {
+  vision: {
+    record: { type: "vision", title: "Where we go" },
+    body: "# Where we go\n\nNo invoice waits more than a day.",
+  },
+  team: {
+    record: { type: "team", title: "Finance" },
+    body: "Pays suppliers and closes the books.",
+  },
+  person: {
+    record: {
+      type: "person",
+      title: "Anna de Vries",
+      role: "Controller",
+      team: "teams/finance.md",
+    },
+    body: "Approves payments; see [[teams/finance.md]].",
+  },
+  tool: {
+    record: { type: "tool", title: "Exact Online", vendor: "Exact" },
+    body: "Bookkeeping.",
+  },
+  source: {
+    record: {
+      type: "source",
+      title: "Interview with Anna",
+      medium: "interview",
+      date: "2026-09-01",
+      person: "people/anna.md",
+    },
+    body: "Notes from the first interview.",
+  },
+  statement: {
+    record: {
+      type: "statement",
+      title: "Invoices wait for approval",
+      source: "sources/anna.md",
+      topic: "time_sink",
+    },
+    body: "Invoices wait up to a week for a second signature.",
+  },
+  workflow: {
+    record: {
+      type: "workflow",
+      title: "Pay supplier invoices",
+      state: "drawn",
+      team: "teams/finance.md",
+      steps: [
+        {
+          name: "Match the invoice",
+          who: "Controller",
+          tool: "Exact Online",
+          handover: true,
+          numbers: {
+            frequency: { value: 40, basis: "estimated" },
+            minutes: { value: 5, basis: "observed" },
+            people: { value: 1, basis: "estimated" },
+          },
+        },
+        { name: "Approve", who: "CFO", handover: false },
+      ],
+      parameters: [{ name: "Approval limit", value: "€ 5,000" }],
+      gain: { hoursPerWeek: 3 },
+    },
+    body: "# Pay supplier invoices\n\nFrom the invoice arriving to it being paid.",
+  },
+  snapshot: {
+    record: {
+      type: "snapshot",
+      title: "September",
+      date: "2026-09-30",
+      maturity: 2,
+      workflows: [{ path: "workflows/pay.md", version: 1 }],
+    },
+    body: "Where we stood at the end of September.",
+  },
+  "plan-item": {
+    record: {
+      type: "plan-item",
+      title: "Automate matching",
+      status: "doing",
+      due: "2026-10-31",
+      workflow: "workflows/pay.md",
+    },
+    body: "Match invoices to orders automatically.",
+  },
+  decision: {
+    record: { type: "decision", title: "Pay weekly", status: "accepted" },
+    body: "We pay suppliers once a week.",
+  },
+  "rulebook-entry": {
+    record: { type: "rulebook-entry", title: "Four eyes over € 5,000" },
+    body: "Two people approve every payment over € 5,000.",
+  },
+};
+
+/** A record's text, as it is saved: its frontmatter, then its body. */
+const textOf = ({
+  record,
+  body,
+}: {
+  record: Record<string, unknown>;
+  body: string;
+}): string => `---\n${stringify(record)}---\n${body}`;
+
+/** The problems a record's frontmatter was refused for, or "ok". */
+const problems = (record: Record<string, unknown>): string[] | "ok" => {
+  try {
+    parseFrontmatter("record.md", textOf({ record, body: "" }));
+    return "ok";
+  } catch (error) {
+    if (error instanceof FrontmatterError) {
+      return error.issues;
+    }
+    throw error;
+  }
+};
+
+const detailsSchema = z.object({
+  details: z.record(z.string(), z.unknown()).default({}),
+});
+
+/** The code and details a promise was refused with. */
+const refusal = async (promise: Promise<unknown>): Promise<unknown> => {
+  try {
+    await promise;
+  } catch (error) {
+    const { details } = detailsSchema.parse(error);
+    return { code: knowledgeErrors.codeOf(error) ?? String(error), ...details };
+  }
+  throw new Error("Expected a refusal");
+};
+
+const save = async (
+  by: Person,
+  input: {
+    path: string;
+    record: Record<string, unknown>;
+    body: string;
+    ifVersion?: number;
+    message?: string;
+  }
+) => await saveRecord(env, by.identity, { ifVersion: 0, ...input });
+
+const link = async (by: Person, input: LinkInput) =>
+  await linkWorkflow(env, by.identity, input);
+
+const workflowFile = `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "pay",
+  { input: z.unknown(), params: {} },
+  async (step) => await step.do("count", { description: "Count" }, async () => 1)
+);
+`;
+
+const workflowTestsFile = `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import pay from "./pay.ts";
+
+export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect: { output: 1 } }]);
+`;
+
+/** An App whose running version has the workflow `pay`; returns its ID. */
+const appWithWorkflow = async (builder: Person): Promise<string> => {
+  const { id } = await builder.api.apps.create({
+    name: `Payables ${unique()}`,
+  });
+  await release(builder, id, {
+    "app/server.ts": "export class App {}\n",
+    "workflows/pay.ts": workflowFile,
+    "workflows/pay.workflow-tests.ts": workflowTestsFile,
+  });
+  return id;
+};
+
+describe("Playbook record schemas", () => {
+  it("accept one record of each type", () => {
+    const results = Object.fromEntries(
+      Object.entries(records).map(([type, { record }]) => [
+        type,
+        problems(record),
+      ])
+    );
+    expect(
+      Object.values(results).every((result) => result === "ok")
+    ).toBeTruthy();
+    expect(Object.keys(results).toSorted()).toStrictEqual(
+      Object.keys(records).toSorted()
+    );
+  });
+
+  it("refuse what doesn't fit each type, naming the problem", () => {
+    const workflow = records.workflow.record;
+    expect({
+      person: problems({ type: "person", role: "" }),
+      tool: problems({ type: "tool", vendor: "x".repeat(201) }),
+      source: problems({ type: "source", date: "last week" }),
+      statement: problems({ type: "statement", topic: "gossip" }),
+      workflowState: problems({ ...workflow, state: "sketched" }),
+      workflowStep: problems({
+        ...workflow,
+        steps: [
+          {
+            name: "Match",
+            numbers: { minutes: { value: -1, basis: "guessed" } },
+            minuts: 5,
+          },
+        ],
+      }),
+      drawnWithApp: problems({
+        ...workflow,
+        app: { appId: "app-1", workflowId: "pay" },
+      }),
+      snapshot: problems({ type: "snapshot", maturity: 6 }),
+      planItem: problems({ type: "plan-item", status: "later" }),
+      path: problems({ type: "person", team: "../finance.md" }),
+    }).toStrictEqual({
+      person: [
+        "frontmatter.role: Too small: expected string to have >=1 characters",
+      ],
+      tool: [
+        "frontmatter.vendor: Too big: expected string to have <=200 characters",
+      ],
+      source: ["frontmatter.date: Invalid ISO date"],
+      statement: [
+        "frontmatter.source: Invalid input: expected string, received undefined",
+        'frontmatter.topic: Invalid option: expected one of "goal"|"blocker"|"time_sink"|"handover"|"tool"|"rule"',
+      ],
+      workflowState: [
+        'frontmatter.state: Invalid option: expected one of "drawn"|"designed"',
+      ],
+      workflowStep: [
+        "frontmatter.steps.0.numbers.minutes.value: Too small: expected number to be >=0",
+        'frontmatter.steps.0.numbers.minutes.basis: Invalid option: expected one of "estimated"|"observed"',
+        'frontmatter.steps.0: Unrecognized key: "minuts"',
+      ],
+      drawnWithApp: [
+        "frontmatter.app: Only a designed workflow links to an App workflow",
+      ],
+      snapshot: [
+        "frontmatter.date: Invalid input: expected string, received undefined",
+        "frontmatter.maturity: Too big: expected number to be <=5",
+      ],
+      planItem: [
+        'frontmatter.status: Invalid option: expected one of "planned"|"doing"|"done"|"dropped"',
+      ],
+      path: [
+        "frontmatter.team: A path has no empty, blank, '.' or '..' folders and doesn't start or end with /",
+      ],
+    });
+  });
+
+  it("set a field and keep the rest of the text as it was", () => {
+    const text =
+      "---\n# Drawn with Anna\ntype: workflow\nstate: designed\nextra: kept\n---\n# Pay\n\nBody.";
+    const linked = withFrontmatter(text, {
+      app: { appId: "app-1", workflowId: "pay" },
+    });
+    expect({
+      text: linked,
+      parsed: parseFrontmatter("pay.md", linked).frontmatter,
+    }).toMatchObject({
+      text: "---\n# Drawn with Anna\ntype: workflow\nstate: designed\nextra: kept\napp:\n  appId: app-1\n  workflowId: pay\n---\n# Pay\n\nBody.",
+      parsed: { state: "designed", app: { appId: "app-1", workflowId: "pay" } },
+    });
+  });
+});
+
+describe("Playbook records", () => {
+  it(
+    "save every type as a readable document in the Playbook",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const folder = unique();
+      const saved = [];
+      for (const [type, sample] of Object.entries(records)) {
+        // oxlint-disable-next-line no-await-in-loop -- one record at a time
+        const summary = await save(admin, {
+          path: `${folder}/${type}.md`,
+          ...sample,
+        });
+        // oxlint-disable-next-line no-await-in-loop -- one record at a time
+        const read = await admin.api.knowledge.getDocument(summary.id);
+        const { frontmatter } = parseFrontmatter(
+          summary.path,
+          read.version.text
+        );
+        saved.push({
+          type,
+          summary: {
+            collectionId: summary.collectionId,
+            type: summary.type,
+            title: summary.title,
+          },
+          body: read.version.text.endsWith(`---\n${sample.body}`),
+          // What was saved of each field, read back.
+          fields: Object.fromEntries(
+            Object.entries(frontmatter).filter(([key]) => key in sample.record)
+          ),
+        });
+      }
+      expect(saved).toStrictEqual(
+        Object.entries(records).map(([type, { record }]) => ({
+          type,
+          summary: {
+            collectionId: playbookCollectionId,
+            type,
+            title: record.title,
+          },
+          body: true,
+          fields: Object.fromEntries(
+            Object.entries(record).filter(([key]) => key !== "type")
+          ),
+        }))
+      );
+      // The body is what search finds.
+      const { hits } = await admin.api.knowledge.search("signature", {
+        collectionId: playbookCollectionId,
+        type: "statement",
+      });
+      expect(hits.map(({ path }) => path)).toContain(`${folder}/statement.md`);
+    }
+  );
+
+  it(
+    "keep YAML in values from breaking out of the frontmatter",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const sneaky = "Anna\n---\ntype: skill\nname: evil\n---";
+      const summary = await save(admin, {
+        path: `${unique()}/person.md`,
+        record: { type: "person", title: "Anna", role: sneaky },
+        body: "Body.",
+      });
+      const read = await admin.api.knowledge.getDocument(summary.id);
+      expect({
+        type: summary.type,
+        parsed: parseFrontmatter(summary.path, read.version.text),
+      }).toMatchObject({
+        type: "person",
+        parsed: { type: "person", frontmatter: { role: sneaky } },
+      });
+    }
+  );
+
+  it(
+    "refuse a record that doesn't fit its type, and save nothing",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const path = `${unique()}/pay.md`;
+      const result = await refusal(
+        save(admin, {
+          path,
+          record: { ...records.workflow.record, state: "sketched" },
+          body: "Body.",
+        })
+      );
+      const { documents } =
+        await admin.api.knowledge.listDocuments(playbookCollectionId);
+      expect({
+        result,
+        saved: documents.some((document) => document.path === path),
+        notARecord: await refusal(
+          save(admin, { path, record: { type: "doc" }, body: "Body." })
+        ),
+        withApp: await refusal(
+          save(admin, {
+            path,
+            record: {
+              ...records.workflow.record,
+              state: "designed",
+              app: { appId: "app-1", workflowId: "pay" },
+            },
+            body: "Body.",
+          })
+        ),
+      }).toMatchObject({
+        result: {
+          code: "knowledge.invalid",
+          issues: [
+            'frontmatter.state: Invalid option: expected one of "drawn"|"designed"',
+          ],
+        },
+        saved: false,
+        notARecord: { code: "knowledge.invalid" },
+        withApp: {
+          code: "knowledge.invalid",
+          issues: [
+            "record.app: Link a workflow to an App workflow with linkWorkflow",
+          ],
+        },
+      });
+    }
+  );
+
+  it(
+    "stay in the Playbook: a record elsewhere is refused",
+    setUpTime,
+    async () => {
+      const user = await personOf("user");
+      const { id: collectionId } = await user.api.knowledge.createCollection({
+        name: `Notes ${unique()}`,
+        access: "me",
+      });
+      await expect(
+        refusal(
+          user.api.knowledge.saveDocument({
+            collectionId,
+            path: "anna.md",
+            text: textOf(records.person),
+            ifVersion: 0,
+          })
+        )
+      ).resolves.toStrictEqual({
+        code: "knowledge.invalid",
+        issues: [
+          "frontmatter.type: a person record belongs in the Playbook collection",
+        ],
+      });
+    }
+  );
+
+  it(
+    "are written only by those who may change the Playbook, while the feature is on",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const user = await personOf("user");
+      const input = {
+        path: `${unique()}/team.md`,
+        ...records.team,
+      };
+      const name = `Nowak${unique()}`;
+      // The admin's first save creates the collection.
+      const saved = await save(admin, {
+        path: `${unique()}/team.md`,
+        record: { type: "team", title: `Finance of ${name}` },
+        body: "Body.",
+      });
+      const off: Env = {
+        ...env,
+        FEATURES: { knowledge: true, knowledge_purge: true },
+      };
+      const purgeInput = {
+        type: "content",
+        documentIds: [saved.id],
+        terms: [name],
+        reason: "erasure_request",
+      };
+      expect({
+        user: await outcome(save(user, input)),
+        off: await outcome(
+          saveRecord(off, admin.identity, { ...input, ifVersion: 0 })
+        ),
+        linkOff: await outcome(
+          linkWorkflow(off, admin.identity, {
+            documentId: saved.id,
+            ifVersion: 1,
+            appId: "any",
+            workflowId: "pay",
+          })
+        ),
+        // Nor any other save, while the flag is off.
+        saveDocumentOff: await outcome(
+          saveDocument(off, admin.identity, {
+            collectionId: playbookCollectionId,
+            path: input.path,
+            text: textOf(records.team),
+            ifVersion: 0,
+          })
+        ),
+        restoreOff: await outcome(
+          restoreVersion(off, admin.identity, {
+            documentId: saved.id,
+            version: 1,
+            ifVersion: 1,
+          })
+        ),
+        // What it holds is still read and purged.
+        readOff: await outcome(
+          getDocument(off, { type: "person", person: admin.identity }, saved.id)
+        ),
+        purgeOff: await outcome(
+          (async () => {
+            const { token } = await preparePurge(
+              off,
+              admin.identity,
+              purgeInput
+            );
+            await purge(off, admin.identity, purgeInput, token);
+          })()
+        ),
+      }).toStrictEqual({
+        user: "knowledge.forbidden",
+        off: "feature.disabled",
+        linkOff: "feature.disabled",
+        saveDocumentOff: "feature.disabled",
+        restoreOff: "feature.disabled",
+        readOff: "ok",
+        purgeOff: "ok",
+      });
+      const purged = await admin.api.knowledge.getDocument(saved.id);
+      expect(purged.title).toBe("Finance of (removed)");
+    }
+  );
+
+  it(
+    "move a workflow from drawn to designed to linked, keeping its history",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const appId = await appWithWorkflow(admin);
+      const path = `${unique()}/pay.md`;
+      const drawn = await save(admin, { path, ...records.workflow });
+      const designedRecord = {
+        ...records.workflow.record,
+        state: "designed",
+        steps: [{ name: "Match the invoice", kind: "automated" }],
+      };
+      await save(admin, {
+        path,
+        ifVersion: 1,
+        record: designedRecord,
+        body: records.workflow.body,
+        message: "Designed",
+      });
+      let linked: DocumentSummary | undefined;
+      const events = await auditedDuring(async () => {
+        linked = await link(admin, {
+          documentId: drawn.id,
+          ifVersion: 2,
+          appId,
+          workflowId: "pay",
+        });
+      });
+      // A later edit keeps the link.
+      await save(admin, {
+        path,
+        ifVersion: 3,
+        record: { ...designedRecord, gain: { hoursPerWeek: 4 } },
+        body: records.workflow.body,
+      });
+      const { versions } = await admin.api.knowledge.history(drawn.id);
+      const at = async (version: number) => {
+        const read = await admin.api.knowledge.getDocument(drawn.id, version);
+        return parseFrontmatter(path, read.version.text).frontmatter;
+      };
+      expect({
+        linked,
+        events: events
+          .filter(({ action }) => action === "knowledge.workflow.linked")
+          .map(({ action, target, detail }) => ({ action, target, detail })),
+        history: versions.map(({ number, message }) => ({ number, message })),
+        drawn: await at(1),
+        designed: await at(2),
+        linkedVersion: await at(3),
+        edited: await at(4),
+      }).toMatchObject({
+        linked: { id: drawn.id, currentVersion: 3 },
+        events: [
+          {
+            action: "knowledge.workflow.linked",
+            target: { type: "document", id: drawn.id },
+            detail: { version: 3, appId, workflowId: "pay" },
+          },
+        ],
+        history: [
+          { number: 4, message: null },
+          { number: 3, message: "Linked to its App workflow" },
+          { number: 2, message: "Designed" },
+          { number: 1, message: null },
+        ],
+        drawn: { state: "drawn", steps: records.workflow.record.steps },
+        designed: { state: "designed" },
+        linkedVersion: {
+          state: "designed",
+          app: { appId, workflowId: "pay" },
+        },
+        edited: {
+          gain: { hoursPerWeek: 4 },
+          app: { appId, workflowId: "pay" },
+        },
+      });
+      await expect(at(2)).resolves.not.toHaveProperty("app");
+      // Linked, it can't go back to drawn: the link is a designed one's.
+      await expect(
+        refusal(
+          save(admin, {
+            path,
+            ifVersion: 4,
+            record: { ...designedRecord, state: "drawn" },
+            body: records.workflow.body,
+          })
+        )
+      ).resolves.toMatchObject({
+        code: "knowledge.invalid",
+        issues: [
+          "frontmatter.app: Only a designed workflow links to an App workflow",
+        ],
+      });
+    }
+  );
+
+  it(
+    "link only a designed workflow, from its current version, to a workflow of an App the person may use",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const builder = await personOf("builder");
+      const appId = await appWithWorkflow(admin);
+      const folder = unique();
+      const drawn = await save(admin, {
+        path: `${folder}/drawn.md`,
+        ...records.workflow,
+      });
+      const designed = await save(admin, {
+        path: `${folder}/designed.md`,
+        record: { ...records.workflow.record, state: "designed" },
+        body: "Designed.",
+      });
+      const team = await save(admin, {
+        path: `${folder}/team.md`,
+        ...records.team,
+      });
+      const notes = await admin.api.knowledge.createCollection({
+        name: `Notes ${unique()}`,
+        access: "me",
+      });
+      const { id: elsewhere } = await admin.api.knowledge.saveDocument({
+        collectionId: notes.id,
+        path: "note.md",
+        text: "# Note",
+        ifVersion: 0,
+      });
+      const linkAs = async (
+        by: Person,
+        changes: Partial<LinkInput>
+      ): Promise<string> =>
+        await outcome(
+          link(by, {
+            documentId: designed.id,
+            ifVersion: 1,
+            appId,
+            workflowId: "pay",
+            ...changes,
+          })
+        );
+      // A builder who owns the Playbook may change it, but may not use
+      // an App nobody shared with them.
+      await env.KNOWLEDGE.prepare(
+        "UPDATE collections SET owner = ? WHERE id = ?"
+      )
+        .bind(builder.userId, playbookCollectionId)
+        .run();
+      const notTheirs = await linkAs(builder, {});
+      await env.KNOWLEDGE.prepare(
+        "UPDATE collections SET owner = ? WHERE id = ?"
+      )
+        .bind(admin.userId, playbookCollectionId)
+        .run();
+      expect({
+        drawn: await refusal(
+          link(admin, {
+            documentId: drawn.id,
+            ifVersion: 1,
+            appId,
+            workflowId: "pay",
+          })
+        ),
+        notAWorkflow: await linkAs(admin, { documentId: team.id }),
+        notInThePlaybook: await linkAs(admin, { documentId: elsewhere }),
+        noSuchApp: await linkAs(admin, { appId: "no-such-app" }),
+        noSuchWorkflow: await refusal(
+          link(admin, {
+            documentId: designed.id,
+            ifVersion: 1,
+            appId,
+            workflowId: "refund",
+          })
+        ),
+        notCurrent: await linkAs(admin, { ifVersion: 2 }),
+        notTheirs,
+        user: await linkAs(await personOf("user"), {}),
+        linked: await linkAs(admin, {}),
+        stale: await linkAs(admin, {}),
+      }).toMatchObject({
+        drawn: {
+          code: "knowledge.invalid",
+          issues: [
+            "documentId: only a designed workflow links to an App workflow",
+          ],
+        },
+        notAWorkflow: "knowledge.invalid",
+        notInThePlaybook: "knowledge.not_found",
+        noSuchApp: "app.not_found",
+        noSuchWorkflow: {
+          code: "knowledge.invalid",
+          issues: [
+            `workflowId: the version of App ${appId} that runs has no workflow refund`,
+          ],
+        },
+        notCurrent: "knowledge.conflict",
+        notTheirs: "app.not_found",
+        user: "knowledge.forbidden",
+        linked: "ok",
+        // Linked from version 1 again, now that it is at 2.
+        stale: "knowledge.conflict",
+      });
+    }
+  );
+
+  it(
+    "hold personal data a content purge removes from every version",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const name = `Kowalczyk${unique()}`;
+      const path = `${unique()}/person.md`;
+      const person = await save(admin, {
+        path,
+        record: { ...records.person.record, title: `Anna ${name}` },
+        body: `${name} approves payments.`,
+      });
+      await save(admin, {
+        path,
+        ifVersion: 1,
+        record: {
+          ...records.person.record,
+          title: `Anna ${name}`,
+          role: `Controller, reports to ${name} senior`,
+        },
+        body: `${name} approves payments.`,
+      });
+      const input = {
+        type: "content" as const,
+        documentIds: [person.id],
+        terms: [name],
+        reason: "erasure_request" as const,
+      };
+      const plan = await admin.api.knowledge.preparePurge(input);
+      await admin.api.knowledge.purge(input, plan.token);
+      const { results } = await env.KNOWLEDGE.prepare(
+        "SELECT text FROM versions WHERE document_id = ? ORDER BY number"
+      )
+        .bind(person.id)
+        .all<{ text: string }>();
+      const current = await admin.api.knowledge.getDocument(person.id);
+      expect({
+        plan: plan.versions,
+        holding: results.filter(({ text }) => text.includes(name)).length,
+        type: current.type,
+        title: current.title,
+        role: parseFrontmatter(path, current.version.text).frontmatter,
+      }).toMatchObject({
+        plan: 2,
+        holding: 0,
+        type: "person",
+        title: "Anna (removed)",
+        role: { role: "Controller, reports to (removed) senior" },
+      });
+    }
+  );
+});
