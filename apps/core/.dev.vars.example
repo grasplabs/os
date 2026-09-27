@@ -5,7 +5,9 @@
 # requests to localhost, so it may stay empty locally.
 ROUTER_SECRET=
 # Signs session cookies and encrypts sign-in state. Any random value of at
-# least 32 characters, e.g. `openssl rand -base64 32`.
+# least 32 characters, e.g. `openssl rand -base64 32`. `vp run dev` signs
+# people in through a local fake IdP (scripts/dev.ts): any email at
+# acme.test, and admin@acme.test as an admin.
 BETTER_AUTH_SECRET=
 # Signs the capability each call to connect carries. The same value as in
 # apps/connect/.dev.vars; at least 32 characters, e.g. `openssl rand -base64 32`.

@@ -13,6 +13,12 @@ const domainSchema = z
   .string()
   .regex(/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u, "a lowercase domain, e.g. acme.com");
 
+/** Whether `value` is an origin on this machine, e.g. `http://localhost:8787`. */
+const isLocalOrigin = (value: string): boolean =>
+  URL.canParse(value) &&
+  new URL(value).origin === value &&
+  loopbackHosts.has(new URL(value).hostname);
+
 /** An HTTPS origin, or plain HTTP on this machine for local development. */
 const isOrigin = (value: string): boolean => {
   if (!URL.canParse(value)) {
@@ -126,7 +132,31 @@ export interface OidcProvider {
   jwksEndpoint: string;
 }
 
+const microsoftOrigin = "https://login.microsoftonline.com";
+
+/**
+ * Where a stand-in for Entra answers instead of Microsoft, if anywhere:
+ * local development and the end-to-end tests sign in through one on this
+ * machine (`DEV_IDP_ORIGIN`, set with `wrangler dev --var`, never in
+ * wrangler.jsonc; apps/core/test/idp-worker.ts). It applies only while the
+ * deployment's own origin is on this machine too, which no deployment's
+ * is: no IdP could send anyone back to it. So it can't be turned on in
+ * production, even by setting the var.
+ */
+export const devIdpOrigin = (
+  env: Env,
+  config: SignInConfig
+): string | undefined => {
+  const devIdp = env.DEV_IDP_ORIGIN;
+  return devIdp !== undefined &&
+    isLocalOrigin(devIdp) &&
+    isLocalOrigin(config.origin)
+    ? devIdp
+    : undefined;
+};
+
 const entraProvider = (
+  origin: string,
   providerId: ProviderId,
   label: string,
   tenantId: string,
@@ -135,7 +165,7 @@ const entraProvider = (
 ): OidcProvider => {
   // The tenant's own issuer, not `common`: ID tokens from any other tenant
   // carry another `iss` and fail verification.
-  const base = `https://login.microsoftonline.com/${tenantId}`;
+  const base = `${origin}/${tenantId}`;
   return {
     providerId,
     label,
@@ -160,9 +190,11 @@ export const oidcProviders = (
   const providers: OidcProvider[] = [];
   const entraSecret = env.ENTRA_CLIENT_SECRET;
   const googleSecret = env.GOOGLE_CLIENT_SECRET;
+  const entra = devIdpOrigin(env, config) ?? microsoftOrigin;
   if (config.entra && isSet(entraSecret)) {
     providers.push(
       entraProvider(
+        entra,
         providerIds.entra,
         "Microsoft",
         config.entra.tenantId,
@@ -187,6 +219,7 @@ export const oidcProviders = (
   if (config.staff && isSet(entraSecret) && staffWindowOpen(config, now)) {
     providers.push(
       entraProvider(
+        entra,
         providerIds.staff,
         "Grasp staff",
         config.staff.tenantId,

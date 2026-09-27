@@ -70,19 +70,26 @@ interface SignInOptions {
   coreEnv?: Env;
   /** Where the browser goes once signed in; the start page by default. */
   callbackURL?: string;
+  /** The page sign-in starts from; the client's own by default. */
+  origin?: string;
 }
 
 /** Asks core to start signing in; returns the IdP URL and the browser's cookies. */
 export const startSignIn = async (
   providerId: string,
-  { cookie = "", coreEnv = env, callbackURL = "/" }: SignInOptions = {}
+  {
+    cookie = "",
+    coreEnv = env,
+    callbackURL = "/",
+    origin = clientOrigin,
+  }: SignInOptions = {}
 ) => {
   const response = await routed(
     "/api/auth/sign-in/sso",
     {
       method: "POST",
       headers: {
-        origin: clientOrigin,
+        origin,
         "content-type": "application/json",
         cookie,
       },

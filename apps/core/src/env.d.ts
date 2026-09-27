@@ -40,4 +40,6 @@ interface __BaseEnv_Env {
   APP_CALL_TIMEOUT_MS?: string;
   /** Local dev only (src/router-secret.ts). */
   DEV_SKIP_ROUTER_SECRET?: string;
+  /** Local dev and e2e only: a stand-in for Entra (src/auth/config.ts). */
+  DEV_IDP_ORIGIN?: string;
 }

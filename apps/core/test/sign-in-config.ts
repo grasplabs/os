@@ -45,3 +45,26 @@ export const testSignIn = {
   ENTRA_CLIENT_SECRET: entraClient.secret,
   GOOGLE_CLIENT_SECRET: googleClient.secret,
 };
+
+/** Where the fake IdP runs for local development and the e2e tests. */
+export const localIdpPort = 8788;
+export const localIdpOrigin = `http://localhost:${localIdpPort}`;
+
+/** Who is admin when they join a local stack. */
+export const localAdmin = "admin@acme.test";
+
+/**
+ * Core's sign-in vars for a local stack at `origin`: the client's Entra
+ * tenant, answered by the fake IdP (test/idp-worker.ts), so people sign in
+ * through the product as they do in production. Only test values.
+ */
+export const localSignIn = (origin: string) => ({
+  SIGN_IN: {
+    origin,
+    domains: ["acme.test"],
+    admins: [localAdmin],
+    entra: { tenantId: acmeTenant, clientId: entraClient.id },
+  },
+  ENTRA_CLIENT_SECRET: entraClient.secret,
+  DEV_IDP_ORIGIN: localIdpOrigin,
+});

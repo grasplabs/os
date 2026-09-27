@@ -2,17 +2,48 @@
  * Connections for end-to-end tests. Connecting one goes to Microsoft or
  * Composio, which a local stack can't reach, and its dev server can't point
  * connect's calls out at a fake, so this writes what a finished connection
- * leaves behind straight into connect's local database, as people.ts does
- * for sign-ins: the connection rows only, with no tokens, which nothing
- * here uses. The flows themselves, through a fake Entra and Composio, are
- * core's tests (apps/core/test/connections.test.ts). Written up front, once
+ * leaves behind straight into connect's local database: the connection
+ * rows only, with no tokens, which nothing here uses. The flows themselves,
+ * through a fake Entra and Composio, are core's tests
+ * (apps/core/test/connections.test.ts). Written up front in one write, once
  * for each attempt a test may get, before any test runs; tests only look
  * theirs up.
  */
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+
 import { test } from "@playwright/test";
 
-import { execute, quoted } from "./people.ts";
 import type { Cast } from "./people.ts";
+
+const quoted = (text: string): string => `'${text.replaceAll("'", "''")}'`;
+
+/**
+ * Runs SQL on connect's local database, which the dev server keeps next to
+ * core's (apps/core/package.json), as one batch in one transaction.
+ */
+const execute = (sql: string): void => {
+  execFileSync(
+    path.join(import.meta.dirname, "../node_modules/.bin/wrangler"),
+    [
+      "d1",
+      "execute",
+      "DB",
+      "--local",
+      "-c",
+      "../connect/wrangler.jsonc",
+      "--persist-to",
+      ".wrangler/state",
+      "--command",
+      sql,
+    ],
+    {
+      cwd: path.join(import.meta.dirname, "../apps/core"),
+      stdio: "pipe",
+      env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+    }
+  );
+};
 
 export interface SeededConnection {
   id: string;
@@ -88,7 +119,7 @@ const newConnection = (account: string): SeededConnection => ({
  * in one write. The global setup (e2e/setup.ts) runs it right after it
  * signs everyone in.
  */
-export const seedConnections = async (cast: Cast): Promise<void> => {
+export const seedConnections = (cast: Cast): void => {
   const now = Date.now();
   const written = cast.map((scenes) => {
     const admin = scenes.connections?.admin;
@@ -124,11 +155,10 @@ export const seedConnections = async (cast: Cast): Promise<void> => {
     ];
     return { connections, rows };
   });
-  await execute(
+  execute(
     written
       .flatMap(({ rows }) => rows.map((row) => insert(row, now)))
-      .join("; "),
-    "connect"
+      .join("; ")
   );
   // Playwright hands the global setup's environment to the test workers.
   process.env[seededVariable] = JSON.stringify(

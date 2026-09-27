@@ -1,6 +1,7 @@
 import { defineConfig, devices } from "@playwright/test";
 
-import { testAuthSecret, testSignIn } from "./e2e/people.ts";
+import { localIdpPort, localSignIn } from "./apps/core/test/sign-in-config.ts";
+import { origin, testAuthSecret } from "./e2e/people.ts";
 
 const port = 8787;
 const ci = process.env.CI === "true";
@@ -19,10 +20,8 @@ export default defineConfig({
   timeout: 180_000,
   forbidOnly: ci,
   retries: ci ? 2 : 0,
-  // Two workers, locally as in CI. Tests share core's local D1 file with
-  // the dev server, so they don't write it themselves: a write from a
-  // process of its own fails the dev server's queries meanwhile with
-  // SQLITE_BUSY. The global setup signs everyone in before any test runs.
+  // Two workers, locally as in CI: one local dev server serves every test,
+  // and more at once slow it past the tests' waits (pages, live updates).
   workers: 2,
   globalSetup: "./e2e/setup.ts",
   reporter: ci ? "github" : "list",
@@ -31,31 +30,45 @@ export default defineConfig({
     trace: "on-first-retry",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  // The full local stack: core serves the built frontend, as in production.
-  // `--local` keeps remote bindings off, so it runs without Cloudflare
-  // credentials. Sign-in is set up without an IdP, so tests can make
-  // sessions themselves (e2e/people.ts), and the flagged features are on.
-  webServer: {
-    command: [
-      `vp run --filter @grasp-os/core dev --local --port ${port}`,
-      devVar("BETTER_AUTH_SECRET", testAuthSecret),
-      devVar("SIGN_IN", JSON.stringify(testSignIn)),
-      devVar(
-        "FEATURES",
-        JSON.stringify({
-          apps: true,
-          screens: true,
-          screen_workflows: true,
-          members: true,
-          workflows: true,
-          decisions: true,
-          connections: true,
-          permissions: true,
-        })
-      ),
-    ].join(" "),
-    port,
-    reuseExistingServer: !ci,
-    timeout: 120_000,
-  },
+  webServer: [
+    // The full local stack: core serves the built frontend, as in
+    // production. `--local` keeps remote bindings off, so it runs without
+    // Cloudflare credentials. People sign in through the fake IdP below
+    // (e2e/people.ts), and the flagged features are on.
+    {
+      command: [
+        `vp run --filter @grasp-os/core dev --local --port ${port}`,
+        devVar("BETTER_AUTH_SECRET", testAuthSecret),
+        ...Object.entries(localSignIn(origin)).map(([name, value]) =>
+          devVar(
+            name,
+            typeof value === "string" ? value : JSON.stringify(value)
+          )
+        ),
+        devVar(
+          "FEATURES",
+          JSON.stringify({
+            apps: true,
+            screens: true,
+            screen_workflows: true,
+            members: true,
+            workflows: true,
+            decisions: true,
+            connections: true,
+            permissions: true,
+          })
+        ),
+      ].join(" "),
+      port,
+      reuseExistingServer: !ci,
+      timeout: 120_000,
+    },
+    // Stands in for the client's Entra tenant.
+    {
+      command: `node_modules/.bin/wrangler dev -c apps/core/test/idp.wrangler.jsonc --port ${localIdpPort}`,
+      port: localIdpPort,
+      reuseExistingServer: !ci,
+      timeout: 60_000,
+    },
+  ],
 });
