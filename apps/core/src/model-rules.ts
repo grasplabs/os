@@ -4,6 +4,7 @@ import {
   connectionIdSchema,
   workflowIdSchema,
 } from "@grasp-os/shared/ids";
+import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { and, eq, inArray, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -169,11 +170,15 @@ const namesSensitiveCollection = async (
   return found !== undefined;
 };
 
-/** Cheapest check first: the config, then Knowledge, then the context's object. */
+/**
+ * Cheapest check first: the config, then Knowledge; then the context's
+ * restricted mode, already read.
+ */
 const sensitiveBecause = async (
-  env: RestrictedEnv & Pick<Env, "KNOWLEDGE">,
+  env: Pick<Env, "KNOWLEDGE">,
   sensitive: NonNullable<ModelRules["sensitive"]>,
-  input: RulesInput
+  input: RulesInput,
+  restricted: boolean
 ): Promise<Sensitive | undefined> => {
   const fed = fedBy(input);
   if (sensitive.connections.some((connection) => fed.has(connection))) {
@@ -182,26 +187,46 @@ const sensitiveBecause = async (
   if (await namesSensitiveCollection(env, input.provenance)) {
     return "collection";
   }
-  const { work } = input;
-  if (
-    work !== undefined &&
-    (await isRestricted(env, work.authority, work.context))
-  ) {
-    return "restricted";
-  }
-  return undefined;
+  return restricted ? "restricted" : undefined;
 };
 
 /** Why the gateway refused a call: the code, and which rule said so. */
 export interface Refusal {
-  code: "model.not_allowed" | "model.eu_only" | "model.sensitive_data";
+  code:
+    | "model.not_allowed"
+    | "model.eu_only"
+    | "model.sensitive_data"
+    | "permission.context_invalid";
   because?: string;
 }
 
 /**
+ * Whether the call's `work` context is in restricted mode: `false`
+ * without one, `undefined` for one its authority can't work in (another
+ * App's, say), or one that doesn't exist.
+ */
+const restrictedWork = async (
+  env: RestrictedEnv,
+  { work }: RulesInput
+): Promise<boolean | undefined> => {
+  if (work === undefined) {
+    return false;
+  }
+  try {
+    return await isRestricted(env, work.authority, work.context);
+  } catch (error) {
+    if (permissionErrors.codeOf(error) === "permission.context_invalid") {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
+/**
  * Judges a call by the deployment's rules: what they made of it, or why
- * they refuse it. Throws `permission.context_invalid` for a `work` context
- * the call's authority can't work in.
+ * they refuse it. A `work` context the call's authority can't work in is
+ * refused first, whichever rules are set, so no call gets past a rule
+ * with a context that isn't its own.
  */
 export const judgeCall = async (
   env: RestrictedEnv & Pick<Env, "FEATURES" | "KNOWLEDGE">,
@@ -211,6 +236,10 @@ export const judgeCall = async (
   if (!featureEnabled(env, "model_rules")) {
     return { ok: true, judged: { euOnly: undefined, sensitive: undefined } };
   }
+  const restricted = await restrictedWork(env, input);
+  if (restricted === undefined) {
+    return { ok: false, code: "permission.context_invalid" };
+  }
   const { eu, sensitive: dataRule } = rules;
   const euOnly = eu === undefined ? undefined : euOnlyBecause(eu, input);
   if (euOnly !== undefined && eu?.models.includes(input.model) !== true) {
@@ -219,7 +248,7 @@ export const judgeCall = async (
   const sensitive =
     dataRule === undefined
       ? undefined
-      : await sensitiveBecause(env, dataRule, input);
+      : await sensitiveBecause(env, dataRule, input, restricted);
   if (
     sensitive !== undefined &&
     dataRule?.models.includes(input.model) !== true

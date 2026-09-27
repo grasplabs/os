@@ -351,29 +351,48 @@ describe("model rules", () => {
     ]);
   });
 
-  it("refuse a call that claims to work in another App's context", async () => {
-    const { fake, call } = withRules({ sensitive: { models: [euModel] } });
-    const app = appIdSchema.parse(`app-${crypto.randomUUID()}`);
-    const other = appIdSchema.parse(`app-${crypto.randomUUID()}`);
+  it.each([
+    ["no data rule", {}, []],
+    [
+      "a data rule its connection alone would refuse it by",
+      { sensitive: { models: [euModel], connections: ["connection-hr"] } },
+      ["connection-hr"],
+    ],
+    [
+      "a data rule its model is listed in",
+      { sensitive: { models: [anthropic] } },
+      [],
+    ],
+  ])(
+    "refuse and audit a call that claims to work in another App's context, with %s",
+    async (_, rules, connections) => {
+      const { fake, call } = withRules(rules);
+      const app = appIdSchema.parse(`app-${crypto.randomUUID()}`);
+      const other = appIdSchema.parse(`app-${crypto.randomUUID()}`);
+      const claimed = hello(anthropic, {
+        connections,
+        work: {
+          authority: {
+            subject: { type: "app", appId: app },
+            onBehalfOf: "person-1",
+            mode: "workflow",
+          },
+          context: { type: "app", appId: other },
+        },
+      });
 
-    await expect(
-      outcome(
-        call(
-          hello(anthropic, {
-            work: {
-              authority: {
-                subject: { type: "app", appId: app },
-                onBehalfOf: "person-1",
-                mode: "workflow",
-              },
-              context: { type: "app", appId: other },
-            },
-          })
-        )
-      )
-    ).resolves.toBe("permission.context_invalid");
-    expect(fake.requests).toStrictEqual([]);
-  });
+      await expect(outcome(call(claimed))).resolves.toBe(
+        "permission.context_invalid"
+      );
+      expect(fake.requests).toStrictEqual([]);
+      await expect(eventsOf(claimed.trigger)).resolves.toMatchObject([
+        {
+          action: "model.refused",
+          detail: { reason: "permission.context_invalid", because: null },
+        },
+      ]);
+    }
+  );
 
   it("fail a run's AI step with the reason when its App has an EU-only connection, once: it isn't retried", async () => {
     const builder = await signedInApi(idp, "builder");

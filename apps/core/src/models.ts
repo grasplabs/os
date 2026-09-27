@@ -34,6 +34,7 @@ import { log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
 import {
   authoritySchema,
+  permissionErrors,
   workContextSchema,
 } from "@grasp-os/shared/permissions";
 import { drizzle } from "drizzle-orm/d1";
@@ -696,6 +697,9 @@ const refuse = async (
   const { code, because } = refusal;
   log.warn("model.refused", { reason: code, because });
   await keepAuditEvent(env, drizzle(env.DB), refusedEntry(call, refusal));
+  if (code === "permission.context_invalid") {
+    throw permissionErrors.create(code);
+  }
   throw modelErrors.create(
     code,
     because === undefined
