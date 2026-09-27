@@ -33,7 +33,9 @@ export interface ConnectResult {
   /**
    * The IDs of the resources the action read (messages, files, events), as
    * its connector names them, so callers can label what they build from the
-   * output. Empty when the connector names none.
+   * output. Empty when a native connector names none; a Composio tool that
+   * names none is known by its toolkit and tool instead
+   * (`hubspot/HUBSPOT_LIST_CONTACTS`).
    */
   provenance: string[];
   /**
