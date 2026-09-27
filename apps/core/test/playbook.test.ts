@@ -35,9 +35,11 @@ import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 // fit its type is saved anyway, or its structure makes its text unreadable
 // or breaks out of its frontmatter; a record lands outside the Playbook,
 // where code from before record types would read it; a workflow loses its
-// history or its link on the way from drawn to designed to built; someone
-// links a workflow to an App they can't use, or to a workflow that isn't
-// there; a link or save runs while the feature is off; and a purge can't
+// history or its link on the way from drawn to designed to built, or a
+// save from an old version carries an old link; someone other than an
+// admin changes the Playbook; a link names a workflow that isn't there, or
+// a snapshot a version that isn't; a link or save runs while the feature
+// is off; and a purge can't
 // remove a person's name from their record.
 
 const idp = mockIdp();
@@ -332,6 +334,8 @@ describe("Playbook records", () => {
     async () => {
       const admin = await personOf("admin");
       const folder = unique();
+      // The workflow the snapshot freezes.
+      await save(admin, { path: "workflows/pay.md", ...records.workflow });
       const saved = [];
       for (const [type, sample] of Object.entries(records)) {
         // oxlint-disable-next-line no-await-in-loop -- one record at a time
@@ -644,6 +648,21 @@ describe("Playbook records", () => {
         },
       });
       await expect(at(2)).resolves.not.toHaveProperty("app");
+      // A save from an earlier version writes nothing, whatever it links to.
+      await expect(
+        refusal(
+          save(admin, {
+            path,
+            ifVersion: 3,
+            record: designedRecord,
+            body: "From version 3.",
+          })
+        )
+      ).resolves.toMatchObject({
+        code: "knowledge.conflict",
+        documentId: drawn.id,
+        latestVersion: 4,
+      });
       // Linked, it can't go back to drawn: the link is a designed one's.
       await expect(
         refusal(
@@ -664,7 +683,7 @@ describe("Playbook records", () => {
   );
 
   it(
-    "link only a designed workflow, from its current version, to a workflow of an App the person may use",
+    "link only a designed workflow, from its current version, by an admin, to a workflow the App runs",
     setUpTime,
     async () => {
       const admin = await personOf("admin");
@@ -707,14 +726,14 @@ describe("Playbook records", () => {
             ...changes,
           })
         );
-      // A builder who owns the Playbook may change it, but may not use
-      // an App nobody shared with them.
+      // An owner of the Playbook who is no longer an admin changes it no
+      // more.
       await env.KNOWLEDGE.prepare(
         "UPDATE collections SET owner = ? WHERE id = ?"
       )
         .bind(builder.userId, playbookCollectionId)
         .run();
-      const notTheirs = await linkAs(builder, {});
+      const demotedOwner = await linkAs(builder, {});
       await env.KNOWLEDGE.prepare(
         "UPDATE collections SET owner = ? WHERE id = ?"
       )
@@ -741,7 +760,7 @@ describe("Playbook records", () => {
           })
         ),
         notCurrent: await linkAs(admin, { ifVersion: 2 }),
-        notTheirs,
+        demotedOwner,
         user: await linkAs(await personOf("user"), {}),
         linked: await linkAs(admin, {}),
         stale: await linkAs(admin, {}),
@@ -762,11 +781,47 @@ describe("Playbook records", () => {
           ],
         },
         notCurrent: "knowledge.conflict",
-        notTheirs: "app.not_found",
+        demotedOwner: "knowledge.forbidden",
         user: "knowledge.forbidden",
         linked: "ok",
         // Linked from version 1 again, now that it is at 2.
         stale: "knowledge.conflict",
+      });
+    }
+  );
+
+  it(
+    "freeze in a snapshot only versions of records the Playbook has",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const folder = unique();
+      const workflow = `${folder}/pay.md`;
+      await save(admin, { path: workflow, ...records.workflow });
+      const snapshot = async (workflows: { path: string; version: number }[]) =>
+        await save(admin, {
+          path: `${folder}/snapshot-${unique()}.md`,
+          record: { ...records.snapshot.record, workflows },
+          body: "Snapshot.",
+        });
+      expect({
+        missing: await refusal(
+          snapshot([
+            { path: workflow, version: 1 },
+            { path: workflow, version: 2 },
+            { path: `${folder}/refund.md`, version: 1 },
+          ])
+        ),
+        frozen: await outcome(snapshot([{ path: workflow, version: 1 }])),
+      }).toStrictEqual({
+        missing: {
+          code: "knowledge.invalid",
+          issues: [
+            `record.workflows.1: the Playbook has no version 2 of ${workflow}`,
+            `record.workflows.2: the Playbook has no version 1 of ${folder}/refund.md`,
+          ],
+        },
+        frozen: "ok",
       });
     }
   );

@@ -2,7 +2,7 @@ import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
-  documentTypeSchema,
+  documentTypeOf,
   historyOptionsSchema,
   knowledgeErrors,
   listDocumentsOptionsSchema,
@@ -172,7 +172,7 @@ export const toSummary = (row: DocumentRow): DocumentSummary => ({
   collectionId: collectionIdSchema.parse(row.collectionId),
   path: row.path,
   title: row.title,
-  type: documentTypeSchema.parse(row.type),
+  type: documentTypeOf(row.type),
   description: row.description,
   owner: row.owner,
   tags: tagsSchema.parse(JSON.parse(row.tags)),

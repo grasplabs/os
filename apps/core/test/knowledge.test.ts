@@ -381,6 +381,46 @@ describe("saving a document", () => {
     });
   });
 
+  it("reads a type it doesn't know, as a later release saved it, as a plain doc", async () => {
+    const { api } = await knowledgeOf("user");
+    const { id: collectionId } = await api.createCollection(personal());
+    await api.saveDocument({
+      collectionId,
+      path: "pdf/SKILL.md",
+      text: "---\nname: pdf\ndescription: Read PDFs.\n---\n# PDF",
+      ifVersion: 0,
+    });
+    const skill = await api.listDocuments(collectionId);
+    const later = await api.saveDocument({
+      collectionId,
+      path: "pdf/forms.md",
+      text: "# Forms\n\nFill in quarantined forms.",
+      ifVersion: 0,
+    });
+    // As a rollback leaves it: a type this release has no schema for.
+    await env.KNOWLEDGE.prepare("UPDATE documents SET type = ? WHERE id = ?")
+      .bind("later-kind", later.id)
+      .run();
+    const { documents } = await api.listDocuments(collectionId);
+    const read = await api.getDocument(later.id);
+    const { hits } = await api.search("quarantined", { collectionId });
+    const followed = await api.follow(skill.documents[0]?.id ?? "");
+    expect({
+      listed: documents.map(({ path, type }) => ({ path, type })),
+      read: read.type,
+      searched: hits.map(({ type }) => type),
+      followed: followed.files.map(({ type }) => type),
+    }).toStrictEqual({
+      listed: [
+        { path: "pdf/SKILL.md", type: "skill" },
+        { path: "pdf/forms.md", type: "doc" },
+      ],
+      read: "doc",
+      searched: ["doc"],
+      followed: ["doc"],
+    });
+  });
+
   it("stays within D1's limits: bounded size, sections and links", async () => {
     const { api } = await knowledgeOf("user");
     const { id: collectionId } = await api.createCollection(personal());

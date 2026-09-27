@@ -225,6 +225,14 @@ export const documentTypeSchema = z.enum([
 ]);
 export type DocumentType = z.infer<typeof documentTypeSchema>;
 
+/**
+ * A stored document's type, as this release reads it: a type it doesn't
+ * know (one a later release added, still stored after a rollback) reads
+ * as a plain `doc`, so adding a type never breaks reading on rollback.
+ */
+export const documentTypeOf = (stored: string): DocumentType =>
+  documentTypeSchema.safeParse(stored).data ?? "doc";
+
 /** A document's current state, without its text. */
 export interface DocumentSummary {
   id: DocumentId;

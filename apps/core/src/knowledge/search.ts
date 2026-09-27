@@ -2,7 +2,7 @@ import { toHex } from "@grasp-os/shared/encoding";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
   collectionSearchOptionsSchema,
-  documentTypeSchema,
+  documentTypeOf,
   knowledgeErrors,
   searchOptionsSchema,
   searchQuerySchema,
@@ -216,7 +216,7 @@ const toHit = (row: z.infer<typeof hitRowSchema>): SearchHit => ({
   collectionId: collectionIdSchema.parse(row.collectionId),
   path: row.path,
   title: row.title,
-  type: documentTypeSchema.parse(row.type),
+  type: documentTypeOf(row.type),
   description: row.description,
   section: row.section,
   headings: headingsSchema.parse(JSON.parse(row.headings)),
