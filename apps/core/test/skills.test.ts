@@ -1,4 +1,3 @@
-/// <reference types="vite-plus/client" />
 import type { PurgeInput } from "@grasp-os/shared/knowledge";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
