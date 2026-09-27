@@ -114,10 +114,17 @@ describe("EU resources", () => {
       rate_limiting_interval: 60,
       rate_limiting_limit: 100,
       rate_limiting_technique: "sliding",
+      // BYOK's key store and a log export: an update that dropped them would
+      // cut the client off its own provider keys.
+      store_id: "byok-store-1",
+      logpush: true,
+      logpush_public_key: "public-key",
     };
     account.gateways.push({
       id: "grasp-os",
       authentication: false,
+      created_at: "2026-09-01T00:00:00Z",
+      modified_at: "2026-09-01T00:00:00Z",
       ...settings,
     });
 
@@ -128,6 +135,9 @@ describe("EU resources", () => {
       authentication: true,
       ...settings,
     });
+    // The update sent every setting back, and no read-only field.
+    const update = cloudflare.calls.find(({ method }) => method === "PUT");
+    expect(update?.body).toStrictEqual({ ...settings, authentication: true });
     expect(account.gateways).toStrictEqual([
       { id: "grasp-os", authentication: true, ...settings },
     ]);

@@ -140,20 +140,26 @@ export const ensureR2Bucket = async (
 };
 
 /**
- * An AI Gateway's settings: the ones its update replaces, which a PUT must
- * send whole. Anything else it reports is left alone.
+ * An AI Gateway, with every setting it reports kept: an update (PUT)
+ * replaces them all, so turning authentication on must send the rest back
+ * whole, BYOK's `store_id` and log settings included.
  */
-const gatewaySchema = z.object({
+const gatewaySchema = z.looseObject({
   id: z.string(),
   authentication: z.boolean().nullish(),
-  cache_invalidate_on_update: z.boolean(),
-  cache_ttl: z.number().nullable(),
-  collect_logs: z.boolean(),
-  rate_limiting_interval: z.number().nullable(),
-  rate_limiting_limit: z.number().nullable(),
-  rate_limiting_technique: z.string(),
 });
 export type AiGatewayInfo = z.infer<typeof gatewaySchema>;
+
+/** What a gateway reports but an update doesn't take: ids and timestamps. */
+const readOnlyGatewayFields: ReadonlySet<string> = new Set([
+  "id",
+  "created_at",
+  "modified_at",
+  "is_default",
+  "account_id",
+  "account_tag",
+  "internal_id",
+]);
 
 /**
  * The AI Gateway `id`, created if it's missing, and always authenticated:
@@ -207,11 +213,15 @@ export const ensureAiGateway = async (
   if (existing.authentication === true) {
     return existing;
   }
-  const { id: gatewayId, ...settings } = existing;
+  const settings = Object.fromEntries(
+    Object.entries(existing).filter(
+      ([field]) => !readOnlyGatewayFields.has(field)
+    )
+  );
   return await api.call(
     {
       method: "PUT",
-      path: `${path}/${gatewayId}`,
+      path: `${path}/${existing.id}`,
       json: { ...settings, authentication: true },
     },
     gatewaySchema
