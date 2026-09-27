@@ -264,7 +264,8 @@ describe("memory for a context", setUpTime, () => {
         outcome(forContext(env, asApp, work, { type: "direct" })),
         outcome(forContext(env, asApp, work, { type: "channel" })),
         outcome(forContext(env, asApp, work, { type: "workflow" })),
-        // Only people who can read an App's code work on it.
+        // Only people who can read an App's code work on it: for anyone
+        // else, as an App that isn't there.
         outcome(
           forContext(env, asAgent, work, { type: "own", appId: "some-app" })
         ),
@@ -281,9 +282,50 @@ describe("memory for a context", setUpTime, () => {
       "permission.context_invalid",
       "permission.context_invalid",
       "ok",
-      "role.forbidden",
+      "app.not_found",
       "permission.person_inactive",
     ]);
+  });
+
+  it("gives an App's AGENTS.md only to agents of people who build that App", async () => {
+    const [owner, member, builder, outsider] = await Promise.all([
+      personOf("builder"),
+      personOf("builder"),
+      personOf("builder"),
+      personOf("builder"),
+    ]);
+    const { id: appId } = await owner.api.apps.create({ name: "Desk" });
+    await release(owner, appId, { "AGENTS.md": `App ${unique()}` });
+    await owner.api.apps.members.add(appId, {
+      type: "person",
+      id: member.userId,
+      role: "user",
+    });
+    await owner.api.apps.members.add(appId, {
+      type: "person",
+      id: builder.userId,
+      role: "builder",
+    });
+    const work = await newChat();
+    const agent = newAgent();
+    /** "ok" when the agent gets the App's AGENTS.md, or why it doesn't. */
+    const onApp = async (person: Person) => {
+      const read = async () => {
+        const found = await forContext(
+          env,
+          actingFor(agent, person.userId),
+          work,
+          { type: "own", appId }
+        );
+        if (!found.files.some(({ source }) => source === "app")) {
+          throw new Error("No App memory");
+        }
+      };
+      return await outcome(read());
+    };
+    await expect(
+      Promise.all([owner, builder, member, outsider].map(onApp))
+    ).resolves.toStrictEqual(["ok", "ok", "role.forbidden", "app.not_found"]);
   });
 
   it("is the same, under the same key, until one of its files has a new version", async () => {

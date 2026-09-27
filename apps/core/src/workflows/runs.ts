@@ -9,7 +9,6 @@ import {
 import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { requireBuilder } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import type {
@@ -21,7 +20,7 @@ import { and, desc, eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { versionFiles } from "../apps.ts";
+import { appFor, versionFiles } from "../apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
 import { apps, workflowRuns } from "../db/core/schema.ts";
 import { appHost } from "../durable-objects.ts";
@@ -269,7 +268,7 @@ export const startWorkflow = async (
   workflow: unknown,
   input?: unknown
 ): Promise<WorkflowRun> => {
-  requireBuilder(by);
+  await appFor(env, by, app, "user");
   const json = parse(z.json().optional(), input);
   if (json !== undefined && JSON.stringify(json).length > maxInputLength) {
     throw invalid();
@@ -336,9 +335,8 @@ export const runStatus = async (
   by: Identity,
   run: unknown
 ): Promise<WorkflowRun> => {
-  requireBuilder(by);
   const row = await foundRun(env, run);
-  const { ownerId } = await appRecord(env, appIdSchema.parse(row.appId));
+  const { owner: ownerId } = await appFor(env, by, row.appId, "user");
   const live = await liveOf(env, row);
   const status =
     row.status === "running" && live ? liveStatuses[live.status] : row.status;
@@ -364,9 +362,8 @@ export const listRuns = async (
   by: Identity,
   app: unknown
 ): Promise<WorkflowRun[]> => {
-  requireBuilder(by);
   const appId = parse(appIdSchema, app);
-  const { ownerId } = await appRecord(env, appId);
+  const { owner: ownerId } = await appFor(env, by, appId, "user");
   const rows = await drizzle(env.DB)
     .select()
     .from(workflowRuns)
@@ -395,8 +392,8 @@ export const cancelRun = async (
   by: Identity,
   run: unknown
 ): Promise<WorkflowRun> => {
-  requireBuilder(by);
   const row = await foundRun(env, run);
+  await appFor(env, by, row.appId, "builder");
   if (row.status === "cancelled") {
     await runEngine(env).terminate(row.id);
     await forgetWrites(env, row);

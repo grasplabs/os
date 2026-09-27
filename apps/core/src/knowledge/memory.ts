@@ -23,13 +23,13 @@ import type {
 } from "@grasp-os/shared/memory";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
-import { canBuild, isAdmin, roleErrors } from "@grasp-os/shared/roles";
+import { isAdmin } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, eq, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import { findApp, versionFiles } from "../apps.ts";
-import { memberRole } from "../auth/identity.ts";
+import { appFor, versionFiles } from "../apps.ts";
+import { memberRole, teamsOf } from "../auth/identity.ts";
 import { collections, documents, versions } from "../db/knowledge/schema.ts";
 import { featureEnabled, requireFeature } from "../features.ts";
 import { isRestricted } from "../restricted.ts";
@@ -159,7 +159,7 @@ interface Found {
 /**
  * The files of `wanted` that exist and that the person `userId` may read,
  * with their versions now, in `wanted`'s order. An App's AGENTS.md needs
- * the person to be able to read the App's code: an admin or a builder.
+ * the person to be able to read the App's code: one of its builders.
  */
 const findFiles = async (
   env: Env,
@@ -216,11 +216,15 @@ const findFiles = async (
       }
       continue;
     }
-    if (!canBuild(role)) {
-      throw roleErrors.create("role.forbidden");
-    }
+    // Whoever reads the App's code: one of its builders (app-access.ts).
+    const person = {
+      userId,
+      role,
+      // oxlint-disable-next-line no-await-in-loop -- at most one App per context
+      teams: await teamsOf(env.DB, userId),
+    };
     // oxlint-disable-next-line no-await-in-loop -- at most one App per context
-    const app = await findApp(env, at.appId);
+    const app = await appFor(env, person, at.appId, "builder");
     if (app.currentVersion !== null) {
       found.push({
         wanted: file,
@@ -368,7 +372,8 @@ const assemble = async (
  * `permission.context_invalid` for anyone but an agent (outside a
  * workflow step, which gets nothing), `permission.person_inactive` when the
  * person has left, and, for an App's AGENTS.md, `role.forbidden` when they
- * can't build Apps and `app.not_found` for one that doesn't exist. No
+ * don't build that App and `app.not_found` for one that doesn't exist or
+ * that they have no role in. No
  * memory while `memory` (or `knowledge`) is switched off.
  */
 export const forContext = async (

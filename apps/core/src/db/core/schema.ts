@@ -344,6 +344,32 @@ export const apps = sqliteTable("apps", {
 });
 
 /**
+ * Whom each App is shared with (src/app-access.ts): a person
+ * (`member_type` `person`, `member_id` their user ID) or a team, with their
+ * role in it. Sharing again changes the role; unsharing deletes the row.
+ * Who did which is in the audit log. The App's owner has no row: they are
+ * always one of its builders.
+ */
+export const appMembers = sqliteTable(
+  "app_members",
+  {
+    appId: text("app_id")
+      .notNull()
+      .references(() => apps.id),
+    memberType: text("member_type", { enum: ["person", "team"] }).notNull(),
+    memberId: text("member_id").notNull(),
+    role: text({ enum: ["user", "builder"] }).notNull(),
+    addedBy: text("added_by").notNull(),
+    addedAt: timestamp("added_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.appId, table.memberType, table.memberId] }),
+    // Which Apps are shared with someone, for listing theirs.
+    index("app_members_member_idx").on(table.memberType, table.memberId),
+  ]
+);
+
+/**
  * Every committed version of an App, never changed or deleted. `tree` is
  * the SHA-256 of the version's files, which are stored under it in R2
  * (`src/apps.ts`). Versions count up from 1 per App, and the primary key

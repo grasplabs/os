@@ -57,7 +57,12 @@ export class SessionRpc extends RpcTarget implements SessionApi {
         }
         return await check();
       };
-    this.#apps = new AppsRpc(env, checkWith("apps"));
+    // Sharing Apps: the Apps kill switch stops it too.
+    this.#apps = new AppsRpc(
+      env,
+      checkWith("apps"),
+      checkWith("apps", "app_sharing")
+    );
     this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
     // Memory files are Knowledge documents: that kill switch stops them too.
     this.#memory = new MemoryRpc(env, checkWith("knowledge", "memory"));

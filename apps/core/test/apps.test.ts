@@ -430,15 +430,17 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
     expect(JSON.stringify(events)).not.toContain("Secret");
   });
 
-  it("are for builders and admins only", async () => {
+  it("are made by builders and admins, and private to them", async () => {
     const { apps: builder } = await appsApi("builder");
     const { apps: user } = await appsApi("user");
     const app = await newApp(builder);
     await commit(builder, app.id, first);
 
+    await expect(
+      Promise.all([outcome(user.create({ name: "Mine" })), user.list()])
+    ).resolves.toStrictEqual(["role.forbidden", []]);
+    // The rest as for an App that isn't there (app-roles.test.ts).
     const refused = await Promise.all([
-      outcome(user.create({ name: "Mine" })),
-      outcome(user.list()),
       outcome(user.get(app.id)),
       outcome(user.contents(app.id)),
       outcome(user.files.read(app.id, 1)),
@@ -449,7 +451,7 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
       outcome(user.versions.propose(app.id, 1)),
       outcome(user.versions.setCurrent(app.id, 1)),
     ]);
-    expect(new Set(refused)).toStrictEqual(new Set(["role.forbidden"]));
+    expect(new Set(refused)).toStrictEqual(new Set(["app.not_found"]));
     await expect(builder.get(app.id)).resolves.toMatchObject({
       currentVersion: null,
     });

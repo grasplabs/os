@@ -24,9 +24,9 @@ interface ListedApp {
 }
 
 /**
- * The Apps core lets the person open. Apps have no members of their own
- * yet, so core opens them to the roles that build them and refuses anyone
- * else: someone core refuses for their role has no App to list.
+ * The Apps core lets the person open: their own, those shared with them,
+ * and every App for admins. While sharing Apps is switched off, core
+ * refuses the list to the user role: they have no App to list.
  */
 const openableApps = async (session: Session): Promise<App[]> => {
   try {

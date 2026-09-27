@@ -2,14 +2,14 @@ import { paramValueSchemas } from "@grasp-os/sdk/params";
 import { actorOf } from "@grasp-os/shared/audit";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
-import { requireBuilder, roleErrors } from "@grasp-os/shared/roles";
+import { roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import type { ParamValue, WorkflowParam } from "@grasp-os/shared/workflows";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import { findApp, versionFiles } from "../apps.ts";
+import { appFor, versionFiles } from "../apps.ts";
 import { auditedBatch, outboxedIfChanged } from "../audit-outbox.ts";
 import { apps, workflowParamValues } from "../db/core/schema.ts";
 import { declaredParams, hasWorkflow } from "./code.ts";
@@ -50,8 +50,7 @@ const currentWorkflow = async (
   app: unknown,
   workflow: unknown
 ): Promise<CurrentWorkflow> => {
-  requireBuilder(by);
-  const found = await findApp(env, app);
+  const found = await appFor(env, by, app, "builder");
   const workflowId = workflowErrors.parse(
     "workflow.invalid",
     workflowIdSchema,

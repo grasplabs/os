@@ -154,21 +154,80 @@ export interface AppVersionsApi {
   setCurrent: (app: string, version: number) => Promise<App>;
 }
 
-/** The App registry and each App's code. Admins and builders. */
+/**
+ * A role in one App: a `user` works in its screens; a `builder` also
+ * changes its code, its settings and whom it is shared with. The person's
+ * role in the organization is a ceiling: someone whose role there is
+ * `user` never builds, whatever an App's members say.
+ */
+export const appRoleSchema = z.enum(["user", "builder"]);
+export type AppRole = z.infer<typeof appRoleSchema>;
+
+/** Whom an App is shared with: a person or a team of the organization. */
+export const appMemberRefSchema = z.strictObject({
+  type: z.enum(["person", "team"]),
+  id: identifierSchema,
+});
+export type AppMemberRef = z.infer<typeof appMemberRefSchema>;
+
+/** Sharing an App with someone, or changing their role in it. */
+export const newAppMemberSchema = z.strictObject({
+  ...appMemberRefSchema.shape,
+  role: appRoleSchema,
+});
+export type NewAppMember = z.input<typeof newAppMemberSchema>;
+
+/** Someone an App is shared with. Times are ISO 8601. */
+export interface AppMember extends AppMemberRef {
+  /** The person's or team's name; null once they are gone. */
+  name: string | null;
+  role: AppRole;
+  /** Who shared it with them, or last changed their role. */
+  addedBy: string;
+  addedAt: string;
+}
+
+/**
+ * Whom an App is shared with. Apps are private: open to their owner
+ * (always a builder, and not listed here), to the organization's admins,
+ * who manage every App, and to the people and teams they are shared
+ * with. Anyone with a role in the App lists them; its builders change
+ * them.
+ */
+export interface AppMembersApi {
+  list: (app: string) => Promise<AppMember[]>;
+  /** Shares the App, or changes the role of someone it is shared with. */
+  add: (app: string, member: NewAppMember) => Promise<AppMember>;
+  /**
+   * Stops sharing the App with them. Their open screens of it stop at
+   * once, or within a few seconds, as every push checks their role again.
+   */
+  remove: (app: string, member: AppMemberRef) => Promise<void>;
+}
+
+/**
+ * The App registry and each App's code. An App is open to its owner, the
+ * organization's admins and the people and teams it is shared with
+ * (`members`): its users call what its screens use, its builders the
+ * rest.
+ */
 export interface AppsApi {
   create: (app: NewApp) => Promise<App>;
+  /** The Apps the person has a role in, oldest first. */
   list: () => Promise<App[]>;
   get: (app: string) => Promise<App>;
   /** The screens and workflows of the App's current version. */
   contents: (app: string) => Promise<AppContents>;
   readonly files: AppFilesApi;
   readonly versions: AppVersionsApi;
+  readonly members: AppMembersApi;
 }
 
 /** Why a call to the App registry was refused. */
 export const appErrors = defineErrorFamily({
   "app.invalid": "That isn't a valid request for an App.",
   "app.not_found": "There's no such App.",
+  "app.member_invalid": "The App can't be shared with them like that.",
   "app.version_not_found": "The App has no such version.",
   "app.too_large": "The App's files would be over its limits.",
   "app.nothing_to_commit": "Nothing was written since the latest version.",

@@ -1,10 +1,18 @@
 import { kitModuleName, screenRuntime } from "@grasp-os/compiler";
 import type { Role } from "@grasp-os/shared/roles";
+import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { removeMember } from "../src/app-members.ts";
 import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import { openRpc, outcome, signedInApi } from "./sign-in.ts";
+import {
+  openRpc,
+  outcome,
+  signedIn,
+  signedInApi,
+  staffPerson,
+} from "./sign-in.ts";
 
 // What the frontend's screen host reaches for an App's screens, taken from
 // the side of the screen: App code nobody reviewed line by line, which the
@@ -252,7 +260,7 @@ describe("screens", { timeout: 60_000 }, () => {
     ]);
   });
 
-  it("is refused to people whose role doesn't use Apps, and to nobody signed in", async () => {
+  it("is refused to people without a role in the App, and to nobody signed in", async () => {
     const builder = await personApi("builder");
     const app = await sampleApp(builder);
     const user = await personApi("user");
@@ -275,12 +283,13 @@ describe("screens", { timeout: 60_000 }, () => {
       core.authenticate().screens.call(app, "whoami", [])
     );
     expect({ asUser, signedOut }).toStrictEqual({
+      // As for an App that isn't there (app-roles.test.ts).
       asUser: [
-        "role.forbidden",
-        "role.forbidden",
-        "role.forbidden",
-        "role.forbidden",
-        "role.forbidden",
+        "app.not_found",
+        "app.not_found",
+        "app.not_found",
+        "app.not_found",
+        "app.not_found",
       ],
       signedOut: "auth.unauthenticated",
     });
@@ -338,6 +347,11 @@ describe("screens", { timeout: 60_000 }, () => {
     const one = await personApi("builder");
     const two = await personApi("builder");
     const app = await sampleApp(one);
+    await one.api.apps.members.add(app, {
+      type: "person",
+      id: two.userId,
+      role: "user",
+    });
     const watching = collector();
 
     await one.api.screens.call(app, "watchNotes", [watching.callback]);
@@ -350,10 +364,172 @@ describe("screens", { timeout: 60_000 }, () => {
     expect(watching.received[0]).toStrictEqual([]);
   });
 
+  it("stops pushing to someone unshared within seconds, even when the App's host can't be reached", async () => {
+    const owner = await personApi("builder");
+    const member = await personApi("builder");
+    const app = await sampleApp(owner);
+    const them = { type: "person", id: member.userId } as const;
+    await owner.api.apps.members.add(app, { ...them, role: "user" });
+    const watching = collector();
+    await member.api.screens.call(app, "watchNotes", [watching.callback]);
+    await waitFor(() => watching.received[0]);
+    // Core, with the App's host out of reach for the restart.
+    const unreachable = new Proxy(env.APPS, {
+      get: (target, property) => {
+        if (property === "getByName") {
+          return () => ({
+            restart: async () => {
+              await Promise.reject(new Error("The App's host is unreachable"));
+            },
+          });
+        }
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === "function"
+          ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
+          : value;
+      },
+    });
+
+    const removed = await outcome(
+      removeMember(
+        { ...env, APPS: unreachable },
+        await owner.api.whoami(),
+        app,
+        them
+      )
+    );
+    // The App wasn't restarted, so it still holds their subscription: the
+    // next push after their access was checked again releases it, and the
+    // App lets it go.
+    const left = await vi.waitFor(
+      async () => {
+        await owner.api.screens.call(app, "addNote", ["Meanwhile"]);
+        const count = await owner.api.screens.call(app, "watching", []);
+        if (count !== 0) {
+          throw new Error("Still watching");
+        }
+        return count;
+      },
+      { timeout: 15_000, interval: 1000 }
+    );
+    const received = watching.received.length;
+    await owner.api.screens.call(app, "addNote", ["After it was released"]);
+    expect({
+      removed,
+      left,
+      // Nothing more reaches them.
+      after: await owner.api.screens.call(app, "watching", []),
+      more: watching.received.length - received,
+      opens: await outcome(member.api.apps.get(app)),
+    }).toStrictEqual({
+      removed: "ok",
+      left: 0,
+      after: 0,
+      more: 0,
+      opens: "app.not_found",
+    });
+  });
+
+  it("keeps pushing to Grasp staff while their session holds, and stops once it ends", async () => {
+    const owner = await personApi("builder");
+    const app = await sampleApp(owner);
+    const { core } = await openRpc(
+      await signedIn(idp, "grasp-staff", staffPerson())
+    );
+    const staff = core.authenticate();
+    const { userId, staff: isStaff } = await staff.whoami();
+    const watching = collector();
+
+    // Every push checks their access as the session does, staff window
+    // and all: the first, right away, and the next.
+    await staff.screens.call(app, "watchNotes", [watching.callback]);
+    await waitFor(() => watching.received[0]);
+    await owner.api.screens.call(app, "addNote", ["For staff"]);
+    const pushed = await waitFor(() => watching.received[1]);
+
+    await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?")
+      .bind(userId)
+      .run();
+    const left = await vi.waitFor(
+      async () => {
+        await owner.api.screens.call(app, "addNote", ["After it ended"]);
+        const count = await owner.api.screens.call(app, "watching", []);
+        if (count !== 0) {
+          throw new Error("Still watching");
+        }
+        return count;
+      },
+      { timeout: 15_000, interval: 1000 }
+    );
+    expect({ isStaff, pushed, left }).toStrictEqual({
+      isStaff: true,
+      pushed: ["For staff"],
+      left: 0,
+    });
+  });
+
+  it("closes nobody's screens when unsharing someone it isn't shared with", async () => {
+    const owner = await personApi("builder");
+    const member = await personApi("builder");
+    const app = await sampleApp(owner);
+    await owner.api.apps.members.add(app, {
+      type: "person",
+      id: member.userId,
+      role: "user",
+    });
+    const watching = collector();
+    await member.api.screens.call(app, "watchNotes", [watching.callback]);
+    await waitFor(() => watching.received[0]);
+
+    // Someone it was never shared with, as a mistaken or repeated removal.
+    await owner.api.apps.members.remove(app, {
+      type: "person",
+      id: `user-${crypto.randomUUID()}`,
+    });
+    await owner.api.screens.call(app, "addNote", ["Still here"]);
+    await expect(waitFor(() => watching.received[1])).resolves.toStrictEqual([
+      "Still here",
+    ]);
+  });
+
+  it("stops sending to someone the App is no longer shared with", async () => {
+    const owner = await personApi("builder");
+    const member = await personApi("builder");
+    const app = await sampleApp(owner);
+    const them = { type: "person", id: member.userId } as const;
+    await owner.api.apps.members.add(app, { ...them, role: "user" });
+    const watching = collector();
+    await member.api.screens.call(app, "watchNotes", [watching.callback]);
+    await waitFor(() => watching.received[0]);
+
+    await owner.api.apps.members.remove(app, them);
+    // Unsharing restarted the App, which let go of their subscription.
+    const left = await vi.waitFor(async () => {
+      const count = await owner.api.screens.call(app, "watching", []);
+      if (count !== 0) {
+        throw new Error("Still watching");
+      }
+      return count;
+    }, 10_000);
+    await owner.api.screens.call(app, "addNote", ["After unsharing"]);
+    expect({
+      left,
+      received: watching.received,
+      again: await outcome(
+        member.api.screens.call(app, "watchNotes", [watching.callback])
+      ),
+    }).toStrictEqual({ left: 0, received: [[]], again: "app.not_found" });
+  });
+
   it("stops sending to a screen whose connection ended", async () => {
     const one = await personApi("builder");
     const two = await personApi("builder");
     const app = await sampleApp(one);
+    await one.api.apps.members.add(app, {
+      type: "person",
+      id: two.userId,
+      role: "user",
+    });
     const watching = collector();
     await one.api.screens.call(app, "watchNotes", [watching.callback]);
     await waitFor(() => watching.received[0]);

@@ -144,7 +144,7 @@ describe("removing a member", () => {
   it("stops every stub an App or agent holds for them", async () => {
     const admin = await signedInApi(idp, "admin");
     const person = await signedInApi(idp, "builder");
-    const { id: appId } = await admin.api.apps.create({
+    const { id: appId } = await person.api.apps.create({
       name: `App ${unique()}`,
     });
     const app = { type: "app" as const, appId };

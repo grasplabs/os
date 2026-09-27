@@ -11,6 +11,7 @@ import type {
   App,
   AppContents,
   AppFiles,
+  AppRole,
   AppVersion,
   FileDiff,
 } from "@grasp-os/shared/apps";
@@ -23,9 +24,12 @@ import { canonicalJson } from "@grasp-os/shared/json";
 import { requireBuilder } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import { appsOpenTo, requireAppRole } from "./app-access.ts";
+import type { Person } from "./app-access.ts";
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
@@ -132,7 +136,28 @@ export const findApp = async (env: Env, input: unknown): Promise<App> => {
   return toApp(row);
 };
 
-const findVersion = async (
+/**
+ * The App `input` names, for `by` with at least `needed` in it
+ * (app-access.ts). While `app_sharing` is off, the rule from before Apps
+ * had roles: admins and builders build every App, and users none.
+ */
+export const appFor = async (
+  env: Env,
+  by: Person,
+  input: unknown,
+  needed: AppRole
+): Promise<App> => {
+  if (!featureEnabled(env, "app_sharing")) {
+    requireBuilder(by);
+    return await findApp(env, input);
+  }
+  const app = await findApp(env, input);
+  await requireAppRole(env, by, app, needed);
+  return app;
+};
+
+/** One of an App's versions, which must exist. */
+export const findVersion = async (
   env: Env,
   app: AppId,
   input: unknown
@@ -345,12 +370,25 @@ export const createApp = async (
   return app;
 };
 
-/** Every App, oldest first. */
+/**
+ * The Apps `by` has a role in (app-access.ts), as a condition on `apps`.
+ * As with `appFor`, while `app_sharing` is off: every App for admins and
+ * builders, and none for users.
+ */
+export const appsListedFor = (env: Env, by: Identity): SQL | undefined => {
+  if (!featureEnabled(env, "app_sharing")) {
+    requireBuilder(by);
+    return undefined;
+  }
+  return appsOpenTo(env, by);
+};
+
+/** The Apps `by` has a role in (app-access.ts), oldest first. */
 export const listApps = async (env: Env, by: Identity): Promise<App[]> => {
-  requireBuilder(by);
   const rows = await drizzle(env.DB)
     .select()
     .from(apps)
+    .where(appsListedFor(env, by))
     .orderBy(asc(apps.createdAt), asc(apps.id));
   return rows.map(toApp);
 };
@@ -359,10 +397,7 @@ export const getApp = async (
   env: Env,
   by: Identity,
   app: unknown
-): Promise<App> => {
-  requireBuilder(by);
-  return await findApp(env, app);
-};
+): Promise<App> => await appFor(env, by, app, "user");
 
 /**
  * A screen's name, from its file's path (as `openScreen` finds it, in
@@ -386,8 +421,7 @@ export const appContents = async (
   by: Identity,
   app: unknown
 ): Promise<AppContents> => {
-  requireBuilder(by);
-  const { id, currentVersion } = await findApp(env, app);
+  const { id, currentVersion } = await appFor(env, by, app, "user");
   if (currentVersion === null) {
     return { version: null, screens: [], workflows: [] };
   }
@@ -408,8 +442,7 @@ export const readFiles = async (
   app: unknown,
   version?: unknown
 ): Promise<AppFiles> => {
-  requireBuilder(by);
-  const { id: appId } = await findApp(env, app);
+  const { id: appId } = await appFor(env, by, app, "builder");
   if (version !== undefined) {
     return await versionFiles(env, appId, version);
   }
@@ -433,8 +466,7 @@ export const writeFiles = async (
   app: unknown,
   input: unknown
 ): Promise<void> => {
-  requireBuilder(by);
-  const { id: appId } = await findApp(env, app);
+  const { id: appId } = await appFor(env, by, app, "builder");
   const changes = Object.entries(
     appErrors.parse("app.invalid", fileChangesSchema, input)
   );
@@ -501,8 +533,7 @@ export const commitFiles = async (
   app: unknown,
   message: unknown
 ): Promise<AppVersion> => {
-  requireBuilder(by);
-  const { id: appId } = await findApp(env, app);
+  const { id: appId } = await appFor(env, by, app, "builder");
   const text = appErrors.parse("app.invalid", commitMessageSchema, message);
   const { latest, rows, files } = await workingCopy(env, appId);
   if (rows.length === 0) {
@@ -568,8 +599,7 @@ export const listVersions = async (
   app: unknown,
   before?: unknown
 ): Promise<AppVersion[]> => {
-  requireBuilder(by);
-  const { id } = await findApp(env, app);
+  const { id } = await appFor(env, by, app, "builder");
   const until =
     before === undefined
       ? undefined
@@ -594,8 +624,7 @@ export const getVersion = async (
   app: unknown,
   version: unknown
 ): Promise<AppVersion> => {
-  requireBuilder(by);
-  const { id: appId } = await findApp(env, app);
+  const { id: appId } = await appFor(env, by, app, "builder");
   return toVersion(await findVersion(env, appId, version));
 };
 
@@ -607,8 +636,7 @@ export const diffVersions = async (
   from: unknown,
   to: unknown
 ): Promise<FileDiff[]> => {
-  requireBuilder(by);
-  const { id: appId } = await findApp(env, app);
+  const { id: appId } = await appFor(env, by, app, "builder");
   const treeOf = async (version: unknown) => {
     const { tree } = await findVersion(env, appId, version);
     return await readTree(env, appId, tree);
@@ -637,8 +665,7 @@ export const proposeVersion = async (
   app: unknown,
   version: unknown
 ): Promise<App> => {
-  requireBuilder(by);
-  const found = await findApp(env, app);
+  const found = await appFor(env, by, app, "builder");
   const appId = found.id;
   const { version: number } = await findVersion(env, appId, version);
   const db = drizzle(env.DB);
@@ -677,8 +704,7 @@ export const setCurrentVersion = async (
   app: unknown,
   version: unknown
 ): Promise<App> => {
-  requireBuilder(by);
-  const found = await findApp(env, app);
+  const found = await appFor(env, by, app, "builder");
   const appId = found.id;
   const { version: number } = await findVersion(env, appId, version);
   if (found.currentVersion === number) {
