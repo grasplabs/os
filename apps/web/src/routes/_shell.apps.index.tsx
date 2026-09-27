@@ -10,6 +10,7 @@ import {
 } from "@grasp-os/ui/components/table";
 import { createFileRoute, Link } from "@tanstack/react-router";
 
+import { timeoutMs, withTimeout } from "../core.ts";
 import type { Session } from "../core.ts";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
@@ -38,12 +39,21 @@ const openableApps = async (session: Session): Promise<App[]> => {
   }
 };
 
+/**
+ * How long one App's contents may take: half the page's own limit, so an
+ * App whose read hangs costs only its row, never the whole list.
+ */
+const contentsTimeoutMs = timeoutMs / 2;
+
 const listApps = async (session: Session): Promise<ListedApp[]> => {
   const apps = await openableApps(session);
-  // One App whose contents can't be read (a damaged version) still
-  // leaves the others, and its own row.
+  // One App whose contents can't be read (a damaged version, a read that
+  // hangs) still leaves the others, and its own row.
   const contents = await Promise.allSettled(
-    apps.map(async (app) => await session.apps.contents(app.id))
+    apps.map(
+      async (app) =>
+        await withTimeout(session.apps.contents(app.id), contentsTimeoutMs)
+    )
   );
   return apps.map((app, index) => {
     const read = contents[index];

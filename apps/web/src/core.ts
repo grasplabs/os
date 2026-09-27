@@ -20,7 +20,7 @@ export const connectCore = () => {
 };
 
 /** How long a read from core may take before core counts as unreachable. */
-const timeoutMs = 5000;
+export const timeoutMs = 5000;
 
 /** Core didn't answer in time: a hanging connection, not a refusal. */
 export class CoreTimeoutError extends Error {
