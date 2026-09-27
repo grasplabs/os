@@ -2,13 +2,26 @@ import { errorFields, log } from "@grasp-os/shared/log";
 import type { z } from "zod";
 
 // Composio's REST API, as connect calls it: the only place in Grasp that
-// does. Core reaches Composio only through connect, and nothing but connect
-// holds the key, a Worker secret the console sets (`COMPOSIO_API_KEY`).
-// While it is unset, nothing of Composio is offered or reached.
+// does (threat model CN17). Core reaches Composio only through connect, and
+// nothing but connect holds the key, a Worker secret the console sets
+// (`COMPOSIO_API_KEY`). While it is unset, nothing of Composio is offered
+// or reached.
 //
-// Everything Composio sends is untrusted: each answer is read up to a size
-// cap and validated before anything uses it. A redirect is never followed,
-// so the key goes to Composio's API host and nowhere else.
+// Each safeguard, and why:
+// - The key goes only to Composio's API host: the base URL is fixed here,
+//   and a redirect is never followed, since following one would send the
+//   key wherever Composio's answer pointed.
+// - Everything Composio sends is untrusted. Each answer is read up to a
+//   size cap as it arrives (never trusting `content-length`), so a huge or
+//   endless answer can't exhaust the isolate, then validated before
+//   anything uses it. Names, categories and descriptions are Composio's
+//   text: the UI renders them as text, never as markup.
+// - Every failure (no answer in time, an error status, a redirect, an
+//   oversized or unreadable answer, even a body that won't cancel) ends as
+//   one `ComposioError`, so callers fall back as one: the catalog lists the
+//   native providers alone.
+// - Logs carry the method, the path's first segment and the status: never
+//   the key, the query or a body.
 
 /** Composio's REST API. */
 export const composioApiBase = "https://backend.composio.dev/api/v3.1";
@@ -113,7 +126,10 @@ export const composioRequest = async <Schema extends z.ZodType>(
   }
   log.info("composio.request", { method, area, status: response.status });
   if (!response.ok) {
-    await response.body?.cancel();
+    // Never in place of the error it answered with.
+    await response.body?.cancel().catch((error: unknown) => {
+      log.warn("composio.cancel_failed", errorFields(error));
+    });
     throw new ComposioError(
       `Composio answered ${response.status}`,
       response.status

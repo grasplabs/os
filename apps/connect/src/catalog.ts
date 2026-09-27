@@ -82,34 +82,37 @@ interface Cached<Value> {
 
 // Per isolate, keyed by the SHA-256 of connect's Composio key (a rotated
 // key starts afresh) and what was listed. Only answers are kept: a failure
-// is asked again next time.
-const toolkitCache = new Map<string, Cached<CatalogEntry[]>>();
-const toolCache = new Map<string, Cached<CatalogTool[]>>();
+// is asked again next time. Loads under way are shared: people opening the
+// Connections page at once ask Composio once (`loading`).
+interface Cache<Value> {
+  values: Map<string, Cached<Value>>;
+  loading: Map<string, Promise<Value>>;
+}
+
+const toolkitCache: Cache<CatalogEntry[]> = {
+  values: new Map(),
+  loading: new Map(),
+};
+const toolCache: Cache<CatalogTool[]> = {
+  values: new Map(),
+  loading: new Map(),
+};
 
 /** Forgets everything cached, so the next answer comes from Composio. */
 export const forgetComposioCatalog = (): void => {
-  toolkitCache.clear();
-  toolCache.clear();
+  for (const cache of [toolkitCache, toolCache]) {
+    cache.values.clear();
+    cache.loading.clear();
+  }
 };
 
-/**
- * The value `load` gives for `name` under `key`, from `cache` while it is
- * fresh. Expired entries go when a new one is stored, and the oldest when
- * the cache is full.
- */
-const cachedIn = async <Value>(
+/** Stores `value` under `id`, dropping expired entries, then the oldest. */
+const store = <Value>(
   cache: Map<string, Cached<Value>>,
-  key: string,
-  name: string,
-  load: () => Promise<Value>
-): Promise<Value> => {
-  const id = `${await sha256Hex(key)}:${name}`;
-  const hit = cache.get(id);
+  id: string,
+  value: Value
+): void => {
   const now = Date.now();
-  if (hit !== undefined && hit.expiresAt > now) {
-    return hit.value;
-  }
-  const value = await load();
   for (const [each, { expiresAt }] of cache) {
     if (expiresAt <= now) {
       cache.delete(each);
@@ -121,7 +124,40 @@ const cachedIn = async <Value>(
     cache.delete(oldest);
   }
   cache.set(id, { expiresAt: now + cacheTtlMs, value });
-  return value;
+};
+
+/**
+ * The value `load` gives for `name` under `key`, from `cache` while it is
+ * fresh. A load already under way for the same `name` and `key` is
+ * awaited, not repeated; it is forgotten once it settles, and a failed one
+ * is never kept.
+ */
+const cachedIn = async <Value>(
+  { values, loading }: Cache<Value>,
+  key: string,
+  name: string,
+  load: () => Promise<Value>
+): Promise<Value> => {
+  const id = `${await sha256Hex(key)}:${name}`;
+  const hit = values.get(id);
+  if (hit !== undefined && hit.expiresAt > Date.now()) {
+    return hit.value;
+  }
+  const underWay = loading.get(id);
+  if (underWay !== undefined) {
+    return await underWay;
+  }
+  const loaded = (async () => {
+    try {
+      const value = await load();
+      store(values, id, value);
+      return value;
+    } finally {
+      loading.delete(id);
+    }
+  })();
+  loading.set(id, loaded);
+  return await loaded;
 };
 
 /**
@@ -156,7 +192,8 @@ const toolSchema = z.object({
 /**
  * Every item of one of Composio's lists at `path`, page after page, as
  * far as `paging` goes, each item as `schema` reads it; items it can't read
- * are left out.
+ * are left out. A list longer than `paging` allows is a failure: half a
+ * catalog would look like all of it.
  */
 const composioList = async <Item>(
   key: string,
@@ -185,16 +222,24 @@ const composioList = async <Item>(
     }
     cursor = next ?? undefined;
     if (cursor === undefined) {
-      break;
+      return items;
     }
   }
-  return items;
+  throw new ComposioError(`${path} is longer than connect reads`);
 };
 
 /**
- * Composio's toolkits that can be connected with Composio's own app for
- * them (managed auth), so an admin needs nothing but their consent.
+ * Whether a toolkit is in the catalog: Composio holds an app for it
+ * (managed auth), so an admin needs nothing but their consent, and it has
+ * tools, so connecting it could do something.
  */
+const isListed = ({
+  composio_managed_auth_schemes: managed,
+  meta,
+}: z.infer<typeof toolkitSchema>): boolean =>
+  managed.length > 0 && meta.tools_count > 0;
+
+/** Composio's toolkits in the catalog (`isListed`). */
 const composioEntries = async (key: string): Promise<CatalogEntry[]> => {
   const toolkits = await composioList(
     key,
@@ -202,19 +247,26 @@ const composioEntries = async (key: string): Promise<CatalogEntry[]> => {
     toolkitSchema,
     toolkitPaging
   );
-  return toolkits
-    .filter(({ composio_managed_auth_schemes: managed }) => managed.length > 0)
-    .map(({ slug, name, meta }) => ({
-      source: "composio",
-      id: slug,
-      name,
-      categories: meta.categories.flatMap((category) => {
-        const parsed = categorySchema.safeParse(category);
-        return parsed.success ? [parsed.data.name] : [];
-      }),
-      toolCount: meta.tools_count,
-    }));
+  return toolkits.filter(isListed).map(({ slug, name, meta }) => ({
+    source: "composio",
+    id: slug,
+    name,
+    categories: meta.categories.flatMap((category) => {
+      const parsed = categorySchema.safeParse(category);
+      return parsed.success ? [parsed.data.name] : [];
+    }),
+    toolCount: meta.tools_count,
+  }));
 };
+
+/** Composio's toolkits in the catalog, as cached. */
+const listedToolkits = async (key: string): Promise<CatalogEntry[]> =>
+  await cachedIn(
+    toolkitCache,
+    key,
+    "toolkits",
+    async () => await composioEntries(key)
+  );
 
 /** The catalog, as `ConnectApi.catalog` describes it. */
 export const catalog = async (env: Env, request: unknown): Promise<Catalog> => {
@@ -228,12 +280,7 @@ export const catalog = async (env: Env, request: unknown): Promise<Catalog> => {
     return { entries: native, composio: "off" };
   }
   try {
-    const toolkits = await cachedIn(
-      toolkitCache,
-      key,
-      "toolkits",
-      async () => await composioEntries(key)
-    );
+    const toolkits = await listedToolkits(key);
     return { entries: [...native, ...toolkits], composio: "listed" };
   } catch (error) {
     if (!(error instanceof ComposioError)) {
@@ -245,41 +292,54 @@ export const catalog = async (env: Env, request: unknown): Promise<Catalog> => {
 };
 
 /**
- * A Composio toolkit's tools, by the names its MCP server gives them. A
- * toolkit Composio lists no tools for, or refuses to list tools for, isn't
- * one: every toolkit in the catalog has tools, and one without any
- * couldn't do anything.
+ * A listed Composio toolkit's tools, by the names its MCP server gives
+ * them, as Composio lists them now.
+ */
+const toolsOf = async (
+  key: string,
+  toolkit: string
+): Promise<CatalogTool[]> => {
+  const tools = await composioList(
+    key,
+    `/tools?${new URLSearchParams({ toolkit_slug: toolkit }).toString()}`,
+    toolSchema,
+    toolPaging
+  );
+  return tools.map(({ slug, description }) => ({
+    name: slug,
+    description: description ?? null,
+  }));
+};
+
+/**
+ * A Composio toolkit's tools, only for one the catalog lists, so the two
+ * never disagree on what is in it: `connect.catalog_entry_not_found` for
+ * any other, and `connect.catalog_unavailable` when Composio doesn't list
+ * the catalog or the tools (any failure, a 400 or 404 for a toolkit it
+ * listed too).
  */
 const composioTools = async (
   key: string,
   toolkit: string
 ): Promise<CatalogTool[]> => {
-  let tools: z.infer<typeof toolSchema>[];
   try {
-    tools = await composioList(
+    const listed = await listedToolkits(key);
+    if (!listed.some(({ id }) => id === toolkit)) {
+      throw connectErrors.create("connect.catalog_entry_not_found");
+    }
+    return await cachedIn(
+      toolCache,
       key,
-      `/tools?${new URLSearchParams({ toolkit_slug: toolkit }).toString()}`,
-      toolSchema,
-      toolPaging
+      `tools:${toolkit}`,
+      async () => await toolsOf(key, toolkit)
     );
   } catch (error) {
     if (!(error instanceof ComposioError)) {
       throw error;
     }
-    // Composio's answer to a toolkit it doesn't know.
-    if (error.status === 400 || error.status === 404) {
-      throw connectErrors.create("connect.catalog_entry_not_found");
-    }
     log.warn("catalog.composio_unavailable", errorFields(error));
     throw connectErrors.create("connect.catalog_unavailable");
   }
-  if (tools.length === 0) {
-    throw connectErrors.create("connect.catalog_entry_not_found");
-  }
-  return tools.map(({ slug, description }) => ({
-    name: slug,
-    description: description ?? null,
-  }));
 };
 
 /** One entry's tools, as `ConnectApi.catalogTools` describes them. */
@@ -310,10 +370,5 @@ export const catalogTools = async (
   if (!composio || key === undefined || !toolkit.success) {
     throw connectErrors.create("connect.catalog_entry_not_found");
   }
-  return await cachedIn(
-    toolCache,
-    key,
-    `tools:${toolkit.data}`,
-    async () => await composioTools(key, toolkit.data)
-  );
+  return await composioTools(key, toolkit.data);
 };

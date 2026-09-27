@@ -30,7 +30,14 @@ const toolkits: FakeToolkit[] = [
     tools: [{ slug: "LINEAR_LIST_ISSUES" }],
   },
   // Composio holds no app for it: an admin would need one of their own.
-  { slug: "acme_erp", name: "Acme ERP", managed: false, tools: [] },
+  {
+    slug: "acme_erp",
+    name: "Acme ERP",
+    managed: false,
+    tools: [{ slug: "ACME_LIST" }],
+  },
+  // No tools: connecting it couldn't do anything.
+  { slug: "empty_kit", name: "Empty", tools: [] },
   {
     slug: "notion",
     name: "Notion",
@@ -40,7 +47,17 @@ const toolkits: FakeToolkit[] = [
 
 const composio = fakeComposioApi(toolkits, {
   // Items connect can't read, among the rest.
-  extra: [{ slug: "Not A Slug", name: "Broken" }, { name: "No slug" }, 42],
+  extra: [
+    { slug: "Not A Slug", name: "Broken" },
+    { name: "No slug" },
+    42,
+    // Managed, but saying nothing of its tools.
+    {
+      slug: "no_count",
+      name: "No count",
+      composio_managed_auth_schemes: ["OAUTH2"],
+    },
+  ],
 });
 
 describe("the catalog", () => {
@@ -68,8 +85,8 @@ describe("the catalog", () => {
 
   it("reads every page of Composio's list, with connect's key, following no redirect", async () => {
     await exports.default.catalog({ composio: true });
-    // Four toolkits and three unreadable items, two to a page.
-    expect(composio.requests).toHaveLength(4);
+    // Five toolkits and four other items, two to a page.
+    expect(composio.requests).toHaveLength(5);
     expect(
       composio.requests.every(
         ({ method, keyed, followsRedirects }) =>
@@ -78,11 +95,37 @@ describe("the catalog", () => {
     ).toBeTruthy();
   });
 
-  it("leaves out toolkits Composio holds no app for, and items it can't read", async () => {
+  it("leaves out toolkits Composio holds no app for, those without tools, and items it can't read", async () => {
     const { entries } = await exports.default.catalog({ composio: true });
     const ids = entries.map(({ id }) => id);
-    expect(ids).not.toContain("acme_erp");
-    expect(ids).toHaveLength(5);
+    expect(ids).toStrictEqual([
+      "microsoft",
+      "google",
+      "hubspot",
+      "linear",
+      "notion",
+    ]);
+  });
+
+  it("asks Composio once for people looking at the same time", async () => {
+    const [first, second] = await Promise.all([
+      exports.default.catalog({ composio: true }),
+      exports.default.catalog({ composio: true }),
+    ]);
+    expect(second).toStrictEqual(first);
+    // One read of the list's five pages.
+    expect(composio.requests).toHaveLength(5);
+  });
+
+  it("says Composio is unavailable when its list goes on past what connect reads, and keeps none of it", async () => {
+    composio.endless = true;
+    const endless = await exports.default.catalog({ composio: true });
+    composio.endless = false;
+    const after = await exports.default.catalog({ composio: true });
+    expect([endless.composio, after.composio]).toStrictEqual([
+      "unavailable",
+      "listed",
+    ]);
   });
 
   it("keeps what Composio listed for ten minutes, and asks again after", async () => {
@@ -152,7 +195,8 @@ describe("the catalog", () => {
   });
 
   it("still lists the native providers when Composio fails", async () => {
-    const failures = ["down", "redirect", "garbled"] as const;
+    // `stuck`: even a body that fails to cancel ends as unavailable.
+    const failures = ["down", "redirect", "garbled", "stuck"] as const;
     const results = [];
     for (const failure of failures) {
       composio.health = failure;
@@ -202,6 +246,12 @@ describe("the catalog", () => {
 });
 
 describe("a catalog entry's tools", () => {
+  /** The tool lists connect asked Composio for, by path. */
+  const toolRequests = (): string[] =>
+    composio.requests
+      .map(({ path }) => path)
+      .filter((path) => path.startsWith("/tools"));
+
   it("lists a Composio toolkit's tools by the names its server gives them", async () => {
     await expect(
       exports.default.catalogTools({
@@ -214,7 +264,7 @@ describe("a catalog entry's tools", () => {
       { name: "HUBSPOT_CREATE_CONTACT", description: "Create a contact" },
       { name: "HUBSPOT_DELETE_CONTACT", description: null },
     ]);
-    expect(composio.requests.map(({ path }) => path)).toStrictEqual([
+    expect(toolRequests()).toStrictEqual([
       "/tools?toolkit_slug=hubspot&limit=200",
       "/tools?toolkit_slug=hubspot&limit=200&cursor=2",
     ]);
@@ -231,7 +281,7 @@ describe("a catalog entry's tools", () => {
       first
     );
     await exports.default.catalogTools({ ...hubspot, id: "linear" });
-    expect(composio.requests.map(({ path }) => path)).toStrictEqual([
+    expect(toolRequests()).toStrictEqual([
       "/tools?toolkit_slug=hubspot&limit=200",
       "/tools?toolkit_slug=hubspot&limit=200&cursor=2",
       "/tools?toolkit_slug=linear&limit=200",
@@ -253,6 +303,10 @@ describe("a catalog entry's tools", () => {
     const requests = [
       { composio: true, source: "composio", id: "nobody" },
       { composio: true, source: "composio", id: "../toolkits" },
+      // Toolkits Composio lists, but the catalog doesn't.
+      { composio: true, source: "composio", id: "acme_erp" },
+      { composio: true, source: "composio", id: "empty_kit" },
+      { composio: true, source: "composio", id: "no_count" },
       { composio: true, source: "native", id: "hubspot" },
       // Off, Composio's toolkits aren't in the catalog.
       { composio: false, source: "composio", id: "hubspot" },
@@ -265,23 +319,29 @@ describe("a catalog entry's tools", () => {
     expect(ends).toStrictEqual(
       requests.map(() => "connect.catalog_entry_not_found")
     );
-    // Only the well-formed toolkit, while the flag is on, was looked up.
-    expect(composio.requests.map(({ path }) => path)).toStrictEqual([
-      "/tools?toolkit_slug=nobody&limit=200",
-    ]);
+    // None of them has its tools asked for.
+    expect(toolRequests()).toStrictEqual([]);
   });
 
-  it("finds no toolkit Composio refuses to list tools for", async () => {
-    composio.health = "refusing";
-    await expect(
-      outcome(
-        exports.default.catalogTools({
-          composio: true,
-          source: "composio",
-          id: "hubspot",
-        })
-      )
-    ).resolves.toBe("connect.catalog_entry_not_found");
+  it("says Composio is unavailable when it refuses to list a listed toolkit's tools", async () => {
+    const ends = [];
+    for (const status of [400, 404]) {
+      composio.toolsStatus = status;
+      ends.push(
+        // oxlint-disable-next-line no-await-in-loop -- one answer at a time
+        await outcome(
+          exports.default.catalogTools({
+            composio: true,
+            source: "composio",
+            id: "hubspot",
+          })
+        )
+      );
+    }
+    expect(ends).toStrictEqual([
+      "connect.catalog_unavailable",
+      "connect.catalog_unavailable",
+    ]);
   });
 
   it("says Composio is unavailable when it fails", async () => {

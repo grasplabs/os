@@ -225,8 +225,9 @@ export interface CatalogEntry {
 /**
  * The catalog, native entries first. `composio` says whether Composio's
  * toolkits are in it: `listed`, `off` (the `composio` flag is off, or
- * connect has no Composio key), or `unavailable` (Composio didn't answer:
- * the native entries are listed all the same).
+ * connect has no Composio key), or `unavailable` (Composio didn't answer,
+ * or not completely: the native entries are listed all the same). Listed
+ * are the toolkits Composio holds an app for that have tools.
  */
 export interface Catalog {
   entries: CatalogEntry[];
@@ -392,10 +393,11 @@ export interface ConnectApi {
    */
   catalog: (request: CatalogRequest) => Promise<Catalog>;
   /**
-   * One catalog entry's tools, or `connect.catalog_entry_not_found`. A
-   * Composio entry is in the catalog only if `composio` and connect has a
-   * Composio key; `connect.catalog_unavailable` when Composio doesn't
-   * answer.
+   * One catalog entry's tools, or `connect.catalog_entry_not_found` for
+   * anything `catalog` doesn't list. Composio's toolkits are listed only if
+   * `composio` and connect has a Composio key, and only those Composio
+   * holds an app for that have tools. `connect.catalog_unavailable` when
+   * Composio doesn't list the catalog or the toolkit's tools completely.
    */
   catalogTools: (request: CatalogToolsRequest) => Promise<CatalogTool[]>;
   /**
