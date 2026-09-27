@@ -9,6 +9,7 @@ import {
   purgedMarker,
 } from "@grasp-os/shared/knowledge";
 import type { PurgePlan, PurgeResult } from "@grasp-os/shared/knowledge";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, count, eq, gt, inArray, lte, or, sql } from "drizzle-orm";
@@ -17,7 +18,7 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type { z } from "zod";
 
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
-import { inList } from "../db/d1.ts";
+import { inList, notInList } from "../db/d1.ts";
 import {
   collections,
   documents,
@@ -32,6 +33,7 @@ import type { CollectionRow } from "./collections.ts";
 import { checkedText, personWriter, writeVersion } from "./documents.ts";
 import type { DocumentRow } from "./documents.ts";
 import { personalCollectionId } from "./memory-files.ts";
+import { failBatchIfProposals } from "./memory-proposals.ts";
 
 // Purging personal data from Knowledge, for good, when someone leaves or
 // asks (GDPR erasure): an admin prepares a purge, which says how much it
@@ -49,9 +51,13 @@ import { personalCollectionId } from "./memory-files.ts";
 //   description again, and fails for anyone who saved meanwhile from text
 //   not yet purged.
 //
-// Then the search index is optimized: FTS5 keeps a deleted row's terms in
-// its index pages until they are merged, where they can't be found by a
-// search but are still in the database.
+// Then the search index is rebuilt from what it holds now: FTS5 keeps a
+// deleted row's terms in its index pages, where they can't be found by a
+// search but are still in the database, until a merge drops them, and
+// `optimize` doesn't merge an index that is one segment already, which can
+// still hold them. The rebuild runs after the data is committed, and on every purge, also one with nothing left to change, so
+// when it fails (`knowledge.purge_index_pending`) running the purge again
+// finishes it.
 //
 // The audit log can't be purged, so what it records of a purge is who,
 // when, why (a reason from a fixed list), which documents and how many
@@ -70,6 +76,14 @@ const tokenLifetimeMs = 10 * 60 * 1000;
 
 /** Versions read at once when rewriting a document's: up to 1 MB each. */
 const versionsPerPage = 5;
+
+/**
+ * Largest text and message of a version a purge writes, in bytes of UTF-8.
+ * D1 keeps a row to 2 MB; this leaves the rest of the row a clear margin.
+ * A version saved at the 1 MB limit grows past it when many short terms
+ * become the longer marker.
+ */
+const rewrittenMaxBytes = 1.5 * 1024 * 1024;
 
 type PurgeInput = z.output<typeof purgeInputSchema>;
 type PersonalPurge = Extract<PurgeInput, { type: "personal" }>;
@@ -170,15 +184,24 @@ const tokenFor = async (
 
 /**
  * Drops deleted rows' terms from the search index's pages for good, by
- * merging them: after a delete, FTS5 only marks them deleted.
+ * rebuilding it from its content: after a delete, FTS5 only marks them
+ * deleted. Refuses with `knowledge.purge_index_pending` when it fails: the
+ * data is deleted already, and running the purge again rebuilds again.
  */
-const optimizeSearchIndex = async (db: DrizzleD1Database): Promise<void> => {
-  await db.batch([
-    db.run(sql`INSERT INTO search_words (search_words) VALUES ('optimize')`),
-    db.run(
-      sql`INSERT INTO search_trigrams (search_trigrams) VALUES ('optimize')`
-    ),
-  ]);
+const rebuildSearchIndex = async (db: DrizzleD1Database): Promise<void> => {
+  try {
+    await db.batch([
+      db.run(sql`INSERT INTO search_words (search_words) VALUES ('rebuild')`),
+      db.run(
+        sql`INSERT INTO search_trigrams (search_trigrams) VALUES ('rebuild')`
+      ),
+    ]);
+  } catch (error) {
+    // The data is already deleted by now; running the purge again, which
+    // always rebuilds, finishes the cleanup.
+    log.error("knowledge.purge.rebuild_failed", errorFields(error));
+    throw knowledgeErrors.create("knowledge.purge_index_pending");
+  }
 };
 
 /** The audit event of preparing or running a purge: never its terms. */
@@ -253,7 +276,8 @@ const personalScope = async (
  * Deletes `userId`'s Personal collection, everything in it and their
  * agents' proposals, with the audit event, in one batch: all or nothing.
  * The sections go first, row by row, so the triggers take them out of the
- * search index; the rest in the order they refer to one another.
+ * search index; the rest in the order they refer to one another. The
+ * search index is rebuilt after, also when nothing was left to delete.
  */
 const purgePersonal = async (
   env: Env,
@@ -283,7 +307,7 @@ const purgePersonal = async (
       )
     ),
   ]);
-  await optimizeSearchIndex(db);
+  await rebuildSearchIndex(db);
   return { purgeId, ...counts };
 };
 
@@ -327,17 +351,31 @@ interface Named {
   collection: CollectionRow;
 }
 
-/** The documents a content purge names that exist, in ID order. */
+/**
+ * The documents a content purge names, in ID order. Refuses with
+ * `knowledge.not_found`, naming the ones that don't exist, rather than
+ * skipping them: a mistyped ID would otherwise leave the text it was meant
+ * for where it is, with a purge recorded as done.
+ */
 const documentsNamed = async (
   db: DrizzleD1Database,
   { documentIds }: ContentPurge
-): Promise<Named[]> =>
-  await db
+): Promise<Named[]> => {
+  const found = await db
     .select({ document: documents, collection: collections })
     .from(documents)
     .innerJoin(collections, eq(collections.id, documents.collectionId))
     .where(inList(documents.id, documentIds))
     .orderBy(asc(documents.id));
+  const existing = new Set(found.map(({ document }) => document.id));
+  const missing = documentIds.filter((id) => !existing.has(id));
+  if (missing.length > 0) {
+    throw knowledgeErrors.create("knowledge.not_found", {
+      documentIds: missing,
+    });
+  }
+  return found;
+};
 
 /** The text and message of `document`'s version `number`. */
 const versionOf = async (
@@ -389,9 +427,32 @@ const requireSavable = async (
 };
 
 /**
+ * Refuses with `knowledge.invalid` when version `number` of `document`,
+ * rewritten, is over {@link rewrittenMaxBytes}: D1 would refuse the row.
+ */
+const requireStorable = (
+  document: DocumentRow,
+  number: number,
+  { text, message }: { text: string; message: string | null }
+): void => {
+  const encoder = new TextEncoder();
+  const bytes =
+    encoder.encode(text).byteLength + encoder.encode(message ?? "").byteLength;
+  if (bytes > rewrittenMaxBytes) {
+    throw knowledgeErrors.create("knowledge.invalid", {
+      issues: [
+        `terms: removing them makes version ${number} of document ${document.id} too large to store (${bytes} bytes, at most ${rewrittenMaxBytes})`,
+      ],
+    });
+  }
+};
+
+/**
  * Rewrites the versions of `document` up to `upTo` that hold a term, in
  * place, a page at a time; only counts them unless `write`. Returns how
- * many hold one.
+ * many hold one. Refuses with `knowledge.invalid` when one would be too
+ * large to store (`requireStorable`): a purge scans them all first, so
+ * one that can't be finished changes nothing.
  */
 const rewriteVersions = async (
   db: DrizzleD1Database,
@@ -421,6 +482,9 @@ const rewriteVersions = async (
       .limit(versionsPerPage);
     const updates = page.flatMap((row) => {
       const changed = rewritten(row, matcher);
+      if (changed !== undefined) {
+        requireStorable(document, row.number, changed);
+      }
       return changed === undefined
         ? []
         : [
@@ -525,10 +589,10 @@ const countDocument = async (
  * version it had move to the new one, which has the same text but for the
  * terms.
  *
- * The save is from the version the purge started at, so anyone who saved
- * or restored meanwhile, from text the purge hadn't rewritten yet, makes
- * it fail with `knowledge.conflict`; running the purge again rewrites
- * their version too. A purge cut short leaves the current version as it
+ * The proposals are read first, and the save is from the version the purge
+ * started at, so anyone who saved, restored or proposed meanwhile, from
+ * text the purge hadn't rewritten yet, makes it fail with
+ * `knowledge.conflict`; running the purge again rewrites theirs too. A purge cut short leaves the current version as it
  * was, so running it again finishes it; one run again after it finished
  * finds nothing, and writes nothing.
  */
@@ -541,8 +605,8 @@ const purgeDocument = async (
 ): Promise<Counts> => {
   const { document, collection } = named;
   const at = document.currentVersion;
-  const earlier = await rewriteVersions(db, document, at - 1, matcher, true);
   const { updates, pendingIds } = await proposalRewrites(db, document, matcher);
+  const earlier = await rewriteVersions(db, document, at - 1, matcher, true);
   const current = await versionOf(db, document, at);
   const changed = current && rewritten(current, matcher);
   const changedVersions = earlier + (changed === undefined ? 0 : 1);
@@ -569,6 +633,19 @@ const purgeDocument = async (
                 ),
             ]),
         ...updates,
+        // A proposal made from version N after they were read would wait
+        // on it with text this purge never saw: the batch fails, as a
+        // conflict, and running the purge again rewrites it too.
+        failBatchIfProposals(
+          db,
+          and(
+            eq(memoryProposals.collectionId, document.collectionId),
+            eq(memoryProposals.path, document.path),
+            eq(memoryProposals.status, "pending"),
+            eq(memoryProposals.baseVersion, at),
+            notInList(memoryProposals.id, pendingIds)
+          )
+        ),
         ...(pendingIds.length === 0
           ? []
           : [
@@ -609,9 +686,12 @@ const contentCounts = async (
 };
 
 /**
- * Purges the terms from the documents named: checked first, so a purge
- * that would leave one that can't be saved changes nothing; then recorded
- * in the audit log; then run, one document at a time.
+ * Purges the terms from the documents named: checked first, every version
+ * of every one, a page at a time, so a purge that would leave one that
+ * can't be saved or stored changes nothing; then recorded in the audit
+ * log; then run, one document at a time. The search index is rebuilt
+ * last, also when nothing was left to change, so running a purge again
+ * finishes a cleanup that failed.
  */
 const purgeContent = async (
   env: Env,
@@ -621,10 +701,7 @@ const purgeContent = async (
   const db = drizzle(env.KNOWLEDGE);
   const named = await documentsNamed(db, input);
   const matcher = matcherOf(input.terms);
-  for (const one of named) {
-    // oxlint-disable-next-line no-await-in-loop -- one document at a time, to bound memory
-    await requireSavable(env, db, one, matcher);
-  }
+  await contentCounts(env, db, named, matcher);
   const purgeId = crypto.randomUUID();
   // Recorded before anything changes, so no purge goes unrecorded however
   // far it gets.
@@ -646,7 +723,7 @@ const purgeContent = async (
     // oxlint-disable-next-line no-await-in-loop -- one document at a time, to bound memory
     done.push(await purgeDocument(env, db, person, one, matcher));
   }
-  await optimizeSearchIndex(db);
+  await rebuildSearchIndex(db);
   return { purgeId, ...sum(done) };
 };
 

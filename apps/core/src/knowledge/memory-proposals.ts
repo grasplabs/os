@@ -32,6 +32,7 @@ import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, count, eq, gt, ne, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
@@ -88,24 +89,28 @@ const toProposal = (row: ProposalRow): MemoryProposal => ({
 });
 
 /**
- * A statement that fails the D1 batch it is in when `condition` holds for
- * the proposal `proposalId` as the batch has it by then: it inserts the
- * proposal's own row again, under the same ID, which the primary key
- * refuses, and that rolls the whole batch back. When `condition` doesn't
- * hold it selects no row and inserts nothing. D1 has no other way to
- * abort a batch on a condition.
+ * A statement that fails the D1 batch it is in when any proposal matches
+ * `condition` as the batch has it by then: it inserts those proposals'
+ * own rows again, under the same IDs, which the primary key refuses, and
+ * that rolls the whole batch back. When none matches it selects no row
+ * and inserts nothing. D1 has no other way to abort a batch on a
+ * condition.
  */
+export const failBatchIfProposals = (
+  db: DrizzleD1Database,
+  condition: SQL | undefined
+) =>
+  db
+    .insert(memoryProposals)
+    .select(db.select().from(memoryProposals).where(condition));
+
+/** `failBatchIfProposals`, for `condition` on the proposal `proposalId`. */
 const failBatchIf = (
-  db: ReturnType<typeof drizzle>,
+  db: DrizzleD1Database,
   proposalId: string,
   condition: SQL
 ) =>
-  db.insert(memoryProposals).select(
-    db
-      .select()
-      .from(memoryProposals)
-      .where(and(eq(memoryProposals.id, proposalId), condition))
-  );
+  failBatchIfProposals(db, and(eq(memoryProposals.id, proposalId), condition));
 
 /**
  * Proposes new text for a shared memory file, as the agent `authority`

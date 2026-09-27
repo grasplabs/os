@@ -16,6 +16,7 @@ import {
   auditedDuring,
   openRpc,
   outcome,
+  refusal,
   signedIn,
   signedInApi,
   staffPerson,
@@ -101,6 +102,43 @@ const versionTexts = async (documentId: string): Promise<string[]> => {
     .bind(documentId)
     .all<{ text: string }>();
   return results.map(({ text }) => text);
+};
+
+interface KnowledgeHooks {
+  /** Before each statement is made. */
+  prepare?: (query: string) => void;
+  /** Before each batch runs: throwing fails it. */
+  beforeBatch?: () => void;
+  /** After each batch ran, before the caller gets its results. */
+  afterBatch?: () => Promise<void>;
+}
+
+/**
+ * `person`'s API on a connection whose core sees the Knowledge database
+ * through `hooks`: something happening at a chosen point of a purge.
+ */
+const apiWith = async (person: Person, hooks: KnowledgeHooks) => {
+  const real = env.KNOWLEDGE;
+  const knowledge: D1Database = {
+    prepare: (query) => {
+      hooks.prepare?.(query);
+      return real.prepare(query);
+    },
+    batch: async <T>(statements: D1PreparedStatement[]) => {
+      hooks.beforeBatch?.();
+      const results = await real.batch<T>(statements);
+      await hooks.afterBatch?.();
+      return results;
+    },
+    exec: async (query) => await real.exec(query),
+    // oxlint-disable-next-line typescript/no-deprecated -- D1Database still has it
+    dump: async () => await real.dump(),
+    withSession: (constraint) => real.withSession(constraint),
+  };
+  const { core } = await openRpc(person.session, {
+    coreEnv: { ...env, KNOWLEDGE: knowledge },
+  });
+  return await core.authenticate();
 };
 
 /** Saves `text` over what is at `path` now. */
@@ -708,26 +746,14 @@ describe("a purge of content", setUpTime, () => {
     // writes (its audit event, before any version), someone saves from the
     // text they had open.
     let saved = false;
-    const real = env.KNOWLEDGE;
-    const knowledge: D1Database = {
-      prepare: (query) => real.prepare(query),
-      batch: async <T>(statements: D1PreparedStatement[]) => {
-        const results = await real.batch<T>(statements);
+    const racing = await apiWith(admin, {
+      afterBatch: async () => {
         if (!saved) {
           saved = true;
           await saveOver(admin, handbook.id, "note.md", `# Note\n${name} 3.`);
         }
-        return results;
       },
-      exec: async (query) => await real.exec(query),
-      // oxlint-disable-next-line typescript/no-deprecated -- D1Database still has it
-      dump: async () => await real.dump(),
-      withSession: (constraint) => real.withSession(constraint),
-    };
-    const { core } = await openRpc(admin.session, {
-      coreEnv: { ...env, KNOWLEDGE: knowledge },
     });
-    const racing = core.authenticate();
     const input: PurgeInput = {
       type: "content",
       documentIds: [note.id],
@@ -757,6 +783,215 @@ describe("a purge of content", setUpTime, () => {
         "# Note\n(removed) 3.",
         "# Note\n(removed) 3.",
       ],
+    });
+  });
+
+  it("fails for a proposal made after it read them, and finishes when run again", async () => {
+    const admin = await personOf("admin");
+    const agent = newAgent();
+    const asAgent = actingFor(agent, admin.userId);
+    const work = await newChat();
+    const name = `Jonker${unique()}`;
+    const { memory } = await admin.api.memory.collections();
+    const path = `agents/${agent.agentId}/AGENTS.md`;
+    await saveOver(admin, memory ?? "", path, `# Agent\nAsk ${name} first.`);
+    const file = await saveOver(
+      admin,
+      memory ?? "",
+      path,
+      `# Agent\nAsk ${name} second.`
+    );
+    const firstHolds = async (): Promise<boolean> => {
+      const [first] = await versionTexts(file.id);
+      return first?.includes(name) ?? false;
+    };
+    // Knowledge as the purge's request sees it: once it has rewritten the
+    // earlier version, after reading the proposals, the agent proposes a
+    // change from the current version, with the name in it.
+    let proposed = "";
+    const racing = await apiWith(admin, {
+      afterBatch: async () => {
+        if (proposed === "" && !(await firstHolds())) {
+          const proposal = await proposeMemory(env, asAgent, work, {
+            file: "agent",
+            text: `# Agent\nAsk ${name} third.`,
+          });
+          proposed = proposal.id;
+        }
+      },
+    });
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [file.id],
+      terms: [name],
+      reason: "other",
+    };
+    const { token } = await admin.api.knowledge.preparePurge(input);
+    const first = await outcome(racing.knowledge.purge(input, token));
+    const afterFirst = await versionTexts(file.id);
+    await purged(admin, input);
+    const proposal = await env.KNOWLEDGE.prepare(
+      "SELECT text, base_version AS baseVersion FROM memory_proposals WHERE id = ?"
+    )
+      .bind(proposed)
+      .first();
+    expect({
+      first,
+      afterFirst: afterFirst.map((text) => text.includes(name)),
+      proposal,
+      texts: await versionTexts(file.id),
+    }).toStrictEqual({
+      first: "knowledge.conflict",
+      // Only the earlier version was rewritten; the batch that saves the
+      // next one failed whole.
+      afterFirst: [false, true],
+      proposal: { text: "# Agent\nAsk (removed) third.", baseVersion: 3 },
+      texts: [
+        "# Agent\nAsk (removed) first.",
+        "# Agent\nAsk (removed) second.",
+        "# Agent\nAsk (removed) second.",
+      ],
+    });
+  });
+
+  it("refuses, before changing anything, a purge that makes an earlier version too large to store", async () => {
+    const admin = await personOf("admin");
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const log = await saveOver(
+      admin,
+      handbook.id,
+      "log.md",
+      "# Log\nQz was here."
+    );
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [log.id],
+      terms: ["Qz"],
+      reason: "other",
+    };
+    const { token } = await admin.api.knowledge.preparePurge(input);
+    // 600 KB, within a document's 1 MB; 2 MB once each "Qz" is "(removed)".
+    const huge = `# Log\n${"Qz ".repeat(200_000)}`;
+    await saveOver(admin, handbook.id, "log.md", huge);
+    await saveOver(admin, handbook.id, "log.md", "# Log\nNothing else.");
+    let refused = "";
+    const events = await auditedDuring(async () => {
+      refused = await outcome(admin.api.knowledge.purge(input, token));
+    });
+    const texts = await versionTexts(log.id);
+    expect({
+      refused,
+      prepared: await outcome(admin.api.knowledge.preparePurge(input)),
+      purged: events.filter(({ action }) => action === "knowledge.purged")
+        .length,
+      first: texts[0],
+      hugeKept: texts[1] === huge,
+      versions: texts.length,
+    }).toStrictEqual({
+      refused: "knowledge.invalid",
+      prepared: "knowledge.invalid",
+      purged: 0,
+      first: "# Log\nQz was here.",
+      hugeKept: true,
+      versions: 3,
+    });
+  });
+});
+
+describe("a purge whose index cleanup fails", setUpTime, () => {
+  /** `person`'s API, on which the purge's index rebuild fails once. */
+  const rebuildFailingOnce = async (person: Person) => {
+    let failNext = false;
+    let failed = false;
+    return await apiWith(person, {
+      prepare: (query) => {
+        if (!failed && query.includes("VALUES ('rebuild')")) {
+          failNext = true;
+        }
+      },
+      beforeBatch: () => {
+        if (failNext) {
+          failNext = false;
+          failed = true;
+          throw new Error("D1 is unavailable");
+        }
+      },
+    });
+  };
+
+  it("says the data is gone and a run again cleans up, for content", async () => {
+    const admin = await personOf("admin");
+    const secret = `claes${unique()}`;
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const document = await saveOver(
+      admin,
+      handbook.id,
+      "people.md",
+      `# People\nWrite to ${secret}.`
+    );
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [document.id],
+      terms: [secret],
+      reason: "other",
+    };
+    const failing = await rebuildFailingOnce(admin);
+    const { token } = await admin.api.knowledge.preparePurge(input);
+    const first = await outcome(failing.knowledge.purge(input, token));
+    const heldAfterFirst = await holding(secret);
+    // Nothing left to change, but the index is cleaned up.
+    const again = await purged(admin, input);
+    expect({
+      first,
+      heldAfterFirst,
+      again: again.result.versions,
+      heldAfterAgain: await holding(secret),
+    }).toStrictEqual({
+      first: "knowledge.purge_index_pending",
+      heldAfterFirst: ["search_words_data.block"],
+      again: 0,
+      heldAfterAgain: [],
+    });
+  });
+
+  it("says the data is gone and a run again cleans up, for a person", async () => {
+    const admin = await personOf("admin");
+    const leaver = await personOf("user");
+    const secret = `brouwer${unique()}`;
+    await saveUserMemory(
+      env,
+      actingFor(newAgent(), leaver.userId),
+      await newChat(),
+      { type: "own" },
+      { text: `# About me\nCall me ${secret}.`, ifVersion: 0 }
+    );
+    const input: PurgeInput = {
+      type: "personal",
+      userId: leaver.userId,
+      reason: "offboarding",
+    };
+    const failing = await rebuildFailingOnce(admin);
+    const { token } = await admin.api.knowledge.preparePurge(input);
+    const first = await outcome(failing.knowledge.purge(input, token));
+    const heldAfterFirst = await holding(secret);
+    // The collection is gone already, but the index is cleaned up.
+    const again = await purged(admin, input);
+    expect({
+      first,
+      heldAfterFirst,
+      again: again.result.documents,
+      heldAfterAgain: await holding(secret),
+    }).toStrictEqual({
+      first: "knowledge.purge_index_pending",
+      heldAfterFirst: ["search_words_data.block"],
+      again: 0,
+      heldAfterAgain: [],
     });
   });
 });
@@ -1027,6 +1262,72 @@ describe("purging", setUpTime, () => {
       refused: "knowledge.invalid",
       events: [],
       user: [`# About me\nCall me ${name}.`, current],
+    });
+  });
+
+  it("refuses documents that don't exist, naming them, when prepared and when run", async () => {
+    const admin = await personOf("admin");
+    const leaver = await personOf("user");
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const kept = await saveOver(
+      admin,
+      handbook.id,
+      "kept.md",
+      "# Kept\nRoos stays."
+    );
+    const missing = crypto.randomUUID();
+    const prepared = await refusal(
+      admin.api.knowledge.preparePurge({
+        type: "content",
+        documentIds: [kept.id, missing],
+        terms: ["Roos"],
+        reason: "other",
+      })
+    );
+    // A document that goes after the purge was prepared: here, with its
+    // owner's Personal collection.
+    const user = await saveUserMemory(
+      env,
+      actingFor(newAgent(), leaver.userId),
+      await newChat(),
+      { type: "own" },
+      { text: "# About me\nCall me Roos.", ifVersion: 0 }
+    );
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [kept.id, user.id],
+      terms: ["Roos"],
+      reason: "other",
+    };
+    const { token } = await admin.api.knowledge.preparePurge(input);
+    await purged(admin, {
+      type: "personal",
+      userId: leaver.userId,
+      reason: "offboarding",
+    });
+    let run: unknown;
+    const events = await auditedDuring(async () => {
+      run = await refusal(admin.api.knowledge.purge(input, token));
+    });
+    expect({
+      prepared,
+      run,
+      events: events.map(({ action }) => action),
+      kept: await versionTexts(kept.id),
+    }).toMatchObject({
+      prepared: {
+        code: "knowledge.not_found",
+        details: { documentIds: [missing] },
+      },
+      run: {
+        code: "knowledge.not_found",
+        details: { documentIds: [user.id] },
+      },
+      events: [],
+      kept: ["# Kept\nRoos stays."],
     });
   });
 
