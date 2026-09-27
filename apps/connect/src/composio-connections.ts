@@ -11,9 +11,10 @@ import { randomToken, sha256Hex } from "@grasp-os/shared/encoding";
 import { identifierSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { isAdmin, roleErrors } from "@grasp-os/shared/roles";
-import { eq, lte } from "drizzle-orm";
+import { eq, lte, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { recordEvents } from "./audit.ts";
@@ -136,6 +137,14 @@ const deleteAtComposio = async (
 /** The first wait before trying a failed cleanup again. */
 const firstRetryMs = 60 * 1000;
 
+/**
+ * When the cron trigger may start on a cleanup recorded while a start or a
+ * finish is still under way (a few Composio requests of at most ten
+ * seconds each): long after either is done, so it never deletes what one
+ * of them is about to keep.
+ */
+const underWayMs = 5 * 60 * 1000;
+
 /** The longest wait between two tries of a cleanup. */
 const maxRetryMs = 24 * 60 * 60 * 1000;
 
@@ -143,36 +152,56 @@ const maxRetryMs = 24 * 60 * 60 * 1000;
 const retryDelayMs = (attempts: number): number =>
   Math.min(firstRetryMs * 2 ** attempts, maxRetryMs);
 
+// Cleanups follow the outbox's pattern: record, then act, then clear. What
+// connect gives up at Composio is recorded as a `composio_cleanups` row in
+// the same transaction as the change that gives it up (a flow taken, a
+// connection disconnected), so neither is ever kept without the other.
+// Only then is Composio asked to delete it, and only once it has is the
+// row cleared. Whatever happens in between (no key, Composio failing, a
+// crash), the row is there for the cron trigger (`retryComposioCleanups`).
+
+/** A cleanup row for `made`, due at `retryAt`, to insert with its change. */
+const cleanupRow = (id: string, made: AtComposio, retryAt: Date) => ({
+  id,
+  serverId: made.serverId ?? null,
+  connectedAccountId: made.connectedAccountId ?? null,
+  authConfigId: made.authConfigId ?? null,
+  retryAt,
+  createdAt: new Date(Date.now()),
+});
+
 /**
- * Deletes at Composio what connect made there, and records what it
- * couldn't delete (all of it, without a key) for the cron trigger to try
- * again (`retryComposioCleanups`), so an account with tokens is never
- * forgotten. Never throws: it runs where another error is on its way. What
- * was left to delete.
+ * Carries out the recorded cleanup `id` of `made`: deletes it at Composio,
+ * then clears the row, or keeps in it what is left for the cron trigger.
+ * Never throws: it runs where another error may be on its way, and a row
+ * it fails to clear is only tried again. What is left to delete
+ * (everything, without a key).
  */
-const cleanUpAtComposio = async (
+const carryOutCleanup = async (
   env: Env,
+  id: string,
   made: AtComposio
 ): Promise<AtComposio> => {
   const key = composioKey(env);
-  const left = key === undefined ? made : await deleteAtComposio(key, made);
-  if (isNothing(left)) {
-    return left;
+  if (key === undefined) {
+    return made;
   }
-  const now = Date.now();
+  const left = await deleteAtComposio(key, made);
+  const db = drizzle(env.DB);
+  const row = eq(composioCleanups.id, id);
   try {
-    await drizzle(env.DB)
-      .insert(composioCleanups)
-      .values({
-        id: crypto.randomUUID(),
-        serverId: left.serverId ?? null,
-        connectedAccountId: left.connectedAccountId ?? null,
-        authConfigId: left.authConfigId ?? null,
-        retryAt: new Date(now + firstRetryMs),
-        createdAt: new Date(now),
-      });
+    await (isNothing(left)
+      ? db.delete(composioCleanups).where(row)
+      : db
+          .update(composioCleanups)
+          .set({
+            serverId: left.serverId ?? null,
+            connectedAccountId: left.connectedAccountId ?? null,
+            authConfigId: left.authConfigId ?? null,
+          })
+          .where(row));
   } catch (error) {
-    log.error("composio.cleanup_not_recorded", errorFields(error));
+    log.error("composio.cleanup_not_cleared", errorFields(error));
   }
   return left;
 };
@@ -310,6 +339,11 @@ export const startToolkitConnection = async (
       schema: authConfigSchema,
     });
     made.authConfigId = authConfig.id;
+    // Recorded at once: should anything after this fail, or the isolate
+    // go, the cron trigger deletes it (`underWayMs` from now).
+    await drizzle(env.DB)
+      .insert(composioCleanups)
+      .values(cleanupRow(flowId, made, new Date(Date.now() + underWayMs)));
     const link = await composioRequest(key, {
       method: "POST",
       path: "/connected_accounts/link",
@@ -321,6 +355,12 @@ export const startToolkitConnection = async (
       schema: linkSchema,
     });
     made.connectedAccountId = link.connected_account_id;
+    const db = drizzle(env.DB);
+    await db
+      .update(composioCleanups)
+      .set({ connectedAccountId: link.connected_account_id })
+      .where(eq(composioCleanups.id, flowId));
+    // The flow takes over what the cleanup row held, in one transaction.
     await recordEvents(
       env,
       [
@@ -335,24 +375,23 @@ export const startToolkitConnection = async (
         }),
       ],
       [
-        drizzle(env.DB)
-          .insert(composioFlows)
-          .values({
-            stateHash,
-            flowId,
-            userId: person.userId,
-            toolkit,
-            authConfigId: authConfig.id,
-            connectedAccountId: link.connected_account_id,
-            tools: storedTools,
-            returnTo,
-            expiresAt: new Date(Date.now() + oauthFlowLifetimeMs),
-          }),
+        db.delete(composioCleanups).where(eq(composioCleanups.id, flowId)),
+        db.insert(composioFlows).values({
+          stateHash,
+          flowId,
+          userId: person.userId,
+          toolkit,
+          authConfigId: authConfig.id,
+          connectedAccountId: link.connected_account_id,
+          tools: storedTools,
+          returnTo,
+          expiresAt: new Date(Date.now() + oauthFlowLifetimeMs),
+        }),
       ]
     );
     return { url: link.redirect_url };
   } catch (error) {
-    await cleanUpAtComposio(env, made);
+    await carryOutCleanup(env, flowId, made);
     if (!(error instanceof ComposioError)) {
       throw error;
     }
@@ -365,63 +404,131 @@ export const startToolkitConnection = async (
   }
 };
 
+interface FlowRow {
+  state_hash: string;
+  flow_id: string;
+  user_id: string;
+  toolkit: string;
+  auth_config_id: string;
+  connected_account_id: string;
+  tools: string;
+  return_to: string;
+  expires_at: number;
+}
+
 /**
- * Takes the Composio flow `stateHash` names: deleted before anything is
- * checked, so it is spent whatever happens next.
+ * Takes the Composio flows `where` (SQL over `composio_flows`, with
+ * `binds`) matches, and hands what each made at Composio over to a cleanup
+ * row due at `retryAt`, keyed by its flow ID, in one transaction: a flow
+ * is never gone without its cleanup recorded. Two takes of one flow never
+ * both get it. The flows taken.
+ */
+const handOverFlows = async (
+  env: Env,
+  where: string,
+  binds: readonly unknown[],
+  retryAt: number
+): Promise<ToolkitFlow[]> => {
+  const [, taken] = await env.DB.batch<FlowRow>([
+    env.DB.prepare(
+      `INSERT INTO composio_cleanups (id, server_id, connected_account_id, auth_config_id, attempts, retry_at, created_at) SELECT flow_id, NULL, connected_account_id, auth_config_id, 0, ?, ? FROM composio_flows WHERE ${where}`
+    ).bind(retryAt, Date.now(), ...binds),
+    env.DB.prepare(
+      `DELETE FROM composio_flows WHERE ${where} RETURNING *`
+    ).bind(...binds),
+  ]);
+  return (taken?.results ?? []).map((row) => ({
+    stateHash: row.state_hash,
+    flowId: row.flow_id,
+    userId: row.user_id,
+    toolkit: row.toolkit,
+    authConfigId: row.auth_config_id,
+    connectedAccountId: row.connected_account_id,
+    tools: row.tools,
+    returnTo: row.return_to,
+    expiresAt: new Date(row.expires_at),
+  }));
+};
+
+/**
+ * Takes the Composio flow `stateHash` names, its cleanup recorded (due
+ * `underWayMs` from now, once whoever took it is done): spent whatever
+ * happens next.
  */
 export const takeToolkitFlow = async (
   env: Env,
   stateHash: string
 ): Promise<ToolkitFlow | undefined> => {
-  const [flow] = await drizzle(env.DB)
-    .delete(composioFlows)
-    .where(eq(composioFlows.stateHash, stateHash))
-    .returning();
+  const [flow] = await handOverFlows(
+    env,
+    "state_hash = ?",
+    [stateHash],
+    Date.now() + underWayMs
+  );
   return flow;
 };
 
 /**
- * Deletes at Composio what a flow that will never finish made there (one
- * that came back but can't finish), or records it to delete later.
+ * Deletes at Composio what a flow taken for good made there (one that
+ * came back but can't finish); its cleanup row keeps what can't be.
  */
 export const abandonToolkitFlow = async (
   env: Env,
   flow: ToolkitFlow
 ): Promise<void> => {
-  await cleanUpAtComposio(env, flow);
+  await carryOutCleanup(env, flow.flowId, flow);
 };
-
-/** Most Composio flows one `dropToolkitFlows` takes: a few requests each. */
-const dropBatchSize = 10;
 
 /**
- * Drops Composio flows that will never finish, those `where` matches (at
- * most {@link dropBatchSize}; a later call takes the rest), and deletes
- * what each made at Composio: an admin may have connected there and never
- * come back, leaving an account with tokens. What can't be deleted now
- * is recorded to delete later. Each flow is taken first, so two calls
- * never both handle one.
+ * Hands every Composio flow of the people `userIds` over to cleanup rows
+ * due now, in one transaction, however many there are: someone removed
+ * can finish none. The cron trigger deletes them at Composio, a bounded
+ * number a run.
  */
-export const dropToolkitFlows = async (env: Env, where: SQL): Promise<void> => {
-  const db = drizzle(env.DB);
-  const due = await db
-    .select({ stateHash: composioFlows.stateHash })
-    .from(composioFlows)
-    .where(where)
-    .limit(dropBatchSize);
-  for (const { stateHash } of due) {
-    // oxlint-disable-next-line no-await-in-loop -- a small batch, in turn
-    const flow = await takeToolkitFlow(env, stateHash);
-    if (flow !== undefined) {
-      // oxlint-disable-next-line no-await-in-loop -- a small batch, in turn
-      await abandonToolkitFlow(env, flow);
-    }
-  }
+export const dropToolkitFlowsOf = async (
+  env: Env,
+  userIds: readonly string[]
+): Promise<void> => {
+  await handOverFlows(
+    env,
+    "user_id IN (SELECT value FROM json_each(?))",
+    [JSON.stringify(userIds)],
+    Date.now()
+  );
 };
 
-/** Drops Composio flows nobody finished in time. The cron trigger calls it. */
+/**
+ * Hands the Composio flows nobody finished in time over to cleanup rows
+ * due now, for the cron trigger to delete at Composio. It calls this.
+ */
 export const purgeExpiredToolkitFlows = async (env: Env): Promise<void> => {
-  await dropToolkitFlows(env, lte(composioFlows.expiresAt, new Date()));
+  const now = Date.now();
+  await handOverFlows(env, "expires_at <= ?", [now], now);
+};
+
+/**
+ * Whether `url`, as Composio generated it, is the server connect calls for
+ * this server and this one connected account, and nothing wider: Composio's
+ * MCP host, the server's own path, and exactly this account (never a
+ * user-wide URL).
+ */
+const isServerFor = (
+  url: string,
+  serverId: string,
+  connectedAccountId: string
+): boolean => {
+  if (!isComposioServerUrl(url)) {
+    return false;
+  }
+  const { pathname, searchParams } = new URL(url);
+  const path = `/v3/mcp/${encodeURIComponent(serverId)}`;
+  const accounts = searchParams.getAll("connected_account_id");
+  return (
+    (pathname === path || pathname === `${path}/mcp`) &&
+    accounts.length === 1 &&
+    accounts[0] === connectedAccountId &&
+    !searchParams.has("user_id")
+  );
 };
 
 const allowedToolsSchema = z.array(z.string());
@@ -491,6 +598,10 @@ const finishToolkitConnection = async (
       schema: mcpServerSchema,
     });
     made.serverId = server.id;
+    await drizzle(env.DB)
+      .update(composioCleanups)
+      .set({ serverId: server.id })
+      .where(eq(composioCleanups.id, flow.flowId));
     const { connected_account_urls: urls } = await composioRequest(key, {
       method: "POST",
       path: "/mcp/servers/generate",
@@ -501,7 +612,11 @@ const finishToolkitConnection = async (
       schema: mcpUrlsSchema,
     });
     const [url] = urls;
-    if (urls.length !== 1 || url === undefined || !isComposioServerUrl(url)) {
+    if (
+      urls.length !== 1 ||
+      url === undefined ||
+      !isServerFor(url, server.id, flow.connectedAccountId)
+    ) {
       throw new ComposioError("Composio's server URL isn't one connect calls");
     }
     const connectionId = crypto.randomUUID();
@@ -519,6 +634,10 @@ const finishToolkitConnection = async (
         }),
       ],
       [
+        // The connection takes over what the flow's cleanup row held.
+        drizzle(env.DB)
+          .delete(composioCleanups)
+          .where(eq(composioCleanups.id, flow.flowId)),
         drizzle(env.DB).insert(connections).values({
           id: connectionId,
           provider: flow.toolkit,
@@ -539,7 +658,7 @@ const finishToolkitConnection = async (
     );
     return { connectionId, returnTo: flow.returnTo };
   } catch (error) {
-    await cleanUpAtComposio(env, made);
+    await carryOutCleanup(env, flow.flowId, made);
     if (!(error instanceof ComposioError)) {
       throw error;
     }
@@ -571,15 +690,44 @@ export const finishToolkitFlow = async (
 };
 
 /**
- * Deletes a Composio connection's server, account and auth config at
- * Composio, which deletes its tokens there, or records what it couldn't
- * delete to try again later: whether the account is deleted now.
+ * The cleanup of a Composio connection being disconnected: an insert of
+ * its server, account and auth config into `composio_cleanups` as `id`,
+ * only while `stillConnected` matches it, for the same transaction that
+ * marks it disconnected (src/oauth.ts). Calls stop with that transaction,
+ * whatever becomes of the deletion at Composio after it.
+ */
+export const disconnectCleanup = (
+  db: DrizzleD1Database,
+  id: string,
+  stillConnected: SQL
+) =>
+  db.insert(composioCleanups).select(
+    db
+      .select({
+        id: sql<string>`${id}`.as("id"),
+        serverId: connections.composioServerId,
+        connectedAccountId: connections.accountId,
+        authConfigId: connections.composioAuthConfigId,
+        attempts: sql<number>`0`.as("attempts"),
+        retryAt: sql<Date>`${Date.now() + firstRetryMs}`.as("retry_at"),
+        createdAt: sql<Date>`${Date.now()}`.as("created_at"),
+      })
+      .from(connections)
+      .where(stillConnected)
+  );
+
+/**
+ * Deletes a disconnected Composio connection's server, account and auth
+ * config at Composio, which deletes its tokens there, as the cleanup row
+ * `id` its disconnect recorded says; the row keeps what can't be deleted
+ * now. Whether the account is deleted now.
  */
 export const revokeAtComposio = async (
   env: Env,
+  id: string,
   connection: Connection
 ): Promise<boolean> => {
-  const left = await cleanUpAtComposio(env, {
+  const left = await carryOutCleanup(env, id, {
     serverId: connection.composioServerId,
     connectedAccountId: connection.accountId,
     authConfigId: connection.composioAuthConfigId,

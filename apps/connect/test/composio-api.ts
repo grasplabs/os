@@ -255,6 +255,11 @@ export const fakeComposioApi = (
     failing: string | undefined;
     /** Where it says a new server is, instead of its own MCP host. */
     serverUrlBase: string;
+    /**
+     * Which account the URL it generates names: the one asked for, another
+     * one, or none (a URL for no one account).
+     */
+    accountInUrl: "own" | "other" | "none";
     /** What connect made at Composio and hasn't deleted. */
     holds: Holdings;
     /** The MCP servers' requests and tool runs, all of them together. */
@@ -267,6 +272,7 @@ export const fakeComposioApi = (
     toolsStatus: undefined,
     failing: undefined,
     serverUrlBase: mcpBase,
+    accountInUrl: "own",
     holds: { authConfigs: new Map(), accounts: new Map(), servers: new Map() },
     mcp: mcp.state,
   };
@@ -334,7 +340,12 @@ export const fakeComposioApi = (
         return Response.json({
           mcp_url: base,
           connected_account_urls: stringsOf(body.connected_account_ids).map(
-            (account) => `${base}?connected_account_id=${account}`
+            (account) =>
+              ({
+                own: `${base}?connected_account_id=${account}`,
+                other: `${base}?connected_account_id=ca_someone_else`,
+                none: base,
+              })[state.accountInUrl]
           ),
           user_ids_url: [],
         });
@@ -453,6 +464,7 @@ export const fakeComposioApi = (
     state.toolsStatus = undefined;
     state.failing = undefined;
     state.serverUrlBase = mcpBase;
+    state.accountInUrl = "own";
     state.holds = {
       authConfigs: new Map(),
       accounts: new Map(),

@@ -26,7 +26,8 @@ import { drizzle } from "drizzle-orm/d1";
 import { recordEventIf, recordEvents } from "./audit.ts";
 import {
   abandonToolkitFlow,
-  dropToolkitFlows,
+  disconnectCleanup,
+  dropToolkitFlowsOf,
   revokeAtComposio,
   takeToolkitFlow,
 } from "./composio-connections.ts";
@@ -36,7 +37,6 @@ import {
   refuseStaff,
 } from "./connection-audit.ts";
 import {
-  composioFlows,
   connections,
   connectionTokens,
   oauthFlows,
@@ -485,9 +485,6 @@ const revoke = async (
   env: Env,
   connection: typeof connections.$inferSelect
 ): Promise<boolean> => {
-  if (connection.serverKind === "composio") {
-    return await revokeAtComposio(env, connection);
-  }
   const parsed = oauthProviderSchema.safeParse(connection.provider);
   if (!parsed.success) {
     return false;
@@ -523,7 +520,13 @@ const stop = async (
   detail: Record<string, AuditDetailValue> = {}
 ): Promise<{ revoked: boolean; stopped: boolean }> => {
   const db = drizzle(env.DB);
-  const revoked = await revoke(env, connection);
+  // A Composio connection is stopped first, with its cleanup recorded in
+  // the same transaction, and deleted at Composio only after: calls stop
+  // whatever becomes of that deletion, and the cron trigger retries it
+  // (src/composio-connections.ts). An OAuth grant is revoked first, as ever.
+  const composio = connection.serverKind === "composio";
+  const cleanupId = crypto.randomUUID();
+  const revokedGrant = composio ? false : await revoke(env, connection);
   // Recorded only by the disconnect that stops it, if two run at once.
   const stillConnected = sql`${connections.id} = ${connection.id} AND ${connections.status} <> 'disconnected'`;
   const stopped = await recordEventIf(
@@ -533,10 +536,11 @@ const stop = async (
       provider: connection.provider,
       scope: connection.scope,
       outcome: "ok",
-      revoked,
+      ...(composio ? { tokenHolder: "composio" } : { revoked: revokedGrant }),
     }),
     { from: connections, where: stillConnected },
     [
+      ...(composio ? [disconnectCleanup(db, cleanupId, stillConnected)] : []),
       db
         .update(connections)
         .set({ status: "disconnected", updatedAt: new Date() })
@@ -552,6 +556,10 @@ const stop = async (
     "connection.disconnected",
     person
   );
+  const revoked =
+    composio && stopped
+      ? await revokeAtComposio(env, cleanupId, connection)
+      : revokedGrant;
   return { revoked, stopped };
 };
 
@@ -647,7 +655,7 @@ export const disconnectPersonal = async (
   // and a full list of owners is that many on its own.
   const owners = sql`(SELECT value FROM json_each(${JSON.stringify(ownerUserIds)}))`;
   await db.delete(oauthFlows).where(sql`${oauthFlows.userId} IN ${owners}`);
-  await dropToolkitFlows(env, sql`${composioFlows.userId} IN ${owners}`);
+  await dropToolkitFlowsOf(env, ownerUserIds);
   const owned = await db
     .select()
     .from(connections)

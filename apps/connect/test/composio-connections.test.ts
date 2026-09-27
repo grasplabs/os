@@ -170,6 +170,34 @@ const afterMinutes = async (
   }
 };
 
+/** How many Composio flows of `person` are under way. */
+const flowsOf = async (person: ConnectionPerson): Promise<number> => {
+  const counted = await env.DB.prepare(
+    "SELECT COUNT(*) AS n FROM composio_flows WHERE user_id = ?"
+  )
+    .bind(person.userId)
+    .first<{ n: number }>();
+  return counted?.n ?? 0;
+};
+
+/**
+ * Runs `run` while every `when` (`BEFORE INSERT`, `BEFORE DELETE`) write to
+ * `composio_cleanups` fails, as a D1 write can.
+ */
+const withTrigger = async <Result>(
+  when: "BEFORE INSERT" | "BEFORE DELETE",
+  run: () => Promise<Result>
+): Promise<Result> => {
+  await env.DB.prepare(
+    `CREATE TRIGGER fail_cleanups ${when} ON composio_cleanups BEGIN SELECT RAISE(ABORT, 'D1 failed'); END`
+  ).run();
+  try {
+    return await run();
+  } finally {
+    await env.DB.prepare("DROP TRIGGER fail_cleanups").run();
+  }
+};
+
 /** Ends the time `person`'s Composio flows had to finish. */
 const expireFlowsOf = async (person: ConnectionPerson): Promise<void> => {
   await env.DB.prepare(
@@ -418,17 +446,93 @@ describe("connecting a Composio toolkit", () => {
     );
   });
 
-  it("drops the flows of an admin removed from the organization, and what they made at Composio", async () => {
+  it("hands every flow of an admin removed from the organization over to cleanup at once, however many", async () => {
     const admin = someone("admin");
-    const { state } = composio.authorize(await start(admin));
+    const flows = 12;
+    const states: string[] = [];
+    for (let flow = 0; flow < flows; flow += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one flow at a time
+      states.push(composio.authorize(await start(admin)).state);
+    }
     await exports.default.disconnectPersonal({
       person: null,
       ownerUserIds: [admin.userId],
     });
-    expect(heldAtComposio().accounts).toBe(0);
-    await expect(outcome(back(admin, state))).resolves.toBe(
-      "connection.flow_invalid"
+    const handedOver = {
+      flows: await flowsOf(admin),
+      cleanups: await cleanupsLeft(),
+    };
+    // The cron trigger deletes them at Composio, ten a run.
+    await exports.default.scheduled();
+    await exports.default.scheduled();
+    expect({
+      handedOver,
+      held: heldAtComposio(),
+      cleanups: await cleanupsLeft(),
+      finished: await outcome(back(admin, states[0] ?? "")),
+    }).toStrictEqual({
+      handedOver: { flows: 0, cleanups: flows },
+      held: nothingHeld,
+      cleanups: 0,
+      finished: "connection.flow_invalid",
+    });
+  });
+
+  it("takes no flow whose cleanup it can't record: nothing is deleted at Composio without a record, and nothing is lost", async () => {
+    const admin = someone("admin");
+    const { state } = composio.authorize(await start(admin));
+    const failed = await withTrigger(
+      "BEFORE INSERT",
+      async () => await outcome(exports.default.abandonFlow(state))
     );
+    const kept = { flows: await flowsOf(admin), held: heldAtComposio() };
+    await exports.default.abandonFlow(state);
+    expect({
+      failed: failed !== "ok",
+      kept,
+      after: { flows: await flowsOf(admin), held: heldAtComposio() },
+    }).toStrictEqual({
+      failed: true,
+      kept: { flows: 1, held: { ...nothingHeld, authConfigs: 1, accounts: 1 } },
+      after: { flows: 0, held: nothingHeld },
+    });
+  });
+
+  it("leaves a taken flow's cleanup for the cron trigger when nothing gets to act on it", async () => {
+    const admin = someone("admin");
+    const { state } = composio.authorize(await start(admin));
+    // As if the isolate went right after taking it: no key to act with.
+    await connectWith({ COMPOSIO_API_KEY: undefined }).abandonFlow(state);
+    const kept = await cleanupsLeft();
+    await afterMinutes(6, async () => {
+      await exports.default.scheduled();
+    });
+    expect({
+      kept,
+      held: heldAtComposio(),
+      left: await cleanupsLeft(),
+    }).toStrictEqual({
+      kept: 1,
+      held: nothingHeld,
+      left: 0,
+    });
+  });
+
+  it("stores no server URL for another account, or for no one account", async () => {
+    const admin = someone("admin");
+    const ends = [];
+    for (const accountInUrl of ["other", "none"] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one flow at a time
+      const { state } = composio.authorize(await start(admin));
+      composio.state.accountInUrl = accountInUrl;
+      // oxlint-disable-next-line no-await-in-loop -- one flow at a time
+      ends.push(await outcome(back(admin, state)));
+      composio.state.accountInUrl = "own";
+    }
+    expect({ ends, held: heldAtComposio() }).toStrictEqual({
+      ends: ["connection.provider_refused", "connection.provider_refused"],
+      held: nothingHeld,
+    });
   });
 
   it("reads the role again when the admin comes back: someone no longer an admin can't finish", async () => {
@@ -460,11 +564,12 @@ describe("connecting a Composio toolkit", () => {
       withoutKey.finishConnection({ person: admin, state, composio: true })
     );
     const kept = { held: heldAtComposio(), cleanups: await cleanupsLeft() };
-    await afterMinutes(2, async () => {
+    // Due once the finish would long be done.
+    await afterMinutes(6, async () => {
       await withoutKey.scheduled();
     });
     const stillKept = await cleanupsLeft();
-    await afterMinutes(2, async () => {
+    await afterMinutes(6, async () => {
       await exports.default.scheduled();
     });
     expect({
@@ -601,6 +706,59 @@ describe("a Composio connection", () => {
     });
     expect(JSON.stringify(errors)).toContain("composio.cleanup_stuck");
     expect(JSON.stringify(errors)).not.toContain(connectionId);
+  });
+
+  it("stops taking calls when disconnected, even if clearing its cleanup fails after Composio deleted it", async () => {
+    const admin = someone("admin");
+    const connectionId = await connectHubSpot(admin);
+    const revoked = await withTrigger(
+      "BEFORE DELETE",
+      async () =>
+        await exports.default.disconnect({ person: admin, connectionId })
+    );
+    const inactive = await outcome(
+      callAs(workflow, call(connectionId, "HUBSPOT_LIST_CONTACTS"))
+    );
+    const kept = await cleanupsLeft();
+    await afterMinutes(2, async () => {
+      await exports.default.scheduled();
+    });
+    expect({
+      revoked,
+      inactive,
+      held: heldAtComposio(),
+      kept,
+      left: await cleanupsLeft(),
+    }).toStrictEqual({
+      revoked: { revoked: true },
+      inactive: "connect.connection_inactive",
+      held: nothingHeld,
+      kept: 1,
+      left: 0,
+    });
+  });
+
+  it("deletes nothing at Composio when its disconnect can't be recorded", async () => {
+    const admin = someone("admin");
+    const connectionId = await connectHubSpot(admin);
+    const failed = await withTrigger(
+      "BEFORE INSERT",
+      async () =>
+        await outcome(
+          exports.default.disconnect({ person: admin, connectionId })
+        )
+    );
+    expect({
+      failed: failed !== "ok",
+      held: heldAtComposio(),
+      calls: await outcome(
+        callAs(workflow, call(connectionId, "HUBSPOT_LIST_CONTACTS"))
+      ),
+    }).toStrictEqual({
+      failed: true,
+      held: { authConfigs: 1, accounts: 1, servers: 1 },
+      calls: "ok",
+    });
   });
 
   it("takes no calls while connect has no Composio key", async () => {
