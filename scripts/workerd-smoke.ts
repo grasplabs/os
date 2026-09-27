@@ -76,6 +76,11 @@ const core :Workerd.Worker = (
     (className = "App", uniqueKey = "app", enableSql = true),
     (className = "AuditLog", uniqueKey = "audit-log", enableSql = true),
   ],
+  # In-memory storage aborts workerd when a Durable Object alarm fires, so
+  # the smoke run must not write audit events or run the 15-minute cron
+  # trigger: either arms the audit log's retention alarm
+  # (apps/core/src/audit-log.ts). On-prem runs
+  # use localDisk storage, where alarms work.
   durableObjectStorage = (inMemory = void),
 );
 `

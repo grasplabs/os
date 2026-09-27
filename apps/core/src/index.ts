@@ -1,6 +1,7 @@
 import { errorFields, log } from "@grasp-os/shared/log";
 
 import { sweepPendingCopies } from "./app-blueprints.ts";
+import { auditLog } from "./audit-log.ts";
 import { drainAuditOutboxes } from "./audit-outbox.ts";
 import { consumeLeftoverAuditQueue } from "./audit-queue-leftovers.ts";
 import { handleRequest } from "./entry.ts";
@@ -43,14 +44,18 @@ export default {
   // invocation with the jobs above: the day's improvement signals, until
   // they're computed (see src/signals.ts), and Apps whose entry in the Apps
   // collection isn't of their current version (see
-  // src/knowledge/apps-collection.ts).
-  //
-  // Audit retention runs on the audit log's own alarm (see
-  // src/audit-log.ts), not here.
+  // src/knowledge/apps-collection.ts). And the audit log's retention
+  // alarm armed, if it isn't yet: retention itself runs on that alarm (see
+  // src/audit-log.ts), and a deployment that appends nothing after a
+  // release still gets it.
   scheduled: async (controller, env) => {
     const jobs =
       controller.cron === quarterHourCron
-        ? [refreshSignalsIfDue(env), indexApps(env)]
+        ? [
+            refreshSignalsIfDue(env),
+            indexApps(env),
+            auditLog(env).armRetention(),
+          ]
         : [
             drainAuditOutboxes(env),
             retryDisconnects(env),

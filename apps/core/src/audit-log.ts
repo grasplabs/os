@@ -156,10 +156,12 @@ export const archiveRetentionDays = (
 // it. Archiving and purging run only while the `audit_retention` feature
 // is on (not `audit`, which gates reading the log).
 //
-// The log runs retention itself, on its alarm (`AuditLog.alarm`), which it
-// arms when it appends an event while none is set, and re-arms on every
-// pass: for when the next event or archived stretch passes its retention,
-// and never more than a day away.
+// The log runs retention itself, daily, on its alarm (`AuditLog.alarm`),
+// which it arms when it appends an event while none is set (and core's
+// 15-minute cron trigger arms it too, for a deployment that appends
+// nothing). Daily, not at each event's exact deadline: that would archive
+// a stretch per event, and each `audit.archived` event would bring an
+// alarm of its own. An event is archived at most a day past retention.
 
 /** Most stretches one retention pass archives, and purges. */
 const stretchesPerPass = 10;
@@ -230,16 +232,6 @@ export const retainAuditLog = async (
   }
   return true;
 };
-
-/** Longest the log's alarm waits between retention passes. */
-const retentionCheckMs = dayMs;
-
-/**
- * Soonest the log's alarm runs again after a pass that moved nothing:
- * whatever held it up (the feature off, a stretch that doesn't verify, R2
- * failing) is tried again an hour later, never in a loop.
- */
-const retentionRetryMs = 60 * 60 * 1000;
 
 /**
  * A receipt time held this far behind the head's is logged: the log holds
@@ -464,6 +456,9 @@ const entryColumns =
 export class AuditLog extends DurableObject<Env> {
   readonly #db = drizzle(this.ctx.storage);
 
+  /** Whether this instance found the retention alarm set, or set it. */
+  #armed = false;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     migrateOnWake(ctx, migrations);
@@ -481,27 +476,33 @@ export class AuditLog extends DurableObject<Env> {
   }
 
   /**
-   * A retention pass ({@link retainAuditLog}), then the alarm re-armed for
-   * the next. Alarms run at least once, so a pass may run again: that is
-   * safe. The alarm is re-armed a day out before the pass starts, as a
-   * recovery alarm: a pass cut short (the object evicted, a limit hit)
-   * still runs again. A pass that throws is logged, and tried again an
-   * hour later.
+   * Arms the retention alarm if none is set (see `#armRetentionIfUnset`):
+   * core's 15-minute cron trigger calls it, so a deployment that appends
+   * nothing after a release still starts retention.
+   */
+  async armRetention(): Promise<void> {
+    await this.#armRetentionIfUnset();
+  }
+
+  /**
+   * A retention pass ({@link retainAuditLog}). The next alarm is set a day
+   * out first, which also makes it the recovery alarm: a pass cut short
+   * (the object evicted, a limit hit) or one that throws (logged) runs
+   * again a day later. A pass that moved something may have stopped at its
+   * cap, so the next one follows at once, until a pass moves nothing.
+   * Alarms run at least once, so a pass may run again: that is safe.
    */
   override async alarm(): Promise<void> {
-    await this.ctx.storage.setAlarm(Date.now() + retentionCheckMs);
+    await this.ctx.storage.setAlarm(Date.now() + dayMs);
     let moved = false;
     try {
       moved = await retainAuditLog(this, this.env);
     } catch (error) {
       log.error("audit.retention_failed", errorFields(error));
     }
-    // After a pass that moved nothing, a deadline it couldn't meet waits an
-    // hour, so it never runs in a loop; after one that did, a deadline
-    // already past runs it again at once, working off a backlog.
-    await this.#armRetention(
-      moved ? Date.now() : Date.now() + retentionRetryMs
-    );
+    if (moved) {
+      await this.ctx.storage.setAlarm(Date.now());
+    }
   }
 
   /**
@@ -1136,51 +1137,24 @@ export class AuditLog extends DurableObject<Env> {
   }
 
   /**
-   * Arms the retention alarm while none is set: when the log first appends
-   * an event, in a new deployment or one from before the alarm. Only the
-   * alarm itself re-arms it after that. A failure is logged, not thrown, so
-   * it never fails an append that went in; the next append tries again.
+   * Arms the retention alarm, for now, while none is set: in a new
+   * deployment, or one from before the alarm. Only the alarm itself re-arms
+   * it after that, so an object checks once while it's awake. A failure is
+   * logged, not thrown, so it never fails an append that went in; the next
+   * call tries again.
    */
   async #armRetentionIfUnset(): Promise<void> {
+    if (this.#armed) {
+      return;
+    }
     try {
       if ((await this.ctx.storage.getAlarm()) === null) {
-        await this.#armRetention(Date.now());
+        await this.ctx.storage.setAlarm(Date.now());
       }
+      this.#armed = true;
     } catch (error) {
       log.error("audit.retention_arm_failed", errorFields(error));
     }
-  }
-
-  /**
-   * Sets the alarm for the next retention pass: the earliest of a day from
-   * now, when the oldest event the log holds passes retention, and when the
-   * oldest archived stretch not purged passes archive retention; but not
-   * before `soonest`.
-   */
-  async #armRetention(soonest: number): Promise<void> {
-    const now = Date.now();
-    // The first moment something received at `receivedAt` is past `days`:
-    // archive and purge take only what was received before their cutoff.
-    const past = (receivedAt: string, days: number): number =>
-      Date.parse(receivedAt) + days * dayMs + 1;
-    const deadlines = [now + retentionCheckMs];
-    const retention = auditRetentionDays(this.env);
-    const [oldest] = this.#page(0, 1);
-    if (retention !== undefined && oldest !== undefined) {
-      deadlines.push(past(oldest.receivedAt, retention));
-    }
-    const archiveRetention = archiveRetentionDays(this.env);
-    const unpurged = this.#db
-      .select({ lastReceivedAt: archives.lastReceivedAt })
-      .from(archives)
-      .where(isNull(archives.purgedAt))
-      .orderBy(asc(archives.firstSeq))
-      .limit(1)
-      .get();
-    if (archiveRetention !== undefined && unpurged !== undefined) {
-      deadlines.push(past(unpurged.lastReceivedAt, archiveRetention));
-    }
-    await this.ctx.storage.setAlarm(Math.max(Math.min(...deadlines), soonest));
   }
 
   /** The last archived position and its hash, if anything is archived. */

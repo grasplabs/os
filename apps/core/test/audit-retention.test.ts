@@ -1,12 +1,17 @@
 import { auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
-import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import {
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import type { AuditLog } from "../src/audit-log.ts";
 import { auditLog, retainAuditLog } from "../src/audit-log.ts";
 import { allEvents, exportReader, verifyAll } from "./audit-events.ts";
+import { runQuarterHourCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { outcome, signedInApi, signedInWithRole, unique } from "./sign-in.ts";
 
@@ -18,7 +23,6 @@ import { outcome, signedInApi, signedInWithRole, unique } from "./sign-in.ts";
 const idp = mockIdp();
 
 const dayMs = 24 * 60 * 60 * 1000;
-const hourMs = 60 * 60 * 1000;
 
 type Log = DurableObjectStub<AuditLog>;
 
@@ -100,6 +104,15 @@ const alarmAfter = async (
 };
 
 /**
+ * Runs `log`'s alarm now, on the real clock: the one an append or the cron
+ * trigger armed for now, so it can't fire later, while a test has moved
+ * the clock.
+ */
+const settled = async (log: Log): Promise<void> => {
+  await runDurableObjectAlarm(log);
+};
+
+/**
  * Runs a retention pass over the deployment's log `days` after it
  * received `event`, with `changes` to the deployment's env: what the
  * log's alarm runs, under other config.
@@ -110,6 +123,8 @@ const passAfter = async (
   changes: Partial<Env>
 ): Promise<void> => {
   const log = auditLog(env);
+  // Not the alarm the event's append armed, under the moved clock.
+  await settled(log);
   await later(await receivedAtOf(event), days, async () => {
     await runInDurableObject(
       log,
@@ -239,47 +254,60 @@ describe("audit log retention", () => {
     });
   });
 
-  it("arms its alarm on its first event, and re-arms it for when the next event passes retention", async () => {
+  it("arms its alarm on its first event, and archives once the event passes retention", async () => {
     const log = newLog();
     await expect(alarmOf(log)).resolves.toBeNull();
     const event = await logged(log);
-    const appended = Date.now();
-    const receivedAt = await receivedAtOf(event, log);
-    // A day from when it appended: at most a day away, whatever retention is.
-    const armed = await alarmOf(log);
-    expect(armed).toBeGreaterThanOrEqual(receivedAt + dayMs);
-    expect(armed).toBeLessThanOrEqual(appended + dayMs);
+    // Armed for now, and then, once that pass has run, for a day later: set
+    // either way, apart from the moment the pass starts.
+    await expect.poll(async () => await alarmOf(log)).not.toBeNull();
+    await settled(log);
 
-    // Half a day before the event passes the default of 180 days: the
-    // alarm is then set for the moment it does, and archives it then.
-    await alarmAfter(receivedAt, 179.5, log);
-    const due = receivedAt + 180 * dayMs + 1;
-    await expect(alarmOf(log)).resolves.toBe(due);
-    await alarmAfter(due, 0, log);
+    const receivedAt = await receivedAtOf(event, log);
+    await alarmAfter(receivedAt, 181, log);
     await expect(held(event, log)).resolves.toBeFalsy();
   });
 
   it("starts retention at once in a log that holds events from before its alarm", async () => {
     const log = newLog();
     const old = await logged(log);
+    await settled(log);
     const receivedAt = await receivedAtOf(old, log);
-    // As a log from a release before the alarm: events, and no alarm.
+    // As a log from a release before the alarm: events, no alarm, and an
+    // object started afresh by the release.
     await runInDurableObject(log, async (_instance, state) => {
       await state.storage.deleteAlarm();
     });
+    await evictDurableObject(log);
 
     await later(receivedAt, 181, async () => {
       await logged(log);
     });
-    // The old event is past retention: due at once.
+    // Due at once.
     await expect(alarmOf(log)).resolves.toBe(receivedAt + 181 * dayMs);
     await alarmAfter(receivedAt, 181, log);
     await expect(held(old, log)).resolves.toBeFalsy();
   });
 
+  it("arms the deployment's log from the 15-minute cron trigger, also when nothing is appended", async () => {
+    const log = auditLog(env);
+    await logged();
+    await settled(log);
+    // As after a release: no alarm, an object started afresh, no appends.
+    await runInDurableObject(log, async (_instance, state) => {
+      await state.storage.deleteAlarm();
+    });
+    await evictDurableObject(log);
+
+    await runQuarterHourCron();
+    await expect.poll(async () => await alarmOf(log)).not.toBeNull();
+    await settled(log);
+  });
+
   it("works off a backlog larger than one pass takes, a pass after another", async () => {
     const log = newLog();
     const first = await logged(log);
+    await settled(log);
     const receivedAt = await receivedAtOf(first, log);
     // More than ten full stretches of 500, what one pass archives at most.
     for (let batch = 0; batch < 10; batch += 1) {
@@ -300,29 +328,21 @@ describe("audit log retention", () => {
 
     await alarmAfter(receivedAt, 181, log);
     await expect(held(last, log)).resolves.toBeTruthy();
-    // The rest is still past retention: the next pass is due at once.
+    // It moved stretches, and may have stopped at its cap: the next pass
+    // is due at once.
     await expect(alarmOf(log)).resolves.toBe(receivedAt + 181 * dayMs);
     await alarmAfter(receivedAt, 181, log);
     await expect(held(last, log)).resolves.toBeFalsy();
-  });
-
-  it("tries again an hour later, not at once, when a pass could archive nothing that was due", async () => {
-    const log = newLog();
-    const event = await logged(log);
-    const receivedAt = await receivedAtOf(event, log);
-    // A broken chain, which retention never archives.
-    await runInDurableObject(log, (_instance, state) => {
-      state.storage.sql.exec("UPDATE events SET hash = 'broken'");
-    });
-
+    // That pass moved the rest; the one after it moves nothing, and waits
+    // a day.
     await alarmAfter(receivedAt, 181, log);
-    await expect(held(event, log)).resolves.toBeTruthy();
-    await expect(alarmOf(log)).resolves.toBe(receivedAt + 181 * dayMs + hourMs);
+    await expect(alarmOf(log)).resolves.toBe(receivedAt + 182 * dayMs);
   });
 
-  it("tries a pass that fails again an hour later", async () => {
+  it("keeps its daily alarm through a pass that fails, and archives on the next", async () => {
     const log = newLog();
     const event = await logged(log);
+    await settled(log);
     const receivedAt = await receivedAtOf(event, log);
 
     // The archive bucket is down.
@@ -335,10 +355,10 @@ describe("audit log retention", () => {
       down.mockRestore();
     }
     await expect(held(event, log)).resolves.toBeTruthy();
-    await expect(alarmOf(log)).resolves.toBe(receivedAt + 181 * dayMs + hourMs);
+    await expect(alarmOf(log)).resolves.toBe(receivedAt + 182 * dayMs);
 
-    // Up again: the next pass archives it.
-    await alarmAfter(receivedAt, 181 + 1 / 24, log);
+    // Up again: the next day's pass archives it.
+    await alarmAfter(receivedAt, 182, log);
     await expect(held(event, log)).resolves.toBeFalsy();
   });
 });
