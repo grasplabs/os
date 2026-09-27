@@ -954,17 +954,30 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     const afterLoad = await liveStatus(leftOver.id);
     await builder.api.workflows.cancel(leftOver.id);
 
-    // A cancel that raced a start that failed: the row says cancelled, and
-    // the engine has no instance to terminate. Cancelling again is done.
-    const neverStarted = crypto.randomUUID();
-    await env.DB.prepare(
-      `INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at)
-       SELECT ?, app_id, workflow_id, version, started_by, 'cancelled', created_at
-       FROM workflow_runs WHERE id = ?`
-    )
-      .bind(neverStarted, leftOver.id)
-      .run();
-    const raced = await builder.api.workflows.cancel(neverStarted);
+    // A cancel that raced a start that failed: the engine has no instance
+    // to terminate. A cancel of the row still running marks and audits it,
+    // and one of the row already cancelled is done.
+    const withoutInstance = async (
+      status: "running" | "cancelled"
+    ): Promise<string> => {
+      const id = crypto.randomUUID();
+      await env.DB.prepare(
+        `INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at)
+         SELECT ?, app_id, workflow_id, version, started_by, ?, created_at
+         FROM workflow_runs WHERE id = ?`
+      )
+        .bind(id, status, leftOver.id)
+        .run();
+      return id;
+    };
+    const neverRunning = await withoutInstance("running");
+    const neverCancelled = await withoutInstance("cancelled");
+    const raced = await Promise.all(
+      [neverRunning, neverCancelled].map(async (id) => {
+        const { status } = await builder.api.workflows.cancel(id);
+        return status;
+      })
+    );
 
     const events = await allEvents();
     expect({
@@ -979,14 +992,19 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       ).length,
       afterLoad,
       after: await hitsOf(app, builder.userId, "after"),
-      raced: raced.status,
+      raced,
+      racedAudited: events.filter(
+        ({ action, target }) =>
+          action === "workflow.run.cancelled" && target?.id === neverRunning
+      ).length,
     }).toStrictEqual({
       cancelled: ["cancelled", "cancelled"],
       live: ["terminated", "terminated"],
       audited: 2,
       afterLoad: "errored",
       after: 0,
-      raced: "cancelled",
+      raced: ["cancelled", "cancelled"],
+      racedAudited: 1,
     });
   });
 
