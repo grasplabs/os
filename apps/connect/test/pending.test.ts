@@ -260,8 +260,15 @@ describe("a side effect from chat", () => {
       waiting: await waitingFor(anna),
       again: await outcome(confirm(anna, held)),
     }).toStrictEqual({
-      confirmed: { output: '{"sent":"ben@acme.test"}', provenance: [] },
-      repeat: { output: '{"sent":"ben@acme.test"}', provenance: [] },
+      // A Composio tool names nothing it read: known by toolkit and tool.
+      confirmed: {
+        output: '{"sent":"ben@acme.test"}',
+        provenance: ["mail/mail.send"],
+      },
+      repeat: {
+        output: '{"sent":"ben@acme.test"}',
+        provenance: ["mail/mail.send"],
+      },
       ran: [{ tool: "mail.send", input: call.input }],
       waiting: [],
       again: "connect.pending_not_found",

@@ -1,7 +1,7 @@
 import { auditRejectReasons } from "@grasp-os/shared/audit";
 /**
- * Connect D1 schema: the connection registry, OAuth flows under way, the
- * connections' sealed tokens, the stored answers of side effects, the side
+ * Connect D1 schema: the connection registry, OAuth and Composio flows under
+ * way, the connections' sealed tokens, the stored answers of side effects, the side
  * effects held for their person and the audit outbox.
  */
 import { sql } from "drizzle-orm";
@@ -49,6 +49,14 @@ export const connections = sqliteTable(
     accountId: text("account_id"),
     accountName: text("account_name"),
     connectedBy: text("connected_by"),
+    /**
+     * For a Composio connection: the MCP server Composio made for it, which
+     * disconnecting deletes, and the tools the admin allowed, as a JSON
+     * array of names. A call of any other tool is refused, and a Composio
+     * connection without them takes no calls at all.
+     */
+    composioServerId: text("composio_server_id"),
+    tools: text(),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },
@@ -204,6 +212,34 @@ export const oauthFlows = sqliteTable(
     index("oauth_flows_expires_idx").on(table.expiresAt),
     // Offboarding spends a removed person's open flows.
     index("oauth_flows_user_id_idx").on(table.userId),
+  ]
+);
+
+/**
+ * Composio flows under way: one row from the moment an admin consents to
+ * connecting a Composio toolkit until Composio sends them back, at most ten
+ * minutes. Keyed by the SHA-256 of the flow's `state`, like an OAuth flow,
+ * and taken (deleted) the first time its state comes back. The auth config
+ * and the connected account are the ones connect made at Composio for this
+ * flow: finishing checks the account is that one, active, for that
+ * toolkit. `tools` are the tools the admin allowed, as a JSON array.
+ */
+export const composioFlows = sqliteTable(
+  "composio_flows",
+  {
+    stateHash: text("state_hash").primaryKey(),
+    /** The admin who consented: only they can finish it. */
+    userId: text("user_id").notNull(),
+    toolkit: text().notNull(),
+    authConfigId: text("auth_config_id").notNull(),
+    connectedAccountId: text("connected_account_id").notNull(),
+    tools: text().notNull(),
+    returnTo: text("return_to").notNull(),
+    expiresAt: timestamp("expires_at").notNull(),
+  },
+  (table) => [
+    index("composio_flows_expires_idx").on(table.expiresAt),
+    index("composio_flows_user_id_idx").on(table.userId),
   ]
 );
 

@@ -45,7 +45,7 @@ const toolkits: FakeToolkit[] = [
   },
 ];
 
-const composio = fakeComposioApi(toolkits, {
+const { state: composio } = fakeComposioApi(toolkits, {
   // Items connect can't read, among the rest.
   extra: [
     { slug: "Not A Slug", name: "Broken" },

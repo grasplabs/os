@@ -41,6 +41,8 @@ const typeRules: readonly {
   { action: "connection.call", type: "read" },
   { action: "connection.connect", type: "config" },
   { action: "connection.disconnect", type: "config" },
+  // An admin consenting to Composio holding a connection's tokens.
+  { action: "connection.consent", type: "config" },
   { action: "knowledge.search", type: "read" },
   { action: "knowledge.read", type: "read" },
   { action: "knowledge.collection", type: "config" },

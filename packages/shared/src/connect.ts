@@ -126,6 +126,11 @@ export const finishConnectionSchema = z.strictObject({
   code: z.string().min(1).max(4096).optional(),
   /** The provider's error code, when it sent one instead of a code. */
   error: z.string().min(1).max(256).optional(),
+  /**
+   * Whether core's `composio` flag is on: a Composio flow finishes only
+   * while it is. Left out by a core from before Composio, which starts none.
+   */
+  composio: z.boolean().optional(),
 });
 export type FinishConnection = z.input<typeof finishConnectionSchema>;
 
@@ -160,6 +165,9 @@ export type DisconnectPersonal = z.input<typeof disconnectPersonalSchema>;
 /** One connection, as people see it: never its tokens. */
 export interface ConnectionSummary {
   id: string;
+  /** Who holds its tokens and carries out its actions: connect, or Composio. */
+  source: CatalogSource;
+  /** A native provider (`microsoft`), or a Composio toolkit's slug. */
   provider: string;
   scope: ConnectionScope;
   status: "active" | "needs_reauth" | "disconnected";
@@ -212,6 +220,18 @@ export interface ConnectionsApi {
   catalog: () => Promise<Catalog>;
   /** The tools of one catalog entry, as `catalog` lists it. */
   catalogTools: (source: CatalogSource, id: string) => Promise<CatalogTool[]>;
+  /**
+   * Starts connecting a Composio toolkit, for an admin who consented: the
+   * Composio URL to send their browser to. Composio sends it back to the
+   * same callback as a provider's OAuth flow.
+   */
+  connectToolkit: (request: {
+    toolkit: string;
+    tools: string[];
+    /** Exactly {@link composioConsentText}, as the admin was shown it. */
+    consent: string;
+    returnTo?: string;
+  }) => Promise<{ url: string }>;
 }
 
 // The catalog: everything an admin can connect, in one list. Native
@@ -258,6 +278,51 @@ export interface CatalogTool {
   name: string;
   description: string | null;
 }
+
+/**
+ * What an admin consents to before connecting a Composio toolkit: shown to
+ * them word for word, sent back with the request, and recorded (as its
+ * SHA-256) with who consented, in the audit log. Changing it changes what
+ * the next consent records.
+ */
+export const composioConsentText =
+  "Composio, a third party, will hold this connection's tokens in its own cloud, outside this deployment, and Grasp won't see them. Grasp calls only the tools you allow, through Composio, which acts for your organization with those tokens. Disconnecting deletes the account at Composio.";
+
+/** Most tools an admin may allow on one Composio connection. */
+export const composioToolsMax = 1000;
+
+/**
+ * The tools an admin allows on a Composio connection: names a call can
+ * name as its action, once each.
+ */
+export const composioToolsSchema = z
+  .array(permissionActionSchema)
+  .min(1)
+  .max(composioToolsMax)
+  .refine((tools) => new Set(tools).size === tools.length, {
+    message: "Each tool once",
+  });
+
+/**
+ * Starts connecting a Composio toolkit as a shared connection, for an
+ * admin who consented to Composio holding its tokens.
+ */
+export const startToolkitConnectionSchema = z.strictObject({
+  person: connectionPersonSchema,
+  /** Whether core's `composio` flag is on. */
+  composio: z.boolean(),
+  toolkit: composioToolkitSchema,
+  tools: composioToolsSchema,
+  /** Exactly {@link composioConsentText}, as the admin was shown it. */
+  consent: z.string().refine((text) => text === composioConsentText),
+  /** The deployment's origin, from its config: Composio returns there. */
+  origin: z.url(),
+  /** A path on the deployment's origin; core checks it. */
+  returnTo: z.string().startsWith("/").max(returnPathMaxLength),
+});
+export type StartToolkitConnection = z.input<
+  typeof startToolkitConnectionSchema
+>;
 
 /** Lists the catalog, with Composio's toolkits only when `composio`. */
 export const catalogRequestSchema = z.strictObject({ composio: z.boolean() });
@@ -419,6 +484,15 @@ export interface ConnectApi {
    * leaves the native entries listed.
    */
   catalog: (request: CatalogRequest) => Promise<Catalog>;
+  /**
+   * Starts connecting a Composio toolkit for an admin who consented, and
+   * records their consent: the Composio URL to send their browser to.
+   * `finishConnection` finishes it, as it does an OAuth flow, once
+   * Composio sends the browser back.
+   */
+  startToolkitConnection: (
+    request: StartToolkitConnection
+  ) => Promise<{ url: string }>;
   /**
    * One catalog entry's tools, or `connect.catalog_entry_not_found` for
    * anything `catalog` doesn't list. Composio's toolkits are listed only if

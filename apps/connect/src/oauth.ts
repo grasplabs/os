@@ -1,5 +1,4 @@
-import { actorOf } from "@grasp-os/shared/audit";
-import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
+import type { AuditDetailValue } from "@grasp-os/shared/audit";
 import {
   connectErrors,
   connectionCallbackPath,
@@ -26,6 +25,18 @@ import { drizzle } from "drizzle-orm/d1";
 
 import { recordEventIf, recordEvents } from "./audit.ts";
 import {
+  abandonToolkitFlow,
+  dropToolkitFlows,
+  revokeAtComposio,
+  takeToolkitFlow,
+} from "./composio-connections.ts";
+import {
+  auditRefusal,
+  connectionEvent,
+  refuseStaff,
+} from "./connection-audit.ts";
+import {
+  composioFlows,
   connections,
   connectionTokens,
   oauthFlows,
@@ -59,60 +70,6 @@ import type { Vault } from "./vault.ts";
 // bits, single-use and valid for ten minutes; only its hash is stored. The
 // PKCE verifier never leaves connect, so the code alone, which core sees on
 // the callback, is useless (CN3).
-
-/**
- * One connect or disconnect, for the audit log: IDs, never tokens. Its
- * actor is the person core named, or core itself (`null`).
- */
-const event = (
-  person: ConnectionPerson | null,
-  action: "connection.connect" | "connection.disconnect",
-  connectionId: string | undefined,
-  detail: Record<string, AuditDetailValue>
-): AuditEntry => ({
-  actor: person === null ? { type: "system" } : actorOf(person),
-  action,
-  target:
-    connectionId === undefined
-      ? undefined
-      : { type: "connection", id: connectionId },
-  detail,
-});
-
-/** Records a refused or failed attempt; if that fails too, it is logged. */
-const auditRefusal = async (
-  env: Env,
-  person: ConnectionPerson,
-  action: "connection.connect" | "connection.disconnect",
-  detail: Record<string, AuditDetailValue>,
-  connectionId?: string
-): Promise<void> => {
-  try {
-    await recordEvents(env, [event(person, action, connectionId, detail)]);
-  } catch (error) {
-    log.error("audit.record_failed", errorFields(error));
-  }
-};
-
-/**
- * Grasp staff, in a staff window, can't connect anything: accounts belong
- * to the client's people and admins.
- */
-const refuseStaff = async (
-  env: Env,
-  person: ConnectionPerson,
-  detail: Record<string, AuditDetailValue>
-): Promise<void> => {
-  if (!person.staff) {
-    return;
-  }
-  await auditRefusal(env, person, "connection.connect", {
-    ...detail,
-    outcome: "refused",
-    reason: "connection.staff_not_allowed",
-  });
-  throw connectionErrors.create("connection.staff_not_allowed");
-};
 
 /**
  * Whether `account` is the person's own: the account they sign in with at
@@ -272,8 +229,16 @@ const takeFlow = async (env: Env, state: string) => {
  */
 export const abandonFlow = async (env: Env, state: unknown): Promise<void> => {
   const parsed = finishConnectionSchema.shape.state.safeParse(state);
-  if (parsed.success) {
-    await takeFlow(env, parsed.data);
+  if (!parsed.success) {
+    return;
+  }
+  const flow = await takeFlow(env, parsed.data);
+  if (flow !== undefined) {
+    return;
+  }
+  const toolkitFlow = await takeToolkitFlow(env, await sha256Hex(parsed.data));
+  if (toolkitFlow !== undefined) {
+    await abandonToolkitFlow(env, toolkitFlow);
   }
 };
 
@@ -338,7 +303,7 @@ const storeConnection = async (
   await recordEvents(
     env,
     [
-      event(person, "connection.connect", connectionId, {
+      connectionEvent(person, "connection.connect", connectionId, {
         provider: provider.id,
         scope: flow.scope,
         outcome: "ok",
@@ -500,6 +465,7 @@ export const listConnections = async (
     .orderBy(desc(connections.createdAt));
   return rows.map((row) => ({
     id: row.id,
+    source: row.serverKind,
     provider: row.provider,
     scope: row.scope,
     status: row.status,
@@ -519,6 +485,9 @@ const revoke = async (
   env: Env,
   connection: typeof connections.$inferSelect
 ): Promise<boolean> => {
+  if (connection.serverKind === "composio") {
+    return await revokeAtComposio(env, connection);
+  }
   const parsed = oauthProviderSchema.safeParse(connection.provider);
   if (!parsed.success) {
     return false;
@@ -559,7 +528,7 @@ const stop = async (
   const stillConnected = sql`${connections.id} = ${connection.id} AND ${connections.status} <> 'disconnected'`;
   const stopped = await recordEventIf(
     env,
-    event(person, "connection.disconnect", connection.id, {
+    connectionEvent(person, "connection.disconnect", connection.id, {
       ...detail,
       provider: connection.provider,
       scope: connection.scope,
@@ -678,6 +647,7 @@ export const disconnectPersonal = async (
   // and a full list of owners is that many on its own.
   const owners = sql`(SELECT value FROM json_each(${JSON.stringify(ownerUserIds)}))`;
   await db.delete(oauthFlows).where(sql`${oauthFlows.userId} IN ${owners}`);
+  await dropToolkitFlows(env, sql`${composioFlows.userId} IN ${owners}`);
   const owned = await db
     .select()
     .from(connections)
@@ -755,7 +725,7 @@ export const resealFlows = async (env: Env): Promise<void> => {
   }
 };
 
-/** Deletes flows nobody finished in time. The cron trigger calls it. */
+/** Deletes OAuth flows nobody finished in time. The cron trigger calls it. */
 export const purgeExpiredFlows = async (env: Env): Promise<void> => {
   await drizzle(env.DB)
     .delete(oauthFlows)

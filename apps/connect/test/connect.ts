@@ -32,7 +32,28 @@ type ConnectionRow = typeof connections.$inferInsert;
 export const serverUrl =
   "https://backend.composio.dev/v3/mcp/server-mail?user_id=grasp";
 
-/** A shared connection to `serverUrl`, unless `fields` say otherwise. */
+/**
+ * The tools an admin allowed on the test connections: every tool the
+ * tests' servers have, and nothing more.
+ */
+export const allowedTools = [
+  "mail.archive",
+  "mail.bounce",
+  "mail.draft",
+  "mail.export",
+  "mail.forward",
+  "mail.list",
+  "mail.open",
+  "mail.photo",
+  "mail.read",
+  "mail.search",
+  "mail.send",
+];
+
+/**
+ * A shared connection to `serverUrl` allowing `allowedTools`, unless
+ * `fields` say otherwise.
+ */
 export const addConnection = async (
   fields: Partial<ConnectionRow> = {}
 ): Promise<string> => {
@@ -46,6 +67,7 @@ export const addConnection = async (
       status: "active",
       serverKind: "composio",
       server: serverUrl,
+      tools: JSON.stringify(allowedTools),
       createdAt: now,
       updatedAt: now,
       ...fields,

@@ -62,3 +62,19 @@ export const checkResourceScope = (
  */
 export const didNothing = (kind: ServerKind, result: McpToolResult): boolean =>
   kind === "native" && result.notPerformed;
+
+/**
+ * The result as connect passes it on, with the resources it read. A
+ * Composio server's tools name none (`provenanceMetaKey` is ours), so
+ * a call there that names none is known by its toolkit and tool, such as
+ * `hubspot/HUBSPOT_LIST_CONTACTS`: what its output came from, if not
+ * which record.
+ */
+export const withProvenance = (
+  connection: Pick<Connection, "serverKind" | "provider">,
+  tool: string,
+  result: McpToolResult
+): McpToolResult =>
+  connection.serverKind === "native" || result.provenance.length > 0
+    ? result
+    : { ...result, provenance: [`${connection.provider}/${tool}`] };

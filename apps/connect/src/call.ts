@@ -6,7 +6,11 @@ import type { Json } from "@grasp-os/shared/json";
 import type { BatchItem } from "drizzle-orm/batch";
 import { z } from "zod";
 
-import { composioServer, usableConnection } from "./connections.ts";
+import {
+  composioServer,
+  isAllowedTool,
+  usableConnection,
+} from "./connections.ts";
 import type { Connection } from "./connections.ts";
 import { nativeAction, nativeServer } from "./connectors.ts";
 import { hashCall, idempotencyStore } from "./idempotency.ts";
@@ -16,7 +20,12 @@ import { McpError } from "./mcp.ts";
 import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
 import { hold } from "./pending.ts";
 import type { HeldAction } from "./pending.ts";
-import { checkResourceScope, didNothing, hasSideEffect } from "./policy.ts";
+import {
+  checkResourceScope,
+  didNothing,
+  hasSideEffect,
+  withProvenance,
+} from "./policy.ts";
 
 const retryAfterSchema = z.object({
   error: z.object({
@@ -158,7 +167,8 @@ const toolFor = async (server: McpServer, action: string): Promise<McpTool> => {
  * The tool a call names, and how to reach its server. A native connector's
  * tool comes from its manifest, and its server (an isolate, with the
  * connection's token for its egress) is only opened once the call passed
- * every check. A Composio server is asked for its tools.
+ * every check. A Composio server is asked for its tools, and only for one
+ * its admin allowed.
  */
 const actionFor = async (
   env: Env,
@@ -173,7 +183,11 @@ const actionFor = async (
       open: async () => await nativeServer(env, connection, native, claims),
     };
   }
-  const server = composioServer(connection);
+  // Only a tool the admin allowed, asked for before anything goes out.
+  if (!isAllowedTool(connection, action)) {
+    throw connectErrors.create("connect.action_not_found");
+  }
+  const server = composioServer(env, connection);
   const tool = await toolFor(server, action);
   return { tool, open: async () => await Promise.resolve(server) };
 };
@@ -299,7 +313,11 @@ export const carryOut = async (
   if (!sideEffect) {
     let read: McpToolResult;
     try {
-      read = await server.call(tool.name, input);
+      read = withProvenance(
+        connection,
+        tool.name,
+        await server.call(tool.name, input)
+      );
     } catch (error) {
       throw error instanceof McpError
         ? connectErrors.create("connect.server_unavailable")
@@ -320,7 +338,11 @@ export const carryOut = async (
   }
   let done: McpToolResult;
   try {
-    done = await server.call(tool.name, input);
+    done = withProvenance(
+      connection,
+      tool.name,
+      await server.call(tool.name, input)
+    );
   } catch (error) {
     // Only a server that turned the call away frees the key. A tool that
     // reports an error may have acted first, so its answer is kept below.

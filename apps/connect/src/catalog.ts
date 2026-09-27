@@ -318,7 +318,7 @@ const toolsOf = async (
  * the catalog or the tools (any failure, a 400 or 404 for a toolkit it
  * listed too).
  */
-const composioTools = async (
+export const composioTools = async (
   key: string,
   toolkit: string
 ): Promise<CatalogTool[]> => {
