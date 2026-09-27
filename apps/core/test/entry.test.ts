@@ -100,6 +100,43 @@ describe("router secret", () => {
     ]);
   });
 
+  it("accepts the previous secret too while rotating, and only then", async () => {
+    const previous = "previous-router-secret";
+    const rotating = { ...env, ROUTER_SECRET_PREVIOUS: previous };
+    const presented = [env.ROUTER_SECRET, previous, `${previous}x`, ""];
+
+    const whileRotating = await Promise.all(
+      presented.map(
+        async (secret) =>
+          await worker.fetch(
+            presenting("https://core/health", secret),
+            rotating,
+            createExecutionContext()
+          )
+      )
+    );
+    const afterwards = await worker.fetch(
+      presenting("https://core/health", previous),
+      env,
+      createExecutionContext()
+    );
+
+    expect(whileRotating.map((response) => response.status)).toStrictEqual([
+      200, 200, 403, 403,
+    ]);
+    expect(afterwards.status).toBe(403);
+  });
+
+  it("refuses everything with only a previous secret configured", async () => {
+    const previous = "previous-router-secret";
+    const response = await worker.fetch(
+      presenting("https://core/health", previous),
+      { ...env, ROUTER_SECRET: "", ROUTER_SECRET_PREVIOUS: previous },
+      createExecutionContext()
+    );
+    expect(response.status).toBe(403);
+  });
+
   it("skips the check in local development, for this machine only", async () => {
     const local = { ...env, ROUTER_SECRET: "", DEV_SKIP_ROUTER_SECRET: "true" };
     const fromHere = await worker.fetch(

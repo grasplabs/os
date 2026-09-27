@@ -155,6 +155,7 @@ const platformBindingNames: ReadonlySet<string> = new Set([
   "MODEL_GATEWAY",
   "PLATFORM_CHANGE",
   "ROUTER_SECRET",
+  "ROUTER_SECRET_PREVIOUS",
   "SIGN_IN",
   "TOKEN_ENCRYPTION_KEY",
   "TOKEN_ENCRYPTION_KEY_PREVIOUS",

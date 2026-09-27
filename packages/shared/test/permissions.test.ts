@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { permissionRequestSchema } from "../src/permissions.ts";
+import {
+  bindingNameSchema,
+  permissionRequestSchema,
+} from "../src/permissions.ts";
 
 const request = {
   subject: { type: "app", appId: "app-invoices" },
@@ -69,5 +72,23 @@ describe("permission requests", () => {
     );
     expect(isValid({ actions })).toBeFalsy();
     expect(isValid({ actions: actions.slice(0, 8) })).toBeTruthy();
+  });
+});
+
+// Core's and connect's env tests check only the names their test env
+// carries. The optional secrets and switches a deployment may leave unset
+// are checked here by name, so none can drop off the reserved list unseen.
+describe("reserved binding names", () => {
+  it.each([
+    "ROUTER_SECRET_PREVIOUS",
+    "DEV_SKIP_ROUTER_SECRET",
+    "CAPABILITY_SIGNING_KEY_PREVIOUS",
+    "TOKEN_ENCRYPTION_KEY_PREVIOUS",
+    "AUDIT_RETENTION_DAYS",
+    "DOWNLOAD_HOSTS",
+    "ENTRA_CLIENT_SECRET",
+    "GOOGLE_CLIENT_SECRET",
+  ])("refuses %s, which only the platform may use", (name) => {
+    expect(bindingNameSchema.safeParse(name).success).toBeFalsy();
   });
 });
