@@ -39,8 +39,8 @@ export interface ComposioApiRequest {
 /**
  * How the API answers: `up`; `down` (a 503 to everything); `redirect` (a
  * 302 to another host); `garbled` (a 200 that isn't JSON); `huge` (a 200
- * streaming 5 MiB); `refusing` (a
- * 400, as to a toolkit it doesn't know).
+ * streaming a valid page of 6 MiB, `hugeAnswerBytes`); `refusing` (a 400,
+ * as to a toolkit it doesn't know).
  */
 export type ComposioHealth =
   | "up"
@@ -59,25 +59,52 @@ const failures: Partial<Record<ComposioHealth, () => Response>> = {
       headers: { location: "https://elsewhere.example/api" },
     }),
   garbled: () => new Response("<html>", { status: 200 }),
-  // Past connect's 4 MiB cap, in chunks, without a `content-length`.
-  huge: () => {
-    const chunk = new Uint8Array(1024 * 1024).fill(32);
-    let sent = 0;
-    return new Response(
-      new ReadableStream<Uint8Array>({
-        pull: (controller) => {
-          sent += 1;
-          if (sent > 5) {
-            controller.close();
-            return;
-          }
-          controller.enqueue(chunk);
-        },
-      })
-    );
-  },
   refusing: () =>
     Response.json({ error: { message: "Toolkit not found" } }, { status: 400 }),
+};
+
+const hugeHead = new TextEncoder().encode(
+  '{"items":[],"next_cursor":null,"pad":"'
+);
+const hugeTail = new TextEncoder().encode('"}');
+// Of `a` (0x61).
+const hugeChunk = new Uint8Array(64 * 1024).fill(0x61);
+const hugeChunks = 96;
+
+/**
+ * Bytes in the `huge` answer: an empty page of the list, valid JSON, that
+ * pads it past connect's 4 MiB cap to 6 MiB.
+ */
+export const hugeAnswerBytes =
+  hugeHead.byteLength + hugeChunks * hugeChunk.byteLength + hugeTail.byteLength;
+
+/**
+ * The `huge` answer, in chunks and without a `content-length`, sent only
+ * as fast as it is read: `sent` counts the bytes read so far.
+ */
+const hugeAnswer = (sent: { bytes: number }): Response => {
+  let next = 0;
+  return new Response(
+    new ReadableStream<Uint8Array>({
+      pull: (controller) => {
+        let chunk: Uint8Array | undefined = hugeChunk;
+        if (next === 0) {
+          chunk = hugeHead;
+        } else if (next === hugeChunks + 1) {
+          chunk = hugeTail;
+        } else if (next > hugeChunks + 1) {
+          chunk = undefined;
+        }
+        next += 1;
+        if (chunk === undefined) {
+          controller.close();
+          return;
+        }
+        sent.bytes += chunk.byteLength;
+        controller.enqueue(chunk);
+      },
+    })
+  );
 };
 
 /** Items per page: few, so a short list takes more than one. */
@@ -132,7 +159,9 @@ export const fakeComposioApi = (
     /** Every request connect sent to it, in order. */
     requests: ComposioApiRequest[];
     health: ComposioHealth;
-  } = { requests: [], health: "up" };
+    /** Bytes of the `huge` answer read so far. */
+    hugeSent: { bytes: number };
+  } = { requests: [], health: "up", hugeSent: { bytes: 0 } };
 
   const answer = (request: Request): Response => {
     const url = new URL(request.url);
@@ -148,6 +177,9 @@ export const fakeComposioApi = (
         { error: { message: "Invalid API key" } },
         { status: 401 }
       );
+    }
+    if (state.health === "huge") {
+      return hugeAnswer(state.hugeSent);
     }
     const failure = failures[state.health]?.();
     if (failure !== undefined) {
@@ -181,6 +213,7 @@ export const fakeComposioApi = (
     forgetComposioCatalog();
     state.requests = [];
     state.health = "up";
+    state.hugeSent = { bytes: 0 };
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const request = new Request(input, init);
       if (!request.url.startsWith(`${composioApiBase}/`)) {

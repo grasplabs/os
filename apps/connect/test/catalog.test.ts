@@ -3,7 +3,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { catalog } from "../src/catalog.ts";
-import { fakeComposioApi } from "./composio-api.ts";
+import { fakeComposioApi, hugeAnswerBytes } from "./composio-api.ts";
 import type { FakeToolkit } from "./composio-api.ts";
 import { outcome } from "./connect.ts";
 import { testComposioKey } from "./provider-config.ts";
@@ -152,8 +152,7 @@ describe("the catalog", () => {
   });
 
   it("still lists the native providers when Composio fails", async () => {
-    // `huge` streams past the size cap, without saying its length.
-    const failures = ["down", "redirect", "garbled", "huge"] as const;
+    const failures = ["down", "redirect", "garbled"] as const;
     const results = [];
     for (const failure of failures) {
       composio.health = failure;
@@ -163,6 +162,22 @@ describe("the catalog", () => {
     expect(
       results.map(({ composio: state, entries }) => [state, entries.length])
     ).toStrictEqual(failures.map(() => ["unavailable", 2]));
+  });
+
+  it("reads no more of an answer than its size cap, however valid it is", async () => {
+    composio.health = "huge";
+    const listed = await exports.default.catalog({ composio: true });
+    expect({
+      state: listed.composio,
+      entries: listed.entries.length,
+      readPastCap: composio.hugeSent.bytes > 5 * 1024 * 1024,
+      readAll: composio.hugeSent.bytes >= hugeAnswerBytes,
+    }).toStrictEqual({
+      state: "unavailable",
+      entries: 2,
+      readPastCap: false,
+      readAll: false,
+    });
   });
 
   it("never logs connect's Composio key", async () => {
