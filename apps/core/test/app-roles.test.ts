@@ -281,6 +281,13 @@ describe("App roles", () => {
     const { id: permission } = await owner.api.permissions.request(
       outlook(app)
     );
+    // An agent's permission names the App too, as a workflow's.
+    const { id: agents } = await admin.api.permissions.request({
+      subject: { type: "agent", agentId: `agent-${unique()}` },
+      object: { type: "workflow", appId: app, workflowId: "report" },
+      actions: ["start"],
+      binding: "REPORT",
+    });
     const { id: theirs } = await other.api.apps.create({ name: "Theirs" });
     const startsReport: PermissionRequest = {
       subject: { type: "app", appId: theirs },
@@ -292,7 +299,9 @@ describe("App roles", () => {
       const found = await person.api.permissions.list(
         subject === undefined ? undefined : { type: "app", appId: subject }
       );
-      return found.some(({ id }) => id === permission);
+      return [permission, agents].map((wanted) =>
+        found.some(({ id }) => id === wanted)
+      );
     };
 
     const before = {
@@ -315,12 +324,12 @@ describe("App roles", () => {
       },
     }).toStrictEqual({
       before: {
-        all: false,
-        ofApp: false,
-        admin: true,
+        all: [false, false],
+        ofApp: [false, false],
+        admin: [true, true],
         workflow: "app.not_found",
       },
-      after: { all: true, workflow: "ok" },
+      after: { all: [true, true], workflow: "ok" },
     });
   });
 

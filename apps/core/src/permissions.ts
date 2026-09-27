@@ -489,7 +489,8 @@ export const revokePermission = async (
 /**
  * Every permission, or those of one App or agent, oldest first. With
  * `openApps` (a condition on `apps`: the Apps the person has a role in, as
- * `appsListedFor` in apps.ts says), an App's only if it is one of them.
+ * `appsListedFor` in apps.ts says), one that names an App, as its subject
+ * or as a workflow's, only if that App is one of them.
  */
 export const listPermissions = async (
   env: Env,
@@ -499,14 +500,21 @@ export const listPermissions = async (
 ): Promise<Permission[]> => {
   requireBuilder(by);
   const db = drizzle(env.DB);
+  const open = db.select({ id: apps.id }).from(apps).where(openApps);
+  // Both Apps a permission names, its subject and a workflow's, must be
+  // open to the person: an agent's permission for a hidden App's workflow
+  // would name that App otherwise.
   const ofOpenApp =
     openApps === undefined
       ? undefined
-      : or(
-          ne(permissions.subjectType, "app"),
-          inArray(
-            permissions.subjectId,
-            db.select({ id: apps.id }).from(apps).where(openApps)
+      : and(
+          or(
+            ne(permissions.subjectType, "app"),
+            inArray(permissions.subjectId, open)
+          ),
+          or(
+            ne(permissions.objectType, "workflow"),
+            inArray(permissions.objectId, open)
           )
         );
   const ofOne =
