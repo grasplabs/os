@@ -196,3 +196,16 @@ export const memoryProposals = sqliteTable(
     ),
   ]
 );
+
+/**
+ * Which version of each App its entry in the Apps collection holds
+ * (knowledge/apps-collection.ts): written in the same batch as the entry,
+ * so it never names a version the entry doesn't have. An App whose current
+ * version differs, or that has no row, is indexed again.
+ */
+export const appEntries = sqliteTable("app_entries", {
+  /** An App in the core database. */
+  appId: text("app_id").primaryKey(),
+  version: integer().notNull(),
+  indexedAt: timestamp("indexed_at").notNull(),
+});

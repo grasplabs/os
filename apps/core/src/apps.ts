@@ -28,7 +28,7 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { appsOpenTo, requireAppRole } from "./app-access.ts";
+import { appsFoundBy, requireAppRole } from "./app-access.ts";
 import type { Person } from "./app-access.ts";
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
@@ -409,15 +409,13 @@ export const createApp = async (
 /**
  * The Apps `by` has a role in (app-access.ts), as a condition on `apps`.
  * As with `appFor`, while `app_sharing` is off: every App for admins and
- * builders, and none for users. Never a pending App (`findApp`).
+ * builders, and users are refused. Never a pending App (`findApp`).
  */
-export const appsListedFor = (env: Env, by: Identity): SQL | undefined => {
-  const inUse = isNull(apps.pendingSince);
+export const appsListedFor = (env: Env, by: Identity): SQL => {
   if (!featureEnabled(env, "app_sharing")) {
     requireBuilder(by);
-    return inUse;
   }
-  return and(inUse, appsOpenTo(env, by));
+  return appsFoundBy(env, by);
 };
 
 /** The Apps `by` has a role in (app-access.ts), oldest first. */

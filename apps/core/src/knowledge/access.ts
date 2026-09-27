@@ -19,14 +19,18 @@ import { keepAuditEvent } from "../audit-outbox.ts";
 import { teamsOf } from "../auth/identity.ts";
 import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
+import { featureEnabled } from "../features.ts";
 import { grantedPermissions } from "../permissions.ts";
 import { restrict } from "../restricted.ts";
 import type { WorkContext } from "../restricted.ts";
 
 // The one place Knowledge decides what may be read. Every query that reads
-// collections, documents, versions or links puts `allowedCollections`
-// inside its SQL, never as a filter afterwards, so no path (listing,
-// history, backlinks, search) shows more than a read would.
+// collections puts `allowedCollections` inside its SQL, and every query
+// that reads documents, versions or links puts `allowedFor`'s `documents`
+// (app-entries.ts: these collections, and of the Apps collection only the
+// entries of Apps the reader may open), never as a filter afterwards, so
+// no path (listing, history, backlinks, search) shows more than a read
+// would.
 //
 // A person reads a collection for everyone, one of their teams', or one
 // they own. An App or agent reads the collections it has a permission to
@@ -153,36 +157,89 @@ const grantedToRead = async (
   return ids;
 };
 
+/** Whether Apps are indexed into the Apps collection, and found there. */
+export const appsCollectionEnabled = (env: Pick<Env, "FEATURES">): boolean =>
+  featureEnabled(env, "knowledge") && featureEnabled(env, "apps_collection");
+
+/** The collections a reader may read, and for a delegate, those granted. */
+export interface CollectionsAllowed {
+  /** A condition on `collections`. */
+  condition: SQL;
+  /**
+   * The collections an App or agent is granted to read, read now (every
+   * collection's own rule applies on top); undefined for a person.
+   */
+  granted: readonly string[] | undefined;
+}
+
+/** A person's or delegate's collections, before the Apps collection's flag. */
+const collectionsOf = async (
+  env: Env,
+  db: DrizzleD1Database,
+  reader: Reader
+): Promise<CollectionsAllowed> => {
+  if (reader.type === "person") {
+    const { userId, teams } = reader.person;
+    return {
+      condition: readableBy(db, {
+        userId,
+        teamIds: teams.map(({ id }) => id),
+      }),
+      granted: undefined,
+    };
+  }
+  const { authority, permissionId } = reader;
+  const granted = await grantedToRead(env, authority, permissionId);
+  if (granted.length === 0) {
+    return { condition: sql`0`, granted };
+  }
+  const teams = await teamsOf(env.DB, authority.onBehalfOf);
+  return {
+    condition:
+      and(
+        inList(collections.id, granted),
+        // A personal collection is never read under a grant: an App is
+        // shared, and a grant isn't the person's own. What an agent reads
+        // of its person's own collection (their USER.md) it reads as
+        // memory, through `readableForPerson`.
+        ne(collections.access, "me"),
+        readableBy(db, {
+          userId: authority.onBehalfOf,
+          teamIds: teams.map(({ id }) => id),
+        })
+      ) ?? sql`0`,
+    granted,
+  };
+};
+
+/**
+ * The collections `reader` may read (`condition`), and those an App or
+ * agent is granted. The Apps collection (app-entries.ts) is none of them
+ * while `apps_collection` is off: nobody lists, reads or searches it.
+ */
+export const collectionsAllowed = async (
+  env: Env,
+  db: DrizzleD1Database,
+  reader: Reader
+): Promise<CollectionsAllowed> => {
+  const allowed = await collectionsOf(env, db, reader);
+  if (appsCollectionEnabled(env)) {
+    return allowed;
+  }
+  return {
+    ...allowed,
+    condition: and(allowed.condition, ne(collections.source, "apps")) ?? sql`0`,
+  };
+};
+
 /** The collections `reader` may read, as a condition on `collections`. */
 export const allowedCollections = async (
   env: Env,
   db: DrizzleD1Database,
   reader: Reader
 ): Promise<SQL> => {
-  if (reader.type === "person") {
-    const { userId, teams } = reader.person;
-    return readableBy(db, { userId, teamIds: teams.map(({ id }) => id) });
-  }
-  const { authority, permissionId } = reader;
-  const granted = await grantedToRead(env, authority, permissionId);
-  if (granted.length === 0) {
-    return sql`0`;
-  }
-  const teams = await teamsOf(env.DB, authority.onBehalfOf);
-  return (
-    and(
-      inList(collections.id, granted),
-      // A personal collection is never read under a grant: an App is
-      // shared, and a grant isn't the person's own. What an agent reads of
-      // its person's own collection (their USER.md) it reads as memory,
-      // through `readableForPerson`.
-      ne(collections.access, "me"),
-      readableBy(db, {
-        userId: authority.onBehalfOf,
-        teamIds: teams.map(({ id }) => id),
-      })
-    ) ?? sql`0`
-  );
+  const { condition } = await collectionsAllowed(env, db, reader);
+  return condition;
 };
 
 /**

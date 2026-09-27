@@ -14,7 +14,7 @@ import { requestGranted } from "./apps.ts";
 import { actingFor, envOf, knowledgeIn, newChat } from "./contexts.ts";
 import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
-import { readCollection } from "./knowledge.ts";
+import { knowledgeRacing, readCollection } from "./knowledge.ts";
 import {
   auditedDuring,
   openRpc,
@@ -75,35 +75,6 @@ const textOf = async (person: Person, documentId: string): Promise<string> => {
 /** This release's skills, with `path`'s text changed: another release. */
 const releaseChanging = (path: string, text: string): GraspSkill[] =>
   graspSkills.map((skill) => (skill.path === path ? { path, text } : skill));
-
-const insertsVersion = /^insert into "versions"/iu;
-
-/**
- * The Knowledge database, but running `first` once, just before the first
- * batch that writes a version: another sync that gets there first.
- */
-const knowledgeRacing = (first: () => Promise<void>): D1Database => {
-  const real = env.KNOWLEDGE;
-  let writing = false;
-  let raced = false;
-  return {
-    prepare: (query) => {
-      writing ||= insertsVersion.test(query);
-      return real.prepare(query);
-    },
-    batch: async <T>(statements: D1PreparedStatement[]) => {
-      if (writing && !raced) {
-        raced = true;
-        await first();
-      }
-      return await real.batch<T>(statements);
-    },
-    exec: async (query) => await real.exec(query),
-    // oxlint-disable-next-line typescript/no-deprecated -- D1Database still has it
-    dump: async () => await real.dump(),
-    withSession: (constraint) => real.withSession(constraint),
-  };
-};
 
 const knowledgeActions = <Event extends { action: string }>(
   events: Event[]

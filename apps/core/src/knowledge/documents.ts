@@ -24,7 +24,6 @@ import type {
 } from "@grasp-os/shared/knowledge";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, desc, eq, gt, inArray, lt, ne, sql } from "drizzle-orm";
-import type { SQL } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
@@ -42,6 +41,8 @@ import {
 } from "../db/knowledge/schema.ts";
 import { allowedCollections, noteProvenance } from "./access.ts";
 import type { Reader } from "./access.ts";
+import { allowedFor } from "./app-entries.ts";
+import type { Allowed } from "./app-entries.ts";
 import { readableCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
 import { FrontmatterError, parseFrontmatter } from "./frontmatter.ts";
@@ -577,12 +578,12 @@ export const writeVersion = async (
 };
 
 /**
- * The document with `documentId` and its collection, if it is in one of the
- * `allowed` collections. A malformed ID is one that doesn't exist.
+ * The document with `documentId` and its collection, if it is one of the
+ * `allowed` documents. A malformed ID is one that doesn't exist.
  */
 export const readableDocument = async (
   db: DrizzleD1Database,
-  allowed: SQL,
+  allowed: Allowed,
   documentId: unknown
 ): Promise<{ document: DocumentRow; collection: CollectionRow }> => {
   const id = documentIdSchema.safeParse(documentId);
@@ -591,7 +592,7 @@ export const readableDocument = async (
         .select({ document: documents, collection: collections })
         .from(documents)
         .innerJoin(collections, eq(collections.id, documents.collectionId))
-        .where(and(eq(documents.id, id.data), allowed))
+        .where(and(eq(documents.id, id.data), allowed.documents()))
         .get()
     : undefined;
   if (!found) {
@@ -639,7 +640,7 @@ export const restoreVersion = async (
   const db = drizzle(env.KNOWLEDGE);
   const { document, collection } = await readableDocument(
     db,
-    await allowedCollections(env, db, { type: "person", person }),
+    await allowedFor(env, db, { type: "person", person }),
     documentId
   );
   requireWritable(env, person, collection);
@@ -675,7 +676,7 @@ export const getDocument = async (
       ? undefined
       : knowledgeErrors.parse("knowledge.invalid", versionInputSchema, version);
   const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedCollections(env, db, reader);
+  const allowed = await allowedFor(env, db, reader);
   const id = documentIdSchema.safeParse(documentId);
   // The text is read in the same query as the access check, so it is never
   // read from a collection that stopped being readable in between.
@@ -695,7 +696,7 @@ export const getDocument = async (
             eq(versions.number, number ?? documents.currentVersion)
           )
         )
-        .where(and(eq(documents.id, id.data), allowed))
+        .where(and(eq(documents.id, id.data), allowed.documents()))
         .get()
     : undefined;
   if (!found) {
@@ -735,8 +736,12 @@ export const listDocuments = async (
     options
   );
   const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedCollections(env, db, reader);
-  const collection = await readableCollection(db, allowed, collectionId);
+  const allowed = await allowedFor(env, db, reader, collectionId);
+  const collection = await readableCollection(
+    db,
+    allowed.collections,
+    collectionId
+  );
   const rows = await db
     .select({ document: documents })
     .from(documents)
@@ -744,7 +749,7 @@ export const listDocuments = async (
     .where(
       and(
         eq(documents.collectionId, collection.id),
-        allowed,
+        allowed.documents(),
         after === undefined ? undefined : gt(documents.path, after)
       )
     )
@@ -779,7 +784,7 @@ export const history = async (
     options
   );
   const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedCollections(env, db, reader);
+  const allowed = await allowedFor(env, db, reader);
   const { document, collection } = await readableDocument(
     db,
     allowed,
@@ -793,7 +798,7 @@ export const history = async (
     .where(
       and(
         eq(versions.documentId, document.id),
-        allowed,
+        allowed.documents(),
         before === undefined ? undefined : lt(versions.number, before)
       )
     )
@@ -816,13 +821,13 @@ const linking = alias(documents, "linking");
 
 /**
  * The documents that link to `document`, in path order after `after`: only
- * those in collections that are `allowed`. Links name paths in their own
+ * those that are `allowed`. Links name paths in their own
  * collection, so a path is enough to page by, and every backlink is in the
  * document's own collection: the read's provenance.
  */
 export const backlinkRows = async (
   db: DrizzleD1Database,
-  allowed: SQL,
+  allowed: Allowed,
   document: DocumentRow,
   { after, limit }: { after?: string; limit: number }
 ): Promise<Backlink[]> => {
@@ -845,7 +850,7 @@ export const backlinkRows = async (
         // What links are made of already keeps them in one collection; this
         // keeps the provenance true however links come to be written.
         eq(linking.collectionId, document.collectionId),
-        allowed,
+        allowed.documents(linking.path),
         after === undefined ? undefined : gt(linking.path, after)
       )
     )
@@ -871,7 +876,7 @@ export const backlinks = async (
     options
   );
   const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedCollections(env, db, reader);
+  const allowed = await allowedFor(env, db, reader);
   const { document, collection } = await readableDocument(
     db,
     allowed,

@@ -373,7 +373,7 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
     const { apps, userId } = await appsApi("admin");
     const actor = { type: "person", userId };
     let tree = "";
-    const events = await auditedDuring(async () => {
+    const recorded = await auditedDuring(async () => {
       const app = await newApp(apps);
       await apps.files.write(app.id, first);
       ({ tree } = await apps.files.commit(
@@ -386,6 +386,10 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
       await apps.versions.setCurrent(app.id, 1);
       await apps.versions.propose(app.id, 1);
     });
+    // The App's own events; indexing it into the Apps collection records
+    // its entry's (apps-collection.test.ts).
+    const events = recorded.filter(({ target: on }) => on?.type === "app");
+    expect(JSON.stringify(recorded)).not.toContain("Secret");
 
     const [created] = events;
     const target = { type: "app", id: created?.target?.id };
@@ -427,7 +431,6 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
         detail: { version: 1, previous: null },
       },
     ]);
-    expect(JSON.stringify(events)).not.toContain("Secret");
   });
 
   it("are made by builders and admins, and private to them", async () => {
