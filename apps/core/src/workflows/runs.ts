@@ -1,4 +1,3 @@
-import { wrapWorkflowBinding } from "@cloudflare/dynamic-workflows";
 import { appErrors } from "@grasp-os/shared/apps";
 import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf, runActorOf } from "@grasp-os/shared/audit";
@@ -28,11 +27,12 @@ import { apps, workflowRuns } from "../db/core/schema.ts";
 import { appHost } from "../durable-objects.ts";
 import { requireFeature } from "../features.ts";
 import { hasWorkflow } from "./code.ts";
+import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
 
 // Runs of Apps' workflows, as core keeps them: one row each (the App
 // version it is pinned to, who started it, where it was last seen), next
-// to the run itself in Cloudflare Workflows, under the same ID. The
+// to the run itself in the engine (engine.ts), under the same ID. The
 // dispatcher (dispatcher.ts) loads a run from its row on every start and
 // resume.
 
@@ -211,12 +211,10 @@ export const startRun = async (
     ),
   ]);
   try {
-    // Tagged with what the dispatcher loads it by; it reads the rest from
-    // the row. Placed in the EU where the platform can.
-    await wrapWorkflowBinding({ app, workflow, version }).create({
+    await runEngine(env).create({
       id: row.id,
-      params: input,
-      locationHint: "weur",
+      pinned: { app, workflow, version },
+      input,
     });
   } catch (error) {
     // The instance may exist all the same: the dispatcher refuses to run
@@ -313,29 +311,19 @@ const runFor = (by: Identity, row: RunRow, ownerId: string): WorkflowRun =>
     ? { ...toRun(row), failure: row.failure }
     : toRun(row);
 
-/** How Workflows says it has no instance of that ID. */
-const instanceNotFound = /\binstance\.not_found\b/u;
-
 /**
- * Where Workflows has a run; nothing for one that has ended without an
+ * Where the engine has a run; nothing for one that has ended without an
  * instance to ask (its start failed), whose row says all there is.
  */
 const liveOf = async (
   env: Env,
   row: RunRow
 ): Promise<InstanceStatus | undefined> => {
-  try {
-    const instance = await env.WORKFLOWS.get(row.id);
-    return await instance.status();
-  } catch (error) {
-    if (
-      unended.includes(row.status) ||
-      !(error instanceof Error && instanceNotFound.test(error.message))
-    ) {
-      throw error;
-    }
-    return undefined;
+  const live = await runEngine(env).status(row.id);
+  if (live === undefined && unended.includes(row.status)) {
+    throw new Error(`The engine has no instance of run ${row.id}`);
   }
+  return live;
 };
 
 /**
@@ -396,26 +384,6 @@ const forgetWrites = async (env: Env, row: RunRow): Promise<void> => {
   );
 };
 
-/** Where Cloudflare Workflows has a run that has ended. */
-const endedStatuses = new Set<InstanceStatus["status"]>([
-  "terminated",
-  "complete",
-  "errored",
-]);
-
-/** Terminates a run's instance; one that has ended already stays as it is. */
-const terminate = async (env: Env, run: string): Promise<void> => {
-  const instance = await env.WORKFLOWS.get(run);
-  try {
-    await instance.terminate();
-  } catch (error) {
-    const { status } = await instance.status();
-    if (!endedStatuses.has(status)) {
-      throw error;
-    }
-  }
-};
-
 /**
  * Stops a run for good, and records who did; a run that ended otherwise
  * stays as it is. The row is marked first, so a run that ends meanwhile
@@ -430,7 +398,7 @@ export const cancelRun = async (
   requireBuilder(by);
   const row = await foundRun(env, run);
   if (row.status === "cancelled") {
-    await terminate(env, row.id);
+    await runEngine(env).terminate(row.id);
     await forgetWrites(env, row);
     return toRun(row);
   }
@@ -450,7 +418,7 @@ export const cancelRun = async (
   ]);
   const now = cancelled ?? (await foundRun(env, row.id));
   if (now.status === "cancelled") {
-    await terminate(env, row.id);
+    await runEngine(env).terminate(row.id);
     await forgetWrites(env, now);
   }
   return toRun(now);

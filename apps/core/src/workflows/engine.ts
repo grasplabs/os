@@ -1,0 +1,121 @@
+import { wrapWorkflowBinding } from "@cloudflare/dynamic-workflows";
+import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
+import type { Json } from "@grasp-os/shared/json";
+
+// The engine that runs Apps' workflow runs, behind the little core asks of
+// it: create a run, see where it is, terminate it, send it an event. This
+// is the only module that touches the engine (`WORKFLOWS`, Cloudflare
+// Workflows), so another profile swaps it here and nowhere else.
+//
+// On-prem (plain workerd, scripts/workerd-smoke.ts) has no `WORKFLOWS`:
+// workerd has no Workflows engine (Wrangler's local dev and the tests get
+// one from Miniflare, which emulates it with a Worker of its own). Nor does
+// it have `LOADER` unless workerd runs with `--experimental`: workerd
+// refuses a Worker Loader binding without it. The loader runs App methods
+// (app.ts), the screen compiler (screens.ts) and workflow code (code.ts).
+// So on-prem, `apps` and `screens` stay switched off unless workerd runs
+// with `--experimental`, and `workflows` stays off either way. With
+// `workflows` off no run starts (runs.ts), and nothing here is reached.
+
+export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
+
+/** What a run is tagged with: the dispatcher loads it by these. */
+export interface PinnedRun {
+  app: AppId;
+  workflow: WorkflowId;
+  version: number;
+}
+
+/** The engine core runs workflow runs on. */
+export interface RunEngine {
+  /** Creates the run `id`, pinned to its App version, with its input. */
+  create: (run: {
+    id: string;
+    pinned: PinnedRun;
+    input: Json | undefined;
+  }) => Promise<void>;
+  /** Where the engine has the run; nothing when it has no such run. */
+  status: (id: string) => Promise<InstanceStatus | undefined>;
+  /**
+   * Terminates the run; one that has ended already, or that the engine has
+   * no instance of, stays as it is.
+   */
+  terminate: (id: string) => Promise<void>;
+  /** Sends the run an event, for a wait on it to see. */
+  sendEvent: (
+    id: string,
+    event: { type: string; payload: unknown }
+  ) => Promise<void>;
+}
+
+/** How Workflows says it has no instance of that ID. */
+const instanceNotFound = /\binstance\.not_found\b/u;
+
+const isNotFound = (error: unknown): boolean =>
+  error instanceof Error && instanceNotFound.test(error.message);
+
+/** Where Cloudflare Workflows has a run that has ended. */
+const endedStatuses = new Set<InstanceStatus["status"]>([
+  "terminated",
+  "complete",
+  "errored",
+]);
+
+/** Whether the instance has ended; not when its status can't be read. */
+const hasEnded = async (instance: WorkflowInstance): Promise<boolean> => {
+  try {
+    const { status } = await instance.status();
+    return endedStatuses.has(status);
+  } catch {
+    return false;
+  }
+};
+
+/** Cloudflare Workflows, through the deployment's one dispatcher. */
+export const runEngine = (env: Env): RunEngine => ({
+  create: async ({ id, pinned: { app, workflow, version }, input }) => {
+    // Tagged with what the dispatcher loads it by; it reads the rest from
+    // the run's row. Placed in the EU where the platform can.
+    await wrapWorkflowBinding({ app, workflow, version }).create({
+      id,
+      params: input,
+      locationHint: "weur",
+    });
+  },
+  status: async (id): Promise<InstanceStatus | undefined> => {
+    try {
+      const instance = await env.WORKFLOWS.get(id);
+      return await instance.status();
+    } catch (error) {
+      if (!isNotFound(error)) {
+        throw error;
+      }
+      return undefined;
+    }
+  },
+  terminate: async (id) => {
+    let instance: WorkflowInstance;
+    try {
+      instance = await env.WORKFLOWS.get(id);
+    } catch (error) {
+      // No instance, nothing to terminate: a run whose start failed, as a
+      // cancel racing it finds it.
+      if (isNotFound(error)) {
+        return;
+      }
+      throw error;
+    }
+    try {
+      await instance.terminate();
+    } catch (error) {
+      // The terminate's own error, unless the run has ended anyway.
+      if (!(await hasEnded(instance))) {
+        throw error;
+      }
+    }
+  },
+  sendEvent: async (id, event) => {
+    const instance = await env.WORKFLOWS.get(id);
+    await instance.sendEvent(event);
+  },
+});

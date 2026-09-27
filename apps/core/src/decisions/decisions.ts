@@ -34,6 +34,7 @@ import {
   workflowRuns,
 } from "../db/core/schema.ts";
 import { requireFeature } from "../features.ts";
+import { runEngine } from "../workflows/engine.ts";
 
 // Decisions workflow runs wait for (`step.decision`), and the only ways to
 // answer one. Threat model R3, R8 and WF1 to WF4:
@@ -521,8 +522,7 @@ export const decisionFor = async (
  */
 const wake = async (env: Env, row: DecisionRow): Promise<void> => {
   try {
-    const instance = await env.WORKFLOWS.get(row.runId);
-    await instance.sendEvent({
+    await runEngine(env).sendEvent(row.runId, {
       type: decisionEventType(row.id),
       payload: null,
     });
