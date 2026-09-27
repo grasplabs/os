@@ -321,6 +321,54 @@ describe("App code", () => {
     ]);
   });
 
+  it("names the screens and workflows of the version that runs, and only those", async () => {
+    const { apps } = await appsApi("builder");
+    const app = await newApp(apps);
+    await commit(apps, app.id, first);
+    const none = await apps.contents(app.id);
+    await apps.versions.setCurrent(app.id, 1);
+    await commit(apps, app.id, {
+      "screens/archive.tsx": "export default () => null;\n",
+      // Neither is a screen or a workflow: code they share.
+      "screens/parts/row.tsx": "export const Row = () => null;\n",
+      "workflows/lib/dates.ts": "export const today = () => 0;\n",
+      "workflows/report.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "report",
+  { input: z.unknown(), params: {} },
+  async (step) => await step.do("count", { description: "Count" }, async () => 1)
+);
+`,
+      "workflows/report.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import report from "./report.ts";
+
+export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, expect: { output: 1 } }]);
+`,
+    });
+    // Committed, not yet current: what runs is still version 1.
+    const beforeCurrent = await apps.contents(app.id);
+    await apps.versions.setCurrent(app.id, 2);
+
+    expect({
+      none,
+      beforeCurrent,
+      current: await apps.contents(app.id),
+    }).toStrictEqual({
+      none: { version: null, screens: [], workflows: [] },
+      beforeCurrent: { version: 1, screens: ["inbox"], workflows: [] },
+      current: {
+        version: 2,
+        screens: ["archive", "inbox"],
+        workflows: ["report"],
+      },
+    });
+    await expect(outcome(apps.contents("no-such-app"))).resolves.toBe(
+      "app.not_found"
+    );
+  });
+
   it("audits every commit and version change, by identifiers only", async () => {
     const { apps, userId } = await appsApi("admin");
     const actor = { type: "person", userId };
@@ -392,6 +440,7 @@ describe("App code", () => {
       outcome(user.create({ name: "Mine" })),
       outcome(user.list()),
       outcome(user.get(app.id)),
+      outcome(user.contents(app.id)),
       outcome(user.files.read(app.id, 1)),
       outcome(user.files.write(app.id, { "AGENTS.md": "# Mine\n" })),
       outcome(user.files.commit(app.id, "Mine")),

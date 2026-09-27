@@ -106,6 +106,19 @@ export interface AppVersion {
   createdAt: string;
 }
 
+/**
+ * What an App's current version offers people: its screens by name (`inbox`
+ * for `screens/inbox.tsx`) and its workflows by ID (`report` for
+ * `workflows/report.ts`), each sorted. Empty while it has no current
+ * version.
+ */
+export interface AppContents {
+  /** The current version; null while it has none. */
+  version: number | null;
+  screens: string[];
+  workflows: string[];
+}
+
 /** An App's files by path. */
 export type AppFiles = Record<string, string>;
 
@@ -146,6 +159,8 @@ export interface AppsApi {
   create: (app: NewApp) => Promise<App>;
   list: () => Promise<App[]>;
   get: (app: string) => Promise<App>;
+  /** The screens and workflows of the App's current version. */
+  contents: (app: string) => Promise<AppContents>;
   readonly files: AppFilesApi;
   readonly versions: AppVersionsApi;
 }

@@ -1,8 +1,6 @@
-import { messageOf } from "@grasp-os/shared/errors";
 import type { Member } from "@grasp-os/shared/members";
 import { roleSchema } from "@grasp-os/shared/roles";
 import type { Role } from "@grasp-os/shared/roles";
-import type { SignInOption } from "@grasp-os/shared/rpc";
 import { Button } from "@grasp-os/ui/components/button";
 import {
   Dialog,
@@ -31,16 +29,9 @@ import {
 import { createFileRoute, useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 
-import {
-  CoreTimeoutError,
-  loadCoreStatus,
-  withSession,
-  withTimeout,
-} from "../core.ts";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
-import { signInErrorSearch } from "../sign-in-errors.ts";
-import { SignInOptions } from "../sign-in-options.tsx";
+import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 
 // Offboarding, for admins: the organization's members, each with their
@@ -50,35 +41,7 @@ import { useCoreAction } from "../use-core-action.ts";
 // ending your own sessions, and demoting yourself (which core allows while
 // another admin exists) is left out so nobody loses this page by accident.
 
-type MembersView =
-  | { state: "offline" }
-  | { state: "signed-out"; signInOptions: SignInOption[] }
-  | { state: "refused"; message: string }
-  | { state: "ready"; members: Member[]; me: string };
-
 const roles = roleSchema.options.map((role) => ({ label: role, value: role }));
-
-const loadMembers = async (): Promise<MembersView> => {
-  const { connected, signInOptions, identity } = await loadCoreStatus();
-  if (!connected) {
-    return { state: "offline" };
-  }
-  if (identity === undefined) {
-    return { state: "signed-out", signInOptions };
-  }
-  try {
-    // A connection that answered the status check can still hang here.
-    const members = await withSession(
-      async (session) => await withTimeout(session.members.list())
-    );
-    return { state: "ready", members, me: identity.userId };
-  } catch (error) {
-    if (error instanceof CoreTimeoutError) {
-      return { state: "offline" };
-    }
-    return { state: "refused", message: messageOf(error) };
-  }
-};
 
 type Change = (members: Session["members"]) => Promise<unknown>;
 
@@ -273,38 +236,20 @@ const MembersTable = ({ members, me }: { members: Member[]; me: string }) => {
 
 const Members = () => {
   const page = Route.useLoaderData();
-  const { error } = Route.useSearch();
+  const { identity } = Route.useRouteContext();
   return (
-    <main className="mx-auto flex max-w-4xl flex-col gap-6 p-6">
+    <main className="flex max-w-4xl flex-col gap-6 p-6">
       <h1 className="text-2xl font-medium">Members</h1>
-      {page.state === "offline" ? (
-        <ErrorText>
-          Grasp can&apos;t be reached right now. Try again in a moment.
-        </ErrorText>
-      ) : null}
-      {page.state === "signed-out" ? (
-        <>
-          <p className="text-muted-foreground text-sm">
-            Sign in to see your organization&apos;s members.
-          </p>
-          <SignInOptions
-            options={page.signInOptions}
-            error={error}
-            returnTo="/members"
-          />
-        </>
-      ) : null}
-      {page.state === "refused" ? <ErrorText>{page.message}</ErrorText> : null}
+      <NotLoaded page={page} />
       {page.state === "ready" ? (
-        <MembersTable members={page.members} me={page.me} />
+        <MembersTable members={page.data} me={identity.userId} />
       ) : null}
     </main>
   );
 };
 
-export const Route = createFileRoute("/members")({
+export const Route = createFileRoute("/_shell/members")({
   component: Members,
-  // A refused sign-in comes back as `?error=<code>`.
-  validateSearch: signInErrorSearch,
-  loader: loadMembers,
+  loader: async () =>
+    await loadFromCore(async (session) => await session.members.list()),
 });

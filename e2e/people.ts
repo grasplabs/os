@@ -173,11 +173,14 @@ export const apiOf = (person: Person) => {
   return { core, api: core.authenticate() };
 };
 
-/** Writes `files` to the App, commits them and makes that version current. */
+/**
+ * Writes `files` to the App (null deletes one), commits them and makes
+ * that version current.
+ */
 export const release = async (
   api: ReturnType<typeof apiOf>["api"],
   app: string,
-  files: Record<string, string>,
+  files: Record<string, string | null>,
   message: string
 ): Promise<void> => {
   await api.apps.files.write(app, files);

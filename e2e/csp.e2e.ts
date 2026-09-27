@@ -70,7 +70,7 @@ test("runs no injected inline script", async ({ page }) => {
 test("connects to no other origin", async ({ page }) => {
   const violations = await recordCspViolations(page);
   await page.goto("/");
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  await expect(page.getByText("Sign in to go on.")).toBeVisible();
 
   const targets = ["http://attacker.test/steal", "ws://attacker.test/steal"];
   await page.evaluate(async ([http = "", ws = ""]) => {

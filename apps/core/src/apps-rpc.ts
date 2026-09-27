@@ -1,9 +1,9 @@
-import type { App, AppsApi, NewApp } from "@grasp-os/shared/apps";
+import type { App, AppContents, AppsApi, NewApp } from "@grasp-os/shared/apps";
 import { RpcTarget } from "capnweb";
 
 import { AppFilesRpc } from "./app-files-rpc.ts";
 import { AppVersionsRpc } from "./app-versions-rpc.ts";
-import { createApp, getApp, listApps } from "./apps.ts";
+import { appContents, createApp, getApp, listApps } from "./apps.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -52,6 +52,13 @@ export class AppsRpc extends RpcTarget implements AppsApi {
     return await withPerson(
       this.#check,
       async (by) => await getApp(this.#env, by, app)
+    );
+  }
+
+  async contents(app: string): Promise<AppContents> {
+    return await withPerson(
+      this.#check,
+      async (by) => await appContents(this.#env, by, app)
     );
   }
 }
