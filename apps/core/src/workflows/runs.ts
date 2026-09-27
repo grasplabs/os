@@ -28,6 +28,7 @@ import { requireFeature } from "../features.ts";
 import { hasWorkflow } from "./code.ts";
 import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
+import { tellScreens } from "./run-changes.ts";
 
 // Runs of Apps' workflows, as core keeps them: one row each (the App
 // version it is pinned to, who started it, where it was last seen), next
@@ -264,8 +265,11 @@ export const startRun = async (
         })
       ),
     ]);
+    await tellScreens(env, row);
     throw error;
   }
+  // Only now: a screen told of the run reads it from the engine too.
+  await tellScreens(env, row);
   return toRun(row);
 };
 
@@ -431,6 +435,11 @@ export const cancelRun = async (
       .returning(),
     outboxedIfChanged(db, runEntry(actorOf(by), "workflow.run.cancelled", row)),
   ]);
+  // Told first: a termination that fails leaves the row cancelled, and a
+  // cancel tried again finds it so, and tells no one.
+  if (cancelled) {
+    await tellScreens(env, cancelled);
+  }
   const now = cancelled ?? (await foundRun(env, row.id));
   if (now.status === "cancelled") {
     await runEngine(env).terminate(row.id);
@@ -467,13 +476,14 @@ export const endRun = async (
           ...failed,
           failedAt: endedAt.toISOString(),
         };
-  await auditedBatch(env, db, [
+  const [[ended]] = await auditedBatch(env, db, [
     db
       .update(workflowRuns)
       .set({ status, endedAt, failure })
       .where(
         and(eq(workflowRuns.id, row.id), inArray(workflowRuns.status, unended))
-      ),
+      )
+      .returning({ id: workflowRuns.id }),
     outboxedIfChanged(
       db,
       runEntry(
@@ -484,6 +494,10 @@ export const endRun = async (
       )
     ),
   ]);
+  // Only when this ended it: not again for a run a cancel ended first.
+  if (ended) {
+    await tellScreens(env, row);
+  }
   await forgetWrites(env, row);
 };
 

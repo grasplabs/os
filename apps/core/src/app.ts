@@ -13,7 +13,7 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
-import type { AppErrorEntry } from "@grasp-os/shared/screens";
+import type { AppErrorEntry, RunChange } from "@grasp-os/shared/screens";
 import { DurableObject } from "cloudflare:workers";
 
 import { appBindings } from "./app-bindings.ts";
@@ -148,6 +148,13 @@ const isMethod = (
 ): value is (...args: unknown[]) => Promise<AppAnswer> =>
   typeof value === "function";
 
+/**
+ * A screen's callback for its App's run changes, as the host keeps it:
+ * screens-rpc.ts wraps it, checking before each push that the person may
+ * still use the App.
+ */
+export type RunWatcher = Rpc.Stub<(change: RunChange) => Promise<void>>;
+
 /** Who calls the App, as core knows it; the token is the host's. */
 export type AppCallerInput = Omit<AppCaller, "token">;
 
@@ -227,6 +234,9 @@ export class App extends DurableObject<Env> {
 
   /** How many times a call has read the current version. */
   #reads = 0;
+
+  /** Screens following the App's runs, by workflow (`watchRuns`). */
+  readonly #runWatchers = new Map<string, Set<RunWatcher>>();
 
   /**
    * The calls running now, by token, with the version their code runs on
@@ -345,6 +355,48 @@ export class App extends DurableObject<Env> {
   /** The App's error log, newest first. */
   async errors(): Promise<AppErrorEntry[]> {
     return await readErrorLog(this.ctx.storage);
+  }
+
+  /**
+   * Keeps `onChange`, a screen's callback, and calls it each time a run of
+   * the App's workflow `workflow` changes (`runChanged`), until calling it
+   * fails: the screen is gone, or the person may no longer use the App.
+   * Kept here in memory, outside the App's code, so a restart of that code
+   * keeps them; a restart of this object drops them, which tells each
+   * screen to follow again.
+   */
+  watchRuns(workflow: string, onChange: RunWatcher): void {
+    const watchers = this.#runWatchers.get(workflow) ?? new Set();
+    watchers.add(onChange.dup());
+    this.#runWatchers.set(workflow, watchers);
+  }
+
+  /**
+   * Tells the screens following `workflow` that its run `run` changed, so
+   * they read it again (workflows/run-changes.ts). Returns at once: each
+   * push goes on by itself, and one that fails drops only its screen.
+   */
+  runChanged(workflow: string, run: string): void {
+    for (const watcher of this.#runWatchers.get(workflow) ?? []) {
+      void this.#tell(workflow, watcher, { run });
+    }
+  }
+
+  async #tell(
+    workflow: string,
+    watcher: RunWatcher,
+    change: RunChange
+  ): Promise<void> {
+    try {
+      await watcher(change);
+    } catch {
+      const watchers = this.#runWatchers.get(workflow);
+      watchers?.delete(watcher);
+      if (watchers?.size === 0) {
+        this.#runWatchers.delete(workflow);
+      }
+      watcher[Symbol.dispose]();
+    }
   }
 
   /**

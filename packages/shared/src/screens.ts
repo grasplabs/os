@@ -101,6 +101,14 @@ export interface ScreenRun extends WorkflowRun {
 }
 
 /**
+ * What core tells a screen following its App's runs (`watchRuns`): which
+ * run changed. The screen reads it again (`run`, `runs`), as its person.
+ */
+export interface RunChange {
+  run: string;
+}
+
+/**
  * A signed-in person's way to an App's screens: for anyone with a role in
  * the App (`AppsApi`); its error log for its builders only.
  */
@@ -149,6 +157,18 @@ export interface ScreensApi {
     decision: string,
     answer: DecisionAnswerInput
   ) => Promise<DecisionView>;
+  /**
+   * Calls `onChange` each time one of the App's runs of `workflow` starts,
+   * waits for a decision, has it answered or closed, or ends, for as long
+   * as the person may use the App. Released when core stops calling it,
+   * which tells the screen to follow again. One screen's connection
+   * follows at most 20 at once.
+   */
+  watchRuns: (
+    app: string,
+    workflow: string,
+    onChange: (change: RunChange) => void
+  ) => Promise<void>;
 }
 
 /** Why a call to an App's screens was refused. */
@@ -156,4 +176,6 @@ export const screenErrors = defineErrorFamily({
   "screen.not_found": "The App has no such screen.",
   "screen.build_failed": "The App's screens don't build.",
   "screen.invalid": "That isn't a valid request for a screen.",
+  "screen.too_many_subscriptions":
+    "A screen follows at most 20 workflows' runs at a time.",
 });
