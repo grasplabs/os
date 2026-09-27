@@ -1137,9 +1137,11 @@ export class AuditLog extends DurableObject<Env> {
   }
 
   /**
-   * Arms the retention alarm, for now, while none is set: in a new
-   * deployment, or one from before the alarm. Only the alarm itself re-arms
-   * it after that, so an object checks once while it's awake. A failure is
+   * Arms the retention alarm, a day out, while none is set: in a new
+   * deployment, or one from before the alarm, whose backlog then starts at
+   * most a day after the release (retention runs daily anyway). Only the
+   * alarm itself re-arms it after that, so an object checks once while it's
+   * awake. A failure is
    * logged, not thrown, so it never fails an append that went in; the next
    * call tries again.
    */
@@ -1149,7 +1151,7 @@ export class AuditLog extends DurableObject<Env> {
     }
     try {
       if ((await this.ctx.storage.getAlarm()) === null) {
-        await this.ctx.storage.setAlarm(Date.now());
+        await this.ctx.storage.setAlarm(Date.now() + dayMs);
       }
       this.#armed = true;
     } catch (error) {

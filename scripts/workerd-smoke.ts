@@ -79,8 +79,9 @@ const core :Workerd.Worker = (
   # In-memory storage aborts workerd when a Durable Object alarm fires, so
   # the smoke run must not write audit events or run the 15-minute cron
   # trigger: either arms the audit log's retention alarm
-  # (apps/core/src/audit-log.ts). On-prem runs
-  # use localDisk storage, where alarms work.
+  # (apps/core/src/audit-log.ts). That alarm is a day out, so it wouldn't
+  # fire within one smoke run, but anything left running that long would
+  # abort. On-prem runs use localDisk storage, where alarms work.
   durableObjectStorage = (inMemory = void),
 );
 `

@@ -104,15 +104,6 @@ const alarmAfter = async (
 };
 
 /**
- * Runs `log`'s alarm now, on the real clock: the one an append or the cron
- * trigger armed for now, so it can't fire later, while a test has moved
- * the clock.
- */
-const settled = async (log: Log): Promise<void> => {
-  await runDurableObjectAlarm(log);
-};
-
-/**
  * Runs a retention pass over the deployment's log `days` after it
  * received `event`, with `changes` to the deployment's env: what the
  * log's alarm runs, under other config.
@@ -123,8 +114,6 @@ const passAfter = async (
   changes: Partial<Env>
 ): Promise<void> => {
   const log = auditLog(env);
-  // Not the alarm the event's append armed, under the moved clock.
-  await settled(log);
   await later(await receivedAtOf(event), days, async () => {
     await runInDurableObject(
       log,
@@ -254,24 +243,22 @@ describe("audit log retention", () => {
     });
   });
 
-  it("arms its alarm on its first event, and archives once the event passes retention", async () => {
+  it("arms its alarm a day out on its first event, and archives once the event passes retention", async () => {
     const log = newLog();
     await expect(alarmOf(log)).resolves.toBeNull();
     const event = await logged(log);
-    // Armed for now, and then, once that pass has run, for a day later: set
-    // either way, apart from the moment the pass starts.
-    await expect.poll(async () => await alarmOf(log)).not.toBeNull();
-    await settled(log);
-
     const receivedAt = await receivedAtOf(event, log);
+    const armed = await alarmOf(log);
+    expect(armed).toBeGreaterThanOrEqual(receivedAt + dayMs);
+    expect(armed).toBeLessThanOrEqual(Date.now() + dayMs);
+
     await alarmAfter(receivedAt, 181, log);
     await expect(held(event, log)).resolves.toBeFalsy();
   });
 
-  it("starts retention at once in a log that holds events from before its alarm", async () => {
+  it("arms a log that holds events from before its alarm a day out, and that pass works off the backlog", async () => {
     const log = newLog();
     const old = await logged(log);
-    await settled(log);
     const receivedAt = await receivedAtOf(old, log);
     // As a log from a release before the alarm: events, no alarm, and an
     // object started afresh by the release.
@@ -283,16 +270,13 @@ describe("audit log retention", () => {
     await later(receivedAt, 181, async () => {
       await logged(log);
     });
-    // Due at once.
-    await expect(alarmOf(log)).resolves.toBe(receivedAt + 181 * dayMs);
-    await alarmAfter(receivedAt, 181, log);
+    await expect(alarmOf(log)).resolves.toBe(receivedAt + 182 * dayMs);
+    await alarmAfter(receivedAt, 182, log);
     await expect(held(old, log)).resolves.toBeFalsy();
   });
 
   it("arms the deployment's log from the 15-minute cron trigger, also when nothing is appended", async () => {
     const log = auditLog(env);
-    await logged();
-    await settled(log);
     // As after a release: no alarm, an object started afresh, no appends.
     await runInDurableObject(log, async (_instance, state) => {
       await state.storage.deleteAlarm();
@@ -300,14 +284,12 @@ describe("audit log retention", () => {
     await evictDurableObject(log);
 
     await runQuarterHourCron();
-    await expect.poll(async () => await alarmOf(log)).not.toBeNull();
-    await settled(log);
+    await expect(alarmOf(log)).resolves.not.toBeNull();
   });
 
   it("works off a backlog larger than one pass takes, a pass after another", async () => {
     const log = newLog();
     const first = await logged(log);
-    await settled(log);
     const receivedAt = await receivedAtOf(first, log);
     // More than ten full stretches of 500, what one pass archives at most.
     for (let batch = 0; batch < 10; batch += 1) {
@@ -342,7 +324,6 @@ describe("audit log retention", () => {
   it("keeps its daily alarm through a pass that fails, and archives on the next", async () => {
     const log = newLog();
     const event = await logged(log);
-    await settled(log);
     const receivedAt = await receivedAtOf(event, log);
 
     // The archive bucket is down.
