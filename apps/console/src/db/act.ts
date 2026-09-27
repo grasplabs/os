@@ -2,6 +2,7 @@
  * How the console changes anything: the change and its audit event in one
  * D1 batch, so neither lands without the other (threat model R19, CO6).
  */
+import { sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
@@ -32,9 +33,27 @@ export interface ConsoleEvent {
 /** A dotted verb: at least two lowercase segments, as in core's audit log. */
 const actionPattern = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)+$/u;
 
+/** Checks `event` and builds its row. */
+const rowOf = (actor: Actor, event: ConsoleEvent) => {
+  if (!actionPattern.test(event.action)) {
+    throw new Error(`Not an audit action: ${event.action}`);
+  }
+  return {
+    id: crypto.randomUUID(),
+    at: new Date(),
+    actor: actor === "system" ? actor : actor.email,
+    action: event.action,
+    clientId: event.clientId ?? null,
+    target: event.target ?? null,
+    detail: event.detail === undefined ? null : JSON.stringify(event.detail),
+  };
+};
+
 /**
- * Runs `statements` and records `event` by `actor` in one batch: if any
- * statement fails, nothing is written, the event included.
+ * Runs `statements` and records `event` by `actor` in one batch (one
+ * transaction): if any statement fails, nothing is written, the event
+ * included. For changes that always happen when their statements succeed;
+ * a conditional one goes through `actIfChanged`.
  */
 export const act = async (
   db: ConsoleDatabase,
@@ -42,18 +61,39 @@ export const act = async (
   statements: readonly BatchItem<"sqlite">[],
   event: ConsoleEvent
 ): Promise<void> => {
-  if (!actionPattern.test(event.action)) {
-    throw new Error(`Not an audit action: ${event.action}`);
-  }
-  const record = db.insert(auditEvents).values({
-    id: crypto.randomUUID(),
-    at: new Date(),
-    actor: actor === "system" ? actor : actor.email,
-    action: event.action,
-    clientId: event.clientId,
-    target: event.target,
-    detail: event.detail === undefined ? null : JSON.stringify(event.detail),
-  });
-  // One batch is one transaction: the event first is as good as last.
+  const record = db.insert(auditEvents).values(rowOf(actor, event));
+  // One batch is one transaction, so where the event sits in it doesn't
+  // matter: it goes first so the batch is never empty. (`actIfChanged` is
+  // different: its event must follow the statement whose changes it reads.)
   await db.batch([record, ...statements]);
+};
+
+/**
+ * Runs `statement`, a conditional change (an update or delete with a
+ * `WHERE` that may match nothing), and records `event` by `actor` only if
+ * it changed a row, in the same batch. Returns whether it did.
+ *
+ * The event's insert comes right after the statement and reads its
+ * `changes()`. That's sound in the console's database, which has no FTS
+ * tables: an FTS5 index flush sets `changes()` too (see core's
+ * `outboxedIfChanged`), so this must not be used where one could run.
+ */
+export const actIfChanged = async (
+  db: ConsoleDatabase,
+  actor: Actor,
+  statement: BatchItem<"sqlite">,
+  event: ConsoleEvent
+): Promise<boolean> => {
+  const row = rowOf(actor, event);
+  const record = db
+    .insert(auditEvents)
+    .select(
+      sql`SELECT ${row.id}, ${row.at.getTime()}, ${row.actor}, ${row.action}, ${row.clientId}, ${row.target}, ${row.detail} WHERE changes() > 0`
+    );
+  await db.batch([statement, record]);
+  const [recorded] = await db
+    .select({ id: auditEvents.id })
+    .from(auditEvents)
+    .where(sql`${auditEvents.id} = ${row.id}`);
+  return recorded !== undefined;
 };

@@ -33,6 +33,12 @@ export const clients = sqliteTable("clients", {
   name: text().notNull(),
   /** The Cloudflare account the console adopted for it. */
   accountId: text("account_id").notNull().unique(),
+  /**
+   * The router secret's generation: the secret is
+   * `HMAC(ROUTER_KEY, "router:<id>:<generation>")`, so raising it rotates
+   * the secret with nothing stored.
+   */
+  generation: integer().notNull().default(1),
   /** The rollout ring it's in: 0 first. */
   ring: integer().notNull().default(1),
   status: text({ enum: ["provisioning", "active", "offboarded"] })
@@ -145,7 +151,7 @@ export const staff = sqliteTable("staff", {
 
 /**
  * Every console action, written in the same batch as the change it records
- * (`act`, src/db/act.ts). Append-only; identifiers only, never secrets or
+ * (`act` and `actIfChanged`, src/db/act.ts). Append-only; identifiers only, never secrets or
  * content (threat model R16, R17).
  */
 export const auditEvents = sqliteTable(

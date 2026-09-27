@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "240dd6a5-c8ae-42ce-84ff-64ca3258d0bf",
+  "id": "4ab6068e-a68f-4cf0-9dd6-5bcc094de3c7",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "tables": {
     "audit_events": {
@@ -189,6 +189,14 @@
           "primaryKey": false,
           "notNull": true,
           "autoincrement": false
+        },
+        "generation": {
+          "name": "generation",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 1
         },
         "ring": {
           "name": "ring",

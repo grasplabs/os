@@ -26,6 +26,7 @@ CREATE TABLE `clients` (
 	`id` text PRIMARY KEY NOT NULL,
 	`name` text NOT NULL,
 	`account_id` text NOT NULL,
+	`generation` integer DEFAULT 1 NOT NULL,
 	`ring` integer DEFAULT 1 NOT NULL,
 	`status` text DEFAULT 'provisioning' NOT NULL,
 	`pinned_release_id` text,

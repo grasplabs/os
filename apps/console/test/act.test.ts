@@ -1,8 +1,8 @@
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { describe, expect, it } from "vite-plus/test";
 
-import { act, consoleDatabase } from "../src/db/act.ts";
+import { act, actIfChanged, consoleDatabase } from "../src/db/act.ts";
 import { auditEvents, clients, settings } from "../src/db/schema.ts";
 
 const db = consoleDatabase(env.DB);
@@ -131,5 +131,76 @@ describe(act, () => {
     await expect(
       db.select().from(clients).where(eq(clients.id, client.id))
     ).resolves.toStrictEqual([]);
+  });
+});
+
+describe(actIfChanged, () => {
+  /** Moves `client` to `ring` only while it's still in ring 1. */
+  const promote = (clientId: string, ring: number) =>
+    db
+      .update(clients)
+      .set({ ring })
+      .where(and(eq(clients.id, clientId), eq(clients.ring, 1)));
+
+  it("records a conditional change that happened", async () => {
+    const client = newClient();
+    await db.insert(clients).values(client);
+
+    await expect(
+      actIfChanged(db, staff, promote(client.id, 0), {
+        action: "client.ring",
+        clientId: client.id,
+        detail: { ring: 0 },
+      })
+    ).resolves.toBeTruthy();
+
+    const events = await eventsFor(client.id);
+    expect(events).toMatchObject([
+      {
+        actor: staff.email,
+        action: "client.ring",
+        target: null,
+        detail: JSON.stringify({ ring: 0 }),
+      },
+    ]);
+    expect(events[0]?.at).toBeInstanceOf(Date);
+  });
+
+  it("records nothing when the change matched no row", async () => {
+    const client = newClient();
+    await db.insert(clients).values({ ...client, ring: 2 });
+
+    await expect(
+      actIfChanged(db, staff, promote(client.id, 0), {
+        action: "client.ring",
+        clientId: client.id,
+      })
+    ).resolves.toBeFalsy();
+
+    await expect(eventsFor(client.id)).resolves.toStrictEqual([]);
+    const [row] = await db
+      .select({ ring: clients.ring })
+      .from(clients)
+      .where(eq(clients.id, client.id));
+    expect(row).toStrictEqual({ ring: 2 });
+  });
+
+  it("records one change once, when two race for it", async () => {
+    const client = newClient();
+    await db.insert(clients).values(client);
+
+    const results = await Promise.all([
+      actIfChanged(db, staff, promote(client.id, 0), {
+        action: "client.ring",
+        clientId: client.id,
+      }),
+      actIfChanged(db, "system", promote(client.id, 3), {
+        action: "client.ring",
+        clientId: client.id,
+      }),
+    ]);
+
+    expect(results.filter(Boolean)).toHaveLength(1);
+    await expect(eventsFor(client.id)).resolves.toHaveLength(1);
   });
 });
