@@ -24,7 +24,7 @@ import { z } from "zod";
 import { parseJsonc } from "../wrangler-config-rules.ts";
 import { collectAssets, collectModules, collectSqlFiles } from "./hash-lib.ts";
 import {
-  clearReleaseDir,
+  assertReleaseDir,
   generateManifest,
   parseWranglerConfig,
   verifyRelease,
@@ -135,8 +135,9 @@ if (wranglerVersion === undefined) {
   throw new Error("wrangler has no version");
 }
 console.info(`Building release ${releaseId} from ${commit}`);
-// Refuses a mistyped --out before minutes of building, not after.
-clearReleaseDir(out);
+// Refuses a mistyped --out before minutes of building, not after. Only a
+// check: an earlier release in it stays until this one is built.
+assertReleaseDir(out);
 
 // Before core's build, which adds the compiled screen runtime to its output.
 runVisibly("vp", ["run", "--filter", `@grasp-os/${FRONTEND}`, "build"]);

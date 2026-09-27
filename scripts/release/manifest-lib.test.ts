@@ -27,6 +27,7 @@ import {
   stableStringify,
 } from "./hash-lib.ts";
 import {
+  assertReleaseDir,
   assetKey,
   generateManifest,
   moduleKey,
@@ -218,6 +219,30 @@ describe("a written release", () => {
     const nested = path.join(out, "nested", "release");
     writeRelease(nested, manifest, builds());
     expect(verifyRelease(nested)).toStrictEqual(manifest);
+  });
+
+  it("keeps the previous release when the next build fails", () => {
+    // What build-release does: check --out first, build, then write.
+    assertReleaseDir(out);
+    expect(() =>
+      generateManifest({ ...info, commit: "not a commit" }, builds())
+    ).toThrow(/commit/u);
+    expect(verifyRelease(out)).toStrictEqual(manifest);
+  });
+
+  it("refuses a directory that isn't a release before building", () => {
+    const other = mkdtempSync(path.join(tmpdir(), "grasp-os-not-a-release-"));
+    try {
+      writeFileSync(path.join(other, "keep.txt"), "someone's work");
+      expect(() => {
+        assertReleaseDir(other);
+      }).toThrow(/refusing to delete it/u);
+      expect(() => {
+        assertReleaseDir(path.join(other, "absent"));
+      }).not.toThrow();
+    } finally {
+      rmSync(other, { force: true, recursive: true });
+    }
   });
 
   it("refuses to replace a directory that isn't a release", () => {

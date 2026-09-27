@@ -430,21 +430,28 @@ const writeBlob = (outDir: string, key: string, bytes: Buffer): void => {
 export const RELEASE_MARKER = ".grasp-release";
 
 /**
- * Empties `outDir` for a new release, creating it if it's absent. It deletes
- * only a directory that is empty or holds {@link RELEASE_MARKER}, so a
- * mistyped `--out` (the repo, a home directory) is refused, not wiped.
+ * Throws unless `outDir` is safe to replace with a release: absent, empty, or
+ * holding {@link RELEASE_MARKER}. So a mistyped `--out` (the repo, a home
+ * directory) is refused, not wiped. Only checks; changes nothing.
  */
-export const clearReleaseDir = (outDir: string): void => {
-  if (existsSync(outDir) && readdirSync(outDir).length > 0) {
-    if (!existsSync(path.join(outDir, RELEASE_MARKER))) {
-      throw new Error(
-        `${outDir} isn't empty and isn't a release directory (no ${RELEASE_MARKER}); refusing to delete it`
-      );
-    }
-    rmSync(outDir, { force: true, recursive: true });
+export const assertReleaseDir = (outDir: string): void => {
+  if (
+    existsSync(outDir) &&
+    readdirSync(outDir).length > 0 &&
+    !existsSync(path.join(outDir, RELEASE_MARKER))
+  ) {
+    throw new Error(
+      `${outDir} isn't empty and isn't a release directory (no ${RELEASE_MARKER}); refusing to delete it`
+    );
   }
+};
+
+/** Empties `outDir` for a new release, once {@link assertReleaseDir} allows it. */
+const clearReleaseDir = (outDir: string): void => {
+  assertReleaseDir(outDir);
+  rmSync(outDir, { force: true, recursive: true });
   mkdirSync(outDir, { recursive: true });
-  // First, so a build that stops halfway leaves a directory the next build
+  // First, so a write that stops halfway leaves a directory the next build
   // may replace.
   writeFileSync(path.join(outDir, RELEASE_MARKER), "");
 };
