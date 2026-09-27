@@ -64,13 +64,51 @@ test("names each member's actions for them, and asks before making someone an ad
   await expect(role).toContainText("user");
 });
 
-test("shows the members page only to someone signed in", async ({ page }) => {
+test("shows the members page only to someone signed in, and never signs them out for core failing", async ({
+  context,
+  page,
+}) => {
   await page.goto("/members");
   await expect(page.getByText("Sign in to go on.")).toBeVisible();
   expect(new URL(page.url()).pathname).toBe("/sign-in");
   expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/members");
   await expect(page.getByRole("heading", { name: "Members" })).toHaveCount(0);
   await expect(page.getByRole("table")).toHaveCount(0);
+
+  // Core fails the next connections outright, as a busy database failing
+  // the upgrade does: the browser sees only a closed socket.
+  let failing = 0;
+  await page.routeWebSocket("**/rpc", async (socket) => {
+    if (failing > 0) {
+      failing -= 1;
+      await socket.close();
+      return;
+    }
+    socket.connectToServer();
+  });
+  const { admin } = await signedIn({ admin: "admin" });
+  await signInTo(context, admin);
+
+  // A couple of failures pass: the page asks again and lets them in.
+  failing = 2;
+  await page.goto("/members");
+  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe("/members");
+  expect(failing).toBe(0);
+
+  // Failing for good says so, rather than asking them to sign in again.
+  failing = Number.POSITIVE_INFINITY;
+  await page.goto("/members");
+  await expect(
+    page.getByText("Grasp can't be reached right now. Try again in a moment.")
+  ).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe("/members");
+  await expect(page.getByText("Sign in to go on.")).toHaveCount(0);
+
+  // Once core answers again, trying again lets them in.
+  failing = 0;
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
 });
 
 test("an admin changes a member's role, and the controls wait for the list to show it", async ({

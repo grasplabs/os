@@ -216,16 +216,19 @@ base(
   }
 );
 
-test("a screen subscribes again after its connection drops, trying one connection at a time", async ({
+test("a screen opens through core failing at first, subscribes again after its connection drops, and tries one connection at a time", async ({
   browser,
 }) => {
   const page = await pageOf(browser, one);
   let drop: (() => Promise<void>) | undefined;
   let dropped = false;
+  let connections = 0;
   let afterDrop = 0;
-  // After the drop, core is out of reach for the next attempt.
-  let refuse = 0;
+  // Core is out of reach for the first attempt, and again for the next
+  // attempt after the drop.
+  let refuse = 1;
   await page.routeWebSocket("**/rpc", async (socket) => {
+    connections += 1;
     if (dropped) {
       afterDrop += 1;
     }
@@ -234,7 +237,18 @@ test("a screen subscribes again after its connection drops, trying one connectio
       await socket.close();
       return;
     }
-    socket.connectToServer();
+    const server = socket.connectToServer();
+    if (connections === 2) {
+      // Core fails the connection that holds while the screen opens on it.
+      socket.onMessage(async (message) => {
+        if (String(message).includes('["screens","open"]')) {
+          await socket.close();
+          return;
+        }
+        server.send(message);
+      });
+      return;
+    }
     drop = async () => {
       dropped = true;
       refuse = 1;
@@ -242,6 +256,9 @@ test("a screen subscribes again after its connection drops, trying one connectio
     };
   });
   const screen = await openScreen(page, app);
+  // The refused first attempt, the one that failed the open, and the one
+  // the screen opened on.
+  expect(connections).toBe(3);
   await drop?.();
 
   // Only a new subscription, on the page's new connection, can bring it.
