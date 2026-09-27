@@ -64,6 +64,8 @@ const verifiedStaff = async (
     const { payload } = await jwtVerify(token, keySetFor(issuer), {
       issuer,
       audience,
+      // Access signs with RS256; nothing else is accepted.
+      algorithms: ["RS256"],
     });
     if (typeof payload.email !== "string" || payload.email === "") {
       return null;
@@ -74,14 +76,33 @@ const verifiedStaff = async (
   }
 };
 
+/** Where TanStack Start serves server functions (its default base). */
+const serverFunctionBase = "/_serverFn";
+
 /**
- * A state-changing request must come from the console's own pages: CSRF
- * protection on top of Access's SameSite cookie. A missing `Origin` counts
- * as foreign; browsers send it on every non-GET request.
+ * Whether a request could be a cross-site forgery (CSRF), on top of
+ * Access's SameSite cookie:
+ * - a non-GET request whose `Origin` isn't the console's own (a missing
+ *   `Origin` counts as foreign; browsers send it on every non-GET request);
+ * - a call to a server function, whatever its method, without the
+ *   `x-tsr-serverFn: true` header TanStack's client always sends. A server
+ *   function can be a GET, which a link or an image on another site could
+ *   otherwise run, and a cross-site request can't set that header without a
+ *   CORS preflight, which the console never allows.
  */
-const isForeignWrite = (request: Request): boolean =>
-  !safeMethods.has(request.method) &&
-  request.headers.get("origin") !== new URL(request.url).origin;
+const isForgeable = (request: Request): boolean => {
+  const url = new URL(request.url);
+  if (
+    url.pathname.startsWith(serverFunctionBase) &&
+    request.headers.get("x-tsr-serverfn") !== "true"
+  ) {
+    return true;
+  }
+  return (
+    !safeMethods.has(request.method) &&
+    request.headers.get("origin") !== url.origin
+  );
+};
 
 const forbidden = (): Response =>
   new Response("Forbidden", {
@@ -97,7 +118,7 @@ const forbidden = (): Response =>
 export const withAccess =
   (handler: (request: Request, staff: Staff) => Promise<Response>) =>
   async (request: Request, env: AccessEnv): Promise<Response> => {
-    if (isForeignWrite(request)) {
+    if (isForgeable(request)) {
       return forbidden();
     }
     const devEmail = env.DEV_ACCESS_EMAIL ?? "";

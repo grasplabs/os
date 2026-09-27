@@ -120,6 +120,37 @@ describe("the local dev bypass", () => {
 });
 
 describe("cross-site requests", () => {
+  it("refuses a server function called without TanStack's header, even a GET", async () => {
+    const jwt = await accessJwt(staffEmail);
+    const statuses = await Promise.all([
+      statusOf(asStaff("/_serverFn/anything?payload=x", jwt)),
+      statusOf(
+        asStaff("/_serverFn/anything", jwt, {
+          method: "POST",
+          headers: { origin },
+        })
+      ),
+      statusOf(
+        asStaff("/_serverFn/anything", jwt, {
+          headers: { "x-tsr-serverFn": "false" },
+        })
+      ),
+    ]);
+    expect(statuses).toStrictEqual([403, 403, 403]);
+  });
+
+  it("lets the console's own client call a server function", async () => {
+    const jwt = await accessJwt(staffEmail);
+    const status = await statusOf(
+      asStaff("/_serverFn/anything", jwt, {
+        method: "POST",
+        headers: { origin, "x-tsr-serverFn": "true" },
+      })
+    );
+    // Past the check, TanStack Start answers: no such server function.
+    expect(status).toBe(404);
+  });
+
   it("refuses a state change from another origin, or none", async () => {
     const jwt = await accessJwt(staffEmail);
     const statuses = await Promise.all([

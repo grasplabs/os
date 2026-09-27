@@ -28,6 +28,9 @@ export default defineProject({
           // The Access team test/access.ts stands in for.
           CF_ACCESS_AUD: accessTeam.audience,
           CF_ACCESS_ISS: accessTeam.issuer,
+          // Off whatever a developer's .dev.vars sets: the tests of the
+          // bypass set it themselves.
+          DEV_ACCESS_EMAIL: "",
         },
       },
     }),
