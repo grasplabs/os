@@ -5,6 +5,7 @@ import { auditLog } from "./audit-log.ts";
 import { drainAuditOutboxes } from "./audit-outbox.ts";
 import { consumeLeftoverAuditQueue } from "./audit-queue-leftovers.ts";
 import { handleRequest } from "./entry.ts";
+import { featureEnabled } from "./features.ts";
 import { indexApps } from "./knowledge/apps-collection.ts";
 import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import { sweepUploads } from "./knowledge/uploads.ts";
@@ -16,6 +17,7 @@ const quarterHourCron = "*/15 * * * *";
 
 export { App } from "./app.ts";
 export { AuditLog } from "./audit-log.ts";
+export { Builtins } from "./builtins.ts";
 export { AppConnectionBinding } from "./app-bindings.ts";
 export { ConnectionBinding } from "./bindings.ts";
 export { AppCollectionBinding } from "./knowledge/app-binding.ts";
@@ -36,9 +38,10 @@ export default {
   // Every minute: audit events waiting in core's outboxes and connect's
   // (see src/audit-outbox.ts), personal connections of removed people still
   // connected (see src/members.ts), Apps copied from a blueprint left
-  // pending (see src/app-blueprints.ts), the release's Grasp skills (see
-  // src/knowledge/grasp-skills.ts), and uploads left behind (see
-  // src/knowledge/uploads.ts).
+  // pending (see src/app-blueprints.ts), the release's Grasp skills while
+  // `builtins` is off (see src/knowledge/grasp-skills.ts; once it's on, the
+  // first request installs them, src/builtins.ts), and uploads left behind
+  // (see src/knowledge/uploads.ts).
   //
   // Every 15 minutes, on a trigger of its own so neither shares an
   // invocation with the jobs above: the day's improvement signals, until
@@ -60,7 +63,8 @@ export default {
             drainAuditOutboxes(env),
             retryDisconnects(env),
             sweepPendingCopies(env),
-            syncGraspSkills(env),
+            // Remove with the `builtins` flag, in a later release.
+            ...(featureEnabled(env, "builtins") ? [] : [syncGraspSkills(env)]),
             sweepUploads(env),
           ];
     const results = await Promise.allSettled(jobs);

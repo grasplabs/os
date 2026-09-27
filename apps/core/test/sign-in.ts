@@ -7,6 +7,7 @@ import type { Role } from "@grasp-os/shared/roles";
 import { routerSecretHeader } from "@grasp-os/shared/router";
 import type { CoreApi } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";
+import { createExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { z } from "zod";
 
@@ -45,7 +46,7 @@ export const routed = async (
     ...init,
     headers,
   });
-  return await worker.fetch(request, coreEnv);
+  return await worker.fetch(request, coreEnv, createExecutionContext());
 };
 
 /** The `name=value` pairs a response sets, as a `Cookie` header. */

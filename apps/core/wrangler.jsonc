@@ -88,10 +88,14 @@
       { "name": "WORKSPACES", "class_name": "Workspace" },
       { "name": "APPS", "class_name": "App" },
       { "name": "AUDIT_LOG", "class_name": "AuditLog" },
+      // The one object that installs what ships with each release
+      // (src/builtins.ts).
+      { "name": "BUILTINS", "class_name": "Builtins" },
     ],
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["Workspace", "App", "AuditLog"] },
+    { "tag": "v2", "new_sqlite_classes": ["Builtins"] },
   ],
   // The one dispatcher of every App's workflow runs (src/workflows/): it
   // loads each run's code by App and pinned version, with an env rebuilt

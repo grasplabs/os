@@ -86,7 +86,10 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             // env: the shortest archive retention the console may set.
             AUDIT_ARCHIVE_RETENTION_DAYS: "365",
             ...testSignIn,
-            // Every flagged feature on; features.test.ts switches them off.
+            // Every flagged feature on, features.test.ts switches them off,
+            // but `builtins`: its install, started in the background by
+            // whichever test first sends a request, would write while other
+            // tests check what was written. builtins.test.ts switches it on.
             FEATURES: {
               apps: true,
               app_sharing: true,

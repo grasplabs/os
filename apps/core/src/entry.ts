@@ -6,6 +6,7 @@ import { screenFramePath } from "@grasp-os/shared/screens";
 
 import { authBasePath } from "./auth/auth.ts";
 import { handleAuthRequest } from "./auth/routes.ts";
+import { installBuiltinsOnce } from "./builtins.ts";
 import { handleConnectionCallback } from "./connections.ts";
 import { errorResponse } from "./errors.ts";
 import { originalResponse } from "./knowledge/uploads.ts";
@@ -73,11 +74,13 @@ interface Outcome {
 const respond = async (
   request: Request,
   env: Env,
+  ctx: Pick<ExecutionContext, "waitUntil">,
   requestId: string
 ): Promise<Outcome> => {
   try {
     const checked = await checkRouterSecret(request, env);
     if (checked.ok) {
+      installBuiltinsOnce(env, ctx);
       const response = await route(checked.request, env, requestId);
       return { response, level: "info" };
     }
@@ -114,12 +117,18 @@ const withRequestId = (response: Response, requestId: string): Response => {
 /** Every request to core starts here, static files included. */
 export const handleRequest = async (
   request: Request,
-  env: Env
+  env: Env,
+  ctx: Pick<ExecutionContext, "waitUntil">
 ): Promise<Response> => {
   const startedAt = Date.now();
   const requestId = crypto.randomUUID();
   const url = new URL(request.url);
-  const { response, level, fields } = await respond(request, env, requestId);
+  const { response, level, fields } = await respond(
+    request,
+    env,
+    ctx,
+    requestId
+  );
   // One line per request. Only the path: query strings can carry tokens.
   log[level]("request", {
     requestId,

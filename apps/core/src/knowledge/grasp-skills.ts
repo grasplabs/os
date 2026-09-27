@@ -35,27 +35,27 @@ import type { Writer } from "./documents.ts";
 //
 // - the Grasp skills: how Grasp works (a baseline, a workflow, the board
 //   page), in apps/core/skills/, bundled with each release as text, and
-//   synced into their collection (source `grasp`) by the cron trigger.
-//   Nobody else writes them, admins neither (documents.ts `checkedText`),
-//   and a purge that names one is refused: they hold no personal data,
-//   and the sync would put their text back;
+//   synced into their collection (source `grasp`) once per release, on
+//   the first request (builtins.ts), or, while the `builtins` flag is off,
+//   by the cron trigger every minute. Nobody else writes them, admins
+//   neither (documents.ts `checkedText`), and a purge that names one is
+//   refused: they hold no personal data, and the sync would put their
+//   text back;
 // - the client's skills: a collection for everyone that its admins write,
 //   like any other, and where a Grasp skill is copied to be adapted.
 //
-// Workers have no deploy hook, so the sync runs on the cron trigger,
-// every minute: a release's changed skills are in the collection within
-// a minute of it going out, or of the `skills` flag going on. Each run
-// reads every Grasp skill's current text in one query and writes only the
-// ones that differ from the bundle, each as its next version from the
-// version it read: two runs at once (a slow run and the next, or two
-// isolates) both try the same version number, and the second is refused
-// as a conflict (by the version's primary key, when both got past the
-// version check) and writes nothing, so a change is written once. A rollback syncs the older text back, as a version of its own.
-// While old and new isolates both run, during a rollout, each writes its
-// own release's text if it differs; the one still running a minute later
-// has the last word. Deploys replace every version at once: with gradual
-// deployments, cron runs would split between the old and new versions
-// for the whole rollout, and a changed skill would flip every minute.
+// Each sync reads every Grasp skill's current text in one query and
+// writes only the ones that differ from the release, each as its next
+// version from the version it read: two syncs at once both try the same
+// version number, and the second is refused as a conflict (by the
+// version's primary key, when both got past the version check) and
+// writes nothing, so a change is written once. A rollback syncs the older
+// text back, as a version of its own.
+//
+// On the cron trigger, while old and new isolates both run during a
+// rollout, each writes its own release's text if it differs, so a changed
+// skill flips every minute until the rollout ends. The install on the
+// first request doesn't: builtins.ts says why.
 
 /** The Grasp skills' collection, under this ID: no other has it. */
 export const graspSkillsCollectionId: CollectionId =
@@ -126,15 +126,18 @@ const requireSkills = (env: Env): void => {
  * Writes each Grasp skill whose current text isn't the release's (`skills`,
  * this one's unless a test passes another) as its next version, creating
  * the collection first if it doesn't exist. Does nothing while `skills`
- * is off. A skill that fails is logged, and the others are still written;
- * the next run tries it again. The cron trigger calls it.
+ * is off. A skill that fails, or that another sync wrote from the same
+ * version first, is logged, and the others are still written; the next
+ * sync compares it again. Resolves whether every skill is the release's
+ * (or `skills` is off). The install on the first request calls it, and the
+ * cron trigger while `builtins` is off.
  */
 export const syncGraspSkills = async (
   env: Env,
   skills: readonly GraspSkill[] = graspSkills
-): Promise<void> => {
+): Promise<boolean> => {
   if (!skillsEnabled(env)) {
-    return;
+    return true;
   }
   const db = drizzle(env.KNOWLEDGE);
   const stored = await db
@@ -157,9 +160,10 @@ export const syncGraspSkills = async (
     (skill) => byPath.get(skill.path)?.text !== skill.text
   );
   if (changed.length === 0) {
-    return;
+    return true;
   }
   const collection = await ensureCollection(env, graspSkillsRow(), graspActor);
+  let complete = true;
   for (const skill of changed) {
     try {
       // oxlint-disable-next-line no-await-in-loop -- a few skills, one at a time
@@ -173,7 +177,9 @@ export const syncGraspSkills = async (
         graspSync: true,
       });
     } catch (error) {
-      // Another run wrote it from the same version first.
+      complete = false;
+      // Another sync wrote it from the same version first: which text it
+      // wrote, the next sync compares.
       if (knowledgeErrors.codeOf(error) !== "knowledge.conflict") {
         log.error("skills.sync_failed", {
           path: skill.path,
@@ -182,6 +188,7 @@ export const syncGraspSkills = async (
       }
     }
   }
+  return complete;
 };
 
 /**
