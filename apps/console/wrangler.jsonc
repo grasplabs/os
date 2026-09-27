@@ -1,14 +1,20 @@
 // Deployed to grasp-os-staging on every merge and to grasp-os-ops by hand, behind
-// Cloudflare Access (company sign-in + MFA).
+// Cloudflare Access (company sign-in + MFA). The Worker verifies the Access JWT
+// on every request itself (src/access.ts), against the CF_ACCESS_AUD and
+// CF_ACCESS_ISS vars set on each account; without them it refuses everything.
 // Client account tokens live in Secrets Store, never in the database.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "grasp-os-console",
-  "main": "@tanstack/react-start/server-entry",
+  // TanStack Start's handler, behind the Access check.
+  "main": "src/server.ts",
   "compatibility_date": "2026-09-15",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
+  // The Access vars are set on each account, not here (src/env.d.ts);
+  // without this, every deploy would delete them.
+  "keep_vars": true,
   // No platform line per invocation, and query strings stay out of logs and
   // traces, as on every Worker (threat model R17).
   "observability": {
