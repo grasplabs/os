@@ -19,6 +19,11 @@ export default defineConfig({
   timeout: 180_000,
   forbidOnly: ci,
   retries: ci ? 2 : 0,
+  // Two workers, locally as in CI. Tests share core's local D1 file with
+  // the dev server, and each sign-in write (e2e/people.ts) opens it from a
+  // process of its own, which can make the dev server's queries fail
+  // meanwhile. More workers overlap more often; two costs a little speed.
+  workers: 2,
   reporter: ci ? "github" : "list",
   use: {
     baseURL: `http://localhost:${port}`,
