@@ -73,8 +73,10 @@ export class CoreLink {
   /**
    * Runs `run` on the signed-in session, and a few times again, with a
    * growing pause, while it fails in a way that may pass: core failing, or
-   * the connection breaking (the next try waits for the new one). Not
-   * connecting at all fails at once: connecting has tried again already.
+   * the connection breaking. After a break, the next try waits for the new
+   * connection, and a connection that once worked reconnects for as long
+   * as it takes, so that wait has no bound. Not connecting at all fails at
+   * once: the first connection has tried again already.
    */
   async retrying<T>(run: (session: Session) => Promise<T>): Promise<T> {
     let connected = false;

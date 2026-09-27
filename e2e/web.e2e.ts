@@ -86,7 +86,7 @@ test("shows the members page only to someone signed in, and never signs them out
     }
     socket.connectToServer();
   });
-  const { admin } = await signedIn({ admin: "admin" });
+  const { admin } = peopleIn("membersRecover");
   await signInTo(context, admin);
 
   // A couple of failures pass: the page asks again and lets them in.
@@ -104,6 +104,17 @@ test("shows the members page only to someone signed in, and never signs them out
   ).toBeVisible();
   expect(new URL(page.url()).pathname).toBe("/members");
   await expect(page.getByText("Sign in to go on.")).toHaveCount(0);
+
+  // Trying again shows it's trying, then says so again while core fails.
+  const unreachable = page.getByRole("alert");
+  await page.getByRole("button", { name: "Try again" }).click();
+  await expect(
+    page.getByRole("button", { name: "Trying again…" })
+  ).toBeDisabled();
+  await expect(unreachable).toHaveText(
+    "Grasp can't be reached right now. Try again in a moment."
+  );
+  expect(new URL(page.url()).pathname).toBe("/members");
 
   // Once core answers again, trying again lets them in.
   failing = 0;

@@ -8,6 +8,7 @@ import {
   Outlet,
   redirect,
   useRouter,
+  useRouterState,
 } from "@tanstack/react-router";
 import type { ErrorComponentProps } from "@tanstack/react-router";
 
@@ -120,22 +121,27 @@ class CoreUnreachableError extends Error {
  */
 const ShellError = ({ error }: ErrorComponentProps) => {
   const router = useRouter();
+  const trying = useRouterState({ select: (state) => state.isLoading });
   if (!(error instanceof CoreUnreachableError)) {
     return <ErrorComponent error={error} />;
   }
   return (
     <main className="flex min-h-svh flex-col items-center justify-center gap-4 p-6">
       <h1 className="text-2xl font-medium">Grasp</h1>
-      <ErrorText>
-        Grasp can&apos;t be reached right now. Try again in a moment.
-      </ErrorText>
+      {/* Gone while trying, so the alert is announced again if it fails. */}
+      {trying ? null : (
+        <ErrorText>
+          Grasp can&apos;t be reached right now. Try again in a moment.
+        </ErrorText>
+      )}
       <Button
         variant="outline"
+        disabled={trying}
         onClick={() => {
           void router.invalidate();
         }}
       >
-        Try again
+        {trying ? "Trying again…" : "Try again"}
       </Button>
     </main>
   );

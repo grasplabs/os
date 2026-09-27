@@ -3,11 +3,7 @@
 // main.tsx does. Importing this first keeps Zod jitless before any of them
 // builds a schema, whichever chunk they land in.
 import "./zod-jitless.ts";
-import {
-  authErrors,
-  internalErrors,
-  isExpectedError,
-} from "@grasp-os/shared/errors";
+import { authErrors, internalErrors } from "@grasp-os/shared/errors";
 import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";
 import type { RpcStub } from "capnweb";
@@ -66,14 +62,25 @@ export const wait = async (ms: number): Promise<void> => {
 
 /**
  * Whether `error` may pass when core is asked again: core out of reach or
- * failing, never a refusal it meant. A connection that failed or broke
- * rejects with a plain error (a browser sees a refused upgrade, even a 500,
- * only as a closed socket), and anything core didn't plan for arrives as
- * `internal.unexpected`, such as a busy database. Every other expected
- * error (nobody signed in, not found, forbidden) is core's answer.
+ * failing, never a refusal it meant. Told by the error's shape alone, so a
+ * code from a family this chunk hasn't loaded still counts as an answer.
+ * A connection that failed or broke rejects with an error that has no
+ * string `code` (a browser sees a refused upgrade, even a 500, only as a
+ * closed socket), and anything core didn't plan for arrives as
+ * `internal.unexpected`, such as a busy database. Any other coded error
+ * (nobody signed in, not found, forbidden) is core's answer.
  */
-export const isTransient = (error: unknown): boolean =>
-  !isExpectedError(error) || internalErrors.codeOf(error) !== undefined;
+export const isTransient = (error: unknown): boolean => {
+  if (internalErrors.codeOf(error) !== undefined) {
+    return true;
+  }
+  const coded =
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    typeof error.code === "string";
+  return !coded;
+};
 
 /**
  * Runs `attempt`, and again after each of `delaysMs` for as long as it
