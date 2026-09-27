@@ -1,5 +1,6 @@
 import { actorOf } from "@grasp-os/shared/audit";
 import {
+  catalogSourceSchema,
   composioToolkitSchema,
   connectErrors,
   connectionErrors,
@@ -178,6 +179,25 @@ const hiddenEntries = async (env: Env): Promise<Set<string>> => {
   return new Set(rows.map(({ source, id }) => entryKey(source, id)));
 };
 
+/** Whether an admin hid the entry `source` `id`. */
+const isHidden = async (
+  env: Env,
+  source: CatalogSource,
+  id: string
+): Promise<boolean> => {
+  const hidden = await drizzle(env.DB)
+    .select({ id: hiddenConnectors.connectorId })
+    .from(hiddenConnectors)
+    .where(
+      and(
+        eq(hiddenConnectors.source, source),
+        eq(hiddenConnectors.connectorId, id)
+      )
+    )
+    .get();
+  return hidden !== undefined;
+};
+
 /**
  * Refuses to start connecting the entry `source` `id`, as a `scope`
  * connection, while it is hidden, and records the refusal as connect
@@ -193,21 +213,10 @@ const requireOffered = async (
     scope,
   }: { source: CatalogSource; id: string; scope: ConnectionScope }
 ): Promise<void> => {
-  const db = drizzle(env.DB);
-  const hidden = await db
-    .select({ id: hiddenConnectors.connectorId })
-    .from(hiddenConnectors)
-    .where(
-      and(
-        eq(hiddenConnectors.source, source),
-        eq(hiddenConnectors.connectorId, id)
-      )
-    )
-    .get();
-  if (hidden === undefined) {
+  if (!(await isHidden(env, source, id))) {
     return;
   }
-  await keepAuditEvent(env, db, {
+  await keepAuditEvent(env, drizzle(env.DB), {
     actor: actorOf(person),
     action: "connection.connect",
     detail: {
@@ -434,7 +443,18 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
     source: CatalogSource,
     id: string
   ): Promise<CatalogTool[]> {
-    await this.#check();
+    const { role } = await this.#check();
+    // A hidden entry isn't in anyone's catalog but an admin's, so to
+    // everyone else it has no tools either: as for an entry there isn't.
+    const entry = catalogSourceSchema.safeParse(source);
+    if (
+      !isAdmin(role) &&
+      entry.success &&
+      typeof id === "string" &&
+      (await isHidden(this.#env, entry.data, id))
+    ) {
+      throw connectErrors.create("connect.catalog_entry_not_found");
+    }
     return await this.#env.CONNECT.catalogTools({
       composio: featureEnabled(this.#env, "composio"),
       source,

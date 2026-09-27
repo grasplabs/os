@@ -532,6 +532,30 @@ describe("offering catalog entries", () => {
     ).resolves.toBe("ok");
   });
 
+  it("keeps a hidden entry's tools from everyone but admins, as for an entry there isn't", async () => {
+    const admin = await person("admin");
+    const anna = await person();
+    await admin.connections.setOffered("native", "google", false);
+    await admin.connections.setOffered("composio", "hubspot", false);
+    const hidden = await Promise.all(
+      [anna, admin].flatMap(({ connections }) => [
+        outcome(connections.catalogTools("native", "google")),
+        outcome(connections.catalogTools("composio", "hubspot")),
+      ])
+    );
+    await admin.connections.setOffered("native", "google", true);
+    await admin.connections.setOffered("composio", "hubspot", true);
+    expect(hidden).toStrictEqual([
+      "connect.catalog_entry_not_found",
+      "connect.catalog_entry_not_found",
+      "ok",
+      "ok",
+    ]);
+    await expect(
+      anna.connections.catalogTools("composio", "hubspot")
+    ).resolves.toHaveLength(2);
+  });
+
   it("is changed by the organization's admins only, never by staff, and only for entries there can be", async () => {
     const admin = await person("admin");
     const anna = await person();

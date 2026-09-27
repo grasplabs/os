@@ -232,7 +232,11 @@ export interface ConnectionsApi {
     id: string,
     offered: boolean
   ) => Promise<void>;
-  /** The tools of one catalog entry, as `catalog` lists it. */
+  /**
+   * The tools of one catalog entry, as `catalog` lists it: an entry that
+   * isn't offered has none but for admins (`connect.catalog_entry_not_found`,
+   * as for an entry there isn't).
+   */
   catalogTools: (source: CatalogSource, id: string) => Promise<CatalogTool[]>;
   /**
    * Starts connecting a Composio toolkit, for an admin who consented: the
