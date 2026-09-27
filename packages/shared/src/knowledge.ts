@@ -514,8 +514,12 @@ export type PurgeReason = z.infer<typeof purgeReasonSchema>;
  */
 export const purgeMaxDocuments = auditProvenanceMaxItems;
 
-/** Most terms one purge of content removes. */
-export const purgeMaxTerms = 20;
+/**
+ * Most terms one purge of content removes: enough for a person's name, its
+ * joined forms ("Toms", "tomVisser") and email addresses, which a purge
+ * only finds when each is a term of its own.
+ */
+export const purgeMaxTerms = 50;
 
 /** Longest term, in characters: a passage of a few sentences. */
 export const purgeTermMaxLength = 1000;
@@ -569,7 +573,11 @@ const purgeTermSchema = z
  * - `content`: every occurrence of the `terms` (a name, an email address,
  *   a passage), in any case and as a whole word (never inside a longer
  *   word), from the documents named, which stay: each becomes
- *   {@link purgedMarker}.
+ *   {@link purgedMarker}. A form joined to more letters or digits ("Toms",
+ *   "Tom2", "tomVisser" for "Tom") must be a term of its own; the plan
+ *   counts how many are left (`inLongerWords`). In scripts written without
+ *   spaces (Chinese, Japanese, Thai, Lao, Khmer, Burmese) a term is found
+ *   inside running text.
  */
 export const purgeInputSchema = z.discriminatedUnion("type", [
   z.strictObject({
@@ -598,6 +606,13 @@ export interface PurgePlan {
   versions: number;
   /** Memory proposals it deletes or rewrites. */
   proposals: number;
+  /**
+   * How often a term would be left as part of a longer word, in every
+   * version and memory proposal of the documents named ("Toms" or
+   * "automated" for "Tom"): list the forms to remove as terms of their
+   * own. Always 0 for `personal`.
+   */
+  inLongerWords: number;
   /** Confirms exactly this purge, by the admin who prepared it. */
   token: string;
   /** ISO 8601. */

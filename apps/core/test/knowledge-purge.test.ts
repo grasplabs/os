@@ -227,6 +227,7 @@ describe("a personal purge", setUpTime, () => {
         documents: 1,
         versions: 2,
         proposals: 1,
+        inLongerWords: 0,
         token: "string",
         expiresAt: "string",
       },
@@ -399,7 +400,7 @@ describe("a purge of content", setUpTime, () => {
     const proposal = await proposeMemory(env, asAgent, work, {
       file: "MEMORY.md",
       text: `# Company\n${name} runs payroll and HR.`,
-      message: `${name} does HR too`,
+      message: `${name} does HR too, as ${name}s did`,
     });
     const before = await forContext(env, asAgent, work, { type: "own" });
 
@@ -430,6 +431,7 @@ describe("a purge of content", setUpTime, () => {
         documents: outcomeOf?.plan.documents,
         versions: outcomeOf?.plan.versions,
         proposals: outcomeOf?.plan.proposals,
+        inLongerWords: outcomeOf?.plan.inLongerWords,
       },
       result: {
         ...outcomeOf?.result,
@@ -450,7 +452,8 @@ describe("a purge of content", setUpTime, () => {
       hits: hits.hits.map(({ documentId }) => documentId),
       backlinks: backlinks.backlinks.map(({ documentId }) => documentId),
     }).toStrictEqual({
-      plan: { documents: 2, versions: 4, proposals: 1 },
+      // "…s did", left in the proposal's message.
+      plan: { documents: 2, versions: 4, proposals: 1, inLongerWords: 1 },
       result: {
         purgeId: "string",
         documents: 2,
@@ -475,7 +478,7 @@ describe("a purge of content", setUpTime, () => {
       // Still waiting, on the new version: approving it still works.
       proposal: {
         text: "# Company\n(removed) runs payroll and HR.",
-        message: "(removed) does HR too",
+        message: `(removed) does HR too, as ${name}s did`,
         status: "pending",
         baseVersion: companyTexts.length,
       },
@@ -638,7 +641,40 @@ describe("a purge of content", setUpTime, () => {
     });
   });
 
-  it("removes a term as a whole word, in any case and next to punctuation, never inside a longer word", async () => {
+  it("removes a term as a whole word, in any case and next to punctuation, and counts where it is inside a longer word", async () => {
+    const admin = await personOf("admin");
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    await saveOver(admin, handbook.id, "team.md", "# Team\nTom planned it.");
+    const document = await saveOver(
+      admin,
+      handbook.id,
+      "team.md",
+      "# Team\nTom planned it, tom automated it (Tom). Ask Tom, then Tomas or Ann's team.\nMail tom.visser@acme.test or Tom.Visser@ACME.test, not atom.visser@acme.test."
+    );
+    const { plan } = await purged(admin, {
+      type: "content",
+      documentIds: [document.id],
+      terms: ["Tom", "Ann", "tom.visser@acme.test"],
+      reason: "offboarding",
+    });
+    const purgedText =
+      "# Team\n(removed) planned it, (removed) automated it ((removed)). Ask (removed), then Tomas or (removed)'s team.\nMail (removed) or (removed), not atom.visser@acme.test.";
+    expect({
+      versions: await versionTexts(document.id),
+      // "planned" in both versions; "automated", "Tomas" and
+      // "atom.visser@acme.test" in the second.
+      inLongerWords: plan.inLongerWords,
+    }).toStrictEqual({
+      // The two saved, and the one saved as the purge's.
+      versions: ["# Team\n(removed) planned it.", purgedText, purgedText],
+      inLongerWords: 5,
+    });
+  });
+
+  it("removes a term that ends in punctuation whatever follows it", async () => {
     const admin = await personOf("admin");
     const handbook = await admin.api.knowledge.createCollection({
       name: "Handbook",
@@ -647,25 +683,22 @@ describe("a purge of content", setUpTime, () => {
     const document = await saveOver(
       admin,
       handbook.id,
-      "team.md",
-      "# Team\nTom planned it, tom automated it (Tom). Ask Tom, then Tomas or Ann's team.\nMail tom.visser@acme.test or Tom.Visser@ACME.test, not atom.visser@acme.test."
+      "log.md",
+      "# Log\nTom left.Next day, Tom left.\nAtom left.Now"
     );
     await purged(admin, {
       type: "content",
       documentIds: [document.id],
-      terms: ["Tom", "Ann", "tom.visser@acme.test"],
+      terms: ["Tom left."],
       reason: "offboarding",
     });
-    const purgedText =
-      "# Team\n(removed) planned it, (removed) automated it ((removed)). Ask (removed), then Tomas or (removed)'s team.\nMail (removed) or (removed), not atom.visser@acme.test.";
-    // The version saved, and the one saved as the purge's.
-    await expect(versionTexts(document.id)).resolves.toStrictEqual([
-      purgedText,
-      purgedText,
-    ]);
+    const read = await admin.api.knowledge.getDocument(document.id);
+    expect(read.version.text).toBe(
+      "# Log\n(removed)Next day, (removed)\nAtom left.Now"
+    );
   });
 
-  it("finds whole words in any script, with accents as part of the word", async () => {
+  it("finds whole words in any script, with accents and invisible characters as part of the word", async () => {
     const admin = await personOf("admin");
     const handbook = await admin.api.knowledge.createCollection({
       name: "Handbook",
@@ -674,24 +707,55 @@ describe("a purge of content", setUpTime, () => {
     // "José" twice: once with its accent as one character, which only a
     // Unicode-aware boundary keeps from ending "Jos", and once as an e and
     // a combining accent, which is part of the word, so "Jose" isn't all
-    // of it.
+    // of it. A soft hyphen and a zero-width non-joiner sit inside words.
     const decomposed = `Jose${String.fromCodePoint(0x3_01)}`;
+    const softHyphen = String.fromCodePoint(0xad);
+    const nonJoiner = String.fromCodePoint(0x20_0c);
     const document = await saveOver(
       admin,
       handbook.id,
       "team.md",
-      `# Team\nRené, rené and RENÉ left; Renée stays.\nJos and Jose left; José and ${decomposed} stay.`
+      `# Team\nRené, rené and RENÉ left; Renée stays.\nJos and Jose left; José and ${decomposed} stay.\nTom left; Tom${softHyphen}my and Tom${nonJoiner}s stay.`
     );
     await purged(admin, {
       type: "content",
       documentIds: [document.id],
-      terms: ["René", "Jos", "Jose"],
+      terms: ["René", "Jos", "Jose", "Tom"],
       reason: "offboarding",
     });
     const read = await admin.api.knowledge.getDocument(document.id);
     expect(read.version.text).toBe(
-      `# Team\n(removed), (removed) and (removed) left; Renée stays.\n(removed) and (removed) left; José and ${decomposed} stay.`
+      `# Team\n(removed), (removed) and (removed) left; Renée stays.\n(removed) and (removed) left; José and ${decomposed} stay.\n(removed) left; Tom${softHyphen}my and Tom${nonJoiner}s stay.`
     );
+  });
+
+  it("finds a term inside running text in scripts written without spaces", async () => {
+    const admin = await personOf("admin");
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const document = await saveOver(
+      admin,
+      handbook.id,
+      "team.md",
+      "# Team\n我和张伟去了。我和Tom去了。\nฉันกับสมชายไปตลาด\nTomas stays."
+    );
+    const { plan } = await purged(admin, {
+      type: "content",
+      documentIds: [document.id],
+      terms: ["张伟", "สมชาย", "Tom"],
+      reason: "offboarding",
+    });
+    const read = await admin.api.knowledge.getDocument(document.id);
+    expect({
+      text: read.version.text,
+      // Only "Tomas": the letters around the others don't make them longer.
+      inLongerWords: plan.inLongerWords,
+    }).toStrictEqual({
+      text: "# Team\n我和(removed)去了。我和(removed)去了。\nฉันกับ(removed)ไปตลาด\nTomas stays.",
+      inLongerWords: 1,
+    });
   });
 
   it("leaves frontmatter values that hold a term inside a word, so it can purge the document", async () => {

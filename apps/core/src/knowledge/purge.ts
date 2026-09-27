@@ -45,12 +45,14 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 //   which hold text from their chats. One batch, with its audit event.
 // - `content`: every occurrence of some terms (a name, an email address, a
 //   passage), in any case and as a whole word (never inside a longer
-//   word), is replaced with `purgedMarker` in every version of the
-//   documents named, and in their memory proposals. Whenever anything
-//   changed, the current text is also saved as the next version, which
-//   makes its sections, links, search rows and the document's title and
-//   description again, and fails for anyone who saved meanwhile from text
-//   not yet purged.
+//   word, except in scripts written without spaces), is replaced with
+//   `purgedMarker` in every version of the documents named, and in their
+//   memory proposals. Preparing one also counts how often a term would be
+//   left inside a longer word, so the admin can add those forms as terms
+//   of their own. Whenever anything changed, the current text is also
+//   saved as the next version, which makes its sections, links, search
+//   rows and the document's title and description again, and fails for
+//   anyone who saved meanwhile from text not yet purged.
 //
 // Then the search index is rebuilt from what it holds now: FTS5 keeps a
 // deleted row's terms in its index pages, where they can't be found by a
@@ -69,10 +71,12 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 // What a purge doesn't reach: paths (a document named after someone keeps
 // its name), collection names and descriptions, other documents that
 // quote the text, a term split by Markdown or a line break, a term
-// spelled otherwise (a variant, an accent left out or encoded otherwise,
-// a word joined to it, as in "Toms"), memory already cached in a running
-// isolate (never served again, gone once evicted), D1's own point-in-time
-// recovery, and anything outside Knowledge.
+// spelled otherwise (a variant, an accent left out or encoded otherwise),
+// a term joined to more of a word ("Toms", "tomVisser": counted, not
+// removed), memory already cached in a running isolate (never served
+// again, gone once evicted), D1's own point-in-time recovery, and
+// anything outside Knowledge. And it reaches too far where a name is an
+// ordinary word too (Will, Mark, May): every "will" goes.
 
 /** How long an admin has to confirm a purge they prepared. */
 const tokenLifetimeMs = 10 * 60 * 1000;
@@ -321,49 +325,106 @@ const literal = (term: string): string =>
   term.replaceAll(/[$()*+./?[\\\]^{|}]/gu, "\\$&");
 
 /**
- * A character that is part of a word, in any script: a letter, a digit,
- * an underscore, or a combining mark (an accent written as its own code
- * point stays part of its letter's word). `\b` knows only ASCII, so it
- * would split "José" after the "Jos".
+ * Scripts written without spaces between words (Chinese, Japanese, Thai,
+ * Lao, Khmer, Burmese): a name in running text has letters on both sides,
+ * so a character of one never makes a word longer.
  */
-const wordCharacter = String.raw`[\p{L}\p{M}\p{N}_]`;
-const startsWithWord = new RegExp(`^${wordCharacter}`, "u");
-const endsWithWord = new RegExp(`${wordCharacter}$`, "u");
+const unspacedScripts = String.raw`[\p{scx=Han}\p{scx=Hiragana}\p{scx=Katakana}\p{scx=Thai}\p{scx=Lao}\p{scx=Khmer}\p{scx=Myanmar}]`;
+
+/**
+ * A character that makes a word longer, in any script written with
+ * spaces: a letter, a digit, an underscore, a combining mark (an accent
+ * written as its own code point stays part of its letter's word), or an
+ * invisible format character (a soft hyphen, a zero-width joiner or
+ * non-joiner, which sit inside words). `\b` knows only ASCII, so it would
+ * split "José" after the "Jos".
+ */
+const joining = String.raw`(?!${unspacedScripts})[\p{L}\p{M}\p{N}\p{Cf}_]`;
+const startsJoining = new RegExp(`^${joining}`, "u");
+const endsJoining = new RegExp(`${joining}$`, "u");
+
+/**
+ * Where a term becomes part of a longer word when the character next to
+ * it joins it: at its start and end, when those join (a letter of "Tom"
+ * does; the bracket of "(Tom)", the dot ending a passage, or a character
+ * of a script written without spaces don't).
+ */
+const sidesOf = (term: string) => ({
+  before: startsJoining.test(term),
+  after: endsJoining.test(term),
+});
 
 /**
  * A term as a pattern that matches it as a whole word: never inside a
- * longer one, so "Tom" leaves "automated" and "Ann" leaves "planned" (and
- * frontmatter keys and values) alone. A side of the term that is not a
- * word character (the dot ending a passage, the bracket of "(Tom)") needs
- * nothing next to it, as there is no word there to be part of.
+ * longer one, so "Tom" leaves "automated" and "Ann" leaves "planned", and
+ * frontmatter keys and values that merely contain a term stay as they
+ * are. The pattern finds the term first and only then looks behind it
+ * for a joining character, so that check costs only where the term is.
  */
 const wholeWord = (term: string): string => {
-  const before = startsWithWord.test(term) ? `(?<!${wordCharacter})` : "";
-  const after = endsWithWord.test(term) ? `(?!${wordCharacter})` : "";
-  return `${before}${literal(term)}${after}`;
+  const { before, after } = sidesOf(term);
+  const itself = literal(term);
+  return `${itself}${before ? `(?<!${joining}${itself})` : ""}${after ? `(?!${joining})` : ""}`;
 };
 
 /**
- * The terms as whole words, in any case, longest first, so a term inside a
- * longer one doesn't leave the rest of the longer one behind.
+ * A term as a pattern that matches it only where it is part of a longer
+ * word, which the purge leaves; none for a term no character can join.
  */
-const matcherOf = (terms: string[]): RegExp =>
+const partOfWord = (term: string): string[] => {
+  const { before, after } = sidesOf(term);
+  const itself = literal(term);
+  return [
+    ...(before ? [`${itself}(?<=${joining}${itself})`] : []),
+    ...(after ? [`${itself}(?=${joining})`] : []),
+  ];
+};
+
+/** Alternatives in any case, as one pattern; one that never matches if none. */
+const anyOf = (alternatives: string[]): RegExp =>
   new RegExp(
-    terms
-      .toSorted((one, other) => other.length - one.length)
-      .map(wholeWord)
-      .join("|"),
+    alternatives.length === 0 ? "(?!)" : alternatives.join("|"),
     "giu"
   );
 
+/**
+ * The terms to remove, as whole words, and where they are part of a longer
+ * word, which the purge leaves but counts. Longest first, so a term inside
+ * a longer one doesn't leave the rest of the longer one behind.
+ */
+interface Matcher {
+  remove: RegExp;
+  joined: RegExp;
+}
+
+const matcherOf = (terms: string[]): Matcher => {
+  const longestFirst = terms.toSorted(
+    (one, other) => other.length - one.length
+  );
+  return {
+    remove: anyOf(longestFirst.map(wholeWord)),
+    joined: anyOf(longestFirst.flatMap(partOfWord)),
+  };
+};
+
 /** `text` with every term replaced by the marker. */
-const without = (text: string, matcher: RegExp): string =>
-  text.replaceAll(matcher, purgedMarker);
+const without = (text: string, matcher: Matcher): string =>
+  text.replaceAll(matcher.remove, purgedMarker);
+
+/**
+ * How often a term is still in `texts`, once rewritten, as part of a
+ * longer word: "Toms" or "tomVisser" for "Tom", but also "automated".
+ */
+const joinedIn = (texts: (string | null)[], matcher: Matcher): number =>
+  texts.reduce(
+    (total, text) => total + (text?.match(matcher.joined)?.length ?? 0),
+    0
+  );
 
 /** A version's or proposal's text and message, rewritten if they change. */
 const rewritten = (
   row: { text: string; message: string | null },
-  matcher: RegExp
+  matcher: Matcher
 ): { text: string; message: string | null } | undefined => {
   const text = without(row.text, matcher);
   const message = row.message === null ? null : without(row.message, matcher);
@@ -430,7 +491,7 @@ const requireSavable = async (
   env: Env,
   db: DrizzleD1Database,
   { document, collection }: Named,
-  matcher: RegExp
+  matcher: Matcher
 ): Promise<void> => {
   const current = await versionOf(db, document, document.currentVersion);
   if (current === undefined) {
@@ -476,18 +537,20 @@ const requireStorable = (
 /**
  * Rewrites the versions of `document` up to `upTo` that hold a term, in
  * place, a page at a time; only counts them unless `write`. Returns how
- * many hold one. Refuses with `knowledge.invalid` when one would be too
- * large to store (`requireStorable`): a purge scans them all first, so
- * one that can't be finished changes nothing.
+ * many hold one and, when only counting, how often a term is left in them
+ * as part of a longer word (`joinedIn`). Refuses with `knowledge.invalid`
+ * when one would be too large to store (`requireStorable`): a purge scans
+ * them all first, so one that can't be finished changes nothing.
  */
 const rewriteVersions = async (
   db: DrizzleD1Database,
   document: DocumentRow,
   upTo: number,
-  matcher: RegExp,
+  matcher: Matcher,
   write: boolean
-): Promise<number> => {
+): Promise<{ changed: number; joined: number }> => {
   let changedVersions = 0;
+  let joined = 0;
   for (let after = 0; ;) {
     // oxlint-disable-next-line no-await-in-loop -- a page at a time, to bound memory
     const page = await db
@@ -506,8 +569,17 @@ const rewriteVersions = async (
       )
       .orderBy(asc(versions.number))
       .limit(versionsPerPage);
-    const updates = page.flatMap((row) => {
-      const changed = rewritten(row, matcher);
+    const rows = page.map((row) => ({ row, changed: rewritten(row, matcher) }));
+    if (!write) {
+      joined += joinedIn(
+        rows.flatMap(({ row, changed }) => {
+          const { text, message } = changed ?? row;
+          return [text, message];
+        }),
+        matcher
+      );
+    }
+    const updates = rows.flatMap(({ row, changed }) => {
       if (changed !== undefined) {
         requireStorable(document, row.number, changed);
       }
@@ -533,21 +605,22 @@ const rewriteVersions = async (
     }
     const last = page.at(-1);
     if (last === undefined || page.length < versionsPerPage) {
-      return changedVersions;
+      return { changed: changedVersions, joined };
     }
     after = last.number;
   }
 };
 
 /**
- * Updates of `document`'s memory proposals that hold a term, and the IDs
- * of those waiting that were read: only those, rewritten or not, move to
- * the version a purge saves.
+ * Updates of `document`'s memory proposals that hold a term, the IDs of
+ * those waiting that were read (only those, rewritten or not, move to the
+ * version a purge saves), and how often a term is left in them as part of
+ * a longer word (`joinedIn`).
  */
 const proposalRewrites = async (
   db: DrizzleD1Database,
   document: DocumentRow,
-  matcher: RegExp
+  matcher: Matcher
 ) => {
   const proposals = await db
     .select({
@@ -563,8 +636,11 @@ const proposalRewrites = async (
         eq(memoryProposals.path, document.path)
       )
     );
+  let joined = 0;
   const updates = proposals.flatMap(({ id, text, message }) => {
     const changed = rewritten({ text, message }, matcher);
+    const left = changed ?? { text, message };
+    joined += joinedIn([left.text, left.message], matcher);
     return changed === undefined
       ? []
       : [
@@ -577,30 +653,36 @@ const proposalRewrites = async (
   const pendingIds = proposals
     .filter(({ status }) => status === "pending")
     .map(({ id }) => id);
-  return { updates, pendingIds };
+  return { updates, pendingIds, joined };
 };
 
-/** What purging the terms from `named` would change; checks it can. */
+/**
+ * What purging the terms from `named` would change, and how often a term
+ * would be left as part of a longer word; checks it can.
+ */
 const countDocument = async (
   env: Env,
   db: DrizzleD1Database,
   named: Named,
-  matcher: RegExp
-): Promise<Counts> => {
+  matcher: Matcher
+): Promise<{ counts: Counts; joined: number }> => {
   const { document } = named;
   await requireSavable(env, db, named, matcher);
-  const changedVersions = await rewriteVersions(
+  const inVersions = await rewriteVersions(
     db,
     document,
     document.currentVersion,
     matcher,
     false
   );
-  const { updates } = await proposalRewrites(db, document, matcher);
+  const inProposals = await proposalRewrites(db, document, matcher);
   return {
-    documents: changedVersions + updates.length > 0 ? 1 : 0,
-    versions: changedVersions,
-    proposals: updates.length,
+    counts: {
+      documents: inVersions.changed + inProposals.updates.length > 0 ? 1 : 0,
+      versions: inVersions.changed,
+      proposals: inProposals.updates.length,
+    },
+    joined: inVersions.joined + inProposals.joined,
   };
 };
 
@@ -627,7 +709,7 @@ const purgeDocument = async (
   db: DrizzleD1Database,
   person: Identity,
   named: Named,
-  matcher: RegExp
+  matcher: Matcher
 ): Promise<Counts> => {
   const { document, collection } = named;
   const at = document.currentVersion;
@@ -635,7 +717,7 @@ const purgeDocument = async (
   const earlier = await rewriteVersions(db, document, at - 1, matcher, true);
   const current = await versionOf(db, document, at);
   const changed = current && rewritten(current, matcher);
-  const changedVersions = earlier + (changed === undefined ? 0 : 1);
+  const changedVersions = earlier.changed + (changed === undefined ? 0 : 1);
   if (current !== undefined && changedVersions + updates.length > 0) {
     await writeVersion(env, personWriter(person), {
       collection,
@@ -696,19 +778,25 @@ const purgeDocument = async (
   };
 };
 
-/** What a content purge would change, checking every document first. */
+/**
+ * What a content purge would change, and how often it would leave a term
+ * as part of a longer word, checking every document first.
+ */
 const contentCounts = async (
   env: Env,
   db: DrizzleD1Database,
   named: Named[],
-  matcher: RegExp
-): Promise<Counts> => {
+  matcher: Matcher
+): Promise<{ counts: Counts; joined: number }> => {
   const counts: Counts[] = [];
+  let joined = 0;
   for (const one of named) {
     // oxlint-disable-next-line no-await-in-loop -- one document at a time, to bound memory
-    counts.push(await countDocument(env, db, one, matcher));
+    const document = await countDocument(env, db, one, matcher);
+    counts.push(document.counts);
+    joined += document.joined;
   }
-  return sum(counts);
+  return { counts: sum(counts), joined };
 };
 
 /**
@@ -769,12 +857,19 @@ export const preparePurge = async (
   const db = drizzle(env.KNOWLEDGE);
   let scope: { collectionId?: string; documentIds: string[] };
   let counts: Counts;
+  // A personal purge deletes whole documents: nothing is left in a word.
+  let joined = 0;
   if (parsed.type === "personal") {
     ({ counts, ...scope } = await personalScope(db, parsed));
   } else {
     const named = await documentsNamed(db, parsed);
     scope = { documentIds: named.map(({ document }) => document.id) };
-    counts = await contentCounts(env, db, named, matcherOf(parsed.terms));
+    ({ counts, joined } = await contentCounts(
+      env,
+      db,
+      named,
+      matcherOf(parsed.terms)
+    ));
   }
   await auditedBatch(env, db, [
     outboxed(
@@ -782,7 +877,11 @@ export const preparePurge = async (
       purgeEntry(person, "knowledge.purge.prepared", parsed, scope, counts)
     ),
   ]);
-  return { ...counts, ...(await tokenFor(env, person, parsed)) };
+  return {
+    ...counts,
+    inLongerWords: joined,
+    ...(await tokenFor(env, person, parsed)),
+  };
 };
 
 /**
