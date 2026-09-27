@@ -20,7 +20,9 @@ import { RpcTarget } from "capnweb";
 import { and, asc, desc, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import { stillOpenTo } from "./app-access.ts";
+import type { BuiltinBlueprint } from "#blueprints";
+
+import { builtinOwner, stillOpenTo } from "./app-access.ts";
 import {
   appFor,
   appsListedFor,
@@ -34,6 +36,7 @@ import {
 } from "./apps.ts";
 import type { AppRow, VersionRow } from "./apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
+import { builtinAppId } from "./builtin-app-id.ts";
 import {
   appBlueprints,
   apps,
@@ -458,6 +461,183 @@ export const createFromBlueprint = async (
     permissions: requests.rows.map(toPermission),
     dropped: requests.dropped,
   };
+};
+
+/** An audit entry of the release's install: Grasp, with no person. */
+const installEntry = (
+  action: string,
+  app: AppId,
+  detail: AuditEntry["detail"]
+): AuditEntry => ({
+  actor: { type: "system" },
+  action,
+  target: { type: "app", id: app },
+  detail,
+});
+
+/**
+ * Makes the release's built-in blueprint the blueprint of an ordinary App,
+ * owned by Grasp (`builtinOwner`) under a stable ID (`builtinAppId`), so
+ * it is found, listed and created from as any blueprint is, by everyone
+ * who builds, and changed by nobody but the install (app-access.ts): the App, if it
+ * doesn't exist; its files as the App's next version, if its latest
+ * version's differ; that version marked, and any other unmarked; and its
+ * name and description, if they changed. Each is audited, in the one
+ * batch that writes it all, and only what differs from what's stored is
+ * written, so installing it again writes nothing. The App never runs (it
+ * has no current version, and nobody may make one current) and asks for
+ * no permissions, so neither does an App created from it. Apps created
+ * from it earlier keep their code.
+ *
+ * Two installs at once both try the same version number, and the second
+ * is refused by the version's primary key, writing nothing: the next
+ * install compares again.
+ */
+export const installBuiltinBlueprint = async (
+  env: Env,
+  blueprint: BuiltinBlueprint
+): Promise<void> => {
+  const id = builtinAppId(blueprint.id);
+  const { name, description } = appErrors.parse(
+    "app.invalid",
+    fromBlueprintSchema,
+    { name: blueprint.name, description: blueprint.description }
+  );
+  const files = new Map(Object.entries(blueprint.files));
+  const tree = await versionTree(files);
+  const db = drizzle(env.DB);
+  const [[app], [latest], marked] = await db.batch([
+    db.select().from(apps).where(eq(apps.id, id)),
+    db
+      .select()
+      .from(appVersions)
+      .where(eq(appVersions.appId, id))
+      .orderBy(desc(appVersions.version))
+      .limit(1),
+    db
+      .select({ version: appBlueprints.version })
+      .from(appBlueprints)
+      .where(eq(appBlueprints.appId, id)),
+  ]);
+  const now = new Date();
+  const parent = latest?.version ?? null;
+  const changed = latest?.tree !== tree.tree;
+  const version = changed ? (parent ?? 0) + 1 : (parent ?? 0);
+  if (changed) {
+    await storeTree(env, id, tree);
+  }
+  const created = app
+    ? []
+    : [
+        db
+          .insert(apps)
+          .values({
+            id,
+            name,
+            description,
+            ownerId: builtinOwner,
+            blueprint: null,
+            currentVersion: null,
+            pendingVersion: null,
+            workingRevision: null,
+            pendingSince: null,
+            createdAt: now,
+          })
+          .onConflictDoNothing(),
+        outboxedIfChanged(
+          db,
+          installEntry("app.created", id, { builtin: blueprint.id })
+        ),
+      ];
+  const described =
+    app && (app.name !== name || app.description !== description)
+      ? [
+          db
+            .update(apps)
+            .set({ name, description })
+            .where(
+              and(
+                eq(apps.id, id),
+                sql`(${apps.name} IS NOT ${name} OR ${apps.description} IS NOT ${description})`
+              )
+            ),
+          outboxedIfChanged(
+            db,
+            installEntry("app.described", id, { name, description })
+          ),
+        ]
+      : [];
+  const committed = changed
+    ? [
+        db.insert(appVersions).values({
+          appId: id,
+          version,
+          parent,
+          tree: tree.tree,
+          files: files.size,
+          authorId: builtinOwner,
+          message: "From the release",
+          createdAt: now,
+        }),
+        outboxed(
+          db,
+          installEntry("app.committed", id, {
+            version,
+            parent,
+            tree: tree.tree,
+            files: files.size,
+          })
+        ),
+      ]
+    : [];
+  const markedNow = marked.some((row) => row.version === version)
+    ? []
+    : [
+        db
+          .insert(appBlueprints)
+          .values({
+            appId: id,
+            version,
+            markedBy: builtinOwner,
+            markedAt: now,
+          })
+          .onConflictDoNothing(),
+        outboxedIfChanged(
+          db,
+          installEntry("app.blueprint.marked", id, { version })
+        ),
+      ];
+  // Only the release's version is offered: one built-in, one blueprint.
+  const unmarked = marked.flatMap((row) =>
+    row.version === version
+      ? []
+      : [
+          db
+            .delete(appBlueprints)
+            .where(
+              and(
+                eq(appBlueprints.appId, id),
+                eq(appBlueprints.version, row.version)
+              )
+            ),
+          outboxedIfChanged(
+            db,
+            installEntry("app.blueprint.unmarked", id, {
+              version: row.version,
+            })
+          ),
+        ]
+  );
+  const [first, ...rest] = [
+    ...created,
+    ...described,
+    ...committed,
+    ...markedNow,
+    ...unmarked,
+  ];
+  if (first !== undefined) {
+    await auditedBatch(env, db, [first, ...rest]);
+  }
 };
 
 /** A signed-in person's `apps.blueprints`. */

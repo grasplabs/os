@@ -3,13 +3,19 @@ import { canonicalJson } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { DurableObject } from "cloudflare:workers";
 
+import builtinBlueprints from "#blueprints";
+import type { BuiltinBlueprint } from "#blueprints";
+
+import { installBuiltinBlueprint } from "./app-blueprints.ts";
 import { inJurisdiction } from "./durable-objects.ts";
 import { featureEnabled } from "./features.ts";
 import { graspSkills, syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import type { GraspSkill } from "./knowledge/grasp-skills.ts";
 
 // What ships with the release, installed once per release on the first
-// request, while the `builtins` flag is on: the Grasp skills
+// request, while the `builtins` flag is on: the built-in blueprints
+// (apps/core/blueprints/, embedded by build-blueprints.ts, each the
+// blueprint of an ordinary App, app-blueprints.ts), and the Grasp skills
 // (knowledge/grasp-skills.ts). Workers have no deploy hook, so the first
 // request core serves after the router's check starts the install, in the
 // background (`installBuiltinsOnce`), once per isolate.
@@ -19,10 +25,10 @@ import type { GraspSkill } from "./knowledge/grasp-skills.ts";
 // everything the install writes; an unchanged release does nothing beyond
 // comparing it. Callers who arrive while it installs share that install.
 // The fingerprint is stored only once everything is in, so a partial
-// install (a skill that failed, the object evicted halfway) is tried
-// again by the next request that starts one. Each part compares what is
-// stored before it writes (the skills compare their text), so trying
-// again writes only what is still missing.
+// install (a blueprint or a skill that failed, the object evicted
+// halfway) is tried again by the next request that starts one. Each part
+// compares what is stored before it writes (a blueprint its files, a
+// skill its text), so trying again writes only what is still missing.
 //
 // Which release wins while two run side by side, during a gradual
 // rollout: the one the object runs. It installs its own release, never
@@ -42,14 +48,50 @@ import type { GraspSkill } from "./knowledge/grasp-skills.ts";
 
 /** What a release installs: this one's unless a test passes another. */
 export interface Release {
+  blueprints: readonly BuiltinBlueprint[];
   skills: readonly GraspSkill[];
 }
 
 /** This release's built-ins. */
-export const release: Release = { skills: graspSkills };
+export const release: Release = {
+  blueprints: builtinBlueprints,
+  skills: graspSkills,
+};
 
 /** Where the singleton keeps the fingerprint of what it installed. */
 const installedKey = "installed";
+
+const blueprintsEnabled = (env: Env): boolean =>
+  featureEnabled(env, "apps") && featureEnabled(env, "app_blueprints");
+
+/**
+ * Makes each built-in blueprint an App's blueprint, one at a time (each is
+ * one batch, well within D1's limits), while `apps` and `app_blueprints`
+ * are on. A blueprint that fails is logged, and the others are still
+ * installed. Resolves whether all of them are.
+ */
+const installBlueprints = async (
+  env: Env,
+  blueprints: readonly BuiltinBlueprint[]
+): Promise<boolean> => {
+  if (!blueprintsEnabled(env)) {
+    return true;
+  }
+  let complete = true;
+  for (const blueprint of blueprints) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- a few, one at a time
+      await installBuiltinBlueprint(env, blueprint);
+    } catch (error) {
+      complete = false;
+      log.error("builtins.blueprint_failed", {
+        blueprint: blueprint.id,
+        ...errorFields(error),
+      });
+    }
+  }
+  return complete;
+};
 
 /**
  * The fingerprint of what installing `release` writes on `env`: each part
@@ -61,6 +103,14 @@ export const fingerprintOf = async (env: Env, of: Release): Promise<string> => {
     featureEnabled(env, "knowledge") && featureEnabled(env, "skills");
   return await sha256Hex(
     canonicalJson({
+      blueprints: blueprintsEnabled(env)
+        ? of.blueprints.map(({ id, name, description, files }) => ({
+            id,
+            name,
+            description,
+            files: { ...files },
+          }))
+        : null,
       skills: skillsOn
         ? of.skills.map(({ path, text }) => ({ path, text }))
         : null,
@@ -82,7 +132,9 @@ export const installBuiltins = async (
   if ((await storage.get(installedKey)) === fingerprint) {
     return true;
   }
-  const complete = await syncGraspSkills(env, of.skills);
+  const blueprints = await installBlueprints(env, of.blueprints);
+  const skills = await syncGraspSkills(env, of.skills);
+  const complete = blueprints && skills;
   if (complete) {
     await storage.put(installedKey, fingerprint);
   }

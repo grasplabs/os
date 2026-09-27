@@ -10,5 +10,12 @@
     // Keeps the browser's globals out of a Worker's types (see the file).
     "paths": { "@xmldom/xmldom": ["./types/xmldom.d.ts"] }
   },
-  "include": ["src", "test", "types", "worker-configuration.d.ts", "*.ts"]
+  "include": [
+    "src",
+    "test",
+    "types",
+    "blueprints",
+    "worker-configuration.d.ts",
+    "*.ts"
+  ]
 }
