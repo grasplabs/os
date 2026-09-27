@@ -32,6 +32,11 @@ import { jsonVar } from "@grasp-os/shared/config";
 import { connectionIdSchema } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
+import {
+  authoritySchema,
+  permissionErrors,
+  workContextSchema,
+} from "@grasp-os/shared/permissions";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -171,6 +176,15 @@ const modelRulesConfigSchema = z
     ({ models: allowed, eu }) =>
       eu === undefined || eu.models.every((ref) => allowed.includes(ref)),
     { message: "EU models are allowed models", path: ["eu", "models"] }
+  )
+  .refine(
+    ({ models: allowed, sensitive }) =>
+      sensitive === undefined ||
+      sensitive.models.every((ref) => allowed.includes(ref)),
+    {
+      message: "Models for sensitive data are allowed models",
+      path: ["sensitive", "models"],
+    }
   );
 
 /**
@@ -254,6 +268,19 @@ const callSchema = z
      * the deployment's rules only, never recorded.
      */
     connections: z.array(connectionIdSchema).default([]),
+    /**
+     * Where the call works, and for whom: its restricted mode decides which
+     * models it may use (model-rules.ts). Set by the host, like the
+     * trigger. Required of every caller (`ModelCall`); while the rules
+     * apply, a call without one is refused, as its restricted mode can't be
+     * known.
+     */
+    work: z
+      .strictObject({
+        authority: authoritySchema,
+        context: workContextSchema,
+      })
+      .optional(),
     requestId: auditEventSchema.shape.requestId,
   })
   .refine(({ input, messages }) => (input === undefined) !== !messages, {
@@ -266,6 +293,8 @@ type Call = z.output<typeof callSchema>;
 
 /** One model call. */
 export type ModelCall<Output> = z.input<typeof callSchema> & {
+  /** Where the call works: required, so no caller can leave it out. */
+  work: NonNullable<z.input<typeof callSchema>["work"]>;
   /**
    * The answer must be JSON that matches this schema: it is validated, and
    * the model asked once more when it doesn't match.
@@ -564,6 +593,8 @@ const auditEntry = ({ call, ref, judged }: Admitted, recorded: Recorded) => {
           : null,
       // Which rule kept the call in the EU, if one did.
       euOnly: judged.euOnly ?? null,
+      // Why it carried sensitive data, if a data rule asked and it did.
+      sensitive: judged.sensitive ?? null,
     },
   } satisfies AuditEntry;
 };
@@ -585,7 +616,10 @@ const largestRecord: Recorded = {
 };
 
 /** The most the rules can add to a call's audit event. */
-const largestJudged: Judged = { euOnly: "connection" };
+const largestJudged: Judged = {
+  euOnly: "connection",
+  sensitive: "collection",
+};
 
 /**
  * Records one request in the audit log, however it ended. Never throws: a
@@ -667,6 +701,9 @@ const refuse = async (
   const { code, because } = refusal;
   log.warn("model.refused", { reason: code, because });
   await keepAuditEvent(env, drizzle(env.DB), refusedEntry(call, refusal));
+  if (code === "permission.context_invalid") {
+    throw permissionErrors.create(code);
+  }
   throw modelErrors.create(
     code,
     because === undefined
@@ -710,7 +747,7 @@ const admit = async (
     // Its provenance, say, is too long to record.
     throw modelErrors.create("model.invalid_call");
   }
-  const verdict = judgeCall(env, rules, call);
+  const verdict = await judgeCall(env, rules, call);
   if (!verdict.ok) {
     return await refuse(env, call, verdict);
   }

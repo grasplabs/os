@@ -59,7 +59,7 @@ export class Workspace extends DurableObject<Env> {
 
 /** A workspace's object. */
 export const workspace = (
-  env: Env,
+  env: Pick<Env, "WORKSPACES" | "DURABLE_OBJECT_JURISDICTION">,
   id: WorkspaceId
 ): DurableObjectStub<Workspace> =>
   inJurisdiction(env, env.WORKSPACES).getByName(id);
