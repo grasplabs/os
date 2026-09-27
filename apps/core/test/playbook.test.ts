@@ -921,8 +921,9 @@ describe("Playbook records", () => {
         const { token } = await admin.api.knowledge.preparePurge(input);
         await admin.api.knowledge.purge(input, token);
       };
-      // Version 1 has a step "automated"; purging "tom" from the workflow
-      // rewrites it to "au(removed)ated", which no longer fits its type.
+      // Version 1 has a step of kind "automated"; purging that word from
+      // the workflow rewrites the kind to "(removed)", which no longer fits
+      // its type. The current version has no such step, so it still saves.
       const workflow = `${folder}/pay.md`;
       const pay = await save(admin, {
         path: workflow,
@@ -941,9 +942,9 @@ describe("Playbook records", () => {
         },
         body: `Taken with Zed${folder}.`,
       });
-      await purgeAs(pay.id, "tom");
+      await purgeAs(pay.id, "automated");
       const frozenNow = await admin.api.knowledge.getDocument(pay.id, 1);
-      expect(frozenNow.version.text).toContain("au(removed)ated");
+      expect(frozenNow.version.text).toContain("kind: (removed)");
       const resaved = await outcome(
         save(admin, {
           path: snapshot.path,
