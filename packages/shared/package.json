@@ -14,6 +14,7 @@
     "./config": "./src/config.ts",
     "./connect": "./src/connect.ts",
     "./decisions": "./src/decisions.ts",
+    "./deployment-config": "./src/deployment-config.ts",
     "./encoding": "./src/encoding.ts",
     "./errors": "./src/errors.ts",
     "./ids": "./src/ids.ts",

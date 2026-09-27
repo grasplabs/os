@@ -1,3 +1,4 @@
+import { staffWindowOpen } from "@grasp-os/shared/deployment-config";
 import { roleSchema } from "@grasp-os/shared/roles";
 import type { Role } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
@@ -6,7 +7,7 @@ import { drizzle } from "drizzle-orm/d1";
 
 import { accounts, members, teamMembers, teams } from "../db/core/schema.ts";
 import { authFor, currentMembership, organizationId } from "./auth.ts";
-import { providerIds, signInConfig, staffWindowOpen } from "./config.ts";
+import { providerIds, signInConfig } from "./config.ts";
 
 /**
  * A person's role in the organization, read now. `undefined` when they have

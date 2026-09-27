@@ -15,6 +15,11 @@ import type {
   ParsedAuditFilter,
 } from "@grasp-os/shared/audit-log";
 import { deploymentConfig, jsonVar } from "@grasp-os/shared/config";
+import {
+  auditArchiveRetentionSchema,
+  auditRetentionDefaultDays,
+  auditRetentionSchema,
+} from "@grasp-os/shared/deployment-config";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { DurableObject } from "cloudflare:workers";
@@ -72,18 +77,6 @@ const searchScanMax = 5000;
 /** Most entries one archive moves out: a few MB, well within memory. */
 export const archiveStretch = 500;
 
-/**
- * How long archived stretches are kept, in days from when the log received
- * their last event: at least a year, at most ten.
- */
-const archiveRetentionSchema = z.int().min(365).max(3650);
-
-/** Days the log keeps an event where admins search it, unless set. */
-const retentionDefaultDays = 180;
-
-/** Days the console may set: at least 30 days, at most ten years. */
-const retentionSchema = z.int().min(30).max(3650);
-
 const dayMs = 24 * 60 * 60 * 1000;
 
 /** Most purged objects one purge deletes at once: R2's most per call. */
@@ -97,9 +90,9 @@ export const auditRetentionDays = (
   env: Pick<Env, "AUDIT_RETENTION_DAYS">
 ): number | undefined =>
   env.AUDIT_RETENTION_DAYS === undefined
-    ? retentionDefaultDays
+    ? auditRetentionDefaultDays
     : deploymentConfig(
-        retentionSchema,
+        auditRetentionSchema,
         "AUDIT_RETENTION_DAYS",
         env.AUDIT_RETENTION_DAYS
       );
@@ -117,7 +110,7 @@ export const archiveRetentionDays = (
 ): number | undefined => {
   const retention = auditRetentionDays(env);
   const days = deploymentConfig(
-    archiveRetentionSchema,
+    auditArchiveRetentionSchema,
     "AUDIT_ARCHIVE_RETENTION_DAYS",
     env.AUDIT_ARCHIVE_RETENTION_DAYS
   );

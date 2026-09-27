@@ -1,108 +1,24 @@
 import { deploymentConfig } from "@grasp-os/shared/config";
-import { roleSchema } from "@grasp-os/shared/roles";
+import {
+  signInConfigSchema,
+  staffWindowOpen,
+} from "@grasp-os/shared/deployment-config";
+import type { SignInConfig } from "@grasp-os/shared/deployment-config";
 import { loopbackHosts } from "@grasp-os/shared/router";
-import { z } from "zod";
 
 /**
- * How people sign in to this deployment. Deployment config, set by the
- * console as the `SIGN_IN` var, never an in-product setting: a compromised
- * admin session can't add a tenant, widen the domains or open staff access.
- * Without it nobody can sign in.
+ * The deployment's sign-in config (the `SIGN_IN` var the console sets), or
+ * `undefined` when none is set. A config that doesn't parse counts as none:
+ * sign-in fails closed.
  */
-const domainSchema = z
-  .string()
-  .regex(/^[a-z0-9-]+(?:\.[a-z0-9-]+)+$/u, "a lowercase domain, e.g. acme.com");
+export const signInConfig = (env: Env): SignInConfig | undefined =>
+  deploymentConfig(signInConfigSchema, "SIGN_IN", env.SIGN_IN);
 
 /** Whether `value` is an origin on this machine, e.g. `http://localhost:8787`. */
 const isLocalOrigin = (value: string): boolean =>
   URL.canParse(value) &&
   new URL(value).origin === value &&
   loopbackHosts.has(new URL(value).hostname);
-
-/** An HTTPS origin, or plain HTTP on this machine for local development. */
-const isOrigin = (value: string): boolean => {
-  if (!URL.canParse(value)) {
-    return false;
-  }
-  const url = new URL(value);
-  const secure =
-    url.protocol === "https:" ||
-    (url.protocol === "http:" && loopbackHosts.has(url.hostname));
-  return secure && url.origin === value;
-};
-
-const signInConfigSchema = z.object({
-  /**
-   * The deployment's own address, e.g. `https://acme.<domain>`: where the
-   * IdPs send people back, and the only page that may open `/rpc`.
-   */
-  origin: z.url().refine(isOrigin, "an https origin, without a path"),
-  /** Email domains people may sign in with, exactly (no subdomains). */
-  domains: z.array(domainSchema).min(1),
-  /** Emails that get the admin role when they join. */
-  admins: z.array(z.email().toLowerCase()).default([]),
-  /*
-   * A deployment may offer both IdPs, but a person is one account at one of
-   * them: an email already signed in through one is refused through the
-   * other, as accounts are never linked by email (threat model R15).
-   */
-  /** The client's Microsoft Entra tenant, pinned. */
-  entra: z
-    .object({ tenantId: z.guid(), clientId: z.string().min(1) })
-    .optional(),
-  /** The client's Google Workspace, pinned by its primary domain (`hd`). */
-  google: z
-    .object({ hostedDomain: domainSchema, clientId: z.string().min(1) })
-    .optional(),
-  /**
-   * Grasp staff access, off unless the console opens a window. Only the
-   * listed people (Entra object ids in Grasp's own tenant) sign in, get
-   * `role` without joining the organization, and lose access when `until`
-   * passes.
-   */
-  staff: z
-    .object({
-      tenantId: z.guid(),
-      clientId: z.string().min(1),
-      domains: z.array(domainSchema).min(1),
-      oids: z.array(z.guid()).min(1),
-      role: roleSchema,
-      /** When the console opened the window. */
-      opened: z.iso.datetime({ offset: true }),
-      until: z.iso.datetime({ offset: true }),
-    })
-    .optional(),
-});
-export type SignInConfig = z.infer<typeof signInConfigSchema>;
-
-/**
- * The deployment's sign-in config, or `undefined` when none is set. A config
- * that doesn't parse counts as none: sign-in fails closed.
- */
-export const signInConfig = (env: Env): SignInConfig | undefined =>
-  deploymentConfig(signInConfigSchema, "SIGN_IN", env.SIGN_IN);
-
-/** The longest a staff window may be. */
-const staffWindowMaxMs = 7 * 24 * 60 * 60 * 1000;
-
-/**
- * Whether the staff window is open at `now`: between `opened` and `until`,
- * and seven days long at most. A longer window counts as closed for its
- * whole length, never only once its end draws near: the console opens short
- * windows, and a longer one is a mistake rather than a reason to let staff
- * in.
- */
-export const staffWindowOpen = (
-  config: SignInConfig | undefined,
-  now: number
-): boolean => {
-  if (config?.staff === undefined) {
-    return false;
-  }
-  const opened = Date.parse(config.staff.opened);
-  const until = Date.parse(config.staff.until);
-  return opened <= now && now < until && until - opened <= staffWindowMaxMs;
-};
 
 const isSet = (secret: string | undefined): secret is string =>
   secret !== undefined && secret !== "";
