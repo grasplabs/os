@@ -42,6 +42,9 @@ export default defineProject({
           DEV_ACCESS_EMAIL: "",
           CONSOLE_MIGRATIONS: migrations,
         },
+        // Where the fake Cloudflare API runs client D1 queries
+        // (test/cloudflare-api.ts).
+        d1Databases: { CLIENT_D1: "client-d1" },
       },
     }),
   ],

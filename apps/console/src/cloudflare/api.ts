@@ -95,6 +95,11 @@ export interface ApiCall {
   json?: unknown;
   /** Sent as is: multipart form data, for uploads. */
   body?: FormData;
+  /**
+   * The bearer token for a call that takes another one than the account's:
+   * an assets upload session's. Kept out of errors like the account's.
+   */
+  bearer?: string;
 }
 
 /** A result, with the page of a list it is. */
@@ -149,7 +154,7 @@ export const cloudflareApi = ({
       url.searchParams.set(name, value);
     }
     const headers = new Headers(call.headers);
-    headers.set("authorization", `Bearer ${token}`);
+    headers.set("authorization", `Bearer ${call.bearer ?? token}`);
     let body: BodyInit | undefined = call.body;
     if (call.json !== undefined) {
       headers.set("content-type", "application/json");
