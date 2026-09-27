@@ -556,3 +556,22 @@ export const workflowParamValues = sqliteTable(
     primaryKey({ columns: [table.appId, table.workflowId, table.param] }),
   ]
 );
+
+/**
+ * What model calls cost, in millionths of a US dollar, per budget and
+ * month (model-rules.ts): `scope` is the budget's (`deployment`, `workflow`
+ * or `user`), `key` what it counts within it (the deployment, a workflow
+ * or a person, as JSON), and `period` the UTC month, such as `2026-09`.
+ * Only ever added to, in one statement, so concurrent calls never lose
+ * each other's cost.
+ */
+export const modelSpend = sqliteTable(
+  "model_spend",
+  {
+    scope: text({ enum: ["deployment", "workflow", "user"] }).notNull(),
+    key: text().notNull(),
+    period: text().notNull(),
+    spentMicros: integer("spent_micros").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.scope, table.key, table.period] })]
+);

@@ -381,9 +381,9 @@ export interface StepRunner {
   /**
    * Asks a model through the model gateway. The answer must match `schema`;
    * an answer that doesn't counts as a failure and is retried. The
-   * deployment's rules may refuse the model for this step, say because it
-   * must stay in the EU or its App has read sensitive data; the step then
-   * fails with the reason, and isn't retried.
+   * deployment's rules may refuse the call, say because it must stay in the
+   * EU, its App has read sensitive data, or this month's model budget is
+   * used up; the step then fails with the reason, and isn't retried.
    */
   llm: <Output extends z.ZodType>(
     name: string,

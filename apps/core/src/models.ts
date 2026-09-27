@@ -42,6 +42,7 @@ import { z } from "zod";
 
 import { keepAuditEvent } from "./audit-outbox.ts";
 import { featureEnabled } from "./features.ts";
+import { chargeBudgets } from "./model-budgets.ts";
 import { judgeCall, modelRulesShape } from "./model-rules.ts";
 import type { Judged, ModelRules, Refusal } from "./model-rules.ts";
 
@@ -619,12 +620,13 @@ const largestRecord: Recorded = {
 const largestJudged: Judged = {
   euOnly: "connection",
   sensitive: "collection",
+  budgets: [],
 };
 
 /**
- * Records one request in the audit log, however it ended. Never throws: a
- * caller that lost a paid answer to a bookkeeping failure would ask (and
- * pay) again.
+ * Records one request in the audit log, however it ended, and adds its
+ * cost to the call's budgets. Never throws: a caller that lost a paid
+ * answer to a bookkeeping failure would ask (and pay) again.
  */
 const record = async (
   env: ModelsEnv,
@@ -647,6 +649,13 @@ const record = async (
       status: failure?.status ?? status,
       errorType: failure?.errorType,
     })
+  );
+  // What it cost counts against its budgets, a failed request too.
+  await chargeBudgets(
+    env,
+    admitted.call.trigger,
+    admitted.judged.budgets,
+    costOf(answer.usage)
   );
 };
 
