@@ -5,9 +5,9 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { appHost } from "../src/durable-objects.ts";
-import { serverBuilt } from "./apps.ts";
+import { requestGranted, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import { mailConnection } from "./mail-connection.ts";
+import { mailConnection, mailWithSearch } from "./mail-connection.ts";
 import { endLiveRuns, finished, liveStatus } from "./runs.ts";
 import { openRpc, outcome as codeOf, signedInWithRole } from "./sign-in.ts";
 import {
@@ -41,35 +41,70 @@ const personApi = async (role: Role) => {
 describe("a run's held side effects", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);
 
-  it("wait in their App's restricted mode for the person to confirm a side effect, then send it once", async () => {
+  it("wait in their App's restricted mode for the person to confirm a side effect, or a Composio read the admin marked, then run it once", async () => {
     const admin = await personApi("admin");
-    const mail = await mailConnection();
+    const mail = await mailConnection([], mailWithSearch);
     // No retries: waiting for the person uses none.
-    const app = await appWith(admin, mailer(`retries: { limit: 0 }`));
-    await grantMail(idp, admin, app, mail.id);
+    const app = await appWith(admin, {
+      ...mailer(`retries: { limit: 0 }`),
+      // A read, but on a Composio connection from a restricted App its
+      // input leaves for a third party: a side effect's step, with its key.
+      ...workflowFiles(
+        "search",
+        `  return await step.do("search", { description: "Search the mail", sideEffect: true, input: { query: "INV-7" }, retries: { limit: 0 } }, async ({ idempotencyKey, input }) => JSON.parse((await env.MAIL.call("mail.search", input, { idempotencyKey })).output));`,
+        { search: null }
+      ),
+    });
+    await requestGranted(idp, admin, {
+      subject: { type: "app", appId: app },
+      object: { type: "connection", connectionId: mail.id },
+      actions: ["mail.send", "mail.search"],
+      binding: "MAIL",
+    });
     await appHost(env, appIdSchema.parse(app)).restrict();
     const run = await admin.api.workflows.start(app, "mailer");
+    const search = await admin.api.workflows.start(app, "search");
     // Observed waiting, then shown to the person it acts for, warned.
     await runEvents(run.id, "workflow.run.waiting");
-    const [held] = await admin.api.pendingActions.list();
-    if (held === undefined) {
+    await runEvents(search.id, "workflow.run.waiting");
+    const waiting = await admin.api.pendingActions.list();
+    const held = waiting.find(({ action }) => action === "mail.send");
+    const heldSearch = waiting.find(({ action }) => action === "mail.search");
+    if (held === undefined || heldSearch === undefined) {
       throw new Error("Nothing held");
     }
-    const before = { live: await liveStatus(run.id), server: await mail.did() };
+    const before = {
+      live: [await liveStatus(run.id), await liveStatus(search.id)],
+      server: await mail.did(),
+      searched: await mail.searched(),
+    };
     await admin.api.pendingActions.confirm(held.id, held.inputHash);
+    await admin.api.pendingActions.confirm(heldSearch.id, heldSearch.inputHash);
     await finished(run.id);
+    await finished(search.id);
     expect({
-      held: { mode: held.mode, restricted: held.restricted },
+      held: waiting.map(({ mode, restricted }) => ({ mode, restricted })),
       before,
       run: await admin.api.workflows.status(run.id),
+      search: await admin.api.workflows.status(search.id),
       server: await mail.did(),
+      searched: await mail.searched(),
       audited: await runEvents(run.id, "workflow.run.completed"),
     }).toMatchObject({
-      held: { mode: "workflow", restricted: true },
-      before: { live: "running", server: { calls: 0, sent: [] } },
-      // Run again once confirmed, it got the sent mail's answer.
+      held: [
+        { mode: "workflow", restricted: true },
+        { mode: "workflow", restricted: true },
+      ],
+      before: {
+        live: ["running", "running"],
+        server: { calls: 0, sent: [] },
+        searched: [],
+      },
+      // Run again once confirmed, each got the answer of the call that ran.
       run: { status: "completed", output: { messageId: "message-1" } },
+      search: { status: "completed", output: { messages: ["INV-7-1"] } },
       server: { calls: 1, sent: [invoiceMail] },
+      searched: ["INV-7"],
       audited: [
         "workflow.run.completed",
         "workflow.run.started",
