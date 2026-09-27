@@ -156,8 +156,10 @@ export interface WorkflowEngine {
   /** Durably pauses the run. */
   sleep: (name: string, milliseconds: number) => Promise<void>;
   /**
-   * Durably waits for the first event of `type` sent to this run, for at
-   * most `timeout` milliseconds (the SDK keeps it within 365 days).
+   * Durably waits for the first event of `type` sent to this run that no
+   * earlier wait took, for at most `timeout` milliseconds (the SDK keeps it
+   * within 365 days). A copy of an event delivered twice is left for the
+   * next wait of its type (see `step.waitFor`).
    */
   waitForEvent: (
     name: string,

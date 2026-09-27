@@ -480,8 +480,9 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     await grantMail(idp, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "approved");
     // Delivered twice at once, as an event source that retries may. The
-    // engine keeps each copy for a wait of its type: events carry no ID to
-    // tell a copy by. A workflow that waits twice needs a type per wait.
+    // copy answering the later wait is the documented contract of
+    // `step.waitFor` (packages/sdk/src/workflow.ts): events carry no ID to
+    // tell a copy by, so a workflow that waits twice uses a type per wait.
     const instance = await env.WORKFLOWS.get(run.id);
     const event = { type: "approved", payload: { by: "anna" } };
     await Promise.all([instance.sendEvent(event), instance.sendEvent(event)]);
