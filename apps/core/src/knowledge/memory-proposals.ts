@@ -327,7 +327,7 @@ const pendingProposal = async (
   if (!found) {
     throw knowledgeErrors.create("knowledge.not_found");
   }
-  requireWritable(person, found.collection);
+  requireWritable(env, person, found.collection);
   if (found.proposal.status !== "pending") {
     throw knowledgeErrors.create("knowledge.proposal_decided");
   }

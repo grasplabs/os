@@ -2,10 +2,11 @@ import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
-  documentTypeSchema,
+  documentTypeOf,
   historyOptionsSchema,
   knowledgeErrors,
   listDocumentsOptionsSchema,
+  playbookRecordTypes,
   restoreInputSchema,
   saveInputSchema,
   versionInputSchema,
@@ -22,7 +23,7 @@ import type {
   VersionSummary,
 } from "@grasp-os/shared/knowledge";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, desc, eq, gt, lt, ne } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, lt, ne, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
@@ -31,7 +32,7 @@ import { alias } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
-import { isUniqueViolation } from "../db/d1.ts";
+import { inList, isUniqueViolation } from "../db/d1.ts";
 import {
   collections,
   documents,
@@ -82,7 +83,13 @@ interface Prepared {
   reviewDate: string | null;
   sections: Section[];
   links: Link[];
+  /** A snapshot's workflow records, at the versions it freezes. */
+  frozen: { path: string; version: number }[];
 }
+
+const recordTypes: ReadonlySet<string> = new Set(playbookRecordTypes);
+
+const isPlaybookRecord = (type: DocumentType): boolean => recordTypes.has(type);
 
 const invalid = (issues: string[]) =>
   knowledgeErrors.create("knowledge.invalid", { issues });
@@ -143,7 +150,177 @@ const prepare = (path: string, text: string): Prepared => {
     reviewDate: frontmatter.review ?? null,
     sections: found,
     links: linked,
+    frozen: "workflows" in frontmatter ? frontmatter.workflows : [],
   };
+};
+
+export const findByPath = async (
+  db: DrizzleD1Database,
+  collectionId: string,
+  path: string
+): Promise<DocumentRow | undefined> =>
+  await db
+    .select()
+    .from(documents)
+    .where(
+      and(eq(documents.collectionId, collectionId), eq(documents.path, path))
+    )
+    .get();
+
+/** Versions read at once to type-check a snapshot's new entries: up to 1 MB each. */
+const frozenPerQuery = 5;
+
+type Frozen = Prepared["frozen"];
+
+/** One version of the document at `path`, as a key. */
+const keyOf = ({ path, version }: { path: string; version: number }): string =>
+  JSON.stringify([path, version]);
+
+/** The frontmatter of a saved version's `text`, if it still reads as one. */
+const savedFrontmatter = (
+  path: string,
+  text: string
+): ReturnType<typeof parseFrontmatter> | undefined => {
+  try {
+    return parseFrontmatter(path, text);
+  } catch (error) {
+    if (error instanceof FrontmatterError) {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
+/**
+ * The entries of the snapshot at `path` in `collection` that were already
+ * checked: those of its current version, the one a save goes over, and of
+ * the version a restore restores (`restoredFrom`). Each was checked when
+ * it was saved, and versions are never deleted.
+ */
+const checkedBefore = async (
+  db: DrizzleD1Database,
+  collection: CollectionRow,
+  path: string,
+  restoredFrom: number | null
+): Promise<Set<string>> => {
+  const existing = await findByPath(db, collection.id, path);
+  if (!existing) {
+    return new Set();
+  }
+  const numbers = [existing.currentVersion];
+  if (restoredFrom !== null) {
+    numbers.push(restoredFrom);
+  }
+  const rows = await db
+    .select({ text: versions.text })
+    .from(versions)
+    .where(
+      and(
+        eq(versions.documentId, existing.id),
+        inArray(versions.number, numbers)
+      )
+    );
+  return new Set(
+    rows.flatMap(({ text }) => {
+      const frontmatter = savedFrontmatter(path, text)?.frontmatter;
+      return frontmatter && "workflows" in frontmatter
+        ? frontmatter.workflows.map(keyOf)
+        : [];
+    })
+  );
+};
+
+/** The types of the versions `entries` names, each by its own text. */
+const typesOf = async (
+  db: DrizzleD1Database,
+  collection: CollectionRow,
+  entries: Frozen
+): Promise<Map<string, DocumentType | undefined>> => {
+  const types = new Map<string, DocumentType | undefined>();
+  for (let start = 0; start < entries.length; start += frozenPerQuery) {
+    const page = entries.slice(start, start + frozenPerQuery);
+    // oxlint-disable-next-line no-await-in-loop -- a few versions at a time
+    const rows = await db
+      .select({
+        path: documents.path,
+        version: versions.number,
+        text: versions.text,
+      })
+      .from(versions)
+      .innerJoin(documents, eq(documents.id, versions.documentId))
+      .where(
+        and(
+          eq(documents.collectionId, collection.id),
+          sql`(${documents.path}, ${versions.number}) IN (SELECT json_extract(value, '$.path'), json_extract(value, '$.version') FROM json_each(${JSON.stringify(page)}))`
+        )
+      );
+    for (const row of rows) {
+      types.set(keyOf(row), savedFrontmatter(row.path, row.text)?.type);
+    }
+  }
+  return types;
+};
+
+/**
+ * Refuses with `knowledge.invalid` a snapshot, saved at `path` in
+ * `collection`, that freezes a version the collection doesn't have (one
+ * query, on every save), or adds one that wasn't a workflow record, each
+ * judged by its own text. Only entries new since the version it goes over
+ * (and the one it restores) are read: a snapshot saved again, restored or
+ * purged reads no text, and a purge that rewrote a frozen version since
+ * doesn't make it invalid.
+ */
+const requireFrozenVersions = async (
+  env: Env,
+  collection: CollectionRow,
+  path: string,
+  frozen: Frozen,
+  restoredFrom: number | null
+): Promise<void> => {
+  if (frozen.length === 0) {
+    return;
+  }
+  const db = drizzle(env.KNOWLEDGE);
+  const found = await db
+    .select({ path: documents.path, currentVersion: documents.currentVersion })
+    .from(documents)
+    .where(
+      and(
+        eq(documents.collectionId, collection.id),
+        inList(documents.path, [...new Set(frozen.map((entry) => entry.path))])
+      )
+    );
+  // A document's versions run from 1 to its current one.
+  const latest = new Map(found.map((row) => [row.path, row.currentVersion]));
+  const exists = (entry: Frozen[number]) =>
+    entry.version <= (latest.get(entry.path) ?? 0);
+  const checked = await checkedBefore(db, collection, path, restoredFrom);
+  const unchecked = [
+    ...new Map(
+      frozen
+        .filter((entry) => exists(entry) && !checked.has(keyOf(entry)))
+        .map((entry) => [keyOf(entry), entry])
+    ).values(),
+  ];
+  const types = await typesOf(db, collection, unchecked);
+  const problems = frozen.flatMap((entry, index) => {
+    const at = `frontmatter.workflows.${index}`;
+    if (!exists(entry)) {
+      return [
+        `${at}: the Playbook has no version ${entry.version} of ${entry.path}`,
+      ];
+    }
+    const key = keyOf(entry);
+    if (!checked.has(key) && types.get(key) !== "workflow") {
+      return [
+        `${at}: version ${entry.version} of ${entry.path} isn't a workflow record`,
+      ];
+    }
+    return [];
+  });
+  if (problems.length > 0) {
+    throw invalid(problems);
+  }
 };
 
 /** Splits rows so no insert binds more parameters than D1 allows. */
@@ -167,7 +344,7 @@ export const toSummary = (row: DocumentRow): DocumentSummary => ({
   collectionId: collectionIdSchema.parse(row.collectionId),
   path: row.path,
   title: row.title,
-  type: documentTypeSchema.parse(row.type),
+  type: documentTypeOf(row.type),
   description: row.description,
   owner: row.owner,
   tags: tagsSchema.parse(JSON.parse(row.tags)),
@@ -204,31 +381,38 @@ const conflict = (existing: DocumentRow | undefined) =>
     latestVersion: existing?.currentVersion ?? 0,
   });
 
-export const findByPath = async (
-  db: DrizzleD1Database,
-  collectionId: string,
-  path: string
-): Promise<DocumentRow | undefined> =>
-  await db
-    .select()
-    .from(documents)
-    .where(
-      and(eq(documents.collectionId, collectionId), eq(documents.path, path))
-    )
-    .get();
-
 /**
  * Reads `text` for the document at `path` in `collection`, refused as a
  * save would refuse it: over a document's limits, frontmatter that doesn't
- * fit its type, or, for a memory file, over that file's size limit.
+ * fit its type, a Playbook record outside a Playbook collection, a
+ * snapshot that freezes what it may not (`requireFrozenVersions`; a
+ * restore passes the version it restores, `restoredFrom`), or, for a
+ * memory file, over that file's size limit.
  */
 export const checkedText = async (
   env: Env,
   collection: CollectionRow,
   path: string,
-  text: string
+  text: string,
+  restoredFrom: number | null = null
 ): Promise<Prepared> => {
   const prepared = prepare(path, text);
+  // Records live in the Playbook collection, which only exists once the
+  // `playbook` flag is on (playbook.ts): until then no text of a record
+  // type is saved anywhere, and code from before record types, which
+  // can't read them, still reads everything that is.
+  if (isPlaybookRecord(prepared.type) && collection.source !== "playbook") {
+    throw invalid([
+      `frontmatter.type: a ${prepared.type} record belongs in the Playbook collection`,
+    ]);
+  }
+  await requireFrozenVersions(
+    env,
+    collection,
+    path,
+    prepared.frozen,
+    restoredFrom
+  );
   const memoryFile = await memoryFileOf(collection, path);
   if (memoryFile !== undefined) {
     requireWithinLimit(env, memoryFile, text);
@@ -279,7 +463,7 @@ export const writeVersion = async (
 ): Promise<DocumentSummary> => {
   const { collection, path, text, ifVersion, message, restoredFrom } = write;
   const { also = [] } = write;
-  const prepared = await checkedText(env, collection, path, text);
+  const prepared = await checkedText(env, collection, path, text, restoredFrom);
   const db = drizzle(env.KNOWLEDGE);
   const existing = await findByPath(db, collection.id, path);
   if ((existing?.currentVersion ?? 0) !== ifVersion) {
@@ -413,7 +597,7 @@ export const saveDocument = async (
     await allowedCollections(env, db, { type: "person", person }),
     collectionId
   );
-  requireWritable(person, collection);
+  requireWritable(env, person, collection);
   return await writeVersion(env, personWriter(person), {
     collection,
     path,
@@ -441,7 +625,7 @@ export const restoreVersion = async (
     await allowedCollections(env, db, { type: "person", person }),
     documentId
   );
-  requireWritable(person, collection);
+  requireWritable(env, person, collection);
   const restored = await db
     .select({ text: versions.text })
     .from(versions)

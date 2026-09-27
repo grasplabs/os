@@ -1,6 +1,6 @@
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
-  documentTypeSchema,
+  documentTypeOf,
   followMaxEntries,
   knowledgeErrors,
   readOptionsSchema,
@@ -345,7 +345,7 @@ export const follow = async (
       documentId: documentIdSchema.parse(row.id),
       path: row.path,
       title: row.title,
-      type: documentTypeSchema.parse(row.type),
+      type: documentTypeOf(row.type),
       description: row.description,
     }));
   }

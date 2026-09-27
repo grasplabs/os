@@ -195,6 +195,25 @@ export const historyOptionsSchema = z
   .default({ limit: pageMaxLimit });
 export type HistoryOptions = z.input<typeof historyOptionsSchema>;
 
+/**
+ * The Playbook's records: typed documents that only a Playbook collection
+ * holds (the one per deployment the platform creates), with the Playbook's
+ * `decision`s, which any collection can hold.
+ */
+export const playbookRecordTypes = [
+  "vision",
+  "team",
+  "person",
+  "tool",
+  "source",
+  "statement",
+  "workflow",
+  "snapshot",
+  "plan-item",
+  "rulebook-entry",
+] as const;
+export type PlaybookRecordType = (typeof playbookRecordTypes)[number];
+
 /** The kinds of document, each with its own frontmatter. */
 export const documentTypeSchema = z.enum([
   "doc",
@@ -202,8 +221,17 @@ export const documentTypeSchema = z.enum([
   "memory",
   "decision",
   "file",
+  ...playbookRecordTypes,
 ]);
 export type DocumentType = z.infer<typeof documentTypeSchema>;
+
+/**
+ * A stored document's type, as this release reads it: a type it doesn't
+ * know (one a later release added, still stored after a rollback) reads
+ * as a plain `doc`, so adding a type never breaks reading on rollback.
+ */
+export const documentTypeOf = (stored: string): DocumentType =>
+  documentTypeSchema.safeParse(stored).data ?? "doc";
 
 /** A document's current state, without its text. */
 export interface DocumentSummary {
