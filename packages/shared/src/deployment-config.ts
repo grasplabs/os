@@ -10,7 +10,8 @@ import { loopbackHosts } from "./router.ts";
 // never sets a value core would refuse. Each var is deployment config,
 // never an in-product setting, so no admin session can change it. The
 // `MEMORY_LIMITS` var's schema is `memoryLimitsSchema` in
-// @grasp-os/shared/memory.
+// @grasp-os/shared/memory, and `PLATFORM_CHANGE`'s is in
+// @grasp-os/shared/platform-change.
 
 // SIGN_IN (core's src/auth/config.ts)
 

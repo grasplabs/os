@@ -43,7 +43,7 @@
     "run_worker_first": true,
   },
   // The console sets the deployment config vars below (SIGN_IN,
-  // MODEL_GATEWAY, FEATURES) through the API; without this, every deploy
+  // MODEL_GATEWAY, FEATURES, PLATFORM_CHANGE) through the API; without this, every deploy
   // would delete them, as Wrangler deletes the vars it doesn't find here.
   "keep_vars": true,
   // Every secret core needs: deploys fail while one is unset, and local dev
@@ -61,6 +61,10 @@
   // the deployment's AI Gateway, the models it allows and the client's rules
   // for them (src/model-rules.ts). It needs no secret:
   // provider keys stay in AI Gateway. Without it every model call is refused.
+  //
+  // So is `PLATFORM_CHANGE` (src/platform-updates.ts): who made this
+  // version, and what they changed, which the cron records in the audit log
+  // once per version.
   //
   // So are feature flags: the `FEATURES` var (src/features.ts), e.g.
   // `{"apps": true}`. Every feature is off until it names it.
@@ -137,14 +141,18 @@
     },
   ],
   // Every minute: appends the audit events waiting in core's outboxes and
-  // connect's to the AuditLog object, and more (src/index.ts). Every 15
-  // minutes, on its own: the day's improvement signals, until they're
-  // computed (src/signals.ts), and Apps whose entry in the Apps collection
-  // isn't of their current version (src/knowledge/apps-collection.ts).
+  // connect's to the AuditLog object, records platform updates, and more
+  // (src/index.ts). Every 15 minutes, on its own: the day's improvement
+  // signals, until they're computed (src/signals.ts), and Apps whose entry
+  // in the Apps collection isn't of their current version
+  // (src/knowledge/apps-collection.ts).
   "triggers": { "crons": ["* * * * *", "*/15 * * * *"] },
   // The model gateway's transport to AI Gateway (src/models.ts); core never
   // holds a raw provider key.
   "ai": { "binding": "AI", "remote": true },
   "send_email": [{ "name": "EMAIL" }],
+  // The running version's ID, which the cron compares with the last one it
+  // recorded to audit platform updates (src/platform-updates.ts).
+  "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "services": [{ "binding": "CONNECT", "service": "grasp-os-connect" }],
 }
