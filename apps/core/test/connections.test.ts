@@ -1,3 +1,4 @@
+import { composioConsentText } from "@grasp-os/shared/connect";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -351,5 +352,69 @@ describe("the catalog", () => {
     await expect(outcome(connections.catalog())).resolves.toBe(
       "feature.disabled"
     );
+  });
+});
+
+describe("connecting a Composio toolkit", () => {
+  /** An admin's `connections`, with `features` as the flags. */
+  const adminWith = async (features: Record<string, boolean>) => {
+    const { session } = await signedInWithRole(idp, "admin");
+    const coreEnv: Env = { ...env, FEATURES: features };
+    const { core } = await openRpc(session, { coreEnv });
+    return { session, coreEnv, connections: core.authenticate().connections };
+  };
+
+  const request = {
+    toolkit: "hubspot",
+    tools: ["HUBSPOT_LIST_CONTACTS"],
+    consent: composioConsentText,
+    returnTo: "/connections?tab=shared",
+  };
+
+  it("goes from the admin's consent through Composio and back, to one shared connection", async () => {
+    const admin = await adminWith({ connections: true, composio: true });
+    const { url } = await admin.connections.connectToolkit(request);
+    // Composio sends the browser straight back to the callback it was given.
+    const state = new URL(url).searchParams.get("state") ?? "";
+    const response = await backFromProvider(
+      admin.session,
+      { state, status: "success" },
+      admin.coreEnv
+    );
+    const listed = await admin.connections.list();
+    const connection = listed.find(({ provider }) => provider === "hubspot");
+    expect(response.headers.get("location")).toBe(
+      `${clientOrigin}/connections?tab=shared&connection=${connection?.id}`
+    );
+    expect(connection).toMatchObject({ source: "composio", scope: "shared" });
+  });
+
+  it("isn't offered while the composio flag is off, nor finished if it goes off meanwhile", async () => {
+    const off = await adminWith({ connections: true });
+    await expect(
+      outcome(off.connections.connectToolkit(request))
+    ).resolves.toBe("connection.provider_unavailable");
+    const on = await adminWith({ connections: true, composio: true });
+    const { url } = await on.connections.connectToolkit(request);
+    const response = await backFromProvider(
+      on.session,
+      { state: new URL(url).searchParams.get("state") ?? "" },
+      off.coreEnv
+    );
+    expect(response.headers.get("location")).toBe(
+      `${clientOrigin}/?connectionError=connection.provider_unavailable`
+    );
+  });
+
+  it("sends the browser back nowhere but this origin", async () => {
+    const admin = await adminWith({ connections: true, composio: true });
+    await expect(
+      outcome(
+        admin.connections.connectToolkit({
+          ...request,
+          returnTo: "//evil.test/connections",
+        })
+      )
+    ).resolves.toBe("connection.invalid");
   });
 });

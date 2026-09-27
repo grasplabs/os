@@ -12,6 +12,8 @@ import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { testComposioKey } from "./provider-config.ts";
+
 export interface FakeTool {
   name: string;
   /** Declared read-only (`readOnlyHint: true`). */
@@ -138,34 +140,37 @@ const serverWith = (tools: readonly FakeTool[], ran: Ran[]): McpServer => {
   return server;
 };
 
+interface ServerOptions {
+  /** Answer in event streams instead of JSON bodies. */
+  stream?: boolean;
+  /** Tiny events to send ahead of each streamed answer. */
+  padding?: number;
+}
+
 /**
- * An MCP server at `url` with `tools`, for each test in the file. `stream`
- * makes it answer in event streams instead of JSON bodies.
+ * An MCP server with `tools`: its state, and how it answers one request.
+ * `stream` makes it answer in event streams instead of JSON bodies.
  */
-export const fakeMcpServer = (
-  url: string,
+export const mcpServerWith = (
   tools: readonly FakeTool[],
-  {
-    stream = false,
-    padding = 0,
-  }: {
-    /** Answer in event streams instead of JSON bodies. */
-    stream?: boolean;
-    /** Tiny events to send ahead of each streamed answer. */
-    padding?: number;
-  } = {}
+  { stream = false, padding = 0 }: ServerOptions = {}
 ) => {
   const state: {
     /** Every tool run, in order. */
     ran: Ran[];
     /** Every request connect sent to it. */
     requests: number;
+    /** Requests that came without connect's Composio key. */
+    unkeyed: number;
     /** How the next tool call fares; back to `ok` after it. */
     network: Network;
-  } = { ran: [], requests: 0, network: "ok" };
+  } = { ran: [], requests: 0, unkeyed: 0, network: "ok" };
 
   const answer = async (request: Request): Promise<Response> => {
     state.requests += 1;
+    if (request.headers.get("x-api-key") !== testComposioKey) {
+      state.unkeyed += 1;
+    }
     const body: unknown = await request.clone().json();
     const network = isToolCall(body) ? state.network : "ok";
     if (isToolCall(body)) {
@@ -198,10 +203,25 @@ export const fakeMcpServer = (
     return padded(response, stream ? padding : 0);
   };
 
-  beforeEach(() => {
+  const reset = (): void => {
     state.ran = [];
     state.requests = 0;
+    state.unkeyed = 0;
     state.network = "ok";
+  };
+
+  return { state, answer, reset };
+};
+
+/** An MCP server at `url` with `tools`, for each test in the file. */
+export const fakeMcpServer = (
+  url: string,
+  tools: readonly FakeTool[],
+  options: ServerOptions = {}
+) => {
+  const { state, answer, reset } = mcpServerWith(tools, options);
+  beforeEach(() => {
+    reset();
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const request = new Request(input, init);
       if (request.url !== url) {

@@ -17,12 +17,14 @@ import type {
 import { authoritySchema } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { roleErrors } from "@grasp-os/shared/roles";
+import { createExecutionContext } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach } from "vite-plus/test";
 import type { z } from "zod";
 
 import { connections } from "../src/db/schema.ts";
+import Connect from "../src/index.ts";
 import type { Account, fakeProviders } from "./oauth-provider.ts";
 import { acmeDomain, acmeTenant } from "./provider-config.ts";
 
@@ -32,7 +34,28 @@ type ConnectionRow = typeof connections.$inferInsert;
 export const serverUrl =
   "https://backend.composio.dev/v3/mcp/server-mail?user_id=grasp";
 
-/** A shared connection to `serverUrl`, unless `fields` say otherwise. */
+/**
+ * The tools an admin allowed on the test connections: every tool the
+ * tests' servers have, and nothing more.
+ */
+export const allowedTools = [
+  "mail.archive",
+  "mail.bounce",
+  "mail.draft",
+  "mail.export",
+  "mail.forward",
+  "mail.list",
+  "mail.open",
+  "mail.photo",
+  "mail.read",
+  "mail.search",
+  "mail.send",
+];
+
+/**
+ * A shared connection to `serverUrl` allowing `allowedTools`, unless
+ * `fields` say otherwise.
+ */
 export const addConnection = async (
   fields: Partial<ConnectionRow> = {}
 ): Promise<string> => {
@@ -46,6 +69,7 @@ export const addConnection = async (
       status: "active",
       serverKind: "composio",
       server: serverUrl,
+      tools: JSON.stringify(allowedTools),
       createdAt: now,
       updatedAt: now,
       ...fields,
@@ -109,15 +133,24 @@ export const chatOrigin: NonNullable<Signed["origin"]> = {
 export const callAs = async (
   authority: Authority,
   call: Call,
-  signed: Signed = {}
+  signed: Signed = {},
+  connect: Pick<Connect, "call"> = exports.default
 ): Promise<ConnectResult> =>
-  await exports.default.call({
+  await connect.call({
     ...call,
     capability: await signCapability(env.CAPABILITY_SIGNING_KEY, authority, {
       ...call,
       ...signed,
     }),
   });
+
+/**
+ * Connect as a deployment with `vars` in its env instead would run it,
+ * such as without its Composio key: the same Worker, through its RPC
+ * methods.
+ */
+export const connectWith = (vars: Partial<Env>): Connect =>
+  new Connect(createExecutionContext(), { ...env, ...vars });
 
 /** The code connect refused or failed with, or "ok" if it didn't. */
 export const outcome = async (promise: Promise<unknown>): Promise<string> => {

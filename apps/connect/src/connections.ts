@@ -7,6 +7,7 @@ import { eq, inArray } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import { composioKey } from "./composio.ts";
 import { connections } from "./db/schema.ts";
 import { mcpServer } from "./mcp.ts";
 import type { McpServer } from "./mcp.ts";
@@ -25,8 +26,8 @@ const composioMcpPath = "/v3/mcp/";
 
 /**
  * A Composio server's URL, as stored: HTTPS on Composio's MCP host, and
- * never with credentials in it (those are added per call). Anything else
- * is never called, whatever the registry says.
+ * never with credentials in it (connect's key is added per call, in a
+ * header). Anything else is never called, whatever the registry says.
  */
 const composioUrlSchema = z.url({ protocol: /^https$/u }).refine((url) => {
   const { host, pathname, username, password } = new URL(url);
@@ -71,13 +72,48 @@ export const usableConnection = async (
   return connection;
 };
 
-/** The Composio MCP server behind the connection, if its URL is one. */
-export const composioServer = (connection: Connection): McpServer => {
+/** Whether `url` is one connect would call as a Composio server. */
+export const isComposioServerUrl = (url: string): boolean =>
+  composioUrlSchema.safeParse(url).success;
+
+const toolsSchema = z.array(z.string());
+
+/**
+ * Whether the admin allowed `action` on a Composio connection. One whose
+ * tools aren't recorded, or can't be read, allows none.
+ */
+export const isAllowedTool = (
+  connection: Connection,
+  action: string
+): boolean => {
+  if (connection.tools === null) {
+    return false;
+  }
+  let tools: unknown;
+  try {
+    tools = JSON.parse(connection.tools);
+  } catch {
+    return false;
+  }
+  return toolsSchema.safeParse(tools).data?.includes(action) === true;
+};
+
+/**
+ * The Composio MCP server behind the connection, if its URL is one, with
+ * connect's Composio key on each request (Composio requires it), and
+ * never while the key is unset.
+ */
+export const composioServer = (env: Env, connection: Connection): McpServer => {
   const url = composioUrlSchema.safeParse(connection.server);
-  if (!url.success) {
+  const key = composioKey(env);
+  if (!url.success || key === undefined) {
     throw connectErrors.create("connect.server_unavailable");
   }
-  return mcpServer(url.data, async (request) => await fetch(request));
+  return mcpServer(url.data, async (request) => {
+    const headers = new Headers(request.headers);
+    headers.set("x-api-key", key);
+    return await fetch(new Request(request, { headers }));
+  });
 };
 
 /**

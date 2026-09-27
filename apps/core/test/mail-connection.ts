@@ -1,7 +1,7 @@
 /**
  * Mail connections in connect's registry for core's tests: each a Composio
  * toolkit's, to a mail server of its own (test/mail-server.ts) whose one
- * tool, `mail.send`, is a side effect.
+ * tool, `mail.send`, is a side effect, and the one its admin allowed.
  */
 import { z } from "zod";
 
@@ -37,7 +37,7 @@ export const mailConnection = async (plan: MailAnswer[] = []) => {
   const now = Date.now();
   await connectDb()
     .prepare(
-      "INSERT INTO connections (id, provider, scope, status, server_kind, server, created_at, updated_at) VALUES (?, 'mail', 'shared', 'active', 'composio', ?, ?, ?)"
+      "INSERT INTO connections (id, provider, scope, status, server_kind, server, tools, created_at, updated_at) VALUES (?, 'mail', 'shared', 'active', 'composio', ?, '[\"mail.send\"]', ?, ?)"
     )
     .bind(id, mailServerUrl(name), now, now)
     .run();

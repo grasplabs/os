@@ -41,6 +41,12 @@ import type { SessionCheck } from "./session-check.ts";
 // deployment is (its origin and its tenant at the provider, both from
 // deployment config, never from a request).
 
+/** What the frontend sends to connect a toolkit, checked as `returnTo` is. */
+const connectToolkitRequestSchema = z.object({
+  returnTo: z.string().default("/"),
+});
+type ConnectToolkitRequest = Parameters<ConnectionsApi["connectToolkit"]>[0];
+
 /** What the frontend sends to start: checked here, as it came over the wire. */
 const startRequestSchema = z.strictObject({
   provider: oauthProviderSchema,
@@ -179,6 +185,37 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
     });
   }
 
+  /**
+   * Connecting a Composio toolkit, for an admin who consented; connect
+   * checks the rest (the role, the toolkit, the tools, the consent).
+   */
+  async connectToolkit(
+    request: ConnectToolkitRequest
+  ): Promise<{ url: string }> {
+    const person = await this.#person();
+    const parsed = connectToolkitRequestSchema.safeParse(request);
+    const config = signInConfig(this.#env);
+    if (config === undefined) {
+      throw connectionErrors.create("connection.provider_unavailable");
+    }
+    const back = parsed.success
+      ? onOrigin(config.origin, parsed.data.returnTo)
+      : undefined;
+    if (back === undefined) {
+      throw connectionErrors.create("connection.invalid");
+    }
+    const { toolkit, tools, consent } = request;
+    return await this.#env.CONNECT.startToolkitConnection({
+      person,
+      composio: featureEnabled(this.#env, "composio"),
+      toolkit,
+      tools,
+      consent,
+      origin: config.origin,
+      returnTo: `${back.pathname}${back.search}`,
+    });
+  }
+
   async list(): Promise<ConnectionSummary[]> {
     const person = await this.#person();
     return await this.#env.CONNECT.listConnections(person);
@@ -282,6 +319,7 @@ export const handleConnectionCallback = async (
       code: params.get("code") ?? undefined,
       // Only whether there is one matters; the provider's text isn't kept.
       error: params.get("error")?.slice(0, 64) ?? undefined,
+      composio: featureEnabled(env, "composio"),
     });
   } catch (error) {
     return failed(errorCodeOf(error));
