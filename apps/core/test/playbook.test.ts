@@ -844,8 +844,9 @@ describe("Playbook records", () => {
           ifVersion: 0,
         })
       );
-      // Restored: an old snapshot that was valid still is, and one stored
-      // with a bad reference (as a bug could leave it) isn't.
+      // Restored: an old snapshot that was valid still is. One stored with
+      // references to versions that aren't there (as a bug could leave it)
+      // isn't; the types of what it froze were checked when it was saved.
       const frozen = await snapshot(valid);
       await save(admin, {
         path: frozen.path,
@@ -893,13 +894,148 @@ describe("Playbook records", () => {
         saveRecord: { code: "knowledge.invalid", issues },
         raw: { code: "knowledge.invalid", issues },
         valid: "ok",
-        badRestore: { code: "knowledge.invalid", issues },
+        badRestore: { code: "knowledge.invalid", issues: issues.slice(2) },
         unreadable: {
           code: "knowledge.invalid",
           issues: [
             `frontmatter.workflows.0: version 1 of ${unreadable} isn't a workflow record`,
           ],
         },
+      });
+    }
+  );
+
+  it(
+    "keep a snapshot valid after a purge rewrites what it froze, reading only entries it adds",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const folder = unique();
+      const purgeAs = async (documentId: string, term: string) => {
+        const input = {
+          type: "content" as const,
+          documentIds: [documentId],
+          terms: [term],
+          reason: "erasure_request" as const,
+        };
+        const { token } = await admin.api.knowledge.preparePurge(input);
+        await admin.api.knowledge.purge(input, token);
+      };
+      // Version 1 has a step "automated"; purging "tom" from the workflow
+      // rewrites it to "au(removed)ated", which no longer fits its type.
+      const workflow = `${folder}/pay.md`;
+      const pay = await save(admin, {
+        path: workflow,
+        record: {
+          ...records.workflow.record,
+          steps: [{ name: "Match", kind: "automated" }],
+        },
+        body: "Drawn.",
+      });
+      await save(admin, { path: workflow, ifVersion: 1, ...records.workflow });
+      const snapshot = await save(admin, {
+        path: `${folder}/snapshot.md`,
+        record: {
+          ...records.snapshot.record,
+          workflows: [{ path: workflow, version: 1 }],
+        },
+        body: `Taken with Zed${folder}.`,
+      });
+      await purgeAs(pay.id, "tom");
+      const frozenNow = await admin.api.knowledge.getDocument(pay.id, 1);
+      expect(frozenNow.version.text).toContain("au(removed)ated");
+      const resaved = await outcome(
+        save(admin, {
+          path: snapshot.path,
+          ifVersion: 1,
+          record: {
+            ...records.snapshot.record,
+            workflows: [{ path: workflow, version: 1 }],
+          },
+          body: `Taken with Zed${folder}, again.`,
+        })
+      );
+      const restored = await outcome(
+        admin.api.knowledge.restoreVersion({
+          documentId: snapshot.id,
+          version: 1,
+          ifVersion: 2,
+        })
+      );
+      const purged = await outcome(purgeAs(snapshot.id, `Zed${folder}`));
+      // Added anew, the rewritten version is read, and refused.
+      const added = await refusal(
+        save(admin, {
+          path: `${folder}/new-snapshot.md`,
+          record: {
+            ...records.snapshot.record,
+            workflows: [{ path: workflow, version: 1 }],
+          },
+          body: "New.",
+        })
+      );
+
+      // A large snapshot, one entry added: only that entry is read. Every
+      // version it froze before is made unreadable first; were any read,
+      // the save would be refused.
+      const many = `${folder}/many.md`;
+      await save(admin, { path: many, ...records.workflow });
+      const frozenCount = 12;
+      for (let version = 1; version < frozenCount; version += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- one version at a time
+        await save(admin, {
+          path: many,
+          ifVersion: version,
+          ...records.workflow,
+        });
+      }
+      const entries = (upTo: number) =>
+        Array.from({ length: upTo }, (_, index) => ({
+          path: many,
+          version: index + 1,
+        }));
+      const large = await save(admin, {
+        path: `${folder}/large.md`,
+        record: {
+          ...records.snapshot.record,
+          workflows: entries(frozenCount - 1),
+        },
+        body: "Large.",
+      });
+      const largeNow = await admin.api.knowledge.getDocument(large.id);
+      await env.KNOWLEDGE.prepare(
+        `UPDATE versions SET text = ? WHERE number < ? AND document_id =
+          (SELECT id FROM documents WHERE collection_id = ? AND path = ?)`
+      )
+        .bind(
+          "---\ntype: [unclosed\n---",
+          frozenCount,
+          playbookCollectionId,
+          many
+        )
+        .run();
+      const grown = await outcome(
+        save(admin, {
+          path: large.path,
+          ifVersion: largeNow.currentVersion,
+          record: {
+            ...records.snapshot.record,
+            workflows: entries(frozenCount),
+          },
+          body: "Large, one more.",
+        })
+      );
+      expect({ resaved, restored, purged, added, grown }).toStrictEqual({
+        resaved: "ok",
+        restored: "ok",
+        purged: "ok",
+        added: {
+          code: "knowledge.invalid",
+          issues: [
+            `frontmatter.workflows.0: version 1 of ${workflow} isn't a workflow record`,
+          ],
+        },
+        grown: "ok",
       });
     }
   );
