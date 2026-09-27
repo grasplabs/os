@@ -154,7 +154,8 @@ const appLinkOf = (path: string, text: string): unknown => {
 /**
  * Refuses with `knowledge.invalid` a snapshot, as `text` at `path` in the
  * Playbook `collection`, that freezes a version of a record that isn't
- * there. Text that doesn't fit its type is refused the same way.
+ * there, or a record that isn't a workflow now. Text that doesn't fit its
+ * type is refused the same way.
  */
 const requireFrozenVersions = async (
   db: DrizzleD1Database,
@@ -179,7 +180,11 @@ const requireFrozenVersions = async (
   }
   const { workflows } = frontmatter;
   const found = await db
-    .select({ path: documents.path, currentVersion: documents.currentVersion })
+    .select({
+      path: documents.path,
+      type: documents.type,
+      currentVersion: documents.currentVersion,
+    })
     .from(documents)
     .where(
       and(
@@ -192,18 +197,23 @@ const requireFrozenVersions = async (
     );
   // A document's versions run from 1 to its current one, and none of the
   // Playbook's are ever deleted.
-  const latest = new Map(
-    found.map((row) => [row.path, row.currentVersion] as const)
-  );
-  const missing = workflows.flatMap((frozen, index) =>
-    frozen.version <= (latest.get(frozen.path) ?? 0)
-      ? []
-      : [
-          `record.workflows.${index}: the Playbook has no version ${frozen.version} of ${frozen.path}`,
-        ]
-  );
-  if (missing.length > 0) {
-    throw knowledgeErrors.create("knowledge.invalid", { issues: missing });
+  const byPath = new Map(found.map((row) => [row.path, row] as const));
+  const problems = workflows.flatMap((frozen, index) => {
+    const row = byPath.get(frozen.path);
+    if (row === undefined || frozen.version > row.currentVersion) {
+      return [
+        `record.workflows.${index}: the Playbook has no version ${frozen.version} of ${frozen.path}`,
+      ];
+    }
+    if (row.type !== "workflow") {
+      return [
+        `record.workflows.${index}: ${frozen.path} isn't a workflow record`,
+      ];
+    }
+    return [];
+  });
+  if (problems.length > 0) {
+    throw knowledgeErrors.create("knowledge.invalid", { issues: problems });
   }
 };
 
@@ -213,7 +223,7 @@ const requireFrozenVersions = async (
  * doesn't fit its type, `knowledge.conflict` when `ifVersion` isn't
  * current), and only by those who may change the Playbook (its admins).
  * A workflow keeps the App workflow the version it was edited from links
- * to, and a snapshot freezes only versions of records the Playbook has.
+ * to, and a snapshot freezes only versions of the Playbook's workflows.
  */
 export const saveRecord = async (
   env: Env,

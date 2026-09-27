@@ -791,13 +791,15 @@ describe("Playbook records", () => {
   );
 
   it(
-    "freeze in a snapshot only versions of records the Playbook has",
+    "freeze in a snapshot only versions of workflow records the Playbook has",
     setUpTime,
     async () => {
       const admin = await personOf("admin");
       const folder = unique();
       const workflow = `${folder}/pay.md`;
       await save(admin, { path: workflow, ...records.workflow });
+      const team = `${folder}/team.md`;
+      await save(admin, { path: team, ...records.team });
       const snapshot = async (workflows: { path: string; version: number }[]) =>
         await save(admin, {
           path: `${folder}/snapshot-${unique()}.md`,
@@ -810,6 +812,7 @@ describe("Playbook records", () => {
             { path: workflow, version: 1 },
             { path: workflow, version: 2 },
             { path: `${folder}/refund.md`, version: 1 },
+            { path: team, version: 1 },
           ])
         ),
         frozen: await outcome(snapshot([{ path: workflow, version: 1 }])),
@@ -819,6 +822,7 @@ describe("Playbook records", () => {
           issues: [
             `record.workflows.1: the Playbook has no version 2 of ${workflow}`,
             `record.workflows.2: the Playbook has no version 1 of ${folder}/refund.md`,
+            `record.workflows.3: ${team} isn't a workflow record`,
           ],
         },
         frozen: "ok",
