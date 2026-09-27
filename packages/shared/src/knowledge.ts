@@ -607,11 +607,12 @@ export interface PurgePlan {
   /** Memory proposals it deletes or rewrites. */
   proposals: number;
   /**
-   * How often a term would still start a longer word, in every version
-   * and memory proposal of the documents named ("Toms", "Tomin" or
-   * "tomVisser" for "Tom"; not "automated" or "custom", where it is
-   * inside or ends one): list the forms to remove as terms of their own.
-   * Always 0 for `personal`.
+   * How often a term would still start a longer word in what the purge
+   * leaves of the documents named: every version, the one it saves too,
+   * and every memory proposal ("Toms", "Tomin", "tomVisser" or
+   * "tom.visser@acme.test.evil" for "Tom" or the address; not "automated"
+   * or "custom", where it is inside or ends one). List the forms to
+   * remove as terms of their own. Always 0 for `personal`.
    */
   inLongerWords: number;
   /** Confirms exactly this purge, by the admin who prepared it. */

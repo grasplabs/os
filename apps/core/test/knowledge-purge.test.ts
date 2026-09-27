@@ -665,13 +665,105 @@ describe("a purge of content", setUpTime, () => {
       "# Team\n(removed) planned it, (removed) automated it ((removed)). Ask (removed), then Tomas or (removed)'s team.\nMail (removed) or (removed), not atom.visser@acme.test.";
     expect({
       versions: await versionTexts(document.id),
-      // Only "Tomas": in "automated", "planned" and "atom.visser@acme.test"
-      // a term is inside or ends a longer word, which makes another word.
+      // Only "Tomas", in the second version and in the one the purge
+      // saves: in "automated", "planned" and "atom.visser@acme.test" a
+      // term is inside or ends a longer word, which makes another word.
       inLongerWords: plan.inLongerWords,
     }).toStrictEqual({
       // The two saved, and the one saved as the purge's.
       versions: ["# Team\n(removed) planned it.", purgedText, purgedText],
-      inLongerWords: 1,
+      inLongerWords: 2,
+    });
+  });
+
+  it("counts the forms left in every version it leaves, the one it saves too", async () => {
+    const admin = await personOf("admin");
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const document = await saveOver(
+      admin,
+      handbook.id,
+      "team.md",
+      "# Team\nTom Tomas"
+    );
+    const { plan } = await purged(admin, {
+      type: "content",
+      documentIds: [document.id],
+      terms: ["Tom"],
+      reason: "offboarding",
+    });
+    expect({
+      versions: await versionTexts(document.id),
+      inLongerWords: plan.inLongerWords,
+    }).toStrictEqual({
+      versions: ["# Team\n(removed) Tomas", "# Team\n(removed) Tomas"],
+      inLongerWords: 2,
+    });
+  });
+
+  it("treats an address or a domain as one word, and removes it next to punctuation", async () => {
+    const admin = await personOf("admin");
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const document = await saveOver(
+      admin,
+      handbook.id,
+      "mail.md",
+      "# Mail\nNot tom.visser@acme.test.evil or evil.tom.visser@acme.test, but tom.visser@acme.test.\nOr (tom.visser@acme.test). Ask Tom.\nTom.Next stays, Jan-Tom goes."
+    );
+    const { plan } = await purged(admin, {
+      type: "content",
+      documentIds: [document.id],
+      terms: ["tom.visser@acme.test", "Tom"],
+      reason: "offboarding",
+    });
+    const read = await admin.api.knowledge.getDocument(document.id);
+    expect({
+      text: read.version.text,
+      // "tom.visser@acme.test.evil" and "Tom.Next" start longer words, in
+      // the version saved and in the one the purge saves.
+      inLongerWords: plan.inLongerWords,
+    }).toStrictEqual({
+      text: "# Mail\nNot tom.visser@acme.test.evil or evil.tom.visser@acme.test, but (removed).\nOr ((removed)). Ask (removed).\nTom.Next stays, Jan-(removed) goes.",
+      inLongerWords: 4,
+    });
+  });
+
+  it("removes a term left joined only by a term removed next to it, and finds nothing when run again", async () => {
+    const admin = await personOf("admin");
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const document = await saveOver(
+      admin,
+      handbook.id,
+      "log.md",
+      "# Log\nTom.Ann left."
+    );
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [document.id],
+      terms: ["Tom.", "Ann"],
+      reason: "offboarding",
+    };
+    await purged(admin, input);
+    const read = await admin.api.knowledge.getDocument(document.id);
+    const again = await admin.api.knowledge.preparePurge(input);
+    expect({
+      text: read.version.text,
+      again: {
+        documents: again.documents,
+        versions: again.versions,
+        proposals: again.proposals,
+      },
+    }).toStrictEqual({
+      text: "# Log\n(removed)(removed) left.",
+      again: { documents: 0, versions: 0, proposals: 0 },
     });
   });
 
@@ -810,11 +902,12 @@ describe("a purge of content", setUpTime, () => {
     const read = await admin.api.knowledge.getDocument(document.id);
     expect({
       text: read.version.text,
-      // Only "Tomas": the letters around the others don't make them longer.
+      // Only "Tomas", in the version saved and the one the purge saves:
+      // the letters around the others don't make them longer.
       inLongerWords: plan.inLongerWords,
     }).toStrictEqual({
       text: "# Team\n我和(removed)去了。我和(removed)去了。\nฉันกับ(removed)ไปตลาด\nTomas stays.",
-      inLongerWords: 1,
+      inLongerWords: 2,
     });
   });
 

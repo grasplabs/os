@@ -358,14 +358,27 @@ const sidesOf = (term: string) => ({
 });
 
 /**
- * A term, and no joining character before it, where its start joins. The
+ * What joins a term to more of a word on a side where its edge joins: a
+ * joining character, or a dot or an at sign with one past it, so a
+ * domain or an address is one word ("tom.visser@acme.test" isn't found
+ * in "tom.visser@acme.test.evil" or "evil.tom.visser@acme.test"). The
+ * cost: "Tom" isn't found in "Tom.Next", with no space after the dot. A
+ * hyphen doesn't join: "Jan-Tom" holds "Tom".
+ */
+const joinedAfter = String.raw`[.@]?${joining}`;
+const joinedBefore = String.raw`${joining}[.@]?`;
+
+/**
+ * A term, and nothing that joins it before, where its start joins. The
  * check before comes after the term's own characters (looking behind them
  * and it), so it runs only where the whole term matched rather than at
  * every position: on text made to be slow, over twice as fast.
  */
 const startingWord = (term: string): string => {
   const itself = literal(term);
-  return sidesOf(term).before ? `${itself}(?<!${joining}${itself})` : itself;
+  return sidesOf(term).before
+    ? `${itself}(?<!${joinedBefore}${itself})`
+    : itself;
 };
 
 /**
@@ -375,7 +388,7 @@ const startingWord = (term: string): string => {
  * are.
  */
 const wholeWord = (term: string): string =>
-  `${startingWord(term)}${sidesOf(term).after ? `(?!${joining})` : ""}`;
+  `${startingWord(term)}${sidesOf(term).after ? `(?!${joinedAfter})` : ""}`;
 
 /**
  * A term as a pattern that matches it only where it starts a longer word
@@ -385,7 +398,7 @@ const wholeWord = (term: string): string =>
  * character can join.
  */
 const startOfWord = (term: string): string[] =>
-  sidesOf(term).after ? [`${startingWord(term)}(?=${joining})`] : [];
+  sidesOf(term).after ? [`${startingWord(term)}(?=${joinedAfter})`] : [];
 
 /** Alternatives in any case, as one pattern; one that never matches if none. */
 const anyOf = (alternatives: string[]): RegExp =>
@@ -425,11 +438,27 @@ const matcherOf = (
   };
 };
 
-/** `text` with every term replaced by the marker. */
-const without = (text: string, matcher: Matcher): string =>
-  matcher.anywhere.test(text)
-    ? text.replaceAll(matcher.remove, purgedMarker)
-    : text;
+/**
+ * `text` with every term replaced by the marker, until none is left: a
+ * term that ends or starts with a dot or an at sign, once replaced, can
+ * leave a term next to it no longer joined ("Tom." and "Ann" in
+ * "Tom.Ann"), which one pass would leave to a purge run again. It ends:
+ * a term can't overlap the marker (`purgeTermSchema`), so each pass
+ * replaces text outside the markers, or markers with fewer of them.
+ */
+const without = (text: string, matcher: Matcher): string => {
+  if (!matcher.anywhere.test(text)) {
+    return text;
+  }
+  let current = text;
+  for (;;) {
+    const next = current.replaceAll(matcher.remove, purgedMarker);
+    if (next === current) {
+      return current;
+    }
+    current = next;
+  }
+};
 
 /**
  * How often a term still starts a longer word in `texts`, once rewritten
@@ -513,17 +542,17 @@ const versionOf = async (
  * and a memory file's. Checked for every document named, whether or not
  * its current text holds a term (a purge saves it again when an earlier
  * version does), before a purge changes anything, so one that can't be
- * finished changes nothing.
+ * finished changes nothing. Returns the text it would save.
  */
 const requireSavable = async (
   env: Env,
   db: DrizzleD1Database,
   { document, collection }: Named,
   matcher: Matcher
-): Promise<void> => {
+): Promise<string | undefined> => {
   const current = await versionOf(db, document, document.currentVersion);
   if (current === undefined) {
-    return;
+    return undefined;
   }
   const text = rewritten(current, matcher)?.text ?? current.text;
   try {
@@ -539,6 +568,7 @@ const requireSavable = async (
       ],
     });
   }
+  return text;
 };
 
 /**
@@ -684,7 +714,8 @@ const proposalRewrites = async (
 
 /**
  * What purging the terms from `named` would change, and how often a term
- * would still start a longer word; checks it can.
+ * would still start a longer word in what it leaves: every version, the
+ * one it saves too, and every memory proposal. Checks it can.
  */
 const countDocument = async (
   env: Env,
@@ -693,7 +724,7 @@ const countDocument = async (
   matcher: Matcher
 ): Promise<{ counts: Counts; joined: number }> => {
   const { document } = named;
-  await requireSavable(env, db, named, matcher);
+  const saved = await requireSavable(env, db, named, matcher);
   const inVersions = await rewriteVersions(
     db,
     document,
@@ -702,13 +733,18 @@ const countDocument = async (
     false
   );
   const inProposals = await proposalRewrites(db, document, matcher);
+  const changes = inVersions.changed + inProposals.updates.length > 0;
+  // When anything changes, the purge saves the current text, rewritten,
+  // as the next version too (`purgeDocument`).
+  const inSaved =
+    changes && saved !== undefined ? joinedIn([saved], matcher) : 0;
   return {
     counts: {
-      documents: inVersions.changed + inProposals.updates.length > 0 ? 1 : 0,
+      documents: changes ? 1 : 0,
       versions: inVersions.changed,
       proposals: inProposals.updates.length,
     },
-    joined: inVersions.joined + inProposals.joined,
+    joined: inVersions.joined + inProposals.joined + inSaved,
   };
 };
 
