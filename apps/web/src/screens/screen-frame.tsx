@@ -49,6 +49,14 @@ interface ScreenFrameProps {
   screen: string;
 }
 
+interface ScreenFrameOptions extends ScreenFrameProps {
+  /**
+   * Inside a page with a heading of its own (the App's page): the App's
+   * name is a second-level heading, not the page's.
+   */
+  embedded?: boolean;
+}
+
 interface FrameProps extends ScreenFrameProps {
   onState: (state: ScreenState) => void;
   onOpened: (appName: string) => void;
@@ -82,7 +90,12 @@ const Frame = ({ app, screen, onState, onOpened }: FrameProps) => {
  * A screen can draw anything in its frame, a fake sign-in prompt too; the
  * chrome is how a person tells the App's part from Grasp's.
  */
-export const ScreenFrame = ({ app, screen }: ScreenFrameProps) => {
+export const ScreenFrame = ({
+  app,
+  screen,
+  embedded = false,
+}: ScreenFrameOptions) => {
+  const Title = embedded ? "h2" : "h1";
   const [state, setState] = useState<ScreenState>({ status: "loading" });
   const [appName, setAppName] = useState("");
   const [attempt, setAttempt] = useState(0);
@@ -94,7 +107,7 @@ export const ScreenFrame = ({ app, screen }: ScreenFrameProps) => {
     <div className="flex flex-1 flex-col">
       <header className="flex items-center gap-2 border-b p-3">
         <Badge variant="secondary">App screen</Badge>
-        <h1 className="text-sm font-medium">{appName}</h1>
+        <Title className="text-sm font-medium">{appName}</Title>
       </header>
       <ScreenStatus onReload={reload} state={state} />
       <Frame

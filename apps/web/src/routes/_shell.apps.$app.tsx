@@ -100,7 +100,7 @@ const Screens = ({ app, contents }: { app: string; contents: AppContents }) => {
         </Link>
       </div>
       <div className="flex min-h-96 flex-1 flex-col rounded-lg border">
-        <ScreenFrame app={app} key={selected} screen={selected} />
+        <ScreenFrame app={app} embedded key={selected} screen={selected} />
       </div>
     </div>
   );

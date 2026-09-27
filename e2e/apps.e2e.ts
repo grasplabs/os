@@ -126,9 +126,7 @@ test("a builder finds an App in the list, opens it and uses its screen with live
   ]);
   await row.getByRole("link", { name }).click();
 
-  await expect(
-    page.getByRole("heading", { level: 1, name }).first()
-  ).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1, name })).toBeVisible();
   await expect(page.getByText("Version 1")).toBeVisible();
   // The first open builds the screen, which on a loaded machine takes a
   // while (screens.e2e.ts).
@@ -136,6 +134,9 @@ test("a builder finds an App in the list, opens it and uses its screen with live
   await expect(counter.getByRole("heading", { name: "Counter" })).toBeVisible({
     timeout: 20_000,
   });
+  // One page heading: the screen's chrome names the App a level below it.
+  await expect(page.getByRole("heading", { level: 2, name })).toBeVisible();
+  await expect(page.getByRole("heading", { level: 1 })).toHaveCount(1);
   await expect(counter.getByRole("status", { name: "Count" })).toHaveText("0");
   await counter.getByRole("button", { name: "Add one" }).click();
   await expect(counter.getByRole("status", { name: "Count" })).toHaveText("1");
