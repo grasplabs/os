@@ -210,19 +210,19 @@ jobs:
 
   # Every merge to main is a release: built once, verified against its
   # manifest and published to R2 in grasp-os-ops, where the console imports
-  # it. Deploys nothing. The R2 key is loaded only after the build, and only
-  # the upload step sees it. Skipped until the repository variable
+  # it. Deploys nothing. The R2 key is loaded after the build and passed only
+  # to the upload step, which keeps it out of the build's environment; all
+  # steps share one runner, so that isn't a security boundary. Skipped until the repository variable
   # PUBLISH_RELEASES is `true`, set once the bucket, key and environment
-  # exist.
+  # exist. Pushes to main share the workflow's concurrency group, which keeps
+  # only the newest pending run: in a burst of merges a middle commit may
+  # never be published, and its changes ship in the next release.
   publish-release:
     name: publish-release
     if: github.event_name == 'push' && vars.PUBLISH_RELEASES == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: grasp-os-releases
-    concurrency:
-      group: publish-release
-      cancel-in-progress: false
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

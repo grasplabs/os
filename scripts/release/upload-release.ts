@@ -1,11 +1,14 @@
 /**
  * Publishes a built release (build-release.ts) to R2 through its S3 API.
  *
- * The release is verified against its manifest first. Blobs are
- * content-addressed, so one an earlier release uploaded is found by a HEAD
- * and skipped. The manifest goes up last, to `releases/<id>/manifest.json`:
- * the console imports only releases whose manifest exists, so an upload that
- * stops halfway never leaves a manifest pointing at missing blobs. It's
+ * The release is verified against its manifest first, and only the blobs
+ * it references are uploaded. Blobs are content-addressed, so one an
+ * earlier release uploaded is found by a HEAD and skipped; the PUT is
+ * conditional as well, so one written since the HEAD is left as it is.
+ *
+ * The manifest goes up last, to `releases/<id>/manifest.json`: the console
+ * imports only releases whose manifest exists, so an upload that stops
+ * halfway never leaves a manifest pointing at missing blobs. It's
  * written only if absent, so a published release never changes, not even
  * when its CI run is re-run.
  *
@@ -16,7 +19,7 @@
  *      R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
  * Usage: vp run release:upload --release <dir> [--dry-run]
  */
-import { readdirSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
@@ -41,19 +44,19 @@ const releaseDir = path.resolve(args.release);
 
 const manifest = verifyRelease(releaseDir);
 const published = manifestKey(manifest.releaseId);
-// Every blob, at the key it has in the release directory and in R2.
-const blobs = readdirSync(path.join(releaseDir, "blobs"), {
-  recursive: true,
-  withFileTypes: true,
-})
-  .filter((entry) => entry.isFile())
-  .map((entry) =>
-    path
-      .relative(releaseDir, path.join(entry.parentPath, entry.name))
-      .split(path.sep)
-      .join("/")
-  )
-  .toSorted();
+// Every blob the verified manifest references, once, at the key it has in
+// the release directory and in R2. Nothing else under blobs/ is uploaded.
+const blobs = [
+  ...new Set([
+    ...Object.values(manifest.workers).flatMap((worker) => [
+      ...worker.modules.map((module) => module.r2Key),
+      ...worker.d1Databases.flatMap((database) =>
+        database.migrations.map((migration) => migration.r2Key)
+      ),
+    ]),
+    ...Object.values(manifest.assets).map((asset) => asset.r2Key),
+  ]),
+].toSorted();
 
 const requireEnv = (name: string): string => {
   const value = process.env[name];
@@ -82,10 +85,16 @@ const upload = async (): Promise<void> => {
     if (head.status !== HTTP_NOT_FOUND) {
       throw new Error(`HEAD ${key}: ${head.status}`);
     }
+    // Conditional too: a blob written since the HEAD (another upload of the
+    // same content) is left as it is.
     const put = await client.fetch(url(key), {
       method: "PUT",
       body: readFileSync(path.join(releaseDir, key)),
+      headers: { "If-None-Match": "*" },
     });
+    if (put.status === HTTP_PRECONDITION_FAILED) {
+      return "skipped";
+    }
     if (!put.ok) {
       throw new Error(`PUT ${key}: ${put.status} ${await put.text()}`);
     }

@@ -5,7 +5,7 @@
  */
 import { spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
@@ -40,11 +40,21 @@ const HTTP_PRECONDITION_FAILED = 412;
 const manifest = generateManifest(info, builds());
 const published = `releases/${manifest.releaseId}/manifest.json`;
 
-/** Objects by key, and every PUT that stored one, in order. */
+/**
+ * Objects by key, every PUT that stored one, in order, and keys another
+ * writer stores right after answering a HEAD for them with "not found".
+ */
 interface Bucket {
   objects: Map<string, Buffer>;
   puts: string[];
+  writtenAfterHead: Map<string, Buffer>;
 }
+
+const emptyBucket = (): Bucket => ({
+  objects: new Map(),
+  puts: [],
+  writtenAfterHead: new Map(),
+});
 
 const handle = async (
   bucket: Bucket,
@@ -62,6 +72,10 @@ const handle = async (
     response
       .writeHead(bucket.objects.has(key) ? HTTP_OK : HTTP_NOT_FOUND)
       .end();
+    const other = bucket.writtenAfterHead.get(key);
+    if (other !== undefined && !bucket.objects.has(key)) {
+      bucket.objects.set(key, other);
+    }
     return;
   }
   const body = await buffer(request);
@@ -77,13 +91,13 @@ const handle = async (
 describe("publishing a release", () => {
   let dir = "";
   let server: Server | undefined;
-  let bucket: Bucket = { objects: new Map(), puts: [] };
+  let bucket = emptyBucket();
   let endpoint = "";
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "grasp-os-upload-test-"));
     writeRelease(dir, manifest, builds());
-    bucket = { objects: new Map(), puts: [] };
+    bucket = emptyBucket();
     const current = bucket;
     server = createServer((request, response) => {
       void handle(current, request, response);
@@ -142,6 +156,28 @@ describe("publishing a release", () => {
     expect(bucket.puts).toStrictEqual([]);
     expect(bucket.objects.get(published)).toStrictEqual(first);
     expect(stdout).toContain("0 uploaded");
+  });
+
+  it("leaves a blob that appears between its HEAD and its PUT", async () => {
+    const module = manifest.workers.core?.modules[0];
+    if (module === undefined) {
+      throw new Error("expected a core module");
+    }
+    const other = Buffer.from("written by another upload");
+    bucket.writtenAfterHead.set(module.r2Key, other);
+    const stdout = await upload();
+    expect(bucket.objects.get(module.r2Key)).toStrictEqual(other);
+    expect(bucket.puts).not.toContain(module.r2Key);
+    expect(bucket.puts.at(-1)).toBe(published);
+    expect(stdout).toContain(`Published ${published}`);
+  });
+
+  it("uploads only the blobs the manifest references", async () => {
+    const stray = "blobs/modules/stray";
+    mkdirSync(path.dirname(path.join(dir, stray)), { recursive: true });
+    writeFileSync(path.join(dir, stray), "not in the manifest");
+    await upload();
+    expect(bucket.puts).not.toContain(stray);
   });
 
   it("uploads nothing on a dry run", async () => {
