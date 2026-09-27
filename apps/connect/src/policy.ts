@@ -2,7 +2,7 @@ import { connectErrors } from "@grasp-os/shared/connect";
 import type { Json } from "@grasp-os/shared/json";
 
 import type { Connection, ToolRule } from "./connections.ts";
-import type { McpTool, McpToolResult } from "./mcp.ts";
+import type { McpServerTool, McpTool, McpToolResult } from "./mcp.ts";
 
 // What connect takes a tool to be. A native connector's tool is what its
 // manifest says: the manifest is ours, reviewed. A Composio server's tool
@@ -16,21 +16,34 @@ type ServerKind = Connection["serverKind"];
 const resourceFieldPattern = /^[A-Za-z_]\w*$/u;
 
 /**
- * A Composio server's tool as the admin's rule for it says: the server's
- * own `readOnlyHint` and resource `_meta` count for nothing. Only the
- * input properties its schema declares are kept, to hold a call to them.
+ * A Composio server's tool as the admin's rule for it says. The server's
+ * own hints aren't even read (`McpServerTool`): only the input properties
+ * its schema declares are kept, to hold a call to them.
  */
-export const composioTool = (tool: McpTool, rule: ToolRule): McpTool => ({
-  ...tool,
+export const composioTool = (
+  { name, inputProperties }: McpServerTool,
+  rule: ToolRule
+): McpTool => ({
+  name,
+  inputProperties,
   readOnly: rule.read,
   resourceField: rule.resource,
 });
 
 /**
- * Whether a call of `tool`, as connect takes it to be (above), may change
- * something: anything not declared read-only is a side effect.
+ * Whether a call of `tool`, as connect takes it to be (above), is handled
+ * as a side effect: anything not declared read-only may change something.
+ * So is every call on a Composio server from a context that read
+ * restricted data (`restricted`), reads too: its input goes to a third
+ * party and may carry that data, so the person it acts for decides (R12).
+ * Its answer is then kept like any side effect's, so a run's step that
+ * waited for the person's decision gets it rather than being held again.
  */
-export const hasSideEffect = (tool: McpTool): boolean => !tool.readOnly;
+export const hasSideEffect = (
+  tool: McpTool,
+  kind: ServerKind,
+  restricted: boolean
+): boolean => !tool.readOnly || (restricted && kind === "composio");
 
 /**
  * Keeps a call for one resource on that resource. The capability names the

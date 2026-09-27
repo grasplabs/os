@@ -17,7 +17,12 @@ import { hashCall, idempotencyStore } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
 import { fieldOf, masked, maskedPaths } from "./mask.ts";
 import { McpError } from "./mcp.ts";
-import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
+import type {
+  McpServer,
+  McpServerTool,
+  McpTool,
+  McpToolResult,
+} from "./mcp.ts";
 import { hold } from "./pending.ts";
 import type { HeldAction } from "./pending.ts";
 import {
@@ -148,8 +153,11 @@ const masksFor = (
 };
 
 /** Finds the action's tool, exactly as named. */
-const toolFor = async (server: McpServer, action: string): Promise<McpTool> => {
-  let tool: McpTool | undefined;
+const toolFor = async (
+  server: McpServer,
+  action: string
+): Promise<McpServerTool> => {
+  let tool: McpServerTool | undefined;
   try {
     tool = await server.tool(action);
   } catch (error) {
@@ -201,8 +209,9 @@ const actionFor = async (
  * for (`interactive`) waits for them to confirm it on a view of the exact
  * input (R7). So does every one of a context that read restricted data
  * (R12), whatever it is: what it sends may carry that data, so the person
- * it acts for decides, warned. Its reads, where the tool is one connect
- * trusts to be a read, go on. A workflow run's other side effects come
+ * it acts for decides, warned. Its reads of a native connector go on; on
+ * Composio every call of such a context is a side effect (policy.ts). A
+ * workflow run's other side effects come
  * from reviewed code or pass a decision, and run. The held action a
  * person just confirmed (`held`) runs.
  */
@@ -295,7 +304,11 @@ export const carryOut = async (
   }
 
   const { tool, open } = await actionFor(env, connection, claims, call.action);
-  const sideEffect = hasSideEffect(tool);
+  const sideEffect = hasSideEffect(
+    tool,
+    connection.serverKind,
+    claims.restricted
+  );
   progress.sideEffect = sideEffect;
   checkResourceScope(resource, tool, input);
   if (

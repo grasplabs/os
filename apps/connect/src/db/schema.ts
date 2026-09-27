@@ -55,8 +55,7 @@ export const connections = sqliteTable(
      * and the tools the admin allowed, as a JSON array of names, or of
      * rules saying which tools only read and which input property names a
      * tool's resource (`ComposioToolRule`). A call of any other tool is
-     * refused, and a Composio connection without them
-     * takes no calls at all.
+     * refused, and a Composio connection without them takes no calls.
      */
     composioServerId: text("composio_server_id"),
     composioAuthConfigId: text("composio_auth_config_id"),

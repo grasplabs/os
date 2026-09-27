@@ -102,20 +102,31 @@ describe("a Composio tool the admin marked as a read", () => {
     expect(call?.detail).toMatchObject({ sideEffect: false, outcome: "ok" });
   });
 
-  it("goes on in a restricted context", async () => {
+  it("is held for its person in a restricted context, as a side effect: what it sends may carry that data", async () => {
     const connectionId = await hubspot();
-    await expect(
-      outcome(
-        callAs(
-          agentFor("user-anna"),
-          read(connectionId, "HUBSPOT_LIST_CONTACTS"),
-          {
-            restricted: true,
-            origin: chatOrigin,
-          }
-        )
+    const restricted = { restricted: true, origin: chatOrigin };
+    const withoutKey = await outcome(
+      callAs(
+        agentFor("user-anna"),
+        read(connectionId, "HUBSPOT_LIST_CONTACTS"),
+        restricted
       )
-    ).resolves.toBe("ok");
+    );
+    const withKey = await outcome(
+      callAs(
+        agentFor("user-anna"),
+        {
+          ...read(connectionId, "HUBSPOT_LIST_CONTACTS"),
+          idempotencyKey: crypto.randomUUID(),
+        },
+        restricted
+      )
+    );
+    expect({ withoutKey, withKey, ran: composio.state.mcp.ran }).toStrictEqual({
+      withoutKey: "connect.idempotency_key_required",
+      withKey: "connect.held",
+      ran: [],
+    });
   });
 
   it("is held to one resource by the input property the admin named", async () => {

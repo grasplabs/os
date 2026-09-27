@@ -3,7 +3,6 @@ import {
   notPerformedMetaKey,
   provenanceMetaKey,
   provenanceSchema,
-  resourceMetaKey,
 } from "@grasp-os/connector-kit/manifest";
 import type { Json } from "@grasp-os/shared/json";
 import { z } from "zod";
@@ -33,19 +32,28 @@ const maxToolPages = 20;
 /** Sends one request to the server. */
 type McpFetch = (request: Request) => Promise<Response>;
 
-/** A tool, as far as connect decides anything by it. */
+/**
+ * A tool, as far as connect decides anything by it: as a native
+ * connector's manifest declares it, or as the admin's rule for a Composio
+ * tool says (policy.ts). Never as a server declares it.
+ */
 export interface McpTool {
   name: string;
-  /**
-   * Only a tool the server declares read-only (`readOnlyHint: true`) is a
-   * read. Anything else, a missing or malformed hint too, is a side effect.
-   */
+  /** Only a tool declared read-only is a read; anything else may act. */
   readOnly: boolean;
   /** The input property holding the resource it acts on, if it names one. */
   resourceField: string | undefined;
   /** The properties its input schema declares, if it declares any. */
   inputProperties: readonly string[] | undefined;
 }
+
+/**
+ * A tool as a server lists it, as far as connect reads it: its name and
+ * the properties its input schema declares. What a server says of its own
+ * tools (`readOnlyHint`, a resource `_meta`) isn't read at all: only our
+ * own word decides whether a tool is a read, or where its resource is.
+ */
+export type McpServerTool = Pick<McpTool, "name" | "inputProperties">;
 
 /** What a tool call returned. */
 export interface McpToolResult {
@@ -111,11 +119,9 @@ const toolsPageSchema = z.object({
   tools: z.array(
     z.object({
       name: z.string(),
-      annotations: z.object({ readOnlyHint: z.unknown() }).partial().optional(),
       inputSchema: z
         .object({ properties: z.record(z.string(), z.unknown()).optional() })
         .optional(),
-      _meta: metaSchema,
     })
   ),
   nextCursor: z.string().optional(),
@@ -245,14 +251,10 @@ const readResponse = async (
 
 const toolOf = (
   tool: z.infer<typeof toolsPageSchema>["tools"][number]
-): McpTool => {
-  const resourceField = tool._meta?.[resourceMetaKey];
+): McpServerTool => {
   const properties = tool.inputSchema?.properties;
   return {
     name: tool.name,
-    readOnly: tool.annotations?.readOnlyHint === true,
-    resourceField:
-      typeof resourceField === "string" ? resourceField : undefined,
     inputProperties:
       properties === undefined ? undefined : Object.keys(properties),
   };
@@ -287,7 +289,7 @@ const resultOf = (result: unknown): McpToolResult => {
 /** The one MCP server a connection's calls go to. */
 export interface McpServer {
   /** The tool named exactly `name`, or undefined if the server has none. */
-  tool: (name: string) => Promise<McpTool | undefined>;
+  tool: (name: string) => Promise<McpServerTool | undefined>;
   /** Calls the tool once. Throws {@link McpError} if it didn't answer. */
   call: (name: string, input: Record<string, Json>) => Promise<McpToolResult>;
 }
@@ -398,7 +400,7 @@ export const mcpServer = (
   return {
     tool: async (name) => {
       await started();
-      let found: McpTool | undefined;
+      let found: McpServerTool | undefined;
       let cursor: string | undefined;
       let pages = 0;
       do {
