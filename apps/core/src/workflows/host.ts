@@ -1049,8 +1049,8 @@ export class RunHost extends RpcTarget {
 
   /**
    * Asks the model gateway for an AI step, from inside the step only: the
-   * model must be one the deployment allows, and its answer must match the
-   * step's schema (a JSON Schema from the SDK, checked here as Zod, and
+   * model must be one the deployment allows and its rules let this call
+   * use (model-rules.ts), and its answer must match the step's schema (a JSON Schema from the SDK, checked here as Zod, and
    * again by the SDK). The audit log records the call under this run.
    */
   async callModel(request: unknown): Promise<Settled<unknown>> {
@@ -1076,6 +1076,14 @@ export class RunHost extends RpcTarget {
         schema,
         purpose: "workflow.step",
         trigger: this.#actor,
+        // The step may have read any of them into its input.
+        connections: [
+          ...new Set(
+            Object.values(this.#run.connections).map(
+              ({ connection }) => connection.connectionId
+            )
+          ),
+        ],
       });
       return answer.output;
     });
