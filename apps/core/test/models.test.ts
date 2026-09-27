@@ -91,7 +91,12 @@ const refuse = (): never => {
   throw new Error("Unavailable");
 };
 
-describe("model gateway", () => {
+// A test waits up to 10 seconds for a call's audit events (`auditedFor`),
+// which reach the log through the audit outbox after the answer. Under
+// the default five seconds a slow event would fail as a test timeout, not
+// as the events that never came. No test waits more than once, so thirty
+// seconds holds that wait and the calls around it on a slow runner.
+describe("model gateway", { timeout: 30_000 }, () => {
   it.each([
     [workersAi, "/workers-ai/v1/chat/completions"],
     [anthropic, "/anthropic/v1/messages"],
