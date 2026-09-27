@@ -95,8 +95,8 @@ export interface Memory {
    */
   text: string;
   /**
-   * Changes exactly when a file is added, removed, has a new version or
-   * is purged, or a file's limit changes: the same key is the same `text`.
+   * Changes exactly when a file is added, removed or has a new version, or
+   * a file's limit changes: the same key is the same `text`.
    */
   key: string;
   provenance: Provenance;

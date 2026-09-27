@@ -6,18 +6,18 @@ import {
   knowledgeErrors,
   purgeInputSchema,
   purgeMaxDocuments,
+  purgedMarker,
 } from "@grasp-os/shared/knowledge";
 import type { PurgePlan, PurgeResult } from "@grasp-os/shared/knowledge";
 import { isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, count, eq, gt, inArray, lt, ne, or, sql } from "drizzle-orm";
-import type { BatchItem } from "drizzle-orm/batch";
+import { and, asc, count, eq, gt, inArray, lte, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type { z } from "zod";
 
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
-import { inList, isUniqueViolation } from "../db/d1.ts";
+import { inList } from "../db/d1.ts";
 import {
   collections,
   documents,
@@ -28,8 +28,9 @@ import {
 } from "../db/knowledge/schema.ts";
 import { derivedHmacKey } from "../derived-keys.ts";
 import { requireFeature } from "../features.ts";
-import { prepareText, replaceDerived } from "./documents.ts";
-import type { DocumentRow, Prepared } from "./documents.ts";
+import type { CollectionRow } from "./collections.ts";
+import { checkedText, personWriter, writeVersion } from "./documents.ts";
+import type { DocumentRow } from "./documents.ts";
 import { personalCollectionId } from "./memory-files.ts";
 
 // Purging personal data from Knowledge, for good, when someone leaves or
@@ -43,9 +44,9 @@ import { personalCollectionId } from "./memory-files.ts";
 // - `content`: every occurrence of some terms (a name, an email address, a
 //   passage) is replaced with `purgedMarker` in every version of the
 //   documents named, and in their memory proposals. The current version's
-//   sections, links and search rows, and the document's title and
-//   description, are made again from its new text, and the document's
-//   updated time is set, so memory cached by version is looked up afresh.
+//   new text is also saved as the next version, which makes its sections,
+//   links, search rows and the document's title and description again,
+//   and fails for anyone who saved meanwhile from text not yet purged.
 //
 // Then the search index is optimized: FTS5 keeps a deleted row's terms in
 // its index pages until they are merged, where they can't be found by a
@@ -58,18 +59,16 @@ import { personalCollectionId } from "./memory-files.ts";
 // read, so trying terms one by one leaves a trace.
 //
 // What a purge doesn't reach: paths (a document named after someone keeps
-// its name), other documents that quote the text, memory already cached in
-// a running isolate (never served again, gone once evicted), D1's own
-// point-in-time recovery, and anything outside Knowledge.
+// its name), collection names and descriptions, other documents that
+// quote the text, a term split by Markdown or a line break, memory already
+// cached in a running isolate (never served again, gone once evicted),
+// D1's own point-in-time recovery, and anything outside Knowledge.
 
 /** How long an admin has to confirm a purge they prepared. */
 const tokenLifetimeMs = 10 * 60 * 1000;
 
 /** Versions read at once when rewriting a document's: up to 1 MB each. */
-const versionsPerPage = 20;
-
-/** What each purged term becomes. */
-const purgedMarker = "[removed]";
+const versionsPerPage = 5;
 
 type PurgeInput = z.output<typeof purgeInputSchema>;
 type PersonalPurge = Extract<PurgeInput, { type: "personal" }>;
@@ -187,7 +186,7 @@ const purgeEntry = (
   action: "knowledge.purge.prepared" | "knowledge.purged",
   input: PurgeInput,
   scope: { collectionId?: string; documentIds: string[] },
-  counts: Counts,
+  counts: Partial<Counts>,
   purgeId?: string
 ): AuditEntry => ({
   actor: actorOf(person),
@@ -306,26 +305,73 @@ const matcherOf = (terms: string[]): RegExp =>
     "giu"
   );
 
+/** `text` with every term replaced by the marker. */
+const without = (text: string, matcher: RegExp): string =>
+  text.replaceAll(matcher, purgedMarker);
+
 /** A version's or proposal's text and message, rewritten if they change. */
 const rewritten = (
   row: { text: string; message: string | null },
   matcher: RegExp
 ): { text: string; message: string | null } | undefined => {
-  const text = row.text.replaceAll(matcher, purgedMarker);
-  const message = row.message?.replaceAll(matcher, purgedMarker) ?? null;
+  const text = without(row.text, matcher);
+  const message = row.message === null ? null : without(row.message, matcher);
   return text === row.text && message === row.message
     ? undefined
     : { text, message };
 };
 
+interface Named {
+  document: DocumentRow;
+  collection: CollectionRow;
+}
+
+/** The documents a content purge names that exist, in ID order. */
+const documentsNamed = async (
+  db: DrizzleD1Database,
+  { documentIds }: ContentPurge
+): Promise<Named[]> =>
+  await db
+    .select({ document: documents, collection: collections })
+    .from(documents)
+    .innerJoin(collections, eq(collections.id, documents.collectionId))
+    .where(inList(documents.id, documentIds))
+    .orderBy(asc(documents.id));
+
+/** The text and message of `document`'s version `number`. */
+const versionOf = async (
+  db: DrizzleD1Database,
+  document: DocumentRow,
+  number: number
+) =>
+  await db
+    .select({ text: versions.text, message: versions.message })
+    .from(versions)
+    .where(
+      and(eq(versions.documentId, document.id), eq(versions.number, number))
+    )
+    .get();
+
 /**
- * The current version's new text, read as a save reads it. A purge that
- * would leave a document that can't be read (its frontmatter broken, or
- * over a limit) is refused as a whole, before anything changes.
+ * Refuses with `knowledge.invalid` unless the current version of `named`,
+ * with the terms removed, can be saved as its next version: its
+ * frontmatter still fits its type, and it is within a document's limits
+ * and a memory file's. Checked for every document before a purge changes
+ * anything, so one that can't be finished changes nothing.
  */
-const preparedRewrite = (document: DocumentRow, text: string): Prepared => {
+const requireSavable = async (
+  env: Env,
+  db: DrizzleD1Database,
+  { document, collection }: Named,
+  matcher: RegExp
+): Promise<void> => {
+  const current = await versionOf(db, document, document.currentVersion);
+  const changed = current && rewritten(current, matcher);
+  if (changed === undefined) {
+    return;
+  }
   try {
-    return prepareText(document.path, text);
+    await checkedText(env, collection, document.path, changed.text);
   } catch (error) {
     const code = knowledgeErrors.codeOf(error);
     if (code === undefined) {
@@ -340,39 +386,17 @@ const preparedRewrite = (document: DocumentRow, text: string): Prepared => {
 };
 
 /**
- * A statement that fails the batch it is in unless `document` is still at
- * the version read: it inserts the document's row again, which the primary
- * key refuses. A save in between would otherwise add a version this purge
- * never saw, and get its sections replaced by those of the one before.
+ * Rewrites the versions of `document` up to `upTo` that hold a term, in
+ * place, a page at a time; only counts them unless `write`. Returns how
+ * many hold one.
  */
-const failUnlessAt = (db: DrizzleD1Database, document: DocumentRow) =>
-  db.insert(documents).select(
-    db
-      .select()
-      .from(documents)
-      .where(
-        and(
-          eq(documents.id, document.id),
-          ne(documents.currentVersion, document.currentVersion)
-        )
-      )
-  );
-
-/**
- * Purges the terms from `document`: when `write` is false, only counts
- * what it would change, and checks the current version's new text. Earlier
- * versions are rewritten a page at a time, as they're never read by
- * anything that follows them; the current version, its sections, links
- * and search rows, the document's row and its proposals in one batch at
- * the end, which fails with `knowledge.conflict` if the document got a new
- * version meanwhile. Running it again finishes a purge cut short.
- */
-const purgeDocument = async (
+const rewriteVersions = async (
   db: DrizzleD1Database,
   document: DocumentRow,
+  upTo: number,
   matcher: RegExp,
   write: boolean
-): Promise<Counts> => {
+): Promise<number> => {
   let changedVersions = 0;
   for (let after = 0; ;) {
     // oxlint-disable-next-line no-await-in-loop -- a page at a time, to bound memory
@@ -387,7 +411,7 @@ const purgeDocument = async (
         and(
           eq(versions.documentId, document.id),
           gt(versions.number, after),
-          lt(versions.number, document.currentVersion)
+          lte(versions.number, upTo)
         )
       )
       .orderBy(asc(versions.number))
@@ -416,25 +440,18 @@ const purgeDocument = async (
     }
     const last = page.at(-1);
     if (last === undefined || page.length < versionsPerPage) {
-      break;
+      return changedVersions;
     }
     after = last.number;
   }
-  const current = await db
-    .select({ text: versions.text, message: versions.message })
-    .from(versions)
-    .where(
-      and(
-        eq(versions.documentId, document.id),
-        eq(versions.number, document.currentVersion)
-      )
-    )
-    .get();
-  const newCurrent = current && rewritten(current, matcher);
-  const prepared =
-    newCurrent === undefined
-      ? undefined
-      : preparedRewrite(document, newCurrent.text);
+};
+
+/** Updates of `document`'s memory proposals that hold a term. */
+const proposalRewrites = async (
+  db: DrizzleD1Database,
+  document: DocumentRow,
+  matcher: RegExp
+) => {
   const proposals = await db
     .select({
       id: memoryProposals.id,
@@ -448,7 +465,7 @@ const purgeDocument = async (
         eq(memoryProposals.path, document.path)
       )
     );
-  const proposalUpdates = proposals.flatMap(({ id, ...row }) => {
+  return proposals.flatMap(({ id, ...row }) => {
     const changed = rewritten(row, matcher);
     return changed === undefined
       ? []
@@ -459,90 +476,124 @@ const purgeDocument = async (
             .where(eq(memoryProposals.id, id)),
         ];
   });
-  const currentUpdates: BatchItem<"sqlite">[] =
-    newCurrent === undefined || prepared === undefined
-      ? []
-      : [
-          failUnlessAt(db, document),
-          // Before the sections: the search index copies the title and
-          // description from the document's row as each section goes in.
-          db
-            .update(documents)
-            .set({
-              title: prepared.title,
-              type: prepared.type,
-              description: prepared.description,
-              owner: prepared.owner ?? document.owner,
-              tags: JSON.stringify(prepared.tags),
-              reviewDate: prepared.reviewDate,
-              // Always later than before: cached memory is keyed by it.
-              updatedAt: new Date(
-                Math.max(Date.now(), document.updatedAt.getTime() + 1)
-              ),
-            })
-            .where(eq(documents.id, document.id)),
-          db
-            .update(versions)
-            .set(newCurrent)
-            .where(
-              and(
-                eq(versions.documentId, document.id),
-                eq(versions.number, document.currentVersion)
-              )
-            ),
-          ...replaceDerived(db, document, document.currentVersion, prepared),
-        ];
-  const [first, ...rest] = [...currentUpdates, ...proposalUpdates];
-  if (write && first) {
-    try {
-      await db.batch([first, ...rest]);
-    } catch (error) {
-      if (isUniqueViolation(error)) {
-        throw knowledgeErrors.create("knowledge.conflict", {
-          documentId: document.id,
-          latestVersion: document.currentVersion,
-        });
-      }
-      throw error;
-    }
-  }
-  const versionsChanged = changedVersions + (newCurrent === undefined ? 0 : 1);
+};
+
+/** What purging the terms from `named` would change; checks it can. */
+const countDocument = async (
+  env: Env,
+  db: DrizzleD1Database,
+  named: Named,
+  matcher: RegExp
+): Promise<Counts> => {
+  const { document } = named;
+  await requireSavable(env, db, named, matcher);
+  const changedVersions = await rewriteVersions(
+    db,
+    document,
+    document.currentVersion,
+    matcher,
+    false
+  );
+  const proposals = await proposalRewrites(db, document, matcher);
   return {
-    documents: versionsChanged + proposalUpdates.length > 0 ? 1 : 0,
-    versions: versionsChanged,
-    proposals: proposalUpdates.length,
+    documents: changedVersions + proposals.length > 0 ? 1 : 0,
+    versions: changedVersions,
+    proposals: proposals.length,
   };
 };
 
-/** The documents a content purge names that exist, in ID order. */
-const documentsNamed = async (
+/**
+ * Purges the terms from `named`, as `person`: rewrites the earlier
+ * versions that hold one in place, a page at a time; then, if the current
+ * version holds one, saves its text without them as the next version
+ * (`writeVersion`), which makes the sections, links, search rows, title,
+ * description, owner and tags again, and gives memory cached by version a
+ * new key. In the same batch, the current version is rewritten in place
+ * too, its memory proposals are rewritten, and those waiting on the
+ * version it had move to the new one, which has the same text but for the
+ * terms.
+ *
+ * The save is from the version the purge started at, so anyone who saved
+ * or restored meanwhile, from text the purge hadn't rewritten yet, makes
+ * it fail with `knowledge.conflict`; running the purge again rewrites
+ * their version too. A purge cut short leaves the current version as it
+ * was, so running it again finishes it.
+ */
+const purgeDocument = async (
+  env: Env,
   db: DrizzleD1Database,
-  { documentIds }: ContentPurge
-): Promise<DocumentRow[]> =>
-  await db
-    .select()
-    .from(documents)
-    .where(inList(documents.id, documentIds))
-    .orderBy(asc(documents.id));
+  person: Identity,
+  named: Named,
+  matcher: RegExp
+): Promise<Counts> => {
+  const { document, collection } = named;
+  const at = document.currentVersion;
+  const earlier = await rewriteVersions(db, document, at - 1, matcher, true);
+  const proposals = await proposalRewrites(db, document, matcher);
+  const current = await versionOf(db, document, at);
+  const changed = current && rewritten(current, matcher);
+  if (changed === undefined) {
+    const [first, ...rest] = proposals;
+    if (first) {
+      await db.batch([first, ...rest]);
+    }
+  } else {
+    await writeVersion(env, personWriter(person), {
+      collection,
+      path: document.path,
+      text: changed.text,
+      ifVersion: at,
+      message: "Personal data removed",
+      restoredFrom: null,
+      also: [
+        db
+          .update(versions)
+          .set(changed)
+          .where(
+            and(eq(versions.documentId, document.id), eq(versions.number, at))
+          ),
+        ...proposals,
+        db
+          .update(memoryProposals)
+          .set({ baseVersion: at + 1 })
+          .where(
+            and(
+              eq(memoryProposals.collectionId, document.collectionId),
+              eq(memoryProposals.path, document.path),
+              eq(memoryProposals.status, "pending"),
+              eq(memoryProposals.baseVersion, at)
+            )
+          ),
+      ],
+    });
+  }
+  const changedVersions = earlier + (changed === undefined ? 0 : 1);
+  return {
+    documents: changedVersions + proposals.length > 0 ? 1 : 0,
+    versions: changedVersions,
+    proposals: proposals.length,
+  };
+};
 
 /** What a content purge would change, checking every document first. */
 const contentCounts = async (
+  env: Env,
   db: DrizzleD1Database,
-  named: DocumentRow[],
+  named: Named[],
   matcher: RegExp
 ): Promise<Counts> => {
   const counts: Counts[] = [];
-  for (const document of named) {
+  for (const one of named) {
     // oxlint-disable-next-line no-await-in-loop -- one document at a time, to bound memory
-    counts.push(await purgeDocument(db, document, matcher, false));
+    counts.push(await countDocument(env, db, one, matcher));
   }
   return sum(counts);
 };
 
 /**
  * Purges the terms from the documents named: checked first, so a purge
- * that would break one changes nothing; then recorded in the audit log;
- * then run, one document at a time.
+ * that would leave one that can't be saved changes nothing; then recorded
+ * in the audit log; then run, one document at a time.
  */
 const purgeContent = async (
   env: Env,
@@ -552,7 +603,10 @@ const purgeContent = async (
   const db = drizzle(env.KNOWLEDGE);
   const named = await documentsNamed(db, input);
   const matcher = matcherOf(input.terms);
-  const planned = await contentCounts(db, named, matcher);
+  for (const one of named) {
+    // oxlint-disable-next-line no-await-in-loop -- one document at a time, to bound memory
+    await requireSavable(env, db, one, matcher);
+  }
   const purgeId = crypto.randomUUID();
   // Recorded before anything changes, so no purge goes unrecorded however
   // far it gets.
@@ -563,16 +617,16 @@ const purgeContent = async (
         person,
         "knowledge.purged",
         input,
-        { documentIds: named.map(({ id }) => id) },
-        planned,
+        { documentIds: named.map(({ document }) => document.id) },
+        { documents: named.length },
         purgeId
       )
     ),
   ]);
   const done: Counts[] = [];
-  for (const document of named) {
+  for (const one of named) {
     // oxlint-disable-next-line no-await-in-loop -- one document at a time, to bound memory
-    done.push(await purgeDocument(db, document, matcher, true));
+    done.push(await purgeDocument(env, db, person, one, matcher));
   }
   await optimizeSearchIndex(db);
   return { purgeId, ...sum(done) };
@@ -598,8 +652,8 @@ export const preparePurge = async (
     ({ counts, ...scope } = await personalScope(db, parsed));
   } else {
     const named = await documentsNamed(db, parsed);
-    scope = { documentIds: named.map(({ id }) => id) };
-    counts = await contentCounts(db, named, matcherOf(parsed.terms));
+    scope = { documentIds: named.map(({ document }) => document.id) };
+    counts = await contentCounts(env, db, named, matcherOf(parsed.terms));
   }
   await auditedBatch(env, db, [
     outboxed(
@@ -612,8 +666,8 @@ export const preparePurge = async (
 
 /**
  * Runs the purge `input`, with the token `preparePurge` returned `person`
- * for it. What it removes is counted again as it runs, so it may differ
- * from what was prepared; the counts returned are what it removed.
+ * for it. What it removes is counted as it runs, so it may differ from
+ * what was prepared; the counts returned are what it removed.
  */
 export const purge = async (
   env: Env,

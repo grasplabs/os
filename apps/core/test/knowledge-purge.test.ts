@@ -379,7 +379,7 @@ describe("a purge of content", setUpTime, () => {
     const after = await forContext(env, asAgent, work, { type: "own" });
     const current = await owner.api.knowledge.getDocument(leave.id);
     const proposalRow = await env.KNOWLEDGE.prepare(
-      "SELECT text, message FROM memory_proposals WHERE id = ?"
+      "SELECT text, message, status, base_version AS baseVersion FROM memory_proposals WHERE id = ?"
     )
       .bind(proposal.id)
       .first();
@@ -403,7 +403,7 @@ describe("a purge of content", setUpTime, () => {
       other: await versionTexts(other.id),
       // Earlier tests saved MEMORY.md too.
       company: companyTexts.filter(
-        (text) => text.includes(name) || text.includes("[removed]")
+        (text) => text.includes(name) || text.includes("(removed)")
       ),
       proposal: proposalRow,
       memoryBefore: before.text.includes(name),
@@ -420,17 +420,26 @@ describe("a purge of content", setUpTime, () => {
         proposals: 1,
       },
       leave: [
-        "# Leave\nAsk [removed] ([removed]) about it.",
-        "# [removed]'s leave\nAsk [removed] about it.\n\n## More\nNothing else.",
-        "# [removed]'s leave\nAsk [removed] about it.\n\n## More\nNothing else. See [[other.md]].",
+        "# Leave\nAsk (removed) ((removed)) about it.",
+        "# (removed)'s leave\nAsk (removed) about it.\n\n## More\nNothing else.",
+        "# (removed)'s leave\nAsk (removed) about it.\n\n## More\nNothing else. See [[other.md]].",
+        // Saved again, so its sections, title and search rows are made
+        // again, and anyone who saved meanwhile conflicts.
+        "# (removed)'s leave\nAsk (removed) about it.\n\n## More\nNothing else. See [[other.md]].",
       ],
-      history: [null, "About [removed]", null],
-      title: "[removed]'s leave",
+      history: ["Personal data removed", null, "About (removed)", null],
+      title: "(removed)'s leave",
       other: [`# Other\n${name} is here too.`],
-      company: ["# Company\n[removed] runs payroll."],
+      company: [
+        "# Company\n(removed) runs payroll.",
+        "# Company\n(removed) runs payroll.",
+      ],
+      // Still waiting, on the new version: approving it still works.
       proposal: {
-        text: "# Company\n[removed] runs payroll and HR.",
-        message: "[removed] does HR too",
+        text: "# Company\n(removed) runs payroll and HR.",
+        message: "(removed) does HR too",
+        status: "pending",
+        baseVersion: companyTexts.length,
       },
       memoryBefore: true,
       memoryAfter: false,
@@ -439,11 +448,13 @@ describe("a purge of content", setUpTime, () => {
       backlinks: [leave.id],
     });
     expect({
-      events: events.map(({ action, provenance, detail }) => ({
-        action,
-        provenance: provenance.toSorted(),
-        detail,
-      })),
+      events: events
+        .filter(({ action }) => action.startsWith("knowledge.purge"))
+        .map(({ action, provenance, detail }) => ({
+          action,
+          provenance: provenance.toSorted(),
+          detail,
+        })),
       carriesText: [name, email].some((term) =>
         JSON.stringify(events).toLowerCase().includes(term.toLowerCase())
       ),
@@ -470,8 +481,6 @@ describe("a purge of content", setUpTime, () => {
             reason: "erasure_request",
             terms: 2,
             documents: 2,
-            versions: 4,
-            proposals: 1,
           },
         },
       ],
@@ -545,9 +554,157 @@ describe("a purge of content", setUpTime, () => {
       foundBefore: 2,
       heldAfter: [],
       passageAfter: [],
-      text: `---\ndescription: About [removed]\n---\n# [removed]\nWrite to [removed] for leave.\nShe is [removed]\n\n## Other\nNothing ${kept}.`,
+      text: `---\ndescription: About (removed)\n---\n# (removed)\nWrite to (removed) for leave.\nShe is (removed)\n\n## Other\nNothing ${kept}.`,
       foundAfter: 0,
-      stillFound: [{ documentId: document.id, title: "[removed]" }],
+      stillFound: [{ documentId: document.id, title: "(removed)" }],
+    });
+  });
+
+  it("leaves frontmatter that still reads, where a name is the title, owner or a tag", async () => {
+    const admin = await personOf("admin");
+    const name = `Visser${unique()}`;
+    const email = `${name.toLowerCase()}@acme.test`;
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const document = await saveOver(
+      admin,
+      handbook.id,
+      "person.md",
+      `---\ntitle: ${name}\nowner: ${email}\ntags: [${name}, hr]\n---\n# Profile\n${name} works in HR.`
+    );
+    await purged(admin, {
+      type: "content",
+      documentIds: [document.id],
+      terms: [name, email],
+      reason: "offboarding",
+    });
+    const read = await admin.api.knowledge.getDocument(document.id);
+    expect({
+      title: read.title,
+      owner: read.owner,
+      tags: read.tags,
+      text: read.version.text,
+    }).toStrictEqual({
+      title: "(removed)",
+      owner: "(removed)",
+      tags: ["(removed)", "hr"],
+      text: "---\ntitle: (removed)\nowner: (removed)\ntags: [(removed), hr]\n---\n# Profile\n(removed) works in HR.",
+    });
+  });
+
+  it("rewrites every version, however many there are", async () => {
+    const admin = await personOf("admin");
+    const name = `Bakker${unique()}`;
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const saved = 23;
+    let documentId = "";
+    for (let number = 1; number <= saved; number += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one version after another
+      const summary = await saveOver(
+        admin,
+        handbook.id,
+        "log.md",
+        `# Log\n${name} did thing ${number}.`
+      );
+      documentId = summary.id;
+    }
+    const { plan, result } = await purged(admin, {
+      type: "content",
+      documentIds: [documentId],
+      terms: [name],
+      reason: "other",
+    });
+    const texts = await versionTexts(documentId);
+    expect({
+      planned: plan.versions,
+      rewritten: result.versions,
+      versions: texts.length,
+      holding: texts.filter((text) => text.includes(name)).length,
+      last: texts.at(-1),
+    }).toStrictEqual({
+      planned: saved,
+      rewritten: saved,
+      versions: saved + 1,
+      holding: 0,
+      last: `# Log\n(removed) did thing ${saved}.`,
+    });
+  });
+
+  it("fails for a save made from text not yet purged, and finishes when run again", async () => {
+    const admin = await personOf("admin");
+    const name = `Smit${unique()}`;
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    await saveOver(admin, handbook.id, "note.md", `# Note\n${name} one.`);
+    const note = await saveOver(
+      admin,
+      handbook.id,
+      "note.md",
+      `# Note\n${name} two.`
+    );
+    // Knowledge as the purge's request sees it: once it has rewritten a
+    // page of earlier versions, someone saves from the text they had open.
+    let rewriting = false;
+    let saved = false;
+    const real = env.KNOWLEDGE;
+    const knowledge: D1Database = {
+      prepare: (query) => {
+        rewriting ||= query.startsWith('update "versions"');
+        return real.prepare(query);
+      },
+      batch: async <T>(statements: D1PreparedStatement[]) => {
+        const results = await real.batch<T>(statements);
+        if (rewriting && !saved) {
+          saved = true;
+          await saveOver(admin, handbook.id, "note.md", `# Note\n${name} 3.`);
+        }
+        return results;
+      },
+      exec: async (query) => await real.exec(query),
+      // oxlint-disable-next-line typescript/no-deprecated -- D1Database still has it
+      dump: async () => await real.dump(),
+      withSession: (constraint) => real.withSession(constraint),
+    };
+    const { core } = await openRpc(admin.session, {
+      coreEnv: { ...env, KNOWLEDGE: knowledge },
+    });
+    const racing = core.authenticate();
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [note.id],
+      terms: [name],
+      reason: "other",
+    };
+    const { token } = await racing.knowledge.preparePurge(input);
+    const first = await outcome(racing.knowledge.purge(input, token));
+    const afterFirst = await versionTexts(note.id);
+    const again = await purged(admin, input);
+    expect({
+      saved,
+      first,
+      afterFirst: afterFirst.map((text) => text.includes(name)),
+      again: again.result.versions,
+      afterAgain: await versionTexts(note.id),
+    }).toStrictEqual({
+      saved: true,
+      first: "knowledge.conflict",
+      // The earlier version was rewritten; the current one, and the one
+      // saved meanwhile, weren't.
+      afterFirst: [false, true, true],
+      again: 2,
+      afterAgain: [
+        "# Note\n(removed) one.",
+        "# Note\n(removed) two.",
+        "# Note\n(removed) 3.",
+        "# Note\n(removed) 3.",
+      ],
     });
   });
 });
@@ -631,6 +788,18 @@ describe("purging", setUpTime, () => {
           reason: "other",
         })
       ),
+      // Terms the marker holds: a purge would find them again in it.
+      ...["removed", "MOVE", "(r", "d)"].map(
+        async (term) =>
+          await outcome(
+            admin.api.knowledge.preparePurge({
+              type: "content",
+              documentIds: [crypto.randomUUID()],
+              terms: ["Jan", term],
+              reason: "other",
+            })
+          )
+      ),
     ]);
     // Past its ten minutes.
     vi.useFakeTimers({ toFake: ["Date"] });
@@ -651,6 +820,10 @@ describe("purging", setUpTime, () => {
         "knowledge.purge_expired",
         "knowledge.purge_expired",
         "knowledge.purge_expired",
+        "knowledge.invalid",
+        "knowledge.invalid",
+        "knowledge.invalid",
+        "knowledge.invalid",
         "knowledge.invalid",
         "knowledge.invalid",
         "knowledge.invalid",
@@ -694,9 +867,57 @@ describe("purging", setUpTime, () => {
     expect({
       prepared: await outcome(admin.api.knowledge.preparePurge(input)),
       kept: await versionTexts(kept.id),
+      document: await versionTexts(document.id),
     }).toStrictEqual({
       prepared: "knowledge.invalid",
       kept: [`# Kept\n${other} stays until the purge is refused.`],
+      document: [`---\ndescription: HR\n---\n# People\n${other} is here.`],
+    });
+  });
+
+  it("refuses to run a purge that a new version made impossible, before changing anything", async () => {
+    const admin = await personOf("admin");
+    const agent = actingFor(newAgent(), admin.userId);
+    const work = await newChat();
+    const own = { type: "own" } as const;
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    const kept = await saveOver(
+      admin,
+      handbook.id,
+      "kept.md",
+      "# Kept\nJo stays until the purge is refused."
+    );
+    const first = await saveUserMemory(env, agent, work, own, {
+      text: "# About me\nCall me Jo.",
+      ifVersion: 0,
+    });
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [kept.id, first.id],
+      terms: ["Jo"],
+      reason: "erasure_request",
+    };
+    const { token } = await admin.api.knowledge.preparePurge(input);
+    // Within USER.md's 500 tokens, but not once each "Jo" is "(removed)".
+    const long = `# About me\n${"Jo ".repeat(400)}`;
+    await saveUserMemory(env, agent, work, own, { text: long, ifVersion: 1 });
+    let refused = "";
+    const events = await auditedDuring(async () => {
+      refused = await outcome(admin.api.knowledge.purge(input, token));
+    });
+    expect({
+      refused,
+      events: events.map(({ action }) => action),
+      kept: await versionTexts(kept.id),
+      user: await versionTexts(first.id),
+    }).toStrictEqual({
+      refused: "knowledge.invalid",
+      events: [],
+      kept: ["# Kept\nJo stays until the purge is refused."],
+      user: ["# About me\nCall me Jo.", long],
     });
   });
 

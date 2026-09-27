@@ -493,11 +493,31 @@ export const purgeMaxTerms = 20;
 export const purgeTermMaxLength = 1000;
 
 /**
+ * What each purged term becomes: a plain scalar in YAML frontmatter and
+ * plain text in Markdown, so a purged document still reads as one.
+ */
+export const purgedMarker = "(removed)";
+
+/**
+ * A term to purge: none the marker holds, in any case, or a purge would
+ * find it again in its own marker, and never finish finding it.
+ */
+const purgeTermSchema = z
+  .string()
+  .trim()
+  .min(2)
+  .max(purgeTermMaxLength)
+  .refine((term) => !purgedMarker.toLowerCase().includes(term.toLowerCase()), {
+    message: `A term can't be part of "${purgedMarker}"`,
+  });
+
+/**
  * What a purge removes, for good, from every version:
  * - `personal`: the person's Personal collection, with their USER.md, all
  *   its versions, and the memory proposals their agents made;
  * - `content`: every occurrence of the `terms` (a name, an email address,
- *   a passage), in any case, from the documents named, which stay.
+ *   a passage), in any case, from the documents named, which stay: each
+ *   becomes {@link purgedMarker}.
  */
 export const purgeInputSchema = z.discriminatedUnion("type", [
   z.strictObject({
@@ -512,10 +532,7 @@ export const purgeInputSchema = z.discriminatedUnion("type", [
       .min(1)
       .max(purgeMaxDocuments)
       .transform((ids) => [...new Set(ids)]),
-    terms: z
-      .array(z.string().trim().min(2).max(purgeTermMaxLength))
-      .min(1)
-      .max(purgeMaxTerms),
+    terms: z.array(purgeTermSchema).min(1).max(purgeMaxTerms),
     reason: purgeReasonSchema,
   }),
 ]);
