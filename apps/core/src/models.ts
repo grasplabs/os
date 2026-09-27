@@ -32,6 +32,10 @@ import { jsonVar } from "@grasp-os/shared/config";
 import { connectionIdSchema } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
+import {
+  authoritySchema,
+  workContextSchema,
+} from "@grasp-os/shared/permissions";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -171,6 +175,15 @@ const modelRulesConfigSchema = z
     ({ models: allowed, eu }) =>
       eu === undefined || eu.models.every((ref) => allowed.includes(ref)),
     { message: "EU models are allowed models", path: ["eu", "models"] }
+  )
+  .refine(
+    ({ models: allowed, sensitive }) =>
+      sensitive === undefined ||
+      sensitive.models.every((ref) => allowed.includes(ref)),
+    {
+      message: "Models for sensitive data are allowed models",
+      path: ["sensitive", "models"],
+    }
   );
 
 /**
@@ -254,6 +267,17 @@ const callSchema = z
      * the deployment's rules only, never recorded.
      */
     connections: z.array(connectionIdSchema).default([]),
+    /**
+     * Where the call works, and for whom: its restricted mode decides which
+     * models it may use (model-rules.ts). Set by the host, like the
+     * trigger.
+     */
+    work: z
+      .strictObject({
+        authority: authoritySchema,
+        context: workContextSchema,
+      })
+      .optional(),
     requestId: auditEventSchema.shape.requestId,
   })
   .refine(({ input, messages }) => (input === undefined) !== !messages, {
@@ -564,6 +588,8 @@ const auditEntry = ({ call, ref, judged }: Admitted, recorded: Recorded) => {
           : null,
       // Which rule kept the call in the EU, if one did.
       euOnly: judged.euOnly ?? null,
+      // Why it carried sensitive data, if a data rule asked and it did.
+      sensitive: judged.sensitive ?? null,
     },
   } satisfies AuditEntry;
 };
@@ -585,7 +611,10 @@ const largestRecord: Recorded = {
 };
 
 /** The most the rules can add to a call's audit event. */
-const largestJudged: Judged = { euOnly: "connection" };
+const largestJudged: Judged = {
+  euOnly: "connection",
+  sensitive: "collection",
+};
 
 /**
  * Records one request in the audit log, however it ended. Never throws: a
@@ -710,7 +739,7 @@ const admit = async (
     // Its provenance, say, is too long to record.
     throw modelErrors.create("model.invalid_call");
   }
-  const verdict = judgeCall(env, rules, call);
+  const verdict = await judgeCall(env, rules, call);
   if (!verdict.ok) {
     return await refuse(env, call, verdict);
   }

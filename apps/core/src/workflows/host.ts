@@ -1084,6 +1084,15 @@ export class RunHost extends RpcTarget {
             )
           ),
         ],
+        // The run's restricted mode, which is its App's.
+        work: {
+          authority: this.#run.authority,
+          context: {
+            type: "run",
+            appId: this.#run.app,
+            runId: this.#run.runId,
+          },
+        },
       });
       return answer.output;
     });

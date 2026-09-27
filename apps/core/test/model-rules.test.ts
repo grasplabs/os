@@ -1,6 +1,7 @@
 import type { AiBinding } from "@earendil-works/pi-ai/api/cloudflare-ai-binding";
 import { runActorOf } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
+import { appIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
@@ -8,8 +9,11 @@ import { z } from "zod";
 import { models } from "../src/models.ts";
 import type { ModelCall, ModelsEnv } from "../src/models.ts";
 import { fakeGateway } from "./ai-gateway.ts";
+import type { GatewayReply } from "./ai-gateway.ts";
+import { requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
+import { collectionWithNote, newTeam, readCollection } from "./knowledge.ts";
 import { mailConnection } from "./mail-connection.ts";
 import { finished } from "./runs.ts";
 import { outcome, signedInApi } from "./sign-in.ts";
@@ -65,6 +69,29 @@ const hello = (
   trigger: newPerson(),
   ...more,
 });
+
+/**
+ * What `run` returns, with `config` as the deployment's gateway config for
+ * the workflow runs it starts, and the fake gateway answering with
+ * `replies`.
+ */
+const withDeploymentRules = async <Result>(
+  config: unknown,
+  replies: GatewayReply[],
+  run: () => Promise<Result>
+) => {
+  const { MODEL_GATEWAY: before } = env;
+  const fake = fakeGateway(...replies);
+  const ai: AiBinding = env.AI;
+  const sending = vi.spyOn(ai, "fetch").mockImplementation(fake.binding.fetch);
+  try {
+    env.MODEL_GATEWAY = config;
+    return { fake, result: await run() };
+  } finally {
+    env.MODEL_GATEWAY = before;
+    sending.mockRestore();
+  }
+};
 
 /** A run of `workflow` in `app` no other test uses. */
 const runOf = (app: string, workflow: string) =>
@@ -224,32 +251,127 @@ describe("model rules", () => {
 
   it("leave only the allowlist while model_rules is switched off: the kill switch", async () => {
     const { call } = withRules(
-      { eu: { models: [euModel], deployment: true } },
+      {
+        eu: { models: [euModel], deployment: true },
+        sensitive: { models: [euModel], connections: ["connection-hr"] },
+      },
       {
         ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
         model_rules: false,
       }
     );
-    const answered = hello(anthropic);
+    const answered = hello(anthropic, { connections: ["connection-hr"] });
 
     await expect(outcome(call(answered))).resolves.toBe("ok");
     await expect(outcome(call(hello("openai/gpt-4o-mini")))).resolves.toBe(
       "model.not_allowed"
     );
     await expect(eventsOf(answered.trigger)).resolves.toMatchObject([
-      { action: "model.call", detail: { euOnly: null } },
+      { action: "model.call", detail: { euOnly: null, sensitive: null } },
     ]);
   });
 
-  it("refuse every call when an EU model isn't an allowed one: the config is invalid", async () => {
-    const { fake, call } = withRules({
-      models: [workersAi],
-      eu: { models: [euModel], deployment: true },
+  it.each([
+    ["an EU model", { eu: { models: [euModel], deployment: true } }],
+    ["a model for sensitive data", { sensitive: { models: [euModel] } }],
+  ])(
+    "refuse every call when %s isn't an allowed one: the config is invalid",
+    async (_, rules) => {
+      const { fake, call } = withRules({ models: [workersAi], ...rules });
+
+      await expect(outcome(call(hello(workersAi)))).resolves.toBe(
+        "model.unconfigured"
+      );
+      expect(fake.requests).toStrictEqual([]);
+    }
+  );
+
+  it("send a prompt holding a sensitive collection's content only to a model the data rule lists, such as an EU one", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const teamId = await newTeam(admin, []);
+    const [payroll, handbook] = await Promise.all([
+      collectionWithNote(admin.api, {
+        name: "Payroll",
+        access: "teams",
+        teams: [teamId],
+        sensitive: true,
+      }),
+      collectionWithNote(admin.api, { name: "Handbook", access: "everyone" }),
+    ]);
+    const { fake, call } = withRules({ sensitive: { models: [euModel] } });
+    const refused = hello(anthropic, {
+      provenance: [handbook.noteId, payroll.collectionId],
+    });
+    const answered = hello(euModel, { provenance: [payroll.noteId] });
+
+    await expect(
+      Promise.all([
+        outcome(call(refused)),
+        // Named by one of its documents.
+        outcome(call(hello(anthropic, { provenance: [payroll.noteId] }))),
+        outcome(call(answered)),
+        // Nothing sensitive: any allowed model.
+        outcome(call(hello(anthropic, { provenance: [handbook.noteId] }))),
+      ])
+    ).resolves.toStrictEqual([
+      "model.sensitive_data",
+      "model.sensitive_data",
+      "ok",
+      "ok",
+    ]);
+    expect(fake.requests).toHaveLength(2);
+    await expect(eventsOf(refused.trigger)).resolves.toMatchObject([
+      {
+        action: "model.refused",
+        detail: { reason: "model.sensitive_data", because: "collection" },
+      },
+    ]);
+    await expect(eventsOf(answered.trigger)).resolves.toMatchObject([
+      { action: "model.call", detail: { sensitive: "collection" } },
+    ]);
+  });
+
+  it("send a sensitive connection's data only to a model the data rule lists", async () => {
+    const { call } = withRules({
+      sensitive: { models: [euModel], connections: ["connection-hr"] },
     });
 
-    await expect(outcome(call(hello(workersAi)))).resolves.toBe(
-      "model.unconfigured"
-    );
+    await expect(
+      Promise.all([
+        outcome(call(hello(anthropic, { connections: ["connection-hr"] }))),
+        outcome(call(hello(anthropic, { provenance: ["connection-hr"] }))),
+        outcome(call(hello(euModel, { connections: ["connection-hr"] }))),
+        outcome(call(hello(anthropic, { connections: ["connection-crm"] }))),
+      ])
+    ).resolves.toStrictEqual([
+      "model.sensitive_data",
+      "model.sensitive_data",
+      "ok",
+      "ok",
+    ]);
+  });
+
+  it("refuse a call that claims to work in another App's context", async () => {
+    const { fake, call } = withRules({ sensitive: { models: [euModel] } });
+    const app = appIdSchema.parse(`app-${crypto.randomUUID()}`);
+    const other = appIdSchema.parse(`app-${crypto.randomUUID()}`);
+
+    await expect(
+      outcome(
+        call(
+          hello(anthropic, {
+            work: {
+              authority: {
+                subject: { type: "app", appId: app },
+                onBehalfOf: "person-1",
+                mode: "workflow",
+              },
+              context: { type: "app", appId: other },
+            },
+          })
+        )
+      )
+    ).resolves.toBe("permission.context_invalid");
     expect(fake.requests).toStrictEqual([]);
   });
 
@@ -271,25 +393,20 @@ describe("model rules", () => {
       )
     );
     await grantMail(idp, builder, app, mail.id);
-    const { MODEL_GATEWAY: config } = env;
-    const fake = fakeGateway();
-    const ai: AiBinding = env.AI;
-    const sending = vi
-      .spyOn(ai, "fetch")
-      .mockImplementation(fake.binding.fetch);
-    let run: { id: string };
-    try {
-      env.MODEL_GATEWAY = {
+
+    const { fake, result: run } = await withDeploymentRules(
+      {
         gateway,
         models: [workersAi, euModel],
         eu: { models: [euModel], connections: [mail.id] },
-      };
-      run = await builder.api.workflows.start(app, "reader");
-      await finished(run.id);
-    } finally {
-      env.MODEL_GATEWAY = config;
-      sending.mockRestore();
-    }
+      },
+      [],
+      async () => {
+        const started = await builder.api.workflows.start(app, "reader");
+        await finished(started.id);
+        return started;
+      }
+    );
 
     await expect(builder.api.workflows.status(run.id)).resolves.toMatchObject({
       status: "failed",
@@ -306,6 +423,93 @@ describe("model rules", () => {
       events.filter(({ action }) => action === "model.refused")
     ).toMatchObject([
       { detail: { reason: "model.eu_only", because: "connection" } },
+    ]);
+  });
+
+  it("fail the AI steps of an App that read a sensitive collection, unless their model is one the data rule lists", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const teamId = await newTeam(admin, []);
+    const payroll = await collectionWithNote(admin.api, {
+      name: "Payroll",
+      access: "teams",
+      teams: [teamId],
+      sensitive: true,
+    });
+    // Reads the note, then asks a model about it: the prompt holds it.
+    const summarizer = (id: string, model: string) =>
+      workflowFiles(
+        id,
+        `  const note = await step.do("read", { description: "Read the note" }, async () => await env.HANDBOOK.getDocument("${payroll.noteId}"));
+  return await step.llm("summarize", {
+    description: "Summarize the note",
+    model: "${model}",
+    instructions: "Summarize the note.",
+    input: note.version.text,
+    schema: z.object({ summary: z.string() }),
+  });`,
+        {
+          read: { version: { text: "Note" } },
+          summarize: { summary: "A note." },
+        }
+      );
+    const app = await appWith(admin, {
+      ...summarizer("anywhere", workersAi),
+      ...summarizer("eu", euModel),
+    });
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(
+        { type: "app", appId: appIdSchema.parse(app) },
+        payroll.collectionId
+      )
+    );
+
+    const { fake, result: runs } = await withDeploymentRules(
+      {
+        gateway,
+        models: [workersAi, euModel],
+        sensitive: { models: [euModel] },
+      },
+      [{ text: '{ "summary": "A note." }', inputTokens: 10, outputTokens: 5 }],
+      async () => {
+        // One after another: the second starts restricted.
+        const refused = await admin.api.workflows.start(app, "anywhere");
+        await finished(refused.id);
+        const answered = await admin.api.workflows.start(app, "eu");
+        await finished(answered.id);
+        return { refused: refused.id, answered: answered.id };
+      }
+    );
+
+    await expect(
+      Promise.all([
+        admin.api.workflows.status(runs.refused),
+        admin.api.workflows.status(runs.answered),
+      ])
+    ).resolves.toMatchObject([
+      {
+        status: "failed",
+        error: {
+          message:
+            "This call carries sensitive data, and that model may not take it. Choose one this deployment allows for sensitive data.",
+        },
+      },
+      { status: "completed", output: { summary: "A note." } },
+    ]);
+    // Only the EU model's call was sent, and it held the note.
+    expect(fake.requests.map(({ url }) => new URL(url).pathname)).toStrictEqual(
+      [`/ai-gateway/gateways/${gateway}/openai/responses`]
+    );
+    expect(JSON.stringify(fake.requests[0]?.body)).toContain("See [[note.md]]");
+    // No provenance named the collection: the App's restricted mode did.
+    const refusals = await eventsOf(
+      runActorOf({ runId: runs.refused, app, workflow: "anywhere" })
+    );
+    expect(
+      refusals.filter(({ action }) => action === "model.refused")
+    ).toMatchObject([
+      { detail: { reason: "model.sensitive_data", because: "restricted" } },
     ]);
   });
 });

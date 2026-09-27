@@ -4,13 +4,21 @@ import {
   connectionIdSchema,
   workflowIdSchema,
 } from "@grasp-os/shared/ids";
+import type { Authority } from "@grasp-os/shared/permissions";
+import { and, eq, inArray, or } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import { inList } from "./db/d1.ts";
+import { collections, documents } from "./db/knowledge/schema.ts";
 import { featureEnabled } from "./features.ts";
+import { isRestricted } from "./restricted.ts";
+import type { RestrictedEnv, WorkContext } from "./restricted.ts";
 
 // The client's rules for model calls, which the gateway checks on every
 // call before anything is sent (models.ts): beyond the allowlist, which
-// always applies, whether a call must stay with a model hosted in the EU.
+// always applies, whether a call must stay with a model hosted in the EU,
+// and which models may take sensitive data.
 //
 // The rules are deployment config, part of the `MODEL_GATEWAY` var the
 // console sets, like the allowlist: they are what the client agreed to, so
@@ -27,6 +35,13 @@ import { featureEnabled } from "./features.ts";
 // still goes through AI Gateway, which can't be pinned to the EU: it passes
 // the request on and logs its metadata only (models.ts). A direct EU route
 // comes later, through connect.
+//
+// A call carries sensitive data when its context is in restricted mode
+// (restricted.ts), which is sticky: once a chat or an App has read a
+// sensitive collection, everything it sends a model may hold what it read.
+// So does a call whose provenance names a sensitive collection, or one of
+// its documents, or whose data came from a connection the config marks
+// sensitive. Only the models the data rule lists may take such a call.
 
 /**
  * The rules' part of the gateway config: `modelRef` checks one
@@ -47,6 +62,14 @@ export const modelRulesShape = (modelRef: z.ZodType<string>) => ({
       connections: z.array(connectionIdSchema).default([]),
     })
     .optional(),
+  sensitive: z
+    .strictObject({
+      /** The allowed models that may take sensitive data. */
+      models: z.array(modelRef).min(1),
+      /** Connections whose data is sensitive. */
+      connections: z.array(connectionIdSchema).default([]),
+    })
+    .optional(),
 });
 
 export type ModelRules = z.output<
@@ -63,21 +86,36 @@ export interface RulesInput {
   provenance: readonly string[];
   /** Connections whose data may have fed the prompt. */
   connections: readonly string[];
+  /** Where the call works, whose restricted mode it has. */
+  work?: { authority: Authority; context: WorkContext };
 }
 
 /** Why a call must stay in the EU: which rule says so. */
 export type EuOnly = "deployment" | "workflow" | "connection";
 
+/** Why a call carries sensitive data. */
+export type Sensitive = "restricted" | "collection" | "connection";
+
 /** What the rules made of a call the gateway may send. */
 export interface Judged {
   /** Why the call had to stay in the EU; `undefined` when it didn't. */
   euOnly: EuOnly | undefined;
+  /**
+   * Why the call carries sensitive data; `undefined` when it doesn't, or
+   * when no data rule asked.
+   */
+  sensitive: Sensitive | undefined;
 }
+
+/** The connections whose data fed the prompt, or may have. */
+const fedBy = ({ provenance, connections }: RulesInput): Set<string> =>
+  new Set([...provenance, ...connections]);
 
 const euOnlyBecause = (
   eu: NonNullable<ModelRules["eu"]>,
-  { trigger, provenance, connections }: RulesInput
+  input: RulesInput
 ): EuOnly | undefined => {
+  const { trigger } = input;
   if (eu.deployment) {
     return "deployment";
   }
@@ -90,35 +128,103 @@ const euOnlyBecause = (
   ) {
     return "workflow";
   }
-  // A connection's data fed the prompt when it is named as provenance, or
-  // may have when the caller had the connection at hand.
-  const fedBy = new Set([...provenance, ...connections]);
-  return eu.connections.some((connection) => fedBy.has(connection))
+  const fed = fedBy(input);
+  return eu.connections.some((connection) => fed.has(connection))
     ? "connection"
     : undefined;
 };
 
+/**
+ * Whether `ids` name a sensitive collection, or a document in one: one
+ * query, whatever their number.
+ */
+const namesSensitiveCollection = async (
+  env: Pick<Env, "KNOWLEDGE">,
+  ids: readonly string[]
+): Promise<boolean> => {
+  if (ids.length === 0) {
+    return false;
+  }
+  const db = drizzle(env.KNOWLEDGE);
+  const found = await db
+    .select({ id: collections.id })
+    .from(collections)
+    .where(
+      and(
+        eq(collections.sensitive, true),
+        or(
+          inList(collections.id, ids),
+          inArray(
+            collections.id,
+            db
+              .select({ id: documents.collectionId })
+              .from(documents)
+              .where(inList(documents.id, ids))
+          )
+        )
+      )
+    )
+    .limit(1)
+    .get();
+  return found !== undefined;
+};
+
+/** Cheapest check first: the config, then Knowledge, then the context's object. */
+const sensitiveBecause = async (
+  env: RestrictedEnv & Pick<Env, "KNOWLEDGE">,
+  sensitive: NonNullable<ModelRules["sensitive"]>,
+  input: RulesInput
+): Promise<Sensitive | undefined> => {
+  const fed = fedBy(input);
+  if (sensitive.connections.some((connection) => fed.has(connection))) {
+    return "connection";
+  }
+  if (await namesSensitiveCollection(env, input.provenance)) {
+    return "collection";
+  }
+  const { work } = input;
+  if (
+    work !== undefined &&
+    (await isRestricted(env, work.authority, work.context))
+  ) {
+    return "restricted";
+  }
+  return undefined;
+};
+
 /** Why the gateway refused a call: the code, and which rule said so. */
 export interface Refusal {
-  code: "model.not_allowed" | "model.eu_only";
+  code: "model.not_allowed" | "model.eu_only" | "model.sensitive_data";
   because?: string;
 }
 
 /**
  * Judges a call by the deployment's rules: what they made of it, or why
- * they refuse it.
+ * they refuse it. Throws `permission.context_invalid` for a `work` context
+ * the call's authority can't work in.
  */
-export const judgeCall = (
-  env: Pick<Env, "FEATURES">,
+export const judgeCall = async (
+  env: RestrictedEnv & Pick<Env, "FEATURES" | "KNOWLEDGE">,
   rules: ModelRules,
   input: RulesInput
-): { ok: true; judged: Judged } | ({ ok: false } & Refusal) => {
-  if (!featureEnabled(env, "model_rules") || rules.eu === undefined) {
-    return { ok: true, judged: { euOnly: undefined } };
+): Promise<{ ok: true; judged: Judged } | ({ ok: false } & Refusal)> => {
+  if (!featureEnabled(env, "model_rules")) {
+    return { ok: true, judged: { euOnly: undefined, sensitive: undefined } };
   }
-  const euOnly = euOnlyBecause(rules.eu, input);
-  if (euOnly !== undefined && !rules.eu.models.includes(input.model)) {
+  const { eu, sensitive: dataRule } = rules;
+  const euOnly = eu === undefined ? undefined : euOnlyBecause(eu, input);
+  if (euOnly !== undefined && eu?.models.includes(input.model) !== true) {
     return { ok: false, code: "model.eu_only", because: euOnly };
   }
-  return { ok: true, judged: { euOnly } };
+  const sensitive =
+    dataRule === undefined
+      ? undefined
+      : await sensitiveBecause(env, dataRule, input);
+  if (
+    sensitive !== undefined &&
+    dataRule?.models.includes(input.model) !== true
+  ) {
+    return { ok: false, code: "model.sensitive_data", because: sensitive };
+  }
+  return { ok: true, judged: { euOnly, sensitive } };
 };

@@ -17,5 +17,7 @@ export const inJurisdiction = <T extends Rpc.DurableObjectBranded | undefined>(
     : namespace.jurisdiction("eu");
 
 /** The object that hosts an App's server code (app.ts), named by the App's ID. */
-export const appHost = (env: Env, app: AppId) =>
-  inJurisdiction(env, env.APPS).getByName(app);
+export const appHost = (
+  env: Pick<Env, "APPS" | "DURABLE_OBJECT_JURISDICTION">,
+  app: AppId
+) => inJurisdiction(env, env.APPS).getByName(app);

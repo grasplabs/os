@@ -18,8 +18,10 @@ import { workspace } from "./workspace.ts";
 // is kept where the chat or App lives (its workspace's or its own Durable
 // Object), so it survives restarts, and it is set before the data is
 // returned, so nothing that holds the data runs unrestricted. It is read
-// in the one place core lets a call out: where it makes the capability for
-// connect (bindings.ts), which carries it.
+// in the places core lets data out: where it makes the capability for
+// connect (bindings.ts), which carries it, and in the model gateway, whose
+// data rules decide which models a restricted context may use
+// (model-rules.ts).
 //
 // Only connect knows which actions write, so connect enforces it: a
 // restricted context may still call the actions its connector declares as
@@ -56,6 +58,12 @@ import { workspace } from "./workspace.ts";
  */
 export type { WorkContext } from "@grasp-os/shared/permissions";
 
+/** What reading a context's restricted mode needs of core's env. */
+export type RestrictedEnv = Pick<
+  Env,
+  "DB" | "APPS" | "WORKSPACES" | "DURABLE_OBJECT_JURISDICTION"
+>;
+
 const contextInvalid = () =>
   permissionErrors.create("permission.context_invalid");
 
@@ -66,7 +74,7 @@ const contextInvalid = () =>
  * workflow, for a run.
  */
 const requireOwnApp = async (
-  env: Env,
+  env: RestrictedEnv,
   authority: Authority,
   context: Extract<WorkContext, { appId: AppId }>
 ): Promise<{ workflow?: string }> => {
@@ -105,7 +113,7 @@ const requireOwnApp = async (
  * one that doesn't exist: it has nowhere to keep the flag.
  */
 const restrictedState = async (
-  env: Env,
+  env: RestrictedEnv,
   authority: Authority,
   context: WorkContext
 ): Promise<{ restricted: boolean; workflow?: string }> => {
@@ -191,7 +199,7 @@ export const restrict = async (
 
 /** Whether `context` has read restricted data, as `restrictedState` says. */
 export const isRestricted = async (
-  env: Env,
+  env: RestrictedEnv,
   authority: Authority,
   context: WorkContext
 ): Promise<boolean> => {
