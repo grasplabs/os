@@ -211,10 +211,12 @@ jobs:
   # Every merge to main is a release: built once, verified against its
   # manifest and published to R2 in grasp-os-ops, where the console imports
   # it. Deploys nothing. The R2 key is loaded only after the build, and only
-  # the upload step sees it.
+  # the upload step sees it. Skipped until the repository variable
+  # PUBLISH_RELEASES is `true`, set once the bucket, key and environment
+  # exist.
   publish-release:
     name: publish-release
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && vars.PUBLISH_RELEASES == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
     environment: grasp-os-releases
