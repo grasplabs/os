@@ -43,10 +43,11 @@ import { personalCollectionId } from "./memory-files.ts";
 //   which hold text from their chats. One batch, with its audit event.
 // - `content`: every occurrence of some terms (a name, an email address, a
 //   passage) is replaced with `purgedMarker` in every version of the
-//   documents named, and in their memory proposals. The current version's
-//   new text is also saved as the next version, which makes its sections,
-//   links, search rows and the document's title and description again,
-//   and fails for anyone who saved meanwhile from text not yet purged.
+//   documents named, and in their memory proposals. Whenever anything
+//   changed, the current text is also saved as the next version, which
+//   makes its sections, links, search rows and the document's title and
+//   description again, and fails for anyone who saved meanwhile from text
+//   not yet purged.
 //
 // Then the search index is optimized: FTS5 keeps a deleted row's terms in
 // its index pages until they are merged, where they can't be found by a
@@ -446,7 +447,11 @@ const rewriteVersions = async (
   }
 };
 
-/** Updates of `document`'s memory proposals that hold a term. */
+/**
+ * Updates of `document`'s memory proposals that hold a term, and the IDs
+ * of those waiting that were read: only those, rewritten or not, move to
+ * the version a purge saves.
+ */
 const proposalRewrites = async (
   db: DrizzleD1Database,
   document: DocumentRow,
@@ -457,6 +462,7 @@ const proposalRewrites = async (
       id: memoryProposals.id,
       text: memoryProposals.text,
       message: memoryProposals.message,
+      status: memoryProposals.status,
     })
     .from(memoryProposals)
     .where(
@@ -465,8 +471,8 @@ const proposalRewrites = async (
         eq(memoryProposals.path, document.path)
       )
     );
-  return proposals.flatMap(({ id, ...row }) => {
-    const changed = rewritten(row, matcher);
+  const updates = proposals.flatMap(({ id, text, message }) => {
+    const changed = rewritten({ text, message }, matcher);
     return changed === undefined
       ? []
       : [
@@ -476,6 +482,10 @@ const proposalRewrites = async (
             .where(eq(memoryProposals.id, id)),
         ];
   });
+  const pendingIds = proposals
+    .filter(({ status }) => status === "pending")
+    .map(({ id }) => id);
+  return { updates, pendingIds };
 };
 
 /** What purging the terms from `named` would change; checks it can. */
@@ -494,22 +504,22 @@ const countDocument = async (
     matcher,
     false
   );
-  const proposals = await proposalRewrites(db, document, matcher);
+  const { updates } = await proposalRewrites(db, document, matcher);
   return {
-    documents: changedVersions + proposals.length > 0 ? 1 : 0,
+    documents: changedVersions + updates.length > 0 ? 1 : 0,
     versions: changedVersions,
-    proposals: proposals.length,
+    proposals: updates.length,
   };
 };
 
 /**
  * Purges the terms from `named`, as `person`: rewrites the earlier
- * versions that hold one in place, a page at a time; then, if the current
- * version holds one, saves its text without them as the next version
+ * versions that hold one in place, a page at a time; then, if anything
+ * held one, saves the current text, without them, as the next version
  * (`writeVersion`), which makes the sections, links, search rows, title,
  * description, owner and tags again, and gives memory cached by version a
  * new key. In the same batch, the current version is rewritten in place
- * too, its memory proposals are rewritten, and those waiting on the
+ * too, the memory proposals are rewritten, and those read waiting on the
  * version it had move to the new one, which has the same text but for the
  * terms.
  *
@@ -517,7 +527,8 @@ const countDocument = async (
  * or restored meanwhile, from text the purge hadn't rewritten yet, makes
  * it fail with `knowledge.conflict`; running the purge again rewrites
  * their version too. A purge cut short leaves the current version as it
- * was, so running it again finishes it.
+ * was, so running it again finishes it; one run again after it finished
+ * finds nothing, and writes nothing.
  */
 const purgeDocument = async (
   env: Env,
@@ -529,49 +540,54 @@ const purgeDocument = async (
   const { document, collection } = named;
   const at = document.currentVersion;
   const earlier = await rewriteVersions(db, document, at - 1, matcher, true);
-  const proposals = await proposalRewrites(db, document, matcher);
+  const { updates, pendingIds } = await proposalRewrites(db, document, matcher);
   const current = await versionOf(db, document, at);
   const changed = current && rewritten(current, matcher);
-  if (changed === undefined) {
-    const [first, ...rest] = proposals;
-    if (first) {
-      await db.batch([first, ...rest]);
-    }
-  } else {
+  const changedVersions = earlier + (changed === undefined ? 0 : 1);
+  if (current !== undefined && changedVersions + updates.length > 0) {
     await writeVersion(env, personWriter(person), {
       collection,
       path: document.path,
-      text: changed.text,
+      text: changed?.text ?? current.text,
       ifVersion: at,
       message: "Personal data removed",
       restoredFrom: null,
       also: [
-        db
-          .update(versions)
-          .set(changed)
-          .where(
-            and(eq(versions.documentId, document.id), eq(versions.number, at))
-          ),
-        ...proposals,
-        db
-          .update(memoryProposals)
-          .set({ baseVersion: at + 1 })
-          .where(
-            and(
-              eq(memoryProposals.collectionId, document.collectionId),
-              eq(memoryProposals.path, document.path),
-              eq(memoryProposals.status, "pending"),
-              eq(memoryProposals.baseVersion, at)
-            )
-          ),
+        ...(changed === undefined
+          ? []
+          : [
+              db
+                .update(versions)
+                .set(changed)
+                .where(
+                  and(
+                    eq(versions.documentId, document.id),
+                    eq(versions.number, at)
+                  )
+                ),
+            ]),
+        ...updates,
+        ...(pendingIds.length === 0
+          ? []
+          : [
+              db
+                .update(memoryProposals)
+                .set({ baseVersion: at + 1 })
+                .where(
+                  and(
+                    inList(memoryProposals.id, pendingIds),
+                    eq(memoryProposals.status, "pending"),
+                    eq(memoryProposals.baseVersion, at)
+                  )
+                ),
+            ]),
       ],
     });
   }
-  const changedVersions = earlier + (changed === undefined ? 0 : 1);
   return {
-    documents: changedVersions + proposals.length > 0 ? 1 : 0,
+    documents: changedVersions + updates.length > 0 ? 1 : 0,
     versions: changedVersions,
-    proposals: proposals.length,
+    proposals: updates.length,
   };
 };
 

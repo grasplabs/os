@@ -499,16 +499,39 @@ export const purgeTermMaxLength = 1000;
 export const purgedMarker = "(removed)";
 
 /**
- * A term to purge: none the marker holds, in any case, or a purge would
- * find it again in its own marker, and never finish finding it.
+ * Whether `term` could be found again once replaced by the marker, in any
+ * case: the marker holds it, it starts with how the marker ends, or it
+ * ends with how the marker starts (the marker and the text next to it
+ * would make it again).
+ */
+const overlapsMarker = (term: string): boolean => {
+  const marker = purgedMarker.toLowerCase();
+  const lower = term.toLowerCase();
+  if (marker.includes(lower)) {
+    return true;
+  }
+  for (let length = 1; length <= marker.length; length += 1) {
+    if (
+      lower.startsWith(marker.slice(-length)) ||
+      lower.endsWith(marker.slice(0, length))
+    ) {
+      return true;
+    }
+  }
+  return false;
+};
+
+/**
+ * A term to purge: none that overlaps the marker, or a purge would find it
+ * again next to or in its own marker, and never finish finding it.
  */
 const purgeTermSchema = z
   .string()
   .trim()
   .min(2)
   .max(purgeTermMaxLength)
-  .refine((term) => !purgedMarker.toLowerCase().includes(term.toLowerCase()), {
-    message: `A term can't be part of "${purgedMarker}"`,
+  .refine((term) => !overlapsMarker(term), {
+    message: `A term can't be part of "${purgedMarker}", start with its end or end with its start`,
   });
 
 /**

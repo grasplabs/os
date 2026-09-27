@@ -486,6 +486,12 @@ describe("a purge of content", setUpTime, () => {
       ],
       carriesText: false,
     });
+    // The proposal moved to the new version, so approving it works.
+    await admin.api.memory.approve(proposal.id);
+    const approved = await admin.api.knowledge.getDocument(company.id);
+    expect(approved.version.text).toBe(
+      "# Company\n(removed) runs payroll and HR."
+    );
   });
 
   it("drops the terms from the search index and its pages", async () => {
@@ -620,18 +626,67 @@ describe("a purge of content", setUpTime, () => {
       reason: "other",
     });
     const texts = await versionTexts(documentId);
+    // Run again once finished: nothing found, nothing written.
+    const again = await purged(admin, {
+      type: "content",
+      documentIds: [documentId],
+      terms: [name],
+      reason: "other",
+    });
+    const textsAgain = await versionTexts(documentId);
     expect({
       planned: plan.versions,
       rewritten: result.versions,
       versions: texts.length,
       holding: texts.filter((text) => text.includes(name)).length,
       last: texts.at(-1),
+      again: { ...again.result, purgeId: typeof again.result.purgeId },
+      unchanged: textsAgain,
     }).toStrictEqual({
       planned: saved,
       rewritten: saved,
       versions: saved + 1,
       holding: 0,
       last: `# Log\n(removed) did thing ${saved}.`,
+      again: { purgeId: "string", documents: 0, versions: 0, proposals: 0 },
+      unchanged: texts,
+    });
+  });
+
+  it("saves a new version when only earlier versions held a term", async () => {
+    const admin = await personOf("admin");
+    const name = `Dekker${unique()}`;
+    const handbook = await admin.api.knowledge.createCollection({
+      name: "Handbook",
+      access: "everyone",
+    });
+    await saveOver(admin, handbook.id, "note.md", `# Note\n${name} was here.`);
+    const note = await saveOver(
+      admin,
+      handbook.id,
+      "note.md",
+      "# Note\nNobody here."
+    );
+    const { result } = await purged(admin, {
+      type: "content",
+      documentIds: [note.id],
+      terms: [name],
+      reason: "other",
+    });
+    const { versions } = await admin.api.knowledge.history(note.id);
+    expect({
+      versions: result.versions,
+      texts: await versionTexts(note.id),
+      messages: versions.map(({ message }) => message),
+    }).toStrictEqual({
+      versions: 1,
+      // So anyone who restored the first before it was purged conflicts.
+      texts: [
+        "# Note\n(removed) was here.",
+        "# Note\nNobody here.",
+        "# Note\nNobody here.",
+      ],
+      messages: ["Personal data removed", null, null],
     });
   });
 
@@ -649,19 +704,16 @@ describe("a purge of content", setUpTime, () => {
       "note.md",
       `# Note\n${name} two.`
     );
-    // Knowledge as the purge's request sees it: once it has rewritten a
-    // page of earlier versions, someone saves from the text they had open.
-    let rewriting = false;
+    // Knowledge as the purge's request sees it: once the purge first
+    // writes (its audit event, before any version), someone saves from the
+    // text they had open.
     let saved = false;
     const real = env.KNOWLEDGE;
     const knowledge: D1Database = {
-      prepare: (query) => {
-        rewriting ||= query.startsWith('update "versions"');
-        return real.prepare(query);
-      },
+      prepare: (query) => real.prepare(query),
       batch: async <T>(statements: D1PreparedStatement[]) => {
         const results = await real.batch<T>(statements);
-        if (rewriting && !saved) {
+        if (!saved) {
           saved = true;
           await saveOver(admin, handbook.id, "note.md", `# Note\n${name} 3.`);
         }
@@ -682,7 +734,7 @@ describe("a purge of content", setUpTime, () => {
       terms: [name],
       reason: "other",
     };
-    const { token } = await racing.knowledge.preparePurge(input);
+    const { token } = await admin.api.knowledge.preparePurge(input);
     const first = await outcome(racing.knowledge.purge(input, token));
     const afterFirst = await versionTexts(note.id);
     const again = await purged(admin, input);
@@ -789,7 +841,17 @@ describe("purging", setUpTime, () => {
         })
       ),
       // Terms the marker holds: a purge would find them again in it.
-      ...["removed", "MOVE", "(r", "d)"].map(
+      // Or that the marker and the text next to it would make again.
+      ...[
+        "removed",
+        "MOVE",
+        "(r",
+        "d)",
+        ") Jan",
+        "Jan (",
+        "ED) Jan",
+        "Jan (rem",
+      ].map(
         async (term) =>
           await outcome(
             admin.api.knowledge.preparePurge({
@@ -820,6 +882,10 @@ describe("purging", setUpTime, () => {
         "knowledge.purge_expired",
         "knowledge.purge_expired",
         "knowledge.purge_expired",
+        "knowledge.invalid",
+        "knowledge.invalid",
+        "knowledge.invalid",
+        "knowledge.invalid",
         "knowledge.invalid",
         "knowledge.invalid",
         "knowledge.invalid",
