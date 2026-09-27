@@ -173,6 +173,24 @@ export interface ConnectionSummary {
   createdAt: string;
 }
 
+/** Most connections one `connectionOwners` call takes. */
+export const connectionOwnersMax = 100;
+
+/** The connections whose owners core asks for, by ID. */
+export const connectionOwnersSchema = z
+  .array(identifierSchema)
+  .max(connectionOwnersMax);
+
+/**
+ * Whose a connection is: a personal connection's owner, the only person
+ * who may read what it holds, or `null` for a shared one, which everyone
+ * in the organization may use.
+ */
+export interface ConnectionOwner {
+  id: string;
+  ownerUserId: string | null;
+}
+
 /**
  * A signed-in person's connections, over `/rpc`. Starting one returns the
  * provider URL to send the browser to; the provider sends it back to
@@ -367,6 +385,15 @@ export interface ConnectApi {
   ) => Promise<{ connectionId: string; returnTo: string }>;
   /** The person's own connections and the shared ones. */
   listConnections: (person: ConnectionPerson) => Promise<ConnectionSummary[]>;
+  /**
+   * Whose each of the connections `connectionIds` names is, disconnected
+   * ones too: those that were ever registered, in no particular order.
+   * Core checks against it that sharing an App reaches nobody who can't
+   * read what the App read.
+   */
+  connectionOwners: (
+    connectionIds: readonly string[]
+  ) => Promise<ConnectionOwner[]>;
   /**
    * Deletes the connection's tokens, revoking them at the provider where it
    * can (`revoked`); the connection takes no more calls.

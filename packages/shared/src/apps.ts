@@ -196,7 +196,13 @@ export interface AppMember extends AppMemberRef {
  */
 export interface AppMembersApi {
   list: (app: string) => Promise<AppMember[]>;
-  /** Shares the App, or changes the role of someone it is shared with. */
+  /**
+   * Shares the App, or changes the role of someone it is shared with.
+   * Refused with `app.share_unreadable`, naming the `sources` and `people`
+   * in its details, when the App has read data (from someone's personal
+   * connection, or a sensitive collection) that anyone it would reach
+   * can't read where it comes from.
+   */
   add: (app: string, member: NewAppMember) => Promise<AppMember>;
   /**
    * Stops sharing the App with them. Their open screens of it stop at
@@ -228,6 +234,10 @@ export const appErrors = defineErrorFamily({
   "app.invalid": "That isn't a valid request for an App.",
   "app.not_found": "There's no such App.",
   "app.member_invalid": "The App can't be shared with them like that.",
+  "app.share_unreadable":
+    "This App has read data they can't read where it comes from, such as someone else's mailbox or a sensitive collection, so it can't be shared with them.",
+  "app.unreadable":
+    "This App has read data you can't read where it comes from, so it isn't open to you. Ask whoever shared it.",
   "app.version_not_found": "The App has no such version.",
   "app.too_large": "The App's files would be over its limits.",
   "app.nothing_to_commit": "Nothing was written since the latest version.",

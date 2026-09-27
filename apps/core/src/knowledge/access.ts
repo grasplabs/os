@@ -59,13 +59,13 @@ export type Reader =
     };
 
 /** A person, as far as reading Knowledge goes. */
-interface PersonAccess {
+export interface PersonAccess {
   userId: string;
   teamIds: string[];
 }
 
 /** Collections a person may read, as a condition on `collections`. */
-const readableBy = (
+export const readableBy = (
   db: DrizzleD1Database,
   { userId, teamIds }: PersonAccess
 ): SQL =>

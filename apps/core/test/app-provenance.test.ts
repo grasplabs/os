@@ -1,0 +1,281 @@
+import { connectionOwnersMax } from "@grasp-os/shared/connect";
+import type { Role } from "@grasp-os/shared/roles";
+import { env } from "cloudflare:workers";
+import { describe, expect, it } from "vite-plus/test";
+import { z } from "zod";
+
+import { outlook, requestGranted } from "./apps.ts";
+import { mockIdp } from "./idp.ts";
+import { newTeam, readCollection, storedGrant } from "./knowledge.ts";
+import { mailConnection } from "./mail-connection.ts";
+import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
+import { connectDb } from "./test-env.ts";
+
+// Provenance on sharing: an App keeps what it reads, so sharing it must
+// reach nobody who couldn't read that where it comes from. The ways this
+// could go wrong, tried below: sharing an App that read someone's mailbox
+// or a sensitive collection with someone who can't read it, directly or
+// through a team; the App keeping its data after its grant is revoked;
+// someone joining a team after the App was shared with it; and a source
+// the App is granted after it was shared.
+
+const idp = mockIdp();
+
+type Person = Awaited<ReturnType<typeof signedInApi>>;
+
+const personApi = async (role: Role): Promise<Person> =>
+  await signedInApi(idp, role);
+
+const newApp = async (owner: Person): Promise<string> => {
+  const { id } = await owner.api.apps.create({ name: `Desk ${unique()}` });
+  return id;
+};
+
+/** A personal connection of `owner`'s, such as their mailbox. */
+const mailboxOf = async (owner: Person): Promise<string> => {
+  const id = `connection-mailbox-${unique()}`;
+  const now = Date.now();
+  await connectDb()
+    .prepare(
+      "INSERT INTO connections (id, provider, scope, owner_user_id, status, server_kind, server, created_at, updated_at) VALUES (?, 'microsoft', 'personal', ?, 'active', 'native', 'microsoft-365', ?, ?)"
+    )
+    .bind(id, owner.userId, now, now)
+    .run();
+  return id;
+};
+
+/** Grants `app` `connectionId`, asked for by `owner`. Returns its ID. */
+const grantConnection = async (
+  owner: Person,
+  app: string,
+  connectionId: string
+): Promise<string> =>
+  await requestGranted(idp, owner, {
+    ...outlook(app, `MAIL_${unique().toUpperCase()}`),
+    object: { type: "connection", connectionId },
+  });
+
+/** A sensitive collection for `team`'s people, and `app` granted to read it. */
+const sensitiveFor = async (
+  admin: Person,
+  owner: Person,
+  app: string,
+  team: string
+): Promise<string> => {
+  const { id } = await admin.api.knowledge.createCollection({
+    name: `HR ${unique()}`,
+    access: "teams",
+    teams: [team],
+    sensitive: true,
+  });
+  await requestGranted(
+    idp,
+    owner,
+    readCollection(
+      { type: "app", appId: app },
+      id,
+      `HR_${unique().toUpperCase()}`
+    )
+  );
+  return id;
+};
+
+const refusalSchema = z.object({
+  code: z.literal("app.share_unreadable"),
+  details: z.object({
+    sources: z.array(z.string()),
+    people: z.array(z.string()),
+  }),
+});
+
+/** Why sharing `app` with `member` was refused, or "ok". */
+const shareRefusal = async (
+  owner: Person,
+  app: string,
+  member: { type: "person" | "team"; id: string }
+) => {
+  try {
+    await owner.api.apps.members.add(app, { ...member, role: "user" });
+    return "ok";
+  } catch (error) {
+    const { details } = refusalSchema.parse(error);
+    return details;
+  }
+};
+
+describe("sharing an App", () => {
+  it("is refused, with why, when the App read a mailbox they can't read, and audited", async () => {
+    const owner = await personApi("builder");
+    const [anna, admin] = await Promise.all([
+      personApi("builder"),
+      personApi("admin"),
+    ]);
+    const app = await newApp(owner);
+    const mailbox = await mailboxOf(owner);
+    await grantConnection(owner, app, mailbox);
+
+    let refused: unknown;
+    const events = await auditedDuring(async () => {
+      refused = await shareRefusal(owner, app, {
+        type: "person",
+        id: anna.userId,
+      });
+    });
+    expect(refused).toStrictEqual({
+      sources: [`connection:${mailbox}`],
+      people: [anna.userId],
+    });
+    expect(
+      events.map(({ action, provenance, detail }) => ({
+        action,
+        provenance,
+        detail,
+      }))
+    ).toStrictEqual([
+      {
+        action: "app.member.refused",
+        provenance: [`connection:${mailbox}`],
+        detail: {
+          memberType: "person",
+          member: anna.userId,
+          role: "user",
+          reason: "app.share_unreadable",
+        },
+      },
+    ]);
+    await expect(owner.api.apps.members.list(app)).resolves.toStrictEqual([]);
+
+    // The owner and admins aren't checked: a team of only them is fine.
+    const team = await newTeam(admin, [owner, admin]);
+    await expect(
+      shareRefusal(owner, app, { type: "team", id: team })
+    ).resolves.toBe("ok");
+  });
+
+  it("is refused for the people of a team who can't read a sensitive collection the App read", async () => {
+    const admin = await personApi("admin");
+    const owner = await personApi("builder");
+    const [anna, ben] = await Promise.all([
+      personApi("user"),
+      personApi("user"),
+    ]);
+    const hr = await newTeam(admin, [owner, anna]);
+    const everyone = await newTeam(admin, [anna, ben]);
+    const app = await newApp(owner);
+    const collection = await sensitiveFor(admin, owner, app, hr);
+
+    await expect(
+      Promise.all([
+        shareRefusal(owner, app, { type: "person", id: anna.userId }),
+        shareRefusal(owner, app, { type: "team", id: everyone }),
+        shareRefusal(owner, app, { type: "person", id: ben.userId }),
+      ])
+    ).resolves.toStrictEqual([
+      "ok",
+      { sources: [`collection:${collection}`], people: [ben.userId] },
+      { sources: [`collection:${collection}`], people: [ben.userId] },
+    ]);
+  });
+
+  it("stays refused once the App's grant is revoked: it may still hold what it read", async () => {
+    const [owner, anna, admin] = await Promise.all([
+      personApi("builder"),
+      personApi("builder"),
+      personApi("admin"),
+    ]);
+    const app = await newApp(owner);
+    const mailbox = await mailboxOf(owner);
+    const granted = await grantConnection(owner, app, mailbox);
+    await admin.api.permissions.revoke(granted);
+
+    await expect(
+      shareRefusal(owner, app, { type: "person", id: anna.userId })
+    ).resolves.toMatchObject({ people: [anna.userId] });
+  });
+
+  it("counts every connection the App was granted, however many", async () => {
+    const [owner, anna] = await Promise.all([
+      personApi("builder"),
+      personApi("builder"),
+    ]);
+    const app = await newApp(owner);
+    const mailbox = await mailboxOf(owner);
+    // More than connect answers for at once, the mailbox among the last.
+    const many = Array.from(
+      { length: connectionOwnersMax + 1 },
+      (_, index) => `connection-gone-${index}`
+    );
+    for (const [index, connectionId] of [...many, mailbox].entries()) {
+      // oxlint-disable-next-line no-await-in-loop -- one grant at a time
+      await storedGrant(
+        { type: "app", id: app },
+        { type: "connection", id: connectionId },
+        ["mail.list"],
+        `MAIL_${index}`
+      );
+    }
+
+    await expect(
+      shareRefusal(owner, app, { type: "person", id: anna.userId })
+    ).resolves.toStrictEqual({
+      sources: [`connection:${mailbox}`],
+      people: [anna.userId],
+    });
+  });
+
+  it("reaches anyone when the App read only what everyone may: a shared connection", async () => {
+    const [owner, anna] = await Promise.all([
+      personApi("builder"),
+      personApi("user"),
+    ]);
+    const app = await newApp(owner);
+    const mail = await mailConnection();
+    await grantConnection(owner, app, mail.id);
+
+    await expect(
+      shareRefusal(owner, app, { type: "person", id: anna.userId })
+    ).resolves.toBe("ok");
+    await expect(anna.api.apps.get(app)).resolves.toMatchObject({ id: app });
+  });
+
+  it("stops reaching someone once the App is granted what they can't read, or they join a team it reaches", async () => {
+    const admin = await personApi("admin");
+    const owner = await personApi("builder");
+    const [anna, ben] = await Promise.all([
+      personApi("user"),
+      personApi("user"),
+    ]);
+    const hr = await newTeam(admin, [owner, anna]);
+    const shared = await newTeam(admin, [anna]);
+    const app = await newApp(owner);
+    await sensitiveFor(admin, owner, app, hr);
+    await owner.api.apps.members.add(app, {
+      type: "team",
+      id: shared,
+      role: "user",
+    });
+    const opens = async (person: Person) =>
+      await outcome(person.api.apps.get(app));
+
+    // Ben joins the team the App is shared with, but can't read HR.
+    await env.DB.prepare(
+      "INSERT INTO team_members (id, team_id, user_id, created_at) VALUES (?, ?, ?, ?)"
+    )
+      .bind(crypto.randomUUID(), shared, ben.userId, Date.now())
+      .run();
+    await expect(Promise.all([opens(anna), opens(ben)])).resolves.toStrictEqual(
+      ["ok", "app.unreadable"]
+    );
+
+    // Then the App is granted the owner's mailbox, which Anna can't read.
+    await grantConnection(owner, app, await mailboxOf(owner));
+    await expect(
+      Promise.all([
+        opens(anna),
+        outcome(anna.api.screens.version(app)),
+        opens(owner),
+        opens(admin),
+      ])
+    ).resolves.toStrictEqual(["app.unreadable", "app.unreadable", "ok", "ok"]);
+  });
+});

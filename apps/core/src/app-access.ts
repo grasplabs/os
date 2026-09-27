@@ -6,6 +6,7 @@ import { and, eq, exists, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
+import { sourcesOf, unreadableBy } from "./app-provenance.ts";
 import { apps, appMembers } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
 
@@ -22,6 +23,9 @@ import { inList } from "./db/d1.ts";
 // in an App's screens at most, even their own App's or one shared with
 // them as a builder. Everyone else has no role in the App, and it doesn't
 // exist for them (`app.not_found`), just as an App that isn't there.
+// Someone an App is shared with is refused too, with `app.unreadable`,
+// while it has read data they can't read where it comes from
+// (app-provenance.ts).
 //
 // Roles are read from the database on every call, like the session and
 // the person's role and teams (auth/identity.ts), so unsharing, a team
@@ -55,17 +59,21 @@ const rowsOf = (by: Pick<Identity, "userId" | "teams">): SQL =>
 const ceilingOf = (by: Person): AppRole =>
   canBuild(by.role) ? "builder" : "user";
 
-/** `by`'s role in `app`, or undefined when they have none. */
-export const appRole = async (
+/**
+ * `by`'s role in `app`, and whether it comes from whom the App is shared
+ * with (`shared`), rather than from being an admin or its owner; undefined
+ * when they have none.
+ */
+const appRole = async (
   env: Env,
   by: Person,
   app: App
-): Promise<AppRole | undefined> => {
+): Promise<{ role: AppRole; shared: boolean } | undefined> => {
   if (isAdmin(by.role)) {
-    return "builder";
+    return { role: "builder", shared: false };
   }
   if (app.owner === by.userId) {
-    return ceilingOf(by);
+    return { role: ceilingOf(by), shared: false };
   }
   const rows = await drizzle(env.DB)
     .select({ role: appMembers.role })
@@ -74,13 +82,16 @@ export const appRole = async (
   if (rows.length === 0) {
     return undefined;
   }
-  return rows.some(({ role }) => role === "builder") ? ceilingOf(by) : "user";
+  const builds = rows.some(({ role }) => role === "builder");
+  return { role: builds ? ceilingOf(by) : "user", shared: true };
 };
 
 /**
  * Refuses `by` unless they have `needed` or more in `app`: an App they
  * have no role in with `app.not_found`, as one that isn't there, and too
- * low a role with `role.forbidden`. Returns their role.
+ * low a role with `role.forbidden`. Someone it is shared with is also
+ * refused, with `app.unreadable`, while the App has read data they can't
+ * read where it comes from (app-provenance.ts). Returns their role.
  */
 export const requireAppRole = async (
   env: Env,
@@ -88,19 +99,31 @@ export const requireAppRole = async (
   app: App,
   needed: AppRole
 ): Promise<AppRole> => {
-  const role = await appRole(env, by, app);
-  if (role === undefined) {
+  const found = await appRole(env, by, app);
+  if (found === undefined) {
     throw appErrors.create("app.not_found");
   }
+  const { role, shared } = found;
   if (needed === "builder" && role !== "builder") {
     throw roleErrors.create("role.forbidden");
+  }
+  if (shared) {
+    const unreadable = await unreadableBy(env, await sourcesOf(env, app.id), {
+      userId: by.userId,
+      teamIds: by.teams.map(({ id }) => id),
+    });
+    if (unreadable.length > 0) {
+      throw appErrors.create("app.unreadable");
+    }
   }
   return role;
 };
 
 /**
  * The Apps `by` has a role in, as a condition on `apps`: every App for an
- * admin (undefined), otherwise their own and those shared with them.
+ * admin (undefined), otherwise their own and those shared with them. One
+ * shared with them that has read data they can't read is listed, and
+ * refused when they open it, with why.
  */
 export const appsOpenTo = (env: Env, by: Person): SQL | undefined => {
   if (isAdmin(by.role)) {

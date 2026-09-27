@@ -10,21 +10,23 @@ import type {
   AppMembersApi,
   NewAppMember,
 } from "@grasp-os/shared/apps";
-import { actorOf } from "@grasp-os/shared/audit";
+import { actorOf, auditProvenanceMaxItems } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { canBuild, roleErrors } from "@grasp-os/shared/roles";
+import { canBuild, isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 import { and, asc, eq, isNotNull, ne, or } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
+import { sourcesOf, unreadableBy } from "./app-provenance.ts";
+import type { AppSources } from "./app-provenance.ts";
 import { appFor } from "./apps.ts";
-import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
+import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
 import { activeMember, organizationId } from "./auth/auth.ts";
-import { memberRole } from "./auth/identity.ts";
-import { appMembers, teams, users } from "./db/core/schema.ts";
+import { memberRole, teamsOf } from "./auth/identity.ts";
+import { appMembers, teamMembers, teams, users } from "./db/core/schema.ts";
 import { appHost } from "./durable-objects.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
@@ -182,6 +184,93 @@ const closeScreens = async (env: Env, app: App): Promise<void> => {
   }
 };
 
+/** The people of `member` now: the person, or the team's. */
+const peopleOf = async (env: Env, member: AppMemberRef): Promise<string[]> => {
+  if (member.type === "person") {
+    return [member.id];
+  }
+  const rows = await drizzle(env.DB)
+    .select({ userId: teamMembers.userId })
+    .from(teamMembers)
+    .where(eq(teamMembers.teamId, member.id));
+  return rows.map(({ userId }) => userId);
+};
+
+/**
+ * The sources of `app` that `userId` can't read (app-provenance.ts), or
+ * none when they aren't checked: the App's owner, an admin, or someone no
+ * longer in the organization, who reaches nothing.
+ */
+const unreadableFor = async (
+  env: Env,
+  app: App,
+  sources: AppSources,
+  userId: string
+): Promise<string[]> => {
+  if (userId === app.owner) {
+    return [];
+  }
+  const role = await memberRole(env.DB, userId);
+  if (role === undefined || isAdmin(role)) {
+    return [];
+  }
+  const teamsOfThem = await teamsOf(env.DB, userId);
+  return await unreadableBy(env, sources, {
+    userId,
+    teamIds: teamsOfThem.map(({ id }) => id),
+  });
+};
+
+/**
+ * Refuses sharing `app` with `member` when anyone it would reach now can't
+ * read everything the App has read where it comes from, with
+ * `app.share_unreadable` naming the sources and the people. The refusal
+ * is audited, with those sources as its provenance. Whoever joins a team
+ * later is checked on each call instead (app-access.ts).
+ */
+const requireReadable = async (
+  env: Env,
+  by: Identity,
+  app: App,
+  member: NewAppMember
+): Promise<void> => {
+  const sources = await sourcesOf(env, app.id);
+  if (sources.connections.length === 0 && sources.sensitive.length === 0) {
+    return;
+  }
+  const people = await peopleOf(env, member);
+  const unreadable = await Promise.all(
+    people.map(async (userId) => ({
+      userId,
+      sources: await unreadableFor(env, app, sources, userId),
+    }))
+  );
+  const refused = unreadable.filter(({ sources: ids }) => ids.length > 0);
+  if (refused.length === 0) {
+    return;
+  }
+  const ids = [...new Set(refused.flatMap(({ sources: of }) => of))];
+  const db = drizzle(env.DB);
+  await auditedBatch(env, db, [
+    outboxed(db, {
+      actor: actorOf(by),
+      action: "app.member.refused",
+      target: { type: "app", id: app.id },
+      provenance: ids.slice(0, auditProvenanceMaxItems),
+      detail: {
+        memberType: member.type,
+        member: member.id,
+        role: member.role,
+        reason: "app.share_unreadable",
+      },
+    }),
+  ]);
+  throw appErrors.create("app.share_unreadable", {
+    sources: ids,
+    people: refused.map(({ userId }) => userId),
+  });
+};
+
 /** Whom an App is shared with, in the order they were shared or changed. */
 export const listMembers = async (
   env: Env,
@@ -207,6 +296,7 @@ export const addMember = async (
   requireNotStaff(by);
   const member = appErrors.parse("app.invalid", newAppMemberSchema, input);
   await requireSharable(env, found, member);
+  await requireReadable(env, by, found, member);
   const db = drizzle(env.DB);
   const row: Row = {
     appId: found.id,

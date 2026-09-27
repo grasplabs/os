@@ -15,6 +15,7 @@ import type {
   CatalogTool,
   ConnectApi,
   ConnectCall,
+  ConnectionOwner,
   ConnectionPerson,
   ConnectionSummary,
   ConnectResult,
@@ -32,6 +33,7 @@ import type { CallOutcome, CallRecord } from "./audit.ts";
 import { carryOut, connectionFor } from "./call.ts";
 import type { CallDone, CallProgress } from "./call.ts";
 import { catalog, catalogTools } from "./catalog.ts";
+import { connectionOwners } from "./connections.ts";
 import {
   abandonFlow,
   disconnect,
@@ -192,6 +194,12 @@ export default class Connect
     person: ConnectionPerson
   ): Promise<ConnectionSummary[]> {
     return await listConnections(this.env, person);
+  }
+
+  async connectionOwners(
+    connectionIds: readonly string[]
+  ): Promise<ConnectionOwner[]> {
+    return await connectionOwners(this.env.DB, connectionIds);
   }
 
   async disconnect(request: Disconnect): Promise<{ revoked: boolean }> {

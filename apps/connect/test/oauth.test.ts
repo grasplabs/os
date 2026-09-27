@@ -1,4 +1,7 @@
-import { connectionCallbackPath } from "@grasp-os/shared/connect";
+import {
+  connectionCallbackPath,
+  connectionOwnersMax,
+} from "@grasp-os/shared/connect";
 import type { ConnectionPerson } from "@grasp-os/shared/connect";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 import { env, exports } from "cloudflare:workers";
@@ -451,6 +454,38 @@ describe("tokens", () => {
 });
 
 describe("whose account", () => {
+  it("tells core whose each connection is, disconnected ones too", async () => {
+    const anna = someone();
+    const ada = someone("admin");
+    const personal = await connectAccount(providers, anna, ownAccount(anna));
+    const shared = await connectAccount(providers, ada, mailboxAccount(), {
+      scope: "shared",
+    });
+    await exports.default.disconnect({ person: anna, connectionId: personal });
+
+    const owners = await exports.default.connectionOwners([
+      personal,
+      shared,
+      "connection-unknown",
+    ]);
+    expect(owners.toSorted((a, b) => a.id.localeCompare(b.id))).toStrictEqual(
+      [
+        { id: personal, ownerUserId: anna.userId },
+        { id: shared, ownerUserId: null },
+      ].toSorted((a, b) => a.id.localeCompare(b.id))
+    );
+    await expect(
+      Promise.all([
+        exports.default.connectionOwners([]),
+        outcome(
+          exports.default.connectionOwners(
+            Array.from({ length: connectionOwnersMax + 1 }, () => personal)
+          )
+        ),
+      ])
+    ).resolves.toStrictEqual([[], "connect.invalid"]);
+  });
+
   it("a personal connection must be to the person's own account", async () => {
     const anna = someone();
     const colleague = someone();
