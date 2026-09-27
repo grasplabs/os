@@ -66,6 +66,9 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
       // test next sends something; one logged after the file's last message
       // was never sent, and the file waited for its reply forever.
       disableConsoleIntercept: true,
+      // Tests here build Apps and run workflows in workerd, which takes far
+      // longer than Vitest's 5 s default, most of all on a loaded CI runner.
+      testTimeout: 60_000,
       ...test,
     },
     plugins: [

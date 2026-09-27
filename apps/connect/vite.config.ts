@@ -48,6 +48,10 @@ export default defineProject({
     // request than the test's could leave the file waiting forever (see
     // core's vite.config.ts).
     disableConsoleIntercept: true,
+    // Tests run in workerd alongside core's, which build Apps and run
+    // workflows and so load the machine; Vitest's 5 s default is too short
+    // there. The same default as core's (vite.config.ts).
+    testTimeout: 60_000,
   },
   plugins: [
     cloudflareTest({
