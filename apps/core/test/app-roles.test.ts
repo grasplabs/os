@@ -130,7 +130,13 @@ const lists = async ({ api }: Person, app: string): Promise<boolean> => {
   return apps.some(({ id }) => id === app);
 };
 
-describe("App roles", () => {
+// Each test releases an App of its own and, through `callsOn`, makes some
+// thirty calls in a row, opening its screen among them: that builds the
+// screens of that App's version, which the build cache can't share across
+// Apps (it keys builds by App). The server is built ahead (`serverBuilt`),
+// but a loaded runner still takes longer than the default five seconds,
+// as screen-bridge.test.ts's tests do.
+describe("App roles", { timeout: 60_000 }, () => {
   it("keep an App private to its owner and the admins", async () => {
     const owner = await personApi("builder");
     const [builder, user, admin] = await Promise.all([
