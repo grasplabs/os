@@ -114,6 +114,16 @@ export type WaitReason =
   | { reason: "switched_off"; feature: Feature }
   | { reason: "held" };
 
+/** What a wait records a reason under: once per wait for each. */
+const waitName = (why: WaitReason): string =>
+  why.reason === "held" ? "held" : why.feature;
+
+/**
+ * What a wait's check answers when the run may not go on yet, though it
+ * waits on no reason to record: it checks again after the next sleep.
+ */
+const checkAgain = Symbol("checkAgain");
+
 /** The code a held side effect answers a run's call with (connect). */
 const heldCode = "connect.held";
 
@@ -624,6 +634,11 @@ export interface HostHooks {
    * a side effect of a step is held for the person it acts for.
    */
   waiting: (why: WaitReason) => Promise<void>;
+  /**
+   * Hears that the run goes on past a check for `features`, none of them
+   * off: a wait for one of them, if any, is over.
+   */
+  goesOn: (features: readonly Feature[]) => Promise<void>;
   /** Calls a method of the run's App for `caller` (`callApp`). */
   callApp: (
     caller: AppCallerInput,
@@ -711,11 +726,19 @@ export class RunHost extends RpcTarget {
    * step fails with `workflow.too_many_steps`.
    *
    * The wait's steps are named after the step it holds, so they are the
-   * same on every execution: a new execution replays the sleeps it already
-   * slept (each returns at once) and goes on waiting. The wait is recorded
-   * in a step of its own per feature waited on (`waiting`), so each
-   * stretch is audited once for each, whatever the executions. That step's retries cover a failing audit
-   * write; one that still fails is logged, and the run keeps waiting.
+   * same on every execution that waits there. But every step is checked,
+   * the ones a new execution replays too, so one that starts while the
+   * feature is still off (a deploy, a crash, a resume) waits before the
+   * first step it replays, in steps of its own. The wait is recorded in a
+   * step of its own per feature waited on (`waiting`), and the run's row
+   * keeps the feature until the run goes on past it (`goesOn`), so each
+   * stretch is audited once for each, whatever the executions
+   * (`recordWaiting`). That step's retries cover a failing audit write;
+   * one that still fails is logged, and the run keeps waiting. The run
+   * goes on only once its row no longer keeps the feature: while that
+   * write fails, it is logged and the run waits on, checking again as it
+   * would while the feature is off, so a later wait is never left
+   * unrecorded.
    */
   async #waitWhileOff(
     name: unknown,
@@ -727,13 +750,27 @@ export class RunHost extends RpcTarget {
         const off = features.find(
           (feature) => !featureEnabled(this.#env, feature)
         );
-        return await Promise.resolve(
-          off === undefined
-            ? undefined
-            : { reason: "switched_off" as const, feature: off }
-        );
+        if (off !== undefined) {
+          return { reason: "switched_off" as const, feature: off };
+        }
+        return (await this.#keptGoingOn(features)) ? undefined : checkAgain;
       }
     );
+  }
+
+  /** Whether the run's going on past `features` is kept; logged if not. */
+  async #keptGoingOn(features: readonly Feature[]): Promise<boolean> {
+    try {
+      await this.#hooks.goesOn(features);
+      return true;
+    } catch (error) {
+      log.error("workflow.going_on_failed", {
+        runId: this.#run.runId,
+        features: features.join(","),
+        ...errorFields(error),
+      });
+      return false;
+    }
   }
 
   /**
@@ -799,11 +836,14 @@ export class RunHost extends RpcTarget {
    * Waits while `waitingFor` names a reason: each check a durable sleep, a
    * minute first (`offWaitOf`), doubling up to 15 minutes, in steps named
    * after `prefixOf` (asked only once there is a wait). Each reason is
-   * recorded once per wait, in a step of its own.
+   * recorded once per wait, in a step of its own; `checkAgain` waits for
+   * the next check without one.
    */
   async #waitWhile(
     prefixOf: () => Promise<string>,
-    waitingFor: (checks: number) => Promise<WaitReason | undefined>
+    waitingFor: (
+      checks: number
+    ) => Promise<WaitReason | typeof checkAgain | undefined>
   ): Promise<void> {
     let prefix: string | undefined;
     // Each reason the run waits on is recorded once: with two features
@@ -818,8 +858,8 @@ export class RunHost extends RpcTarget {
       }
       // oxlint-disable-next-line no-await-in-loop -- once per wait
       prefix ??= await prefixOf();
-      const name = why.reason === "held" ? "held" : why.feature;
-      if (!recorded.has(name)) {
+      const name = why === checkAgain ? undefined : waitName(why);
+      if (why !== checkAgain && name !== undefined && !recorded.has(name)) {
         recorded.add(name);
         // oxlint-disable-next-line no-await-in-loop -- once per reason
         await this.#recordWaiting(`${prefix}:waiting:${name}`, why);

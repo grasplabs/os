@@ -435,6 +435,11 @@ export const appVersions = sqliteTable(
  * writes them any more; the previous release still may, and copes with
  * the defaults (0, null) new rows get. They go in a later release
  * (expand, then contract).
+ *
+ * `waiting_for` is the switched-off feature the run was last seen waiting
+ * on, until it goes on: so a run stopped and resumed while it waits (a
+ * deploy, a crash) records its wait once, though the resumed execution
+ * waits again before the first step it replays (workflows/runs.ts).
  */
 export const workflowRuns = sqliteTable(
   "workflow_runs",
@@ -454,6 +459,7 @@ export const workflowRuns = sqliteTable(
     endedAt: timestamp("ended_at"),
     failure: text({ mode: "json" }).$type<RunFailure>(),
     actingFor: text("acting_for"),
+    waitingFor: text("waiting_for"),
   },
   (table) => [
     index("workflow_runs_app_idx").on(table.appId, table.createdAt),

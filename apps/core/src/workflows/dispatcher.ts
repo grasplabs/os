@@ -25,7 +25,13 @@ import {
 } from "./host.ts";
 import type { FailedStep, HostedRun, RunStep } from "./host.ts";
 import { paramValues } from "./params.ts";
-import { appRecord, endRun, findRun, recordWaiting } from "./runs.ts";
+import {
+  appRecord,
+  endRun,
+  findRun,
+  recordGoingOn,
+  recordWaiting,
+} from "./runs.ts";
 import type { RunRow, Stopped } from "./runs.ts";
 
 // The one Workflow of a deployment (`WORKFLOWS` in wrangler.jsonc). Every
@@ -179,11 +185,24 @@ const runWorkflow = async (
       files,
       env: bindings,
     });
+    // The feature the run waits on, as its row has it (`recordWaiting`):
+    // kept here so going on past a wait writes only when there is one.
+    let { waitingFor } = row;
     const host = new RunHost(env, step, run, {
       stepFailed,
       engineStopped: () => engineError !== undefined,
       waiting: async (why) => {
         await recordWaiting(env, row, why);
+        if (why.reason === "switched_off") {
+          waitingFor = why.feature;
+        }
+      },
+      goesOn: async (features) => {
+        if (!features.some((feature) => feature === waitingFor)) {
+          return;
+        }
+        await recordGoingOn(env, row, features);
+        waitingFor = null;
       },
       callApp: async (caller, method, args) =>
         await callApp(env, run.app, caller, method, args),

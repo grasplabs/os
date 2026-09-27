@@ -7,6 +7,78 @@ import { expect, vi } from "vite-plus/test";
 
 import { allEvents } from "./audit-events.ts";
 
+/** What runs a statement against the database: each fails when broken. */
+const statementRuns = new Set<PropertyKey>(["run", "all", "raw", "first"]);
+
+/** `target`'s `key`, a method bound to it, as a proxy passes it through. */
+const through = (target: object, key: PropertyKey): unknown => {
+  const value: unknown = Reflect.get(target, key);
+  if (typeof value !== "function") {
+    return value;
+  }
+  const bound: unknown = value.bind(target);
+  return bound;
+};
+
+/** A clear of a run's `waiting_for`, as drizzle writes it. */
+const clearsWaitingFor = /update "workflow_runs" set "waiting_for" = /iu;
+
+/**
+ * Breaks the core database (`env.DB`) for one kind of write: clearing a
+ * run's `waiting_for` as it goes on past a wait, which fails as D1 can
+ * (overloaded, timed out) until `mend`. Everything else goes through.
+ * `failures` counts the clears refused.
+ */
+export const failingGoingOn = (): {
+  failures: () => number;
+  mend: () => void;
+} => {
+  const db = env.DB;
+  let failures = 0;
+  const failed = (statement: D1PreparedStatement): D1PreparedStatement =>
+    new Proxy(statement, {
+      get: (target, key) => {
+        if (statementRuns.has(key)) {
+          return async () => {
+            failures += 1;
+            await Promise.resolve();
+            throw new Error("D1_ERROR: broken for the test");
+          };
+        }
+        return through(target, key);
+      },
+    });
+  const prepared = (statement: D1PreparedStatement): D1PreparedStatement =>
+    new Proxy(statement, {
+      get: (target, key) => {
+        if (key === "bind") {
+          return (...values: unknown[]) => {
+            const bound = target.bind(...values);
+            return values[0] === null ? failed(bound) : bound;
+          };
+        }
+        return through(target, key);
+      },
+    });
+  env.DB = new Proxy(db, {
+    get: (target, key) => {
+      if (key === "prepare") {
+        return (query: string) => {
+          const statement = target.prepare(query);
+          return clearsWaitingFor.test(query) ? prepared(statement) : statement;
+        };
+      }
+      return through(target, key);
+    },
+  });
+  return {
+    failures: () => failures,
+    mend: () => {
+      env.DB = db;
+    },
+  };
+};
+
 /**
  * Stops a run's execution, as a crash or a deploy does; resuming it runs
  * the workflow again from its start, loaded anew, finished steps replayed.
@@ -67,6 +139,44 @@ export const sleeping = async (run: string, step: string): Promise<void> => {
       // The engine names a sleep after its step, with a count behind.
       expect(
         value.type === "sleep_started" && value.stepName.startsWith(step)
+      ).toBeTruthy();
+    },
+    { timeout: 10_000, interval: 100 }
+  );
+};
+
+/**
+ * Once the run, `stopped` and `resumed`, began a sleep in a step whose
+ * name starts with `step` in the resumed execution: as `sleeping`, but
+ * only a sleep the engine reports after it resumed the run counts. The
+ * resumed execution has then replayed every step before that sleep.
+ */
+export const sleepingOnceResumed = async (
+  run: string,
+  step: string
+): Promise<void> => {
+  const instance = await env.WORKFLOWS.get(run);
+  using events = await instance.subscribe({
+    filter: ["workflow_paused", "workflow_running", "sleep_started"],
+  });
+  let paused = false;
+  let resumedRun = false;
+  await vi.waitFor(
+    async () => {
+      const { done, value } = await events.next();
+      if (done === true) {
+        throw new Error(`Run ${run} ended before it slept in ${step}`);
+      }
+      if (value.type === "workflow_paused") {
+        paused = true;
+        resumedRun = false;
+      } else if (value.type === "workflow_running" && paused) {
+        resumedRun = true;
+      }
+      expect(
+        resumedRun &&
+          value.type === "sleep_started" &&
+          value.stepName.startsWith(step)
       ).toBeTruthy();
     },
     { timeout: 10_000, interval: 100 }
