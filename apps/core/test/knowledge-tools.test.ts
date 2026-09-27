@@ -387,6 +387,46 @@ describe("an agent's Knowledge tools", setUpTime, () => {
     });
   });
 
+  it("say when a document has more backlinks than a follow returns", async () => {
+    const admin = await personOf("admin");
+    const agent = newAgent();
+    const { id: collectionId } = await admin.knowledge.createCollection({
+      name: `Popular ${unique()}`,
+      access: "everyone",
+    });
+    const targetId = await save(admin, collectionId, "target.md", "# Target");
+    // As many documents linking to it as a follow returns, in path order.
+    const paths = Array.from(
+      { length: followMaxEntries },
+      (_, index) => `linking-${String(index).padStart(3, "0")}.md`
+    );
+    await Promise.all(
+      paths.map(
+        async (path) =>
+          await save(admin, collectionId, path, "# Linking\nSee [[target]].")
+      )
+    );
+    await requestGranted(idp, admin, readCollection(agent, collectionId));
+    const knowledge = await toolsOf(agent, admin);
+    const full = await knowledge.follow(targetId);
+    // One more than it returns.
+    await save(admin, collectionId, "zz-last.md", "# Last\nSee [[target]].");
+    const over = await knowledge.follow(targetId);
+    expect({
+      full: {
+        backlinks: full.backlinks.map(({ path }) => path),
+        truncated: full.truncated,
+      },
+      over: {
+        backlinks: over.backlinks.map(({ path }) => path),
+        truncated: over.truncated,
+      },
+    }).toStrictEqual({
+      full: { backlinks: paths, truncated: false },
+      over: { backlinks: paths, truncated: true },
+    });
+  });
+
   it("list the collections and skills they may read in a small catalog, without restricting their chat", async () => {
     const admin = await personOf("admin");
     const agent = newAgent();
