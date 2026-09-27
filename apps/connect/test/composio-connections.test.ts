@@ -583,6 +583,23 @@ describe("a Composio connection", () => {
     await expect(cleanupsLeft()).resolves.toBe(0);
   });
 
+  it("logs a cleanup Composio keeps refusing, once it has failed ten times", async () => {
+    const admin = someone("admin");
+    const connectionId = await connectHubSpot(admin);
+    composio.state.failing = "DELETE /connected_accounts/";
+    await exports.default.disconnect({ person: admin, connectionId });
+    await env.DB.prepare("UPDATE composio_cleanups SET attempts = 9").run();
+    const errors: unknown[] = [];
+    vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args);
+    });
+    await afterMinutes(2, async () => {
+      await exports.default.scheduled();
+    });
+    expect(JSON.stringify(errors)).toContain("composio.cleanup_stuck");
+    expect(JSON.stringify(errors)).not.toContain(connectionId);
+  });
+
   it("takes no calls while connect has no Composio key", async () => {
     const connectionId = await connectHubSpot(someone("admin"));
     await expect(

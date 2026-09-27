@@ -177,6 +177,12 @@ const cleanUpAtComposio = async (
   return left;
 };
 
+/**
+ * Failed tries after which a cleanup is logged as stuck, at every further
+ * try: about a day and a half in, with the waits doubling from a minute.
+ */
+const stuckAttempts = 10;
+
 /** Most cleanups one cron run tries: a few requests each. */
 const cleanupBatchSize = 10;
 
@@ -201,6 +207,17 @@ export const retryComposioCleanups = async (env: Env): Promise<void> => {
     // oxlint-disable-next-line no-await-in-loop -- a small batch, in turn
     const left = await deleteAtComposio(key, cleanup);
     const row = eq(composioCleanups.id, cleanup.id);
+    const attempts = cleanup.attempts + 1;
+    if (!isNothing(left) && attempts >= stuckAttempts) {
+      // Someone should look: logged by area, never by ID.
+      log.error("composio.cleanup_stuck", {
+        attempts,
+        left: areas
+          .filter(([field]) => typeof left[field] === "string")
+          .map(([, area]) => area)
+          .join(","),
+      });
+    }
     // oxlint-disable-next-line no-await-in-loop -- a small batch, in turn
     await (isNothing(left)
       ? db.delete(composioCleanups).where(row)
@@ -210,10 +227,8 @@ export const retryComposioCleanups = async (env: Env): Promise<void> => {
             serverId: left.serverId ?? null,
             connectedAccountId: left.connectedAccountId ?? null,
             authConfigId: left.authConfigId ?? null,
-            attempts: cleanup.attempts + 1,
-            retryAt: new Date(
-              now.getTime() + retryDelayMs(cleanup.attempts + 1)
-            ),
+            attempts,
+            retryAt: new Date(now.getTime() + retryDelayMs(attempts)),
           })
           .where(row));
   }
