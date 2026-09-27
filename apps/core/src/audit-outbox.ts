@@ -17,6 +17,7 @@ import { canonicalJson } from "@grasp-os/shared/json";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { waitUntil } from "cloudflare:workers";
 import { sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import type { BatchItem, BatchResponse } from "drizzle-orm/batch";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
@@ -323,7 +324,7 @@ export const drainAuditOutboxes = async (env: Env): Promise<number> => {
 };
 
 /** What draining core's own outboxes needs. */
-type OutboxEnv = AuditLogEnv & Pick<Env, "KNOWLEDGE">;
+export type OutboxEnv = AuditLogEnv & Pick<Env, "KNOWLEDGE">;
 
 /** Core's or Knowledge's database, as `drizzle` gives it: with its binding. */
 type AuditedDatabase = DrizzleD1Database & { $client: D1Database };
@@ -350,18 +351,30 @@ export const outboxed = (db: DrizzleD1Database, entry: AuditEntry) => {
 };
 
 /**
- * Stores the event for `entry` only if the batch's previous statement
- * changed a row, so a conditional update that changed nothing records
- * nothing.
+ * Stores the event for `entry` only if `condition` holds when the
+ * statement runs, in the batch it runs in: so what the batch's earlier
+ * statements wrote decides it, and no concurrent change can come between.
  */
-export const outboxedIfChanged = (db: DrizzleD1Database, entry: AuditEntry) => {
+export const outboxedWhere = (
+  db: DrizzleD1Database,
+  entry: AuditEntry,
+  condition: SQL
+) => {
   const event = createAuditEvent(entry, "core");
   return db
     .insert(auditOutbox)
     .select(
-      sql`SELECT ${event.id}, ${JSON.stringify(event)}, ${Date.now()} WHERE changes() > 0`
+      sql`SELECT ${event.id}, ${JSON.stringify(event)}, ${Date.now()} WHERE ${condition}`
     );
 };
+
+/**
+ * Stores the event for `entry` only if the batch's previous statement
+ * changed a row, so a conditional update that changed nothing records
+ * nothing.
+ */
+export const outboxedIfChanged = (db: DrizzleD1Database, entry: AuditEntry) =>
+  outboxedWhere(db, entry, sql`changes() > 0`);
 
 /**
  * Appends the event for `entry` straight to the log, with no outbox: for
@@ -416,7 +429,7 @@ export const auditedBatch = async <
   U extends BatchItem<"sqlite">,
   T extends Readonly<[U, ...U[]]>,
 >(
-  env: Env,
+  env: OutboxEnv,
   db: AuditedDatabase,
   statements: T
 ): Promise<BatchResponse<T>> => {

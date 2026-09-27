@@ -10,16 +10,24 @@ import { and, eq, inArray, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import type { OutboxEnv } from "./audit-outbox.ts";
 import { inList } from "./db/d1.ts";
 import { collections, documents } from "./db/knowledge/schema.ts";
 import { featureEnabled } from "./features.ts";
+import {
+  budgetMonth,
+  budgetsFor,
+  checkBudgets,
+  budgetsSchema,
+} from "./model-budgets.ts";
+import type { Budgeted } from "./model-budgets.ts";
 import { isRestricted } from "./restricted.ts";
 import type { RestrictedEnv, WorkContext } from "./restricted.ts";
 
 // The client's rules for model calls, which the gateway checks on every
 // call before anything is sent (models.ts): beyond the allowlist, which
 // always applies, whether a call must stay with a model hosted in the EU,
-// and which models may take sensitive data.
+// which models may take sensitive data, and what calls may cost.
 //
 // The rules are deployment config, part of the `MODEL_GATEWAY` var the
 // console sets, like the allowlist: they are what the client agreed to, so
@@ -43,6 +51,9 @@ import type { RestrictedEnv, WorkContext } from "./restricted.ts";
 // So does a call whose provenance names a sensitive collection, or one of
 // its documents, or whose data came from a connection the config marks
 // sensitive. Only the models the data rule lists may take such a call.
+//
+// And budgets: a call is refused once one of its budgets is used up for
+// the month (model-budgets.ts).
 
 /**
  * The rules' part of the gateway config: `modelRef` checks one
@@ -71,6 +82,7 @@ export const modelRulesShape = (modelRef: z.ZodType<string>) => ({
       connections: z.array(connectionIdSchema).default([]),
     })
     .optional(),
+  budgets: budgetsSchema,
 });
 
 export type ModelRules = z.output<
@@ -110,6 +122,8 @@ export interface Judged {
    * when no data rule asked.
    */
   sensitive: Sensitive | undefined;
+  /** The budgets it counts against, which its cost is added to. */
+  budgets: Budgeted[];
 }
 
 /** The connections whose data fed the prompt, or may have. */
@@ -200,6 +214,7 @@ export interface Refusal {
     | "model.not_allowed"
     | "model.eu_only"
     | "model.sensitive_data"
+    | "model.over_budget"
     | "permission.context_invalid";
   because?: string;
 }
@@ -233,12 +248,17 @@ const restrictedWork = async (
  * no call gets past a rule with a context that isn't its own, or none.
  */
 export const judgeCall = async (
-  env: RestrictedEnv & Pick<Env, "FEATURES" | "KNOWLEDGE">,
+  env: RestrictedEnv &
+    OutboxEnv &
+    Pick<Env, "FEATURES" | "KNOWLEDGE" | "MODEL_BUDGET_MONTH">,
   rules: ModelRules,
   input: RulesInput
 ): Promise<{ ok: true; judged: Judged } | ({ ok: false } & Refusal)> => {
   if (!featureEnabled(env, "model_rules")) {
-    return { ok: true, judged: { euOnly: undefined, sensitive: undefined } };
+    return {
+      ok: true,
+      judged: { euOnly: undefined, sensitive: undefined, budgets: [] },
+    };
   }
   const restricted = await restrictedWork(env, input);
   if (restricted === undefined) {
@@ -259,5 +279,10 @@ export const judgeCall = async (
   ) {
     return { ok: false, code: "model.sensitive_data", because: sensitive };
   }
-  return { ok: true, judged: { euOnly, sensitive } };
+  const budgets = budgetsFor(rules.budgets, input, budgetMonth(env));
+  const usedUp = await checkBudgets(env, input.trigger, budgets);
+  if (usedUp !== undefined) {
+    return { ok: false, code: "model.over_budget", because: usedUp.scope };
+  }
+  return { ok: true, judged: { euOnly, sensitive, budgets } };
 };

@@ -556,3 +556,51 @@ export const workflowParamValues = sqliteTable(
     primaryKey({ columns: [table.appId, table.workflowId, table.param] }),
   ]
 );
+
+/**
+ * What model calls cost, in millionths of a US dollar, per budget and
+ * month (model-rules.ts): `scope` is the budget's (`deployment`, `workflow`
+ * or `user`), `key` what it counts within it (the deployment, a workflow
+ * or a person, as JSON), and `period` the UTC month, such as `2026-09`.
+ * Only ever added to, in one statement, so concurrent calls never lose
+ * each other's cost.
+ */
+export const modelSpend = sqliteTable(
+  "model_spend",
+  {
+    scope: text({ enum: ["deployment", "workflow", "user"] }).notNull(),
+    key: text().notNull(),
+    period: text().notNull(),
+    spentMicros: integer("spent_micros").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.scope, table.key, table.period] })]
+);
+
+/**
+ * The budget alerts admins got, one per budget, month, kind (`alert` at
+ * the alert threshold, `exhausted` at the limit) and threshold value in
+ * millionths of a dollar (model-budgets.ts): an alert is stored only with
+ * a new row here, so each value alerts once a month, however often the
+ * config changes it.
+ */
+export const modelBudgetAlerts = sqliteTable(
+  "model_budget_alerts",
+  {
+    scope: text({ enum: ["deployment", "workflow", "user"] }).notNull(),
+    key: text().notNull(),
+    period: text().notNull(),
+    kind: text({ enum: ["alert", "exhausted"] }).notNull(),
+    thresholdMicros: integer("threshold_micros").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.scope,
+        table.key,
+        table.period,
+        table.kind,
+        table.thresholdMicros,
+      ],
+    }),
+  ]
+);

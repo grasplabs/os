@@ -31,6 +31,11 @@ interface __BaseEnv_Env {
    * feature (src/workflows/host.ts).
    */
   WORKFLOW_OFF_WAIT_MS?: string;
+  /**
+   * Tests only: the UTC month model budgets count in, such as `2031-01`
+   * (src/model-budgets.ts).
+   */
+  MODEL_BUDGET_MONTH?: string;
   /** Tests only: a shorter limit for one call into an App (src/app.ts). */
   APP_CALL_TIMEOUT_MS?: string;
   /** Local dev only (src/router-secret.ts). */
