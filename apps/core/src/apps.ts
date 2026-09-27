@@ -28,9 +28,10 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { appsFoundBy, builtinOwner, requireAppRole } from "./app-access.ts";
+import { appsFoundBy, requireAppRole } from "./app-access.ts";
 import type { Person } from "./app-access.ts";
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
+import { builtinOwner } from "./builtin-app-id.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
 import { featureEnabled } from "./features.ts";

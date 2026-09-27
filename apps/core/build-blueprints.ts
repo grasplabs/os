@@ -9,12 +9,18 @@
  * Each built-in is a folder under apps/core/blueprints/, named by its id,
  * which never changes: renaming the folder makes another App. In it:
  *
- * - `blueprint.json`: `{ "name": …, "description": … }`, as for any App;
+ * - `blueprint.json`: `{ "name": …, "description": … }`, as for any App,
+ *   and optionally `"permissions"`: what each App created from it asks
+ *   for, as `[{ "object": { "type": "collection", "collectionId": … },
+ *   "actions": […], "binding": … }]`, each a request an admin grants on
+ *   the copy (the built-in itself never runs);
  * - `files/`: the App's files, by path, written against `@grasp-os/sdk`
  *   like any App's.
  *
  * Each is checked here as the install would check it, so a bad one fails
- * the build rather than the install: its App ID, its manifest, and its
+ * the build rather than the install: its App ID, its manifest (its
+ * permissions as any request's are checked, but for the collection, which
+ * may not exist until an admin grants the copy's request), and its
  * files as any App's write checks them (paths, no hidden files, each
  * file's size and their number), and their total size as any version's.
  */
@@ -30,6 +36,7 @@ import path from "node:path";
 
 import { appLimits } from "@grasp-os/shared/app-limits";
 import { fileChangesSchema, fromBlueprintSchema } from "@grasp-os/shared/apps";
+import { declaredPermissionSchema } from "@grasp-os/shared/permissions";
 import { z } from "zod";
 
 import type { BuiltinBlueprint } from "#blueprints";
@@ -50,6 +57,27 @@ export const testBlueprintsModule = path.join(
   import.meta.dirname,
   "dist/test-blueprints.js"
 );
+
+/** Most permissions one built-in declares: each is one install statement. */
+export const declaredMaxPermissions = 16;
+
+/**
+ * A `blueprint.json`: the App's name and description, as for any App,
+ * and what each copy asks for, each binding name once, as an App's
+ * permissions have them.
+ */
+const manifestSchema = fromBlueprintSchema.extend({
+  permissions: z
+    .array(declaredPermissionSchema)
+    .max(declaredMaxPermissions)
+    .refine(
+      (permissions) =>
+        new Set(permissions.map(({ binding }) => binding)).size ===
+        permissions.length,
+      { message: "Each binding name once" }
+    )
+    .default([]),
+});
 
 /** A folder name that is safe in an App ID, a URL and an audit event. */
 const idSchema = z.string().regex(/^[a-z0-9]+(?:-[a-z0-9]+)*$/u);
@@ -80,7 +108,7 @@ const blueprintsIn = (dir: string): BuiltinBlueprint[] =>
       } catch {
         throw new Error(`${where}: its name makes no valid App ID (too long)`);
       }
-      const manifest = fromBlueprintSchema.safeParse(
+      const manifest = manifestSchema.safeParse(
         JSON.parse(readFileSync(path.join(folder, "blueprint.json"), "utf-8"))
       );
       if (!manifest.success) {

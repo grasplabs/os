@@ -56,6 +56,12 @@ export const maskFieldsSchema = z
     message: "Each field once",
   });
 
+/** A Knowledge collection, as a permission's object. */
+const collectionObjectSchema = z.strictObject({
+  type: z.literal("collection"),
+  collectionId: collectionIdSchema,
+});
+
 /**
  * What a permission gives access to: a connection (all of it, or one
  * resource in it, such as one mailbox), a Knowledge collection, or one
@@ -73,10 +79,7 @@ export const permissionObjectSchema = z.discriminatedUnion("type", [
      */
     mask: maskFieldsSchema.min(1).optional(),
   }),
-  z.strictObject({
-    type: z.literal("collection"),
-    collectionId: collectionIdSchema,
-  }),
+  collectionObjectSchema,
   z.strictObject({
     type: z.literal("workflow"),
     appId: appIdSchema,
@@ -177,50 +180,76 @@ export const bindingNameSchema = z
     message: "A name the platform uses itself",
   });
 
-/** What a person asks for: the subject, the object, its actions, the name. */
-export const permissionRequestSchema = z
-  .strictObject({
-    subject: permissionSubjectSchema,
-    object: permissionObjectSchema,
-    actions: z
-      .array(permissionActionSchema)
-      .min(1)
-      .max(permissionMaxActions)
-      .refine((actions) => new Set(actions).size === actions.length, {
-        message: "Each action once",
-      }),
-    binding: bindingNameSchema,
-  })
-  .superRefine(({ object, actions }, context) => {
-    for (const action of actions) {
-      if (!isActionOf(object.type, action)) {
-        context.addIssue({
-          code: "custom",
-          path: ["actions"],
-          message: `A ${object.type} has no action ${action}`,
-        });
-      }
-    }
-    // The audit log records the actions as one identifier-sized value.
-    if (actions.join(" ").length > identifierMaxLength) {
+/** What a permission gives: the object, its actions and the stub's name. */
+const grantShape = {
+  object: permissionObjectSchema,
+  actions: z
+    .array(permissionActionSchema)
+    .min(1)
+    .max(permissionMaxActions)
+    .refine((actions) => new Set(actions).size === actions.length, {
+      message: "Each action once",
+    }),
+  binding: bindingNameSchema,
+};
+
+/**
+ * Refuses an action the object doesn't have, and actions or masked fields
+ * too long for the audit log.
+ */
+const checkGrant = (
+  { object, actions }: { object: PermissionObject; actions: readonly string[] },
+  context: z.RefinementCtx
+): void => {
+  for (const action of actions) {
+    if (!isActionOf(object.type, action)) {
       context.addIssue({
         code: "custom",
         path: ["actions"],
-        message: "Too many actions for one permission",
+        message: `A ${object.type} has no action ${action}`,
       });
     }
-    // And the masked fields too.
-    const mask = object.type === "connection" ? (object.mask ?? []) : [];
-    if (mask.join(" ").length > identifierMaxLength) {
-      context.addIssue({
-        code: "custom",
-        path: ["object", "mask"],
-        message: "Too many masked fields for one permission",
-      });
-    }
-  });
+  }
+  // The audit log records the actions as one identifier-sized value.
+  if (actions.join(" ").length > identifierMaxLength) {
+    context.addIssue({
+      code: "custom",
+      path: ["actions"],
+      message: "Too many actions for one permission",
+    });
+  }
+  // And the masked fields too.
+  const mask = object.type === "connection" ? (object.mask ?? []) : [];
+  if (mask.join(" ").length > identifierMaxLength) {
+    context.addIssue({
+      code: "custom",
+      path: ["object", "mask"],
+      message: "Too many masked fields for one permission",
+    });
+  }
+};
+
+/** What a person asks for: the subject, the object, its actions, the name. */
+export const permissionRequestSchema = z
+  .strictObject({ subject: permissionSubjectSchema, ...grantShape })
+  .superRefine(checkGrant);
 /** A permission request as a client sends it, with plain string IDs. */
 export type PermissionRequest = z.input<typeof permissionRequestSchema>;
+
+/**
+ * A permission a built-in blueprint declares (its `blueprint.json`): a
+ * request without its subject, which is every App created from it. Only
+ * a collection: the one thing a built-in can name the same way in every
+ * deployment (the Playbook, say), where connections have IDs of their
+ * own in each.
+ */
+export const declaredPermissionSchema = z
+  .strictObject({
+    ...grantShape,
+    object: collectionObjectSchema,
+  })
+  .superRefine(checkGrant);
+export type DeclaredPermission = z.infer<typeof declaredPermissionSchema>;
 
 /**
  * Requested: asked for, allows nothing yet. Active: granted, allows its
@@ -262,12 +291,15 @@ export interface PermissionsApi {
   request: (request: PermissionRequest) => Promise<Permission>;
   /**
    * Grants a requested permission, the admin's own request included.
-   * Admins only, never Grasp staff; audited.
+   * Admins only, never Grasp staff; audited. Refused for a built-in
+   * blueprint's own permissions (`permission.builtin`): they are granted on
+   * the Apps created from it.
    */
   grant: (id: string) => Promise<Permission>;
   /**
    * Revokes a permission; the next call that needs it is refused. Admins
-   * only, never Grasp staff; audited.
+   * only, never Grasp staff; audited. Refused for a built-in blueprint's
+   * own permissions (`permission.builtin`), which only a release changes.
    */
   revoke: (id: string) => Promise<Permission>;
   /** Every permission, or one App's or agent's. Admins and builders. */
@@ -337,4 +369,6 @@ export const permissionErrors = defineErrorFamily({
   "permission.not_requested": "Only a requested permission can be granted.",
   "permission.conflict":
     "This App or agent already has a permission with that binding name.",
+  "permission.builtin":
+    "A built-in blueprint's permissions are what the Apps created from it ask for: grant or revoke them on those Apps.",
 });

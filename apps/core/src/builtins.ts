@@ -104,12 +104,15 @@ export const fingerprintOf = async (env: Env, of: Release): Promise<string> => {
   return await sha256Hex(
     canonicalJson({
       blueprints: blueprintsEnabled(env)
-        ? of.blueprints.map(({ id, name, description, files }) => ({
-            id,
-            name,
-            description,
-            files: { ...files },
-          }))
+        ? of.blueprints.map(
+            ({ id, name, description, permissions, files }) => ({
+              id,
+              name,
+              description,
+              permissions: [...permissions],
+              files: { ...files },
+            })
+          )
         : null,
       skills: skillsOn
         ? of.skills.map(({ path, text }) => ({ path, text }))
