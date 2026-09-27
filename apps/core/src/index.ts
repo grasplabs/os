@@ -5,6 +5,7 @@ import { drainAuditOutboxes } from "./audit-outbox.ts";
 import { consumeLeftoverAuditQueue } from "./audit-queue-leftovers.ts";
 import { archiveAuditLog } from "./audit-retention.ts";
 import { handleRequest } from "./entry.ts";
+import { indexApps } from "./knowledge/apps-collection.ts";
 import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import { retryDisconnects } from "./members.ts";
 
@@ -31,8 +32,10 @@ export default {
   // (see src/audit-outbox.ts), personal connections of removed people still
   // connected (see src/members.ts), Apps copied from a blueprint left
   // pending (see src/app-blueprints.ts), audit events past retention (see
-  // src/audit-retention.ts), and the release's Grasp skills (see
-  // src/knowledge/grasp-skills.ts).
+  // src/audit-retention.ts), the release's Grasp skills (see
+  // src/knowledge/grasp-skills.ts), and Apps whose entry in the Apps
+  // collection isn't of their current version (see
+  // src/knowledge/apps-collection.ts).
   scheduled: async (_controller, env) => {
     const results = await Promise.allSettled([
       drainAuditOutboxes(env),
@@ -40,6 +43,7 @@ export default {
       sweepPendingCopies(env),
       archiveAuditLog(env),
       syncGraspSkills(env),
+      indexApps(env),
     ]);
     for (const result of results) {
       if (result.status === "rejected") {

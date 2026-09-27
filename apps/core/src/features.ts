@@ -17,7 +17,8 @@ import { z } from "zod";
 // stubs (`knowledge`), an agent's memory and its saves of it (`memory`,
 // which gives every context no memory while off), purging Knowledge
 // (`knowledge_purge`), the Playbook's collection and record saves
-// (`playbook`), syncing and copying skills (`skills`), connection calls
+// (`playbook`), syncing and copying skills (`skills`), indexing Apps
+// into the Apps collection (`apps_collection`), connection calls
 // (`connections`), Composio's toolkits in the catalog and connecting them
 // (`composio`), App methods
 // (`apps`), starting runs and every step of one (`workflows`), and opening
@@ -71,6 +72,13 @@ export type Feature =
    * still read and searched like any document.
    */
   | "skills"
+  /**
+   * The Apps collection (knowledge/apps-collection.ts): each App's
+   * AGENTS.md, at its current version, indexed into Knowledge where those
+   * who may open the App find it; needs `knowledge` on too. While off,
+   * nothing is indexed and the collection's entries are found by nobody.
+   */
+  | "apps_collection"
   | "connections"
   /**
    * Composio's toolkits in the catalog, and starting and finishing

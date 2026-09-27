@@ -23,7 +23,7 @@ import writeBoardPage from "../../skills/write-board-page/SKILL.md";
 import { outboxed } from "../audit-outbox.ts";
 import { collections, documents, versions } from "../db/knowledge/schema.ts";
 import { featureEnabled, requireFeature } from "../features.ts";
-import { allowedCollections } from "./access.ts";
+import { allowedFor } from "./app-entries.ts";
 import { ensureCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
 import { personWriter, readableDocument, writeVersion } from "./documents.ts";
@@ -258,7 +258,7 @@ export const copySkill = async (
   const db = drizzle(env.KNOWLEDGE);
   const { document, collection } = await readableDocument(
     db,
-    await allowedCollections(env, db, { type: "person", person }),
+    await allowedFor(env, db, { type: "person", person }),
     documentId
   );
   if (

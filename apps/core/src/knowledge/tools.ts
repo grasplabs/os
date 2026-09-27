@@ -25,8 +25,9 @@ import {
   links,
   sections,
 } from "../db/knowledge/schema.ts";
-import { allowedCollections, noteProvenance } from "./access.ts";
+import { noteProvenance } from "./access.ts";
 import type { Reader } from "./access.ts";
+import { allowedFor } from "./app-entries.ts";
 import {
   backlinkRows,
   documentMaxLinks,
@@ -38,7 +39,7 @@ import {
 // The agent's Knowledge tools (Code Mode: a typed API it filters in code):
 // a small catalog always in its context, then search (search.ts), read and
 // follow on demand. They read through the same access check as every other
-// read (`allowedCollections`), and every read but the catalog goes through
+// read (`allowedFor`), and every read but the catalog goes through
 // `noteProvenance`: marked with where it came from, restricting an App or
 // agent's context when it is sensitive, and recorded in the audit log.
 
@@ -108,7 +109,7 @@ export const catalog = async (
   reader: Reader
 ): Promise<KnowledgeCatalog> => {
   const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedCollections(env, db, reader);
+  const allowed = await allowedFor(env, db, reader);
   const collectionRows = await db
     .select({
       id: collections.id,
@@ -117,7 +118,7 @@ export const catalog = async (
       sensitive: collections.sensitive,
     })
     .from(collections)
-    .where(allowed)
+    .where(allowed.collections)
     .orderBy(asc(collections.name), asc(collections.id))
     .limit(catalogMaxEntries + 1);
   const skillRows = await db
@@ -133,7 +134,7 @@ export const catalog = async (
       and(
         eq(documents.type, "skill"),
         eq(collections.sensitive, false),
-        allowed
+        allowed.documents()
       )
     )
     .orderBy(asc(documents.title), asc(documents.id))
@@ -197,7 +198,7 @@ export const read = async (
     return { ...summary, section: null, text: version.text, provenance };
   }
   const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedCollections(env, db, reader);
+  const allowed = await allowedFor(env, db, reader);
   const id = documentIdSchema.safeParse(documentId);
   // The section is read in the same query as the access check, as a whole
   // document is (`getDocument`).
@@ -217,7 +218,7 @@ export const read = async (
             eq(sections.position, section)
           )
         )
-        .where(and(eq(documents.id, id.data), allowed))
+        .where(and(eq(documents.id, id.data), allowed.documents()))
         .get()
     : undefined;
   if (!found) {
@@ -276,7 +277,7 @@ export const follow = async (
   documentId: unknown
 ): Promise<FollowResult> => {
   const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedCollections(env, db, reader);
+  const allowed = await allowedFor(env, db, reader);
   const { document, collection } = await readableDocument(
     db,
     allowed,
@@ -290,11 +291,15 @@ export const follow = async (
       title: target.title,
     })
     .from(links)
+    // The document's own collection, which is readable: for which of its
+    // documents the reader may read (the Apps collection's, app-entries.ts).
+    .innerJoin(collections, eq(collections.id, links.toCollectionId))
     .leftJoin(
       target,
       and(
         eq(target.collectionId, links.toCollectionId),
-        eq(target.path, links.toPath)
+        eq(target.path, links.toPath),
+        allowed.documents(target.path)
       )
     )
     .where(
@@ -335,7 +340,7 @@ export const follow = async (
                 gte(documents.path, folder),
                 lt(documents.path, pastFolder(folder))
               ),
-          allowed
+          allowed.documents()
         )
       )
       .orderBy(asc(documents.path))

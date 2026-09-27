@@ -4,13 +4,14 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { canBuild, isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, eq, exists, or, sql } from "drizzle-orm";
+import { and, eq, exists, isNull, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { sourcesOf, sourcesOfApps, unreadableBy } from "./app-provenance.ts";
 import { apps, appMembers, teamMembers } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
+import { featureEnabled } from "./features.ts";
 
 // Who may do what in an App (App roles). An App is open to:
 //
@@ -180,6 +181,21 @@ export const appsOpenTo = (env: Env, by: Person): SQL | undefined => {
         .where(and(eq(appMembers.appId, apps.id), rowsOf(by)))
     )
   );
+};
+
+/**
+ * The Apps `by` finds, as a condition on `apps`: those in use (never one
+ * created from a blueprint that is still pending, app-blueprints.ts) that
+ * they have a role in (`appsOpenTo`). While `app_sharing` is off, the rule
+ * from before Apps had roles: every App for admins and builders, and none
+ * for users.
+ */
+export const appsFoundBy = (env: Env, by: Person): SQL => {
+  const inUse = isNull(apps.pendingSince);
+  if (!featureEnabled(env, "app_sharing")) {
+    return canBuild(by.role) ? inUse : sql`0`;
+  }
+  return and(inUse, appsOpenTo(env, by)) ?? inUse;
 };
 
 /**

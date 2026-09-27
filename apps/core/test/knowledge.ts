@@ -8,6 +8,35 @@ import { z } from "zod";
 
 import { callAuth, unique } from "./sign-in.ts";
 
+const insertsVersion = /^insert into "versions"/iu;
+
+/**
+ * The Knowledge database, but running `first` once, just before the first
+ * batch that writes a version: another writer that gets there first.
+ */
+export const knowledgeRacing = (first: () => Promise<void>): D1Database => {
+  const real = env.KNOWLEDGE;
+  let writing = false;
+  let raced = false;
+  return {
+    prepare: (query) => {
+      writing ||= insertsVersion.test(query);
+      return real.prepare(query);
+    },
+    batch: async <T>(statements: D1PreparedStatement[]) => {
+      if (writing && !raced) {
+        raced = true;
+        await first();
+      }
+      return await real.batch<T>(statements);
+    },
+    exec: async (query) => await real.exec(query),
+    // oxlint-disable-next-line typescript/no-deprecated -- D1Database still has it
+    dump: async () => await real.dump(),
+    withSession: (constraint) => real.withSession(constraint),
+  };
+};
+
 /** A new team with `members`, made by an admin; returns its ID. */
 export const newTeam = async (
   admin: { session: string },

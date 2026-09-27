@@ -13,6 +13,7 @@ import {
   proposeVersion,
   setCurrentVersion,
 } from "./apps.ts";
+import { indexAppNow } from "./knowledge/apps-collection.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -55,10 +56,17 @@ export class AppVersionsRpc extends RpcTarget implements AppVersionsApi {
     );
   }
 
+  /**
+   * Makes a version current, then indexes the App into the Apps collection
+   * (knowledge/apps-collection.ts): its entry holds the new version once
+   * this returns, unless indexing failed or raced another; the cron
+   * trigger then heals it within a minute.
+   */
   async setCurrent(app: string, version: number): Promise<App> {
-    return await withPerson(
-      this.#check,
-      async (by) => await setCurrentVersion(this.#env, by, app, version)
-    );
+    return await withPerson(this.#check, async (by) => {
+      const current = await setCurrentVersion(this.#env, by, app, version);
+      await indexAppNow(this.#env, current.id);
+      return current;
+    });
   }
 }

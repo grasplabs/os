@@ -14,8 +14,9 @@ import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { derivedHmacKey } from "../derived-keys.ts";
-import { allowedCollections, noteProvenance } from "./access.ts";
+import { noteProvenance } from "./access.ts";
 import type { Reader, ReadRecord } from "./access.ts";
+import { allowedFor } from "./app-entries.ts";
 import { readableCollection } from "./collections.ts";
 
 // Full-text search over sections, in two FTS5 indexes kept by triggers on
@@ -32,7 +33,8 @@ import { readableCollection } from "./collections.ts";
 // search narrows as it gets longer.
 //
 // Access is part of the same statement (R11): a section of a collection
-// the reader can't read is never ranked, counted or returned. What comes
+// the reader can't read, or of an App's entry they may not find
+// (app-entries.ts), is never ranked, counted or returned. What comes
 // back is noted as a read (`noteProvenance`), so a search that finds
 // restricted data puts the App or agent's chat or App in restricted mode
 // before the results are handed over, as any read does.
@@ -309,7 +311,7 @@ export const search = async (
         collectionId: only,
       };
   const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedCollections(env, db, reader);
+  const allowed = await allowedFor(env, db, reader, scope);
   // Refused like any read of a collection the reader can't read. A search
   // in one collection reads from it whatever it finds: that nothing
   // matches says something of what it holds too. So the collection is
@@ -317,7 +319,9 @@ export const search = async (
   // even when nothing is found, or a delegate could probe it word by word
   // and send out what it learned.
   const scoped =
-    scope === undefined ? [] : [await readableCollection(db, allowed, scope)];
+    scope === undefined
+      ? []
+      : [await readableCollection(db, allowed.collections, scope)];
   if (terms.length === 0) {
     return {
       hits: [],
@@ -353,7 +357,7 @@ export const search = async (
       JOIN search_rows ON search_rows.id = matches.row_id
       JOIN documents ON documents.id = search_rows.document_id
       JOIN collections ON collections.id = documents.collection_id
-      WHERE ${allowed}
+      WHERE ${allowed.documents()}
         ${scope === undefined ? sql`` : sql`AND collections.id = ${scope}`}
         ${type === undefined ? sql`` : sql`AND documents.type = ${type}`}
     ),

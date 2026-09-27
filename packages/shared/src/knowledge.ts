@@ -25,7 +25,10 @@ export type CollectionAccess = z.infer<typeof collectionAccessSchema>;
 /**
  * Where a collection's documents come from: written here, uploaded, the
  * Playbook, shipped by Grasp, or derived from Apps. The last two are
- * read-only for people and agents: only the platform writes them.
+ * read-only for people and agents: only the platform writes them. The
+ * Apps collection holds each App's AGENTS.md, and each of its documents
+ * is found only by those who may open that App: a listing, read or search
+ * never shows the others.
  */
 export const collectionSourceSchema = z.enum([
   "here",
