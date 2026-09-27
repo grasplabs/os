@@ -17,9 +17,8 @@ import { featureEnabled } from "./features.ts";
 import {
   budgetMonth,
   budgetsFor,
+  checkBudgets,
   budgetsSchema,
-  noteUsedUp,
-  usedUpBudget,
 } from "./model-budgets.ts";
 import type { Budgeted } from "./model-budgets.ts";
 import { isRestricted } from "./restricted.ts";
@@ -281,9 +280,8 @@ export const judgeCall = async (
     return { ok: false, code: "model.sensitive_data", because: sensitive };
   }
   const budgets = budgetsFor(rules.budgets, input, budgetMonth(env));
-  const usedUp = await usedUpBudget(env, budgets);
+  const usedUp = await checkBudgets(env, input.trigger, budgets);
   if (usedUp !== undefined) {
-    await noteUsedUp(env, input.trigger, usedUp);
     return { ok: false, code: "model.over_budget", because: usedUp.scope };
   }
   return { ok: true, judged: { euOnly, sensitive, budgets } };

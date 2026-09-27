@@ -4,5 +4,6 @@ CREATE TABLE `model_spend` (
 	`period` text NOT NULL,
 	`spent_micros` integer NOT NULL,
 	`exhausted_at_micros` integer,
+	`alerted_at_micros` integer,
 	PRIMARY KEY(`scope`, `key`, `period`)
 );

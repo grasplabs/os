@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "987c6882-f197-41dd-a43a-9b34b5ad868b",
+  "id": "563be217-3067-41d4-8628-877873b79545",
   "prevId": "8fa3dde9-6ae1-4148-9d46-f6e2c12d3ae4",
   "tables": {
     "accounts": {
@@ -1032,6 +1032,13 @@
         },
         "exhausted_at_micros": {
           "name": "exhausted_at_micros",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "alerted_at_micros": {
+          "name": "alerted_at_micros",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,

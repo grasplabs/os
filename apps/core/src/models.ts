@@ -42,7 +42,7 @@ import { z } from "zod";
 
 import { keepAuditEvent } from "./audit-outbox.ts";
 import { featureEnabled } from "./features.ts";
-import { chargeBudgets } from "./model-budgets.ts";
+import { chargeBudgets, checkBudgets } from "./model-budgets.ts";
 import { judgeCall, modelRulesShape } from "./model-rules.ts";
 import type { Judged, ModelRules, Refusal } from "./model-rules.ts";
 
@@ -797,6 +797,19 @@ const callModel = async <Output>(
   // A call with a schema asks once more when the answer doesn't fit it.
   const attempts = schema === undefined ? 1 : 2;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    if (attempt > 1) {
+      // The attempt before may have used up a budget: every request is
+      // checked before it is sent, not just the call's first.
+      // oxlint-disable-next-line no-await-in-loop
+      const usedUp = await checkBudgets(env, call.trigger, judged.budgets);
+      if (usedUp !== undefined) {
+        // oxlint-disable-next-line no-await-in-loop
+        await refuse(env, call, {
+          code: "model.over_budget",
+          because: usedUp.scope,
+        });
+      }
+    }
     // Each attempt follows up on the answer before it.
     // oxlint-disable-next-line no-await-in-loop
     const sent = await send(request);

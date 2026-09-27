@@ -577,6 +577,8 @@ export const modelSpend = sqliteTable(
      * limit alerts once, also one lowered below what was already spent.
      */
     exhaustedAtMicros: integer("exhausted_at_micros"),
+    /** The same for the alert threshold admins were last alerted at. */
+    alertedAtMicros: integer("alerted_at_micros"),
   },
   (table) => [primaryKey({ columns: [table.scope, table.key, table.period] })]
 );

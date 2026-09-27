@@ -612,16 +612,16 @@ describe("model rules", () => {
     expect(outcomes).toStrictEqual(["ok", "ok", "ok", "model.over_budget"]);
   });
 
-  it("alert admins once when a limit is lowered below what was spent, and count each month on its own", async () => {
+  it("alert admins once for every limit lowered below what was spent, and count each month on its own", async () => {
     const month = newMonth();
     const spend = withRules(
-      { budgets: { user: { limit: 0.02 } } },
+      { budgets: { user: { limit: 0.02 }, deployment: { limit: 0.02 } } },
       env.FEATURES,
       pricedAnswer,
       month
     );
     const lowered = withRules(
-      { budgets: { user: { limit: 0.01 } } },
+      { budgets: { user: { limit: 0.01 }, deployment: { limit: 0.01 } } },
       env.FEATURES,
       pricedAnswer,
       month
@@ -652,12 +652,72 @@ describe("model rules", () => {
       "ok",
     ]);
     const events = await eventsOf(ada.trigger);
+    // Both used up, both alerted, once each: not only the one that refused.
     expect(
-      events.filter(({ action }) => action === "model.budget.exhausted")
+      events
+        .filter(({ action }) => action === "model.budget.exhausted")
+        .map(({ detail }) => detail)
+        .toSorted((one, other) =>
+          String(one.scope).localeCompare(String(other.scope))
+        )
+    ).toMatchObject([
+      { scope: "deployment", period: month, limit: 0.01, threshold: 0.01 },
+      { scope: "user", period: month, limit: 0.01, threshold: 0.01 },
+    ]);
+  });
+
+  it("alert admins once when the alert threshold is lowered below what was spent", async () => {
+    const month = newMonth();
+    const early = withRules(
+      { budgets: { user: { limit: 0.02, alertAt: 90 } } },
+      env.FEATURES,
+      pricedAnswer,
+      month
+    );
+    const lowered = withRules(
+      { budgets: { user: { limit: 0.02, alertAt: 40 } } },
+      env.FEATURES,
+      pricedAnswer,
+      month
+    );
+    const ada = hello(anthropic);
+    const outcomes: string[] = [];
+    // $0.009 spent, under 90% of $0.02; then 40% is $0.008, already passed.
+    for (const call of [early.call, early.call, lowered.call, lowered.call]) {
+      // oxlint-disable-next-line no-await-in-loop -- one after another
+      outcomes.push(await outcome(call(ada)));
+    }
+
+    expect(outcomes).toStrictEqual(["ok", "ok", "ok", "ok"]);
+    const events = await eventsOf(ada.trigger);
+    expect(
+      events.filter(({ action }) => action === "model.budget.alert")
     ).toMatchObject([
       {
-        detail: { scope: "user", period: month, limit: 0.01, threshold: 0.01 },
+        detail: { scope: "user", period: month, limit: 0.02, threshold: 0.008 },
       },
+    ]);
+  });
+
+  it("check the budgets again before a retry: an attempt that used one up stops the call before anything more is sent", async () => {
+    const { fake, call } = withRules(
+      { budgets: { user: { limit: 0.01 } } },
+      env.FEATURES,
+      // An answer that doesn't fit, and costs $0.0105: past the limit.
+      { text: "No JSON here.", inputTokens: 1000, outputTokens: 500 }
+    );
+    const ada = hello(anthropic);
+
+    await expect(
+      outcome(call({ ...ada, schema: z.object({ total: z.number() }) }))
+    ).resolves.toBe("model.over_budget");
+    expect(fake.requests).toHaveLength(1);
+    const events = await eventsOf(ada.trigger);
+    expect(events.map(({ action }) => action)).toStrictEqual([
+      "model.call",
+      "model.budget.alert",
+      "model.budget.exhausted",
+      "model.refused",
     ]);
   });
 
