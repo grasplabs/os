@@ -397,23 +397,26 @@ export interface SkillFile {
   description: string;
 }
 
-/** Most entries each list of a `FollowResult` holds. */
+/** Most backlinks, and most skill files, one `FollowResult` holds. */
 export const followMaxEntries = pageMaxLimit;
 
 /**
  * Where a document leads: its links, the documents that link to it, and,
- * for a skill, the files it refers to. Each list is in path order and holds
- * at most {@link followMaxEntries}; `backlinks` pages past that.
+ * for a skill, the files it refers to, each list in path order.
  */
 export interface FollowResult {
+  /** All of them: a document has at most 500 distinct links. */
   links: DocumentLink[];
+  /** The first {@link followMaxEntries}; `backlinks()` pages past them. */
   backlinks: Backlink[];
   /**
-   * For a skill, the other documents in its folder and below, where the
-   * Agent Skills format keeps the files a skill refers to by relative
-   * path. Empty for any other type.
+   * For a skill, the first {@link followMaxEntries} other documents in its
+   * folder and below, where the Agent Skills format keeps the files a skill
+   * refers to by relative path. Empty for any other type.
    */
   files: SkillFile[];
+  /** Whether `backlinks` or `files` has more than it holds. */
+  truncated: boolean;
   provenance: Provenance;
 }
 

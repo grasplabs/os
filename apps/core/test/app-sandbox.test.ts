@@ -24,7 +24,7 @@ import {
   storedGrant,
 } from "./knowledge.ts";
 import { mailConnection } from "./mail-connection.ts";
-import { outcome, signedInApi } from "./sign-in.ts";
+import { auditedDuring, outcome, signedInApi } from "./sign-in.ts";
 
 // An App's server code is written by the agent and runs for everyone who
 // uses the App, so these tests take its side: code that tries to reach
@@ -1045,6 +1045,34 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
       withTheirCaller: everyReadIs("app.caller_invalid"),
       theirOwn: everyReadIs("ok"),
     });
+  });
+
+  it("records each read in the audit log as the App's", async () => {
+    const { member, app, finance } = await setUp();
+    const events = await auditedDuring(async () => {
+      await callApp(env, app, as(member.userId), "readWith", [
+        "HANDBOOK",
+        "read",
+        [finance.noteId, { section: 0 }],
+      ]);
+    });
+    expect(
+      events
+        .filter(({ action }) => action === "knowledge.read")
+        .map(({ actor, target, provenance, detail }) => ({
+          actor,
+          target,
+          provenance,
+          detail,
+        }))
+    ).toStrictEqual([
+      {
+        actor: { type: "app", appId: app, part: "server" },
+        target: { type: "document", id: finance.noteId },
+        provenance: [finance.collectionId],
+        detail: { read: "section", version: 1, section: 0, sensitive: false },
+      },
+    ]);
   });
 
   it("never reads a personal collection, not even for its owner", async () => {

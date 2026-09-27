@@ -29,6 +29,7 @@ import { allowedCollections, noteProvenance } from "./access.ts";
 import type { Reader } from "./access.ts";
 import {
   backlinkRows,
+  documentMaxLinks,
   getDocument,
   readableDocument,
   toSummary,
@@ -304,15 +305,19 @@ export const follow = async (
       )
     )
     .orderBy(asc(links.toPath))
-    .limit(followMaxEntries);
+    // All of them: a save keeps a document to this many.
+    .limit(documentMaxLinks);
   const linked: DocumentLink[] = linkRows.map((row) => ({
     ...row,
     documentId:
       row.documentId === null ? null : documentIdSchema.parse(row.documentId),
   }));
-  const backlinks = await backlinkRows(db, allowed, document, {
-    limit: followMaxEntries,
+  // One more than it returns of each, to tell whether there are more.
+  const linking = await backlinkRows(db, allowed, document, {
+    limit: followMaxEntries + 1,
   });
+  const backlinks = linking.slice(0, followMaxEntries);
+  let truncated = linking.length > followMaxEntries;
   let files: SkillFile[] = [];
   if (document.type === "skill") {
     const folder = document.path.slice(0, document.path.lastIndexOf("/") + 1);
@@ -334,8 +339,9 @@ export const follow = async (
         )
       )
       .orderBy(asc(documents.path))
-      .limit(followMaxEntries);
-    files = fileRows.map(({ document: row }) => ({
+      .limit(followMaxEntries + 1);
+    truncated ||= fileRows.length > followMaxEntries;
+    files = fileRows.slice(0, followMaxEntries).map(({ document: row }) => ({
       documentId: documentIdSchema.parse(row.id),
       path: row.path,
       title: row.title,
@@ -358,5 +364,5 @@ export const follow = async (
     },
     collection
   );
-  return { links: linked, backlinks, files, provenance };
+  return { links: linked, backlinks, files, truncated, provenance };
 };

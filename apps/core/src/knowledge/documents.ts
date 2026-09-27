@@ -63,7 +63,7 @@ const documentMaxBytes = 1024 * 1024;
 const documentMaxSections = 1000;
 
 /** Most distinct links one document has. */
-const documentMaxLinks = 500;
+export const documentMaxLinks = 500;
 
 /** D1 binds at most 100 parameters to one statement. */
 const maxBoundParameters = 100;

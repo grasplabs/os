@@ -1,5 +1,6 @@
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { appIdSchema } from "@grasp-os/shared/ids";
+import { followMaxEntries } from "@grasp-os/shared/knowledge";
 import type { KnowledgeApi, KnowledgeTools } from "@grasp-os/shared/knowledge";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
@@ -291,6 +292,7 @@ describe("an agent's Knowledge tools", setUpTime, () => {
           title,
           type,
         })),
+        truncated: followed.truncated,
         provenance: followed.provenance,
       },
       template: {
@@ -331,6 +333,7 @@ describe("an agent's Knowledge tools", setUpTime, () => {
             type: "doc",
           },
         ],
+        truncated: false,
         provenance: {
           collectionIds: [collectionId],
           sensitive: false,
@@ -339,6 +342,48 @@ describe("an agent's Knowledge tools", setUpTime, () => {
       },
       // Not a skill: no files.
       template: { backlinks: [skillId], files: [] },
+    });
+  });
+
+  it("say when a skill has more files than a follow returns", async () => {
+    const admin = await personOf("admin");
+    const agent = newAgent();
+    const { id: collectionId } = await admin.knowledge.createCollection({
+      name: `Big skill ${unique()}`,
+      access: "everyone",
+    });
+    const skillId = await save(
+      admin,
+      collectionId,
+      "big/SKILL.md",
+      skill("big", "Has many files.")
+    );
+    // As many files as a follow returns, in path order.
+    const paths = Array.from(
+      { length: followMaxEntries },
+      (_, index) => `big/file-${String(index).padStart(3, "0")}.md`
+    );
+    await Promise.all(
+      paths.map(async (path) => await save(admin, collectionId, path, "# File"))
+    );
+    await requestGranted(idp, admin, readCollection(agent, collectionId));
+    const knowledge = await toolsOf(agent, admin);
+    const full = await knowledge.follow(skillId);
+    // One more than it returns.
+    await save(admin, collectionId, "big/zz-last.md", "# Last");
+    const over = await knowledge.follow(skillId);
+    expect({
+      full: {
+        files: full.files.map(({ path }) => path),
+        truncated: full.truncated,
+      },
+      over: {
+        files: over.files.map(({ path }) => path),
+        truncated: over.truncated,
+      },
+    }).toStrictEqual({
+      full: { files: paths, truncated: false },
+      over: { files: paths, truncated: true },
     });
   });
 

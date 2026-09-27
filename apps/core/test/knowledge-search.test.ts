@@ -346,6 +346,8 @@ describe("searches that find nothing", () => {
       await person.knowledge.search("Pensioën Regeling", { collectionId });
       await person.knowledge.search("regeling pensioen");
       await person.knowledge.search("leaseauto");
+      // No words at all: nothing searched, and nothing found.
+      await person.knowledge.search("");
       // Found something: recorded as a read (knowledge-tools.test.ts).
       await person.knowledge.search("vakantiedagen", { collectionId });
     });
@@ -385,6 +387,12 @@ describe("searches that find nothing", () => {
           action: "knowledge.search.empty",
           target: undefined,
           terms: 1,
+        },
+        {
+          actor: { type: "person", userId: person.userId },
+          action: "knowledge.search.empty",
+          target: undefined,
+          terms: 0,
         },
         {
           actor: { type: "person", userId: person.userId },
