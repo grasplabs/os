@@ -3,7 +3,8 @@
  * or Google, which a local stack can't reach, so this writes what a
  * finished sign-in leaves behind straight into core's local database: a
  * person, their membership and a session, and signs the session cookie
- * with the test stack's secret, as Better Auth does.
+ * with the test stack's secret, as Better Auth does. It writes them all
+ * up front, before any test runs; tests only look theirs up.
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
@@ -11,6 +12,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 
 import type { Role } from "@grasp-os/shared/roles";
 import type { CoreApi } from "@grasp-os/shared/rpc";
+import { test } from "@playwright/test";
 import type { Browser, BrowserContext, Page } from "@playwright/test";
 import { newWebSocketRpcSession } from "capnweb";
 
@@ -35,7 +37,7 @@ const quoted = (value: string): string => `'${value.replaceAll("'", "''")}'`;
 
 /**
  * How often `execute` tries statements the database was too busy for: it
- * shares the file with the dev server and with the other test workers.
+ * shares the file with the dev server, which may still be settling.
  * It waits between tries, 200 ms first and twice as long each time after,
  * so the lock holder can finish: 3 s at most in all.
  */
@@ -111,37 +113,94 @@ export interface Person {
   cookie: string;
 }
 
-/** People signed in with these roles, by name, one session each. */
-export const signedIn = async <Name extends string>(
-  roles: Record<Name, Role>
-): Promise<Record<Name, Person>> => {
+/**
+ * Everyone the tests sign in as, by scene: a test, or a file whose tests
+ * share them. Scenes don't share people, so what a test changes about
+ * someone, their role say, no other test sees.
+ */
+const cast = {
+  apps: { builder: "builder", user: "user", admin: "admin" },
+  screens: { one: "builder", two: "builder" },
+  decisionAnswered: { builder: "builder", decider: "user", other: "admin" },
+  decisionUnreachable: { decider: "user" },
+  memberActions: { admin: "admin", one: "user", two: "user" },
+  roleChange: { admin: "admin", one: "user" },
+  membersUnreachable: { admin: "admin" },
+} as const satisfies Record<string, Record<string, Role>>;
+
+type Scene = keyof typeof cast;
+
+/** Each attempt's people, by scene and name. */
+type Cast = Record<string, Record<string, Person>>[];
+
+/** How `signInCast` hands everyone to the test workers. */
+const castVariable = "E2E_CAST";
+
+/**
+ * Signs in the whole cast in one write, once for each attempt a test may
+ * get, so a retry starts from people as they were, not as the failed
+ * attempt left them. The global setup (e2e/setup.ts) runs it before any
+ * test loads a page. Writing from a process of its own while the dev
+ * server reads the same file can fail the dev server's query with
+ * SQLITE_BUSY, so no test writes people while tests run.
+ */
+export const signInCast = async (attempts: number): Promise<void> => {
   const now = Date.now();
-  const hour = 60 * 60 * 1000;
-  const people = Object.entries<Role>(roles).map(([name, role]) => ({
-    name,
-    role,
-    userId: crypto.randomUUID(),
-    token: crypto.randomUUID(),
-  }));
+  // Covers the slowest run, also against a stack that was already running.
+  const day = 24 * 60 * 60 * 1000;
+  const people = Array.from({ length: attempts }, (_, attempt) =>
+    Object.entries(cast).flatMap(([scene, roles]) =>
+      Object.entries<Role>(roles).map(([name, role]) => ({
+        attempt,
+        scene,
+        name,
+        role,
+        userId: crypto.randomUUID(),
+        token: crypto.randomUUID(),
+      }))
+    )
+  ).flat();
   await execute(
     [
       `INSERT OR IGNORE INTO organizations (id, name, slug, created_at) VALUES (${quoted(organizationId)}, 'Acme', 'acme', ${now})`,
       ...people.flatMap(({ role, userId, token }) => [
         `INSERT INTO users (id, name, email, email_verified, created_at, updated_at) VALUES (${quoted(userId)}, 'Person', ${quoted(`${userId}@acme.test`)}, 1, ${now}, ${now})`,
         `INSERT INTO members (id, organization_id, user_id, role, created_at) VALUES (${quoted(crypto.randomUUID())}, ${quoted(organizationId)}, ${quoted(userId)}, ${quoted(role)}, ${now})`,
-        `INSERT INTO sessions (id, token, user_id, expires_at, created_at, updated_at, staff) VALUES (${quoted(crypto.randomUUID())}, ${quoted(token)}, ${quoted(userId)}, ${now + hour}, ${now}, ${now}, 0)`,
+        `INSERT INTO sessions (id, token, user_id, expires_at, created_at, updated_at, staff) VALUES (${quoted(crypto.randomUUID())}, ${quoted(token)}, ${quoted(userId)}, ${now + day}, ${now}, ${now}, 0)`,
       ]),
     ].join("; ")
   );
-  const signedPeople = await Promise.all(
-    people.map(async ({ name, role, userId, token }) => [
-      name,
-      { role, userId, cookie: await signed(token) },
-    ])
-  );
-  // SAFETY: one entry for each name in `roles`, as built above.
+  const signedIn: Cast = Array.from({ length: attempts }, () => ({}));
+  for (const { attempt, scene, name, role, userId, token } of people) {
+    const scenes = signedIn[attempt] ?? {};
+    scenes[scene] ??= {};
+    // oxlint-disable-next-line no-await-in-loop -- signing takes microseconds
+    scenes[scene][name] = { role, userId, cookie: await signed(token) };
+  }
+  // Playwright hands the global setup's environment to the test workers.
+  process.env[castVariable] = JSON.stringify(signedIn);
+};
+
+/** The scene's people, signed in for this attempt at the running test. */
+export const peopleIn = <S extends Scene>(
+  scene: S
+): Record<keyof (typeof cast)[S], Person> => {
+  const { retry } = test.info();
+  const json = process.env[castVariable];
+  if (json === undefined) {
+    throw new Error(
+      `${castVariable} is unset: the global setup in playwright.config.ts signs people in`
+    );
+  }
+  // SAFETY: signInCast wrote it, as a Cast.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-  return Object.fromEntries(signedPeople) as Record<Name, Person>;
+  const people = (JSON.parse(json) as Cast)[retry]?.[scene];
+  if (people === undefined) {
+    throw new Error(`Nobody is signed in for ${scene}, attempt ${retry + 1}`);
+  }
+  // SAFETY: signInCast signed in every name in the scene's cast.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+  return people as Record<keyof (typeof cast)[S], Person>;
 };
 
 /** Gives a browser context the person's session. */
