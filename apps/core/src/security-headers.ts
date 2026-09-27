@@ -1,3 +1,4 @@
+import { strictTransportSecurity } from "@grasp-os/shared/http";
 import { screenFramePath } from "@grasp-os/shared/screens";
 
 const policy = (directives: Record<string, string>): string =>
@@ -64,9 +65,6 @@ const screenFramePolicy = policy({
   "frame-ancestors": "'self'",
 });
 
-/** Browsers keep to https for this long after a visit: one year. */
-const hstsMaxAgeSeconds = 365 * 24 * 60 * 60;
-
 /**
  * Sets the security headers on a response core sends for `url`. HSTS goes
  * only on https, since browsers ignore it over http (local development). A
@@ -83,9 +81,6 @@ export const setSecurityHeaders = (headers: Headers, url: URL): void => {
     headers.set("referrer-policy", "strict-origin-when-cross-origin");
   }
   if (url.protocol === "https:") {
-    headers.set(
-      "strict-transport-security",
-      `max-age=${hstsMaxAgeSeconds}; includeSubDomains`
-    );
+    headers.set("strict-transport-security", strictTransportSecurity);
   }
 };

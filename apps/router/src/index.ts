@@ -1,3 +1,9 @@
+import { requestErrors } from "@grasp-os/shared/errors";
+import type { ErrorPayload } from "@grasp-os/shared/errors";
+import {
+  requestIdHeader,
+  strictTransportSecurity,
+} from "@grasp-os/shared/http";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
   deriveRouterSecret,
@@ -63,6 +69,63 @@ const routeFor = async (host: string, env: Env): Promise<Route | null> => {
   return route;
 };
 
+/** Core's sign-in routes (Better Auth, core's `authBasePath`). */
+const authBasePath = "/api/auth";
+
+/** The sign-in limit's window, as `AUTH_RATE_LIMIT` has it in wrangler.jsonc. */
+const signInLimitPeriodS = 60;
+
+/**
+ * Whether a request to core's sign-in routes is within the limit for its
+ * hostname and client IP. Better Auth's own limiter is off in core: behind
+ * the router, every request comes from the router's address. Keyed by
+ * hostname too, so one office behind one address signing in to two clients
+ * counts separately for each. When the limiter itself fails, the request
+ * goes through (and is logged): sign-in stays up.
+ */
+const withinSignInLimit = async (
+  request: Request,
+  host: string,
+  env: Env
+): Promise<boolean> => {
+  const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+  try {
+    const { success } = await env.AUTH_RATE_LIMIT.limit({
+      key: `${host}|${ip}`,
+    });
+    return success;
+  } catch (error) {
+    log.error("router.rate_limit_failed", { host, ...errorFields(error) });
+    return true;
+  }
+};
+
+/** Core's sign-out route, which the limit leaves alone. */
+const signOutPath = `${authBasePath}/sign-out`;
+
+/**
+ * The router's own 429, with the headers core puts on every response it
+ * makes (a request ID, `nosniff`, HSTS on https), since it answers in
+ * core's place. The request ID is logged with the refusal.
+ */
+const rateLimited = (url: URL, host: string): Response => {
+  const requestId = crypto.randomUUID();
+  const { code, message } = requestErrors.create("request.rate_limited");
+  const headers = new Headers({
+    "retry-after": String(signInLimitPeriodS),
+    [requestIdHeader]: requestId,
+    "x-content-type-options": "nosniff",
+  });
+  if (url.protocol === "https:") {
+    headers.set("strict-transport-security", strictTransportSecurity);
+  }
+  log.warn("router.rate_limited", { host, requestId });
+  return Response.json(
+    { code, message, details: { requestId } } satisfies ErrorPayload,
+    { status: 429, headers }
+  );
+};
+
 /**
  * Forwards each request on a client's hostname to that client's core, with
  * the router secret so a client's workers.dev address is no back door.
@@ -85,6 +148,16 @@ export default {
     }
     if (route === null) {
       return new Response("Not found", { status: 404 });
+    }
+
+    const { pathname } = url;
+    const isAuth =
+      pathname === authBasePath || pathname.startsWith(`${authBasePath}/`);
+    // Signing out needs no protection from guessing, and refusing it would
+    // leave the person signed in.
+    const isLimited = isAuth && pathname !== signOutPath;
+    if (isLimited && !(await withinSignInLimit(request, host, env))) {
+      return rateLimited(url, host);
     }
 
     // Any copy the caller sent is replaced (threat model RT3): the secret
