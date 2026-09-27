@@ -144,7 +144,15 @@ const eventsOf = async (actor: unknown): Promise<AuditEvent[]> => {
   );
 };
 
-describe("model rules", () => {
+// The tests that run a workflow release an App of their own, which runs
+// its workflow tests to activate it, have permissions granted where they
+// need them, and wait for up to two runs to end, one after another
+// (`finished` gives each up to 20 seconds). On a loaded CI runner that
+// takes longer than Vitest's default five seconds: the sensitive-collection
+// test, with two workflows to activate and two runs, timed out there.
+// Sixty seconds fits two runs' waits with room for the setup, as
+// app-roles.test.ts and knowledge-access.test.ts give theirs.
+describe("model rules", { timeout: 60_000 }, () => {
   beforeEach(async () => {
     if (appWork !== undefined) {
       return;
