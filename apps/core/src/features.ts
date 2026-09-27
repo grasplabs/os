@@ -118,7 +118,8 @@ export type Feature =
   | "confirmations"
   /**
    * The client's rules for model calls beyond the allowlist, which always
-   * applies (model-rules.ts).
+   * applies (model-rules.ts). Uploads read the rule that keeps the whole
+   * deployment in the EU whether this is on or not (knowledge/extract.ts).
    */
   | "model_rules"
   /**

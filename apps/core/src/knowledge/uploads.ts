@@ -44,7 +44,7 @@ import { allowedCollections, noteProvenance } from "./access.ts";
 import { readableCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
 import { findByPath, writeVersion } from "./documents.ts";
-import { ExtractorUnavailableError, localExtractor } from "./extract.ts";
+import { ExtractorUnavailableError, extractorFor } from "./extract.ts";
 
 // Files uploaded into Knowledge (see @grasp-os/shared/uploads). An upload
 // is checked by what arrived (its size, and that its first bytes are the
@@ -474,9 +474,11 @@ const extractionError = (uploadId: string, error: unknown): unknown => {
 };
 
 /**
- * The extraction run's one step: extracts the upload's text in the
- * extractor's sandbox (extract.ts) and saves it as the next version of its
- * document, marking the upload ready in the same batch. Safe to run again:
+ * The extraction run's one step: extracts the upload's text with the
+ * extractor its collection gets (extract.ts), after recording that the
+ * file is sent out when the extractor is Workers AI, and saves it as the
+ * next version of its document, marking the upload ready and recording
+ * which extractor read it in the same batch. Safe to run again:
  * an upload that is ready or failed, or forgotten (its collection deleted,
  * or purged), is left as it is. Throws an expected error for what the run
  * fails the upload with, and anything else for what a retry may fix.
@@ -508,12 +510,27 @@ export const extractUpload = async (
   if (original === null) {
     throw uploadErrors.create("upload.original_missing");
   }
+  const bytes = new Uint8Array(await original.arrayBuffer());
+  const extractor = extractorFor(env, collection);
+  if (extractor.name === "workers-ai") {
+    // Recorded before the file leaves the Worker, so a failure after it
+    // left is on record too; one that can't be recorded fails the step,
+    // which is retried, and nothing is sent.
+    await auditedBatch(env, db, [
+      outboxed(db, {
+        actor: { type: "system" },
+        action: "knowledge.upload.sent",
+        target: { type: "upload", id: uploadId },
+        detail: { collectionId: row.collectionId, extractor: extractor.name },
+      }),
+    ]);
+  }
   let markdown: string;
   try {
-    markdown = await localExtractor(env)({
+    markdown = await extractor.extract({
       name: row.path,
       mediaType: mediaTypeOf(row),
-      bytes: new Uint8Array(await original.arrayBuffer()),
+      bytes,
     });
   } catch (error) {
     throw extractionError(uploadId, error);
@@ -572,6 +589,16 @@ export const extractUpload = async (
         db
           .delete(uploadCleanups)
           .where(eq(uploadCleanups.key, originalKey(row.collectionId, row.id))),
+        outboxed(db, {
+          actor: { type: "system" },
+          action: "knowledge.upload.extracted",
+          target: { type: "upload", id: uploadId },
+          detail: {
+            collectionId: row.collectionId,
+            extractor: extractor.name,
+            version: ifVersion + 1,
+          },
+        }),
       ],
     }
   );
