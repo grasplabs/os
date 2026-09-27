@@ -24,7 +24,8 @@ import { z } from "zod";
 // (`apps`), starting runs and every step of one (`workflows`), opening
 // or asking a decision (`decisions`), and screens' calls on their App's
 // runs (`screen_workflows`). `model_rules` stops the model
-// gateway checking the client's rules beyond the allowlist.
+// gateway checking the client's rules beyond the allowlist, and
+// `improvement_signals` the daily signals and reading them.
 //
 // `workflows` and `decisions` never fail a run. Before each step, sleep
 // and wait, while `workflows` is off (or `decisions`, before a step that
@@ -109,7 +110,12 @@ export type Feature =
    * The client's rules for model calls beyond the allowlist, which always
    * applies (model-rules.ts).
    */
-  | "model_rules";
+  | "model_rules"
+  /**
+   * Improvement signals (signals.ts): computing them daily, and reading
+   * them. While off, nothing is computed and nobody reads what was.
+   */
+  | "improvement_signals";
 
 // Names nobody knows (a flag since removed) are ignored, not an error.
 const featuresSchema = z.record(z.string(), z.boolean());

@@ -48,6 +48,8 @@ import migrations from "./db/audit-log/migrations/migrations.js";
 import { archives, events } from "./db/audit-log/schema.ts";
 import { migrateOnWake } from "./db/migrate.ts";
 import { inJurisdiction } from "./durable-objects.ts";
+import { SignalTallier } from "./signal-tally.ts";
+import type { SignalTally } from "./signal-tally.ts";
 
 /** How many entries one read returns at most. */
 const pageSize = 500;
@@ -454,6 +456,53 @@ export class AuditLog extends DurableObject<Env> {
     return low === undefined || high === undefined
       ? { low: 1, high: 0 }
       : { low, high };
+  }
+
+  /**
+   * What the improvement signals need of the entries in `range` after
+   * position `after`: model calls' cost per workflow run and Knowledge
+   * searches that found nothing, tallied in one pass over at most
+   * {@link searchScanMax} entries (src/signal-tally.ts), so only partial
+   * totals leave the object. `next` says where to carry on, or is `null`
+   * once the range is read. `null` instead when retention has archived
+   * where it would read.
+   */
+  tallySignals(
+    range: SearchRange,
+    after?: number
+  ): { tally: SignalTally; next: number | null } | null {
+    const low =
+      after === undefined ? range.low : Math.max(range.low, after + 1);
+    const tallier = new SignalTallier();
+    if (low > range.high) {
+      return { tally: tallier.totals(), next: null };
+    }
+    const [oldest] = this.#page(0, 1);
+    if (oldest === undefined || low < oldest.seq) {
+      return null;
+    }
+    let last: number | undefined;
+    // Read as a cursor, one row at a time, with nothing awaited inside.
+    for (const entry of this.ctx.storage.sql.exec<{
+      seq: number;
+      receivedAt: string;
+      event: string;
+    }>(
+      "SELECT seq, received_at AS receivedAt, event FROM events WHERE seq BETWEEN ? AND ? ORDER BY seq LIMIT ?",
+      low,
+      range.high,
+      searchScanMax
+    )) {
+      last = entry.seq;
+      const event = parseStored(entry.event);
+      if (event !== null) {
+        tallier.add(event, entry.receivedAt);
+      }
+    }
+    return {
+      tally: tallier.totals(),
+      next: last === undefined || last >= range.high ? null : last,
+    };
   }
 
   /**
