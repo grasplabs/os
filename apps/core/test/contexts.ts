@@ -1,5 +1,8 @@
 import { workspaceIdSchema } from "@grasp-os/shared/ids";
-import type { CollectionReader } from "@grasp-os/shared/knowledge";
+import type {
+  CollectionReader,
+  KnowledgeTools,
+} from "@grasp-os/shared/knowledge";
 import { authoritySchema } from "@grasp-os/shared/permissions";
 import type {
   Authority,
@@ -63,3 +66,10 @@ export const collectionIn = (
   // methods are those of `CollectionReader`.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
   bindings[name] as CollectionReader | undefined;
+
+/** An agent's Knowledge tools in its env, if it may read any collection. */
+export const knowledgeIn = (bindings: Bindings): KnowledgeTools | undefined =>
+  // SAFETY: `bindingsFor` gives `KNOWLEDGE` a `KnowledgeBinding`, whose
+  // methods are those of `KnowledgeTools`.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+  bindings.KNOWLEDGE as KnowledgeTools | undefined;

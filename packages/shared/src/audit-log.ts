@@ -42,6 +42,7 @@ const typeRules: readonly {
   { action: "connection.connect", type: "config" },
   { action: "connection.disconnect", type: "config" },
   { action: "knowledge.search", type: "read" },
+  { action: "knowledge.read", type: "read" },
   { action: "knowledge.collection", type: "config" },
   { action: "knowledge", type: "action" },
   { action: "model", type: "model_call" },

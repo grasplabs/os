@@ -3,7 +3,9 @@ import type {
   BacklinkPage,
   DocumentPage,
   DocumentRead,
+  FollowResult,
   HistoryPage,
+  KnowledgeRead,
   SearchResults,
 } from "@grasp-os/shared/knowledge";
 import type { Authority } from "@grasp-os/shared/permissions";
@@ -73,5 +75,17 @@ export class AppCollectionBinding extends WorkerEntrypoint<
     options?: unknown
   ): Promise<SearchResults> {
     return await this.#reads(caller).search(query, options);
+  }
+
+  async read(
+    caller: unknown,
+    documentId: unknown,
+    options?: unknown
+  ): Promise<KnowledgeRead> {
+    return await this.#reads(caller).read(documentId, options);
+  }
+
+  async follow(caller: unknown, documentId: unknown): Promise<FollowResult> {
+    return await this.#reads(caller).follow(documentId);
   }
 }

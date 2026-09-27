@@ -24,7 +24,7 @@ import {
   storedGrant,
 } from "./knowledge.ts";
 import { mailConnection } from "./mail-connection.ts";
-import { outcome, signedInApi } from "./sign-in.ts";
+import { auditedDuring, outcome, signedInApi } from "./sign-in.ts";
 
 // An App's server code is written by the agent and runs for everyone who
 // uses the App, so these tests take its side: code that tries to reach
@@ -159,6 +159,8 @@ export class App extends DurableObject {
       outcome(collection.history(who, documentId)),
       outcome(collection.backlinks(who, documentId)),
       outcome(collection.search(who, "note")),
+      outcome(collection.read(who, documentId, { section: 0 })),
+      outcome(collection.follow(who, documentId)),
     ]);
   }
 
@@ -857,7 +859,7 @@ const knowledgeOf = (person: Builder): { knowledge: KnowledgeApi } => {
 };
 
 /** What each of the sample App's reads (`reads`) ended with. */
-const everyReadIs = (code: string) => Array.from({ length: 5 }, () => code);
+const everyReadIs = (code: string) => Array.from({ length: 7 }, () => code);
 
 // The same App serves everyone, so what it reads from Knowledge must be
 // what the person whose call it runs in may read, and no more (R5): the
@@ -918,6 +920,8 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
         "knowledge.not_found",
         "knowledge.not_found",
         "ok",
+        "knowledge.not_found",
+        "knowledge.not_found",
       ],
     });
 
@@ -1041,6 +1045,34 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
       withTheirCaller: everyReadIs("app.caller_invalid"),
       theirOwn: everyReadIs("ok"),
     });
+  });
+
+  it("records each read in the audit log as the App's", async () => {
+    const { member, app, finance } = await setUp();
+    const events = await auditedDuring(async () => {
+      await callApp(env, app, as(member.userId), "readWith", [
+        "HANDBOOK",
+        "read",
+        [finance.noteId, { section: 0 }],
+      ]);
+    });
+    expect(
+      events
+        .filter(({ action }) => action === "knowledge.read")
+        .map(({ actor, target, provenance, detail }) => ({
+          actor,
+          target,
+          provenance,
+          detail,
+        }))
+    ).toStrictEqual([
+      {
+        actor: { type: "app", appId: app, part: "server" },
+        target: { type: "document", id: finance.noteId },
+        provenance: [finance.collectionId],
+        detail: { read: "section", version: 1, section: 0, sensitive: false },
+      },
+    ]);
   });
 
   it("never reads a personal collection, not even for its owner", async () => {
