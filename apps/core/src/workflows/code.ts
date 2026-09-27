@@ -486,7 +486,7 @@ export const requireWorkflowTestsPass = async (
     } else {
       // Often a helper, not a workflow: say where shared code goes.
       failures.push(
-        `${id}: has no tests (${workflowPaths(id).tests}). Every .ts file directly in workflows/, other than its tests, is a workflow: put shared code in a folder under it, such as workflows/lib/.`
+        `${id}: has no tests (${workflowPaths(id).tests}). Only \`workflows/<id>.ts\` (an id without dots) is a workflow: put shared code in a folder under workflows/, such as workflows/lib/.`
       );
     }
   }

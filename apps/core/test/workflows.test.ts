@@ -798,7 +798,7 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
     });
   });
 
-  it("take shared code from a folder under workflows/, and say that any other .ts file directly in it, tests aside, is a workflow", async () => {
+  it("take shared code from a folder under workflows/, and say which files are workflows", async () => {
     const builder = await personApi("builder");
     const { id: app } = await builder.api.apps.create({ name: "Shared" });
     const helper = `export const greeting = (name) => \`Hello, \${name}\`;\n`;
@@ -833,7 +833,7 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
       run: await builder.api.workflows.status(run.id),
     }).toMatchObject({
       directly: [
-        "greeting: has no tests (workflows/greeting.workflow-tests.ts). Every .ts file directly in workflows/, other than its tests, is a workflow: put shared code in a folder under it, such as workflows/lib/.",
+        "greeting: has no tests (workflows/greeting.workflow-tests.ts). Only `workflows/<id>.ts` (an id without dots) is a workflow: put shared code in a folder under workflows/, such as workflows/lib/.",
       ],
       inFolder: "ok",
       run: { status: "completed", output: "Hello, Anna" },
