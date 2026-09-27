@@ -198,6 +198,7 @@ test("signing in goes back to the page asked for, and only to a page of this sit
   for (const elsewhere of [
     "//evil.test/apps",
     "/\\evil.test",
+    "/\t/evil.test",
     "https://evil.test",
   ]) {
     // oxlint-disable-next-line no-await-in-loop -- one address at a time

@@ -12,6 +12,14 @@ import { SignInOptions } from "../sign-in-options.tsx";
 const signInPath = "/sign-in";
 
 /**
+ * What no path of this site holds: control characters and spaces, which
+ * browsers drop from an address (`/\t/evil.test` is `//evil.test`), and
+ * backslashes, which they read as `/` (`/\evil.test`).
+ */
+// oxlint-disable-next-line no-control-regex -- control characters are what it looks for
+const unsafeInPath = /[\u0000- \u007F\\]/u;
+
+/**
  * The page to go back to: a path of this site, never another site's
  * address (`//evil.test`) and never this page, which would send a signed-in
  * person round in circles. Anyone can put anything in a link.
@@ -20,7 +28,7 @@ const returnPathOf = (value: unknown): string =>
   typeof value === "string" &&
   value.startsWith("/") &&
   !value.startsWith("//") &&
-  !value.startsWith("/\\") &&
+  !unsafeInPath.test(value) &&
   !value.startsWith(signInPath)
     ? value
     : "/";
