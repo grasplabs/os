@@ -18,6 +18,7 @@ import { RpcTarget } from "capnweb";
 import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
+import { stillOpenTo } from "./app-access.ts";
 import {
   appFor,
   appsListedFor,
@@ -181,7 +182,8 @@ export const unmarkBlueprint = async (
  * `version`: the code at that version as its first version, and requests
  * for what that App was given or asked for. All of it lands in one batch,
  * or none of it (the version's files, stored first, are only named once
- * it lands), and only while the version is still a blueprint.
+ * it lands), and only while the version is still a blueprint and `by`
+ * still has a role in its App.
  */
 export const createFromBlueprint = async (
   env: Env,
@@ -233,11 +235,12 @@ export const createFromBlueprint = async (
   };
   const requests = await blueprintRequests(env, by, source.id, id);
   const db = drizzle(env.DB);
-  // The App only while the blueprint is still marked, selected from its
-  // row: unmarked since it was read above, nothing is inserted, the
-  // version's row can't name an App that isn't there, and the whole batch
-  // is refused. The insert names its columns, and drizzle refuses fields
-  // that aren't the table's, by name and in order.
+  // The App only while the blueprint is still marked, and `by` still has a
+  // role in its App (`stillOpenTo`), selected from its row: unmarked or
+  // unshared since they were read above, nothing is inserted, the version's
+  // row can't name an App that isn't there, and the whole batch is refused.
+  // The insert names its columns, and drizzle refuses fields that aren't
+  // the table's, by name and in order.
   const appFromBlueprint = db
     .select({
       id: sql<string>`${appRow.id}`.as("id"),
@@ -258,7 +261,11 @@ export const createFromBlueprint = async (
     })
     .from(appBlueprints)
     .where(
-      and(eq(appBlueprints.appId, source.id), eq(appBlueprints.version, number))
+      and(
+        eq(appBlueprints.appId, source.id),
+        eq(appBlueprints.version, number),
+        stillOpenTo(by, source.id)
+      )
     );
   const statements = [
     db.insert(apps).select(appFromBlueprint),
@@ -300,6 +307,8 @@ export const createFromBlueprint = async (
     if (!(await blueprintRow(env, source.id, number))) {
       throw appErrors.create("app.blueprint_not_found");
     }
+    // Refused, as for any call, when they lost their role in the App.
+    await appFor(env, by, source.id, "user");
     throw error;
   }
   return {

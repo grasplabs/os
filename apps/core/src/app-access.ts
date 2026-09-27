@@ -1,6 +1,7 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import type { App, AppRole } from "@grasp-os/shared/apps";
 import { appIdSchema } from "@grasp-os/shared/ids";
+import type { AppId } from "@grasp-os/shared/ids";
 import { canBuild, isAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, eq, exists, or, sql } from "drizzle-orm";
@@ -8,7 +9,7 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { sourcesOf, sourcesOfApps, unreadableBy } from "./app-provenance.ts";
-import { apps, appMembers } from "./db/core/schema.ts";
+import { apps, appMembers, teamMembers } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
 
 // Who may do what in an App (App roles). An App is open to:
@@ -179,4 +180,19 @@ export const appsOpenTo = (env: Env, by: Person): SQL | undefined => {
         .where(and(eq(appMembers.appId, apps.id), rowsOf(by)))
     )
   );
+};
+
+/**
+ * That `by` still has a role in `app` when the statement runs, as SQL: an
+ * admin (as their session said), the App's owner, or someone it is shared
+ * with, as a person or through a team they are in then. For guarding a
+ * write that an earlier check allowed, so a role lost since stops it.
+ * What the App read (`app.unreadable`) can't be decided in SQL, and isn't
+ * part of it.
+ */
+export const stillOpenTo = (by: Person, app: AppId): SQL => {
+  if (isAdmin(by.role)) {
+    return sql`1`;
+  }
+  return sql`(EXISTS (SELECT 1 FROM ${apps} WHERE ${apps.id} = ${app} AND ${apps.ownerId} = ${by.userId}) OR EXISTS (SELECT 1 FROM ${appMembers} WHERE ${appMembers.appId} = ${app} AND ((${appMembers.memberType} = 'person' AND ${appMembers.memberId} = ${by.userId}) OR (${appMembers.memberType} = 'team' AND ${appMembers.memberId} IN (SELECT ${teamMembers.teamId} FROM ${teamMembers} WHERE ${teamMembers.userId} = ${by.userId})))))`;
 };

@@ -84,6 +84,26 @@ const share = async (
 
 const named = { name: "My notes", description: "Mine" };
 
+/**
+ * Core's database, with `first` run just before each batch lands: a
+ * change made by someone else between a check and the write it allowed.
+ */
+const racingDb = (first: (db: D1Database) => Promise<unknown>): D1Database =>
+  new Proxy(env.DB, {
+    get: (target, property) => {
+      if (property === "batch") {
+        return async (statements: D1PreparedStatement[]) => {
+          await first(target);
+          return await target.batch(statements);
+        };
+      }
+      const value: unknown = Reflect.get(target, property);
+      return typeof value === "function"
+        ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
+        : value;
+    },
+  });
+
 /** A personal connection of `owner`'s, such as their mailbox. */
 const mailboxOf = async (owner: Person): Promise<string> => {
   const id = `connection-mailbox-${unique()}`;
@@ -344,25 +364,14 @@ describe("blueprints", () => {
     const source = await notesApp(owner);
     await owner.api.apps.blueprints.mark(source, 1);
     const by = await owner.api.whoami();
-    // The database as the copy sees it, with the version unmarked just
-    // before the batch that creates the App lands.
-    const racing = new Proxy(env.DB, {
-      get: (target, property) => {
-        if (property === "batch") {
-          return async (statements: D1PreparedStatement[]) => {
-            await target
-              .prepare("DELETE FROM app_blueprints WHERE app_id = ?")
-              .bind(source)
-              .run();
-            return await target.batch(statements);
-          };
-        }
-        const value: unknown = Reflect.get(target, property);
-        return typeof value === "function"
-          ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
-          : value;
-      },
-    });
+    // The version unmarked just before the batch that creates the App lands.
+    const racing = racingDb(
+      async (db) =>
+        await db
+          .prepare("DELETE FROM app_blueprints WHERE app_id = ?")
+          .bind(source)
+          .run()
+    );
 
     const refused = await outcome(
       createFromBlueprint({ ...env, DB: racing }, by, source, 1, {
@@ -374,6 +383,38 @@ describe("blueprints", () => {
       refused,
       created: apps.some(({ name }) => name.startsWith("Raced")),
     }).toStrictEqual({ refused: "app.blueprint_not_found", created: false });
+  });
+
+  it("aren't copied by someone the App was unshared with while it was being copied", async () => {
+    const owner = await personApi("builder");
+    const maker = await personApi("builder");
+    const source = await notesApp(owner);
+    await share(owner, source, maker, "user");
+    await owner.api.apps.blueprints.mark(source, 1);
+    const by = await maker.api.whoami();
+    // Unshared just before the batch that creates the App lands.
+    const racing = racingDb(
+      async (db) =>
+        await db
+          .prepare("DELETE FROM app_members WHERE app_id = ? AND member_id = ?")
+          .bind(source, maker.userId)
+          .run()
+    );
+
+    const refused = await outcome(
+      createFromBlueprint({ ...env, DB: racing }, by, source, 1, {
+        name: `Unshared ${unique()}`,
+      })
+    );
+    const created = await env.DB.prepare(
+      "SELECT count(*) AS count FROM apps WHERE owner_id = ?"
+    )
+      .bind(maker.userId)
+      .first<{ count: number }>();
+    expect({ refused, created: created?.count }).toStrictEqual({
+      refused: "app.not_found",
+      created: 0,
+    });
   });
 
   it("are listed newest first", async () => {

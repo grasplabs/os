@@ -115,7 +115,7 @@ describe("feature flags", () => {
     ]);
   });
 
-  it("stop blueprints with their own flag, and with the Apps kill switch", async () => {
+  it("stop blueprints with their own flag, the Apps kill switch, and sharing's", async () => {
     const admin = await signedInWithRole(idp, "admin");
     const blueprintsWith = async (features: Record<string, boolean>) => {
       const coreEnv: Env = { ...env, FEATURES: features };
@@ -130,11 +130,14 @@ describe("feature flags", () => {
     };
     await expect(
       Promise.all([
-        blueprintsWith({ apps: true }),
-        blueprintsWith({ app_blueprints: true }),
+        blueprintsWith({ apps: true, app_sharing: true }),
+        blueprintsWith({ app_sharing: true, app_blueprints: true }),
+        // Whose access is App roles, which sharing turns on.
         blueprintsWith({ apps: true, app_blueprints: true }),
+        blueprintsWith({ apps: true, app_sharing: true, app_blueprints: true }),
       ])
     ).resolves.toStrictEqual([
+      Array.from({ length: 4 }, () => "feature.disabled"),
       Array.from({ length: 4 }, () => "feature.disabled"),
       Array.from({ length: 4 }, () => "feature.disabled"),
       // Past the flags: this App doesn't exist.
