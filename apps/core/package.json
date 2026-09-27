@@ -22,6 +22,9 @@
     "better-auth": "catalog:",
     "capnweb": "catalog:",
     "drizzle-orm": "catalog:",
+    "fflate": "catalog:",
+    "read-excel-file": "catalog:",
+    "unpdf": "catalog:",
     "yaml": "catalog:",
     "zod": "catalog:"
   },

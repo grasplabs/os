@@ -25,6 +25,7 @@ import {
   links,
   memoryProposals,
   sections,
+  uploads,
   versions,
 } from "../db/knowledge/schema.ts";
 import { derivedHmacKey } from "../derived-keys.ts";
@@ -37,6 +38,7 @@ import type { DocumentRow } from "./documents.ts";
 import { frozenPathRanges } from "./frontmatter.ts";
 import { personalCollectionId } from "./memory-files.ts";
 import { failBatchIfProposals } from "./memory-proposals.ts";
+import { cleanUpOriginals, forgetUploads } from "./uploads.ts";
 
 // Purging personal data from Knowledge, for good, when someone leaves or
 // asks (GDPR erasure): an admin prepares a purge, which says how much it
@@ -56,6 +58,11 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 //   saved as the next version, which makes its sections, links, search
 //   rows and the document's title and description again, and fails for
 //   anyone who saved meanwhile from text not yet purged.
+//
+// Both delete the originals of the files uploaded as the documents they
+// purge (uploads.ts), and forget those uploads: an original holds the data
+// too. Recorded in the purge's batch, and deleted from R2 right after, or
+// by the cron trigger when that fails.
 //
 // Then the search index is rebuilt from what it holds now: FTS5 keeps a
 // deleted row's terms in its index pages, where they can't be found by a
@@ -299,7 +306,9 @@ const personalScope = async (
  * agents' proposals, with the audit event, in one batch: all or nothing.
  * The sections go first, row by row, so the triggers take them out of the
  * search index; the rest in the order they refer to one another. The
- * search index is rebuilt after, also when nothing was left to delete.
+ * originals of files uploaded to it are recorded for deleting in the same
+ * batch, and deleted from R2 right after (uploads.ts). The search index is
+ * rebuilt after, also when nothing was left to delete.
  */
 const purgePersonal = async (
   env: Env,
@@ -315,6 +324,7 @@ const purgePersonal = async (
     db.delete(links).where(inArray(links.fromDocumentId, inCollection)),
     db.delete(versions).where(inArray(versions.documentId, inCollection)),
     db.delete(memoryProposals).where(proposalsOf(collectionId, input.userId)),
+    ...forgetUploads(db, eq(uploads.collectionId, collectionId)),
     db.delete(documents).where(eq(documents.collectionId, collectionId)),
     db.delete(collections).where(eq(collections.id, collectionId)),
     outboxed(
@@ -329,6 +339,7 @@ const purgePersonal = async (
       )
     ),
   ]);
+  await cleanUpOriginals(env);
   await rebuildSearchIndex(db);
   return { purgeId, ...counts };
 };
@@ -915,6 +926,8 @@ const purgeDocument = async (
                 ),
             ]),
         ...updates,
+        // The file it was uploaded from holds the terms too.
+        ...forgetUploads(db, eq(uploads.documentId, document.id)),
         // A proposal made from version N after they were read would wait
         // on it with text this purge never saw: the batch fails, as a
         // conflict, and running the purge again rewrites it too.
@@ -1012,6 +1025,7 @@ const purgeContent = async (
     // oxlint-disable-next-line no-await-in-loop -- one document at a time, to bound memory
     done.push(await purgeDocument(env, db, person, one, matcher));
   }
+  await cleanUpOriginals(env);
   await rebuildSearchIndex(db);
   return { purgeId, ...sum(done) };
 };

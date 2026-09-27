@@ -124,6 +124,10 @@ export const internalErrors = defineErrorFamily({
   "internal.unexpected": "Something went wrong.",
 });
 
+/** Whether `code` is the code of an expected error, of any family. */
+export const isExpectedCode = (code: unknown): code is string =>
+  typeof code === "string" && expectedCodes.has(code);
+
 /** Whether `error` is an expected error, of any family. */
 export const isExpectedError = (error: unknown): error is CodedError =>
   error instanceof Error &&
