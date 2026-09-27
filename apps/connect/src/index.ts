@@ -38,6 +38,7 @@ import { connectionOwners } from "./connections.ts";
 import {
   finishToolkitFlow,
   purgeExpiredToolkitFlows,
+  retryComposioCleanups,
   startToolkitConnection,
 } from "./composio-connections.ts";
 import {
@@ -155,13 +156,15 @@ export default class Connect
   }
 
   /**
-   * Every minute: drops OAuth and Composio flows nobody finished, and
-   * seals what a rotated key sealed again.
+   * Every minute: drops OAuth and Composio flows nobody finished, deletes
+   * at Composio what earlier tries couldn't, and seals what a rotated key
+   * sealed again.
    */
   override async scheduled(): Promise<void> {
     const results = await Promise.allSettled([
       purgeExpiredFlows(this.env),
       purgeExpiredToolkitFlows(this.env),
+      retryComposioCleanups(this.env),
       resealTokens(this.env),
       resealFlows(this.env),
     ]);

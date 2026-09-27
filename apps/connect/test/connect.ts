@@ -17,12 +17,14 @@ import type {
 import { authoritySchema } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { roleErrors } from "@grasp-os/shared/roles";
+import { createExecutionContext } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { drizzle } from "drizzle-orm/d1";
 import { beforeEach } from "vite-plus/test";
 import type { z } from "zod";
 
 import { connections } from "../src/db/schema.ts";
+import Connect from "../src/index.ts";
 import type { Account, fakeProviders } from "./oauth-provider.ts";
 import { acmeDomain, acmeTenant } from "./provider-config.ts";
 
@@ -131,15 +133,24 @@ export const chatOrigin: NonNullable<Signed["origin"]> = {
 export const callAs = async (
   authority: Authority,
   call: Call,
-  signed: Signed = {}
+  signed: Signed = {},
+  connect: Pick<Connect, "call"> = exports.default
 ): Promise<ConnectResult> =>
-  await exports.default.call({
+  await connect.call({
     ...call,
     capability: await signCapability(env.CAPABILITY_SIGNING_KEY, authority, {
       ...call,
       ...signed,
     }),
   });
+
+/**
+ * Connect as a deployment with `vars` in its env instead would run it,
+ * such as without its Composio key: the same Worker, through its RPC
+ * methods.
+ */
+export const connectWith = (vars: Partial<Env>): Connect =>
+  new Connect(createExecutionContext(), { ...env, ...vars });
 
 /** The code connect refused or failed with, or "ok" if it didn't. */
 export const outcome = async (promise: Promise<unknown>): Promise<string> => {

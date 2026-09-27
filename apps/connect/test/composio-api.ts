@@ -248,7 +248,10 @@ export const fakeComposioApi = (
     endless: boolean;
     /** The status its tool lists answer with instead, if any. */
     toolsStatus: number | undefined;
-    /** The first path under the API's base that answers 503, if any. */
+    /**
+     * Requests that answer 503: those whose method and path under the
+     * API's base start with this, such as `DELETE /connected_accounts/`.
+     */
     failing: string | undefined;
     /** Where it says a new server is, instead of its own MCP host. */
     serverUrlBase: string;
@@ -401,7 +404,10 @@ export const fakeComposioApi = (
     if (failure !== undefined) {
       return failure;
     }
-    if (state.failing !== undefined && route === state.failing) {
+    if (
+      state.failing !== undefined &&
+      `${request.method} ${route}`.startsWith(state.failing)
+    ) {
       return new Response("Service Unavailable", { status: 503 });
     }
     const cursor = url.searchParams.get("cursor");

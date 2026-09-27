@@ -5,19 +5,15 @@ import type {
 } from "@grasp-os/shared/connect";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 import { env, exports } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
-import { drizzle } from "drizzle-orm/d1";
-import { describe, expect, it } from "vite-plus/test";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { startToolkitConnection } from "../src/composio-connections.ts";
-import { composioServer } from "../src/connections.ts";
-import { connections } from "../src/db/schema.ts";
 import { fakeComposioApi } from "./composio-api.ts";
 import {
   agentFor,
   auditEvents,
   callAs,
   clientOrigin,
+  connectWith,
   outcome,
   someone,
 } from "./connect.ts";
@@ -64,6 +60,26 @@ const composio = fakeComposioApi(
 );
 
 const { events } = auditEvents();
+
+/**
+ * Cleanups at Composio connect still has to try, emptied before each test
+ * of the file, so each counts its own.
+ */
+const composioCleanups = () => {
+  beforeEach(async () => {
+    await env.DB.prepare("DELETE FROM composio_cleanups").run();
+  });
+  return {
+    left: async (): Promise<number> => {
+      const counted = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM composio_cleanups"
+      ).first<{ n: number }>();
+      return counted?.n ?? 0;
+    },
+  };
+};
+
+const { left: cleanupsLeft } = composioCleanups();
 
 const allowed = ["HUBSPOT_LIST_CONTACTS", "HUBSPOT_CREATE_CONTACT"];
 
@@ -137,6 +153,32 @@ const heldAtComposio = () => ({
   servers: composio.state.holds.servers.size,
 });
 
+/** Nothing connect made is left at Composio. */
+const nothingHeld = { authConfigs: 0, accounts: 0, servers: 0 };
+
+/** Runs `run` as if `minutes` had passed. */
+const afterMinutes = async (
+  minutes: number,
+  run: () => Promise<void>
+): Promise<void> => {
+  const now = Date.now();
+  const clock = vi.spyOn(Date, "now").mockReturnValue(now + minutes * 60_000);
+  try {
+    await run();
+  } finally {
+    clock.mockRestore();
+  }
+};
+
+/** Ends the time `person`'s Composio flows had to finish. */
+const expireFlowsOf = async (person: ConnectionPerson): Promise<void> => {
+  await env.DB.prepare(
+    "UPDATE composio_flows SET expires_at = ? WHERE user_id = ?"
+  )
+    .bind(Date.now() - 1, person.userId)
+    .run();
+};
+
 /** Writes connect asked Composio for (anything but reading). */
 const composioWrites = () =>
   composio.state.requests.filter(({ method }) => method !== "GET");
@@ -206,8 +248,16 @@ describe("connecting a Composio toolkit", () => {
         outcome: "ok",
         tokenHolder: "composio",
         consentHash: await sha256Hex(composioConsentText),
+        toolsHash: await sha256Hex(JSON.stringify(allowed)),
         toolCount: allowed.length,
       },
+    });
+    // One flow ties the consent to the connection it led to.
+    const flowId = consented[0]?.detail.flowId;
+    expect(flowId).toStrictEqual(expect.any(String));
+    expect(all.at(-1)?.detail).toMatchObject({
+      flowId,
+      toolsHash: await sha256Hex(JSON.stringify(allowed)),
     });
     expect(all.at(-1)).toMatchObject({
       actor: { type: "person", userId: admin.userId },
@@ -260,18 +310,15 @@ describe("connecting a Composio toolkit", () => {
     );
     await expect(
       outcome(
-        startToolkitConnection(
-          { ...env, COMPOSIO_API_KEY: undefined },
-          {
-            person: admin,
-            composio: true,
-            toolkit: "hubspot",
-            tools: allowed,
-            consent: composioConsentText,
-            origin: clientOrigin,
-            returnTo: "/connections",
-          }
-        )
+        connectWith({ COMPOSIO_API_KEY: undefined }).startToolkitConnection({
+          person: admin,
+          composio: true,
+          toolkit: "hubspot",
+          tools: allowed,
+          consent: composioConsentText,
+          origin: clientOrigin,
+          returnTo: "/connections",
+        })
       )
     ).resolves.toBe("connection.provider_unavailable");
     expect(composio.state.requests).toStrictEqual([]);
@@ -319,7 +366,7 @@ describe("connecting a Composio toolkit", () => {
 
   it("stores nothing, and deletes what it made, when Composio fails on the way", async () => {
     const admin = someone("admin");
-    const failures = ["/mcp/servers", "/mcp/servers/generate"];
+    const failures = ["POST /mcp/servers", "POST /mcp/servers/generate"];
     for (const failing of failures) {
       const { state } = composio.authorize(
         // oxlint-disable-next-line no-await-in-loop -- one flow at a time
@@ -356,11 +403,7 @@ describe("connecting a Composio toolkit", () => {
     const admin = someone("admin");
     // The admin connected at Composio, and never came back.
     const { state } = composio.authorize(await start(admin));
-    await env.DB.prepare(
-      "UPDATE composio_flows SET expires_at = ? WHERE user_id = ?"
-    )
-      .bind(Date.now() - 1, admin.userId)
-      .run();
+    await expireFlowsOf(admin);
     await exports.default.scheduled();
     expect(heldAtComposio()).toStrictEqual({
       authConfigs: 0,
@@ -383,6 +426,70 @@ describe("connecting a Composio toolkit", () => {
     await expect(outcome(back(admin, state))).resolves.toBe(
       "connection.flow_invalid"
     );
+  });
+
+  it("reads the role again when the admin comes back: someone no longer an admin can't finish", async () => {
+    const admin = someone("admin");
+    const { state } = composio.authorize(await start(admin));
+    await expect(
+      outcome(back({ ...admin, role: "user" }, state))
+    ).resolves.toBe("role.forbidden");
+    expect(heldAtComposio()).toStrictEqual(nothingHeld);
+  });
+
+  it("deletes the auth config it made when starting fails midway, and records no consent", async () => {
+    composio.state.failing = "POST /connected_accounts/link";
+    await expect(outcome(start(someone("admin")))).resolves.toBe(
+      "connection.provider_refused"
+    );
+    expect(heldAtComposio()).toStrictEqual(nothingHeld);
+    const recorded = await events();
+    expect(
+      recorded.map(({ action, detail }) => [action, detail.outcome])
+    ).toStrictEqual([["connection.connect", "failed"]]);
+  });
+
+  it("keeps what it couldn't delete without a key, and deletes it once the key is back", async () => {
+    const admin = someone("admin");
+    const { state } = composio.authorize(await start(admin));
+    const withoutKey = connectWith({ COMPOSIO_API_KEY: undefined });
+    const finished = await outcome(
+      withoutKey.finishConnection({ person: admin, state, composio: true })
+    );
+    const kept = { held: heldAtComposio(), cleanups: await cleanupsLeft() };
+    await afterMinutes(2, async () => {
+      await withoutKey.scheduled();
+    });
+    const stillKept = await cleanupsLeft();
+    await afterMinutes(2, async () => {
+      await exports.default.scheduled();
+    });
+    expect({
+      finished,
+      kept,
+      stillKept,
+      after: { held: heldAtComposio(), cleanups: await cleanupsLeft() },
+    }).toStrictEqual({
+      finished: "connection.provider_unavailable",
+      kept: {
+        held: { ...nothingHeld, authConfigs: 1, accounts: 1 },
+        cleanups: 1,
+      },
+      stillKept: 1,
+      after: { held: nothingHeld, cleanups: 0 },
+    });
+  });
+
+  it("keeps an expired flow's account to delete while connect has no key", async () => {
+    const admin = someone("admin");
+    composio.authorize(await start(admin));
+    await expireFlowsOf(admin);
+    await connectWith({ COMPOSIO_API_KEY: undefined }).scheduled();
+    await expect(cleanupsLeft()).resolves.toBe(1);
+    await afterMinutes(2, async () => {
+      await exports.default.scheduled();
+    });
+    expect(heldAtComposio()).toStrictEqual(nothingHeld);
   });
 
   it("deletes what it made at Composio when a flow comes back but can't finish", async () => {
@@ -445,24 +552,49 @@ describe("a Composio connection", () => {
     await expect(
       exports.default.disconnect({ person: admin, connectionId })
     ).resolves.toStrictEqual({ revoked: true });
-    expect(heldAtComposio()).toMatchObject({ accounts: 0, servers: 0 });
+    expect(heldAtComposio()).toStrictEqual(nothingHeld);
     await expect(
       outcome(callAs(workflow, call(connectionId, "HUBSPOT_LIST_CONTACTS")))
     ).resolves.toBe("connect.connection_inactive");
   });
 
+  it("is deleted at Composio later when Composio doesn't take it at once, waiting longer after each failure", async () => {
+    const admin = someone("admin");
+    const connectionId = await connectHubSpot(admin);
+    composio.state.failing = "DELETE /connected_accounts/";
+    await expect(
+      exports.default.disconnect({ person: admin, connectionId })
+    ).resolves.toStrictEqual({ revoked: false });
+    expect(heldAtComposio()).toStrictEqual({ ...nothingHeld, accounts: 1 });
+    // Tried again after a minute, and failing, not again a minute later.
+    await afterMinutes(2, async () => {
+      await exports.default.scheduled();
+    });
+    const tried = composio.state.requests.length;
+    await afterMinutes(3, async () => {
+      await exports.default.scheduled();
+    });
+    expect(composio.state.requests).toHaveLength(tried);
+    composio.state.failing = undefined;
+    await afterMinutes(10, async () => {
+      await exports.default.scheduled();
+    });
+    expect(heldAtComposio()).toStrictEqual(nothingHeld);
+    await expect(cleanupsLeft()).resolves.toBe(0);
+  });
+
   it("takes no calls while connect has no Composio key", async () => {
     const connectionId = await connectHubSpot(someone("admin"));
-    const connection = await drizzle(env.DB)
-      .select()
-      .from(connections)
-      .where(eq(connections.id, connectionId))
-      .get();
-    if (connection === undefined) {
-      throw new Error("Expected the connection");
-    }
-    expect(() =>
-      composioServer({ ...env, COMPOSIO_API_KEY: undefined }, connection)
-    ).toThrow(/didn't take the call/u);
+    await expect(
+      outcome(
+        callAs(
+          workflow,
+          call(connectionId, "HUBSPOT_LIST_CONTACTS"),
+          {},
+          connectWith({ COMPOSIO_API_KEY: undefined })
+        )
+      )
+    ).resolves.toBe("connect.server_unavailable");
+    expect(composio.state.mcp.requests).toBe(0);
   });
 });

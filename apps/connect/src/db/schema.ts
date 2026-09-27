@@ -50,12 +50,14 @@ export const connections = sqliteTable(
     accountName: text("account_name"),
     connectedBy: text("connected_by"),
     /**
-     * For a Composio connection: the MCP server Composio made for it, which
-     * disconnecting deletes, and the tools the admin allowed, as a JSON
-     * array of names. A call of any other tool is refused, and a Composio
-     * connection without them takes no calls at all.
+     * For a Composio connection: the MCP server and the auth config
+     * Composio made for it, which disconnecting deletes with its account,
+     * and the tools the admin allowed, as a JSON array of names. A call of
+     * any other tool is refused, and a Composio connection without them
+     * takes no calls at all.
      */
     composioServerId: text("composio_server_id"),
+    composioAuthConfigId: text("composio_auth_config_id"),
     tools: text(),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
@@ -223,11 +225,14 @@ export const oauthFlows = sqliteTable(
  * and the connected account are the ones connect made at Composio for this
  * flow: finishing checks the account is that one, active, for that
  * toolkit. `tools` are the tools the admin allowed, as a JSON array.
+ * `flow_id` ties the admin's consent to the connection it led to, in the
+ * audit log.
  */
 export const composioFlows = sqliteTable(
   "composio_flows",
   {
     stateHash: text("state_hash").primaryKey(),
+    flowId: text("flow_id").notNull(),
     /** The admin who consented: only they can finish it. */
     userId: text("user_id").notNull(),
     toolkit: text().notNull(),
@@ -241,6 +246,28 @@ export const composioFlows = sqliteTable(
     index("composio_flows_expires_idx").on(table.expiresAt),
     index("composio_flows_user_id_idx").on(table.userId),
   ]
+);
+
+/**
+ * What connect made at Composio and still has to delete there: a flow
+ * that didn't finish, or a connection that was disconnected, while
+ * Composio didn't take the deletion or connect had no Composio key. The
+ * cron trigger tries again at `retry_at`, waiting longer after each failed
+ * `attempts`, until everything is gone. An account left there may hold
+ * tokens, so nothing is forgotten.
+ */
+export const composioCleanups = sqliteTable(
+  "composio_cleanups",
+  {
+    id: text().primaryKey(),
+    serverId: text("server_id"),
+    connectedAccountId: text("connected_account_id"),
+    authConfigId: text("auth_config_id"),
+    attempts: integer().notNull().default(0),
+    retryAt: timestamp("retry_at").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [index("composio_cleanups_retry_idx").on(table.retryAt)]
 );
 
 /**

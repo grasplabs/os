@@ -18,7 +18,7 @@ import { z } from "zod";
 // which gives every context no memory while off), purging Knowledge
 // (`knowledge_purge`), the Playbook's collection and record saves
 // (`playbook`), connection calls (`connections`), Composio's toolkits in
-// the catalog (`composio`), App methods
+// the catalog and connecting them (`composio`), App methods
 // (`apps`), starting runs and every step of one (`workflows`), and opening
 // or asking a decision (`decisions`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist.
@@ -59,8 +59,11 @@ export type Feature =
   | "playbook"
   | "connections"
   /**
-   * Composio's toolkits in the catalog; needs `connections` on too.
-   * Switched off, the catalog lists only native providers.
+   * Composio's toolkits in the catalog, and starting and finishing
+   * connections to them; needs `connections` on too. Switched off, the
+   * catalog lists only native providers and no toolkit connection starts
+   * or finishes. Calls on existing Composio connections go on: removing
+   * connect's `COMPOSIO_API_KEY` stops those.
    */
   | "composio"
   | "workflows"

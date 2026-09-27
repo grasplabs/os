@@ -22,7 +22,7 @@ import { ComposioError, composioKey, composioRequest } from "./composio.ts";
 import { auditRefusal, connectionEvent } from "./connection-audit.ts";
 import { isComposioServerUrl } from "./connections.ts";
 import type { Connection } from "./connections.ts";
-import { composioFlows, connections } from "./db/schema.ts";
+import { composioCleanups, composioFlows, connections } from "./db/schema.ts";
 
 // Connecting a Composio toolkit: one shared connection per toolkit, scoped
 // to the tools the admin allows. Composio holds its tokens, in its cloud,
@@ -42,8 +42,10 @@ import { composioFlows, connections } from "./db/schema.ts";
 // connected account: never Composio's single Tool Router URL.
 //
 // Whatever goes wrong after something was made at Composio, it is deleted
-// there again, as far as Composio lets it: a flow that didn't finish
-// leaves no account behind.
+// there again. What Composio doesn't take, or what can't be deleted while
+// connect has no key, is recorded and tried again by the cron trigger,
+// waiting longer each time, until it is gone: a flow that didn't finish, or
+// a disconnected connection, leaves no account behind for long.
 
 type ToolkitFlow = typeof composioFlows.$inferSelect;
 
@@ -88,23 +90,29 @@ interface AtComposio {
   authConfigId?: string | null;
 }
 
+/** What connect made at Composio, by the area of Composio's API it's in. */
+const areas = [
+  ["serverId", "mcp"],
+  ["connectedAccountId", "connected_accounts"],
+  ["authConfigId", "auth_configs"],
+] as const;
+
+const isNothing = (made: AtComposio): boolean =>
+  areas.every(([field]) => made[field] === undefined || made[field] === null);
+
 /**
  * Deletes what connect made at Composio, server first, then the account
- * (which deletes its tokens), then the auth config. Best effort: each
- * failure is logged, and never takes the place of the error that made the
- * cleanup necessary. Whether the account, if there was one, was deleted.
+ * (which deletes its tokens), then the auth config. What Composio no
+ * longer has (404) is gone. Each failure is logged and never thrown: what
+ * is left to delete.
  */
 const deleteAtComposio = async (
   key: string,
-  { serverId, connectedAccountId, authConfigId }: AtComposio
-): Promise<boolean> => {
-  const deletions = [
-    { area: "mcp", id: serverId },
-    { area: "connected_accounts", id: connectedAccountId },
-    { area: "auth_configs", id: authConfigId },
-  ];
-  let accountDeleted = false;
-  for (const { area, id } of deletions) {
+  made: AtComposio
+): Promise<AtComposio> => {
+  const left: AtComposio = {};
+  for (const [field, area] of areas) {
+    const id = made[field];
     if (id === undefined || id === null) {
       continue;
     }
@@ -115,12 +123,100 @@ const deleteAtComposio = async (
         path: `/${area}/${encodeURIComponent(id)}`,
         schema: anyAnswer,
       });
-      accountDeleted ||= area === "connected_accounts";
     } catch (error) {
-      log.warn("composio.delete_failed", { area, ...errorFields(error) });
+      if (!(error instanceof ComposioError && error.status === 404)) {
+        log.warn("composio.delete_failed", { area, ...errorFields(error) });
+        left[field] = id;
+      }
     }
   }
-  return accountDeleted;
+  return left;
+};
+
+/** The first wait before trying a failed cleanup again. */
+const firstRetryMs = 60 * 1000;
+
+/** The longest wait between two tries of a cleanup. */
+const maxRetryMs = 24 * 60 * 60 * 1000;
+
+/** How long to wait after `attempts` failed tries: doubling, up to a day. */
+const retryDelayMs = (attempts: number): number =>
+  Math.min(firstRetryMs * 2 ** attempts, maxRetryMs);
+
+/**
+ * Deletes at Composio what connect made there, and records what it
+ * couldn't delete (all of it, without a key) for the cron trigger to try
+ * again (`retryComposioCleanups`), so an account with tokens is never
+ * forgotten. Never throws: it runs where another error is on its way. What
+ * was left to delete.
+ */
+const cleanUpAtComposio = async (
+  env: Env,
+  made: AtComposio
+): Promise<AtComposio> => {
+  const key = composioKey(env);
+  const left = key === undefined ? made : await deleteAtComposio(key, made);
+  if (isNothing(left)) {
+    return left;
+  }
+  const now = Date.now();
+  try {
+    await drizzle(env.DB)
+      .insert(composioCleanups)
+      .values({
+        id: crypto.randomUUID(),
+        serverId: left.serverId ?? null,
+        connectedAccountId: left.connectedAccountId ?? null,
+        authConfigId: left.authConfigId ?? null,
+        retryAt: new Date(now + firstRetryMs),
+        createdAt: new Date(now),
+      });
+  } catch (error) {
+    log.error("composio.cleanup_not_recorded", errorFields(error));
+  }
+  return left;
+};
+
+/** Most cleanups one cron run tries: a few requests each. */
+const cleanupBatchSize = 10;
+
+/**
+ * Tries again the cleanups at Composio that are due, waiting longer after
+ * each failed try, and forgets each once everything of it is gone. Nothing
+ * is tried while connect has no Composio key. The cron trigger calls it.
+ */
+export const retryComposioCleanups = async (env: Env): Promise<void> => {
+  const key = composioKey(env);
+  if (key === undefined) {
+    return;
+  }
+  const db = drizzle(env.DB);
+  const now = new Date(Date.now());
+  const due = await db
+    .select()
+    .from(composioCleanups)
+    .where(lte(composioCleanups.retryAt, now))
+    .limit(cleanupBatchSize);
+  for (const cleanup of due) {
+    // oxlint-disable-next-line no-await-in-loop -- a small batch, in turn
+    const left = await deleteAtComposio(key, cleanup);
+    const row = eq(composioCleanups.id, cleanup.id);
+    // oxlint-disable-next-line no-await-in-loop -- a small batch, in turn
+    await (isNothing(left)
+      ? db.delete(composioCleanups).where(row)
+      : db
+          .update(composioCleanups)
+          .set({
+            serverId: left.serverId ?? null,
+            connectedAccountId: left.connectedAccountId ?? null,
+            authConfigId: left.authConfigId ?? null,
+            attempts: cleanup.attempts + 1,
+            retryAt: new Date(
+              now.getTime() + retryDelayMs(cleanup.attempts + 1)
+            ),
+          })
+          .where(row));
+  }
 };
 
 const detailOf = (toolkit: string) => ({ provider: toolkit, scope: "shared" });
@@ -183,6 +279,8 @@ export const startToolkitConnection = async (
 
   const state = randomToken();
   const stateHash = await sha256Hex(state);
+  const flowId = crypto.randomUUID();
+  const storedTools = JSON.stringify(tools);
   const callback = new URL(connectionCallbackPath, origin);
   callback.searchParams.set("state", state);
   const made: AtComposio = {};
@@ -216,6 +314,8 @@ export const startToolkitConnection = async (
           outcome: "ok",
           tokenHolder: "composio",
           consentHash: await sha256Hex(composioConsentText),
+          flowId,
+          toolsHash: await sha256Hex(storedTools),
           toolCount: tools.length,
         }),
       ],
@@ -224,11 +324,12 @@ export const startToolkitConnection = async (
           .insert(composioFlows)
           .values({
             stateHash,
+            flowId,
             userId: person.userId,
             toolkit,
             authConfigId: authConfig.id,
             connectedAccountId: link.connected_account_id,
-            tools: JSON.stringify(tools),
+            tools: storedTools,
             returnTo,
             expiresAt: new Date(Date.now() + oauthFlowLifetimeMs),
           }),
@@ -236,7 +337,7 @@ export const startToolkitConnection = async (
     );
     return { url: link.redirect_url };
   } catch (error) {
-    await deleteAtComposio(key, made);
+    await cleanUpAtComposio(env, made);
     if (!(error instanceof ComposioError)) {
       throw error;
     }
@@ -265,17 +366,14 @@ export const takeToolkitFlow = async (
 };
 
 /**
- * Deletes at Composio what a flow that will never finish made there: one
- * that came back but can't finish.
+ * Deletes at Composio what a flow that will never finish made there (one
+ * that came back but can't finish), or records it to delete later.
  */
 export const abandonToolkitFlow = async (
   env: Env,
   flow: ToolkitFlow
 ): Promise<void> => {
-  const key = composioKey(env);
-  if (key !== undefined) {
-    await deleteAtComposio(key, flow);
-  }
+  await cleanUpAtComposio(env, flow);
 };
 
 /** Most Composio flows one `dropToolkitFlows` takes: a few requests each. */
@@ -285,8 +383,9 @@ const dropBatchSize = 10;
  * Drops Composio flows that will never finish, those `where` matches (at
  * most {@link dropBatchSize}; a later call takes the rest), and deletes
  * what each made at Composio: an admin may have connected there and never
- * come back, leaving an account with tokens. Each flow is taken first, so
- * two calls never both handle one.
+ * come back, leaving an account with tokens. What can't be deleted now
+ * is recorded to delete later. Each flow is taken first, so two calls
+ * never both handle one.
  */
 export const dropToolkitFlows = async (env: Env, where: SQL): Promise<void> => {
   const db = drizzle(env.DB);
@@ -399,6 +498,8 @@ const finishToolkitConnection = async (
           ...detail,
           outcome: "ok",
           tokenHolder: "composio",
+          flowId: flow.flowId,
+          toolsHash: await sha256Hex(flow.tools),
           toolCount: tools.length,
         }),
       ],
@@ -414,6 +515,7 @@ const finishToolkitConnection = async (
           accountId: flow.connectedAccountId,
           connectedBy: person.userId,
           composioServerId: server.id,
+          composioAuthConfigId: flow.authConfigId,
           tools: flow.tools,
           createdAt: now,
           updatedAt: now,
@@ -422,9 +524,7 @@ const finishToolkitConnection = async (
     );
     return { connectionId, returnTo: flow.returnTo };
   } catch (error) {
-    if (key !== undefined) {
-      await deleteAtComposio(key, made);
-    }
+    await cleanUpAtComposio(env, made);
     if (!(error instanceof ComposioError)) {
       throw error;
     }
@@ -456,20 +556,18 @@ export const finishToolkitFlow = async (
 };
 
 /**
- * Deletes a Composio connection's server and account at Composio, which
- * deletes its tokens there. Best effort, as revoking an OAuth grant is:
- * whether the account was deleted.
+ * Deletes a Composio connection's server, account and auth config at
+ * Composio, which deletes its tokens there, or records what it couldn't
+ * delete to try again later: whether the account is deleted now.
  */
 export const revokeAtComposio = async (
   env: Env,
   connection: Connection
 ): Promise<boolean> => {
-  const key = composioKey(env);
-  if (key === undefined) {
-    return false;
-  }
-  return await deleteAtComposio(key, {
+  const left = await cleanUpAtComposio(env, {
     serverId: connection.composioServerId,
     connectedAccountId: connection.accountId,
+    authConfigId: connection.composioAuthConfigId,
   });
+  return connection.accountId !== null && left.connectedAccountId === undefined;
 };

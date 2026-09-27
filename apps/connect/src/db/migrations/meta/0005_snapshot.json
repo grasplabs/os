@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "af2f10a9-dc9d-48fa-96b2-2b57e485510c",
+  "id": "f02aaa70-216a-47a9-a8c8-90c6d47da1b3",
   "prevId": "977f7440-11f8-443a-bb36-62cc57c2e99c",
   "tables": {
     "audit_outbox": {
@@ -95,6 +95,74 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "composio_cleanups": {
+      "name": "composio_cleanups",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "text",
+          "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "server_id": {
+          "name": "server_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "connected_account_id": {
+          "name": "connected_account_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "auth_config_id": {
+          "name": "auth_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "attempts": {
+          "name": "attempts",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "retry_at": {
+          "name": "retry_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {
+        "composio_cleanups_retry_idx": {
+          "name": "composio_cleanups_retry_idx",
+          "columns": [
+            "retry_at"
+          ],
+          "isUnique": false
+        }
+      },
+      "foreignKeys": {},
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "composio_flows": {
       "name": "composio_flows",
       "columns": {
@@ -102,6 +170,13 @@
           "name": "state_hash",
           "type": "text",
           "primaryKey": true,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "flow_id": {
+          "name": "flow_id",
+          "type": "text",
+          "primaryKey": false,
           "notNull": true,
           "autoincrement": false
         },
@@ -324,6 +399,13 @@
         },
         "composio_server_id": {
           "name": "composio_server_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "composio_auth_config_id": {
+          "name": "composio_auth_config_id",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

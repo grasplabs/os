@@ -49,7 +49,8 @@
       "migrations_dir": "src/db/migrations",
     },
   ],
-  // Drops OAuth and Composio flows nobody finished, and seals what a
-  // rotated key sealed again (src/index.ts).
+  // Drops OAuth and Composio flows nobody finished, deletes at Composio
+  // what earlier tries couldn't, and seals what a rotated key sealed again
+  // (src/index.ts).
   "triggers": { "crons": ["* * * * *"] },
 }
