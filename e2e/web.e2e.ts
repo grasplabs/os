@@ -36,7 +36,7 @@ test("names each member's actions for them, and asks before making someone an ad
   await page.goto("/members");
 
   for (const person of [one, two]) {
-    const who = `Person (${person.userId}@acme.test)`;
+    const who = `Person (${person.email})`;
     for (const name of [`End sessions for ${who}`, `Remove ${who}`]) {
       // oxlint-disable-next-line no-await-in-loop -- one control at a time
       await expect(page.getByRole("button", { name, exact: true })).toHaveCount(
@@ -52,7 +52,7 @@ test("names each member's actions for them, and asks before making someone an ad
   expect(new Set(labels).size).toBe(labels.length);
 
   const role = page.getByRole("combobox", {
-    name: `Role of Person (${one.userId}@acme.test)`,
+    name: `Role of Person (${one.email})`,
   });
   await role.click();
   await page.getByRole("option", { name: "admin" }).click();
@@ -130,7 +130,7 @@ test("an admin changes a member's role, and the controls wait for the list to sh
   await signInTo(context, admin);
   const gate = await callGate(page, '["members","list"]');
   await page.goto("/members");
-  const who = `Person (${one.userId}@acme.test)`;
+  const who = `Person (${one.email})`;
   const role = page.getByRole("combobox", { name: `Role of ${who}` });
   await expect(role).toContainText("user");
 

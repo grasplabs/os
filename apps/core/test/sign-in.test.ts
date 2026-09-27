@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { createIdp } from "./fake-idp.ts";
 import { mockIdp } from "./idp.ts";
 import type { Claims } from "./idp.ts";
 import {
@@ -517,5 +518,95 @@ describe("Grasp staff access", () => {
       refused("tenant_mismatch"),
       refused("tenant_mismatch"),
     ]);
+  });
+});
+
+describe("local development's stand-in for Entra", () => {
+  const localOrigin = "http://localhost:8787";
+  const standInOrigin = "http://localhost:8788";
+  /** Core's env on a local stack pointed at a stand-in at `standIn`. */
+  const localEnv = (standIn = standInOrigin): Env => ({
+    ...withSignIn({ origin: localOrigin }),
+    DEV_IDP_ORIGIN: standIn,
+  });
+
+  it("signs someone in on a local stack through the stand-in it's pointed at", async () => {
+    const standIn = createIdp(standInOrigin);
+    vi.spyOn(globalThis, "fetch").mockImplementation(standIn.fetch);
+    const coreEnv = localEnv();
+    const person = entraPerson(acmeTenant);
+    const session = await signedIn(standIn, "microsoft", person, {
+      coreEnv,
+      origin: localOrigin,
+    });
+    const { core } = await openRpc(session, { coreEnv, origin: localOrigin });
+    try {
+      using signedInAs = core.authenticate();
+      await expect(signedInAs.whoami()).resolves.toMatchObject({
+        email: person.email,
+        role: "user",
+      });
+    } finally {
+      core[Symbol.dispose]();
+    }
+  });
+
+  it("never sends a deployment's sign-in there, whatever the var says", async () => {
+    const deployed: Env = { ...env, DEV_IDP_ORIGIN: standInOrigin };
+    const started = await startSignIn("microsoft", { coreEnv: deployed });
+    expect(started.authorizationUrl.origin).toBe(
+      "https://login.microsoftonline.com"
+    );
+    // Its token and keys come from Microsoft too: the IdP here answers
+    // Microsoft's URLs only.
+    const session = await signedIn(idp, "microsoft", entraPerson(acmeTenant), {
+      coreEnv: deployed,
+    });
+    await expect(whoami(session, deployed)).resolves.toMatchObject({
+      staff: false,
+    });
+  });
+
+  it("never trusts the stand-in's origin on a deployment, whatever the var says", async () => {
+    const deployed: Env = { ...env, DEV_IDP_ORIGIN: standInOrigin };
+    /**
+     * Better Auth's answer to a browser starting a sign-in from `origin`,
+     * back to `callbackURL`. The browser has a cookie for the site, as any
+     * visitor does: Better Auth checks the origin of requests with one.
+     */
+    const started = async (origin: string, callbackURL: string) => {
+      const response = await routed(
+        "/api/auth/sign-in/sso",
+        {
+          method: "POST",
+          headers: {
+            origin,
+            cookie: "visited=1",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ providerId: "microsoft", callbackURL }),
+        },
+        deployed
+      );
+      return response.status;
+    };
+    // A page on the stand-in's origin can't start one...
+    await expect(started(standInOrigin, "/")).resolves.toBe(403);
+    // ...nor can a sign-in be sent back there.
+    await expect(
+      started(clientOrigin, `${standInOrigin}/landing`)
+    ).resolves.toBe(403);
+    // The same sign-in from the client's own page, back to it, starts.
+    await expect(started(clientOrigin, "/")).resolves.toBe(200);
+  });
+
+  it("never sends a local stack's sign-in to a stand-in off this machine", async () => {
+    const started = await startSignIn("microsoft", {
+      coreEnv: localEnv("https://idp.attacker.test"),
+      origin: localOrigin,
+    });
+    expect(started.authorizationUrl.origin).toBe(
+      "https://login.microsoftonline.com"
+    );
   });
 });

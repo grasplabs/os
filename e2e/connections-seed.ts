@@ -2,17 +2,82 @@
  * Connections for end-to-end tests. Connecting one goes to Microsoft or
  * Composio, which a local stack can't reach, and its dev server can't point
  * connect's calls out at a fake, so this writes what a finished connection
- * leaves behind straight into connect's local database, as people.ts does
- * for sign-ins: the connection rows only, with no tokens, which nothing
- * here uses. The flows themselves, through a fake Entra and Composio, are
- * core's tests (apps/core/test/connections.test.ts). Written up front, once
+ * leaves behind straight into connect's local database: the connection
+ * rows only, with no tokens, which nothing here uses. The flows themselves,
+ * through a fake Entra and Composio, are core's tests
+ * (apps/core/test/connections.test.ts). Written up front in one write, once
  * for each attempt a test may get, before any test runs; tests only look
  * theirs up.
  */
+import { execFileSync } from "node:child_process";
+import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
+
 import { test } from "@playwright/test";
 
-import { execute, quoted } from "./people.ts";
 import type { Cast } from "./people.ts";
+
+const quoted = (text: string): string => `'${text.replaceAll("'", "''")}'`;
+
+/**
+ * How often `execute` tries a write the database was too busy for (the dev
+ * server shares the file), waiting 200 ms first and twice as long each time
+ * after: 3 s at most in all.
+ */
+const busyAttempts = 5;
+const firstBusyWaitMs = 200;
+
+/**
+ * What wrangler prints when another connection held the file: SQLite's
+ * SQLITE_BUSY, or workerd's opaque "internal error; reference = …" when
+ * the batch fails under the same contention. Any other error, a constraint
+ * failing say, fails the run.
+ */
+const busyErrors = ["SQLITE_BUSY", "internal error; reference ="];
+
+const isBusy = (error: unknown): boolean =>
+  error instanceof Error &&
+  "stderr" in error &&
+  busyErrors.some((text) => String(error.stderr).includes(text));
+
+/**
+ * Runs SQL on connect's local database, which the dev server keeps next to
+ * core's (apps/core/package.json), as one batch in one transaction, which
+ * SQLite undoes whole when it can't finish: so a busy batch is tried again.
+ */
+const execute = async (sql: string): Promise<void> => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      execFileSync(
+        path.join(import.meta.dirname, "../node_modules/.bin/wrangler"),
+        [
+          "d1",
+          "execute",
+          "DB",
+          "--local",
+          "-c",
+          "../connect/wrangler.jsonc",
+          "--persist-to",
+          ".wrangler/state",
+          "--command",
+          sql,
+        ],
+        {
+          cwd: path.join(import.meta.dirname, "../apps/core"),
+          stdio: "pipe",
+          env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+        }
+      );
+      return;
+    } catch (error) {
+      if (attempt >= busyAttempts || !isBusy(error)) {
+        throw error;
+      }
+    }
+    // oxlint-disable-next-line no-await-in-loop -- one try at a time
+    await sleep(firstBusyWaitMs * 2 ** (attempt - 1));
+  }
+};
 
 export interface SeededConnection {
   id: string;
@@ -127,8 +192,7 @@ export const seedConnections = async (cast: Cast): Promise<void> => {
   await execute(
     written
       .flatMap(({ rows }) => rows.map((row) => insert(row, now)))
-      .join("; "),
-    "connect"
+      .join("; ")
   );
   // Playwright hands the global setup's environment to the test workers.
   process.env[seededVariable] = JSON.stringify(

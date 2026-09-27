@@ -39,7 +39,12 @@ import {
 } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { checkClaims } from "./claims.ts";
-import { oidcProviders, providerIds, staffWindowOpen } from "./config.ts";
+import {
+  devIdpOrigin,
+  oidcProviders,
+  providerIds,
+  staffWindowOpen,
+} from "./config.ts";
 import type { OidcProvider, SignInConfig } from "./config.ts";
 
 /** Better Auth's routes, under core's API. */
@@ -373,6 +378,11 @@ const createAuth = (
     // core is reached on its workers.dev address through the router.
     baseURL: config.origin,
     basePath: authBasePath,
+    // The SSO plugin calls no IdP on a private address unless it is
+    // trusted: only a local stack's stand-in for Entra (config.ts) is.
+    trustedOrigins: [devIdpOrigin(env, config)].filter(
+      (origin) => origin !== undefined
+    ),
     secret: env.BETTER_AUTH_SECRET,
     database: drizzleAdapter(db, {
       provider: "sqlite",
