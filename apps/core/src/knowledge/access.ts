@@ -93,7 +93,7 @@ const readableBy = (
 
 /** A collection as `mayRead` needs it: its access, owner and teams. */
 export interface CollectionAccess {
-  access: string;
+  access: (typeof collections.$inferSelect)["access"];
   owner: string;
   teamIds: readonly string[];
 }
@@ -101,15 +101,32 @@ export interface CollectionAccess {
 /**
  * Whether `person` may read `collection`: `readableBy`'s rule, decided in
  * memory, for checking many people against collections read once (sharing
- * an App, app-provenance.ts). The two must always agree.
+ * an App, app-provenance.ts). The two must always agree: a new kind of
+ * access doesn't compile here until it is decided.
  */
 export const mayRead = (
   { userId, teamIds }: PersonAccess,
   { access, owner, teamIds: shared }: CollectionAccess
-): boolean =>
-  access === "everyone" ||
-  owner === userId ||
-  (access === "teams" && shared.some((team) => teamIds.includes(team)));
+): boolean => {
+  // Its owner always, also of a team collection for teams they aren't in.
+  if (owner === userId) {
+    return true;
+  }
+  switch (access) {
+    case "everyone": {
+      return true;
+    }
+    case "teams": {
+      return shared.some((team) => teamIds.includes(team));
+    }
+    case "me": {
+      return false;
+    }
+    default: {
+      return access satisfies never;
+    }
+  }
+};
 
 /**
  * The collections the App or agent may read under its permissions (only

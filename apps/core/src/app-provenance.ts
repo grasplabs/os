@@ -22,7 +22,10 @@ import type { CollectionAccess, PersonAccess } from "./knowledge/access.ts";
 // connection everyone in the organization, who may all use it; a
 // collection whoever Knowledge lets read it now (`mayRead`, the rule of
 // knowledge/access.ts), so a collection whose access narrows reaches fewer
-// people from then on. Sources that no longer exist are left out.
+// people from then on. A granted source that doesn't resolve (connect
+// doesn't know the connection, Knowledge has no such collection) fails
+// closed: nobody reads it but the App's owner and admins, who aren't
+// checked, since what the App read of it can't be placed.
 //
 // The sources are read once, and each person is decided in memory
 // (`unreadableBy`), so checking a whole team costs a few queries, not a
@@ -45,6 +48,8 @@ const sourceId = (type: "connection" | "collection", id: string): string =>
 export interface AppSources {
   connections: ConnectionOwner[];
   collections: (CollectionAccess & { id: string })[];
+  /** Granted sources that don't resolve, as `sourceId` names them. */
+  unresolved: string[];
 }
 
 const actionsSchema = z.array(z.string());
@@ -122,12 +127,22 @@ export const sourcesOf = async (env: Env, app: AppId): Promise<AppSources> => {
     connectionIds.size === 0 ? [] : ownersOf(env, [...connectionIds]),
     collectionIds.size === 0 ? [] : accessOf(env, [...collectionIds]),
   ]);
-  return { connections, collections: readable };
+  const resolved = new Set([
+    ...connections.map(({ id }) => sourceId("connection", id)),
+    ...readable.map(({ id }) => sourceId("collection", id)),
+  ]);
+  const unresolved = [
+    ...[...connectionIds].map((id) => sourceId("connection", id)),
+    ...[...collectionIds].map((id) => sourceId("collection", id)),
+  ].filter((id) => !resolved.has(id));
+  return { connections, collections: readable, unresolved };
 };
 
 /** Whether an App has read from anything at all. */
 export const hasSources = (sources: AppSources): boolean =>
-  sources.connections.length > 0 || sources.collections.length > 0;
+  sources.connections.length > 0 ||
+  sources.collections.length > 0 ||
+  sources.unresolved.length > 0;
 
 /**
  * The sources in `sources` that `reader` can't read, as
@@ -145,4 +160,5 @@ export const unreadableBy = (
   ...sources.collections.flatMap((collection) =>
     mayRead(reader, collection) ? [] : [sourceId("collection", collection.id)]
   ),
+  ...sources.unresolved,
 ];

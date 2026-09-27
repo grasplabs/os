@@ -244,16 +244,19 @@ const checkedPeople = async (
         )
       ),
   ]);
+  const teamsByPerson = new Map<string, string[]>();
+  for (const { userId, teamId } of memberships) {
+    const teamIds = teamsByPerson.get(userId) ?? [];
+    teamIds.push(teamId);
+    teamsByPerson.set(userId, teamIds);
+  }
   return roles.flatMap(({ userId, role }) => {
     // A role that isn't one of ours is no access, as auth/identity.ts has it.
     const known = roleSchema.safeParse(role);
     if (!known.success || isAdmin(known.data)) {
       return [];
     }
-    const teamIds = memberships
-      .filter((membership) => membership.userId === userId)
-      .map(({ teamId }) => teamId);
-    return [{ userId, teamIds }];
+    return [{ userId, teamIds: teamsByPerson.get(userId) ?? [] }];
   });
 };
 

@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
+import { mayRead } from "../src/knowledge/access.ts";
 import { outlook, requestGranted } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { newTeam, readCollection, storedGrant } from "./knowledge.ts";
@@ -81,7 +82,10 @@ const collectionFor = async (
   return id;
 };
 
-/** More people than a query each would stay well under D1's limits for. */
+/**
+ * A team as large as a whole department: sharing with it still answers,
+ * naming exactly the people who can't read what the App read.
+ */
 const teamSize = 120;
 
 const refusalSchema = z.object({
@@ -106,6 +110,59 @@ const shareRefusal = async (
     return details;
   }
 };
+
+/** The same reads, by Knowledge and by `mayRead`. */
+const same = (reads: boolean[]) => ({ knowledge: reads, mayRead: reads });
+
+describe("who reads a collection the App read", () => {
+  it("is decided just as Knowledge decides who reads it", async () => {
+    const admin = await personApi("admin");
+    const [member, outsider] = await Promise.all([
+      personApi("user"),
+      personApi("user"),
+    ]);
+    const team = await newTeam(admin, [member]);
+    // Everyone's, a team's that its owner isn't in, and someone's own.
+    const made = await Promise.all([
+      admin.api.knowledge.createCollection({
+        name: `All ${unique()}`,
+        access: "everyone",
+      }),
+      admin.api.knowledge.createCollection({
+        name: `Team ${unique()}`,
+        access: "teams",
+        teams: [team],
+      }),
+      member.api.knowledge.createCollection({
+        name: `Mine ${unique()}`,
+        access: "me",
+      }),
+    ]);
+    const decided = async (person: Person) => {
+      const [listed, { teams }] = await Promise.all([
+        person.api.knowledge.listCollections(),
+        person.api.whoami(),
+      ]);
+      const reader = {
+        userId: person.userId,
+        teamIds: teams.map(({ id }) => id),
+      };
+      return {
+        knowledge: made.map(({ id }) => listed.some((one) => one.id === id)),
+        mayRead: made.map(({ access, owner, teams: teamIds }) =>
+          mayRead(reader, { access, owner, teamIds })
+        ),
+      };
+    };
+    await expect(
+      Promise.all([admin, member, outsider].map(decided))
+    ).resolves.toStrictEqual([
+      same([true, true, false]),
+      same([true, true, true]),
+      same([true, false, false]),
+    ]);
+  });
+});
 
 describe("sharing an App", () => {
   it("is refused, with why, when the App read a mailbox they can't read, and audited", async () => {
@@ -197,19 +254,31 @@ describe("sharing an App", () => {
     ).resolves.toMatchObject({ people: [anna.userId] });
   });
 
-  it("counts every connection the App was granted, however many", async () => {
+  it("counts every connection the App was granted, however many, and one connect doesn't know as nobody's", async () => {
     const [owner, anna] = await Promise.all([
       personApi("builder"),
       personApi("builder"),
     ]);
     const app = await newApp(owner);
     const mailbox = await mailboxOf(owner);
-    // More than connect answers for at once, the mailbox among the last.
-    const many = Array.from(
+    const gone = `connection-gone-${unique()}`;
+    // More shared ones than connect answers for at once, which everyone
+    // may read, then the mailbox and one connect never had.
+    const now = Date.now();
+    const shared = Array.from(
       { length: connectionOwnersMax + 1 },
-      (_, index) => `connection-gone-${index}`
+      () => `connection-shared-${unique()}`
     );
-    for (const [index, connectionId] of [...many, mailbox].entries()) {
+    await connectDb().batch(
+      shared.map((id) =>
+        connectDb()
+          .prepare(
+            "INSERT INTO connections (id, provider, scope, status, server_kind, server, created_at, updated_at) VALUES (?, 'mail', 'shared', 'active', 'composio', 'https://backend.composio.dev/v3/mcp/none', ?, ?)"
+          )
+          .bind(id, now, now)
+      )
+    );
+    for (const [index, connectionId] of [...shared, mailbox, gone].entries()) {
       // oxlint-disable-next-line no-await-in-loop -- one grant at a time
       await storedGrant(
         { type: "app", id: app },
@@ -222,7 +291,7 @@ describe("sharing an App", () => {
     await expect(
       shareRefusal(owner, app, { type: "person", id: anna.userId })
     ).resolves.toStrictEqual({
-      sources: [`connection:${mailbox}`],
+      sources: [`connection:${mailbox}`, `connection:${gone}`],
       people: [anna.userId],
     });
   });

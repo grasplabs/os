@@ -373,7 +373,8 @@ const assemble = async (
  * workflow step, which gets nothing), `permission.person_inactive` when the
  * person has left, and, for an App's AGENTS.md, `role.forbidden` when they
  * don't build that App and `app.not_found` for one that doesn't exist or
- * that they have no role in. No
+ * that they have no role in, and `app.unreadable` when it is shared with
+ * them but has read data they can't read (app-provenance.ts). No
  * memory while `memory` (or `knowledge`) is switched off.
  */
 export const forContext = async (
