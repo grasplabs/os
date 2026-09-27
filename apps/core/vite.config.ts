@@ -93,6 +93,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               memory: true,
               knowledge_purge: true,
               playbook: true,
+              skills: true,
               connections: true,
               composio: true,
               workflows: true,

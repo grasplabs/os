@@ -383,7 +383,8 @@ const conflict = (existing: DocumentRow | undefined) =>
 
 /**
  * Reads `text` for the document at `path` in `collection`, refused as a
- * save would refuse it: over a document's limits, frontmatter that doesn't
+ * save would refuse it: one to the Grasp skills by anything but their
+ * sync (`graspSync`), over a document's limits, frontmatter that doesn't
  * fit its type, a Playbook record outside a Playbook collection, a
  * snapshot that freezes what it may not (`requireFrozenVersions`; a
  * restore passes the version it restores, `restoredFrom`), or, for a
@@ -394,8 +395,15 @@ export const checkedText = async (
   collection: CollectionRow,
   path: string,
   text: string,
-  restoredFrom: number | null = null
+  restoredFrom: number | null = null,
+  graspSync = false
 ): Promise<Prepared> => {
+  // The Grasp skills are the release's (grasp-skills.ts): no save,
+  // restore, proposal or purge changes them, an admin's neither; the next
+  // sync would only put the release's text back.
+  if (collection.source === "grasp" && !graspSync) {
+    throw knowledgeErrors.create("knowledge.read_only");
+  }
   const prepared = prepare(path, text);
   // Records live in the Playbook collection, which only exists once the
   // `playbook` flag is on (playbook.ts): until then no text of a record
@@ -449,6 +457,8 @@ export interface Write {
    * version comes from approved: they commit with it or not at all.
    */
   also?: BatchItem<"sqlite">[];
+  /** Set only by the sync of the Grasp skills, their one writer. */
+  graspSync?: true;
 }
 
 /**
@@ -462,8 +472,15 @@ export const writeVersion = async (
   write: Write
 ): Promise<DocumentSummary> => {
   const { collection, path, text, ifVersion, message, restoredFrom } = write;
-  const { also = [] } = write;
-  const prepared = await checkedText(env, collection, path, text, restoredFrom);
+  const { also = [], graspSync = false } = write;
+  const prepared = await checkedText(
+    env,
+    collection,
+    path,
+    text,
+    restoredFrom,
+    graspSync
+  );
   const db = drizzle(env.KNOWLEDGE);
   const existing = await findByPath(db, collection.id, path);
   if ((existing?.currentVersion ?? 0) !== ifVersion) {

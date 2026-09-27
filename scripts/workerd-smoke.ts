@@ -41,11 +41,13 @@ const freePort = async (): Promise<number> => {
 };
 const PORT = await freePort();
 
-// Durable Object migrations are bundled next to index.js as text modules.
+// Durable Object migrations and the Grasp skills are bundled next to
+// index.js as text modules.
+const textModule = /(?:\.sql|SKILL\.md)$/u;
 const modules = [
   `(name = "index.js", esModule = embed "index.js")`,
   ...readdirSync(out)
-    .filter((file) => file.endsWith(".sql"))
+    .filter((file) => textModule.test(file))
     .map((file) => `(name = "${file}", text = embed "${file}")`),
 ];
 

@@ -2,6 +2,7 @@ import type {
   BacklinkPage,
   Collection,
   CollectionInput,
+  CopySkillInput,
   DocumentPage,
   DocumentRead,
   DocumentSummary,
@@ -20,6 +21,7 @@ import type {
   SaveInput,
   SearchOptions,
   SearchResults,
+  SkillCollections,
 } from "@grasp-os/shared/knowledge";
 import { RpcTarget } from "capnweb";
 
@@ -35,6 +37,7 @@ import {
   restoreVersion,
   saveDocument,
 } from "./documents.ts";
+import { copySkill, skillCollections } from "./grasp-skills.ts";
 import { preparePurge, purge } from "./purge.ts";
 import { search } from "./search.ts";
 import { catalog, follow, read } from "./tools.ts";
@@ -151,6 +154,20 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   async follow(documentId: string): Promise<FollowResult> {
     return await this.#asReader(
       async (reader) => await follow(this.#env, reader, documentId)
+    );
+  }
+
+  async skillCollections(): Promise<SkillCollections> {
+    return await withPerson(
+      this.#check,
+      async (person) => await skillCollections(this.#env, person)
+    );
+  }
+
+  async copySkill(input: CopySkillInput): Promise<DocumentSummary> {
+    return await withPerson(
+      this.#check,
+      async (person) => await copySkill(this.#env, person, input)
     );
   }
 
