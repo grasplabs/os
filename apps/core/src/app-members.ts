@@ -12,11 +12,13 @@ import type {
 } from "@grasp-os/shared/apps";
 import { actorOf } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { appIdSchema } from "@grasp-os/shared/ids";
+import type { AppId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { canBuild, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
-import { and, asc, eq, isNotNull, ne, or } from "drizzle-orm";
+import { and, asc, eq, isNotNull, ne, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
@@ -24,7 +26,7 @@ import { appFor } from "./apps.ts";
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import { activeMember, organizationId } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
-import { appMembers, teams, users } from "./db/core/schema.ts";
+import { appMembers, apps, teams, users } from "./db/core/schema.ts";
 import { appHost } from "./durable-objects.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
@@ -168,19 +170,49 @@ const requireSharable = async (
   }
 };
 
+/** Most Apps one cron run restarts for people they are no longer shared with. */
+const restartsPerRun = 20;
+
 /**
  * Restarts the App's server code, so it keeps no callbacks of screens
  * whose person it is no longer shared with: they subscribe again, and
- * someone unshared is refused. `app.screens_open` when it can't, after
- * the unsharing stands: removing them again finishes it.
+ * someone unshared is refused. Then clears the App's due restart, if it
+ * is still the one `due` read (a removal since has a later one). A host
+ * that can't be reached leaves it due, for the cron to try again.
  */
-const closeScreens = async (env: Env, app: App): Promise<void> => {
+const closeScreens = async (env: Env, app: AppId, due: Date): Promise<void> => {
   try {
-    await appHost(env, app.id).restart("It is no longer shared with someone.");
+    await appHost(env, app).restart("It is no longer shared with someone.");
   } catch (error) {
-    log.error("app.restart_failed", { appId: app.id, ...errorFields(error) });
-    throw appErrors.create("app.screens_open");
+    log.error("app.restart_failed", { appId: app, ...errorFields(error) });
+    return;
   }
+  await drizzle(env.DB)
+    .update(apps)
+    .set({ screensRestartDue: null })
+    .where(and(eq(apps.id, app), eq(apps.screensRestartDue, due)));
+};
+
+/**
+ * Restarts the Apps whose restart for someone unshared is still due, the
+ * oldest first and at most `restartsPerRun` a run: the cron trigger runs
+ * it every minute, so a host that couldn't be reached at the removal is
+ * restarted within about a minute of being back.
+ */
+export const retryScreenRestarts = async (env: Env): Promise<void> => {
+  const due = await drizzle(env.DB)
+    .select({ id: apps.id, due: apps.screensRestartDue })
+    .from(apps)
+    .where(isNotNull(apps.screensRestartDue))
+    .orderBy(asc(apps.screensRestartDue), asc(apps.id))
+    .limit(restartsPerRun);
+  await Promise.all(
+    due.map(async ({ id, due: since }) => {
+      if (since !== null) {
+        await closeScreens(env, appIdSchema.parse(id), since);
+      }
+    })
+  );
 };
 
 /** Whom an App is shared with, in the order they were shared or changed. */
@@ -237,12 +269,12 @@ export const addMember = async (
 };
 
 /**
- * Stops sharing an App with a person or team. Their next call is refused;
- * the App's server code restarts, so it keeps none of their screens'
- * subscriptions either; `app.screens_open` if it can't restart yet.
- * Unsharing with someone it isn't shared with changes and records
- * nothing, but restarts the App all the same, which finishes a removal
- * whose restart failed.
+ * Stops sharing an App with a person or team. Their next call is refused,
+ * and their open screens of it are closed right away, or within a minute
+ * if the App's host is briefly out of reach: the App's server code
+ * restarts, so it keeps none of their screens' subscriptions. Unsharing
+ * with someone it isn't shared with changes, records and restarts
+ * nothing.
  */
 export const removeMember = async (
   env: Env,
@@ -259,36 +291,43 @@ export const removeMember = async (
     .from(appMembers)
     .where(rowOf(found, member))
     .get();
-  if (before) {
-    // Only in the role read above, so the event records the role it ended.
-    const [[removed]] = await auditedBatch(env, db, [
-      db
-        .delete(appMembers)
-        .where(and(rowOf(found, member), eq(appMembers.role, before.role)))
-        .returning(),
-      outboxedIfChanged(
-        db,
-        memberEntry(by, "app.member.removed", found, {
-          ...member,
-          role: before.role,
-        })
-      ),
-    ]);
-    const kept = removed
-      ? undefined
-      : await db
-          .select({ role: appMembers.role })
-          .from(appMembers)
-          .where(rowOf(found, member))
-          .get();
-    // Their role changed meanwhile; unshared meanwhile is what was asked.
-    if (kept) {
-      throw appErrors.create("app.conflict");
-    }
+  if (!before) {
+    return;
   }
-  // Also when they were unshared already: an earlier removal whose restart
-  // failed is finished by trying again.
-  await closeScreens(env, found);
+  const due = new Date();
+  // Only in the role read above, so the event records the role it ended.
+  // The restart is due, and the event recorded, only if the row went: the
+  // cron trigger restarts the App if the restart below can't.
+  const [[removed]] = await auditedBatch(env, db, [
+    db
+      .delete(appMembers)
+      .where(and(rowOf(found, member), eq(appMembers.role, before.role)))
+      .returning(),
+    db
+      .update(apps)
+      .set({ screensRestartDue: due })
+      .where(and(eq(apps.id, found.id), sql`changes() > 0`)),
+    outboxedIfChanged(
+      db,
+      memberEntry(by, "app.member.removed", found, {
+        ...member,
+        role: before.role,
+      })
+    ),
+  ]);
+  if (removed) {
+    await closeScreens(env, found.id, due);
+    return;
+  }
+  const kept = await db
+    .select({ role: appMembers.role })
+    .from(appMembers)
+    .where(rowOf(found, member))
+    .get();
+  // Their role changed meanwhile; unshared meanwhile is what was asked.
+  if (kept) {
+    throw appErrors.create("app.conflict");
+  }
 };
 
 /** A signed-in person's `apps.members`. */

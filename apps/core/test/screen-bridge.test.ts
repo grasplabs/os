@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import { removeMember } from "../src/app-members.ts";
 import { release } from "./apps.ts";
+import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { openRpc, outcome, signedInApi } from "./sign-in.ts";
 
@@ -358,7 +359,7 @@ describe("screens", { timeout: 60_000 }, () => {
     expect(watching.received[0]).toStrictEqual([]);
   });
 
-  it("says so when unsharing can't close someone's screens yet, and closes them when tried again", async () => {
+  it("closes someone's screens within a minute when unsharing can't reach the App's host", async () => {
     const owner = await personApi("builder");
     const member = await personApi("builder");
     const app = await sampleApp(owner);
@@ -384,7 +385,7 @@ describe("screens", { timeout: 60_000 }, () => {
       },
     });
 
-    const first = await outcome(
+    const removed = await outcome(
       removeMember(
         { ...env, APPS: unreachable },
         await owner.api.whoami(),
@@ -392,9 +393,10 @@ describe("screens", { timeout: 60_000 }, () => {
         them
       )
     );
-    // Removed, but the App still holds their subscription.
+    // Removed, but the App still holds their subscription, until the cron
+    // trigger, every minute, restarts it.
     const stillWatching = await owner.api.screens.call(app, "watching", []);
-    await owner.api.apps.members.remove(app, them);
+    await runCron();
     const left = await vi.waitFor(async () => {
       const count = await owner.api.screens.call(app, "watching", []);
       if (count !== 0) {
@@ -403,16 +405,41 @@ describe("screens", { timeout: 60_000 }, () => {
       return count;
     }, 10_000);
     expect({
-      first,
+      removed,
       stillWatching,
       opens: await outcome(member.api.apps.get(app)),
       left,
     }).toStrictEqual({
-      first: "app.screens_open",
+      removed: "ok",
       stillWatching: 1,
       opens: "app.not_found",
       left: 0,
     });
+  });
+
+  it("closes nobody's screens when unsharing someone it isn't shared with", async () => {
+    const owner = await personApi("builder");
+    const member = await personApi("builder");
+    const app = await sampleApp(owner);
+    await owner.api.apps.members.add(app, {
+      type: "person",
+      id: member.userId,
+      role: "user",
+    });
+    const watching = collector();
+    await member.api.screens.call(app, "watchNotes", [watching.callback]);
+    await waitFor(() => watching.received[0]);
+
+    // Someone it was never shared with, as a mistaken or repeated removal.
+    await owner.api.apps.members.remove(app, {
+      type: "person",
+      id: `user-${crypto.randomUUID()}`,
+    });
+    await runCron();
+    await owner.api.screens.call(app, "addNote", ["Still here"]);
+    await expect(waitFor(() => watching.received[1])).resolves.toStrictEqual([
+      "Still here",
+    ]);
   });
 
   it("stops sending to someone the App is no longer shared with", async () => {
