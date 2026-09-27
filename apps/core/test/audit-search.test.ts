@@ -1,6 +1,7 @@
 import { auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import type {
+  AuditEventType,
   AuditExportFormat,
   AuditFilter,
   AuditRecord,
@@ -225,6 +226,43 @@ describe("audit log search", () => {
       new Set([read?.id])
     );
     await expect(found({})).resolves.toHaveProperty("size", 3);
+  });
+
+  it("finds a run's decisions, and the changes to what's configured, by type", async () => {
+    const { api } = await signedInApi(idp, "admin");
+    const resource = `item-${unique()}`;
+    const [opened, approved, offered, budget] = await logged(
+      event({
+        source: "core",
+        action: "workflow.decision.opened",
+        provenance: [resource],
+      }),
+      event({
+        source: "core",
+        action: "workflow.decision.approved",
+        provenance: [resource],
+      }),
+      event({
+        source: "core",
+        action: "connection.offer_changed",
+        provenance: [resource],
+      }),
+      event({
+        source: "core",
+        action: "model.budget.alert",
+        provenance: [resource],
+      }),
+      event({ source: "core", action: "model.call", provenance: [resource] })
+    );
+    const found = async (type: AuditEventType) =>
+      new Set(idsOf(await searchAll(api, { resource, type })));
+
+    await expect(found("decision")).resolves.toStrictEqual(
+      new Set([opened?.id, approved?.id])
+    );
+    await expect(found("config")).resolves.toStrictEqual(
+      new Set([offered?.id, budget?.id])
+    );
   });
 
   it("pages newest first, each record once", async () => {

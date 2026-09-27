@@ -10,8 +10,9 @@ import { identifierMaxLength, identifierSchema } from "./ids.ts";
 
 /**
  * What kind of thing an event records, for filtering: a read of data, an
- * action with an effect, a decision a person made, a change to permissions,
- * a model call, a change to configuration, or an update of the platform.
+ * action with an effect, a decision put to a person or made by one, a
+ * change to permissions, a model call, a change to configuration, or an
+ * update of the platform.
  */
 export const auditEventTypeSchema = z.enum([
   "read",
@@ -30,6 +31,13 @@ export type AuditEventType = z.infer<typeof auditEventTypeSchema>;
  * `knowledge.document.saved`); a rule with `sideEffect` applies only to an
  * event whose `detail.sideEffect` is that value. An action no rule names has
  * no type: it is still found by every other filter. New actions add a rule.
+ *
+ * Actions are stored in the hash-chained log, so they are a data contract:
+ * never rename one, add a rule instead. A new action is `noun.verbed`, in
+ * dotted segments from the general to the specific (`knowledge.document.
+ * saved`, `workflow.run.started`), so a prefix finds its family. Older
+ * actions that don't follow it (`connection.call`, `connection.offer_changed`)
+ * keep their names.
  */
 const typeRules: readonly {
   action: string;
@@ -43,6 +51,14 @@ const typeRules: readonly {
   { action: "connection.disconnect", type: "config" },
   // An admin consenting to Composio holding a connection's tokens.
   { action: "connection.consent", type: "config" },
+  // An admin changing which connectors are offered.
+  { action: "connection.offer_changed", type: "config" },
+  // A connection's tokens stopped working: it needs signing in again.
+  { action: "connection.needs_reauth", type: "config" },
+  // A held action dropped because nobody can confirm it any more, then a
+  // person confirming or declining one (or being refused that).
+  { action: "connection.action.dropped", type: "action" },
+  { action: "connection.action", type: "decision" },
   { action: "knowledge.search", type: "read" },
   { action: "knowledge.read", type: "read" },
   { action: "knowledge.collection", type: "config" },
@@ -50,13 +66,23 @@ const typeRules: readonly {
   { action: "knowledge.proposal.approved", type: "decision" },
   { action: "knowledge.proposal.declined", type: "decision" },
   { action: "knowledge", type: "action" },
+  // A spending budget crossing its alert threshold or running out: filed
+  // with the budgets it belongs to, not as a model call.
+  { action: "model.budget", type: "config" },
   { action: "model", type: "model_call" },
   { action: "permission", type: "permission" },
-  { action: "decision", type: "decision" },
+  // A chat or run whose context read restricted sources, and so is held to
+  // them, and a staff member signing in to the deployment.
+  { action: "context.restricted", type: "permission" },
+  { action: "staff.session", type: "permission" },
   { action: "app", type: "config" },
   { action: "member", type: "config" },
   { action: "team", type: "config" },
+  // A decision a run put to people: opened, asked, answered, timed out.
+  { action: "workflow.decision", type: "decision" },
+  { action: "workflow.run", type: "action" },
   { action: "workflow.step", type: "action" },
+  { action: "workflow.param", type: "config" },
   { action: "platform", type: "platform_update" },
   // Improvement signals: the daily computation, and reading them.
   { action: "improvement.signals.computed", type: "action" },

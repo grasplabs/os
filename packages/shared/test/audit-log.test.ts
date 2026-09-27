@@ -45,4 +45,59 @@ describe("audit event types", () => {
       )
     ).toStrictEqual(["action", "read"]);
   });
+
+  it("files a workflow's decisions as decisions, and its runs and steps as actions", () => {
+    expect(
+      [
+        "workflow.decision.opened",
+        "workflow.decision.approved",
+        "workflow.decision.timed_out",
+        "workflow.run.started",
+        "workflow.run.waiting",
+        "workflow.step.completed",
+      ].map((action) => typeOf(action))
+    ).toStrictEqual([
+      "decision",
+      "decision",
+      "decision",
+      "action",
+      "action",
+      "action",
+    ]);
+  });
+
+  it("files a person deciding on a held action as a decision, and dropping one as an action", () => {
+    expect(
+      [
+        "connection.action.confirmed",
+        "connection.action.declined",
+        "connection.action.confirm_refused",
+        "connection.action.dropped",
+      ].map((action) => typeOf(action))
+    ).toStrictEqual(["decision", "decision", "decision", "action"]);
+  });
+
+  it("files changes to what's offered, connected and configured as config", () => {
+    expect(
+      [
+        "connection.offer_changed",
+        "connection.needs_reauth",
+        "workflow.param.updated",
+        "model.budget.alert",
+        "model.budget.exhausted",
+      ].map((action) => typeOf(action))
+    ).toStrictEqual(["config", "config", "config", "config", "config"]);
+  });
+
+  it("files a model call as one, and a budget crossing as config, not a call", () => {
+    expect(typeOf("model.call")).toBe("model_call");
+    expect(typeOf("model.refused")).toBe("model_call");
+    expect(typeOf("model.budget.alert")).toBe("config");
+  });
+
+  it("files a restricted context and a staff sign-in under permissions", () => {
+    expect(typeOf("context.restricted")).toBe("permission");
+    expect(typeOf("staff.session.started")).toBe("permission");
+    expect(typeOf("permission.granted")).toBe("permission");
+  });
 });
