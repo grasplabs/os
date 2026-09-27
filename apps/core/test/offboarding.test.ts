@@ -530,7 +530,13 @@ const dayMs = 24 * 60 * 60 * 1000;
 /** Records `count` people as removed at `removedAt`, as a removal would. */
 const removedLongAgo = async (count: number, removedAt: number) => {
   const now = Date.now();
-  const ids = Array.from({ length: count }, () => `removed-${unique()}`);
+  // A whole UUID each, not `unique()`: its 32 bits are plenty for a few
+  // people per test, but across hundreds at a time, on top of everyone the
+  // other tests signed up, two emails sometimes came out the same.
+  const ids = Array.from(
+    { length: count },
+    () => `removed-${crypto.randomUUID()}`
+  );
   await env.DB.batch(
     ids.flatMap((id) => [
       env.DB.prepare(
