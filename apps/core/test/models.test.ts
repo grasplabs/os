@@ -1,5 +1,6 @@
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import type { AuditEvent } from "@grasp-os/shared/audit";
+import { appIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
@@ -31,17 +32,35 @@ const answer = (text: string): GatewayReply => ({
   outputTokens: 100,
 });
 
-/** Core's env with the fake gateway and the given config. */
+/**
+ * Core's env with the fake gateway and the given config. The client's
+ * rules are off: model-rules.test.ts tests them, and with them the `work`
+ * context, which the calls here carry but nothing reads.
+ */
 const withGateway = (replies: GatewayReply[], ...modelGateway: unknown[]) => {
   const gateway = fakeGateway(...replies);
   const gatewayEnv: ModelsEnv = {
     ...env,
     AI: gateway.binding,
+    FEATURES: {
+      ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
+      model_rules: false,
+    },
     // Only an explicit `undefined` leaves the deployment without config.
     MODEL_GATEWAY: modelGateway.length === 0 ? config : modelGateway[0],
   };
   return { gateway, gatewayEnv };
 };
+
+/** Where the calls here work: an App's, unread while the rules are off. */
+const work = {
+  authority: {
+    subject: { type: "app", appId: appIdSchema.parse("app-models") },
+    onBehalfOf: "person-models",
+    mode: "interactive",
+  },
+  context: { type: "app", appId: appIdSchema.parse("app-models") },
+} as const;
 
 /** A person no other test uses, so their audit events are this test's. */
 const newPerson = () =>
@@ -92,6 +111,7 @@ describe("model gateway", () => {
         ],
         purpose: "chat.turn",
         trigger: newPerson(),
+        work,
       });
 
       expect(result).toMatchObject({
@@ -132,6 +152,7 @@ describe("model gateway", () => {
         input: "Count.",
         purpose: "chat.turn",
         trigger: newPerson(),
+        work,
       });
     }
 
@@ -167,6 +188,7 @@ describe("model gateway", () => {
       schema: z.object({ vendor: z.string(), total: z.number() }),
       purpose: "workflow.step",
       trigger: newPerson(),
+      work,
     });
 
     expect(result.output).toStrictEqual({ vendor: "Acme", total: 42.5 });
@@ -185,6 +207,7 @@ describe("model gateway", () => {
       schema: z.object({ total: z.number() }),
       purpose: "workflow.step",
       trigger,
+      work,
     });
 
     // Both requests count.
@@ -221,6 +244,7 @@ describe("model gateway", () => {
           schema: z.object({ total: z.number() }),
           purpose: "workflow.step",
           trigger,
+          work,
         })
       )
     ).resolves.toBe("model.invalid_output");
@@ -241,6 +265,7 @@ describe("model gateway", () => {
         input: "Hello.",
         purpose: "chat.turn",
         trigger: newPerson(),
+        work,
       });
 
     // A model the gateway offers, but not this deployment.
@@ -283,6 +308,7 @@ describe("model gateway", () => {
             input: "Hello.",
             purpose: "chat.turn",
             trigger: newPerson(),
+            work,
           })
         )
       ).resolves.toBe("model.unconfigured");
@@ -299,6 +325,7 @@ describe("model gateway", () => {
           input: "Hello.",
           purpose: "chat.turn",
           trigger: newPerson(),
+          work,
         })
       )
     ).resolves.toBe("ok");
@@ -349,6 +376,7 @@ describe("model gateway", () => {
       model: workersAi,
       purpose: "chat.turn",
       trigger: newPerson(),
+      work,
       ...fields,
     } as ModelCall<undefined>;
     await expect(outcome(models(gatewayEnv).call(call))).resolves.toBe(
@@ -372,6 +400,7 @@ describe("model gateway", () => {
       input: "When is the Acme invoice due?",
       purpose: "chat.turn",
       trigger,
+      work,
       provenance: ["doc-invoice-1", "mail-2"],
       requestId: "request-1",
     });
@@ -416,6 +445,7 @@ describe("model gateway", () => {
       input: "Write a long essay.",
       purpose: "chat.turn",
       trigger,
+      work,
     });
 
     expect(result).toMatchObject({
@@ -447,6 +477,7 @@ describe("model gateway", () => {
             input: "Hello.",
             purpose: "chat.turn",
             trigger,
+            work,
           })
         )
       ).resolves.toBe("model.failed");
@@ -473,6 +504,7 @@ describe("model gateway", () => {
       input: "Hello.",
       purpose: "chat.turn",
       trigger,
+      work,
     });
 
     expect(result.text).toBe("Hi.");
@@ -493,6 +525,7 @@ describe("model gateway", () => {
           timeoutMs: 100,
           purpose: "chat.turn",
           trigger,
+          work,
         })
       )
     ).resolves.toBe("model.failed");
@@ -518,6 +551,7 @@ describe("model gateway", () => {
         maxTokens,
         purpose: "chat.turn",
         trigger: newPerson(),
+        work,
       });
     }
 
@@ -545,6 +579,7 @@ describe("model gateway", () => {
       input: "Say hello.",
       purpose: "chat.turn",
       trigger,
+      work,
     });
 
     expect(result.text).toBe("Hello, Ada.");
@@ -566,6 +601,7 @@ describe("model gateway", () => {
       input: "Say hello.",
       purpose: "chat.turn",
       trigger,
+      work,
     });
 
     expect(result.text).toBe("Hello, Ada.");
@@ -584,6 +620,7 @@ describe("model gateway", () => {
           input: "Hello.",
           purpose: "chat.turn",
           trigger: newPerson(),
+          work,
         })
       )
     ).resolves.toBe("model.unconfigured");

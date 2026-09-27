@@ -87,7 +87,11 @@ export interface RulesInput {
   provenance: readonly string[];
   /** Connections whose data may have fed the prompt. */
   connections: readonly string[];
-  /** Where the call works, whose restricted mode it has. */
+  /**
+   * Where the call works, whose restricted mode it has. The type lets it
+   * be missing only for a caller that isn't type-checked: the rules refuse
+   * such a call.
+   */
   work?: { authority: Authority; context: WorkContext };
 }
 
@@ -201,16 +205,16 @@ export interface Refusal {
 }
 
 /**
- * Whether the call's `work` context is in restricted mode: `false`
- * without one, `undefined` for one its authority can't work in (another
- * App's, say), or one that doesn't exist.
+ * Whether the call's `work` context is in restricted mode; `undefined`
+ * for a call without one, whose restricted mode can't be known, or one its
+ * authority can't work in (another App's, say), or that doesn't exist.
  */
 const restrictedWork = async (
   env: RestrictedEnv,
   { work }: RulesInput
 ): Promise<boolean | undefined> => {
   if (work === undefined) {
-    return false;
+    return undefined;
   }
   try {
     return await isRestricted(env, work.authority, work.context);
@@ -224,9 +228,9 @@ const restrictedWork = async (
 
 /**
  * Judges a call by the deployment's rules: what they made of it, or why
- * they refuse it. A `work` context the call's authority can't work in is
- * refused first, whichever rules are set, so no call gets past a rule
- * with a context that isn't its own.
+ * they refuse it. A call without a `work` context, or with one its
+ * authority can't work in, is refused first, whichever rules are set, so
+ * no call gets past a rule with a context that isn't its own, or none.
  */
 export const judgeCall = async (
   env: RestrictedEnv & Pick<Env, "FEATURES" | "KNOWLEDGE">,

@@ -3,7 +3,7 @@ import { runActorOf } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { models } from "../src/models.ts";
@@ -59,6 +59,20 @@ const withRules = (
 const newPerson = () =>
   ({ type: "person", userId: `person-${crypto.randomUUID()}` }) as const;
 
+/**
+ * Where the calls here work unless a test says otherwise: an App of its
+ * own, never restricted, made before the first test (once the IdP mock
+ * is up) and kept for the rest.
+ */
+let appWork: ModelCall<undefined>["work"] | undefined;
+
+const requireWork = (): ModelCall<undefined>["work"] => {
+  if (appWork === undefined) {
+    throw new Error("The tests' App isn't made yet");
+  }
+  return appWork;
+};
+
 const hello = (
   model: string,
   more: Partial<ModelCall<undefined>> = {}
@@ -67,6 +81,7 @@ const hello = (
   input: "Hello.",
   purpose: "chat.turn",
   trigger: newPerson(),
+  work: requireWork(),
   ...more,
 });
 
@@ -106,6 +121,23 @@ const eventsOf = async (actor: unknown): Promise<AuditEvent[]> => {
 };
 
 describe("model rules", () => {
+  beforeEach(async () => {
+    if (appWork !== undefined) {
+      return;
+    }
+    const builder = await signedInApi(idp, "builder");
+    const { id } = await builder.api.apps.create({ name: "Model rules" });
+    const appId = appIdSchema.parse(id);
+    appWork = {
+      authority: {
+        subject: { type: "app", appId },
+        onBehalfOf: builder.userId,
+        mode: "interactive",
+      },
+      context: { type: "app", appId },
+    };
+  });
+
   it("keep every call of an EU-only deployment with a model hosted in the EU, still through AI Gateway, and audit each refusal", async () => {
     const { fake, call } = withRules({
       eu: { models: [euModel], deployment: true },
@@ -402,6 +434,34 @@ describe("model rules", () => {
       ]);
     }
   );
+
+  it("refuse and audit a call that comes without a work context while the rules apply, and not while they're off", async () => {
+    const { fake, call } = withRules({});
+    const off = withRules(
+      {},
+      {
+        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
+        model_rules: false,
+      }
+    );
+    const { work: _, ...withoutWork } = hello(anthropic);
+    // SAFETY: missing on purpose, as from a caller that isn't type-checked;
+    // every typed caller must pass `work`.
+    // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+    const contextless = withoutWork as ModelCall<undefined>;
+
+    await expect(
+      Promise.all([outcome(call(contextless)), outcome(off.call(contextless))])
+    ).resolves.toStrictEqual(["permission.context_invalid", "ok"]);
+    expect(fake.requests).toStrictEqual([]);
+    await expect(eventsOf(contextless.trigger)).resolves.toMatchObject([
+      {
+        action: "model.refused",
+        detail: { reason: "permission.context_invalid", because: null },
+      },
+      { action: "model.call" },
+    ]);
+  });
 
   it("fail a run's AI step with the reason when its App has an EU-only connection, once: it isn't retried", async () => {
     const builder = await signedInApi(idp, "builder");

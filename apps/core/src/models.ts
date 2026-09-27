@@ -271,7 +271,9 @@ const callSchema = z
     /**
      * Where the call works, and for whom: its restricted mode decides which
      * models it may use (model-rules.ts). Set by the host, like the
-     * trigger.
+     * trigger. Required of every caller (`ModelCall`); while the rules
+     * apply, a call without one is refused, as its restricted mode can't be
+     * known.
      */
     work: z
       .strictObject({
@@ -291,6 +293,8 @@ type Call = z.output<typeof callSchema>;
 
 /** One model call. */
 export type ModelCall<Output> = z.input<typeof callSchema> & {
+  /** Where the call works: required, so no caller can leave it out. */
+  work: NonNullable<z.input<typeof callSchema>["work"]>;
   /**
    * The answer must be JSON that matches this schema: it is validated, and
    * the model asked once more when it doesn't match.
