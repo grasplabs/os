@@ -29,9 +29,12 @@ import {
 } from "../db/knowledge/schema.ts";
 import { derivedHmacKey } from "../derived-keys.ts";
 import { requireFeature } from "../features.ts";
+import { appOfEntry } from "./app-entries.ts";
+import { entryNow } from "./apps-collection.ts";
 import type { CollectionRow } from "./collections.ts";
 import { checkedText, personWriter, writeVersion } from "./documents.ts";
 import type { DocumentRow } from "./documents.ts";
+import { frozenPathRanges } from "./frontmatter.ts";
 import { personalCollectionId } from "./memory-files.ts";
 import { failBatchIfProposals } from "./memory-proposals.ts";
 
@@ -70,13 +73,24 @@ import { failBatchIfProposals } from "./memory-proposals.ts";
 // trying terms one by one leaves a trace.
 //
 // What a purge doesn't reach: paths (a document named after someone keeps
-// its name), collection names and descriptions, other documents that
-// quote the text, a term split by Markdown or a line break, a term
-// spelled otherwise (a variant, an accent left out or encoded otherwise),
-// a term joined to more of a word ("Toms", "tomVisser": not removed,
-// only counted when it starts the word), memory already cached in a
-// running isolate (never served again, gone once evicted), D1's own
-// point-in-time recovery, and anything outside Knowledge. And it reaches too far where a name is an
+// its name; a `[[link]]` or a record field naming it is rewritten like
+// any text, and then names no document), a snapshot's frozen workflow
+// paths (left as they are, and not counted: the snapshot must name
+// versions the Playbook has), the Grasp skills (the release's text,
+// which the next sync puts back: a purge naming one is refused), the App
+// itself (its name, description and versions' AGENTS.md: a purge naming
+// the App's entry in the Apps collection is refused while what indexing
+// would write now holds a term, or when the App can't be read to tell;
+// once the App no longer holds it, the purge rewrites the entry's
+// history, until the App is set back to a version that holds it or given
+// it again), collection names and
+// descriptions, other documents that quote the text, a term split by
+// Markdown or a line break, a term spelled otherwise (a variant, an
+// accent left out or encoded otherwise), a term joined to more of a word
+// ("Toms", "tomVisser": not removed, only counted when it starts the
+// word), memory already cached in a running isolate (never served again,
+// gone once evicted), D1's own point-in-time recovery, and anything
+// outside Knowledge. And it reaches too far where a name is an
 // ordinary word too (Will, Mark, May): every "will" goes.
 
 /** How long an admin has to confirm a purge they prepared. */
@@ -439,12 +453,31 @@ const matcherOf = (
 };
 
 /**
+ * The matches of `pattern` (global) in `text` that aren't inside a
+ * snapshot's frozen workflow path (`frozenPathRanges`). A purge leaves
+ * those: rewritten, one would name a workflow version the Playbook
+ * doesn't have, and the snapshot couldn't be saved, which fails the
+ * purge. Every other path in a text is purged like any text: one that
+ * names a document by a person's name would otherwise keep it. A match
+ * reaching past a frozen path is not inside it.
+ */
+const outsidePaths = (text: string, pattern: RegExp): RegExpExecArray[] => {
+  const paths = frozenPathRanges(text);
+  return [...text.matchAll(pattern)].filter(
+    ({ index, 0: found }) =>
+      !paths.some(([from, to]) => index >= from && index + found.length <= to)
+  );
+};
+
+/**
  * `text` with every term replaced by the marker, until none is left: a
  * term that ends or starts with a dot or an at sign, once replaced, can
  * leave a term next to it no longer joined ("Tom." and "Ann" in
  * "Tom.Ann"), which one pass would leave to a purge run again. It ends:
  * a term can't overlap the marker (`purgeTermSchema`), so each pass
  * replaces text outside the markers, or markers with fewer of them.
+ * Terms inside frozen paths are left (`outsidePaths`), so a pass that
+ * finds only those changes nothing, and the loop ends.
  */
 const without = (text: string, matcher: Matcher): string => {
   if (!matcher.anywhere.test(text)) {
@@ -452,7 +485,13 @@ const without = (text: string, matcher: Matcher): string => {
   }
   let current = text;
   for (;;) {
-    const next = current.replaceAll(matcher.remove, purgedMarker);
+    let next = "";
+    let end = 0;
+    for (const { index, 0: found } of outsidePaths(current, matcher.remove)) {
+      next += `${current.slice(end, index)}${purgedMarker}`;
+      end = index + found.length;
+    }
+    next += current.slice(end);
     if (next === current) {
       return current;
     }
@@ -472,7 +511,7 @@ const joinedIn = (texts: (string | null)[], matcher: Matcher): number => {
   let total = 0;
   for (const text of texts) {
     if (text !== null && anywhere.test(text)) {
-      total += text.match(joined)?.length ?? 0;
+      total += outsidePaths(text, joined).length;
     }
   }
   return total;
@@ -499,7 +538,9 @@ interface Named {
  * The documents a content purge names, in ID order. Refuses with
  * `knowledge.not_found`, naming the ones that don't exist, rather than
  * skipping them: a mistyped ID would otherwise leave the text it was meant
- * for where it is, with a purge recorded as done.
+ * for where it is, with a purge recorded as done. Refuses the Grasp
+ * skills with `knowledge.read_only`, saying why for each: the next sync
+ * would put their text back.
  */
 const documentsNamed = async (
   db: DrizzleD1Database,
@@ -516,6 +557,17 @@ const documentsNamed = async (
   if (missing.length > 0) {
     throw knowledgeErrors.create("knowledge.not_found", {
       documentIds: missing,
+    });
+  }
+  const skills = found.filter(
+    ({ collection }) => collection.source === "grasp"
+  );
+  if (skills.length > 0) {
+    throw knowledgeErrors.create("knowledge.read_only", {
+      issues: skills.map(
+        ({ document }) =>
+          `documentIds: document ${document.id} is a Grasp skill, which is read-only: it holds the release's text, and the next sync would put back anything changed`
+      ),
     });
   }
   return found;
@@ -536,13 +588,70 @@ const versionOf = async (
     .get();
 
 /**
+ * Refuses with `knowledge.read_only` a purge of an App's entry while what
+ * indexing would write now (`entryNow`) holds a term, saying where: the
+ * next indexing (a version made current, the cron catching up) makes the
+ * entry from the App itself, out of a purge's reach, and would put it
+ * back, even when the entry is still of an older version without it.
+ * Refuses too, failing closed, when the App or its current version can't
+ * be read.
+ */
+const requireIndexedWithout = async (
+  env: Env,
+  document: DocumentRow,
+  matcher: Matcher
+): Promise<void> => {
+  const refuse = (why: string) =>
+    knowledgeErrors.create("knowledge.read_only", {
+      issues: [
+        `documentIds: document ${document.id} is an App's entry in the Apps collection, made from the App itself: ${why}`,
+      ],
+    });
+  const appId = appOfEntry(document.path);
+  let now: Awaited<ReturnType<typeof entryNow>>;
+  try {
+    now = appId === undefined ? undefined : await entryNow(env, appId);
+  } catch (error) {
+    log.error("knowledge.purge.app_unreadable", {
+      documentId: document.id,
+      ...errorFields(error),
+    });
+    now = undefined;
+  }
+  if (now === undefined) {
+    throw refuse(
+      "the App or its current version can't be read, so it can't be checked for the terms; try again later"
+    );
+  }
+  if (without(now.text, matcher) === now.text) {
+    return;
+  }
+  const holds = (text: string) => without(text, matcher) !== text;
+  const where = [
+    ...(holds(now.agents)
+      ? ["a term is in the App's AGENTS.md: publish a version without it"]
+      : []),
+    ...(holds(now.name) || holds(now.description)
+      ? [
+          // No API renames an App or changes its description yet.
+          "a term is in the App's name or description, which a purge can't reach: the App's builders or Grasp support must change it first",
+        ]
+      : []),
+  ];
+  throw refuse(
+    `${where.length > 0 ? where.join("; ") : "a term is in what indexing writes for it"}; then purge`
+  );
+};
+
+/**
  * Refuses with `knowledge.invalid` unless the current version of `named`,
  * with the terms removed, can be saved as its next version: its
  * frontmatter still fits its type, and it is within a document's limits
  * and a memory file's. Checked for every document named, whether or not
  * its current text holds a term (a purge saves it again when an earlier
  * version does), before a purge changes anything, so one that can't be
- * finished changes nothing. Returns the text it would save.
+ * finished changes nothing. Refuses an App's entry while the App holds a
+ * term (`requireIndexedWithout`). Returns the text it would save.
  */
 const requireSavable = async (
   env: Env,
@@ -553,6 +662,9 @@ const requireSavable = async (
   const current = await versionOf(db, document, document.currentVersion);
   if (current === undefined) {
     return undefined;
+  }
+  if (collection.source === "apps") {
+    await requireIndexedWithout(env, document, matcher);
   }
   const text = rewritten(current, matcher)?.text ?? current.text;
   try {

@@ -5,7 +5,7 @@ import {
   documentTypeSchema,
 } from "@grasp-os/shared/knowledge";
 import type { DocumentType } from "@grasp-os/shared/knowledge";
-import { parse, parseDocument } from "yaml";
+import { isMap, isScalar, isSeq, parse, parseDocument } from "yaml";
 import { z } from "zod";
 
 // A document's frontmatter: the YAML block between `---` lines at its top.
@@ -53,7 +53,11 @@ const fileSchema = baseSchema.extend({
 // the Markdown after it: the title names the record, the body says the
 // rest. A record names others by their path in the Playbook, as `[[links]]`
 // do. Wherever a name can be, a value is plain text, so a purge that
-// replaces a name with its marker leaves a record that still fits its type.
+// replaces a name with its marker leaves a record that still fits its
+// type. A path that holds a name is purged like any text, and the path
+// then names no document, but for a snapshot's frozen workflow paths,
+// which a purge leaves (`frozenPathRanges`): the snapshot must name
+// versions the Playbook has.
 
 /** A short value a person writes: a name, a role, a tool. */
 const shortText = z.string().trim().min(1).max(200);
@@ -317,4 +321,38 @@ export const withFrontmatter = (
     document.set(key, value);
   }
   return `---\n${document.toString()}---\n${body}`;
+};
+
+const openingFence = /^\uFEFF?---[ \t]*\r?\n/u;
+const closingFence = /^---[ \t]*\r?$/mu;
+
+/**
+ * Where a snapshot in `text` names the workflow versions it froze by
+ * their path (`workflows[].path`), as [start, end) offsets in `text`, a
+ * value's quotes included. None when `text` has no frontmatter or isn't
+ * a snapshot; frontmatter that doesn't read gives what it can.
+ */
+export const frozenPathRanges = (text: string): [number, number][] => {
+  const opening = openingFence.exec(text);
+  if (!opening) {
+    return [];
+  }
+  const start = opening[0].length;
+  const rest = text.slice(start);
+  const closing = closingFence.exec(rest);
+  if (!closing) {
+    return [];
+  }
+  const document = parseDocument(rest.slice(0, closing.index), {
+    logLevel: "error",
+  });
+  const workflows = document.get("workflows", true);
+  if (document.get("type") !== "snapshot" || !isSeq(workflows)) {
+    return [];
+  }
+  return workflows.items.flatMap((entry): [number, number][] => {
+    const path = isMap(entry) ? entry.get("path", true) : undefined;
+    const range = isScalar(path) ? path.range : undefined;
+    return range ? [[start + range[0], start + range[1]]] : [];
+  });
 };

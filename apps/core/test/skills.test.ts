@@ -267,10 +267,10 @@ describe("the Grasp skills", setUpTime, () => {
         })
       )
     ).resolves.toMatchObject({
-      code: "knowledge.invalid",
+      code: "knowledge.read_only",
       details: {
         issues: [
-          `terms: removing them from document ${document.id} leaves text that can't be saved (knowledge.read_only)`,
+          `documentIds: document ${document.id} is a Grasp skill, which is read-only: it holds the release's text, and the next sync would put back anything changed`,
         ],
       },
     });
