@@ -1,8 +1,10 @@
 import { z } from "zod";
 
+import type { AuditActor } from "./audit.ts";
 import { appIdSchema } from "./ids.ts";
 import type { AppId, CollectionId, DocumentId } from "./ids.ts";
-import type { Provenance } from "./knowledge.ts";
+import type { DocumentSummary, Provenance } from "./knowledge.ts";
+import type { WorkContext } from "./permissions.ts";
 
 // Memory: the Markdown files an agent always has in its context. The
 // company's AGENTS.md and MEMORY.md and each agent's AGENTS.md are
@@ -116,6 +118,70 @@ export interface MemoryApi {
    * files are read and saved through `knowledge`.
    */
   collections: () => Promise<MemoryCollections>;
+  /**
+   * The pending proposals the person may decide on: those for collections
+   * they can change (for the Memory collection, admins), oldest first.
+   */
+  proposals: () => Promise<MemoryProposal[]>;
+  /** Saves a pending proposal's text as the file's next version. */
+  approve: (proposalId: string) => Promise<DocumentSummary>;
+  /** Turns a pending proposal down; the file stays as it is. */
+  decline: (proposalId: string) => Promise<void>;
+  /**
+   * The sensitive collections, of those the person may read, that `text`
+   * names: memory that mentions one looks restricted, and the company's
+   * MEMORY.md reaches every agent. For its editor to warn with.
+   */
+  warnings: (text: string) => Promise<MemoryWarning[]>;
+}
+
+/**
+ * A change an agent proposes to a shared memory file: the company's
+ * AGENTS.md or MEMORY.md, or its own AGENTS.md (`agent`). It waits for
+ * someone who can change the Memory collection to approve it.
+ */
+export const memoryProposalInputSchema = z.strictObject({
+  file: z.enum(["AGENTS.md", "MEMORY.md", "agent"]),
+  /** The whole new text of the file. */
+  text: z.string(),
+  /** Why, for whoever decides, and the history. */
+  message: z.string().trim().max(500).optional(),
+});
+export type MemoryProposalInput = z.input<typeof memoryProposalInputSchema>;
+
+/** Where a proposal came from. */
+export interface MemoryProposalSource {
+  /** Who proposed it: an agent, acting for a person. */
+  actor: AuditActor;
+  /** Where it worked. */
+  context: WorkContext;
+  /** Whether that context had read restricted data by then. */
+  restricted: boolean;
+}
+
+/** A proposed change to a shared memory file, and what became of it. */
+export interface MemoryProposal {
+  id: string;
+  collectionId: CollectionId;
+  path: string;
+  /** The version it was proposed from, 0 for a file that didn't exist. */
+  baseVersion: number;
+  text: string;
+  message: string | null;
+  source: MemoryProposalSource;
+  status: "pending" | "approved" | "declined";
+  /** The user ID of who approved or declined it. */
+  decidedBy: string | null;
+  /** ISO 8601. */
+  createdAt: string;
+  /** ISO 8601. */
+  decidedAt: string | null;
+}
+
+/** A sensitive collection that some memory text names. */
+export interface MemoryWarning {
+  collectionId: CollectionId;
+  name: string;
 }
 
 /** A new USER.md, as an agent saves it for the person it acts for. */

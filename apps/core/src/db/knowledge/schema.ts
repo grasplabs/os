@@ -155,3 +155,33 @@ export const links = sqliteTable(
     index("links_to_idx").on(table.toCollectionId, table.toPath),
   ]
 );
+
+/**
+ * A change an agent proposed to a shared memory file (knowledge/memory.ts):
+ * the whole new text, from `base_version` of the document at `path`, which
+ * waits for someone who can change the collection to approve or decline it.
+ */
+export const memoryProposals = sqliteTable(
+  "memory_proposals",
+  {
+    id: text().primaryKey(),
+    collectionId: text("collection_id")
+      .notNull()
+      .references(() => collections.id, { onDelete: "cascade" }),
+    path: text().notNull(),
+    /** The document's version it was proposed from, 0 for a new one. */
+    baseVersion: integer("base_version").notNull(),
+    text: text().notNull(),
+    message: text(),
+    /** JSON: who proposed it, where, and whether that was restricted. */
+    source: text().notNull(),
+    status: text({ enum: ["pending", "approved", "declined"] }).notNull(),
+    /** User ID. */
+    decidedBy: text("decided_by"),
+    createdAt: timestamp("created_at").notNull(),
+    decidedAt: timestamp("decided_at"),
+  },
+  (table) => [
+    index("memory_proposals_status_idx").on(table.status, table.createdAt),
+  ]
+);
