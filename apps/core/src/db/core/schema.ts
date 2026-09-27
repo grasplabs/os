@@ -638,3 +638,21 @@ export const modelBudgetAlerts = sqliteTable(
     }),
   ]
 );
+
+/**
+ * The catalog entries an admin stopped offering (connections.ts): one row
+ * each, by its source (`native` or `composio`) and its ID there. Nobody
+ * starts connecting a hidden entry, admins included, until an admin offers
+ * it again, which deletes its row. Everything else is offered, a new
+ * Composio toolkit too. Connections made before an entry was hidden go on.
+ */
+export const hiddenConnectors = sqliteTable(
+  "hidden_connectors",
+  {
+    source: text({ enum: ["native", "composio"] }).notNull(),
+    connectorId: text("connector_id").notNull(),
+    hiddenBy: text("hidden_by").notNull(),
+    hiddenAt: timestamp("hidden_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.source, table.connectorId] })]
+);

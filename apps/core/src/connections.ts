@@ -1,4 +1,6 @@
+import { actorOf } from "@grasp-os/shared/audit";
 import {
+  composioToolkitSchema,
   connectErrors,
   connectionErrors,
   connectionOwnersMax,
@@ -7,28 +9,34 @@ import {
   returnPathMaxLength,
 } from "@grasp-os/shared/connect";
 import type {
-  Catalog,
   CatalogSource,
+  ConnectionScope,
   CatalogTool,
   ConnectionOwner,
   ConnectionPerson,
   ConnectionsApi,
   ConnectionSummary,
   OAuthProvider,
+  OfferedCatalog,
 } from "@grasp-os/shared/connect";
 import { authErrors } from "@grasp-os/shared/errors";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { roleErrors } from "@grasp-os/shared/roles";
+import { isAdmin, requireAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import {
+  auditedBatch,
+  keepAuditEvent,
+  outboxedIfChanged,
+} from "./audit-outbox.ts";
 import { providerIds, signInConfig } from "./auth/config.ts";
 import type { SignInConfig } from "./auth/config.ts";
 import { identify } from "./auth/identity.ts";
-import { accounts } from "./db/core/schema.ts";
+import { accounts, hiddenConnectors } from "./db/core/schema.ts";
 import { featureEnabled } from "./features.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
@@ -135,6 +143,103 @@ const onOrigin = (origin: string, path: string): URL | undefined => {
   }
 };
 
+// Which catalog entries are offered: every one, but those an admin hid
+// (`hidden_connectors`). Core decides it, as the only caller that starts a
+// flow at connect: a hidden entry isn't listed to anyone but admins, and
+// starting to connect it is refused and recorded, whoever asks. Hiding
+// never touches a connection already made; disconnecting it is separate.
+
+/** One catalog entry an admin offers or hides, as it came over the wire. */
+const offerSchema = z.discriminatedUnion("source", [
+  z.strictObject({
+    source: z.literal("native"),
+    id: oauthProviderSchema,
+    offered: z.boolean(),
+  }),
+  z.strictObject({
+    source: z.literal("composio"),
+    id: composioToolkitSchema,
+    offered: z.boolean(),
+  }),
+]);
+
+/** A catalog entry's key, as the audit log names it. */
+const entryKey = (source: CatalogSource, id: string): string =>
+  `${source}:${id}`;
+
+/** The keys of the entries an admin hid. */
+const hiddenEntries = async (env: Env): Promise<Set<string>> => {
+  const rows = await drizzle(env.DB)
+    .select({
+      source: hiddenConnectors.source,
+      id: hiddenConnectors.connectorId,
+    })
+    .from(hiddenConnectors);
+  return new Set(rows.map(({ source, id }) => entryKey(source, id)));
+};
+
+/**
+ * Refuses to start connecting the entry `source` `id`, as a `scope`
+ * connection, while it is hidden, and records the refusal as connect
+ * records its own (`provider`, `scope`, `outcome`, `reason`): someone went
+ * around the catalog they were shown.
+ */
+const requireOffered = async (
+  env: Env,
+  person: ConnectionPerson,
+  {
+    source,
+    id,
+    scope,
+  }: { source: CatalogSource; id: string; scope: ConnectionScope }
+): Promise<void> => {
+  const db = drizzle(env.DB);
+  const hidden = await db
+    .select({ id: hiddenConnectors.connectorId })
+    .from(hiddenConnectors)
+    .where(
+      and(
+        eq(hiddenConnectors.source, source),
+        eq(hiddenConnectors.connectorId, id)
+      )
+    )
+    .get();
+  if (hidden === undefined) {
+    return;
+  }
+  await keepAuditEvent(env, db, {
+    actor: actorOf(person),
+    action: "connection.connect",
+    detail: {
+      source,
+      provider: id,
+      scope,
+      outcome: "refused",
+      reason: "connection.not_offered",
+    },
+  });
+  throw connectionErrors.create("connection.not_offered");
+};
+
+/**
+ * Refuses to hide the Composio toolkit `slug` unless Composio lists it: a
+ * misspelled slug would otherwise be hidden without a word, while the
+ * toolkit meant stays offered. Offering one again needs no check, so an
+ * entry hidden before Composio dropped it can always be let go.
+ */
+const requireListedToolkit = async (env: Env, slug: string): Promise<void> => {
+  const catalog = await env.CONNECT.catalog({ composio: true });
+  if (catalog.composio !== "listed") {
+    throw connectionErrors.create("connection.provider_unavailable");
+  }
+  const listed = catalog.entries.some(
+    ({ source, id }) => source === "composio" && id === slug
+  );
+  if (!listed) {
+    throw connectionErrors.create("connection.invalid");
+  }
+};
+
 /**
  * A signed-in person's `connections`. Every call checks the session (and
  * the `connections` flag) first; connect checks the rest: who may connect
@@ -165,6 +270,11 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
       throw connectionErrors.create("connection.invalid");
     }
     const { provider, scope, returnTo } = parsed.data;
+    await requireOffered(this.#env, person, {
+      source: "native",
+      id: provider,
+      scope,
+    });
     const config = signInConfig(this.#env);
     const tenant =
       config === undefined ? undefined : tenantOf(config, provider);
@@ -205,6 +315,16 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
       throw connectionErrors.create("connection.invalid");
     }
     const { toolkit, tools, consent } = request;
+    // Connect refuses a toolkit that isn't one; a hidden one is refused here.
+    const slug = composioToolkitSchema.safeParse(toolkit);
+    if (slug.success) {
+      // A toolkit is always a shared connection.
+      await requireOffered(this.#env, person, {
+        source: "composio",
+        id: slug.data,
+        scope: "shared",
+      });
+    }
     return await this.#env.CONNECT.startToolkitConnection({
       person,
       composio: featureEnabled(this.#env, "composio"),
@@ -229,10 +349,84 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
   // Anyone signed in may see what can be connected; connect checks the
   // request itself.
 
-  async catalog(): Promise<Catalog> {
-    await this.#check();
-    return await this.#env.CONNECT.catalog({
-      composio: featureEnabled(this.#env, "composio"),
+  async catalog(): Promise<OfferedCatalog> {
+    return await withPerson(this.#check, async ({ role }) => {
+      const [catalog, hidden] = await Promise.all([
+        this.#env.CONNECT.catalog({
+          composio: featureEnabled(this.#env, "composio"),
+        }),
+        hiddenEntries(this.#env),
+      ]);
+      const entries = catalog.entries.map((entry) => ({
+        ...entry,
+        offered: !hidden.has(entryKey(entry.source, entry.id)),
+      }));
+      return {
+        ...catalog,
+        // Admins choose what is offered, so they see what isn't.
+        entries: isAdmin(role)
+          ? entries
+          : entries.filter(({ offered }) => offered),
+      };
+    });
+  }
+
+  async setOffered(
+    source: CatalogSource,
+    id: string,
+    offered: boolean
+  ): Promise<void> {
+    await withPerson(this.#check, async (identity) => {
+      requireAdmin(identity);
+      // Staff are admins, but never decide what a client's people connect.
+      if (identity.staff) {
+        throw roleErrors.create("role.forbidden");
+      }
+      const parsed = offerSchema.safeParse({ source, id, offered });
+      if (!parsed.success) {
+        throw connectionErrors.create("connection.invalid");
+      }
+      const entry = parsed.data;
+      if (entry.source === "composio" && !entry.offered) {
+        await requireListedToolkit(this.#env, entry.id);
+      }
+      const db = drizzle(this.#env.DB);
+      // Recorded only when it changed something: offering what is offered
+      // already, or hiding what is hidden, leaves no event.
+      const event = outboxedIfChanged(db, {
+        actor: actorOf(identity),
+        action: "connection.offer_changed",
+        target: {
+          type: "catalog_entry",
+          id: entryKey(entry.source, entry.id),
+        },
+        detail: {
+          source: entry.source,
+          provider: entry.id,
+          offered: entry.offered,
+        },
+      });
+      const thisEntry = and(
+        eq(hiddenConnectors.source, entry.source),
+        eq(hiddenConnectors.connectorId, entry.id)
+      );
+      await (entry.offered
+        ? auditedBatch(this.#env, db, [
+            db.delete(hiddenConnectors).where(thisEntry),
+            event,
+          ])
+        : auditedBatch(this.#env, db, [
+            db
+              .insert(hiddenConnectors)
+              .values({
+                source: entry.source,
+                connectorId: entry.id,
+                hiddenBy: identity.userId,
+                hiddenAt: new Date(),
+              })
+              .onConflictDoNothing(),
+            event,
+          ]));
     });
   }
 
