@@ -11,6 +11,7 @@
  */
 import { execFileSync } from "node:child_process";
 import path from "node:path";
+import { setTimeout as sleep } from "node:timers/promises";
 
 import { test } from "@playwright/test";
 
@@ -19,30 +20,63 @@ import type { Cast } from "./people.ts";
 const quoted = (text: string): string => `'${text.replaceAll("'", "''")}'`;
 
 /**
- * Runs SQL on connect's local database, which the dev server keeps next to
- * core's (apps/core/package.json), as one batch in one transaction.
+ * How often `execute` tries a write the database was too busy for (the dev
+ * server shares the file), waiting 200 ms first and twice as long each time
+ * after: 3 s at most in all.
  */
-const execute = (sql: string): void => {
-  execFileSync(
-    path.join(import.meta.dirname, "../node_modules/.bin/wrangler"),
-    [
-      "d1",
-      "execute",
-      "DB",
-      "--local",
-      "-c",
-      "../connect/wrangler.jsonc",
-      "--persist-to",
-      ".wrangler/state",
-      "--command",
-      sql,
-    ],
-    {
-      cwd: path.join(import.meta.dirname, "../apps/core"),
-      stdio: "pipe",
-      env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+const busyAttempts = 5;
+const firstBusyWaitMs = 200;
+
+/**
+ * What wrangler prints when another connection held the file: SQLite's
+ * SQLITE_BUSY, or workerd's opaque "internal error; reference = …" when
+ * the batch fails under the same contention. Any other error, a constraint
+ * failing say, fails the run.
+ */
+const busyErrors = ["SQLITE_BUSY", "internal error; reference ="];
+
+const isBusy = (error: unknown): boolean =>
+  error instanceof Error &&
+  "stderr" in error &&
+  busyErrors.some((text) => String(error.stderr).includes(text));
+
+/**
+ * Runs SQL on connect's local database, which the dev server keeps next to
+ * core's (apps/core/package.json), as one batch in one transaction, which
+ * SQLite undoes whole when it can't finish: so a busy batch is tried again.
+ */
+const execute = async (sql: string): Promise<void> => {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      execFileSync(
+        path.join(import.meta.dirname, "../node_modules/.bin/wrangler"),
+        [
+          "d1",
+          "execute",
+          "DB",
+          "--local",
+          "-c",
+          "../connect/wrangler.jsonc",
+          "--persist-to",
+          ".wrangler/state",
+          "--command",
+          sql,
+        ],
+        {
+          cwd: path.join(import.meta.dirname, "../apps/core"),
+          stdio: "pipe",
+          env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+        }
+      );
+      return;
+    } catch (error) {
+      if (attempt >= busyAttempts || !isBusy(error)) {
+        throw error;
+      }
     }
-  );
+    // oxlint-disable-next-line no-await-in-loop -- one try at a time
+    await sleep(firstBusyWaitMs * 2 ** (attempt - 1));
+  }
 };
 
 export interface SeededConnection {
@@ -119,7 +153,7 @@ const newConnection = (account: string): SeededConnection => ({
  * in one write. The global setup (e2e/setup.ts) runs it right after it
  * signs everyone in.
  */
-export const seedConnections = (cast: Cast): void => {
+export const seedConnections = async (cast: Cast): Promise<void> => {
   const now = Date.now();
   const written = cast.map((scenes) => {
     const admin = scenes.connections?.admin;
@@ -155,7 +189,7 @@ export const seedConnections = (cast: Cast): void => {
     ];
     return { connections, rows };
   });
-  execute(
+  await execute(
     written
       .flatMap(({ rows }) => rows.map((row) => insert(row, now)))
       .join("; ")

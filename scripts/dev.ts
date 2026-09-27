@@ -38,20 +38,40 @@ const children = [
   ]),
 ];
 
+/** How long a stopped process group gets to finish before it's killed. */
+const killAfterMs = 5000;
+
 /** Set once everything is being stopped: exits from then on are expected. */
 let stopping = false;
+let killTimer: NodeJS.Timeout | undefined;
+let running = children.length;
 
-const stopAll = (): void => {
-  stopping = true;
+const signalAll = (signal: NodeJS.Signals): void => {
   for (const { pid } of children) {
     if (pid !== undefined) {
       try {
-        process.kill(-pid, "SIGTERM");
+        process.kill(-pid, signal);
       } catch {
         // The group is already gone.
       }
     }
   }
+};
+
+/** Kills whatever is left at once, grandchildren that outlived theirs too. */
+const killAll = (): void => {
+  clearTimeout(killTimer);
+  signalAll("SIGKILL");
+};
+
+/** Asks every group to stop, and kills them if they haven't in time. */
+const stopAll = (): void => {
+  if (stopping) {
+    return;
+  }
+  stopping = true;
+  signalAll("SIGTERM");
+  killTimer = setTimeout(killAll, killAfterMs);
 };
 
 /**
@@ -70,10 +90,23 @@ const failedToStart = (error: Error): void => {
  * a clean Ctrl+C exits 0.
  */
 const exited = (code: number | null): void => {
+  running -= 1;
   if (!stopping) {
     process.exitCode = code ?? 1;
   }
   stopAll();
+  if (running === 0) {
+    killAll();
+  }
+};
+
+/** The first Ctrl+C stops everything; a second one kills it at once. */
+const interrupted = (): void => {
+  if (stopping) {
+    killAll();
+  } else {
+    stopAll();
+  }
 };
 
 for (const child of children) {
@@ -81,5 +114,5 @@ for (const child of children) {
   child.on("exit", exited);
 }
 for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) {
-  process.on(signal, stopAll);
+  process.on(signal, interrupted);
 }

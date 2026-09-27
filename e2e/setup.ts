@@ -11,7 +11,7 @@ import { signInCast } from "./people.ts";
 const setup = async (config: FullConfig): Promise<void> => {
   const retries = config.projects.map((project) => project.retries);
   const cast = await signInCast(Math.max(0, ...retries) + 1);
-  seedConnections(cast);
+  await seedConnections(cast);
 };
 
 export default setup;
