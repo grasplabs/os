@@ -4,9 +4,9 @@
   "name": "grasp-os-connect",
   "main": "src/index.ts",
   "compatibility_date": "2026-09-15",
-  // global_fetch_strictly_public: connect's own calls out (to Composio's MCP
-  // servers) can't reach private or internal addresses, even when a public
-  // name resolves to one.
+  // global_fetch_strictly_public: connect's own calls out (to Composio's API
+  // and MCP servers) can't reach private or internal addresses, even when a
+  // public name resolves to one.
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
   "workers_dev": false,
   "preview_urls": false,
@@ -28,7 +28,9 @@
   // seals OAuth tokens (src/vault.ts), and each provider's app credentials,
   // MICROSOFT_CLIENT_ID and _SECRET, GOOGLE_CLIENT_ID and _SECRET
   // (src/providers.ts). While one is unset, connecting that provider is
-  // refused. Their types are in src/env.d.ts.
+  // refused. So is COMPOSIO_API_KEY, Grasp's key for the client's Composio
+  // project (src/composio.ts): while it is unset, nothing of Composio is
+  // offered or reached. Their types are in src/env.d.ts.
   "secrets": { "required": ["CAPABILITY_SIGNING_KEY"] },
   // Vars the console set through the API survive a deploy (keep_vars),
   // such as a DOWNLOAD_HOSTS from an earlier release, which nothing reads

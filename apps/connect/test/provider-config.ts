@@ -12,3 +12,6 @@ export const clients = {
   microsoft: { id: "grasp-connect-entra", secret: "entra-connect-secret" },
   google: { id: "grasp-connect-google", secret: "google-connect-secret" },
 } as const;
+
+/** Grasp's key for Composio, as set on connect in the tests. */
+export const testComposioKey = "test-composio-key";

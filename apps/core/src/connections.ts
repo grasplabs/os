@@ -6,6 +6,9 @@ import {
   returnPathMaxLength,
 } from "@grasp-os/shared/connect";
 import type {
+  Catalog,
+  CatalogSource,
+  CatalogTool,
   ConnectionPerson,
   ConnectionsApi,
   ConnectionSummary,
@@ -164,6 +167,28 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
   async disconnect(connectionId: string): Promise<{ revoked: boolean }> {
     const person = await this.#person();
     return await this.#env.CONNECT.disconnect({ person, connectionId });
+  }
+
+  // Anyone signed in may see what can be connected; connect checks the
+  // request itself.
+
+  async catalog(): Promise<Catalog> {
+    await this.#check();
+    return await this.#env.CONNECT.catalog({
+      composio: featureEnabled(this.#env, "composio"),
+    });
+  }
+
+  async catalogTools(
+    source: CatalogSource,
+    id: string
+  ): Promise<CatalogTool[]> {
+    await this.#check();
+    return await this.#env.CONNECT.catalogTools({
+      composio: featureEnabled(this.#env, "composio"),
+      source,
+      id,
+    });
   }
 }
 

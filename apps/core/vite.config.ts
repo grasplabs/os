@@ -7,6 +7,7 @@ import {
 import { defaultExclude, defineProject } from "vite-plus";
 import type { UserWorkspaceConfig } from "vite-plus";
 
+import { testComposioKey } from "../connect/test/provider-config.ts";
 import { connectBundle } from "./test/build-connect.ts";
 import {
   connectClient,
@@ -90,6 +91,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               memory: true,
               knowledge_purge: true,
               connections: true,
+              composio: true,
               workflows: true,
               decisions: true,
               screens: true,
@@ -154,9 +156,11 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
                 TOKEN_ENCRYPTION_KEY: btoa("test-token-key-of-exactly-32-b!!"),
                 MICROSOFT_CLIENT_ID: connectClient.id,
                 MICROSOFT_CLIENT_SECRET: connectClient.secret,
+                COMPOSIO_API_KEY: testComposioKey,
               },
               d1Databases: { DB: "grasp-os-connect" },
-              // Entra, as connect reaches it (test/connect-providers.ts).
+              // Entra and Composio, as connect reaches them
+              // (test/connect-providers.ts).
               outboundService: "connect-providers",
             },
             {

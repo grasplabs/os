@@ -308,3 +308,48 @@ describe("connecting an account", () => {
     expect(response.status).toBe(404);
   });
 });
+
+describe("the catalog", () => {
+  /** What someone signed in sees in the catalog with `features` as the flags. */
+  const sessionWith = async (features: Record<string, boolean>) => {
+    const { session } = await signedInWithRole(idp, "user");
+    const { core } = await openRpc(session, {
+      coreEnv: { ...env, FEATURES: features },
+    });
+    return await core.authenticate().connections;
+  };
+
+  it("lists Composio's toolkits next to the native providers while its flag is on", async () => {
+    const connections = await sessionWith({
+      connections: true,
+      composio: true,
+    });
+    const { entries, composio } = await connections.catalog();
+    expect(composio).toBe("listed");
+    expect(entries.map(({ source, id }) => `${source}:${id}`)).toStrictEqual([
+      "native:microsoft",
+      "native:google",
+      "composio:hubspot",
+    ]);
+  });
+
+  it("lists only the native providers, and finds no toolkit, while the composio flag is off", async () => {
+    const connections = await sessionWith({ connections: true });
+    const { entries, composio } = await connections.catalog();
+    expect(composio).toBe("off");
+    expect(entries.map(({ source }) => source)).toStrictEqual([
+      "native",
+      "native",
+    ]);
+    await expect(
+      outcome(connections.catalogTools("composio", "hubspot"))
+    ).resolves.toBe("connect.catalog_entry_not_found");
+  });
+
+  it("is switched off with the connections flag", async () => {
+    const connections = await sessionWith({ composio: true });
+    await expect(outcome(connections.catalog())).resolves.toBe(
+      "feature.disabled"
+    );
+  });
+});

@@ -19,6 +19,12 @@ interface __BaseEnv_Env {
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   /**
+   * Grasp's key for the client's Composio project (src/composio.ts): lists
+   * Composio's toolkits in the catalog. Without it, nothing of Composio is
+   * offered or reached.
+   */
+  COMPOSIO_API_KEY?: string;
+  /**
    * Deployment config the console used to set: the hosts a connector's
    * download could be redirected to. No longer read: a download follows
    * its route's own redirect hosts (src/egress.ts). An existing value is

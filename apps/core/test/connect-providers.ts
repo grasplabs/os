@@ -3,11 +3,15 @@
  * of its own, set as connect's outbound service in vite.config.ts, so the
  * real connect runs unchanged behind core. Entra ID's token endpoint checks
  * PKCE and Grasp's client secret as Entra does, and issues tokens for the
- * account the code names; a mail provider's MCP server answers as
+ * account the code names; Composio's API lists `composioToolkits` to
+ * connect's key; a mail provider's MCP server answers as
  * test/mail-server.ts says. Imported by vite.config.ts (Node) and the tests
  * (workerd), so it only holds data.
  */
-import { clients } from "../../connect/test/provider-config.ts";
+import {
+  clients,
+  testComposioKey,
+} from "../../connect/test/provider-config.ts";
 import { mailServerScript } from "./mail-server.ts";
 
 /** Grasp's Entra app for connections, as set on connect in the tests. */
@@ -20,6 +24,19 @@ export const connectClient = clients.microsoft;
  */
 export const consentCode = (url: URL, tenant: string, subject: string) =>
   [url.searchParams.get("code_challenge"), tenant, subject].join(".");
+
+/** Composio's toolkits, as its API lists them in core's tests. */
+export const composioToolkits = [
+  {
+    slug: "hubspot",
+    name: "HubSpot",
+    composio_managed_auth_schemes: ["OAUTH2"],
+    meta: {
+      categories: [{ id: "crm", name: "CRM" }],
+      tools_count: 2,
+    },
+  },
+];
 
 /** The tokens the fake issues for `subject`, to look for where they mustn't be. */
 export const tokensFor = (subject: string): string[] => [
@@ -38,6 +55,12 @@ const encoded = (value) =>
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    if (url.hostname === "backend.composio.dev" && url.pathname === "/api/v3.1/toolkits") {
+      if (request.headers.get("x-api-key") !== ${JSON.stringify(testComposioKey)}) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      return Response.json({ items: ${JSON.stringify(composioToolkits)}, next_cursor: null });
+    }
     if (url.hostname === "backend.composio.dev" || url.hostname === "mail-control.test") {
       return await mailServer(request, url);
     }

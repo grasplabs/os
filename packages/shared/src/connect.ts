@@ -187,7 +187,71 @@ export interface ConnectionsApi {
   }) => Promise<{ url: string }>;
   list: () => Promise<ConnectionSummary[]>;
   disconnect: (connectionId: string) => Promise<{ revoked: boolean }>;
+  /**
+   * What can be connected: the native providers, and, while the
+   * `composio` flag is on, Composio's toolkits.
+   */
+  catalog: () => Promise<Catalog>;
+  /** The tools of one catalog entry, as `catalog` lists it. */
+  catalogTools: (source: CatalogSource, id: string) => Promise<CatalogTool[]>;
 }
+
+// The catalog: everything an admin can connect, in one list. Native
+// providers (our own connectors, whose tokens connect holds) and, next to
+// them, Composio's toolkits, whose tokens sit in Composio's cloud. Each
+// entry says which it is, so people can tell who holds the tokens before
+// they connect anything.
+
+/** Who carries out a catalog entry's actions: our connector, or Composio. */
+export const catalogSourceSchema = z.enum(["native", "composio"]);
+export type CatalogSource = z.infer<typeof catalogSourceSchema>;
+
+/** A Composio toolkit's slug, such as `hubspot`. */
+export const composioToolkitSchema = z
+  .string()
+  .regex(/^[a-z0-9][a-z0-9_-]{0,63}$/u);
+
+/** One thing that can be connected. */
+export interface CatalogEntry {
+  source: CatalogSource;
+  /** A native provider (`microsoft`), or a Composio toolkit's slug. */
+  id: string;
+  name: string;
+  categories: string[];
+  /** How many tools it has; `catalogTools` lists them. */
+  toolCount: number;
+}
+
+/**
+ * The catalog, native entries first. `composio` says whether Composio's
+ * toolkits are in it: `listed`, `off` (the `composio` flag is off, or
+ * connect has no Composio key), or `unavailable` (Composio didn't answer,
+ * or not completely: the native entries are listed all the same). Listed
+ * are the toolkits Composio holds an app for that have tools.
+ */
+export interface Catalog {
+  entries: CatalogEntry[];
+  composio: "listed" | "off" | "unavailable";
+}
+
+/** One tool of a catalog entry. */
+export interface CatalogTool {
+  /** The action a call names, exactly. */
+  name: string;
+  description: string | null;
+}
+
+/** Lists the catalog, with Composio's toolkits only when `composio`. */
+export const catalogRequestSchema = z.strictObject({ composio: z.boolean() });
+export type CatalogRequest = z.input<typeof catalogRequestSchema>;
+
+/** Lists one entry's tools; a Composio entry's only when `composio`. */
+export const catalogToolsRequestSchema = z.strictObject({
+  composio: z.boolean(),
+  source: catalogSourceSchema,
+  id: identifierSchema,
+});
+export type CatalogToolsRequest = z.input<typeof catalogToolsRequestSchema>;
 
 // Side effects held for their person (threat model R7, R12). Connect
 // holds a side effect from chat, from a person using an App, or from any
@@ -323,6 +387,20 @@ export interface ConnectApi {
    */
   abandonFlow: (state: string) => Promise<void>;
   /**
+   * The catalog: the native providers, then Composio's toolkits if
+   * `composio` and connect has a Composio key. Composio failing to answer
+   * leaves the native entries listed.
+   */
+  catalog: (request: CatalogRequest) => Promise<Catalog>;
+  /**
+   * One catalog entry's tools, or `connect.catalog_entry_not_found` for
+   * anything `catalog` doesn't list. Composio's toolkits are listed only if
+   * `composio` and connect has a Composio key, and only those Composio
+   * holds an app for that have tools. `connect.catalog_unavailable` when
+   * Composio doesn't list the catalog or the toolkit's tools completely.
+   */
+  catalogTools: (request: CatalogToolsRequest) => Promise<CatalogTool[]>;
+  /**
    * The held actions waiting for `person`, newest first (at most 200):
    * none for Grasp staff.
    */
@@ -435,4 +513,7 @@ export const connectErrors = defineErrorFamily({
     "This connection now reaches another account than when the action was asked for, so it wasn't run.",
   "connect.server_unavailable":
     "The connection's server didn't take the call, so nothing was done.",
+  "connect.catalog_entry_not_found": "There's no such entry in the catalog.",
+  "connect.catalog_unavailable":
+    "Composio's toolkits can't be listed right now. Try again shortly.",
 });
