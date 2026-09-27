@@ -410,8 +410,8 @@ export interface DroppedConnection {
  * entries, for the batch that creates `app`. Like any request, each allows
  * nothing until an admin grants it. A workflow of `from` itself becomes
  * the same workflow of `app`. Someone else's personal connection is left
- * out (`dropped`): only its owner's calls could use it, and a copy is
- * `by`'s own App.
+ * out (`dropped`), as only its owner's calls could use it and a copy is
+ * `by`'s own App, and so is one connect doesn't know.
  */
 export const blueprintRequests = async (
   env: Env,
@@ -444,13 +444,15 @@ export const blueprintRequests = async (
     connectionIds.length === 0
       ? []
       : await connectionOwnersOf(env, connectionIds);
-  const others = new Set(
+  // Kept: shared connections and `by`'s own. Connect knows the rest as
+  // someone else's, or not at all.
+  const kept = new Set(
     owners.flatMap(({ id, ownerUserId }) =>
-      ownerUserId === null || ownerUserId === by.userId ? [] : [id]
+      ownerUserId === null || ownerUserId === by.userId ? [id] : []
     )
   );
   const isOthers = (row: Row): boolean =>
-    row.objectType === "connection" && others.has(row.objectId);
+    row.objectType === "connection" && !kept.has(row.objectId);
   const requestedAt = new Date();
   const rows = found
     .filter((row) => !isOthers(row))

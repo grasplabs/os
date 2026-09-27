@@ -48,7 +48,8 @@ import type { SessionCheck } from "./session-check.ts";
 // code, exactly, and it asks for what the blueprint's App was given or
 // asked for, each request waiting for an admin (permissions.ts), but for
 // someone else's personal connections, which only their owner's calls
-// could use: those are left out, and recorded. Nothing
+// could use, and connections connect doesn't know: those are left out,
+// and recorded. Nothing
 // else comes with it: none of the App's data (its storage, its workflows'
 // state, its runs), settings (parameter values), members or error log.
 // A version never changes, so neither does a blueprint's code.
@@ -232,16 +233,35 @@ export const createFromBlueprint = async (
   };
   const requests = await blueprintRequests(env, by, source.id, id);
   const db = drizzle(env.DB);
-  // The App only while the blueprint is still marked: unmarked since it
-  // was read above, nothing is inserted, the version's row can't name an
-  // App that isn't there, and the whole batch is refused.
-  const stillMarked = sql`EXISTS (SELECT 1 FROM ${appBlueprints} WHERE ${appBlueprints.appId} = ${source.id} AND ${appBlueprints.version} = ${number})`;
-  const statements = [
-    db
-      .insert(apps)
-      .select(
-        sql`SELECT ${appRow.id}, ${appRow.name}, ${appRow.description}, ${appRow.ownerId}, ${appRow.blueprint}, NULL, NULL, NULL, ${now.getTime()} WHERE ${stillMarked}`
+  // The App only while the blueprint is still marked, selected from its
+  // row: unmarked since it was read above, nothing is inserted, the
+  // version's row can't name an App that isn't there, and the whole batch
+  // is refused. The insert names its columns, and drizzle refuses fields
+  // that aren't the table's, by name and in order.
+  const appFromBlueprint = db
+    .select({
+      id: sql<string>`${appRow.id}`.as("id"),
+      name: sql<string>`${appRow.name}`.as("name"),
+      description: sql<string>`${appRow.description}`.as("description"),
+      ownerId: sql<string>`${appRow.ownerId}`.as("owner_id"),
+      blueprint: sql<string | null>`${appRow.blueprint}`.as("blueprint"),
+      currentVersion: sql<number | null>`${appRow.currentVersion}`.as(
+        "current_version"
       ),
+      pendingVersion: sql<number | null>`${appRow.pendingVersion}`.as(
+        "pending_version"
+      ),
+      workingRevision: sql<string | null>`${appRow.workingRevision}`.as(
+        "working_revision"
+      ),
+      createdAt: sql<Date>`${appRow.createdAt.getTime()}`.as("created_at"),
+    })
+    .from(appBlueprints)
+    .where(
+      and(eq(appBlueprints.appId, source.id), eq(appBlueprints.version, number))
+    );
+  const statements = [
+    db.insert(apps).select(appFromBlueprint),
     outboxed(
       db,
       changeEntry(by, "app.created", id, {

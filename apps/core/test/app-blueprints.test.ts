@@ -136,6 +136,12 @@ describe("blueprints", () => {
       ...outlook(source, "MAKERS"),
       object: { type: "connection", connectionId: makersMailbox },
     });
+    // One connect doesn't know doesn't come along either.
+    const ghost = `connection-ghost-${unique()}`;
+    await owner.api.permissions.request({
+      ...outlook(source, "GHOST"),
+      object: { type: "connection", connectionId: ghost },
+    });
     const revoked = await requestGranted(idp, owner, {
       ...outlook(source, "GONE"),
       object: { type: "connection", connectionId: mail.id },
@@ -159,7 +165,11 @@ describe("blueprints", () => {
     }
     const { app, version, permissions, dropped } = created;
 
-    expect({ app, version, dropped }).toMatchObject({
+    expect({
+      app,
+      version,
+      dropped: dropped.toSorted((a, b) => a.binding.localeCompare(b.binding)),
+    }).toMatchObject({
       app: {
         name: "My notes",
         description: "Mine",
@@ -168,7 +178,10 @@ describe("blueprints", () => {
         currentVersion: null,
       },
       version: { version: 1, parent: null, author: maker.userId },
-      dropped: [{ connectionId: ownersMailbox, binding: "OWNERS" }],
+      dropped: [
+        { connectionId: ghost, binding: "GHOST" },
+        { connectionId: ownersMailbox, binding: "OWNERS" },
+      ],
     });
     expect(
       permissions
@@ -214,7 +227,11 @@ describe("blueprints", () => {
         id,
         object.type === "connection" ? object.connectionId : null,
       ]),
-      ["app.blueprint.connection_dropped", app.id, ownersMailbox],
+      ...dropped.map(({ connectionId }) => [
+        "app.blueprint.connection_dropped",
+        app.id,
+        connectionId,
+      ]),
     ]);
 
     // The same code and none of the data: the new App starts empty, and

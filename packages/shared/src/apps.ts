@@ -247,7 +247,8 @@ export type FromBlueprint = z.input<typeof fromBlueprintSchema>;
  * the blueprint's version, and `permissions` are requests, waiting for an
  * admin, for the connections, collections and workflows the blueprint's
  * App was given or asked for, but for someone else's personal
- * connections (`dropped`), which only their owner's calls could use.
+ * connections, which only their owner's calls could use, and connections
+ * connect doesn't know (`dropped`).
  * Nothing else comes with it: no data, no settings, no runs, no members.
  */
 export interface CreatedFromBlueprint {
