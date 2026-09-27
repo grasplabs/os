@@ -9,7 +9,7 @@ import type { z } from "zod";
 
 import { auditLog } from "../src/audit-log.ts";
 import worker from "../src/index.ts";
-import { refreshSignalsIfDue, signalsCron } from "../src/signals.ts";
+import { refreshSignalsIfDue } from "../src/signals.ts";
 import { allEvents, logHead } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { outcome, refusal, signedInApi, unique } from "./sign-in.ts";
@@ -1158,12 +1158,12 @@ describe("improvement signals", () => {
     }).toStrictEqual({ computed: 0, claims: { earlier: 0, now: 3 } });
   });
 
-  it("are computed on their own cron trigger, not the every-minute one", async () => {
+  it("are computed on the 15-minute cron trigger, not the every-minute one", async () => {
     const today = new Date();
 
     await cron("* * * * *");
     const everyMinute = await computationsOf(today);
-    await cron(signalsCron);
+    await cron("*/15 * * * *");
 
     expect({ everyMinute, signals: await computationsOf(today) }).toStrictEqual(
       {

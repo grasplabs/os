@@ -7,7 +7,7 @@ import { z } from "zod";
 import { indexApps } from "../src/knowledge/apps-collection.ts";
 import { release, requestGranted } from "./apps.ts";
 import { actingFor, envOf, knowledgeIn } from "./contexts.ts";
-import { runCron } from "./cron.ts";
+import { runQuarterHourCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import {
   knowledgeRacing,
@@ -227,7 +227,7 @@ describe("indexing", setUpTime, () => {
     });
   });
 
-  it("catches up on the cron trigger with versions made current while indexing was off", async () => {
+  it("catches up on the 15-minute cron trigger with versions made current while indexing was off", async () => {
     const owner = await personOf("builder");
     const word = term();
     let id = "";
@@ -240,19 +240,19 @@ describe("indexing", setUpTime, () => {
     );
 
     // Nothing while it is still off.
-    await runCron({ FEATURES: indexingOff });
+    await runQuarterHourCron({ FEATURES: indexingOff });
     await expect(entriesFound(owner.knowledge, word)).resolves.toStrictEqual(
       []
     );
 
-    await runCron();
+    await runQuarterHourCron();
     await expect(entriesFound(owner.knowledge, word)).resolves.toStrictEqual([
       entryPath(id),
     ]);
     // Caught up: the next run writes nothing.
     const entry = await entryOf(owner, id);
     const events = await auditedDuring(async () => {
-      await runCron();
+      await runQuarterHourCron();
     });
     expect(
       events.filter(({ target }) => target?.id === entry.id)
@@ -322,7 +322,7 @@ describe("indexing", setUpTime, () => {
       found: { [first]: [], [second]: [entryPath(app.id)] },
     });
 
-    await runCron();
+    await runQuarterHourCron();
     await expect(
       entryState(owner, app.id, [first, second])
     ).resolves.toStrictEqual({

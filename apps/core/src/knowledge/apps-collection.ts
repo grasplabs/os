@@ -35,11 +35,13 @@ import { appMemoryPath } from "./memory-files.ts";
 //
 // The App registry is in the core database and the collection in
 // Knowledge's, so no batch holds both. Making a version current indexes
-// the App straight after (`indexAppNow`), and the cron trigger indexes
-// every App whose entry isn't of its current version (`indexApps`): one
-// whose indexing failed, one made current while indexing was off, and
-// every App when it is first switched on. `app_entries` has the version
-// each entry holds, written in the entry's batch.
+// the App straight after (`indexAppNow`), and a cron trigger every 15
+// minutes indexes every App whose entry isn't of its current version
+// (`indexApps`): one whose indexing failed, one made current while
+// indexing was off, and every App when it is first switched on. Indexing
+// where a version is made current keeps entries current; the cron trigger
+// only catches up, so every 15 minutes is enough. `app_entries` has the
+// version each entry holds, written in the entry's batch.
 //
 // Two indexings of one App at once (a version change and the cron, say)
 // never write over each other: each reads the entry before the App, and
@@ -49,7 +51,7 @@ import { appMemoryPath } from "./memory-files.ts";
 // version change that the loser saw, and so leave the text of a version
 // that is no longer current: `app_entries` then names that version, which
 // differs from the App's, and the next cron run indexes it again. So the
-// entry heals itself within a minute.
+// entry heals itself within 15 minutes.
 
 /** Who indexes: Grasp itself, with no person behind it. */
 const appsActor: AuditActor = { type: "system" };
@@ -242,8 +244,9 @@ const indexApp = async (env: Env, appId: string): Promise<void> => {
 };
 
 /**
- * `indexApp`, whose failure is logged and left to the cron trigger: a
- * conflict, another indexing that wrote first, is left to it silently.
+ * `indexApp`, whose failure is logged and left to the cron trigger (see
+ * `indexApps`): a conflict, another indexing that wrote first, is left to
+ * it silently.
  */
 export const indexAppNow = async (env: Env, appId: string): Promise<void> => {
   try {
@@ -260,7 +263,7 @@ export const indexAppNow = async (env: Env, appId: string): Promise<void> => {
  * at most `indexedPerRun`, one at a time, from a random one on (by ID,
  * wrapping around): Apps whose indexing fails every time can't keep the
  * others waiting run after run. Does nothing while indexing is off. The
- * cron trigger calls it every minute.
+ * cron trigger calls it every 15 minutes.
  */
 export const indexApps = async (env: Env): Promise<void> => {
   if (!appsCollectionEnabled(env)) {

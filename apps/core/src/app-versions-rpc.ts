@@ -60,7 +60,7 @@ export class AppVersionsRpc extends RpcTarget implements AppVersionsApi {
    * Makes a version current, then indexes the App into the Apps collection
    * (knowledge/apps-collection.ts): its entry holds the new version once
    * this returns, unless indexing failed or raced another; the cron
-   * trigger then heals it within a minute.
+   * trigger then heals it within 15 minutes.
    */
   async setCurrent(app: string, version: number): Promise<App> {
     return await withPerson(this.#check, async (by) => {
