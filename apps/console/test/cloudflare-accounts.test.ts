@@ -1,0 +1,239 @@
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import {
+  ensureAiGateway,
+  ensureD1Database,
+  ensureKvNamespace,
+  ensureR2Bucket,
+  ensureWorkersSubdomain,
+  getAccount,
+  listAccounts,
+} from "../src/cloudflare/accounts.ts";
+import { CloudflareApiError, cloudflareApi } from "../src/cloudflare/api.ts";
+import { mockCloudflareApi } from "./cloudflare-api.ts";
+
+const token = "test-deployer-token-0123456789";
+const cloudflare = mockCloudflareApi(token);
+/** No waiting between retries: the fake answers at once. */
+const api = cloudflareApi({ token, retryDelayMs: 0 });
+
+/** What `promise` fails with, or undefined if it doesn't. */
+const errorOf = async (promise: Promise<unknown>): Promise<unknown> => {
+  try {
+    await promise;
+  } catch (error) {
+    return error;
+  }
+  return undefined;
+};
+
+describe("accounts", () => {
+  it("reads an account the token is a member of", async () => {
+    const account = cloudflare.addAccount("Acme");
+    await expect(getAccount(api, account.id)).resolves.toStrictEqual({
+      id: account.id,
+      name: "Acme",
+    });
+  });
+
+  it("lists every account, page by page", async () => {
+    const added = Array.from({ length: 57 }, (_, index) =>
+      cloudflare.addAccount(`Client ${index}`)
+    );
+    const accounts = await listAccounts(api);
+    expect(accounts.map(({ id }) => id)).toStrictEqual(
+      added.map(({ id }) => id)
+    );
+    expect(
+      cloudflare.calls.map(({ query }) => query.get("page"))
+    ).toStrictEqual(["1", "2"]);
+  });
+
+  it("fails a list longer than it walks, rather than return part of it", async () => {
+    for (let index = 0; index <= 1000; index += 1) {
+      cloudflare.addAccount(`Client ${index}`);
+    }
+    await expect(listAccounts(api)).rejects.toThrow(
+      "Listing /accounts passed 20 pages"
+    );
+  });
+
+  it("refuses an account the token isn't a member of", async () => {
+    await expect(
+      getAccount(api, "someone-elses-account")
+    ).rejects.toMatchObject({
+      status: 403,
+      codes: [9109],
+    });
+  });
+});
+
+describe("EU resources", () => {
+  it("creates each resource once, in the EU, however often it runs", async () => {
+    const account = cloudflare.addAccount();
+    const provision = async () =>
+      await Promise.all([
+        ensureWorkersSubdomain(api, account.id, "grasp-acme"),
+        ensureD1Database(api, account.id, "grasp-os-core"),
+        ensureR2Bucket(api, account.id, "grasp-os-files"),
+        ensureKvNamespace(api, account.id, "grasp-os-cache"),
+        ensureAiGateway(api, account.id, "grasp-os"),
+      ]);
+
+    const first = await provision();
+    const again = await provision();
+
+    expect(again).toStrictEqual(first);
+    expect(account).toMatchObject({
+      subdomain: "grasp-acme",
+      d1: [{ name: "grasp-os-core", jurisdiction: "eu" }],
+      buckets: [{ name: "grasp-os-files", jurisdiction: "eu" }],
+      namespaces: [{ title: "grasp-os-cache" }],
+      gateways: [{ id: "grasp-os", collect_logs: true, cache_ttl: 0 }],
+    });
+  });
+
+  it("keeps the workers.dev subdomain an account already has", async () => {
+    const account = cloudflare.addAccount();
+    account.subdomain = "chosen-earlier";
+    await expect(
+      ensureWorkersSubdomain(api, account.id, "grasp-acme")
+    ).resolves.toBe("chosen-earlier");
+  });
+
+  it("finds a D1 database by its exact name", async () => {
+    const account = cloudflare.addAccount();
+    account.d1.push({
+      uuid: "other",
+      name: "grasp-os-core-old",
+      jurisdiction: "eu",
+    });
+    const database = await ensureD1Database(api, account.id, "grasp-os-core");
+    expect(database.uuid).not.toBe("other");
+    expect(account.d1).toHaveLength(2);
+  });
+
+  it("stops at a D1 database outside the EU, creating nothing", async () => {
+    const account = cloudflare.addAccount();
+    account.d1.push({ uuid: "us", name: "grasp-os-core" });
+    await expect(
+      ensureD1Database(api, account.id, "grasp-os-core")
+    ).rejects.toThrow(
+      "D1 database grasp-os-core exists outside the EU jurisdiction (none)"
+    );
+    expect(account.d1).toHaveLength(1);
+  });
+
+  it("never uses a bucket of the same name outside the EU", async () => {
+    const account = cloudflare.addAccount();
+    account.buckets.push({ name: "grasp-os-files", jurisdiction: "default" });
+    await ensureR2Bucket(api, account.id, "grasp-os-files");
+    expect(account.buckets).toStrictEqual([
+      { name: "grasp-os-files", jurisdiction: "default" },
+      { name: "grasp-os-files", jurisdiction: "eu" },
+    ]);
+  });
+});
+
+describe("retries", () => {
+  it("retries a rate-limited call, creating once", async () => {
+    const account = cloudflare.addAccount();
+    // The list finds nothing; the create is refused twice, then goes through.
+    cloudflare.failCall(2, 429);
+    cloudflare.failCall(3, 429);
+    await ensureD1Database(api, account.id, "grasp-os-core");
+    expect(account.d1).toHaveLength(1);
+    expect(cloudflare.calls.map(({ method }) => method)).toStrictEqual([
+      "GET",
+      "POST",
+      "POST",
+      "POST",
+    ]);
+  });
+
+  it("retries a read after a server error or no answer", async () => {
+    const account = cloudflare.addAccount("Acme");
+    cloudflare.failCall(1, 502);
+    cloudflare.failCall(2, 503);
+    cloudflare.failCall(3, "network");
+    await expect(getAccount(api, account.id)).resolves.toMatchObject({
+      name: "Acme",
+    });
+    expect(cloudflare.calls).toHaveLength(4);
+  });
+
+  it("doesn't retry a create that may have gone through", async () => {
+    const account = cloudflare.addAccount();
+    cloudflare.failCall(2, 500);
+    await expect(
+      ensureD1Database(api, account.id, "grasp-os-core")
+    ).rejects.toMatchObject({ status: 500, codes: [10_000] });
+    cloudflare.failCall(1, "network");
+    await expect(
+      ensureKvNamespace(api, account.id, "grasp-os-cache")
+    ).resolves.toMatchObject({ title: "grasp-os-cache" });
+    cloudflare.failCall(2, "network");
+    await expect(
+      ensureAiGateway(api, account.id, "grasp-os")
+    ).rejects.toMatchObject({ status: 0 });
+    expect(cloudflare.calls.map(({ method }) => method)).toStrictEqual([
+      "GET",
+      "POST",
+      "GET",
+      "GET",
+      "POST",
+      "GET",
+      "POST",
+    ]);
+  });
+
+  it("gives up after four attempts, waiting twice as long each time", async () => {
+    const account = cloudflare.addAccount();
+    // Waits are counted, not waited.
+    const wait = vi.spyOn(scheduler, "wait").mockResolvedValue();
+    const slow = cloudflareApi({ token, retryDelayMs: 100 });
+    for (const n of [1, 2, 3, 4]) {
+      cloudflare.failCall(n, 429);
+    }
+    await expect(getAccount(slow, account.id)).rejects.toMatchObject({
+      status: 429,
+      codes: [971],
+    });
+    expect(cloudflare.calls).toHaveLength(4);
+    expect(wait.mock.calls).toStrictEqual([[100], [200], [400]]);
+  });
+
+  it("reports an answer without the API's envelope by its status", async () => {
+    const account = cloudflare.addAccount();
+    for (const n of [1, 2, 3, 4]) {
+      cloudflare.failCall(n, 502);
+    }
+    await expect(getAccount(api, account.id)).rejects.toThrow(
+      `Cloudflare API GET /accounts/${account.id} failed (502)`
+    );
+  });
+});
+
+describe("the token", () => {
+  it("goes only into the Authorization header", async () => {
+    const account = cloudflare.addAccount();
+    await ensureD1Database(api, account.id, "grasp-os-core");
+    for (const { headers, path, query } of cloudflare.calls) {
+      expect(headers.get("authorization")).toBe(`Bearer ${token}`);
+      expect(`${path}?${query.toString()}`).not.toContain(token);
+    }
+  });
+
+  it("never shows in an error", async () => {
+    const wrong = cloudflareApi({
+      token: "wrong-token-9876543210",
+      retryDelayMs: 0,
+    });
+    const account = cloudflare.addAccount();
+    const error = await errorOf(getAccount(wrong, account.id));
+    expect(error).toBeInstanceOf(CloudflareApiError);
+    const shown = `${String(error)} ${JSON.stringify(error)} ${error instanceof Error ? error.stack : ""}`;
+    expect(shown).not.toContain("wrong-token-9876543210");
+    expect(shown).toContain("10000 Authentication error");
+  });
+});
