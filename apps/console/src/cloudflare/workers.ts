@@ -387,8 +387,9 @@ export const listDeployments = async (
 /**
  * Sets the secret `name` on `scriptName`, for first-time setup only. It
  * makes a new version from the latest one and deploys it at once, so
- * Cloudflare refuses it (10215) while an uploaded version waits for its
- * deployment; a rollout sets secrets with `uploadVersionWithSecrets`
+ * Cloudflare refuses it (10215) whenever the latest version isn't the one
+ * deployed: while an uploaded version waits for its deployment, and after
+ * any rollback. A rollout sets secrets with `uploadVersionWithSecrets`
  * instead. The value goes only into the request body: never into a path
  * or an error.
  */

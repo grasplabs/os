@@ -439,6 +439,15 @@ describe("secrets, schedules and workflows", () => {
     });
     const [current] = await deployedVersions(account.id, "grasp-os-core");
     expect(current).toStrictEqual([{ version_id: first?.id, percentage: 100 }]);
+
+    // After a rollback the latest version isn't the deployed one, so a
+    // secret can't be set on its own.
+    await expect(
+      putSecret(api, account.id, "grasp-os-core", {
+        name: "ROUTER_SECRET",
+        value: "newer",
+      })
+    ).rejects.toMatchObject({ status: 400, codes: [10_215] });
   });
 
   it("keeps a secret's value out of the error when it's refused", async () => {
