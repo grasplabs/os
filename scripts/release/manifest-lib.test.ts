@@ -119,6 +119,12 @@ describe("the release manifest", () => {
         },
       })
     ).toThrow(/script_name/u);
+    expect(() =>
+      parseWranglerConfig("core", {
+        ...core,
+        observability: { enabled: true, destinations: ["an-account-sink"] },
+      })
+    ).toThrow(/destinations/u);
   });
 
   it("refuses an R2 bucket outside the EU", () => {

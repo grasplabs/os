@@ -32,6 +32,13 @@ export const MANIFEST_VERSION = 1;
 const bindingName = z.string().regex(/^[A-Z][A-Z0-9_]*$/u);
 const named = z.strictObject({ binding: bindingName });
 
+const observabilitySchema = z.strictObject({
+  enabled: z.boolean().optional(),
+  redact_query_string: z.boolean().optional(),
+  logs: z.strictObject({ invocation_logs: z.boolean().optional() }).optional(),
+  traces: z.strictObject({ enabled: z.boolean().optional() }).optional(),
+});
+
 // Every wrangler.jsonc key a released Worker may use, and the shape of each.
 // Strict at every level: a key this generator doesn't handle fails the build,
 // since a new config key needs a decision about how client accounts get it.
@@ -45,8 +52,9 @@ const wranglerConfigSchema = z.strictObject({
   preview_urls: z.boolean(),
   // Bundling only: the modules it produces are in the dry-run output.
   rules: z.array(z.unknown()).optional(),
-  // Passed to the Workers API as it is.
-  observability: z.record(z.string(), z.unknown()).default({}),
+  // Passed to the Workers API as it is, so only keys that mean the same in
+  // every account: one like `destinations` names account resources.
+  observability: observabilitySchema.default({}),
   assets: z
     .strictObject({
       directory: z.string(),
@@ -176,7 +184,7 @@ const workerEntrySchema = z.strictObject({
   keepVars: z.boolean(),
   workersDev: z.boolean(),
   previewUrls: z.boolean(),
-  observability: z.record(z.string(), z.unknown()),
+  observability: observabilitySchema,
   /** Static assets: the API's `assets.config` and upload manifest. */
   assets: z
     .strictObject({
