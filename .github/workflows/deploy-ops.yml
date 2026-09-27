@@ -2,10 +2,22 @@
 # for every client, so it never changes on a merge. Run it by hand from main
 # once the change works in grasp-os-staging. Require a reviewer on the grasp-os-ops
 # environment in GitHub so a second person approves every run.
+#
+# Every run also copies the shared secrets (Grasp's OAuth app secrets and
+# Composio key) from 1Password into the ops account's Secrets Store, where
+# the console reads them to set on each client's Workers. The console never
+# holds a 1Password credential. Run it with "secrets only" after rotating one
+# in 1Password to copy it without deploying; a secrets-only rollout from the
+# console then takes it to every client.
 name: Deploy grasp-os-ops
 
 on:
   workflow_dispatch:
+    inputs:
+      secrets-only:
+        description: Only copy the shared secrets to Secrets Store; deploy nothing
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -38,4 +50,90 @@ jobs:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: op://grasp-os-ops/cloudflare/account-id
           CLOUDFLARE_API_TOKEN: op://grasp-os-ops/cloudflare/api-token
-      - run: vp run --filter @grasp-os/console --filter @grasp-os/router deploy
+          SECRETS_STORE_ID: op://grasp-os-ops/cloudflare/secrets-store-id
+      # The shared secrets, as this step's outputs only (masked in logs):
+      # never exported to the job's env, so no other step, deploys included,
+      # sees them. Each is a field of the `shared` item, named as the Worker
+      # secret it becomes.
+      - id: shared
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          ENTRA_CLIENT_SECRET: op://grasp-os-ops/shared/ENTRA_CLIENT_SECRET
+          MICROSOFT_CLIENT_SECRET: op://grasp-os-ops/shared/MICROSOFT_CLIENT_SECRET
+          GOOGLE_CLIENT_SECRET: op://grasp-os-ops/shared/GOOGLE_CLIENT_SECRET
+          COMPOSIO_API_KEY: op://grasp-os-ops/shared/COMPOSIO_API_KEY
+      # Secrets Store keeps each secret by an ID of its own: an existing one
+      # is updated by that ID, a missing one created. Values go to wrangler
+      # on stdin, never as an argument or in a log line, and are written
+      # every run: Secrets Store never reads a value back to compare.
+      # The API token reaches curl through its config on stdin, not argv.
+      # The store holds only fixed secrets (these, the deployer token and the
+      # router key), never one per client, so one page normally covers it;
+      # the list is still read page by page up to `total_pages`.
+      - name: Copy the shared secrets to Secrets Store
+        env:
+          ENTRA_CLIENT_SECRET: ${{ steps.shared.outputs.ENTRA_CLIENT_SECRET }}
+          MICROSOFT_CLIENT_SECRET: ${{ steps.shared.outputs.MICROSOFT_CLIENT_SECRET }}
+          GOOGLE_CLIENT_SECRET: ${{ steps.shared.outputs.GOOGLE_CLIENT_SECRET }}
+          COMPOSIO_API_KEY: ${{ steps.shared.outputs.COMPOSIO_API_KEY }}
+        run: |
+          set -euo pipefail
+          names=(ENTRA_CLIENT_SECRET MICROSOFT_CLIENT_SECRET GOOGLE_CLIENT_SECRET COMPOSIO_API_KEY)
+          # Every value is checked before any is written, so an empty field
+          # never leaves the store half updated. Only names are reported.
+          empty=()
+          for name in "${names[@]}"; do
+            if [ -z "${!name}" ]; then
+              empty+=("shared/$name")
+            fi
+          done
+          if [ "${#empty[@]}" -gt 0 ]; then
+            echo "::error::Empty 1Password fields, nothing written: ${empty[*]}"
+            exit 1
+          fi
+          existing='[]'
+          page=1
+          while :; do
+            response=$(printf 'header = "Authorization: Bearer %s"\n' "$CLOUDFLARE_API_TOKEN" |
+              curl --silent --show-error --fail-with-body --config - \
+                "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/secrets_store/stores/$SECRETS_STORE_ID/secrets?per_page=100&page=$page")
+            existing=$(jq -c --argjson page "$(jq -c '[.result[] | {name, id}]' <<< "$response")" '. + $page' <<< "$existing")
+            total=$(jq -r '.result_info.total_pages // 1' <<< "$response")
+            if [ "$page" -ge "$total" ]; then
+              break
+            fi
+            page=$((page + 1))
+          done
+          for name in "${names[@]}"; do
+            id=$(jq -r --arg name "$name" '.[] | select(.name == $name) | .id' <<< "$existing")
+            if [ -z "$id" ]; then
+              printf '%s' "${!name}" | vp exec wrangler secrets-store secret create "$SECRETS_STORE_ID" --name "$name" --scopes workers --remote
+            else
+              printf '%s' "${!name}" | vp exec wrangler secrets-store secret update "$SECRETS_STORE_ID" --secret-id "$id" --remote
+            fi
+          done
+      # A D1 database's jurisdiction is set only when it is created, and deploy
+      # would auto-provision a missing one outside the EU: create the
+      # console's database before its first deploy, as CI does for
+      # grasp-os-staging. One that exists outside the EU stops the deploy; it
+      # has to be recreated.
+      - name: Create the console database in the EU
+        if: ${{ !inputs.secrets-only }}
+        run: |
+          existing=$(vp exec wrangler d1 list --json)
+          jurisdiction=$(jq -r '.[] | select(.name == "grasp-os-console") | .jurisdiction // "none"' <<< "$existing")
+          if [ -z "$jurisdiction" ]; then
+            vp exec wrangler d1 create grasp-os-console --jurisdiction eu
+          elif [ "$jurisdiction" != "eu" ]; then
+            echo "::error::D1 database grasp-os-console is not in the EU jurisdiction ($jurisdiction)"
+            exit 1
+          fi
+      # D1 migrations are additive, so the running console keeps working on
+      # the new schema until the deploy after them replaces it.
+      - if: ${{ !inputs.secrets-only }}
+        run: vp run --filter @grasp-os/console db:migrate
+      - if: ${{ !inputs.secrets-only }}
+        run: vp run --filter @grasp-os/console --filter @grasp-os/router deploy

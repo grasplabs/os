@@ -10,7 +10,8 @@
     "preview": "vp preview",
     "deploy": "vp build && wrangler deploy",
     "typegen": "wrangler types --include-runtime=false",
-    "db:generate": "drizzle-kit generate"
+    "db:generate": "drizzle-kit generate",
+    "db:migrate": "wrangler d1 migrations apply DB --remote"
   },
   "dependencies": {
     "@grasp-os/ui": "workspace:*",
