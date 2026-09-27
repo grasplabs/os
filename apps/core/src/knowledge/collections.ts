@@ -1,5 +1,5 @@
 import { actorOf } from "@grasp-os/shared/audit";
-import type { AuditActor } from "@grasp-os/shared/audit";
+import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
 import { collectionIdSchema } from "@grasp-os/shared/ids";
 import {
   collectionInputSchema,
@@ -97,7 +97,7 @@ export const readableCollection = async (
  */
 export const requireWritable = (
   env: Env,
-  person: Identity,
+  person: Pick<Identity, "userId" | "role">,
   collection: CollectionRow
 ): void => {
   if (collection.source === "playbook") {
@@ -185,14 +185,15 @@ export const createCollection = async (
 
 /**
  * Creates the collection `row`, one the platform names (memory's), by
- * `actor`, unless one with its ID exists already; audited only when it
- * created it. Returns the collection under that ID, which is `row` unless
- * it existed.
+ * `actor`, unless one with its ID exists already; audited, with `detail`,
+ * only when it created it. Returns the collection under that ID, which is
+ * `row` unless it existed.
  */
 export const ensureCollection = async (
   env: Env,
   row: CollectionRow,
-  actor: AuditActor
+  actor: AuditActor,
+  detail: Record<string, AuditDetailValue> = {}
 ): Promise<CollectionRow> => {
   const db = drizzle(env.KNOWLEDGE);
   const { access, sensitive, source } = row;
@@ -202,7 +203,7 @@ export const ensureCollection = async (
       actor,
       action: "knowledge.collection.created",
       target: { type: "collection", id: row.id },
-      detail: { access, sensitive, source },
+      detail: { ...detail, access, sensitive, source },
     }),
   ]);
   const found = await db

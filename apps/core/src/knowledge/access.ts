@@ -338,7 +338,7 @@ export const noteProvenance = async (
  * owner and admins.
  */
 export const canWrite = (
-  person: Identity,
+  person: Pick<Identity, "userId" | "role">,
   collection: { owner: string; access: string }
 ): boolean =>
   collection.access !== "everyone" ||

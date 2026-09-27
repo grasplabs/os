@@ -7,6 +7,7 @@ import type {
 import { actorOf } from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
+import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
   permissionErrors,
@@ -42,6 +43,7 @@ import { apps, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
 import { appHost } from "./durable-objects.ts";
+import { featureEnabled } from "./features.ts";
 
 // Permission records and the one check every server path runs. A person
 // asks for a permission (it allows nothing yet), an admin grants it, their
@@ -318,8 +320,8 @@ const requireApps = async (
 };
 
 /**
- * A collection a permission names must exist, and not be someone's
- * personal collection: Apps and agents never read those (see
+ * A collection a permission names must exist (but for the Playbook, see
+ * below), and not be someone's personal collection: Apps and agents never read those (see
  * knowledge/access.ts), so nobody can be asked to grant one.
  *
  * Nor is an App given the Apps collection (knowledge/apps-collection.ts).
@@ -344,6 +346,18 @@ const requireCollection = async (
     .from(collections)
     .where(eq(collections.id, object.collectionId))
     .get();
+  // The Playbook is set up by the first admin who saves a record into it
+  // (knowledge/playbook.ts), so while its flag is on it can be asked for
+  // and granted before then: an App's first save is what sets it up. It
+  // is open to everyone and not an App's collection, as the checks below
+  // require.
+  const playbookNotYet =
+    !found &&
+    object.collectionId === playbookCollectionId &&
+    featureEnabled(env, "playbook");
+  if (playbookNotYet) {
+    return;
+  }
   if (!found) {
     throw permissionErrors.create("permission.invalid", {
       issues: ["object.collectionId: There's no such collection."],

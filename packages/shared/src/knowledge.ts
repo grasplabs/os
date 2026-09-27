@@ -274,6 +274,14 @@ export const historyOptionsSchema = z
 export type HistoryOptions = z.input<typeof historyOptionsSchema>;
 
 /**
+ * The Playbook collection: one per deployment, under this ID, which no
+ * other collection can have (every other one's is a random UUID). So an
+ * App's blueprint can name it, and ask for it, in every deployment.
+ */
+export const playbookCollectionId: CollectionId =
+  collectionIdSchema.parse("playbook");
+
+/**
  * The Playbook's records: typed documents that only a Playbook collection
  * holds (the one per deployment the platform creates), with the Playbook's
  * `decision`s, which any collection can hold.
@@ -368,6 +376,17 @@ export interface Provenance {
 export interface DocumentRead extends DocumentSummary {
   version: Version;
   provenance: Provenance;
+}
+
+/**
+ * A document read as a record: its frontmatter as data (its `type`, and
+ * the fields its type's schema reads, defaults filled in), and the
+ * Markdown after it. How App code, which has no YAML parser, reads a
+ * Playbook record.
+ */
+export interface RecordRead extends DocumentRead {
+  record: Record<string, unknown>;
+  body: string;
 }
 
 /** A page of a collection's documents. */
