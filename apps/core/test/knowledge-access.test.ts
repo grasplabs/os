@@ -14,7 +14,7 @@ import type {
 import type { Role } from "@grasp-os/shared/roles";
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { appHost } from "../src/durable-objects.ts";
@@ -742,16 +742,16 @@ describe("restricted mode", setUpTime, () => {
       // oxlint-disable-next-line no-await-in-loop -- one context at a time
       await readerIn(bindings).search("note");
     }
-    const audited = await vi.waitFor(async () => {
-      const events = await allEvents();
-      const restricted = events.filter(
-        ({ action, target }) =>
-          action === "context.restricted" &&
-          (target?.id === chat.chatId || target?.id === appId)
-      );
-      expect(restricted).toHaveLength(2);
-      return restricted;
-    });
+    // Entering restricted mode is recorded before it is set (the next
+    // test), and the read awaits that record before it returns. `allEvents`
+    // drains the outboxes before it reads: once the reads are done, their
+    // events are there to read, without a wait.
+    const logged = await allEvents();
+    const audited = logged.filter(
+      ({ action, target }) =>
+        action === "context.restricted" &&
+        (target?.id === chat.chatId || target?.id === appId)
+    );
     expect(
       audited.map(({ actor, target, provenance, detail }) => ({
         actor,
@@ -805,15 +805,11 @@ describe("restricted mode", setUpTime, () => {
     }
     // The next restricted read records it, and restricts.
     await readerIn(inApp).getDocument(sensitive.noteId);
-    const events = await vi.waitFor(async () => {
-      const all = await allEvents();
-      const restricted = all.filter(
-        ({ action, target }) =>
-          action === "context.restricted" && target?.id === appId
-      );
-      expect(restricted).toHaveLength(1);
-      return restricted;
-    });
+    const logged = await allEvents();
+    const events = logged.filter(
+      ({ action, target }) =>
+        action === "context.restricted" && target?.id === appId
+    );
     expect({
       failedRead,
       restrictedAfterFailure,

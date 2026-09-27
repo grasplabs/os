@@ -45,6 +45,14 @@ import {
 // test helpers skip sleeps and inject events; the outside systems faked
 // here are the model provider behind AI Gateway, and a mail provider's MCP
 // server behind the real connect (test/mail-server.ts).
+//
+// A run's audit events are in an outbox by the time the run has ended: the
+// dispatcher's end step writes the run's own event with its row, and each
+// step's and each connection call's event is written before the step goes
+// on. `allEvents` drains the outboxes before it reads, so a test reads them
+// once, after the run ended, rather than wait for them: a wait with a
+// deadline adds nothing, and one read of the log can take longer than a
+// short deadline on a loaded runner.
 
 const idp = mockIdp();
 
@@ -274,14 +282,8 @@ describe("workflow runs", { timeout: 60_000 }, () => {
     });
     await reviewer.api.decisions.answer(decision, { approved: true });
     await instance.waitForStatus("complete");
-    const audited = await vi.waitFor(async () => {
-      const events = await allEvents();
-      const ofRun = events.filter(({ target }) => target?.id === run.id);
-      expect(ofRun.map(({ action }) => action)).toContain(
-        "workflow.run.completed"
-      );
-      return ofRun;
-    });
+    const logged = await allEvents();
+    const audited = logged.filter(({ target }) => target?.id === run.id);
 
     expect({
       output: await instance.getOutput(),
@@ -882,14 +884,8 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     const app = await appWith(admin, rogue);
     const run = await admin.api.workflows.start(app, "rogue");
     await finished(run.id);
-    const events = await vi.waitFor(async () => {
-      const all = await allEvents();
-      const ofRun = all.filter(({ target }) => target?.id === run.id);
-      expect(ofRun.map(({ action }) => action)).toContain(
-        "workflow.run.failed"
-      );
-      return ofRun;
-    });
+    const logged = await allEvents();
+    const events = logged.filter(({ target }) => target?.id === run.id);
     const { status, error, failure } = await admin.api.workflows.status(run.id);
     expect({
       status,
@@ -1383,23 +1379,22 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
     const run = await admin.api.workflows.start(app, "mailer");
     await finished(run.id);
     // Each attempt is audited with the version whose code made it.
-    const auditedVersions = await vi.waitFor(async () => {
-      const events = await allEvents();
-      const calls = events.filter(
-        ({ action, target }) =>
-          action === "connection.call" && target?.id === mail.id
-      );
-      expect(calls.map(({ detail }) => detail.outcome)).toContain("ok");
-      return new Set(calls.map(({ detail }) => detail.appVersion));
-    });
+    const logged = await allEvents();
+    const calls = logged.filter(
+      ({ action, target }) =>
+        action === "connection.call" && target?.id === mail.id
+    );
 
     expect({
       run: await admin.api.workflows.status(run.id),
       server: await mail.did(),
-      auditedVersions,
+      outcomes: calls.map(({ detail }) => detail.outcome),
+      auditedVersions: new Set(calls.map(({ detail }) => detail.appVersion)),
     }).toMatchObject({
       run: { status: "completed", output: { messageId: "message-1" } },
       server: { calls: 1, sent: [invoiceMail] },
+      // Two attempts the server took nothing of, then the one that went through.
+      outcomes: ["failed", "failed", "ok"],
       auditedVersions: new Set([1]),
     });
   });
@@ -1540,15 +1535,11 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
     const unknownApp = await refusal(
       starter.api.workflows.list(crypto.randomUUID())
     );
-    const events = await vi.waitFor(async () => {
-      const all = await allEvents();
-      const failed = all.filter(
-        ({ action, target }) =>
-          action === "workflow.run.failed" && target?.id === started.id
-      );
-      expect(failed).toHaveLength(1);
-      return failed;
-    });
+    const logged = await allEvents();
+    const events = logged.filter(
+      ({ action, target }) =>
+        action === "workflow.run.failed" && target?.id === started.id
+    );
 
     const seen = {
       starter: await failures(starter),

@@ -2,7 +2,7 @@ import { maxDeciders } from "@grasp-os/shared/decisions";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { startRun } from "../src/workflows/runs.ts";
 import { release } from "./apps.ts";
@@ -98,7 +98,13 @@ const addMembers = async (team: string, count: number): Promise<void> => {
 const askedTo = (ask: Ask): string[] =>
   ask.recipients.map(({ userId }) => userId);
 
-/** The audit events about `decision`, in log order. */
+/**
+ * The audit events about `decision`, in log order. A decision's events are
+ * written with the change they record (opening, asking, an answer, timing
+ * out), and `allEvents` drains the outboxes before it reads, so a test
+ * reads them once that change is done, without waiting for them: a wait
+ * with a deadline can only fail when one read of the log is slow.
+ */
 const eventsOf = async (decision: string) => {
   const events = await allEvents();
   return events.filter(({ target }) => target?.id === decision);
@@ -156,13 +162,7 @@ describe("decisions", { timeout: 60_000 }, () => {
         payload: { comment: "Matches the PO" },
       },
     });
-    const audited = await vi.waitFor(async () => {
-      const events = await eventsOf(decision);
-      expect(events.map(({ action }) => action)).toContain(
-        "workflow.decision.approved"
-      );
-      return events;
-    });
+    const audited = await eventsOf(decision);
     const [opened, asked, approved] = audited;
     expect({
       actions: audited.map(({ action }) => action),
@@ -252,16 +252,12 @@ describe("decisions", { timeout: 60_000 }, () => {
       outcome(ben.api.decisions.answer(decision, { approved: true })),
     ]);
     const output = await outputOf(admin, run.id);
-    const answers = await vi.waitFor(async () => {
-      const events = await eventsOf(decision);
-      const decided = events.filter(({ action }) =>
-        ["workflow.decision.approved", "workflow.decision.rejected"].includes(
-          action
-        )
-      );
-      expect(decided).toHaveLength(1);
-      return decided;
-    });
+    const logged = await eventsOf(decision);
+    const answers = logged.filter(({ action }) =>
+      ["workflow.decision.approved", "workflow.decision.rejected"].includes(
+        action
+      )
+    );
 
     expect({
       racing: racing.toSorted(),
@@ -301,12 +297,10 @@ describe("decisions", { timeout: 60_000 }, () => {
       late: "decision.closed",
       seen: { status: "timed_out" },
     });
-    await vi.waitFor(async () => {
-      const events = await eventsOf(decision);
-      expect(
-        events.map(({ action, actor }) => [action, actor.type])
-      ).toContainEqual(["workflow.decision.timed_out", "workflow"]);
-    });
+    const events = await eventsOf(decision);
+    expect(
+      events.map(({ action, actor }) => [action, actor.type])
+    ).toContainEqual(["workflow.decision.timed_out", "workflow"]);
   });
 
   it("refuse an answer once the run is cancelled", async () => {
@@ -396,16 +390,12 @@ describe("decisions", { timeout: 60_000 }, () => {
       approved: false,
       by: otherAdmin.userId,
     });
-    const answers = await vi.waitFor(async () => {
-      const events = await eventsOf(byRole.decision);
-      const decided = events.filter(({ action }) =>
-        ["workflow.decision.approved", "workflow.decision.rejected"].includes(
-          action
-        )
-      );
-      expect(decided).toHaveLength(1);
-      return decided;
-    });
+    const logged = await eventsOf(byRole.decision);
+    const answers = logged.filter(({ action }) =>
+      ["workflow.decision.approved", "workflow.decision.rejected"].includes(
+        action
+      )
+    );
     expect(
       answers.map(({ action, actor }) => ({ action, actor }))
     ).toStrictEqual([
