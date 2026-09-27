@@ -227,6 +227,10 @@ test("a screen opens through core failing at first, subscribes again after its c
   // Core is out of reach for the first attempt, and again for the next
   // attempt after the drop.
   let refuse = 1;
+  // Core fails the first open, on whichever connection it comes, by
+  // closing that connection instead of passing the open on.
+  let failOpens = 1;
+  let failedOpens = 0;
   await page.routeWebSocket("**/rpc", async (socket) => {
     connections += 1;
     if (dropped) {
@@ -238,17 +242,15 @@ test("a screen opens through core failing at first, subscribes again after its c
       return;
     }
     const server = socket.connectToServer();
-    if (connections === 2) {
-      // Core fails the connection that holds while the screen opens on it.
-      socket.onMessage(async (message) => {
-        if (String(message).includes('["screens","open"]')) {
-          await socket.close();
-          return;
-        }
-        server.send(message);
-      });
-      return;
-    }
+    socket.onMessage(async (message) => {
+      if (failOpens > 0 && String(message).includes('["screens","open"]')) {
+        failOpens -= 1;
+        failedOpens += 1;
+        await socket.close();
+        return;
+      }
+      server.send(message);
+    });
     drop = async () => {
       dropped = true;
       refuse = 1;
@@ -256,8 +258,10 @@ test("a screen opens through core failing at first, subscribes again after its c
     };
   });
   const screen = await openScreen(page, app);
-  // The refused first attempt, the one that failed the open, and the one
-  // the screen opened on.
+  // The page opens no connection but the screen's own (this route has no
+  // shell): the refused first attempt, the one whose open failed, and the
+  // one the screen opened on.
+  expect(failedOpens).toBe(1);
   expect(connections).toBe(3);
   await drop?.();
 
