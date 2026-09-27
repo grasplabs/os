@@ -200,7 +200,7 @@ export interface AppMembersApi {
    * Shares the App, or changes the role of someone it is shared with.
    * Refused with `app.share_unreadable`, naming the `sources` and `people`
    * in its details, when the App has read data (from someone's personal
-   * connection, or a sensitive collection) that anyone it would reach
+   * connection, or a collection they can't read) that anyone it would reach
    * can't read where it comes from.
    */
   add: (app: string, member: NewAppMember) => Promise<AppMember>;
@@ -235,7 +235,7 @@ export const appErrors = defineErrorFamily({
   "app.not_found": "There's no such App.",
   "app.member_invalid": "The App can't be shared with them like that.",
   "app.share_unreadable":
-    "This App has read data they can't read where it comes from, such as someone else's mailbox or a sensitive collection, so it can't be shared with them.",
+    "This App has read data they can't read where it comes from, such as someone else's mailbox or a collection they can't read, so it can't be shared with them.",
   "app.unreadable":
     "This App has read data you can't read where it comes from, so it isn't open to you. Ask whoever shared it.",
   "app.version_not_found": "The App has no such version.",

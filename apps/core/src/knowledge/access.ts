@@ -65,7 +65,7 @@ export interface PersonAccess {
 }
 
 /** Collections a person may read, as a condition on `collections`. */
-export const readableBy = (
+const readableBy = (
   db: DrizzleD1Database,
   { userId, teamIds }: PersonAccess
 ): SQL =>
@@ -90,6 +90,26 @@ export const readableBy = (
           )
         )
   ) ?? sql`0`;
+
+/** A collection as `mayRead` needs it: its access, owner and teams. */
+export interface CollectionAccess {
+  access: string;
+  owner: string;
+  teamIds: readonly string[];
+}
+
+/**
+ * Whether `person` may read `collection`: `readableBy`'s rule, decided in
+ * memory, for checking many people against collections read once (sharing
+ * an App, app-provenance.ts). The two must always agree.
+ */
+export const mayRead = (
+  { userId, teamIds }: PersonAccess,
+  { access, owner, teamIds: shared }: CollectionAccess
+): boolean =>
+  access === "everyone" ||
+  owner === userId ||
+  (access === "teams" && shared.some((team) => teamIds.includes(team)));
 
 /**
  * The collections the App or agent may read under its permissions (only

@@ -108,7 +108,7 @@ export const requireAppRole = async (
     throw roleErrors.create("role.forbidden");
   }
   if (shared) {
-    const unreadable = await unreadableBy(env, await sourcesOf(env, app.id), {
+    const unreadable = unreadableBy(await sourcesOf(env, app.id), {
       userId: by.userId,
       teamIds: by.teams.map(({ id }) => id),
     });

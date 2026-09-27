@@ -7,22 +7,26 @@ import { z } from "zod";
 
 import { permissions } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
-import { collections } from "./db/knowledge/schema.ts";
-import { readableBy } from "./knowledge/access.ts";
-import type { PersonAccess } from "./knowledge/access.ts";
+import { collectionTeams, collections } from "./db/knowledge/schema.ts";
+import { mayRead } from "./knowledge/access.ts";
+import type { CollectionAccess, PersonAccess } from "./knowledge/access.ts";
 
 // Provenance on sharing. An App keeps what it reads (in its storage, its
 // workflows' state, what its screens show), so sharing it must not reach
 // anyone who couldn't read that where it comes from.
 //
 // What an App may have read: every connection it was ever granted, and
-// every sensitive collection it was ever granted to read. Once granted
-// counts for good, revoked or not: the App may still hold what it read.
-// Who may read each: a personal connection (such as a mailbox) only its
-// owner; a shared connection everyone in the organization, who may all
-// use it; a sensitive collection whoever Knowledge lets read it now
-// (knowledge/access.ts). Other collections are left out: what an App
-// reads of them for someone is limited to what that person may read.
+// every collection it was ever granted to read. Once granted counts for
+// good, revoked or not: the App may still hold what it read. Who may read
+// each: a personal connection (such as a mailbox) only its owner; a shared
+// connection everyone in the organization, who may all use it; a
+// collection whoever Knowledge lets read it now (`mayRead`, the rule of
+// knowledge/access.ts), so a collection whose access narrows reaches fewer
+// people from then on. Sources that no longer exist are left out.
+//
+// The sources are read once, and each person is decided in memory
+// (`unreadableBy`), so checking a whole team costs a few queries, not a
+// few per person.
 //
 // Sharing an App with a person, or with a team (each of its people now),
 // is refused when anyone it would reach can't read one of its sources
@@ -40,8 +44,7 @@ const sourceId = (type: "connection" | "collection", id: string): string =>
 /** What an App may have read, as `sourcesOf` finds it. */
 export interface AppSources {
   connections: ConnectionOwner[];
-  /** Sensitive collections, by ID. */
-  sensitive: string[];
+  collections: (CollectionAccess & { id: string })[];
 }
 
 const actionsSchema = z.array(z.string());
@@ -61,13 +64,32 @@ const ownersOf = async (
   return owners.flat();
 };
 
-/** Which of the collections `ids` are sensitive now. */
-const sensitiveOf = async (env: Env, ids: string[]): Promise<string[]> => {
-  const rows = await drizzle(env.KNOWLEDGE)
-    .select({ id: collections.id })
-    .from(collections)
-    .where(and(inList(collections.id, ids), eq(collections.sensitive, true)));
-  return rows.map(({ id }) => id);
+/** Who may read each of the collections `ids` now, as `mayRead` needs it. */
+const accessOf = async (
+  env: Env,
+  ids: string[]
+): Promise<AppSources["collections"]> => {
+  const db = drizzle(env.KNOWLEDGE);
+  const [rows, shared] = await db.batch([
+    db
+      .select({
+        id: collections.id,
+        access: collections.access,
+        owner: collections.owner,
+      })
+      .from(collections)
+      .where(inList(collections.id, ids)),
+    db
+      .select()
+      .from(collectionTeams)
+      .where(inList(collectionTeams.collectionId, ids)),
+  ]);
+  return rows.map((row) => ({
+    ...row,
+    teamIds: shared
+      .filter(({ collectionId }) => collectionId === row.id)
+      .map(({ teamId }) => teamId),
+  }));
 };
 
 /** The sources `app` may have read, as they are now. */
@@ -96,40 +118,31 @@ export const sourcesOf = async (env: Env, app: AppId): Promise<AppSources> => {
       collectionIds.add(id);
     }
   }
-  const [connections, sensitive] = await Promise.all([
+  const [connections, readable] = await Promise.all([
     connectionIds.size === 0 ? [] : ownersOf(env, [...connectionIds]),
-    collectionIds.size === 0 ? [] : sensitiveOf(env, [...collectionIds]),
+    collectionIds.size === 0 ? [] : accessOf(env, [...collectionIds]),
   ]);
-  return { connections, sensitive };
+  return { connections, collections: readable };
 };
+
+/** Whether an App has read from anything at all. */
+export const hasSources = (sources: AppSources): boolean =>
+  sources.connections.length > 0 || sources.collections.length > 0;
 
 /**
  * The sources in `sources` that `reader` can't read, as
  * `connection:<id>` and `collection:<id>`; none when they may read all.
  */
-export const unreadableBy = async (
-  env: Env,
-  { connections, sensitive }: AppSources,
+export const unreadableBy = (
+  sources: AppSources,
   reader: PersonAccess
-): Promise<string[]> => {
-  const unreadable = connections.flatMap(({ id, ownerUserId }) =>
+): string[] => [
+  ...sources.connections.flatMap(({ id, ownerUserId }) =>
     ownerUserId === null || ownerUserId === reader.userId
       ? []
       : [sourceId("connection", id)]
-  );
-  if (sensitive.length === 0) {
-    return unreadable;
-  }
-  const db = drizzle(env.KNOWLEDGE);
-  const readable = await db
-    .select({ id: collections.id })
-    .from(collections)
-    .where(and(inList(collections.id, sensitive), readableBy(db, reader)));
-  const ids = new Set(readable.map(({ id }) => id));
-  return [
-    ...unreadable,
-    ...sensitive.flatMap((id) =>
-      ids.has(id) ? [] : [sourceId("collection", id)]
-    ),
-  ];
-};
+  ),
+  ...sources.collections.flatMap((collection) =>
+    mayRead(reader, collection) ? [] : [sourceId("collection", collection.id)]
+  ),
+];

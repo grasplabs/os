@@ -7,7 +7,8 @@ import type { FailureReason, ScreenState } from "./screen-host.ts";
 
 const failureMessages: Readonly<Record<FailureReason, string>> = {
   disabled: "Screens aren't switched on for this organization.",
-  forbidden: "Your role can't open this App's screens.",
+  forbidden:
+    "You can't open this App's screens: your role doesn't allow it, or the App has read data you can't read.",
   "not-found": "This App has no such screen.",
   "not-running": "This App has no version to run yet.",
   broken: "This screen doesn't build. Ask a builder to fix it.",

@@ -13,21 +13,33 @@ import type {
 import { actorOf, auditProvenanceMaxItems } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { canBuild, isAdmin, roleErrors } from "@grasp-os/shared/roles";
+import {
+  canBuild,
+  isAdmin,
+  roleErrors,
+  roleSchema,
+} from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 import { and, asc, eq, isNotNull, ne, or } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
-import { sourcesOf, unreadableBy } from "./app-provenance.ts";
-import type { AppSources } from "./app-provenance.ts";
+import { hasSources, sourcesOf, unreadableBy } from "./app-provenance.ts";
 import { appFor } from "./apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
-import { activeMember, organizationId } from "./auth/auth.ts";
-import { memberRole, teamsOf } from "./auth/identity.ts";
-import { appMembers, teamMembers, teams, users } from "./db/core/schema.ts";
+import { activeMember, notRemoved, organizationId } from "./auth/auth.ts";
+import { memberRole } from "./auth/identity.ts";
+import {
+  appMembers,
+  members,
+  teamMembers,
+  teams,
+  users,
+} from "./db/core/schema.ts";
+import { inList } from "./db/d1.ts";
 import { appHost } from "./durable-objects.ts";
+import type { PersonAccess } from "./knowledge/access.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -184,40 +196,64 @@ const closeScreens = async (env: Env, app: App): Promise<void> => {
   }
 };
 
-/** The people of `member` now: the person, or the team's. */
-const peopleOf = async (env: Env, member: AppMemberRef): Promise<string[]> => {
-  if (member.type === "person") {
-    return [member.id];
-  }
-  const rows = await drizzle(env.DB)
-    .select({ userId: teamMembers.userId })
-    .from(teamMembers)
-    .where(eq(teamMembers.teamId, member.id));
-  return rows.map(({ userId }) => userId);
-};
-
 /**
- * The sources of `app` that `userId` can't read (app-provenance.ts), or
- * none when they aren't checked: the App's owner, an admin, or someone no
- * longer in the organization, who reaches nothing.
+ * Whom sharing `app` with `member` reaches now, as far as provenance goes:
+ * the person, or each of the team's people, with their teams. The App's
+ * owner and admins aren't checked, nor anyone no longer in the
+ * organization, who reaches nothing. A few queries, whatever the team's
+ * size.
  */
-const unreadableFor = async (
+const checkedPeople = async (
   env: Env,
   app: App,
-  sources: AppSources,
-  userId: string
-): Promise<string[]> => {
-  if (userId === app.owner) {
+  member: AppMemberRef
+): Promise<PersonAccess[]> => {
+  const db = drizzle(env.DB);
+  const inTeam =
+    member.type === "person"
+      ? []
+      : await db
+          .select({ userId: teamMembers.userId })
+          .from(teamMembers)
+          .where(eq(teamMembers.teamId, member.id));
+  const people =
+    member.type === "person" ? [member.id] : inTeam.map(({ userId }) => userId);
+  const others = people.filter((userId) => userId !== app.owner);
+  if (others.length === 0) {
     return [];
   }
-  const role = await memberRole(env.DB, userId);
-  if (role === undefined || isAdmin(role)) {
-    return [];
-  }
-  const teamsOfThem = await teamsOf(env.DB, userId);
-  return await unreadableBy(env, sources, {
-    userId,
-    teamIds: teamsOfThem.map(({ id }) => id),
+  const [roles, memberships] = await db.batch([
+    db
+      .select({ userId: members.userId, role: members.role })
+      .from(members)
+      .where(
+        and(
+          eq(members.organizationId, organizationId),
+          inList(members.userId, others),
+          notRemoved(members.userId)
+        )
+      ),
+    db
+      .select({ userId: teamMembers.userId, teamId: teamMembers.teamId })
+      .from(teamMembers)
+      .innerJoin(teams, eq(teams.id, teamMembers.teamId))
+      .where(
+        and(
+          inList(teamMembers.userId, others),
+          eq(teams.organizationId, organizationId)
+        )
+      ),
+  ]);
+  return roles.flatMap(({ userId, role }) => {
+    // A role that isn't one of ours is no access, as auth/identity.ts has it.
+    const known = roleSchema.safeParse(role);
+    if (!known.success || isAdmin(known.data)) {
+      return [];
+    }
+    const teamIds = memberships
+      .filter((membership) => membership.userId === userId)
+      .map(({ teamId }) => teamId);
+    return [{ userId, teamIds }];
   });
 };
 
@@ -235,17 +271,16 @@ const requireReadable = async (
   member: NewAppMember
 ): Promise<void> => {
   const sources = await sourcesOf(env, app.id);
-  if (sources.connections.length === 0 && sources.sensitive.length === 0) {
+  if (!hasSources(sources)) {
     return;
   }
-  const people = await peopleOf(env, member);
-  const unreadable = await Promise.all(
-    people.map(async (userId) => ({
+  const people = await checkedPeople(env, app, member);
+  const refused = people
+    .map(({ userId, teamIds }) => ({
       userId,
-      sources: await unreadableFor(env, app, sources, userId),
+      sources: unreadableBy(sources, { userId, teamIds }),
     }))
-  );
-  const refused = unreadable.filter(({ sources: ids }) => ids.length > 0);
+    .filter(({ sources: ids }) => ids.length > 0);
   if (refused.length === 0) {
     return;
   }

@@ -50,6 +50,7 @@ const minuteMs = 60_000;
 const failures: Readonly<Record<string, FailureReason>> = {
   "feature.disabled": "disabled",
   "role.forbidden": "forbidden",
+  "app.unreadable": "forbidden",
   "app.not_found": "not-found",
   "screen.not_found": "not-found",
   "screen.invalid": "not-found",
