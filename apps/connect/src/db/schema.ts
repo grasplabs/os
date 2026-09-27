@@ -52,9 +52,10 @@ export const connections = sqliteTable(
     /**
      * For a Composio connection: the MCP server and the auth config
      * Composio made for it, which disconnecting deletes with its account,
-     * and the tools the admin allowed, as a JSON array of names. A call of
-     * any other tool is refused, and a Composio connection without them
-     * takes no calls at all.
+     * and the tools the admin allowed, as a JSON array of names, or of
+     * rules saying which tools only read and which input property names a
+     * tool's resource (`ComposioToolRule`). A call of any other tool is
+     * refused, and a Composio connection without them takes no calls.
      */
     composioServerId: text("composio_server_id"),
     composioAuthConfigId: text("composio_auth_config_id"),
@@ -224,9 +225,9 @@ export const oauthFlows = sqliteTable(
  * and taken (deleted) the first time its state comes back. The auth config
  * and the connected account are the ones connect made at Composio for this
  * flow: finishing checks the account is that one, active, for that
- * toolkit. `tools` are the tools the admin allowed, as a JSON array.
- * `flow_id` ties the admin's consent to the connection it led to, in the
- * audit log.
+ * toolkit. `tools` are the tools the admin allowed, as `connections.tools`
+ * holds them. `flow_id` ties the admin's consent to the connection it led
+ * to, in the audit log.
  */
 export const composioFlows = sqliteTable(
   "composio_flows",

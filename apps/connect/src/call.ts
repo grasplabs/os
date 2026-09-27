@@ -7,8 +7,8 @@ import type { BatchItem } from "drizzle-orm/batch";
 import { z } from "zod";
 
 import {
+  allowedTool,
   composioServer,
-  isAllowedTool,
   usableConnection,
 } from "./connections.ts";
 import type { Connection } from "./connections.ts";
@@ -17,11 +17,17 @@ import { hashCall, idempotencyStore } from "./idempotency.ts";
 import type { StoredAnswer } from "./idempotency.ts";
 import { fieldOf, masked, maskedPaths } from "./mask.ts";
 import { McpError } from "./mcp.ts";
-import type { McpServer, McpTool, McpToolResult } from "./mcp.ts";
+import type {
+  McpServer,
+  McpServerTool,
+  McpTool,
+  McpToolResult,
+} from "./mcp.ts";
 import { hold } from "./pending.ts";
 import type { HeldAction } from "./pending.ts";
 import {
   checkResourceScope,
+  composioTool,
   didNothing,
   hasSideEffect,
   withProvenance,
@@ -147,8 +153,11 @@ const masksFor = (
 };
 
 /** Finds the action's tool, exactly as named. */
-const toolFor = async (server: McpServer, action: string): Promise<McpTool> => {
-  let tool: McpTool | undefined;
+const toolFor = async (
+  server: McpServer,
+  action: string
+): Promise<McpServerTool> => {
+  let tool: McpServerTool | undefined;
   try {
     tool = await server.tool(action);
   } catch (error) {
@@ -168,7 +177,7 @@ const toolFor = async (server: McpServer, action: string): Promise<McpTool> => {
  * tool comes from its manifest, and its server (an isolate, with the
  * connection's token for its egress) is only opened once the call passed
  * every check. A Composio server is asked for its tools, and only for one
- * its admin allowed.
+ * its admin allowed, which is what the admin's rule says it is.
  */
 const actionFor = async (
   env: Env,
@@ -183,12 +192,14 @@ const actionFor = async (
       open: async () => await nativeServer(env, connection, native, claims),
     };
   }
-  // Only a tool the admin allowed, asked for before anything goes out.
-  if (!isAllowedTool(connection, action)) {
+  // Only a tool the admin allowed, asked for before anything goes out,
+  // and taken to be what the admin said it is.
+  const rule = allowedTool(connection, action);
+  if (rule === undefined) {
     throw connectErrors.create("connect.action_not_found");
   }
   const server = composioServer(env, connection);
-  const tool = await toolFor(server, action);
+  const tool = composioTool(await toolFor(server, action), rule);
   return { tool, open: async () => await Promise.resolve(server) };
 };
 
@@ -198,8 +209,9 @@ const actionFor = async (
  * for (`interactive`) waits for them to confirm it on a view of the exact
  * input (R7). So does every one of a context that read restricted data
  * (R12), whatever it is: what it sends may carry that data, so the person
- * it acts for decides, warned. Its reads, where the tool is one connect
- * trusts to be a read, go on. A workflow run's other side effects come
+ * it acts for decides, warned. Its reads of a native connector go on; on
+ * Composio every call of such a context is a side effect (policy.ts). A
+ * workflow run's other side effects come
  * from reviewed code or pass a decision, and run. The held action a
  * person just confirmed (`held`) runs.
  */
@@ -292,9 +304,13 @@ export const carryOut = async (
   }
 
   const { tool, open } = await actionFor(env, connection, claims, call.action);
-  const sideEffect = hasSideEffect(connection.serverKind, tool);
+  const sideEffect = hasSideEffect(
+    tool,
+    connection.serverKind,
+    claims.restricted
+  );
   progress.sideEffect = sideEffect;
-  checkResourceScope(resource, connection.serverKind, tool, input);
+  checkResourceScope(resource, tool, input);
   if (
     sideEffect &&
     mustHold(claims, store !== undefined, held) &&

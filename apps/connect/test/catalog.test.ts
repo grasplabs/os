@@ -19,7 +19,11 @@ const toolkits: FakeToolkit[] = [
     name: "HubSpot",
     categories: ["CRM", "Marketing"],
     tools: [
-      { slug: "HUBSPOT_LIST_CONTACTS", description: "List contacts" },
+      {
+        slug: "HUBSPOT_LIST_CONTACTS",
+        description: "List contacts",
+        inputs: ["limit", "after"],
+      },
       { slug: "HUBSPOT_CREATE_CONTACT", description: "Create a contact" },
       { slug: "HUBSPOT_DELETE_CONTACT" },
     ],
@@ -260,9 +264,17 @@ describe("a catalog entry's tools", () => {
         id: "hubspot",
       })
     ).resolves.toStrictEqual([
-      { name: "HUBSPOT_LIST_CONTACTS", description: "List contacts" },
-      { name: "HUBSPOT_CREATE_CONTACT", description: "Create a contact" },
-      { name: "HUBSPOT_DELETE_CONTACT", description: null },
+      {
+        name: "HUBSPOT_LIST_CONTACTS",
+        description: "List contacts",
+        inputs: ["limit", "after"],
+      },
+      {
+        name: "HUBSPOT_CREATE_CONTACT",
+        description: "Create a contact",
+        inputs: [],
+      },
+      { name: "HUBSPOT_DELETE_CONTACT", description: null, inputs: [] },
     ]);
     expect(toolRequests()).toStrictEqual([
       "/tools?toolkit_slug=hubspot&limit=200",
@@ -296,6 +308,8 @@ describe("a catalog entry's tools", () => {
     });
     expect(tools.length).toBeGreaterThan(0);
     expect(tools.every(({ description }) => description === null)).toBeTruthy();
+    // Its input properties, as its manifest declares them.
+    expect(tools.some(({ inputs }) => inputs.length > 0)).toBeTruthy();
     expect(composio.requests).toStrictEqual([]);
   });
 

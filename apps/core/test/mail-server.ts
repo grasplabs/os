@@ -2,8 +2,10 @@
  * A mail provider's MCP server behind a Composio connection, as the connect
  * Worker reaches it in core's tests: part of the `connect-providers` Worker
  * (test/connect-providers.ts), so the real connect runs unchanged behind
- * core. It has one tool, `mail.send`, and records every call that reached
- * it and every mail it really sent. Each server (by the name in its URL)
+ * core. It has two tools: `mail.send`, and `mail.search`, a read (which
+ * the server doesn't say: only the admin's allowlist does). It records
+ * every call that reached `mail.send`, every mail it really sent and every
+ * search. Each server (by the name in its URL)
  * answers its next calls as a test plans them. Imported by vite.config.ts
  * (Node) and the tests (workerd), so it only holds data.
  */
@@ -31,7 +33,7 @@ const mailServers = new Map();
 const mailServerNamed = (name) => {
   let server = mailServers.get(name);
   if (!server) {
-    server = { plan: [], calls: 0, sent: [], holding: false, released: false };
+    server = { plan: [], calls: 0, sent: [], searched: [], holding: false, released: false };
     mailServers.set(name, server);
   }
   return server;
@@ -50,7 +52,7 @@ const mailServer = async (request, url) => {
       }
       return new Response(null, { status: 204 });
     }
-    return Response.json({ calls: server.calls, sent: server.sent, holding: server.holding });
+    return Response.json({ calls: server.calls, sent: server.sent, searched: server.searched, holding: server.holding });
   }
   const server = mailServerNamed(url.pathname.split("/").at(-1));
   const { id, method, params } = await request.json();
@@ -70,8 +72,16 @@ const mailServer = async (request, url) => {
       return new Response("Service Unavailable", { status: 503 });
     }
     return rpcResult(id, {
-      tools: [{ name: "mail.send", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } }],
+      tools: [
+        { name: "mail.send", inputSchema: { type: "object" }, annotations: { readOnlyHint: false } },
+        { name: "mail.search", inputSchema: { type: "object", properties: { query: { type: "string" } } } },
+      ],
     });
+  }
+  if (params.name === "mail.search") {
+    server.searched.push(params.arguments.query);
+    const found = { messages: [params.arguments.query + "-1"] };
+    return rpcResult(id, { content: [{ type: "text", text: JSON.stringify(found) }], structuredContent: found });
   }
   const answer = server.plan.shift() ?? "sent";
   server.calls += 1;

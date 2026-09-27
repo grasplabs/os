@@ -366,7 +366,11 @@ describe("connecting a Composio toolkit", () => {
 
   const request = {
     toolkit: "hubspot",
-    tools: ["HUBSPOT_LIST_CONTACTS"],
+    // Each tool by name, or with the admin's rule for it.
+    tools: [
+      { name: "HUBSPOT_LIST_CONTACTS", read: true },
+      "HUBSPOT_CREATE_CONTACT",
+    ],
     consent: composioConsentText,
     returnTo: "/connections?tab=shared",
   };

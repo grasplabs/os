@@ -24,9 +24,10 @@ import { workspace } from "./workspace.ts";
 // (model-rules.ts).
 //
 // Only connect knows which actions write, so connect enforces it: a
-// restricted context may still call the actions its connector declares as
-// reads (only a native connector's word counts), and every other call is
-// held there for the person (a workflow run waits for their decision). With
+// restricted context may still call a native connector's reads (as its
+// manifest declares them, never a server's own word), and every other
+// call, a Composio toolkit's reads too (their input leaves for a third
+// party), is held there for the person (a workflow run waits for their decision). With
 // held actions switched off (`confirmations`), core refuses every call of
 // a restricted context instead (bindings.ts). Knowledge, which stays in
 // the deployment, can be read too.

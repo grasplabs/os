@@ -1,12 +1,17 @@
 import {
   composioConsentText,
+  composioToolName,
+  composioToolsSchema,
   connectionCallbackPath,
   connectionErrors,
   finishConnectionSchema,
   oauthFlowLifetimeMs,
   startToolkitConnectionSchema,
 } from "@grasp-os/shared/connect";
-import type { ConnectionPerson } from "@grasp-os/shared/connect";
+import type {
+  ComposioToolRule,
+  ConnectionPerson,
+} from "@grasp-os/shared/connect";
 import { randomToken, sha256Hex } from "@grasp-os/shared/encoding";
 import { identifierSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -403,6 +408,14 @@ const refuseUnlessAdmin = async (
 };
 
 /**
+ * How many of an allowlist's tools the admin marked as reads: the consent
+ * and connect events record it beside the `toolsHash`, so the log shows at
+ * a glance what runs unheld and without a key.
+ */
+const readCountOf = (tools: readonly (string | ComposioToolRule)[]): number =>
+  tools.filter((tool) => typeof tool !== "string" && tool.read === true).length;
+
+/**
  * Starts connecting a toolkit for an admin who consented: records their
  * consent with the flow, and returns Composio's auth link.
  */
@@ -421,11 +434,22 @@ export const startToolkitConnection = async (
   if (!composio || key === undefined || new URL(origin).origin !== origin) {
     throw connectionErrors.create("connection.provider_unavailable");
   }
-  // Only tools the toolkit has: a name that matches nothing would be an
-  // allowlist entry that silently allows nothing.
+  // Only tools the toolkit has, each held to a resource only by one of its
+  // own input properties: a name that matches nothing would be an entry
+  // that silently allows nothing, or holds nothing.
   const toolkitTools = await composioTools(key, toolkit);
-  const known = new Set(toolkitTools.map(({ name }) => name));
-  if (!tools.every((tool) => known.has(tool))) {
+  const inputsOf = new Map(
+    toolkitTools.map(({ name, inputs }) => [name, inputs])
+  );
+  const fits = tools.every((tool) => {
+    const inputs = inputsOf.get(composioToolName(tool));
+    const resource = typeof tool === "string" ? undefined : tool.resource;
+    return (
+      inputs !== undefined &&
+      (resource === undefined || inputs.includes(resource))
+    );
+  });
+  if (!fits) {
     throw connectionErrors.create("connection.invalid");
   }
 
@@ -490,6 +514,7 @@ export const startToolkitConnection = async (
           flowId,
           toolsHash: await sha256Hex(storedTools),
           toolCount: tools.length,
+          readCount: readCountOf(tools),
         }),
       ],
       [
@@ -650,8 +675,6 @@ const isServerFor = (
   );
 };
 
-const allowedToolsSchema = z.array(z.string());
-
 /**
  * Finishes a Composio flow for the admin who started it, once Composio
  * sent their browser back: the new connection. `composio` is core's flag.
@@ -704,7 +727,7 @@ const finishToolkitConnection = async (
       await refuse("connection.provider_refused", "failed");
       throw connectionErrors.create("connection.provider_refused");
     }
-    const tools = allowedToolsSchema.parse(JSON.parse(flow.tools));
+    const tools = composioToolsSchema.parse(JSON.parse(flow.tools));
     const server = await composioRequest(key, {
       method: "POST",
       path: "/mcp/servers",
@@ -712,7 +735,7 @@ const finishToolkitConnection = async (
         // Its flow's marker: 4 to 30 letters, digits and hyphens.
         name: markerOf(flow.flowId),
         auth_config_ids: [flow.authConfigId],
-        allowed_tools: tools,
+        allowed_tools: tools.map(composioToolName),
       },
       schema: mcpServerSchema,
     });
@@ -750,6 +773,7 @@ const finishToolkitConnection = async (
           flowId: flow.flowId,
           toolsHash: await sha256Hex(flow.tools),
           toolCount: tools.length,
+          readCount: readCountOf(tools),
         }),
       ],
       [
