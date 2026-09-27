@@ -1,5 +1,6 @@
 import { auditRejectReasons } from "@grasp-os/shared/audit";
 import type { Json } from "@grasp-os/shared/json";
+import { signalKinds } from "@grasp-os/shared/signals";
 import type { ParamValue, RunFailure } from "@grasp-os/shared/workflows";
 /**
  * Core D1 database: identity (Better Auth), permissions and the App registry.
@@ -14,6 +15,7 @@ import {
   index,
   integer,
   primaryKey,
+  real,
   sqliteTable,
   text,
   uniqueIndex,
@@ -461,6 +463,14 @@ export const workflowRuns = sqliteTable(
       table.workflowId,
       table.createdAt
     ),
+    // The improvement signals (src/signals.ts): runs that failed in a
+    // window, latest first. Runs started in one are counted per App
+    // workflow by the index above.
+    index("workflow_runs_status_ended_idx").on(
+      table.status,
+      table.endedAt,
+      table.id
+    ),
   ]
 );
 
@@ -498,6 +508,14 @@ export const workflowDecisions = sqliteTable(
   },
   (table) => [
     uniqueIndex("workflow_decisions_run_step_idx").on(table.runId, table.step),
+    // The improvement signals (src/signals.ts): open decisions, oldest
+    // first, and decisions answered in a window, latest first.
+    index("workflow_decisions_status_opened_idx").on(
+      table.status,
+      table.openedAt,
+      table.id
+    ),
+    index("workflow_decisions_decided_idx").on(table.decidedAt, table.id),
   ]
 );
 
@@ -655,4 +673,64 @@ export const hiddenConnectors = sqliteTable(
     hiddenAt: timestamp("hidden_at").notNull(),
   },
   (table) => [primaryKey({ columns: [table.source, table.connectorId] })]
+);
+
+/**
+ * Each computation of the improvement signals (src/signals.ts), one a UTC
+ * day: `started_at` claims it, `finished_at` is set once all its signals
+ * are written. The signals people read are those of the finished one
+ * started last; finishing deletes every computation started before it,
+ * with its signals.
+ */
+export const improvementSignalComputations = sqliteTable(
+  "improvement_signal_computations",
+  {
+    id: text().primaryKey(),
+    /** The UTC day it is the computation of, such as `2026-09-27`. */
+    day: text().notNull(),
+    startedAt: timestamp("started_at").notNull(),
+    finishedAt: timestamp("finished_at"),
+  },
+  (table) => [
+    index("improvement_signal_computations_day_idx").on(table.day),
+    index("improvement_signal_computations_started_idx").on(table.startedAt),
+  ]
+);
+
+/**
+ * The improvement signals of a computation: one per kind, App, workflow
+ * and subject (the deciders, the step, a search's key). `app_id` and
+ * `workflow_id` are empty for the deployment's own signals and for none.
+ * `value` ranks it within its kind; `evidence` is JSON, IDs and counts
+ * only (@grasp-os/shared/signals).
+ */
+export const improvementSignals = sqliteTable(
+  "improvement_signals",
+  {
+    computation: text()
+      .notNull()
+      .references(() => improvementSignalComputations.id),
+    appId: text("app_id").notNull(),
+    workflowId: text("workflow_id").notNull(),
+    kind: text({ enum: signalKinds }).notNull(),
+    subject: text().notNull(),
+    value: real().notNull(),
+    evidence: text({ mode: "json" }).$type<Json>().notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.computation,
+        table.appId,
+        table.workflowId,
+        table.kind,
+        table.subject,
+      ],
+    }),
+    index("improvement_signals_kind_idx").on(
+      table.computation,
+      table.kind,
+      table.value
+    ),
+  ]
 );

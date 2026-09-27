@@ -132,9 +132,11 @@
       "jurisdiction": "eu",
     },
   ],
-  // Appends the audit events waiting in core's outboxes and connect's to the
-  // AuditLog object, and archives audit events past retention (src/index.ts).
-  "triggers": { "crons": ["* * * * *"] },
+  // Every minute: appends the audit events waiting in core's outboxes and
+  // connect's to the AuditLog object, archives audit events past retention,
+  // and more (src/index.ts). Every 15 minutes, on its own: the day's
+  // improvement signals, until they're computed (src/signals.ts).
+  "triggers": { "crons": ["* * * * *", "*/15 * * * *"] },
   // The model gateway's transport to AI Gateway (src/models.ts); core never
   // holds a raw provider key.
   "ai": { "binding": "AI", "remote": true },

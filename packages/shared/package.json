@@ -30,6 +30,7 @@
     "./runtime": "./src/runtime.ts",
     "./screens": "./src/screens.ts",
     "./sign-in": "./src/sign-in.ts",
+    "./signals": "./src/signals.ts",
     "./workflows": "./src/workflows.ts"
   },
   "dependencies": {

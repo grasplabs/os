@@ -58,6 +58,9 @@ const typeRules: readonly {
   { action: "team", type: "config" },
   { action: "workflow.step", type: "action" },
   { action: "platform", type: "platform_update" },
+  // Improvement signals: the daily computation, and reading them.
+  { action: "improvement.signals.computed", type: "action" },
+  { action: "improvement.signals.read", type: "read" },
   // The log's own events, each named, so an `audit` action added later has
   // no type until it gets a rule: retention moving events out and purging
   // them, gaps (outbox rows the log can't take, moved aside, and events

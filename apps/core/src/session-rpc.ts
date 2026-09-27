@@ -15,6 +15,7 @@ import { PermissionsRpc } from "./permissions-rpc.ts";
 import { ScreensRpc } from "./screens-rpc.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
+import { SignalsRpc } from "./signals-rpc.ts";
 import { WorkflowsRpc } from "./workflows/rpc.ts";
 
 /**
@@ -41,6 +42,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #members: MembersRpc;
   readonly #audit: AuditRpc;
   readonly #pendingActions: PendingActionsRpc;
+  readonly #signals: SignalsRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -87,6 +89,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
       env,
       checkWith("connections", "confirmations")
     );
+    this.#signals = new SignalsRpc(env, checkWith("improvement_signals"));
   }
 
   get apps(): AppsRpc {
@@ -131,6 +134,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get pendingActions(): PendingActionsRpc {
     return this.#pendingActions;
+  }
+
+  get signals(): SignalsRpc {
+    return this.#signals;
   }
 
   async whoami(): Promise<Identity> {

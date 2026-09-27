@@ -8,6 +8,7 @@ import { handleRequest } from "./entry.ts";
 import { indexApps } from "./knowledge/apps-collection.ts";
 import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import { retryDisconnects } from "./members.ts";
+import { refreshSignalsIfDue, signalsCron } from "./signals.ts";
 
 export { App } from "./app.ts";
 export { AuditLog } from "./audit-log.ts";
@@ -36,7 +37,19 @@ export default {
   // src/knowledge/grasp-skills.ts), and Apps whose entry in the Apps
   // collection isn't of their current version (see
   // src/knowledge/apps-collection.ts).
-  scheduled: async (_controller, env) => {
+  //
+  // Every 15 minutes, on a trigger of its own so it never shares an
+  // invocation with the jobs above: the day's improvement signals, until
+  // they're computed (see src/signals.ts).
+  scheduled: async (controller, env) => {
+    if (controller.cron === signalsCron) {
+      try {
+        await refreshSignalsIfDue(env);
+      } catch (error) {
+        log.error("cron.failed", errorFields(error));
+      }
+      return;
+    }
     const results = await Promise.allSettled([
       drainAuditOutboxes(env),
       retryDisconnects(env),

@@ -37,4 +37,12 @@ describe("audit event types", () => {
       ].map((action) => typeOf(action))
     ).toStrictEqual(["read", "read", "read", "action", "config"]);
   });
+
+  it("files computing improvement signals as an action, and reading them as a read", () => {
+    expect(
+      ["improvement.signals.computed", "improvement.signals.read"].map(
+        (action) => typeOf(action)
+      )
+    ).toStrictEqual(["action", "read"]);
+  });
 });

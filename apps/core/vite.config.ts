@@ -106,6 +106,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               audit_retention: true,
               confirmations: true,
               model_rules: true,
+              improvement_signals: true,
             },
             // One memory limit set, the others at their defaults.
             MEMORY_LIMITS: { "USER.md": 500 },

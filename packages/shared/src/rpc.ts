@@ -8,6 +8,7 @@ import type { MemoryApi } from "./memory.ts";
 import type { PermissionsApi } from "./permissions.ts";
 import type { Role } from "./roles.ts";
 import type { ScreensApi } from "./screens.ts";
+import type { SignalsApi } from "./signals.ts";
 import type { WorkflowsApi } from "./workflows.ts";
 
 /** A way to sign in to this deployment, for the sign-in screen. */
@@ -75,6 +76,11 @@ export interface SessionApi {
    * an App, and from any of them once it read restricted data.
    */
   readonly pendingActions: PendingActionsApi;
+  /**
+   * Improvement signals from runs and the audit log, computed daily: every
+   * one for admins, an App's for its builders.
+   */
+  readonly signals: SignalsApi;
 }
 
 /**
