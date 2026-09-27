@@ -372,6 +372,15 @@ export const outboxedWhere = (
  * Stores the event for `entry` only if the batch's previous statement
  * changed a row, so a conditional update that changed nothing records
  * nothing.
+ *
+ * Not in a Knowledge batch that writes sections earlier (a save, restore,
+ * purge, or anything in `writeVersion`'s `also`): FTS5 flushes its index
+ * when the next statement opens a savepoint, and that flush sets
+ * `changes()` to 1, so this would record an event for a change that
+ * didn't happen. There, use `outboxedWhere` with a condition on what the
+ * change left behind: `EXISTS` on the row's new state after an insert or
+ * update, `NOT EXISTS` on the row after a delete, or no condition when
+ * the batch always makes the change.
  */
 export const outboxedIfChanged = (db: DrizzleD1Database, entry: AuditEntry) =>
   outboxedWhere(db, entry, sql`changes() > 0`);
