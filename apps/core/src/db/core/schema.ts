@@ -341,6 +341,13 @@ export const apps = sqliteTable("apps", {
   /** The latest write to the working copy (`app_working_files.revision`). */
   workingRevision: text("working_revision"),
   createdAt: timestamp("created_at").notNull(),
+  /**
+   * Set while an App created from a blueprint waits for the check that
+   * lets it be used (src/app-blueprints.ts); null for every App in use.
+   * No path finds a pending App: it is inert until activated, and the
+   * cron trigger deletes one left pending.
+   */
+  pendingSince: timestamp("pending_since"),
 });
 
 /**

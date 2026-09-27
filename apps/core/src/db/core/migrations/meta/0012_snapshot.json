@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "d7fc04b7-4385-435c-84a4-134f2e633912",
+  "id": "0d45f2be-7366-4b55-adc3-04f6049e928f",
   "prevId": "5229b2bd-3830-456a-9676-a0c04e3d336c",
   "tables": {
     "accounts": {
@@ -683,6 +683,13 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
+          "autoincrement": false
+        },
+        "pending_since": {
+          "name": "pending_since",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
           "autoincrement": false
         }
       },

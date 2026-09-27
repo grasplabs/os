@@ -10,12 +10,14 @@ import type {
   CreatedFromBlueprint,
   FromBlueprint,
 } from "@grasp-os/shared/apps";
+import type { AuditEntry } from "@grasp-os/shared/audit";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { requireBuilder, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
-import { and, asc, desc, eq, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, isNotNull, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { stillOpenTo } from "./app-access.ts";
@@ -38,6 +40,7 @@ import {
   appVersions,
   permissions,
 } from "./db/core/schema.ts";
+import { inList } from "./db/d1.ts";
 import { blueprintRequests, toPermission } from "./permissions.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
@@ -177,15 +180,59 @@ export const unmarkBlueprint = async (
   ]);
 };
 
+/** How long a copy may stay pending before the cron trigger deletes it. */
+const pendingMaxMs = 60 * 60 * 1000;
+
+/** Most leftover pending copies one cron run deletes. */
+const sweepsPerRun = 20;
+
 /**
- * After a copy committed: checks `by` may still open the source App
- * (`appFor`, with what it read, which the batch's guard can't express),
- * and if not, takes the copy back at once, in one audited batch, and
- * refuses as the check did. The copy is brand new and `by`'s own, so
- * nobody else has touched it: its requests, its version and its row go.
- * Its tree stays in R2, named by nothing, as a refused commit's does.
+ * Deletes pending copies, and only while they are pending, with the audit
+ * entry of each: their permission requests, their version and their row.
+ * A pending copy was never usable, so nothing else refers to it. Its tree
+ * stays in R2, named by nothing, as a refused commit's does.
  */
-const requireStillOpen = async (
+const discardPending = async (
+  env: Env,
+  copies: readonly { id: AppId; entry: AuditEntry }[]
+): Promise<void> => {
+  if (copies.length === 0) {
+    return;
+  }
+  const db = drizzle(env.DB);
+  const ids = copies.map(({ id }) => id);
+  const pending = and(inList(apps.id, ids), isNotNull(apps.pendingSince));
+  const pendingIds = db.select({ id: apps.id }).from(apps).where(pending);
+  const [first, ...rest] = copies.map(({ entry }) => outboxed(db, entry));
+  if (first === undefined) {
+    return;
+  }
+  await auditedBatch(env, db, [
+    first,
+    ...rest,
+    db
+      .delete(permissions)
+      .where(
+        and(
+          eq(permissions.subjectType, "app"),
+          inArray(permissions.subjectId, pendingIds)
+        )
+      ),
+    db.delete(appVersions).where(inArray(appVersions.appId, pendingIds)),
+    db.delete(apps).where(pending),
+  ]);
+};
+
+/**
+ * After a copy committed, pending: activates it only if `by` may still
+ * open the source App (`appFor`, with what it read, which the batch's
+ * guard can't express). Otherwise, whatever went wrong, even an error
+ * with no code, it tries to delete the copy, audited as
+ * `app.blueprint.revoked`, and refuses as the check did. If even that
+ * fails, the copy stays pending: inert, and deleted by the cron trigger
+ * (`sweepPendingCopies`). It fails closed.
+ */
+const activateCopy = async (
   env: Env,
   by: Identity,
   source: AppId,
@@ -194,32 +241,57 @@ const requireStillOpen = async (
   try {
     await appFor(env, by, source, "user");
   } catch (error) {
-    const reason = appErrors.codeOf(error) ?? roleErrors.codeOf(error);
-    if (reason === undefined) {
-      throw error;
+    const reason =
+      appErrors.codeOf(error) ?? roleErrors.codeOf(error) ?? "check_failed";
+    try {
+      await discardPending(env, [
+        {
+          id: copy,
+          entry: changeEntry(by, "app.blueprint.revoked", copy, {
+            fromApp: source,
+            reason,
+          }),
+        },
+      ]);
+    } catch (discardError) {
+      log.error("app.copy_discard_failed", {
+        appId: copy,
+        ...errorFields(discardError),
+      });
     }
-    const db = drizzle(env.DB);
-    await auditedBatch(env, db, [
-      db
-        .delete(permissions)
-        .where(
-          and(
-            eq(permissions.subjectType, "app"),
-            eq(permissions.subjectId, copy)
-          )
-        ),
-      db.delete(appVersions).where(eq(appVersions.appId, copy)),
-      db.delete(apps).where(eq(apps.id, copy)),
-      outboxed(
-        db,
-        changeEntry(by, "app.blueprint.revoked", copy, {
-          fromApp: source,
-          reason,
-        })
-      ),
-    ]);
     throw error;
   }
+  await drizzle(env.DB)
+    .update(apps)
+    .set({ pendingSince: null })
+    .where(and(eq(apps.id, copy), isNotNull(apps.pendingSince)));
+};
+
+/**
+ * Deletes copies left pending longer than `pendingMaxMs` (their creation
+ * stopped between its batch and its activation), the oldest first and at
+ * most `sweepsPerRun` a run, audited. The cron trigger runs it every
+ * minute.
+ */
+export const sweepPendingCopies = async (env: Env): Promise<void> => {
+  const stale = await drizzle(env.DB)
+    .select({ id: apps.id, blueprint: apps.blueprint })
+    .from(apps)
+    .where(lt(apps.pendingSince, new Date(Date.now() - pendingMaxMs)))
+    .orderBy(asc(apps.pendingSince), asc(apps.id))
+    .limit(sweepsPerRun);
+  await discardPending(
+    env,
+    stale.map(({ id, blueprint }) => ({
+      id: appIdSchema.parse(id),
+      entry: {
+        actor: { type: "system" },
+        action: "app.blueprint.revoked",
+        target: { type: "app", id },
+        detail: { blueprint, reason: "pending_expired" },
+      },
+    }))
+  );
 };
 
 /**
@@ -228,7 +300,9 @@ const requireStillOpen = async (
  * for what that App was given or asked for. All of it lands in one batch,
  * or none of it (the version's files, stored first, are only named once
  * it lands), and only while the version is still a blueprint and `by`
- * still has a role in its App.
+ * still has a role in its App. It lands pending, found by nothing, and is
+ * activated only once `by` passes the source App's check again, what it
+ * read included (`activateCopy`).
  */
 export const createFromBlueprint = async (
   env: Env,
@@ -266,6 +340,7 @@ export const createFromBlueprint = async (
     currentVersion: null,
     pendingVersion: null,
     workingRevision: null,
+    pendingSince: now,
     createdAt: now,
   };
   const versionRow: VersionRow = {
@@ -280,10 +355,11 @@ export const createFromBlueprint = async (
   };
   const requests = await blueprintRequests(env, by, source.id, id);
   const db = drizzle(env.DB);
-  // The App only while the blueprint is still marked, and `by` still has a
-  // role in its App (`stillOpenTo`), selected from its row: unmarked or
-  // unshared since they were read above, nothing is inserted, the version's
-  // row can't name an App that isn't there, and the whole batch is refused.
+  // The App, pending, only while the blueprint is still marked and `by`
+  // still has a role in its App (`stillOpenTo`), selected from its row:
+  // unmarked or unshared since they were read above, nothing is inserted,
+  // the version's row can't name an App that isn't there, and the whole
+  // batch is refused.
   // The insert names its columns, and drizzle refuses fields that aren't
   // the table's, by name and in order.
   const appFromBlueprint = db
@@ -303,6 +379,7 @@ export const createFromBlueprint = async (
         "working_revision"
       ),
       createdAt: sql<Date>`${appRow.createdAt.getTime()}`.as("created_at"),
+      pendingSince: sql<Date | null>`${now.getTime()}`.as("pending_since"),
     })
     .from(appBlueprints)
     .where(
@@ -356,7 +433,7 @@ export const createFromBlueprint = async (
     await appFor(env, by, source.id, "user");
     throw error;
   }
-  await requireStillOpen(env, by, source.id, id);
+  await activateCopy(env, by, source.id, id);
   return {
     app: toApp(appRow),
     version: toVersion(versionRow),

@@ -23,7 +23,7 @@ import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { requireBuilder } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
@@ -124,14 +124,17 @@ export const changeEntry = (
   detail,
 });
 
-/** The App `input` names, which must exist. */
+/**
+ * The App `input` names, which must exist, and be in use: one created from
+ * a blueprint that is still pending (app-blueprints.ts) isn't found.
+ */
 export const findApp = async (env: Env, input: unknown): Promise<App> => {
   const id = appIdSchema.safeParse(input);
   const row = id.success
     ? await drizzle(env.DB)
         .select()
         .from(apps)
-        .where(eq(apps.id, id.data))
+        .where(and(eq(apps.id, id.data), isNull(apps.pendingSince)))
         .get()
     : undefined;
   if (!row) {
@@ -388,6 +391,7 @@ export const createApp = async (
     currentVersion: null,
     pendingVersion: null,
     workingRevision: null,
+    pendingSince: null,
     createdAt: new Date(),
   };
   const app = toApp(row);
@@ -405,14 +409,15 @@ export const createApp = async (
 /**
  * The Apps `by` has a role in (app-access.ts), as a condition on `apps`.
  * As with `appFor`, while `app_sharing` is off: every App for admins and
- * builders, and none for users.
+ * builders, and none for users. Never a pending App (`findApp`).
  */
 export const appsListedFor = (env: Env, by: Identity): SQL | undefined => {
+  const inUse = isNull(apps.pendingSince);
   if (!featureEnabled(env, "app_sharing")) {
     requireBuilder(by);
-    return undefined;
+    return inUse;
   }
-  return appsOpenTo(env, by);
+  return and(inUse, appsOpenTo(env, by));
 };
 
 /** The Apps `by` has a role in (app-access.ts), oldest first. */

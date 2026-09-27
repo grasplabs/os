@@ -6,3 +6,5 @@ CREATE TABLE `app_blueprints` (
 	PRIMARY KEY(`app_id`, `version`),
 	FOREIGN KEY (`app_id`) REFERENCES `apps`(`id`) ON UPDATE no action ON DELETE no action
 );
+--> statement-breakpoint
+ALTER TABLE `apps` ADD `pending_since` integer;
