@@ -18,7 +18,7 @@ const TRAILING_COMMA = /(?<string>"(?:[^"\\]|\\.)*")|,(?=\s*[}\]])/gu;
 const keepStrings = (_match: string, string?: string): string => string ?? "";
 
 /** Wrangler's JSONC: JSON with comments and trailing commas. */
-const parseJsonc = (text: string): unknown =>
+export const parseJsonc = (text: string): unknown =>
   JSON.parse(
     text.replace(COMMENT, keepStrings).replace(TRAILING_COMMA, keepStrings)
   );

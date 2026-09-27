@@ -11,6 +11,8 @@ const generated = [
   "**/routeTree.gen.ts",
   "**/worker-configuration.d.ts",
   "**/src/db/**/migrations/**",
+  // Release fixtures and the golden manifest the release test writes.
+  "scripts/release/testdata/**",
 ];
 
 export default defineConfig({

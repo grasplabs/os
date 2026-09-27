@@ -14,7 +14,8 @@
     "check:wrangler-configs": "node scripts/check-wrangler-configs.ts",
     "github:setup": "node scripts/github-setup.ts",
     "check:branch": "node scripts/check-branch-name.ts",
-    "check:secrets": "secretlint \"**/*\""
+    "check:secrets": "secretlint \"**/*\"",
+    "release:build": "node scripts/release/build-release.ts"
   },
   "devDependencies": {
     "@commitlint/cli": "catalog:",
@@ -30,7 +31,8 @@
     "ultracite": "catalog:",
     "vite-plus": "catalog:",
     "workerd": "catalog:",
-    "wrangler": "catalog:"
+    "wrangler": "catalog:",
+    "zod": "catalog:"
   },
   "commitlint": {
     "extends": [

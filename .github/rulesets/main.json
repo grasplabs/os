@@ -47,6 +47,9 @@
             "context": "workerd"
           },
           {
+            "context": "release"
+          },
+          {
             "context": "conventions"
           }
         ],
