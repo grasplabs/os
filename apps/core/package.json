@@ -4,8 +4,14 @@
   "description": "The core Worker: sign-in, knowledge, Apps, workflows, model gateway, audit log",
   "license": "AGPL-3.0-only",
   "type": "module",
+  "imports": {
+    "#blueprints": {
+      "types": "./src/blueprints.d.ts",
+      "default": "./dist/blueprints.js"
+    }
+  },
   "scripts": {
-    "build": "node ../../packages/compiler/build.ts ../web/dist && node build-extractor.ts ../web/dist",
+    "build": "node build-blueprints.ts && node ../../packages/compiler/build.ts ../web/dist && node build-extractor.ts ../web/dist",
     "dev": "vp -C ../web build --mode development && vp run build && node ../connect/build.ts && wrangler d1 migrations apply DB --local && wrangler d1 migrations apply KNOWLEDGE --local && wrangler d1 migrations apply DB --local -c ../connect/wrangler.jsonc --persist-to .wrangler/state && wrangler dev -c wrangler.jsonc -c ../connect/wrangler.jsonc --var DEV_SKIP_ROUTER_SECRET:true --var DURABLE_OBJECT_JURISDICTION:none",
     "deploy": "vp run build && wrangler deploy",
     "typegen": "wrangler types --include-runtime=false -c wrangler.jsonc -c ../connect/wrangler.jsonc",

@@ -36,6 +36,17 @@ import { featureEnabled } from "./features.ts";
 // Grasp staff, who are admins while their window is open, manage Apps as
 // admins do, but never share one (app-members.ts): whom a client's data
 // reaches is the client's decision.
+//
+// The built-in blueprints' Apps (owned by `builtinOwner`, installed with
+// each release, app-blueprints.ts) are the exception: every admin and
+// builder has the `user` role in them, and nobody more, admins included,
+// so everyone who builds finds them and creates Apps from them, and
+// nobody changes, runs, shares or asks permissions for them. Users have
+// no role in them. That holds whether `app_sharing` is on or off
+// (apps.ts `appFor`).
+
+/** The owner of the built-in blueprints' Apps: Grasp, never a person. */
+export const builtinOwner = "grasp";
 
 /** Who asks, as far as their role in an App goes. */
 export type Person = Pick<Identity, "userId" | "role" | "teams">;
@@ -72,6 +83,9 @@ const appRole = async (
   by: Person,
   app: App
 ): Promise<{ role: AppRole; shared: boolean } | undefined> => {
+  if (app.owner === builtinOwner) {
+    return canBuild(by.role) ? { role: "user", shared: false } : undefined;
+  }
   if (isAdmin(by.role)) {
     return { role: "builder", shared: false };
   }
@@ -163,9 +177,9 @@ export const appsReadableBy = async (
 
 /**
  * The Apps `by` has a role in, as a condition on `apps`: every App for an
- * admin (undefined), otherwise their own and those shared with them. One
- * shared with them that has read data they can't read is listed, and
- * refused when they open it, with why.
+ * admin (undefined), otherwise their own, those shared with them, and, if
+ * they build, the built-ins. One shared with them that has read data they
+ * can't read is listed, and refused when they open it, with why.
  */
 export const appsOpenTo = (env: Env, by: Person): SQL | undefined => {
   if (isAdmin(by.role)) {
@@ -174,6 +188,7 @@ export const appsOpenTo = (env: Env, by: Person): SQL | undefined => {
   const db = drizzle(env.DB);
   return or(
     eq(apps.ownerId, by.userId),
+    canBuild(by.role) ? eq(apps.ownerId, builtinOwner) : undefined,
     exists(
       db
         .select({ one: sql`1` })
@@ -200,8 +215,9 @@ export const appsFoundBy = (env: Env, by: Person): SQL => {
 
 /**
  * That `by` still has a role in `app` when the statement runs, as SQL: an
- * admin (as their session said), the App's owner, or someone it is shared
- * with, as a person or through a team they are in then. For guarding a
+ * admin (as their session said), the App's owner, someone who builds for a
+ * built-in, or someone it is shared with, as a person or through a team
+ * they are in then. For guarding a
  * write that an earlier check allowed, so a role lost since stops it.
  * What the App read (`app.unreadable`) can't be decided in SQL, and isn't
  * part of it.
@@ -210,5 +226,6 @@ export const stillOpenTo = (by: Person, app: AppId): SQL => {
   if (isAdmin(by.role)) {
     return sql`1`;
   }
-  return sql`(EXISTS (SELECT 1 FROM ${apps} WHERE ${apps.id} = ${app} AND ${apps.ownerId} = ${by.userId}) OR EXISTS (SELECT 1 FROM ${appMembers} WHERE ${appMembers.appId} = ${app} AND ((${appMembers.memberType} = 'person' AND ${appMembers.memberId} = ${by.userId}) OR (${appMembers.memberType} = 'team' AND ${appMembers.memberId} IN (SELECT ${teamMembers.teamId} FROM ${teamMembers} WHERE ${teamMembers.userId} = ${by.userId})))))`;
+  const owners = canBuild(by.role) ? [by.userId, builtinOwner] : [by.userId];
+  return sql`(EXISTS (SELECT 1 FROM ${apps} WHERE ${apps.id} = ${app} AND ${inList(apps.ownerId, owners)}) OR EXISTS (SELECT 1 FROM ${appMembers} WHERE ${appMembers.appId} = ${app} AND ((${appMembers.memberType} = 'person' AND ${appMembers.memberId} = ${by.userId}) OR (${appMembers.memberType} = 'team' AND ${appMembers.memberId} IN (SELECT ${teamMembers.teamId} FROM ${teamMembers} WHERE ${teamMembers.userId} = ${by.userId})))))`;
 };

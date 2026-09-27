@@ -21,14 +21,14 @@ import { sha256Hex } from "@grasp-os/shared/encoding";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
-import { requireBuilder } from "@grasp-os/shared/roles";
+import { requireBuilder, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { appsFoundBy, requireAppRole } from "./app-access.ts";
+import { appsFoundBy, builtinOwner, requireAppRole } from "./app-access.ts";
 import type { Person } from "./app-access.ts";
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
@@ -146,7 +146,10 @@ export const findApp = async (env: Env, input: unknown): Promise<App> => {
 /**
  * The App `input` names, for `by` with at least `needed` in it
  * (app-access.ts). While `app_sharing` is off, the rule from before Apps
- * had roles: admins and builders build every App, and users none.
+ * had roles: admins and builders build every App, and users none. A
+ * built-in's App is `user` at most for everyone, admins included, whether
+ * `app_sharing` is on or off: `role.forbidden` for anything that needs
+ * `builder`.
  */
 export const appFor = async (
   env: Env,
@@ -156,7 +159,11 @@ export const appFor = async (
 ): Promise<App> => {
   if (!featureEnabled(env, "app_sharing")) {
     requireBuilder(by);
-    return await findApp(env, input);
+    const app = await findApp(env, input);
+    if (app.owner === builtinOwner && needed === "builder") {
+      throw roleErrors.create("role.forbidden");
+    }
+    return app;
   }
   const app = await findApp(env, input);
   await requireAppRole(env, by, app, needed);

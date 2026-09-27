@@ -2,6 +2,11 @@ import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import buildScreenCompiler from "../../../packages/compiler/build.ts";
+import {
+  blueprintsDir,
+  testBlueprintsModule,
+  writeBlueprints,
+} from "../build-blueprints.ts";
 import buildExtractor from "../build-extractor.ts";
 import { bundleConnect, connectBundle } from "./build-connect.ts";
 
@@ -22,6 +27,13 @@ const writeTestAssets = async (): Promise<void> => {
 };
 
 const prepare = async (): Promise<void> => {
+  // The release's built-ins, and one of the tests' own, so the install
+  // has a blueprint to write while the release ships none: into the
+  // tests' module, never the one core's build ships.
+  writeBlueprints(
+    [blueprintsDir, path.join(import.meta.dirname, "fixtures/blueprints")],
+    testBlueprintsModule
+  );
   await writeTestAssets();
   mkdirSync(path.dirname(connectBundle), { recursive: true });
   writeFileSync(connectBundle, await bundleConnect());
@@ -34,8 +46,8 @@ declare global {
 }
 
 /**
- * Before any test of a project: writes the test assets and bundles the
- * connect Worker, which the project's config reads when its pool starts.
+ * Before any test of a project: embeds the built-in blueprints, writes
+ * the test assets and bundles the connect Worker, which the project's config reads when its pool starts.
  */
 const setup = async (): Promise<void> => {
   globalThis.coreTestSetup ??= prepare();

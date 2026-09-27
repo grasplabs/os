@@ -94,11 +94,14 @@ export default defineConfig({
       "apps/core/vite.screens.config.ts",
       "packages/*",
       "packages/connectors/*",
-      // Repo tooling's pure logic, in Node.
+      // Repo tooling's pure logic, and core's build step, in Node.
       {
         test: {
           name: "scripts",
-          include: ["scripts/**/*.test.ts"],
+          include: [
+            "scripts/**/*.test.ts",
+            "apps/core/build-blueprints.test.ts",
+          ],
           environment: "node",
         },
       },

@@ -130,10 +130,13 @@ export type Feature =
    */
   | "improvement_signals"
   /**
-   * What ships with the release, the Grasp skills, installed once per
-   * release on the first request (builtins.ts) instead of synced by the
-   * cron trigger every minute. Switched off, the cron trigger syncs them
-   * as before. Switch it on only once a release that has it is fully
+   * What ships with the release, installed once per release on the first
+   * request (builtins.ts): the built-in blueprints, while `apps` and
+   * `app_blueprints` are on too, and the Grasp skills, instead of synced
+   * by the cron trigger every minute. Switched off, nothing is installed
+   * and the cron trigger syncs the skills as before; the built-in
+   * blueprints already installed stay, as any App's blueprint does.
+   * Switch it on only once a release that has it is fully
    * rolled out: a release from before it still syncs its own skills on
    * the cron trigger, which the install would not undo.
    */

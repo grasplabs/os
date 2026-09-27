@@ -8,6 +8,7 @@ import { defaultExclude, defineProject } from "vite-plus";
 import type { UserWorkspaceConfig } from "vite-plus";
 
 import { testComposioKey } from "../connect/test/provider-config.ts";
+import { testBlueprintsModule } from "./build-blueprints.ts";
 import { connectBundle } from "./test/build-connect.ts";
 import {
   connectClient,
@@ -70,6 +71,11 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
       // longer than Vitest's 5 s default, most of all on a loaded CI runner.
       testTimeout: 60_000,
       ...test,
+    },
+    // The built-ins the global setup embeds, the tests' own included, in a
+    // module of their own: core's build ships dist/blueprints.js.
+    resolve: {
+      alias: [{ find: /^#blueprints$/u, replacement: testBlueprintsModule }],
     },
     plugins: [
       // Read when the pool starts, after the global setup wrote the bundle.
@@ -189,4 +195,8 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
     ],
   });
 
-export default coreProject({ exclude: [...defaultExclude, ...screenTests] });
+export default coreProject({
+  // The build step's own test runs in Node, in the root config's "scripts"
+  // project.
+  exclude: [...defaultExclude, ...screenTests, "build-blueprints.test.ts"],
+});
