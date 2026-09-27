@@ -1,7 +1,9 @@
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
+import { log } from "@grasp-os/shared/log";
 import { isolateBase } from "@grasp-os/shared/runtime";
 import { uploadErrors } from "@grasp-os/shared/uploads";
 import type { UploadMediaType } from "@grasp-os/shared/uploads";
+import { z } from "zod";
 
 import { extractorAsset } from "./extractor/asset.ts";
 import type ExtractorWorker from "./extractor/worker.ts";
@@ -71,12 +73,32 @@ const extractorSource = async (assets: Fetcher): Promise<string> => {
   const response = await assets.fetch(`https://assets/${extractorAsset}`);
   const type = response.headers.get("content-type") ?? "";
   if (!(response.ok && type.includes("javascript"))) {
-    throw new Error(
-      "The extractor is not among the static assets: build it into them (build-extractor.ts)."
-    );
+    // A deployment built without it (build-extractor.ts): nothing about
+    // the file, so retried, and failed as unexpected once retries run out.
+    log.error("extractor.missing", { status: response.status });
+    throw new ExtractorUnavailableError();
   }
   return await response.text();
 };
+
+/**
+ * The most Markdown core takes from the sandbox, in bytes of UTF-8: a
+ * document's limit (documents.ts). Checked here, whatever the sandbox
+ * says of itself.
+ */
+const markdownMaxBytes = 1024 * 1024;
+
+/**
+ * What the sandbox may answer. Its code is core's, but it runs what it was
+ * handed, so its answer is checked like any other input.
+ */
+const extractedSchema = z.discriminatedUnion("ok", [
+  z.strictObject({ ok: z.literal(true), markdown: z.string() }),
+  z.strictObject({
+    ok: z.literal(false),
+    reason: z.enum(["unreadable", "too_large"]),
+  }),
+]);
 
 /** Extracts in a fresh sandbox, whatever the file's collection. */
 export const localExtractor =
@@ -88,9 +110,9 @@ export const localExtractor =
       mainModule: "extractor.js",
       modules: { "extractor.js": source },
     });
-    let extracted: Awaited<ReturnType<ExtractorWorker["extract"]>>;
+    let answer: unknown;
     try {
-      extracted = await worker
+      answer = await worker
         .getEntrypoint<ExtractorWorker>()
         .extract({ mediaType, bytes });
     } catch (error) {
@@ -99,10 +121,19 @@ export const localExtractor =
       }
       throw new ExtractorUnavailableError({ cause: error });
     }
-    if (extracted.ok) {
+    const parsed = extractedSchema.safeParse(answer);
+    if (!parsed.success) {
+      throw new Error("The extractor answered what it may not");
+    }
+    const extracted = parsed.data;
+    if (
+      extracted.ok &&
+      new TextEncoder().encode(extracted.markdown).byteLength <=
+        markdownMaxBytes
+    ) {
       return extracted.markdown;
     }
-    if (extracted.reason === "too_large") {
+    if (extracted.ok || extracted.reason === "too_large") {
       throw knowledgeErrors.create("knowledge.too_large");
     }
     throw new Error("The extractor couldn't read the file");

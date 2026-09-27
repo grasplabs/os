@@ -13,6 +13,7 @@ import { env } from "cloudflare:workers";
 import { zipSync } from "fflate";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { extractorAsset } from "../src/knowledge/extractor/asset.ts";
 import {
   extractUpload,
   extractionRunId,
@@ -24,7 +25,16 @@ import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { newTeam } from "./knowledge.ts";
 import { finished } from "./runs.ts";
-import { outcome, routed, signedInApi, unique } from "./sign-in.ts";
+import { signInConfig } from "./sign-in-config.ts";
+import {
+  outcome,
+  routed,
+  signedIn,
+  signedInApi,
+  staffPerson,
+  unique,
+  whoami,
+} from "./sign-in.ts";
 
 // Files uploaded into Knowledge, through the API people use: each becomes
 // a document at its name, its text extracted by core's own workflow on the
@@ -101,7 +111,11 @@ const originalStored = async (
 const leftPending = async (
   person: { userId: string; collectionId: string },
   file: string,
-  { name = file, createdAt = Date.now() - 60 * 60_000 } = {}
+  {
+    name = file,
+    createdAt = Date.now() - 60 * 60_000,
+    staff = false,
+  }: { name?: string; createdAt?: number; staff?: boolean } = {}
 ): Promise<string> => {
   const bytes = await fixture(file);
   const id = crypto.randomUUID();
@@ -120,12 +134,76 @@ const leftPending = async (
       bytes.length,
       await sha256Of(bytes),
       person.userId,
-      JSON.stringify({ type: "person", userId: person.userId }),
+      JSON.stringify({
+        type: staff ? "staff" : "person",
+        userId: person.userId,
+      }),
       createdAt,
       createdAt
     )
     .run();
   return id;
+};
+
+/** An upload's status and failure, as stored: whoever made it. */
+const statusOf = async (
+  uploadId: string
+): Promise<{ status: string; failure: string | null }> => {
+  const row = await env.KNOWLEDGE.prepare(
+    "SELECT status, failure FROM uploads WHERE id = ?"
+  )
+    .bind(uploadId)
+    .first<{ status: string; failure: string | null }>();
+  if (!row) {
+    throw new Error(`No upload ${uploadId}`);
+  }
+  return row;
+};
+
+/** Once the upload `uploadId` has ended, ready or failed: whoever made it. */
+const settled = async (uploadId: string): Promise<void> => {
+  await vi.waitFor(
+    async () => {
+      const { status } = await statusOf(uploadId);
+      if (status !== "ready" && status !== "failed") {
+        throw new Error(`Upload ${uploadId} is ${status}`);
+      }
+    },
+    { timeout: 20_000, interval: 100 }
+  );
+};
+
+/**
+ * Runs `run` with every extraction's sandbox running `extract` (the body
+ * of its method, in JavaScript) in place of the extractor's own code: an
+ * answer only a broken or subverted extractor gives. Returns how many
+ * sandboxes were started.
+ */
+const withSandboxAnswering = async (
+  extract: string,
+  run: () => Promise<void>
+): Promise<number> => {
+  let started = 0;
+  const load = env.LOADER.load.bind(env.LOADER);
+  const loading = vi.spyOn(env.LOADER, "load").mockImplementation(() => {
+    started += 1;
+    return load({
+      compatibilityDate,
+      mainModule: "extractor.js",
+      modules: {
+        "extractor.js": `import { WorkerEntrypoint } from "cloudflare:workers";
+export default class extends WorkerEntrypoint {
+  extract() { ${extract} }
+}`,
+      },
+    });
+  });
+  try {
+    await run();
+  } finally {
+    loading.mockRestore();
+  }
+  return started;
 };
 
 /**
@@ -498,37 +576,150 @@ describe("uploads", { timeout: 60_000 }, () => {
     await introspector.modifyAll(async (modifier) => {
       await modifier.disableRetryDelays();
     });
-    let started = 0;
-    // A sandbox that answers as the runtime does once it stopped the
-    // isolate over its limits.
-    const load = env.LOADER.load.bind(env.LOADER);
-    const loading = vi.spyOn(env.LOADER, "load").mockImplementation(() => {
-      started += 1;
-      return load({
-        compatibilityDate,
-        mainModule: "extractor.js",
-        modules: {
-          "extractor.js": `import { WorkerEntrypoint } from "cloudflare:workers";
-export default class extends WorkerEntrypoint {
-  extract() { throw new Error("Worker exceeded CPU time limit."); }
-}`,
-        },
-      });
-    });
     let upload: Upload | undefined;
-    try {
-      upload = await uploaded(person, "expense-policy.pdf");
-    } finally {
-      loading.mockRestore();
-    }
+    // As the runtime answers once it stopped the isolate over its limits.
+    const started = await withSandboxAnswering(
+      'throw new Error("Worker exceeded CPU time limit.");',
+      async () => {
+        upload = await uploaded(person, "expense-policy.pdf");
+      }
+    );
 
-    expect({ started, failure: upload.failure }).toStrictEqual({
+    expect({ started, failure: upload?.failure }).toStrictEqual({
       started: 1,
       failure: {
         code: "upload.too_complex",
         message:
           "The file takes more work to read than an upload may take: it may be damaged, or built to be. Check that it opens, or save it again as a simpler file, then upload it again.",
       },
+    });
+  });
+
+  it("take from the sandbox only an answer it may give, within a document's limit", async () => {
+    const person = await personWithCollection();
+    const answers = {
+      malformed: 'return { ok: "yes", markdown: 42 };',
+      oversized:
+        'return { ok: true, markdown: "# Big\\n" + "x".repeat(2 * 1024 * 1024) };',
+      unknownReason: 'return { ok: false, reason: "tired" };',
+    };
+    const failures: Record<string, string | undefined> = {};
+    for (const [name, extract] of Object.entries(answers)) {
+      // oxlint-disable-next-line no-await-in-loop -- one sandbox at a time
+      await withSandboxAnswering(extract, async () => {
+        const upload = await uploaded(
+          person,
+          "travel-policy.docx",
+          `${name}.docx`
+        );
+        failures[name] = upload.failure?.code;
+      });
+    }
+
+    expect(failures).toStrictEqual({
+      malformed: "upload.unreadable",
+      oversized: "knowledge.too_large",
+      unknownReason: "upload.unreadable",
+    });
+  });
+
+  it("read a workbook whose parts prefix their namespace", async () => {
+    const person = await personWithCollection();
+    const upload = await uploaded(person, "offices-prefixed.xlsx");
+    const { hits } = await person.api.knowledge.search("upkeep", {
+      collectionId: person.collectionId,
+    });
+
+    expect({
+      status: upload.status,
+      hits: hits.map(({ path, headings }) => ({ path, headings })),
+    }).toStrictEqual({
+      status: "ready",
+      hits: [{ path: "offices-prefixed.xlsx", headings: ["Contacts"] }],
+    });
+  });
+
+  it("serve the extractor's code among core's static assets", async () => {
+    const response = await env.ASSETS.fetch(`https://assets/${extractorAsset}`);
+    const code = await response.text();
+
+    expect({
+      ok: response.ok,
+      type: response.headers.get("content-type")?.includes("javascript"),
+      entrypoint: code.includes("WorkerEntrypoint"),
+    }).toStrictEqual({ ok: true, type: true, entrypoint: true });
+  });
+
+  it("retry an extraction while the extractor's code is missing", async () => {
+    const person = await personWithCollection();
+    const id = await leftPending(person, "travel-policy.docx", {
+      createdAt: Date.now(),
+    });
+    // A deployment built without the extractor: the assets answer with the
+    // frontend's page.
+    const assets: Fetcher = {
+      ...env.ASSETS,
+      fetch: async () =>
+        await Promise.resolve(
+          new Response("<!doctype html>", {
+            headers: { "content-type": "text/html" },
+          })
+        ),
+    };
+    const refused = await outcome(
+      extractUpload({ ...env, ASSETS: assets }, id)
+    );
+
+    const { status } = await person.api.uploads.get(id);
+
+    expect({ refused, upload: status }).toStrictEqual({
+      refused: "ExtractorUnavailableError: The extractor couldn't be reached",
+      upload: "extracting",
+    });
+  });
+
+  it("save a staff member's upload while their window is open, and nothing once it closed", async () => {
+    const staffSession = await signedIn(idp, "grasp-staff", staffPerson());
+    const { userId } = await whoami(staffSession);
+    const admin = await signedInApi(idp, "admin");
+    const { id: collectionId } = await admin.api.knowledge.createCollection({
+      name: `Handbook ${unique()}`,
+      access: "everyone",
+    });
+    const staff = { userId, collectionId };
+    const whileOpen = await leftPending(staff, "travel-policy.docx", {
+      name: "open.docx",
+      staff: true,
+    });
+    await runCron();
+    await settled(whileOpen);
+    const afterClosing = await leftPending(staff, "travel-policy.docx", {
+      name: "closed.docx",
+      staff: true,
+    });
+    const before = env.SIGN_IN;
+    const day = 24 * 60 * 60_000;
+    env.SIGN_IN = {
+      ...signInConfig,
+      staff: {
+        ...signInConfig.staff,
+        opened: new Date(Date.now() - 2 * day).toISOString(),
+        until: new Date(Date.now() - day).toISOString(),
+      },
+    };
+    try {
+      await runCron();
+      await settled(afterClosing);
+    } finally {
+      env.SIGN_IN = before;
+    }
+
+    expect({
+      open: await statusOf(whileOpen),
+      closed: await statusOf(afterClosing),
+    }).toStrictEqual({
+      open: { status: "ready", failure: null },
+      closed: { status: "failed", failure: "knowledge.forbidden" },
     });
   });
 

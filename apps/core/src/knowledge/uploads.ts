@@ -31,7 +31,7 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { stringify } from "yaml";
 
 import { auditedBatch, outboxed, outboxedWhere } from "../audit-outbox.ts";
-import { identify, memberRole, teamsOf } from "../auth/identity.ts";
+import { identify, memberRole, staffRole, teamsOf } from "../auth/identity.ts";
 import {
   collections,
   uploadCleanups,
@@ -380,10 +380,13 @@ export const finalFailures: ReadonlySet<string> = new Set([
 
 /**
  * Refuses the save of `row` into `collection` unless its uploader may
- * still change the collection, as they are now: still a member, reading it
- * with their teams now, and allowed to write it (`requireWritable`). A
- * person removed from the organization, or from the team it is shared
- * with, gets nothing saved in their name.
+ * still change the collection, as they are now, the way `identify` would
+ * see them: a member still, with their role and teams now; Grasp staff
+ * while the staff window is open and they are on the staff list, with the
+ * config's role. Then reading it, and allowed to write it
+ * (`requireWritable`). Someone removed from the organization or the team
+ * it is shared with, or staff whose window closed, gets nothing saved in
+ * their name.
  */
 const requireStillWritable = async (
   env: Env,
@@ -391,7 +394,10 @@ const requireStillWritable = async (
   row: UploadRow,
   collection: CollectionRow
 ): Promise<void> => {
-  const role = await memberRole(env.DB, row.uploadedBy);
+  const staff = auditActorSchema.parse(JSON.parse(row.actor)).type === "staff";
+  const role = staff
+    ? await staffRole(env, row.uploadedBy)
+    : await memberRole(env.DB, row.uploadedBy);
   if (role === undefined) {
     throw knowledgeErrors.create("knowledge.forbidden");
   }
@@ -400,8 +406,8 @@ const requireStillWritable = async (
     email: "",
     name: "",
     role,
-    teams: await teamsOf(env.DB, row.uploadedBy),
-    staff: false,
+    teams: staff ? [] : await teamsOf(env.DB, row.uploadedBy),
+    staff,
     expiresAt: "",
   };
   const readable = await db

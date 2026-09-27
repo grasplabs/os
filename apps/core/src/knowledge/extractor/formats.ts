@@ -11,7 +11,8 @@ import { extractText } from "unpdf";
 // synchronous `unzipSync` (its asynchronous `unzip` starts Web Workers,
 // which a Worker doesn't have) and read here in one pass each: every
 // pattern stops at the next `<`, so no input makes them scan back over
-// what they read.
+// what they read. Excel's parts may prefix their namespace
+// (`<x:worksheet>`): each part is read with its root element's prefix.
 
 /**
  * The most an Office file may unzip to, by the sizes it declares: far past
@@ -214,14 +215,53 @@ const docxMarkdown = (bytes: Uint8Array): string => {
     .join("\n\n");
 };
 
-const textContent = /<t(?:\s[^<>]*)?>(?<text>[^<]*)<\/t>/gu;
-const cellValue = /<v(?:\s[^<>]*)?>(?<value>[^<]*)<\/v>/u;
 const columnLetters = /^[A-Z]{1,3}/u;
 const lettersInAlphabet = 26;
 
+/** How far into a part its root element is looked for. */
+const rootWithin = 4096;
+
+/**
+ * The namespace prefix a part's root element `root` has, with its colon
+ * (`x:` for `<x:worksheet>`), or none: the prefix every element of the
+ * spreadsheet namespace then has in that part.
+ */
+const prefixOf = (part: string, root: string): string => {
+  const found = new RegExp(
+    `<(?:(?<prefix>[A-Za-z_][\\w.-]{0,31}):)?${root}[\\s/>]`,
+    "u"
+  ).exec(part.slice(0, rootWithin))?.groups?.prefix;
+  return found === undefined ? "" : `${found}:`;
+};
+
+/** The patterns for a string's runs and a cell's value, by prefix. */
+const valuePatterns = new Map<string, { text: RegExp; value: RegExp }>();
+
+const patternsFor = (prefix: string): { text: RegExp; value: RegExp } => {
+  let patterns = valuePatterns.get(prefix);
+  if (patterns === undefined) {
+    const escaped = prefix.replaceAll(
+      /[.-]/gu,
+      (character) => `\\${character}`
+    );
+    patterns = {
+      text: new RegExp(
+        `<${escaped}t(?:\\s[^<>]*)?>(?<text>[^<]*)</${escaped}t>`,
+        "gu"
+      ),
+      value: new RegExp(
+        `<${escaped}v(?:\\s[^<>]*)?>(?<value>[^<]*)</${escaped}v>`,
+        "u"
+      ),
+    };
+    valuePatterns.set(prefix, patterns);
+  }
+  return patterns;
+};
+
 /** The text of every `<t>` in `element`, joined: a string's runs. */
-const texts = (element: string): string =>
-  Array.from(element.matchAll(textContent), ({ groups }) =>
+const texts = (element: string, prefix: string): string =>
+  Array.from(element.matchAll(patternsFor(prefix).text), ({ groups }) =>
     xmlText(groups?.text ?? "")
   ).join("");
 
@@ -239,12 +279,14 @@ const columnOf = (reference: string | undefined): number | undefined => {
 };
 
 /** A cell as its text: a shared or inline string, a boolean, a number as written. */
-const cellText = (cell: string, shared: string[]): string => {
+const cellText = (cell: string, shared: string[], prefix: string): string => {
   const type = attribute(cell, "t");
   if (type === "inlineStr") {
-    return texts(cell);
+    return texts(cell, prefix);
   }
-  const value = xmlText(cellValue.exec(cell)?.groups?.value ?? "");
+  const value = xmlText(
+    patternsFor(prefix).value.exec(cell)?.groups?.value ?? ""
+  );
   if (type === "s") {
     return shared[Number(value)] ?? "";
   }
@@ -281,15 +323,17 @@ const markdownTable = (rows: string[][]): string => {
 };
 
 /** A sheet's rows, each cell at its column, with the strings it shares. */
-const sheetRows = (sheet: string, shared: string[]): string[][] =>
-  elements(sheet, "<row", "</row>").map((row) => {
+const sheetRows = (sheet: string, shared: string[]): string[][] => {
+  const prefix = prefixOf(sheet, "worksheet");
+  return elements(sheet, `<${prefix}row`, `</${prefix}row>`).map((row) => {
     const cells: string[] = [];
-    for (const cell of elements(row, "<c", "</c>")) {
+    for (const cell of elements(row, `<${prefix}c`, `</${prefix}c>`)) {
       const column = columnOf(attribute(cell, "r")) ?? cells.length;
-      cells[column] = cellText(cell, shared);
+      cells[column] = cellText(cell, shared, prefix);
     }
     return Array.from(cells, (cell) => cell ?? "");
   });
+};
 
 /** Where a workbook part points: a path in the archive, from `xl/`. */
 const partPath = (target: string): string =>
@@ -308,20 +352,27 @@ const xlsxMarkdown = (bytes: Uint8Array): string => {
   if (workbook === undefined) {
     throw new Error("The file has no workbook in it");
   }
+  const relationships = parts.get("xl/_rels/workbook.xml.rels") ?? "";
   const targets = new Map(
-    tags(parts.get("xl/_rels/workbook.xml.rels") ?? "", "Relationship").map(
-      (tag): [string, string] => [
-        attribute(tag, "Id") ?? "",
-        attribute(tag, "Target") ?? "",
-      ]
-    )
+    tags(
+      relationships,
+      `${prefixOf(relationships, "Relationships")}Relationship`
+    ).map((tag): [string, string] => [
+      attribute(tag, "Id") ?? "",
+      attribute(tag, "Target") ?? "",
+    ])
   );
+  const strings = parts.get("xl/sharedStrings.xml") ?? "";
+  const stringsPrefix = prefixOf(strings, "sst");
   const shared = elements(
-    parts.get("xl/sharedStrings.xml") ?? "",
-    "<si",
-    "</si>"
-  ).map((item) => texts(item));
-  const sheets = tags(workbook, "sheet").flatMap((tag) => {
+    strings,
+    `<${stringsPrefix}si`,
+    `</${stringsPrefix}si>`
+  ).map((item) => texts(item, stringsPrefix));
+  const sheets = tags(
+    workbook,
+    `${prefixOf(workbook, "workbook")}sheet`
+  ).flatMap((tag) => {
     const name = attribute(tag, "name");
     const target = targets.get(attribute(tag, "r:id") ?? "");
     return name === undefined || target === undefined
