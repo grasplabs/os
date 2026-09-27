@@ -115,6 +115,36 @@ describe("feature flags", () => {
     ]);
   });
 
+  it("stop blueprints with their own flag, the Apps kill switch, and sharing's", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const blueprintsWith = async (features: Record<string, boolean>) => {
+      const coreEnv: Env = { ...env, FEATURES: features };
+      const { core } = await openRpc(admin.session, { coreEnv });
+      const { blueprints } = core.authenticate().apps;
+      return await Promise.all([
+        outcome(blueprints.list()),
+        outcome(blueprints.mark("app", 1)),
+        outcome(blueprints.unmark("app", 1)),
+        outcome(blueprints.create("app", 1, { name: "Mine" })),
+      ]);
+    };
+    await expect(
+      Promise.all([
+        blueprintsWith({ apps: true, app_sharing: true }),
+        blueprintsWith({ app_sharing: true, app_blueprints: true }),
+        // Whose access is App roles, which sharing turns on.
+        blueprintsWith({ apps: true, app_blueprints: true }),
+        blueprintsWith({ apps: true, app_sharing: true, app_blueprints: true }),
+      ])
+    ).resolves.toStrictEqual([
+      Array.from({ length: 4 }, () => "feature.disabled"),
+      Array.from({ length: 4 }, () => "feature.disabled"),
+      Array.from({ length: 4 }, () => "feature.disabled"),
+      // Past the flags: this App doesn't exist.
+      ["ok", "app.not_found", "app.not_found", "app.not_found"],
+    ]);
+  });
+
   it("switch everything off when the var doesn't parse", async () => {
     for (const features of ["{not json", '{"apps": "yes"}', "[true]"]) {
       // oxlint-disable-next-line no-await-in-loop -- one config at a time

@@ -1,6 +1,7 @@
 import type { App, AppContents, AppsApi, NewApp } from "@grasp-os/shared/apps";
 import { RpcTarget } from "capnweb";
 
+import { AppBlueprintsRpc } from "./app-blueprints.ts";
 import { AppFilesRpc } from "./app-files-rpc.ts";
 import { AppMembersRpc } from "./app-members.ts";
 import { AppVersionsRpc } from "./app-versions-rpc.ts";
@@ -9,9 +10,10 @@ import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
 /**
- * A signed-in person's `apps`, with `apps.files`, `apps.versions` and
- * `apps.members`, in SessionRpc's form. The App functions check the
- * person's role in the App and validate what the client sent.
+ * A signed-in person's `apps`, with `apps.files`, `apps.versions`,
+ * `apps.members` and `apps.blueprints`, in SessionRpc's form. The App
+ * functions check the person's role in the App and validate what the
+ * client sent.
  */
 export class AppsRpc extends RpcTarget implements AppsApi {
   readonly #env: Env;
@@ -19,15 +21,25 @@ export class AppsRpc extends RpcTarget implements AppsApi {
   readonly #files: AppFilesRpc;
   readonly #versions: AppVersionsRpc;
   readonly #members: AppMembersRpc;
+  readonly #blueprints: AppBlueprintsRpc;
 
-  /** `sharing` is the check for `members`, which sharing Apps turns on. */
-  constructor(env: Env, check: SessionCheck, sharing: SessionCheck) {
+  /**
+   * `sharing` is the check for `members`, which sharing Apps turns on, and
+   * `blueprints` the one for `blueprints`.
+   */
+  constructor(
+    env: Env,
+    check: SessionCheck,
+    sharing: SessionCheck,
+    blueprints: SessionCheck
+  ) {
     super();
     this.#env = env;
     this.#check = check;
     this.#files = new AppFilesRpc(env, check);
     this.#versions = new AppVersionsRpc(env, check);
     this.#members = new AppMembersRpc(env, sharing);
+    this.#blueprints = new AppBlueprintsRpc(env, blueprints);
   }
 
   get files(): AppFilesRpc {
@@ -40,6 +52,10 @@ export class AppsRpc extends RpcTarget implements AppsApi {
 
   get members(): AppMembersRpc {
     return this.#members;
+  }
+
+  get blueprints(): AppBlueprintsRpc {
+    return this.#blueprints;
   }
 
   async create(app: NewApp): Promise<App> {

@@ -4,6 +4,7 @@ import { appLimits } from "./app-limits.ts";
 import { defineErrorFamily } from "./errors.ts";
 import { identifierSchema } from "./ids.ts";
 import type { AppId } from "./ids.ts";
+import type { Permission } from "./permissions.ts";
 
 // An App's code is a tree of text files, versioned as a whole: builders
 // (and the agent, for a builder) write files into the App's working copy
@@ -50,7 +51,11 @@ export const appVersionSchema = z.int().min(1);
 export const newAppSchema = z.strictObject({
   name: z.string().trim().min(1).max(appLimits.nameLength),
   description: z.string().max(appLimits.descriptionLength).default(""),
-  /** The blueprint the App was made from, if any. */
+  /**
+   * A label for what the App was made from, as its creator gives it,
+   * unchecked. An App made from a blueprint (`AppBlueprintsApi.create`)
+   * gets `<app>@<version>` instead.
+   */
   blueprint: identifierSchema.optional(),
 });
 export type NewApp = z.input<typeof newAppSchema>;
@@ -83,6 +88,10 @@ export interface App {
   description: string;
   /** The user who created it. */
   owner: string;
+  /**
+   * What the App was made from: `<app>@<version>` for an App made from a
+   * blueprint, otherwise the label its creator gave, if any.
+   */
   blueprint: string | null;
   /** The version that runs; null until one is made current. */
   currentVersion: number | null;
@@ -212,6 +221,61 @@ export interface AppMembersApi {
 }
 
 /**
+ * A version of an App its builders marked as a blueprint: whoever has a
+ * role in the App, and builds, can create an App of their own from it.
+ * Times are ISO 8601.
+ */
+export interface Blueprint {
+  app: AppId;
+  /** The App's name and description now. */
+  name: string;
+  description: string;
+  version: number;
+  markedBy: string;
+  markedAt: string;
+}
+
+/** What a builder gives to create an App from a blueprint. */
+export const fromBlueprintSchema = newAppSchema.pick({
+  name: true,
+  description: true,
+});
+export type FromBlueprint = z.input<typeof fromBlueprintSchema>;
+
+/**
+ * An App created from a blueprint: its first version holds the code at
+ * the blueprint's version, and `permissions` are requests, waiting for an
+ * admin, for the connections, collections and workflows the blueprint's
+ * App was given or asked for, but for someone else's personal
+ * connections, which only their owner's calls could use, and connections
+ * connect doesn't know (`dropped`).
+ * Nothing else comes with it: no data, no settings, no runs, no members.
+ */
+export interface CreatedFromBlueprint {
+  app: App;
+  version: AppVersion;
+  permissions: Permission[];
+  /** The connections, by binding, it doesn't ask for. */
+  dropped: { connectionId: string; binding: string }[];
+}
+
+/** Blueprints: App versions to create Apps from. */
+export interface AppBlueprintsApi {
+  /** The blueprints of the Apps the person has a role in, newest first. */
+  list: () => Promise<Blueprint[]>;
+  /** Marks a version of the App as a blueprint. Its builders. */
+  mark: (app: string, version: number) => Promise<Blueprint>;
+  /** Stops offering a version as a blueprint. Its builders. */
+  unmark: (app: string, version: number) => Promise<void>;
+  /** Creates an App of the person's own from a blueprint. */
+  create: (
+    app: string,
+    version: number,
+    input: FromBlueprint
+  ) => Promise<CreatedFromBlueprint>;
+}
+
+/**
  * The App registry and each App's code. An App is open to its owner, the
  * organization's admins and the people and teams it is shared with
  * (`members`): its users call what its screens use, its builders the
@@ -227,6 +291,7 @@ export interface AppsApi {
   readonly files: AppFilesApi;
   readonly versions: AppVersionsApi;
   readonly members: AppMembersApi;
+  readonly blueprints: AppBlueprintsApi;
 }
 
 /** Why a call to the App registry was refused. */
@@ -238,6 +303,7 @@ export const appErrors = defineErrorFamily({
     "This App has read data they can't read where it comes from, such as someone else's mailbox or a collection they can't read, so it can't be shared with them.",
   "app.unreadable":
     "This App has read data you can't read where it comes from, so it isn't open to you. Ask whoever shared it.",
+  "app.blueprint_not_found": "That version of the App isn't a blueprint.",
   "app.version_not_found": "The App has no such version.",
   "app.too_large": "The App's files would be over its limits.",
   "app.nothing_to_commit": "Nothing was written since the latest version.",

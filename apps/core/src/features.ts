@@ -44,6 +44,11 @@ export type Feature =
    * shares one.
    */
   | "app_sharing"
+  /**
+   * Blueprints: App versions to create Apps from (app-blueprints.ts);
+   * needs `app_sharing` on too, whose roles decide who marks and copies.
+   */
+  | "app_blueprints"
   | "permissions"
   | "knowledge"
   /** Memory files (knowledge/memory.ts); needs `knowledge` on too. */

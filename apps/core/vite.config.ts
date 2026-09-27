@@ -87,6 +87,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             FEATURES: {
               apps: true,
               app_sharing: true,
+              app_blueprints: true,
               permissions: true,
               knowledge: true,
               memory: true,

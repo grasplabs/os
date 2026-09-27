@@ -1,4 +1,3 @@
-import { connectionOwnersMax } from "@grasp-os/shared/connect";
 import type { ConnectionOwner } from "@grasp-os/shared/connect";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
@@ -6,6 +5,7 @@ import { and, eq, inArray, isNotNull } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import { connectionOwnersOf } from "./connections.ts";
 import { permissions } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
 import { collectionTeams, collections } from "./db/knowledge/schema.ts";
@@ -54,21 +54,6 @@ export interface AppSources {
 }
 
 const actionsSchema = z.array(z.string());
-
-/** Whose each connection is, from connect, a page of IDs at a time. */
-const ownersOf = async (
-  env: Env,
-  ids: string[]
-): Promise<ConnectionOwner[]> => {
-  const pages: string[][] = [];
-  for (let start = 0; start < ids.length; start += connectionOwnersMax) {
-    pages.push(ids.slice(start, start + connectionOwnersMax));
-  }
-  const owners = await Promise.all(
-    pages.map(async (page) => await env.CONNECT.connectionOwners(page))
-  );
-  return owners.flat();
-};
 
 /** Who may read each of the collections `ids` now, as `mayRead` needs it. */
 const accessOf = async (
@@ -150,7 +135,7 @@ export const sourcesOfApps = async (
     ...new Set([...granted.values()].flatMap(({ read }) => [...read])),
   ];
   const [owners, readable] = await Promise.all([
-    connectionIds.length === 0 ? [] : ownersOf(env, connectionIds),
+    connectionIds.length === 0 ? [] : connectionOwnersOf(env, connectionIds),
     collectionIds.length === 0 ? [] : accessOf(env, collectionIds),
   ]);
   const ownerOf = new Map(owners.map((owner) => [owner.id, owner]));

@@ -341,6 +341,13 @@ export const apps = sqliteTable("apps", {
   /** The latest write to the working copy (`app_working_files.revision`). */
   workingRevision: text("working_revision"),
   createdAt: timestamp("created_at").notNull(),
+  /**
+   * Set while an App created from a blueprint waits for the check that
+   * lets it be used (src/app-blueprints.ts); null for every App in use.
+   * No path finds a pending App: it is inert until activated, and the
+   * cron trigger deletes one left pending.
+   */
+  pendingSince: timestamp("pending_since"),
 });
 
 /**
@@ -367,6 +374,25 @@ export const appMembers = sqliteTable(
     // Which Apps are shared with someone, for listing theirs.
     index("app_members_member_idx").on(table.memberType, table.memberId),
   ]
+);
+
+/**
+ * The versions of Apps marked as blueprints (src/app-blueprints.ts), to
+ * create Apps from. Unmarking deletes the row; who marked and unmarked
+ * which is in the audit log. A version itself never changes, so a
+ * blueprint's code never does either.
+ */
+export const appBlueprints = sqliteTable(
+  "app_blueprints",
+  {
+    appId: text("app_id")
+      .notNull()
+      .references(() => apps.id),
+    version: integer().notNull(),
+    markedBy: text("marked_by").notNull(),
+    markedAt: timestamp("marked_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.appId, table.version] })]
 );
 
 /**

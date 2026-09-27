@@ -23,7 +23,7 @@ import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { requireBuilder } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
+import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
@@ -54,8 +54,8 @@ import { requireWorkflowTestsPass } from "./workflows/code.ts";
 // copy, as the next number. Two commits at once both try the same number,
 // and the database keeps one; the other is refused as a conflict.
 
-type AppRow = typeof apps.$inferSelect;
-type VersionRow = typeof appVersions.$inferSelect;
+export type AppRow = typeof apps.$inferSelect;
+export type VersionRow = typeof appVersions.$inferSelect;
 
 /** A tree as `commitFiles` stores it. */
 const storedTreeSchema = z.record(z.string(), z.string());
@@ -81,7 +81,7 @@ const readTree = async (
   return new Map(Object.entries(storedTreeSchema.parse(JSON.parse(text))));
 };
 
-const toApp = (row: AppRow): App => ({
+export const toApp = (row: AppRow): App => ({
   id: appIdSchema.parse(row.id),
   name: row.name,
   description: row.description,
@@ -92,7 +92,7 @@ const toApp = (row: AppRow): App => ({
   createdAt: row.createdAt.toISOString(),
 });
 
-const toVersion = (row: VersionRow): AppVersion => ({
+export const toVersion = (row: VersionRow): AppVersion => ({
   app: appIdSchema.parse(row.appId),
   version: row.version,
   parent: row.parent,
@@ -104,13 +104,17 @@ const toVersion = (row: VersionRow): AppVersion => ({
 });
 
 /** The audit entry of a change to `app` by `by`: identifiers only. */
-const changeEntry = (
+export const changeEntry = (
   by: Identity,
   action:
     | "app.created"
     | "app.committed"
     | "app.version.proposed"
-    | "app.version.current",
+    | "app.version.current"
+    | "app.blueprint.marked"
+    | "app.blueprint.unmarked"
+    | "app.blueprint.connection_dropped"
+    | "app.blueprint.revoked",
   app: AppId,
   detail: Record<string, AuditDetailValue>
 ): AuditEntry => ({
@@ -120,14 +124,17 @@ const changeEntry = (
   detail,
 });
 
-/** The App `input` names, which must exist. */
+/**
+ * The App `input` names, which must exist, and be in use: one created from
+ * a blueprint that is still pending (app-blueprints.ts) isn't found.
+ */
 export const findApp = async (env: Env, input: unknown): Promise<App> => {
   const id = appIdSchema.safeParse(input);
   const row = id.success
     ? await drizzle(env.DB)
         .select()
         .from(apps)
-        .where(eq(apps.id, id.data))
+        .where(and(eq(apps.id, id.data), isNull(apps.pendingSince)))
         .get()
     : undefined;
   if (!row) {
@@ -325,6 +332,34 @@ const checkMemory = (
   }
 };
 
+/** A version's files as stored: canonical JSON, and its SHA-256. */
+interface Tree {
+  tree: string;
+  json: string;
+}
+
+/**
+ * `files` as a version's tree, or `app.too_large` if they are over an
+ * App's limits: a version always fits them.
+ */
+export const versionTree = async (
+  files: ReadonlyMap<string, string>
+): Promise<Tree> => {
+  checkLimits(files);
+  const json = canonicalJson(Object.fromEntries(files));
+  return { tree: await sha256Hex(json), json };
+};
+
+/** Stores a tree under its hash, before any version row names it. */
+export const storeTree = async (
+  env: Env,
+  app: AppId,
+  { tree, json }: Tree
+): Promise<void> => {
+  // R2 checks the upload against its hash, so what's stored is what's named.
+  await env.FILES.put(treeKey(app, tree), json, { sha256: tree });
+};
+
 /** The files of one of an App's versions. For the runtime and the compiler. */
 export const versionFiles = async (
   env: Env,
@@ -356,6 +391,7 @@ export const createApp = async (
     currentVersion: null,
     pendingVersion: null,
     workingRevision: null,
+    pendingSince: null,
     createdAt: new Date(),
   };
   const app = toApp(row);
@@ -373,14 +409,15 @@ export const createApp = async (
 /**
  * The Apps `by` has a role in (app-access.ts), as a condition on `apps`.
  * As with `appFor`, while `app_sharing` is off: every App for admins and
- * builders, and none for users.
+ * builders, and none for users. Never a pending App (`findApp`).
  */
 export const appsListedFor = (env: Env, by: Identity): SQL | undefined => {
+  const inUse = isNull(apps.pendingSince);
   if (!featureEnabled(env, "app_sharing")) {
     requireBuilder(by);
-    return undefined;
+    return inUse;
   }
-  return appsOpenTo(env, by);
+  return and(inUse, appsOpenTo(env, by));
 };
 
 /** The Apps `by` has a role in (app-access.ts), oldest first. */
@@ -539,14 +576,11 @@ export const commitFiles = async (
   if (rows.length === 0) {
     throw appErrors.create("app.nothing_to_commit");
   }
-  checkLimits(files);
-  const json = canonicalJson(Object.fromEntries(files));
-  const tree = await sha256Hex(json);
+  const { tree, json } = await versionTree(files);
   if (tree === latest?.tree) {
     throw appErrors.create("app.nothing_to_commit");
   }
-  // R2 checks the upload against its hash, so what's stored is what's named.
-  await env.FILES.put(treeKey(appId, tree), json, { sha256: tree });
+  await storeTree(env, appId, { tree, json });
 
   const row: VersionRow = {
     appId,
