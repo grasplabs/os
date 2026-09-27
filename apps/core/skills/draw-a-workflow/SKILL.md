@@ -11,10 +11,24 @@ A workflow record is one piece of recurring work, from what starts it to what en
 
 1. **Pick the state.** `drawn` for how it runs today; `designed` for how it should run. Draw before you design: a design is measured against the drawing.
 2. **Name it** by its outcome, such as "Pay supplier invoices", and set its `team` to the team record that owns it.
-3. **List the steps** in order. For each: a short `name`, `who` does it (a role), the `tool` used, and `handover: true` when the work passes to someone else after it.
-4. **Add the numbers** where known: `frequency` (times a week), `minutes` (each time) and `people` (each time), each with a `basis` of `estimated` or `observed`.
-5. **Designed only:** give each step its `kind` (`automated`, `ai_checked`, `tool` or `instruction`), list what can be set as `parameters` (such as an approval limit), and estimate the `gain` in `hoursPerWeek`.
+3. **List the `steps`** in order. For each: a short `name`, `who` does it (a role), the `tool` used, and `handover: true` when the work passes to someone else after it.
+4. **Add each step's `numbers`** where known: `frequency` (times a week), `minutes` (each time) and `people` (each time), each as `{ value, basis }` with a `basis` of `estimated` or `observed`. Numbers belong on a step, never at the top of the record.
+5. **Designed only:** give each step its `kind` (`automated`, `ai_checked`, `tool` or `instruction`), list what can be set as `parameters: [{ name, value }]` (such as an approval limit), and estimate the time it saves as `gain: { hoursPerWeek }`.
 6. **Write the body** for a person: what starts the work, what done looks like, and the statements it rests on, linked by their paths.
+
+## Example step
+
+```yaml
+steps:
+  - name: Match the invoice
+    who: Controller
+    tool: Exact Online
+    handover: true
+    numbers:
+      frequency: { value: 40, basis: estimated }
+      minutes: { value: 5, basis: observed }
+      people: { value: 1, basis: estimated }
+```
 
 ## Good to know
 

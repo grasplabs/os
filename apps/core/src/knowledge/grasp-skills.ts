@@ -51,7 +51,9 @@ import type { Writer } from "./documents.ts";
 // version check) and writes nothing, so a change is written once. A rollback syncs the older text back, as a version of its own.
 // While old and new isolates both run, during a rollout, each writes its
 // own release's text if it differs; the one still running a minute later
-// has the last word.
+// has the last word. Deploys replace every version at once: with gradual
+// deployments, cron runs would split between the old and new versions
+// for the whole rollout, and a changed skill would flip every minute.
 
 /** The Grasp skills' collection, under this ID: no other has it. */
 export const graspSkillsCollectionId: CollectionId =

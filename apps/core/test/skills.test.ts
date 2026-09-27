@@ -1,3 +1,4 @@
+/// <reference types="vite-plus/client" />
 import type { PurgeInput } from "@grasp-os/shared/knowledge";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
@@ -106,6 +107,16 @@ const knowledgeActions = <Event extends { action: string }>(
 ): Event[] => events.filter(({ action }) => action.startsWith("knowledge."));
 
 describe("the Grasp skills", setUpTime, () => {
+  it("are every skill folder of the release, and only those", () => {
+    // Vite lists the folders at build time; the Worker imports each one.
+    const folders = Object.keys(import.meta.glob("../skills/*/SKILL.md")).map(
+      (file) => file.slice("../skills/".length)
+    );
+    expect(graspSkills.map(({ path }) => path).toSorted()).toStrictEqual(
+      folders.toSorted()
+    );
+  });
+
   it("are this release's once the cron trigger runs, and a run with nothing changed writes nothing", async () => {
     const admin = await personOf("admin");
     await runCron();

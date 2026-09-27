@@ -14,7 +14,7 @@ A baseline records how work is done now, before anything changes, so later gains
 3. **Pull out statements.** From each source, save one `statement` per claim, with its `source` and a `topic`: `goal`, `blocker`, `time_sink`, `handover`, `tool` or `rule`. Quote briefly; keep one claim per record.
 4. **Name people and tools.** Save a `person` record (with `role` and `team`) for everyone who does work in a workflow, and a `tool` record for every system they use.
 5. **Draw the workflows.** For every recurring piece of work the statements describe, draw a workflow as it runs today: see the `draw-a-workflow` skill.
-6. **Freeze it.** Save a `snapshot` record dated today, listing every drawn workflow at its current version, with a `maturity` from 0 to 5.
+6. **Freeze it.** Save a `snapshot` record with today's `date`, a `maturity` from 0 to 5, and every drawn workflow at its current version as `workflows: [{ path, version }]`.
 
 ## Good to know
 
