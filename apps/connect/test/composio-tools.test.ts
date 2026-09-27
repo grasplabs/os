@@ -1,6 +1,7 @@
+import { signCapability } from "@grasp-os/shared/capability";
 import { composioConsentText } from "@grasp-os/shared/connect";
 import type { ComposioToolRule } from "@grasp-os/shared/connect";
-import { exports } from "cloudflare:workers";
+import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { fakeComposioApi } from "./composio-api.ts";
@@ -81,6 +82,15 @@ const hubspot = async (): Promise<string> =>
 
 const owner = "owner-7";
 
+/** Where a run's call comes from, as core signs it. */
+const runOrigin = {
+  permissionId: "permission-hubspot",
+  context: { type: "run" as const, appId: "app-crm", runId: "run-1" },
+};
+
+/** An answer's output, as the JSON value it holds. */
+const parsed = (text: string): unknown => JSON.parse(text);
+
 /** A call without an idempotency key. */
 const read = (
   connectionId: string,
@@ -103,29 +113,57 @@ describe("a Composio tool the admin marked as a read", () => {
   });
 
   it("is held for its person in a restricted context, as a side effect: what it sends may carry that data", async () => {
+    const anna = someone();
     const connectionId = await hubspot();
-    const restricted = { restricted: true, origin: chatOrigin };
+    const run = agentFor(anna.userId);
+    const signed = { restricted: true, origin: runOrigin };
     const withoutKey = await outcome(
-      callAs(
-        agentFor("user-anna"),
-        read(connectionId, "HUBSPOT_LIST_CONTACTS"),
-        restricted
-      )
+      callAs(run, read(connectionId, "HUBSPOT_LIST_CONTACTS"), signed)
     );
-    const withKey = await outcome(
-      callAs(
-        agentFor("user-anna"),
-        {
-          ...read(connectionId, "HUBSPOT_LIST_CONTACTS"),
-          idempotencyKey: crypto.randomUUID(),
-        },
-        restricted
-      )
-    );
-    expect({ withoutKey, withKey, ran: composio.state.mcp.ran }).toStrictEqual({
+    const call = {
+      ...read(connectionId, "HUBSPOT_LIST_CONTACTS", { owner_id: owner }),
+      idempotencyKey: "run-1:list",
+    };
+    const withKey = await outcome(callAs(run, call, signed));
+    const ranBefore = [...composio.state.mcp.ran];
+    const [held, ...others] = await exports.default.listPendingActions(anna);
+    if (held === undefined || others.length > 0) {
+      throw new Error("Expected one held action");
+    }
+    const confirmed = await exports.default.confirmAction({
+      person: anna,
+      id: held.id,
+      inputHash: held.inputHash,
+      capability: await signCapability(env.CAPABILITY_SIGNING_KEY, run, {
+        connectionId,
+        action: held.action,
+        idempotencyKey: held.idempotencyKey,
+        ...signed,
+        confirms: held.id,
+      }),
+    });
+    // The step tries again under the same key: it gets the answer, and
+    // the tool doesn't run again.
+    const repeat = await callAs(run, call, signed);
+    const recorded = await events();
+    const calls = recorded.filter(({ action }) => action === "connection.call");
+    const output = { owner, contacts: [] };
+    expect({
+      withoutKey,
+      withKey,
+      ranBefore,
+      confirmed: parsed(confirmed.output),
+      repeat: parsed(repeat.output),
+      outcomes: calls.map(({ detail }) => detail.outcome),
+      ran: composio.state.mcp.ran,
+    }).toStrictEqual({
       withoutKey: "connect.idempotency_key_required",
       withKey: "connect.held",
-      ran: [],
+      ranBefore: [],
+      confirmed: output,
+      repeat: output,
+      outcomes: ["refused", "held", "ok", "replayed"],
+      ran: [{ tool: "HUBSPOT_LIST_CONTACTS", input: { owner_id: owner } }],
     });
   });
 
@@ -203,9 +241,12 @@ describe("a Composio tool the admin didn't mark as a read", () => {
 });
 
 /** Starts connecting HubSpot with `tools`, for an admin. */
-const start = async (tools: (string | ComposioToolRule)[]) =>
+const start = async (
+  tools: (string | ComposioToolRule)[],
+  person = someone("admin")
+) =>
   await exports.default.startToolkitConnection({
-    person: someone("admin"),
+    person,
     composio: true,
     toolkit: "hubspot",
     tools,
@@ -215,10 +256,29 @@ const start = async (tools: (string | ComposioToolRule)[]) =>
   });
 
 describe("the admin's allowlist, when they connect", () => {
-  it("is kept with the flow, rules and all, and counted in the consent", async () => {
-    await start(rules);
-    const [consent] = await events();
-    expect(consent?.detail).toMatchObject({ toolCount: 3, readCount: 1 });
+  it("is kept with the flow, rules and all, and counted in the consent and the connection", async () => {
+    const admin = someone("admin");
+    const { url } = await start(rules, admin);
+    const { state } = composio.authorize(url);
+    await exports.default.finishConnection({
+      person: admin,
+      state,
+      composio: true,
+    });
+    const recorded = await events();
+    const counted = recorded
+      .filter(({ action }) =>
+        ["connection.consent", "connection.connect"].includes(action)
+      )
+      .map(({ action, detail }) => ({
+        action,
+        toolCount: detail.toolCount,
+        readCount: detail.readCount,
+      }));
+    expect(counted).toStrictEqual([
+      { action: "connection.consent", toolCount: 3, readCount: 1 },
+      { action: "connection.connect", toolCount: 3, readCount: 1 },
+    ]);
   });
 
   it("names only the tools' own input properties as resources, and each tool once", async () => {
@@ -239,15 +299,7 @@ describe("the admin's allowlist, when they connect", () => {
 
   it("gives Composio's server the allowed tools by name", async () => {
     const admin = someone("admin");
-    const { url } = await exports.default.startToolkitConnection({
-      person: admin,
-      composio: true,
-      toolkit: "hubspot",
-      tools: rules,
-      consent: composioConsentText,
-      origin: clientOrigin,
-      returnTo: "/connections",
-    });
+    const { url } = await start(rules, admin);
     const { state } = composio.authorize(url);
     await exports.default.finishConnection({
       person: admin,

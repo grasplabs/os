@@ -36,7 +36,8 @@ export const composioTool = (
  * So is every call on a Composio server from a context that read
  * restricted data (`restricted`), reads too: its input goes to a third
  * party and may carry that data, so the person it acts for decides (R12).
- * Its answer is then kept like any side effect's, so a run's step that
+ * Like any side effect it then needs an idempotency key: without one it is
+ * refused, not held. Its answer is then kept like any side effect's, so a run's step that
  * waited for the person's decision gets it rather than being held again.
  */
 export const hasSideEffect = (

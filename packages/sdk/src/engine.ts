@@ -72,6 +72,12 @@ export type BindingMethod = (...args: Json[]) => Promise<unknown>;
  * answer, which the step's code (or the App's) may catch and handle like
  * any other error, as its own choice; uncaught, it fails the step. A run
  * that ended meanwhile gets nothing (`connect.run_ended`, for the person).
+ * On a Composio connection, once the App has read restricted data, a read
+ * counts as a side effect too (its input leaves for a third party): it
+ * needs the step's `idempotencyKey` like any other, or connect refuses it
+ * (`connect.idempotency_key_required`), not holds it. Make such a call in
+ * a `sideEffect: true` step, which gets the key: one call per action and
+ * input with it, so more calls take keyed steps of their own.
  */
 export type WorkflowEnv = Readonly<
   Record<string, Readonly<Record<string, BindingMethod>>>

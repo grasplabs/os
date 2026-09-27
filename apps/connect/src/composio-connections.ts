@@ -8,7 +8,10 @@ import {
   oauthFlowLifetimeMs,
   startToolkitConnectionSchema,
 } from "@grasp-os/shared/connect";
-import type { ConnectionPerson } from "@grasp-os/shared/connect";
+import type {
+  ComposioToolRule,
+  ConnectionPerson,
+} from "@grasp-os/shared/connect";
 import { randomToken, sha256Hex } from "@grasp-os/shared/encoding";
 import { identifierSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -405,6 +408,14 @@ const refuseUnlessAdmin = async (
 };
 
 /**
+ * How many of an allowlist's tools the admin marked as reads: the consent
+ * and connect events record it beside the `toolsHash`, so the log shows at
+ * a glance what runs unheld and without a key.
+ */
+const readCountOf = (tools: readonly (string | ComposioToolRule)[]): number =>
+  tools.filter((tool) => typeof tool !== "string" && tool.read === true).length;
+
+/**
  * Starts connecting a toolkit for an admin who consented: records their
  * consent with the flow, and returns Composio's auth link.
  */
@@ -503,9 +514,7 @@ export const startToolkitConnection = async (
           flowId,
           toolsHash: await sha256Hex(storedTools),
           toolCount: tools.length,
-          readCount: tools.filter(
-            (tool) => typeof tool !== "string" && tool.read === true
-          ).length,
+          readCount: readCountOf(tools),
         }),
       ],
       [
@@ -764,6 +773,7 @@ const finishToolkitConnection = async (
           flowId: flow.flowId,
           toolsHash: await sha256Hex(flow.tools),
           toolCount: tools.length,
+          readCount: readCountOf(tools),
         }),
       ],
       [

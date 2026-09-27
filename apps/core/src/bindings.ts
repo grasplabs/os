@@ -217,7 +217,10 @@ export class ConnectionBinding extends WorkerEntrypoint<
    * chat read restricted data) is held for the person to confirm instead:
    * the answer then has `pending` set, `output` is the JSON text `"null"`
    * and `provenance` is empty; repeating the call later returns the
-   * action's result once it ran.
+   * action's result once it ran. On a Composio connection, once the chat
+   * read restricted data, a read is a side effect too and needs a key from
+   * the agent: without one it is refused
+   * (`connect.idempotency_key_required`), not held.
    */
   async call(
     action: unknown,
