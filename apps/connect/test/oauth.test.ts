@@ -9,7 +9,7 @@ import { eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { connectionTokens, oauthFlows } from "../src/db/schema.ts";
+import { connections, connectionTokens, oauthFlows } from "../src/db/schema.ts";
 import { startConnection } from "../src/oauth.ts";
 import {
   auditEvents,
@@ -536,6 +536,27 @@ describe("whose account", () => {
     expect(providers.revocations()).toStrictEqual([]);
     expect(providers.grantHolds(account)).toBeTruthy();
     await expect(ownConnections(anna)).resolves.toHaveLength(1);
+  });
+
+  it("needing to be connected again still holds its account: connecting it again waits until it is disconnected", async () => {
+    const anna = someone();
+    const account = ownAccount(anna, "google");
+    const connectionId = await connectAccount(providers, anna, account);
+    // What a refresh the provider refused for good leaves (vault.test.ts).
+    await drizzle(env.DB)
+      .update(connections)
+      .set({ status: "needs_reauth" })
+      .where(eq(connections.id, connectionId));
+    await expect(
+      outcome(connectAccount(providers, anna, account))
+    ).resolves.toBe("connection.already_connected");
+    await exports.default.disconnect({ person: anna, connectionId });
+    await expect(
+      outcome(connectAccount(providers, anna, account))
+    ).resolves.toBe("ok");
+    await expect(ownConnections(anna)).resolves.toMatchObject([
+      { status: "active", accountName: account.email },
+    ]);
   });
 
   it("refused for another reason, doesn't revoke the grant a connection already holds", async () => {

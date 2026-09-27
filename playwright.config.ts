@@ -48,6 +48,8 @@ export default defineConfig({
           members: true,
           workflows: true,
           decisions: true,
+          connections: true,
+          permissions: true,
         })
       ),
     ].join(" "),

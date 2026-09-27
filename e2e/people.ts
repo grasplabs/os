@@ -33,7 +33,8 @@ const wrangler = path.join(
   "../node_modules/.bin/wrangler"
 );
 
-const quoted = (value: string): string => `'${value.replaceAll("'", "''")}'`;
+export const quoted = (value: string): string =>
+  `'${value.replaceAll("'", "''")}'`;
 
 /**
  * How often `execute` tries statements the database was too busy for: it
@@ -59,18 +60,45 @@ const isBusy = (error: unknown): boolean =>
   busyErrors.some((text) => String(error.stderr).includes(text));
 
 /**
- * Runs SQL on core's local database, the one the stack's dev server uses.
- * Wrangler runs the statements as one batch in one transaction, which
- * SQLite undoes whole when it can't finish, so a busy batch is tried
- * again. Should one ever commit and still report failure, trying it again
- * inserts the same keys and fails on them, rather than writing twice.
+ * Where each local database of the stack is, as wrangler options run from
+ * core's directory: core's own, and connect's, which the dev server keeps
+ * next to it (apps/core/package.json).
  */
-const execute = async (sql: string): Promise<void> => {
+const databases = {
+  core: [],
+  connect: [
+    "-c",
+    "../connect/wrangler.jsonc",
+    "--persist-to",
+    ".wrangler/state",
+  ],
+} as const;
+
+/**
+ * Runs SQL on one of the local databases the stack's dev server uses,
+ * core's unless `database` says otherwise. Wrangler runs the statements as
+ * one batch in one transaction, which SQLite undoes whole when it can't
+ * finish, so a busy batch is tried again. Should one ever commit and still
+ * report failure, trying it again inserts the same keys and fails on them,
+ * rather than writing twice.
+ */
+export const execute = async (
+  sql: string,
+  database: keyof typeof databases = "core"
+): Promise<void> => {
   for (let attempt = 1; ; attempt += 1) {
     try {
       execFileSync(
         wrangler,
-        ["d1", "execute", "DB", "--local", "--command", sql],
+        [
+          "d1",
+          "execute",
+          "DB",
+          "--local",
+          ...databases[database],
+          "--command",
+          sql,
+        ],
         {
           cwd: coreDirectory,
           stdio: "pipe",
@@ -127,12 +155,13 @@ const cast = {
   roleChange: { admin: "admin", one: "user" },
   membersUnreachable: { admin: "admin" },
   membersRecover: { admin: "admin" },
+  connections: { admin: "admin", user: "user" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;
 
 /** Each attempt's people, by scene and name. */
-type Cast = Record<string, Record<string, Person>>[];
+export type Cast = Record<string, Record<string, Person>>[];
 
 /** How `signInCast` hands everyone to the test workers. */
 const castVariable = "E2E_CAST";
@@ -141,11 +170,11 @@ const castVariable = "E2E_CAST";
  * Signs in the whole cast in one write, once for each attempt a test may
  * get, so a retry starts from people as they were, not as the failed
  * attempt left them. The global setup (e2e/setup.ts) runs it before any
- * test loads a page. Writing from a process of its own while the dev
+ * test loads a page, and returns them. Writing from a process of its own while the dev
  * server reads the same file can fail the dev server's query with
  * SQLITE_BUSY, so no test writes people while tests run.
  */
-export const signInCast = async (attempts: number): Promise<void> => {
+export const signInCast = async (attempts: number): Promise<Cast> => {
   const now = Date.now();
   // Covers the slowest run, also against a stack that was already running.
   const day = 24 * 60 * 60 * 1000;
@@ -180,6 +209,7 @@ export const signInCast = async (attempts: number): Promise<void> => {
   }
   // Playwright hands the global setup's environment to the test workers.
   process.env[castVariable] = JSON.stringify(signedIn);
+  return signedIn;
 };
 
 /** The scene's people, signed in for this attempt at the running test. */
