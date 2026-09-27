@@ -406,8 +406,10 @@ export const forContext = async (
   const sources = found.flatMap(({ collection }) =>
     collection === null ? [] : [collection]
   );
-  const app = found.find(({ documentId }) => documentId === null);
-  const appId = app && "appId" in app.wanted.at ? app.wanted.at.appId : null;
+  // The App whose AGENTS.md was read, and at which version: at most one.
+  const [app] = found.flatMap(({ wanted: { at }, version }) =>
+    "appId" in at ? [{ appId: at.appId, version }] : []
+  );
   // Before anyone gets the text: an agent that reads something sensitive
   // is restricted first, and every read is recorded, cached or not, an
   // App's AGENTS.md too (by the App and its version, in its provenance).
@@ -419,13 +421,15 @@ export const forContext = async (
           { type: "delegate", authority, context: work },
           {
             action: "knowledge.read",
-            documentIds: found.map(
-              ({ documentId }) => documentId ?? appId ?? ""
+            documentIds: found.flatMap(
+              ({ documentId, wanted: { at } }) =>
+                // A document by its ID, an App's AGENTS.md by the App's.
+                documentId ?? ("appId" in at ? [at.appId] : [])
             ),
             detail: {
               read: "memory",
               context: context.type,
-              appId,
+              appId: app?.appId ?? null,
               appVersion: app?.version ?? null,
             },
           },
