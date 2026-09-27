@@ -181,6 +181,18 @@ export interface ConnectionSummary {
   accountName: string | null;
   /** ISO 8601. */
   createdAt: string;
+  /**
+   * A Composio connection's allowed tools, by name, as the admin who
+   * connected it consented to them. Absent for a native connection, and
+   * from a connect that predates it.
+   */
+  tools?: string[];
+}
+
+/** A connection as core lists it to people: who connected it, by name too. */
+export interface ListedConnection extends ConnectionSummary {
+  /** `connectedBy`'s name, while core knows them. */
+  connectedByName: string | null;
 }
 
 /** Most connections one `connectionOwners` call takes. */
@@ -205,7 +217,8 @@ export interface ConnectionOwner {
  * A signed-in person's connections, over `/rpc`. Starting one returns the
  * provider URL to send the browser to; the provider sends it back to
  * core's callback, which returns it to `returnTo` (a path on this origin)
- * with `connection=<id>`, or `connectionError=<code>`.
+ * with `connection=<id>` once it finished, or to the Connections page with
+ * `connectionError=<code>` when it didn't.
  */
 export interface ConnectionsApi {
   start: (request: {
@@ -213,7 +226,7 @@ export interface ConnectionsApi {
     scope: ConnectionScope;
     returnTo?: string;
   }) => Promise<{ url: string }>;
-  list: () => Promise<ConnectionSummary[]>;
+  list: () => Promise<ListedConnection[]>;
   disconnect: (connectionId: string) => Promise<{ revoked: boolean }>;
   /**
    * What can be connected: the native providers, and, while the

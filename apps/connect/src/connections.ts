@@ -79,6 +79,27 @@ export const isComposioServerUrl = (url: string): boolean =>
   composioUrlSchema.safeParse(url).success;
 
 /**
+ * The tools the admin allowed on a Composio connection, as stored: none
+ * when they aren't recorded or can't be read.
+ */
+const storedTools = ({ tools }: Pick<Connection, "tools">) => {
+  if (tools === null) {
+    return [];
+  }
+  let stored: unknown;
+  try {
+    stored = JSON.parse(tools);
+  } catch {
+    return [];
+  }
+  return composioToolsSchema.safeParse(stored).data ?? [];
+};
+
+/** The names of the tools the admin allowed on a Composio connection. */
+export const allowedToolNames = (connection: Pick<Connection, "tools">) =>
+  storedTools(connection).map(composioToolName);
+
+/**
  * What the admin said about a tool they allowed on a Composio connection
  * (`ComposioToolRule`): whether it only reads, and which input property
  * names its resource.
@@ -97,18 +118,9 @@ export const allowedTool = (
   connection: Connection,
   action: string
 ): ToolRule | undefined => {
-  if (connection.tools === null) {
-    return undefined;
-  }
-  let stored: unknown;
-  try {
-    stored = JSON.parse(connection.tools);
-  } catch {
-    return undefined;
-  }
-  const tool = composioToolsSchema
-    .safeParse(stored)
-    .data?.find((each) => composioToolName(each) === action);
+  const tool = storedTools(connection).find(
+    (each) => composioToolName(each) === action
+  );
   if (tool === undefined) {
     return undefined;
   }

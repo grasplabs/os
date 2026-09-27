@@ -32,6 +32,7 @@ const person = async (role: "admin" | "user" = "user") => {
     userId,
     // Their own Microsoft account: the Entra object ID they sign in with.
     oid: String(claims.oid),
+    name: String(claims.name),
     connections: core.authenticate().connections,
   };
 };
@@ -91,7 +92,11 @@ describe("connecting an account", () => {
       status: "active",
       ownerUserId: anna.userId,
       accountName: `${account}@acme.test`,
+      connectedBy: anna.userId,
+      connectedByName: anna.name,
     });
+    // Only a Composio connection has tools the admin allowed.
+    expect(connection).not.toHaveProperty("tools");
   });
 
   it("never hands core a token, nor logs the code", async () => {
@@ -147,12 +152,12 @@ describe("connecting an account", () => {
     };
     const response = await backFromProvider(anna.session, query);
     expect(response.headers.get("location")).toBe(
-      `${clientOrigin}/?connectionError=connection.flow_invalid`
+      `${clientOrigin}/connections?connectionError=connection.flow_invalid`
     );
     // The flow is spent: Mallory can't finish it either.
     const again = await backFromProvider(mallory.session, query);
     expect(again.headers.get("location")).toBe(
-      `${clientOrigin}/?connectionError=connection.flow_invalid`
+      `${clientOrigin}/connections?connectionError=connection.flow_invalid`
     );
     await expect(
       Promise.all([anna.connections.list(), mallory.connections.list()])
@@ -179,12 +184,12 @@ describe("connecting an account", () => {
     };
     const response = await backFromProvider(undefined, query);
     expect(response.headers.get("location")).toBe(
-      `${clientOrigin}/?connectionError=auth.unauthenticated`
+      `${clientOrigin}/connections?connectionError=auth.unauthenticated`
     );
     // The same URL, brought back later with a session, finishes nothing.
     const later = await backFromProvider(anna.session, query);
     expect(later.headers.get("location")).toBe(
-      `${clientOrigin}/?connectionError=connection.flow_invalid`
+      `${clientOrigin}/connections?connectionError=connection.flow_invalid`
     );
     await expect(anna.connections.list()).resolves.toStrictEqual([]);
   });
@@ -201,7 +206,7 @@ describe("connecting an account", () => {
       state: authorization.searchParams.get("state") ?? "",
     });
     expect(response.headers.get("location")).toBe(
-      `${clientOrigin}/?connectionError=connection.wrong_account`
+      `${clientOrigin}/connections?connectionError=connection.wrong_account`
     );
   });
 
@@ -244,7 +249,7 @@ describe("connecting an account", () => {
       state: authorization.searchParams.get("state") ?? "",
     });
     expect(response.headers.get("location")).toBe(
-      `${clientOrigin}/?connectionError=connection.not_own_account`
+      `${clientOrigin}/connections?connectionError=connection.not_own_account`
     );
   });
 
@@ -359,10 +364,15 @@ describe("the catalog", () => {
 describe("connecting a Composio toolkit", () => {
   /** An admin's `connections`, with `features` as the flags. */
   const adminWith = async (features: Record<string, boolean>) => {
-    const { session } = await signedInWithRole(idp, "admin");
+    const { session, userId } = await signedInWithRole(idp, "admin");
     const coreEnv: Env = { ...env, FEATURES: features };
     const { core } = await openRpc(session, { coreEnv });
-    return { session, coreEnv, connections: core.authenticate().connections };
+    return {
+      session,
+      userId,
+      coreEnv,
+      connections: core.authenticate().connections,
+    };
   };
 
   const request = {
@@ -391,7 +401,13 @@ describe("connecting a Composio toolkit", () => {
     expect(response.headers.get("location")).toBe(
       `${clientOrigin}/connections?tab=shared&connection=${connection?.id}`
     );
-    expect(connection).toMatchObject({ source: "composio", scope: "shared" });
+    // What the admin consented to: by them, for exactly these tools.
+    expect(connection).toMatchObject({
+      source: "composio",
+      scope: "shared",
+      connectedBy: admin.userId,
+      tools: ["HUBSPOT_LIST_CONTACTS", "HUBSPOT_CREATE_CONTACT"],
+    });
   });
 
   it("isn't offered while the composio flag is off, nor finished if it goes off meanwhile", async () => {
@@ -407,7 +423,7 @@ describe("connecting a Composio toolkit", () => {
       off.coreEnv
     );
     expect(response.headers.get("location")).toBe(
-      `${clientOrigin}/?connectionError=connection.provider_unavailable`
+      `${clientOrigin}/connections?connectionError=connection.provider_unavailable`
     );
   });
 

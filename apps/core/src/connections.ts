@@ -16,7 +16,7 @@ import type {
   ConnectionOwner,
   ConnectionPerson,
   ConnectionsApi,
-  ConnectionSummary,
+  ListedConnection,
   OAuthProvider,
   OfferedCatalog,
 } from "@grasp-os/shared/connect";
@@ -37,7 +37,8 @@ import {
 import { providerIds, signInConfig } from "./auth/config.ts";
 import type { SignInConfig } from "./auth/config.ts";
 import { identify } from "./auth/identity.ts";
-import { accounts, hiddenConnectors } from "./db/core/schema.ts";
+import { accounts, hiddenConnectors, users } from "./db/core/schema.ts";
+import { inList } from "./db/d1.ts";
 import { featureEnabled } from "./features.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
@@ -345,9 +346,27 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
     });
   }
 
-  async list(): Promise<ConnectionSummary[]> {
+  async list(): Promise<ListedConnection[]> {
     const person = await this.#person();
-    return await this.#env.CONNECT.listConnections(person);
+    const listed = await this.#env.CONNECT.listConnections(person);
+    const ids = [
+      ...new Set(listed.flatMap(({ connectedBy }) => connectedBy ?? [])),
+    ];
+    const people =
+      ids.length === 0
+        ? []
+        : await drizzle(this.#env.DB)
+            .select({ id: users.id, name: users.name })
+            .from(users)
+            .where(inList(users.id, ids));
+    const names = new Map(people.map(({ id, name }) => [id, name]));
+    return listed.map((connection) => ({
+      ...connection,
+      connectedByName:
+        connection.connectedBy === null
+          ? null
+          : (names.get(connection.connectedBy) ?? null),
+    }));
   }
 
   async disconnect(connectionId: string): Promise<{ revoked: boolean }> {
@@ -509,10 +528,13 @@ export const handleConnectionCallback = async (
   ) {
     return undefined;
   }
-  const home = new URL("/", config.origin);
+  // A flow that fails returns to the Connections page, where people start
+  // connecting and can read why: its own `returnTo` stays with connect,
+  // which may never have found the flow.
+  const connectionsPage = new URL("/connections", config.origin);
   const failed = (code: string): Response => {
-    home.searchParams.set("connectionError", code);
-    return redirect(home);
+    connectionsPage.searchParams.set("connectionError", code);
+    return redirect(connectionsPage);
   };
   const params = new URL(request.url).searchParams;
   const state = params.get("state");
@@ -538,7 +560,7 @@ export const handleConnectionCallback = async (
   } catch (error) {
     return failed(errorCodeOf(error));
   }
-  const back = onOrigin(config.origin, finished.returnTo) ?? home;
+  const back = onOrigin(config.origin, finished.returnTo) ?? connectionsPage;
   back.searchParams.set("connection", finished.connectionId);
   return redirect(back);
 };
