@@ -263,6 +263,12 @@ export const composioCleanups = sqliteTable(
     serverId: text("server_id"),
     connectedAccountId: text("connected_account_id"),
     authConfigId: text("auth_config_id"),
+    /**
+     * For a flow's cleanup: the marker everything the flow made at Composio
+     * carries in its name, which finds what no ID column names (an ID whose
+     * write failed after Composio made it).
+     */
+    marker: text(),
     attempts: integer().notNull().default(0),
     retryAt: timestamp("retry_at").notNull(),
     createdAt: timestamp("created_at").notNull(),

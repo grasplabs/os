@@ -3,6 +3,7 @@ CREATE TABLE `composio_cleanups` (
 	`server_id` text,
 	`connected_account_id` text,
 	`auth_config_id` text,
+	`marker` text,
 	`attempts` integer DEFAULT 0 NOT NULL,
 	`retry_at` integer NOT NULL,
 	`created_at` integer NOT NULL

@@ -98,25 +98,110 @@ const areas = [
   ["authConfigId", "auth_configs"],
 ] as const;
 
-const isNothing = (made: AtComposio): boolean =>
-  areas.every(([field]) => made[field] === undefined || made[field] === null);
+type Area = (typeof areas)[number][1];
+
+/** One thing at Composio to delete: its area and its ID. */
+type Target = readonly [Area, string];
+
+const targetsOf = (made: AtComposio): Target[] =>
+  areas.flatMap(([field, area]) => {
+    const id = made[field];
+    return id === undefined || id === null ? [] : [[area, id] as const];
+  });
 
 /**
- * Deletes what connect made at Composio, server first, then the account
- * (which deletes its tokens), then the auth config. What Composio no
- * longer has (404) is gone. Each failure is logged and never thrown: what
- * is left to delete.
+ * The marker everything a flow makes at Composio carries in its name,
+ * found by it even when no ID of it was recorded: `grasp-` and the first
+ * 24 hex digits of the flow ID, 30 characters, as Composio allows for an
+ * MCP server's name. `handOverFlows` computes the same in SQL.
+ */
+export const markerOf = (flowId: string): string =>
+  `grasp-${flowId.replaceAll("-", "").slice(0, 24)}`;
+
+const listSchema = z.object({ items: z.array(z.unknown()) });
+const namedSchema = z.object({ id: idSchema, name: z.string().nullish() });
+
+/** Most things of one kind a marker is looked up for: it names one flow's. */
+const markedMax = 50;
+
+/** The IDs of the items of the list at `path`, those `keep` keeps. */
+const listedIds = async (
+  key: string,
+  path: string,
+  keep: (item: z.infer<typeof namedSchema>) => boolean = () => true
+): Promise<string[]> => {
+  const { items } = await composioRequest(key, { path, schema: listSchema });
+  return items.flatMap((item) => {
+    const parsed = namedSchema.safeParse(item);
+    return parsed.success && keep(parsed.data) ? [parsed.data.id] : [];
+  });
+};
+
+/**
+ * Everything at Composio that carries `marker`: auth configs and MCP
+ * servers by their name, which Composio can filter by, and the connected
+ * accounts of those auth configs, which it can filter by too. `undefined`
+ * when Composio doesn't answer: then not everything may be found.
+ */
+const findMarked = async (
+  key: string,
+  marker: string
+): Promise<Target[] | undefined> => {
+  const query = (params: Record<string, string>) =>
+    new URLSearchParams({ ...params, limit: String(markedMax) }).toString();
+  const named = ({ name }: z.infer<typeof namedSchema>) => name === marker;
+  try {
+    const authConfigs = await listedIds(
+      key,
+      `/auth_configs?${query({ search: marker })}`,
+      named
+    );
+    const servers = await listedIds(
+      key,
+      `/mcp/servers?${query({ name: marker })}`,
+      named
+    );
+    const accounts: string[] = [];
+    for (const authConfig of authConfigs) {
+      accounts.push(
+        // oxlint-disable-next-line no-await-in-loop -- one flow has one auth config
+        ...(await listedIds(
+          key,
+          `/connected_accounts?${query({ auth_config_ids: authConfig })}`
+        ))
+      );
+    }
+    return [
+      ...servers.map((id) => ["mcp", id] as const),
+      ...accounts.map((id) => ["connected_accounts", id] as const),
+      ...authConfigs.map((id) => ["auth_configs", id] as const),
+    ];
+  } catch (error) {
+    if (!(error instanceof ComposioError)) {
+      throw error;
+    }
+    log.warn("composio.find_marked_failed", errorFields(error));
+    return undefined;
+  }
+};
+
+/**
+ * Deletes `targets` at Composio, servers first, then accounts (which
+ * deletes their tokens), then auth configs. What Composio no longer has
+ * (404) is gone. Each failure is logged and never thrown: what is left.
  */
 const deleteAtComposio = async (
   key: string,
-  made: AtComposio
-): Promise<AtComposio> => {
-  const left: AtComposio = {};
-  for (const [field, area] of areas) {
-    const id = made[field];
-    if (id === undefined || id === null) {
-      continue;
-    }
+  targets: readonly Target[]
+): Promise<Target[]> => {
+  const order = (area: Area) => areas.findIndex(([, each]) => each === area);
+  const unique = [
+    ...new Map(targets.map((each) => [each.join(":"), each])).values(),
+  ];
+  unique.sort(([a], [b]) => order(a) - order(b));
+  const left: Target[] = [];
+  for (const target of unique) {
+    const [area, id] = target;
     try {
       // oxlint-disable-next-line no-await-in-loop -- the server before the account it serves
       await composioRequest(key, {
@@ -127,11 +212,40 @@ const deleteAtComposio = async (
     } catch (error) {
       if (!(error instanceof ComposioError && error.status === 404)) {
         log.warn("composio.delete_failed", { area, ...errorFields(error) });
-        left[field] = id;
+        left.push(target);
       }
     }
   }
   return left;
+};
+
+/**
+ * Deletes at Composio what `made` names and, with a `marker`, everything
+ * that carries it (found first, so an auth config's accounts are found
+ * before it goes). `complete` only when everything was found and deleted.
+ */
+const settleAtComposio = async (
+  key: string,
+  made: AtComposio,
+  marker: string | null
+): Promise<{ left: Target[]; complete: boolean }> => {
+  const marked = marker === null ? [] : await findMarked(key, marker);
+  const left = await deleteAtComposio(key, [
+    ...targetsOf(made),
+    ...(marked ?? []),
+  ]);
+  return { left, complete: marked !== undefined && left.length === 0 };
+};
+
+/** What is left, as a cleanup row's ID columns hold it (the marker finds the rest). */
+const idsOf = (left: readonly Target[]) => {
+  const first = (area: Area) =>
+    left.find(([each]) => each === area)?.[1] ?? null;
+  return {
+    serverId: first("mcp"),
+    connectedAccountId: first("connected_accounts"),
+    authConfigId: first("auth_configs"),
+  };
 };
 
 /** The first wait before trying a failed cleanup again. */
@@ -160,50 +274,45 @@ const retryDelayMs = (attempts: number): number =>
 // row cleared. Whatever happens in between (no key, Composio failing, a
 // crash), the row is there for the cron trigger (`retryComposioCleanups`).
 
-/** A cleanup row for `made`, due at `retryAt`, to insert with its change. */
-const cleanupRow = (id: string, made: AtComposio, retryAt: Date) => ({
-  id,
-  serverId: made.serverId ?? null,
-  connectedAccountId: made.connectedAccountId ?? null,
-  authConfigId: made.authConfigId ?? null,
-  retryAt,
-  createdAt: new Date(Date.now()),
-});
+// A flow's cleanup row is written before anything is made at Composio
+// (intent first), and everything made there carries the flow's marker
+// (`markerOf`) in its name. Each ID is written to the row as soon as it is
+// known, the fast path; should that write fail, the marker still finds it.
 
 /**
- * Carries out the recorded cleanup `id` of `made`: deletes it at Composio,
- * then clears the row, or keeps in it what is left for the cron trigger.
- * Never throws: it runs where another error may be on its way, and a row
- * it fails to clear is only tried again. What is left to delete
- * (everything, without a key).
+ * Carries out the recorded cleanup `id` of `made` (and, with a `marker`,
+ * of everything carrying it): deletes it at Composio, then clears the row,
+ * or keeps in it what is left for the cron trigger. Never throws: it runs
+ * where another error may be on its way, and a row it fails to clear is
+ * only tried again. Whether the account `made` names, if any, is deleted.
  */
 const carryOutCleanup = async (
   env: Env,
   id: string,
-  made: AtComposio
-): Promise<AtComposio> => {
+  made: AtComposio,
+  marker: string | null
+): Promise<boolean> => {
   const key = composioKey(env);
   if (key === undefined) {
-    return made;
+    return false;
   }
-  const left = await deleteAtComposio(key, made);
+  const { left, complete } = await settleAtComposio(key, made, marker);
   const db = drizzle(env.DB);
   const row = eq(composioCleanups.id, id);
   try {
-    await (isNothing(left)
+    await (complete
       ? db.delete(composioCleanups).where(row)
-      : db
-          .update(composioCleanups)
-          .set({
-            serverId: left.serverId ?? null,
-            connectedAccountId: left.connectedAccountId ?? null,
-            authConfigId: left.authConfigId ?? null,
-          })
-          .where(row));
+      : db.update(composioCleanups).set(idsOf(left)).where(row));
   } catch (error) {
     log.error("composio.cleanup_not_cleared", errorFields(error));
   }
-  return left;
+  const account = made.connectedAccountId;
+  return (
+    typeof account === "string" &&
+    !left.some(
+      ([area, each]) => area === "connected_accounts" && each === account
+    )
+  );
 };
 
 /**
@@ -234,28 +343,27 @@ export const retryComposioCleanups = async (env: Env): Promise<void> => {
     .limit(cleanupBatchSize);
   for (const cleanup of due) {
     // oxlint-disable-next-line no-await-in-loop -- a small batch, in turn
-    const left = await deleteAtComposio(key, cleanup);
+    const { left, complete } = await settleAtComposio(
+      key,
+      cleanup,
+      cleanup.marker
+    );
     const row = eq(composioCleanups.id, cleanup.id);
     const attempts = cleanup.attempts + 1;
-    if (!isNothing(left) && attempts >= stuckAttempts) {
+    if (!complete && attempts >= stuckAttempts) {
       // Someone should look: logged by area, never by ID.
       log.error("composio.cleanup_stuck", {
         attempts,
-        left: areas
-          .filter(([field]) => typeof left[field] === "string")
-          .map(([, area]) => area)
-          .join(","),
+        left: [...new Set(left.map(([area]) => area))].join(","),
       });
     }
     // oxlint-disable-next-line no-await-in-loop -- a small batch, in turn
-    await (isNothing(left)
+    await (complete
       ? db.delete(composioCleanups).where(row)
       : db
           .update(composioCleanups)
           .set({
-            serverId: left.serverId ?? null,
-            connectedAccountId: left.connectedAccountId ?? null,
-            authConfigId: left.authConfigId ?? null,
+            ...idsOf(left),
             attempts,
             retryAt: new Date(now.getTime() + retryDelayMs(attempts)),
           })
@@ -327,6 +435,18 @@ export const startToolkitConnection = async (
   const storedTools = JSON.stringify(tools);
   const callback = new URL(connectionCallbackPath, origin);
   callback.searchParams.set("state", state);
+  const marker = markerOf(flowId);
+  const db = drizzle(env.DB);
+  const thisCleanup = eq(composioCleanups.id, flowId);
+  // Intent first: should anything after this fail, or the isolate go, the
+  // cron trigger finds what was made by its marker (`underWayMs` from now,
+  // long after this start is done). If this fails, nothing is made.
+  await db.insert(composioCleanups).values({
+    id: flowId,
+    marker,
+    retryAt: new Date(Date.now() + underWayMs),
+    createdAt: new Date(Date.now()),
+  });
   const made: AtComposio = {};
   try {
     const { auth_config: authConfig } = await composioRequest(key, {
@@ -334,16 +454,15 @@ export const startToolkitConnection = async (
       path: "/auth_configs",
       body: {
         toolkit: { slug: toolkit },
-        auth_config: { type: "use_composio_managed_auth" },
+        auth_config: { type: "use_composio_managed_auth", name: marker },
       },
       schema: authConfigSchema,
     });
     made.authConfigId = authConfig.id;
-    // Recorded at once: should anything after this fail, or the isolate
-    // go, the cron trigger deletes it (`underWayMs` from now).
-    await drizzle(env.DB)
-      .insert(composioCleanups)
-      .values(cleanupRow(flowId, made, new Date(Date.now() + underWayMs)));
+    await db
+      .update(composioCleanups)
+      .set({ authConfigId: authConfig.id })
+      .where(thisCleanup);
     const link = await composioRequest(key, {
       method: "POST",
       path: "/connected_accounts/link",
@@ -355,11 +474,10 @@ export const startToolkitConnection = async (
       schema: linkSchema,
     });
     made.connectedAccountId = link.connected_account_id;
-    const db = drizzle(env.DB);
     await db
       .update(composioCleanups)
       .set({ connectedAccountId: link.connected_account_id })
-      .where(eq(composioCleanups.id, flowId));
+      .where(thisCleanup);
     // The flow takes over what the cleanup row held, in one transaction.
     await recordEvents(
       env,
@@ -375,7 +493,7 @@ export const startToolkitConnection = async (
         }),
       ],
       [
-        db.delete(composioCleanups).where(eq(composioCleanups.id, flowId)),
+        db.delete(composioCleanups).where(thisCleanup),
         db.insert(composioFlows).values({
           stateHash,
           flowId,
@@ -391,7 +509,7 @@ export const startToolkitConnection = async (
     );
     return { url: link.redirect_url };
   } catch (error) {
-    await carryOutCleanup(env, flowId, made);
+    await carryOutCleanup(env, flowId, made, marker);
     if (!(error instanceof ComposioError)) {
       throw error;
     }
@@ -431,7 +549,8 @@ const handOverFlows = async (
 ): Promise<ToolkitFlow[]> => {
   const [, taken] = await env.DB.batch<FlowRow>([
     env.DB.prepare(
-      `INSERT INTO composio_cleanups (id, server_id, connected_account_id, auth_config_id, attempts, retry_at, created_at) SELECT flow_id, NULL, connected_account_id, auth_config_id, 0, ?, ? FROM composio_flows WHERE ${where}`
+      // The marker as `markerOf` makes it.
+      `INSERT INTO composio_cleanups (id, server_id, connected_account_id, auth_config_id, marker, attempts, retry_at, created_at) SELECT flow_id, NULL, connected_account_id, auth_config_id, 'grasp-' || substr(replace(flow_id, '-', ''), 1, 24), 0, ?, ? FROM composio_flows WHERE ${where}`
     ).bind(retryAt, Date.now(), ...binds),
     env.DB.prepare(
       `DELETE FROM composio_flows WHERE ${where} RETURNING *`
@@ -476,7 +595,7 @@ export const abandonToolkitFlow = async (
   env: Env,
   flow: ToolkitFlow
 ): Promise<void> => {
-  await carryOutCleanup(env, flow.flowId, flow);
+  await carryOutCleanup(env, flow.flowId, flow, markerOf(flow.flowId));
 };
 
 /**
@@ -590,8 +709,8 @@ const finishToolkitConnection = async (
       method: "POST",
       path: "/mcp/servers",
       body: {
-        // 4 to 30 letters, digits, spaces and hyphens.
-        name: `grasp-${crypto.randomUUID().slice(0, 8)}`,
+        // Its flow's marker: 4 to 30 letters, digits and hyphens.
+        name: markerOf(flow.flowId),
         auth_config_ids: [flow.authConfigId],
         allowed_tools: tools,
       },
@@ -658,7 +777,7 @@ const finishToolkitConnection = async (
     );
     return { connectionId, returnTo: flow.returnTo };
   } catch (error) {
-    await carryOutCleanup(env, flow.flowId, made);
+    await carryOutCleanup(env, flow.flowId, made, markerOf(flow.flowId));
     if (!(error instanceof ComposioError)) {
       throw error;
     }
@@ -708,6 +827,7 @@ export const disconnectCleanup = (
         serverId: connections.composioServerId,
         connectedAccountId: connections.accountId,
         authConfigId: connections.composioAuthConfigId,
+        marker: sql<string | null>`NULL`.as("marker"),
         attempts: sql<number>`0`.as("attempts"),
         retryAt: sql<Date>`${Date.now() + firstRetryMs}`.as("retry_at"),
         createdAt: sql<Date>`${Date.now()}`.as("created_at"),
@@ -726,11 +846,14 @@ export const revokeAtComposio = async (
   env: Env,
   id: string,
   connection: Connection
-): Promise<boolean> => {
-  const left = await carryOutCleanup(env, id, {
-    serverId: connection.composioServerId,
-    connectedAccountId: connection.accountId,
-    authConfigId: connection.composioAuthConfigId,
-  });
-  return connection.accountId !== null && left.connectedAccountId === undefined;
-};
+): Promise<boolean> =>
+  await carryOutCleanup(
+    env,
+    id,
+    {
+      serverId: connection.composioServerId,
+      connectedAccountId: connection.accountId,
+      authConfigId: connection.composioAuthConfigId,
+    },
+    null
+  );

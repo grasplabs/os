@@ -181,11 +181,11 @@ const flowsOf = async (person: ConnectionPerson): Promise<number> => {
 };
 
 /**
- * Runs `run` while every `when` (`BEFORE INSERT`, `BEFORE DELETE`) write to
+ * Runs `run` while every `when` (`BEFORE INSERT`, …) write to
  * `composio_cleanups` fails, as a D1 write can.
  */
 const withTrigger = async <Result>(
-  when: "BEFORE INSERT" | "BEFORE DELETE",
+  when: "BEFORE INSERT" | "BEFORE UPDATE" | "BEFORE DELETE",
   run: () => Promise<Result>
 ): Promise<Result> => {
   await env.DB.prepare(
@@ -223,9 +223,16 @@ describe("connecting a Composio toolkit", () => {
     );
     // This deployment's one Composio user, and Composio's own app.
     expect(account?.userId).toBe(new URL(clientOrigin).host);
-    expect([...composio.state.holds.authConfigs.values()]).toStrictEqual([
-      { toolkit: "hubspot", managed: true },
-    ]);
+    expect(
+      [...composio.state.holds.authConfigs.values()].map(
+        ({ toolkit, managed, name }) => ({
+          toolkit,
+          managed,
+          // Named by the flow's marker, so it can be found without its ID.
+          marked: /^grasp-[0-9a-f]{24}$/u.test(name ?? ""),
+        })
+      )
+    ).toStrictEqual([{ toolkit: "hubspot", managed: true, marked: true }]);
   });
 
   it("makes one shared connection, to a server scoped to its auth config, its account and the allowed tools", async () => {
@@ -475,6 +482,71 @@ describe("connecting a Composio toolkit", () => {
       held: nothingHeld,
       cleanups: 0,
       finished: "connection.flow_invalid",
+    });
+  });
+
+  it("makes nothing at Composio when it can't first record what it will make", async () => {
+    const failed = await withTrigger(
+      "BEFORE INSERT",
+      async () => await outcome(start(someone("admin")))
+    );
+    expect({
+      failed: failed !== "ok",
+      held: heldAtComposio(),
+      writes: composioWrites(),
+      cleanups: await cleanupsLeft(),
+    }).toStrictEqual({
+      failed: true,
+      held: nothingHeld,
+      writes: [],
+      cleanups: 0,
+    });
+  });
+
+  it("finds by its marker an auth config whose ID it couldn't record and couldn't delete at once", async () => {
+    const admin = someone("admin");
+    composio.state.failing = "DELETE /";
+    const failed = await withTrigger(
+      "BEFORE UPDATE",
+      async () => await outcome(start(admin))
+    );
+    composio.state.failing = undefined;
+    const kept = { held: heldAtComposio(), cleanups: await cleanupsLeft() };
+    await afterMinutes(6, async () => {
+      await exports.default.scheduled();
+    });
+    expect({
+      failed: failed !== "ok",
+      kept,
+      after: { held: heldAtComposio(), cleanups: await cleanupsLeft() },
+    }).toStrictEqual({
+      failed: true,
+      kept: { held: { ...nothingHeld, authConfigs: 1 }, cleanups: 1 },
+      after: { held: nothingHeld, cleanups: 0 },
+    });
+  });
+
+  it("finds by its marker a server whose ID it couldn't record and couldn't delete at once", async () => {
+    const admin = someone("admin");
+    const { state } = composio.authorize(await start(admin));
+    composio.state.failing = "DELETE /";
+    const failed = await withTrigger(
+      "BEFORE UPDATE",
+      async () => await outcome(back(admin, state))
+    );
+    composio.state.failing = undefined;
+    const kept = heldAtComposio();
+    await afterMinutes(6, async () => {
+      await exports.default.scheduled();
+    });
+    expect({
+      failed: failed !== "ok",
+      kept,
+      after: { held: heldAtComposio(), cleanups: await cleanupsLeft() },
+    }).toStrictEqual({
+      failed: true,
+      kept: { authConfigs: 1, accounts: 1, servers: 1 },
+      after: { held: nothingHeld, cleanups: 0 },
     });
   });
 

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "f02aaa70-216a-47a9-a8c8-90c6d47da1b3",
+  "id": "dd669e06-06eb-41bc-bcf9-bcdec1e10f0d",
   "prevId": "977f7440-11f8-443a-bb36-62cc57c2e99c",
   "tables": {
     "audit_outbox": {
@@ -121,6 +121,13 @@
         },
         "auth_config_id": {
           "name": "auth_config_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "marker": {
+          "name": "marker",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

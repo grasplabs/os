@@ -34,13 +34,13 @@ import type { CallOutcome, CallRecord } from "./audit.ts";
 import { carryOut, connectionFor } from "./call.ts";
 import type { CallDone, CallProgress } from "./call.ts";
 import { catalog, catalogTools } from "./catalog.ts";
-import { connectionOwners } from "./connections.ts";
 import {
   finishToolkitFlow,
   purgeExpiredToolkitFlows,
   retryComposioCleanups,
   startToolkitConnection,
 } from "./composio-connections.ts";
+import { connectionOwners } from "./connections.ts";
 import {
   abandonFlow,
   disconnect,

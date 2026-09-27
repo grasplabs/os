@@ -181,6 +181,7 @@ const notFound = (): Response =>
 export interface FakeAuthConfig {
   toolkit: string;
   managed: boolean;
+  name: string | null;
 }
 
 /** A connected account connect made, and how its auth went. */
@@ -290,6 +291,10 @@ export const fakeComposioApi = (
           toolkit,
           managed:
             nested(body.auth_config, "type") === "use_composio_managed_auth",
+          name:
+            typeof nested(body.auth_config, "name") === "string"
+              ? String(nested(body.auth_config, "name"))
+              : null,
         });
         return Response.json(
           { toolkit: { slug: toolkit }, auth_config: { id: authConfigId } },
@@ -379,9 +384,47 @@ export const fakeComposioApi = (
         });
   };
 
-  const manage = async (request: Request, route: string): Promise<Response> => {
+  /**
+   * Lists of what connect made, as Composio filters them: auth configs by
+   * a search of their name, servers by their name and auth configs, and
+   * connected accounts by their auth configs.
+   */
+  const listing = (route: string, query: URLSearchParams): Response => {
+    const { holds } = state;
+    const search = query.get("search") ?? query.get("name") ?? "";
+    const byAuthConfig = query.get("auth_config_ids");
+    const lists: Record<string, { id: string; name?: string | null }[]> = {
+      "/auth_configs": [...holds.authConfigs]
+        .filter(([, { name }]) => (name ?? "").includes(search))
+        .map(([id, { name }]) => ({ id, name })),
+      "/mcp/servers": [...holds.servers]
+        .filter(([, { name }]) =>
+          name.toLowerCase().includes(search.toLowerCase())
+        )
+        .map(([id, { name }]) => ({ id, name })),
+      "/connected_accounts": [...holds.accounts]
+        .filter(([, { authConfigId }]) => authConfigId === byAuthConfig)
+        .map(([id]) => ({ id })),
+    };
+    const items = lists[route];
+    return items === undefined
+      ? notFound()
+      : Response.json({ items, next_cursor: null });
+  };
+
+  const manage = async (
+    request: Request,
+    route: string,
+    query: URLSearchParams
+  ): Promise<Response> => {
     if (request.method === "DELETE") {
       return deletion(route);
+    }
+    if (
+      request.method === "GET" &&
+      ["/auth_configs", "/mcp/servers", "/connected_accounts"].includes(route)
+    ) {
+      return listing(route, query);
     }
     if (request.method === "GET" && route.startsWith("/connected_accounts/")) {
       return accountAt(route);
@@ -451,7 +494,7 @@ export const fakeComposioApi = (
         cursor
       );
     }
-    return await manage(request, route);
+    return await manage(request, route, url.searchParams);
   };
 
   beforeEach(() => {
