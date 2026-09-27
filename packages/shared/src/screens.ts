@@ -1,7 +1,9 @@
 import { z } from "zod";
 
+import type { DecisionAnswerInput, DecisionView } from "./decisions.ts";
 import { defineErrorFamily } from "./errors.ts";
 import type { AppId } from "./ids.ts";
+import type { WorkflowRun } from "./workflows.ts";
 
 // An App's screens run in a sandboxed frame in the frontend (apps/web):
 // the page builds the frame's import map from a screen's modules, the kit
@@ -75,6 +77,29 @@ export interface AppErrorEntry extends ScreenProblem {
   screen: string;
 }
 
+/** A decision a run waits for, as its App's screens see it. */
+export interface WaitingDecision {
+  /** Its name in the workflow (`step.decision(name, …)`), with its key. */
+  name: string;
+  /**
+   * What it asks, as the workflow describes it: only for whoever sees the
+   * run's details (its starter, admins) or may answer the decision. It is
+   * written by workflow code, and can hold what the run read.
+   */
+  description?: string;
+  /** Its deadline, ISO 8601: no answer counts after it. */
+  expiresAt: string;
+}
+
+/**
+ * A run as its App's screens see it: `waiting` exactly while a decision of
+ * it is open, with the decisions it waits for; `running` while it waits
+ * on anything else; none once it has ended.
+ */
+export interface ScreenRun extends WorkflowRun {
+  waitingFor: WaitingDecision[];
+}
+
 /**
  * A signed-in person's way to an App's screens: for anyone with a role in
  * the App (`AppsApi`); its error log for its builders only.
@@ -98,6 +123,32 @@ export interface ScreensApi {
   ) => Promise<void>;
   /** The App's error log, newest first. */
   errors: (app: string) => Promise<AppErrorEntry[]>;
+  /**
+   * Starts a run of the App's workflow, for the person: anyone with a role
+   * in the App. Audited as started on a screen (`via: "screen"`). Behind
+   * `screen_workflows`, as are the calls below.
+   */
+  startRun: (
+    app: string,
+    workflow: string,
+    input?: unknown
+  ) => Promise<WorkflowRun>;
+  /** The App's latest 100 runs of `workflow`, newest first. */
+  runs: (app: string, workflow: string) => Promise<ScreenRun[]>;
+  /** One of the App's runs as it is now; another App's is not found. */
+  run: (app: string, run: string) => Promise<ScreenRun>;
+  /**
+   * Answers the decision `decision` (its name in the workflow) of one of
+   * the App's runs, as the person, by the decision's own rules: only
+   * someone it is from, and never the run's starter unless it names
+   * exactly them. Audited as answered on a screen (`via: "screen"`).
+   */
+  decide: (
+    app: string,
+    run: string,
+    decision: string,
+    answer: DecisionAnswerInput
+  ) => Promise<DecisionView>;
 }
 
 /** Why a call to an App's screens was refused. */

@@ -38,10 +38,10 @@ import type { WaitReason } from "./host.ts";
 export type RunRow = typeof workflowRuns.$inferSelect;
 
 /** The statuses of a run that hasn't ended. */
-const unended: RunRow["status"][] = ["running", "paused"];
+export const unended: RunRow["status"][] = ["running", "paused"];
 
 /** Most runs one `list` call returns. */
-const runsPerPage = 100;
+export const runsPerPage = 100;
 
 /** The most input a run starts with, as JSON text. */
 const maxInputLength = 128 * 1024;
@@ -60,7 +60,7 @@ const parse = <Schema extends z.ZodType>(
 };
 
 /** A workflow's ID as its file names it (`workflows/<id>.ts`). */
-const workflowInputSchema = z
+export const workflowInputSchema = z
   .string()
   .regex(/^[A-Za-z][\w-]{0,63}$/u)
   .pipe(workflowIdSchema);
@@ -73,8 +73,11 @@ const iso = (date: Date | null): string | null => date?.toISOString() ?? null;
  * started, the App's owner (`ownerId`, now). A failed run's report is
  * here: `status`, and `list` for all of an App's runs.
  */
-const seesDetails = (by: Identity, row: RunRow, ownerId: string): boolean =>
-  by.role === "admin" || by.userId === (row.startedBy ?? ownerId);
+export const seesDetails = (
+  by: Identity,
+  row: RunRow,
+  ownerId: string
+): boolean => by.role === "admin" || by.userId === (row.startedBy ?? ownerId);
 
 /** What a run's row holds that its callers see. */
 type RunFields = Pick<
@@ -167,6 +170,11 @@ export interface RunRequest {
   startedBy: string | null;
   /** Who started it, for the audit log. */
   actor: AuditActor;
+  /**
+   * Where the person started it, when not directly: from one of the App's
+   * screens (`screen`). The audit log says so (`via`).
+   */
+  via?: "screen";
 }
 
 /**
@@ -177,7 +185,7 @@ export interface RunRequest {
  */
 export const startRun = async (
   env: Env,
-  { app, workflow, input, startedBy, actor }: RunRequest
+  { app, workflow, input, startedBy, actor, via }: RunRequest
 ): Promise<WorkflowRun> => {
   // Every way a run starts, a trigger's too, stops with the kill switch.
   requireFeature(env, "workflows");
@@ -206,6 +214,7 @@ export const startRun = async (
       db,
       runEntry(actor, "workflow.run.started", row, {
         startedBy: startedBy === null ? "trigger" : "person",
+        ...(via === undefined ? {} : { via }),
       })
     ),
   ]);
@@ -260,13 +269,17 @@ export const startRun = async (
   return toRun(row);
 };
 
-/** Starts a run of an App's workflow for the person `by`. */
+/**
+ * Starts a run of an App's workflow for the person `by`; `via` says where,
+ * when not directly (`RunRequest`).
+ */
 export const startWorkflow = async (
   env: Env,
   by: Identity,
   app: unknown,
   workflow: unknown,
-  input?: unknown
+  input?: unknown,
+  via?: "screen"
 ): Promise<WorkflowRun> => {
   await appFor(env, by, app, "user");
   const json = parse(z.json().optional(), input);
@@ -279,6 +292,7 @@ export const startWorkflow = async (
     input: json,
     startedBy: by.userId,
     actor: actorOf(by),
+    ...(via === undefined ? {} : { via }),
   });
 };
 
@@ -305,7 +319,11 @@ const foundRun = async (env: Env, run: unknown): Promise<RunRow> => {
 };
 
 /** A run, with its failure report when `by` sees its details. */
-const runFor = (by: Identity, row: RunRow, ownerId: string): WorkflowRun =>
+export const runFor = (
+  by: Identity,
+  row: RunRow,
+  ownerId: string
+): WorkflowRun =>
   row.failure !== null && seesDetails(by, row, ownerId)
     ? { ...toRun(row), failure: row.failure }
     : toRun(row);

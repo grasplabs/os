@@ -33,6 +33,7 @@ import {
   workflowDecisions,
   workflowRuns,
 } from "../db/core/schema.ts";
+import { inList } from "../db/d1.ts";
 import { requireFeature } from "../features.ts";
 import { runEngine } from "../workflows/engine.ts";
 
@@ -536,15 +537,55 @@ const wake = async (env: Env, row: DecisionRow): Promise<void> => {
 };
 
 /**
+ * Of `decisions`, the ones `by` may answer now (`mayAnswer`): none for
+ * Grasp staff. One query per distinct set of deciders among them, all in
+ * one batch: one round trip, and one snapshot.
+ */
+export const answerableBy = async (
+  env: Env,
+  by: Identity,
+  decisions: readonly { id: string; deciders: string }[]
+): Promise<Set<string>> => {
+  if (by.staff || decisions.length === 0) {
+    return new Set();
+  }
+  const byDeciders = new Map<string, string[]>();
+  for (const { id, deciders } of decisions) {
+    byDeciders.set(deciders, [...(byDeciders.get(deciders) ?? []), id]);
+  }
+  const db = drizzle(env.DB);
+  const [first, ...rest] = [...byDeciders].map(([deciders, ids]) =>
+    db
+      .select({ id: workflowDecisions.id })
+      .from(workflowDecisions)
+      .where(
+        and(
+          inList(workflowDecisions.id, ids),
+          mayAnswer(db, by.userId, deciders)
+        )
+      )
+  );
+  // Never without one: there is a decision (see above).
+  if (first === undefined) {
+    return new Set();
+  }
+  const found = await db.batch([first, ...rest]);
+  return new Set(found.flat().map(({ id }) => id));
+};
+
+/**
  * Answers a decision for `by`, if they may, once: the first answer, before
  * the deadline and while the run goes on, is the decision, and anything
- * after it is `decision.closed`.
+ * after it is `decision.closed`. `via` says where they answered, when not
+ * on the decision's own page: on one of the App's screens (`screen`). The
+ * audit log says so.
  */
 export const answerDecision = async (
   env: Env,
   by: Identity,
   decision: unknown,
-  answer: unknown
+  answer: unknown,
+  via?: "screen"
 ): Promise<DecisionView> => {
   const found = await allowedDecision(env, by, decision);
   const { approved, payload }: DecisionAnswerInput = decisionErrors.parse(
@@ -595,7 +636,13 @@ export const answerDecision = async (
       .returning(),
     outboxedIfChanged(
       db,
-      decisionEntry(actorOf(by), `workflow.decision.${status}`, run, row)
+      decisionEntry(
+        actorOf(by),
+        `workflow.decision.${status}`,
+        run,
+        row,
+        via === undefined ? {} : { via }
+      )
     ),
   ]);
   if (!answered) {

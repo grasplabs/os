@@ -5,6 +5,7 @@ import {
   screenRuntime,
 } from "@grasp-os/compiler";
 import { appErrors, appVersionSchema } from "@grasp-os/shared/apps";
+import type { DecisionView } from "@grasp-os/shared/decisions";
 import { isExpectedError } from "@grasp-os/shared/errors";
 import type { AppId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -17,8 +18,10 @@ import {
 import type {
   AppErrorEntry,
   ScreenBundle,
+  ScreenRun,
   ScreensApi,
 } from "@grasp-os/shared/screens";
+import type { WorkflowRun } from "@grasp-os/shared/workflows";
 import { RpcStub, RpcTarget } from "capnweb";
 import { z } from "zod";
 
@@ -29,6 +32,12 @@ import { appHost } from "./durable-objects.ts";
 import { buildFailed, buildScreens } from "./screens.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
+import {
+  decideScreenRun,
+  screenRun,
+  screenRuns,
+  startScreenRun,
+} from "./workflows/screen-runs.ts";
 
 // What the frontend's screen host reaches for the frames it runs (see
 // @grasp-os/sdk/screen-runtime): an App's screen to load, its server to
@@ -38,8 +47,9 @@ import type { SessionCheck } from "./session-check.ts";
 // session and role on every call.
 //
 // Anyone with a role in the App (app-access.ts) uses its screens: opens
-// them, calls its server and reports problems. Only its builders read its
-// error log.
+// them, calls its server, reports problems, and starts, follows and
+// answers its workflow runs (workflows/screen-runs.ts). Only its builders
+// read its error log.
 //
 // A callback the App keeps (a screen's subscription) outlives the call
 // that passed it, so each push through it checks again that the person
@@ -347,6 +357,44 @@ export class ScreensRpc extends RpcTarget implements ScreensApi {
     return await withPerson(
       this.#check,
       async (by) => await errorLog(this.#env, by, app)
+    );
+  }
+
+  async startRun(
+    app: string,
+    workflow: string,
+    input?: unknown
+  ): Promise<WorkflowRun> {
+    return await withPerson(
+      this.#check,
+      async (by) => await startScreenRun(this.#env, by, app, workflow, input)
+    );
+  }
+
+  async runs(app: string, workflow: string): Promise<ScreenRun[]> {
+    return await withPerson(
+      this.#check,
+      async (by) => await screenRuns(this.#env, by, app, workflow)
+    );
+  }
+
+  async run(app: string, run: string): Promise<ScreenRun> {
+    return await withPerson(
+      this.#check,
+      async (by) => await screenRun(this.#env, by, app, run)
+    );
+  }
+
+  async decide(
+    app: string,
+    run: string,
+    decision: string,
+    answer: unknown
+  ): Promise<DecisionView> {
+    return await withPerson(
+      this.#check,
+      async (by) =>
+        await decideScreenRun(this.#env, by, app, run, decision, answer)
     );
   }
 }

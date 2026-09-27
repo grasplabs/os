@@ -21,8 +21,9 @@ import { z } from "zod";
 // into the Apps collection (`apps_collection`), connection calls
 // (`connections`), Composio's toolkits in the catalog and connecting them
 // (`composio`), App methods
-// (`apps`), starting runs and every step of one (`workflows`), and opening
-// or asking a decision (`decisions`). `model_rules` stops the model
+// (`apps`), starting runs and every step of one (`workflows`), opening
+// or asking a decision (`decisions`), and screens' calls on their App's
+// runs (`screen_workflows`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist.
 //
 // `workflows` and `decisions` never fail a run. Before each step, sleep
@@ -91,6 +92,12 @@ export type Feature =
   | "workflows"
   | "decisions"
   | "screens"
+  /**
+   * An App's screens starting, following and answering its workflow runs
+   * (workflows/screen-runs.ts); needs `apps`, `screens` and `workflows`
+   * on too, and `decisions` to answer one.
+   */
+  | "screen_workflows"
   | "members"
   /** Reading the audit log: search, export and verify. */
   | "audit"

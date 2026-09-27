@@ -100,6 +100,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               workflows: true,
               decisions: true,
               screens: true,
+              screen_workflows: true,
               members: true,
               audit: true,
               audit_retention: true,

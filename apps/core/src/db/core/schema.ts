@@ -453,7 +453,15 @@ export const workflowRuns = sqliteTable(
     failure: text({ mode: "json" }).$type<RunFailure>(),
     actingFor: text("acting_for"),
   },
-  (table) => [index("workflow_runs_app_idx").on(table.appId, table.createdAt)]
+  (table) => [
+    index("workflow_runs_app_idx").on(table.appId, table.createdAt),
+    // An App's runs of one workflow, newest first: what its screens list.
+    index("workflow_runs_app_workflow_idx").on(
+      table.appId,
+      table.workflowId,
+      table.createdAt
+    ),
+  ]
 );
 
 /**
