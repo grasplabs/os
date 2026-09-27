@@ -987,6 +987,49 @@ describe("purging", setUpTime, () => {
     });
   });
 
+  it("refuses to run a purge of a memory file now over its limit, even when only earlier versions hold a term", async () => {
+    const admin = await personOf("admin");
+    const agent = actingFor(newAgent(), admin.userId);
+    const work = await newChat();
+    const own = { type: "own" } as const;
+    const name = `Mulder${unique()}`;
+    const first = await saveUserMemory(env, agent, work, own, {
+      text: `# About me\nCall me ${name}.`,
+      ifVersion: 0,
+    });
+    const current = `# About me\n${"Something else. ".repeat(20)}`;
+    await saveUserMemory(env, agent, work, own, {
+      text: current,
+      ifVersion: 1,
+    });
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [first.id],
+      terms: [name],
+      reason: "erasure_request",
+    };
+    const { token } = await admin.api.knowledge.preparePurge(input);
+    // The limit lowered since: the current USER.md, which holds no term,
+    // is over it, and a purge would save it again.
+    const { core } = await openRpc(admin.session, {
+      coreEnv: { ...env, MEMORY_LIMITS: { "USER.md": 10 } },
+    });
+    const lowered = core.authenticate();
+    let refused = "";
+    const events = await auditedDuring(async () => {
+      refused = await outcome(lowered.knowledge.purge(input, token));
+    });
+    expect({
+      refused,
+      events: events.map(({ action }) => action),
+      user: await versionTexts(first.id),
+    }).toStrictEqual({
+      refused: "knowledge.invalid",
+      events: [],
+      user: [`# About me\nCall me ${name}.`, current],
+    });
+  });
+
   it("is switched off by its flag", async () => {
     const admin = await personOf("admin");
     const coreEnv: Env = {

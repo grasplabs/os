@@ -357,8 +357,10 @@ const versionOf = async (
  * Refuses with `knowledge.invalid` unless the current version of `named`,
  * with the terms removed, can be saved as its next version: its
  * frontmatter still fits its type, and it is within a document's limits
- * and a memory file's. Checked for every document before a purge changes
- * anything, so one that can't be finished changes nothing.
+ * and a memory file's. Checked for every document named, whether or not
+ * its current text holds a term (a purge saves it again when an earlier
+ * version does), before a purge changes anything, so one that can't be
+ * finished changes nothing.
  */
 const requireSavable = async (
   env: Env,
@@ -367,12 +369,12 @@ const requireSavable = async (
   matcher: RegExp
 ): Promise<void> => {
   const current = await versionOf(db, document, document.currentVersion);
-  const changed = current && rewritten(current, matcher);
-  if (changed === undefined) {
+  if (current === undefined) {
     return;
   }
+  const text = rewritten(current, matcher)?.text ?? current.text;
   try {
-    await checkedText(env, collection, document.path, changed.text);
+    await checkedText(env, collection, document.path, text);
   } catch (error) {
     const code = knowledgeErrors.codeOf(error);
     if (code === undefined) {
