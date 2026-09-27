@@ -926,8 +926,15 @@ const purgeDocument = async (
                 ),
             ]),
         ...updates,
-        // The file it was uploaded from holds the terms too.
-        ...forgetUploads(db, eq(uploads.documentId, document.id)),
+        // The files uploaded under its name hold the terms too, one
+        // still being extracted as well: forgotten, it isn't saved.
+        ...forgetUploads(
+          db,
+          and(
+            eq(uploads.collectionId, document.collectionId),
+            eq(uploads.path, document.path)
+          )
+        ),
         // A proposal made from version N after they were read would wait
         // on it with text this purge never saw: the batch fails, as a
         // conflict, and running the purge again rewrites it too.

@@ -1,6 +1,8 @@
 import type { PurgeInput } from "@grasp-os/shared/knowledge";
 import type { SessionApi } from "@grasp-os/shared/rpc";
+import { compatibilityDate } from "@grasp-os/shared/runtime";
 import {
+  uploadExtensionOf,
   uploadMaxBytes,
   uploadOriginalPath,
   uploadTypes,
@@ -8,13 +10,19 @@ import {
 import type { Upload } from "@grasp-os/shared/uploads";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
+import { zipSync } from "fflate";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { extractionRunId, originalKey } from "../src/knowledge/uploads.ts";
+import {
+  extractUpload,
+  extractionRunId,
+  originalKey,
+} from "../src/knowledge/uploads.ts";
 import { runEngine } from "../src/workflows/engine.ts";
 import { allEvents } from "./audit-events.ts";
 import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
+import { newTeam } from "./knowledge.ts";
 import { finished } from "./runs.ts";
 import { outcome, routed, signedInApi, unique } from "./sign-in.ts";
 
@@ -77,33 +85,28 @@ const sha256Of = async (bytes: Uint8Array): Promise<string> =>
     (byte) => byte.toString(16).padStart(2, "0")
   ).join("");
 
-/** Whether R2 holds the original of the fixture `file` in the collection. */
+/** Whether R2 holds the original of the upload `uploadId`. */
 const originalStored = async (
   collectionId: string,
-  file: string
-): Promise<boolean> => {
-  const key = originalKey(collectionId, await sha256Of(await fixture(file)));
-  return (await env.FILES.head(key)) !== null;
-};
+  uploadId: string
+): Promise<boolean> =>
+  (await env.FILES.head(originalKey(collectionId, uploadId))) !== null;
 
-// Each test waits for its uploads to end, with up to 20 seconds each
-// (`ended`), and several upload a few files: more than Vitest's default
-// five seconds on a loaded runner. Sixty fits the longest, with room for
-// signing in.
 /**
- * Records a pending upload of `file`, unchanged for an hour, with its
- * original stored: as core leaves one that stopped between recording it
- * and starting its run.
+ * Records a pending upload of the fixture `file` as `name`, with its
+ * original stored, made at `createdAt` and unchanged since: an hour ago
+ * unless given, as core leaves one that stopped between recording it and
+ * starting its run.
  */
 const leftPending = async (
   person: { userId: string; collectionId: string },
-  file: string
+  file: string,
+  { name = file, createdAt = Date.now() - 60 * 60_000 } = {}
 ): Promise<string> => {
   const bytes = await fixture(file);
-  const sha256 = await sha256Of(bytes);
   const id = crypto.randomUUID();
-  const longAgo = Date.now() - 60 * 60_000;
-  await env.FILES.put(originalKey(person.collectionId, sha256), bytes);
+  const extension = uploadExtensionOf(name) ?? "docx";
+  await env.FILES.put(originalKey(person.collectionId, id), bytes);
   await env.KNOWLEDGE.prepare(
     `INSERT INTO uploads (id, collection_id, path, media_type, bytes, sha256,
        uploaded_by, actor, status, created_at, updated_at)
@@ -112,19 +115,68 @@ const leftPending = async (
     .bind(
       id,
       person.collectionId,
-      file,
-      uploadTypes.docx,
+      name,
+      uploadTypes[extension],
       bytes.length,
-      sha256,
+      await sha256Of(bytes),
       person.userId,
       JSON.stringify({ type: "person", userId: person.userId }),
-      longAgo,
-      longAgo
+      createdAt,
+      createdAt
     )
     .run();
   return id;
 };
 
+/**
+ * Knowledge's database, with `first` run once, just before the first
+ * batch lands: a change made by someone else between a read and the write
+ * it allowed.
+ */
+const racingKnowledge = (first: () => Promise<unknown>): D1Database => {
+  let raced = false;
+  return new Proxy(env.KNOWLEDGE, {
+    get: (target, property) => {
+      if (property === "batch") {
+        return async (statements: D1PreparedStatement[]) => {
+          if (!raced) {
+            raced = true;
+            await first();
+          }
+          return await target.batch(statements);
+        };
+      }
+      const value: unknown = Reflect.get(target, property);
+      return typeof value === "function"
+        ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
+        : value;
+    },
+  });
+};
+
+/** The text of every version of `documentId`, oldest first. */
+const versionTexts = async (documentId: string): Promise<string[]> => {
+  const { results } = await env.KNOWLEDGE.prepare(
+    "SELECT text FROM versions WHERE document_id = ? ORDER BY number"
+  )
+    .bind(documentId)
+    .all<{ text: string }>();
+  return results.map(({ text }) => text);
+};
+
+/** A Word file of `document.xml` and `styles.xml` as given. */
+const wordFile = (document: string, styles: string): Uint8Array => {
+  const encoder = new TextEncoder();
+  return zipSync({
+    "word/document.xml": encoder.encode(document),
+    "word/styles.xml": encoder.encode(styles),
+  });
+};
+
+// Each test waits for its uploads to end, with up to 20 seconds each
+// (`ended`), and none waits for more than two in a row: more than
+// Vitest's default five seconds on a loaded runner. Sixty fits the
+// longest, with room for signing in.
 describe("uploads", { timeout: 60_000 }, () => {
   it("make a PDF, a Word file and a workbook searchable by section", async () => {
     const person = await personWithCollection();
@@ -245,53 +297,66 @@ describe("uploads", { timeout: 60_000 }, () => {
     });
   });
 
-  it("save uploads of one name made at once in the order they were made", async () => {
+  it("don't save an earlier upload over a later one saved first", async () => {
     const person = await personWithCollection();
-    // The one that conflicts saves again at once, not 30 seconds later.
-    await using introspector = await introspectWorkflow(env.WORKFLOWS);
-    await introspector.modifyAll(async (modifier) => {
-      await modifier.disableRetryDelays();
+    const later = await uploaded(person, "travel-policy-2.docx", "Policy.docx");
+    // Made before the later one, and extracted after it.
+    const earlier = await leftPending(person, "travel-policy.docx", {
+      name: "Policy.docx",
     });
-    const files = await Promise.all([
-      fixture("travel-policy.docx"),
-      fixture("travel-policy-2.docx"),
-    ]);
-    const started = await Promise.all(
-      files.map(
-        async (bytes) =>
-          await person.api.uploads.upload({
-            collectionId: person.collectionId,
-            name: "Policy.docx",
-            bytes,
-          })
-      )
-    );
-    const all = await Promise.all(
-      started.map(async ({ id }) => await ended(person.api, id))
-    );
-    // The order they were made in: by time, then by ID.
-    const { results } = await env.KNOWLEDGE.prepare(
-      "SELECT id FROM uploads WHERE collection_id = ? ORDER BY created_at, id"
-    )
-      .bind(person.collectionId)
-      .all<{ id: string }>();
-    const [earlier, later] = results.map(({ id }) =>
-      all.find((upload) => upload.id === id)
-    );
+    await runCron();
+    const ended_ = await ended(person.api, earlier);
     const document = await person.api.knowledge.getDocument(
-      later?.documentId ?? ""
+      later.documentId ?? ""
     );
-    // The earlier one is saved as the version before, or not at all.
-    const earlierKept =
-      earlier?.status === "ready"
-        ? earlier.version === (later?.version ?? 0) - 1
-        : earlier?.failure?.code === "upload.superseded";
 
     expect({
-      later: later?.status,
-      current: document.version.number === later?.version,
-      earlierKept,
-    }).toStrictEqual({ later: "ready", current: true, earlierKept: true });
+      earlier: ended_.failure?.code,
+      current: document.version.number,
+      text: document.version.text.includes("under 800 kilometres"),
+    }).toStrictEqual({ earlier: "upload.superseded", current: 1, text: true });
+  });
+
+  it("save an upload on top of a save made while it was extracted", async () => {
+    const person = await personWithCollection();
+    const first = await uploaded(person, "travel-policy.docx", "Policy.docx");
+    const second = await leftPending(person, "travel-policy-2.docx", {
+      name: "Policy.docx",
+      createdAt: Date.now(),
+    });
+    // Someone saves the document between the extraction's read of its
+    // version and its save.
+    const racing = racingKnowledge(
+      async () =>
+        await person.api.knowledge.saveDocument({
+          collectionId: person.collectionId,
+          path: "Policy.docx",
+          text: "# Policy\nEdited by hand.",
+          ifVersion: 1,
+        })
+    );
+    const raced = await outcome(
+      extractUpload({ ...env, KNOWLEDGE: racing }, second)
+    );
+    // The step's retry.
+    await extractUpload(env, second);
+    const { versions } = await person.api.knowledge.history(
+      first.documentId ?? ""
+    );
+
+    expect({
+      raced,
+      saved: await person.api.uploads.get(second),
+      history: versions.map(({ number, message }) => [number, message]),
+    }).toMatchObject({
+      raced: "knowledge.conflict",
+      saved: { status: "ready", version: 3 },
+      history: [
+        [3, "Uploaded Policy.docx"],
+        [2, null],
+        [1, "Uploaded Policy.docx"],
+      ],
+    });
   });
 
   it("fail a file that can't be read, say why, and delete its original", async () => {
@@ -304,7 +369,7 @@ describe("uploads", { timeout: 60_000 }, () => {
 
     expect({
       upload: failed,
-      stored: await originalStored(person.collectionId, "broken.pdf"),
+      stored: await originalStored(person.collectionId, failed.id),
       documents: documents.length,
       audited: events
         .filter(({ target }) => target?.id === failed.id)
@@ -371,12 +436,181 @@ describe("uploads", { timeout: 60_000 }, () => {
 
     expect({
       status: upload.status,
-      failure: upload.failure?.code,
-      stored: await originalStored(person.collectionId, "offices.xlsx"),
+      failure: upload.failure,
+      stored: await originalStored(person.collectionId, upload.id),
     }).toStrictEqual({
       status: "failed",
-      failure: "upload.unreadable",
+      failure: {
+        code: "internal.unexpected",
+        message: "Something went wrong.",
+      },
       stored: false,
+    });
+  });
+
+  it("read a sheet of thousands of rows", async () => {
+    const person = await personWithCollection();
+    const upload = await uploaded(person, "orders.xlsx");
+    const { hits } = await person.api.knowledge.search("Zebra Logistics", {
+      collectionId: person.collectionId,
+    });
+
+    expect({
+      status: upload.status,
+      hits: hits.map(({ path, headings }) => ({ path, headings })),
+    }).toStrictEqual({
+      status: "ready",
+      hits: [{ path: "orders.xlsx", headings: ["Orders"] }],
+    });
+  });
+
+  it("read a Word file of countless unclosed tags in one pass", async () => {
+    const person = await personWithCollection();
+    // Read by patterns that scan on from every unclosed tag, this takes
+    // minutes; read in one pass, a moment.
+    const unclosed = 200_000;
+    const bytes = wordFile(
+      `<w:document><w:body>${"<w:p>".repeat(unclosed)}<w:p><w:r><w:t>Still read</w:t></w:r></w:p></w:body></w:document>`,
+      `<w:styles>${'<w:style w:styleId="x">'.repeat(unclosed)}</w:styles>`
+    );
+    const upload = await person.api.uploads.upload({
+      collectionId: person.collectionId,
+      name: "unclosed.docx",
+      bytes,
+    });
+    const read = await vi.waitFor(
+      async () => {
+        const now = await person.api.uploads.get(upload.id);
+        if (now.status !== "ready" && now.status !== "failed") {
+          throw new Error(`Upload ${upload.id} is ${now.status}`);
+        }
+        return now;
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+
+    expect([read.status, read.failure]).toStrictEqual(["ready", null]);
+  });
+
+  it("fail a file that runs the extractor out of its limits once, and say why", async () => {
+    const person = await personWithCollection();
+    await using introspector = await introspectWorkflow(env.WORKFLOWS);
+    await introspector.modifyAll(async (modifier) => {
+      await modifier.disableRetryDelays();
+    });
+    let started = 0;
+    // A sandbox that answers as the runtime does once it stopped the
+    // isolate over its limits.
+    const load = env.LOADER.load.bind(env.LOADER);
+    const loading = vi.spyOn(env.LOADER, "load").mockImplementation(() => {
+      started += 1;
+      return load({
+        compatibilityDate,
+        mainModule: "extractor.js",
+        modules: {
+          "extractor.js": `import { WorkerEntrypoint } from "cloudflare:workers";
+export default class extends WorkerEntrypoint {
+  extract() { throw new Error("Worker exceeded CPU time limit."); }
+}`,
+        },
+      });
+    });
+    let upload: Upload | undefined;
+    try {
+      upload = await uploaded(person, "expense-policy.pdf");
+    } finally {
+      loading.mockRestore();
+    }
+
+    expect({ started, failure: upload.failure }).toStrictEqual({
+      started: 1,
+      failure: {
+        code: "upload.too_complex",
+        message:
+          "The file takes more work to read than an upload may take: it may be damaged, or built to be. Check that it opens, or save it again as a simpler file, then upload it again.",
+      },
+    });
+  });
+
+  it("save nothing for someone who lost access to the collection meanwhile", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const member = await signedInApi(idp, "user");
+    const team = await newTeam(admin, [member]);
+    const { id: collectionId } = await admin.api.knowledge.createCollection({
+      name: `Team files ${unique()}`,
+      access: "teams",
+      teams: [team],
+    });
+    const id = await leftPending(
+      { userId: member.userId, collectionId },
+      "travel-policy.docx"
+    );
+    // Taken out of the team while the file waited to be extracted.
+    await env.DB.prepare("DELETE FROM team_members WHERE user_id = ?")
+      .bind(member.userId)
+      .run();
+    await runCron();
+    const { documents } = await admin.api.knowledge.listDocuments(collectionId);
+
+    await expect(ended(member.api, id)).resolves.toMatchObject({
+      status: "failed",
+      failure: { code: "knowledge.forbidden" },
+    });
+    expect(documents).toStrictEqual([]);
+  });
+
+  it("save nothing of an upload whose document a purge rewrote while it was extracted", async () => {
+    const person = await personWithCollection();
+    const admin = await signedInApi(idp, "admin");
+    const saved = await uploaded(person, "offices.xlsx");
+    const inFlight = await leftPending(person, "offices.xlsx", {
+      createdAt: Date.now(),
+    });
+    const input: PurgeInput = {
+      type: "content",
+      documentIds: [saved.documentId ?? ""],
+      terms: ["facilities@example.com"],
+      reason: "erasure_request",
+    };
+    const { token } = await admin.api.knowledge.preparePurge(input);
+    // The purge lands once the extraction has read the file, before it
+    // reads the document's version.
+    const readThenPurge = async (key: string) => {
+      const original = await env.FILES.get(key);
+      const bytes = await original?.arrayBuffer();
+      await admin.api.knowledge.purge(input, token);
+      return bytes === undefined
+        ? null
+        : { arrayBuffer: async () => await Promise.resolve(bytes) };
+    };
+    const files = new Proxy(env.FILES, {
+      get: (target, property) => {
+        if (property === "get") {
+          return readThenPurge;
+        }
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === "function"
+          ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
+          : value;
+      },
+    });
+    const raced = await outcome(
+      extractUpload({ ...env, FILES: files }, inFlight)
+    );
+    // The step's retry.
+    await extractUpload(env, inFlight);
+    const texts = await versionTexts(saved.documentId ?? "");
+
+    expect({
+      refused: raced !== "ok",
+      upload: await outcome(person.api.uploads.get(inFlight)),
+      versions: texts.length,
+      purged: texts.every((text) => !text.includes("facilities@example.com")),
+    }).toStrictEqual({
+      refused: true,
+      upload: "upload.not_found",
+      versions: 2,
+      purged: true,
     });
   });
 
@@ -604,7 +838,7 @@ describe("uploads", { timeout: 60_000 }, () => {
     await admin.api.knowledge.purge(input, plan.token);
 
     expect({
-      stored: await originalStored(person.collectionId, "offices.xlsx"),
+      stored: await originalStored(person.collectionId, upload.id),
       upload: await outcome(person.api.uploads.get(upload.id)),
     }).toStrictEqual({ stored: false, upload: "upload.not_found" });
   });
@@ -627,7 +861,7 @@ describe("uploads", { timeout: 60_000 }, () => {
 
     expect({
       ready: upload.status,
-      stored: await originalStored(personal, "offices.xlsx"),
+      stored: await originalStored(personal, upload.id),
       upload: await outcome(person.api.uploads.get(upload.id)),
     }).toStrictEqual({
       ready: "ready",

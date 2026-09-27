@@ -4,16 +4,18 @@ import { NonRetryableError } from "cloudflare:workflows";
 import { z } from "zod";
 
 import type { RunStep } from "../workflows/host.ts";
-import { localExtractor } from "./extract.ts";
 import { extractUpload, failUpload, finalFailures } from "./uploads.ts";
 
 // The extraction workflow: core's own, run on the engine like an App's
 // workflows but by the dispatcher's own hand (workflows/dispatcher.ts),
 // once per upload (uploads.ts). One step extracts the text and saves it;
-// a failure a retry may fix (the database or R2 for a moment, a save that
-// conflicted) is retried with backoff, one no retry changes (a file that
-// doesn't read, text over a document's limits) isn't. Either way, once it
-// fails for good, a last step fails the upload with the reason.
+// a failure a retry may fix (the database, R2 or the extractor's sandbox
+// out of reach for a moment, a save that conflicted) is retried with
+// backoff; one no retry changes (a file that doesn't read, one that runs
+// its sandbox out of CPU or memory, text over a document's limits) isn't.
+// Either way, once it fails for good, a last step fails the upload with
+// the reason: its code, or `internal.unexpected` for a failure that had
+// none.
 //
 // Replaying the run is safe: a step that finished isn't run again, and
 // one that ran without its result being kept finds the upload ready (or
@@ -52,7 +54,7 @@ const stepError = (error: unknown): unknown => {
 const failureCode = (error: unknown): string => {
   const code =
     error instanceof Error ? error.message.split(": ").at(-1) : undefined;
-  return isExpectedCode(code) ? code : "upload.unreadable";
+  return isExpectedCode(code) ? code : "internal.unexpected";
 };
 
 /** Runs (or resumes) the extraction of one upload. */
@@ -65,7 +67,7 @@ export const runExtraction = async (
   try {
     await step.do("extract", extractConfig, async () => {
       try {
-        await extractUpload(env, uploadId, localExtractor);
+        await extractUpload(env, uploadId);
       } catch (error) {
         throw stepError(error);
       }

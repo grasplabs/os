@@ -1,8 +1,6 @@
 CREATE TABLE `upload_cleanups` (
-	`collection_id` text NOT NULL,
-	`sha256` text NOT NULL,
-	`created_at` integer NOT NULL,
-	PRIMARY KEY(`collection_id`, `sha256`)
+	`key` text PRIMARY KEY NOT NULL,
+	`created_at` integer NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE `uploads` (

@@ -134,6 +134,8 @@ export const uploadErrors = defineErrorFamily({
     "Only PDF, Word (.docx) and Excel (.xlsx) files can be uploaded, with a name that ends in .pdf, .docx or .xlsx.",
   "upload.unreadable":
     "The file's text couldn't be read. Check that it opens, then upload it again.",
+  "upload.too_complex":
+    "The file takes more work to read than an upload may take: it may be damaged, or built to be. Check that it opens, or save it again as a simpler file, then upload it again.",
   "upload.no_text":
     "The file has no text to read: a scan without a text layer has none.",
   "upload.original_missing":

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "700f17e0-ce52-41c0-8ab0-16c26d0d9db1",
+  "id": "87f9c26f-7427-46bb-9694-a2f67cb546eb",
   "prevId": "aea9f184-751a-4670-b6d1-2888f2155f90",
   "tables": {
     "app_entries": {
@@ -639,17 +639,10 @@
     "upload_cleanups": {
       "name": "upload_cleanups",
       "columns": {
-        "collection_id": {
-          "name": "collection_id",
+        "key": {
+          "name": "key",
           "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "sha256": {
-          "name": "sha256",
-          "type": "text",
-          "primaryKey": false,
+          "primaryKey": true,
           "notNull": true,
           "autoincrement": false
         },
@@ -663,15 +656,7 @@
       },
       "indexes": {},
       "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "upload_cleanups_collection_id_sha256_pk": {
-          "columns": [
-            "collection_id",
-            "sha256"
-          ],
-          "name": "upload_cleanups_collection_id_sha256_pk"
-        }
-      },
+      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "checkConstraints": {}
     },

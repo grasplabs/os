@@ -227,7 +227,7 @@ export const uploads = sqliteTable(
     mediaType: text("media_type").notNull(),
     /** The file's size. */
     bytes: integer().notNull(),
-    /** The file's SHA-256, in hex, which its original's key in R2 names. */
+    /** The file's SHA-256, in hex, which R2 checks the original against. */
     sha256: text().notNull(),
     /** User ID. */
     uploadedBy: text("uploaded_by").notNull(),
@@ -256,17 +256,13 @@ export const uploads = sqliteTable(
 );
 
 /**
- * Originals to delete from R2 once no upload needs them
- * (knowledge/uploads.ts), recorded in the same batch as what made them
- * unneeded: an upload that failed, a purge. Cleared once done; the cron
- * trigger finishes what a failure left.
+ * Originals to delete from R2 (knowledge/uploads.ts), by key, recorded in
+ * the same batch as what made them unneeded: an upload that failed, a
+ * purge. Cleared once deleted; the cron trigger finishes what a failure
+ * left.
  */
-export const uploadCleanups = sqliteTable(
-  "upload_cleanups",
-  {
-    collectionId: text("collection_id").notNull(),
-    sha256: text().notNull(),
-    createdAt: timestamp("created_at").notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.collectionId, table.sha256] })]
-);
+export const uploadCleanups = sqliteTable("upload_cleanups", {
+  /** The original's key in R2. */
+  key: text().primaryKey(),
+  createdAt: timestamp("created_at").notNull(),
+});
