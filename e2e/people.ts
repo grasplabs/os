@@ -69,7 +69,12 @@ const execute = async (sql: string): Promise<void> => {
       execFileSync(
         wrangler,
         ["d1", "execute", "DB", "--local", "--command", sql],
-        { cwd: coreDirectory, stdio: "pipe" }
+        {
+          cwd: coreDirectory,
+          stdio: "pipe",
+          // Test writes aren't usage worth reporting, and every call sent it.
+          env: { ...process.env, WRANGLER_SEND_METRICS: "false" },
+        }
       );
       return;
     } catch (error) {
