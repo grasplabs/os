@@ -9,6 +9,7 @@ import type { PermissionsApi } from "./permissions.ts";
 import type { Role } from "./roles.ts";
 import type { ScreensApi } from "./screens.ts";
 import type { SignalsApi } from "./signals.ts";
+import type { UploadsApi } from "./uploads.ts";
 import type { WorkflowsApi } from "./workflows.ts";
 
 /** A way to sign in to this deployment, for the sign-in screen. */
@@ -52,6 +53,11 @@ export interface SessionApi {
   readonly knowledge: KnowledgeApi;
   /** Memory files: the collections that hold them. */
   readonly memory: MemoryApi;
+  /**
+   * Files uploaded into Knowledge: uploading one, and following its
+   * status as its text is extracted.
+   */
+  readonly uploads: UploadsApi;
   /**
    * Accounts connected through OAuth: the person's own, and shared ones
    * (which only admins connect and disconnect).

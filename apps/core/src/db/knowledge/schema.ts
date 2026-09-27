@@ -209,3 +209,66 @@ export const appEntries = sqliteTable("app_entries", {
   version: integer().notNull(),
   indexedAt: timestamp("indexed_at").notNull(),
 });
+
+/**
+ * A file uploaded into a collection (knowledge/uploads.ts): its original,
+ * kept in R2 under its hash, and where extracting its text into the
+ * document at `path` stands. Only the person who uploaded it sees it.
+ */
+export const uploads = sqliteTable(
+  "uploads",
+  {
+    id: text().primaryKey(),
+    collectionId: text("collection_id")
+      .notNull()
+      .references(() => collections.id, { onDelete: "cascade" }),
+    /** The file's name, and the path of its document. */
+    path: text().notNull(),
+    mediaType: text("media_type").notNull(),
+    /** The file's size. */
+    bytes: integer().notNull(),
+    /** The file's SHA-256, in hex, which R2 checks the original against. */
+    sha256: text().notNull(),
+    /** User ID. */
+    uploadedBy: text("uploaded_by").notNull(),
+    /** JSON: the audit log's actor for the person who uploaded it. */
+    actor: text().notNull(),
+    status: text({
+      enum: ["pending", "extracting", "ready", "failed"],
+    }).notNull(),
+    /** The code of the error it failed with. */
+    failure: text(),
+    /** The document and version it was saved as, once ready. */
+    documentId: text("document_id"),
+    version: integer(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("uploads_path_idx").on(
+      table.collectionId,
+      table.path,
+      table.createdAt
+    ),
+    index("uploads_original_idx").on(table.collectionId, table.sha256),
+    index("uploads_status_idx").on(table.status, table.updatedAt),
+  ]
+);
+
+/**
+ * Originals to delete from R2 (knowledge/uploads.ts), by key: recorded
+ * with the upload, before its original is stored, and cleared once it is
+ * saved; recorded again by a purge. Deleted by the failure that makes one
+ * unneeded, or by the cron trigger once its upload is gone or failed.
+ */
+export const uploadCleanups = sqliteTable("upload_cleanups", {
+  /** The original's key in R2. */
+  key: text().primaryKey(),
+  /** The upload whose original it is. */
+  uploadId: text("upload_id").notNull(),
+  /**
+   * When its original may have been written, at the latest: the upload's
+   * creation, or 0 for one known to be written already.
+   */
+  createdAt: timestamp("created_at").notNull(),
+});

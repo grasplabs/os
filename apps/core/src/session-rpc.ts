@@ -9,6 +9,7 @@ import { requireFeature } from "./features.ts";
 import type { Feature } from "./features.ts";
 import { MemoryRpc } from "./knowledge/memory-rpc.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
+import { UploadsRpc } from "./knowledge/uploads-rpc.ts";
 import { MembersRpc } from "./members.ts";
 import { PendingActionsRpc } from "./pending-actions.ts";
 import { PermissionsRpc } from "./permissions-rpc.ts";
@@ -34,6 +35,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #apps: AppsRpc;
   readonly #knowledge: KnowledgeRpc;
   readonly #memory: MemoryRpc;
+  readonly #uploads: UploadsRpc;
   readonly #permissions: PermissionsRpc;
   readonly #connections: ConnectionsRpc;
   readonly #workflows: WorkflowsRpc;
@@ -70,6 +72,11 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
     // Memory files are Knowledge documents: that kill switch stops them too.
     this.#memory = new MemoryRpc(env, checkWith("knowledge", "memory"));
+    // Uploads become Knowledge documents: that kill switch stops them too.
+    this.#uploads = new UploadsRpc(
+      env,
+      checkWith("knowledge", "knowledge_uploads")
+    );
     this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
     this.#connections = new ConnectionsRpc(env, checkWith("connections"));
     this.#workflows = new WorkflowsRpc(env, checkWith("workflows"));
@@ -102,6 +109,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get memory(): MemoryRpc {
     return this.#memory;
+  }
+
+  get uploads(): UploadsRpc {
+    return this.#uploads;
   }
 
   get permissions(): PermissionsRpc {

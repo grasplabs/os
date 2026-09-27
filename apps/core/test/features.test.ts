@@ -1,8 +1,9 @@
+import { uploadOriginalPath } from "@grasp-os/shared/uploads";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { mockIdp } from "./idp.ts";
-import { openRpc, outcome, signedInWithRole } from "./sign-in.ts";
+import { openRpc, outcome, routed, signedInWithRole } from "./sign-in.ts";
 
 // Features ship switched off, and switching one off is its kill switch:
 // every call of its API is refused, whoever makes it.
@@ -20,6 +21,7 @@ const callsWith = async (features?: unknown) => {
     outcome(session.permissions.list()),
     outcome(session.knowledge.listCollections()),
     outcome(session.memory.collections()),
+    outcome(session.uploads.get(crypto.randomUUID())),
     outcome(session.connections.list()),
     outcome(session.workflows.list(crypto.randomUUID())),
     outcome(session.decisions.get(crypto.randomUUID())),
@@ -35,6 +37,7 @@ const callsWith = async (features?: unknown) => {
 describe("feature flags", () => {
   it("refuse every flagged API while no flag is set", async () => {
     await expect(callsWith()).resolves.toStrictEqual([
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -67,7 +70,45 @@ describe("feature flags", () => {
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
+      "feature.disabled",
       "ok",
+    ]);
+  });
+
+  it("stop uploads with their own flag, and with the Knowledge kill switch", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const uploadsWith = async (features: Record<string, boolean>) => {
+      const coreEnv: Env = { ...env, FEATURES: features };
+      const { core } = await openRpc(admin.session, { coreEnv });
+      const { uploads } = core.authenticate();
+      const original = await routed(
+        uploadOriginalPath(crypto.randomUUID()),
+        {},
+        coreEnv
+      );
+      return [
+        await outcome(uploads.get(crypto.randomUUID())),
+        await outcome(
+          uploads.upload({
+            collectionId: crypto.randomUUID(),
+            name: "a.pdf",
+            bytes: new Uint8Array(0),
+          })
+        ),
+        // Signed out: past the flags, a download needs a session.
+        original.status,
+      ];
+    };
+    await expect(
+      Promise.all([
+        uploadsWith({ knowledge: true }),
+        uploadsWith({ knowledge_uploads: true }),
+        uploadsWith({ knowledge: true, knowledge_uploads: true }),
+      ])
+    ).resolves.toStrictEqual([
+      ["feature.disabled", "feature.disabled", 404],
+      ["feature.disabled", "feature.disabled", 404],
+      ["upload.not_found", "upload.unsupported", 401],
     ]);
   });
 
@@ -152,6 +193,7 @@ describe("feature flags", () => {
     for (const features of ["{not json", '{"apps": "yes"}', "[true]"]) {
       // oxlint-disable-next-line no-await-in-loop -- one config at a time
       await expect(callsWith(features)).resolves.toStrictEqual([
+        "feature.disabled",
         "feature.disabled",
         "feature.disabled",
         "feature.disabled",

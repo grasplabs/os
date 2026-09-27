@@ -228,6 +228,7 @@ describe("a personal purge", setUpTime, () => {
         versions: 2,
         proposals: 1,
         inLongerWords: 0,
+        originals: 0,
         token: "string",
         expiresAt: "string",
       },

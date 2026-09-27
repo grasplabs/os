@@ -7,6 +7,7 @@ import { archiveAuditLog } from "./audit-retention.ts";
 import { handleRequest } from "./entry.ts";
 import { indexApps } from "./knowledge/apps-collection.ts";
 import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
+import { sweepUploads } from "./knowledge/uploads.ts";
 import { retryDisconnects } from "./members.ts";
 import { refreshSignalsIfDue, signalsCron } from "./signals.ts";
 
@@ -34,9 +35,10 @@ export default {
   // connected (see src/members.ts), Apps copied from a blueprint left
   // pending (see src/app-blueprints.ts), audit events past retention (see
   // src/audit-retention.ts), the release's Grasp skills (see
-  // src/knowledge/grasp-skills.ts), and Apps whose entry in the Apps
+  // src/knowledge/grasp-skills.ts), Apps whose entry in the Apps
   // collection isn't of their current version (see
-  // src/knowledge/apps-collection.ts).
+  // src/knowledge/apps-collection.ts), and uploads left behind (see
+  // src/knowledge/uploads.ts).
   //
   // Every 15 minutes, on a trigger of its own so it never shares an
   // invocation with the jobs above: the day's improvement signals, until
@@ -57,6 +59,7 @@ export default {
       archiveAuditLog(env),
       syncGraspSkills(env),
       indexApps(env),
+      sweepUploads(env),
     ]);
     for (const result of results) {
       if (result.status === "rejected") {

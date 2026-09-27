@@ -12,6 +12,7 @@ import { z } from "zod";
 import { callApp } from "../app.ts";
 import { versionFiles } from "../apps.ts";
 import { runBindingsFor } from "../bindings.ts";
+import { runExtraction } from "../knowledge/extraction.ts";
 import type { WorkContext } from "../restricted.ts";
 import { declaredParams, loadRun } from "./code.ts";
 import type { Settled, StepError } from "./code.ts";
@@ -48,6 +49,10 @@ import type { RunRow, Stopped } from "./runs.ts";
 // nobody who has left, checked at every load and before every step: once
 // they have, the run fails, whoever started it.
 //
+// Core's own workflows run here too (engine.ts): a run tagged with the
+// internal workflow it is, not an App version, runs that workflow's code,
+// which is core's, with core's env.
+//
 // A run's parameter values are the ones people set (params.ts), read as
 // the version it is pinned to declares them, never the current version:
 // so a stored value counts only where that version declares it of that
@@ -60,6 +65,9 @@ const pinnedSchema = z.object({
   workflow: workflowIdSchema,
   version: z.int().positive(),
 });
+
+/** What the dispatcher tags each of core's own runs with (engine.ts). */
+const internalSchema = z.object({ internal: z.literal("extraction") });
 
 /**
  * Who a run acts for now: its person, or its App's owner; and the App
@@ -243,15 +251,16 @@ const runWorkflow = async (
  */
 export const WorkflowDispatcher = createDynamicWorkflowEntrypoint<Env>(
   ({ env, metadata }): WorkflowRunner => ({
-    run: async (event, step) =>
-      await runWorkflow(
-        env,
-        metadata,
-        event,
-        // SAFETY: the library hands on the `step` Cloudflare Workflows gave
-        // the dispatcher, typed loosely so it needn't depend on its types.
-        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-        step as RunStep
-      ),
+    run: async (event, loose) => {
+      // SAFETY: the library hands on the `step` Cloudflare Workflows gave
+      // the dispatcher, typed loosely so it needn't depend on its types.
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+      const step = loose as RunStep;
+      if (internalSchema.safeParse(metadata).success) {
+        await runExtraction(env, event.payload, step);
+        return null;
+      }
+      return await runWorkflow(env, metadata, event, step);
+    },
   })
 );

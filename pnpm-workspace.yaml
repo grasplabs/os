@@ -44,6 +44,9 @@ catalog:
   drizzle-orm: 0.45.3
   # Knowledge frontmatter.
   yaml: 2.9.1
+  # Text of uploaded files, extracted in core: PDF, Word and Excel.
+  fflate: 0.8.3
+  unpdf: 1.8.1
   zod: 4.6.5
 
   # Identity, agents, connections

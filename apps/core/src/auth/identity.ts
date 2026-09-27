@@ -44,6 +44,34 @@ export const teamsOf = async (
     .orderBy(teams.name);
 
 /**
+ * A Grasp staff member's role now, from the sign-in config: `undefined`
+ * once the staff window has closed, or they are no longer on the staff
+ * list the console keeps (checked now, not only when they signed in).
+ */
+export const staffRole = async (
+  env: Env,
+  userId: string
+): Promise<Role | undefined> => {
+  const config = signInConfig(env);
+  if (!(config?.staff && staffWindowOpen(config, Date.now()))) {
+    return undefined;
+  }
+  const [account] = await drizzle(env.DB)
+    .select({ oid: accounts.oid })
+    .from(accounts)
+    .where(
+      and(
+        eq(accounts.userId, userId),
+        eq(accounts.providerId, providerIds.staff)
+      )
+    );
+  const listed = config.staff.oids.some(
+    (oid) => oid.toLowerCase() === account?.oid?.toLowerCase()
+  );
+  return listed ? config.staff.role : undefined;
+};
+
+/**
  * Who a request comes from: the person behind its session cookie, with their
  * role and teams read now, from the database. Called on every request and
  * RPC call that needs a person, so a revoked or expired session, a changed
@@ -71,27 +99,11 @@ export const identify = async (
     expiresAt: session.expiresAt.toISOString(),
   };
 
-  const db = drizzle(env.DB);
   if (session.staff) {
-    if (!(config.staff && staffWindowOpen(config, Date.now()))) {
-      return undefined;
-    }
-    // Still on the staff list the console keeps, not only when signing in.
-    const [account] = await db
-      .select({ oid: accounts.oid })
-      .from(accounts)
-      .where(
-        and(
-          eq(accounts.userId, user.id),
-          eq(accounts.providerId, providerIds.staff)
-        )
-      );
-    const listed = config.staff.oids.some(
-      (oid) => oid.toLowerCase() === account?.oid?.toLowerCase()
-    );
-    return listed
-      ? { ...person, role: config.staff.role, teams: [], staff: true }
-      : undefined;
+    const role = await staffRole(env, user.id);
+    return role === undefined
+      ? undefined
+      : { ...person, role, teams: [], staff: true };
   }
 
   const role = await memberRole(env.DB, user.id);

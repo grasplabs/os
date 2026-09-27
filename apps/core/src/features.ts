@@ -16,7 +16,8 @@ import { z } from "zod";
 // (session-rpc.ts), and what App and workflow code reach of it: collection
 // stubs (`knowledge`), an agent's memory and its saves of it (`memory`,
 // which gives every context no memory while off), purging Knowledge
-// (`knowledge_purge`), the Playbook's collection and record saves
+// (`knowledge_purge`), uploading files and extracting their text
+// (`knowledge_uploads`), the Playbook's collection and record saves
 // (`playbook`), syncing and copying skills (`skills`), indexing Apps
 // into the Apps collection (`apps_collection`), connection calls
 // (`connections`), Composio's toolkits in the catalog and connecting them
@@ -59,6 +60,15 @@ export type Feature =
   | "memory"
   /** Purging personal data (knowledge/purge.ts); needs `knowledge` on too. */
   | "knowledge_purge"
+  /**
+   * Uploading files into Knowledge and extracting their text
+   * (knowledge/uploads.ts); needs `knowledge` on too. While off, nothing is
+   * uploaded or downloaded, and an extraction under way fails once its
+   * retries run out; what earlier uploads saved is still read and searched
+   * like any document. It runs on the engine (workflows/engine.ts), which
+   * plain workerd lacks: on-prem it stays off.
+   */
+  | "knowledge_uploads"
   /**
    * The Playbook collection and saving its records (knowledge/playbook.ts);
    * needs `knowledge` on too. While off, nothing is saved to the Playbook,

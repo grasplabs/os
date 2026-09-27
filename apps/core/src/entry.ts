@@ -8,6 +8,7 @@ import { authBasePath } from "./auth/auth.ts";
 import { handleAuthRequest } from "./auth/routes.ts";
 import { handleConnectionCallback } from "./connections.ts";
 import { errorResponse } from "./errors.ts";
+import { originalResponse } from "./knowledge/uploads.ts";
 import { checkRouterSecret } from "./router-secret.ts";
 import { rpcResponse } from "./rpc.ts";
 import { screenFrameResponse } from "./screen-frame.ts";
@@ -18,6 +19,9 @@ const requestIdHeader = "x-request-id";
 
 const isUnder = (pathname: string, base: string): boolean =>
   pathname === base || pathname.startsWith(`${base}/`);
+
+/** `/api/knowledge/uploads/<id>/original`: an upload's original. */
+const originalPath = /^\/api\/knowledge\/uploads\/(?<id>[\w-]+)\/original$/u;
 
 /** Routes a request that has passed the router-secret check. */
 const route = async (
@@ -43,6 +47,10 @@ const route = async (
     if (response !== undefined) {
       return response;
     }
+  }
+  const original = originalPath.exec(pathname)?.groups?.id;
+  if (original !== undefined) {
+    return await originalResponse(request, env, original, requestId);
   }
   if (isUnder(pathname, "/api")) {
     return errorResponse(

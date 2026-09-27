@@ -14,8 +14,10 @@ import type { Json } from "@grasp-os/shared/json";
 // refuses a Worker Loader binding without it. The loader runs App methods
 // (app.ts), the screen compiler (screens.ts) and workflow code (code.ts).
 // So on-prem, `apps` and `screens` stay switched off unless workerd runs
-// with `--experimental`, and `workflows` stays off either way. With
-// `workflows` off no run starts (runs.ts), and nothing here is reached.
+// with `--experimental`, and `workflows` and `knowledge_uploads` (whose
+// extractions are core's own runs, knowledge/uploads.ts) stay off either
+// way. With both off no run starts (runs.ts, uploads.ts), and nothing here
+// is reached.
 
 export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 
@@ -26,6 +28,12 @@ export interface PinnedRun {
   version: number;
 }
 
+/**
+ * A workflow of core's own, not an App's, run on the same engine and
+ * dispatcher: extracting an upload's text (knowledge/extraction.ts).
+ */
+export type InternalWorkflow = "extraction";
+
 /** The engine core runs workflow runs on. */
 export interface RunEngine {
   /** Creates the run `id`, pinned to its App version, with its input. */
@@ -33,6 +41,12 @@ export interface RunEngine {
     id: string;
     pinned: PinnedRun;
     input: Json | undefined;
+  }) => Promise<void>;
+  /** Creates the run `id` of one of core's own workflows, with its input. */
+  createInternal: (run: {
+    id: string;
+    workflow: InternalWorkflow;
+    input: Json;
   }) => Promise<void>;
   /** Where the engine has the run; nothing when it has no such run. */
   status: (id: string) => Promise<InstanceStatus | undefined>;
@@ -77,6 +91,14 @@ export const runEngine = (env: Env): RunEngine => ({
     // Tagged with what the dispatcher loads it by; it reads the rest from
     // the run's row. Placed in the EU where the platform can.
     await wrapWorkflowBinding({ app, workflow, version }).create({
+      id,
+      params: input,
+      locationHint: "weur",
+    });
+  },
+  createInternal: async ({ id, workflow, input }) => {
+    // Tagged with the workflow it is: the dispatcher runs it by that.
+    await wrapWorkflowBinding({ internal: workflow }).create({
       id,
       params: input,
       locationHint: "weur",
