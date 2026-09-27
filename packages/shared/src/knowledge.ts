@@ -560,7 +560,9 @@ export const knowledgeErrors = defineErrorFamily({
   "knowledge.too_many_links":
     "This document has too many links to save. Split it into several documents.",
   "knowledge.proposal_decided":
-    "This proposal was already approved or rejected.",
+    "This proposal was already approved or declined.",
+  "knowledge.too_many_proposals":
+    "This agent has too many proposals waiting. Approve or decline some first.",
   "knowledge.conflict":
     "This document changed since you opened it. Load the latest version and apply your change to it.",
 });

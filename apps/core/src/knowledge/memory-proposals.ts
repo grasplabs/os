@@ -27,7 +27,7 @@ import {
 } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, count, eq, ne, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -60,10 +60,12 @@ type ProposalRow = typeof memoryProposals.$inferSelect;
 /** Most pending proposals one listing returns. */
 const proposalsMaxListed = 200;
 
+/** Most proposals one agent may have waiting at once. */
+export const proposalsMaxPendingPerAgent = 20;
+
 const sourceSchema = z.object({
   actor: auditActorSchema,
   context: workContextSchema,
-  restricted: z.boolean(),
 });
 
 const toProposal = (row: ProposalRow): MemoryProposal => ({
@@ -84,14 +86,16 @@ const toProposal = (row: ProposalRow): MemoryProposal => ({
  * Proposes new text for a shared memory file, as the agent `authority`
  * working in `work`: the company's AGENTS.md or MEMORY.md, or its own
  * AGENTS.md. The text is checked as a save would check it (its limit
- * included), and nothing changes until it is approved. A context that
- * read restricted data may still propose, marked so for whoever decides:
- * they read the text before it reaches anyone.
+ * included), and nothing changes until it is approved.
  *
  * Throws `permission.denied` for anything but an agent,
  * `permission.person_inactive` when its person has left,
- * `permission.context_invalid` for a context it can't work in, and
- * `knowledge.not_found` while no admin has set up the Memory collection.
+ * `permission.context_invalid` for a context it can't work in,
+ * `permission.restricted` from a context that read restricted data (as
+ * `saveUserMemory` does: shared memory would carry it to everyone),
+ * `knowledge.not_found` while no admin has set up the Memory collection,
+ * and `knowledge.too_many_proposals` while the agent has
+ * {@link proposalsMaxPendingPerAgent} waiting.
  */
 export const proposeMemory = async (
   env: Env,
@@ -113,7 +117,9 @@ export const proposeMemory = async (
   if (!(await memberRole(env.DB, onBehalfOf))) {
     throw permissionErrors.create("permission.person_inactive");
   }
-  const restricted = await isRestricted(env, authority, work);
+  if (await isRestricted(env, authority, work)) {
+    throw permissionErrors.create("permission.restricted");
+  }
   const db = drizzle(env.KNOWLEDGE);
   const collection = await readableCollection(
     db,
@@ -130,7 +136,7 @@ export const proposeMemory = async (
   await checkedText(env, collection, path, text);
   const existing = await findByPath(db, collection.id, path);
   const actor = delegateActorOf(authority);
-  const source: MemoryProposalSource = { actor, context: work, restricted };
+  const source: MemoryProposalSource = { actor, context: work };
   const row: ProposalRow = {
     id: crypto.randomUUID(),
     collectionId: collection.id,
@@ -139,14 +145,32 @@ export const proposeMemory = async (
     text,
     message: message === undefined || message === "" ? null : message,
     source: JSON.stringify(source),
+    agentId: subject.agentId,
     status: "pending",
     decidedBy: null,
     createdAt: new Date(),
     decidedAt: null,
   };
-  await auditedBatch(env, db, [
-    db.insert(memoryProposals).values(row),
-    outboxed(db, {
+  const pending = db
+    .select({ count: count() })
+    .from(memoryProposals)
+    .where(
+      and(
+        eq(memoryProposals.agentId, row.agentId),
+        eq(memoryProposals.status, "pending")
+      )
+    );
+  const [inserted] = await auditedBatch(env, db, [
+    // Inserted only while the agent has fewer than the most waiting,
+    // counted in the same statement, so proposals made at once can't
+    // together pass it. The columns in the table's order.
+    db
+      .insert(memoryProposals)
+      .select(
+        sql`SELECT ${row.id}, ${row.collectionId}, ${row.path}, ${row.baseVersion}, ${row.text}, ${row.message}, ${row.source}, ${row.agentId}, ${row.status}, NULL, ${row.createdAt.getTime()}, NULL WHERE (${pending}) < ${proposalsMaxPendingPerAgent}`
+      )
+      .returning({ id: memoryProposals.id }),
+    outboxedIfChanged(db, {
       actor,
       action: "knowledge.proposal.created",
       target: { type: "proposal", id: row.id },
@@ -154,10 +178,14 @@ export const proposeMemory = async (
       detail: {
         collectionId: collection.id,
         baseVersion: row.baseVersion,
-        restricted,
       },
     }),
   ]);
+  if (inserted.length === 0) {
+    throw knowledgeErrors.create("knowledge.too_many_proposals", {
+      maxPending: proposalsMaxPendingPerAgent,
+    });
+  }
   return toProposal(row);
 };
 
@@ -256,12 +284,36 @@ const decide = (
     );
 
 /**
+ * Fails the batch it is in unless `proposal` is approved by now: it
+ * inserts the proposal's own row again, under the same ID, whenever its
+ * status is anything else, and the primary key refuses that, which rolls
+ * the whole batch back. So an approval whose `decide` changed nothing (a
+ * decline got there first) saves nothing either. When the proposal is
+ * approved it selects no row and inserts nothing.
+ */
+const unlessApproved = (
+  db: ReturnType<typeof drizzle>,
+  proposal: ProposalRow
+) =>
+  db.insert(memoryProposals).select(
+    db
+      .select()
+      .from(memoryProposals)
+      .where(
+        and(
+          eq(memoryProposals.id, proposal.id),
+          ne(memoryProposals.status, "approved")
+        )
+      )
+  );
+
+/**
  * Approves a pending proposal: its text becomes the file's next version,
- * by `person`, in the same batch that marks it approved. If the file
+ * by `person`, in the same batch that marks it approved, which commits
+ * only if this approval is what decided it (`unlessApproved`). If the file
  * changed since it was proposed, `knowledge.conflict`, and it stays
- * pending, to be declined or proposed again. Approving and declining one
- * proposal at the same moment can save the text and leave it declined;
- * the history and the audit log show both.
+ * pending, to be declined or proposed again; if it was decided meanwhile,
+ * `knowledge.proposal_decided`, and nothing is saved.
  */
 export const approveProposal = async (
   env: Env,
@@ -274,21 +326,38 @@ export const approveProposal = async (
     proposalId
   );
   const db = drizzle(env.KNOWLEDGE);
-  return await writeVersion(env, personWriter(person), {
-    collection,
-    path: proposal.path,
-    text: proposal.text,
-    ifVersion: proposal.baseVersion,
-    message: proposal.message,
-    restoredFrom: null,
-    also: [
-      decide(db, person, proposal, "approved"),
-      outboxedIfChanged(
-        db,
-        decisionEntry(person, proposal, "knowledge.proposal.approved")
-      ),
-    ],
-  });
+  try {
+    return await writeVersion(env, personWriter(person), {
+      collection,
+      path: proposal.path,
+      text: proposal.text,
+      ifVersion: proposal.baseVersion,
+      message: proposal.message,
+      restoredFrom: null,
+      also: [
+        decide(db, person, proposal, "approved"),
+        unlessApproved(db, proposal),
+        outboxed(
+          db,
+          decisionEntry(person, proposal, "knowledge.proposal.approved")
+        ),
+      ],
+    });
+  } catch (error) {
+    // A batch refused by a primary key reaches us as a conflict: the
+    // guard's, when the proposal was decided meanwhile.
+    if (knowledgeErrors.codeOf(error) === "knowledge.conflict") {
+      const now = await db
+        .select({ status: memoryProposals.status })
+        .from(memoryProposals)
+        .where(eq(memoryProposals.id, proposal.id))
+        .get();
+      if (now?.status !== "pending") {
+        throw knowledgeErrors.create("knowledge.proposal_decided");
+      }
+    }
+    throw error;
+  }
 };
 
 /** Declines a pending proposal; the file stays as it is. */

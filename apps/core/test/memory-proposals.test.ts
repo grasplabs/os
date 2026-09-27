@@ -11,17 +11,24 @@ import type { WorkContext } from "../src/restricted.ts";
 import { actingFor, newChat } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
 import { newTeam } from "./knowledge.ts";
-import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
+import {
+  auditedDuring,
+  openRpc,
+  outcome,
+  signedInApi,
+  unique,
+} from "./sign-in.ts";
 
 // Proposals: shared memory files (the company's AGENTS.md and MEMORY.md,
 // an agent's own AGENTS.md) reach every agent, so an agent only proposes
 // their new text and someone who can change the Memory collection decides.
 // These tests start from the ways that can fail: a proposal changes the
 // file before anyone approved it; someone who can't change the file
-// approves it; an approval saves over a change made since; a proposal
-// escapes the file's limit; a decision is made twice or leaves no trace;
-// and a warning about restricted content names a collection the editor
-// can't see.
+// approves it; an approval saves over a change made since, or lands with a
+// decline at once; a proposal escapes the file's limit, or carries
+// restricted data; an agent floods the owner with proposals; a decision is
+// made twice or leaves no trace; and a warning about restricted content
+// names a collection the editor can't see.
 
 const idp = mockIdp();
 
@@ -69,6 +76,16 @@ const propose = async (
   work: WorkContext,
   input: MemoryProposalInput
 ) => await proposeMemory(env, authority, work, input);
+
+/** A proposal's status as stored, whoever may see it. */
+const statusOf = async (proposalId: string): Promise<string | undefined> => {
+  const row = await env.KNOWLEDGE.prepare(
+    "SELECT status FROM memory_proposals WHERE id = ?"
+  )
+    .bind(proposalId)
+    .first<{ status: string }>();
+  return row?.status;
+};
 
 /** Whether the memory of an agent acting for `userId` has `text` now. */
 const memoryHas = async (
@@ -163,7 +180,7 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
           baseVersion: currentVersion,
           text: after,
           message: "Scooters since May",
-          source: { actor: agentActor, context: work, restricted: false },
+          source: { actor: agentActor, context: work },
           status: "pending",
           decidedBy: null,
           createdAt: adminsView.find(({ id }) => id === proposalId)?.createdAt,
@@ -256,6 +273,69 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
       memory: true,
     });
   });
+
+  it("is either approved and saved, or declined and not, when both happen at once", async () => {
+    const admin = await personOf("admin");
+    const other = await personOf("admin");
+    const memory = await memoryOf(admin);
+    const work = await newChat();
+    const asAgent = actingFor(newAgent(), admin.userId);
+    const outcomes: { saved: boolean; status: string | undefined }[] = [];
+    for (let round = 0; round < 5; round += 1) {
+      const base = `Base ${unique()}`;
+      const proposed = `Proposed ${unique()}`;
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      await saveOver(admin, memory, "MEMORY.md", base);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const { id } = await propose(asAgent, work, {
+        file: "MEMORY.md",
+        text: proposed,
+      });
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const [approved, declined] = await Promise.all([
+        outcome(admin.api.memory.approve(id)),
+        outcome(other.api.memory.decline(id)),
+      ]);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const status = await statusOf(id);
+      // oxlint-disable-next-line no-await-in-loop -- one round at a time
+      const saved = await memoryHas(admin.userId, work, proposed);
+      const consistent =
+        (approved === "ok" &&
+          declined === "knowledge.proposal_decided" &&
+          status === "approved" &&
+          saved) ||
+        (declined === "ok" &&
+          approved === "knowledge.proposal_decided" &&
+          status === "declined" &&
+          !saved);
+      outcomes.push({ saved: consistent, status });
+    }
+    expect(outcomes.every(({ saved }) => saved)).toBeTruthy();
+  });
+
+  it("is checked against the file's limit again when approved", async () => {
+    const admin = await personOf("admin");
+    const memory = await memoryOf(admin);
+    await saveOver(admin, memory, "MEMORY.md", `Base ${unique()}`);
+    const work = await newChat();
+    const { id } = await propose(actingFor(newAgent(), admin.userId), work, {
+      file: "MEMORY.md",
+      text: "Longer than four characters",
+    });
+    // The limit lowered to 1 token (4 characters) since it was proposed.
+    const { core } = await openRpc(admin.session, {
+      coreEnv: { ...env, MEMORY_LIMITS: { "MEMORY.md": 1 } },
+    });
+    const lowered = core.authenticate();
+    expect({
+      approved: await outcome(lowered.memory.approve(id)),
+      status: await statusOf(id),
+    }).toStrictEqual({
+      approved: "knowledge.memory_too_large",
+      status: "pending",
+    });
+  });
 });
 
 describe("proposals", setUpTime, () => {
@@ -287,6 +367,8 @@ describe("proposals", setUpTime, () => {
     await memoryOf(admin);
     const asAgent = actingFor(newAgent(), admin.userId);
     const work = await newChat();
+    const restricted = await newChat();
+    await restrict(env, asAgent, restricted, []);
     const outcomeOf = async (authority: Authority, input: unknown) =>
       await outcome(proposeMemory(env, authority, work, input));
     await expect(
@@ -311,6 +393,13 @@ describe("proposals", setUpTime, () => {
             { file: "MEMORY.md", text: "Off" }
           )
         ),
+        // Shared memory would carry restricted data to everyone.
+        outcome(
+          proposeMemory(env, asAgent, restricted, {
+            file: "MEMORY.md",
+            text: "From a restricted chat",
+          })
+        ),
       ])
     ).resolves.toStrictEqual([
       "knowledge.memory_too_large",
@@ -319,20 +408,40 @@ describe("proposals", setUpTime, () => {
       "permission.denied",
       "permission.person_inactive",
       "feature.disabled",
+      "permission.restricted",
     ]);
   });
 
-  it("from a context that read restricted data are marked so", async () => {
+  it("wait at most 20 at a time from one agent", async () => {
     const admin = await personOf("admin");
     await memoryOf(admin);
+    const work = await newChat();
     const asAgent = actingFor(newAgent(), admin.userId);
-    const restricted = await newChat();
-    await restrict(env, asAgent, restricted, []);
-    const proposal = await propose(asAgent, restricted, {
-      file: "MEMORY.md",
-      text: "From a restricted chat",
+    const ids: string[] = [];
+    for (let index = 0; index < 20; index += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one proposal at a time
+      const { id } = await propose(asAgent, work, {
+        file: "MEMORY.md",
+        text: `Proposal ${index}`,
+      });
+      ids.push(id);
+    }
+    const next = { file: "MEMORY.md", text: "One more" } as const;
+    const overCap = await outcome(propose(asAgent, work, next));
+    // Another agent has a count of its own.
+    const otherAgent = await outcome(
+      propose(actingFor(newAgent(), admin.userId), work, next)
+    );
+    await admin.api.memory.decline(ids[0] ?? "");
+    expect({
+      overCap,
+      otherAgent,
+      afterDecline: await outcome(propose(asAgent, work, next)),
+    }).toStrictEqual({
+      overCap: "knowledge.too_many_proposals",
+      otherAgent: "ok",
+      afterDecline: "ok",
     });
-    expect(proposal.source.restricted).toBeTruthy();
   });
 });
 

@@ -155,8 +155,6 @@ export interface MemoryProposalSource {
   actor: AuditActor;
   /** Where it worked. */
   context: WorkContext;
-  /** Whether that context had read restricted data by then. */
-  restricted: boolean;
 }
 
 /** A proposed change to a shared memory file, and what became of it. */

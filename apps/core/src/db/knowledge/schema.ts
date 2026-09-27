@@ -157,7 +157,8 @@ export const links = sqliteTable(
 );
 
 /**
- * A change an agent proposed to a shared memory file (knowledge/memory.ts):
+ * A change an agent proposed to a shared memory file
+ * (knowledge/memory-proposals.ts):
  * the whole new text, from `base_version` of the document at `path`, which
  * waits for someone who can change the collection to approve or decline it.
  */
@@ -173,8 +174,10 @@ export const memoryProposals = sqliteTable(
     baseVersion: integer("base_version").notNull(),
     text: text().notNull(),
     message: text(),
-    /** JSON: who proposed it, where, and whether that was restricted. */
+    /** JSON: who proposed it, and where. */
     source: text().notNull(),
+    /** The agent that proposed it, to keep how many it has waiting. */
+    agentId: text("agent_id").notNull(),
     status: text({ enum: ["pending", "approved", "declined"] }).notNull(),
     /** User ID. */
     decidedBy: text("decided_by"),
@@ -183,5 +186,6 @@ export const memoryProposals = sqliteTable(
   },
   (table) => [
     index("memory_proposals_status_idx").on(table.status, table.createdAt),
+    index("memory_proposals_agent_idx").on(table.agentId, table.status),
   ]
 );
