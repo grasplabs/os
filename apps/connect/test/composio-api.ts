@@ -7,6 +7,7 @@
  */
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 
+import { forgetComposioCatalog } from "../src/catalog.ts";
 import { composioApiBase } from "../src/composio.ts";
 import { testComposioKey } from "./provider-config.ts";
 
@@ -20,7 +21,6 @@ export interface FakeToolkit {
   name: string;
   /** Whether Composio holds an app for it (managed auth); by default yes. */
   managed?: boolean;
-  logo?: string;
   categories?: string[];
   tools: FakeComposioTool[];
 }
@@ -38,7 +38,8 @@ export interface ComposioApiRequest {
 
 /**
  * How the API answers: `up`; `down` (a 503 to everything); `redirect` (a
- * 302 to another host); `garbled` (a 200 that isn't JSON); `refusing` (a
+ * 302 to another host); `garbled` (a 200 that isn't JSON); `huge` (a 200
+ * streaming 5 MiB); `refusing` (a
  * 400, as to a toolkit it doesn't know).
  */
 export type ComposioHealth =
@@ -46,6 +47,7 @@ export type ComposioHealth =
   | "down"
   | "redirect"
   | "garbled"
+  | "huge"
   | "refusing";
 
 /** What the API answers to everything while it isn't up. */
@@ -57,6 +59,23 @@ const failures: Partial<Record<ComposioHealth, () => Response>> = {
       headers: { location: "https://elsewhere.example/api" },
     }),
   garbled: () => new Response("<html>", { status: 200 }),
+  // Past connect's 4 MiB cap, in chunks, without a `content-length`.
+  huge: () => {
+    const chunk = new Uint8Array(1024 * 1024).fill(32);
+    let sent = 0;
+    return new Response(
+      new ReadableStream<Uint8Array>({
+        pull: (controller) => {
+          sent += 1;
+          if (sent > 5) {
+            controller.close();
+            return;
+          }
+          controller.enqueue(chunk);
+        },
+      })
+    );
+  },
   refusing: () =>
     Response.json({ error: { message: "Toolkit not found" } }, { status: 400 }),
 };
@@ -68,7 +87,6 @@ const toolkitItem = ({
   slug,
   name,
   managed,
-  logo,
   categories,
   tools,
 }: FakeToolkit) => ({
@@ -80,7 +98,7 @@ const toolkitItem = ({
   no_auth: false,
   meta: {
     description: `${name} toolkit`,
-    logo,
+    logo: `https://logos.composio.dev/api/${slug}`,
     categories: (categories ?? []).map((category) => ({
       id: category.toLowerCase(),
       name: category,
@@ -159,6 +177,8 @@ export const fakeComposioApi = (
   };
 
   beforeEach(() => {
+    // Each test asks Composio afresh, as a new isolate would.
+    forgetComposioCatalog();
     state.requests = [];
     state.health = "up";
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {

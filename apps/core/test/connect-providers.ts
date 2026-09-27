@@ -32,7 +32,6 @@ export const composioToolkits = [
     name: "HubSpot",
     composio_managed_auth_schemes: ["OAUTH2"],
     meta: {
-      logo: null,
       categories: [{ id: "crm", name: "CRM" }],
       tools_count: 2,
     },

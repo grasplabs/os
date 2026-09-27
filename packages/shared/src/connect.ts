@@ -217,8 +217,6 @@ export interface CatalogEntry {
   /** A native provider (`microsoft`), or a Composio toolkit's slug. */
   id: string;
   name: string;
-  /** An HTTPS URL of its logo, if it has one. */
-  logo: string | null;
   categories: string[];
   /** How many tools it has; `catalogTools` lists them. */
   toolCount: number;

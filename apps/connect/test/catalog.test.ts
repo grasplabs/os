@@ -17,7 +17,6 @@ const toolkits: FakeToolkit[] = [
   {
     slug: "hubspot",
     name: "HubSpot",
-    logo: "https://logos.composio.dev/api/hubspot",
     categories: ["CRM", "Marketing"],
     tools: [
       { slug: "HUBSPOT_LIST_CONTACTS", description: "List contacts" },
@@ -28,7 +27,6 @@ const toolkits: FakeToolkit[] = [
   {
     slug: "linear",
     name: "Linear",
-    logo: "http://logos.example/linear",
     tools: [{ slug: "LINEAR_LIST_ISSUES" }],
   },
   // Composio holds no app for it: an admin would need one of their own.
@@ -36,7 +34,6 @@ const toolkits: FakeToolkit[] = [
   {
     slug: "notion",
     name: "Notion",
-    logo: "https://user:pass@logos.example/notion",
     tools: [{ slug: "NOTION_SEARCH" }],
   },
 ];
@@ -63,7 +60,7 @@ describe("the catalog", () => {
       source: "composio",
       id: "hubspot",
       name: "HubSpot",
-      logo: "https://logos.composio.dev/api/hubspot",
+      // No logo: a browser showing Composio's would tell it who looks.
       categories: ["CRM", "Marketing"],
       toolCount: 3,
     });
@@ -88,14 +85,30 @@ describe("the catalog", () => {
     expect(ids).toHaveLength(5);
   });
 
-  it("gives only HTTPS logos without credentials in them", async () => {
-    const { entries } = await exports.default.catalog({ composio: true });
-    const logos = Object.fromEntries(entries.map(({ id, logo }) => [id, logo]));
-    expect(logos).toMatchObject({
-      microsoft: null,
-      hubspot: "https://logos.composio.dev/api/hubspot",
-      linear: null,
-      notion: null,
+  it("keeps what Composio listed for ten minutes, and asks again after", async () => {
+    const first = await exports.default.catalog({ composio: true });
+    const asked = composio.requests.length;
+    const again = await exports.default.catalog({ composio: true });
+    expect(again).toStrictEqual(first);
+    expect(composio.requests).toHaveLength(asked);
+    const now = Date.now();
+    vi.spyOn(Date, "now").mockReturnValue(now + 11 * 60 * 1000);
+    await exports.default.catalog({ composio: true });
+    expect(composio.requests).toHaveLength(asked * 2);
+  });
+
+  it("doesn't keep a failure: the next look asks Composio again", async () => {
+    composio.health = "down";
+    await expect(
+      exports.default.catalog({ composio: true })
+    ).resolves.toMatchObject({
+      composio: "unavailable",
+    });
+    composio.health = "up";
+    await expect(
+      exports.default.catalog({ composio: true })
+    ).resolves.toMatchObject({
+      composio: "listed",
     });
   });
 
@@ -139,7 +152,8 @@ describe("the catalog", () => {
   });
 
   it("still lists the native providers when Composio fails", async () => {
-    const failures = ["down", "redirect", "garbled"] as const;
+    // `huge` streams past the size cap, without saying its length.
+    const failures = ["down", "redirect", "garbled", "huge"] as const;
     const results = [];
     for (const failure of failures) {
       composio.health = failure;
@@ -186,8 +200,26 @@ describe("a catalog entry's tools", () => {
       { name: "HUBSPOT_DELETE_CONTACT", description: null },
     ]);
     expect(composio.requests.map(({ path }) => path)).toStrictEqual([
-      "/tools?toolkit_slug=hubspot&limit=1000",
-      "/tools?toolkit_slug=hubspot&limit=1000&cursor=2",
+      "/tools?toolkit_slug=hubspot&limit=200",
+      "/tools?toolkit_slug=hubspot&limit=200&cursor=2",
+    ]);
+  });
+
+  it("keeps a toolkit's tools for ten minutes, for that toolkit only", async () => {
+    const hubspot = {
+      composio: true,
+      source: "composio",
+      id: "hubspot",
+    } as const;
+    const first = await exports.default.catalogTools(hubspot);
+    await expect(exports.default.catalogTools(hubspot)).resolves.toStrictEqual(
+      first
+    );
+    await exports.default.catalogTools({ ...hubspot, id: "linear" });
+    expect(composio.requests.map(({ path }) => path)).toStrictEqual([
+      "/tools?toolkit_slug=hubspot&limit=200",
+      "/tools?toolkit_slug=hubspot&limit=200&cursor=2",
+      "/tools?toolkit_slug=linear&limit=200",
     ]);
   });
 
@@ -220,7 +252,7 @@ describe("a catalog entry's tools", () => {
     );
     // Only the well-formed toolkit, while the flag is on, was looked up.
     expect(composio.requests.map(({ path }) => path)).toStrictEqual([
-      "/tools?toolkit_slug=nobody&limit=1000",
+      "/tools?toolkit_slug=nobody&limit=200",
     ]);
   });
 

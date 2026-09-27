@@ -10,6 +10,7 @@ import type {
   CatalogTool,
   OAuthProvider,
 } from "@grasp-os/shared/connect";
+import { sha256Hex } from "@grasp-os/shared/encoding";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { z } from "zod";
 
@@ -22,7 +23,9 @@ import { providers } from "./providers.ts";
 // toolkits from Composio's API, with connect's key, while the `composio`
 // flag is on (core says so with each request). Each entry is marked with
 // who carries out its actions, and so who holds its tokens: connect
-// (`native`) or Composio's cloud (`composio`).
+// (`native`) or Composio's cloud (`composio`). What Composio lists is kept
+// for ten minutes (`cachedIn`), and only asked for while the flag is on and
+// connect has its key.
 
 /** How native providers are shown in the catalog. */
 const nativeShown: Record<
@@ -45,17 +48,81 @@ const nativeEntries = (): CatalogEntry[] =>
         source: "native",
         id: provider.id,
         ...nativeShown[provider.id],
-        logo: null,
         toolCount: Object.keys(connector.manifest.actions).length,
       },
     ];
   });
 
-/** Most pages of Composio's lists read for one answer. */
-const maxPages = 5;
+/**
+ * How much of one of Composio's lists is read for one answer: pages of
+ * `pageSize` items, at most `maxPages` of them. Toolkits come in Composio's
+ * largest pages; tools, which carry their input schemas, in smaller ones.
+ */
+interface Paging {
+  pageSize: number;
+  maxPages: number;
+}
 
-/** Items per page asked of Composio: its maximum. */
-const pageSize = 1000;
+const toolkitPaging: Paging = { pageSize: 1000, maxPages: 5 };
+const toolPaging: Paging = { pageSize: 200, maxPages: 25 };
+
+/**
+ * How long what Composio listed is kept: its catalog changes rarely, and
+ * the Connections page shouldn't ask Composio every time it opens.
+ */
+const cacheTtlMs = 10 * 60 * 1000;
+
+/** Most answers kept in each cache: about one per toolkit people look at. */
+const maxCached = 100;
+
+interface Cached<Value> {
+  expiresAt: number;
+  value: Value;
+}
+
+// Per isolate, keyed by the SHA-256 of connect's Composio key (a rotated
+// key starts afresh) and what was listed. Only answers are kept: a failure
+// is asked again next time.
+const toolkitCache = new Map<string, Cached<CatalogEntry[]>>();
+const toolCache = new Map<string, Cached<CatalogTool[]>>();
+
+/** Forgets everything cached, so the next answer comes from Composio. */
+export const forgetComposioCatalog = (): void => {
+  toolkitCache.clear();
+  toolCache.clear();
+};
+
+/**
+ * The value `load` gives for `name` under `key`, from `cache` while it is
+ * fresh. Expired entries go when a new one is stored, and the oldest when
+ * the cache is full.
+ */
+const cachedIn = async <Value>(
+  cache: Map<string, Cached<Value>>,
+  key: string,
+  name: string,
+  load: () => Promise<Value>
+): Promise<Value> => {
+  const id = `${await sha256Hex(key)}:${name}`;
+  const hit = cache.get(id);
+  const now = Date.now();
+  if (hit !== undefined && hit.expiresAt > now) {
+    return hit.value;
+  }
+  const value = await load();
+  for (const [each, { expiresAt }] of cache) {
+    if (expiresAt <= now) {
+      cache.delete(each);
+    }
+  }
+  cache.delete(id);
+  const [oldest] = cache.keys();
+  if (cache.size >= maxCached && oldest !== undefined) {
+    cache.delete(oldest);
+  }
+  cache.set(id, { expiresAt: now + cacheTtlMs, value });
+  return value;
+};
 
 /**
  * A page of one of Composio's lists. Items are checked one at a time, so
@@ -73,7 +140,6 @@ const toolkitSchema = z.object({
   composio_managed_auth_schemes: z.array(z.string()).default([]),
   meta: z
     .object({
-      logo: z.string().nullish(),
       categories: z.array(z.unknown()).default([]),
       tools_count: z.number().int().nonnegative().default(0),
     })
@@ -87,26 +153,16 @@ const toolSchema = z.object({
   description: z.string().max(4096).nullish(),
 });
 
-/** A logo URL, only if it is HTTPS without credentials in it. */
-const logoOf = (logo: string | null | undefined): string | null => {
-  if (logo === undefined || logo === null || !URL.canParse(logo)) {
-    return null;
-  }
-  const url = new URL(logo);
-  return url.protocol === "https:" && url.username === "" && url.password === ""
-    ? url.href
-    : null;
-};
-
 /**
- * Every item of one of Composio's lists at `path`, page after page, up to
- * {@link maxPages}, each item as `schema` reads it; items it can't read are
- * left out.
+ * Every item of one of Composio's lists at `path`, page after page, as
+ * far as `paging` goes, each item as `schema` reads it; items it can't read
+ * are left out.
  */
 const composioList = async <Item>(
   key: string,
   path: string,
-  schema: z.ZodType<Item>
+  schema: z.ZodType<Item>,
+  { pageSize, maxPages }: Paging
 ): Promise<Item[]> => {
   const items: Item[] = [];
   let cursor: string | undefined;
@@ -143,7 +199,8 @@ const composioEntries = async (key: string): Promise<CatalogEntry[]> => {
   const toolkits = await composioList(
     key,
     "/toolkits?sort_by=alphabetically",
-    toolkitSchema
+    toolkitSchema,
+    toolkitPaging
   );
   return toolkits
     .filter(({ composio_managed_auth_schemes: managed }) => managed.length > 0)
@@ -151,7 +208,6 @@ const composioEntries = async (key: string): Promise<CatalogEntry[]> => {
       source: "composio",
       id: slug,
       name,
-      logo: logoOf(meta.logo),
       categories: meta.categories.flatMap((category) => {
         const parsed = categorySchema.safeParse(category);
         return parsed.success ? [parsed.data.name] : [];
@@ -172,10 +228,13 @@ export const catalog = async (env: Env, request: unknown): Promise<Catalog> => {
     return { entries: native, composio: "off" };
   }
   try {
-    return {
-      entries: [...native, ...(await composioEntries(key))],
-      composio: "listed",
-    };
+    const toolkits = await cachedIn(
+      toolkitCache,
+      key,
+      "toolkits",
+      async () => await composioEntries(key)
+    );
+    return { entries: [...native, ...toolkits], composio: "listed" };
   } catch (error) {
     if (!(error instanceof ComposioError)) {
       throw error;
@@ -200,7 +259,8 @@ const composioTools = async (
     tools = await composioList(
       key,
       `/tools?${new URLSearchParams({ toolkit_slug: toolkit }).toString()}`,
-      toolSchema
+      toolSchema,
+      toolPaging
     );
   } catch (error) {
     if (!(error instanceof ComposioError)) {
@@ -250,5 +310,10 @@ export const catalogTools = async (
   if (!composio || key === undefined || !toolkit.success) {
     throw connectErrors.create("connect.catalog_entry_not_found");
   }
-  return await composioTools(key, toolkit.data);
+  return await cachedIn(
+    toolCache,
+    key,
+    `tools:${toolkit.data}`,
+    async () => await composioTools(key, toolkit.data)
+  );
 };
