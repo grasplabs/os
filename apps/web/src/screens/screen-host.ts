@@ -93,9 +93,28 @@ const sendTheme = async (
   }
 };
 
+/** A string the frame passed, or `screen.invalid`. */
+const text = (value: unknown): string => {
+  if (typeof value !== "string") {
+    throw screenErrors.create("screen.invalid");
+  }
+  return value;
+};
+
 /**
- * What the frame reaches through its port: its own App's server, the
- * App's error log and the page's theme. Everything it passes is untrusted.
+ * `value` as what core's call takes: the frame's input, passed on as it is
+ * for core to check, as `call` passes its arguments.
+ */
+const forCore = (value: unknown): never =>
+  // SAFETY: core checks every value a screen sends (screens-rpc.ts); the
+  // page only binds the call to the screen's own App.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+  value as never;
+
+/**
+ * What the frame reaches through its port: its own App's server and
+ * workflow runs, the App's error log and the page's theme. Everything it
+ * passes is untrusted.
  */
 class Bridge extends RpcTarget implements ScreenBridge {
   readonly #link: CoreLink;
@@ -123,6 +142,52 @@ class Bridge extends RpcTarget implements ScreenBridge {
     }
     const session = await this.#link.session();
     return await session.screens.call(this.#bundle.app, method, args);
+  }
+
+  async startRun(workflow: unknown, input: unknown): Promise<unknown> {
+    const session = await this.#link.session();
+    return await session.screens.startRun(
+      this.#bundle.app,
+      text(workflow),
+      input
+    );
+  }
+
+  async runs(workflow: unknown): Promise<unknown> {
+    const session = await this.#link.session();
+    return await session.screens.runs(this.#bundle.app, text(workflow));
+  }
+
+  async run(run: unknown): Promise<unknown> {
+    const session = await this.#link.session();
+    return await session.screens.run(this.#bundle.app, text(run));
+  }
+
+  async decide(
+    run: unknown,
+    decision: unknown,
+    answer: unknown
+  ): Promise<unknown> {
+    const session = await this.#link.session();
+    return await session.screens.decide(
+      this.#bundle.app,
+      text(run),
+      text(decision),
+      forCore(answer)
+    );
+  }
+
+  /**
+   * The frame's callback goes on to core, which may only call it; the
+   * subscription core answers goes back to the frame, to release.
+   */
+  async watchRuns(workflow: unknown, onChange: unknown): Promise<unknown> {
+    const session = await this.#link.session();
+    return await session.screens.watchRuns(
+      this.#bundle.app,
+      text(workflow),
+      forCore(onChange)
+    );
   }
 
   report(problem: unknown): void {

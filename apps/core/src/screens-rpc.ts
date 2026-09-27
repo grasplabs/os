@@ -30,6 +30,7 @@ import { callApp, isPlainData } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
 import { appFor, findVersion, getApp, versionFiles } from "./apps.ts";
 import { appHost } from "./durable-objects.ts";
+import { RunSubscription } from "./run-subscription.ts";
 import { buildFailed, buildScreens } from "./screens.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
@@ -249,7 +250,7 @@ const watchRuns = async (
   }: { app: unknown; workflow: unknown; onChange: unknown },
   stillOpenFor: (app: AppId) => StillOpen,
   subscriptions: Set<Disposable>
-): Promise<void> => {
+): Promise<RunSubscription> => {
   requireScreenWorkflows(env);
   const { id } = await getApp(env, by, app);
   const name = screenWorkflow(workflow);
@@ -267,12 +268,23 @@ const watchRuns = async (
     }
   );
   subscriptions.add(callback);
+  let watch: string;
   try {
-    await appHost(env, id).watchRuns(name, callback);
+    watch = await appHost(env, id).watchRuns(name, callback);
   } catch (error) {
     callback[Symbol.dispose]();
     throw error;
   }
+  return new RunSubscription(async () => {
+    // The slot is free at once, and the callback forwards nothing more;
+    // the host drops it now, or at its next push if it can't be reached.
+    callback[Symbol.dispose]();
+    try {
+      await appHost(env, id).unwatchRuns(name, watch);
+    } catch (error) {
+      log.warn("screen.unwatch_failed", { appId: id, ...errorFields(error) });
+    }
+  });
 };
 
 /**
@@ -463,15 +475,17 @@ export class ScreensRpc extends RpcTarget implements ScreensApi {
     app: string,
     workflow: string,
     onChange: (change: RunChange) => void
-  ): Promise<void> {
-    await withPerson(this.#check, async (by) => {
-      await watchRuns(
-        this.#env,
-        by,
-        { app, workflow, onChange },
-        (id) => this.#stillOpen(id),
-        this.#runSubscriptions
-      );
-    });
+  ): Promise<RunSubscription> {
+    return await withPerson(
+      this.#check,
+      async (by) =>
+        await watchRuns(
+          this.#env,
+          by,
+          { app, workflow, onChange },
+          (id) => this.#stillOpen(id),
+          this.#runSubscriptions
+        )
+    );
   }
 }

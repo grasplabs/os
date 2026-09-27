@@ -235,8 +235,8 @@ export class App extends DurableObject<Env> {
   /** How many times a call has read the current version. */
   #reads = 0;
 
-  /** Screens following the App's runs, by workflow (`watchRuns`). */
-  readonly #runWatchers = new Map<string, Set<RunWatcher>>();
+  /** Screens following the App's runs, by workflow and ID (`watchRuns`). */
+  readonly #runWatchers = new Map<string, Map<string, RunWatcher>>();
 
   /**
    * The calls running now, by token, with the version their code runs on
@@ -363,12 +363,20 @@ export class App extends DurableObject<Env> {
    * fails: the screen is gone, or the person may no longer use the App.
    * Kept here in memory, outside the App's code, so a restart of that code
    * keeps them; a restart of this object drops them, which tells each
-   * screen to follow again.
+   * screen to follow again. Returns the ID `unwatchRuns` drops it by.
    */
-  watchRuns(workflow: string, onChange: RunWatcher): void {
-    const watchers = this.#runWatchers.get(workflow) ?? new Set();
-    watchers.add(onChange.dup());
+  watchRuns(workflow: string, onChange: RunWatcher): string {
+    const id = crypto.randomUUID();
+    const watchers =
+      this.#runWatchers.get(workflow) ?? new Map<string, RunWatcher>();
+    watchers.set(id, onChange.dup());
     this.#runWatchers.set(workflow, watchers);
+    return id;
+  }
+
+  /** Drops the screen's callback `watchRuns` kept as `id`, if it still does. */
+  unwatchRuns(workflow: string, id: string): void {
+    this.#drop(workflow, id);
   }
 
   /**
@@ -377,26 +385,32 @@ export class App extends DurableObject<Env> {
    * push goes on by itself, and one that fails drops only its screen.
    */
   runChanged(workflow: string, run: string): void {
-    for (const watcher of this.#runWatchers.get(workflow) ?? []) {
-      void this.#tell(workflow, watcher, { run });
+    for (const [id, watcher] of this.#runWatchers.get(workflow) ?? []) {
+      void this.#tell(workflow, id, watcher, { run });
     }
   }
 
   async #tell(
     workflow: string,
+    id: string,
     watcher: RunWatcher,
     change: RunChange
   ): Promise<void> {
     try {
       await watcher(change);
     } catch {
-      const watchers = this.#runWatchers.get(workflow);
-      watchers?.delete(watcher);
-      if (watchers?.size === 0) {
-        this.#runWatchers.delete(workflow);
-      }
-      watcher[Symbol.dispose]();
+      this.#drop(workflow, id);
     }
+  }
+
+  #drop(workflow: string, id: string): void {
+    const watchers = this.#runWatchers.get(workflow);
+    const watcher = watchers?.get(id);
+    watchers?.delete(id);
+    if (watchers?.size === 0) {
+      this.#runWatchers.delete(workflow);
+    }
+    watcher?.[Symbol.dispose]();
   }
 
   /**

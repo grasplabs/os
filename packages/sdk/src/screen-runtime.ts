@@ -33,6 +33,23 @@ export interface ScreenBridge {
   report: (problem: ScreenProblem) => void;
   /** Calls `onTheme` with the page's theme now and whenever it changes. */
   theme: (onTheme: (theme: Theme) => void) => void;
+  /** Starts a run of the App's workflow, for the person. */
+  startRun: (workflow: string, input: unknown) => Promise<unknown>;
+  /** The App's runs of `workflow`, newest first. */
+  runs: (workflow: string) => Promise<unknown>;
+  /** One of the App's runs as it is now. */
+  run: (run: string) => Promise<unknown>;
+  /** Answers the decision `decision` of one of the App's runs. */
+  decide: (run: string, decision: string, answer: unknown) => Promise<unknown>;
+  /**
+   * Calls `onChange` each time one of the App's runs of `workflow`
+   * changes, until the subscription it answers is released (`release()`)
+   * or core lets go of `onChange`.
+   */
+  watchRuns: (
+    workflow: string,
+    onChange: (change: unknown) => void
+  ) => Promise<unknown>;
 }
 
 let connected: RpcStub<ScreenBridge> | undefined;

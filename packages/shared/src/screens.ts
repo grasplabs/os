@@ -109,6 +109,15 @@ export interface RunChange {
 }
 
 /**
+ * A screen's hold on its App's runs of one workflow (`watchRuns`), until
+ * it releases it: then core calls its callback no more, and the slot it
+ * took of the 20 a screen may hold is free again.
+ */
+export interface RunSubscriptionApi {
+  release: () => Promise<void>;
+}
+
+/**
  * A signed-in person's way to an App's screens: for anyone with a role in
  * the App (`AppsApi`); its error log for its builders only.
  */
@@ -160,15 +169,16 @@ export interface ScreensApi {
   /**
    * Calls `onChange` each time one of the App's runs of `workflow` starts,
    * waits for a decision, has it answered or closed, or ends, for as long
-   * as the person may use the App. Released when core stops calling it,
-   * which tells the screen to follow again. One screen's connection
-   * follows at most 20 at once.
+   * as the person may use the App and until the screen releases the
+   * subscription it answers. Core lets go of `onChange` when it stops
+   * calling it, which tells the screen to follow again. One screen's
+   * connection holds at most 20 subscriptions at once.
    */
   watchRuns: (
     app: string,
     workflow: string,
     onChange: (change: RunChange) => void
-  ) => Promise<void>;
+  ) => Promise<RunSubscriptionApi>;
 }
 
 /** Why a call to an App's screens was refused. */
