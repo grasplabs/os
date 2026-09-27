@@ -1,7 +1,9 @@
 // Deployed to grasp-os-staging on every merge and to grasp-os-ops by hand, behind
 // Cloudflare Access (company sign-in + MFA). The Worker verifies the Access JWT
 // on every request itself (src/access.ts), against the CF_ACCESS_AUD and
-// CF_ACCESS_ISS vars set on each account; without them it refuses everything.
+// CF_ACCESS_ISS vars; without them it refuses everything. Deploy-ops passes
+// them from the grasp-os-ops environment's variables with `--var`, and stops
+// if either is missing.
 // Client account tokens live in Secrets Store, never in the database.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
@@ -12,8 +14,9 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "preview_urls": false,
-  // The Access vars are set on each account, not here (src/env.d.ts);
-  // without this, every deploy would delete them.
+  // The Access vars come from each deploy's `--var`, not from here
+  // (src/env.d.ts); this keeps them too on a deploy that passes none, such
+  // as `wrangler deploy` by hand.
   "keep_vars": true,
   // No platform line per invocation, and query strings stay out of logs and
   // traces, as on every Worker (threat model R17).
