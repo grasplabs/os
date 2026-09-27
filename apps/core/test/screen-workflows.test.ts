@@ -362,12 +362,18 @@ describe("workflows from screens", { timeout: 60_000 }, () => {
       decide: await outcome(
         session.screens.decide(app, "run", "review", { approved: true })
       ),
+      watch: await outcome(
+        session.screens.watchRuns(app, "approval", () => {
+          // Never called.
+        })
+      ),
       version: await outcome(session.screens.version(app)),
     }).toStrictEqual({
       start: "feature.disabled",
       runs: "feature.disabled",
       run: "feature.disabled",
       decide: "feature.disabled",
+      watch: "feature.disabled",
       // Past the flags: there's no such App.
       version: "app.not_found",
     });

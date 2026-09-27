@@ -36,6 +36,7 @@ import {
 import { inList } from "../db/d1.ts";
 import { requireFeature } from "../features.ts";
 import { runEngine } from "../workflows/engine.ts";
+import { tellScreens } from "../workflows/run-changes.ts";
 
 // Decisions workflow runs wait for (`step.decision`), and the only ways to
 // answer one. Threat model R3, R8 and WF1 to WF4:
@@ -62,6 +63,13 @@ import { runEngine } from "../workflows/engine.ts";
 //   audit log records the answer under them, without its payload (R16).
 
 type DecisionRow = typeof workflowDecisions.$inferSelect;
+
+/** The run a decision belongs to, as `tellScreens` names it. */
+const changed = (run: DecisionRun) => ({
+  id: run.runId,
+  appId: run.app,
+  workflowId: run.workflow,
+});
 
 /** The run a decision belongs to, as the host serves it. */
 export interface DecisionRun {
@@ -161,13 +169,14 @@ export const openDecision = async (
     decidedVia: null,
     payload: null,
   };
-  await auditedBatch(env, db, [
+  const [[inserted]] = await auditedBatch(env, db, [
     db
       .insert(workflowDecisions)
       .values(row)
       .onConflictDoNothing({
         target: [workflowDecisions.runId, workflowDecisions.step],
-      }),
+      })
+      .returning({ id: workflowDecisions.id }),
     outboxedIfChanged(
       db,
       decisionEntry(runActorOf(run), "workflow.decision.opened", run, row, {
@@ -175,6 +184,11 @@ export const openDecision = async (
       })
     ),
   ]);
+  // The run now waits for it; a step run again after a crash opened
+  // nothing, and tells no one.
+  if (inserted) {
+    await tellScreens(env, changed(run));
+  }
   const opened = await db
     .select({
       id: workflowDecisions.id,
@@ -377,7 +391,7 @@ export const decisionOutcome = async (
   const found = await runDecision(env, run, decision);
   if (close && found.status === "open") {
     const db = drizzle(env.DB);
-    await auditedBatch(env, db, [
+    const [[closed]] = await auditedBatch(env, db, [
       db
         .update(workflowDecisions)
         .set({ status: "timed_out" })
@@ -386,7 +400,8 @@ export const decisionOutcome = async (
             eq(workflowDecisions.id, found.id),
             eq(workflowDecisions.status, "open")
           )
-        ),
+        )
+        .returning({ id: workflowDecisions.id }),
       outboxedIfChanged(
         db,
         decisionEntry(
@@ -397,6 +412,9 @@ export const decisionOutcome = async (
         )
       ),
     ]);
+    if (closed) {
+      await tellScreens(env, changed(run));
+    }
   }
   const row = close ? await runDecision(env, run, decision) : found;
   if (
@@ -654,6 +672,7 @@ export const answerDecision = async (
     );
   }
   await wake(env, answered);
+  await tellScreens(env, changed(run));
   return toView({
     ...found,
     decision: answered,

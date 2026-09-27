@@ -326,6 +326,7 @@ describe("workflow runs", { timeout: 60_000 }, () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, versioned(1));
     const first = await builder.api.workflows.start(app, "pinned");
+    await stepDone(first.id, "$params");
     await stopped(first.id);
 
     await release(builder, app, versioned(2));
@@ -502,6 +503,7 @@ ${mailStep("after")}`,
       )
     );
     const run = await leaver.api.workflows.start(app, "waiting");
+    await stepDone(run.id, "$params");
     await stopped(run.id);
     // Offboarded by an admin, as in the product.
     await admin.api.members.remove(leaver.userId);
@@ -776,6 +778,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     );
     const waiting = await builder.api.workflows.start(app, "cancellable");
     const paused = await builder.api.workflows.start(app, "cancellable");
+    await stepDone(paused.id, "$params");
     await stopped(paused.id);
     const cancelled = await Promise.all(
       [waiting, paused].map(
@@ -787,6 +790,10 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     // instance goes on. Its next load does nothing more, and cancelling
     // again terminates it.
     const leftOver = await builder.api.workflows.start(app, "cancellable");
+    // Stopped once it waits: a run the local engine pauses while its code
+    // still loads can go on in that execution after it resumes, with the
+    // row it read before this test marked it cancelled.
+    await stepDone(leftOver.id, "$params");
     await stopped(leftOver.id);
     await env.DB.prepare(
       "UPDATE workflow_runs SET status = 'cancelled' WHERE id = ?"

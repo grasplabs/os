@@ -17,6 +17,7 @@ import {
 } from "@grasp-os/shared/screens";
 import type {
   AppErrorEntry,
+  RunChange,
   ScreenBundle,
   ScreenRun,
   ScreensApi,
@@ -34,8 +35,10 @@ import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 import {
   decideScreenRun,
+  requireScreenWorkflows,
   screenRun,
   screenRuns,
+  screenWorkflow,
   startScreenRun,
 } from "./workflows/screen-runs.ts";
 
@@ -51,8 +54,9 @@ import {
 // answers its workflow runs (workflows/screen-runs.ts). Only its builders
 // read its error log.
 //
-// A callback the App keeps (a screen's subscription) outlives the call
-// that passed it, so each push through it checks again that the person
+// A callback the App keeps (a screen's subscription), or its host keeps
+// for the App's run changes (`watchRuns`), outlives the call that passed
+// it, so each push through it checks again that the person
 // still has a role in the App (`stillOpen`), at most every
 // `recheckMs` per App and connection. Once they don't (unshared, a team
 // left, a role changed, a source they can't read), the callback is
@@ -61,6 +65,14 @@ import {
 
 /** How long one answer to whether the person may still use an App holds. */
 const recheckMs = 5000;
+
+/**
+ * Most run subscriptions (`watchRuns`) one connection keeps at once. A
+ * connection is one open screen, which follows a workflow or two: this
+ * only bounds what a screen that subscribes over and over keeps in its
+ * App's host.
+ */
+const maxRunSubscriptions = 20;
 
 /** Whether the person may still use the App, as a push through a callback asks. */
 type StillOpen = () => Promise<boolean>;
@@ -133,11 +145,13 @@ const isStub = (value: unknown): value is RpcStub<Callback> =>
  * Releasing it releases the screen's callback too, which tells the screen
  * to subscribe again. Before each push, `stillOpen` checks the person may
  * still use the App; once they may not, it releases itself and refuses
- * the push, and every one after.
+ * the push, and every one after. `released`, if given, is called once it's
+ * released, however that happened.
  */
 const callbackFor = (
   stub: RpcStub<Callback>,
-  stillOpen: StillOpen
+  stillOpen: StillOpen,
+  released?: () => void
 ): Callback & Disposable => {
   const toScreen = stub.dup();
   return Object.assign(
@@ -154,6 +168,7 @@ const callbackFor = (
     {
       [Symbol.dispose]: () => {
         toScreen[Symbol.dispose]();
+        released?.();
       },
     }
   );
@@ -213,6 +228,49 @@ const callServer = async (
     for (const callback of callbacks) {
       callback[Symbol.dispose]();
     }
+    throw error;
+  }
+};
+
+/**
+ * Follows the App's runs of `workflow` for the person (app.ts,
+ * `watchRuns`): the screen's callback goes to the App's host as a
+ * function it can only call, checked before each push as any callback of
+ * a screen is. `subscriptions` holds this connection's, which drop out
+ * once released: at most {@link maxRunSubscriptions} at once.
+ */
+const watchRuns = async (
+  env: Env,
+  by: Identity,
+  {
+    app,
+    workflow,
+    onChange,
+  }: { app: unknown; workflow: unknown; onChange: unknown },
+  stillOpenFor: (app: AppId) => StillOpen,
+  subscriptions: Set<Disposable>
+): Promise<void> => {
+  requireScreenWorkflows(env);
+  const { id } = await getApp(env, by, app);
+  const name = screenWorkflow(workflow);
+  if (!isStub(onChange)) {
+    throw screenErrors.create("screen.invalid");
+  }
+  if (subscriptions.size >= maxRunSubscriptions) {
+    throw screenErrors.create("screen.too_many_subscriptions");
+  }
+  const callback: Callback & Disposable = callbackFor(
+    onChange,
+    stillOpenFor(id),
+    () => {
+      subscriptions.delete(callback);
+    }
+  );
+  subscriptions.add(callback);
+  try {
+    await appHost(env, id).watchRuns(name, callback);
+  } catch (error) {
+    callback[Symbol.dispose]();
     throw error;
   }
 };
@@ -288,6 +346,9 @@ const errorLog = async (
 export class ScreensRpc extends RpcTarget implements ScreensApi {
   readonly #env: Env;
   readonly #check: SessionCheck;
+
+  /** This connection's run subscriptions that haven't been released. */
+  readonly #runSubscriptions = new Set<Disposable>();
 
   /** The latest answer to whether the person may use each App, and until when it holds. */
   readonly #access = new Map<
@@ -396,5 +457,21 @@ export class ScreensRpc extends RpcTarget implements ScreensApi {
       async (by) =>
         await decideScreenRun(this.#env, by, app, run, decision, answer)
     );
+  }
+
+  async watchRuns(
+    app: string,
+    workflow: string,
+    onChange: (change: RunChange) => void
+  ): Promise<void> {
+    await withPerson(this.#check, async (by) => {
+      await watchRuns(
+        this.#env,
+        by,
+        { app, workflow, onChange },
+        (id) => this.#stillOpen(id),
+        this.#runSubscriptions
+      );
+    });
   }
 }
