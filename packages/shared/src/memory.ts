@@ -1,7 +1,7 @@
 import { z } from "zod";
 
 import type { AuditActor } from "./audit.ts";
-import { appIdSchema } from "./ids.ts";
+import { appIdSchema, identifierMaxLength } from "./ids.ts";
 import type { AppId, CollectionId, DocumentId } from "./ids.ts";
 import type { DocumentSummary, Provenance } from "./knowledge.ts";
 import type { WorkContext } from "./permissions.ts";
@@ -119,10 +119,11 @@ export interface MemoryApi {
    */
   collections: () => Promise<MemoryCollections>;
   /**
-   * The pending proposals the person may decide on: those for collections
-   * they can change (for the Memory collection, admins), oldest first.
+   * A page of the pending proposals the person may decide on: those for
+   * collections they can change (for the Memory collection, admins),
+   * oldest first, after the page whose `next` is `after`.
    */
-  proposals: () => Promise<MemoryProposal[]>;
+  proposals: (options?: ProposalsOptions) => Promise<ProposalPage>;
   /** Saves a pending proposal's text as the file's next version. */
   approve: (proposalId: string) => Promise<DocumentSummary>;
   /** Turns a pending proposal down; the file stays as it is. */
@@ -174,6 +175,30 @@ export interface MemoryProposal {
   createdAt: string;
   /** ISO 8601. */
   decidedAt: string | null;
+}
+
+/** Most proposals one page holds. */
+export const proposalsPageMaxLimit = 200;
+
+/** A page of proposals: `limit` of them, after the cursor `after`. */
+export const proposalsOptionsSchema = z
+  .strictObject({
+    /** The `next` of the page before. */
+    after: z.string().max(identifierMaxLength).optional(),
+    limit: z
+      .int()
+      .min(1)
+      .max(proposalsPageMaxLimit)
+      .default(proposalsPageMaxLimit),
+  })
+  .default({ limit: proposalsPageMaxLimit });
+export type ProposalsOptions = z.input<typeof proposalsOptionsSchema>;
+
+/** A page of pending proposals, and the cursor to the next one. */
+export interface ProposalPage {
+  proposals: MemoryProposal[];
+  /** Pass as `after` for the next page; `null` on the last. */
+  next: string | null;
 }
 
 /** A sensitive collection that some memory text names. */

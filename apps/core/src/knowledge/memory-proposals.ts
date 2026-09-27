@@ -15,11 +15,13 @@ import {
   memoryCharactersPerToken,
   memoryMaxLimit,
   memoryProposalInputSchema,
+  proposalsOptionsSchema,
 } from "@grasp-os/shared/memory";
 import type {
   MemoryProposal,
   MemoryProposalSource,
   MemoryWarning,
+  ProposalPage,
 } from "@grasp-os/shared/memory";
 import {
   permissionErrors,
@@ -27,19 +29,19 @@ import {
 } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, count, eq, ne, sql } from "drizzle-orm";
+import { and, asc, count, eq, gt, ne, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
 import { memberRole } from "../auth/identity.ts";
-import { isUniqueViolation } from "../db/d1.ts";
+import { isUniqueViolation, notInList } from "../db/d1.ts";
 import { collections, memoryProposals } from "../db/knowledge/schema.ts";
 import { requireFeature } from "../features.ts";
 import { isRestricted } from "../restricted.ts";
 import type { WorkContext } from "../restricted.ts";
-import { allowedCollections, canWrite, readableForPerson } from "./access.ts";
+import { allowedCollections, readableForPerson } from "./access.ts";
 import { readableCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
 import {
@@ -58,9 +60,6 @@ import { agentMemoryPath, memoryCollectionId } from "./memory-files.ts";
 // which saves it as the next version, or declines it. Each step is audited.
 
 type ProposalRow = typeof memoryProposals.$inferSelect;
-
-/** Most pending proposals one listing returns. */
-const proposalsMaxListed = 200;
 
 /**
  * Most proposals one agent may have waiting at once for one person: per
@@ -214,31 +213,82 @@ export const proposeMemory = async (
   return toProposal(row);
 };
 
-/** Whether `person` may decide on proposals for `collection`. */
-const canDecide = (person: Identity, collection: CollectionRow): boolean =>
-  !readOnlySources.has(collection.source) && canWrite(person, collection);
+/**
+ * The collections whose proposals `person` may decide on, as a condition
+ * on `collections`: those they may change (`requireWritable`), in SQL so
+ * a page holds only proposals they may decide on.
+ */
+const decidableBy = (person: Identity): SQL =>
+  and(
+    notInList(collections.source, [...readOnlySources]),
+    person.role === "admin"
+      ? undefined
+      : or(
+          ne(collections.access, "everyone"),
+          eq(collections.owner, person.userId)
+        )
+  ) ?? sql`1`;
 
-/** The pending proposals `person` may decide on, oldest first. */
+/** A page's cursor: its last proposal's time and ID. */
+const cursorOf = (row: ProposalRow): string =>
+  `${row.createdAt.getTime()}.${row.id}`;
+
+const cursorPattern = /^(?<time>\d{1,15})\.(?<id>.+)$/u;
+
+/**
+ * A page of the pending proposals `person` may decide on, oldest first,
+ * after the cursor `after`: by time, then ID, so proposals made in the
+ * same millisecond are neither skipped nor repeated.
+ */
 export const listProposals = async (
   env: Env,
-  person: Identity
-): Promise<MemoryProposal[]> => {
+  person: Identity,
+  options?: unknown
+): Promise<ProposalPage> => {
+  const { after, limit } = knowledgeErrors.parse(
+    "knowledge.invalid",
+    proposalsOptionsSchema,
+    options
+  );
+  const cursor = after === undefined ? undefined : cursorPattern.exec(after);
+  if (after !== undefined && !cursor) {
+    throw knowledgeErrors.create("knowledge.invalid", {
+      issues: ["after: not a page's next"],
+    });
+  }
+  const time = cursor?.groups?.time;
+  const afterTime = time === undefined ? undefined : new Date(Number(time));
+  const afterId = cursor?.groups?.id ?? "";
   const db = drizzle(env.KNOWLEDGE);
   const rows = await db
-    .select({ proposal: memoryProposals, collection: collections })
+    .select({ proposal: memoryProposals })
     .from(memoryProposals)
     .innerJoin(collections, eq(collections.id, memoryProposals.collectionId))
     .where(
       and(
         eq(memoryProposals.status, "pending"),
-        await allowedCollections(env, db, { type: "person", person })
+        await allowedCollections(env, db, { type: "person", person }),
+        decidableBy(person),
+        afterTime === undefined
+          ? undefined
+          : or(
+              gt(memoryProposals.createdAt, afterTime),
+              and(
+                eq(memoryProposals.createdAt, afterTime),
+                gt(memoryProposals.id, afterId)
+              )
+            )
       )
     )
     .orderBy(asc(memoryProposals.createdAt), asc(memoryProposals.id))
-    .limit(proposalsMaxListed);
-  return rows
-    .filter(({ collection }) => canDecide(person, collection))
-    .map(({ proposal }) => toProposal(proposal));
+    // One more than the page, to tell whether there is a next one.
+    .limit(limit + 1);
+  const page = rows.slice(0, limit).map(({ proposal }) => proposal);
+  const last = page.at(-1);
+  return {
+    proposals: page.map(toProposal),
+    next: rows.length > limit && last ? cursorOf(last) : null,
+  };
 };
 
 /**

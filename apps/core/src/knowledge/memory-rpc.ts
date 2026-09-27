@@ -2,8 +2,9 @@ import type { DocumentSummary } from "@grasp-os/shared/knowledge";
 import type {
   MemoryApi,
   MemoryCollections,
-  MemoryProposal,
   MemoryWarning,
+  ProposalPage,
+  ProposalsOptions,
 } from "@grasp-os/shared/memory";
 import { RpcTarget } from "capnweb";
 
@@ -35,10 +36,10 @@ export class MemoryRpc extends RpcTarget implements MemoryApi {
     );
   }
 
-  async proposals(): Promise<MemoryProposal[]> {
+  async proposals(options?: ProposalsOptions): Promise<ProposalPage> {
     return await withPerson(
       this.#check,
-      async (person) => await listProposals(this.#env, person)
+      async (person) => await listProposals(this.#env, person, options)
     );
   }
 

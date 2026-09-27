@@ -1,6 +1,10 @@
 import { sql } from "drizzle-orm";
 import type { SQL, SQLWrapper } from "drizzle-orm";
 
+/** `value NOT IN (...values)`, bound as one parameter, as `inList` is. */
+export const notInList = (value: SQLWrapper, values: readonly string[]): SQL =>
+  sql`${value} NOT IN (SELECT value FROM json_each(${JSON.stringify(values)}))`;
+
 /** Whether D1 refused a write for a unique index, however it was wrapped. */
 export const isUniqueViolation = (error: unknown): boolean =>
   error instanceof Error &&

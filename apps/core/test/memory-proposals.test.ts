@@ -1,10 +1,17 @@
-import type { MemoryProposalInput } from "@grasp-os/shared/memory";
+import type {
+  MemoryProposal,
+  MemoryProposalInput,
+} from "@grasp-os/shared/memory";
 import type { Authority } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
-import { proposeMemory } from "../src/knowledge/memory-proposals.ts";
+import {
+  approveProposal,
+  declineProposal,
+  proposeMemory,
+} from "../src/knowledge/memory-proposals.ts";
 import { forContext } from "../src/knowledge/memory.ts";
 import { restrict } from "../src/restricted.ts";
 import type { WorkContext } from "../src/restricted.ts";
@@ -99,12 +106,58 @@ const memoryHas = async (
   return memory.text.includes(text);
 };
 
+/**
+ * Core's env, but with `run` done right before the first batch written to
+ * the Knowledge database, and only once: to make something else land
+ * between a call's reads and its write.
+ */
+const beforeFirstBatch = (run: () => Promise<unknown>): Env => {
+  let done = false;
+  const knowledge = new Proxy(env.KNOWLEDGE, {
+    get: (target, property) => {
+      if (property === "batch") {
+        return async (
+          statements: D1PreparedStatement[]
+        ): Promise<D1Result[]> => {
+          if (!done) {
+            done = true;
+            await run();
+          }
+          return await target.batch(statements);
+        };
+      }
+      const value: unknown = Reflect.get(target, property, target);
+      if (typeof value !== "function") {
+        return value;
+      }
+      return (...args: unknown[]): unknown => {
+        const result: unknown = Reflect.apply(value, target, args);
+        return result;
+      };
+    },
+  });
+  return { ...env, KNOWLEDGE: knowledge };
+};
+
+/** Every proposal `person` may decide on now, page by page. */
+const allProposals = async (person: Person): Promise<MemoryProposal[]> => {
+  const all: MemoryProposal[] = [];
+  let after: string | undefined;
+  do {
+    // oxlint-disable-next-line no-await-in-loop -- one page after another
+    const page = await person.api.memory.proposals({ after });
+    all.push(...page.proposals);
+    after = page.next ?? undefined;
+  } while (after !== undefined);
+  return all;
+};
+
 /** Whether `person` may decide on the proposal `proposalId` now. */
 const isPending = async (
   person: Person,
   proposalId: string
 ): Promise<boolean> => {
-  const proposals = await person.api.memory.proposals();
+  const proposals = await allProposals(person);
   return proposals.some(({ id }) => id === proposalId);
 };
 
@@ -133,10 +186,10 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
       });
       proposalId = proposal.id;
     });
-    const adminsView = await admin.api.memory.proposals();
+    const adminsView = await allProposals(admin);
     const waiting = {
       memory: await memoryHas(user.userId, work, before),
-      forUser: await user.api.memory.proposals(),
+      forUser: await allProposals(user),
       userApproves: await outcome(user.api.memory.approve(proposalId)),
       userDeclines: await outcome(user.api.memory.decline(proposalId)),
       forAdmin: adminsView.find(({ id }) => id === proposalId),
@@ -274,59 +327,38 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
     });
   });
 
-  it("is either approved and saved, or declined and not, when both happen at once", async () => {
+  it("saves nothing when a decline lands while it is being approved", async () => {
     const admin = await personOf("admin");
     const other = await personOf("admin");
     const memory = await memoryOf(admin);
     const work = await newChat();
-    const asAgent = actingFor(newAgent(), admin.userId);
-    // This checks that the end state is always one of the two consistent
-    // ones. It can't make the two calls overlap in the database; the guard
-    // statement is what makes an overlap safe (memory-proposals.ts).
-    const rounds: {
-      approved: string;
-      declined: string;
-      status: string | undefined;
-      saved: boolean;
-    }[] = [];
-    for (let round = 0; round < 5; round += 1) {
-      const base = `Base ${unique()}`;
-      const proposed = `Proposed ${unique()}`;
-      // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      await saveOver(admin, memory, "MEMORY.md", base);
-      // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      const { id } = await propose(asAgent, work, {
-        file: "MEMORY.md",
-        text: proposed,
-      });
-      // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      const [approved, declined] = await Promise.all([
-        outcome(admin.api.memory.approve(id)),
-        outcome(other.api.memory.decline(id)),
-      ]);
-      // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      const status = await statusOf(id);
-      // oxlint-disable-next-line no-await-in-loop -- one round at a time
-      const saved = await memoryHas(admin.userId, work, proposed);
-      rounds.push({ approved, declined, status, saved });
-    }
-    const approvedWins = {
-      approved: "ok",
-      declined: "knowledge.proposal_decided",
-      status: "approved",
-      saved: true,
-    };
-    const declineWins = {
+    const base = `Base ${unique()}`;
+    const proposed = `Proposed ${unique()}`;
+    await saveOver(admin, memory, "MEMORY.md", base);
+    const { id } = await propose(actingFor(newAgent(), admin.userId), work, {
+      file: "MEMORY.md",
+      text: proposed,
+    });
+    const [approver, decider] = await Promise.all([
+      admin.api.whoami(),
+      other.api.whoami(),
+    ]);
+    // The decline lands after the approval read the proposal as pending,
+    // and before its batch: the one order the guard is there for.
+    const racing = beforeFirstBatch(async () => {
+      await declineProposal(env, decider, id);
+    });
+    expect({
+      approved: await outcome(approveProposal(racing, approver, id)),
+      status: await statusOf(id),
+      saved: await memoryHas(admin.userId, work, proposed),
+      unchanged: await memoryHas(admin.userId, work, base),
+    }).toStrictEqual({
       approved: "knowledge.proposal_decided",
-      declined: "ok",
       status: "declined",
       saved: false,
-    };
-    expect(rounds).toStrictEqual(
-      rounds.map(({ approved }) =>
-        approved === "ok" ? approvedWins : declineWins
-      )
-    );
+      unchanged: true,
+    });
   });
 
   it("is checked against the file's limit again when approved", async () => {
@@ -427,6 +459,37 @@ describe("proposals", setUpTime, () => {
     ]);
   });
 
+  it("keep to the cap when another proposal lands while one is being made", async () => {
+    const admin = await personOf("admin");
+    await memoryOf(admin);
+    const work = await newChat();
+    const agent = newAgent();
+    const asAgent = actingFor(agent, admin.userId);
+    for (let index = 0; index < 19; index += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one proposal at a time
+      await propose(asAgent, work, {
+        file: "MEMORY.md",
+        text: `Proposal ${index}`,
+      });
+    }
+    const text = `Racing ${unique()}`;
+    // The 20th lands after the 21st passed every check, before its batch.
+    const racing = beforeFirstBatch(async () => {
+      await propose(asAgent, work, { file: "MEMORY.md", text });
+    });
+    const last = await outcome(
+      proposeMemory(racing, asAgent, work, { file: "MEMORY.md", text })
+    );
+    const waiting = await allProposals(admin);
+    expect({
+      last,
+      pending: waiting.filter(
+        ({ source: { actor } }) =>
+          actor.type === "agent" && actor.agentId === agent.agentId
+      ).length,
+    }).toStrictEqual({ last: "knowledge.too_many_proposals", pending: 20 });
+  });
+
   it("wait at most 20 at a time from one agent for one person", async () => {
     const admin = await personOf("admin");
     const other = await personOf("user");
@@ -452,7 +515,7 @@ describe("proposals", setUpTime, () => {
     const otherPerson = await outcome(
       propose(actingFor(asAgent.subject, other.userId), work, next)
     );
-    const waiting = await admin.api.memory.proposals();
+    const waiting = await allProposals(admin);
     await admin.api.memory.decline(ids[0] ?? "");
     expect({
       overCap,
@@ -467,6 +530,55 @@ describe("proposals", setUpTime, () => {
       otherPerson: "ok",
       stored: 2,
       afterDecline: "ok",
+    });
+  });
+});
+
+describe("the proposals listing", setUpTime, () => {
+  it("pages past its first 200, reaching every pending proposal once", async () => {
+    const admin = await personOf("admin");
+    const memory = await memoryOf(admin);
+    const agentId = `agent-${unique()}`;
+    const source = JSON.stringify({
+      actor: { type: "agent", agentId, onBehalfOf: admin.userId },
+      context: await newChat(),
+    });
+    // Stored as they are, past the cap, and after every other proposal:
+    // 201 of them, two made in the same millisecond.
+    const start = Date.now() + 60_000;
+    const ids = Array.from({ length: 201 }, () => crypto.randomUUID());
+    await env.KNOWLEDGE.batch(
+      ids.map((id, index) =>
+        env.KNOWLEDGE.prepare(
+          `INSERT INTO memory_proposals (id, collection_id, path, base_version, text, message, source, agent_id, on_behalf_of, status, created_at)
+           VALUES (?, ?, 'MEMORY.md', 0, 'Paged', NULL, ?, ?, ?, 'pending', ?)`
+        ).bind(
+          id,
+          memory,
+          source,
+          agentId,
+          admin.userId,
+          start + Math.min(index, 199)
+        )
+      )
+    );
+    const first = await admin.api.memory.proposals();
+    const reachable = await allProposals(admin);
+    const all = reachable.map(({ id }) => id);
+    expect({
+      firstPage: first.proposals.length,
+      hasNext: first.next !== null,
+      reached: ids.filter((id) => all.includes(id)).length,
+      last: all.includes(ids.at(-1) ?? ""),
+      once: new Set(all).size === all.length,
+      badCursor: await outcome(admin.api.memory.proposals({ after: "nope" })),
+    }).toStrictEqual({
+      firstPage: 200,
+      hasNext: true,
+      reached: 201,
+      last: true,
+      once: true,
+      badCursor: "knowledge.invalid",
     });
   });
 });
