@@ -342,4 +342,29 @@ describe("audit log retention", () => {
     await alarmAfter(receivedAt, 182, log);
     await expect(held(event, log)).resolves.toBeFalsy();
   });
+
+  it("arms again from the 15-minute cron trigger after the alarm couldn't set the next one", async () => {
+    const log = newLog();
+    // Armed, and known to be by this object.
+    await logged(log);
+
+    // The alarm fires (which uses it up), and storage refuses the next one.
+    await runInDurableObject(log, async (instance, state) => {
+      await state.storage.deleteAlarm();
+      const refused = vi
+        .spyOn(state.storage, "setAlarm")
+        .mockRejectedValueOnce(new Error("Storage unavailable"));
+      try {
+        // Thrown, so the platform retries the alarm too.
+        await expect(instance.alarm?.()).rejects.toThrow("Storage unavailable");
+      } finally {
+        refused.mockRestore();
+      }
+    });
+    await expect(alarmOf(log)).resolves.toBeNull();
+
+    // What the cron trigger calls.
+    await log.armRetention();
+    await expect(alarmOf(log)).resolves.not.toBeNull();
+  });
 });

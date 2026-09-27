@@ -493,7 +493,7 @@ export class AuditLog extends DurableObject<Env> {
    * Alarms run at least once, so a pass may run again: that is safe.
    */
   override async alarm(): Promise<void> {
-    await this.ctx.storage.setAlarm(Date.now() + dayMs);
+    await this.#rearm(Date.now() + dayMs);
     let moved = false;
     try {
       moved = await retainAuditLog(this, this.env);
@@ -501,7 +501,22 @@ export class AuditLog extends DurableObject<Env> {
       log.error("audit.retention_failed", errorFields(error));
     }
     if (moved) {
-      await this.ctx.storage.setAlarm(Date.now());
+      await this.#rearm(Date.now());
+    }
+  }
+
+  /**
+   * Sets the alarm from within the alarm. If that fails, the alarm may be
+   * left unset, so this instance forgets it was armed: the next append or
+   * 15-minute cron run arms it again. The error is thrown, so the platform
+   * also retries the alarm, with backoff.
+   */
+  async #rearm(time: number): Promise<void> {
+    try {
+      await this.ctx.storage.setAlarm(time);
+    } catch (error) {
+      this.#armed = false;
+      throw error;
     }
   }
 
