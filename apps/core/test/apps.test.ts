@@ -60,7 +60,13 @@ const first = {
   "AGENTS.md": "# Invoice desk — facturen, 請求書 🧾\n",
 };
 
-describe("App code", () => {
+// Making a version with workflows current compiles them and runs their
+// tests, as "names the screens and workflows" does. That takes half a
+// second locally, and several times that on a loaded runner, closer to
+// the default five seconds than the rest of this file. Nothing polls or
+// sleeps; sixty seconds is room for a slow runner, as the other tests
+// that release Apps give theirs.
+describe("App code", { timeout: 60_000 }, () => {
   it("reads back every version exactly as it was committed", async () => {
     const { apps, userId } = await appsApi("builder");
     const app = await newApp(apps);
