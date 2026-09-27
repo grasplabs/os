@@ -294,6 +294,9 @@ importers:
       '@tanstack/react-start':
         specifier: 'catalog:'
         version: 1.168.56(@voidzero-dev/vite-plus-core@0.3.3(@types/node@26.6.2)(esbuild@0.28.2)(jiti@2.7.0)(tsx@4.23.15)(typescript@7.0.2)(yaml@2.9.1))(esbuild@0.28.2)(react-dom@19.3.0(react@19.3.0))(react@19.3.0)(rolldown@1.2.9)(supports-color@10.2.2)
+      drizzle-orm:
+        specifier: 'catalog:'
+        version: 0.45.3(@cloudflare/workers-types@5.20260921.1)(kysely@0.29.6)
       jose:
         specifier: 'catalog:'
         version: 6.2.12

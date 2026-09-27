@@ -1,9 +1,16 @@
-import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
+import {
+  cloudflareTest,
+  readD1Migrations,
+} from "@cloudflare/vitest-pool-workers";
 import { tanstackStart } from "@tanstack/react-start/plugin/vite";
 import react from "@vitejs/plugin-react";
 import { defineProject } from "vite-plus";
 
 import { accessTeam } from "./test/access-config.ts";
+
+const migrations = await readD1Migrations(
+  `${import.meta.dirname}/src/db/migrations`
+);
 
 /**
  * The console's tests, in workerd. The Cloudflare Vite plugin (vite.config.ts)
@@ -15,6 +22,8 @@ export default defineProject({
   test: {
     name: "console",
     include: ["test/**/*.test.ts"],
+    // Brings the database up to the committed migrations.
+    setupFiles: ["./test/apply-migrations.ts"],
   },
   plugins: [
     tanstackStart(),
@@ -31,6 +40,7 @@ export default defineProject({
           // Off whatever a developer's .dev.vars sets: the tests of the
           // bypass set it themselves.
           DEV_ACCESS_EMAIL: "",
+          CONSOLE_MIGRATIONS: migrations,
         },
       },
     }),
