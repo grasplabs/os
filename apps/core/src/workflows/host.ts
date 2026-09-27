@@ -1022,7 +1022,10 @@ export class RunHost extends RpcTarget {
     });
   }
 
-  /** The first event of `type` for this run, or `received: false` at the timeout. */
+  /**
+   * The first event of `type` for this run that no earlier wait took, or
+   * `received: false` at the timeout.
+   */
   async waitForEvent(
     name: unknown,
     options: unknown

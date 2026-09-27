@@ -47,6 +47,19 @@ export const mailConnection = async (plan: MailAnswer[] = []) => {
   });
   return {
     id,
+    /** Whether the server holds a `slow` call now. */
+    holding: async () => {
+      const response = await providers().fetch(mailControlUrl(name));
+      return z.object({ holding: z.boolean() }).parse(await response.json())
+        .holding;
+    },
+    /** Lets a held `slow` call go through. */
+    release: async () => {
+      await providers().fetch(mailControlUrl(name), {
+        method: "POST",
+        body: JSON.stringify({ release: true }),
+      });
+    },
     /** What the mail server did: calls that reached its tool, mail sent. */
     did: async () => {
       const response = await providers().fetch(mailControlUrl(name));

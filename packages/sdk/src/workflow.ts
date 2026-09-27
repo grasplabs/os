@@ -397,7 +397,14 @@ export interface StepRunner {
   decision: (name: string, options: DecisionOptions) => Promise<Decision>;
   /** Durably pauses the run. */
   sleep: (name: string, options: SleepOptions) => Promise<void>;
-  /** Durably waits for an event of `type`, e.g. from a connector. */
+  /**
+   * Durably waits for an event of `type`, e.g. from a connector. Each wait
+   * takes the first event of its type that no earlier wait took, including
+   * one sent before the wait began. Events carry no ID, so an event
+   * delivered twice (a sender retrying) answers this wait and then a later
+   * wait for the same type too. A workflow that waits more than once should
+   * use a distinct event type for each wait.
+   */
   waitFor: <Payload extends z.ZodType = z.ZodUnknown>(
     name: string,
     options: WaitForOptions<Payload>
