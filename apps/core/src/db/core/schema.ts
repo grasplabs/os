@@ -572,13 +572,35 @@ export const modelSpend = sqliteTable(
     key: text().notNull(),
     period: text().notNull(),
     spentMicros: integer("spent_micros").notNull(),
-    /**
-     * The limit admins were last alerted the budget was used up at, so each
-     * limit alerts once, also one lowered below what was already spent.
-     */
-    exhaustedAtMicros: integer("exhausted_at_micros"),
-    /** The same for the alert threshold admins were last alerted at. */
-    alertedAtMicros: integer("alerted_at_micros"),
   },
   (table) => [primaryKey({ columns: [table.scope, table.key, table.period] })]
+);
+
+/**
+ * The budget alerts admins got, one per budget, month, kind (`alert` at
+ * the alert threshold, `exhausted` at the limit) and threshold value in
+ * millionths of a dollar (model-budgets.ts): an alert is stored only with
+ * a new row here, so each value alerts once a month, however often the
+ * config changes it.
+ */
+export const modelBudgetAlerts = sqliteTable(
+  "model_budget_alerts",
+  {
+    scope: text({ enum: ["deployment", "workflow", "user"] }).notNull(),
+    key: text().notNull(),
+    period: text().notNull(),
+    kind: text({ enum: ["alert", "exhausted"] }).notNull(),
+    thresholdMicros: integer("threshold_micros").notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.scope,
+        table.key,
+        table.period,
+        table.kind,
+        table.thresholdMicros,
+      ],
+    }),
+  ]
 );

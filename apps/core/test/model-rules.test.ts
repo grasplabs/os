@@ -721,6 +721,97 @@ describe("model rules", () => {
     ]);
   });
 
+  it("alert once per limit value a month, however the limit changes back and forth", async () => {
+    const month = newMonth();
+    const withLimit = (limit: number) =>
+      withRules(
+        { budgets: { user: { limit } } },
+        env.FEATURES,
+        pricedAnswer,
+        month
+      ).call;
+    const ada = hello(anthropic);
+    const outcomes: string[] = [];
+    // $0.0135 spent under $0.03; then $0.012, $0.01 and $0.012 again.
+    for (const call of [
+      withLimit(0.03),
+      withLimit(0.03),
+      withLimit(0.03),
+      withLimit(0.012),
+      withLimit(0.01),
+      withLimit(0.012),
+    ]) {
+      // oxlint-disable-next-line no-await-in-loop -- one after another
+      outcomes.push(await outcome(call(ada)));
+    }
+
+    expect(outcomes).toStrictEqual([
+      "ok",
+      "ok",
+      "ok",
+      "model.over_budget",
+      "model.over_budget",
+      "model.over_budget",
+    ]);
+    const events = await eventsOf(ada.trigger);
+    expect(
+      events
+        .filter(({ action }) => action === "model.budget.exhausted")
+        .map(({ detail }) => detail.threshold)
+    ).toStrictEqual([0.012, 0.01]);
+  });
+
+  it("check and count a retry in the month it is sent in, when the month turns between attempts", async () => {
+    const [before, after] = [newMonth(), newMonth()];
+    const fake = fakeGateway(
+      pricedAnswer,
+      pricedAnswer,
+      { ...pricedAnswer, text: "No JSON here." },
+      { ...pricedAnswer, text: '{ "total": 1 }' }
+    );
+    const turningEnv: ModelsEnv = {
+      ...env,
+      AI: fake.binding,
+      MODEL_GATEWAY: {
+        gateway,
+        models: allowed,
+        budgets: { user: { limit: 0.01, alertAt: 40 } },
+      },
+      // The month turns once the call's first attempt was sent.
+      get MODEL_BUDGET_MONTH() {
+        return fake.requests.length < 3 ? before : after;
+      },
+    };
+    const ada = hello(anthropic);
+    const call = async (more: Partial<ModelCall<undefined>> = {}) =>
+      await outcome(models(turningEnv).call({ ...ada, ...more }));
+
+    // $0.009 of the old month's $0.01.
+    await expect(Promise.all([call(), call()])).resolves.toStrictEqual([
+      "ok",
+      "ok",
+    ]);
+    // Its first attempt uses the old month up; its retry is in the new one.
+    await expect(
+      outcome(
+        models(turningEnv).call({
+          ...ada,
+          schema: z.object({ total: z.number() }),
+        })
+      )
+    ).resolves.toBe("ok");
+    const events = await eventsOf(ada.trigger);
+    expect(
+      events
+        .filter(({ action }) => action.startsWith("model.budget."))
+        .map(({ action, detail }) => [action, detail.period])
+    ).toStrictEqual([
+      ["model.budget.alert", before],
+      ["model.budget.exhausted", before],
+      ["model.budget.alert", after],
+    ]);
+  });
+
   it("keep a paid answer when its cost can't be counted", async () => {
     const fake = fakeGateway(pricedAnswer);
     const database: D1Database = env.DB;

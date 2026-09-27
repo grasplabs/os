@@ -1,14 +1,14 @@
 import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
 import { errorFields, log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
-import { and, eq, gte, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import type { OutboxEnv } from "./audit-outbox.ts";
-import { modelSpend } from "./db/core/schema.ts";
+import { modelBudgetAlerts, modelSpend } from "./db/core/schema.ts";
 
 // Model budgets, one of the client's rules for model calls (model-rules.ts):
 // what the deployment's calls may cost in a UTC month, all together, per
@@ -17,16 +17,19 @@ import { modelSpend } from "./db/core/schema.ts";
 // at the prices in the model catalog (models.ts), the same cost its audit
 // event records.
 //
-// Before each request a call sends (a retry too), it is refused once any
-// of its budgets is used up: the call stops at 100%. After each request,
-// its cost is added to each of its budgets with one statement per budget,
-// so concurrent calls never lose each other's cost. Admins are alerted
-// when a budget's spend reaches its alert threshold or its limit. Each
-// alert is stored with a conditional update that marks the budget's row
-// with the threshold value it alerted at, in the batch that reached it:
-// so each value alerts once, whichever call reached it, and a threshold
-// or limit changed below what was already spent alerts once too, with
-// the next call that checks it.
+// Before each request a call sends (a retry too), in the month it is
+// sent in, it is refused once any of its budgets is used up: the call
+// stops at 100%. After each request, its cost is added to each of its
+// budgets with one statement per budget, so concurrent calls never lose
+// each other's cost. Admins are alerted when a budget's spend reaches its
+// alert threshold or its limit, once per month and threshold value: the
+// alert is a row in `model_budget_alerts`, keyed by that value and
+// inserted only if the spend has reached it and the row isn't there yet,
+// and its event is stored only if the insert added the row, in the same
+// batch. It runs with every addition, and before each request for a
+// budget whose spend has reached a value with no alert yet. So whichever
+// call reaches a value, however many run at once, and in whatever order
+// the config changes a threshold, each value alerts once a month.
 //
 // A budget is only checked before a call, whose cost isn't known until it
 // is answered: calls already under way when the budget runs out still
@@ -39,9 +42,6 @@ import { modelSpend } from "./db/core/schema.ts";
 
 /** Millionths of a US dollar, which the spend is counted in. */
 const microsPerDollar = 1_000_000;
-
-/** What marking a budget as alerted returns: its spend, if it marked it. */
-const spentSchema = z.array(z.object({ spent: z.number() }));
 
 const budgetSchema = z.strictObject({
   /** US dollars a month: a cent at least, and well within an integer. */
@@ -168,100 +168,106 @@ const rowOf = (budget: Budgeted) =>
     eq(modelSpend.period, budget.period)
   );
 
-/** The two thresholds a budget alerts at, and the column each is marked in. */
+/** The alerts `budget` got this month. */
+const alertsOf = (budget: Budgeted) =>
+  and(
+    eq(modelBudgetAlerts.scope, budget.scope),
+    eq(modelBudgetAlerts.key, budget.key),
+    eq(modelBudgetAlerts.period, budget.period)
+  );
+
+/** The two thresholds a budget alerts at. */
 const thresholds = [
-  {
-    kind: "alert",
-    of: (budget: Budgeted) => budget.alertMicros,
-    marked: modelSpend.alertedAtMicros,
-    field: "alertedAtMicros",
-  },
-  {
-    kind: "exhausted",
-    of: (budget: Budgeted) => budget.limitMicros,
-    marked: modelSpend.exhaustedAtMicros,
-    field: "exhaustedAtMicros",
-  },
+  { kind: "alert", of: (budget: Budgeted) => budget.alertMicros },
+  { kind: "exhausted", of: (budget: Budgeted) => budget.limitMicros },
 ] as const;
 type Threshold = (typeof thresholds)[number];
 
+/** One alert a budget may be due. */
+interface Due {
+  budget: Budgeted;
+  threshold: Threshold;
+}
+
 /** What admins are alerted to when a budget's spend reaches a threshold. */
-const alertEntry = (
-  trigger: AuditActor,
-  budget: Budgeted,
-  threshold: Threshold
-): AuditEntry => ({
-  actor: trigger,
-  action: `model.budget.${threshold.kind}`,
-  detail: {
-    scope: budget.scope,
-    period: budget.period,
-    limit: budget.limitMicros / microsPerDollar,
-    threshold: threshold.of(budget) / microsPerDollar,
-    ...budget.names,
-  },
-});
+const alertEntry = (trigger: AuditActor, { budget, threshold }: Due) =>
+  ({
+    actor: trigger,
+    action: `model.budget.${threshold.kind}`,
+    detail: {
+      scope: budget.scope,
+      period: budget.period,
+      limit: budget.limitMicros / microsPerDollar,
+      threshold: threshold.of(budget) / microsPerDollar,
+      ...budget.names,
+    },
+  }) satisfies AuditEntry;
 
 /**
- * Alerts admins, once per threshold value, that `budget`'s spend has
- * reached `threshold`: marks its row with the value it was reached at, if
- * the spend has reached it and the row isn't marked at that value yet,
- * and stores the alert only if that changed the row. So each value alerts
- * once, whether an addition reached it or it was lowered below what was
- * already spent, and a changed value alerts again once reached.
+ * Alerts admins that a budget's spend has reached a threshold, once per
+ * month and threshold value: records the alert in `model_budget_alerts`
+ * if the spend has reached the value, and stores its event only if that
+ * added the row. The row's key is the value, so a threshold lowered below
+ * what was already spent alerts once, and changing it back and forth
+ * never alerts twice for one value.
  */
 const alertStatements = (
   db: DrizzleD1Database,
   trigger: AuditActor,
-  budget: Budgeted,
-  threshold: Threshold
+  due: Due
 ) => {
+  const { budget, threshold } = due;
   const value = threshold.of(budget);
+  const spent = db
+    .select({ spent: modelSpend.spentMicros })
+    .from(modelSpend)
+    .where(rowOf(budget));
   return [
     db
-      .update(modelSpend)
-      .set({ [threshold.field]: value })
-      .where(
-        and(
-          rowOf(budget),
-          gte(modelSpend.spentMicros, value),
-          or(isNull(threshold.marked), ne(threshold.marked, value))
-        )
+      .insert(modelBudgetAlerts)
+      .select(
+        sql`SELECT ${budget.scope}, ${budget.key}, ${budget.period}, ${threshold.kind}, ${value} WHERE (${spent}) >= ${value}`
       )
-      .returning({ spent: modelSpend.spentMicros }),
-    outboxedIfChanged(db, alertEntry(trigger, budget, threshold)),
+      .onConflictDoNothing()
+      .returning({
+        kind: modelBudgetAlerts.kind,
+        scope: modelBudgetAlerts.scope,
+        period: modelBudgetAlerts.period,
+      }),
+    outboxedIfChanged(db, alertEntry(trigger, due)),
   ] as const;
 };
 
-/** What `alertStatements` runs per threshold. */
-const statementsPerThreshold = 2;
+/** An alert `alertStatements` recorded, as its insert returns it. */
+const recordedSchema = z.array(
+  z.object({ kind: z.string(), scope: z.string(), period: z.string() })
+);
 
-/** Logs each alert a batch of `alertStatements` stored. */
-const logAlerts = (
-  alerted: readonly { budget: Budgeted; threshold: Threshold }[],
-  results: readonly unknown[],
-  offset: (index: number) => number
-): void => {
-  for (const [index, { budget, threshold }] of alerted.entries()) {
-    const marked = spentSchema.safeParse(results[offset(index)]).data ?? [];
-    if (marked.length > 0) {
-      log.warn(`model.budget_${threshold.kind}`, {
-        scope: budget.scope,
-        period: budget.period,
-      });
+/** Logs each alert a batch's `alertStatements` recorded. */
+const logAlerts = (results: readonly unknown[]): void => {
+  for (const result of results) {
+    for (const { kind, scope, period } of recordedSchema.safeParse(result)
+      .data ?? []) {
+      log.warn(`model.budget_${kind}`, { scope, period });
     }
   }
 };
 
+/** Every alert `budgeted` may be due. */
+const everyAlert = (budgeted: readonly Budgeted[]): Due[] =>
+  budgeted.flatMap((budget) =>
+    thresholds.map((threshold) => ({ budget, threshold }))
+  );
+
 /**
- * Checks `budgeted` before a request is sent, in one read: returns the
- * first that is used up, if any. Alerts admins first to every threshold a
- * budget has reached without an alert at its value yet: a threshold or
- * limit lowered below this month's spend, which no addition reached, and
- * every budget used up, not just the one that refuses. Nothing is written
- * while no budget needs an alert; the write, when one does, is the same
- * conditional one an addition runs, so two calls alert once between them.
- * An alert that can't be stored is logged, and the next call tries again.
+ * Checks `budgeted` before a request is sent: returns the first that is
+ * used up, if any. Alerts admins first to every threshold a budget has
+ * reached without an alert at that value this month: a threshold or limit
+ * lowered below this month's spend, which no addition reached, and every
+ * budget used up, not just the one that refuses. Nothing is written while
+ * none is due; the write, when one is, is the same conditional insert an
+ * addition runs, so two calls alert once between them. An alert that
+ * can't be stored is logged, and the next call tries again.
  */
 export const checkBudgets = async (
   env: OutboxEnv & Pick<Env, "DB">,
@@ -272,54 +278,49 @@ export const checkBudgets = async (
     return undefined;
   }
   const db = drizzle(env.DB);
-  const rows = await db
-    .select()
-    .from(modelSpend)
-    .where(or(...budgeted.map(rowOf)));
-  const rowFor = (budget: Budgeted) =>
-    rows.find((row) => row.scope === budget.scope && row.key === budget.key);
-  const due = budgeted.flatMap((budget) => {
-    const row = rowFor(budget);
-    return row === undefined
-      ? []
-      : thresholds
-          .filter(
-            (threshold) =>
-              row.spentMicros >= threshold.of(budget) &&
-              row[threshold.field] !== threshold.of(budget)
-          )
-          .map((threshold) => ({ budget, threshold }));
-  });
-  const [first, ...rest] = due;
-  if (first !== undefined) {
-    const statements = ({
-      budget,
-      threshold,
-    }: {
-      budget: Budgeted;
-      threshold: Threshold;
-    }) => alertStatements(db, trigger, budget, threshold);
+  const [spends, alerts] = await Promise.all([
+    db
+      .select()
+      .from(modelSpend)
+      .where(or(...budgeted.map(rowOf))),
+    db
+      .select()
+      .from(modelBudgetAlerts)
+      .where(or(...budgeted.map(alertsOf))),
+  ]);
+  const spentOn = (budget: Budgeted): number =>
+    spends.find((row) => row.scope === budget.scope && row.key === budget.key)
+      ?.spentMicros ?? 0;
+  const due = everyAlert(budgeted).filter(
+    ({ budget, threshold }) =>
+      spentOn(budget) >= threshold.of(budget) &&
+      !alerts.some(
+        (row) =>
+          row.scope === budget.scope &&
+          row.key === budget.key &&
+          row.kind === threshold.kind &&
+          row.thresholdMicros === threshold.of(budget)
+      )
+  );
+  const [head, ...rest] = due.flatMap((one) =>
+    alertStatements(db, trigger, one)
+  );
+  if (head !== undefined) {
     try {
-      const results = await auditedBatch(env, db, [
-        ...statements(first),
-        ...rest.flatMap(statements),
-      ]);
-      logAlerts(due, results, (index) => index * statementsPerThreshold);
+      logAlerts(await auditedBatch(env, db, [head, ...rest]));
     } catch (error) {
       log.error("model.budget_alert_failed", errorFields(error));
     }
   }
-  return budgeted.find(
-    (budget) => (rowFor(budget)?.spentMicros ?? 0) >= budget.limitMicros
-  );
+  return budgeted.find((budget) => spentOn(budget) >= budget.limitMicros);
 };
 
 /**
  * Adds a request's `cost` (US dollars) to each budget it counts against,
- * and alerts admins to each threshold it reached. Never throws: it runs
- * after the request was answered and paid for, and a caller that lost
- * the answer would ask (and pay) again. A spend that can't be stored is
- * logged, and the budget counts it short.
+ * and alerts admins to each threshold it reached, in one batch. Never
+ * throws: it runs after the request was answered and paid for, and a
+ * caller that lost the answer would ask (and pay) again. A spend that
+ * can't be stored is logged, and the budget counts it short.
  */
 export const chargeBudgets = async (
   env: OutboxEnv & Pick<Env, "DB">,
@@ -327,39 +328,39 @@ export const chargeBudgets = async (
   budgeted: readonly Budgeted[],
   cost: number
 ): Promise<void> => {
-  const [first, ...rest] = budgeted;
-  if (first === undefined || !(cost > 0)) {
+  if (budgeted.length === 0 || !(cost > 0)) {
     return;
   }
   // At least one, so many tiny calls never add up to nothing.
   const added = Math.max(1, Math.round(cost * microsPerDollar));
   const db = drizzle(env.DB);
-  const statements = (budget: Budgeted) =>
-    [
-      db
-        .insert(modelSpend)
-        .values({
-          scope: budget.scope,
-          key: budget.key,
-          period: budget.period,
-          spentMicros: added,
-        })
-        .onConflictDoUpdate({
-          target: [modelSpend.scope, modelSpend.key, modelSpend.period],
-          set: {
-            spentMicros: sql`${modelSpend.spentMicros} + excluded.spent_micros`,
-          },
-        }),
-      ...thresholds.flatMap((threshold) =>
-        alertStatements(db, trigger, budget, threshold)
-      ),
-    ] as const;
+  const additions = budgeted.map((budget) =>
+    db
+      .insert(modelSpend)
+      .values({
+        scope: budget.scope,
+        key: budget.key,
+        period: budget.period,
+        spentMicros: added,
+      })
+      .onConflictDoUpdate({
+        target: [modelSpend.scope, modelSpend.key, modelSpend.period],
+        set: {
+          spentMicros: sql`${modelSpend.spentMicros} + excluded.spent_micros`,
+        },
+      })
+  );
+  const statements = [
+    ...additions,
+    ...everyAlert(budgeted).flatMap((due) => alertStatements(db, trigger, due)),
+  ];
+  const [head, ...rest] = statements;
+  if (head === undefined) {
+    return;
+  }
   let results: readonly unknown[] = [];
   try {
-    results = await auditedBatch(env, db, [
-      ...statements(first),
-      ...rest.flatMap(statements),
-    ]);
+    results = await auditedBatch(env, db, [head, ...rest]);
   } catch (error) {
     log.error("model.spend_lost", {
       ...errorFields(error),
@@ -368,15 +369,5 @@ export const chargeBudgets = async (
     });
     return;
   }
-  const alerted = budgeted.flatMap((budget) =>
-    thresholds.map((threshold) => ({ budget, threshold }))
-  );
-  const perBudget = 1 + thresholds.length * statementsPerThreshold;
-  logAlerts(alerted, results, (index) => {
-    const budgetIndex = Math.floor(index / thresholds.length);
-    const thresholdIndex = index % thresholds.length;
-    return (
-      budgetIndex * perBudget + 1 + thresholdIndex * statementsPerThreshold
-    );
-  });
+  logAlerts(results);
 };

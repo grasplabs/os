@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "563be217-3067-41d4-8628-877873b79545",
+  "id": "5229b2bd-3830-456a-9676-a0c04e3d336c",
   "prevId": "8fa3dde9-6ae1-4148-9d46-f6e2c12d3ae4",
   "tables": {
     "accounts": {
@@ -999,6 +999,62 @@
       "uniqueConstraints": {},
       "checkConstraints": {}
     },
+    "model_budget_alerts": {
+      "name": "model_budget_alerts",
+      "columns": {
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "key": {
+          "name": "key",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "period": {
+          "name": "period",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "kind": {
+          "name": "kind",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
+        "threshold_micros": {
+          "name": "threshold_micros",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        }
+      },
+      "indexes": {},
+      "foreignKeys": {},
+      "compositePrimaryKeys": {
+        "model_budget_alerts_scope_key_period_kind_threshold_micros_pk": {
+          "columns": [
+            "scope",
+            "key",
+            "period",
+            "kind",
+            "threshold_micros"
+          ],
+          "name": "model_budget_alerts_scope_key_period_kind_threshold_micros_pk"
+        }
+      },
+      "uniqueConstraints": {},
+      "checkConstraints": {}
+    },
     "model_spend": {
       "name": "model_spend",
       "columns": {
@@ -1028,20 +1084,6 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true,
-          "autoincrement": false
-        },
-        "exhausted_at_micros": {
-          "name": "exhausted_at_micros",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "alerted_at_micros": {
-          "name": "alerted_at_micros",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
           "autoincrement": false
         }
       },

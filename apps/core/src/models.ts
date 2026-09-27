@@ -42,7 +42,13 @@ import { z } from "zod";
 
 import { keepAuditEvent } from "./audit-outbox.ts";
 import { featureEnabled } from "./features.ts";
-import { chargeBudgets, checkBudgets } from "./model-budgets.ts";
+import {
+  budgetMonth,
+  budgetsFor,
+  chargeBudgets,
+  checkBudgets,
+} from "./model-budgets.ts";
+import type { Budgeted } from "./model-budgets.ts";
 import { judgeCall, modelRulesShape } from "./model-rules.ts";
 import type { Judged, ModelRules, Refusal } from "./model-rules.ts";
 
@@ -725,7 +731,14 @@ const refuse = async (
 const admit = async (
   env: ModelsEnv,
   fields: unknown
-): Promise<Admitted & { gateway: string; transport: FetchFunction }> => {
+): Promise<
+  Admitted & {
+    /** The budgets a request sent now counts against, in this month. */
+    budgetsNow: () => Budgeted[];
+    gateway: string;
+    transport: FetchFunction;
+  }
+> => {
   const parsed = callSchema.safeParse(fields);
   if (!parsed.success) {
     throw modelErrors.create("model.invalid_call");
@@ -764,6 +777,7 @@ const admit = async (
     call,
     ref,
     judged: verdict.judged,
+    budgetsNow: () => budgetsFor(rules.budgets, call, budgetMonth(env)),
     gateway: config.gateway,
     transport: createAiBindingFetch(env.AI),
   };
@@ -773,7 +787,10 @@ const callModel = async <Output>(
   env: ModelsEnv,
   { schema, ...fields }: ModelCall<Output>
 ): Promise<ModelAnswer<Output>> => {
-  const { call, ref, judged, gateway, transport } = await admit(env, fields);
+  const { call, ref, judged, budgetsNow, gateway, transport } = await admit(
+    env,
+    fields
+  );
   const model = gatewayModel(gateway, ref);
   const signal = AbortSignal.timeout(call.timeoutMs ?? defaultTimeoutMs);
   const request: Request = {
@@ -798,10 +815,12 @@ const callModel = async <Output>(
   const attempts = schema === undefined ? 1 : 2;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
     if (attempt > 1) {
-      // The attempt before may have used up a budget: every request is
-      // checked before it is sent, not just the call's first.
+      // The attempt before may have used up a budget, or the month may
+      // have turned: every request is checked, and counted, in the month
+      // it is sent in, not just the call's first.
+      const budgets = budgetsNow();
       // oxlint-disable-next-line no-await-in-loop
-      const usedUp = await checkBudgets(env, call.trigger, judged.budgets);
+      const usedUp = await checkBudgets(env, call.trigger, budgets);
       if (usedUp !== undefined) {
         // oxlint-disable-next-line no-await-in-loop
         await refuse(env, call, {
@@ -809,6 +828,7 @@ const callModel = async <Output>(
           because: usedUp.scope,
         });
       }
+      request.judged = { ...request.judged, budgets };
     }
     // Each attempt follows up on the answer before it.
     // oxlint-disable-next-line no-await-in-loop
