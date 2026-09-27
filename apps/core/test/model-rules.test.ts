@@ -231,23 +231,32 @@ describe("model rules", () => {
     });
   });
 
-  it("read the rules only while model_rules is on: a malformed rule refuses every call then, and none while it's off", async () => {
-    const malformed = { eu: { models: "all of them" } };
-    const off = withRules(malformed, {
-      ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-      model_rules: false,
-    });
-    const on = withRules(malformed);
+  it.each([
+    ["eu", { eu: { models: "all of them" } }],
+    ["sensitive", { sensitive: { models: [euModel], connections: 7 } }],
+  ])(
+    "read the rules only while model_rules is on: a malformed %s rule refuses every call then, and none while it's off",
+    async (_, malformed) => {
+      const off = withRules(malformed, {
+        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
+        model_rules: false,
+      });
+      const on = withRules(malformed);
 
-    await expect(
-      Promise.all([
-        outcome(off.call(hello(anthropic))),
-        outcome(off.call(hello("openai/gpt-4o-mini"))),
-        outcome(on.call(hello(anthropic))),
-      ])
-    ).resolves.toStrictEqual(["ok", "model.not_allowed", "model.unconfigured"]);
-    expect(on.fake.requests).toStrictEqual([]);
-  });
+      await expect(
+        Promise.all([
+          outcome(off.call(hello(anthropic))),
+          outcome(off.call(hello("openai/gpt-4o-mini"))),
+          outcome(on.call(hello(anthropic))),
+        ])
+      ).resolves.toStrictEqual([
+        "ok",
+        "model.not_allowed",
+        "model.unconfigured",
+      ]);
+      expect(on.fake.requests).toStrictEqual([]);
+    }
+  );
 
   it("leave only the allowlist while model_rules is switched off: the kill switch", async () => {
     const { call } = withRules(
