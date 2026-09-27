@@ -112,7 +112,7 @@ export type Feature =
   | "members"
   /** Reading the audit log: search, export and verify. */
   | "audit"
-  /** Archiving and purging the audit log (audit-retention.ts). */
+  /** Archiving and purging the audit log (audit-log.ts, `retainAuditLog`). */
   | "audit_retention"
   /** Held side effects: listing, confirming and declining them. */
   | "confirmations"

@@ -6,7 +6,23 @@ import worker from "../src/index.ts";
 
 /** Runs core's cron trigger, as Cloudflare does every minute, on an env with `changes`. */
 export const runCron = async (changes: Partial<Env> = {}): Promise<void> => {
-  await worker.scheduled(createScheduledController(), { ...env, ...changes });
+  await worker.scheduled(createScheduledController({ cron: "* * * * *" }), {
+    ...env,
+    ...changes,
+  });
+};
+
+/**
+ * Runs core's cron trigger, as Cloudflare does every 15 minutes, on an env
+ * with `changes`.
+ */
+export const runQuarterHourCron = async (
+  changes: Partial<Env> = {}
+): Promise<void> => {
+  await worker.scheduled(createScheduledController({ cron: "*/15 * * * *" }), {
+    ...env,
+    ...changes,
+  });
 };
 
 /**

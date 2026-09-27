@@ -48,6 +48,7 @@ import migrations from "./db/audit-log/migrations/migrations.js";
 import { archives, events } from "./db/audit-log/schema.ts";
 import { migrateOnWake } from "./db/migrate.ts";
 import { inJurisdiction } from "./durable-objects.ts";
+import { featureEnabled } from "./features.ts";
 import { SignalTallier } from "./signal-tally.ts";
 import type { SignalTally } from "./signal-tally.ts";
 
@@ -90,7 +91,7 @@ const deleteBatchMax = 1000;
 
 /**
  * The deployment's retention in days (`AUDIT_RETENTION_DAYS`, see
- * src/audit-retention.ts), or `undefined` if its config is invalid.
+ * {@link retainAuditLog}), or `undefined` if its config is invalid.
  */
 export const auditRetentionDays = (
   env: Pick<Env, "AUDIT_RETENTION_DAYS">
@@ -133,6 +134,103 @@ export const archiveRetentionDays = (
     return undefined;
   }
   return days;
+};
+
+// Retention of the audit log: how long the log keeps an event where admins
+// search it. After that the event moves to the archive in R2 (in the EU),
+// as it was stored, and the chain carries on (see `AuditLog`), so an
+// archived event still counts when the chain is verified. The archive keeps
+// it until the log purges it, once the deployment's archive retention has
+// passed (`AUDIT_ARCHIVE_RETENTION_DAYS`, the event's total age, worked out
+// by the log itself; see `AuditLog.purge`), and never while that is unset.
+// Verification reports a purged stretch as purged. Deleting archived
+// objects any other way (outside the product) makes verification report
+// them missing.
+//
+// The console sets it per deployment with the `AUDIT_RETENTION_DAYS` var:
+// 180 days unless set, at least 30 (so an admin always has the last month
+// to search), at most ten years. A value outside that, or one that isn't a
+// whole number of days, is logged as `config.invalid` and archives nothing:
+// events stay searchable until the config is fixed. It's deployment config,
+// not an in-product setting, so a compromised admin session can't shorten
+// it. Archiving and purging run only while the `audit_retention` feature
+// is on (not `audit`, which gates reading the log).
+//
+// The log runs retention itself, daily, on its alarm (`AuditLog.alarm`),
+// which it arms when it appends an event while none is set (and core's
+// 15-minute cron trigger arms it too, for a deployment that appends
+// nothing). Daily, not at each event's exact deadline: that would archive
+// a stretch per event, and each `audit.archived` event would bring an
+// alarm of its own. An event is archived at most a day past retention.
+
+/** Most stretches one retention pass archives, and purges. */
+const stretchesPerPass = 10;
+
+/** The log's methods a retention pass calls. */
+type Retained = Pick<AuditLog, "archive" | "purge">;
+
+/** Archives what is past retention, up to {@link stretchesPerPass} stretches. */
+const archiveExpired = async (store: Retained, env: Env): Promise<boolean> => {
+  const days = auditRetentionDays(env);
+  if (days === undefined) {
+    return false;
+  }
+  const cutoff = new Date(Date.now() - days * dayMs).toISOString();
+  for (let pass = 0; pass < stretchesPerPass; pass += 1) {
+    // One stretch after another: each starts where the last one ended.
+    // oxlint-disable-next-line no-await-in-loop
+    const stretch = await store.archive(cutoff, days);
+    if (stretch === null) {
+      return pass > 0;
+    }
+    const { from, through } = stretch;
+    log.info("audit.archived", { from, through });
+    if (through - from + 1 < archiveStretch) {
+      return true;
+    }
+  }
+  return true;
+};
+
+/**
+ * One retention pass over the log `store`, with the deployment's `env`:
+ * archives the events it received longer ago than the deployment's
+ * retention, oldest first, a stretch at a time; the log records each
+ * stretch as `audit.archived`, in the same transaction. Then purges the
+ * archived stretches past archive retention, likewise recorded as
+ * `audit.purged`. At most {@link stretchesPerPass} of each, so a backlog
+ * is worked off over several passes. Only while `audit_retention` is
+ * switched on: a flag of its own, so switching audit search off (`audit`)
+ * doesn't stop retention. Returns whether it archived or purged anything.
+ *
+ * Running it again, also after a pass cut short, is safe: an archive
+ * starts where the last recorded one ended, and a purge records each
+ * stretch once. So the log's alarm, which may run more than once, can
+ * always run it.
+ */
+export const retainAuditLog = async (
+  store: Retained,
+  env: Env
+): Promise<boolean> => {
+  if (!featureEnabled(env, "audit_retention")) {
+    // Most likely a deployment that switched the log on before retention
+    // had a flag of its own: events are kept, not archived, until it's on.
+    if (featureEnabled(env, "audit")) {
+      log.warn("audit.retention_off", {});
+    }
+    return false;
+  }
+  const archived = await archiveExpired(store, env);
+  for (let pass = 0; pass < stretchesPerPass; pass += 1) {
+    // One stretch after another, oldest first.
+    // oxlint-disable-next-line no-await-in-loop
+    const stretch = await store.purge();
+    if (stretch === null) {
+      return archived || pass > 0;
+    }
+    log.info("audit.purged", { from: stretch.from, through: stretch.through });
+  }
+  return true;
 };
 
 /**
@@ -339,8 +437,9 @@ const entryColumns =
  * chain (a clock that does is held at the last time), so a time range is
  * a range of positions.
  *
- * Retention moves the oldest entries out, a stretch at a time, to the
- * AUDIT_ARCHIVE bucket (in the EU), as they were stored, and keeps a record
+ * Retention, run on the log's own alarm ({@link retainAuditLog}), moves
+ * the oldest entries out, a stretch at a time, to the AUDIT_ARCHIVE bucket
+ * (in the EU), as they were stored, and keeps a record
  * of each stretch (`archives`): its positions, the hash before it and its
  * last hash. The chain carries on from there, so it stays one chain that
  * can be verified from its first entry to its last, archived stretches
@@ -357,6 +456,9 @@ const entryColumns =
 export class AuditLog extends DurableObject<Env> {
   readonly #db = drizzle(this.ctx.storage);
 
+  /** Whether this instance found the retention alarm set, or set it. */
+  #armed = false;
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     migrateOnWake(ctx, migrations);
@@ -368,7 +470,54 @@ export class AuditLog extends DurableObject<Env> {
    * appends nothing from its batch.
    */
   async append(batch: readonly AuditEvent[]): Promise<AppendResult> {
-    return await this.#append(batch);
+    const result = await this.#append(batch);
+    await this.#armRetentionIfUnset();
+    return result;
+  }
+
+  /**
+   * Arms the retention alarm if none is set (see `#armRetentionIfUnset`):
+   * core's 15-minute cron trigger calls it, so a deployment that appends
+   * nothing after a release still starts retention.
+   */
+  async armRetention(): Promise<void> {
+    await this.#armRetentionIfUnset();
+  }
+
+  /**
+   * A retention pass ({@link retainAuditLog}). The next alarm is set a day
+   * out first, which also makes it the recovery alarm: a pass cut short
+   * (the object evicted, a limit hit) or one that throws (logged) runs
+   * again a day later. A pass that moved something may have stopped at its
+   * cap, so the next one follows at once, until a pass moves nothing.
+   * Alarms run at least once, so a pass may run again: that is safe.
+   */
+  override async alarm(): Promise<void> {
+    await this.#rearm(Date.now() + dayMs);
+    let moved = false;
+    try {
+      moved = await retainAuditLog(this, this.env);
+    } catch (error) {
+      log.error("audit.retention_failed", errorFields(error));
+    }
+    if (moved) {
+      await this.#rearm(Date.now());
+    }
+  }
+
+  /**
+   * Sets the alarm from within the alarm. If that fails, the alarm may be
+   * left unset, so this instance forgets it was armed: the next append or
+   * 15-minute cron run arms it again. The error is thrown, so the platform
+   * also retries the alarm, with backoff.
+   */
+  async #rearm(time: number): Promise<void> {
+    try {
+      await this.ctx.storage.setAlarm(time);
+    } catch (error) {
+      this.#armed = false;
+      throw error;
+    }
   }
 
   /**
@@ -396,7 +545,7 @@ export class AuditLog extends DurableObject<Env> {
         `At most ${auditProvenanceMaxItems} dead letters at a time`
       );
     }
-    return await this.#append(batch, (recovered, conflicts) =>
+    const result = await this.#append(batch, (recovered, conflicts) =>
       recovered.length === 0 && lost === 0 && conflicts === 0
         ? undefined
         : prepare(
@@ -413,6 +562,8 @@ export class AuditLog extends DurableObject<Env> {
             )
           )
     );
+    await this.#armRetentionIfUnset();
+    return result;
   }
 
   /** Entries after position `after`, oldest first, at most one page. */
@@ -692,7 +843,7 @@ export class AuditLog extends DurableObject<Env> {
    * purges go oldest first. The log works the cutoff out itself, so its
    * caller can't purge early. Every purge, also one that fails, then
    * deletes the objects of purged stretches whose delete failed before.
-   * The cron trigger calls it; it isn't on the RPC API, so no session can
+   * The log's alarm calls it; it isn't on the RPC API, so no session can
    * purge, staff included.
    */
   async purge(): Promise<ArchivedStretch | null> {
@@ -998,6 +1149,29 @@ export class AuditLog extends DurableObject<Env> {
       : { ...ended, ...step };
     this.ctx.storage.kv.put(lastPassKey, last);
     this.ctx.storage.kv.delete(passKey);
+  }
+
+  /**
+   * Arms the retention alarm, a day out, while none is set: in a new
+   * deployment, or one from before the alarm, whose backlog then starts at
+   * most a day after the release (retention runs daily anyway). Only the
+   * alarm itself re-arms it after that, so an object checks once while it's
+   * awake. A failure is
+   * logged, not thrown, so it never fails an append that went in; the next
+   * call tries again.
+   */
+  async #armRetentionIfUnset(): Promise<void> {
+    if (this.#armed) {
+      return;
+    }
+    try {
+      if ((await this.ctx.storage.getAlarm()) === null) {
+        await this.ctx.storage.setAlarm(Date.now() + dayMs);
+      }
+      this.#armed = true;
+    } catch (error) {
+      log.error("audit.retention_arm_failed", errorFields(error));
+    }
   }
 
   /** The last archived position and its hash, if anything is archived. */

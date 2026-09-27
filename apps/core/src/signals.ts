@@ -49,9 +49,9 @@ import { auditableCode } from "./workflows/host.ts";
 // records, over the last `signalWindowDays` days.
 //
 // They're computed once a UTC day and kept in `improvement_signals`, so
-// reading them is a few indexed queries. A cron trigger of their own runs
-// every 15 minutes (`signalsCron`), never in the same invocation as the
-// every-minute jobs, and the first run of a day that claims it computes
+// reading them is a few indexed queries. A cron trigger runs every 15
+// minutes (src/index.ts), never in the same invocation as the every-minute
+// jobs, and the first run of a day that claims it computes
 // them: a claim is a row in `improvement_signal_computations`, inserted
 // only while the day has no finished computation, no claim younger than
 // `leaseMs` and fewer than `attemptsPerDay` claims, in one statement, so
@@ -1015,9 +1015,6 @@ const store = async (
     db.delete(computations).where(and(finished, before)),
   ]);
 };
-
-/** The cron trigger of the improvement signals (wrangler.jsonc). */
-export const signalsCron = "*/15 * * * *";
 
 /**
  * Computes the improvement signals of `now`'s UTC day, unless that day's

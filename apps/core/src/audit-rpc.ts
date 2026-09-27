@@ -32,7 +32,7 @@ import type { SessionCheck } from "./session-check.ts";
 // before anything is returned, so a read that can't be recorded returns
 // nothing. Grasp staff read it only through the admin role their staff
 // access gives them, and are recorded as staff; they can't change retention
-// or archive anything (that's deployment config and the cron trigger).
+// or archive anything (that's deployment config and the log's own alarm).
 
 /** Most records one page of a search holds. */
 const searchPageSize = 100;

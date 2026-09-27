@@ -15,7 +15,7 @@ interface __BaseEnv_Env {
   FEATURES?: unknown;
   /** Memory files' size limits, in tokens (src/knowledge/memory-files.ts): JSON. */
   MEMORY_LIMITS?: unknown;
-  /** Days the audit log keeps events before archiving (src/audit-retention.ts). */
+  /** Days the audit log keeps events before archiving (src/audit-log.ts, `retainAuditLog`). */
   AUDIT_RETENTION_DAYS?: unknown;
   /** Days archived audit events are kept before they're purged (src/audit-log.ts). */
   AUDIT_ARCHIVE_RETENTION_DAYS?: unknown;
