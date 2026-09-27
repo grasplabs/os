@@ -1,7 +1,7 @@
 import type { AiBinding } from "@earendil-works/pi-ai/api/cloudflare-ai-binding";
 import { runActorOf } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
-import { appIdSchema } from "@grasp-os/shared/ids";
+import { appIdSchema, runIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
@@ -43,14 +43,28 @@ const cheapAnswer = { text: "Hi.", inputTokens: 10, outputTokens: 5 };
  */
 const pricedAnswer = { text: "Hi.", inputTokens: 1000, outputTokens: 100 };
 
+let monthsUsed = 0;
+
+/**
+ * A month no other test counts budgets in, so none depends on the real
+ * month or another test's spend.
+ */
+const newMonth = (): string => {
+  monthsUsed += 1;
+  const year = 2100 + Math.floor(monthsUsed / 12);
+  return `${year}-${String((monthsUsed % 12) + 1).padStart(2, "0")}`;
+};
+
 /**
  * Core's env with the fake gateway answering up to eight calls with
- * `answer`, the rules `config` adds, and `features`.
+ * `answer`, the rules `config` adds, and `features`; budgets count in
+ * `month`.
  */
 const withRules = (
   config: Record<string, unknown>,
   features: unknown = env.FEATURES,
-  answer: GatewayReply = cheapAnswer
+  answer: GatewayReply = cheapAnswer,
+  month = newMonth()
 ) => {
   const fake = fakeGateway(...Array.from({ length: 8 }, () => answer));
   const rulesEnv: ModelsEnv = {
@@ -58,6 +72,7 @@ const withRules = (
     AI: fake.binding,
     FEATURES: features,
     MODEL_GATEWAY: { gateway, models: allowed, ...config },
+    MODEL_BUDGET_MONTH: month,
   };
   return { fake, call: models(rulesEnv).call };
 };
@@ -102,15 +117,17 @@ const withDeploymentRules = async <Result>(
   replies: GatewayReply[],
   run: () => Promise<Result>
 ) => {
-  const { MODEL_GATEWAY: before } = env;
+  const { MODEL_GATEWAY: before, MODEL_BUDGET_MONTH: month } = env;
   const fake = fakeGateway(...replies);
   const ai: AiBinding = env.AI;
   const sending = vi.spyOn(ai, "fetch").mockImplementation(fake.binding.fetch);
   try {
     env.MODEL_GATEWAY = config;
+    env.MODEL_BUDGET_MONTH = newMonth();
     return { fake, result: await run() };
   } finally {
     env.MODEL_GATEWAY = before;
+    env.MODEL_BUDGET_MONTH = month;
     sending.mockRestore();
   }
 };
@@ -556,32 +573,31 @@ describe("model rules", () => {
   });
 
   it("count the calls an agent or a run makes for a person against that person's budget", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const app = await appWith(builder, workflowFiles("idle", "  return null;"));
+    const run = await builder.api.workflows.start(app, "idle");
+    await finished(run.id);
+    const appId = appIdSchema.parse(app);
     const { call } = withRules(
       { budgets: { user: { limit: 0.01 } } },
       env.FEATURES,
       pricedAnswer
     );
-    const ada = newPerson();
+    const ada = { type: "person", userId: builder.userId } as const;
     const forAda = [
       hello(anthropic, {
         trigger: { type: "agent", agentId: "chat", onBehalfOf: ada.userId },
       }),
       hello(anthropic, {
         purpose: "workflow.step",
-        trigger: runOf(`app-${crypto.randomUUID()}`, "invoices"),
+        trigger: runActorOf({ runId: run.id, app, workflow: "idle" }),
         work: {
           authority: {
-            subject: {
-              type: "app",
-              appId: appIdSchema.parse(`app-${crypto.randomUUID()}`),
-            },
+            subject: { type: "app", appId },
             onBehalfOf: ada.userId,
             mode: "workflow",
           },
-          context: {
-            type: "app",
-            appId: appIdSchema.parse(`app-${crypto.randomUUID()}`),
-          },
+          context: { type: "run", appId, runId: runIdSchema.parse(run.id) },
         },
       }),
       hello(anthropic, { trigger: ada }),
@@ -595,6 +611,55 @@ describe("model rules", () => {
     expect(outcomes).toStrictEqual(["ok", "ok", "ok", "model.over_budget"]);
   });
 
+  it("alert admins once when a limit is lowered below what was spent, and count each month on its own", async () => {
+    const month = newMonth();
+    const spend = withRules(
+      { budgets: { user: { limit: 0.02 } } },
+      env.FEATURES,
+      pricedAnswer,
+      month
+    );
+    const lowered = withRules(
+      { budgets: { user: { limit: 0.01 } } },
+      env.FEATURES,
+      pricedAnswer,
+      month
+    );
+    const nextMonth = withRules(
+      { budgets: { user: { limit: 0.01 } } },
+      env.FEATURES,
+      pricedAnswer
+    );
+    const ada = hello(anthropic);
+    const outcomes: string[] = [];
+    // $0.0135: under the first limit, over the lowered one.
+    for (const call of [spend.call, spend.call, spend.call]) {
+      // oxlint-disable-next-line no-await-in-loop -- one after another
+      outcomes.push(await outcome(call(ada)));
+    }
+    for (const call of [lowered.call, lowered.call, nextMonth.call]) {
+      // oxlint-disable-next-line no-await-in-loop -- one after another
+      outcomes.push(await outcome(call(ada)));
+    }
+
+    expect(outcomes).toStrictEqual([
+      "ok",
+      "ok",
+      "ok",
+      "model.over_budget",
+      "model.over_budget",
+      "ok",
+    ]);
+    const events = await eventsOf(ada.trigger);
+    expect(
+      events.filter(({ action }) => action === "model.budget.exhausted")
+    ).toMatchObject([
+      {
+        detail: { scope: "user", period: month, limit: 0.01, threshold: 0.01 },
+      },
+    ]);
+  });
+
   it("keep a paid answer when its cost can't be counted", async () => {
     const fake = fakeGateway(pricedAnswer);
     const database: D1Database = env.DB;
@@ -606,6 +671,7 @@ describe("model rules", () => {
         models: allowed,
         budgets: { user: { limit: 0.01 } },
       },
+      MODEL_BUDGET_MONTH: newMonth(),
       // Reads and single writes work; the batch that counts the cost fails.
       DB: new Proxy(database, {
         get: (target, name): unknown => {

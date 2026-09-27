@@ -10,10 +10,17 @@ import { and, eq, inArray, or } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import type { OutboxEnv } from "./audit-outbox.ts";
 import { inList } from "./db/d1.ts";
 import { collections, documents } from "./db/knowledge/schema.ts";
 import { featureEnabled } from "./features.ts";
-import { budgetsFor, budgetsSchema, usedUpBudget } from "./model-budgets.ts";
+import {
+  budgetMonth,
+  budgetsFor,
+  budgetsSchema,
+  noteUsedUp,
+  usedUpBudget,
+} from "./model-budgets.ts";
 import type { Budgeted } from "./model-budgets.ts";
 import { isRestricted } from "./restricted.ts";
 import type { RestrictedEnv, WorkContext } from "./restricted.ts";
@@ -242,7 +249,9 @@ const restrictedWork = async (
  * no call gets past a rule with a context that isn't its own, or none.
  */
 export const judgeCall = async (
-  env: RestrictedEnv & Pick<Env, "FEATURES" | "KNOWLEDGE">,
+  env: RestrictedEnv &
+    OutboxEnv &
+    Pick<Env, "FEATURES" | "KNOWLEDGE" | "MODEL_BUDGET_MONTH">,
   rules: ModelRules,
   input: RulesInput
 ): Promise<{ ok: true; judged: Judged } | ({ ok: false } & Refusal)> => {
@@ -271,9 +280,10 @@ export const judgeCall = async (
   ) {
     return { ok: false, code: "model.sensitive_data", because: sensitive };
   }
-  const budgets = budgetsFor(rules.budgets, input);
+  const budgets = budgetsFor(rules.budgets, input, budgetMonth(env));
   const usedUp = await usedUpBudget(env, budgets);
   if (usedUp !== undefined) {
+    await noteUsedUp(env, input.trigger, usedUp);
     return { ok: false, code: "model.over_budget", because: usedUp.scope };
   }
   return { ok: true, judged: { euOnly, sensitive, budgets } };

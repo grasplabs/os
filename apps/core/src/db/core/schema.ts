@@ -572,6 +572,11 @@ export const modelSpend = sqliteTable(
     key: text().notNull(),
     period: text().notNull(),
     spentMicros: integer("spent_micros").notNull(),
+    /**
+     * The limit admins were last alerted the budget was used up at, so each
+     * limit alerts once, also one lowered below what was already spent.
+     */
+    exhaustedAtMicros: integer("exhausted_at_micros"),
   },
   (table) => [primaryKey({ columns: [table.scope, table.key, table.period] })]
 );
