@@ -29,12 +29,15 @@ import {
 } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { jsonVar } from "@grasp-os/shared/config";
+import { connectionIdSchema } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { keepAuditEvent } from "./audit-outbox.ts";
+import { judgeCall, modelRulesShape } from "./model-rules.ts";
+import type { Judged, Refusal } from "./model-rules.ts";
 
 // The model gateway: every model call in a deployment goes through here, and
 // from here through the deployment's AI Gateway, never straight to a
@@ -45,6 +48,10 @@ import { keepAuditEvent } from "./audit-outbox.ts";
 // the model, tokens and cost, never the prompt or the answer. The event goes
 // through the audit outbox, so a request that was answered (and paid for)
 // is recorded even when the audit log can't take it for a moment.
+//
+// Before anything is sent, a call is checked against the deployment's
+// allowlist and its other rules (model-rules.ts). A refused call is
+// audited too, with the reason, and nothing is sent.
 //
 // Only providers whose pi adapter takes a custom fetch can ride the binding.
 // Google's refuses one, so Google models would need a gateway token over
@@ -134,18 +141,25 @@ const parseModelRef = (ref: string): ModelRef | undefined => {
 /** An AI Gateway ID: lowercase letters, digits and dashes. */
 const gatewayIdPattern = /^[a-z0-9][a-z0-9-]{0,63}$/u;
 
-const modelGatewayConfigSchema = z.object({
-  /** The deployment's AI Gateway, in the deployment's own account. */
-  gateway: z.string().regex(gatewayIdPattern),
-  /** The models this deployment allows; every other model is refused. */
-  models: z
-    .array(
-      z.string().refine((ref) => parseModelRef(ref) !== undefined, {
-        message: "A <provider>/<model> the gateway offers",
-      })
-    )
-    .min(1),
-});
+const modelRefSchema = z
+  .string()
+  .refine((ref) => parseModelRef(ref) !== undefined, {
+    message: "A <provider>/<model> the gateway offers",
+  });
+
+const modelGatewayConfigSchema = z
+  .object({
+    /** The deployment's AI Gateway, in the deployment's own account. */
+    gateway: z.string().regex(gatewayIdPattern),
+    /** The models this deployment allows; every other model is refused. */
+    models: z.array(modelRefSchema).min(1),
+    ...modelRulesShape(modelRefSchema),
+  })
+  .refine(
+    ({ models: allowed, eu }) =>
+      eu === undefined || eu.models.every((ref) => allowed.includes(ref)),
+    { message: "EU models are allowed models", path: ["eu", "models"] }
+  );
 type ModelGatewayConfig = z.infer<typeof modelGatewayConfigSchema>;
 
 /**
@@ -206,6 +220,11 @@ const callSchema = z
     trigger: auditActorSchema,
     /** IDs of the resources that fed the prompt. */
     provenance: auditEventSchema.shape.provenance,
+    /**
+     * Connections whose data may have fed the prompt, such as a run's: for
+     * the deployment's rules only, never recorded.
+     */
+    connections: z.array(connectionIdSchema).default([]),
     requestId: auditEventSchema.shape.requestId,
   })
   .refine(({ input, messages }) => (input === undefined) !== !messages, {
@@ -346,10 +365,15 @@ const costOf = ({ cost }: Usage): number =>
 const hasFailed = ({ stopReason }: AssistantMessage): boolean =>
   stopReason === "error" || stopReason === "aborted";
 
-interface Request {
-  model: Model<Api>;
-  ref: ModelRef;
+/** A call the gateway took: its model, and what the rules made of it. */
+interface Admitted {
   call: Call;
+  ref: ModelRef;
+  judged: Judged;
+}
+
+interface Request extends Admitted {
+  model: Model<Api>;
   /** The AI binding's fetch, which reaches the gateway. */
   transport: FetchFunction;
   /** Ends the call when it takes too long, retries included. */
@@ -484,7 +508,7 @@ interface Recorded {
   errorType: string | undefined;
 }
 
-const auditEntry = (call: Call, ref: ModelRef, recorded: Recorded) => {
+const auditEntry = ({ call, ref, judged }: Admitted, recorded: Recorded) => {
   const { logId } = recorded;
   return {
     actor: call.trigger,
@@ -509,6 +533,8 @@ const auditEntry = (call: Call, ref: ModelRef, recorded: Recorded) => {
         logId !== undefined && logId.length <= auditIdentifierMaxLength
           ? logId
           : null,
+      // Which rule kept the call in the EU, if one did.
+      euOnly: judged.euOnly ?? null,
     },
   } satisfies AuditEntry;
 };
@@ -529,6 +555,9 @@ const largestRecord: Recorded = {
   errorType: "x".repeat(64),
 };
 
+/** The most the rules can add to a call's audit event. */
+const largestJudged: Judged = { euOnly: "connection" };
+
 /**
  * Records one request in the audit log, however it ended. Never throws: a
  * caller that lost a paid answer to a bookkeeping failure would ask (and
@@ -536,8 +565,7 @@ const largestRecord: Recorded = {
  */
 const record = async (
   env: ModelsEnv,
-  call: Call,
-  ref: ModelRef,
+  admitted: Admitted,
   { answer, logId, status }: Sent,
   attempt: number,
   outcome: Outcome,
@@ -546,7 +574,7 @@ const record = async (
   await keepAuditEvent(
     env,
     drizzle(env.DB),
-    auditEntry(call, ref, {
+    auditEntry(admitted, {
       inputTokens: inputTokens(answer.usage),
       outputTokens: answer.usage.output,
       cost: costOf(answer.usage),
@@ -559,11 +587,45 @@ const record = async (
   );
 };
 
+/**
+ * Records a call the deployment's rules refused, with the reason, and
+ * refuses it. Its event is smaller than the one its call would have had,
+ * whose size `admit` checks first.
+ */
+const refuse = async (
+  env: ModelsEnv,
+  call: Call,
+  { code, because }: Refusal
+): Promise<never> => {
+  // Never a model name so long that the event would be refused.
+  const model =
+    call.model.length <= auditIdentifierMaxLength ? call.model : null;
+  log.warn("model.refused", { reason: code, because });
+  await keepAuditEvent(env, drizzle(env.DB), {
+    actor: call.trigger,
+    action: "model.refused",
+    requestId: call.requestId,
+    provenance: call.provenance,
+    detail: {
+      purpose: call.purpose,
+      reason: code,
+      because: because ?? null,
+      model,
+    },
+  });
+  throw modelErrors.create(
+    code,
+    because === undefined
+      ? { model: call.model }
+      : { model: call.model, because }
+  );
+};
+
 /** Checks a call against the deployment's config, before anything is sent. */
-const admit = (
+const admit = async (
   env: ModelsEnv,
   fields: unknown
-): { call: Call; ref: ModelRef; gateway: string; transport: FetchFunction } => {
+): Promise<Admitted & { gateway: string; transport: FetchFunction }> => {
   const parsed = callSchema.safeParse(fields);
   if (!parsed.success) {
     throw modelErrors.create("model.invalid_call");
@@ -578,17 +640,25 @@ const admit = (
     ? parseModelRef(call.model)
     : undefined;
   if (ref === undefined) {
-    throw modelErrors.create("model.not_allowed", { model: call.model });
+    return await refuse(env, call, { code: "model.not_allowed" });
   }
   try {
-    createAuditEvent(auditEntry(call, ref, largestRecord), "core");
+    createAuditEvent(
+      auditEntry({ call, ref, judged: largestJudged }, largestRecord),
+      "core"
+    );
   } catch {
     // Its provenance, say, is too long to record.
     throw modelErrors.create("model.invalid_call");
   }
+  const verdict = judgeCall(env, config, call);
+  if (!verdict.ok) {
+    return await refuse(env, call, verdict);
+  }
   return {
     call,
     ref,
+    judged: verdict.judged,
     gateway: config.gateway,
     transport: createAiBindingFetch(env.AI),
   };
@@ -598,13 +668,14 @@ const callModel = async <Output>(
   env: ModelsEnv,
   { schema, ...fields }: ModelCall<Output>
 ): Promise<ModelAnswer<Output>> => {
-  const { call, ref, gateway, transport } = admit(env, fields);
+  const { call, ref, judged, gateway, transport } = await admit(env, fields);
   const model = gatewayModel(gateway, ref);
   const signal = AbortSignal.timeout(call.timeoutMs ?? defaultTimeoutMs);
   const request: Request = {
     model,
     ref,
     call,
+    judged,
     transport,
     signal,
     system:
@@ -640,15 +711,14 @@ const callModel = async <Output>(
         stopReason: answer.stopReason,
       });
       // oxlint-disable-next-line no-await-in-loop
-      await record(env, call, ref, sent, attempt, "failed", failure);
+      await record(env, request, sent, attempt, "failed", failure);
       throw modelErrors.create("model.failed");
     }
     if (schema === undefined) {
       // oxlint-disable-next-line no-await-in-loop
       await record(
         env,
-        call,
-        ref,
+        request,
         sent,
         attempt,
         truncated ? "truncated" : "answered"
@@ -664,8 +734,7 @@ const callModel = async <Output>(
     // oxlint-disable-next-line no-await-in-loop
     await record(
       env,
-      call,
-      ref,
+      request,
       sent,
       attempt,
       result.ok ? "answered" : "invalid_output"
@@ -684,9 +753,9 @@ const callModel = async <Output>(
 
 /**
  * The model gateway for core: `await models(env).call({ model, input,
- * purpose, trigger })`. Refuses a model the deployment doesn't allow, sends
- * the call through AI Gateway, and records every request it makes in the
- * audit log. With a `schema`, the answer is JSON that matches it.
+ * purpose, trigger })`. Refuses a model the deployment doesn't allow or
+ * its rules don't let the call use, sends the call through AI Gateway, and
+ * records every request it makes, and every refusal, in the audit log. With a `schema`, the answer is JSON that matches it.
  */
 export const models = (env: ModelsEnv) => ({
   call: async <Output = undefined>(

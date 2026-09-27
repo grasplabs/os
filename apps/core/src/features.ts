@@ -18,7 +18,8 @@ import { z } from "zod";
 // which gives every context no memory while off), purging Knowledge
 // (`knowledge_purge`), connection calls (`connections`), App methods
 // (`apps`), starting runs and every step of one (`workflows`), and opening
-// or asking a decision (`decisions`).
+// or asking a decision (`decisions`). `model_rules` stops the model
+// gateway checking the client's rules beyond the allowlist.
 //
 // `workflows` and `decisions` never fail a run. Before each step, sleep
 // and wait, while `workflows` is off (or `decisions`, before a step that
@@ -57,13 +58,21 @@ export type Feature =
   /** Archiving and purging the audit log (audit-retention.ts). */
   | "audit_retention"
   /** Held side effects: listing, confirming and declining them. */
-  | "confirmations";
+  | "confirmations"
+  /**
+   * The client's rules for model calls beyond the allowlist, which always
+   * applies (model-rules.ts).
+   */
+  | "model_rules";
 
 // Names nobody knows (a flag since removed) are ignored, not an error.
 const featuresSchema = z.record(z.string(), z.boolean());
 
 /** Whether `feature` is switched on for this deployment. */
-export const featureEnabled = (env: Env, feature: Feature): boolean =>
+export const featureEnabled = (
+  env: Pick<Env, "FEATURES">,
+  feature: Feature
+): boolean =>
   deploymentConfig(featuresSchema, "FEATURES", env.FEATURES)?.[feature] ===
   true;
 
