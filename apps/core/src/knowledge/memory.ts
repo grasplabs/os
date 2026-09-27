@@ -403,25 +403,31 @@ export const forContext = async (
   );
   const entry = assembled.get(key) ?? (await assemble(env, found));
   remember(key, entry);
-  const sources = found.flatMap(({ collection }) =>
+  // What memory holds: an App's version whose code has no AGENTS.md is in
+  // the key (a new version may add one) but wasn't read into it.
+  const appIncluded = entry.files.some(({ source }) => source === "app");
+  const included = found.filter(
+    ({ documentId }) => documentId !== null || appIncluded
+  );
+  const sources = included.flatMap(({ collection }) =>
     collection === null ? [] : [collection]
   );
   // The App whose AGENTS.md was read, and at which version: at most one.
-  const [app] = found.flatMap(({ wanted: { at }, version }) =>
+  const [app] = included.flatMap(({ wanted: { at }, version }) =>
     "appId" in at ? [{ appId: at.appId, version }] : []
   );
   // Before anyone gets the text: an agent that reads something sensitive
   // is restricted first, and every read is recorded, cached or not, an
   // App's AGENTS.md too (by the App and its version, in its provenance).
   const provenance =
-    found.length === 0
+    included.length === 0
       ? noProvenance
       : await noteProvenance(
           env,
           { type: "delegate", authority, context: work },
           {
             action: "knowledge.read",
-            documentIds: found.flatMap(
+            documentIds: included.flatMap(
               ({ documentId, wanted: { at } }) =>
                 // A document by its ID, an App's AGENTS.md by the App's.
                 documentId ?? ("appId" in at ? [at.appId] : [])
@@ -435,7 +441,13 @@ export const forContext = async (
           },
           ...sources
         );
-  return { ...entry, key, provenance };
+  // Copies: the cached entry is shared by every caller with the same key.
+  return {
+    files: entry.files.map((file) => ({ ...file })),
+    text: entry.text,
+    key,
+    provenance,
+  };
 };
 
 /** The Memory collection, as the admin `ownerId` sets it up. */

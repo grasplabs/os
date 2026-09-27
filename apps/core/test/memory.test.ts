@@ -411,6 +411,54 @@ describe("memory for a context", setUpTime, () => {
     });
   });
 
+  it("records no App read when the App's code has no AGENTS.md", async () => {
+    const admin = await personOf("admin");
+    const agent = newAgent();
+    const memory = await memoryOf(admin);
+    const work = await newChat();
+    const asAgent = actingFor(agent, admin.userId);
+    await saveOver(admin, memory, "AGENTS.md", `Agents ${unique()}`);
+    const { id: appId } = await admin.api.apps.create({ name: "Bare" });
+    await release(admin, appId, { "README.md": "No memory here" });
+    let found: Memory | undefined;
+    const events = await auditedDuring(async () => {
+      found = await forContext(env, asAgent, work, { type: "own", appId });
+    });
+    const sources = found?.files.map(({ source }) => source) ?? [];
+    expect({
+      app: sources.includes("app"),
+      provenance: events.map(({ provenance }) => provenance.includes(appId)),
+      detail: events.map(({ detail }) => ({
+        appId: detail.appId,
+        appVersion: detail.appVersion,
+      })),
+    }).toStrictEqual({
+      app: false,
+      provenance: [false],
+      detail: [{ appId: null, appVersion: null }],
+    });
+  });
+
+  it("gives each caller its own copy of cached memory", async () => {
+    const admin = await personOf("admin");
+    const memory = await memoryOf(admin);
+    await saveOver(admin, memory, "AGENTS.md", `Agents ${unique()}`);
+    const work = await newChat();
+    const asAgent = actingFor(newAgent(), admin.userId);
+    const first = await forContext(env, asAgent, work, { type: "own" });
+    const asReturned = structuredClone(first.files);
+    // One caller changes what it got.
+    for (const file of first.files) {
+      file.cut = true;
+    }
+    first.files.length = 0;
+    const second = await forContext(env, asAgent, work, { type: "own" });
+    expect({
+      sameKey: second.key === first.key,
+      files: second.files,
+    }).toStrictEqual({ sameKey: true, files: asReturned });
+  });
+
   it("is empty while memory is switched off", async () => {
     const admin = await personOf("admin");
     const memory = await memoryOf(admin);
