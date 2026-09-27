@@ -5,7 +5,7 @@ import {
 import { defineProject } from "vite-plus";
 
 import { testConnectorsFile } from "./test/global-setup.ts";
-import { clients } from "./test/provider-config.ts";
+import { clients, testComposioKey } from "./test/provider-config.ts";
 
 const migrations = await readD1Migrations(
   `${import.meta.dirname}/src/db/migrations`
@@ -67,6 +67,8 @@ export default defineProject({
           MICROSOFT_CLIENT_SECRET: clients.microsoft.secret,
           GOOGLE_CLIENT_ID: clients.google.id,
           GOOGLE_CLIENT_SECRET: clients.google.secret,
+          // Grasp's key for Composio, as test/composio-api.ts checks it.
+          COMPOSIO_API_KEY: testComposioKey,
           CONNECT_MIGRATIONS: migrations,
           // As a deployment of an earlier release may still have it: nothing
           // reads it, and downloads to other hosts go all the same.

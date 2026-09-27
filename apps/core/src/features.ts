@@ -16,7 +16,8 @@ import { z } from "zod";
 // (session-rpc.ts), and what App and workflow code reach of it: collection
 // stubs (`knowledge`), an agent's memory and its saves of it (`memory`,
 // which gives every context no memory while off), purging Knowledge
-// (`knowledge_purge`), connection calls (`connections`), App methods
+// (`knowledge_purge`), connection calls (`connections`), Composio's
+// toolkits in the catalog (`composio`), App methods
 // (`apps`), starting runs and every step of one (`workflows`), and opening
 // or asking a decision (`decisions`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist.
@@ -49,6 +50,11 @@ export type Feature =
   /** Purging personal data (knowledge/purge.ts); needs `knowledge` on too. */
   | "knowledge_purge"
   | "connections"
+  /**
+   * Composio's toolkits in the catalog; needs `connections` on too.
+   * Switched off, the catalog lists only native providers.
+   */
+  | "composio"
   | "workflows"
   | "decisions"
   | "screens"

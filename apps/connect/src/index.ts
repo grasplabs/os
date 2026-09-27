@@ -11,6 +11,8 @@ import {
   declineActionSchema,
 } from "@grasp-os/shared/connect";
 import type {
+  Catalog,
+  CatalogTool,
   ConnectApi,
   ConnectCall,
   ConnectionPerson,
@@ -29,6 +31,7 @@ import { ackAuditEvents, auditCall, takeAuditEvents } from "./audit.ts";
 import type { CallOutcome, CallRecord } from "./audit.ts";
 import { carryOut, connectionFor } from "./call.ts";
 import type { CallDone, CallProgress } from "./call.ts";
+import { catalog, catalogTools } from "./catalog.ts";
 import {
   abandonFlow,
   disconnect,
@@ -203,6 +206,17 @@ export default class Connect
 
   async abandonFlow(state: string): Promise<void> {
     await abandonFlow(this.env, state);
+  }
+
+  // The catalog (src/catalog.ts): what can be connected. Core says whether
+  // its `composio` flag is on.
+
+  async catalog(request: unknown): Promise<Catalog> {
+    return await catalog(this.env, request);
+  }
+
+  async catalogTools(request: unknown): Promise<CatalogTool[]> {
+    return await catalogTools(this.env, request);
   }
 
   // Held actions (src/pending.ts). Core names the person from their
