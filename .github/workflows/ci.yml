@@ -1,7 +1,8 @@
 # Trunk-based: feature branch -> pull request into main -> merge queue, which
 # tests it on top of the latest main and squash-merges it. Checks run on pull
 # requests and in the merge queue; a push to main only deploys what those
-# checks already tested, to grasp-os-staging. grasp-os-ops is deployed by hand
+# checks already tested, to grasp-os-staging, and publishes it as a release
+# for the console. grasp-os-ops is deployed by hand
 # with the Deploy grasp-os-ops workflow. Jobs with secrets never run for pull
 # requests from forks. CI never deploys to a client account: the console
 # rolls releases out.
@@ -206,3 +207,43 @@ jobs:
       # not set up for it yet mustn't hold back the console.
       - run: vp run --filter @grasp-os/console deploy
       - run: vp run --filter @grasp-os/router deploy
+
+  # Every merge to main is a release: built once, verified against its
+  # manifest and published to R2 in grasp-os-ops, where the console imports
+  # it. Deploys nothing. The R2 key is loaded only after the build, and only
+  # the upload step sees it.
+  publish-release:
+    name: publish-release
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment: grasp-os-releases
+    concurrency:
+      group: publish-release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ["--frozen-lockfile"]
+      - run: vp run release:build --out release-out
+      - id: r2
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: false
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          R2_ENDPOINT: op://grasp-os-releases/r2/endpoint
+          R2_ACCESS_KEY_ID: op://grasp-os-releases/r2/access-key-id
+          R2_SECRET_ACCESS_KEY: op://grasp-os-releases/r2/secret-access-key
+      - run: vp run release:upload --release release-out
+        env:
+          R2_ENDPOINT: ${{ steps.r2.outputs.R2_ENDPOINT }}
+          R2_BUCKET: grasp-os-releases
+          R2_ACCESS_KEY_ID: ${{ steps.r2.outputs.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ steps.r2.outputs.R2_SECRET_ACCESS_KEY }}

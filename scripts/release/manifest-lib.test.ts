@@ -1,7 +1,6 @@
 /**
  * The release manifest, generated from the real wrangler.jsonc of core and
- * connect with fixture bundles, assets and migrations in place of a build.
- * Changing either config fails the golden test until the golden file is
+ * connect (fixture-release.ts). Changing either config fails the golden test until the golden file is
  * regenerated (`vp test -u scripts/release`): a deliberate decision about
  * how the change reaches client accounts.
  */
@@ -17,15 +16,9 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
-import { parseJsonc } from "../wrangler-config-rules.ts";
-import {
-  collectAssets,
-  collectModules,
-  collectSqlFiles,
-  stableStringify,
-} from "./hash-lib.ts";
+import { builds, fixtureBuild, info, rawConfig } from "./fixture-release.ts";
+import { stableStringify } from "./hash-lib.ts";
 import {
   assertReleaseDir,
   assetKey,
@@ -35,48 +28,6 @@ import {
   verifyRelease,
   writeRelease,
 } from "./manifest-lib.ts";
-import type { ReleaseInfo, WorkerBuild } from "./manifest-lib.ts";
-
-const ROOT = path.join(import.meta.dirname, "../..");
-const TESTDATA = path.join(import.meta.dirname, "testdata");
-
-const rawConfig = (app: string): Record<string, unknown> =>
-  z
-    .record(z.string(), z.unknown())
-    .parse(
-      parseJsonc(
-        readFileSync(path.join(ROOT, "apps", app, "wrangler.jsonc"), "utf-8")
-      )
-    );
-
-const fixtureBuild = (app: string): WorkerBuild => {
-  const config = parseWranglerConfig(app, rawConfig(app));
-  return {
-    key: app,
-    config,
-    ...collectModules(path.join(TESTDATA, "bundles", app)),
-    d1Migrations: Object.fromEntries(
-      config.d1_databases.map((database) => [
-        database.binding,
-        collectSqlFiles(path.join(TESTDATA, "migrations")),
-      ])
-    ),
-    ...(config.assets
-      ? { assets: collectAssets(path.join(TESTDATA, "assets")) }
-      : {}),
-  };
-};
-
-const info: ReleaseInfo = {
-  releaseId: "r000001-0000000",
-  commit: "0".repeat(40),
-  createdAt: "2026-01-01T00:00:00.000Z",
-  notes: "feat(core): a fixture",
-  wranglerVersion: "0.0.0-fixture",
-  packages: { zod: "0.0.0-fixture" },
-};
-
-const builds = (): WorkerBuild[] => ["connect", "core"].map(fixtureBuild);
 
 /** Every string anywhere in `value`. */
 const stringsIn = (value: unknown): string[] => {

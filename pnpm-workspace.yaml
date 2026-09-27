@@ -24,6 +24,8 @@ catalog:
   "@shadcn/lint": 0.1.5
   "@secretlint/secretlint-rule-preset-recommend": 13.0.5
   "@types/node": 26.6.2
+  # Signs the release upload to R2's S3 API (scripts/release).
+  aws4fetch: 1.0.20
   secretlint: 13.0.5
   typescript: 7.0.2
   ultracite: 7.12.0
