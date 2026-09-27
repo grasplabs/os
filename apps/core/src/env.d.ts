@@ -15,6 +15,12 @@ interface __BaseEnv_Env {
   FEATURES?: unknown;
   /** Memory files' size limits, in tokens (src/knowledge/memory-files.ts): JSON. */
   MEMORY_LIMITS?: unknown;
+  /**
+   * The change that made this version (src/platform-updates.ts): JSON,
+   * `{by, what, release, at}`, set by the console on every version it
+   * deploys.
+   */
+  PLATFORM_CHANGE?: unknown;
   /** Days the audit log keeps events before archiving (src/audit-log.ts, `retainAuditLog`). */
   AUDIT_RETENTION_DAYS?: unknown;
   /** Days archived audit events are kept before they're purged (src/audit-log.ts). */

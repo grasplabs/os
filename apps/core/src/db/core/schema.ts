@@ -12,6 +12,7 @@ import type { ParamValue, RunFailure } from "@grasp-os/shared/workflows";
  */
 import { sql } from "drizzle-orm";
 import {
+  check,
   index,
   integer,
   primaryKey,
@@ -739,4 +740,19 @@ export const improvementSignals = sqliteTable(
       table.value
     ),
   ]
+);
+
+/**
+ * The version of core the cron last saw running (src/platform-updates.ts):
+ * one row, `id` 1. A version it hasn't seen replaces it, and is audited
+ * as `platform.updated` in the same statement's batch.
+ */
+export const platformVersion = sqliteTable(
+  "platform_version",
+  {
+    id: integer().primaryKey(),
+    versionId: text("version_id").notNull(),
+    recordedAt: timestamp("recorded_at").notNull(),
+  },
+  (table) => [check("platform_version_one_row", sql`${table.id} = 1`)]
 );

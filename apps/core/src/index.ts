@@ -10,6 +10,7 @@ import { indexApps } from "./knowledge/apps-collection.ts";
 import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import { sweepUploads } from "./knowledge/uploads.ts";
 import { retryDisconnects } from "./members.ts";
+import { recordPlatformUpdate } from "./platform-updates.ts";
 import { refreshSignalsIfDue } from "./signals.ts";
 
 /** The cron trigger that runs every 15 minutes (wrangler.jsonc). */
@@ -40,8 +41,9 @@ export default {
   // connected (see src/members.ts), Apps copied from a blueprint left
   // pending (see src/app-blueprints.ts), the release's Grasp skills while
   // `builtins` is off (see src/knowledge/grasp-skills.ts; once it's on, the
-  // first request installs them, src/builtins.ts), and uploads left behind
-  // (see src/knowledge/uploads.ts).
+  // first request installs them, src/builtins.ts), uploads left behind
+  // (see src/knowledge/uploads.ts), and a new version of core, audited as
+  // a platform update (see src/platform-updates.ts).
   //
   // Every 15 minutes, on a trigger of its own so neither shares an
   // invocation with the jobs above: the day's improvement signals, until
@@ -66,6 +68,7 @@ export default {
             // Remove with the `builtins` flag, in a later release.
             ...(featureEnabled(env, "builtins") ? [] : [syncGraspSkills(env)]),
             sweepUploads(env),
+            recordPlatformUpdate(env),
           ];
     const results = await Promise.allSettled(jobs);
     for (const result of results) {

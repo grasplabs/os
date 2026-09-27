@@ -25,6 +25,7 @@
     "./memory": "./src/memory.ts",
     "./models": "./src/models.ts",
     "./permissions": "./src/permissions.ts",
+    "./platform-change": "./src/platform-change.ts",
     "./roles": "./src/roles.ts",
     "./router": "./src/router.ts",
     "./rpc": "./src/rpc.ts",
