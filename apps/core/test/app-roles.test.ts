@@ -1,8 +1,9 @@
+import type { PermissionRequest } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
-import { outlook, release } from "./apps.ts";
+import { outlook, release, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { newTeam } from "./knowledge.ts";
 import {
@@ -37,10 +38,19 @@ const files = {
   "screens/desk.tsx": "export default () => <p>Desk</p>;\n",
 };
 
-/** A released App of `owner`'s. */
+/** The run each App `newApp` makes has: one that has ended. */
+const runOf = (app: string): string => `run-${app}`;
+
+/** A released App of `owner`'s, its server built, with an ended run. */
 const newApp = async (owner: Person): Promise<string> => {
   const { id } = await owner.api.apps.create({ name: `Desk ${unique()}` });
-  await release(owner, id, files);
+  const version = await release(owner, id, files);
+  await serverBuilt(id, version);
+  await env.DB.prepare(
+    "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at) VALUES (?, ?, 'report', ?, ?, 'completed', ?, ?)"
+  )
+    .bind(runOf(id), id, version, owner.userId, Date.now(), Date.now())
+    .run();
   return id;
 };
 
@@ -57,16 +67,24 @@ const callsOn = async ({ api }: Person, app: string) => ({
       { kind: "error", message: "Oops" }
     )
   ),
+  open: await outcome(api.screens.open(app, "desk")),
+  call: await outcome(api.screens.call(app, "missing", [])),
   runs: await outcome(api.workflows.list(app)),
+  status: await outcome(api.workflows.status(runOf(app))),
+  start: await outcome(api.workflows.start(app, "report")),
   members: await outcome(api.apps.members.list(app)),
   // Its code and settings.
   read: await outcome(api.apps.files.read(app)),
   write: await outcome(api.apps.files.write(app, { "notes.md": "# Mine\n" })),
   commit: await outcome(api.apps.files.commit(app, "Mine")),
   versions: await outcome(api.apps.versions.list(app)),
+  version: await outcome(api.apps.versions.get(app, 1)),
+  diff: await outcome(api.apps.versions.diff(app, 1, 1)),
+  propose: await outcome(api.apps.versions.propose(app, 1)),
   setCurrent: await outcome(api.apps.versions.setCurrent(app, 1)),
   errors: await outcome(api.screens.errors(app)),
   params: await outcome(api.workflows.params.list(app, "report")),
+  cancel: await outcome(api.workflows.cancel(runOf(app))),
   permission: await outcome(
     api.permissions.request({
       ...outlook(app),
@@ -83,15 +101,25 @@ const asUser = {
   contents: "ok",
   screen: "ok",
   report: "ok",
+  open: "ok",
+  // Past the role check: the App's server fails on a method it lacks.
+  call: "app.failed",
   runs: "ok",
+  status: "ok",
+  // Past the role check: the App has no such workflow.
+  start: "workflow.not_found",
   members: "ok",
   read: "role.forbidden",
   write: "role.forbidden",
   commit: "role.forbidden",
   versions: "role.forbidden",
+  version: "role.forbidden",
+  diff: "role.forbidden",
+  propose: "role.forbidden",
   setCurrent: "role.forbidden",
   errors: "role.forbidden",
   params: "role.forbidden",
+  cancel: "role.forbidden",
   permission: "role.forbidden",
   share: "role.forbidden",
 };
@@ -162,8 +190,12 @@ describe("App roles", () => {
       write: "ok",
       commit: "ok",
       versions: "ok",
+      version: "ok",
+      diff: "ok",
+      propose: "ok",
       setCurrent: "ok",
       errors: "ok",
+      cancel: "ok",
       // Refused for the workflow it doesn't have, past the role check.
       params: "workflow.not_found",
       permission: "ok",
@@ -237,6 +269,59 @@ describe("App roles", () => {
         outcome(ben.api.apps.files.read(app)),
       ])
     ).resolves.toStrictEqual(["role.forbidden", "ok", "ok"]);
+  });
+
+  it("keep an App's permissions, and its workflows, to those with a role in it", async () => {
+    const [owner, other, admin] = await Promise.all([
+      personApi("builder"),
+      personApi("builder"),
+      personApi("admin"),
+    ]);
+    const app = await newApp(owner);
+    const { id: permission } = await owner.api.permissions.request(
+      outlook(app)
+    );
+    const { id: theirs } = await other.api.apps.create({ name: "Theirs" });
+    const startsReport: PermissionRequest = {
+      subject: { type: "app", appId: theirs },
+      object: { type: "workflow", appId: app, workflowId: "report" },
+      actions: ["start"],
+      binding: "REPORT",
+    };
+    const listed = async (person: Person, subject?: string) => {
+      const found = await person.api.permissions.list(
+        subject === undefined ? undefined : { type: "app", appId: subject }
+      );
+      return found.some(({ id }) => id === permission);
+    };
+
+    const before = {
+      all: await listed(other),
+      ofApp: await listed(other, app),
+      admin: await listed(admin),
+      // As for an App that isn't there.
+      workflow: await outcome(other.api.permissions.request(startsReport)),
+    };
+    await owner.api.apps.members.add(app, {
+      type: "person",
+      id: other.userId,
+      role: "user",
+    });
+    expect({
+      before,
+      after: {
+        all: await listed(other),
+        workflow: await outcome(other.api.permissions.request(startsReport)),
+      },
+    }).toStrictEqual({
+      before: {
+        all: false,
+        ofApp: false,
+        admin: true,
+        workflow: "app.not_found",
+      },
+      after: { all: true, workflow: "ok" },
+    });
   });
 
   it("never let someone build whose role in the organization doesn't", async () => {

@@ -6,7 +6,8 @@ import type {
 } from "@grasp-os/shared/permissions";
 import { RpcTarget } from "capnweb";
 
-import { appFor } from "./apps.ts";
+import { appFor, appsListedFor } from "./apps.ts";
+import { featureEnabled } from "./features.ts";
 import {
   grantPermission,
   listPermissions,
@@ -39,7 +40,12 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
           this.#env,
           person,
           request,
-          async (app) => await appFor(this.#env, person, app, "builder")
+          async (app, role) => {
+            // While sharing is off, requestPermission's own checks, as before.
+            if (featureEnabled(this.#env, "app_sharing")) {
+              await appFor(this.#env, person, app, role);
+            }
+          }
         )
     );
   }
@@ -61,7 +67,13 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
   async list(subject?: PermissionSubjectInput): Promise<Permission[]> {
     return await withPerson(
       this.#check,
-      async (person) => await listPermissions(this.#env, person, subject)
+      async (person) =>
+        await listPermissions(
+          this.#env,
+          person,
+          subject,
+          appsListedFor(this.#env, person)
+        )
     );
   }
 }

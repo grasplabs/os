@@ -30,6 +30,9 @@ import { inList } from "./db/d1.ts";
 // admins do, but never share one (app-members.ts): whom a client's data
 // reaches is the client's decision.
 
+/** Who asks, as far as their role in an App goes. */
+export type Person = Pick<Identity, "userId" | "role" | "teams">;
+
 /** The member rows that are `by`'s: their own, or one of their teams'. */
 const rowsOf = (by: Pick<Identity, "userId" | "teams">): SQL =>
   or(
@@ -49,13 +52,13 @@ const rowsOf = (by: Pick<Identity, "userId" | "teams">): SQL =>
   ) ?? sql`0`;
 
 /** The highest role `by`'s organization role lets them have in an App. */
-const ceilingOf = (by: Identity): AppRole =>
+const ceilingOf = (by: Person): AppRole =>
   canBuild(by.role) ? "builder" : "user";
 
 /** `by`'s role in `app`, or undefined when they have none. */
 export const appRole = async (
   env: Env,
-  by: Identity,
+  by: Person,
   app: App
 ): Promise<AppRole | undefined> => {
   if (isAdmin(by.role)) {
@@ -81,7 +84,7 @@ export const appRole = async (
  */
 export const requireAppRole = async (
   env: Env,
-  by: Identity,
+  by: Person,
   app: App,
   needed: AppRole
 ): Promise<AppRole> => {
@@ -99,7 +102,7 @@ export const requireAppRole = async (
  * The Apps `by` has a role in, as a condition on `apps`: every App for an
  * admin (undefined), otherwise their own and those shared with them.
  */
-export const appsOpenTo = (env: Env, by: Identity): SQL | undefined => {
+export const appsOpenTo = (env: Env, by: Person): SQL | undefined => {
   if (isAdmin(by.role)) {
     return undefined;
   }

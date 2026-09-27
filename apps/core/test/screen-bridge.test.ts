@@ -356,6 +356,35 @@ describe("screens", { timeout: 60_000 }, () => {
     expect(watching.received[0]).toStrictEqual([]);
   });
 
+  it("stops sending to someone the App is no longer shared with", async () => {
+    const owner = await personApi("builder");
+    const member = await personApi("builder");
+    const app = await sampleApp(owner);
+    const them = { type: "person", id: member.userId } as const;
+    await owner.api.apps.members.add(app, { ...them, role: "user" });
+    const watching = collector();
+    await member.api.screens.call(app, "watchNotes", [watching.callback]);
+    await waitFor(() => watching.received[0]);
+
+    await owner.api.apps.members.remove(app, them);
+    // Unsharing restarted the App, which let go of their subscription.
+    const left = await vi.waitFor(async () => {
+      const count = await owner.api.screens.call(app, "watching", []);
+      if (count !== 0) {
+        throw new Error("Still watching");
+      }
+      return count;
+    }, 10_000);
+    await owner.api.screens.call(app, "addNote", ["After unsharing"]);
+    expect({
+      left,
+      received: watching.received,
+      again: await outcome(
+        member.api.screens.call(app, "watchNotes", [watching.callback])
+      ),
+    }).toStrictEqual({ left: 0, received: [[]], again: "app.not_found" });
+  });
+
   it("stops sending to a screen whose connection ended", async () => {
     const one = await personApi("builder");
     const two = await personApi("builder");

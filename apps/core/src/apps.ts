@@ -24,10 +24,12 @@ import { canonicalJson } from "@grasp-os/shared/json";
 import { requireBuilder } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, desc, eq, lt, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { appsOpenTo, requireAppRole } from "./app-access.ts";
+import type { Person } from "./app-access.ts";
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
@@ -141,7 +143,7 @@ export const findApp = async (env: Env, input: unknown): Promise<App> => {
  */
 export const appFor = async (
   env: Env,
-  by: Identity,
+  by: Person,
   input: unknown,
   needed: AppRole
 ): Promise<App> => {
@@ -368,16 +370,25 @@ export const createApp = async (
   return app;
 };
 
+/**
+ * The Apps `by` has a role in (app-access.ts), as a condition on `apps`.
+ * As with `appFor`, while `app_sharing` is off: every App for admins and
+ * builders, and none for users.
+ */
+export const appsListedFor = (env: Env, by: Identity): SQL | undefined => {
+  if (!featureEnabled(env, "app_sharing")) {
+    requireBuilder(by);
+    return undefined;
+  }
+  return appsOpenTo(env, by);
+};
+
 /** The Apps `by` has a role in (app-access.ts), oldest first. */
 export const listApps = async (env: Env, by: Identity): Promise<App[]> => {
-  const sharing = featureEnabled(env, "app_sharing");
-  if (!sharing) {
-    requireBuilder(by);
-  }
   const rows = await drizzle(env.DB)
     .select()
     .from(apps)
-    .where(sharing ? appsOpenTo(env, by) : undefined)
+    .where(appsListedFor(env, by))
     .orderBy(asc(apps.createdAt), asc(apps.id));
   return rows.map(toApp);
 };

@@ -1,3 +1,4 @@
+import type { AppRole } from "@grasp-os/shared/apps";
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
@@ -21,7 +22,7 @@ import {
   roleErrors,
 } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, eq, inArray, isNull, or, sql } from "drizzle-orm";
+import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
@@ -332,15 +333,17 @@ const requireCollection = async (
 
 /**
  * Asks for a permission for an App or agent. It allows nothing until an
- * admin grants it. For an App, only its builders ask: `requireAppBuilder` refuses
- * anyone else (`appFor` in apps.ts, passed in because apps.ts depends on
- * this module, through workflow code and its bindings).
+ * admin grants it. For an App, only its builders ask, and a workflow of
+ * another App only someone with a role in that App: `requireAppRole`
+ * refuses anyone else, before anything says whether the App exists
+ * (`appFor` in apps.ts, passed in because apps.ts depends on this module,
+ * through workflow code and its bindings).
  */
 export const requestPermission = async (
   env: Env,
   by: Identity,
   input: unknown,
-  requireAppBuilder: (app: AppId) => Promise<unknown>
+  requireAppRole: (app: AppId, role: AppRole) => Promise<unknown>
 ): Promise<Permission> => {
   requireBuilder(by);
   if (by.staff) {
@@ -352,10 +355,17 @@ export const requestPermission = async (
     permissionRequestSchema,
     input
   );
-  await requireApps(env, subject, object);
   if (subject.type === "app") {
-    await requireAppBuilder(subject.appId);
+    await requireAppRole(subject.appId, "builder");
   }
+  const ownWorkflow =
+    subject.type === "app" &&
+    object.type === "workflow" &&
+    object.appId === subject.appId;
+  if (object.type === "workflow" && !ownWorkflow) {
+    await requireAppRole(object.appId, "user");
+  }
+  await requireApps(env, subject, object);
   await requireCollection(env, object);
   const row: Row = {
     id: crypto.randomUUID(),
@@ -476,27 +486,43 @@ export const revokePermission = async (
   return permission;
 };
 
-/** Every permission, or those of one App or agent, oldest first. */
+/**
+ * Every permission, or those of one App or agent, oldest first. With
+ * `openApps` (a condition on `apps`: the Apps the person has a role in, as
+ * `appsListedFor` in apps.ts says), an App's only if it is one of them.
+ */
 export const listPermissions = async (
   env: Env,
   by: Identity,
-  subject?: unknown
+  subject?: unknown,
+  openApps?: SQL
 ): Promise<Permission[]> => {
   requireBuilder(by);
-  let filter: SQL | undefined;
-  if (subject !== undefined) {
-    filter = ofSubject(
-      permissionErrors.parse(
-        "permission.invalid",
-        permissionSubjectSchema,
-        subject
-      )
-    );
-  }
-  const rows = await drizzle(env.DB)
+  const db = drizzle(env.DB);
+  const ofOpenApp =
+    openApps === undefined
+      ? undefined
+      : or(
+          ne(permissions.subjectType, "app"),
+          inArray(
+            permissions.subjectId,
+            db.select({ id: apps.id }).from(apps).where(openApps)
+          )
+        );
+  const ofOne =
+    subject === undefined
+      ? undefined
+      : ofSubject(
+          permissionErrors.parse(
+            "permission.invalid",
+            permissionSubjectSchema,
+            subject
+          )
+        );
+  const rows = await db
     .select()
     .from(permissions)
-    .where(filter)
+    .where(and(ofOne, ofOpenApp))
     .orderBy(asc(permissions.requestedAt), asc(permissions.id));
   return rows.map(toPermission);
 };

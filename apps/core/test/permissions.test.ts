@@ -556,7 +556,8 @@ describe("permissions", () => {
         async (request) => await outcome(admin.api.permissions.request(request))
       )
     );
-    expect(refused).toStrictEqual(["permission.invalid", "permission.invalid"]);
+    // While sharing Apps is on, as for any App the person has no role in.
+    expect(refused).toStrictEqual(["app.not_found", "app.not_found"]);
     await expect(
       outcome(admin.api.permissions.request(workflowOf(app.appId)))
     ).resolves.toBe("ok");
