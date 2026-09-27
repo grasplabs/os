@@ -7,15 +7,15 @@ import type { Json } from "@grasp-os/shared/json";
 // is the only module that touches the engine (`WORKFLOWS`, Cloudflare
 // Workflows), so another profile swaps it here and nowhere else.
 //
-// On-prem (plain workerd, scripts/workerd-smoke.ts): workerd has no
-// Workflows engine. Wrangler's local dev and the tests get one from
-// Miniflare, which emulates it with a Worker of its own; workerd's config
-// has no binding for it. And workerd has the Worker Loader (`LOADER`),
-// which workflow code runs in, only behind `--experimental`, which
-// on-prem doesn't turn on: so Code Mode, which needs the loader, stays off
-// there. On-prem has no `WORKFLOWS` and no `LOADER`, and the `workflows`
-// feature stays switched off: with the flag off no run starts (runs.ts),
-// and nothing here is reached.
+// On-prem (plain workerd, scripts/workerd-smoke.ts) has no `WORKFLOWS`:
+// workerd has no Workflows engine (Wrangler's local dev and the tests get
+// one from Miniflare, which emulates it with a Worker of its own). Nor does
+// it have `LOADER` unless workerd runs with `--experimental`: workerd
+// refuses a Worker Loader binding without it. The loader runs App methods
+// (app.ts), the screen compiler (screens.ts) and workflow code (code.ts).
+// So on-prem, `apps` and `screens` stay switched off unless workerd runs
+// with `--experimental`, and `workflows` stays off either way. With
+// `workflows` off no run starts (runs.ts), and nothing here is reached.
 
 export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 
@@ -36,7 +36,10 @@ export interface RunEngine {
   }) => Promise<void>;
   /** Where the engine has the run; nothing when it has no such run. */
   status: (id: string) => Promise<InstanceStatus | undefined>;
-  /** Terminates the run; one that has ended already stays as it is. */
+  /**
+   * Terminates the run; one that has ended already, or that the engine has
+   * no instance of, stays as it is.
+   */
   terminate: (id: string) => Promise<void>;
   /** Sends the run an event, for a wait on it to see. */
   sendEvent: (
@@ -48,12 +51,25 @@ export interface RunEngine {
 /** How Workflows says it has no instance of that ID. */
 const instanceNotFound = /\binstance\.not_found\b/u;
 
+const isNotFound = (error: unknown): boolean =>
+  error instanceof Error && instanceNotFound.test(error.message);
+
 /** Where Cloudflare Workflows has a run that has ended. */
 const endedStatuses = new Set<InstanceStatus["status"]>([
   "terminated",
   "complete",
   "errored",
 ]);
+
+/** Whether the instance has ended; not when its status can't be read. */
+const hasEnded = async (instance: WorkflowInstance): Promise<boolean> => {
+  try {
+    const { status } = await instance.status();
+    return endedStatuses.has(status);
+  } catch {
+    return false;
+  }
+};
 
 /** Cloudflare Workflows, through the deployment's one dispatcher. */
 export const runEngine = (env: Env): RunEngine => ({
@@ -71,19 +87,29 @@ export const runEngine = (env: Env): RunEngine => ({
       const instance = await env.WORKFLOWS.get(id);
       return await instance.status();
     } catch (error) {
-      if (!(error instanceof Error && instanceNotFound.test(error.message))) {
+      if (!isNotFound(error)) {
         throw error;
       }
       return undefined;
     }
   },
   terminate: async (id) => {
-    const instance = await env.WORKFLOWS.get(id);
+    let instance: WorkflowInstance;
+    try {
+      instance = await env.WORKFLOWS.get(id);
+    } catch (error) {
+      // No instance, nothing to terminate: a run whose start failed, as a
+      // cancel racing it finds it.
+      if (isNotFound(error)) {
+        return;
+      }
+      throw error;
+    }
     try {
       await instance.terminate();
     } catch (error) {
-      const { status } = await instance.status();
-      if (!endedStatuses.has(status)) {
+      // The terminate's own error, unless the run has ended anyway.
+      if (!(await hasEnded(instance))) {
         throw error;
       }
     }

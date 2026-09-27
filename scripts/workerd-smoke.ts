@@ -65,8 +65,9 @@ const core :Workerd.Worker = (
   bindings = [
     (name = "ROUTER_SECRET", text = "${ROUTER_SECRET}"),
     (name = "DURABLE_OBJECT_JURISDICTION", text = "none"),
-    # No LOADER and no WORKFLOWS: Code Mode and workflows stay off on-prem
-    # (apps/core/src/workflows/engine.ts).
+    # No LOADER (experimental in workerd) and no WORKFLOWS (no engine):
+    # apps and screens stay off on-prem unless workerd runs with
+    # --experimental, and workflows stay off (apps/core/src/workflows/engine.ts).
   ],
   durableObjectNamespaces = [
     (className = "Workspace", uniqueKey = "workspace", enableSql = true),
