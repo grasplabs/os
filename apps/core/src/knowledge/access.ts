@@ -32,7 +32,9 @@ import type { WorkContext } from "../restricted.ts";
 // they own. An App or agent reads the collections it has a permission to
 // read, never a personal one, and of those only the ones the person it
 // acts for may read too
-// (R5): a grant never reaches past that person. What anyone reads is
+// (R5): a grant never reaches past that person. The one exception is an
+// agent's memory (`readableForPerson`), which reads what the person may
+// read, without a grant, and only their memory files. What anyone reads is
 // marked with where it came from and recorded in the audit log, and
 // restricted data puts the chat or App an App or agent works in in
 // restricted mode (`noteProvenance`).
@@ -144,6 +146,22 @@ export const allowedCollections = async (
       })
     ) ?? sql`0`
   );
+};
+
+/**
+ * The collections the person `userId` may read themselves, their teams
+ * read now, as a condition on `collections`. Only for memory (memory.ts):
+ * an agent's memory is the person's own files and the company's, which it
+ * gets without a permission, in the contexts that are that person's own.
+ * Every other read by an App or agent goes through `allowedCollections`.
+ */
+export const readableForPerson = async (
+  env: Env,
+  db: DrizzleD1Database,
+  userId: string
+): Promise<SQL> => {
+  const teams = await teamsOf(env.DB, userId);
+  return readableBy(db, { userId, teamIds: teams.map(({ id }) => id) });
 };
 
 /** Who read, as the audit log names them. */

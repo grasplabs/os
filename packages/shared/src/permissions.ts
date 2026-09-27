@@ -147,6 +147,7 @@ const platformBindingNames: ReadonlySet<string> = new Set([
   "GOOGLE_CLIENT_SECRET",
   "KNOWLEDGE",
   "LOADER",
+  "MEMORY_LIMITS",
   "MICROSOFT_CLIENT_ID",
   "MICROSOFT_CLIENT_SECRET",
   "MODEL_GATEWAY",

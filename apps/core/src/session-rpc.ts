@@ -7,6 +7,7 @@ import { ConnectionsRpc } from "./connections.ts";
 import { DecisionsRpc } from "./decisions/rpc.ts";
 import { requireFeature } from "./features.ts";
 import type { Feature } from "./features.ts";
+import { MemoryRpc } from "./knowledge/memory-rpc.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
 import { MembersRpc } from "./members.ts";
 import { PendingActionsRpc } from "./pending-actions.ts";
@@ -31,6 +32,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #check: SessionCheck;
   readonly #apps: AppsRpc;
   readonly #knowledge: KnowledgeRpc;
+  readonly #memory: MemoryRpc;
   readonly #permissions: PermissionsRpc;
   readonly #connections: ConnectionsRpc;
   readonly #workflows: WorkflowsRpc;
@@ -57,6 +59,8 @@ export class SessionRpc extends RpcTarget implements SessionApi {
       };
     this.#apps = new AppsRpc(env, checkWith("apps"));
     this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
+    // Memory files are Knowledge documents: that kill switch stops them too.
+    this.#memory = new MemoryRpc(env, checkWith("knowledge", "memory"));
     this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
     this.#connections = new ConnectionsRpc(env, checkWith("connections"));
     this.#workflows = new WorkflowsRpc(env, checkWith("workflows"));
@@ -84,6 +88,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get knowledge(): KnowledgeRpc {
     return this.#knowledge;
+  }
+
+  get memory(): MemoryRpc {
+    return this.#memory;
   }
 
   get permissions(): PermissionsRpc {

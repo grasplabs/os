@@ -553,6 +553,8 @@ export const knowledgeErrors = defineErrorFamily({
     "This collection is managed by Grasp or an App and can't be changed here.",
   "knowledge.invalid": "That isn't a valid collection or document.",
   "knowledge.too_large": "This document is too large to save.",
+  "knowledge.memory_too_large":
+    "This memory file is over its size limit. Shorten it: agents have it in their context all the time.",
   "knowledge.too_many_sections":
     "This document has too many headings to save. Split it into several documents.",
   "knowledge.too_many_links":
