@@ -7,7 +7,9 @@
  * The output directory is laid out as the release is stored in R2
  * (upload-release.ts): `blobs/modules/<sha256>`, `blobs/migrations/<sha256>`,
  * `blobs/assets/<asset hash>`, then `manifest.json`, written last and
- * checked against every blob before the build succeeds.
+ * checked against every blob before the build succeeds. It also holds a
+ * `.grasp-release` marker: an existing `--out` is replaced only when it's
+ * empty or holds one.
  *
  * Usage: vp run release:build --out <dir> [--release-id <id>]
  */
@@ -22,6 +24,7 @@ import { z } from "zod";
 import { parseJsonc } from "../wrangler-config-rules.ts";
 import { collectAssets, collectModules, collectSqlFiles } from "./hash-lib.ts";
 import {
+  clearReleaseDir,
   generateManifest,
   parseWranglerConfig,
   verifyRelease,
@@ -132,6 +135,8 @@ if (wranglerVersion === undefined) {
   throw new Error("wrangler has no version");
 }
 console.info(`Building release ${releaseId} from ${commit}`);
+// Refuses a mistyped --out before minutes of building, not after.
+clearReleaseDir(out);
 
 // Before core's build, which adds the compiled screen runtime to its output.
 runVisibly("vp", ["run", "--filter", `@grasp-os/${FRONTEND}`, "build"]);
@@ -158,7 +163,6 @@ const manifest = generateManifest(
   },
   workers
 );
-rmSync(out, { force: true, recursive: true });
 writeRelease(out, manifest, workers);
 verifyRelease(out);
 

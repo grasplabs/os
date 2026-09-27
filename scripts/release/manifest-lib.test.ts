@@ -6,6 +6,7 @@
  * how the change reaches client accounts.
  */
 import {
+  existsSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -170,6 +171,12 @@ describe("the release manifest", () => {
     expect(() =>
       generateManifest(info, [connect, { ...core, d1Migrations: {} }])
     ).toThrow(/no migrations collected for DB/u);
+    expect(() =>
+      generateManifest(info, [
+        connect,
+        { ...core, d1Migrations: { DB: [], KNOWLEDGE: [] } },
+      ])
+    ).toThrow(/no migrations collected for DB/u);
     const { assets: _assets, ...coreWithoutAssets } = core;
     expect(() => generateManifest(info, [connect, coreWithoutAssets])).toThrow(
       /assets/u
@@ -197,6 +204,36 @@ describe("a written release", () => {
 
   it("verifies against its manifest", () => {
     expect(verifyRelease(out)).toStrictEqual(manifest);
+  });
+
+  it("replaces an earlier release in the same directory", () => {
+    const stale = path.join(out, moduleKey("0".repeat(64)));
+    writeFileSync(stale, "from an earlier release");
+    writeRelease(out, manifest, builds());
+    expect(existsSync(stale)).toBeFalsy();
+    expect(verifyRelease(out)).toStrictEqual(manifest);
+  });
+
+  it("creates the directory when it's absent", () => {
+    const nested = path.join(out, "nested", "release");
+    writeRelease(nested, manifest, builds());
+    expect(verifyRelease(nested)).toStrictEqual(manifest);
+  });
+
+  it("refuses to replace a directory that isn't a release", () => {
+    const other = mkdtempSync(path.join(tmpdir(), "grasp-os-not-a-release-"));
+    try {
+      writeFileSync(path.join(other, "keep.txt"), "someone's work");
+      expect(() => {
+        writeRelease(other, manifest, builds());
+      }).toThrow(/refusing to delete it/u);
+      expect(readFileSync(path.join(other, "keep.txt"), "utf-8")).toBe(
+        "someone's work"
+      );
+      expect(existsSync(path.join(other, "manifest.json"))).toBeFalsy();
+    } finally {
+      rmSync(other, { force: true, recursive: true });
+    }
   });
 
   it("fails verification when a module changed", () => {

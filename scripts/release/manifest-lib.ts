@@ -14,7 +14,14 @@
  * know, so this file and the console change together, behind
  * MANIFEST_VERSION.
  */
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import path from "node:path";
 
 import { z } from "zod";
@@ -339,7 +346,9 @@ const workerEntry = (
     bindings: bindingsOf(config, releaseNames),
     d1Databases: config.d1_databases.map((database) => {
       const migrations = d1Migrations[database.binding];
-      if (migrations === undefined) {
+      // Every database starts from a first migration: none collected means
+      // the wrong directory, which would ship a release with no schema.
+      if (migrations === undefined || migrations.length === 0) {
         throw new Error(
           `${config.name}: no migrations collected for ${database.binding}`
         );
@@ -417,15 +426,40 @@ const writeBlob = (outDir: string, key: string, bytes: Buffer): void => {
   writeFileSync(file, bytes);
 };
 
+/** The file that marks a directory as a release this build wrote. */
+export const RELEASE_MARKER = ".grasp-release";
+
+/**
+ * Empties `outDir` for a new release, creating it if it's absent. It deletes
+ * only a directory that is empty or holds {@link RELEASE_MARKER}, so a
+ * mistyped `--out` (the repo, a home directory) is refused, not wiped.
+ */
+export const clearReleaseDir = (outDir: string): void => {
+  if (existsSync(outDir) && readdirSync(outDir).length > 0) {
+    if (!existsSync(path.join(outDir, RELEASE_MARKER))) {
+      throw new Error(
+        `${outDir} isn't empty and isn't a release directory (no ${RELEASE_MARKER}); refusing to delete it`
+      );
+    }
+    rmSync(outDir, { force: true, recursive: true });
+  }
+  mkdirSync(outDir, { recursive: true });
+  // First, so a build that stops halfway leaves a directory the next build
+  // may replace.
+  writeFileSync(path.join(outDir, RELEASE_MARKER), "");
+};
+
 /**
  * Writes a release directory laid out as it's stored in R2: every blob at
- * its key, then `manifest.json`, last.
+ * its key, then `manifest.json`, last. Replaces an earlier release in
+ * `outDir`, and refuses any other non-empty directory.
  */
 export const writeRelease = (
   outDir: string,
   manifest: ReleaseManifest,
   workers: WorkerBuild[]
 ): void => {
+  clearReleaseDir(outDir);
   for (const worker of workers) {
     for (const module of worker.modules) {
       writeBlob(outDir, moduleKey(module.sha256), module.bytes);
