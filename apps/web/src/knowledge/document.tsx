@@ -98,17 +98,20 @@ const Editor = ({
   const { busy, failure, run } = useCoreAction();
   const [text, setText] = useState(doc.version.text);
   const [message, setMessage] = useState("");
-  // The version this text is edited from: a conflict moves it on to the
-  // newer one, which the person has now seen.
+  // The version this text is edited from.
   const [base, setBase] = useState(doc.currentVersion);
+  // A version saved since `base`, shown after a conflict. While it is, a
+  // save would replace it: only the explicit "Replace" does, or the person
+  // starts again from it.
   const [newer, setNewer] = useState<DocumentRead>();
-  const save = async (): Promise<void> => {
+  /** Saves the text as the version after `from`. */
+  const save = async (from: number): Promise<void> => {
     const outcome = await run(async (session) => {
       const result = await saveOrNewer(session, doc.id, {
         collectionId: doc.collectionId,
         path: doc.path,
         text,
-        ifVersion: base,
+        ifVersion: from,
         ...(message.trim() === "" ? {} : { message }),
       });
       if ("saved" in result) {
@@ -122,7 +125,6 @@ const Editor = ({
     }
     if ("newer" in outcome) {
       setNewer(outcome.newer);
-      setBase(outcome.newer.currentVersion);
       return;
     }
     onClose();
@@ -132,7 +134,10 @@ const Editor = ({
       className="flex flex-col gap-3"
       onSubmit={(event) => {
         event.preventDefault();
-        void save();
+        // With a newer version shown, only the explicit button replaces it.
+        if (newer === undefined) {
+          void save(base);
+        }
       }}
     >
       {newer === undefined ? null : (
@@ -145,13 +150,15 @@ const Editor = ({
             id="newer-version"
             role="alert"
           >
-            {`This document changed since you opened it. Version ${newer.currentVersion} is below; your text is kept. Apply your change to it, then save again.`}
+            {`This document changed since you opened it. Version ${newer.currentVersion} is below; your text is kept. Start again from it, or replace it with your text.`}
           </p>
           <DocumentMarkdown resolve={resolve} text={newer.version.text} />
           <Button
             className="self-start"
             onClick={() => {
               setText(newer.version.text);
+              setBase(newer.currentVersion);
+              setNewer(undefined);
             }}
             type="button"
             variant="outline"
@@ -178,9 +185,22 @@ const Editor = ({
         value={message}
       />
       <div className="flex gap-2">
-        <Button disabled={busy} type="submit">
-          Save
-        </Button>
+        {newer === undefined ? (
+          <Button disabled={busy} type="submit">
+            Save
+          </Button>
+        ) : (
+          <Button
+            disabled={busy}
+            onClick={() => {
+              void save(newer.currentVersion);
+            }}
+            type="button"
+            variant="destructive"
+          >
+            {`Replace version ${newer.currentVersion} with mine`}
+          </Button>
+        )}
         <Button
           disabled={busy}
           onClick={onClose}

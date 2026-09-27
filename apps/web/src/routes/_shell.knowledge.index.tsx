@@ -59,6 +59,20 @@ const loadMemory = async (session: Session): Promise<MemoryFiles> => {
   return { memory, personal, files };
 };
 
+/**
+ * The memory files, then the collections: asking for memory creates the
+ * Personal collection on a first visit (and an admin's Memory
+ * collection), which the list then has. Each says on its own why it
+ * failed; the list is read whatever memory's outcome.
+ */
+const memoryThenCollections = async () => {
+  const memory = await loadFromCore(loadMemory);
+  const collections = await loadFromCore(
+    async (session) => await session.knowledge.listCollections()
+  );
+  return { memory, collections };
+};
+
 const DocumentLink = ({
   collectionId,
   documentId,
@@ -267,13 +281,10 @@ export const Route = createFileRoute("/_shell/knowledge/")({
       ? { q: search.q.slice(0, searchQueryMaxLength) }
       : {},
   loaderDeps: ({ search: { q } }) => ({ q }),
-  // Each part is read on its own, and says on its own why it failed.
+  // Each part says on its own why it failed; search runs beside the rest.
   loader: async ({ deps: { q } }) => {
-    const [collections, memory, results] = await Promise.all([
-      loadFromCore(
-        async (session) => await session.knowledge.listCollections()
-      ),
-      loadFromCore(loadMemory),
+    const [{ collections, memory }, results] = await Promise.all([
+      memoryThenCollections(),
       q === undefined
         ? undefined
         : loadFromCore(async (session) => await session.knowledge.search(q)),

@@ -25,6 +25,11 @@ test("a person searches, edits a document, meets a newer version instead of over
   const { one, two } = peopleIn("knowledge");
   const word = `zebrafish${crypto.randomUUID().replaceAll("-", "")}`;
   const original = [
+    // Frontmatter as core reads it: after a byte order mark, with spaces
+    // after the opening fence.
+    "\uFEFF---  ",
+    "description: Who gets how much leave",
+    "---",
     "# Leave",
     "",
     "## Parental leave",
@@ -80,6 +85,10 @@ test("a person searches, edits a document, meets a newer version instead of over
       .filter({ has: page.getByRole("link", { name: collectionName }) });
     await expect(listed.getByText("Only the owner")).toBeVisible();
     await expect(collections.getByText(hiddenName)).toHaveCount(0);
+    // A first visit creates the person's Personal collection, listed at once.
+    await expect(
+      collections.getByRole("link", { name: "Personal", exact: true })
+    ).toBeVisible();
     await expect(
       page.getByRole("region", { name: "Memory" }).getByRole("alert")
     ).toHaveCount(0);
@@ -112,6 +121,11 @@ test("a person searches, edits a document, meets a newer version instead of over
       await expect(link).toHaveAttribute("target", "_blank");
     }
     await expect(article.locator("img")).toHaveCount(0);
+    // The frontmatter is a detail, not text.
+    await expect(article.getByText("description:")).toHaveCount(0);
+    await expect(
+      page.getByRole("definition").getByText("Who gets how much leave")
+    ).toBeVisible();
 
     // A `[[link]]` opens the document it names here, and each lists the
     // other as using it.
@@ -143,7 +157,7 @@ test("a person searches, edits a document, meets a newer version instead of over
     await expect(versionRow(page, 2)).toContainText("Longer leave");
 
     // A save from another tab while the editor is open: saving shows that
-    // version, keeps this text, and saving again builds on it.
+    // version and keeps this text, and only an explicit step replaces it.
     await page.getByRole("button", { name: "Edit" }).click();
     await mine.api.knowledge.saveDocument({
       collectionId,
@@ -162,7 +176,10 @@ test("a person searches, edits a document, meets a newer version instead of over
     await expect(page.getByRole("textbox", { name: "Text" })).toHaveValue(
       mineText
     );
-    await page.getByRole("button", { name: "Save" }).click();
+    await expect(page.getByRole("button", { name: "Save" })).toHaveCount(0);
+    await page
+      .getByRole("button", { name: "Replace version 3 with mine" })
+      .click();
     await expect(article.getByText(/twenty-six weeks/u)).toBeVisible();
     await expect(versionRow(page, 4)).toBeVisible();
     await expect(versionRow(page, 3)).toContainText("From another tab");

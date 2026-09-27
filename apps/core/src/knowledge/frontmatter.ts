@@ -3,6 +3,7 @@ import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import {
   documentPathSchema,
   documentTypeSchema,
+  splitFrontmatterBlock,
 } from "@grasp-os/shared/knowledge";
 import type { DocumentType } from "@grasp-os/shared/knowledge";
 import { isMap, isScalar, isSeq, parse, parseDocument } from "yaml";
@@ -234,29 +235,17 @@ export class FrontmatterError extends Error {
   }
 }
 
-const fence = /^---[ \t]*$/u;
-const lineBreak = /\r?\n/u;
-const byteOrderMark = "﻿";
-
 /** The YAML between the fences, and the Markdown after them. */
 const splitFrontmatter = (
   text: string
 ): { yaml: string | undefined; body: string } => {
-  const source = text.startsWith(byteOrderMark) ? text.slice(1) : text;
-  const lines = source.split(lineBreak);
-  if (!fence.test(lines[0] ?? "")) {
-    return { yaml: undefined, body: source };
-  }
-  const end = lines.findIndex((line, index) => index > 0 && fence.test(line));
-  if (end === -1) {
+  const split = splitFrontmatterBlock(text);
+  if (split === undefined) {
     throw new FrontmatterError([
       "frontmatter: it starts with --- but has no closing --- line",
     ]);
   }
-  return {
-    yaml: lines.slice(1, end).join("\n"),
-    body: lines.slice(end + 1).join("\n"),
-  };
+  return split;
 };
 
 const readYaml = (yaml: string): Record<string, unknown> => {

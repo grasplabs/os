@@ -1,3 +1,4 @@
+import { splitFrontmatterBlock } from "@grasp-os/shared/knowledge";
 import {
   Table,
   TableBody,
@@ -24,11 +25,13 @@ import type { ResolveLink } from "./wiki-links.ts";
 // who read the document, and when. A `[[link]]` to a document of the
 // collection opens it here (wiki-links.ts).
 
-/** YAML frontmatter at the start of a document: its fields, not its prose. */
-const frontmatter = /^---\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/u;
-
-/** A document's Markdown without its frontmatter. */
-export const bodyOf = (text: string): string => text.replace(frontmatter, "");
+/**
+ * A document's Markdown without its frontmatter, found as core finds it.
+ * Text that opens a block it never closes (core never saves one) shows
+ * whole.
+ */
+export const bodyOf = (text: string): string =>
+  splitFrontmatterBlock(text)?.body ?? text;
 
 /** A resolved `[[link]]`'s address (`documentHref`), or one written so. */
 const documentLink = /^\?doc=[^&#]+$/u;

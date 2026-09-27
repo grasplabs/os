@@ -174,6 +174,37 @@ export const documentPathSchema = z.string().superRefine((path, context) => {
   }
 });
 
+const frontmatterFence = /^---[ \t]*$/u;
+const lineBreak = /\r?\n/u;
+const byteOrderMark = "\uFEFF";
+
+/**
+ * A document's frontmatter, the YAML between `---` lines at its top (after
+ * a byte order mark, if it has one), and the Markdown after it: `yaml` is
+ * `undefined` when it has none, and the whole is `undefined` when it opens
+ * a block it never closes, which core refuses to save. Core reads
+ * frontmatter by it, and the web app leaves it out of the rendered text.
+ */
+export const splitFrontmatterBlock = (
+  text: string
+): { yaml: string | undefined; body: string } | undefined => {
+  const source = text.startsWith(byteOrderMark) ? text.slice(1) : text;
+  const lines = source.split(lineBreak);
+  if (!frontmatterFence.test(lines[0] ?? "")) {
+    return { yaml: undefined, body: source };
+  }
+  const end = lines.findIndex(
+    (line, index) => index > 0 && frontmatterFence.test(line)
+  );
+  if (end === -1) {
+    return undefined;
+  }
+  return {
+    yaml: lines.slice(1, end).join("\n"),
+    body: lines.slice(end + 1).join("\n"),
+  };
+};
+
 /** A version number: 1 for a document's first version. */
 const versionSchema = z.int().min(1);
 
