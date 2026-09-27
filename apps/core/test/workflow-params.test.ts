@@ -115,7 +115,15 @@ const runLimit = async (person: Person, app: string): Promise<unknown> => {
   return await limitOfRun(person, run.id);
 };
 
-describe("workflow parameters", () => {
+// Every test here releases an App with a workflow, and making a version
+// current compiles its workflows and runs their tests. Locally the
+// slowest takes two seconds, and one starts a run and waits up to 20
+// seconds for it to end (`finished`), so neither the builds on a loaded
+// runner nor that wait fit in the default five seconds. Sixty seconds is
+// room for a slow runner, not for a hang.
+const buildTime = { timeout: 60_000 };
+
+describe("workflow parameters", buildTime, () => {
   it("are listed as the code declares them, and set at once, sensitive or not, audited without their values", async () => {
     const builder = await personApi("builder");
     const app = await invoicesApp(builder);
@@ -221,7 +229,7 @@ describe("workflow parameters", () => {
   });
 });
 
-describe("declarations", () => {
+describe("declarations", buildTime, () => {
   it("count a stored value only where the reading version declares it of that kind", async () => {
     const builder = await personApi("builder");
     const app = await invoicesApp(builder);
@@ -286,7 +294,7 @@ describe("declarations", () => {
   });
 });
 
-describe("runs", { timeout: 60_000 }, () => {
+describe("runs", buildTime, () => {
   afterEach(endLiveRuns);
 
   it("use a value as soon as it's set", async () => {

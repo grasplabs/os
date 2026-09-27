@@ -119,7 +119,16 @@ const mailboxOf = async (owner: Person): Promise<string> => {
   return id;
 };
 
-describe("blueprints", () => {
+// The first test builds the server code of two Apps, the source and the
+// copy, one after the other (the build cache keys builds by App, so the
+// copy's can't reuse the source's), and calls each once. That is the
+// point of it: the copy runs the same code with none of the data. On its
+// own it takes about 1.5 seconds, but on a loaded runner the two builds
+// pushed it past the default five. Nothing polls or sleeps: the only
+// deadlines are the two calls' ten seconds each (`APP_CALL_TIMEOUT_MS`),
+// which end a call that hangs. Sixty seconds is room for a slow runner,
+// as the other tests that release Apps give theirs.
+describe("blueprints", { timeout: 60_000 }, () => {
   it("create an App with the same code, none of the data, and requests for what it was given", async () => {
     const [owner, maker, admin] = await Promise.all([
       personApi("builder"),
