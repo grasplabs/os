@@ -715,7 +715,9 @@ export interface KnowledgeApi {
    * release's text, and an App's entry in the Apps collection while the
    * App holds a term (`knowledge.read_only`, saying where): the entry is
    * made from the App's name, description and current version's
-   * AGENTS.md, so change the App first, then purge. Nothing changes yet.
+   * AGENTS.md, so the App changes first (a version without it; a name or
+   * description only through its builders or Grasp support, as no API
+   * changes them yet), then purge. Nothing changes yet.
    */
   preparePurge: (input: PurgeInput) => Promise<PurgePlan>;
   /**

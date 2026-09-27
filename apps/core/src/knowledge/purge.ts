@@ -632,7 +632,10 @@ const requireIndexedWithout = async (
       ? ["a term is in the App's AGENTS.md: publish a version without it"]
       : []),
     ...(holds(now.name) || holds(now.description)
-      ? ["a term is in the App's name or description: change it"]
+      ? [
+          // No API renames an App or changes its description yet.
+          "a term is in the App's name or description, which a purge can't reach: the App's builders or Grasp support must change it first",
+        ]
       : []),
   ];
   throw refuse(

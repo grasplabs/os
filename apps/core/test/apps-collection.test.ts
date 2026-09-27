@@ -735,7 +735,7 @@ describe("read-only", setUpTime, () => {
     const { id } = await entryOf(owner, appId);
     const input = purgeOf(id, word);
     await expect(purgeRefusal(admin, input)).resolves.toStrictEqual([
-      `documentIds: document ${id} is an App's entry in the Apps collection, made from the App itself: a term is in the App's name or description: change it; then purge`,
+      `documentIds: document ${id} is an App's entry in the Apps collection, made from the App itself: a term is in the App's name or description, which a purge can't reach: the App's builders or Grasp support must change it first; then purge`,
     ]);
 
     // No API renames an App yet: the name changes where the App keeps it.
