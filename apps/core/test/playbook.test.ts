@@ -791,41 +791,115 @@ describe("Playbook records", () => {
   );
 
   it(
-    "freeze in a snapshot only versions of workflow records the Playbook has",
+    "freeze in a snapshot only versions that were workflow records, however they are saved",
     setUpTime,
     async () => {
       const admin = await personOf("admin");
       const folder = unique();
-      const workflow = `${folder}/pay.md`;
-      await save(admin, { path: workflow, ...records.workflow });
-      const team = `${folder}/team.md`;
-      await save(admin, { path: team, ...records.team });
+      // A workflow that later became a team, and a team that later became
+      // a workflow: each version is judged by its own type.
+      const becameTeam = `${folder}/became-team.md`;
+      await save(admin, { path: becameTeam, ...records.workflow });
+      await save(admin, { path: becameTeam, ifVersion: 1, ...records.team });
+      const becameWorkflow = `${folder}/became-workflow.md`;
+      await save(admin, { path: becameWorkflow, ...records.team });
+      await save(admin, {
+        path: becameWorkflow,
+        ifVersion: 1,
+        ...records.workflow,
+      });
+      const snapshotText = (workflows: { path: string; version: number }[]) =>
+        textOf({
+          record: { ...records.snapshot.record, workflows },
+          body: "Snapshot.",
+        });
       const snapshot = async (workflows: { path: string; version: number }[]) =>
         await save(admin, {
           path: `${folder}/snapshot-${unique()}.md`,
           record: { ...records.snapshot.record, workflows },
           body: "Snapshot.",
         });
+      const valid = [
+        { path: becameTeam, version: 1 },
+        { path: becameWorkflow, version: 2 },
+      ];
+      const invalid = [
+        { path: becameTeam, version: 2 },
+        { path: becameWorkflow, version: 1 },
+        { path: becameWorkflow, version: 3 },
+        { path: `${folder}/refund.md`, version: 1 },
+      ];
+      const issues = [
+        `frontmatter.workflows.0: version 2 of ${becameTeam} isn't a workflow record`,
+        `frontmatter.workflows.1: version 1 of ${becameWorkflow} isn't a workflow record`,
+        `frontmatter.workflows.2: the Playbook has no version 3 of ${becameWorkflow}`,
+        `frontmatter.workflows.3: the Playbook has no version 1 of ${folder}/refund.md`,
+      ];
+      // Saved as a document, not through saveRecord.
+      const raw = await refusal(
+        admin.api.knowledge.saveDocument({
+          collectionId: playbookCollectionId,
+          path: `${folder}/raw.md`,
+          text: snapshotText(invalid),
+          ifVersion: 0,
+        })
+      );
+      // Restored: an old snapshot that was valid still is, and one stored
+      // with a bad reference (as a bug could leave it) isn't.
+      const frozen = await snapshot(valid);
+      await save(admin, {
+        path: frozen.path,
+        ifVersion: 1,
+        record: { ...records.snapshot.record, workflows: [] },
+        body: "Emptied.",
+      });
+      const restored = await outcome(
+        admin.api.knowledge.restoreVersion({
+          documentId: frozen.id,
+          version: 1,
+          ifVersion: 2,
+        })
+      );
+      await env.KNOWLEDGE.prepare(
+        "UPDATE versions SET text = ? WHERE document_id = ? AND number = 1"
+      )
+        .bind(snapshotText(invalid), frozen.id)
+        .run();
+      const badRestore = await refusal(
+        admin.api.knowledge.restoreVersion({
+          documentId: frozen.id,
+          version: 1,
+          ifVersion: 3,
+        })
+      );
+      // A frozen version whose text no longer reads as a record isn't one.
+      const unreadable = `${folder}/unreadable.md`;
+      const stored = await save(admin, {
+        path: unreadable,
+        ...records.workflow,
+      });
+      await env.KNOWLEDGE.prepare(
+        "UPDATE versions SET text = ? WHERE document_id = ? AND number = 1"
+      )
+        .bind("---\ntype: [unclosed\n---\nBody.", stored.id)
+        .run();
       expect({
-        missing: await refusal(
-          snapshot([
-            { path: workflow, version: 1 },
-            { path: workflow, version: 2 },
-            { path: `${folder}/refund.md`, version: 1 },
-            { path: team, version: 1 },
-          ])
-        ),
-        frozen: await outcome(snapshot([{ path: workflow, version: 1 }])),
+        saveRecord: await refusal(snapshot(invalid)),
+        raw,
+        valid: restored,
+        badRestore,
+        unreadable: await refusal(snapshot([{ path: unreadable, version: 1 }])),
       }).toStrictEqual({
-        missing: {
+        saveRecord: { code: "knowledge.invalid", issues },
+        raw: { code: "knowledge.invalid", issues },
+        valid: "ok",
+        badRestore: { code: "knowledge.invalid", issues },
+        unreadable: {
           code: "knowledge.invalid",
           issues: [
-            `record.workflows.1: the Playbook has no version 2 of ${workflow}`,
-            `record.workflows.2: the Playbook has no version 1 of ${folder}/refund.md`,
-            `record.workflows.3: ${team} isn't a workflow record`,
+            `frontmatter.workflows.0: version 1 of ${unreadable} isn't a workflow record`,
           ],
         },
-        frozen: "ok",
       });
     }
   );

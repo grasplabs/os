@@ -16,23 +16,17 @@ import { isAdmin } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { stringify } from "yaml";
 import { z } from "zod";
 
 import { appContents } from "../apps.ts";
 import { outboxed } from "../audit-outbox.ts";
-import { inList } from "../db/d1.ts";
 import { collections, documents, versions } from "../db/knowledge/schema.ts";
 import { requireFeature } from "../features.ts";
 import { ensureCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
 import { findByPath, personWriter, writeVersion } from "./documents.ts";
-import {
-  FrontmatterError,
-  parseFrontmatter,
-  withFrontmatter,
-} from "./frontmatter.ts";
+import { parseFrontmatter, withFrontmatter } from "./frontmatter.ts";
 
 // The Playbook: the company's records (its vision, teams, people, tools,
 // what people said, its workflows drawn and designed, snapshots, the plan,
@@ -152,78 +146,12 @@ const appLinkOf = (path: string, text: string): unknown => {
 };
 
 /**
- * Refuses with `knowledge.invalid` a snapshot, as `text` at `path` in the
- * Playbook `collection`, that freezes a version of a record that isn't
- * there, or a record that isn't a workflow now. Text that doesn't fit its
- * type is refused the same way.
- */
-const requireFrozenVersions = async (
-  db: DrizzleD1Database,
-  collection: CollectionRow,
-  path: string,
-  text: string
-): Promise<void> => {
-  let parsed: ReturnType<typeof parseFrontmatter>;
-  try {
-    parsed = parseFrontmatter(path, text);
-  } catch (error) {
-    if (error instanceof FrontmatterError) {
-      throw knowledgeErrors.create("knowledge.invalid", {
-        issues: error.issues,
-      });
-    }
-    throw error;
-  }
-  const { frontmatter } = parsed;
-  if (!("workflows" in frontmatter) || frontmatter.workflows.length === 0) {
-    return;
-  }
-  const { workflows } = frontmatter;
-  const found = await db
-    .select({
-      path: documents.path,
-      type: documents.type,
-      currentVersion: documents.currentVersion,
-    })
-    .from(documents)
-    .where(
-      and(
-        eq(documents.collectionId, collection.id),
-        inList(
-          documents.path,
-          workflows.map((frozen) => frozen.path)
-        )
-      )
-    );
-  // A document's versions run from 1 to its current one, and none of the
-  // Playbook's are ever deleted.
-  const byPath = new Map(found.map((row) => [row.path, row] as const));
-  const problems = workflows.flatMap((frozen, index) => {
-    const row = byPath.get(frozen.path);
-    if (row === undefined || frozen.version > row.currentVersion) {
-      return [
-        `record.workflows.${index}: the Playbook has no version ${frozen.version} of ${frozen.path}`,
-      ];
-    }
-    if (row.type !== "workflow") {
-      return [
-        `record.workflows.${index}: ${frozen.path} isn't a workflow record`,
-      ];
-    }
-    return [];
-  });
-  if (problems.length > 0) {
-    throw knowledgeErrors.create("knowledge.invalid", { issues: problems });
-  }
-};
-
-/**
  * Creates or updates a Playbook record, as `person`, through the save
  * pipeline: refused as any save is (`knowledge.invalid` when the record
  * doesn't fit its type, `knowledge.conflict` when `ifVersion` isn't
  * current), and only by those who may change the Playbook (its admins).
  * A workflow keeps the App workflow the version it was edited from links
- * to, and a snapshot freezes only versions of the Playbook's workflows.
+ * to.
  */
 export const saveRecord = async (
   env: Env,
@@ -255,7 +183,6 @@ export const saveRecord = async (
     app === undefined ? record : { ...record, app },
     body
   );
-  await requireFrozenVersions(db, collection, path, text);
   return await writeVersion(env, personWriter(person), {
     collection,
     path,

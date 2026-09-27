@@ -23,7 +23,7 @@ import type {
   VersionSummary,
 } from "@grasp-os/shared/knowledge";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, desc, eq, gt, lt, ne } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lt, ne, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
@@ -83,6 +83,8 @@ interface Prepared {
   reviewDate: string | null;
   sections: Section[];
   links: Link[];
+  /** A snapshot's workflow records, at the versions it freezes. */
+  frozen: { path: string; version: number }[];
 }
 
 const recordTypes: ReadonlySet<string> = new Set(playbookRecordTypes);
@@ -148,7 +150,84 @@ const prepare = (path: string, text: string): Prepared => {
     reviewDate: frontmatter.review ?? null,
     sections: found,
     links: linked,
+    frozen: "workflows" in frontmatter ? frontmatter.workflows : [],
   };
+};
+
+/** Versions read at once to check a snapshot: up to 1 MB each. */
+const frozenPerQuery = 5;
+
+/** One version of the document at `path`, as a key. */
+const keyOf = ({ path, version }: { path: string; version: number }): string =>
+  JSON.stringify([path, version]);
+
+/** The type of a saved version's `text`, if it still reads as one. */
+const savedTypeOf = (path: string, text: string): DocumentType | undefined => {
+  try {
+    return parseFrontmatter(path, text).type;
+  } catch (error) {
+    if (error instanceof FrontmatterError) {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
+/**
+ * Refuses with `knowledge.invalid` a snapshot in `collection` that
+ * freezes a version it doesn't have, or one that wasn't a workflow record:
+ * each version is judged by its own text, as the snapshot froze it.
+ * Versions are never deleted, so a snapshot that was valid stays valid,
+ * restored too.
+ */
+const requireFrozenVersions = async (
+  env: Env,
+  collection: CollectionRow,
+  frozen: Prepared["frozen"]
+): Promise<void> => {
+  const wanted = [
+    ...new Map(frozen.map((entry) => [keyOf(entry), entry])).values(),
+  ];
+  const db = drizzle(env.KNOWLEDGE);
+  const types = new Map<string, DocumentType | undefined>();
+  for (let start = 0; start < wanted.length; start += frozenPerQuery) {
+    const page = wanted.slice(start, start + frozenPerQuery);
+    // oxlint-disable-next-line no-await-in-loop -- a few versions at a time
+    const rows = await db
+      .select({
+        path: documents.path,
+        version: versions.number,
+        text: versions.text,
+      })
+      .from(versions)
+      .innerJoin(documents, eq(documents.id, versions.documentId))
+      .where(
+        and(
+          eq(documents.collectionId, collection.id),
+          sql`(${documents.path}, ${versions.number}) IN (SELECT json_extract(value, '$.path'), json_extract(value, '$.version') FROM json_each(${JSON.stringify(page)}))`
+        )
+      );
+    for (const row of rows) {
+      types.set(keyOf(row), savedTypeOf(row.path, row.text));
+    }
+  }
+  const problems = frozen.flatMap((entry, index) => {
+    const at = `frontmatter.workflows.${index}`;
+    if (!types.has(keyOf(entry))) {
+      return [
+        `${at}: the Playbook has no version ${entry.version} of ${entry.path}`,
+      ];
+    }
+    if (types.get(keyOf(entry)) !== "workflow") {
+      return [
+        `${at}: version ${entry.version} of ${entry.path} isn't a workflow record`,
+      ];
+    }
+    return [];
+  });
+  if (problems.length > 0) {
+    throw invalid(problems);
+  }
 };
 
 /** Splits rows so no insert binds more parameters than D1 allows. */
@@ -244,6 +323,7 @@ export const checkedText = async (
       `frontmatter.type: a ${prepared.type} record belongs in the Playbook collection`,
     ]);
   }
+  await requireFrozenVersions(env, collection, prepared.frozen);
   const memoryFile = await memoryFileOf(collection, path);
   if (memoryFile !== undefined) {
     requireWithinLimit(env, memoryFile, text);
