@@ -9,15 +9,23 @@
 // Additionally, you should also exclude this file from your linter and/or formatter to prevent it from being checked or modified.
 
 import { Route as rootRouteImport } from './routes/__root'
-import { Route as IndexRouteImport } from './routes/index'
+import { Route as ShellRouteImport } from './routes/_shell'
 import { Route as KitRouteImport } from './routes/kit'
-import { Route as MembersRouteImport } from './routes/members'
+import { Route as SignInRouteImport } from './routes/sign-in'
+import { Route as ShellIndexRouteImport } from './routes/_shell.index'
+import { Route as ShellActivityRouteImport } from './routes/_shell.activity'
+import { Route as ShellConnectionsRouteImport } from './routes/_shell.connections'
+import { Route as ShellKnowledgeRouteImport } from './routes/_shell.knowledge'
+import { Route as ShellMembersRouteImport } from './routes/_shell.members'
+import { Route as ShellModelsRouteImport } from './routes/_shell.models'
+import { Route as ShellWorkflowsRouteImport } from './routes/_shell.workflows'
 import { Route as DecisionsDecisionRouteImport } from './routes/decisions.$decision'
+import { Route as ShellAppsIndexRouteImport } from './routes/_shell.apps.index'
+import { Route as ShellAppsAppRouteImport } from './routes/_shell.apps.$app'
 import { Route as AppsAppScreensScreenRouteImport } from './routes/apps.$app.screens.$screen'
 
-const IndexRoute = IndexRouteImport.update({
-  id: '/',
-  path: '/',
+const ShellRoute = ShellRouteImport.update({
+  id: '/_shell',
   getParentRoute: () => rootRouteImport,
 } as any)
 const KitRoute = KitRouteImport.update({
@@ -25,15 +33,60 @@ const KitRoute = KitRouteImport.update({
   path: '/kit',
   getParentRoute: () => rootRouteImport,
 } as any)
-const MembersRoute = MembersRouteImport.update({
+const SignInRoute = SignInRouteImport.update({
+  id: '/sign-in',
+  path: '/sign-in',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ShellIndexRoute = ShellIndexRouteImport.update({
+  id: '/',
+  path: '/',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellActivityRoute = ShellActivityRouteImport.update({
+  id: '/activity',
+  path: '/activity',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellConnectionsRoute = ShellConnectionsRouteImport.update({
+  id: '/connections',
+  path: '/connections',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellKnowledgeRoute = ShellKnowledgeRouteImport.update({
+  id: '/knowledge',
+  path: '/knowledge',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellMembersRoute = ShellMembersRouteImport.update({
   id: '/members',
   path: '/members',
-  getParentRoute: () => rootRouteImport,
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellModelsRoute = ShellModelsRouteImport.update({
+  id: '/models',
+  path: '/models',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellWorkflowsRoute = ShellWorkflowsRouteImport.update({
+  id: '/workflows',
+  path: '/workflows',
+  getParentRoute: () => ShellRoute,
 } as any)
 const DecisionsDecisionRoute = DecisionsDecisionRouteImport.update({
   id: '/decisions/$decision',
   path: '/decisions/$decision',
   getParentRoute: () => rootRouteImport,
+} as any)
+const ShellAppsIndexRoute = ShellAppsIndexRouteImport.update({
+  id: '/apps/',
+  path: '/apps/',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellAppsAppRoute = ShellAppsAppRouteImport.update({
+  id: '/apps/$app',
+  path: '/apps/$app',
+  getParentRoute: () => ShellRoute,
 } as any)
 const AppsAppScreensScreenRoute = AppsAppScreensScreenRouteImport.update({
   id: '/apps/$app/screens/$screen',
@@ -42,25 +95,50 @@ const AppsAppScreensScreenRoute = AppsAppScreensScreenRouteImport.update({
 } as any)
 
 export interface FileRoutesByFullPath {
-  '/': typeof IndexRoute
+  '/': typeof ShellIndexRoute
   '/kit': typeof KitRoute
-  '/members': typeof MembersRoute
+  '/sign-in': typeof SignInRoute
+  '/activity': typeof ShellActivityRoute
+  '/connections': typeof ShellConnectionsRoute
+  '/knowledge': typeof ShellKnowledgeRoute
+  '/members': typeof ShellMembersRoute
+  '/models': typeof ShellModelsRoute
+  '/workflows': typeof ShellWorkflowsRoute
   '/decisions/$decision': typeof DecisionsDecisionRoute
+  '/apps/$app': typeof ShellAppsAppRoute
+  '/apps/': typeof ShellAppsIndexRoute
   '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRoutesByTo {
-  '/': typeof IndexRoute
   '/kit': typeof KitRoute
-  '/members': typeof MembersRoute
+  '/sign-in': typeof SignInRoute
+  '/activity': typeof ShellActivityRoute
+  '/connections': typeof ShellConnectionsRoute
+  '/knowledge': typeof ShellKnowledgeRoute
+  '/members': typeof ShellMembersRoute
+  '/models': typeof ShellModelsRoute
+  '/workflows': typeof ShellWorkflowsRoute
   '/decisions/$decision': typeof DecisionsDecisionRoute
+  '/': typeof ShellIndexRoute
+  '/apps/$app': typeof ShellAppsAppRoute
+  '/apps': typeof ShellAppsIndexRoute
   '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
-  '/': typeof IndexRoute
+  '/_shell': typeof ShellRouteWithChildren
   '/kit': typeof KitRoute
-  '/members': typeof MembersRoute
+  '/sign-in': typeof SignInRoute
+  '/_shell/activity': typeof ShellActivityRoute
+  '/_shell/connections': typeof ShellConnectionsRoute
+  '/_shell/knowledge': typeof ShellKnowledgeRoute
+  '/_shell/members': typeof ShellMembersRoute
+  '/_shell/models': typeof ShellModelsRoute
+  '/_shell/workflows': typeof ShellWorkflowsRoute
   '/decisions/$decision': typeof DecisionsDecisionRoute
+  '/_shell/': typeof ShellIndexRoute
+  '/_shell/apps/$app': typeof ShellAppsAppRoute
+  '/_shell/apps/': typeof ShellAppsIndexRoute
   '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRouteTypes {
@@ -68,40 +146,65 @@ export interface FileRouteTypes {
   fullPaths:
     | '/'
     | '/kit'
+    | '/sign-in'
+    | '/activity'
+    | '/connections'
+    | '/knowledge'
     | '/members'
+    | '/models'
+    | '/workflows'
     | '/decisions/$decision'
+    | '/apps/$app'
+    | '/apps/'
     | '/apps/$app/screens/$screen'
   fileRoutesByTo: FileRoutesByTo
   to:
-    | '/'
     | '/kit'
+    | '/sign-in'
+    | '/activity'
+    | '/connections'
+    | '/knowledge'
     | '/members'
+    | '/models'
+    | '/workflows'
     | '/decisions/$decision'
+    | '/'
+    | '/apps/$app'
+    | '/apps'
     | '/apps/$app/screens/$screen'
   id:
     | '__root__'
-    | '/'
+    | '/_shell'
     | '/kit'
-    | '/members'
+    | '/sign-in'
+    | '/_shell/activity'
+    | '/_shell/connections'
+    | '/_shell/knowledge'
+    | '/_shell/members'
+    | '/_shell/models'
+    | '/_shell/workflows'
     | '/decisions/$decision'
+    | '/_shell/'
+    | '/_shell/apps/$app'
+    | '/_shell/apps/'
     | '/apps/$app/screens/$screen'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
-  IndexRoute: typeof IndexRoute
+  ShellRoute: typeof ShellRouteWithChildren
   KitRoute: typeof KitRoute
-  MembersRoute: typeof MembersRoute
+  SignInRoute: typeof SignInRoute
   DecisionsDecisionRoute: typeof DecisionsDecisionRoute
   AppsAppScreensScreenRoute: typeof AppsAppScreensScreenRoute
 }
 
 declare module '@tanstack/react-router' {
   interface FileRoutesByPath {
-    '/': {
-      id: '/'
-      path: '/'
+    '/_shell': {
+      id: '/_shell'
+      path: ''
       fullPath: '/'
-      preLoaderRoute: typeof IndexRouteImport
+      preLoaderRoute: typeof ShellRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/kit': {
@@ -111,12 +214,61 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof KitRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/members': {
-      id: '/members'
+    '/sign-in': {
+      id: '/sign-in'
+      path: '/sign-in'
+      fullPath: '/sign-in'
+      preLoaderRoute: typeof SignInRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/_shell/': {
+      id: '/_shell/'
+      path: '/'
+      fullPath: '/'
+      preLoaderRoute: typeof ShellIndexRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/activity': {
+      id: '/_shell/activity'
+      path: '/activity'
+      fullPath: '/activity'
+      preLoaderRoute: typeof ShellActivityRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/connections': {
+      id: '/_shell/connections'
+      path: '/connections'
+      fullPath: '/connections'
+      preLoaderRoute: typeof ShellConnectionsRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/knowledge': {
+      id: '/_shell/knowledge'
+      path: '/knowledge'
+      fullPath: '/knowledge'
+      preLoaderRoute: typeof ShellKnowledgeRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/members': {
+      id: '/_shell/members'
       path: '/members'
       fullPath: '/members'
-      preLoaderRoute: typeof MembersRouteImport
-      parentRoute: typeof rootRouteImport
+      preLoaderRoute: typeof ShellMembersRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/models': {
+      id: '/_shell/models'
+      path: '/models'
+      fullPath: '/models'
+      preLoaderRoute: typeof ShellModelsRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/workflows': {
+      id: '/_shell/workflows'
+      path: '/workflows'
+      fullPath: '/workflows'
+      preLoaderRoute: typeof ShellWorkflowsRouteImport
+      parentRoute: typeof ShellRoute
     }
     '/decisions/$decision': {
       id: '/decisions/$decision'
@@ -124,6 +276,20 @@ declare module '@tanstack/react-router' {
       fullPath: '/decisions/$decision'
       preLoaderRoute: typeof DecisionsDecisionRouteImport
       parentRoute: typeof rootRouteImport
+    }
+    '/_shell/apps/': {
+      id: '/_shell/apps/'
+      path: '/apps'
+      fullPath: '/apps/'
+      preLoaderRoute: typeof ShellAppsIndexRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/apps/$app': {
+      id: '/_shell/apps/$app'
+      path: '/apps/$app'
+      fullPath: '/apps/$app'
+      preLoaderRoute: typeof ShellAppsAppRouteImport
+      parentRoute: typeof ShellRoute
     }
     '/apps/$app/screens/$screen': {
       id: '/apps/$app/screens/$screen'
@@ -135,10 +301,36 @@ declare module '@tanstack/react-router' {
   }
 }
 
+interface ShellRouteChildren {
+  ShellActivityRoute: typeof ShellActivityRoute
+  ShellConnectionsRoute: typeof ShellConnectionsRoute
+  ShellKnowledgeRoute: typeof ShellKnowledgeRoute
+  ShellMembersRoute: typeof ShellMembersRoute
+  ShellModelsRoute: typeof ShellModelsRoute
+  ShellWorkflowsRoute: typeof ShellWorkflowsRoute
+  ShellIndexRoute: typeof ShellIndexRoute
+  ShellAppsAppRoute: typeof ShellAppsAppRoute
+  ShellAppsIndexRoute: typeof ShellAppsIndexRoute
+}
+
+const ShellRouteChildren: ShellRouteChildren = {
+  ShellActivityRoute: ShellActivityRoute,
+  ShellConnectionsRoute: ShellConnectionsRoute,
+  ShellKnowledgeRoute: ShellKnowledgeRoute,
+  ShellMembersRoute: ShellMembersRoute,
+  ShellModelsRoute: ShellModelsRoute,
+  ShellWorkflowsRoute: ShellWorkflowsRoute,
+  ShellIndexRoute: ShellIndexRoute,
+  ShellAppsAppRoute: ShellAppsAppRoute,
+  ShellAppsIndexRoute: ShellAppsIndexRoute,
+}
+
+const ShellRouteWithChildren = ShellRoute._addFileChildren(ShellRouteChildren)
+
 const rootRouteChildren: RootRouteChildren = {
-  IndexRoute: IndexRoute,
+  ShellRoute: ShellRouteWithChildren,
   KitRoute: KitRoute,
-  MembersRoute: MembersRoute,
+  SignInRoute: SignInRoute,
   DecisionsDecisionRoute: DecisionsDecisionRoute,
   AppsAppScreensScreenRoute: AppsAppScreensScreenRoute,
 }

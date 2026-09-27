@@ -4,12 +4,15 @@ import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
 import { signedIn, signInTo } from "./people.ts";
 
-test("loads the frontend from core and reaches core over RPC", async ({
+test("loads the frontend from core, reaches core over RPC, and asks whoever isn't signed in to sign in", async ({
   page,
 }) => {
   await page.goto("/");
   await expect(page.getByRole("heading", { name: "Grasp" })).toBeVisible();
-  await expect(page.getByText("Connected", { exact: true })).toBeVisible();
+  // Only once core answered: without an answer, the page says so instead.
+  await expect(page.getByText("Sign in to go on.")).toBeVisible();
+  await expect(page.getByRole("alert")).toHaveCount(0);
+  expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/");
 });
 
 test("shows only its own words for a refused sign-in, never the link's", async ({
@@ -67,11 +70,10 @@ test("names each member's actions for them, and asks before making someone an ad
 
 test("shows the members page only to someone signed in", async ({ page }) => {
   await page.goto("/members");
-  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
-  await expect(
-    page.getByText("Sign in to see your organization's members.")
-  ).toBeVisible();
-  await expect(page.getByRole("alert")).toHaveCount(0);
+  await expect(page.getByText("Sign in to go on.")).toBeVisible();
+  expect(new URL(page.url()).pathname).toBe("/sign-in");
+  expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/members");
+  await expect(page.getByRole("heading", { name: "Members" })).toHaveCount(0);
   await expect(page.getByRole("table")).toHaveCount(0);
 });
 

@@ -1,3 +1,4 @@
+import { workflowIdOf } from "@grasp-os/compiler";
 import { appLimits } from "@grasp-os/shared/app-limits";
 import {
   appErrors,
@@ -8,6 +9,7 @@ import {
 } from "@grasp-os/shared/apps";
 import type {
   App,
+  AppContents,
   AppFiles,
   AppVersion,
   FileDiff,
@@ -339,6 +341,43 @@ export const getApp = async (
 ): Promise<App> => {
   requireBuilder(by);
   return await findApp(env, app);
+};
+
+/**
+ * A screen's name, from its file's path (as `openScreen` finds it, in
+ * screens-rpc.ts); undefined for any other file.
+ */
+const screenPath = /^screens\/(?<name>[\w-]{1,64})\.tsx$/u;
+
+/** The names `nameOf` finds in `paths`, in their order. */
+const namesIn = (
+  paths: string[],
+  nameOf: (path: string) => string | undefined
+): string[] =>
+  paths.flatMap((path) => {
+    const name = nameOf(path);
+    return name === undefined ? [] : [name];
+  });
+
+/** The screens and workflows of an App's current version. */
+export const appContents = async (
+  env: Env,
+  by: Identity,
+  app: unknown
+): Promise<AppContents> => {
+  requireBuilder(by);
+  const { id, currentVersion } = await findApp(env, app);
+  if (currentVersion === null) {
+    return { version: null, screens: [], workflows: [] };
+  }
+  const paths = Object.keys(
+    await versionFiles(env, id, currentVersion)
+  ).toSorted();
+  return {
+    version: currentVersion,
+    screens: namesIn(paths, (path) => screenPath.exec(path)?.groups?.name),
+    workflows: namesIn(paths, workflowIdOf),
+  };
 };
 
 /** An App's files at `version`, or its working copy without one. */
