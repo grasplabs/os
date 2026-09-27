@@ -397,6 +397,57 @@ export const requestPermission = async (
 };
 
 /**
+ * Requests for `app` of what `from` was given or asked for (its
+ * permissions that aren't revoked), made by `by` as `app` is created from
+ * a blueprint of `from` (app-blueprints.ts): the rows and their audit
+ * entries, for the batch that creates `app`. Like any request, each allows
+ * nothing until an admin grants it. A workflow of `from` itself becomes
+ * the same workflow of `app`.
+ */
+export const blueprintRequests = async (
+  env: Env,
+  by: Identity,
+  from: AppId,
+  app: AppId
+): Promise<{ rows: Row[]; entries: AuditEntry[] }> => {
+  const found = await drizzle(env.DB)
+    .select()
+    .from(permissions)
+    .where(
+      and(
+        ofSubject({ type: "app", appId: from }),
+        inArray(permissions.status, ["requested", "active"])
+      )
+    )
+    .orderBy(asc(permissions.requestedAt), asc(permissions.id));
+  const requestedAt = new Date();
+  const rows = found.map((row): Row => ({
+    ...row,
+    id: crypto.randomUUID(),
+    ...subjectColumns({ type: "app", appId: app }),
+    objectId:
+      row.objectType === "workflow" && row.objectId === from
+        ? app
+        : row.objectId,
+    status: "requested",
+    requestedBy: by.userId,
+    requestedAt,
+    grantedBy: null,
+    grantedAt: null,
+    revokedBy: null,
+    revokedAt: null,
+  }));
+  return {
+    rows,
+    entries: rows.map((row) =>
+      changeEntry(by, "permission.requested", toPermission(row), {
+        blueprint: from,
+      })
+    ),
+  };
+};
+
+/**
  * Grants a requested permission, the admin's own request included. Only
  * from requested: an active or revoked one is refused, so a revoke is for
  * good. Audited with who asked for it.

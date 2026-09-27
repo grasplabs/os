@@ -85,6 +85,13 @@
       "when": 1790515015746,
       "tag": "0011_model_spend",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1790516546150,
+      "tag": "0012_app_blueprints",
+      "breakpoints": true
     }
   ]
 }

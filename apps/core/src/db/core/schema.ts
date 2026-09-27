@@ -370,6 +370,25 @@ export const appMembers = sqliteTable(
 );
 
 /**
+ * The versions of Apps marked as blueprints (src/app-blueprints.ts), to
+ * create Apps from. Unmarking deletes the row; who marked and unmarked
+ * which is in the audit log. A version itself never changes, so a
+ * blueprint's code never does either.
+ */
+export const appBlueprints = sqliteTable(
+  "app_blueprints",
+  {
+    appId: text("app_id")
+      .notNull()
+      .references(() => apps.id),
+    version: integer().notNull(),
+    markedBy: text("marked_by").notNull(),
+    markedAt: timestamp("marked_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.appId, table.version] })]
+);
+
+/**
  * Every committed version of an App, never changed or deleted. `tree` is
  * the SHA-256 of the version's files, which are stored under it in R2
  * (`src/apps.ts`). Versions count up from 1 per App, and the primary key

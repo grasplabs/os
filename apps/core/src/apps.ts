@@ -54,8 +54,8 @@ import { requireWorkflowTestsPass } from "./workflows/code.ts";
 // copy, as the next number. Two commits at once both try the same number,
 // and the database keeps one; the other is refused as a conflict.
 
-type AppRow = typeof apps.$inferSelect;
-type VersionRow = typeof appVersions.$inferSelect;
+export type AppRow = typeof apps.$inferSelect;
+export type VersionRow = typeof appVersions.$inferSelect;
 
 /** A tree as `commitFiles` stores it. */
 const storedTreeSchema = z.record(z.string(), z.string());
@@ -81,7 +81,7 @@ const readTree = async (
   return new Map(Object.entries(storedTreeSchema.parse(JSON.parse(text))));
 };
 
-const toApp = (row: AppRow): App => ({
+export const toApp = (row: AppRow): App => ({
   id: appIdSchema.parse(row.id),
   name: row.name,
   description: row.description,
@@ -92,7 +92,7 @@ const toApp = (row: AppRow): App => ({
   createdAt: row.createdAt.toISOString(),
 });
 
-const toVersion = (row: VersionRow): AppVersion => ({
+export const toVersion = (row: VersionRow): AppVersion => ({
   app: appIdSchema.parse(row.appId),
   version: row.version,
   parent: row.parent,
@@ -104,13 +104,15 @@ const toVersion = (row: VersionRow): AppVersion => ({
 });
 
 /** The audit entry of a change to `app` by `by`: identifiers only. */
-const changeEntry = (
+export const changeEntry = (
   by: Identity,
   action:
     | "app.created"
     | "app.committed"
     | "app.version.proposed"
-    | "app.version.current",
+    | "app.version.current"
+    | "app.blueprint.marked"
+    | "app.blueprint.unmarked",
   app: AppId,
   detail: Record<string, AuditDetailValue>
 ): AuditEntry => ({
@@ -323,6 +325,34 @@ const checkMemory = (
   if (grew && featureEnabled(env, "memory")) {
     requireWithinLimit(env, "AGENTS.md", after);
   }
+};
+
+/** A version's files as stored: canonical JSON, and its SHA-256. */
+interface Tree {
+  tree: string;
+  json: string;
+}
+
+/**
+ * `files` as a version's tree, or `app.too_large` if they are over an
+ * App's limits: a version always fits them.
+ */
+export const versionTree = async (
+  files: ReadonlyMap<string, string>
+): Promise<Tree> => {
+  checkLimits(files);
+  const json = canonicalJson(Object.fromEntries(files));
+  return { tree: await sha256Hex(json), json };
+};
+
+/** Stores a tree under its hash, before any version row names it. */
+export const storeTree = async (
+  env: Env,
+  app: AppId,
+  { tree, json }: Tree
+): Promise<void> => {
+  // R2 checks the upload against its hash, so what's stored is what's named.
+  await env.FILES.put(treeKey(app, tree), json, { sha256: tree });
 };
 
 /** The files of one of an App's versions. For the runtime and the compiler. */
@@ -539,14 +569,11 @@ export const commitFiles = async (
   if (rows.length === 0) {
     throw appErrors.create("app.nothing_to_commit");
   }
-  checkLimits(files);
-  const json = canonicalJson(Object.fromEntries(files));
-  const tree = await sha256Hex(json);
+  const { tree, json } = await versionTree(files);
   if (tree === latest?.tree) {
     throw appErrors.create("app.nothing_to_commit");
   }
-  // R2 checks the upload against its hash, so what's stored is what's named.
-  await env.FILES.put(treeKey(appId, tree), json, { sha256: tree });
+  await storeTree(env, appId, { tree, json });
 
   const row: VersionRow = {
     appId,
