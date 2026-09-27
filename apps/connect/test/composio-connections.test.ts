@@ -277,12 +277,15 @@ describe("connecting a Composio toolkit", () => {
       "connection.staff_not_allowed",
     ]);
     expect(composio.state.requests).toStrictEqual([]);
+    // Both were asked at once, so their events may be stored in either order.
     const refused = await events();
     expect(
-      refused.map(({ action, detail }) => [action, detail.reason])
+      refused
+        .map(({ action, detail }) => `${action} ${String(detail.reason)}`)
+        .toSorted()
     ).toStrictEqual([
-      ["connection.connect", "role.forbidden"],
-      ["connection.connect", "connection.staff_not_allowed"],
+      "connection.connect connection.staff_not_allowed",
+      "connection.connect role.forbidden",
     ]);
   });
 
