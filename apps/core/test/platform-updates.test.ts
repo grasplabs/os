@@ -1,7 +1,9 @@
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { auditEventTypeOf } from "@grasp-os/shared/audit-log";
 import type { PlatformChange } from "@grasp-os/shared/platform-change";
-import { describe, expect, it } from "vite-plus/test";
+import { env } from "cloudflare:workers";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import { allEvents } from "./audit-events.ts";
 import { runCron } from "./cron.ts";
@@ -23,6 +25,9 @@ const change: PlatformChange = {
   release: "r000123-abcdef0",
   at: "2031-01-02T03:04:00.000Z",
 };
+
+/** One structured log line, by its event name. */
+const logSchema = z.looseObject({ event: z.string() });
 
 /** The `platform.updated` events recorded for `version`, oldest first. */
 const updatesOf = async ({
@@ -117,5 +122,44 @@ describe("platform updates", () => {
         .slice(before.length)
         .filter((event) => event.action === "platform.updated")
     ).toStrictEqual([]);
+  });
+
+  it("wait for their table, warning once, and record the running version once it exists", async () => {
+    const version = newVersion();
+    // As before the migration that adds it ran.
+    await env.DB.exec(
+      "ALTER TABLE platform_version RENAME TO platform_version_away"
+    );
+    const warn = vi.spyOn(console, "warn").mockReturnValue();
+    const error = vi.spyOn(console, "error").mockReturnValue();
+    const events = (spy: typeof warn): string[] =>
+      spy.mock.calls.flatMap(([fields]: unknown[]) => {
+        const parsed = logSchema.safeParse(fields);
+        return parsed.success ? [parsed.data.event] : [];
+      });
+    try {
+      await runCron({ CF_VERSION_METADATA: version });
+      await runCron({ CF_VERSION_METADATA: version });
+      expect({
+        warned: events(warn).filter(
+          (event) => event === "platform.update.table_missing"
+        ),
+        failed: events(error).filter((event) => event === "cron.failed"),
+      }).toStrictEqual({
+        warned: ["platform.update.table_missing"],
+        failed: [],
+      });
+    } finally {
+      warn.mockRestore();
+      error.mockRestore();
+      await env.DB.exec(
+        "ALTER TABLE platform_version_away RENAME TO platform_version"
+      );
+    }
+    await expect(updatesOf(version)).resolves.toHaveLength(0);
+
+    await runCron({ CF_VERSION_METADATA: version });
+
+    await expect(updatesOf(version)).resolves.toHaveLength(1);
   });
 });

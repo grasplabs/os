@@ -1,8 +1,10 @@
 import type { AuditDetailValue } from "@grasp-os/shared/audit";
 import { deploymentConfig } from "@grasp-os/shared/config";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { platformChangeSchema } from "@grasp-os/shared/platform-change";
 import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import type { DrizzleD1Database } from "drizzle-orm/d1";
 
 import { outboxedIfChanged } from "./audit-outbox.ts";
 import { platformVersion } from "./db/core/schema.ts";
@@ -24,7 +26,10 @@ import { platformVersion } from "./db/core/schema.ts";
 // the version's own ID and creation time, so a reader can tell. Without
 // the var, or with one that doesn't parse, the change is `unknown`.
 // Where there is no version metadata (plain workerd, on-prem), nothing is
-// recorded.
+// recorded. Nor is anything while `platform_version` doesn't exist yet
+// (a version deployed before its migration ran): that is logged once per
+// isolate as a warning, and the first run after the migration records the
+// version then running.
 
 /** What recording platform updates needs. */
 export type PlatformUpdateEnv = Pick<Env, "DB" | "PLATFORM_CHANGE"> &
@@ -32,6 +37,42 @@ export type PlatformUpdateEnv = Pick<Env, "DB" | "PLATFORM_CHANGE"> &
 
 /** Who, what and which release, when `PLATFORM_CHANGE` doesn't say. */
 const unknown = "unknown";
+
+/** Whether this isolate has warned that `platform_version` is missing. */
+let warnedMissingTable = false;
+
+/** Whether `error`, or what it wraps, says `platform_version` is missing. */
+const isMissingTable = (error: unknown): boolean =>
+  error instanceof Error &&
+  (error.message.includes("no such table: platform_version") ||
+    isMissingTable(error.cause));
+
+/** The conditional replace of the recorded version, and its event. */
+const record = async (
+  db: DrizzleD1Database,
+  version: WorkerVersionMetadata,
+  detail: Record<string, AuditDetailValue>
+): Promise<void> => {
+  await db.batch([
+    db
+      .insert(platformVersion)
+      .values({ id: 1, versionId: version.id, recordedAt: new Date() })
+      .onConflictDoUpdate({
+        target: platformVersion.id,
+        set: {
+          versionId: sql`excluded.version_id`,
+          recordedAt: sql`excluded.recorded_at`,
+        },
+        setWhere: sql`${platformVersion.versionId} <> excluded.version_id`,
+      }),
+    outboxedIfChanged(db, {
+      actor: { type: "system" },
+      action: "platform.updated",
+      target: { type: "version", id: version.id },
+      detail,
+    }),
+  ]);
+};
 
 /**
  * Records the running version as `platform.updated` if it isn't the one
@@ -58,23 +99,15 @@ export const recordPlatformUpdate = async (
     changedAt: change?.at ?? null,
   };
   const db = drizzle(env.DB);
-  await db.batch([
-    db
-      .insert(platformVersion)
-      .values({ id: 1, versionId: version.id, recordedAt: new Date() })
-      .onConflictDoUpdate({
-        target: platformVersion.id,
-        set: {
-          versionId: sql`excluded.version_id`,
-          recordedAt: sql`excluded.recorded_at`,
-        },
-        setWhere: sql`${platformVersion.versionId} <> excluded.version_id`,
-      }),
-    outboxedIfChanged(db, {
-      actor: { type: "system" },
-      action: "platform.updated",
-      target: { type: "version", id: version.id },
-      detail,
-    }),
-  ]);
+  try {
+    await record(db, version, detail);
+  } catch (error) {
+    if (!isMissingTable(error)) {
+      throw error;
+    }
+    if (!warnedMissingTable) {
+      warnedMissingTable = true;
+      log.warn("platform.update.table_missing", errorFields(error));
+    }
+  }
 };
