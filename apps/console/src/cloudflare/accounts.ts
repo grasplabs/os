@@ -139,35 +139,34 @@ export const ensureR2Bucket = async (
   );
 };
 
-const namespaceSchema = z.object({ id: z.string(), title: z.string() });
-export type KvNamespaceInfo = z.infer<typeof namespaceSchema>;
-
 /**
- * The KV namespace `title`, created if it's missing. KV can't be pinned to
- * the EU, so it never holds client content (threat model R18).
+ * An AI Gateway's settings: the ones its update replaces, which a PUT must
+ * send whole. Anything else it reports is left alone.
  */
-export const ensureKvNamespace = async (
-  api: CloudflareApi,
-  accountId: string,
-  title: string
-): Promise<KvNamespaceInfo> => {
-  const path = `/accounts/${accountId}/storage/kv/namespaces`;
-  const namespaces = await listAll(api, path, namespaceSchema);
-  const found = namespaces.find((namespace) => namespace.title === title);
-  return (
-    found ??
-    (await api.call({ method: "POST", path, json: { title } }, namespaceSchema))
-  );
-};
-
-const gatewaySchema = z.object({ id: z.string() });
+const gatewaySchema = z.object({
+  id: z.string(),
+  authentication: z.boolean().nullish(),
+  cache_invalidate_on_update: z.boolean(),
+  cache_ttl: z.number().nullable(),
+  collect_logs: z.boolean(),
+  rate_limiting_interval: z.number().nullable(),
+  rate_limiting_limit: z.number().nullable(),
+  rate_limiting_technique: z.string(),
+});
 export type AiGatewayInfo = z.infer<typeof gatewaySchema>;
 
 /**
- * The AI Gateway `id`, created if it's missing: no cache and no rate limit
- * (core's model gateway enforces budgets). It logs each call's metadata,
- * which core's audit events point to by log id; core turns payload logging
- * off on every call, so prompts and replies aren't kept (threat model EU7).
+ * The AI Gateway `id`, created if it's missing, and always authenticated:
+ * the gateway holds the client's provider keys (BYOK), so without
+ * authentication anyone who knows its URL could spend them (threat model
+ * CO14). Core reaches it through the AI binding, which Cloudflare
+ * authenticates in-account, so it needs no token. An existing gateway with
+ * authentication off gets it switched on, its other settings kept.
+ *
+ * A new gateway has no cache and no rate limit (core's model gateway
+ * enforces budgets). It logs each call's metadata, which core's audit
+ * events point to by log id; core turns payload logging off on every call,
+ * so prompts and replies aren't kept (threat model EU7).
  */
 export const ensureAiGateway = async (
   api: CloudflareApi,
@@ -175,8 +174,9 @@ export const ensureAiGateway = async (
   id: string
 ): Promise<AiGatewayInfo> => {
   const path = `/accounts/${accountId}/ai-gateway/gateways`;
+  let existing: AiGatewayInfo | undefined = undefined;
   try {
-    return await api.call(
+    existing = await api.call(
       { method: "GET", path: `${path}/${id}` },
       gatewaySchema
     );
@@ -185,19 +185,34 @@ export const ensureAiGateway = async (
       throw error;
     }
   }
+  if (existing === undefined) {
+    return await api.call(
+      {
+        method: "POST",
+        path,
+        json: {
+          id,
+          authentication: true,
+          cache_ttl: 0,
+          cache_invalidate_on_update: false,
+          collect_logs: true,
+          rate_limiting_interval: 0,
+          rate_limiting_limit: 0,
+          rate_limiting_technique: "fixed",
+        },
+      },
+      gatewaySchema
+    );
+  }
+  if (existing.authentication === true) {
+    return existing;
+  }
+  const { id: gatewayId, ...settings } = existing;
   return await api.call(
     {
-      method: "POST",
-      path,
-      json: {
-        id,
-        cache_ttl: 0,
-        cache_invalidate_on_update: false,
-        collect_logs: true,
-        rate_limiting_interval: 0,
-        rate_limiting_limit: 0,
-        rate_limiting_technique: "fixed",
-      },
+      method: "PUT",
+      path: `${path}/${gatewayId}`,
+      json: { ...settings, authentication: true },
     },
     gatewaySchema
   );

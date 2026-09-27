@@ -3,7 +3,6 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import {
   ensureAiGateway,
   ensureD1Database,
-  ensureKvNamespace,
   ensureR2Bucket,
   ensureWorkersSubdomain,
   getAccount,
@@ -76,7 +75,6 @@ describe("EU resources", () => {
         ensureWorkersSubdomain(api, account.id, "grasp-acme"),
         ensureD1Database(api, account.id, "grasp-os-core"),
         ensureR2Bucket(api, account.id, "grasp-os-files"),
-        ensureKvNamespace(api, account.id, "grasp-os-cache"),
         ensureAiGateway(api, account.id, "grasp-os"),
       ]);
 
@@ -88,8 +86,14 @@ describe("EU resources", () => {
       subdomain: "grasp-acme",
       d1: [{ name: "grasp-os-core", jurisdiction: "eu" }],
       buckets: [{ name: "grasp-os-files", jurisdiction: "eu" }],
-      namespaces: [{ title: "grasp-os-cache" }],
-      gateways: [{ id: "grasp-os", collect_logs: true, cache_ttl: 0 }],
+      gateways: [
+        {
+          id: "grasp-os",
+          authentication: true,
+          collect_logs: true,
+          cache_ttl: 0,
+        },
+      ],
     });
   });
 
@@ -99,6 +103,42 @@ describe("EU resources", () => {
     await expect(
       ensureWorkersSubdomain(api, account.id, "grasp-acme")
     ).resolves.toBe("chosen-earlier");
+  });
+
+  it("switches authentication on for a gateway that has it off, keeping its settings", async () => {
+    const account = cloudflare.addAccount();
+    const settings = {
+      cache_invalidate_on_update: true,
+      cache_ttl: 60,
+      collect_logs: true,
+      rate_limiting_interval: 60,
+      rate_limiting_limit: 100,
+      rate_limiting_technique: "sliding",
+    };
+    account.gateways.push({
+      id: "grasp-os",
+      authentication: false,
+      ...settings,
+    });
+
+    await expect(
+      ensureAiGateway(api, account.id, "grasp-os")
+    ).resolves.toStrictEqual({
+      id: "grasp-os",
+      authentication: true,
+      ...settings,
+    });
+    expect(account.gateways).toStrictEqual([
+      { id: "grasp-os", authentication: true, ...settings },
+    ]);
+
+    // Once on, it's left alone.
+    await ensureAiGateway(api, account.id, "grasp-os");
+    expect(cloudflare.calls.map(({ method }) => method)).toStrictEqual([
+      "GET",
+      "PUT",
+      "GET",
+    ]);
   });
 
   it("finds a D1 database by its exact name", async () => {
@@ -170,8 +210,8 @@ describe("retries", () => {
     ).rejects.toMatchObject({ status: 500, codes: [10_000] });
     cloudflare.failCall(1, "network");
     await expect(
-      ensureKvNamespace(api, account.id, "grasp-os-cache")
-    ).resolves.toMatchObject({ title: "grasp-os-cache" });
+      ensureR2Bucket(api, account.id, "grasp-os-files")
+    ).resolves.toMatchObject({ name: "grasp-os-files" });
     cloudflare.failCall(2, "network");
     await expect(
       ensureAiGateway(api, account.id, "grasp-os")

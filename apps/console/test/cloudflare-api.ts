@@ -21,7 +21,6 @@ interface AccountState {
   d1: { uuid: string; name: string; jurisdiction?: string }[];
   /** Buckets by jurisdiction: a name is unique only within one. */
   buckets: { name: string; jurisdiction: string }[];
-  namespaces: { id: string; title: string }[];
   gateways: Json[];
 }
 
@@ -165,20 +164,6 @@ const routes: Route[] = [
   },
   {
     method: "GET",
-    path: /^\/storage\/kv\/namespaces$/u,
-    answer: ({ account, call }) => paged(account.namespaces, call.query),
-  },
-  {
-    method: "POST",
-    path: /^\/storage\/kv\/namespaces$/u,
-    answer: ({ account, json }) => {
-      const namespace = { id: crypto.randomUUID(), title: text(json, "title") };
-      account.namespaces.push(namespace);
-      return envelope(namespace);
-    },
-  },
-  {
-    method: "GET",
     path: /^\/ai-gateway\/gateways\/(?<id>[^/]+)$/u,
     answer: ({ account, params }) => {
       const gateway = account.gateways.find(({ id }) => id === params.id);
@@ -189,8 +174,23 @@ const routes: Route[] = [
     method: "POST",
     path: /^\/ai-gateway\/gateways$/u,
     answer: ({ account, json }) => {
-      account.gateways.push(json);
-      return envelope(json);
+      const gateway = { authentication: false, ...json };
+      account.gateways.push(gateway);
+      return envelope(gateway);
+    },
+  },
+  {
+    method: "PUT",
+    path: /^\/ai-gateway\/gateways\/(?<id>[^/]+)$/u,
+    answer: ({ account, params, json }) => {
+      const index = account.gateways.findIndex(({ id }) => id === params.id);
+      if (index === -1) {
+        return notFound();
+      }
+      // An update replaces the gateway's settings, as the API does.
+      const gateway = { id: params.id, authentication: false, ...json };
+      account.gateways[index] = gateway;
+      return envelope(gateway);
     },
   },
 ];
@@ -209,7 +209,8 @@ const routeAccount = (
       return route.answer({ account, call, params: { ...match.groups }, json });
     }
   }
-  return notFound();
+  // As the API answers a path it doesn't serve.
+  return refusal(400, 7003, "No route for the URI");
 };
 
 /**
@@ -317,7 +318,6 @@ export const mockCloudflareApi = (token: string) => {
         name,
         d1: [],
         buckets: [],
-        namespaces: [],
         gateways: [],
       };
       accounts.set(account.id, account);
