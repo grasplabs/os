@@ -290,6 +290,7 @@ describe("model rules", () => {
   it.each([
     ["eu", { eu: { models: "all of them" } }],
     ["sensitive", { sensitive: { models: [euModel], connections: 7 } }],
+    ["budgets", { budgets: { user: { limit: -5 } } }],
   ])(
     "read the rules only while model_rules is on: a malformed %s rule refuses every call then, and none while it's off",
     async (_, malformed) => {
