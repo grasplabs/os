@@ -1,4 +1,5 @@
 import { actorOf } from "@grasp-os/shared/audit";
+import type { AuditActor } from "@grasp-os/shared/audit";
 import { collectionIdSchema } from "@grasp-os/shared/ids";
 import {
   collectionInputSchema,
@@ -12,7 +13,7 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
-import { auditedBatch, outboxed } from "../audit-outbox.ts";
+import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
 import { organizationId } from "../auth/auth.ts";
 import { teams } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
@@ -168,4 +169,37 @@ export const createCollection = async (
     }),
   ]);
   return toCollection(row, teamIds);
+};
+
+/**
+ * Creates the collection `row`, one the platform names (memory's), by
+ * `actor`, unless one with its ID exists already; audited only when it
+ * created it. Returns the collection under that ID, which is `row` unless
+ * it existed.
+ */
+export const ensureCollection = async (
+  env: Env,
+  row: CollectionRow,
+  actor: AuditActor
+): Promise<CollectionRow> => {
+  const db = drizzle(env.KNOWLEDGE);
+  const { access, sensitive, source } = row;
+  await auditedBatch(env, db, [
+    db.insert(collections).values(row).onConflictDoNothing(),
+    outboxedIfChanged(db, {
+      actor,
+      action: "knowledge.collection.created",
+      target: { type: "collection", id: row.id },
+      detail: { access, sensitive, source },
+    }),
+  ]);
+  const found = await db
+    .select()
+    .from(collections)
+    .where(eq(collections.id, row.id))
+    .get();
+  if (!found) {
+    throw new Error(`Collection ${row.id} is missing after creating it`);
+  }
+  return found;
 };

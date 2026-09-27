@@ -86,6 +86,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               apps: true,
               permissions: true,
               knowledge: true,
+              memory: true,
               connections: true,
               workflows: true,
               decisions: true,
@@ -95,6 +96,8 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               audit_retention: true,
               confirmations: true,
             },
+            // One memory limit set, the others at their defaults.
+            MEMORY_LIMITS: { "USER.md": 500 },
             // The gateway runs call the model through; tests fake the AI binding.
             MODEL_GATEWAY: {
               gateway: "grasp-os-test",

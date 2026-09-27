@@ -21,6 +21,7 @@
     "./knowledge": "./src/knowledge.ts",
     "./log": "./src/log.ts",
     "./members": "./src/members.ts",
+    "./memory": "./src/memory.ts",
     "./models": "./src/models.ts",
     "./permissions": "./src/permissions.ts",
     "./roles": "./src/roles.ts",

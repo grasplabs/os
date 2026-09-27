@@ -4,6 +4,7 @@ import type { ConnectionsApi, PendingActionsApi } from "./connect.ts";
 import type { DecisionsApi } from "./decisions.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
 import type { MembersApi } from "./members.ts";
+import type { MemoryApi } from "./memory.ts";
 import type { PermissionsApi } from "./permissions.ts";
 import type { Role } from "./roles.ts";
 import type { ScreensApi } from "./screens.ts";
@@ -45,6 +46,8 @@ export interface SessionApi {
   readonly apps: AppsApi;
   /** Knowledge: collections, documents and their versions. */
   readonly knowledge: KnowledgeApi;
+  /** Memory files: the collections that hold them. */
+  readonly memory: MemoryApi;
   /**
    * Accounts connected through OAuth: the person's own, and shared ones
    * (which only admins connect and disconnect).

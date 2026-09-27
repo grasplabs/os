@@ -1,4 +1,4 @@
-import type { AuditEntry } from "@grasp-os/shared/audit";
+import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
@@ -46,9 +46,11 @@ import type { CollectionRow } from "./collections.ts";
 import { FrontmatterError, parseFrontmatter } from "./frontmatter.ts";
 import { extractLinks, splitSections } from "./markdown.ts";
 import type { Link, Section } from "./markdown.ts";
+import { memoryFileOf, requireWithinLimit } from "./memory-files.ts";
 
-// Saving a document: its frontmatter is read and checked, its Markdown split
-// into sections and its links found, and then one D1 batch (a transaction)
+// Saving a document: its frontmatter is read and checked (and a memory
+// file's size, memory-files.ts), its Markdown split into sections and its
+// links found, and then one D1 batch (a transaction)
 // adds the next version, replaces the sections and links, updates the
 // document and stores the audit event. The batch commits whole or not at
 // all, and a save from a version that is no longer current writes nothing.
@@ -215,8 +217,43 @@ const findByPath = async (
     )
     .get();
 
+/**
+ * Reads `text` for the document at `path` in `collection`, refused as a
+ * save would refuse it: over a document's limits, frontmatter that doesn't
+ * fit its type, or, for a memory file, over that file's size limit.
+ */
+export const checkedText = async (
+  env: Env,
+  collection: CollectionRow,
+  path: string,
+  text: string
+): Promise<Prepared> => {
+  const prepared = prepare(path, text);
+  const memoryFile = await memoryFileOf(collection, path);
+  if (memoryFile !== undefined) {
+    requireWithinLimit(env, memoryFile, text);
+  }
+  return prepared;
+};
+
+/**
+ * Who saves a version: the audit log's actor, and the person the version
+ * is by (the author, and the owner of a new document without one in its
+ * frontmatter): a person saving themselves, or the one an agent acts for.
+ */
+export interface Writer {
+  actor: AuditActor;
+  userId: string;
+}
+
+/** A person, saving a version themselves. */
+export const personWriter = (person: Identity): Writer => ({
+  actor: actorOf(person),
+  userId: person.userId,
+});
+
 /** A new version of the document at `path` in `collection`. */
-interface Write {
+export interface Write {
   collection: CollectionRow;
   path: string;
   text: string;
@@ -230,13 +267,13 @@ interface Write {
  * (0: it doesn't exist yet). Throws `knowledge.conflict`, with the version
  * it is at, and writes nothing otherwise.
  */
-const writeVersion = async (
+export const writeVersion = async (
   env: Env,
-  person: Identity,
+  by: Writer,
   write: Write
 ): Promise<DocumentSummary> => {
   const { collection, path, text, ifVersion, message, restoredFrom } = write;
-  const prepared = prepare(path, text);
+  const prepared = await checkedText(env, collection, path, text);
   const db = drizzle(env.KNOWLEDGE);
   const existing = await findByPath(db, collection.id, path);
   if ((existing?.currentVersion ?? 0) !== ifVersion) {
@@ -249,7 +286,7 @@ const writeVersion = async (
     title: prepared.title,
     type: prepared.type,
     description: prepared.description,
-    owner: prepared.owner ?? existing?.owner ?? person.userId,
+    owner: prepared.owner ?? existing?.owner ?? by.userId,
     tags: JSON.stringify(prepared.tags),
     reviewDate: prepared.reviewDate,
     currentVersion: number,
@@ -263,7 +300,7 @@ const writeVersion = async (
     ...changes,
   };
   const entry: AuditEntry = {
-    actor: actorOf(person),
+    actor: by.actor,
     action:
       restoredFrom === null
         ? "knowledge.document.saved"
@@ -282,7 +319,7 @@ const writeVersion = async (
       documentId,
       number,
       text,
-      author: person.userId,
+      author: by.userId,
       message,
       restoredFrom,
       createdAt: now,
@@ -370,7 +407,7 @@ export const saveDocument = async (
     collectionId
   );
   requireWritable(person, collection);
-  return await writeVersion(env, person, {
+  return await writeVersion(env, personWriter(person), {
     collection,
     path,
     text,
@@ -408,7 +445,7 @@ export const restoreVersion = async (
   if (!restored) {
     throw knowledgeErrors.create("knowledge.not_found");
   }
-  return await writeVersion(env, person, {
+  return await writeVersion(env, personWriter(person), {
     collection,
     path: document.path,
     text: restored.text,

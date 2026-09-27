@@ -27,6 +27,8 @@ import { z } from "zod";
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
+import { featureEnabled } from "./features.ts";
+import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";
 
 // The App registry and each App's code. The registry, the versions and the
@@ -277,6 +279,25 @@ const checkLimits = (
   }
 };
 
+/**
+ * `knowledge.memory_too_large` if the App's AGENTS.md, which agents
+ * working on the App have in their context (knowledge/memory.ts), is over
+ * its limit, and only if it also grew, as with `checkLimits`. While
+ * `memory` is switched off, an App's AGENTS.md is a file like any other.
+ */
+const checkMemory = (
+  env: Env,
+  before: string | undefined,
+  after: string | undefined
+): void => {
+  const grew =
+    after !== undefined &&
+    (before === undefined || after.length > before.length);
+  if (grew && featureEnabled(env, "memory")) {
+    requireWithinLimit(env, "AGENTS.md", after);
+  }
+};
+
 /** The files of one of an App's versions. For the runtime and the compiler. */
 export const versionFiles = async (
   env: Env,
@@ -380,6 +401,7 @@ export const writeFiles = async (
   );
   const { files, revision } = await workingCopy(env, appId);
   const before = sizeOf(files);
+  const agentsBefore = files.get(appMemoryPath);
   const added = new Set(
     changes.flatMap(([path, content]) =>
       content === null || files.has(path) ? [] : [path]
@@ -394,6 +416,7 @@ export const writeFiles = async (
   }
   checkLimits(files, before);
   checkPaths(files.keys(), added);
+  checkMemory(env, agentsBefore, files.get(appMemoryPath));
 
   const db = drizzle(env.DB);
   const next = crypto.randomUUID();

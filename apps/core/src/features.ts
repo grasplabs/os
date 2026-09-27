@@ -14,9 +14,10 @@ import { z } from "zod";
 
 // A flag stops its feature everywhere core offers it: its `/rpc` namespace
 // (session-rpc.ts), and what App and workflow code reach of it: collection
-// stubs (`knowledge`), connection calls (`connections`), App methods
-// (`apps`), starting runs and every step of one (`workflows`), and opening
-// or asking a decision (`decisions`).
+// stubs (`knowledge`), an agent's memory and its saves of it (`memory`,
+// which gives every context no memory while off), connection calls
+// (`connections`), App methods (`apps`), starting runs and every step of
+// one (`workflows`), and opening or asking a decision (`decisions`).
 //
 // `workflows` and `decisions` never fail a run. Before each step, sleep
 // and wait, while `workflows` is off (or `decisions`, before a step that
@@ -35,6 +36,8 @@ export type Feature =
   | "apps"
   | "permissions"
   | "knowledge"
+  /** Memory files (knowledge/memory.ts); needs `knowledge` on too. */
+  | "memory"
   | "connections"
   | "workflows"
   | "decisions"
