@@ -1,4 +1,8 @@
-import { appErrors } from "@grasp-os/shared/apps";
+import {
+  appErrors,
+  appMethodPattern,
+  reservedAppMethods,
+} from "@grasp-os/shared/apps";
 import type { AppCaller } from "@grasp-os/shared/apps";
 import {
   isExpectedError,
@@ -57,34 +61,11 @@ const callTimeoutMs = (env: Env): number => {
 
 /**
  * A method App code exports: an identifier, and not one the Durable Object
- * runtime, RPC or `Object` gives a meaning of its own. A name on the facet
- * stub's prototype chain is refused too (see `call`).
+ * runtime, RPC or `Object` gives a meaning of its own (shared with the
+ * workflow SDK's typed stub of the App). A name on the facet stub's
+ * prototype chain is refused too (see `call`).
  */
-const methodName = /^[a-z][A-Za-z0-9]{0,63}$/u;
-const reservedMethods = new Set([
-  "alarm",
-  "connect",
-  "constructor",
-  "delete",
-  "dup",
-  "fetch",
-  "get",
-  "hasOwnProperty",
-  "id",
-  "isPrototypeOf",
-  "name",
-  "propertyIsEnumerable",
-  "put",
-  "queue",
-  "scheduled",
-  "then",
-  "toLocaleString",
-  "toString",
-  "valueOf",
-  "webSocketClose",
-  "webSocketError",
-  "webSocketMessage",
-]);
+const reservedMethods: ReadonlySet<string> = new Set(reservedAppMethods);
 
 /** Where the host counts starts on new code or permissions (`#load`, `restart`). */
 const generationKey = "generation";
@@ -272,7 +253,7 @@ export class App extends DurableObject<Env> {
     method: string,
     args: unknown[]
   ): Promise<AppAnswer> {
-    if (!methodName.test(method) || reservedMethods.has(method)) {
+    if (!appMethodPattern.test(method) || reservedMethods.has(method)) {
       throw appErrors.create("app.method_invalid", { method });
     }
     const token = crypto.randomUUID();

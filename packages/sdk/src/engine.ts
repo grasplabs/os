@@ -54,7 +54,8 @@ export type BindingMethod = (...args: Json[]) => Promise<unknown>;
  * What a run reaches outside its own code, by binding name: one binding per
  * permission of its App (a connection, say: `env.OUTLOOK.call(action,
  * input, { idempotencyKey })`), and its App's own server methods
- * (`env.APP.call(method, ...args)`). Each call is checked against the
+ * (`env.APP.call(method, ...args)`, or typed by the App's class with
+ * `appServer<App>(env)` from `@grasp-os/sdk/workflow`). Each call is checked against the
  * permissions as they are then, and acts for the person the run acts for.
  * They work only inside a step (a replay doesn't call them again), and a
  * connection call takes that step's `idempotencyKey` or none. An App

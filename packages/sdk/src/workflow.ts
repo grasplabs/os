@@ -1,3 +1,5 @@
+import { appMethodPattern, reservedAppMethods } from "@grasp-os/shared/apps";
+import type { ReservedAppMethod } from "@grasp-os/shared/apps";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { RunId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
@@ -10,6 +12,7 @@ import { z } from "zod";
 
 import type {
   Backoff,
+  BindingMethod,
   DecisionRecipient,
   EngineDecision,
   WorkflowEngine,
@@ -448,6 +451,155 @@ export interface WorkflowContext<P extends Params, Input> {
    */
   env: WorkflowEnv;
 }
+
+// The App's own server
+
+/** Names core refuses to call as an App's methods. */
+const reserved: ReadonlySet<string> = new Set(reservedAppMethods);
+
+/** Letters a method's name may start with (`appMethodPattern`). */
+type Lowercase =
+  | "a"
+  | "b"
+  | "c"
+  | "d"
+  | "e"
+  | "f"
+  | "g"
+  | "h"
+  | "i"
+  | "j"
+  | "k"
+  | "l"
+  | "m"
+  | "n"
+  | "o"
+  | "p"
+  | "q"
+  | "r"
+  | "s"
+  | "t"
+  | "u"
+  | "v"
+  | "w"
+  | "x"
+  | "y"
+  | "z";
+
+/** Characters a method's name may hold after its first (`appMethodPattern`). */
+type NameCharacter =
+  | Lowercase
+  | Uppercase<Lowercase>
+  | "0"
+  | "1"
+  | "2"
+  | "3"
+  | "4"
+  | "5"
+  | "6"
+  | "7"
+  | "8"
+  | "9";
+
+/** Whether every character of `Rest` is a letter or a digit. */
+type AllNameCharacters<Rest extends string> = Rest extends ""
+  ? true
+  : Rest extends `${infer First}${infer Others}`
+    ? First extends NameCharacter
+      ? AllNameCharacters<Others>
+      : false
+    : false;
+
+/**
+ * Names the stub leaves out though core would call them: `toJSON`, which
+ * `JSON.stringify` looks up on any object, so serializing a stub (to log
+ * it, say) must never call the App.
+ */
+type StubOnlyName = "toJSON";
+
+/**
+ * Whether core calls `Name` as a method of an App's server, and the stub
+ * offers it: it starts with a lowercase letter, holds only letters and
+ * digits, and is neither reserved (`reservedAppMethods`) nor `toJSON`.
+ * Names such as `__DURABLE_OBJECT_BRAND`, which a class that extends
+ * `DurableObject` has, or `set_status`, aren't. Types don't count, so a
+ * name longer than `appMethodPattern`'s 64 characters still types, and
+ * core refuses it with `app.method_invalid`.
+ */
+type IsAppMethod<Name> = Name extends `${Lowercase}${infer Rest}`
+  ? Name extends ReservedAppMethod | StubOnlyName
+    ? false
+    : AllNameCharacters<Rest>
+  : false;
+
+/**
+ * The methods of an App's server class `Server` as a workflow calls them:
+ * without the caller, which core passes first, answering what each
+ * answers. Only names core calls (`IsAppMethod`) and only functions.
+ */
+export type AppServer<Server> = {
+  readonly [
+    Name in keyof Server as IsAppMethod<Name> extends true
+      ? Server[Name] extends (...args: never[]) => unknown
+        ? Name
+        : never
+      : never
+  ]: Server[Name] extends (caller: never, ...args: infer Args) => infer Answer
+    ? (...args: Args) => Promise<Awaited<Answer>>
+    : never;
+};
+
+/**
+ * A typed stub of the run's own App's server methods (`app/server.ts`):
+ * `appServer<App>(env).setStatus("INV-7", "booked")` is
+ * `env.APP.call("setStatus", "INV-7", "booked")`, typed by the App's
+ * class, which a workflow imports as a type only:
+ *
+ * ```ts
+ * import type { App } from "../app/server.ts";
+ *
+ * await step.do("book", { description: "Book it", sideEffect: true }, async () => {
+ *   await appServer<App>(env).setStatus(input.invoice, "booked");
+ * });
+ * ```
+ *
+ * Like `env.APP`, it works only inside a step, and acts for the person the
+ * run acts for. Within one App no permission is needed. What the method
+ * writes reaches the App's open screens as the App tells them (the
+ * live updates of `@grasp-os/sdk/screen`).
+ */
+export const appServer = <Server = Record<string, BindingMethod>>(
+  env: WorkflowEnv
+): AppServer<Server> => {
+  const method =
+    (name: string): BindingMethod =>
+    async (...args) => {
+      const app = env.APP;
+      if (app?.call === undefined) {
+        throw invalidCall("The run has no App to call (env.APP)");
+      }
+      return await app.call(name, ...args);
+    };
+  // SAFETY: every name `AppServer` has is a method that calls the App's
+  // method of that name; core checks the name again, and refuses one the
+  // App doesn't have.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+  return new Proxy(
+    {},
+    {
+      // Only names core calls, as `AppServer` has them: nothing for a
+      // symbol, `then` (so a stub can be awaited as a value), `toJSON` (so
+      // serializing it calls nothing) or any other name core refuses.
+      get: (_target, name): BindingMethod | undefined =>
+        typeof name === "string" &&
+        appMethodPattern.test(name) &&
+        !reserved.has(name) &&
+        name !== "toJSON"
+          ? method(name)
+          : undefined,
+    }
+  ) as AppServer<Server>;
+};
 
 // Definition
 

@@ -1,8 +1,9 @@
 /* oxlint-disable require-await -- fakes of async interfaces answer right away */
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { createTestState } from "../src/testing.ts";
+import { createTestState, testRun } from "../src/testing.ts";
 import {
+  appServer,
   model,
   money,
   number,
@@ -926,5 +927,93 @@ describe("idempotency keys", () => {
     // Two writes, two different keys.
     expect(keys).toHaveLength(2);
     expect(new Set(keys).size).toBe(2);
+  });
+});
+
+describe(appServer, () => {
+  /** The App's server, as a class a workflow imports as a type. */
+  interface InvoiceApp {
+    setStatus: (
+      caller: { userId: string },
+      invoice: string,
+      status: string
+    ) => string;
+  }
+
+  /** A workflow that books `invoice` through its App's typed stub. */
+  const booking = workflow(
+    "booking",
+    { params: noParams, input: z.string() },
+    async (step, { env, input }) =>
+      await step.do("book", { description: "Book it" }, async () => {
+        // Awaited as a value first: the stub is no thenable.
+        const app = await Promise.resolve(appServer<InvoiceApp>(env));
+        return await app.setStatus(input, "booked");
+      })
+  );
+
+  it("calls the run's App's method of that name with the arguments", async () => {
+    const calls: unknown[][] = [];
+    const run = await testRun(booking, {
+      input: "INV-7",
+      env: {
+        APP: {
+          call: async (...args) => {
+            calls.push(args);
+            return "booked INV-7";
+          },
+        },
+      },
+    });
+
+    expect({ run: run.status, calls }).toStrictEqual({
+      run: "completed",
+      calls: [["setStatus", "INV-7", "booked"]],
+    });
+    expect(run).toMatchObject({ output: "booked INV-7" });
+  });
+
+  it("calls nothing when it's serialized, awaited or asked for a name core refuses", async () => {
+    const calls: unknown[][] = [];
+    const stub = appServer({
+      APP: {
+        call: async (...args) => {
+          calls.push(args);
+          return null;
+        },
+      },
+    });
+    // Names core refuses, and `toJSON`: none is a method of the stub.
+    const methods = [
+      "then",
+      "toJSON",
+      "toString",
+      "set_status",
+      "Upper",
+    ].filter((name) => Reflect.get(stub, name) !== undefined);
+
+    expect({
+      json: JSON.stringify(stub),
+      awaited: (await Promise.resolve(stub)) === stub,
+      methods,
+      symbol: typeof Reflect.get(stub, Symbol.toPrimitive),
+      // Read last, after everything above.
+      calls,
+    }).toStrictEqual({
+      json: "{}",
+      awaited: true,
+      methods: [],
+      symbol: "undefined",
+      calls: [],
+    });
+  });
+
+  it("fails the step with a workflow error when the run has no App to call", async () => {
+    const run = await testRun(booking, { input: "INV-7" });
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "workflow.invalid_step_call" },
+    });
   });
 });

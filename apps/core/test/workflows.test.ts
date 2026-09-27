@@ -89,9 +89,12 @@ const extractionModel = "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 /**
  * The sample invoice workflow, as an App ships it: it matches the purchase
  * order, reads the total with a model, asks a reviewer above a threshold
- * and books the invoice, through its App's server code.
+ * and books the invoice, through its App's server code, typed by the
+ * App's own class (`appServer`).
  */
-const invoiceWorkflow = `import { model, money, person, workflow, z } from "@grasp-os/sdk/workflow";
+const invoiceWorkflow = `import { appServer, model, money, person, workflow, z } from "@grasp-os/sdk/workflow";
+
+import type { App } from "../app/server.ts";
 
 export default workflow(
   "invoice-approval",
@@ -107,7 +110,7 @@ export default workflow(
     const order = await step.do(
       "match-po",
       { description: "Find the purchase order the invoice refers to", locked: true, input: input.purchaseOrder },
-      async ({ input: number }) => await env.APP.call("purchaseOrder", number)
+      async ({ input: number }) => await appServer<App>(env).purchaseOrder(number)
     );
     if (!order) {
       return { status: "unmatched" };
@@ -139,7 +142,7 @@ export default workflow(
         locked: true,
         input: { invoice: input.number, total: extracted.total },
       },
-      async ({ idempotencyKey, input: booking }) => await env.APP.call("book", booking, idempotencyKey)
+      async ({ idempotencyKey, input: booking }) => await appServer<App>(env).book(booking, idempotencyKey)
     );
     return { status: "booked", entry };
   }

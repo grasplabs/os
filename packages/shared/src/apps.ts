@@ -320,6 +320,46 @@ export const appErrors = defineErrorFamily({
 });
 
 /**
+ * Names an App's server class may have that aren't methods core calls:
+ * the ones the Durable Object runtime, RPC or `Object` give a meaning of
+ * their own. Core refuses them (`App.call`), and the workflow SDK's typed
+ * stub of the App leaves them out (`appServer`).
+ */
+export const reservedAppMethods = [
+  "alarm",
+  "connect",
+  "constructor",
+  "delete",
+  "dup",
+  "fetch",
+  "get",
+  "hasOwnProperty",
+  "id",
+  "isPrototypeOf",
+  "name",
+  "propertyIsEnumerable",
+  "put",
+  "queue",
+  "scheduled",
+  "then",
+  "toLocaleString",
+  "toString",
+  "valueOf",
+  "webSocketClose",
+  "webSocketError",
+  "webSocketMessage",
+] as const;
+
+/** A name core refuses to call as an App's method (`reservedAppMethods`). */
+export type ReservedAppMethod = (typeof reservedAppMethods)[number];
+
+/**
+ * A name core calls as an App's method: an identifier that starts with a
+ * lowercase letter, of at most 64 letters and digits, and not reserved.
+ */
+export const appMethodPattern = /^[a-z][A-Za-z0-9]{0,63}$/u;
+
+/**
  * Who calls a method of an App's server code. The platform passes it as
  * the method's first argument, from the person's session or the workflow
  * run: App code never chooses it. The App passes it on to its connections
