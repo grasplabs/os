@@ -5,10 +5,14 @@ import type {
   DocumentPage,
   DocumentRead,
   DocumentSummary,
+  FollowResult,
   HistoryOptions,
   HistoryPage,
   KnowledgeApi,
+  KnowledgeCatalog,
+  KnowledgeRead,
   ListDocumentsOptions,
+  ReadOptions,
   RestoreInput,
   SaveInput,
   SearchOptions,
@@ -29,6 +33,7 @@ import {
   saveDocument,
 } from "./documents.ts";
 import { search } from "./search.ts";
+import { catalog, follow, read } from "./tools.ts";
 
 /**
  * Knowledge for a signed-in person over `/rpc`. Like the session API, it
@@ -121,6 +126,27 @@ export class KnowledgeRpc extends RpcTarget implements KnowledgeApi {
   async search(query: string, options?: SearchOptions): Promise<SearchResults> {
     return await this.#asReader(
       async (reader) => await search(this.#env, reader, query, options)
+    );
+  }
+
+  async catalog(): Promise<KnowledgeCatalog> {
+    return await this.#asReader(
+      async (reader) => await catalog(this.#env, reader)
+    );
+  }
+
+  async read(
+    documentId: string,
+    options?: ReadOptions
+  ): Promise<KnowledgeRead> {
+    return await this.#asReader(
+      async (reader) => await read(this.#env, reader, documentId, options)
+    );
+  }
+
+  async follow(documentId: string): Promise<FollowResult> {
+    return await this.#asReader(
+      async (reader) => await follow(this.#env, reader, documentId)
     );
   }
 }

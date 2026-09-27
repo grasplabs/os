@@ -1,3 +1,9 @@
+import {
+  actorOf,
+  auditProvenanceMaxItems,
+  delegateActorOf,
+} from "@grasp-os/shared/audit";
+import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
 import { collectionIdSchema } from "@grasp-os/shared/ids";
 import type { PermissionId } from "@grasp-os/shared/ids";
 import type { Provenance } from "@grasp-os/shared/knowledge";
@@ -6,8 +12,10 @@ import type { Authority } from "@grasp-os/shared/permissions";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, eq, exists, ne, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
+import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
+import { keepAuditEvent } from "../audit-outbox.ts";
 import { teamsOf } from "../auth/identity.ts";
 import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
@@ -24,9 +32,10 @@ import type { WorkContext } from "../restricted.ts";
 // they own. An App or agent reads the collections it has a permission to
 // read, never a personal one, and of those only the ones the person it
 // acts for may read too
-// (R5): a grant never reaches past that person. What it reads is marked
-// with where it came from, and restricted data puts the chat or App it
-// works in in restricted mode (`noteProvenance`).
+// (R5): a grant never reaches past that person. What anyone reads is
+// marked with where it came from and recorded in the audit log, and
+// restricted data puts the chat or App an App or agent works in in
+// restricted mode (`noteProvenance`).
 
 /**
  * Who reads Knowledge: a signed-in person, or an App or agent acting for
@@ -137,18 +146,45 @@ export const allowedCollections = async (
   );
 };
 
+/** Who read, as the audit log names them. */
+export const readerActor = (reader: Reader): AuditActor =>
+  reader.type === "person"
+    ? actorOf(reader.person)
+    : delegateActorOf(reader.authority);
+
+/**
+ * A read, as the audit log records it: which read (`knowledge.read`, with
+ * `detail.read` naming it, or a search), what it was of, and the documents
+ * it returned beyond that (a search's hits). Identifiers and counts only,
+ * never what was read or searched for.
+ */
+export interface ReadRecord {
+  action: "knowledge.read" | "knowledge.search" | "knowledge.search.empty";
+  target?: { type: "document" | "collection"; id: string };
+  documentIds?: string[];
+  detail: Record<string, AuditDetailValue>;
+}
+
 /**
  * Notes where what `reader` read came from, `sources` (a collection, or
  * those a search found something in; none when it found nothing), and
  * returns the read's provenance. Call it after the read and before handing
  * over what it returned: an App or agent that read restricted data puts
  * its chat or App in restricted mode first, so the data never reaches
- * anything that can still call out. If that fails, the read fails. The
- * read itself isn't audited yet; entering restricted mode is (restricted.ts).
+ * anything that can still call out. If that fails, the read fails, and
+ * isn't recorded as one (entering restricted mode is, in restricted.ts).
+ *
+ * Then the read is recorded (R16), whoever read, staff included: `record`,
+ * with the collections it read from and the documents it names as the
+ * event's provenance, and whether any was sensitive. Through the Knowledge
+ * outbox, which never fails the read (`keepAuditEvent`): what was read is
+ * read, and a read that can't be recorded there goes straight to the log,
+ * or to the logs.
  */
 export const noteProvenance = async (
   env: Env,
   reader: Reader,
+  record: ReadRecord,
   ...sources: { id: string; sensitive: boolean }[]
 ): Promise<Provenance> => {
   const sensitive = sources.some((source) => source.sensitive);
@@ -168,6 +204,18 @@ export const noteProvenance = async (
       provenance.collectionIds
     );
   }
+  const { action, target, documentIds = [], detail } = record;
+  await keepAuditEvent(env, drizzle(env.KNOWLEDGE), {
+    actor: readerActor(reader),
+    action,
+    target,
+    // At most one collection per document a search returns, and a search
+    // returns at most `searchMaxLimit` (50): both fit.
+    provenance: [
+      ...new Set([...provenance.collectionIds, ...documentIds]),
+    ].slice(0, auditProvenanceMaxItems),
+    detail: { ...detail, sensitive },
+  });
   return provenance;
 };
 

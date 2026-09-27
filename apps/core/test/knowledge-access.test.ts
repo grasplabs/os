@@ -97,7 +97,7 @@ const readerIn = (bindings: Env, binding = "HANDBOOK"): CollectionReader => {
 
 /**
  * Every read of a collection stub, on `noteId`. The stub's own collection
- * comes first and last: its listing and a search in it.
+ * comes first and sixth: its listing and a search in it.
  */
 const everyRead = async (reader: CollectionReader, noteId: string) =>
   await Promise.all([
@@ -107,9 +107,11 @@ const everyRead = async (reader: CollectionReader, noteId: string) =>
     outcome(reader.history(noteId)),
     outcome(reader.backlinks(noteId)),
     outcome(reader.search("note")),
+    outcome(reader.read(noteId, { section: 0 })),
+    outcome(reader.follow(noteId)),
   ]);
 
-const everyReadIs = (code: string) => Array.from({ length: 6 }, () => code);
+const everyReadIs = (code: string) => Array.from({ length: 8 }, () => code);
 
 /** A fetch from Outlook, from an env. */
 const callOutlook = async (bindings: Env) => {
@@ -206,6 +208,8 @@ describe("Apps and agents reading Knowledge", setUpTime, () => {
         "ok",
         ...Array.from({ length: 4 }, () => "knowledge.not_found"),
         "ok",
+        "knowledge.not_found",
+        "knowledge.not_found",
       ],
     });
     // Both collections have a `note.md`: only its own is listed or found.
@@ -608,7 +612,7 @@ describe("restricted mode", setUpTime, () => {
     });
   });
 
-  it("is entered by listings, history, backlinks and searches too, also those that find nothing", async () => {
+  it("is entered by listings, history, backlinks, searches, sections and follows too, also those that find nothing", async () => {
     const { admin, subject, sensitive } = await setUp();
     // What finds nothing in a sensitive collection still tells something
     // of it: a search for a word, or for a version, candidate by candidate.
@@ -624,6 +628,11 @@ describe("restricted mode", setUpTime, () => {
       async (reader: CollectionReader) => await reader.search(""),
       async (reader: CollectionReader) =>
         await reader.getDocument(sensitive.noteId, 99),
+      async (reader: CollectionReader) =>
+        await reader.read(sensitive.noteId, { section: 0 }),
+      async (reader: CollectionReader) =>
+        await reader.read(sensitive.noteId, { section: 99 }),
+      async (reader: CollectionReader) => await reader.follow(sensitive.noteId),
     ];
     const results = await Promise.all(
       reads.map(async (read) => {

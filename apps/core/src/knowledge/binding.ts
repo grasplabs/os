@@ -4,7 +4,9 @@ import type {
   CollectionReader,
   DocumentPage,
   DocumentRead,
+  FollowResult,
   HistoryPage,
+  KnowledgeRead,
   SearchResults,
 } from "@grasp-os/shared/knowledge";
 import type { Authority } from "@grasp-os/shared/permissions";
@@ -16,6 +18,7 @@ import type { WorkContext } from "../restricted.ts";
 import type { Reader } from "./access.ts";
 import { backlinks, getDocument, history, listDocuments } from "./documents.ts";
 import { search } from "./search.ts";
+import { follow, read } from "./tools.ts";
 
 /** A collection permission, as a stub holds it, and where it works. */
 export interface CollectionGrant {
@@ -35,59 +38,82 @@ interface CollectionReads {
   history: (documentId: unknown, options?: unknown) => Promise<HistoryPage>;
   backlinks: (documentId: unknown, options?: unknown) => Promise<BacklinkPage>;
   search: (query: unknown, options?: unknown) => Promise<SearchResults>;
+  read: (documentId: unknown, options?: unknown) => Promise<KnowledgeRead>;
+  follow: (documentId: unknown) => Promise<FollowResult>;
 }
 
 /**
- * The reads of the collection `grant` is for, as `authority` (or as whoever
- * it resolves to on each read, which may refuse), with errors as the
- * sandbox sees them. Every read goes through `allowedCollections`
- * (access.ts) as a delegate: only while the permission allows reading,
- * only its own collection, and only what the person it acts for may read
- * too. And only while `knowledge` is switched on: every collection stub
- * reads through here.
+ * Runs one read of sandbox code as a delegate: `authority` (or whoever it
+ * resolves to on each read, which may refuse) working in `context`, under
+ * the permission `permissionId` only, or under all it has to read. Every
+ * read goes through `allowedCollections` (access.ts) as a delegate: only
+ * while a permission allows reading, and only what the person it acts for
+ * may read too. And only while `knowledge` is switched on: every stub
+ * reads through here. Errors are as the sandbox sees them.
+ */
+export const readAsDelegate = async <T>(
+  env: Env,
+  authority: Authority | (() => Promise<Authority>),
+  context: WorkContext,
+  permissionId: PermissionId | undefined,
+  run: (reader: Reader) => Promise<T>
+): Promise<T> => {
+  requireFeature(env, "knowledge");
+  try {
+    return await run({
+      type: "delegate",
+      authority:
+        typeof authority === "function" ? await authority() : authority,
+      context,
+      permissionId,
+    });
+  } catch (error) {
+    throw forSandbox(error);
+  }
+};
+
+/**
+ * The reads of the collection `grant` is for, as `authority`, each through
+ * `readAsDelegate` under the grant's permission: only its own collection.
  */
 export const collectionReads = (
   env: Env,
   authority: Authority | (() => Promise<Authority>),
   { context, permissionId, collectionId }: CollectionGrant
 ): CollectionReads => {
-  const read = async <T>(run: (reader: Reader) => Promise<T>): Promise<T> => {
-    requireFeature(env, "knowledge");
-    try {
-      return await run({
-        type: "delegate",
-        authority:
-          typeof authority === "function" ? await authority() : authority,
-        context,
-        permissionId,
-      });
-    } catch (error) {
-      throw forSandbox(error);
-    }
-  };
+  const asDelegate = async <T>(
+    run: (reader: Reader) => Promise<T>
+  ): Promise<T> =>
+    await readAsDelegate(env, authority, context, permissionId, run);
   return {
     listDocuments: async (options) =>
-      await read(
+      await asDelegate(
         async (reader) =>
           await listDocuments(env, reader, collectionId, options)
       ),
     getDocument: async (documentId, version) =>
-      await read(
+      await asDelegate(
         async (reader) => await getDocument(env, reader, documentId, version)
       ),
     history: async (documentId, options) =>
-      await read(
+      await asDelegate(
         async (reader) => await history(env, reader, documentId, options)
       ),
     backlinks: async (documentId, options) =>
-      await read(
+      await asDelegate(
         async (reader) => await backlinks(env, reader, documentId, options)
       ),
     search: async (query, options) =>
-      await read(
+      await asDelegate(
         async (reader) =>
           await search(env, reader, query, options, collectionId)
       ),
+    read: async (documentId, options) =>
+      await asDelegate(
+        async (reader) => await read(env, reader, documentId, options)
+      ),
+    follow: async (documentId) =>
+      await asDelegate(async (reader) => await follow(env, reader, documentId)),
   };
 };
 
@@ -132,5 +158,13 @@ export class CollectionBinding
 
   async search(query: unknown, options?: unknown): Promise<SearchResults> {
     return await this.#reads.search(query, options);
+  }
+
+  async read(documentId: unknown, options?: unknown): Promise<KnowledgeRead> {
+    return await this.#reads.read(documentId, options);
+  }
+
+  async follow(documentId: unknown): Promise<FollowResult> {
+    return await this.#reads.follow(documentId);
   }
 }

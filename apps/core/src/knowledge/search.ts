@@ -1,5 +1,3 @@
-import type { AuditEntry } from "@grasp-os/shared/audit";
-import { actorOf, delegateActorOf } from "@grasp-os/shared/audit";
 import { toHex } from "@grasp-os/shared/encoding";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
@@ -15,10 +13,9 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { keepAuditEvent } from "../audit-outbox.ts";
 import { derivedHmacKey } from "../derived-keys.ts";
 import { allowedCollections, noteProvenance } from "./access.ts";
-import type { Reader } from "./access.ts";
+import type { Reader, ReadRecord } from "./access.ts";
 import { readableCollection } from "./collections.ts";
 
 // Full-text search over sections, in two FTS5 indexes kept by triggers on
@@ -249,35 +246,42 @@ const queryKey = async (env: Env, terms: string[]): Promise<string> => {
 };
 
 /**
- * Records a search that found nothing the reader may read, for the usage
- * signals that tell owners what's missing: who searched, where, how many
- * words, and a key to group the same question by. Never the words
- * themselves: people search for people, and the audit log keeps
+ * A search, as the audit log records it (`noteProvenance`): who searched,
+ * where, and the documents it returned. One that found nothing the reader
+ * may read feeds the usage signals that tell owners what's missing, so it
+ * has how many words and a key to group the same question by. Never the
+ * words themselves: people search for people, and the audit log keeps
  * everything for good.
  */
-const recordNothingFound = async (
+const searchRecord = async (
   env: Env,
-  reader: Reader,
   terms: string[],
-  collectionId: string | undefined
-): Promise<void> => {
-  const entry: AuditEntry = {
-    actor:
-      reader.type === "person"
-        ? actorOf(reader.person)
-        : delegateActorOf(reader.authority),
-    action: "knowledge.search.empty",
-    ...(collectionId === undefined
-      ? {}
-      : { target: { type: "collection", id: collectionId } }),
-    detail: { terms: terms.length, queryKey: await queryKey(env, terms) },
+  collectionId: string | undefined,
+  hits: { documentId: string }[]
+): Promise<ReadRecord> => {
+  const target =
+    collectionId === undefined
+      ? undefined
+      : { type: "collection" as const, id: collectionId };
+  if (hits.length === 0) {
+    return {
+      action: "knowledge.search.empty",
+      target,
+      detail: { terms: terms.length, queryKey: await queryKey(env, terms) },
+    };
+  }
+  return {
+    action: "knowledge.search",
+    target,
+    documentIds: hits.map(({ documentId }) => documentId),
+    detail: { terms: terms.length, hits: hits.length },
   };
-  await keepAuditEvent(env, drizzle(env.KNOWLEDGE), entry);
 };
 
 /**
  * The sections that match `query`, best first, in the collections `reader`
- * may read, or in the one `options` names. A collection's stub passes its
+ * may read, or in the one `options` names, and of the document type it
+ * names, if any. A collection's stub passes its
  * own as `only`, and its options can't name another.
  */
 export const search = async (
@@ -290,17 +294,20 @@ export const search = async (
   const terms = termsOf(
     knowledgeErrors.parse("knowledge.invalid", searchQuerySchema, query)
   );
-  const { collectionId: scope, limit } =
-    only === undefined
-      ? knowledgeErrors.parse("knowledge.invalid", searchOptionsSchema, options)
-      : {
-          ...knowledgeErrors.parse(
-            "knowledge.invalid",
-            collectionSearchOptionsSchema,
-            options
-          ),
-          collectionId: only,
-        };
+  const {
+    collectionId: scope,
+    type,
+    limit,
+  } = only === undefined
+    ? knowledgeErrors.parse("knowledge.invalid", searchOptionsSchema, options)
+    : {
+        ...knowledgeErrors.parse(
+          "knowledge.invalid",
+          collectionSearchOptionsSchema,
+          options
+        ),
+        collectionId: only,
+      };
   const db = drizzle(env.KNOWLEDGE);
   const allowed = await allowedCollections(env, db, reader);
   // Refused like any read of a collection the reader can't read. A search
@@ -314,7 +321,12 @@ export const search = async (
   if (terms.length === 0) {
     return {
       hits: [],
-      provenance: await noteProvenance(env, reader, ...scoped),
+      provenance: await noteProvenance(
+        env,
+        reader,
+        await searchRecord(env, terms, scope, []),
+        ...scoped
+      ),
     };
   }
   const now = Date.now();
@@ -343,6 +355,7 @@ export const search = async (
       JOIN collections ON collections.id = documents.collection_id
       WHERE ${allowed}
         ${scope === undefined ? sql`` : sql`AND collections.id = ${scope}`}
+        ${type === undefined ? sql`` : sql`AND documents.type = ${type}`}
     ),
     found AS (
       SELECT * FROM readable
@@ -378,12 +391,10 @@ export const search = async (
       ranked.in_document
   `);
   const found = z.array(hitRowSchema).parse(rows);
-  if (found.length === 0) {
-    await recordNothingFound(env, reader, terms, scope);
-  }
   const provenance = await noteProvenance(
     env,
     reader,
+    await searchRecord(env, terms, scope, found),
     ...scoped,
     ...found.map((row) => ({
       id: row.collectionId,

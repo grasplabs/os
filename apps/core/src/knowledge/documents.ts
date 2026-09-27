@@ -11,6 +11,7 @@ import {
   versionInputSchema,
 } from "@grasp-os/shared/knowledge";
 import type {
+  Backlink,
   BacklinkPage,
   DocumentPage,
   DocumentRead,
@@ -67,7 +68,7 @@ const documentMaxLinks = 500;
 /** D1 binds at most 100 parameters to one statement. */
 const maxBoundParameters = 100;
 
-type DocumentRow = typeof documents.$inferSelect;
+export type DocumentRow = typeof documents.$inferSelect;
 
 /** What a save writes, read from the text. */
 interface Prepared {
@@ -159,7 +160,7 @@ const inChunks = <Row extends object>(rows: Row[]): Row[][] => {
 
 const tagsSchema = z.array(z.string());
 
-const toSummary = (row: DocumentRow): DocumentSummary => ({
+export const toSummary = (row: DocumentRow): DocumentSummary => ({
   id: documentIdSchema.parse(row.id),
   collectionId: collectionIdSchema.parse(row.collectionId),
   path: row.path,
@@ -334,7 +335,7 @@ const writeVersion = async (
  * The document with `documentId` and its collection, if it is in one of the
  * `allowed` collections. A malformed ID is one that doesn't exist.
  */
-const readableDocument = async (
+export const readableDocument = async (
   db: DrizzleD1Database,
   allowed: SQL,
   documentId: unknown
@@ -459,7 +460,16 @@ export const getDocument = async (
   // Recorded before a missing version is refused: that a version isn't
   // there says something of the document too, so a sensitive one
   // restricts the reader either way.
-  const provenance = await noteProvenance(env, reader, collection);
+  const provenance = await noteProvenance(
+    env,
+    reader,
+    {
+      action: "knowledge.read",
+      target: { type: "document", id: document.id },
+      detail: { read: "document", version: number ?? document.currentVersion },
+    },
+    collection
+  );
   if (row === null) {
     throw knowledgeErrors.create("knowledge.not_found");
   }
@@ -495,7 +505,16 @@ export const listDocuments = async (
     )
     .orderBy(asc(documents.path))
     .limit(limit);
-  const provenance = await noteProvenance(env, reader, collection);
+  const provenance = await noteProvenance(
+    env,
+    reader,
+    {
+      action: "knowledge.read",
+      target: { type: "collection", id: collection.id },
+      detail: { read: "documents", count: rows.length },
+    },
+    collection
+  );
   return {
     documents: rows.map(({ document }) => toSummary(document)),
     provenance,
@@ -535,36 +554,33 @@ export const history = async (
     )
     .orderBy(desc(versions.number))
     .limit(limit);
-  const provenance = await noteProvenance(env, reader, collection);
+  const provenance = await noteProvenance(
+    env,
+    reader,
+    {
+      action: "knowledge.read",
+      target: { type: "document", id: document.id },
+      detail: { read: "history", count: rows.length },
+    },
+    collection
+  );
   return { versions: rows.map(toVersionSummary), provenance };
 };
 
 const linking = alias(documents, "linking");
 
 /**
- * A page of the documents that link to this one, in path order after
- * `after`: only those in collections `reader` may read. Links name paths in
- * their own collection, so a path is enough to page by, and every backlink
- * is in the document's own collection: the read's provenance.
+ * The documents that link to `document`, in path order after `after`: only
+ * those in collections that are `allowed`. Links name paths in their own
+ * collection, so a path is enough to page by, and every backlink is in the
+ * document's own collection: the read's provenance.
  */
-export const backlinks = async (
-  env: Env,
-  reader: Reader,
-  documentId: unknown,
-  options?: unknown
-): Promise<BacklinkPage> => {
-  const { after, limit } = knowledgeErrors.parse(
-    "knowledge.invalid",
-    listDocumentsOptionsSchema,
-    options
-  );
-  const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedCollections(env, db, reader);
-  const { document, collection } = await readableDocument(
-    db,
-    allowed,
-    documentId
-  );
+export const backlinkRows = async (
+  db: DrizzleD1Database,
+  allowed: SQL,
+  document: DocumentRow,
+  { after, limit }: { after?: string; limit: number }
+): Promise<Backlink[]> => {
   const rows = await db
     .select({
       documentId: linking.id,
@@ -590,13 +606,42 @@ export const backlinks = async (
     )
     .orderBy(asc(linking.path))
     .limit(limit);
-  const provenance = await noteProvenance(env, reader, collection);
-  return {
-    backlinks: rows.map((row) => ({
-      ...row,
-      documentId: documentIdSchema.parse(row.documentId),
-      collectionId: collectionIdSchema.parse(row.collectionId),
-    })),
-    provenance,
-  };
+  return rows.map((row) => ({
+    ...row,
+    documentId: documentIdSchema.parse(row.documentId),
+    collectionId: collectionIdSchema.parse(row.collectionId),
+  }));
+};
+
+/** A page of the documents that link to this one (`backlinkRows`). */
+export const backlinks = async (
+  env: Env,
+  reader: Reader,
+  documentId: unknown,
+  options?: unknown
+): Promise<BacklinkPage> => {
+  const page = knowledgeErrors.parse(
+    "knowledge.invalid",
+    listDocumentsOptionsSchema,
+    options
+  );
+  const db = drizzle(env.KNOWLEDGE);
+  const allowed = await allowedCollections(env, db, reader);
+  const { document, collection } = await readableDocument(
+    db,
+    allowed,
+    documentId
+  );
+  const found = await backlinkRows(db, allowed, document, page);
+  const provenance = await noteProvenance(
+    env,
+    reader,
+    {
+      action: "knowledge.read",
+      target: { type: "document", id: document.id },
+      detail: { read: "backlinks", count: found.length },
+    },
+    collection
+  );
+  return { backlinks: found, provenance };
 };

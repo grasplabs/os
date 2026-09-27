@@ -22,6 +22,7 @@ import type {
   CollectionBinding,
   CollectionGrant,
 } from "./knowledge/binding.ts";
+import type { KnowledgeBinding } from "./knowledge/tools-binding.ts";
 import { authorize, grantedPermissions } from "./permissions.ts";
 import { isRestricted } from "./restricted.ts";
 import type { WorkContext } from "./restricted.ts";
@@ -290,6 +291,12 @@ const collectionStubOf = (authority: Authority, context: WorkContext) => {
  * `authority.onBehalfOf` and keeping its restricted mode in `context`.
  * Throws `permission.person_inactive` when that person has left.
  *
+ * With a permission to read a collection, it also has `KNOWLEDGE`, the
+ * agent's Knowledge tools across all of them (`KnowledgeBinding`); a
+ * permission can't take that name, which is core's own binding's. Without
+ * one, it has nothing to read, so the env stays as empty as its
+ * permissions.
+ *
  * That fits an agent, which acts for one person. A workflow run gets
  * `runBindingsFor`, and an App, which serves many people at once,
  * `appBindings`.
@@ -299,19 +306,36 @@ export const bindingsFor = async (
   authority: Authority,
   context: WorkContext
 ): Promise<
-  Record<string, Fetcher<ConnectionBinding> | Fetcher<CollectionBinding>>
+  Record<
+    string,
+    | Fetcher<ConnectionBinding>
+    | Fetcher<CollectionBinding>
+    | Fetcher<KnowledgeBinding>
+  >
 > => {
   const grantOf = connectionGrantOf(context);
   const collectionOf = collectionStubOf(authority, context);
-  return stubsOf<Fetcher<ConnectionBinding> | Fetcher<CollectionBinding>>(
-    await grantedPermissions(env, authority),
-    (permission) => {
-      const grant = grantOf(permission);
-      return grant === undefined
-        ? collectionOf(permission)
-        : exports.ConnectionBinding({ props: { ...grant, authority } });
-    }
+  const permissions = await grantedPermissions(env, authority);
+  const stubs = stubsOf<
+    Fetcher<ConnectionBinding> | Fetcher<CollectionBinding>
+  >(permissions, (permission) => {
+    const grant = grantOf(permission);
+    return grant === undefined
+      ? collectionOf(permission)
+      : exports.ConnectionBinding({ props: { ...grant, authority } });
+  });
+  const readsKnowledge = permissions.some(
+    ({ object, actions }) =>
+      object.type === "collection" && actions.includes("read")
   );
+  return readsKnowledge
+    ? {
+        ...stubs,
+        KNOWLEDGE: exports.KnowledgeBinding({
+          props: { authority, context },
+        }),
+      }
+    : stubs;
 };
 
 /**

@@ -159,6 +159,8 @@ export class App extends DurableObject {
       outcome(collection.history(who, documentId)),
       outcome(collection.backlinks(who, documentId)),
       outcome(collection.search(who, "note")),
+      outcome(collection.read(who, documentId, { section: 0 })),
+      outcome(collection.follow(who, documentId)),
     ]);
   }
 
@@ -857,7 +859,7 @@ const knowledgeOf = (person: Builder): { knowledge: KnowledgeApi } => {
 };
 
 /** What each of the sample App's reads (`reads`) ended with. */
-const everyReadIs = (code: string) => Array.from({ length: 5 }, () => code);
+const everyReadIs = (code: string) => Array.from({ length: 7 }, () => code);
 
 // The same App serves everyone, so what it reads from Knowledge must be
 // what the person whose call it runs in may read, and no more (R5): the
@@ -918,6 +920,8 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
         "knowledge.not_found",
         "knowledge.not_found",
         "ok",
+        "knowledge.not_found",
+        "knowledge.not_found",
       ],
     });
 

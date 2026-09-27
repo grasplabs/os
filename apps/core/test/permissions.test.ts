@@ -454,7 +454,7 @@ describe("permissions", () => {
     );
   });
 
-  it("build an env with a stub for each active grant, and nothing else", async () => {
+  it("build an env with a stub for each active grant, its Knowledge tools, and nothing else", async () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);
     const grant = async (request: PermissionRequest) => {
@@ -479,7 +479,12 @@ describe("permissions", () => {
     await grant(outlook(other.appId, "SOMEONE_ELSES"));
 
     const bindings = await envOf(actingFor(app, admin.userId));
-    expect(Object.keys(bindings)).toStrictEqual(["OUTLOOK", "POLICIES"]);
+    // With a collection to read, the Knowledge tools across all of them.
+    expect(Object.keys(bindings)).toStrictEqual([
+      "OUTLOOK",
+      "POLICIES",
+      "KNOWLEDGE",
+    ]);
   });
 
   it("leave a name out of the env once the platform takes it, and keep the rest", async () => {

@@ -301,9 +301,13 @@ const searchDefaultLimit = 20;
 /** A search's words, as someone typed them: no query syntax. */
 export const searchQuerySchema = z.string().max(searchQueryMaxLength);
 
-/** How many results a search on one collection returns, best first. */
+/**
+ * How many results a search on one collection returns, best first, and of
+ * which type of document only, if one is given.
+ */
 export const collectionSearchOptionsSchema = z
   .strictObject({
+    type: documentTypeSchema.optional(),
     limit: z.int().min(1).max(searchMaxLimit).default(searchDefaultLimit),
   })
   .default({ limit: searchDefaultLimit });
@@ -311,11 +315,16 @@ export type CollectionSearchOptions = z.input<
   typeof collectionSearchOptionsSchema
 >;
 
-/** Where to search, and how many results to return, best first. */
+/**
+ * Where to search, for which type of document, and how many results to
+ * return, best first.
+ */
 export const searchOptionsSchema = z
   .strictObject({
     /** Only this collection; otherwise every one the reader may read. */
     collectionId: collectionIdSchema.optional(),
+    /** Only documents of this type, such as `skill`; otherwise any. */
+    type: documentTypeSchema.optional(),
     limit: z.int().min(1).max(searchMaxLimit).default(searchDefaultLimit),
   })
   .default({ limit: searchDefaultLimit });
@@ -344,8 +353,120 @@ export interface SearchResults {
 }
 
 /**
+ * Which part of a document to read: one section, by its place from 0 (a
+ * search hit's `section`), or the whole document when none is given.
+ */
+export const readOptionsSchema = z
+  .strictObject({ section: z.int().min(0).optional() })
+  .default({});
+export type ReadOptions = z.input<typeof readOptionsSchema>;
+
+/**
+ * A document or one of its sections, at its current version. A section is
+ * its Markdown from its heading to the next one; a whole document is its
+ * text, frontmatter included.
+ */
+export interface KnowledgeRead extends DocumentSummary {
+  /** The section read, or `null` for the whole document. */
+  section: {
+    /** Its place in its document, from 0. */
+    position: number;
+    /** The headings above and of the section, outermost first. */
+    headings: string[];
+  } | null;
+  text: string;
+  provenance: Provenance;
+}
+
+/** A `[[link]]` in a document, and the document it names, if there is one. */
+export interface DocumentLink {
+  path: string;
+  /** The link's own text (`[[path|label]]`), if it has one. */
+  label: string | null;
+  /** `null` while no document is at `path`. */
+  documentId: DocumentId | null;
+  title: string | null;
+}
+
+/** A document in a skill's folder: one of the files the skill refers to. */
+export interface SkillFile {
+  documentId: DocumentId;
+  path: string;
+  title: string;
+  type: DocumentType;
+  description: string;
+}
+
+/** Most entries each list of a `FollowResult` holds. */
+export const followMaxEntries = pageMaxLimit;
+
+/**
+ * Where a document leads: its links, the documents that link to it, and,
+ * for a skill, the files it refers to. Each list is in path order and holds
+ * at most {@link followMaxEntries}; `backlinks` pages past that.
+ */
+export interface FollowResult {
+  links: DocumentLink[];
+  backlinks: Backlink[];
+  /**
+   * For a skill, the other documents in its folder and below, where the
+   * Agent Skills format keeps the files a skill refers to by relative
+   * path. Empty for any other type.
+   */
+  files: SkillFile[];
+  provenance: Provenance;
+}
+
+/** A collection, as the catalog lists it. */
+export interface CatalogCollection {
+  id: CollectionId;
+  name: string;
+  /** When to use it, cut to fit the catalog. */
+  description: string;
+  sensitive: boolean;
+}
+
+/** A skill, as the catalog lists it: read it with `read(documentId)`. */
+export interface CatalogSkill {
+  documentId: DocumentId;
+  collectionId: CollectionId;
+  name: string;
+  /** When to use it, cut to fit the catalog. */
+  description: string;
+}
+
+/**
+ * What an agent always has in context: the collections it may read and the
+ * skills in them, within a fixed size. `truncated` when some didn't fit;
+ * `search` still finds those.
+ */
+export interface KnowledgeCatalog {
+  collections: CatalogCollection[];
+  skills: CatalogSkill[];
+  truncated: boolean;
+}
+
+/**
+ * Knowledge as an agent uses it, across every collection it may read: a
+ * small catalog always in context, then search, read and follow on demand.
+ * Each of those three is recorded in the audit log, and returns where what
+ * it read came from; the catalog, which only names what may be read, isn't.
+ */
+export interface KnowledgeTools {
+  /** The readable collections and their skills, sized for always-on context. */
+  catalog: () => Promise<KnowledgeCatalog>;
+  /** Sections that match `query`, best first, with snippets. */
+  search: (query: string, options?: SearchOptions) => Promise<SearchResults>;
+  /** A document, or one section of it (a search hit's `section`). */
+  read: (documentId: string, options?: ReadOptions) => Promise<KnowledgeRead>;
+  /** A document's links and backlinks, and for a skill, its files. */
+  follow: (documentId: string) => Promise<FollowResult>;
+}
+
+/**
  * What a signed-in person reaches in Knowledge. Every call checks the
- * session and what the person may see and change, on the server.
+ * session and what the person may see and change, on the server, and
+ * every read of documents is recorded in the audit log.
  */
 export interface KnowledgeApi {
   /** The collections the person may read. */
@@ -379,6 +500,12 @@ export interface KnowledgeApi {
    * person may read, or from one of them.
    */
   search: (query: string, options?: SearchOptions) => Promise<SearchResults>;
+  /** The collections the person may read and their skills, as an agent's. */
+  catalog: KnowledgeTools["catalog"];
+  /** A document, or one section of it. */
+  read: KnowledgeTools["read"];
+  /** A document's links and backlinks, and for a skill, its files. */
+  follow: KnowledgeTools["follow"];
 }
 
 /**
@@ -386,7 +513,8 @@ export interface KnowledgeApi {
  * it: `await env.HANDBOOK.getDocument(id)`. It reads that collection only,
  * and only while the person the App or agent acts for may read it too.
  * Reading restricted data puts the chat, App or run it works in in
- * restricted mode, before the data is returned.
+ * restricted mode, before the data is returned. Every read is recorded in
+ * the audit log.
  */
 export interface CollectionReader {
   /** A page of the collection's documents, in path order. */
@@ -407,6 +535,10 @@ export interface CollectionReader {
     query: string,
     options?: CollectionSearchOptions
   ) => Promise<SearchResults>;
+  /** A document, or one section of it. */
+  read: KnowledgeTools["read"];
+  /** A document's links and backlinks, and for a skill, its files. */
+  follow: KnowledgeTools["follow"];
 }
 
 /** Why a Knowledge call was refused. */

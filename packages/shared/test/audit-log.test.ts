@@ -25,4 +25,16 @@ describe("audit event types", () => {
     expect(typeOf("connection.call", { sideEffect: false })).toBe("read");
     expect(typeOf("connection.call.provenance")).toBe("read");
   });
+
+  it("files reading Knowledge as a read, and changing it as an action", () => {
+    expect(
+      [
+        "knowledge.read",
+        "knowledge.search",
+        "knowledge.search.empty",
+        "knowledge.document.saved",
+        "knowledge.collection.created",
+      ].map((action) => typeOf(action))
+    ).toStrictEqual(["read", "read", "read", "action", "config"]);
+  });
 });

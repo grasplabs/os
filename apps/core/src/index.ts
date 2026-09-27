@@ -12,6 +12,7 @@ export { AppConnectionBinding } from "./app-bindings.ts";
 export { ConnectionBinding } from "./bindings.ts";
 export { AppCollectionBinding } from "./knowledge/app-binding.ts";
 export { CollectionBinding } from "./knowledge/binding.ts";
+export { KnowledgeBinding } from "./knowledge/tools-binding.ts";
 export {
   DynamicWorkflowBinding,
   WorkflowDispatcher,
