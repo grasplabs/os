@@ -246,13 +246,16 @@ export type FromBlueprint = z.input<typeof fromBlueprintSchema>;
  * An App created from a blueprint: its first version holds the code at
  * the blueprint's version, and `permissions` are requests, waiting for an
  * admin, for the connections, collections and workflows the blueprint's
- * App was given or asked for. Nothing else comes with it: no data, no
- * settings, no runs, no members.
+ * App was given or asked for, but for someone else's personal
+ * connections (`dropped`), which only their owner's calls could use.
+ * Nothing else comes with it: no data, no settings, no runs, no members.
  */
 export interface CreatedFromBlueprint {
   app: App;
   version: AppVersion;
   permissions: Permission[];
+  /** The connections, by binding, it doesn't ask for. */
+  dropped: { connectionId: string; binding: string }[];
 }
 
 /** Blueprints: App versions to create Apps from. */

@@ -30,6 +30,7 @@ import { z } from "zod";
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
+import { connectionOwnersOf } from "./connections.ts";
 import { apps, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
@@ -396,20 +397,32 @@ export const requestPermission = async (
   return permission;
 };
 
+/** A connection a blueprint's App was given that a copy doesn't ask for. */
+export interface DroppedConnection {
+  connectionId: string;
+  binding: string;
+}
+
 /**
  * Requests for `app` of what `from` was given or asked for (its
  * permissions that aren't revoked), made by `by` as `app` is created from
  * a blueprint of `from` (app-blueprints.ts): the rows and their audit
  * entries, for the batch that creates `app`. Like any request, each allows
  * nothing until an admin grants it. A workflow of `from` itself becomes
- * the same workflow of `app`.
+ * the same workflow of `app`. Someone else's personal connection is left
+ * out (`dropped`): only its owner's calls could use it, and a copy is
+ * `by`'s own App.
  */
 export const blueprintRequests = async (
   env: Env,
   by: Identity,
   from: AppId,
   app: AppId
-): Promise<{ rows: Row[]; entries: AuditEntry[] }> => {
+): Promise<{
+  rows: Row[];
+  entries: AuditEntry[];
+  dropped: DroppedConnection[];
+}> => {
   const found = await drizzle(env.DB)
     .select()
     .from(permissions)
@@ -420,23 +433,43 @@ export const blueprintRequests = async (
       )
     )
     .orderBy(asc(permissions.requestedAt), asc(permissions.id));
+  const connectionIds = [
+    ...new Set(
+      found.flatMap(({ objectType, objectId }) =>
+        objectType === "connection" ? [objectId] : []
+      )
+    ),
+  ];
+  const owners =
+    connectionIds.length === 0
+      ? []
+      : await connectionOwnersOf(env, connectionIds);
+  const others = new Set(
+    owners.flatMap(({ id, ownerUserId }) =>
+      ownerUserId === null || ownerUserId === by.userId ? [] : [id]
+    )
+  );
+  const isOthers = (row: Row): boolean =>
+    row.objectType === "connection" && others.has(row.objectId);
   const requestedAt = new Date();
-  const rows = found.map((row): Row => ({
-    ...row,
-    id: crypto.randomUUID(),
-    ...subjectColumns({ type: "app", appId: app }),
-    objectId:
-      row.objectType === "workflow" && row.objectId === from
-        ? app
-        : row.objectId,
-    status: "requested",
-    requestedBy: by.userId,
-    requestedAt,
-    grantedBy: null,
-    grantedAt: null,
-    revokedBy: null,
-    revokedAt: null,
-  }));
+  const rows = found
+    .filter((row) => !isOthers(row))
+    .map((row): Row => ({
+      ...row,
+      id: crypto.randomUUID(),
+      ...subjectColumns({ type: "app", appId: app }),
+      objectId:
+        row.objectType === "workflow" && row.objectId === from
+          ? app
+          : row.objectId,
+      status: "requested",
+      requestedBy: by.userId,
+      requestedAt,
+      grantedBy: null,
+      grantedAt: null,
+      revokedBy: null,
+      revokedAt: null,
+    }));
   return {
     rows,
     entries: rows.map((row) =>
@@ -444,6 +477,9 @@ export const blueprintRequests = async (
         blueprint: from,
       })
     ),
+    dropped: found
+      .filter(isOthers)
+      .map(({ objectId, binding }) => ({ connectionId: objectId, binding })),
   };
 };
 

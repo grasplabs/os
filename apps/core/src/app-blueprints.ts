@@ -15,7 +15,7 @@ import type { AppId } from "@grasp-os/shared/ids";
 import { requireBuilder, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
-import { and, asc, desc, eq } from "drizzle-orm";
+import { and, asc, desc, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import {
@@ -46,16 +46,29 @@ import type { SessionCheck } from "./session-check.ts";
 // (an admin or builder in the organization) creates an App of their own
 // from it. The new App is theirs. Its first version is the blueprint's
 // code, exactly, and it asks for what the blueprint's App was given or
-// asked for, each request waiting for an admin (permissions.ts). Nothing
+// asked for, each request waiting for an admin (permissions.ts), but for
+// someone else's personal connections, which only their owner's calls
+// could use: those are left out, and recorded. Nothing
 // else comes with it: none of the App's data (its storage, its workflows'
 // state, its runs), settings (parameter values), members or error log.
 // A version never changes, so neither does a blueprint's code.
 //
 // Marking, unmarking and creating are audited, each in the same batch as
-// its change. Grasp staff don't create from blueprints: that asks for
+// its change. Grasp staff neither mark, unmark nor create from blueprints:
+// which Apps get copied is the client's decision, and creating asks for
 // permissions, which staff never do for a client.
 
 type Row = typeof appBlueprints.$inferSelect;
+
+/**
+ * Refuses Grasp staff: which of a client's Apps others copy, and copying
+ * one (which asks for permissions), is the client's to decide.
+ */
+const requireNotStaff = (by: Identity): void => {
+  if (by.staff) {
+    throw roleErrors.create("role.forbidden");
+  }
+};
 
 const toBlueprint = (row: Row, app: App): Blueprint => ({
   app: app.id,
@@ -106,6 +119,7 @@ export const markBlueprint = async (
   version: unknown
 ): Promise<Blueprint> => {
   const found = await appFor(env, by, app, "builder");
+  requireNotStaff(by);
   const { version: number } = await findVersion(env, found.id, version);
   const db = drizzle(env.DB);
   await auditedBatch(env, db, [
@@ -142,6 +156,7 @@ export const unmarkBlueprint = async (
   version: unknown
 ): Promise<void> => {
   const found = await appFor(env, by, app, "builder");
+  requireNotStaff(by);
   const number = appErrors.parse("app.invalid", appVersionSchema, version);
   const db = drizzle(env.DB);
   await auditedBatch(env, db, [
@@ -165,7 +180,7 @@ export const unmarkBlueprint = async (
  * `version`: the code at that version as its first version, and requests
  * for what that App was given or asked for. All of it lands in one batch,
  * or none of it (the version's files, stored first, are only named once
- * it lands).
+ * it lands), and only while the version is still a blueprint.
  */
 export const createFromBlueprint = async (
   env: Env,
@@ -175,9 +190,7 @@ export const createFromBlueprint = async (
   input: unknown
 ): Promise<CreatedFromBlueprint> => {
   requireBuilder(by);
-  if (by.staff) {
-    throw roleErrors.create("role.forbidden");
-  }
+  requireNotStaff(by);
   const source = await appFor(env, by, app, "user");
   const number = appErrors.parse("app.invalid", appVersionSchema, version);
   if (!(await blueprintRow(env, source.id, number))) {
@@ -219,8 +232,16 @@ export const createFromBlueprint = async (
   };
   const requests = await blueprintRequests(env, by, source.id, id);
   const db = drizzle(env.DB);
-  await auditedBatch(env, db, [
-    db.insert(apps).values(appRow),
+  // The App only while the blueprint is still marked: unmarked since it
+  // was read above, nothing is inserted, the version's row can't name an
+  // App that isn't there, and the whole batch is refused.
+  const stillMarked = sql`EXISTS (SELECT 1 FROM ${appBlueprints} WHERE ${appBlueprints.appId} = ${source.id} AND ${appBlueprints.version} = ${number})`;
+  const statements = [
+    db
+      .insert(apps)
+      .select(
+        sql`SELECT ${appRow.id}, ${appRow.name}, ${appRow.description}, ${appRow.ownerId}, ${appRow.blueprint}, NULL, NULL, NULL, ${now.getTime()} WHERE ${stillMarked}`
+      ),
     outboxed(
       db,
       changeEntry(by, "app.created", id, {
@@ -242,11 +263,30 @@ export const createFromBlueprint = async (
     // One statement each: D1 binds at most 100 values to one.
     ...requests.rows.map((row) => db.insert(permissions).values(row)),
     ...requests.entries.map((entry) => outboxed(db, entry)),
-  ]);
+    ...requests.dropped.map(({ connectionId, binding }) =>
+      outboxed(
+        db,
+        changeEntry(by, "app.blueprint.connection_dropped", id, {
+          connectionId,
+          binding,
+          fromApp: source.id,
+        })
+      )
+    ),
+  ] as const;
+  try {
+    await auditedBatch(env, db, statements);
+  } catch (error) {
+    if (!(await blueprintRow(env, source.id, number))) {
+      throw appErrors.create("app.blueprint_not_found");
+    }
+    throw error;
+  }
   return {
     app: toApp(appRow),
     version: toVersion(versionRow),
     permissions: requests.rows.map(toPermission),
+    dropped: requests.dropped,
   };
 };
 

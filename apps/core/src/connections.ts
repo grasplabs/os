@@ -1,6 +1,7 @@
 import {
   connectErrors,
   connectionErrors,
+  connectionOwnersMax,
   connectionScopeSchema,
   oauthProviderSchema,
   returnPathMaxLength,
@@ -9,6 +10,7 @@ import type {
   Catalog,
   CatalogSource,
   CatalogTool,
+  ConnectionOwner,
   ConnectionPerson,
   ConnectionsApi,
   ConnectionSummary,
@@ -74,6 +76,24 @@ export const personOf = async (
     }
   }
   return { userId, role, staff, email, accounts: accountsOf };
+};
+
+/**
+ * Whose each of the connections `ids` is, from connect, a page of IDs at
+ * a time (`ConnectApi.connectionOwners`); unknown ones are left out.
+ */
+export const connectionOwnersOf = async (
+  env: Env,
+  ids: readonly string[]
+): Promise<ConnectionOwner[]> => {
+  const pages: string[][] = [];
+  for (let start = 0; start < ids.length; start += connectionOwnersMax) {
+    pages.push(ids.slice(start, start + connectionOwnersMax));
+  }
+  const owners = await Promise.all(
+    pages.map(async (page) => await env.CONNECT.connectionOwners(page))
+  );
+  return owners.flat();
 };
 
 /** The organization's tenant at `provider`, from the sign-in config. */
