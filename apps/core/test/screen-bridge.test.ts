@@ -6,7 +6,13 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { removeMember } from "../src/app-members.ts";
 import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import { openRpc, outcome, signedInApi } from "./sign-in.ts";
+import {
+  openRpc,
+  outcome,
+  signedIn,
+  signedInApi,
+  staffPerson,
+} from "./sign-in.ts";
 
 // What the frontend's screen host reaches for an App's screens, taken from
 // the side of the screen: App code nobody reviewed line by line, which the
@@ -421,6 +427,44 @@ describe("screens", { timeout: 60_000 }, () => {
       after: 0,
       more: 0,
       opens: "app.not_found",
+    });
+  });
+
+  it("keeps pushing to Grasp staff while their session holds, and stops once it ends", async () => {
+    const owner = await personApi("builder");
+    const app = await sampleApp(owner);
+    const { core } = await openRpc(
+      await signedIn(idp, "grasp-staff", staffPerson())
+    );
+    const staff = core.authenticate();
+    const { userId, staff: isStaff } = await staff.whoami();
+    const watching = collector();
+
+    // Every push checks their access as the session does, staff window
+    // and all: the first, right away, and the next.
+    await staff.screens.call(app, "watchNotes", [watching.callback]);
+    await waitFor(() => watching.received[0]);
+    await owner.api.screens.call(app, "addNote", ["For staff"]);
+    const pushed = await waitFor(() => watching.received[1]);
+
+    await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?")
+      .bind(userId)
+      .run();
+    const left = await vi.waitFor(
+      async () => {
+        await owner.api.screens.call(app, "addNote", ["After it ended"]);
+        const count = await owner.api.screens.call(app, "watching", []);
+        if (count !== 0) {
+          throw new Error("Still watching");
+        }
+        return count;
+      },
+      { timeout: 15_000, interval: 1000 }
+    );
+    expect({ isStaff, pushed, left }).toStrictEqual({
+      isStaff: true,
+      pushed: ["For staff"],
+      left: 0,
     });
   });
 

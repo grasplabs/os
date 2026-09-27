@@ -25,7 +25,6 @@ import { z } from "zod";
 import { callApp, isPlainData } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
 import { appFor, findVersion, getApp, versionFiles } from "./apps.ts";
-import { memberRole, teamsOf } from "./auth/identity.ts";
 import { appHost } from "./durable-objects.ts";
 import { buildFailed, buildScreens } from "./screens.ts";
 import { withPerson } from "./session-check.ts";
@@ -209,23 +208,21 @@ const callServer = async (
 };
 
 /**
- * Whether `userId` still has a role in `app`, read now: their role in the
- * organization and their teams as they are, and the App's rules
- * (`appFor`). Anything that goes wrong on the way is a no: a callback
- * must not outlive access because a check failed.
+ * Whether the person behind the connection still has a role in `app`,
+ * read now: the connection's own session check (`check`), which reads
+ * their session, role and teams as every call does, Grasp staff's
+ * window included, then the App's rules (`appFor`). Anything that goes
+ * wrong on the way is a no: a callback must not outlive access because a
+ * check failed. A session that ended also closes the connection, as on
+ * any call.
  */
 const hasRole = async (
   env: Env,
-  userId: string,
+  check: SessionCheck,
   app: AppId
 ): Promise<boolean> => {
   try {
-    const role = await memberRole(env.DB, userId);
-    if (role === undefined) {
-      return false;
-    }
-    const teams = await teamsOf(env.DB, userId);
-    await appFor(env, { userId, role, teams }, app, "user");
+    await appFor(env, await check(), app, "user");
     return true;
   } catch (error) {
     if (!isExpectedError(error)) {
@@ -295,18 +292,18 @@ export class ScreensRpc extends RpcTarget implements ScreensApi {
   }
 
   /**
-   * Whether `userId` may still use `app`, for this connection's callbacks:
+   * Whether the person may still use `app`, for this connection's callbacks:
    * read again at most every `recheckMs`, and shared by every push
    * meanwhile.
    */
-  #stillOpen(userId: string, app: AppId): StillOpen {
+  #stillOpen(app: AppId): StillOpen {
     return async () => {
       const now = Date.now();
       const cached = this.#access.get(app);
       if (cached !== undefined && cached.until > now) {
         return await cached.open;
       }
-      const open = hasRole(this.#env, userId, app);
+      const open = hasRole(this.#env, this.#check, app);
       this.#access.set(app, { open, until: now + recheckMs });
       return await open;
     };
@@ -324,7 +321,7 @@ export class ScreensRpc extends RpcTarget implements ScreensApi {
       this.#check,
       async (by) =>
         await callServer(this.#env, by, { app, method, args }, (id) =>
-          this.#stillOpen(by.userId, id)
+          this.#stillOpen(id)
         )
     );
   }
