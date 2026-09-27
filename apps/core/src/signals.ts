@@ -270,6 +270,11 @@ const waitingSignals = async (
         })
         .from(workflowDecisions)
         .innerJoin(workflowRuns, eq(workflowRuns.id, workflowDecisions.runId))
+        // Every decision still open, however long ago it opened: not only
+        // the window's. This is a snapshot of who is waited for now, and a
+        // decision open for months is the worst wait there is, the one
+        // this signal is for; cutting it off at the window would hide it.
+        // Open decisions are bounded by the runs still waiting on them.
         .where(
           and(
             eq(workflowDecisions.status, "open"),

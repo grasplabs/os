@@ -27,7 +27,12 @@ import {
 /** The days of runs, decisions and audit events a computation reads. */
 export const signalWindowDays = 30;
 
-/** Runs open longest while waiting for a person to decide. */
+/**
+ * Runs waiting longest for a person to decide: every decision open now,
+ * however long ago it opened, not only those of the last
+ * `signalWindowDays` days. It is a snapshot of who is waited for, and a
+ * decision open for months is the worst wait, the one this signal is for.
+ */
 const waitingSchema = z.object({
   kind: z.literal("waiting_for_person"),
   /** Milliseconds the oldest open decision has waited. */
