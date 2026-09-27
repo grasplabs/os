@@ -280,7 +280,15 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
     const memory = await memoryOf(admin);
     const work = await newChat();
     const asAgent = actingFor(newAgent(), admin.userId);
-    const outcomes: { saved: boolean; status: string | undefined }[] = [];
+    // This checks that the end state is always one of the two consistent
+    // ones. It can't make the two calls overlap in the database; the guard
+    // statement is what makes an overlap safe (memory-proposals.ts).
+    const rounds: {
+      approved: string;
+      declined: string;
+      status: string | undefined;
+      saved: boolean;
+    }[] = [];
     for (let round = 0; round < 5; round += 1) {
       const base = `Base ${unique()}`;
       const proposed = `Proposed ${unique()}`;
@@ -300,18 +308,25 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
       const status = await statusOf(id);
       // oxlint-disable-next-line no-await-in-loop -- one round at a time
       const saved = await memoryHas(admin.userId, work, proposed);
-      const consistent =
-        (approved === "ok" &&
-          declined === "knowledge.proposal_decided" &&
-          status === "approved" &&
-          saved) ||
-        (declined === "ok" &&
-          approved === "knowledge.proposal_decided" &&
-          status === "declined" &&
-          !saved);
-      outcomes.push({ saved: consistent, status });
+      rounds.push({ approved, declined, status, saved });
     }
-    expect(outcomes.every(({ saved }) => saved)).toBeTruthy();
+    const approvedWins = {
+      approved: "ok",
+      declined: "knowledge.proposal_decided",
+      status: "approved",
+      saved: true,
+    };
+    const declineWins = {
+      approved: "knowledge.proposal_decided",
+      declined: "ok",
+      status: "declined",
+      saved: false,
+    };
+    expect(rounds).toStrictEqual(
+      rounds.map(({ approved }) =>
+        approved === "ok" ? approvedWins : declineWins
+      )
+    );
   });
 
   it("is checked against the file's limit again when approved", async () => {
@@ -412,8 +427,9 @@ describe("proposals", setUpTime, () => {
     ]);
   });
 
-  it("wait at most 20 at a time from one agent", async () => {
+  it("wait at most 20 at a time from one agent for one person", async () => {
     const admin = await personOf("admin");
+    const other = await personOf("user");
     await memoryOf(admin);
     const work = await newChat();
     const asAgent = actingFor(newAgent(), admin.userId);
@@ -426,20 +442,30 @@ describe("proposals", setUpTime, () => {
       });
       ids.push(id);
     }
-    const next = { file: "MEMORY.md", text: "One more" } as const;
+    const next = { file: "MEMORY.md", text: `One more ${unique()}` } as const;
     const overCap = await outcome(propose(asAgent, work, next));
-    // Another agent has a count of its own.
+    // Another agent has a count of its own, and so does the same agent
+    // acting for someone else.
     const otherAgent = await outcome(
       propose(actingFor(newAgent(), admin.userId), work, next)
     );
+    const otherPerson = await outcome(
+      propose(actingFor(asAgent.subject, other.userId), work, next)
+    );
+    const waiting = await admin.api.memory.proposals();
     await admin.api.memory.decline(ids[0] ?? "");
     expect({
       overCap,
       otherAgent,
+      otherPerson,
+      // The refused one isn't stored: only the other two are.
+      stored: waiting.filter(({ text }) => text === next.text).length,
       afterDecline: await outcome(propose(asAgent, work, next)),
     }).toStrictEqual({
       overCap: "knowledge.too_many_proposals",
       otherAgent: "ok",
+      otherPerson: "ok",
+      stored: 2,
       afterDecline: "ok",
     });
   });

@@ -7,6 +7,7 @@ CREATE TABLE `memory_proposals` (
 	`message` text,
 	`source` text NOT NULL,
 	`agent_id` text NOT NULL,
+	`on_behalf_of` text NOT NULL,
 	`status` text NOT NULL,
 	`decided_by` text,
 	`created_at` integer NOT NULL,
@@ -15,4 +16,4 @@ CREATE TABLE `memory_proposals` (
 );
 --> statement-breakpoint
 CREATE INDEX `memory_proposals_status_idx` ON `memory_proposals` (`status`,`created_at`);--> statement-breakpoint
-CREATE INDEX `memory_proposals_agent_idx` ON `memory_proposals` (`agent_id`,`status`);
+CREATE INDEX `memory_proposals_agent_idx` ON `memory_proposals` (`agent_id`,`on_behalf_of`,`status`);

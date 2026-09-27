@@ -176,8 +176,10 @@ export const memoryProposals = sqliteTable(
     message: text(),
     /** JSON: who proposed it, and where. */
     source: text().notNull(),
-    /** The agent that proposed it, to keep how many it has waiting. */
+    /** The agent that proposed it: its proposals waiting are capped. */
     agentId: text("agent_id").notNull(),
+    /** User ID: the person it acted for, whom the cap counts by too. */
+    onBehalfOf: text("on_behalf_of").notNull(),
     status: text({ enum: ["pending", "approved", "declined"] }).notNull(),
     /** User ID. */
     decidedBy: text("decided_by"),
@@ -186,6 +188,10 @@ export const memoryProposals = sqliteTable(
   },
   (table) => [
     index("memory_proposals_status_idx").on(table.status, table.createdAt),
-    index("memory_proposals_agent_idx").on(table.agentId, table.status),
+    index("memory_proposals_agent_idx").on(
+      table.agentId,
+      table.onBehalfOf,
+      table.status
+    ),
   ]
 );

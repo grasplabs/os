@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "b6da44b5-6fd4-455b-959c-99645c7036df",
+  "id": "77810211-b10f-48f3-bb47-60032cf19029",
   "prevId": "0ff249d8-ec72-4069-97ab-00dba0dc1f02",
   "tables": {
     "audit_outbox": {
@@ -462,6 +462,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "on_behalf_of": {
+          "name": "on_behalf_of",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "status": {
           "name": "status",
           "type": "text",
@@ -504,6 +511,7 @@
           "name": "memory_proposals_agent_idx",
           "columns": [
             "agent_id",
+            "on_behalf_of",
             "status"
           ],
           "isUnique": false

@@ -28,11 +28,13 @@ import {
 import type { Authority } from "@grasp-os/shared/permissions";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, count, eq, ne, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
 import { memberRole } from "../auth/identity.ts";
+import { isUniqueViolation } from "../db/d1.ts";
 import { collections, memoryProposals } from "../db/knowledge/schema.ts";
 import { requireFeature } from "../features.ts";
 import { isRestricted } from "../restricted.ts";
@@ -60,8 +62,12 @@ type ProposalRow = typeof memoryProposals.$inferSelect;
 /** Most pending proposals one listing returns. */
 const proposalsMaxListed = 200;
 
-/** Most proposals one agent may have waiting at once. */
-export const proposalsMaxPendingPerAgent = 20;
+/**
+ * Most proposals one agent may have waiting at once for one person: per
+ * person, so one person's chats can't use up an agent's proposals for
+ * everyone else.
+ */
+export const proposalsMaxPending = 20;
 
 const sourceSchema = z.object({
   actor: auditActorSchema,
@@ -83,6 +89,26 @@ const toProposal = (row: ProposalRow): MemoryProposal => ({
 });
 
 /**
+ * A statement that fails the D1 batch it is in when `condition` holds for
+ * the proposal `proposalId` as the batch has it by then: it inserts the
+ * proposal's own row again, under the same ID, which the primary key
+ * refuses, and that rolls the whole batch back. When `condition` doesn't
+ * hold it selects no row and inserts nothing. D1 has no other way to
+ * abort a batch on a condition.
+ */
+const failBatchIf = (
+  db: ReturnType<typeof drizzle>,
+  proposalId: string,
+  condition: SQL
+) =>
+  db.insert(memoryProposals).select(
+    db
+      .select()
+      .from(memoryProposals)
+      .where(and(eq(memoryProposals.id, proposalId), condition))
+  );
+
+/**
  * Proposes new text for a shared memory file, as the agent `authority`
  * working in `work`: the company's AGENTS.md or MEMORY.md, or its own
  * AGENTS.md. The text is checked as a save would check it (its limit
@@ -95,7 +121,7 @@ const toProposal = (row: ProposalRow): MemoryProposal => ({
  * `saveUserMemory` does: shared memory would carry it to everyone),
  * `knowledge.not_found` while no admin has set up the Memory collection,
  * and `knowledge.too_many_proposals` while the agent has
- * {@link proposalsMaxPendingPerAgent} waiting.
+ * {@link proposalsMaxPending} waiting for that person.
  */
 export const proposeMemory = async (
   env: Env,
@@ -146,45 +172,44 @@ export const proposeMemory = async (
     message: message === undefined || message === "" ? null : message,
     source: JSON.stringify(source),
     agentId: subject.agentId,
+    onBehalfOf,
     status: "pending",
     decidedBy: null,
     createdAt: new Date(),
     decidedAt: null,
   };
-  const pending = db
+  // Over the cap once this one is in: the count includes it.
+  const overCap = sql`(${db
     .select({ count: count() })
     .from(memoryProposals)
     .where(
       and(
         eq(memoryProposals.agentId, row.agentId),
+        eq(memoryProposals.onBehalfOf, row.onBehalfOf),
         eq(memoryProposals.status, "pending")
       )
-    );
-  const [inserted] = await auditedBatch(env, db, [
-    // Inserted only while the agent has fewer than the most waiting,
-    // counted in the same statement, so proposals made at once can't
-    // together pass it. The columns in the table's order.
-    db
-      .insert(memoryProposals)
-      .select(
-        sql`SELECT ${row.id}, ${row.collectionId}, ${row.path}, ${row.baseVersion}, ${row.text}, ${row.message}, ${row.source}, ${row.agentId}, ${row.status}, NULL, ${row.createdAt.getTime()}, NULL WHERE (${pending}) < ${proposalsMaxPendingPerAgent}`
-      )
-      .returning({ id: memoryProposals.id }),
-    outboxedIfChanged(db, {
-      actor,
-      action: "knowledge.proposal.created",
-      target: { type: "proposal", id: row.id },
-      provenance: existing ? [existing.id] : [],
-      detail: {
-        collectionId: collection.id,
-        baseVersion: row.baseVersion,
-      },
-    }),
-  ]);
-  if (inserted.length === 0) {
-    throw knowledgeErrors.create("knowledge.too_many_proposals", {
-      maxPending: proposalsMaxPendingPerAgent,
-    });
+    )}) > ${proposalsMaxPending}`;
+  try {
+    await auditedBatch(env, db, [
+      db.insert(memoryProposals).values(row),
+      // In the same batch, so proposals made at once can't together pass
+      // the cap: each counts the others that got in first.
+      failBatchIf(db, row.id, overCap),
+      outboxed(db, {
+        actor,
+        action: "knowledge.proposal.created",
+        target: { type: "proposal", id: row.id },
+        provenance: existing ? [existing.id] : [],
+        detail: { collectionId: collection.id, baseVersion: row.baseVersion },
+      }),
+    ]);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw knowledgeErrors.create("knowledge.too_many_proposals", {
+        maxPending: proposalsMaxPending,
+      });
+    }
+    throw error;
   }
   return toProposal(row);
 };
@@ -284,33 +309,9 @@ const decide = (
     );
 
 /**
- * Fails the batch it is in unless `proposal` is approved by now: it
- * inserts the proposal's own row again, under the same ID, whenever its
- * status is anything else, and the primary key refuses that, which rolls
- * the whole batch back. So an approval whose `decide` changed nothing (a
- * decline got there first) saves nothing either. When the proposal is
- * approved it selects no row and inserts nothing.
- */
-const unlessApproved = (
-  db: ReturnType<typeof drizzle>,
-  proposal: ProposalRow
-) =>
-  db.insert(memoryProposals).select(
-    db
-      .select()
-      .from(memoryProposals)
-      .where(
-        and(
-          eq(memoryProposals.id, proposal.id),
-          ne(memoryProposals.status, "approved")
-        )
-      )
-  );
-
-/**
  * Approves a pending proposal: its text becomes the file's next version,
  * by `person`, in the same batch that marks it approved, which commits
- * only if this approval is what decided it (`unlessApproved`). If the file
+ * only if this approval is what decided it (`failBatchIf`). If the file
  * changed since it was proposed, `knowledge.conflict`, and it stays
  * pending, to be declined or proposed again; if it was decided meanwhile,
  * `knowledge.proposal_decided`, and nothing is saved.
@@ -336,7 +337,9 @@ export const approveProposal = async (
       restoredFrom: null,
       also: [
         decide(db, person, proposal, "approved"),
-        unlessApproved(db, proposal),
+        // An approval whose `decide` changed nothing (a decline got there
+        // first) saves nothing either.
+        failBatchIf(db, proposal.id, ne(memoryProposals.status, "approved")),
         outboxed(
           db,
           decisionEntry(person, proposal, "knowledge.proposal.approved")
