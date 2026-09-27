@@ -1,7 +1,9 @@
 import { kitModuleName, screenRuntime } from "@grasp-os/compiler";
 import type { Role } from "@grasp-os/shared/roles";
+import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { removeMember } from "../src/app-members.ts";
 import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { openRpc, outcome, signedInApi } from "./sign-in.ts";
@@ -354,6 +356,63 @@ describe("screens", { timeout: 60_000 }, () => {
       "Call Acme",
     ]);
     expect(watching.received[0]).toStrictEqual([]);
+  });
+
+  it("says so when unsharing can't close someone's screens yet, and closes them when tried again", async () => {
+    const owner = await personApi("builder");
+    const member = await personApi("builder");
+    const app = await sampleApp(owner);
+    const them = { type: "person", id: member.userId } as const;
+    await owner.api.apps.members.add(app, { ...them, role: "user" });
+    const watching = collector();
+    await member.api.screens.call(app, "watchNotes", [watching.callback]);
+    await waitFor(() => watching.received[0]);
+    // Core, with the App's host out of reach for this one call.
+    const unreachable = new Proxy(env.APPS, {
+      get: (target, property) => {
+        if (property === "getByName") {
+          return () => ({
+            restart: async () => {
+              await Promise.reject(new Error("The App's host is unreachable"));
+            },
+          });
+        }
+        const value: unknown = Reflect.get(target, property);
+        return typeof value === "function"
+          ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
+          : value;
+      },
+    });
+
+    const first = await outcome(
+      removeMember(
+        { ...env, APPS: unreachable },
+        await owner.api.whoami(),
+        app,
+        them
+      )
+    );
+    // Removed, but the App still holds their subscription.
+    const stillWatching = await owner.api.screens.call(app, "watching", []);
+    await owner.api.apps.members.remove(app, them);
+    const left = await vi.waitFor(async () => {
+      const count = await owner.api.screens.call(app, "watching", []);
+      if (count !== 0) {
+        throw new Error("Still watching");
+      }
+      return count;
+    }, 10_000);
+    expect({
+      first,
+      stillWatching,
+      opens: await outcome(member.api.apps.get(app)),
+      left,
+    }).toStrictEqual({
+      first: "app.screens_open",
+      stillWatching: 1,
+      opens: "app.not_found",
+      left: 0,
+    });
   });
 
   it("stops sending to someone the App is no longer shared with", async () => {

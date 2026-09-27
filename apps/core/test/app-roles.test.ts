@@ -333,6 +333,36 @@ describe("App roles", () => {
     });
   });
 
+  it("list only people still in the organization, and teams that still exist", async () => {
+    const admin = await personApi("admin");
+    const owner = await personApi("builder");
+    const [stays, leaves] = await Promise.all([
+      personApi("user"),
+      personApi("user"),
+    ]);
+    const [kept, deleted] = await Promise.all([
+      newTeam(admin, []),
+      newTeam(admin, []),
+    ]);
+    const app = await newApp(owner);
+    for (const member of [
+      { type: "person", id: stays.userId },
+      { type: "person", id: leaves.userId },
+      { type: "team", id: kept },
+      { type: "team", id: deleted },
+    ] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one share at a time
+      await owner.api.apps.members.add(app, { ...member, role: "user" });
+    }
+
+    await admin.api.members.remove(leaves.userId);
+    await env.DB.prepare("DELETE FROM teams WHERE id = ?").bind(deleted).run();
+    const listed = await owner.api.apps.members.list(app);
+    expect(new Set(listed.map(({ id }) => id))).toStrictEqual(
+      new Set([stays.userId, kept])
+    );
+  });
+
   it("never let someone build whose role in the organization doesn't", async () => {
     const admin = await personApi("admin");
     const owner = await personApi("builder");

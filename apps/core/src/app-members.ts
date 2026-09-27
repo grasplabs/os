@@ -12,19 +12,20 @@ import type {
 } from "@grasp-os/shared/apps";
 import { actorOf } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { canBuild, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
-import { and, asc, eq, ne } from "drizzle-orm";
+import { and, asc, eq, isNotNull, ne, or } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { appFor } from "./apps.ts";
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
-import { organizationId } from "./auth/auth.ts";
+import { activeMember, organizationId } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
 import { appMembers, teams, users } from "./db/core/schema.ts";
-import { restartApp } from "./permissions.ts";
+import { appHost } from "./durable-objects.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -74,9 +75,26 @@ const namedMembers = async (
     )
     .leftJoin(
       teams,
-      and(eq(appMembers.memberType, "team"), eq(teams.id, appMembers.memberId))
+      and(
+        eq(appMembers.memberType, "team"),
+        eq(teams.id, appMembers.memberId),
+        eq(teams.organizationId, organizationId)
+      )
     )
-    .where(where)
+    .where(
+      and(
+        where,
+        // Only people in the organization now, and teams that still exist:
+        // the rest reach nothing.
+        or(
+          and(
+            eq(appMembers.memberType, "person"),
+            activeMember(appMembers.memberId)
+          ),
+          and(eq(appMembers.memberType, "team"), isNotNull(teams.id))
+        )
+      )
+    )
     .orderBy(
       asc(appMembers.addedAt),
       asc(appMembers.memberType),
@@ -150,6 +168,21 @@ const requireSharable = async (
   }
 };
 
+/**
+ * Restarts the App's server code, so it keeps no callbacks of screens
+ * whose person it is no longer shared with: they subscribe again, and
+ * someone unshared is refused. `app.screens_open` when it can't, after
+ * the unsharing stands: removing them again finishes it.
+ */
+const closeScreens = async (env: Env, app: App): Promise<void> => {
+  try {
+    await appHost(env, app.id).restart("It is no longer shared with someone.");
+  } catch (error) {
+    log.error("app.restart_failed", { appId: app.id, ...errorFields(error) });
+    throw appErrors.create("app.screens_open");
+  }
+};
+
 /** Whom an App is shared with, in the order they were shared or changed. */
 export const listMembers = async (
   env: Env,
@@ -206,8 +239,10 @@ export const addMember = async (
 /**
  * Stops sharing an App with a person or team. Their next call is refused;
  * the App's server code restarts, so it keeps none of their screens'
- * subscriptions either. Unsharing with someone it isn't shared with
- * changes and records nothing.
+ * subscriptions either; `app.screens_open` if it can't restart yet.
+ * Unsharing with someone it isn't shared with changes and records
+ * nothing, but restarts the App all the same, which finishes a removal
+ * whose restart failed.
  */
 export const removeMember = async (
   env: Env,
@@ -224,36 +259,36 @@ export const removeMember = async (
     .from(appMembers)
     .where(rowOf(found, member))
     .get();
-  if (!before) {
-    return;
+  if (before) {
+    // Only in the role read above, so the event records the role it ended.
+    const [[removed]] = await auditedBatch(env, db, [
+      db
+        .delete(appMembers)
+        .where(and(rowOf(found, member), eq(appMembers.role, before.role)))
+        .returning(),
+      outboxedIfChanged(
+        db,
+        memberEntry(by, "app.member.removed", found, {
+          ...member,
+          role: before.role,
+        })
+      ),
+    ]);
+    const kept = removed
+      ? undefined
+      : await db
+          .select({ role: appMembers.role })
+          .from(appMembers)
+          .where(rowOf(found, member))
+          .get();
+    // Their role changed meanwhile; unshared meanwhile is what was asked.
+    if (kept) {
+      throw appErrors.create("app.conflict");
+    }
   }
-  // Only in the role read above, so the event records the role it ended.
-  const [[removed]] = await auditedBatch(env, db, [
-    db
-      .delete(appMembers)
-      .where(and(rowOf(found, member), eq(appMembers.role, before.role)))
-      .returning(),
-    outboxedIfChanged(
-      db,
-      memberEntry(by, "app.member.removed", found, {
-        ...member,
-        role: before.role,
-      })
-    ),
-  ]);
-  if (removed) {
-    await restartApp(env, { type: "app", appId: found.id });
-    return;
-  }
-  const kept = await db
-    .select({ role: appMembers.role })
-    .from(appMembers)
-    .where(rowOf(found, member))
-    .get();
-  // Their role changed meanwhile; unshared meanwhile is what was asked.
-  if (kept) {
-    throw appErrors.create("app.conflict");
-  }
+  // Also when they were unshared already: an earlier removal whose restart
+  // failed is finished by trying again.
+  await closeScreens(env, found);
 };
 
 /** A signed-in person's `apps.members`. */

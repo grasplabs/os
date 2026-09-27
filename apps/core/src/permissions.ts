@@ -239,11 +239,10 @@ const parseId = (id: unknown): PermissionId => {
 /**
  * An App's server code gets its env when it starts: restarting it after a
  * grant or revoke gives it an env as the records are now. A revoked stub
- * it still holds is refused anyway, on its next call. Unsharing an App
- * restarts it too (app-members.ts). Best effort: the change stands if the
- * App can't be reached.
+ * it still holds is refused anyway, on its next call. Best effort: the
+ * change stands if the App can't be reached.
  */
-export const restartApp = async (
+const restartApp = async (
   env: Env,
   subject: PermissionSubject
 ): Promise<void> => {

@@ -198,7 +198,11 @@ export interface AppMembersApi {
   list: (app: string) => Promise<AppMember[]>;
   /** Shares the App, or changes the role of someone it is shared with. */
   add: (app: string, member: NewAppMember) => Promise<AppMember>;
-  /** Stops sharing the App with them; nothing if it wasn't. */
+  /**
+   * Stops sharing the App with them, and closes their open screens of it.
+   * `app.screens_open` when those couldn't be closed yet: they're removed,
+   * and removing them again finishes it.
+   */
   remove: (app: string, member: AppMemberRef) => Promise<void>;
 }
 
@@ -225,6 +229,8 @@ export const appErrors = defineErrorFamily({
   "app.invalid": "That isn't a valid request for an App.",
   "app.not_found": "There's no such App.",
   "app.member_invalid": "The App can't be shared with them like that.",
+  "app.screens_open":
+    "They're removed, but their open screens of this App couldn't be closed yet. Remove them again to finish.",
   "app.version_not_found": "The App has no such version.",
   "app.too_large": "The App's files would be over its limits.",
   "app.nothing_to_commit": "Nothing was written since the latest version.",
