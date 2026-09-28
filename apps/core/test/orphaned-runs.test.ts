@@ -14,11 +14,11 @@ import { endLiveRuns, liveStatus } from "./runs.ts";
 import { signedInApi } from "./sign-in.ts";
 import { appWith, runEvents, workflowFiles } from "./workflow-apps.ts";
 
-// A start that stopped between writing its run's row and creating the
-// run's engine instance (core stopped in between) leaves a row that says
-// `running` with nothing behind it. Core's cron trigger marks such a row
-// failed once it's old enough, as a start that failed is, and leaves
-// every run the engine has alone.
+// A run's row says `starting` until its engine instance is created. A
+// start that stopped in between (core stopped) leaves a row starting
+// with nothing behind it. Core's cron trigger ends such a row once it's
+// old enough: failed without an instance, running with one. Live runs
+// are never starting, so the sweep never looks at them.
 
 const idp = mockIdp();
 
@@ -26,16 +26,21 @@ const personApi = async (role: Role) => await signedInApi(idp, role);
 type Person = Awaited<ReturnType<typeof personApi>>;
 
 const minute = 60_000;
-const hour = 60 * minute;
+const day = 24 * 60 * minute;
 
-/** The sweep's query of the runs in its window. */
-const sweepQuery = /from "workflow_runs" where .*"created_at" >= \?/u;
+/** The sweep's query of the runs still starting. */
+const sweepQuery = /from "workflow_runs" where .*"status" = \?/u;
 
-/** A workflow that waits for an event it isn't sent: a live run. */
+/**
+ * A workflow that does one step, then waits for an event it isn't sent:
+ * a live run.
+ */
 const waiting = workflowFiles(
   "waits",
-  `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
-  return null;`
+  `  await step.do("work", { description: "Work" }, async () => null);
+  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  return null;`,
+  { work: null }
 );
 
 /** A run's row as a start leaves it that stopped `age` ago. */
@@ -47,61 +52,101 @@ const orphanOf = async (
 ): Promise<string> => {
   const run = crypto.randomUUID();
   await env.DB.prepare(
-    "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, trigger_key) VALUES (?, ?, 'waits', 1, ?, 'running', ?, ?)"
+    "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, trigger_key) VALUES (?, ?, 'waits', 1, ?, 'starting', ?, ?)"
   )
     .bind(run, app, person?.userId ?? null, Date.now() - age, triggerKey)
     .run();
   return run;
 };
 
-/** Makes a run's row `age` old, as a run that has been going that long. */
-const aged = async (run: string, age: number): Promise<void> => {
-  await env.DB.prepare("UPDATE workflow_runs SET created_at = ? WHERE id = ?")
-    .bind(Date.now() - age, run)
+/** Sets a run's row: its status, and how long ago it was written. */
+const setRow = async (
+  run: string,
+  status: string,
+  age: number
+): Promise<void> => {
+  await env.DB.prepare(
+    "UPDATE workflow_runs SET status = ?, created_at = ? WHERE id = ?"
+  )
+    .bind(status, Date.now() - age, run)
     .run();
 };
 
-/** Where core's record has a run, as the App's run list shows it. */
-const listedStatus = async (
-  person: Person,
-  app: string,
-  run: string
-): Promise<string | undefined> => {
-  const runs = await person.api.workflows.list(app);
-  return runs.find(({ id }) => id === run)?.status;
+/** A run's status as its row has it. */
+const rowStatus = async (run: string): Promise<string | undefined> => {
+  const row = await env.DB.prepare(
+    "SELECT status FROM workflow_runs WHERE id = ?"
+  )
+    .bind(run)
+    .first<{ status: string }>();
+  return row?.status;
 };
 
-/** How many `workflow.run.failed` events the audit log has of `run`. */
-const failedEvents = async (run: string): Promise<number> => {
+/** Once the run's row says `status`. */
+const rowSays = async (run: string, status: string): Promise<void> => {
+  await vi.waitFor(
+    async () => {
+      await expect(rowStatus(run)).resolves.toBe(status);
+    },
+    { timeout: 10_000, interval: 100 }
+  );
+};
+
+/** The actions of the audit events of `run`. */
+const actionsOf = async (run: string): Promise<string[]> => {
   const events = await allEvents();
-  return events.filter(
-    ({ action, target }) =>
-      action === "workflow.run.failed" && target?.id === run
-  ).length;
+  return events
+    .filter(({ target }) => target?.id === run)
+    .map(({ action }) => action);
+};
+
+/** Whether the audit log has `run` failing. */
+const failedAtAll = async (run: string): Promise<boolean> => {
+  const actions = await actionsOf(run);
+  return actions.includes("workflow.run.failed");
 };
 
 const endedStatuses = new Set(["complete", "errored", "terminated"]);
 
+/** The run's engine instance, created as its start would have. */
+const createInstance = async (app: string, run: string): Promise<void> => {
+  await runEngine(env).create({
+    id: run,
+    pinned: {
+      app: appIdSchema.parse(app),
+      workflow: workflowIdSchema.parse("waits"),
+      version: 1,
+    },
+    input: undefined,
+  });
+};
+
 describe("runs that never reached the engine", () => {
   afterEach(endLiveRuns);
 
-  it("are marked failed once they're old enough, audited once, for their person to see", async () => {
+  it("are marked failed once they're old enough, however long ago, audited once, for their person to see", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, waiting);
     const orphan = await orphanOf(builder, app, 20 * minute);
+    // Left by a start as core went down for a month.
+    const afterOutage = await orphanOf(builder, app, 30 * day);
     const young = await orphanOf(builder, app, 2 * minute);
-    const beyond = await orphanOf(builder, app, 25 * hour);
 
     await runCron();
     const { status, failure } = await builder.api.workflows.status(orphan);
+    const outage = await builder.api.workflows.status(afterOutage);
+    const youngShown = await builder.api.workflows.status(young);
     // Once more: it is marked, and audited, once.
     await runCron();
 
     expect({
       status,
       error: failure?.error,
-      young: await listedStatus(builder, app, young),
-      beyond: await listedStatus(builder, app, beyond),
+      outage: outage.status,
+      // Its start may still be under way, or a delivery restart it; it
+      // shows as running meanwhile.
+      young: await rowStatus(young),
+      youngShown: youngShown.status,
       audited: await runEvents(orphan, "workflow.run.failed"),
     }).toStrictEqual({
       status: "failed",
@@ -109,15 +154,14 @@ describe("runs that never reached the engine", () => {
         code: "workflow.run_failed",
         message: "The engine has no record of this run.",
       },
-      // Its start may still be under way, or a delivery restart it.
-      young: "running",
-      // Older than the window the sweep reads.
-      beyond: "running",
+      outage: "failed",
+      young: "starting",
+      youngShown: "running",
       audited: ["workflow.run.failed no_instance workflow.run_failed"],
     });
   });
 
-  it("are found by an index, in their window, reading no table whole", async () => {
+  it("are found by an index, reading no table whole and sorting nothing", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, waiting);
     await orphanOf(builder, app, 20 * minute);
@@ -135,30 +179,81 @@ describe("runs that never reached the engine", () => {
         .map(async (recorded) => await planOf(recorded))
     );
 
-    // Its slice from a random time on, then from the window's start: one
-    // run is fewer than a slice holds, so both read.
-    const inWindow = [
-      "SEARCH workflow_runs USING INDEX workflow_runs_status_created_idx (status=? AND created_at>? AND created_at<?)",
-    ];
     expect({ stats: stats.results, plans }).toStrictEqual({
       stats: [],
-      plans: [inWindow, inWindow],
+      plans: [
+        [
+          "SEARCH workflow_runs USING INDEX workflow_runs_status_ended_idx (status=? AND ended_at=?)",
+        ],
+      ],
     });
   });
 
-  it("leave live runs alone, however old", async () => {
+  it("never include a run started as ever, however old", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, waiting);
     const live = await builder.api.workflows.start(app, "waits");
-    await aged(live.id, 20 * minute);
+    const started = await rowStatus(live.id);
+    await setRow(live.id, "running", 20 * day);
 
     await runCron();
 
     expect({
-      listed: await listedStatus(builder, app, live.id),
+      started,
+      row: await rowStatus(live.id),
       ended: endedStatuses.has(await liveStatus(live.id)),
-      failed: await failedEvents(live.id),
-    }).toStrictEqual({ listed: "running", ended: false, failed: 0 });
+      failed: await failedAtAll(live.id),
+    }).toStrictEqual({
+      started: "running",
+      row: "running",
+      ended: false,
+      failed: false,
+    });
+  });
+
+  it("are marked running when their instance exists, a start that didn't record it", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, waiting);
+    const slow = await orphanOf(builder, app, 20 * minute);
+    await createInstance(app, slow);
+    await rowSays(slow, "running");
+    // As if neither the start nor the instance had recorded it.
+    await setRow(slow, "starting", 20 * minute);
+
+    await runCron();
+
+    expect({
+      row: await rowStatus(slow),
+      ended: endedStatuses.has(await liveStatus(slow)),
+      failed: await failedAtAll(slow),
+    }).toStrictEqual({ row: "running", ended: false, failed: false });
+  });
+
+  it("take no step when their instance is created after they were marked failed", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, waiting);
+    const orphan = await orphanOf(builder, app, 20 * minute);
+
+    await runCron();
+    // The start that stopped goes on after all, and creates the instance.
+    await createInstance(app, orphan);
+    await vi.waitFor(
+      async () => {
+        expect(endedStatuses.has(await liveStatus(orphan))).toBeTruthy();
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+
+    expect({
+      row: await rowStatus(orphan),
+      engine: await liveStatus(orphan),
+      actions: await actionsOf(orphan),
+    }).toStrictEqual({
+      row: "failed",
+      // The dispatcher refused it before its first step.
+      engine: "errored",
+      actions: ["workflow.run.failed"],
+    });
   });
 
   it("are left while workflows are switched off, and marked failed once they're back on", async () => {
@@ -168,65 +263,12 @@ describe("runs that never reached the engine", () => {
 
     const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
     await runCron({ FEATURES: { ...on, workflows: false } });
-    const whileOff = await listedStatus(builder, app, orphan);
+    const whileOff = await rowStatus(orphan);
     await runCron();
 
-    expect({
-      whileOff,
-      after: await listedStatus(builder, app, orphan),
-    }).toStrictEqual({ whileOff: "running", after: "failed" });
-  });
-
-  it("are marked failed, and their instance ended, when it's created just after the check", async () => {
-    const builder = await personApi("builder");
-    const app = await appWith(builder, waiting);
-    const orphan = await orphanOf(builder, app, 20 * minute);
-    // The run's instance is created right after the sweep found none: its
-    // start, or a delivery, got there in between.
-    const workflows = env.WORKFLOWS;
-    const get = workflows.get.bind(workflows);
-    let created = false;
-    const racing = vi
-      .spyOn(env.WORKFLOWS, "get")
-      .mockImplementation(async (id) => {
-        const found = await get(id).then(
-          (instance) => ({ instance }),
-          (error: unknown) => ({ error })
-        );
-        if (id === orphan && !created) {
-          created = true;
-          await runEngine(env).create({
-            id: orphan,
-            pinned: {
-              app: appIdSchema.parse(app),
-              workflow: workflowIdSchema.parse("waits"),
-              version: 1,
-            },
-            input: undefined,
-          });
-        }
-        if ("error" in found) {
-          throw found.error;
-        }
-        return found.instance;
-      });
-    try {
-      await runCron();
-    } finally {
-      racing.mockRestore();
-    }
-    await runCron();
-
-    expect({
-      created,
-      listed: await listedStatus(builder, app, orphan),
-      ended: endedStatuses.has(await liveStatus(orphan)),
-      failed: await failedEvents(orphan),
-    }).toStrictEqual({
-      created: true,
-      listed: "failed",
-      ended: true,
-      failed: 1,
+    expect({ whileOff, after: await rowStatus(orphan) }).toStrictEqual({
+      whileOff: "starting",
+      after: "failed",
     });
   });
 
@@ -249,9 +291,9 @@ describe("runs that never reached the engine", () => {
     });
 
     expect({
-      orphan: await listedStatus(builder, app, orphan),
+      orphan: await rowStatus(orphan),
       newRun: again.id !== orphan,
-      again: await listedStatus(builder, app, again.id),
+      again: await rowStatus(again.id),
     }).toStrictEqual({ orphan: "failed", newRun: true, again: "running" });
   });
 });

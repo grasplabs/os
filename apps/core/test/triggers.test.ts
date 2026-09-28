@@ -442,7 +442,7 @@ describe("trigger deliveries", () => {
     // and creating its instance, two minutes ago.
     const orphan = crypto.randomUUID();
     await env.DB.prepare(
-      "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, trigger_key) VALUES (?, ?, 'weekly', 1, NULL, 'running', ?, ?)"
+      "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, trigger_key) VALUES (?, ?, 'weekly', 1, NULL, 'starting', ?, ?)"
     )
       .bind(orphan, app, Date.now() - 2 * minute, key)
       .run();
@@ -475,7 +475,7 @@ describe("trigger deliveries", () => {
     // instance, just now: the next minute comes before it counts as stopped.
     const orphan = crypto.randomUUID();
     await env.DB.prepare(
-      "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, trigger_key) VALUES (?, ?, 'weekly', 1, NULL, 'running', ?, ?)"
+      "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, trigger_key) VALUES (?, ?, 'weekly', 1, NULL, 'starting', ?, ?)"
     )
       .bind(
         orphan,

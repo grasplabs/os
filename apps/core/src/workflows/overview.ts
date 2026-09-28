@@ -58,7 +58,7 @@ import { answerableBy, stillOpen } from "../decisions/decisions.ts";
 import { declaredParams, dryRunTests, hasWorkflow } from "./code.ts";
 import { paramValues } from "./param-values.ts";
 import { listParams } from "./params.ts";
-import { runFor, unended, workflowInputSchema } from "./runs.ts";
+import { runFor, shownStatus, unended, workflowInputSchema } from "./runs.ts";
 import type { RunRow } from "./runs.ts";
 
 // Every workflow a person can see, across Apps, and their runs: the
@@ -206,7 +206,14 @@ const latestRunSchema = z.object({
   id: z.string(),
   app: z.string(),
   workflow: z.string(),
-  status: z.enum(["running", "paused", "completed", "failed", "cancelled"]),
+  status: z.enum([
+    "starting",
+    "running",
+    "paused",
+    "completed",
+    "failed",
+    "cancelled",
+  ]),
   createdAt: z.number(),
   waits: z.number(),
 });
@@ -248,7 +255,8 @@ const latestRuns = async (
       .array(latestRunSchema)
       .parse(rows)
       .map((row) => {
-        const status: RunStatus = row.waits === 1 ? "waiting" : row.status;
+        const status: RunStatus =
+          row.waits === 1 ? "waiting" : shownStatus(row.status);
         return [
           keyOf(row.app, row.workflow),
           {

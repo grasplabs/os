@@ -30,6 +30,7 @@ import {
   appRecord,
   endRun,
   findRun,
+  markRunning,
   recordGoingOn,
   recordWaiting,
 } from "./runs.ts";
@@ -143,7 +144,14 @@ const runWorkflow = async (
 ): Promise<unknown> => {
   const pinned = pinnedSchema.safeParse(metadata);
   const runId = runIdSchema.parse(event.instanceId);
-  const row = await findRun(env, runId);
+  let row = await findRun(env, runId);
+  // Its start hasn't recorded that the instance exists, which it does:
+  // this execution is it. Read again, as it may have ended meanwhile
+  // (`failOrphans` found it without its instance a moment before).
+  if (row?.status === "starting") {
+    await markRunning(env, runId);
+    row = await findRun(env, runId);
+  }
   if (
     !(pinned.success && row) ||
     row.appId !== pinned.data.app ||
@@ -153,7 +161,9 @@ const runWorkflow = async (
     throw new Error(`Run ${runId} doesn't match its record`);
   }
   // Cancelled (its instance maybe not yet terminated) or failed to start:
-  // it does nothing more.
+  // it does nothing more. Every execution, its first and every resume,
+  // comes here before any step, so such a run takes no step, whether or
+  // not its instance was terminated.
   if (row.status === "cancelled" || row.status === "failed") {
     throw new Error(`Run ${runId} has ended: ${row.status}`);
   }
