@@ -56,6 +56,8 @@ export default defineConfig({
             decisions: true,
             connections: true,
             permissions: true,
+            knowledge: true,
+            memory: true,
           })
         ),
       ].join(" "),
