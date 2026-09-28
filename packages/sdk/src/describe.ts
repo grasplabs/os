@@ -10,6 +10,12 @@ import type {
   ObjectExpression,
 } from "@babel/types";
 import { messageOf } from "@grasp-os/shared/errors";
+import type {
+  OptionValue,
+  OutlineNode,
+  StepOutline,
+  WorkflowOutline,
+} from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import {
@@ -19,68 +25,19 @@ import {
   stepKinds,
   stepOptionSchemas,
 } from "./steps.ts";
-import type { OptionForm, StepKind, StepMethod } from "./steps.ts";
+import type { OptionForm, StepMethod } from "./steps.ts";
 import { WorkflowError } from "./workflow.ts";
 
-export type { StepKind } from "./steps.ts";
-
-/** An option written as a literal, or an object of literals. */
-export type OptionValue =
-  | string
-  | number
-  | boolean
-  | { [key: string]: OptionValue };
-
-/** A step as the UI shows it. */
-export interface StepOutline {
-  type: "step";
-  name: string;
-  kind: StepKind;
-  description: string;
-  /** Source of the per-item key, e.g. `invoice.id`; only on keyed steps. */
-  key?: string;
-  /** Changes something outside Grasp; a decision's `ask` always does. */
-  sideEffect: boolean;
-  /** Deterministic, with no model involvement. */
-  locked: boolean;
-  /** Parameters the call reads (options and callback), in source order. */
-  params: string[];
-  /** Other options written as literals, e.g. `retries` or `instructions`. */
-  options: Record<string, OptionValue>;
-  line: number;
-}
-
-/** Steps that run only when a condition holds. */
-export interface BranchOutline {
-  type: "branch";
-  /** The condition as written, e.g. `extracted.total > params.threshold`. */
-  condition: string;
-  /** Parameters the condition reads. */
-  params: string[];
-  /** Steps when the condition holds. */
-  steps: OutlineNode[];
-  /** Steps when it doesn't (the `else`). */
-  otherwise: OutlineNode[];
-  line: number;
-}
-
-/** Steps that run once per item. */
-export interface LoopOutline {
-  type: "loop";
-  /** The loop's head as written, e.g. `for (const invoice of input.invoices)`. */
-  header: string;
-  /** Parameters the head reads. */
-  params: string[];
-  steps: OutlineNode[];
-  line: number;
-}
-
-export type OutlineNode = StepOutline | BranchOutline | LoopOutline;
-
-/** A workflow's steps, as its code runs them. */
-export interface WorkflowOutline {
-  steps: OutlineNode[];
-}
+// The outline's types are shared: core returns an outline to the web.
+export type {
+  BranchOutline,
+  LoopOutline,
+  OptionValue,
+  OutlineNode,
+  StepKind,
+  StepOutline,
+  WorkflowOutline,
+} from "@grasp-os/shared/workflows";
 
 const formHints: Record<OptionForm, string> = {
   literal: "must be a literal",

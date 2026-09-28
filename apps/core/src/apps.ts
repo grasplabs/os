@@ -465,6 +465,13 @@ const namesIn = (
     return name === undefined ? [] : [name];
   });
 
+/**
+ * The IDs of the workflows in a version's files, sorted: what its row
+ * keeps (`app_versions.workflows`) when it is committed.
+ */
+export const workflowsIn = (files: ReadonlyMap<string, string>): string[] =>
+  namesIn([...files.keys()].toSorted(), workflowIdOf);
+
 /** The screens and workflows of an App's current version. */
 export const appContents = async (
   env: Env,
@@ -605,6 +612,7 @@ export const commitFiles = async (
     message: text,
     createdAt: new Date(),
     approved: null,
+    workflows: workflowsIn(files),
   };
   // Only the rows this commit read: each write gives the rows it writes a
   // new revision, so a row written since has one this commit didn't read.

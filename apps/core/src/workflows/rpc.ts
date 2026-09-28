@@ -1,8 +1,22 @@
-import type { WorkflowRun, WorkflowsApi } from "@grasp-os/shared/workflows";
+import type {
+  RunsPage,
+  RunFilter,
+  WorkflowDetail,
+  WorkflowDryRun,
+  WorkflowRun,
+  WorkflowsApi,
+  WorkflowSummary,
+} from "@grasp-os/shared/workflows";
 import { RpcTarget } from "capnweb";
 
 import { withPerson } from "../session-check.ts";
 import type { SessionCheck } from "../session-check.ts";
+import {
+  dryRunWorkflow,
+  listAllRuns,
+  workflowDetail,
+  workflowOverview,
+} from "./overview.ts";
 import { WorkflowParamsRpc } from "./params-rpc.ts";
 import { cancelRun, listRuns, runStatus, startWorkflow } from "./runs.ts";
 
@@ -57,6 +71,34 @@ export class WorkflowsRpc extends RpcTarget implements WorkflowsApi {
     return await withPerson(
       this.#check,
       async (by) => await cancelRun(this.#env, by, run)
+    );
+  }
+
+  async overview(): Promise<WorkflowSummary[]> {
+    return await withPerson(
+      this.#check,
+      async (by) => await workflowOverview(this.#env, by)
+    );
+  }
+
+  async runs(filter?: RunFilter): Promise<RunsPage> {
+    return await withPerson(
+      this.#check,
+      async (by) => await listAllRuns(this.#env, by, filter)
+    );
+  }
+
+  async get(app: string, workflow: string): Promise<WorkflowDetail> {
+    return await withPerson(
+      this.#check,
+      async (by) => await workflowDetail(this.#env, by, app, workflow)
+    );
+  }
+
+  async test(app: string, workflow: string): Promise<WorkflowDryRun> {
+    return await withPerson(
+      this.#check,
+      async (by) => await dryRunWorkflow(this.#env, by, app, workflow)
     );
   }
 }

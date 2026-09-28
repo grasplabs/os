@@ -33,6 +33,7 @@ import {
   toVersion,
   versionFiles,
   versionTree,
+  workflowsIn,
 } from "./apps.ts";
 import type { AppRow, VersionRow } from "./apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
@@ -402,6 +403,7 @@ export const createFromBlueprint = async (
     // (`madeCurrent`) only when that version was, unlike a version its
     // builder commits; otherwise approved as any version is.
     approved: (await approvedSource(env, source, number)) ? 1 : null,
+    workflows: workflowsIn(files),
   };
   const requests = await blueprintRequests(env, by, source.id, id);
   const db = drizzle(env.DB);
@@ -610,6 +612,7 @@ export const installBuiltinBlueprint = async (
           message: "From the release",
           createdAt: now,
           approved: 1,
+          workflows: workflowsIn(files),
         }),
         outboxed(
           db,
