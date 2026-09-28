@@ -1,8 +1,8 @@
 # Trunk-based: feature branch -> pull request into main -> merge queue, which
 # tests it on top of the latest main and squash-merges it. Checks run on pull
 # requests and in the merge queue; a push to main only deploys what those
-# checks already tested, to grasp-os-staging, and publishes it as a release
-# for the console. grasp-os-ops is deployed by hand
+# checks already tested, to grasp-os-staging, and once that succeeds
+# publishes it as a release for the console. grasp-os-ops is deployed by hand
 # with the Deploy grasp-os-ops workflow. Jobs with secrets never run for pull
 # requests from forks. CI never deploys to a client account: the console
 # rolls releases out.
@@ -202,23 +202,58 @@ jobs:
       - run: vp run --filter @grasp-os/core db:migrate
       - run: vp run --filter @grasp-os/core deploy
       - run: vp run --filter @grasp-os/console db:migrate
-      # Console first, each on its own: the router's deploy needs the
-      # account's Secrets Store (scripts/wrangler-deploy.ts), and an account
-      # not set up for it yet mustn't hold back the console.
       - run: vp run --filter @grasp-os/console deploy
+
+  # The router on its own: its deploy needs the account's Secrets Store
+  # (scripts/wrangler-deploy.ts), and an account not set up for it yet
+  # mustn't hold back the console, nor publishing, which waits only for
+  # deploy-staging. It isn't part of a release.
+  deploy-staging-router:
+    name: deploy-staging-router
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: grasp-os-staging
+    concurrency:
+      group: deploy-grasp-os-staging-router
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ["--frozen-lockfile"]
+      - uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: op://grasp-os-staging/cloudflare/account-id
+          CLOUDFLARE_API_TOKEN: op://grasp-os-staging/cloudflare/api-token
       - run: vp run --filter @grasp-os/router deploy
 
   # Every merge to main is a release: built once, verified against its
   # manifest and published to R2 in grasp-os-ops, where the console imports
-  # it. Deploys nothing. The R2 key is loaded after the build and passed only
-  # to the upload step, which keeps it out of the build's environment; all
-  # steps share one runner, so that isn't a security boundary. Skipped until the repository variable
-  # PUBLISH_RELEASES is `true`, set once the bucket, key and environment
-  # exist. Pushes to main share the workflow's concurrency group, which keeps
-  # only the newest pending run: in a burst of merges a middle commit may
-  # never be published, and its changes ship in the next release.
+  # it. Deploys nothing itself, and runs only once deploy-staging has
+  # deployed the same commit (this run's): a commit whose staging migrations
+  # or deploys fail is never published, so the console can't roll it out to
+  # a client. When deploy-staging fails, is cancelled or is skipped, this job
+  # is skipped too, and the commit's changes ship in the next release that
+  # passes staging. The R2 key is loaded after the build and passed only to
+  # the upload step, which keeps it out of the build's environment; all
+  # steps share one runner, so that isn't a security boundary. Skipped until
+  # the repository variable PUBLISH_RELEASES is `true`, set once the bucket,
+  # key and environment exist, and staging deploys. Pushes to main share the
+  # workflow's concurrency group, which keeps only the newest pending run: in
+  # a burst of merges a middle commit may never be published, and its
+  # changes ship in the next release.
   publish-release:
     name: publish-release
+    needs: deploy-staging
     if: github.event_name == 'push' && vars.PUBLISH_RELEASES == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15

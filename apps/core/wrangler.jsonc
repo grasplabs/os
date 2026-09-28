@@ -154,8 +154,8 @@
   // holds a raw provider key.
   "ai": { "binding": "AI", "remote": true },
   "send_email": [{ "name": "EMAIL" }],
-  // The running version's ID, which the cron compares with the last one it
-  // recorded to audit platform updates (src/platform-updates.ts).
+  // The running version's ID, which the cron records once per version to
+  // audit platform updates (src/platform-updates.ts).
   "version_metadata": { "binding": "CF_VERSION_METADATA" },
   "services": [{ "binding": "CONNECT", "service": "grasp-os-connect" }],
 }
