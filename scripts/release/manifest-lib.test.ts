@@ -155,7 +155,7 @@ describe("a written release", () => {
   });
 
   it("verifies against its manifest", () => {
-    expect(verifyRelease(out)).toStrictEqual(manifest);
+    expect(verifyRelease(out).manifest).toStrictEqual(manifest);
   });
 
   it("replaces an earlier release in the same directory", () => {
@@ -163,13 +163,13 @@ describe("a written release", () => {
     writeFileSync(stale, "from an earlier release");
     writeRelease(out, manifest, builds());
     expect(existsSync(stale)).toBeFalsy();
-    expect(verifyRelease(out)).toStrictEqual(manifest);
+    expect(verifyRelease(out).manifest).toStrictEqual(manifest);
   });
 
   it("creates the directory when it's absent", () => {
     const nested = path.join(out, "nested", "release");
     writeRelease(nested, manifest, builds());
-    expect(verifyRelease(nested)).toStrictEqual(manifest);
+    expect(verifyRelease(nested).manifest).toStrictEqual(manifest);
   });
 
   it("keeps the previous release when the next build fails", () => {
@@ -178,7 +178,7 @@ describe("a written release", () => {
     expect(() =>
       generateManifest({ ...info, commit: "not a commit" }, builds())
     ).toThrow(/commit/u);
-    expect(verifyRelease(out)).toStrictEqual(manifest);
+    expect(verifyRelease(out).manifest).toStrictEqual(manifest);
   });
 
   it("refuses a directory that isn't a release before building", () => {
@@ -223,6 +223,29 @@ describe("a written release", () => {
     expect(() => verifyRelease(out)).toThrow(/doesn't match its hash/u);
     unlinkSync(asset);
     expect(() => verifyRelease(out)).toThrow(/missing/u);
+  });
+
+  it("checks every asset index entry, served or not, inside the release", () => {
+    const write = (assets: Record<string, unknown>): void => {
+      writeFileSync(
+        path.join(out, "manifest.json"),
+        stableStringify({ ...manifest, assets })
+      );
+    };
+    const [hash, blob] = Object.entries(manifest.assets)[0] ?? [];
+    if (hash === undefined || blob === undefined) {
+      throw new Error("expected an asset");
+    }
+    write({ ...manifest.assets, [hash]: { ...blob, r2Key: "../../outside" } });
+    expect(() => verifyRelease(out)).toThrow(/content address/u);
+
+    const unserved = "f".repeat(32);
+    writeFileSync(path.join(out, assetKey(unserved)), "served by nothing");
+    write({
+      ...manifest.assets,
+      [unserved]: { size: 17, r2Key: assetKey(unserved) },
+    });
+    expect(() => verifyRelease(out)).toThrow(/no Worker serves/u);
   });
 
   it("fails verification when the manifest points a blob elsewhere", () => {

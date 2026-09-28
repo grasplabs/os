@@ -486,6 +486,8 @@ export const writeRelease = (
 };
 
 const readBlob = (outDir: string, key: string, expectedKey: string): Buffer => {
+  // Only the content-addressed form, which is plain hex under blobs/: an
+  // r2Key can never name a path outside the release directory.
   if (key !== expectedKey) {
     throw new Error(`${key} isn't stored at its content address`);
   }
@@ -496,48 +498,81 @@ const readBlob = (outDir: string, key: string, expectedKey: string): Buffer => {
   }
 };
 
-const verifyFile = (
-  outDir: string,
-  file: z.infer<typeof fileRef>,
-  key: (hash: string) => string
-): void => {
-  const bytes = readBlob(outDir, file.r2Key, key(file.sha256));
-  if (sha256Hex(bytes) !== file.sha256 || bytes.length !== file.size) {
-    throw new Error(`${file.r2Key} (${file.name}) doesn't match its hash`);
-  }
-};
+/** A release directory checked against its manifest (see {@link verifyRelease}). */
+export interface VerifiedRelease {
+  manifest: ReleaseManifest;
+  /** The bytes of `manifest.json` that were parsed. */
+  manifestBytes: Buffer;
+  /** Every blob, by its R2 key: the bytes that were hashed. */
+  blobs: Map<string, Buffer>;
+}
 
 /**
  * Checks a release directory against its manifest: every module, migration
- * and asset is present at its content address, and its bytes hash to it.
- * Returns the parsed manifest.
+ * and asset is present at its content address, and its bytes hash to it;
+ * every entry in the asset index is one a Worker serves. Each file is read
+ * once, and those bytes are returned, so what's published is what was
+ * checked.
  */
-export const verifyRelease = (outDir: string): ReleaseManifest => {
+export const verifyRelease = (outDir: string): VerifiedRelease => {
+  const manifestBytes = readFileSync(path.join(outDir, "manifest.json"));
   const manifest = releaseManifestSchema.parse(
-    JSON.parse(readFileSync(path.join(outDir, "manifest.json"), "utf-8"))
+    JSON.parse(manifestBytes.toString("utf-8"))
   );
-  for (const worker of Object.values(manifest.workers)) {
-    for (const module of worker.modules) {
-      verifyFile(outDir, module, moduleKey);
+  const blobs = new Map<string, Buffer>();
+
+  for (const [hash, blob] of Object.entries(manifest.assets)) {
+    const bytes = readBlob(outDir, blob.r2Key, assetKey(hash));
+    if (bytes.length !== blob.size) {
+      throw new Error(`${blob.r2Key} doesn't match its hash`);
     }
-    for (const migration of worker.d1Databases.flatMap((d) => d.migrations)) {
-      verifyFile(outDir, migration, migrationKey);
+    blobs.set(blob.r2Key, bytes);
+  }
+
+  const served = new Set<string>();
+  for (const worker of Object.values(manifest.workers)) {
+    const files = [
+      ...worker.modules.map((file) => ({ file, key: moduleKey })),
+      ...worker.d1Databases.flatMap((database) =>
+        database.migrations.map((file) => ({ file, key: migrationKey }))
+      ),
+    ];
+    for (const { file, key } of files) {
+      if (file.r2Key !== key(file.sha256)) {
+        throw new Error(`${file.r2Key} isn't stored at its content address`);
+      }
+      // Two Workers may list the same blob; it is read once.
+      const bytes =
+        blobs.get(file.r2Key) ?? readBlob(outDir, file.r2Key, file.r2Key);
+      if (sha256Hex(bytes) !== file.sha256 || bytes.length !== file.size) {
+        throw new Error(`${file.r2Key} (${file.name}) doesn't match its hash`);
+      }
+      blobs.set(file.r2Key, bytes);
     }
     for (const [assetPath, entry] of Object.entries(
       worker.assets?.manifest ?? {}
     )) {
-      const blob = manifest.assets[entry.hash];
-      if (blob === undefined) {
+      const bytes = blobs.get(assetKey(entry.hash));
+      if (bytes === undefined) {
         throw new Error(`${assetPath} isn't in the release's asset index`);
       }
-      const bytes = readBlob(outDir, blob.r2Key, assetKey(entry.hash));
       if (
         cfAssetHash(bytes, assetPath) !== entry.hash ||
         bytes.length !== entry.size
       ) {
         throw new Error(`${assetPath} doesn't match its hash`);
       }
+      served.add(entry.hash);
     }
   }
-  return manifest;
+
+  const unserved = Object.keys(manifest.assets).filter(
+    (hash) => !served.has(hash)
+  );
+  if (unserved.length > 0) {
+    throw new Error(
+      `The asset index lists blobs no Worker serves: ${unserved.join(", ")}`
+    );
+  }
+  return { manifest, manifestBytes, blobs };
 };

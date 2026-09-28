@@ -1,11 +1,19 @@
 /**
  * upload-release.ts run as CI runs it, against a stand-in for R2's S3 API
- * (the outside system) that stores objects in memory and honours
- * `If-None-Match: *` as R2 does.
+ * (the outside system) that stores objects in memory and, as R2 does,
+ * honours `If-None-Match: *`, checks `x-amz-checksum-sha256` on a PUT and
+ * reports it on a HEAD with checksum mode on.
  */
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { createServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { tmpdir } from "node:os";
@@ -40,18 +48,26 @@ const HTTP_PRECONDITION_FAILED = 412;
 const manifest = generateManifest(info, builds());
 const published = `releases/${manifest.releaseId}/manifest.json`;
 
+const HTTP_BAD_REQUEST = 400;
+
+const sha256Base64 = (bytes: Uint8Array): string =>
+  createHash("sha256").update(bytes).digest("base64");
+
 /**
- * Objects by key, every PUT that stored one, in order, and keys another
- * writer stores right after answering a HEAD for them with "not found".
+ * Objects by key, the SHA-256 each was stored with (if any), every PUT that
+ * stored one, in order, and objects another writer stores (without a
+ * checksum) right after answering a HEAD for their key with "not found".
  */
 interface Bucket {
   objects: Map<string, Buffer>;
+  checksums: Map<string, string>;
   puts: string[];
   writtenAfterHead: Map<string, Buffer>;
 }
 
 const emptyBucket = (): Bucket => ({
   objects: new Map(),
+  checksums: new Map(),
   puts: [],
   writtenAfterHead: new Map(),
 });
@@ -68,22 +84,43 @@ const handle = async (
     response.writeHead(HTTP_NOT_FOUND).end();
     return;
   }
+  const stored = bucket.objects.get(key);
   if (request.method === "HEAD") {
+    const checksum = bucket.checksums.get(key);
+    const reportChecksum =
+      checksum !== undefined &&
+      request.headers["x-amz-checksum-mode"] === "ENABLED";
     response
-      .writeHead(bucket.objects.has(key) ? HTTP_OK : HTTP_NOT_FOUND)
+      .writeHead(
+        stored === undefined ? HTTP_NOT_FOUND : HTTP_OK,
+        reportChecksum ? { "x-amz-checksum-sha256": checksum } : {}
+      )
       .end();
     const other = bucket.writtenAfterHead.get(key);
-    if (other !== undefined && !bucket.objects.has(key)) {
+    if (other !== undefined && stored === undefined) {
       bucket.objects.set(key, other);
     }
     return;
   }
+  if (request.method === "GET") {
+    response.writeHead(stored === undefined ? HTTP_NOT_FOUND : HTTP_OK);
+    response.end(stored);
+    return;
+  }
   const body = await buffer(request);
-  if (request.headers["if-none-match"] === "*" && bucket.objects.has(key)) {
+  if (request.headers["if-none-match"] === "*" && stored !== undefined) {
     response.writeHead(HTTP_PRECONDITION_FAILED).end();
     return;
   }
+  const checksum = request.headers["x-amz-checksum-sha256"];
+  if (typeof checksum === "string" && checksum !== sha256Base64(body)) {
+    response.writeHead(HTTP_BAD_REQUEST).end();
+    return;
+  }
   bucket.objects.set(key, body);
+  if (typeof checksum === "string") {
+    bucket.checksums.set(key, checksum);
+  }
   bucket.puts.push(key);
   response.writeHead(HTTP_OK).end();
 };
@@ -158,18 +195,40 @@ describe("publishing a release", () => {
     expect(stdout).toContain("0 uploaded");
   });
 
-  it("leaves a blob that appears between its HEAD and its PUT", async () => {
+  const coreModule = (): { key: string; bytes: Buffer } => {
     const module = manifest.workers.core?.modules[0];
     if (module === undefined) {
       throw new Error("expected a core module");
     }
-    const other = Buffer.from("written by another upload");
-    bucket.writtenAfterHead.set(module.r2Key, other);
+    return {
+      key: module.r2Key,
+      bytes: readFileSync(path.join(dir, module.r2Key)),
+    };
+  };
+
+  it("keeps a matching blob another writer stores between its HEAD and its PUT", async () => {
+    const { key, bytes } = coreModule();
+    bucket.writtenAfterHead.set(key, bytes);
     const stdout = await upload();
-    expect(bucket.objects.get(module.r2Key)).toStrictEqual(other);
-    expect(bucket.puts).not.toContain(module.r2Key);
+    expect(bucket.puts).not.toContain(key);
     expect(bucket.puts.at(-1)).toBe(published);
     expect(stdout).toContain(`Published ${published}`);
+  });
+
+  it("publishes nothing when another writer stores other bytes between its HEAD and its PUT", async () => {
+    const { key } = coreModule();
+    bucket.writtenAfterHead.set(key, Buffer.from("other bytes"));
+    await expect(upload()).rejects.toThrow(/isn't the release's bytes/u);
+    expect(bucket.objects.has(published)).toBeFalsy();
+  });
+
+  it("publishes nothing when R2 already holds other bytes at a blob's key", async () => {
+    const { key } = coreModule();
+    const other = Buffer.from("other bytes");
+    bucket.objects.set(key, other);
+    bucket.checksums.set(key, sha256Base64(other));
+    await expect(upload()).rejects.toThrow(/isn't the release's bytes/u);
+    expect(bucket.objects.has(published)).toBeFalsy();
   });
 
   it("uploads only the blobs the manifest references", async () => {

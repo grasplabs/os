@@ -1,10 +1,14 @@
 /**
  * Publishes a built release (build-release.ts) to R2 through its S3 API.
  *
- * The release is verified against its manifest first, and only the blobs
- * it references are uploaded. Blobs are content-addressed, so one an
- * earlier release uploaded is found by a HEAD and skipped; the PUT is
- * conditional as well, so one written since the HEAD is left as it is.
+ * The release is verified against its manifest first, and the bytes that
+ * were hashed are the bytes sent: nothing is read from disk twice. Blobs
+ * are content-addressed and uploaded with their SHA-256
+ * (`x-amz-checksum-sha256`), which R2 checks on write. A blob R2 already
+ * holds, from an earlier release or another writer since the HEAD (the PUT
+ * is conditional), is skipped only once its stored SHA-256 matches: the
+ * checksum R2 reports, or, for an object stored without one, the hash of
+ * its bytes. One that doesn't match fails the upload, before the manifest.
  *
  * The manifest goes up last, to `releases/<id>/manifest.json`: the console
  * imports only releases whose manifest exists, so an upload that stops
@@ -19,7 +23,7 @@
  *      R2_BUCKET, R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY
  * Usage: vp run release:upload --release <dir> [--dry-run]
  */
-import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
@@ -42,21 +46,20 @@ if (args.release === undefined) {
 }
 const releaseDir = path.resolve(args.release);
 
-const manifest = verifyRelease(releaseDir);
+const { manifest, manifestBytes, blobs } = verifyRelease(releaseDir);
 const published = manifestKey(manifest.releaseId);
-// Every blob the verified manifest references, once, at the key it has in
-// the release directory and in R2. Nothing else under blobs/ is uploaded.
-const blobs = [
-  ...new Set([
-    ...Object.values(manifest.workers).flatMap((worker) => [
-      ...worker.modules.map((module) => module.r2Key),
-      ...worker.d1Databases.flatMap((database) =>
-        database.migrations.map((migration) => migration.r2Key)
-      ),
-    ]),
-    ...Object.values(manifest.assets).map((asset) => asset.r2Key),
-  ]),
-].toSorted();
+
+/** SHA-256, base64: the form of R2's `x-amz-checksum-sha256`. */
+const sha256Base64 = (bytes: Uint8Array): string =>
+  createHash("sha256").update(bytes).digest("base64");
+
+const assertStored = (key: string, stored: string, expected: string): void => {
+  if (stored !== expected) {
+    throw new Error(
+      `${key} in R2 isn't the release's bytes (SHA-256 ${stored}, expected ${expected}); nothing published`
+    );
+  }
+};
 
 const requireEnv = (name: string): string => {
   const value = process.env[name];
@@ -77,22 +80,50 @@ const upload = async (): Promise<void> => {
   });
   const url = (key: string): string => `${endpoint}/${bucket}/${key}`;
 
-  const uploadBlob = async (key: string): Promise<"uploaded" | "skipped"> => {
-    const head = await client.fetch(url(key), { method: "HEAD" });
-    if (head.ok) {
-      return "skipped";
+  const checksumMode = { "x-amz-checksum-mode": "ENABLED" };
+
+  // The SHA-256 of what R2 holds at `key`, or undefined when it holds nothing.
+  const storedSha256 = async (key: string): Promise<string | undefined> => {
+    const head = await client.fetch(url(key), {
+      method: "HEAD",
+      headers: checksumMode,
+    });
+    if (head.status === HTTP_NOT_FOUND) {
+      return undefined;
     }
-    if (head.status !== HTTP_NOT_FOUND) {
+    if (!head.ok) {
       throw new Error(`HEAD ${key}: ${head.status}`);
     }
-    // Conditional too: a blob written since the HEAD (another upload of the
-    // same content) is left as it is.
+    const checksum = head.headers.get("x-amz-checksum-sha256");
+    if (checksum !== null) {
+      return checksum;
+    }
+    // Stored without a checksum: hash the bytes themselves.
+    const get = await client.fetch(url(key));
+    if (!get.ok) {
+      throw new Error(`GET ${key}: ${get.status}`);
+    }
+    return sha256Base64(new Uint8Array(await get.arrayBuffer()));
+  };
+
+  const uploadBlob = async (
+    key: string,
+    bytes: Buffer
+  ): Promise<"uploaded" | "skipped"> => {
+    const expected = sha256Base64(bytes);
+    const existing = await storedSha256(key);
+    if (existing !== undefined) {
+      assertStored(key, existing, expected);
+      return "skipped";
+    }
     const put = await client.fetch(url(key), {
       method: "PUT",
-      body: readFileSync(path.join(releaseDir, key)),
-      headers: { "If-None-Match": "*" },
+      body: bytes,
+      headers: { "If-None-Match": "*", "x-amz-checksum-sha256": expected },
     });
     if (put.status === HTTP_PRECONDITION_FAILED) {
+      // Another writer stored it since the HEAD: skipped only if it matches.
+      assertStored(key, (await storedSha256(key)) ?? "none", expected);
       return "skipped";
     }
     if (!put.ok) {
@@ -105,9 +136,9 @@ const upload = async (): Promise<void> => {
   const queue = [...blobs];
   const results: ("uploaded" | "skipped")[] = [];
   const work = async (): Promise<void> => {
-    for (let key = queue.shift(); key !== undefined; key = queue.shift()) {
+    for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
       // oxlint-disable-next-line no-await-in-loop -- each worker uploads one blob at a time
-      results.push(await uploadBlob(key));
+      results.push(await uploadBlob(...next));
     }
   };
   await Promise.all(Array.from({ length: UPLOAD_CONCURRENCY }, work));
@@ -118,8 +149,12 @@ const upload = async (): Promise<void> => {
 
   const put = await client.fetch(url(published), {
     method: "PUT",
-    body: readFileSync(path.join(releaseDir, "manifest.json")),
-    headers: { "Content-Type": "application/json", "If-None-Match": "*" },
+    body: manifestBytes,
+    headers: {
+      "Content-Type": "application/json",
+      "If-None-Match": "*",
+      "x-amz-checksum-sha256": sha256Base64(manifestBytes),
+    },
   });
   if (put.status === HTTP_PRECONDITION_FAILED) {
     // A re-run of the same CI run: same id, a new build time. The release
@@ -135,7 +170,7 @@ const upload = async (): Promise<void> => {
 
 if (args["dry-run"]) {
   console.info(
-    `Dry run: release ${manifest.releaseId} verified; would upload whichever of its ${blobs.length} blobs R2 lacks, then ${published}`
+    `Dry run: release ${manifest.releaseId} verified; would upload whichever of its ${blobs.size} blobs R2 lacks, then ${published}`
   );
 } else {
   await upload();
