@@ -660,6 +660,71 @@ describe("chat agent turns", () => {
     expect(gateway.requests).toStrictEqual([]);
   });
 
+  it("shortens a long turn's oldest code results to fit, keeping its latest and every call's result", async () => {
+    const { stub, chat, gateway, ask } = await newChat(
+      // 30 code runs of a result the model reads cut to 32 KiB each.
+      ...Array.from({ length: maxRunsPerTurn / maxRunsPerResponse }, () =>
+        codeStep(
+          "export default async () => 'r'.repeat(40_000);",
+          maxRunsPerResponse
+        )
+      ),
+      says("Done.")
+    );
+
+    await expect(ask("Run it all.")).resolves.toMatchObject({
+      outcome: "answered",
+    });
+
+    // What the last request sent, in Anthropic's wire format.
+    const blockSchema = z.looseObject({
+      type: z.string(),
+      id: z.string().optional(),
+      tool_use_id: z.string().optional(),
+    });
+    const bodySchema = z.looseObject({
+      messages: z.array(
+        z.looseObject({
+          content: z.union([z.string(), z.array(blockSchema)]),
+        })
+      ),
+    });
+    const last = gateway.requests.at(-1)?.body;
+    const blocks = bodySchema
+      .parse(last)
+      .messages.flatMap(({ content }) =>
+        typeof content === "string" ? [] : content
+      );
+    const calls = blocks.flatMap(({ type, id }) =>
+      type === "tool_use" ? [id] : []
+    );
+    const results = blocks.filter(({ type }) => type === "tool_result");
+    const stored = await codeResults(stub, chat.id);
+    const shortened = results.filter((result) =>
+      JSON.stringify(result).includes("(output left out to fit;")
+    );
+    const latest = results.at(-1);
+    expect({
+      calls: calls.length,
+      withinWindow: JSON.stringify(last).length < historyChars + 50_000,
+      // Every call still has its result, in the same order.
+      pairs: results.map(({ tool_use_id: id }) => id),
+      someShortened: shortened.length > 0,
+      latestWhole:
+        latest !== undefined &&
+        !shortened.includes(latest) &&
+        JSON.stringify(latest).includes(
+          JSON.stringify(stored.at(-1)?.text ?? "missing").slice(1, -1)
+        ),
+    }).toStrictEqual({
+      calls: maxRunsPerTurn,
+      withinWindow: true,
+      pairs: calls,
+      someShortened: true,
+      latestWhole: true,
+    });
+  });
+
   it("sends only a long chat's recent turns, and stops a chat that is too long", async () => {
     const { stub, chat, gateway, ask } = await newChat(
       codeStep("export default async () => 'early' + '-result';"),

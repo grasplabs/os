@@ -222,27 +222,83 @@ const leftOut =
   "Earlier messages of this chat are left out: the chat is longer than what each request sends. Say so if a question needs them.";
 
 /**
- * What a request sends of a long chat: the system messages (instructions
- * and API declarations), the newest turns that fit in {@link historyChars}
- * and always the turn under way, with a note where earlier turns were left
- * out. A turn is a question and everything after it up to the next, so a
- * tool call is never parted from its result.
+ * The turn under way made to fit in {@link historyChars} where it can: its
+ * oldest code results, but never its latest, give way to a note of how long
+ * they were, oldest first, until it fits. Each result keeps its place and
+ * its call's ID, so every call still has its result.
  */
-export const recentHistory = (messages: readonly Message[]): Message[] => {
+const fitTurnUnderWay = (
+  messages: Message[],
+  turns: readonly number[],
+  turn: number,
+  size: number
+): number => {
+  const results = [...messages.keys()].filter(
+    (index) => turns[index] === turn && messages[index]?.role === "toolResult"
+  );
+  let left = size;
+  for (const index of results.slice(0, -1)) {
+    const result = messages[index];
+    if (left <= historyChars || result?.role !== "toolResult") {
+      break;
+    }
+    const before = JSON.stringify(result).length;
+    const text = result.content
+      .flatMap((part) => (part.type === "text" ? [part.text] : []))
+      .join("");
+    const shortened: Message = {
+      ...result,
+      content: [
+        {
+          type: "text",
+          text: `(output left out to fit; ${text.length} characters)`,
+        },
+      ],
+    };
+    messages[index] = shortened;
+    left -= before - JSON.stringify(shortened).length;
+  }
+  return left;
+};
+
+/**
+ * Which turn each message is in (-1 before the first question), and each
+ * turn's size as JSON, its system messages left out.
+ */
+const measureTurns = (
+  messages: readonly Message[]
+): { turns: number[]; sizes: number[] } => {
   const turns: number[] = [];
   const sizes: number[] = [];
-  let turn = -1;
   for (const message of messages) {
     if (message.role === "user") {
-      turn += 1;
       sizes.push(0);
     }
+    const turn = sizes.length - 1;
     turns.push(turn);
     if (message.role !== "system" && turn >= 0) {
       sizes[turn] = (sizes[turn] ?? 0) + JSON.stringify(message).length;
     }
   }
-  // The turn under way, whatever its size, then earlier ones while they fit.
+  return { turns, sizes };
+};
+
+/**
+ * What a request sends of a long chat: the system messages (instructions
+ * and API declarations), the newest turns that fit in {@link historyChars}
+ * and always the turn under way (its oldest code results shortened when it
+ * alone is over), with a note where earlier turns were left out. A turn is
+ * a question and everything after it up to the next, so a tool call is
+ * never parted from its result.
+ */
+export const recentHistory = (history: readonly Message[]): Message[] => {
+  const messages = [...history];
+  const { turns, sizes } = measureTurns(messages);
+  const turn = sizes.length - 1;
+  if (turn >= 0 && (sizes[turn] ?? 0) > historyChars) {
+    sizes[turn] = fitTurnUnderWay(messages, turns, turn, sizes[turn] ?? 0);
+  }
+  // The turn under way, then earlier ones while they fit.
   let first = turn;
   let used = sizes[turn] ?? 0;
   while (first > 0 && used + (sizes[first - 1] ?? 0) <= historyChars) {
@@ -250,7 +306,7 @@ export const recentHistory = (messages: readonly Message[]): Message[] => {
     used += sizes[first] ?? 0;
   }
   if (first <= 0) {
-    return [...messages];
+    return messages;
   }
   const sent: Message[] = [];
   for (const [index, message] of messages.entries()) {
