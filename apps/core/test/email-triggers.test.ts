@@ -394,20 +394,38 @@ describe("email triggers", () => {
     });
   });
 
-  it("stop a workflow going over its hourly limit, start the others, and fail the mail for now", async () => {
+  it("stop a workflow going over its hourly limit, start the others, and start each run once when the mail comes again", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, {
       ...intake("busy"),
       ...intake("busy", "tally"),
     });
-    // The hour's 60 runs of `intake` from mail, as recorded.
-    const seeded = Array.from({ length: 60 }, () => crypto.randomUUID());
+    // The hour's runs from mail, as recorded: `intake` at its 60, `tally`
+    // one short, so this message's run is `tally`'s 60th.
     const now = Date.now();
+    const hours = [
+      ...Array.from({ length: 60 }, (_, index) => ({
+        workflow: "intake",
+        index,
+      })),
+      ...Array.from({ length: 59 }, (_, index) => ({
+        workflow: "tally",
+        index,
+      })),
+    ].map((run) => ({ ...run, id: crypto.randomUUID() }));
+    const seeded = new Set(hours.map(({ id }) => id));
     await env.DB.batch(
-      seeded.map((id, index) =>
+      hours.map(({ id, workflow, index }) =>
         env.DB.prepare(
-          "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at, trigger_key) VALUES (?, ?, 'intake', 1, NULL, 'completed', ?, ?, ?)"
-        ).bind(id, app, now - index * 1000, now, `email:${app}:intake:${index}`)
+          "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at, trigger_key) VALUES (?, ?, ?, 1, NULL, 'completed', ?, ?, ?)"
+        ).bind(
+          id,
+          app,
+          workflow,
+          now - index * 1000,
+          now,
+          `email:${app}:${workflow}:${index}`
+        )
       )
     );
     const mail = invoiceMail({
@@ -417,14 +435,15 @@ describe("email triggers", () => {
     const started = async () => {
       const runs = await runsOf(builder, app);
       return runs
-        .filter(({ id }) => !seeded.includes(id))
+        .filter(({ id }) => !seeded.has(id))
         .map(({ workflow }) => workflow)
         .toSorted();
     };
 
     const first = await outcome(deliver("busy@grasp.test", mail));
     const whileCapped = await started();
-    // The hour moves on; the sender tries again.
+    // The hour moves on for `intake`; `tally` is at its 60 now, one of
+    // them this message's. The sender tries again.
     await env.DB.prepare(
       "UPDATE workflow_runs SET created_at = ? WHERE app_id = ? AND workflow_id = 'intake'"
     )

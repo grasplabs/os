@@ -2,7 +2,7 @@ import { sha256Hex, toHex } from "@grasp-os/shared/encoding";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import type { InboundEmail } from "@grasp-os/shared/workflows";
-import { and, count, eq, gte, like } from "drizzle-orm";
+import { and, eq, gte, like, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import PostalMime from "postal-mime";
 import type { Address, Email } from "postal-mime";
@@ -308,29 +308,41 @@ const emailRunsPerHour = 60;
 const hourMs = 60 * 60 * 1000;
 
 /**
- * Whether mail started `emailRunsPerHour` runs of App `app`'s workflow
- * `workflow` in the past hour, counted on its runs (their index by App,
- * workflow and time). Checked before the starts, not with them, so mail
- * delivered at the same moment can go a few over.
+ * Whether App `app`'s workflow `workflow` is at its hourly limit for the
+ * message whose run has trigger key `key`: mail started `emailRunsPerHour`
+ * of its runs in the past hour (counted on its index by App, workflow and
+ * time), and none of them is this message's. A workflow that has this
+ * message's run already is never capped for it, so a delivery tried again
+ * because another workflow was capped isn't refused by the run it started
+ * itself. Checked before the starts, not with them, so mail delivered at
+ * the same moment can go a few over.
  */
 const atHourlyCap = async (
   env: Env,
   app: string,
-  workflow: string
+  workflow: string,
+  key: string
 ): Promise<boolean> => {
+  const recent = and(
+    gte(workflowRuns.createdAt, new Date(Date.now() - hourMs)),
+    like(workflowRuns.triggerKey, "email:%")
+  );
+  const mine = eq(workflowRuns.triggerKey, key);
   const counted = await drizzle(env.DB)
-    .select({ runs: count() })
+    .select({
+      runs: sql<number | null>`sum(case when ${recent} then 1 else 0 end)`,
+      delivered: sql<number | null>`max(case when ${mine} then 1 else 0 end)`,
+    })
     .from(workflowRuns)
     .where(
       and(
         eq(workflowRuns.appId, app),
         eq(workflowRuns.workflowId, workflow),
-        gte(workflowRuns.createdAt, new Date(Date.now() - hourMs)),
-        like(workflowRuns.triggerKey, "email:%")
+        or(recent, mine)
       )
     )
     .get();
-  return (counted?.runs ?? 0) >= emailRunsPerHour;
+  return counted?.delivered !== 1 && (counted?.runs ?? 0) >= emailRunsPerHour;
 };
 
 /** `raw` parsed, or undefined for a message that doesn't parse. */
@@ -380,11 +392,27 @@ export const receiveEmail = async (
     messageId !== undefined && messageId.includes("@")
       ? await sha256Hex(messageId)
       : id;
-  // Each workflow's limit is its own: the message goes to those with
-  // room now, and the others get it when the sender tries again.
+  // By workflow, not by trigger row: the rows are written anew each time
+  // a version is made current.
+  const keyOf = ({
+    appId,
+    workflowId,
+  }: {
+    appId: string;
+    workflowId: string;
+  }) => `email:${appId}:${workflowId}:${same}`;
+  // Each workflow's limit is its own: the message goes to those with room
+  // now or its run already, and the others get it when the sender tries
+  // again.
   const capped = await Promise.all(
     receivers.map(
-      async ({ appId, workflowId }) => await atHourlyCap(env, appId, workflowId)
+      async (receiver) =>
+        await atHourlyCap(
+          env,
+          receiver.appId,
+          receiver.workflowId,
+          keyOf(receiver)
+        )
     )
   );
   const withRoom = receivers.filter((_, index) => capped[index] !== true);
@@ -400,9 +428,7 @@ export const receiveEmail = async (
           actor: { type: "system" },
           trigger: {
             type: "email",
-            // By workflow, not by trigger row: the rows are written anew
-            // each time a version is made current.
-            key: `email:${receiver.appId}:${receiver.workflowId}:${same}`,
+            key: keyOf(receiver),
             version: receiver.version,
           },
         })
