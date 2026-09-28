@@ -74,9 +74,9 @@ const startScheduled = async (
       log.info("workflow.start_pending", { trigger: schedule.id });
       return;
     }
-    // The time stays due, so the next minute tries its key again: a run
-    // the failed attempt recorded (and audited, as started, then as failed
-    // to start) is the run, and a key starts no second one.
+    // The time stays due, so the next minute tries its key again. A run
+    // whose start failed (audited as started, then as failed to start)
+    // gave its key up, so that try starts the run anew.
     log.error("workflow.trigger_failed", {
       trigger: schedule.id,
       type: "schedule",

@@ -484,7 +484,8 @@ export const workflowRuns = sqliteTable(
     /**
      * What a trigger started it for (src/workflows/triggers.ts): one key
      * per scheduled time, so the same one delivered twice starts one run.
-     * Null for a run a person started.
+     * Null for a run a person started, and for one whose start failed,
+     * which gives its key up for the delivery tried again.
      */
     triggerKey: text("trigger_key"),
   },

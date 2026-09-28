@@ -247,9 +247,10 @@ const restartOrphan = async (
  * The row and its audit event are written before the run is created, so
  * the dispatcher always finds the row; a run that can't be created is
  * marked failed, audited as a failed run. A trigger's key already taken
- * returns the run that took it, whatever became of it, once it has its
- * engine instance (`restartOrphan`; `workflow.start_pending` until
- * then). A trigger of a
+ * returns the run that took it, whatever became of it since, once it has
+ * its engine instance (`restartOrphan`; `workflow.start_pending` until
+ * then); a run whose start failed gives its key up, so the delivery
+ * tried again starts it anew. A trigger of a
  * version that is no longer current starts nothing
  * (`workflow.trigger_gone`): the version that replaced it may not declare
  * it. The run is pinned to the version checked, so at worst a trigger
@@ -328,7 +329,9 @@ export const startRun = async (
   } catch (error) {
     // The instance may exist all the same: the dispatcher refuses to run
     // a failed run's row. Its report says only that it didn't start: the
-    // platform's error stays in the log.
+    // platform's error stays in the log. It gives up its trigger key, so
+    // the delivery tried again (a schedule stays due, mail and events are
+    // retried) starts the run as a new one, rather than finding this one.
     log.error("workflow.start_failed", {
       runId: row.id,
       ...errorFields(error),
@@ -350,7 +353,12 @@ export const startRun = async (
     await auditedBatch(env, db, [
       db
         .update(workflowRuns)
-        .set({ status: "failed", endedAt: failedAt, failure })
+        .set({
+          status: "failed",
+          endedAt: failedAt,
+          failure,
+          triggerKey: null,
+        })
         .where(
           and(
             eq(workflowRuns.id, row.id),

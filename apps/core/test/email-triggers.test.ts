@@ -1,6 +1,6 @@
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { setCurrentVersion } from "../src/apps.ts";
@@ -27,11 +27,14 @@ type Person = Awaited<ReturnType<typeof personApi>>;
  * The invoice intake workflow, receiving mail at `address`: it returns
  * what it read of the message it started with.
  */
-const intake = (address = "invoices"): Record<string, string> => ({
-  "workflows/intake.ts": `import { emailMessage, workflow } from "@grasp-os/sdk/workflow";
+const intake = (
+  address = "invoices",
+  id = "intake"
+): Record<string, string> => ({
+  [`workflows/${id}.ts`]: `import { emailMessage, workflow } from "@grasp-os/sdk/workflow";
 
 export default workflow(
-  "intake",
+  "${id}",
   { params: {}, input: emailMessage, triggers: [{ type: "email", address: "${address}" }] },
   async (step, { input }) =>
     await step.do("read", { description: "Read the invoice mail" }, async () => ({
@@ -47,9 +50,9 @@ export default workflow(
     }))
 );
 `,
-  "workflows/intake.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+  [`workflows/${id}.workflow-tests.ts`]: `import { workflowTests } from "@grasp-os/sdk/testing";
 
-import definition from "./intake.ts";
+import definition from "./${id}.ts";
 
 const input = { id: "m", from: { name: "", address: "a@b.test" }, to: [], cc: [], subject: "", date: null, text: "", truncated: false, attachments: [] };
 
@@ -100,6 +103,19 @@ const invoiceMail = ({
     "",
     "JVBERi0=",
     "--b--",
+    "",
+  ].join("\r\n");
+
+/** An HTML-only message to `unclosed@`, with `subject` and `body`. */
+const unclosed = (subject: string, body: string): string =>
+  [
+    "From: Ben <ben@acme.test>",
+    "To: unclosed@grasp.test",
+    `Subject: ${subject}`,
+    "MIME-Version: 1.0",
+    "Content-Type: text/html; charset=utf-8",
+    "",
+    body,
     "",
   ].join("\r\n");
 
@@ -278,55 +294,155 @@ describe("email triggers", () => {
   it("read the text of HTML that never closes its tags in time that grows with its length alone", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, intake("unclosed"));
-    // Scripts opened and never closed, over 2 MB: a scan from each to the
-    // end, as a lazy pattern does, takes over a minute here; one pass, a
-    // few milliseconds.
-    const html = [
-      "From: Ben <ben@acme.test>",
-      "To: unclosed@grasp.test",
-      "Subject: Unclosed",
-      "MIME-Version: 1.0",
-      "Content-Type: text/html; charset=utf-8",
-      "",
-      `<p>Pay INV-7</p>${"<script".repeat(300_000)}`,
-      "",
-    ].join("\r\n");
-
+    // Scripts and tags opened and never closed, over 2 MB each: a scan
+    // from each to the end, as a lazy pattern does, takes over a minute
+    // here; one pass, a few milliseconds.
     const startedAt = performance.now();
-    await deliver("unclosed@grasp.test", html);
+    await deliver(
+      "unclosed@grasp.test",
+      unclosed("scripts", `<p>Pay INV-7</p>${"<script".repeat(300_000)}`)
+    );
+    await deliver(
+      "unclosed@grasp.test",
+      unclosed("tags", `<p>Pay INV-7</p>${"<a <b".repeat(500_000)}`)
+    );
     const took = performance.now() - startedAt;
+    const reads = await readByRuns(builder, app);
 
     expect(took).toBeLessThan(5000);
-    await expect(readByRun(builder, app)).resolves.toMatchObject({
-      text: "Pay INV-7",
+    expect(
+      Object.fromEntries(
+        reads.map(({ subject, text }) => [subject, text.slice(0, 20)])
+      )
+    ).toStrictEqual({
+      // A script that never ends ends the text.
+      scripts: "Pay INV-7",
+      // A tag that never closes is text, as far as it fits.
+      tags: "Pay INV-7\n<a <b<a <b",
     });
   });
 
-  it("stop to go over its hourly limit, and fail the mail for now", async () => {
+  it("start a message's run when delivered again after its start failed, once", async () => {
     const builder = await personApi("builder");
-    const app = await appWith(builder, intake("busy"));
-    // The hour's 60 runs from mail, as recorded.
+    const app = await appWith(builder, intake("retried"));
+    const mail = invoiceMail({
+      to: "retried@grasp.test",
+      messageId: `${crypto.randomUUID()}@acme.test`,
+    });
+    // An ID core's record takes but Workflows refuses (over 100
+    // characters), so creating the run fails after its row is written.
+    const unstartable: ReturnType<typeof crypto.randomUUID> =
+      `run-${"x".repeat(100)}-${crypto.randomUUID()}`;
+    const uuid = vi
+      .spyOn(crypto, "randomUUID")
+      .mockReturnValueOnce(unstartable);
+    let first: string;
+    try {
+      first = await outcome(deliver("retried@grasp.test", mail));
+    } finally {
+      uuid.mockRestore();
+    }
+
+    const again = await outcome(deliver("retried@grasp.test", mail));
+    const third = await outcome(deliver("retried@grasp.test", mail));
+    const started = await runsOf(builder, app);
+    await Promise.all(
+      started
+        .filter(({ id }) => id !== unstartable)
+        .map(async ({ id }) => {
+          await finished(id);
+        })
+    );
+    const runs = await runsOf(builder, app);
+
+    expect({
+      first: first === "ok",
+      again,
+      third,
+      runs: runs
+        .map(
+          ({ id, status }) =>
+            `${id === unstartable ? "failed start" : "new"}: ${status}`
+        )
+        .toSorted(),
+    }).toStrictEqual({
+      first: false,
+      again: "ok",
+      third: "ok",
+      runs: ["failed start: failed", "new: completed"],
+    });
+  });
+
+  it("keep a < that starts no tag as text", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, intake("math"));
+    const html = [
+      "From: Ben <ben@acme.test>",
+      "To: math@grasp.test",
+      "Subject: Math",
+      "MIME-Version: 1.0",
+      "Content-Type: text/html; charset=utf-8",
+      "",
+      "<!DOCTYPE html><p>5 < 10 and 10 > 5</p><p>x <3 y</p>",
+      "",
+    ].join("\r\n");
+
+    await deliver("math@grasp.test", html);
+
+    await expect(readByRun(builder, app)).resolves.toMatchObject({
+      text: "5 < 10 and 10 > 5\nx <3 y",
+    });
+  });
+
+  it("stop a workflow going over its hourly limit, start the others, and fail the mail for now", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, {
+      ...intake("busy"),
+      ...intake("busy", "tally"),
+    });
+    // The hour's 60 runs of `intake` from mail, as recorded.
+    const seeded = Array.from({ length: 60 }, () => crypto.randomUUID());
     const now = Date.now();
     await env.DB.batch(
-      Array.from({ length: 60 }, (_, index) =>
+      seeded.map((id, index) =>
         env.DB.prepare(
           "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at, trigger_key) VALUES (?, ?, 'intake', 1, NULL, 'completed', ?, ?, ?)"
-        ).bind(
-          crypto.randomUUID(),
-          app,
-          now - index * 1000,
-          now,
-          `email:${app}:intake:${index}`
-        )
+        ).bind(id, app, now - index * 1000, now, `email:${app}:intake:${index}`)
       )
     );
+    const mail = invoiceMail({
+      to: "busy@grasp.test",
+      messageId: `${crypto.randomUUID()}@acme.test`,
+    });
+    const started = async () => {
+      const runs = await runsOf(builder, app);
+      return runs
+        .filter(({ id }) => !seeded.includes(id))
+        .map(({ workflow }) => workflow)
+        .toSorted();
+    };
 
-    await expect(
-      outcome(
-        deliver("busy@grasp.test", invoiceMail({ to: "busy@grasp.test" }))
-      )
-    ).resolves.toMatch(/over its workflow's hourly limit/u);
-    await expect(runsOf(builder, app)).resolves.toHaveLength(60);
+    const first = await outcome(deliver("busy@grasp.test", mail));
+    const whileCapped = await started();
+    // The hour moves on; the sender tries again.
+    await env.DB.prepare(
+      "UPDATE workflow_runs SET created_at = ? WHERE app_id = ? AND workflow_id = 'intake'"
+    )
+      .bind(now - 2 * 60 * 60 * 1000, app)
+      .run();
+    const again = await outcome(deliver("busy@grasp.test", mail));
+
+    expect({
+      first: first.includes("over a workflow's hourly limit"),
+      whileCapped,
+      again,
+      afterwards: await started(),
+    }).toStrictEqual({
+      first: true,
+      whileCapped: ["tally"],
+      again: "ok",
+      afterwards: ["intake", "tally"],
+    });
   });
 
   it("cut text of characters UTF-16 splits in two on a character's edge, to fit", async () => {

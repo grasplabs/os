@@ -36,8 +36,11 @@ import { maxInputLength, startRun } from "./runs.ts";
 // writes the Message-ID, though: a message that reuses another's, sent
 // first, keeps that one from starting a run.
 //
-// Mail starts at most `emailRunsPerHour` runs of a workflow an hour; past
-// that it fails for now, so its sender tries again later.
+// Mail starts at most `emailRunsPerHour` runs of a workflow an hour. A
+// message goes to each receiving workflow with room; if one is at its
+// limit, the delivery fails for now once the others started, so its
+// sender tries again later, and only the workflows that didn't start it
+// start it then.
 //
 // Anyone can send mail, and its headers say what its sender wrote: the
 // message is untrusted data for the run, its From address included. A
@@ -178,6 +181,7 @@ const skippedTags = new Set(["script", "style"]);
 /** Tags whose end ends a line of text (`<br>` at its start). */
 const lineEndTags = new Set(["p", "div", "li", "tr", "h1", "h2", "h3", "h4"]);
 
+const tagStart = /^(?:[!?]|\/?[a-z])/u;
 const tagName = /^\/?(?<name>[a-z][a-z0-9]*)/u;
 const entities = /&(?<name>amp|lt|gt|quot|#39|nbsp);/gu;
 const entityText: Record<string, string> = {
@@ -193,9 +197,10 @@ const entityText: Record<string, string> = {
  * The plain text of a message that has only HTML, of at most
  * `maxHtmlLength` of it: its tags dropped (a line end where a paragraph,
  * line or item ends), scripts and styles with their content, and the
- * common entities decoded. One pass, each character looked at a bounded
- * number of times, whatever the HTML: a tag, script or style that never
- * ends ends the text.
+ * common entities decoded. A `<` that starts no tag is text, and so is
+ * the rest after a tag that never closes; only a script or style that
+ * never ends ends the text. One pass, each character looked at a bounded
+ * number of times, whatever the HTML.
  */
 const textOfHtml = (full: string): string => {
   const html = full.slice(0, maxHtmlLength);
@@ -209,13 +214,25 @@ const textOfHtml = (full: string): string => {
       break;
     }
     parts.push(html.slice(at, open));
+    // A tag starts with a name (`<p`, `</p`), or is a comment or
+    // declaration (`<!`, `<?`); any other `<`, as in `5 < 10`, is text.
+    const head = lower.slice(open + 1, open + 16);
+    if (!tagStart.test(head)) {
+      parts.push("<");
+      at = open + 1;
+      continue;
+    }
+    const name = tagName.exec(head)?.groups?.name ?? "";
     const close = html.indexOf(">", open);
     if (close === -1) {
+      // No `>` in the rest: no tag in it either. It's text, but for a
+      // script or style that never starts its content.
+      if (!skippedTags.has(name)) {
+        parts.push(html.slice(open));
+      }
       break;
     }
-    const tag = lower.slice(open + 1, Math.min(close, open + 16));
-    const name = tagName.exec(tag)?.groups?.name ?? "";
-    const ending = tag.startsWith("/");
+    const ending = lower[open + 1] === "/";
     at = close + 1;
     if (!ending && skippedTags.has(name)) {
       const end = lower.indexOf(`</${name}`, at);
@@ -363,19 +380,17 @@ export const receiveEmail = async (
     messageId !== undefined && messageId.includes("@")
       ? await sha256Hex(messageId)
       : id;
+  // Each workflow's limit is its own: the message goes to those with
+  // room now, and the others get it when the sender tries again.
   const capped = await Promise.all(
     receivers.map(
       async ({ appId, workflowId }) => await atHourlyCap(env, appId, workflowId)
     )
   );
-  if (capped.includes(true)) {
-    // Fails for now, so its sender tries again once the hour allows.
-    log.warn("workflow.trigger_rate_limited", { type: "email", message: id });
-    throw new Error(`Message ${id} is over its workflow's hourly limit`);
-  }
+  const withRoom = receivers.filter((_, index) => capped[index] !== true);
   const input = inputOf(id, message.from, parsed);
   const started = await Promise.allSettled(
-    receivers.map(
+    withRoom.map(
       async (receiver) =>
         await startRun(env, {
           app: appIdSchema.parse(receiver.appId),
@@ -405,5 +420,16 @@ export const receiveEmail = async (
   }
   if (failures.length > 0) {
     throw new Error(`Message ${id} didn't start every run it should`);
+  }
+  if (withRoom.length < receivers.length) {
+    // Fails for now, so its sender tries again once the hour allows: the
+    // runs started now are the same runs then (their keys), and the
+    // workflows at their limit start theirs.
+    log.warn("workflow.trigger_rate_limited", {
+      type: "email",
+      message: id,
+      capped: receivers.length - withRoom.length,
+    });
+    throw new Error(`Message ${id} is over a workflow's hourly limit`);
   }
 };
