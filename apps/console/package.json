@@ -18,6 +18,7 @@
     "@grasp-os/ui": "workspace:*",
     "@tanstack/react-router": "catalog:",
     "@tanstack/react-start": "catalog:",
+    "drizzle-orm": "catalog:",
     "jose": "catalog:",
     "react": "catalog:",
     "react-dom": "catalog:"
