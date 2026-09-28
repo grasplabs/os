@@ -743,9 +743,10 @@ export const improvementSignals = sqliteTable(
 );
 
 /**
- * The version of core the cron last saw running (src/platform-updates.ts):
- * one row, `id` 1. A version it hasn't seen replaces it, and is audited
- * as `platform.updated` in the same statement's batch.
+ * The version of core the cron last saw running, one row, `id` 1, as the
+ * first release of src/platform-updates.ts kept it. No longer written:
+ * `platform_versions` replaces it. Drop it in a later release, once no
+ * version that writes it can be rolled back to.
  */
 export const platformVersion = sqliteTable(
   "platform_version",
@@ -756,3 +757,13 @@ export const platformVersion = sqliteTable(
   },
   (table) => [check("platform_version_one_row", sql`${table.id} = 1`)]
 );
+
+/**
+ * Every version of core the cron has seen running (src/platform-updates.ts),
+ * each recorded once: the insert of a version not here is audited as
+ * `platform.updated` in the same batch.
+ */
+export const platformVersions = sqliteTable("platform_versions", {
+  versionId: text("version_id").primaryKey(),
+  recordedAt: timestamp("recorded_at").notNull(),
+});
