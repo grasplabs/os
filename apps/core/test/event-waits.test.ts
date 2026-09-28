@@ -29,9 +29,10 @@ const engineStop = "Aborting engine: User called pause";
 /**
  * Cloudflare's `step` as far as a wait uses it: steps are recorded by name
  * and replayed from the record, a wait keeps its deadline across
- * executions, and each delivery goes to one wait of its type. With
- * `stopAtCopies` set, it stops the execution when a wait begins to wait
- * again for a copy, as a crash or a deploy may.
+ * executions, and each delivery goes to one wait of its type, also one
+ * the engine got before the wait began. With `stopAtCopies` set, it stops
+ * the execution when a wait begins to wait again for a copy, as a crash
+ * or a deploy may.
  */
 const fakeEngine = (deliveries: readonly Delivery[]) => {
   const recorded = new Map<string, { value: unknown } | { error: Error }>();
@@ -45,9 +46,17 @@ const fakeEngine = (deliveries: readonly Delivery[]) => {
     }
     return record;
   };
+  const stopsAt = (name: string): boolean =>
+    engine.stopAtCopies &&
+    name.startsWith("$grasp:wait:") &&
+    !name.endsWith(":deadline");
   const step: RunStep = {
     do: async (name, _config, fn) => {
-      const record = replayed(name) ?? { value: await fn() };
+      const known = replayed(name);
+      if (!known && stopsAt(name)) {
+        throw new Error(engineStop);
+      }
+      const record = known ?? { value: await fn() };
       recorded.set(name, record);
       return record.value;
     },
@@ -59,7 +68,7 @@ const fakeEngine = (deliveries: readonly Delivery[]) => {
       if (record) {
         return { payload: record.value };
       }
-      if (engine.stopAtCopies && name.startsWith("$grasp:wait:")) {
+      if (stopsAt(name)) {
         throw new Error(engineStop);
       }
       const deadline = deadlines.get(name) ?? Date.now() + Number(timeout);
@@ -123,31 +132,37 @@ const execution = (step: RunStep): RunHost => {
 
 const wait = { type: "go", timeout: 1000 };
 
+/**
+ * A run whose first wait took an event at 0 ms, and whose second passed
+ * over its copy at 900 ms and was then stopped, before it waited again.
+ */
+const stoppedAfterCopy = async (later: readonly Delivery[] = []) => {
+  vi.setSystemTime(0);
+  const { step, engine } = fakeEngine([
+    { at: 0, type: "go", id: "event" },
+    { at: 900, type: "go", id: "event" },
+    ...later,
+  ]);
+  engine.stopAtCopies = true;
+  const first = execution(step);
+  const taken = await first.waitForEvent("first", wait);
+  const stopped = await first.waitForEvent("second", wait);
+  engine.stopAtCopies = false;
+  return {
+    step,
+    before: { first: taken, secondEnded: stopped.ok, stoppedAt: Date.now() },
+  };
+};
+
 describe("waits for an event", () => {
   afterEach(() => {
     vi.useRealTimers();
   });
 
   it("end at their timeout from when they began, when one passes over a copy after a restart", async () => {
-    vi.setSystemTime(0);
-    // An event at once, which the first wait takes, and its copy at 900
-    // ms, which the second passes over: then nothing more.
-    const { step, engine } = fakeEngine([
-      { at: 0, type: "go", id: "event" },
-      { at: 900, type: "go", id: "event" },
-    ]);
-    const first = execution(step);
-    engine.stopAtCopies = true;
-    const taken = await first.waitForEvent("first", wait);
-    const stopped = await first.waitForEvent("second", wait);
-    const before = {
-      first: taken,
-      secondEnded: stopped.ok,
-      stoppedAt: Date.now(),
-    };
+    const { step, before } = await stoppedAfterCopy();
     // Restarted at 900 ms: the new execution replays both waits, and the
     // second waits on, for what is left of its 1000 ms.
-    engine.stopAtCopies = false;
     const again = execution(step);
     await again.waitForEvent("first", wait);
 
@@ -163,6 +178,49 @@ describe("waits for an event", () => {
       },
       second: { ok: true, value: { received: false } },
       endedAt: 1000,
+    });
+  });
+
+  it("have timed out when one resumes at or past its deadline, whatever event the engine holds", async () => {
+    const outcomes: unknown[] = [];
+    for (const resumedAt of [1000, 1500]) {
+      // A new event, which the engine got after the copy, and holds.
+      // oxlint-disable-next-line no-await-in-loop -- one run at a time
+      const { step } = await stoppedAfterCopy([
+        { at: 950, type: "go", id: "late" },
+      ]);
+      vi.setSystemTime(resumedAt);
+      const again = execution(step);
+      // oxlint-disable-next-line no-await-in-loop -- one run at a time
+      await again.waitForEvent("first", wait);
+      // oxlint-disable-next-line no-await-in-loop -- one run at a time
+      outcomes.push(await again.waitForEvent("second", wait));
+    }
+
+    expect(outcomes).toStrictEqual([
+      { ok: true, value: { received: false } },
+      { ok: true, value: { received: false } },
+    ]);
+  });
+
+  it("tell events apart by type and ID, whatever characters they hold", async () => {
+    vi.setSystemTime(0);
+    // As one string with a newline between, both pairs would read "a\nb\nc".
+    const { step } = fakeEngine([
+      { at: 0, type: "a", id: "b\nc" },
+      { at: 0, type: "a\nb", id: "c" },
+    ]);
+    const run = execution(step);
+
+    expect({
+      first: await run.waitForEvent("first", { type: "a", timeout: 1000 }),
+      second: await run.waitForEvent("second", {
+        type: "a\nb",
+        timeout: 1000,
+      }),
+    }).toStrictEqual({
+      first: { ok: true, value: { received: true, payload: null } },
+      second: { ok: true, value: { received: true, payload: null } },
     });
   });
 });

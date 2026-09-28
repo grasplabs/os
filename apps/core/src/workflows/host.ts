@@ -380,11 +380,13 @@ const offStepPrefix = `${coreStepPrefix}off:`;
 
 /**
  * The steps a wait for an event takes besides its own: its deadline, and
- * a wait again for each copy of an event it passes over. Core's, and
- * counted as the run's own against the reserve, as the sleeps above.
+ * for each copy of an event it passes over, the time left and a wait
+ * again. Core's, and counted as the run's own against the reserve, as the
+ * sleeps above.
  *
- * Their names, `$grasp:wait:<key>:deadline` and `$grasp:wait:<key>:<n>`
- * with `offKeyOf`'s key, are how a new execution finds what earlier ones
+ * Their names, `$grasp:wait:<key>:deadline`, `$grasp:wait:<key>:<n>:left`
+ * and `$grasp:wait:<key>:<n>`, with `offKeyOf`'s key, are how a new
+ * execution finds what earlier ones
  * recorded: never rename them, nor change `offKeyOf`, or runs under way
  * replay their waits wrong.
  */
@@ -1119,14 +1121,33 @@ export class RunHost extends RpcTarget {
           )
         );
       for (let copies = 0; ; copies += 1) {
+        // The first wait begins right after its deadline is recorded, so
+        // with time left: at least 1 ms, as the engine takes none as its
+        // default of a day. A wait again after a copy may begin at or past
+        // the deadline (a restart meanwhile): the wait has timed out then,
+        // and must not take an event the engine holds. What is left is
+        // recorded, so a replay decides as the first execution did.
+        const left =
+          copies === 0
+            ? Math.max(deadline - Date.now(), 1)
+            : z.number().parse(
+                // oxlint-disable-next-line no-await-in-loop -- one wait at a time
+                await this.#step.do(
+                  `${prefix}:${copies}:left`,
+                  {},
+                  async () => await Promise.resolve(deadline - Date.now())
+                )
+              );
+        if (left <= 0) {
+          return { received: false };
+        }
         let event: { payload: unknown };
         try {
           // oxlint-disable-next-line no-await-in-loop -- one wait at a time
           event = await this.#step.waitForEvent(
             copies === 0 ? step : `${prefix}:${copies}`,
-            // At least 1 ms: the engine takes none as its default of a
-            // day. A replayed wait answers as it did, whatever it's given.
-            { type, timeout: Math.max(deadline - Date.now(), 1) }
+            // A replayed wait answers as it did, whatever it's given.
+            { type, timeout: left }
           );
         } catch (error) {
           if (isTimeout(error)) {
@@ -1135,7 +1156,8 @@ export class RunHost extends RpcTarget {
           throw error;
         }
         const { id, payload } = sentEventSchema.parse(event.payload);
-        const taken = `${type}\n${id}`;
+        // As JSON, so no type and ID can pass for another pair.
+        const taken = JSON.stringify([type, id]);
         if (!this.#takenEvents.has(taken)) {
           this.#takenEvents.add(taken);
           return { received: true, payload };
