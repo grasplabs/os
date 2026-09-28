@@ -513,6 +513,10 @@ export const workflowRuns = sqliteTable(
       table.id
     ),
     uniqueIndex("workflow_runs_trigger_key_idx").on(table.triggerKey),
+    // Runs still running that started in a window, oldest first: those
+    // the sweep for runs left without their engine instance checks
+    // (src/workflows/runs.ts, `failOrphans`).
+    index("workflow_runs_status_created_idx").on(table.status, table.createdAt),
   ]
 );
 

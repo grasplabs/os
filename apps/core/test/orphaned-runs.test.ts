@@ -9,6 +9,7 @@ import { startRun } from "../src/workflows/runs.ts";
 import { allEvents } from "./audit-events.ts";
 import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
+import { planOf, recordedQueries } from "./query-plans.ts";
 import { endLiveRuns, liveStatus } from "./runs.ts";
 import { signedInApi } from "./sign-in.ts";
 import { appWith, runEvents, workflowFiles } from "./workflow-apps.ts";
@@ -25,6 +26,10 @@ const personApi = async (role: Role) => await signedInApi(idp, role);
 type Person = Awaited<ReturnType<typeof personApi>>;
 
 const minute = 60_000;
+const hour = 60 * minute;
+
+/** The sweep's query of the runs in its window. */
+const sweepQuery = /from "workflow_runs" where .*"created_at" >= \?/u;
 
 /** A workflow that waits for an event it isn't sent: a live run. */
 const waiting = workflowFiles(
@@ -85,25 +90,59 @@ describe("runs that never reached the engine", () => {
     const app = await appWith(builder, waiting);
     const orphan = await orphanOf(builder, app, 20 * minute);
     const young = await orphanOf(builder, app, 2 * minute);
+    const beyond = await orphanOf(builder, app, 25 * hour);
 
     await runCron();
-    await runCron();
     const { status, failure } = await builder.api.workflows.status(orphan);
+    // Once more: it is marked, and audited, once.
+    await runCron();
 
     expect({
       status,
       error: failure?.error,
       young: await listedStatus(builder, app, young),
+      beyond: await listedStatus(builder, app, beyond),
       audited: await runEvents(orphan, "workflow.run.failed"),
     }).toStrictEqual({
       status: "failed",
       error: {
         code: "workflow.run_failed",
-        message: "The workflow run couldn't be started.",
+        message: "The engine has no record of this run.",
       },
       // Its start may still be under way, or a delivery restart it.
       young: "running",
-      audited: ["workflow.run.failed start_failed workflow.run_failed"],
+      // Older than the window the sweep reads.
+      beyond: "running",
+      audited: ["workflow.run.failed no_instance workflow.run_failed"],
+    });
+  });
+
+  it("are found by an index, in their window, reading no table whole", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, waiting);
+    await orphanOf(builder, app, 20 * minute);
+    // A fresh D1 has no statistics: SQLite goes by the queries alone.
+    const stats = await env.DB.prepare(
+      "SELECT name FROM sqlite_master WHERE name LIKE 'sqlite_stat%'"
+    ).all();
+
+    const queries = await recordedQueries(async () => {
+      await runCron();
+    });
+    const plans = await Promise.all(
+      queries
+        .filter(({ query }) => sweepQuery.test(query))
+        .map(async (recorded) => await planOf(recorded))
+    );
+
+    // Its slice from a random time on, then from the window's start: one
+    // run is fewer than a slice holds, so both read.
+    const inWindow = [
+      "SEARCH workflow_runs USING INDEX workflow_runs_status_created_idx (status=? AND created_at>? AND created_at<?)",
+    ];
+    expect({ stats: stats.results, plans }).toStrictEqual({
+      stats: [],
+      plans: [inWindow, inWindow],
     });
   });
 

@@ -28,7 +28,6 @@ import {
   ne,
   or,
 } from "drizzle-orm";
-import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -260,16 +259,36 @@ const restartOrphan = async (
   }
 };
 
+/** Drops the state writes an ended run applied (app.ts). */
+const forgetWrites = async (env: Env, row: RunRow): Promise<void> => {
+  await appHost(env, appIdSchema.parse(row.appId)).forgetWorkflowWrites(
+    row.workflowId,
+    row.id
+  );
+};
+
 /**
- * Marks a run that didn't start as failed, audited as a failed run, once:
- * a run that ended meanwhile stays as it ended. Its report, which its
- * owner sees as they see any failed run's, says only that it didn't
- * start. It gives up its trigger key, so its trigger delivered again
- * starts a new run. Whether this marked it.
+ * Why a run is marked failed without having run: its engine instance
+ * couldn't be created (`start_failed`, `startRun`), or it was never
+ * created and the row was found alone (`no_instance`, `failOrphans`).
+ * Each with the message its report says it with.
+ */
+const unstarted = {
+  start_failed: "The workflow run couldn't be started.",
+  no_instance: "The engine has no record of this run.",
+} as const;
+
+/**
+ * Marks a run that didn't start as failed, for `reason`, audited as a
+ * failed run, once: a run that ended meanwhile stays as it ended. Its
+ * report, which its owner sees as they see any failed run's, says only
+ * that it didn't start. It gives up its trigger key, so its trigger
+ * delivered again starts a new run. Whether this marked it.
  */
 const failStart = async (
   env: Env,
-  row: Pick<RunRow, "id" | "appId" | "workflowId" | "version">
+  row: Pick<RunRow, "id" | "appId" | "workflowId" | "version">,
+  reason: keyof typeof unstarted
 ): Promise<boolean> => {
   const db = drizzle(env.DB);
   const failedAt = new Date();
@@ -280,10 +299,7 @@ const failStart = async (
     version: row.version,
     step: null,
     input: null,
-    error: {
-      code: "workflow.run_failed",
-      message: "The workflow run couldn't be started.",
-    },
+    error: { code: "workflow.run_failed", message: unstarted[reason] },
     failedAt: failedAt.toISOString(),
   };
   const [[failed]] = await auditedBatch(env, db, [
@@ -297,7 +313,7 @@ const failStart = async (
     outboxedIfChanged(
       db,
       runEntry(runActor(row), "workflow.run.failed", row, {
-        reason: "start_failed",
+        reason,
         error: "workflow.run_failed",
       })
     ),
@@ -317,31 +333,42 @@ const failStart = async (
  */
 const orphanFailsAfterMs = 15 * 60_000;
 
+/**
+ * How old a run's row may be for `failOrphans` to look at it at all. A
+ * run is left without its instance as it starts, so the sweep finds it
+ * within minutes; older runs, live ones that wait for weeks included, it
+ * never reads again.
+ */
+const orphanWindowMs = 24 * 60 * 60_000;
+
 /** Most runs one `failOrphans` asks the engine about. */
 const orphanChecksPerRun = 25;
 
 /**
- * Marks runs left without their engine instance for `orphanFailsAfterMs`
- * failed, as a start that failed is (`failStart`): a start that stopped
- * between writing the row and creating the instance (core stopped in
- * between). Such a run isn't restarted: its row doesn't keep its input,
- * which only the engine does, so a person's start can't be made again
- * as they made it; they see it failed and start it again. A triggered
- * run gets here only if nothing delivered its trigger again in that
- * time (triggers were off, or its version was replaced); it gives up its
- * key, so a delivery after this starts a new run.
+ * Marks runs created `orphanFailsAfterMs` to `orphanWindowMs` ago and
+ * still without their engine instance failed (`no_instance`): a start
+ * that stopped between writing the row and creating the instance (core
+ * stopped in between). Such a run isn't restarted: its row doesn't keep
+ * its input, which only the engine does, so a person's start can't be
+ * made again as they made it; they see it failed and start it again. A
+ * triggered run gets here only if nothing delivered its trigger again in
+ * that time (triggers were off, or its version was replaced); it gives
+ * up its key, so a delivery after this starts a new run.
  *
  * The cron trigger runs it every minute. Each run asks the engine about
- * at most `orphanChecksPerRun` rows: a slice of the old `running` rows
- * from a random ID on, in ID order, wrapping round. Live runs can be old
- * too (a run can wait for weeks), so a slice from the oldest would find
- * the same live runs every minute and never reach an orphan behind them;
- * a random slice reaches every row in time.
+ * at most `orphanChecksPerRun` rows: those from a random time in the
+ * window on, oldest first, wrapping round to its start. Runs started in
+ * the window can outnumber a run's checks, and a slice from the window's
+ * start would find the same live ones every minute; a random slice
+ * reaches every row in time.
  *
- * A run whose instance is created after its check (its start or a
- * delivery racing this) is marked failed all the same, audited once; the
- * dispatcher refuses to run a failed run's row, and its instance is
- * terminated, so the engine agrees with the row.
+ * A run whose instance is created after its check (its start, or a
+ * delivery racing this) is marked failed all the same, audited once.
+ * The dispatcher refuses it at its next resume, and this terminates it
+ * and drops its state writes, as a cancel does; a terminate that fails
+ * isn't tried again, and the dispatcher's refusal ends it. So, rarely, a
+ * delivery that `restartOrphan` answered with the run just before is
+ * left with a run that failed: accepted, and audited.
  */
 export const failOrphans = async (env: Env): Promise<void> => {
   // Nothing while the kill switch is on, nor on-prem, which has no engine.
@@ -349,28 +376,33 @@ export const failOrphans = async (env: Env): Promise<void> => {
     return;
   }
   const db = drizzle(env.DB);
-  const old = and(
-    eq(workflowRuns.status, "running"),
-    isNull(workflowRuns.endedAt),
-    lt(workflowRuns.createdAt, new Date(Date.now() - orphanFailsAfterMs))
-  );
-  const from = crypto.randomUUID();
-  const slice = async (after: SQL, limit: number): Promise<RunRow[]> =>
+  const now = Date.now();
+  const oldest = now - orphanWindowMs;
+  const newest = now - orphanFailsAfterMs;
+  const from = oldest + Math.floor(Math.random() * (newest - oldest));
+  const slice = async (
+    after: number,
+    before: number,
+    limit: number
+  ): Promise<RunRow[]> =>
     await db
       .select()
       .from(workflowRuns)
-      .where(and(old, after))
-      .orderBy(asc(workflowRuns.id))
+      .where(
+        and(
+          eq(workflowRuns.status, "running"),
+          gte(workflowRuns.createdAt, new Date(after)),
+          lt(workflowRuns.createdAt, new Date(before))
+        )
+      )
+      .orderBy(asc(workflowRuns.createdAt))
       .limit(limit);
-  const onward = await slice(gte(workflowRuns.id, from), orphanChecksPerRun);
+  const onward = await slice(from, newest, orphanChecksPerRun);
   const rows =
     onward.length < orphanChecksPerRun
       ? [
           ...onward,
-          ...(await slice(
-            lt(workflowRuns.id, from),
-            orphanChecksPerRun - onward.length
-          )),
+          ...(await slice(oldest, from, orphanChecksPerRun - onward.length)),
         ]
       : onward;
   // Each on its own: one the engine or D1 fails on is tried again by a
@@ -382,8 +414,9 @@ export const failOrphans = async (env: Env): Promise<void> => {
           return;
         }
         log.warn("workflow.run_orphaned", { runId: row.id });
-        if (await failStart(env, row)) {
+        if (await failStart(env, row, "no_instance")) {
           await runEngine(env).terminate(row.id);
+          await forgetWrites(env, row);
         }
       } catch (error) {
         log.error("workflow.orphan_check_failed", {
@@ -489,7 +522,7 @@ export const startRun = async (
       runId: row.id,
       ...errorFields(error),
     });
-    await failStart(env, row);
+    await failStart(env, row, "start_failed");
     throw error;
   }
   // Only now: a screen told of the run reads it from the engine too.
@@ -613,14 +646,6 @@ export const listRuns = async (
     .orderBy(desc(workflowRuns.createdAt), desc(workflowRuns.id))
     .limit(runsPerPage);
   return rows.map((row) => runFor(by, row, ownerId));
-};
-
-/** Drops the state writes an ended run applied (app.ts). */
-const forgetWrites = async (env: Env, row: RunRow): Promise<void> => {
-  await appHost(env, appIdSchema.parse(row.appId)).forgetWorkflowWrites(
-    row.workflowId,
-    row.id
-  );
 };
 
 /**
