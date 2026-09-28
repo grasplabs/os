@@ -50,6 +50,7 @@ import type { CollectionRow } from "./collections.ts";
 import {
   findByPath,
   getDocument,
+  keptFieldsOf,
   toSummary,
   writeVersion,
 } from "./documents.ts";
@@ -256,12 +257,15 @@ type RecordInput = z.output<typeof recordInputSchema>;
 
 /**
  * Writes `record` as `writer`, from `ifVersion` of `path`, keeping what
- * only the platform writes of the version it goes over (`keptFrom`).
+ * only the platform writes of the version it goes over (`keptFrom`), or,
+ * for the platform's own write (`setsKept`), setting them as `record`
+ * has them (`keptFieldsOf`).
  */
 const writeRecord = async (
   env: Env,
   writer: RecordWriter,
-  { path, ifVersion, record, body, message }: RecordInput
+  { path, ifVersion, record, body, message }: RecordInput,
+  setsKept = false
 ): Promise<DocumentSummary> => {
   const collection = await playbookCollection(env, writer);
   requireWritable(env, writer.person, collection);
@@ -276,13 +280,15 @@ const writeRecord = async (
       : undefined;
   const kept =
     previous === undefined ? {} : keptFrom(record.type, path, previous);
+  const text = recordText({ ...record, ...kept }, body);
   return await writeVersion(env, versionWriter(writer), {
     collection,
     path,
-    text: recordText({ ...record, ...kept }, body),
+    text,
     ifVersion,
     message: message === undefined || message === "" ? null : message,
     restoredFrom: null,
+    ...(setsKept ? { sets: keptFieldsOf(path, text) } : {}),
     ...lastCheckOf(writer),
   });
 };
@@ -554,23 +560,29 @@ const takeSnapshotAs = async (
   // snapshots were taken (`2026-09-28T101530123Z`, after an older path of
   // that day, `2026-09-28-…`); two taken at once are two snapshots.
   const taken = `${date}T${now.toISOString().slice(11, 23).replaceAll(/[:.]/gu, "")}Z`;
-  return await writeRecord(env, writer, {
-    path: `snapshots/${taken}-${crypto.randomUUID().slice(0, 8)}.md`,
-    ifVersion: 0,
-    record: {
-      type: "snapshot",
-      title: title ?? `Snapshot ${date}`,
-      date,
-      maturity,
-      workflows,
-      figures,
-      ...(decisionNeeded === undefined || decisionNeeded === ""
-        ? {}
-        : { decisionNeeded }),
+  return await writeRecord(
+    env,
+    writer,
+    {
+      path: `snapshots/${taken}-${crypto.randomUUID().slice(0, 8)}.md`,
+      ifVersion: 0,
+      record: {
+        type: "snapshot",
+        title: title ?? `Snapshot ${date}`,
+        date,
+        maturity,
+        workflows,
+        figures,
+        ...(decisionNeeded === undefined || decisionNeeded === ""
+          ? {}
+          : { decisionNeeded }),
+      },
+      body,
+      message: "Taken",
     },
-    body,
-    message: "Taken",
-  });
+    // The one write that sets what a snapshot freezes.
+    true
+  );
 };
 
 /**

@@ -351,6 +351,22 @@ export const outboxed = (db: DrizzleD1Database, entry: AuditEntry) => {
 };
 
 /**
+ * `outboxedWhere` for an event made already (`createAuditEvent`), so the
+ * batch's later statements can tell by its ID whether it was stored
+ * (`storedEvent`).
+ */
+export const outboxedEventWhere = (
+  db: DrizzleD1Database,
+  event: AuditEvent,
+  condition: SQL
+) =>
+  db
+    .insert(auditOutbox)
+    .select(
+      sql`SELECT ${event.id}, ${JSON.stringify(event)}, ${Date.now()} WHERE ${condition}`
+    );
+
+/**
  * Stores the event for `entry` only if `condition` holds when the
  * statement runs, in the batch it runs in: so what the batch's earlier
  * statements wrote decides it, and no concurrent change can come between.
@@ -359,14 +375,14 @@ export const outboxedWhere = (
   db: DrizzleD1Database,
   entry: AuditEntry,
   condition: SQL
-) => {
-  const event = createAuditEvent(entry, "core");
-  return db
-    .insert(auditOutbox)
-    .select(
-      sql`SELECT ${event.id}, ${JSON.stringify(event)}, ${Date.now()} WHERE ${condition}`
-    );
-};
+) => outboxedEventWhere(db, createAuditEvent(entry, "core"), condition);
+
+/**
+ * That the batch stored the event `id` (`outboxedEventWhere`), as SQL: a
+ * condition on an earlier statement having changed what its event records.
+ */
+export const storedEvent = (id: string): SQL =>
+  sql`EXISTS (SELECT 1 FROM ${auditOutbox} WHERE ${auditOutbox.id} = ${id})`;
 
 /**
  * Stores the event for `entry` only if the batch's previous statement

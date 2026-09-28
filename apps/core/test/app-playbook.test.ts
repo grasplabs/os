@@ -994,6 +994,106 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     });
   });
 
+  it("is asked again for its first version whatever blueprint its creator names", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    // A label anyone creating an App may give: not a copy of anything.
+    const { id } = await builder.api.apps.create({
+      name: `Map ${unique()}`,
+      blueprint: "builtin-workflow-map@1",
+    });
+    const app = appIdSchema.parse(id);
+    const asked = await builder.api.permissions.request(playbookFor(app));
+    await admin.api.permissions.grant(asked.id);
+    await changedBy(builder, app, "Its own code.");
+
+    const [write] = await permissionsOf(admin, app);
+    expect(write?.status).toBe("requested");
+  });
+
+  it("asks for nothing again when another request made the same version current first", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    const app = await builtBy(builder, admin);
+    const granted = await permissionsOf(admin, app);
+    await builder.api.apps.files.write(app, {
+      "app/server.ts": `${serverCode}\n// Reviewed.\n`,
+    });
+    const { version } = await builder.api.apps.files.commit(app, "Reviewed");
+    // The admin makes it current after the builder's request read the
+    // App, and before its batch lands: that batch changes nothing.
+    const racing: Env = {
+      ...env,
+      DB: racingDb(async () => {
+        await admin.api.apps.versions.setCurrent(app, version);
+      }, /^update "apps"/iu),
+    };
+
+    let refused = "";
+    const events = await auditedDuring(async () => {
+      refused = await outcome(
+        setCurrentVersion(racing, await builder.api.whoami(), app, version)
+      );
+    });
+
+    expect({
+      refused,
+      permissions: await permissionsOf(admin, app),
+      audited: events.filter(({ action }) => action.startsWith("permission.")),
+    }).toStrictEqual({
+      refused: "app.conflict",
+      permissions: granted,
+      audited: [],
+    });
+  });
+
+  it("is asked again when the admin making it current is no longer one as the change lands", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    const app = await builtBy(builder, admin);
+    await builder.api.apps.files.write(app, {
+      "app/server.ts": `${serverCode}\n// Demoted.\n`,
+    });
+    const { version } = await builder.api.apps.files.commit(app, "Demoted");
+    const racing: Env = {
+      ...env,
+      DB: racingDb(async () => {
+        await env.DB.prepare(
+          "UPDATE members SET role = 'builder' WHERE user_id = ?"
+        )
+          .bind(admin.userId)
+          .run();
+      }, /^update "apps"/iu),
+    };
+
+    // Checked as an admin when the request came in.
+    await setCurrentVersion(racing, await admin.api.whoami(), app, version);
+    const statuses = await env.DB.prepare(
+      "SELECT binding, status FROM permissions WHERE subject_id = ? ORDER BY binding"
+    )
+      .bind(app)
+      .all();
+    const approved = await env.DB.prepare(
+      "SELECT approved FROM app_versions WHERE app_id = ? AND version = ?"
+    )
+      .bind(app, version)
+      .first("approved");
+
+    expect({ statuses: statuses.results, approved }).toStrictEqual({
+      statuses: [
+        { binding: "PLAYBOOK", status: "requested" },
+        { binding: "PLAYBOOK_READ", status: "active" },
+      ],
+      approved: 0,
+    });
+  });
+
   it("keeps its permissions when an admin makes it current, as they could grant them, and not when Grasp staff do", async () => {
     const [admin, builder] = await Promise.all([
       personApi("admin"),

@@ -348,6 +348,52 @@ describe("workflow runs", { timeout: 60_000 }, () => {
     ]);
   });
 
+  it("fail the next step of a run on a version no admin approved, whatever is granted again for another", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    const version = (mark: string) =>
+      workflowFiles(
+        "mailer",
+        `  // ${mark}
+  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+${mailStep("after")}`,
+        { after: "reached" }
+      );
+    const app = await appWith(builder, version("First."));
+    const permission = await requestGranted(idp, builder, outlook(app));
+    // The attack: the builder's own code, which an admin's run starts on
+    // and waits in; then harmless code, which an admin grants again for.
+    await release(builder, app, version("Mails whatever it likes."));
+    const run = await admin.api.workflows.start(app, "mailer");
+    await stepDone(run.id, "$params");
+    await stopped(run.id);
+    await release(builder, app, version("Harmless."));
+    await admin.api.permissions.grant(permission);
+
+    await resumed(run.id);
+    await finished(run.id, { type: "go", payload: null });
+    // A run on the version the admin granted for works.
+    const approved = await admin.api.workflows.start(app, "mailer");
+    await finished(approved.id, { type: "go", payload: null });
+    const events = await allEvents();
+    const failedStep = events.find(
+      ({ action, target }) =>
+        action === "workflow.step.failed" && target?.id === run.id
+    );
+
+    expect({
+      attacked: await admin.api.workflows.status(run.id),
+      failedStep: failedStep?.detail,
+      approved: await admin.api.workflows.status(approved.id),
+    }).toMatchObject({
+      attacked: { version: 2, status: "failed" },
+      failedStep: { step: "after", errorCode: "permission.denied" },
+      approved: { version: 3, status: "completed" },
+    });
+  });
+
   it("fail the next step with a permission error once a permission is revoked mid-run", async () => {
     const admin = await personApi("admin");
     const app = await appWith(

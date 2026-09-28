@@ -12,7 +12,7 @@ import { takeSnapshotAsDelegate } from "../src/knowledge/playbook.ts";
 import { hoursOf } from "../src/knowledge/snapshots.ts";
 import { release, requestGranted, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import { auditedDuring, signedInApi, unique } from "./sign-in.ts";
+import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // Snapshots the platform takes (knowledge/snapshots.ts, `takeSnapshot` on
 // an App's Playbook stub): a dated record that freezes every workflow's
@@ -562,8 +562,21 @@ describe("snapshots the platform takes", { timeout: 60_000 }, () => {
       record: { ...before.record },
       body: "",
     });
+    // Saved as text, past saveRecord: what it froze is kept all the same.
+    const { version: current } = await admin.api.knowledge.getDocument(
+      taken.id
+    );
+    const raw = await outcome(
+      admin.api.knowledge.saveDocument({
+        collectionId: playbookCollectionId,
+        path: taken.path,
+        text: current.text.replace("maturity: 1", "maturity: 4"),
+        ifVersion: 2,
+      })
+    );
 
     expect({
+      raw,
       later: later.record,
       saved: {
         version: saved.version.number,
@@ -579,6 +592,7 @@ describe("snapshots the platform takes", { timeout: 60_000 }, () => {
       first: first.record,
       forged,
     }).toStrictEqual({
+      raw: "knowledge.invalid",
       later: before.record,
       saved: {
         version: 2,

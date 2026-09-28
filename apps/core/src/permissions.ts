@@ -4,7 +4,7 @@ import type {
   AuditDetailValue,
   AuditEntry,
 } from "@grasp-os/shared/audit";
-import { actorOf } from "@grasp-os/shared/audit";
+import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
 import { playbookCollectionId } from "@grasp-os/shared/knowledge";
@@ -35,12 +35,23 @@ import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
+import {
+  auditedBatch,
+  outboxed,
+  outboxedEventWhere,
+  outboxedIfChanged,
+  storedEvent,
+} from "./audit-outbox.ts";
 import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { connectionOwnersOf } from "./connections.ts";
-import { apps, auditOutbox, permissions } from "./db/core/schema.ts";
+import {
+  apps,
+  appVersions,
+  auditOutbox,
+  permissions,
+} from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
 import { appHost } from "./durable-objects.ts";
@@ -684,6 +695,12 @@ export const grantPermission = async (
   // the Apps collection, however old its request.
   await requireCollection(env, subjectOf(found), objectOf(found));
   const db = drizzle(env.DB);
+  const event = createAuditEvent(
+    changeEntry(by, "permission.granted", toPermission(found), {
+      requestedBy: found.requestedBy,
+    }),
+    "core"
+  );
   const [[granted]] = await auditedBatch(env, db, [
     db
       .update(permissions)
@@ -696,12 +713,20 @@ export const grantPermission = async (
         )
       )
       .returning(),
-    outboxedIfChanged(
-      db,
-      changeEntry(by, "permission.granted", toPermission(found), {
-        requestedBy: found.requestedBy,
-      })
-    ),
+    outboxedEventWhere(db, event, sql`changes() > 0`),
+    // An admin granting an App's permission approves the version that runs
+    // then (`madeCurrent`), as they would by making it current.
+    db
+      .update(appVersions)
+      .set({ approved: 1 })
+      .where(
+        and(
+          eq(appVersions.appId, found.subjectId),
+          sql`${appVersions.version} = (SELECT ${apps.currentVersion} FROM ${apps} WHERE ${apps.id} = ${found.subjectId})`,
+          eq(appVersions.approved, 0),
+          found.subjectType === "app" ? storedEvent(event.id) : sql`0`
+        )
+      ),
   ]);
   if (!granted) {
     await requireStillAdmin(env, by);
@@ -747,44 +772,88 @@ const auditDetailSql = sql`json_patch(
 )`;
 
 /**
- * The statements, for the batch that makes `version` the current version
- * of `app` (apps.ts), that ask again for each of the App's permissions
- * active when the batch runs that lets it change things for the person
- * using it: any on a connection (core can't tell a connector's writes from
- * its reads; connect knows), writing a collection, or starting a workflow.
- * Unless `by` could grant them themselves: an admin, not Grasp staff, still
- * an admin when the batch runs. An admin grants a permission trusting the
- * code that will use it, and an App's code runs as whoever uses it, so a
- * builder's next version could otherwise write the Playbook, say, as the
- * next admin who opens it. Reading only is kept: the code reads what the
- * person may.
- *
- * Both statements select their rows with the same condition when the
- * batch runs, nothing read before it, so a grant made just before is asked
- * for again too: first an audit event for each (`permission.requested`,
- * by `by`, with the version, the one it replaced and who had granted it),
- * then the update, back to requested, asked for by `by`. Only while
- * `version` is current. Core's database has no full-text index, so
- * nothing in the batch moves `changes()` under them.
+ * That `by` could grant a permission as the batch runs, as SQL: an admin
+ * of the organization, not Grasp staff, still an admin then.
  */
-export const requestedAgainFor = (
+const canGrantSql = (by: Identity): SQL =>
+  isAdmin(by.role) && !by.staff ? stillAdmin(by) : sql`0`;
+
+/**
+ * That a permission lets an App change things for the person using it,
+ * as SQL on its row: any on a connection (core can't tell a connector's
+ * writes from its reads; connect knows), or with an action other than
+ * `read`, such as writing a collection or starting a workflow.
+ */
+const changesThingsSql = or(
+  eq(permissions.objectType, "connection"),
+  sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value <> 'read')`
+);
+
+/** `changesThingsSql` for one action of a permission on `object`. */
+const changesThings = (object: PermissionObject, action: string): boolean =>
+  object.type === "connection" || action !== "read";
+
+/** A version of an App becoming current (`madeCurrent`). */
+export interface MadeCurrent {
+  app: AppId;
+  version: number;
+  /** The version it replaces. */
+  previous: number | null;
+  /** That the batch did make it current, as SQL (apps.ts). */
+  changed: SQL;
+  /**
+   * Whether the App's permissions stay as they are, whoever makes it
+   * current: only for an App's first version copied from a blueprint,
+   * made current for the first time, which was approved as it was created.
+   */
+  keep: boolean;
+}
+
+/**
+ * The statements, for the batch that makes a version the current version
+ * of an App (apps.ts), for its approval and the App's permissions, each
+ * only if the batch did make it current (`changed`). An admin grants a
+ * permission trusting the code that will use it, and an App's code runs
+ * as whoever uses it, so a builder's next version could otherwise write
+ * the Playbook, say, as the next admin who opens it.
+ *
+ * The version is approved (`app_versions.approved`, which `authorize`
+ * reads) if `by` could grant the permissions themselves (`canGrantSql`),
+ * and unapproved otherwise. And unless `by` could, or the permissions are
+ * kept (`keep`), each of the App's permissions active when the batch runs
+ * that lets it change things for the person using it (`changesThingsSql`)
+ * is asked for again: first an audit event for each
+ * (`permission.requested`, by `by`, with the version, the one it replaced
+ * and who had granted it), then the update, back to requested, asked for
+ * by `by`. Both select their rows with the same condition when the batch
+ * runs, nothing read before it, so a grant made just before is asked for
+ * again too. Reading only is kept: the code reads what the person may.
+ * Core's database has no full-text index, so nothing in the batch moves
+ * `changes()` under them.
+ */
+export const madeCurrent = (
   env: Env,
   by: Identity,
-  app: AppId,
-  version: number,
-  previous: number | null
-): [BatchItem<"sqlite">, BatchItem<"sqlite">] => {
+  { app, version, previous, changed, keep }: MadeCurrent
+): BatchItem<"sqlite">[] => {
   const db = drizzle(env.DB);
-  const mayGrant = isAdmin(by.role) && !by.staff;
+  const approval = db
+    .update(appVersions)
+    .set({
+      approved: keep ? 1 : sql`CASE WHEN ${canGrantSql(by)} THEN 1 ELSE 0 END`,
+    })
+    .where(
+      and(eq(appVersions.appId, app), eq(appVersions.version, version), changed)
+    );
+  if (keep) {
+    return [approval];
+  }
   const requestedAgain = and(
     ofSubject({ type: "app", appId: app }),
     eq(permissions.status, "active"),
-    or(
-      eq(permissions.objectType, "connection"),
-      sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value <> 'read')`
-    ),
-    sql`EXISTS (SELECT 1 FROM ${apps} WHERE ${apps.id} = ${app} AND ${apps.currentVersion} = ${version})`,
-    mayGrant ? sql`NOT ${stillAdmin(by)}` : undefined
+    changesThingsSql,
+    changed,
+    sql`NOT ${canGrantSql(by)}`
   );
   const now = new Date();
   const eventId = eventIdSql(crypto.randomUUID());
@@ -806,6 +875,7 @@ export const requestedAgainFor = (
     )
   )`;
   return [
+    approval,
     db
       .insert(auditOutbox)
       .select(
@@ -962,7 +1032,10 @@ export const grantedPermissions = async (
  * covers the object and allows the action. Only that permission counts, so
  * revoking it stops its stubs even when another permission covers the same
  * thing. A permission for a whole connection covers each resource in it;
- * one for a resource covers only that resource. Throws `permission.denied`
+ * one for a resource covers only that resource. For an App's code, an
+ * action that changes things (on a connection, or other than `read`) also
+ * needs the version it runs to be one an admin approved (`madeCurrent`).
+ * Throws `permission.denied`
  * or `permission.person_inactive` otherwise. Returns the fields that
  * permission masks in a connection's results (none for other objects).
  *
@@ -979,6 +1052,17 @@ export const authorize = async (
 ): Promise<{ mask: string[] }> => {
   await requireActivePerson(env, authority);
   const { objectType, objectId, resource } = objectColumns(object);
+  const { subject, appVersion } = authority;
+  // An App's code changes things only from a version an admin approved
+  // (`madeCurrent`): a run keeps the version it started on, which may be
+  // one made current since without, its permissions granted again for
+  // another.
+  const unapproved =
+    subject.type === "app" &&
+    appVersion !== undefined &&
+    changesThings(object, action)
+      ? sql`NOT EXISTS (SELECT 1 FROM ${appVersions} WHERE ${appVersions.appId} = ${subject.appId} AND ${appVersions.version} = ${appVersion} AND ${appVersions.approved} = 0)`
+      : undefined;
   const rows = await drizzle(env.DB)
     .select({
       id: permissions.id,
@@ -995,7 +1079,11 @@ export const authorize = async (
         eq(permissions.objectId, objectId),
         resource === null
           ? isNull(permissions.resource)
-          : or(isNull(permissions.resource), eq(permissions.resource, resource))
+          : or(
+              isNull(permissions.resource),
+              eq(permissions.resource, resource)
+            ),
+        unapproved
       )
     );
   const allowing = rows.find((row) =>

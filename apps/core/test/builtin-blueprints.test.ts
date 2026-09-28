@@ -520,7 +520,7 @@ describe("the built-in blueprints", () => {
     });
   });
 
-  it("leave what a copy was granted as its builder makes its first version current and a release changes them, but not its next version", async () => {
+  it("leave what a copy was granted as its builder makes its first version current and a release changes them, but not its next version or a rollback", async () => {
     await reinstall();
     const admin = await signedInApi(idp, "admin");
     const builder = await signedInApi(idp, "builder");
@@ -569,6 +569,13 @@ describe("the built-in blueprints", () => {
     await builder.api.apps.versions.setCurrent(created.app.id, version);
     const next = await admin.api.permissions.list(copy);
 
+    // Granted again for the builder's code, then rolled back to the first
+    // version by the builder: asked for again, as for any version but the
+    // first one's first time.
+    await admin.api.permissions.grant(asked?.id ?? "");
+    await builder.api.apps.versions.setCurrent(created.app.id, 1);
+    const rolledBack = await admin.api.permissions.list(copy);
+
     expect({
       audited: kept.filter(
         ({ action, detail }) =>
@@ -577,10 +584,12 @@ describe("the built-in blueprints", () => {
       ),
       afterRelease,
       next: next.map(({ status, requestedBy }) => ({ status, requestedBy })),
+      rolledBack: rolledBack.map(({ status }) => status),
     }).toStrictEqual({
       audited: [],
       afterRelease: [granted],
       next: [{ status: "requested", requestedBy: builder.userId }],
+      rolledBack: ["requested"],
     });
 
     await reinstall();

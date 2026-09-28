@@ -484,16 +484,28 @@ export interface Write {
 }
 
 /**
- * The frontmatter fields of each Playbook record type that one function of
- * its own sets, having checked them, by field with that function's name:
- * every other save or restore, of raw text too, keeps them from the
- * version it goes over (none for a new document), and is refused
- * otherwise (`requireFieldsKept`).
+ * Frontmatter fields of a Playbook record type that one function of its
+ * own (`owner`) sets, having checked or computed them. The first field
+ * says whether they are set: only `owner` sets it, and once it is, every
+ * other save or restore, of raw text too, keeps them all as the version
+ * it goes over has them (`requireFieldsKept`).
  */
-const keptFields: Partial<Record<DocumentType, Record<string, string>>> = {
+interface KeptFields {
+  owner: string;
+  fields: readonly [string, ...string[]];
+}
+
+/** The `KeptFields` of each Playbook record type that has them. */
+const keptFields: Partial<Record<DocumentType, KeptFields>> = {
   // A workflow's link to an App workflow (playbook.ts): it checks that the
   // person may use the App and that the App runs the workflow.
-  workflow: { app: "linkWorkflow" },
+  workflow: { owner: "linkWorkflow", fields: ["app"] },
+  // What a snapshot the platform took froze (snapshots.ts). One made by
+  // hand, without figures, is saved as any record.
+  snapshot: {
+    owner: "takeSnapshot",
+    fields: ["figures", "date", "maturity", "workflows"],
+  },
 };
 
 /** A frontmatter field's value, if it has one. */
@@ -521,7 +533,7 @@ export const keptFieldsOf = (
     return {};
   }
   return Object.fromEntries(
-    Object.keys(keptFields[parsed.type] ?? {}).map((field) => [
+    (keptFields[parsed.type]?.fields ?? []).map((field) => [
       field,
       fieldOf(parsed.frontmatter, field),
     ])
@@ -530,10 +542,11 @@ export const keptFieldsOf = (
 
 /**
  * Refuses with `knowledge.invalid` a Playbook version of `type` that
- * changes one of its `keptFields` from the version it goes over
- * (`ifVersion`), unless the write `sets` it. The version it goes over is
- * the one the write's batch requires is still current, so nothing saved
- * in between is compared against.
+ * changes `keptFields` from the version it goes over (`ifVersion`),
+ * those of its type and of that version's, so a change of type doesn't
+ * drop them either, unless the write `sets` them. The version it goes
+ * over is the one the write's batch requires is still current, so
+ * nothing saved in between is compared against.
  */
 const requireFieldsKept = async (
   db: DrizzleD1Database,
@@ -552,10 +565,6 @@ const requireFieldsKept = async (
   },
   sets: Record<string, unknown> = {}
 ): Promise<void> => {
-  const fields = Object.entries(keptFields[type] ?? {});
-  if (fields.length === 0) {
-    return;
-  }
   const before = existing
     ? await db
         .select({ text: versions.text })
@@ -568,23 +577,36 @@ const requireFieldsKept = async (
         )
         .get()
     : undefined;
-  const was =
-    before === undefined
-      ? undefined
-      : savedFrontmatter(path, before.text)?.frontmatter;
+  const saved =
+    before === undefined ? undefined : savedFrontmatter(path, before.text);
+  const was = saved?.frontmatter;
   const now = savedFrontmatter(path, text)?.frontmatter;
-  const changed = fields.filter(
-    ([field]) =>
-      comparable(fieldOf(now, field)) !==
-      comparable(fieldOf(Object.hasOwn(sets, field) ? sets : was, field))
+  const groups = new Set(
+    [type, saved?.type].flatMap((of) => {
+      const group = of === undefined ? undefined : keptFields[of];
+      return group === undefined ? [] : [group];
+    })
   );
-  if (changed.length > 0) {
-    throw invalid(
-      changed.map(
-        ([field, owner]) =>
-          `frontmatter.${field}: only ${owner} changes it; a save keeps the version before's`
-      )
+  const problems = [...groups].flatMap(({ owner, fields }) => {
+    const [first] = fields;
+    const setting = Object.hasOwn(sets, first);
+    const keeping = setting || fieldOf(was, first) !== undefined;
+    const kept = setting ? sets : was;
+    const changed = keeping
+      ? fields.filter(
+          (field) =>
+            comparable(fieldOf(now, field)) !== comparable(fieldOf(kept, field))
+        )
+      : fields.filter(
+          (field) => field === first && fieldOf(now, field) !== undefined
+        );
+    return changed.map(
+      (field) =>
+        `frontmatter.${field}: only ${owner} changes it; a save keeps the version before's`
     );
+  });
+  if (problems.length > 0) {
+    throw invalid(problems);
   }
 };
 

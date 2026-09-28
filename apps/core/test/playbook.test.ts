@@ -758,6 +758,8 @@ describe("Playbook records", () => {
         kept: await raw({ ...linkedTo("pay"), title: "Pay invoices" }, 2),
         relinked: await raw(linkedTo("refund"), 3),
         dropped: await raw(designed, 3),
+        // Saved as another type, which has no link.
+        retyped: await raw(records.team.record, 3),
         // Restored from before the link, or with the same link.
         restoredUnlinked: await restore(1, 3),
         restoredLinked: await restore(2, 3),
@@ -780,6 +782,7 @@ describe("Playbook records", () => {
           kept: "ok",
           relinked: "knowledge.invalid",
           dropped: "knowledge.invalid",
+          retyped: "knowledge.invalid",
           restoredUnlinked: "knowledge.invalid",
           restoredLinked: "ok",
         },

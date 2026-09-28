@@ -377,6 +377,9 @@ export const createFromBlueprint = async (
     authorId: by.userId,
     message: `Created from the blueprint of ${source.name}, version ${number}.`,
     createdAt: now,
+    // The blueprint's code, which its requests came with: approved
+    // (`madeCurrent`), unlike a version its builder commits.
+    approved: 1,
   };
   const requests = await blueprintRequests(env, by, source.id, id);
   const db = drizzle(env.DB);
@@ -584,6 +587,7 @@ export const installBuiltinBlueprint = async (
           authorId: builtinOwner,
           message: "From the release",
           createdAt: now,
+          approved: 1,
         }),
         outboxed(
           db,

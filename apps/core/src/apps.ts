@@ -16,7 +16,7 @@ import type {
   FileDiff,
 } from "@grasp-os/shared/apps";
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
-import { actorOf } from "@grasp-os/shared/audit";
+import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
@@ -30,13 +30,19 @@ import { z } from "zod";
 
 import { appsFoundBy, requireAppRole } from "./app-access.ts";
 import type { Person } from "./app-access.ts";
-import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
+import {
+  auditedBatch,
+  outboxed,
+  outboxedEventWhere,
+  outboxedIfChanged,
+  storedEvent,
+} from "./audit-outbox.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
 import { featureEnabled } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
-import { requestedAgainFor } from "./permissions.ts";
+import { madeCurrent } from "./permissions.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";
 
 // The App registry and each App's code. The registry, the versions and the
@@ -598,6 +604,7 @@ export const commitFiles = async (
     authorId: by.userId,
     message: text,
     createdAt: new Date(),
+    approved: null,
   };
   // Only the rows this commit read: each write gives the rows it writes a
   // new revision, so a row written since has one this commit didn't read.
@@ -738,10 +745,11 @@ export const proposeVersion = async (
  * Makes a version the one that runs: the pending one after review, or any
  * other, such as an earlier one to roll back. The pending version is
  * cleared once it is current. Made current by someone who couldn't grant
- * them, the App's permissions that change things for the person using it
- * are asked for again (`requestedAgainFor`), but for an App's first
- * version when it was created from a blueprint: that is the code its
- * requests came with, which the admin who granted them was shown.
+ * them, the version is unapproved and the App's permissions that change
+ * things for the person using it are asked for again (`madeCurrent`), but
+ * for an App's first version copied from a blueprint, the first time:
+ * version 1 existed and was immutable when the admin granted its
+ * requests.
  */
 export const setCurrentVersion = async (
   env: Env,
@@ -751,7 +759,7 @@ export const setCurrentVersion = async (
 ): Promise<App> => {
   const found = await appFor(env, by, app, "builder");
   const appId = found.id;
-  const { version: number } = await findVersion(env, appId, version);
+  const { version: number, approved } = await findVersion(env, appId, version);
   if (found.currentVersion === number) {
     return found;
   }
@@ -763,13 +771,17 @@ export const setCurrentVersion = async (
     await versionFiles(env, appId, number)
   );
   const previous = found.currentVersion;
-  const blueprintCode = found.blueprint !== null && number === 1;
-  const requestedAgain = blueprintCode
-    ? []
-    : requestedAgainFor(env, by, appId, number, previous);
+  const event = createAuditEvent(
+    changeEntry(by, "app.version.current", appId, {
+      version: number,
+      previous,
+    }),
+    "core"
+  );
   const db = drizzle(env.DB);
   // Only over the current version read above, so the event's `previous`
-  // is the version this replaced.
+  // is the version this replaced. The event is stored only if this batch
+  // made it current, and what follows it only then.
   const [[changed]] = await auditedBatch(env, db, [
     db
       .update(apps)
@@ -781,14 +793,16 @@ export const setCurrentVersion = async (
         and(eq(apps.id, appId), sql`${apps.currentVersion} IS ${previous}`)
       )
       .returning(),
-    outboxedIfChanged(
-      db,
-      changeEntry(by, "app.version.current", appId, {
-        version: number,
-        previous,
-      })
-    ),
-    ...requestedAgain,
+    outboxedEventWhere(db, event, sql`changes() > 0`),
+    ...madeCurrent(env, by, {
+      app: appId,
+      version: number,
+      previous,
+      changed: storedEvent(event.id),
+      // A copy's first version, approved as it was created from the
+      // blueprint (app-blueprints.ts), made current for the first time.
+      keep: previous === null && approved === 1,
+    }),
   ]);
   if (!changed) {
     throw appErrors.create("app.conflict");

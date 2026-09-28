@@ -161,10 +161,14 @@ export interface AppVersionsApi {
   propose: (app: string, version: number) => Promise<App>;
   /**
    * Makes a version the one that runs, after review or to roll back. By
-   * anyone but an admin, it asks again for the App's permissions on a
+   * anyone but one of the organization's admins (Grasp staff too, and a
+   * rollback too), it asks again for the App's permissions on a
    * connection, to write a collection or to start a workflow: they allow
-   * nothing until an admin grants them again. Not for the first version
-   * of an App created from a blueprint, the code its requests came with.
+   * nothing until an admin grants them again, which approves the version
+   * that is current then. Code of a version no admin approved changes
+   * nothing, in a run that started on it too. Not for the first version
+   * of an App created from a blueprint, made current for the first time:
+   * it existed and was immutable when an admin granted its requests.
    */
   setCurrent: (app: string, version: number) => Promise<App>;
 }
