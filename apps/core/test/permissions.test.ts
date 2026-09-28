@@ -654,7 +654,7 @@ describe("permissions", () => {
     await ask("ASKED");
     const granted = await ask("GRANTED");
     const revoked = await ask("REVOKED");
-    await admin.api.permissions.grant(granted.id);
+    await admin.api.permissions.grant(granted.id, { version: null });
     await admin.api.permissions.revoke(revoked.id);
     const bindingsIn = async (status?: PermissionStatus) => {
       const listed = await admin.api.permissions.list(app, status);

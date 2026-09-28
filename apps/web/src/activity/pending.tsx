@@ -1,4 +1,4 @@
-import { builtinOwner } from "@grasp-os/shared/apps";
+import { appErrors, builtinOwner } from "@grasp-os/shared/apps";
 import type { Permission } from "@grasp-os/shared/permissions";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -95,22 +95,73 @@ const objectOf = ({ object }: Permission, directory: Directory): string => {
 
 /**
  * The version of the App an admin reviews as they decide: the one current
- * now, whose code the grant trusts.
+ * as the list was read, whose code the grant trusts. Null for an agent's
+ * permission, an App with none current, or one the list doesn't have:
+ * core then grants only if the App still has none current.
  */
 const reviewedVersion = (
   { subject }: Permission,
   directory: Directory
+): number | null =>
+  subject.type === "app"
+    ? (directory.apps.get(subject.appId)?.currentVersion ?? null)
+    : null;
+
+/** The version to review, as the row shows it. */
+const reviewedVersionText = (
+  request: Permission,
+  directory: Directory
 ): string => {
+  const { subject } = request;
   if (subject.type !== "app") {
     return "–";
   }
-  const app = directory.apps.get(subject.appId);
-  if (app === undefined) {
+  if (!directory.apps.has(subject.appId)) {
     return "Unknown";
   }
-  return app.currentVersion === null
-    ? "None current"
-    : String(app.currentVersion);
+  const version = reviewedVersion(request, directory);
+  return version === null ? "None current" : String(version);
+};
+
+/**
+ * Why a request is asked for again, if it is: it was granted before, and
+ * making another version of its App current asked for it again.
+ */
+const askedAgain = (
+  request: Permission,
+  directory: Directory
+): string | undefined => {
+  const { grantedBy, grantedAt } = request;
+  if (grantedBy === null || grantedAt === null) {
+    return undefined;
+  }
+  const version = reviewedVersion(request, directory);
+  const after =
+    version === null ? "" : ` after version ${version} was made current`;
+  return `Asked again${after} (previously granted by ${personName(directory, grantedBy)} on ${formatTime(grantedAt)})`;
+};
+
+const versionChanged =
+  "Another version of this App was made current since this list was read. The list now shows it: review that version, then approve again.";
+
+/**
+ * Grants `request` for `version`, the one the admin reviewed. Core refuses
+ * with `app.conflict` once another version is current: that is said
+ * plainly. Outside components, as the React Compiler can't compile `try`.
+ */
+const grantReviewed = async (
+  permissions: Session["permissions"],
+  request: Permission,
+  version: number | null
+): Promise<Permission> => {
+  try {
+    return await permissions.grant(request.id, { version });
+  } catch (error) {
+    if (appErrors.codeOf(error) === "app.conflict") {
+      throw new Error(versionChanged, { cause: error });
+    }
+    throw error;
+  }
 };
 
 /** What a decision did, with a way to find it in the log. */
@@ -121,10 +172,13 @@ interface Decided {
 
 const RequestActions = ({
   request,
+  version,
   who,
   onDecided,
 }: {
   request: Permission;
+  /** The version of its App the row shows for review. */
+  version: number | null;
   who: string;
   /** Says what a decision did; clears what the last one said when given nothing. */
   onDecided: (decided?: Decided) => void;
@@ -160,7 +214,8 @@ const RequestActions = ({
           aria-label={`Approve ${who}`}
           onClick={() => {
             void decide(
-              async (permissions) => await permissions.grant(request.id),
+              async (permissions) =>
+                await grantReviewed(permissions, request, version),
               `Approved: ${who}.`
             );
           }}
@@ -258,6 +313,7 @@ export const PendingApprovals = ({
             {requests.map((request) => {
               const subject = subjectOf(request, directory);
               const object = objectOf(request, directory);
+              const again = askedAgain(request, directory);
               return (
                 <TableRow key={request.id}>
                   <TableCell>{subject}</TableCell>
@@ -268,15 +324,23 @@ export const PendingApprovals = ({
                     </span>
                   </TableCell>
                   <TableCell>{request.actions.join(", ")}</TableCell>
-                  <TableCell>{reviewedVersion(request, directory)}</TableCell>
+                  <TableCell>
+                    {reviewedVersionText(request, directory)}
+                  </TableCell>
                   <TableCell>
                     {personName(directory, request.requestedBy)}
+                    {again === undefined ? null : (
+                      <span className="text-muted-foreground block text-xs">
+                        {again}
+                      </span>
+                    )}
                   </TableCell>
                   <TableCell>{formatTime(request.requestedAt)}</TableCell>
                   {decides ? (
                     <TableCell>
                       <RequestActions
                         request={request}
+                        version={reviewedVersion(request, directory)}
                         who={`${subject}: ${request.actions.join(", ")} on ${object}`}
                         onDecided={setDecided}
                       />

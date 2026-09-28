@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { expect } from "@playwright/test";
 
 import { test } from "./csp.ts";
-import { apiOf, pageOf, peopleIn } from "./people.ts";
+import { apiOf, pageOf, peopleIn, release } from "./people.ts";
 
 // The Activity page: an admin approves one App's permission request and
 // rejects another, finds the approval in the audit log with its details,
@@ -164,4 +164,64 @@ test("an admin approves a permission request, finds it in the audit log, and exp
   await expect(page.getByRole("textbox", { name: "Action" })).toHaveValue("");
   await expect(granted).toHaveCount(1);
   await expect(page.getByRole("alert")).toHaveCount(0);
+});
+
+test("an admin sees a grant asked for again after a new version, and approves only the version the list shows", async ({
+  browser,
+}) => {
+  const { admin, builder } = peopleIn("activityAgain");
+  const appName = `Minutes ${crypto.randomUUID()}`;
+  const builds = apiOf(builder);
+  const decides = apiOf(admin);
+  let appId: string;
+  try {
+    ({ id: appId } = await builds.api.apps.create({
+      name: appName,
+      description: "Writes the Playbook",
+    }));
+    await release(builds.api, appId, { "README.md": "One" }, "First");
+    const { id } = await builds.api.permissions.request({
+      subject: { type: "app", appId },
+      object: { type: "collection", collectionId: "playbook" },
+      actions: ["write"],
+      binding: "PLAYBOOK",
+    });
+    await decides.api.permissions.grant(id, { version: 1 });
+    // The builder can't grant it, so a new version asks for it again.
+    await release(builds.api, appId, { "README.md": "Two" }, "Second");
+  } finally {
+    decides.core[Symbol.dispose]();
+  }
+
+  try {
+    const page = await pageOf(browser, admin);
+    await page.goto("/activity?tab=pending");
+    const row = page.getByRole("row").filter({ hasText: appName });
+    await expect(row).toContainText(
+      /Asked again after version 2 was made current \(previously granted by .+ on .+\)/u
+    );
+    await expect(row.getByRole("cell", { name: "2", exact: true })).toHaveCount(
+      1
+    );
+
+    // Another version is made current while the admin looks at version 2.
+    await release(builds.api, appId, { "README.md": "Three" }, "Third");
+    await row.getByRole("button", { name: /^Approve /u }).click();
+    await expect(row.getByRole("alert")).toHaveText(
+      "Another version of this App was made current since this list was read. The list now shows it: review that version, then approve again."
+    );
+    await expect(row.getByRole("cell", { name: "3", exact: true })).toHaveCount(
+      1
+    );
+    await expect(row).toContainText("Asked again after version 3");
+    await expect(page.getByRole("status")).toHaveCount(0);
+
+    await row.getByRole("button", { name: /^Approve /u }).click();
+    await expect(page.getByRole("status")).toContainText(
+      `Approved: ${appName}: write on Collection playbook.`
+    );
+    await expect(row).toHaveCount(0);
+  } finally {
+    builds.core[Symbol.dispose]();
+  }
 });
