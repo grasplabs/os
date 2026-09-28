@@ -244,15 +244,57 @@ export const workerRoutes: Route[] = [
         return upload;
       }
       const name = params.script ?? "";
+      account.scriptUploads.push({
+        script: name,
+        live: Object.fromEntries(
+          [...account.scripts].map(([other, state]) => [
+            other,
+            deployedVersion(state)?.id,
+          ])
+        ),
+      });
       const script = account.scripts.get(name) ?? {
         versions: [],
         deployments: [],
         schedules: [],
       };
+      // A Durable Object migration runs only from the tag the script is
+      // at, as the API checks it.
+      const migrations = z
+        .object({ old_tag: z.string().optional(), new_tag: z.string() })
+        .loose()
+        .optional()
+        .parse(upload.metadata.migrations);
+      if (
+        migrations !== undefined &&
+        migrations.old_tag !== script.migrationTag
+      ) {
+        return refusal(400, 10_079, "Migration tag precondition failed");
+      }
+      if (migrations !== undefined) {
+        script.migrationTag = migrations.new_tag;
+      }
       account.scripts.set(name, script);
       const version = newVersion(script, upload, secretsOf(script, upload));
       deploy(script, [{ version_id: version.id, percentage: 100 }], {});
       return envelope({ id: name });
+    },
+  },
+  {
+    method: "GET",
+    path: /^\/workers\/services\/(?<script>[^/]+)$/u,
+    answer: ({ account, params }) => {
+      const script = scriptOf(account, params);
+      if (script instanceof Response) {
+        return script;
+      }
+      return envelope({
+        id: params.script,
+        default_environment: {
+          environment: "production",
+          script: { migration_tag: script.migrationTag ?? null },
+        },
+      });
     },
   },
   {
@@ -281,6 +323,13 @@ export const workerRoutes: Route[] = [
       const upload = await readUpload(account, call.body);
       if (upload instanceof Response) {
         return upload;
+      }
+      if (upload.metadata.migrations !== undefined) {
+        return refusal(
+          400,
+          10_000,
+          "A version can't carry Durable Object migrations"
+        );
       }
       const { id, number } = newVersion(
         script,

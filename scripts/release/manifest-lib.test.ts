@@ -115,6 +115,34 @@ describe("the release manifest", () => {
     ).toThrow(/releaseId/u);
   });
 
+  it("refuses Worker, Workflow and database names the Workers API wouldn't take", () => {
+    const [connect, core] = fixture;
+    if (connect === undefined || core === undefined) {
+      throw new Error("expected two builds");
+    }
+    const renamed = (config: Partial<typeof core.config>) =>
+      generateManifest(info, [
+        connect,
+        { ...core, config: { ...core.config, ...config } },
+      ]);
+    expect(() => renamed({ name: "Grasp_Core" })).toThrow(/name/u);
+    expect(() =>
+      renamed({
+        workflows: [
+          { name: "Grasp Workflows", binding: "WORKFLOWS", class_name: "W" },
+        ],
+      })
+    ).toThrow(/Workflow/u);
+    expect(() =>
+      renamed({
+        d1_databases: core.config.d1_databases.map((database) => ({
+          ...database,
+          database_name: "grasp.core",
+        })),
+      })
+    ).toThrow(/databaseName/u);
+  });
+
   it("refuses a build without its D1 migrations or static assets", () => {
     const [connect, core] = fixture;
     if (connect === undefined || core === undefined) {

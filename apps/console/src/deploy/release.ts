@@ -36,12 +36,14 @@ export interface BlobRef {
 }
 
 /**
- * The bytes of `file`, read from `store` and checked against the
- * manifest: its size before its body is read, then its SHA-256.
+ * The bytes of the blob `file` names, read from `store` and checked
+ * against the manifest: its size before its body is read, then its bytes
+ * with `matches` (its SHA-256, or a static file's content key).
  */
-export const readBlob = async (
+export const readChecked = async (
   store: ReleaseStore,
-  file: BlobRef
+  file: Omit<BlobRef, "sha256">,
+  matches: (bytes: Bytes) => Promise<boolean>
 ): Promise<Bytes> => {
   const object = await store.get(file.r2Key);
   if (object === null) {
@@ -58,7 +60,7 @@ export const readBlob = async (
     );
   }
   const bytes = new Uint8Array(await object.arrayBuffer());
-  if ((await sha256OfBytes(bytes)) !== file.sha256) {
+  if (!(await matches(bytes))) {
     throw new DeployError(
       "release_blob_mismatch",
       `${file.r2Key} (${file.name}) doesn't match its hash`
@@ -66,3 +68,14 @@ export const readBlob = async (
   }
   return bytes;
 };
+
+/** A module's or a migration's bytes, checked as `readChecked` does, by SHA-256. */
+export const readBlob = async (
+  store: ReleaseStore,
+  file: BlobRef
+): Promise<Bytes> =>
+  await readChecked(
+    store,
+    file,
+    async (bytes) => (await sha256OfBytes(bytes)) === file.sha256
+  );

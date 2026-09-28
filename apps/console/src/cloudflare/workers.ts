@@ -184,6 +184,22 @@ export const listDeployments = async (
   return deployments;
 };
 
+/**
+ * The version all of `scriptName`'s traffic goes to, if one does: none
+ * while its deployment splits traffic, or before its first.
+ */
+export const liveVersion = async (
+  api: CloudflareApi,
+  accountId: string,
+  scriptName: string
+): Promise<string | undefined> => {
+  const [current] = await listDeployments(api, accountId, scriptName);
+  const [only, ...others] = current?.versions ?? [];
+  return others.length === 0 && only?.percentage === 100
+    ? only.version_id
+    : undefined;
+};
+
 /** A secret a version is uploaded with. */
 export interface Secret {
   name: string;
@@ -228,13 +244,7 @@ export const latestIsDeployed = async (
   if (latest === undefined) {
     return true;
   }
-  const [current] = await listDeployments(api, accountId, scriptName);
-  const [only, ...others] = current?.versions ?? [];
-  return (
-    others.length === 0 &&
-    only?.version_id === latest &&
-    only.percentage === 100
-  );
+  return (await liveVersion(api, accountId, scriptName)) === latest;
 };
 
 /** A version would keep the secrets of a version that isn't live. */
@@ -394,6 +404,45 @@ export const uploadScript = async (
     },
     z.unknown()
   );
+};
+
+const serviceSchema = z.object({
+  default_environment: z.object({
+    script: z.object({ migration_tag: z.string().nullish() }),
+  }),
+});
+
+/**
+ * Whether `scriptName` exists, and the tag of the last Durable Object
+ * migration it ran, if any: what decides which of a release's migrations
+ * its next upload carries. Read as Wrangler reads it.
+ */
+export const scriptMigrationState = async (
+  api: CloudflareApi,
+  accountId: string,
+  scriptName: string
+): Promise<{ exists: boolean; migrationTag?: string }> => {
+  try {
+    const { default_environment: environment } = await api.call(
+      {
+        method: "GET",
+        path: `/accounts/${accountId}/workers/services/${scriptName}`,
+      },
+      serviceSchema
+    );
+    const tag = environment.script.migration_tag;
+    return {
+      exists: true,
+      ...(tag === null || tag === undefined || tag === ""
+        ? {}
+        : { migrationTag: tag }),
+    };
+  } catch (error) {
+    if (isNotFound(error)) {
+      return { exists: false };
+    }
+    throw error;
+  }
 };
 
 /**

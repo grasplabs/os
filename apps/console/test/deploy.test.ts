@@ -1,26 +1,46 @@
+import { deriveClientSecret } from "@grasp-os/shared/client-secrets";
+import { deriveRouterSecret } from "@grasp-os/shared/router";
 import { env } from "cloudflare:workers";
-import { and, asc, eq } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import { cloudflareApi } from "../src/cloudflare/api.ts";
 import { queryD1 } from "../src/cloudflare/workers.ts";
 import { act, consoleDatabase } from "../src/db/act.ts";
-import { auditEvents, clientDeploys, clients } from "../src/db/schema.ts";
+import {
+  auditEvents,
+  clientDeploys,
+  clients,
+  clientWorkers,
+  settings,
+} from "../src/db/schema.ts";
 import { runDeploy, startDeploy } from "../src/deploy/deploy.ts";
+import { rotateClientSecrets } from "../src/deploy/rotation.ts";
+import type { DeploySecrets } from "../src/deploy/secrets.ts";
 import { importReleases } from "../src/releases/import.ts";
+import type { ReleaseStore } from "../src/releases/import.ts";
 import type { AccountState } from "./cloudflare-api-kit.ts";
 import { mockCloudflareApi } from "./cloudflare-api.ts";
 import { publishRelease } from "./releases.ts";
+import type { ReleaseSpec } from "./releases.ts";
 
 const token = "test-deployer-token-0123456789";
 const cloudflare = mockCloudflareApi(token);
 const api = cloudflareApi({ token, retryDelayMs: 0 });
 const db = consoleDatabase(env.DB);
-const context = { api, db, store: env.RELEASES };
+const secrets: DeploySecrets = {
+  routerKey: "test-router-key",
+  clientKey: "test-client-key",
+  shared: {
+    connect: { COMPOSIO_API_KEY: "composio" },
+  },
+};
+const context = { api, db, store: env.RELEASES, secrets };
 const staff = { email: "staff@grasp.test", sub: "sub-staff" };
 
 /** A client on a new account in the fake, and a release imported to deploy to it. */
-const setUp = async () => {
+const setUp = async (spec?: ReleaseSpec) => {
   const account = cloudflare.addAccount();
   const clientId = `client-${crypto.randomUUID().slice(0, 8)}`;
   const now = new Date();
@@ -38,7 +58,9 @@ const setUp = async () => {
     ],
     { action: "client.create", clientId }
   );
-  const release = await publishRelease({ notes: "feat(core): deploy me" });
+  const release = await publishRelease(
+    spec ?? { notes: "feat(core): deploy me" }
+  );
   await importReleases(env.RELEASES, db);
   const deployId = await startDeploy(db, staff, clientId, release.id);
   return { account, clientId, release, deployId };
@@ -58,7 +80,8 @@ const deployEvents = async (clientId: string) => {
     .select({ action: auditEvents.action, detail: auditEvents.detail })
     .from(auditEvents)
     .where(eq(auditEvents.clientId, clientId))
-    .orderBy(asc(auditEvents.at));
+    // Events of one millisecond in the order they were written.
+    .orderBy(asc(auditEvents.at), sql`rowid`);
   return events.filter(({ action }) => action.startsWith("deploy."));
 };
 
@@ -127,7 +150,7 @@ describe("deploying a release to a client's account", () => {
     });
     await expect(deployRow(deployId)).resolves.toMatchObject({
       status: "done",
-      step: "migrations",
+      step: "workers",
       error: null,
     });
     const events = await deployEvents(clientId);
@@ -135,6 +158,11 @@ describe("deploying a release to a client's account", () => {
       "deploy.start",
       "deploy.resources",
       "deploy.migrations",
+      "deploy.version",
+      "deploy.worker_live",
+      "deploy.version",
+      "deploy.worker_live",
+      "deploy.workers",
       "deploy.done",
     ]);
   });
@@ -166,6 +194,11 @@ describe("deploying a release to a client's account", () => {
       "deploy.fail",
       "deploy.resources",
       "deploy.migrations",
+      "deploy.version",
+      "deploy.worker_live",
+      "deploy.version",
+      "deploy.worker_live",
+      "deploy.workers",
       "deploy.done",
     ]);
   });
@@ -272,5 +305,558 @@ describe("deploying a release to a client's account", () => {
         error: "release_blob_mismatch",
       })
     );
+  });
+});
+
+/** The version all of `script`'s traffic goes to in `account`. */
+const liveVersionOf = (account: AccountState, script: string) => {
+  const state = account.scripts.get(script);
+  const [only] = state?.deployments[0]?.versions ?? [];
+  return state?.versions.find(({ id }) => id === only?.version_id);
+};
+
+/** A version's bindings, by name. */
+const bindingsOf = (version: ReturnType<typeof liveVersionOf>) =>
+  new Map(
+    z
+      .array(z.looseObject({ name: z.string() }))
+      .parse(version?.metadata.bindings ?? [])
+      .map((binding) => [binding.name, binding])
+  );
+
+describe("deploying a release's Workers", () => {
+  it("uploads connect then core with their secrets and settings, on the release's pins, and sends them all traffic", async () => {
+    const { account, clientId, release, deployId } = await setUp();
+
+    await runDeploy(context, deployId);
+
+    const connect = liveVersionOf(account, "grasp-os-connect");
+    // Core signs capabilities with what connect checks them with.
+    const capability = await deriveClientSecret(
+      "test-client-key",
+      "capability",
+      clientId,
+      1
+    );
+    const core = liveVersionOf(account, "grasp-os-core");
+    expect({
+      connect: Object.fromEntries(connect?.secrets ?? []),
+      core: Object.fromEntries(core?.secrets ?? []),
+    }).toStrictEqual({
+      // Derived for the client's first generation, and the shared one.
+      connect: {
+        CAPABILITY_SIGNING_KEY: capability,
+        COMPOSIO_API_KEY: "composio",
+        TOKEN_ENCRYPTION_KEY: await deriveClientSecret(
+          "test-client-key",
+          "token-encryption",
+          clientId,
+          1,
+          "base64"
+        ),
+      },
+      core: {
+        BETTER_AUTH_SECRET: await deriveClientSecret(
+          "test-client-key",
+          "better-auth",
+          clientId,
+          1
+        ),
+        CAPABILITY_SIGNING_KEY: capability,
+        // The first router secret generation, as a new client has.
+        ROUTER_SECRET: await deriveRouterSecret("test-router-key", clientId, 1),
+      },
+    });
+    const coreDb = account.d1.find(({ name }) => name === "grasp-os-core");
+    const started = await deployRow(deployId);
+    const bindings = bindingsOf(core);
+    expect({
+      db: bindings.get("DB"),
+      change: bindings.get("PLATFORM_CHANGE"),
+      compatibilityDate: core?.metadata.compatibility_date,
+      tag: account.scripts.get("grasp-os-core")?.migrationTag,
+    }).toStrictEqual({
+      db: { type: "d1", name: "DB", id: coreDb?.uuid },
+      change: {
+        type: "json",
+        name: "PLATFORM_CHANGE",
+        json: {
+          by: staff.email,
+          what: "release",
+          release: release.id,
+          // When the deploy started.
+          at: started?.createdAt.toISOString(),
+        },
+      },
+      compatibilityDate: release.manifest.compatibilityDate,
+      tag: "v1",
+    });
+    expect({
+      schedules: account.scripts.get("grasp-os-core")?.schedules,
+      subdomain: account.scripts.get("grasp-os-core")?.subdomain,
+      workflow: account.workflows.get("grasp-os-workflows"),
+    }).toStrictEqual({
+      schedules: ["* * * * *"],
+      subdomain: { enabled: true, previews_enabled: false },
+      workflow: {
+        class_name: "WorkflowDispatcher",
+        script_name: "grasp-os-core",
+      },
+    });
+    const workers = await db
+      .select({
+        worker: clientWorkers.worker,
+        versionId: clientWorkers.versionId,
+      })
+      .from(clientWorkers)
+      .where(eq(clientWorkers.clientId, clientId));
+    expect(
+      workers.toSorted((a, b) => a.worker.localeCompare(b.worker))
+    ).toStrictEqual([
+      { worker: "connect", versionId: connect?.id },
+      { worker: "core", versionId: core?.id },
+    ]);
+  });
+
+  it("deploys a later release as new versions, and runs only its new Durable Object migrations", async () => {
+    const { account, clientId, deployId } = await setUp();
+    await runDeploy(context, deployId);
+    const next = await publishRelease({
+      notes: "feat(core): next",
+      core: "export default { core: 2 };",
+      durableObjectMigrations: ["v1", "v2"],
+    });
+    const same = await publishRelease({
+      notes: "fix(core): same objects",
+      core: "export default { core: 3 };",
+      durableObjectMigrations: ["v1", "v2"],
+    });
+    await importReleases(env.RELEASES, db);
+
+    await runDeploy(context, await startDeploy(db, staff, clientId, next.id));
+    const migrated = cloudflare.calls.filter(
+      ({ method, path }) =>
+        method === "PUT" && path.endsWith("/workers/scripts/grasp-os-core")
+    );
+    await runDeploy(context, await startDeploy(db, staff, clientId, same.id));
+
+    // The first deploy and v2 went as script uploads; the last as a
+    // version, since it runs no migration.
+    const core = account.scripts.get("grasp-os-core");
+    expect({
+      scriptUploads: migrated.length,
+      migrations: core?.versions[1]?.metadata.migrations,
+      tag: core?.migrationTag,
+      live: liveVersionOf(account, "grasp-os-core")?.modules[0]?.content,
+      versions: core?.versions.length,
+    }).toStrictEqual({
+      scriptUploads: 2,
+      migrations: {
+        old_tag: "v1",
+        new_tag: "v2",
+        steps: [{ new_sqlite_classes: ["Classv2"] }],
+      },
+      tag: "v2",
+      live: "export default { core: 3 };",
+      versions: 3,
+    });
+  });
+
+  it("refuses to upload without a required secret, and resumes without uploading connect again", async () => {
+    const { account, deployId } = await setUp({
+      notes: "feat(core): needs a shared secret",
+      coreSecrets: ["ENTRA_CLIENT_SECRET"],
+    });
+    const withoutEntra = context;
+    const withEntra = {
+      ...context,
+      secrets: {
+        ...secrets,
+        shared: { ...secrets.shared, core: { ENTRA_CLIENT_SECRET: "entra" } },
+      },
+    };
+
+    await expect(runDeploy(withoutEntra, deployId)).rejects.toMatchObject({
+      code: "missing_secret",
+    });
+    await expect(deployRow(deployId)).resolves.toMatchObject({
+      status: "failed",
+      step: "migrations",
+      error: "missing_secret",
+    });
+    expect(account.scripts.has("grasp-os-core")).toBeFalsy();
+
+    await runDeploy(withEntra, deployId);
+
+    expect(
+      [...account.scripts].map(([name, script]) => [
+        name,
+        script.versions.length,
+      ])
+    ).toStrictEqual([
+      ["grasp-os-connect", 1],
+      ["grasp-os-core", 1],
+    ]);
+  });
+});
+
+/** A deploy of a new release to the client set up, started now. */
+const nextDeploy = async (clientId: string, spec: ReleaseSpec) => {
+  const release = await publishRelease(spec);
+  await importReleases(env.RELEASES, db);
+  return await startDeploy(db, staff, clientId, release.id);
+};
+
+describe("deploying safely", () => {
+  it("makes connect live on its new version before core's script upload goes out", async () => {
+    const { account, clientId, deployId } = await setUp();
+    await runDeploy(context, deployId);
+    const next = await nextDeploy(clientId, {
+      notes: "feat(core): both change",
+      connect: "export default { connect: 2 };",
+      durableObjectMigrations: ["v1", "v2"],
+    });
+
+    await runDeploy(context, next);
+
+    // What was live the moment core's migrating script upload landed.
+    const coreUpload = account.scriptUploads.findLast(
+      ({ script }) => script === "grasp-os-core"
+    );
+    const connect = account.scripts.get("grasp-os-connect");
+    expect({
+      connectVersions: connect?.versions.length,
+      liveThen: coreUpload?.live["grasp-os-connect"],
+    }).toStrictEqual({
+      connectVersions: 2,
+      liveThen: connect?.versions.at(-1)?.id,
+    });
+  });
+
+  it("resumes after a Durable Object migration's upload went through but its answer was lost, without running it again", async () => {
+    const { account, clientId, deployId } = await setUp();
+    await runDeploy(context, deployId);
+    const next = await nextDeploy(clientId, {
+      notes: "feat(core): v2",
+      core: "export default { core: 2 };",
+      durableObjectMigrations: ["v1", "v2"],
+    });
+    cloudflare.failNext(
+      (call) =>
+        call.method === "PUT" &&
+        call.path.endsWith("/workers/scripts/grasp-os-core"),
+      "lost"
+    );
+
+    await failingDeploy(next);
+    await runDeploy(context, next);
+
+    const core = account.scripts.get("grasp-os-core");
+    const migrated = core?.versions.filter(
+      ({ metadata }) => metadata.migrations !== undefined
+    );
+    expect({
+      tag: core?.migrationTag,
+      migrations: migrated?.map(({ metadata }) => metadata.migrations),
+      live: liveVersionOf(account, "grasp-os-core")?.modules[0]?.content,
+    }).toStrictEqual({
+      tag: "v2",
+      // v1 on the first deploy, v2 once, whatever the resume did.
+      migrations: [
+        { new_tag: "v1", steps: [{ new_sqlite_classes: ["Classv1"] }] },
+        {
+          old_tag: "v1",
+          new_tag: "v2",
+          steps: [{ new_sqlite_classes: ["Classv2"] }],
+        },
+      ],
+      live: "export default { core: 2 };",
+    });
+  });
+
+  it("refuses to run a deploy a newer one superseded, and runs the newer one", async () => {
+    const { clientId, deployId } = await setUp();
+    const newer = await nextDeploy(clientId, { notes: "feat(core): newer" });
+
+    await expect(runDeploy(context, deployId)).rejects.toMatchObject({
+      code: "deploy_superseded",
+    });
+    await expect(deployRow(deployId)).resolves.toMatchObject({
+      status: "superseded",
+    });
+    await runDeploy(context, newer);
+    await expect(deployRow(newer)).resolves.toMatchObject({ status: "done" });
+  });
+
+  it("stops a deploy that a newer one superseded while it ran, leaving it superseded", async () => {
+    const { account, clientId, release, deployId } = await setUp();
+    let newer = "";
+    // The newer deploy starts while this one reads its first migration.
+    const store: ReleaseStore = {
+      list: async (options) => await env.RELEASES.list(options),
+      get: async (key: string) => {
+        if (newer === "") {
+          newer = await startDeploy(db, staff, clientId, release.id);
+        }
+        return await env.RELEASES.get(key);
+      },
+    };
+
+    await expect(
+      runDeploy({ ...context, store }, deployId)
+    ).rejects.toMatchObject({ code: "deploy_superseded" });
+
+    const events = await deployEvents(clientId);
+    const row = await deployRow(deployId);
+    expect({
+      row: row?.status,
+      scripts: account.scripts.size,
+      failures: events.filter(({ action }) => action === "deploy.fail").length,
+    }).toStrictEqual({ row: "superseded", scripts: 0, failures: 0 });
+  });
+
+  it("deploys a rotated client's secrets with the previous ones, and refuses another rotation within the week", async () => {
+    const { account, clientId, deployId } = await setUp();
+    await runDeploy(context, deployId);
+    const now = new Date();
+
+    const rotated = await rotateClientSecrets(db, staff, clientId, now);
+    const again = await rotateClientSecrets(db, staff, clientId, now);
+    await runDeploy(
+      context,
+      await nextDeploy(clientId, { notes: "fix(core): rotated" })
+    );
+
+    const core = liveVersionOf(account, "grasp-os-core");
+    expect({
+      rotated,
+      again,
+      router: core?.secrets.get("ROUTER_SECRET"),
+      previous: core?.secrets.get("ROUTER_SECRET_PREVIOUS"),
+    }).toStrictEqual({
+      rotated: true,
+      again: false,
+      router: await deriveRouterSecret("test-router-key", clientId, 2),
+      previous: await deriveRouterSecret("test-router-key", clientId, 1),
+    });
+  });
+
+  it("uploads again what a deploy recorded before the client's secrets rotated", async () => {
+    const { account, clientId, deployId } = await setUp({
+      notes: "feat(core): needs a shared secret",
+      coreSecrets: ["ENTRA_CLIENT_SECRET"],
+    });
+    await failingDeploy(deployId);
+    await rotateClientSecrets(db, staff, clientId, new Date());
+
+    await runDeploy(
+      {
+        ...context,
+        secrets: {
+          ...secrets,
+          shared: { ...secrets.shared, core: { ENTRA_CLIENT_SECRET: "entra" } },
+        },
+      },
+      deployId
+    );
+
+    const connect = account.scripts.get("grasp-os-connect");
+    expect({
+      versions: connect?.versions.length,
+      key: liveVersionOf(account, "grasp-os-connect")?.secrets.get(
+        "CAPABILITY_SIGNING_KEY"
+      ),
+    }).toStrictEqual({
+      versions: 2,
+      key: await deriveClientSecret(
+        "test-client-key",
+        "capability",
+        clientId,
+        2
+      ),
+    });
+  });
+
+  it("sets a client's settings as core's vars, and refuses a setting that isn't a deployment config var", async () => {
+    const { account, clientId, deployId } = await setUp();
+    const now = new Date();
+    await db.insert(settings).values({
+      clientId,
+      key: "FEATURES",
+      value: JSON.stringify({ apps: true }),
+      updatedBy: staff.email,
+      updatedAt: now,
+    });
+    await runDeploy(context, deployId);
+    await db.insert(settings).values({
+      clientId,
+      key: "DB",
+      value: JSON.stringify("elsewhere"),
+      updatedBy: staff.email,
+      updatedAt: now,
+    });
+    const refused = await nextDeploy(clientId, { notes: "fix(core): db" });
+
+    await failingDeploy(refused);
+
+    expect(
+      bindingsOf(liveVersionOf(account, "grasp-os-core")).get("FEATURES")
+    ).toStrictEqual({
+      type: "json",
+      name: "FEATURES",
+      json: { apps: true },
+    });
+    await expect(deployRow(refused)).resolves.toMatchObject({
+      error: "unknown_setting",
+    });
+  });
+
+  it("refuses a shared secret named like a binding", async () => {
+    const { deployId } = await setUp();
+
+    await expect(
+      runDeploy(
+        {
+          ...context,
+          secrets: {
+            ...secrets,
+            shared: { ...secrets.shared, core: { DB: "not a database" } },
+          },
+        },
+        deployId
+      )
+    ).rejects.toMatchObject({ code: "binding_name_taken" });
+  });
+});
+
+describe("resuming and superseding, Worker by Worker", () => {
+  it("makes nothing more live once a newer deploy supersedes it between two Workers", async () => {
+    const { account, clientId, release, deployId } = await setUp();
+    const coreModule = release.manifest.workers.core?.modules[0]?.r2Key;
+    let newer = "";
+    // The newer deploy starts once connect is live, while core's code is read.
+    const store: ReleaseStore = {
+      list: async (options) => await env.RELEASES.list(options),
+      get: async (key: string) => {
+        if (key === coreModule && newer === "") {
+          newer = await startDeploy(db, staff, clientId, release.id);
+        }
+        return await env.RELEASES.get(key);
+      },
+    };
+
+    await expect(
+      runDeploy({ ...context, store }, deployId)
+    ).rejects.toMatchObject({ code: "deploy_superseded" });
+
+    expect({
+      connect: liveVersionOf(account, "grasp-os-connect") !== undefined,
+      core: account.scripts.has("grasp-os-core"),
+    }).toStrictEqual({ connect: true, core: false });
+  });
+
+  it("uploads a recorded version again when a shared secret or a setting changed since", async () => {
+    const { account, clientId, deployId } = await setUp({
+      notes: "feat(core): needs a shared secret",
+      coreSecrets: ["ENTRA_CLIENT_SECRET"],
+    });
+    // Connect is uploaded and recorded; core stops the deploy.
+    await failingDeploy(deployId);
+    const changed = {
+      ...context,
+      secrets: {
+        ...secrets,
+        shared: {
+          connect: { COMPOSIO_API_KEY: "a-new-composio-key" },
+          core: { ENTRA_CLIENT_SECRET: "entra" },
+        },
+      },
+    };
+
+    await runDeploy(changed, deployId);
+
+    const connect = liveVersionOf(account, "grasp-os-connect");
+    expect({
+      versions: account.scripts.get("grasp-os-connect")?.versions.length,
+      key: connect?.secrets.get("COMPOSIO_API_KEY"),
+    }).toStrictEqual({ versions: 2, key: "a-new-composio-key" });
+
+    // Core's new version is recorded, but its deployment fails; then a
+    // setting changes, so the resume uploads core again.
+    const next = await nextDeploy(clientId, {
+      notes: "feat(core): needs a shared secret",
+      coreSecrets: ["ENTRA_CLIENT_SECRET"],
+    });
+    cloudflare.failNext(
+      (call) =>
+        call.method === "POST" &&
+        call.path.endsWith("/grasp-os-core/deployments"),
+      500
+    );
+    const failing = vi.spyOn(console, "error").mockImplementation(() => {
+      // The failure is logged; the test reads the row instead.
+    });
+    await expect(runDeploy(changed, next)).rejects.toBeInstanceOf(Error);
+    failing.mockRestore();
+    await db.insert(settings).values({
+      clientId,
+      key: "FEATURES",
+      value: JSON.stringify({ apps: true }),
+      updatedBy: staff.email,
+      updatedAt: new Date(),
+    });
+    const coreVersions = account.scripts.get("grasp-os-core")?.versions.length;
+    await runDeploy(changed, next);
+    expect({
+      uploaded:
+        (account.scripts.get("grasp-os-core")?.versions.length ?? 0) -
+        (coreVersions ?? 0),
+      features: bindingsOf(liveVersionOf(account, "grasp-os-core")).get(
+        "FEATURES"
+      ),
+    }).toStrictEqual({
+      uploaded: 1,
+      features: { type: "json", name: "FEATURES", json: { apps: true } },
+    });
+  });
+
+  it("uploads again without the previous keys once the rotation's week has closed", async () => {
+    const { account, clientId, deployId } = await setUp({
+      notes: "feat(core): needs a shared secret",
+      coreSecrets: ["ENTRA_CLIENT_SECRET"],
+    });
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    await rotateClientSecrets(db, staff, clientId, new Date(now - 9 * day));
+    // Live a day ago: within the week, so connect gets the previous keys.
+    await db
+      .update(clients)
+      .set({ rotationLiveAt: new Date(now - day) })
+      .where(eq(clients.id, clientId));
+    await failingDeploy(deployId);
+    const first = account.scripts.get("grasp-os-connect")?.versions.at(-1);
+
+    // Live eight days ago: the week has closed.
+    await db
+      .update(clients)
+      .set({ rotationLiveAt: new Date(now - 8 * day) })
+      .where(eq(clients.id, clientId));
+    await runDeploy(
+      {
+        ...context,
+        secrets: {
+          ...secrets,
+          shared: { ...secrets.shared, core: { ENTRA_CLIENT_SECRET: "entra" } },
+        },
+      },
+      deployId
+    );
+
+    const live = liveVersionOf(account, "grasp-os-connect");
+    expect({
+      before: first?.secrets.has("TOKEN_ENCRYPTION_KEY_PREVIOUS"),
+      after: live?.secrets.has("TOKEN_ENCRYPTION_KEY_PREVIOUS"),
+      reuploaded: live?.id !== first?.id,
+    }).toStrictEqual({ before: true, after: false, reuploaded: true });
   });
 });

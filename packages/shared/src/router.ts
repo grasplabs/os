@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { toHex } from "./encoding.ts";
+import { clientIdPattern, deriveClientSecret } from "./client-secrets.ts";
 
 /**
  * The header the router adds to every request it forwards to a client's core,
@@ -49,9 +49,6 @@ const isWorkersDevOrigin = (value: string): boolean => {
   );
 };
 
-/** A client's id as the console gives it: no `:`, so the derivation below stays unambiguous. */
-const clientIdPattern = /^[A-Za-z0-9_-]{1,64}$/u;
-
 /**
  * One entry of the router's hostname map (KV, key: the hostname as
  * `routerHostKey` gives it), written by the console. `generation` counts the
@@ -70,39 +67,16 @@ export type RouterHost = z.infer<typeof routerHostSchema>;
 export const routerHostKey = (hostname: string): string =>
   hostname.toLowerCase().replace(/\.$/u, "");
 
-const encoder = new TextEncoder();
-
 /**
  * A client's router secret: `HMAC-SHA256(routerKey, "router:<clientId>:<generation>")`
- * as lowercase hex. The router derives it on every forward, the console to
- * set it on the client's core, so nothing per client is stored anywhere.
- * `routerKey` is the one `ROUTER_KEY` in Secrets Store (grasp-os-ops).
+ * as lowercase hex (`deriveClientSecret`). The router derives it on every
+ * forward, the console to set it on the client's core, so nothing per
+ * client is stored anywhere. `routerKey` is the one `ROUTER_KEY` in
+ * Secrets Store (grasp-os-ops).
  */
 export const deriveRouterSecret = async (
   routerKey: string,
   clientId: string,
   generation: number
-): Promise<string> => {
-  if (routerKey === "") {
-    throw new TypeError("No router key");
-  }
-  if (!clientIdPattern.test(clientId)) {
-    throw new TypeError("Not a client id");
-  }
-  if (!Number.isSafeInteger(generation) || generation < 0) {
-    throw new TypeError("Not a router secret generation");
-  }
-  const key = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(routerKey),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const mac = await crypto.subtle.sign(
-    "HMAC",
-    key,
-    encoder.encode(`router:${clientId}:${generation}`)
-  );
-  return toHex(new Uint8Array(mac));
-};
+): Promise<string> =>
+  await deriveClientSecret(routerKey, "router", clientId, generation);

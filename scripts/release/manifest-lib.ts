@@ -22,6 +22,7 @@ import path from "node:path";
 import {
   assetKey,
   bindingNameSchema as bindingName,
+  d1IdPlaceholder,
   MANIFEST_VERSION,
   migrationKey,
   moduleKey,
@@ -181,7 +182,7 @@ const bindingsOf = (
   ...config.d1_databases.map((database) => ({
     type: "d1",
     name: database.binding,
-    id: `$D1_${database.binding}_ID`,
+    id: d1IdPlaceholder(database.binding),
   })),
   ...config.r2_buckets.map((bucket) => ({
     type: "r2_bucket",

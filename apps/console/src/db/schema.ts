@@ -47,11 +47,20 @@ export const clients = sqliteTable("clients", {
   /** The Cloudflare account the console adopted for it. */
   accountId: text("account_id").notNull().unique(),
   /**
-   * The router secret's generation: the secret is
-   * `HMAC(ROUTER_KEY, "router:<id>:<generation>")`, so raising it rotates
-   * the secret with nothing stored.
+   * The generation of the client's derived secrets: each is
+   * `HMAC(<master key>, "<purpose>:<id>:<generation>")`
+   * (src/deploy/secrets.ts), so raising it rotates them with nothing
+   * stored.
    */
   generation: integer().notNull().default(1),
+  /** When the generation last rose; null before the first rotation. */
+  rotatedAt: timestamp("rotated_at"),
+  /**
+   * When a deploy first made the current generation live; null while the
+   * last rotation hasn't reached the client yet. The previous generation's
+   * keys are kept for a window from here (src/deploy/secrets.ts).
+   */
+  rotationLiveAt: timestamp("rotation_live_at"),
   /** The rollout ring it's in: 0 first. */
   ring: integer().notNull().default(1),
   status: text({ enum: ["provisioning", "active", "offboarded"] })
@@ -98,11 +107,21 @@ export const clientDeploys = sqliteTable(
     releaseId: text("release_id")
       .notNull()
       .references(() => releases.id),
-    status: text({ enum: ["running", "done", "failed"] }).notNull(),
+    /** `superseded`: a newer deploy of the client started, so this one no longer runs. */
+    status: text({
+      enum: ["running", "done", "failed", "superseded"],
+    }).notNull(),
     /** The last step that finished, such as `resources`; null before the first. */
     step: text(),
     /** Why it failed: an error code, never a token or a response body. */
     error: text(),
+    /**
+     * The versions this deploy uploaded, and the secrets generation they
+     * carry: JSON, `{"generation": 1, "byApp": {"connect": "<version id>"}}`.
+     * A resumed deploy deploys these rather than upload again, unless the
+     * generation has changed since.
+     */
+    versions: text(),
     /** The staff member who started it, or `system`. */
     startedBy: text("started_by").notNull(),
     createdAt: timestamp("created_at").notNull(),

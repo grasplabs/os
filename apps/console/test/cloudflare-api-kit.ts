@@ -34,6 +34,8 @@ export interface ScriptState {
   deployments: DeploymentState[];
   schedules: string[];
   subdomain?: { enabled: boolean; previews_enabled: boolean };
+  /** The last Durable Object migration a script upload ran. */
+  migrationTag?: string;
 }
 
 export interface AccountState {
@@ -59,6 +61,11 @@ export interface AccountState {
   sessions: Map<string, Set<string>>;
   /** Assets completion tokens it issued. */
   completions: Set<string>;
+  /**
+   * Each script upload as it landed: the script, and the version each of
+   * the account's scripts was live on at that moment.
+   */
+  scriptUploads: { script: string; live: Record<string, string | undefined> }[];
 }
 
 /** A call the fake got. */

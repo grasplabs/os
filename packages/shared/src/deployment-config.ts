@@ -232,3 +232,17 @@ export const auditRetentionSchema = z.int().min(30).max(3650);
  * most ten. Core also refuses one shorter than the retention.
  */
 export const auditArchiveRetentionSchema = z.int().min(365).max(3650);
+
+/**
+ * The names of the deployment config vars above, the only settings the
+ * console sets on core as vars. `PLATFORM_CHANGE` is the console's own, set
+ * on every version it deploys, never a setting.
+ */
+export const deploymentConfigVars = [
+  "SIGN_IN",
+  "FEATURES",
+  "MODEL_GATEWAY",
+  "MEMORY_LIMITS",
+  "AUDIT_RETENTION_DAYS",
+  "AUDIT_ARCHIVE_RETENTION_DAYS",
+] as const;

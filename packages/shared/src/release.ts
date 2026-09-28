@@ -54,6 +54,17 @@ const fileRef = z.strictObject({
   r2Key: z.string(),
 });
 
+/**
+ * A name the Workers API takes for a Worker, a Workflow or a D1 database
+ * in a client account: lowercase letters, digits and dashes, at most 63.
+ */
+export const workerNameSchema = z
+  .string()
+  .regex(/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u);
+
+/** The placeholder a D1 binding's id is in the manifest, filled in per account. */
+export const d1IdPlaceholder = (binding: string): string => `$D1_${binding}_ID`;
+
 // `r<run>-<sha7>` from CI, `dev-<time>` locally. It becomes an R2 prefix, so
 // nothing else is allowed in it.
 const RELEASE_ID = /^(?:r\d{6,}-[0-9a-f]{7}|dev-[0-9a-z]+)$/u;
@@ -63,7 +74,7 @@ export const releaseIdSchema = z.string().regex(RELEASE_ID);
 
 const workerEntrySchema = z.strictObject({
   /** The Worker's name in every client account. */
-  name: z.string(),
+  name: workerNameSchema,
   /** The entry module, one of `modules`. */
   mainModule: z.string(),
   modules: z.array(
@@ -72,13 +83,21 @@ const workerEntrySchema = z.strictObject({
   compatibilityFlags: z.array(z.string()),
   /** Script-upload API bindings, account-specific values as placeholders. */
   bindings: z.array(
-    z.looseObject({ type: z.string(), name: bindingNameSchema })
+    z
+      .looseObject({ type: z.string(), name: bindingNameSchema })
+      // A Workflow is created by its name in the account.
+      .refine(
+        (binding) =>
+          binding.type !== "workflow" ||
+          workerNameSchema.safeParse(binding.workflow_name).success,
+        "A Workflow binding names its Workflow as a Worker name"
+      )
   ),
   /** Each D1 database: created by name, migrated in order before deploying. */
   d1Databases: z.array(
     z.strictObject({
       binding: bindingNameSchema,
-      databaseName: z.string(),
+      databaseName: workerNameSchema,
       migrations: z.array(fileRef),
     })
   ),

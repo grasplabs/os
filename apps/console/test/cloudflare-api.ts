@@ -241,6 +241,9 @@ export const mockCloudflareApi = (token: string) => {
   const accounts = new Map<string, AccountState>();
   const calls: ApiCall[] = [];
   const planned = new Map<number, Failure>();
+  /** Failures planned for the next call a test picks out, each once. */
+  const matched: { matches: (call: ApiCall) => boolean; failure: Failure }[] =
+    [];
 
   /** Calls being answered now, and the most at once. */
   const load = { now: 0, peak: 0 };
@@ -298,7 +301,9 @@ export const mockCloudflareApi = (token: string) => {
       body: await readBody(request),
     };
     calls.push(call);
-    const failure = planned.get(calls.length);
+    const match = matched.findIndex(({ matches }) => matches(call));
+    const [picked] = match === -1 ? [] : matched.splice(match, 1);
+    const failure = planned.get(calls.length) ?? picked?.failure;
     if (failure === "lost") {
       await respond(request, call);
       return lostConnection();
@@ -330,6 +335,7 @@ export const mockCloudflareApi = (token: string) => {
     forgetDatabases();
     calls.length = 0;
     planned.clear();
+    matched.length = 0;
     load.peak = 0;
   });
 
@@ -351,6 +357,7 @@ export const mockCloudflareApi = (token: string) => {
         assets: new Set(),
         sessions: new Map(),
         completions: new Set(),
+        scriptUploads: [],
       };
       accounts.set(account.id, account);
       return account;
@@ -358,6 +365,10 @@ export const mockCloudflareApi = (token: string) => {
     /** Fails the `n`th call from now as `failure` says, whatever it asks. */
     failCall: (n: number, failure: Failure) => {
       planned.set(calls.length + n, failure);
+    },
+    /** Fails the next call `matches` picks out as `failure` says, once. */
+    failNext: (matches: (call: ApiCall) => boolean, failure: Failure) => {
+      matched.push({ matches, failure });
     },
   };
 };
