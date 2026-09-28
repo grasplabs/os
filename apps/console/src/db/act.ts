@@ -50,28 +50,29 @@ const rowOf = (actor: Actor, event: ConsoleEvent) => {
 };
 
 /**
- * Runs `statements` and records `event` by `actor` in one batch (one
- * transaction): if any statement fails, nothing is written, the event
- * included. For changes that always happen when their statements succeed;
- * a conditional one goes through `actIfChanged`.
+ * Runs `statements`, at least one, and records `event` by `actor` in one
+ * batch (one transaction): if any statement fails, nothing is written, the
+ * event included. For changes that always happen when their statements
+ * succeed; a conditional one goes through `actIfChanged`.
  */
 export const act = async (
   db: ConsoleDatabase,
   actor: Actor,
-  statements: readonly BatchItem<"sqlite">[],
+  statements: readonly [BatchItem<"sqlite">, ...BatchItem<"sqlite">[]],
   event: ConsoleEvent
 ): Promise<void> => {
   const record = db.insert(auditEvents).values(rowOf(actor, event));
   // One batch is one transaction, so where the event sits in it doesn't
-  // matter: it goes first so the batch is never empty. (`actIfChanged` is
-  // different: its event must follow the statement whose changes it reads.)
+  // matter. (`actIfChanged` is different: its event must follow the
+  // statement whose changes it reads.)
   await db.batch([record, ...statements]);
 };
 
 /**
  * Runs `statement`, a conditional change (an update or delete with a
  * `WHERE` that may match nothing), and records `event` by `actor` only if
- * it changed a row, in the same batch. Returns whether it did.
+ * it changed a row, in the same batch. Returns whether it did, read from
+ * the batch's own results: nothing runs after the batch commits.
  *
  * The event's insert comes right after the statement and reads its
  * `changes()`. That's sound in the console's database, which has no FTS
@@ -89,11 +90,8 @@ export const actIfChanged = async (
     .insert(auditEvents)
     .select(
       sql`SELECT ${row.id}, ${row.at.getTime()}, ${row.actor}, ${row.action}, ${row.clientId}, ${row.target}, ${row.detail} WHERE changes() > 0`
-    );
-  await db.batch([statement, record]);
-  const [recorded] = await db
-    .select({ id: auditEvents.id })
-    .from(auditEvents)
-    .where(sql`${auditEvents.id} = ${row.id}`);
-  return recorded !== undefined;
+    )
+    .returning({ id: auditEvents.id });
+  const [, recorded] = await db.batch([statement, record]);
+  return recorded.length > 0;
 };
