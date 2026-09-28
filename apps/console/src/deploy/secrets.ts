@@ -9,8 +9,9 @@
  * Composio key), and the caller passes it.
  *
  * Raising the client's generation (`rotateClientSecrets`) rotates all of
- * them at once. For `rotationWindowMs` after it, the keys that support
- * rotation also get the previous generation's value: core accepts the
+ * them at once. Until the new generation is live (a deploy has made it
+ * so, `clients.rotation_live_at`) and for `rotationWindowMs` after, the
+ * keys that support rotation also get the previous generation's value: core accepts the
  * previous router secret while every router isolate moves to the new one,
  * connect checks capabilities signed with the previous key, and its cron
  * seals tokens again under the new vault key. Rotating also changes
@@ -25,8 +26,9 @@ import type { Secret } from "../cloudflare/workers.ts";
 import { DeployError } from "./errors.ts";
 
 /**
- * How long after a rotation a Worker also gets the previous generation's
- * keys: long enough for connect's cron to seal every token again.
+ * How long after a rotation went live a Worker still gets the previous
+ * generation's keys: long enough for connect's cron to seal every token
+ * again.
  */
 export const rotationWindowMs = 7 * 24 * 60 * 60 * 1000;
 
@@ -119,14 +121,14 @@ export interface ClientGeneration {
   id: string;
   /** Its generation, from 1. */
   generation: number;
-  /** When its generation last rose, if it has. */
-  rotatedAt: Date | null;
+  /** When a deploy made this generation live; null until one has. */
+  rotationLiveAt: Date | null;
 }
 
 /**
  * Every secret the Worker `app` runs with: its derived ones for the client
- * and its generation (with the previous generation's, within
- * `rotationWindowMs` of a rotation, where the Worker takes it), and the
+ * and its generation (with the previous generation's, where the Worker
+ * takes it, until `rotationWindowMs` after the generation went live), and the
  * shared ones given for it. Throws `reserved_secret_name` for a shared
  * secret under a reserved name, and `missing_secret` for a required one it
  * has no value for, so nothing is uploaded without it.
@@ -150,8 +152,8 @@ export const workerSecrets = async (
   }
   const rotating =
     client.generation > 1 &&
-    client.rotatedAt !== null &&
-    now.getTime() - client.rotatedAt.getTime() < rotationWindowMs;
+    (client.rotationLiveAt === null ||
+      now.getTime() - client.rotationLiveAt.getTime() < rotationWindowMs);
   const derive = async (secret: DerivedSecret, generation: number) =>
     await deriveClientSecret(
       secrets[secret.master],

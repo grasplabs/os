@@ -1,9 +1,10 @@
 /**
  * Rotating a client's derived secrets: raising its generation
  * (src/deploy/secrets.ts). The next deploy gives its Workers the new
- * secrets, and for `rotationWindowMs` the previous ones where a Worker
- * takes them. So a rotation is refused while the last one's window is
- * open: the previous values would be the ones still in use.
+ * secrets, and the previous ones where a Worker takes them, until
+ * `rotationWindowMs` after a deploy made the new generation live. So a
+ * rotation is refused until the last one is live and its window has
+ * closed: the previous values would be the ones still in use.
  */
 import { and, eq, isNull, lte, or, sql } from "drizzle-orm";
 
@@ -14,8 +15,9 @@ import { rotationWindowMs } from "./secrets.ts";
 
 /**
  * Raises client `clientId`'s secrets generation, audited, unless its last
- * rotation was less than `rotationWindowMs` before `now`. Returns whether
- * it did. Everyone signs in again once the next deploy is live.
+ * rotation isn't live yet or went live less than `rotationWindowMs` before
+ * `now`. Returns whether it did. Everyone signs in again once the next
+ * deploy is live.
  */
 export const rotateClientSecrets = async (
   db: ConsoleDatabase,
@@ -31,6 +33,7 @@ export const rotateClientSecrets = async (
       .set({
         generation: sql`${clients.generation} + 1`,
         rotatedAt: now,
+        rotationLiveAt: null,
         updatedAt: now,
       })
       .where(
@@ -38,7 +41,10 @@ export const rotateClientSecrets = async (
           eq(clients.id, clientId),
           or(
             isNull(clients.rotatedAt),
-            lte(clients.rotatedAt, new Date(now.getTime() - rotationWindowMs))
+            lte(
+              clients.rotationLiveAt,
+              new Date(now.getTime() - rotationWindowMs)
+            )
           )
         )
       ),

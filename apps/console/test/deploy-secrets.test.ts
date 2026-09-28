@@ -29,9 +29,9 @@ const secrets: DeploySecrets = {
 };
 
 const now = new Date(Date.UTC(2026, 8, 28, 12));
-/** A day into a rotation, and a day after its window closed. */
-const rotatedRecently = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-const rotatedLongAgo = new Date(
+/** A day after a rotation went live, and a day after its window closed. */
+const liveRecently = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+const liveLongAgo = new Date(
   now.getTime() - rotationWindowMs - 24 * 60 * 60 * 1000
 );
 
@@ -42,18 +42,18 @@ const derived = async (
   key = "client-key"
 ) => await deriveClientSecret(key, purpose, "acme", generation, encoding);
 
-/** `app`'s secrets by name, for generation `generation` rotated at `rotatedAt`. */
+/** `app`'s secrets by name, for generation `generation` rotated at `rotationLiveAt`. */
 const byName = async (
   app: "core" | "connect",
   generation: number,
-  rotatedAt: Date | null,
+  rotationLiveAt: Date | null,
   given = secrets
 ) => {
   const values = await workerSecrets(
     app,
     app === "core" ? core : connect,
     given,
-    { id: "acme", generation, rotatedAt },
+    { id: "acme", generation, rotationLiveAt },
     now
   );
   return Object.fromEntries(values.map(({ name, value }) => [name, value]));
@@ -69,7 +69,7 @@ describe("a Worker's secrets", () => {
   });
 
   it("carry the previous generation's keys for a week after a rotation, the router secret's included", async () => {
-    await expect(byName("connect", 2, rotatedRecently)).resolves.toStrictEqual({
+    await expect(byName("connect", 2, liveRecently)).resolves.toStrictEqual({
       COMPOSIO_API_KEY: "composio",
       CAPABILITY_SIGNING_KEY: await derived("capability", 2),
       CAPABILITY_SIGNING_KEY_PREVIOUS: await derived("capability", 1),
@@ -80,7 +80,7 @@ describe("a Worker's secrets", () => {
         "base64"
       ),
     });
-    await expect(byName("core", 2, rotatedRecently)).resolves.toStrictEqual({
+    await expect(byName("core", 2, liveRecently)).resolves.toStrictEqual({
       ROUTER_SECRET: await derived("router", 2, "hex", "router-key"),
       ROUTER_SECRET_PREVIOUS: await derived("router", 1, "hex", "router-key"),
       BETTER_AUTH_SECRET: await derived("better-auth", 2),
@@ -88,8 +88,13 @@ describe("a Worker's secrets", () => {
     });
   });
 
+  it("carry the previous keys while the rotation isn't live yet, however long ago it was raised", async () => {
+    const names = Object.keys(await byName("core", 2, null));
+    expect(names).toContain("ROUTER_SECRET_PREVIOUS");
+  });
+
   it("drop the previous keys once the rotation's window has closed", async () => {
-    const names = Object.keys(await byName("connect", 2, rotatedLongAgo));
+    const names = Object.keys(await byName("connect", 2, liveLongAgo));
     expect(names.toSorted()).toStrictEqual([
       "CAPABILITY_SIGNING_KEY",
       "COMPOSIO_API_KEY",
@@ -131,7 +136,7 @@ describe("a Worker's secrets", () => {
         "connect",
         { ...connect, requiredSecrets: ["MICROSOFT_CLIENT_SECRET"] },
         secrets,
-        { id: "acme", generation: 1, rotatedAt: null },
+        { id: "acme", generation: 1, rotationLiveAt: null },
         now
       )
     ).rejects.toMatchObject({ code: "missing_secret" });

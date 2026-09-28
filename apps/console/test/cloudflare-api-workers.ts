@@ -244,6 +244,15 @@ export const workerRoutes: Route[] = [
         return upload;
       }
       const name = params.script ?? "";
+      account.scriptUploads.push({
+        script: name,
+        live: Object.fromEntries(
+          [...account.scripts].map(([other, state]) => [
+            other,
+            deployedVersion(state)?.id,
+          ])
+        ),
+      });
       const script = account.scripts.get(name) ?? {
         versions: [],
         deployments: [],

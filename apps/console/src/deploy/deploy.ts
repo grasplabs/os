@@ -32,12 +32,12 @@ import { deploymentConfigVars } from "@grasp-os/shared/deployment-config";
 import { log } from "@grasp-os/shared/log";
 import type { PlatformChange } from "@grasp-os/shared/platform-change";
 import type { ReleaseManifest } from "@grasp-os/shared/release";
-import { and, desc, eq, inArray, sql } from "drizzle-orm";
+import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { CloudflareApiError } from "../cloudflare/api.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
-import { act } from "../db/act.ts";
+import { act, actIfChanged } from "../db/act.ts";
 import type { Actor, ConsoleDatabase } from "../db/act.ts";
 import {
   clientDeploys,
@@ -64,6 +64,8 @@ export interface DeployContext {
   store: ReleaseStore;
   /** The secrets to give the Workers, from Secrets Store. */
   secrets: DeploySecrets;
+  /** The time now: `new Date()` unless a test sets it. */
+  now?: () => Date;
 }
 
 /** The steps a deploy runs, in order. */
@@ -148,7 +150,7 @@ const deployOf = async (db: ConsoleDatabase, id: string) => {
       createdAt: clientDeploys.createdAt,
       accountId: clients.accountId,
       generation: clients.generation,
-      rotatedAt: clients.rotatedAt,
+      rotationLiveAt: clients.rotationLiveAt,
     })
     .from(clientDeploys)
     .innerJoin(clients, eq(clients.id, clientDeploys.clientId))
@@ -174,6 +176,16 @@ const latestDeployOf = async (
   return latest?.id;
 };
 
+/** A deploy a newer one hasn't superseded. */
+const notSuperseded = ne(clientDeploys.status, "superseded");
+
+/** The deploy was superseded while it ran: it stops. */
+const superseded = (id: string): DeployError =>
+  new DeployError(
+    "deploy_superseded",
+    `A newer deploy superseded ${id} while it ran`
+  );
+
 /**
  * Marks a deploy failed at `step`, audited. A failure to record it is
  * logged, not thrown, so the caller throws the deploy's own error.
@@ -190,15 +202,14 @@ const recordFailure = async (
 ): Promise<void> => {
   const { id, clientId, releaseId, step, code } = failure;
   try {
-    await act(
+    // A deploy superseded meanwhile stays superseded.
+    await actIfChanged(
       db,
       "system",
-      [
-        db
-          .update(clientDeploys)
-          .set({ status: "failed", error: code, updatedAt: new Date() })
-          .where(eq(clientDeploys.id, id)),
-      ],
+      db
+        .update(clientDeploys)
+        .set({ status: "failed", error: code, updatedAt: new Date() })
+        .where(and(eq(clientDeploys.id, id), notSuperseded)),
       {
         action: "deploy.fail",
         clientId,
@@ -280,13 +291,15 @@ const recordedVersions = (deploy: Deploy): Record<string, string> => {
  * again.
  */
 const deployWorkers = async (
-  { api, db, store, secrets }: DeployContext,
+  context: DeployContext,
   id: string,
   deploy: Deploy,
   manifest: ReleaseManifest,
   databases: ReadonlyMap<string, string>
 ): Promise<number> => {
+  const { api, db, store, secrets } = context;
   const { accountId, clientId, releaseId } = deploy;
+  const now = context.now?.() ?? new Date();
   // Refused before anything is uploaded: a release with another Worker
   // needs the console to know it first.
   const order = deployOrder(manifest.workers).map((app) => {
@@ -301,7 +314,6 @@ const deployWorkers = async (
   });
   const versions = recordedVersions(deploy);
   const vars = await coreVars(db, deploy);
-  const now = new Date();
   for (const app of order) {
     const worker = manifest.workers[app];
     if (worker === undefined) {
@@ -317,7 +329,7 @@ const deployWorkers = async (
         {
           id: clientId,
           generation: deploy.generation,
-          rotatedAt: deploy.rotatedAt,
+          rotationLiveAt: deploy.rotationLiveAt,
         },
         now
       );
@@ -498,15 +510,13 @@ export const runDeploy = async (
     step: DeployStep,
     detail: Record<string, number>
   ): Promise<void> => {
-    await act(
+    const recorded = await actIfChanged(
       db,
       "system",
-      [
-        db
-          .update(clientDeploys)
-          .set({ step, status: "running", error: null, updatedAt: new Date() })
-          .where(eq(clientDeploys.id, id)),
-      ],
+      db
+        .update(clientDeploys)
+        .set({ step, status: "running", error: null, updatedAt: new Date() })
+        .where(and(eq(clientDeploys.id, id), notSuperseded)),
       {
         action: `deploy.${step}`,
         clientId,
@@ -514,6 +524,9 @@ export const runDeploy = async (
         detail: { deploy: id, ...detail },
       }
     );
+    if (!recorded) {
+      throw superseded(id);
+    }
   };
 
   let step: DeployStep = "resources";
@@ -537,20 +550,44 @@ export const runDeploy = async (
     throw error;
   }
 
-  await act(
+  const done = await actIfChanged(
     db,
     "system",
-    [
-      db
-        .update(clientDeploys)
-        .set({ status: "done", updatedAt: new Date() })
-        .where(eq(clientDeploys.id, id)),
-    ],
+    db
+      .update(clientDeploys)
+      .set({ status: "done", updatedAt: new Date() })
+      .where(and(eq(clientDeploys.id, id), notSuperseded)),
     {
       action: "deploy.done",
       clientId,
       target: releaseId,
       detail: { deploy: id },
+    }
+  );
+  if (!done) {
+    throw superseded(id);
+  }
+  // A rotated generation is live from now: its previous keys are kept for
+  // a window from here (src/deploy/secrets.ts).
+  const liveAt = context.now?.() ?? new Date();
+  await actIfChanged(
+    db,
+    "system",
+    db
+      .update(clients)
+      .set({ rotationLiveAt: liveAt, updatedAt: liveAt })
+      .where(
+        and(
+          eq(clients.id, clientId),
+          eq(clients.generation, deploy.generation),
+          gt(clients.generation, 1),
+          isNull(clients.rotationLiveAt)
+        )
+      ),
+    {
+      action: "client.rotation_live",
+      clientId,
+      detail: { generation: deploy.generation },
     }
   );
 };

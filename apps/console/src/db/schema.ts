@@ -55,6 +55,12 @@ export const clients = sqliteTable("clients", {
   generation: integer().notNull().default(1),
   /** When the generation last rose; null before the first rotation. */
   rotatedAt: timestamp("rotated_at"),
+  /**
+   * When a deploy first made the current generation live; null while the
+   * last rotation hasn't reached the client yet. The previous generation's
+   * keys are kept for a window from here (src/deploy/secrets.ts).
+   */
+  rotationLiveAt: timestamp("rotation_live_at"),
   /** The rollout ring it's in: 0 first. */
   ring: integer().notNull().default(1),
   status: text({ enum: ["provisioning", "active", "offboarded"] })

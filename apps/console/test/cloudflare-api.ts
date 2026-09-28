@@ -357,6 +357,7 @@ export const mockCloudflareApi = (token: string) => {
         assets: new Set(),
         sessions: new Map(),
         completions: new Set(),
+        scriptUploads: [],
       };
       accounts.set(account.id, account);
       return account;

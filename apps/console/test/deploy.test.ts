@@ -19,6 +19,7 @@ import { runDeploy, startDeploy } from "../src/deploy/deploy.ts";
 import { rotateClientSecrets } from "../src/deploy/rotation.ts";
 import type { DeploySecrets } from "../src/deploy/secrets.ts";
 import { importReleases } from "../src/releases/import.ts";
+import type { ReleaseStore } from "../src/releases/import.ts";
 import type { AccountState } from "./cloudflare-api-kit.ts";
 import { mockCloudflareApi } from "./cloudflare-api.ts";
 import { publishRelease } from "./releases.ts";
@@ -499,12 +500,6 @@ describe("deploying a release's Workers", () => {
   });
 });
 
-/** The index of the first call the fake got that `matches`, or -1. */
-const callIndex = (method: string, path: RegExp) =>
-  cloudflare.calls.findIndex(
-    (call) => call.method === method && path.test(call.path)
-  );
-
 /** A deploy of a new release to the client set up, started now. */
 const nextDeploy = async (clientId: string, spec: ReleaseSpec) => {
   const release = await publishRelease(spec);
@@ -514,26 +509,28 @@ const nextDeploy = async (clientId: string, spec: ReleaseSpec) => {
 
 describe("deploying safely", () => {
   it("makes connect live on its new version before core's script upload goes out", async () => {
-    const { clientId, deployId } = await setUp();
+    const { account, clientId, deployId } = await setUp();
     await runDeploy(context, deployId);
     const next = await nextDeploy(clientId, {
       notes: "feat(core): both change",
       connect: "export default { connect: 2 };",
       durableObjectMigrations: ["v1", "v2"],
     });
-    const before = cloudflare.calls.length;
 
     await runDeploy(context, next);
 
-    const connectLive = callIndex("POST", /\/grasp-os-connect\/deployments$/u);
-    const coreScript = cloudflare.calls.findIndex(
-      (call, index) =>
-        index >= before &&
-        call.method === "PUT" &&
-        call.path.endsWith("/workers/scripts/grasp-os-core")
+    // What was live the moment core's migrating script upload landed.
+    const coreUpload = account.scriptUploads.findLast(
+      ({ script }) => script === "grasp-os-core"
     );
-    expect(connectLive).toBeGreaterThan(before);
-    expect(coreScript).toBeGreaterThan(connectLive);
+    const connect = account.scripts.get("grasp-os-connect");
+    expect({
+      connectVersions: connect?.versions.length,
+      liveThen: coreUpload?.live["grasp-os-connect"],
+    }).toStrictEqual({
+      connectVersions: 2,
+      liveThen: connect?.versions.at(-1)?.id,
+    });
   });
 
   it("resumes after a Durable Object migration's upload went through but its answer was lost, without running it again", async () => {
@@ -589,6 +586,33 @@ describe("deploying safely", () => {
     });
     await runDeploy(context, newer);
     await expect(deployRow(newer)).resolves.toMatchObject({ status: "done" });
+  });
+
+  it("stops a deploy that a newer one superseded while it ran, leaving it superseded", async () => {
+    const { account, clientId, release, deployId } = await setUp();
+    let newer = "";
+    // The newer deploy starts while this one reads its first migration.
+    const store: ReleaseStore = {
+      list: async (options) => await env.RELEASES.list(options),
+      get: async (key: string) => {
+        if (newer === "") {
+          newer = await startDeploy(db, staff, clientId, release.id);
+        }
+        return await env.RELEASES.get(key);
+      },
+    };
+
+    await expect(
+      runDeploy({ ...context, store }, deployId)
+    ).rejects.toMatchObject({ code: "deploy_superseded" });
+
+    const events = await deployEvents(clientId);
+    const row = await deployRow(deployId);
+    expect({
+      row: row?.status,
+      scripts: account.scripts.size,
+      failures: events.filter(({ action }) => action === "deploy.fail").length,
+    }).toStrictEqual({ row: "superseded", scripts: 0, failures: 0 });
   });
 
   it("deploys a rotated client's secrets with the previous ones, and refuses another rotation within the week", async () => {
@@ -702,5 +726,48 @@ describe("deploying safely", () => {
         deployId
       )
     ).rejects.toMatchObject({ code: "binding_name_taken" });
+  });
+});
+
+describe("rotating a client's secrets", () => {
+  const day = 24 * 60 * 60 * 1000;
+
+  it("keeps the previous keys until a week after the new generation went live, however late it's deployed", async () => {
+    const { account, clientId, release, deployId } = await setUp();
+    await runDeploy(context, deployId);
+    const now = Date.now();
+    const at = (days: number) => new Date(now + days * day);
+    // Raised eight days before it's deployed.
+    await rotateClientSecrets(db, staff, clientId, at(-8));
+
+    const previousAt = async (days: number) => {
+      await runDeploy(
+        { ...context, now: () => at(days) },
+        await startDeploy(db, staff, clientId, release.id)
+      );
+      return liveVersionOf(account, "grasp-os-core")?.secrets.has(
+        "ROUTER_SECRET_PREVIOUS"
+      );
+    };
+    // Live from now: the first deploy, then three days on, keep them.
+    const whenLive = await previousAt(0);
+    const threeDaysOn = await previousAt(3);
+    const tooSoon = await rotateClientSecrets(db, staff, clientId, at(3));
+    const eightDaysOn = await previousAt(8);
+    const later = await rotateClientSecrets(db, staff, clientId, at(8));
+
+    expect({
+      whenLive,
+      threeDaysOn,
+      tooSoon,
+      eightDaysOn,
+      later,
+    }).toStrictEqual({
+      whenLive: true,
+      threeDaysOn: true,
+      tooSoon: false,
+      eightDaysOn: false,
+      later: true,
+    });
   });
 });
