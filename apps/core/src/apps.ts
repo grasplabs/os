@@ -461,7 +461,7 @@ const namesIn = (
 /** The screens and workflows of an App's current version. */
 export const appContents = async (
   env: Env,
-  by: Identity,
+  by: Person,
   app: unknown
 ): Promise<AppContents> => {
   const { id, currentVersion } = await appFor(env, by, app, "user");

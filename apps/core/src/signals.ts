@@ -5,6 +5,7 @@ import {
   runIdSchema,
 } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
+import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import { log } from "@grasp-os/shared/log";
 import { signalWindowDays } from "@grasp-os/shared/signals";
 import type { ImprovementSignal, SignalKind } from "@grasp-os/shared/signals";
@@ -37,7 +38,6 @@ import { inList } from "./db/d1.ts";
 import { documents, versions } from "./db/knowledge/schema.ts";
 import { featureEnabled } from "./features.ts";
 import { parseFrontmatter } from "./knowledge/frontmatter.ts";
-import { playbookCollectionId } from "./knowledge/playbook.ts";
 import { collectionsPerQuestion } from "./signal-tally.ts";
 import type { SignalTally } from "./signal-tally.ts";
 import { auditableCode } from "./workflows/host.ts";

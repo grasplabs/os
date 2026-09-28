@@ -1,4 +1,8 @@
-import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
+import type {
+  AuditActor,
+  AuditDetailValue,
+  AuditEntry,
+} from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import {
@@ -432,11 +436,15 @@ export const checkedText = async (
 /**
  * Who saves a version: the audit log's actor, and the person the version
  * is by (the author, and the owner of a new document without one in its
- * frontmatter): a person saving themselves, or the one an agent acts for.
+ * frontmatter): a person saving themselves, or the one an agent or App
+ * acts for. `detail` goes into the save's audit event: for an App, the
+ * person it acted for, how (interactive or a workflow run) and its
+ * version, which its actor doesn't name.
  */
 export interface Writer {
   actor: AuditActor;
   userId: string;
+  detail?: Record<string, AuditDetailValue>;
 }
 
 /** A person, saving a version themselves. */
@@ -460,6 +468,12 @@ export interface Write {
   also?: BatchItem<"sqlite">[];
   /** Set only by the sync of the Grasp skills, their one writer. */
   graspSync?: true;
+  /**
+   * Checked last, just before the batch is sent, with nothing awaited in
+   * between: throws to refuse the write, such as a delegate's context that
+   * became restricted while the save was being prepared.
+   */
+  lastCheck?: () => Promise<void>;
 }
 
 /**
@@ -515,6 +529,7 @@ export const writeVersion = async (
         : "knowledge.document.restored",
     target: { type: "document", id: documentId },
     detail: {
+      ...by.detail,
       collectionId: collection.id,
       version: number,
       ...(restoredFrom === null ? {} : { restoredFrom }),
@@ -566,6 +581,7 @@ export const writeVersion = async (
           )
         )
     : db.insert(documents).values(row);
+  await write.lastCheck?.();
   try {
     await auditedBatch(env, db, [document, ...statements]);
   } catch (error) {

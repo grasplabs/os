@@ -3,17 +3,25 @@ import type {
   BacklinkPage,
   DocumentPage,
   DocumentRead,
+  DocumentSummary,
   FollowResult,
   HistoryPage,
   KnowledgeRead,
+  RecordRead,
   SearchResults,
 } from "@grasp-os/shared/knowledge";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 import { callerOf } from "../app-bindings.ts";
-import { collectionReads } from "./binding.ts";
+import { forSandbox } from "../bindings.ts";
+import { collectionReads, readAsDelegate } from "./binding.ts";
 import type { CollectionGrant } from "./binding.ts";
+import {
+  getRecord,
+  linkWorkflowAsDelegate,
+  saveRecordAsDelegate,
+} from "./playbook.ts";
 
 /**
  * A collection, as an App's server code holds it:
@@ -24,18 +32,28 @@ import type { CollectionGrant } from "./binding.ts";
  * that person may read, never a personal collection (access.ts), and a
  * read of restricted data puts the App in restricted mode first, for
  * everyone using it.
+ *
+ * The Playbook's stub also writes records (`saveRecord`, `linkWorkflow`),
+ * under a permission with `write`, for the caller and with their rights
+ * (playbook.ts). Other collections have no writes: a save through any
+ * other stub is refused by the permission check.
  */
 export class AppCollectionBinding extends WorkerEntrypoint<
   Env,
   CollectionGrant & { app: AppId }
 > {
-  #reads(caller: unknown) {
-    const { app, ...grant } = this.ctx.props;
-    const authority = async (): Promise<Authority> => {
+  /** Who `caller` is, asked of the App's host when a read needs it. */
+  #authorityOf(caller: unknown): () => Promise<Authority> {
+    const { app } = this.ctx.props;
+    return async () => {
       const resolved = await callerOf(this.env, app, caller);
       return resolved.authority;
     };
-    return collectionReads(this.env, authority, grant);
+  }
+
+  #reads(caller: unknown) {
+    const { app: _app, ...grant } = this.ctx.props;
+    return collectionReads(this.env, this.#authorityOf(caller), grant);
   }
 
   async listDocuments(
@@ -87,5 +105,81 @@ export class AppCollectionBinding extends WorkerEntrypoint<
 
   async follow(caller: unknown, documentId: unknown): Promise<FollowResult> {
     return await this.#reads(caller).follow(documentId);
+  }
+
+  /**
+   * A document with its frontmatter as data (`record`) and its Markdown
+   * (`body`), read as `getDocument` reads it: how App code, which has no
+   * YAML parser, reads a Playbook record.
+   */
+  async getRecord(
+    caller: unknown,
+    documentId: unknown,
+    version?: unknown
+  ): Promise<RecordRead> {
+    const { context, permissionId } = this.ctx.props;
+    return await readAsDelegate(
+      this.env,
+      this.#authorityOf(caller),
+      context,
+      permissionId,
+      async (reader) => await getRecord(this.env, reader, documentId, version)
+    );
+  }
+
+  /**
+   * Saves a Playbook record for `caller` (`saveRecord` in playbook.ts:
+   * `{ path, ifVersion, record, body, message? }`), through the save
+   * pipeline, with versions: only under a permission that writes the
+   * Playbook, and only for someone who may change it themselves.
+   */
+  async saveRecord(caller: unknown, input: unknown): Promise<DocumentSummary> {
+    return await this.#write(
+      caller,
+      async (authority, grant) =>
+        await saveRecordAsDelegate(
+          this.env,
+          authority,
+          grant.context,
+          grant.permissionId,
+          input
+        )
+    );
+  }
+
+  /**
+   * Links a designed workflow record to the workflow of an App, for
+   * `caller` (`linkWorkflow` in playbook.ts: `{ documentId, ifVersion,
+   * appId, workflowId }`): as `saveRecord`, and only to an App `caller`
+   * may use.
+   */
+  async linkWorkflow(
+    caller: unknown,
+    input: unknown
+  ): Promise<DocumentSummary> {
+    return await this.#write(
+      caller,
+      async (authority, grant) =>
+        await linkWorkflowAsDelegate(
+          this.env,
+          authority,
+          grant.context,
+          grant.permissionId,
+          input
+        )
+    );
+  }
+
+  /** Runs a write for `caller`, with errors as the sandbox sees them. */
+  async #write<T>(
+    caller: unknown,
+    run: (authority: Authority, grant: CollectionGrant) => Promise<T>
+  ): Promise<T> {
+    const { app: _app, ...grant } = this.ctx.props;
+    try {
+      return await run(await this.#authorityOf(caller)(), grant);
+    } catch (error) {
+      throw forSandbox(error);
+    }
   }
 }

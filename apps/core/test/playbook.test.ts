@@ -1,4 +1,7 @@
-import { knowledgeErrors } from "@grasp-os/shared/knowledge";
+import {
+  knowledgeErrors,
+  playbookCollectionId,
+} from "@grasp-os/shared/knowledge";
 import type {
   DocumentSummary,
   PlaybookRecordType,
@@ -19,11 +22,7 @@ import {
   parseFrontmatter,
   withFrontmatter,
 } from "../src/knowledge/frontmatter.ts";
-import {
-  linkWorkflow,
-  playbookCollectionId,
-  saveRecord,
-} from "../src/knowledge/playbook.ts";
+import { linkWorkflow, saveRecord } from "../src/knowledge/playbook.ts";
 import type { LinkInput } from "../src/knowledge/playbook.ts";
 import { preparePurge, purge } from "../src/knowledge/purge.ts";
 import { release } from "./apps.ts";
