@@ -458,7 +458,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     ]);
   });
 
-  it("take an event delivered twice once, however late or often its copies come, send once, and still take new events of its type", async () => {
+  it("take an event delivered twice once, however late or often its copies come, send once, and still take new events of its type and its ID under another type", async () => {
     const admin = await personApi("admin");
     const mail = await mailConnection();
     const app = await appWith(
@@ -477,7 +477,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
   const again = await step.waitFor("again", { description: "Wait again", type: "approved", timeout: "1 day" });
   await step.waitFor("release", { description: "Wait for the test", type: "release", timeout: "1 day" });
   const last = await step.waitFor("last", { description: "Wait once more", type: "approved", timeout: 1000 });
-  return { approval: approval.received && approval.payload, again: again.received && again.payload, last: last.received, sent };`,
+  const filed = await step.waitFor("filed", { description: "Wait for filing", type: "filed", timeout: "1 day" });
+  return { approval: approval.received && approval.payload, again: again.received && again.payload, last: last.received, filed: filed.received && filed.payload, sent };`,
         { send: { messageId: "mocked" } }
       )
     );
@@ -501,6 +502,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     await sent(run.id, second);
     await sent(run.id, second);
     await sent(run.id, first);
+    // The first event's ID under another type: another event.
+    await sent(run.id, { type: "filed", id: "first", payload: "filed" });
     await finished(run.id, { type: "release", payload: null });
 
     expect({
@@ -514,6 +517,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
           approval: { by: "anna" },
           again: { by: "ben" },
           last: false,
+          filed: "filed",
           sent: { messageId: "message-1" },
         },
       },

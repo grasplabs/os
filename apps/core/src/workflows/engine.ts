@@ -59,7 +59,9 @@ export interface RunEngine {
   /**
    * Sends the run an event, for a wait on it to see. `event.id` names the
    * event, not the delivery: a sender that tries again sends the same ID,
-   * and the run takes the event once (`RunHost.waitForEvent`).
+   * and the run takes an event of that type and ID once
+   * (`RunHost.waitForEvent`). The same ID under another type is another
+   * event.
    */
   sendEvent: (
     id: string,

@@ -364,7 +364,10 @@ const defaultStepLimit = 10_000;
  * Steps kept back for core's own (`$grasp:…`), so the step that records
  * how the run ended always fits, with room to spare. A run's own steps
  * are refused this far short of the limit; past the limit, the engine
- * would refuse core's end too.
+ * would refuse core's end too. Core's steps that the run's code causes
+ * without bound count as the run's own: the sleeps of a wait while a
+ * feature is off ({@link offStepPrefix}) and the extra steps of a wait
+ * for an event ({@link waitStepPrefix}).
  */
 const coreStepReserve = 5;
 
@@ -379,6 +382,11 @@ const offStepPrefix = `${coreStepPrefix}off:`;
  * The steps a wait for an event takes besides its own: its deadline, and
  * a wait again for each copy of an event it passes over. Core's, and
  * counted as the run's own against the reserve, as the sleeps above.
+ *
+ * Their names, `$grasp:wait:<key>:deadline` and `$grasp:wait:<key>:<n>`
+ * with `offKeyOf`'s key, are how a new execution finds what earlier ones
+ * recorded: never rename them, nor change `offKeyOf`, or runs under way
+ * replay their waits wrong.
  */
 const waitStepPrefix = `${coreStepPrefix}wait:`;
 
@@ -673,9 +681,10 @@ export class RunHost extends RpcTarget {
    */
   #running: StepAttempt | undefined;
   /**
-   * The IDs of the events this run's waits took, as far as this execution
-   * has come: every execution replays the waits before, in order, so a
-   * wait sees the IDs of all that came before it.
+   * The events this run's waits took, by type and ID, as far as this
+   * execution has come: every execution replays the waits before, in
+   * order, so a wait sees all that came before it. By type too: one ID
+   * may name events of more types, e.g. a message received and replied.
    */
   readonly #takenEvents = new Set<string>();
 
@@ -1082,10 +1091,10 @@ export class RunHost extends RpcTarget {
    * The first event of `type` for this run that no earlier wait took, or
    * `received: false` at the timeout. The engine keeps a run's events by
    * type only, so a copy of an event delivered twice stays for the next
-   * wait of its type: a wait passes over an event whose ID an earlier one
-   * took, and waits again for what is left of its timeout. The deadline
-   * is recorded, so a wait that passes over a copy after a restart waits
-   * no longer than it would have.
+   * wait of its type: a wait passes over an event whose type and ID an
+   * earlier one took, and waits again for what is left of its timeout.
+   * The deadline is recorded, so a wait that passes over a copy after a
+   * restart waits no longer than it would have.
    */
   async waitForEvent(
     name: unknown,
@@ -1126,8 +1135,9 @@ export class RunHost extends RpcTarget {
           throw error;
         }
         const { id, payload } = sentEventSchema.parse(event.payload);
-        if (!this.#takenEvents.has(id)) {
-          this.#takenEvents.add(id);
+        const taken = `${type}\n${id}`;
+        if (!this.#takenEvents.has(taken)) {
+          this.#takenEvents.add(taken);
           return { received: true, payload };
         }
       }
