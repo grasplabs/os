@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "aac48987-6c5f-4bad-9607-0751cd362226",
+  "id": "58457635-ed97-42b8-99ac-2463a8a9f9d2",
   "prevId": "76233bf3-4c48-4cb1-b7ab-3c450e50ffa5",
   "tables": {
     "audit_events": {
@@ -313,6 +313,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": 1
+        },
+        "rotated_at": {
+          "name": "rotated_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         },
         "ring": {
           "name": "ring",

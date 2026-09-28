@@ -4,53 +4,63 @@
  * files read from R2 and checked against the manifest. Its secrets are in
  * src/deploy/secrets.ts.
  */
-import { assetContentKey, assetKey } from "@grasp-os/shared/release";
+import {
+  assetContentKey,
+  assetKey,
+  d1IdPlaceholder,
+} from "@grasp-os/shared/release";
 import type { ReleaseManifest, WorkerEntry } from "@grasp-os/shared/release";
 
 import type {
   AssetFile,
+  Secret,
   WorkerMetadata,
   WorkerModule,
   WorkerUpload,
 } from "../cloudflare/workers.ts";
 import type { ReleaseStore } from "../releases/import.ts";
-import { readBlob } from "./release.ts";
+import { DeployError } from "./errors.ts";
+import { readBlob, readChecked } from "./release.ts";
 
-/** The placeholder a D1 binding's id is in the manifest (scripts/release). */
-const d1Placeholder = /^\$D1_(?<binding>[A-Z][A-Z0-9_]*)_ID$/u;
+const unknownPlaceholder = (worker: WorkerEntry, binding: string) =>
+  new DeployError(
+    "unknown_placeholder",
+    `${worker.name}'s binding ${binding} names a placeholder the console doesn't fill`
+  );
 
 /**
- * `worker`'s bindings with each `$D1_<BINDING>_ID` replaced by the id of
- * the database that binding names. The placeholder list is closed: any
- * other `$` value is refused, so the manifest and this change together.
+ * `worker`'s bindings with each D1 binding's id filled in: a D1 binding's
+ * `id` must be exactly its own placeholder (`d1IdPlaceholder`), for a
+ * database the Worker lists, and is replaced by that database's id in the
+ * account. The placeholder list is closed: any other `$` value is refused
+ * (`unknown_placeholder`), so the manifest and this change together.
  */
 export const renderBindings = (
   worker: WorkerEntry,
   databases: ReadonlyMap<string, string>
 ): Record<string, unknown>[] =>
-  worker.bindings.map((binding) =>
-    Object.fromEntries(
-      Object.entries(binding).map(([field, value]) => {
-        if (typeof value !== "string" || !value.startsWith("$")) {
-          return [field, value];
-        }
-        const name = d1Placeholder.exec(value)?.groups?.binding;
-        const database = worker.d1Databases.find(
-          (entry) => entry.binding === name
-        );
-        const id =
-          database === undefined
-            ? undefined
-            : databases.get(database.databaseName);
-        if (id === undefined) {
-          throw new Error(
-            `${worker.name}'s binding ${binding.name} names a placeholder the console doesn't fill`
-          );
-        }
-        return [field, id];
-      })
-    )
-  );
+  worker.bindings.map((binding) => {
+    const rendered: Record<string, unknown> = { ...binding };
+    if (binding.type === "d1") {
+      const database = worker.d1Databases.find(
+        (entry) => entry.binding === binding.name
+      );
+      const id =
+        database === undefined
+          ? undefined
+          : databases.get(database.databaseName);
+      if (binding.id !== d1IdPlaceholder(binding.name) || id === undefined) {
+        throw unknownPlaceholder(worker, binding.name);
+      }
+      rendered.id = id;
+    }
+    for (const value of Object.values(rendered)) {
+      if (typeof value === "string" && value.startsWith("$")) {
+        throw unknownPlaceholder(worker, binding.name);
+      }
+    }
+    return rendered;
+  });
 
 /** The API's content type for each module type in the manifest. */
 const moduleTypes = {
@@ -90,18 +100,15 @@ const readAssets = async (
 ): Promise<AssetFile[]> =>
   await Promise.all(
     Object.entries(worker.assets?.manifest ?? {}).map(
-      async ([path, { hash, size }]) => {
-        const object = await store.get(assetKey(hash));
-        if (object === null || object.size !== size) {
-          await object?.body.cancel();
-          throw new Error(`${path} is missing from the release or changed`);
-        }
-        const content = new Uint8Array(await object.arrayBuffer());
-        if ((await assetContentKey(content, path)) !== hash) {
-          throw new Error(`${path} doesn't match its hash`);
-        }
-        return { path, content, type: assetType(path) };
-      }
+      async ([path, { hash, size }]) => ({
+        path,
+        content: await readChecked(
+          store,
+          { name: path, size, r2Key: assetKey(hash) },
+          async (bytes) => (await assetContentKey(bytes, path)) === hash
+        ),
+        type: assetType(path),
+      })
     )
   );
 
@@ -150,4 +157,28 @@ export const workerUpload = async (
       ? {}
       : { assets: await readAssets(store, worker) }),
   };
+};
+
+/**
+ * Throws `binding_name_taken` unless every binding, var and secret of
+ * `worker` has a name of its own: a setting named like a binding or a
+ * secret, or a shared secret named like a binding, would replace it.
+ */
+export const checkBindingNames = (
+  worker: WorkerEntry,
+  vars: Readonly<Record<string, unknown>>,
+  secrets: readonly Secret[]
+): void => {
+  const bindings = new Set(worker.bindings.map(({ name }) => name));
+  const secretNames = new Set(secrets.map(({ name }) => name));
+  const taken =
+    Object.keys(vars).find(
+      (name) => bindings.has(name) || secretNames.has(name)
+    ) ?? [...secretNames].find((name) => bindings.has(name));
+  if (taken !== undefined) {
+    throw new DeployError(
+      "binding_name_taken",
+      `${worker.name} has more than one binding named ${taken}`
+    );
+  }
 };

@@ -184,6 +184,22 @@ export const listDeployments = async (
   return deployments;
 };
 
+/**
+ * The version all of `scriptName`'s traffic goes to, if one does: none
+ * while its deployment splits traffic, or before its first.
+ */
+export const liveVersion = async (
+  api: CloudflareApi,
+  accountId: string,
+  scriptName: string
+): Promise<string | undefined> => {
+  const [current] = await listDeployments(api, accountId, scriptName);
+  const [only, ...others] = current?.versions ?? [];
+  return others.length === 0 && only?.percentage === 100
+    ? only.version_id
+    : undefined;
+};
+
 /** A secret a version is uploaded with. */
 export interface Secret {
   name: string;
@@ -228,13 +244,7 @@ export const latestIsDeployed = async (
   if (latest === undefined) {
     return true;
   }
-  const [current] = await listDeployments(api, accountId, scriptName);
-  const [only, ...others] = current?.versions ?? [];
-  return (
-    others.length === 0 &&
-    only?.version_id === latest &&
-    only.percentage === 100
-  );
+  return (await liveVersion(api, accountId, scriptName)) === latest;
 };
 
 /** A version would keep the secrets of a version that isn't live. */

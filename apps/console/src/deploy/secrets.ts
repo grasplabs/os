@@ -4,18 +4,31 @@
  * A client's own secrets are derived, never stored: each is
  * `HMAC(masterKey, "<purpose>:<clientId>:<generation>")`
  * (`deriveClientSecret`), the router secret under `ROUTER_KEY` and the
- * rest under `CLIENT_KEY`, both from Secrets Store. Raising the client's
- * generation rotates them all; connect's keys that support rotation get
- * the previous generation's value too, so tokens sealed and capabilities
- * signed before still open. Everything else a Worker needs is shared by
- * every client (the OAuth apps' secrets, the Composio key), and the caller
- * passes it.
+ * rest under `CLIENT_KEY`, both from Secrets Store. Everything else a
+ * Worker needs is shared by every client (the OAuth apps' secrets, the
+ * Composio key), and the caller passes it.
+ *
+ * Raising the client's generation (`rotateClientSecrets`) rotates all of
+ * them at once. For `rotationWindowMs` after it, the keys that support
+ * rotation also get the previous generation's value: core accepts the
+ * previous router secret while every router isolate moves to the new one,
+ * connect checks capabilities signed with the previous key, and its cron
+ * seals tokens again under the new vault key. Rotating also changes
+ * `BETTER_AUTH_SECRET`, which has no previous value: everyone is signed
+ * out and signs in again.
  */
 import { deriveClientSecret } from "@grasp-os/shared/client-secrets";
 import type { SecretEncoding } from "@grasp-os/shared/client-secrets";
 import type { WorkerEntry } from "@grasp-os/shared/release";
 
 import type { Secret } from "../cloudflare/workers.ts";
+import { DeployError } from "./errors.ts";
+
+/**
+ * How long after a rotation a Worker also gets the previous generation's
+ * keys: long enough for connect's cron to seal every token again.
+ */
+export const rotationWindowMs = 7 * 24 * 60 * 60 * 1000;
 
 /** The secrets a deploy gives the Workers, from Secrets Store. */
 export interface DeploySecrets {
@@ -25,7 +38,7 @@ export interface DeploySecrets {
   clientKey: string;
   /**
    * The secrets shared by every client, by app (`core`, `connect`), then
-   * by name. Never one of the derived ones.
+   * by name. Never a reserved name (`reservedSecretNames`).
    */
   shared: Readonly<Record<string, Readonly<Record<string, string>>>>;
 }
@@ -42,12 +55,13 @@ interface DerivedSecret {
   previous?: string;
 }
 
-/** Core's router secret (core's src/router-secret.ts). */
+/** Core's router secret (core's src/router-secret.ts): 64 hex characters. */
 const routerSecret: DerivedSecret = {
   name: "ROUTER_SECRET",
   purpose: "router",
   master: "routerKey",
   encoding: "hex",
+  previous: "ROUTER_SECRET_PREVIOUS",
 };
 
 /** Core's auth secret (core's src/auth/auth.ts): 64 hex characters. */
@@ -58,7 +72,10 @@ const authSecret: DerivedSecret = {
   encoding: "hex",
 };
 
-/** Core signs capabilities with it, connect checks them: at least 32 characters. */
+/**
+ * Core signs capabilities with it, connect checks them (at least 32
+ * characters); only connect checks with the previous one.
+ */
 const capabilityKey = (previous?: string): DerivedSecret => ({
   name: "CAPABILITY_SIGNING_KEY",
   purpose: "capability",
@@ -85,28 +102,56 @@ const derivedSecrets: Readonly<Record<string, readonly DerivedSecret[]>> = {
   ],
 };
 
-/** A Worker's required secret that the deploy wasn't given. */
-export class MissingSecretError extends Error {
-  constructor(worker: string, name: string) {
-    super(`No value for ${worker}'s secret ${name}`);
-    this.name = "MissingSecretError";
-  }
+/**
+ * Every name a derived secret or its previous value takes, on any Worker:
+ * none can be given as a shared secret.
+ */
+export const reservedSecretNames: ReadonlySet<string> = new Set(
+  Object.values(derivedSecrets).flatMap((secrets) =>
+    secrets.flatMap(({ name, previous }) =>
+      previous === undefined ? [name] : [name, previous]
+    )
+  )
+);
+
+/** The client whose secrets are derived, and its rotation. */
+export interface ClientGeneration {
+  id: string;
+  /** Its generation, from 1. */
+  generation: number;
+  /** When its generation last rose, if it has. */
+  rotatedAt: Date | null;
 }
 
 /**
  * Every secret the Worker `app` runs with: its derived ones for the client
- * and its generation (with the previous generation's where the Worker
- * rotates the key), and the shared ones given for it. Throws for a shared
- * secret given under a derived one's name, and `MissingSecretError` for a
- * required secret it has no value for, so nothing is uploaded without it.
+ * and its generation (with the previous generation's, within
+ * `rotationWindowMs` of a rotation, where the Worker takes it), and the
+ * shared ones given for it. Throws `reserved_secret_name` for a shared
+ * secret under a reserved name, and `missing_secret` for a required one it
+ * has no value for, so nothing is uploaded without it.
  */
 export const workerSecrets = async (
   app: string,
   worker: WorkerEntry,
   secrets: DeploySecrets,
-  client: { id: string; generation: number }
+  client: ClientGeneration,
+  now: Date
 ): Promise<Secret[]> => {
   const values = new Map(Object.entries(secrets.shared[app] ?? {}));
+  const reserved = [...values.keys()].find((name) =>
+    reservedSecretNames.has(name)
+  );
+  if (reserved !== undefined) {
+    throw new DeployError(
+      "reserved_secret_name",
+      `${worker.name}'s ${reserved} is derived, never given`
+    );
+  }
+  const rotating =
+    client.generation > 1 &&
+    client.rotatedAt !== null &&
+    now.getTime() - client.rotatedAt.getTime() < rotationWindowMs;
   const derive = async (secret: DerivedSecret, generation: number) =>
     await deriveClientSecret(
       secrets[secret.master],
@@ -116,27 +161,19 @@ export const workerSecrets = async (
       secret.encoding
     );
   for (const secret of derivedSecrets[app] ?? []) {
-    const names = [secret.name, secret.previous].filter(
-      (name): name is string => name !== undefined
-    );
-    if (names.some((name) => values.has(name))) {
-      throw new Error(
-        `${worker.name}'s ${secret.name} is derived, never given`
-      );
-    }
     // oxlint-disable-next-line no-await-in-loop -- a few per Worker
     values.set(secret.name, await derive(secret, client.generation));
-    // A client starts at generation 1 (`clients.generation`): only a
-    // rotated one has a previous value.
-    if (secret.previous !== undefined && client.generation > 1) {
+    if (secret.previous !== undefined && rotating) {
       // oxlint-disable-next-line no-await-in-loop -- a few per Worker
       values.set(secret.previous, await derive(secret, client.generation - 1));
     }
   }
-  for (const name of worker.requiredSecrets) {
-    if (!values.has(name)) {
-      throw new MissingSecretError(worker.name, name);
-    }
+  const missing = worker.requiredSecrets.find((name) => !values.has(name));
+  if (missing !== undefined) {
+    throw new DeployError(
+      "missing_secret",
+      `No value for ${worker.name}'s secret ${missing}`
+    );
   }
   return [...values].map(([name, value]) => ({ name, value }));
 };

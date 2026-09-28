@@ -8,13 +8,17 @@
  * first, and one that runs Durable Object migrations, which a version
  * can't carry. Which migrations it carries is worked out from the tag the
  * account's script is at, as Wrangler does.
+ *
+ * Each Worker goes live before the next is uploaded (connect before core,
+ * which binds it), so a script upload of core, live at once, never runs
+ * against the connect it replaced.
  */
 import type { WorkerEntry } from "@grasp-os/shared/release";
 
 import type { CloudflareApi } from "../cloudflare/api.ts";
 import {
   deployVersion,
-  listDeployments,
+  liveVersion,
   putSchedules,
   putWorkflow,
   scriptMigrationState,
@@ -23,6 +27,7 @@ import {
   uploadVersionWithSecrets,
 } from "../cloudflare/workers.ts";
 import type { Secret, WorkerUpload } from "../cloudflare/workers.ts";
+import { DeployError } from "./errors.ts";
 
 /** The migrations section of a script upload, as the API takes it. */
 interface MigrationsUpload {
@@ -34,43 +39,33 @@ interface MigrationsUpload {
 /**
  * The Durable Object migrations the script at `tag` hasn't run, from the
  * release's whole ordered history; none when it's at the last one. A tag
- * the history doesn't have (a migration since removed) runs them all
- * from it, as Wrangler does.
+ * the history doesn't have is refused (`unknown_migration_tag`), where
+ * Wrangler would run them all again: the script ran migrations this
+ * release doesn't know, such as a later release's, and replaying the rest
+ * could undo them.
  */
 export const pendingMigrations = (
   history: WorkerEntry["durableObjectMigrations"],
   tag?: string
 ): MigrationsUpload | undefined => {
   const last = history.at(-1);
-  if (last === undefined) {
-    return undefined;
-  }
   const at =
     tag === undefined ? -1 : history.findIndex((step) => step.tag === tag);
-  if (tag !== undefined && at === history.length - 1) {
+  if (tag !== undefined && at === -1) {
+    throw new DeployError(
+      "unknown_migration_tag",
+      `The script is at Durable Object migration ${tag}, which the release doesn't have`
+    );
+  }
+  if (last === undefined || at === history.length - 1) {
     return undefined;
   }
-  const steps = (at === -1 ? history : history.slice(at + 1)).map(
-    ({ tag: _tag, ...step }) => step
-  );
+  const steps = history.slice(at + 1).map(({ tag: _tag, ...step }) => step);
   return {
     ...(tag === undefined ? {} : { old_tag: tag }),
     new_tag: last.tag,
     steps,
   };
-};
-
-/** The version all of `scriptName`'s traffic goes to, if one does. */
-const liveVersion = async (
-  api: CloudflareApi,
-  accountId: string,
-  scriptName: string
-): Promise<string | undefined> => {
-  const [current] = await listDeployments(api, accountId, scriptName);
-  const [only, ...others] = current?.versions ?? [];
-  return others.length === 0 && only?.percentage === 100
-    ? only.version_id
-    : undefined;
 };
 
 /**

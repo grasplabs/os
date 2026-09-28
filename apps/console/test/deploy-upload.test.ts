@@ -47,12 +47,10 @@ describe("Durable Object migrations to upload", () => {
     ]);
   });
 
-  it("runs them all from a tag the release no longer has, as Wrangler does", () => {
-    expect(pendingMigrations(history, "v0")).toStrictEqual({
-      old_tag: "v0",
-      new_tag: "v2",
-      steps: [{ new_sqlite_classes: ["A"] }, { new_sqlite_classes: ["B"] }],
-    });
+  it("refuses a tag the release doesn't have, rather than run them all again", () => {
+    expect(() => pendingMigrations(history, "v3")).toThrow(
+      expect.objectContaining({ code: "unknown_migration_tag" })
+    );
   });
 });
 
@@ -69,17 +67,29 @@ describe("a Worker's bindings", () => {
     ).toStrictEqual([{ type: "d1", name: "DB", id: "uuid-core" }]);
   });
 
-  it("refuses a placeholder it doesn't fill", () => {
-    expect(() =>
-      renderBindings(
-        worker(
-          "core",
-          [{ type: "kv_namespace", name: "KV", id: "$KV_KV_ID" }],
-          d1
-        ),
-        databases
-      )
-    ).toThrow(/placeholder/u);
+  it("refuses a placeholder it doesn't fill, and a D1 id that isn't its own binding's", () => {
+    const refused = [
+      [{ type: "kv_namespace", name: "KV", id: "$KV_KV_ID" }],
+      // Another binding's placeholder.
+      [{ type: "d1", name: "DB", id: "$D1_OTHER_ID" }],
+      // A literal id where the placeholder belongs.
+      [{ type: "d1", name: "DB", id: "uuid-elsewhere" }],
+      // A D1 binding with no database listed for it.
+      [{ type: "d1", name: "LOGS", id: "$D1_LOGS_ID" }],
+    ].map((bindings) => {
+      try {
+        renderBindings(worker("core", bindings, d1), databases);
+        return "rendered";
+      } catch (error) {
+        return error instanceof Error && "code" in error ? error.code : "other";
+      }
+    });
+    expect(refused).toStrictEqual([
+      "unknown_placeholder",
+      "unknown_placeholder",
+      "unknown_placeholder",
+      "unknown_placeholder",
+    ]);
   });
 });
 
