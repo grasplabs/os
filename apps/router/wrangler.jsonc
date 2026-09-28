@@ -32,4 +32,18 @@
       "secret_name": "ROUTER_KEY",
     },
   ],
+  // Requests to core's sign-in routes (/api/auth/*), per hostname and
+  // client IP: 300 a minute. A person's sign-in takes two (start, IdP
+  // callback), and the same routes serve session and team calls, so a
+  // whole office behind one address can work at once, while a flood of
+  // sign-in starts or callback guesses is cut to five a second. Counted
+  // per Cloudflare location. The namespace id is ours to
+  // pick, unique per account; the period is in src/index.ts too.
+  "ratelimits": [
+    {
+      "name": "AUTH_RATE_LIMIT",
+      "namespace_id": "1001",
+      "simple": { "limit": 300, "period": 60 },
+    },
+  ],
 }

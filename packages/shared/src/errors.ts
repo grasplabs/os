@@ -104,6 +104,7 @@ export const requestErrors = defineErrorFamily({
   "request.not_found": "Not found.",
   "request.upgrade_required":
     "This endpoint only accepts WebSocket connections.",
+  "request.rate_limited": "Too many requests. Try again in a minute.",
 });
 
 /** Why a call needs a person to sign in (again). */

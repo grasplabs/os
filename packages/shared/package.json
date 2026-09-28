@@ -17,6 +17,7 @@
     "./deployment-config": "./src/deployment-config.ts",
     "./encoding": "./src/encoding.ts",
     "./errors": "./src/errors.ts",
+    "./http": "./src/http.ts",
     "./ids": "./src/ids.ts",
     "./json": "./src/json.ts",
     "./knowledge": "./src/knowledge.ts",
