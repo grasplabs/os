@@ -5,7 +5,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { indexApps } from "../src/knowledge/apps-collection.ts";
-import { release, requestGranted } from "./apps.ts";
+import { grantReviewed, release, requestGranted } from "./apps.ts";
 import { actingFor, envOf, knowledgeIn } from "./contexts.ts";
 import { runQuarterHourCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
@@ -567,7 +567,7 @@ describe("who finds an App", setUpTime, () => {
         outcome(
           owner.api.permissions.request(readCollection(subject, appsCollection))
         ),
-        outcome(admin.api.permissions.grant(old)),
+        outcome(grantReviewed(admin.api, old)),
       ])
     ).resolves.toStrictEqual(["permission.invalid", "permission.invalid"]);
     await expect(admin.api.permissions.list(subject)).resolves.toMatchObject([

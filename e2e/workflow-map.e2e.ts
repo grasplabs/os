@@ -57,8 +57,9 @@ const mapFor = async (admin: Person): Promise<string> => {
       },
     ]);
     for (const { id } of created.permissions) {
+      // Reviewed before a version of the copy is current.
       // oxlint-disable-next-line no-await-in-loop -- one grant at a time
-      await api.permissions.grant(id);
+      await api.permissions.grant(id, { version: null });
     }
     await api.apps.versions.setCurrent(created.app.id, 1);
     return created.app.id;

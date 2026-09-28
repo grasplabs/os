@@ -123,7 +123,8 @@ test("an admin sees which Apps can use a shared connection, revokes a permission
       actions: ["mail.read"],
       binding: "MAILBOX",
     });
-    await api.permissions.grant(id);
+    // Reviewed with no version of the App current yet.
+    await api.permissions.grant(id, { version: null });
     // Only asked for, it allows nothing yet: not a holder.
     await api.permissions.request({
       subject: { type: "app", appId },

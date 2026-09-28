@@ -16,7 +16,7 @@ import {
 } from "../src/builtins.ts";
 import type { Release } from "../src/builtins.ts";
 import { buildScreens } from "../src/screens.ts";
-import { racingDb, serverBuilt } from "./apps.ts";
+import { grantReviewed, racingDb, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote } from "./knowledge.ts";
 import {
@@ -458,7 +458,7 @@ describe("the built-in blueprints", () => {
         requestedBy: builder.userId,
       }),
     ]);
-    const granted = await admin.api.permissions.grant(asked?.id ?? "");
+    const granted = await grantReviewed(admin.api, asked?.id ?? "");
 
     // The built-in's own request is the release's: an admin neither grants
     // nor revokes it, so every copy keeps asking for it.
@@ -468,7 +468,7 @@ describe("the built-in blueprints", () => {
       .bind(helloApp)
       .first<{ id: string }>();
     const refusedOwn = await Promise.all([
-      outcome(admin.api.permissions.grant(own?.id ?? "")),
+      outcome(grantReviewed(admin.api, own?.id ?? "")),
       outcome(admin.api.permissions.revoke(own?.id ?? "")),
     ]);
     const second = await builder.api.apps.blueprints.create(
@@ -537,7 +537,7 @@ describe("the built-in blueprints", () => {
       { name: "Granted" }
     );
     const [asked] = created.permissions;
-    const granted = await admin.api.permissions.grant(asked?.id ?? "");
+    const granted = await grantReviewed(admin.api, asked?.id ?? "");
     const copy = { type: "app", appId: created.app.id } as const;
 
     // Its first version is the blueprint's code, which the admin granted
@@ -572,7 +572,7 @@ describe("the built-in blueprints", () => {
     // Granted again for the builder's code, then rolled back to the first
     // version by the builder: asked for again, as for any version but the
     // first one's first time.
-    await admin.api.permissions.grant(asked?.id ?? "");
+    await grantReviewed(admin.api, asked?.id ?? "");
     await builder.api.apps.versions.setCurrent(created.app.id, 1);
     const rolledBack = await admin.api.permissions.list(copy);
 

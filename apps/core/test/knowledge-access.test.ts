@@ -20,7 +20,7 @@ import { z } from "zod";
 import { appHost } from "../src/durable-objects.ts";
 import type { WorkContext } from "../src/restricted.ts";
 import { workspace } from "../src/workspace.ts";
-import { requestGranted } from "./apps.ts";
+import { grantReviewed, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import {
   actingFor,
@@ -195,7 +195,7 @@ describe("Apps and agents reading Knowledge", setUpTime, () => {
     });
 
     // Granted one collection: that one, and no document of another.
-    await admin.api.permissions.grant(permissionId);
+    await grantReviewed(admin.api, permissionId);
     const reader = readerIn(
       await envOf(actingFor(agent, admin.userId), context)
     );
@@ -394,8 +394,8 @@ describe("Apps and agents reading Knowledge", setUpTime, () => {
     let grants: string[] = [];
     const events = await auditedDuring(async () => {
       grants = [
-        await outcome(admin.api.permissions.grant(personal)),
-        await outcome(admin.api.permissions.grant(missing)),
+        await outcome(grantReviewed(admin.api, personal)),
+        await outcome(grantReviewed(admin.api, missing)),
       ];
     });
     const listed = await admin.api.permissions.list({

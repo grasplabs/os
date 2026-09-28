@@ -1,5 +1,9 @@
 import { appIdSchema } from "@grasp-os/shared/ids";
-import type { PermissionRequest } from "@grasp-os/shared/permissions";
+import type {
+  GrantReview,
+  Permission,
+  PermissionRequest,
+} from "@grasp-os/shared/permissions";
 import { env } from "cloudflare:workers";
 
 import { versionFiles } from "../src/apps.ts";
@@ -55,6 +59,35 @@ export const outlook = (
   binding,
 });
 
+/** An admin's API (`signedInApi`). */
+type Api = Awaited<ReturnType<typeof signedInApi>>["api"];
+
+/**
+ * What an admin reviews as they grant the permission `id`: the version of
+ * its App current now, or none for an agent's, or an App with none
+ * current (`PermissionsApi.grant`).
+ */
+export const reviewedOf = async (
+  api: Api,
+  id: string
+): Promise<GrantReview> => {
+  const listed = await api.permissions.list();
+  const subject = listed.find((permission) => permission.id === id)?.subject;
+  if (subject?.type !== "app") {
+    return { version: null };
+  }
+  const apps = await api.apps.list();
+  const app = apps.find(({ id: appId }) => appId === subject.appId);
+  return { version: app?.currentVersion ?? null };
+};
+
+/** Grants the permission `id` as `api`'s admin, having reviewed it now. */
+export const grantReviewed = async (
+  api: Api,
+  id: string
+): Promise<Permission> =>
+  await api.permissions.grant(id, await reviewedOf(api, id));
+
 /**
  * Asks for `request` as `requester`, who may be a builder, and has an
  * admin, signed in for it, grant it. Returns its ID.
@@ -67,7 +100,7 @@ export const requestGranted = async (
   const { id } = await requester.api.permissions.request(request);
   const admin = await signedInApi(idp, "admin");
   try {
-    await admin.api.permissions.grant(id);
+    await grantReviewed(admin.api, id);
   } finally {
     admin.core[Symbol.dispose]();
   }

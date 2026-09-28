@@ -14,7 +14,7 @@ import { callApp } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
 import { startRun } from "../src/workflows/runs.ts";
 import { fakeGateway } from "./ai-gateway.ts";
-import { outlook, release, requestGranted } from "./apps.ts";
+import { grantReviewed, outlook, release, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote, readCollection } from "./knowledge.ts";
@@ -370,7 +370,7 @@ ${mailStep("after")}`,
     await stepDone(run.id, "$params");
     await stopped(run.id);
     await release(builder, app, version("Harmless."));
-    await admin.api.permissions.grant(permission);
+    await grantReviewed(admin.api, permission);
 
     await resumed(run.id);
     await finished(run.id, { type: "go", payload: null });
@@ -391,6 +391,71 @@ ${mailStep("after")}`,
       attacked: { version: 2, status: "failed" },
       failedStep: { step: "after", errorCode: "permission.denied" },
       approved: { version: 3, status: "completed" },
+    });
+  });
+
+  it("refuse a run on a version no admin approved its App's server methods, which run the approved current one", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    // Server code that saves a Playbook record for its caller.
+    const playbookServer = `import { DurableObject } from "cloudflare:workers";
+
+export class App extends DurableObject {
+  async save(caller: unknown, path: string): Promise<unknown> {
+    const record = { type: "team", title: "Finance" };
+    const saved = await (this.env as any).PLAYBOOK.saveRecord(caller, { path, ifVersion: 0, record, body: "" });
+    return saved.currentVersion;
+  }
+}
+`;
+    const path = `teams/finance-${crypto.randomUUID().slice(0, 8)}.md`;
+    const version = (mark: string) => ({
+      "app/server.ts": playbookServer,
+      ...workflowFiles(
+        "saver",
+        `  // ${mark}
+  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  return await step.do("save", { description: "Save", retries: { limit: 0 } }, async () => await env.APP.call("save", ${JSON.stringify(path)}));`,
+        { save: 1 }
+      ),
+    });
+    const { id: app } = await builder.api.apps.create({ name: "Saver" });
+    await release(builder, app, version("First."));
+    const permission = await requestGranted(idp, builder, {
+      subject: { type: "app", appId: app },
+      object: { type: "collection", collectionId: "playbook" },
+      actions: ["read", "write"],
+      binding: "PLAYBOOK",
+    });
+    // The run on the builder's own version waits; then harmless code is
+    // made current, and an admin grants again for it.
+    await release(builder, app, version("Rewrites every rule."));
+    const run = await admin.api.workflows.start(app, "saver");
+    await stepDone(run.id, "$params");
+    await stopped(run.id);
+    await release(builder, app, version("Harmless."));
+    await grantReviewed(admin.api, permission);
+
+    await resumed(run.id);
+    await finished(run.id, { type: "go", payload: null });
+    const approved = await admin.api.workflows.start(app, "saver");
+    await finished(approved.id, { type: "go", payload: null });
+    const events = await allEvents();
+
+    expect({
+      attacked: await admin.api.workflows.status(run.id),
+      failedStep: events.find(
+        ({ action, target }) =>
+          action === "workflow.step.failed" && target?.id === run.id
+      )?.detail,
+      approved: await admin.api.workflows.status(approved.id),
+    }).toMatchObject({
+      attacked: { version: 2, status: "failed" },
+      failedStep: { step: "save", errorCode: "permission.denied" },
+      // The run on the version the admin granted for saves.
+      approved: { version: 3, status: "completed", output: 1 },
     });
   });
 

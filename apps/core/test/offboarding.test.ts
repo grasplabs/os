@@ -10,6 +10,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { sessionEndedCloseCode } from "../src/rpc.ts";
+import { grantReviewed } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { consentCode } from "./connect-providers.ts";
 import { connectionIn, envOf, reached } from "./contexts.ts";
@@ -154,7 +155,7 @@ describe("removing a member", () => {
       actions: ["mail.list"],
       binding: "OUTLOOK",
     });
-    await admin.api.permissions.grant(id);
+    await grantReviewed(admin.api, id);
     const authority = authoritySchema.parse({
       subject: app,
       onBehalfOf: person.userId,

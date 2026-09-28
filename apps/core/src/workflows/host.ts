@@ -43,7 +43,7 @@ import { appHost } from "../durable-objects.ts";
 import { featureEnabled } from "../features.ts";
 import type { Feature } from "../features.ts";
 import { models } from "../models.ts";
-import { requireActivePerson } from "../permissions.ts";
+import { requireActivePerson, requireApprovedVersion } from "../permissions.ts";
 import type { Settled, StepError } from "./code.ts";
 
 // The engine a run's workflow code runs on, as core's side of it: the SDK's
@@ -1211,7 +1211,10 @@ export class RunHost extends RpcTarget {
    * for the person the run acts for, in workflow mode, only inside a step.
    * The caller the method gets carries the step's key, the only one its
    * connection calls take (app-bindings.ts). Within one App no permission
-   * is needed, but the person must still be there. The answer is plain
+   * is needed, but the person must still be there, and the run's version
+   * must be one an admin approved: the method runs the App's current
+   * version, as the person, whatever version the run is on
+   * (`requireApprovedVersion`). The answer is plain
    * data (`callApp`), and whatever it holds of the App's data is covered by
    * the run's restricted mode, which is the App's (restricted.ts).
    */
@@ -1221,6 +1224,7 @@ export class RunHost extends RpcTarget {
       attempt.calledApp = true;
       const idempotencyKey = this.#stepKey();
       await this.#requirePerson();
+      await requireApprovedVersion(this.#env, this.#run.app, this.#run.version);
       const { authority } = this.#run;
       // The App's own connection calls take the step's key: held, they
       // hold the step as the run's own do (`do` asks connect too).

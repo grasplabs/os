@@ -266,6 +266,15 @@ export const permissionStatusSchema = z.enum([
 ]);
 export type PermissionStatus = z.infer<typeof permissionStatusSchema>;
 
+/**
+ * What an admin reviewed as they grant a permission: the version of its
+ * App current then, or null for an agent's, or an App with none current.
+ */
+export const grantReviewSchema = z.strictObject({
+  version: z.int().positive().nullable(),
+});
+export type GrantReview = z.infer<typeof grantReviewSchema>;
+
 /** One permission, as the API returns it. */
 export interface Permission {
   id: PermissionId;
@@ -277,6 +286,11 @@ export interface Permission {
   /** User IDs, and when (ISO 8601). */
   requestedBy: string;
   requestedAt: string;
+  /**
+   * Who granted it last, and when. On a requested permission, it was
+   * granted before and is asked for again (`AppVersionsApi.setCurrent`);
+   * only `status` says what it allows.
+   */
   grantedBy: string | null;
   grantedAt: string | null;
   revokedBy: string | null;
@@ -297,9 +311,13 @@ export interface PermissionsApi {
    * Grants a requested permission, the admin's own request included.
    * Admins only, never Grasp staff; audited. Refused for a built-in
    * blueprint's own permissions (`permission.builtin`): they are granted on
-   * the Apps created from it.
+   * the Apps created from it. `reviewed.version` is the version of the App
+   * the admin reviewed, the one current as they decided (null for an
+   * agent's permission, or an App with none current): the grant approves
+   * it, and is refused with `app.conflict`, changing nothing, once another
+   * version is current.
    */
-  grant: (id: string) => Promise<Permission>;
+  grant: (id: string, reviewed: GrantReview) => Promise<Permission>;
   /**
    * Revokes a permission; the next call that needs it is refused. Admins
    * only, never Grasp staff; audited. Refused for a built-in blueprint's

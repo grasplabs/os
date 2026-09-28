@@ -12,7 +12,14 @@ import type { AppCallerInput } from "../src/app.ts";
 import { setCurrentVersion } from "../src/apps.ts";
 import { saveRecordAsDelegate } from "../src/knowledge/playbook.ts";
 import { restrict } from "../src/restricted.ts";
-import { racingDb, release, requestGranted, serverBuilt } from "./apps.ts";
+import {
+  grantReviewed,
+  racingDb,
+  release,
+  requestGranted,
+  reviewedOf,
+  serverBuilt,
+} from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote, newTeam, readCollection } from "./knowledge.ts";
 import {
@@ -748,7 +755,7 @@ const builtBy = async (builder: Person, admin: Person): Promise<AppId> => {
     // oxlint-disable-next-line no-await-in-loop -- one at a time, in order
     const { id: permission } = await builder.api.permissions.request(request);
     // oxlint-disable-next-line no-await-in-loop -- as above
-    await admin.api.permissions.grant(permission);
+    await grantReviewed(admin.api, permission);
   }
   return app;
 };
@@ -836,7 +843,8 @@ describe("An App's next version", { timeout: 60_000 }, () => {
       // The new version has no Playbook stub to write with.
       after: { error: "failed" },
       bindings: ["PLAYBOOK_READ"],
-      // Asked for again, it is the newest request.
+      // Asked for again, it is the newest request, and still says who
+      // granted it before: not a first request.
       permissions: [
         read,
         {
@@ -844,7 +852,7 @@ describe("An App's next version", { timeout: 60_000 }, () => {
           binding: "PLAYBOOK",
           status: "requested",
           requestedBy: builder.userId,
-          grantedBy: null,
+          grantedBy: admin.userId,
         },
       ],
       audited: [
@@ -868,7 +876,7 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     });
 
     // Granted again, by an admin who saw the new code, it writes again.
-    await admin.api.permissions.grant(write?.id ?? "");
+    await grantReviewed(admin.api, write?.id ?? "");
     await expect(
       callApp(env, app, as(admin.userId), "save", saveArgs(path, drawn, 1))
     ).resolves.toMatchObject({ ok: { path, currentVersion: 2 } });
@@ -911,7 +919,7 @@ describe("An App's next version", { timeout: 60_000 }, () => {
         // oxlint-disable-next-line no-await-in-loop -- one at a time
         const { id } = await builder.api.permissions.request(request);
         // oxlint-disable-next-line no-await-in-loop -- as above
-        await admin.api.permissions.grant(id);
+        await grantReviewed(admin.api, id);
       }
     });
     const events = await auditedDuring(async () => {
@@ -956,7 +964,7 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     const racing: Env = {
       ...env,
       DB: racingDb(async () => {
-        await admin.api.permissions.grant(late.id);
+        await grantReviewed(admin.api, late.id);
       }, /^update "apps"/iu),
     };
 
@@ -994,6 +1002,70 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     });
   });
 
+  it("is refused a grant for the version the admin reviewed once a builder made another current", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    const app = await builtBy(builder, admin);
+    const more = await builder.api.permissions.request(
+      playbookFor(app, ["read", "write"], "PLAYBOOK_MORE")
+    );
+    // The admin reviews version 1; meanwhile the builder swaps the code.
+    const reviewed = await reviewedOf(admin.api, more.id);
+    await changedBy(builder, app, "Swapped while the admin looked.");
+
+    const refused = await outcome(
+      admin.api.permissions.grant(more.id, reviewed)
+    );
+    const listed = await permissionsOf(admin, app);
+    const approved = await env.DB.prepare(
+      "SELECT approved FROM app_versions WHERE app_id = ? AND version = 2"
+    )
+      .bind(app)
+      .first("approved");
+
+    expect({
+      reviewed,
+      refused,
+      more: listed.find(({ binding }) => binding === "PLAYBOOK_MORE")?.status,
+      approved,
+    }).toStrictEqual({
+      reviewed: { version: 1 },
+      refused: "app.conflict",
+      more: "requested",
+      approved: 0,
+    });
+  });
+
+  it("is asked again for the first version of a copy of code no admin approved", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    // A version never made current, marked as a blueprint.
+    const { id } = await builder.api.apps.create({ name: `Map ${unique()}` });
+    const source = appIdSchema.parse(id);
+    await builder.api.apps.files.write(source, { "app/server.ts": serverCode });
+    const { version } = await builder.api.apps.files.commit(
+      source,
+      "Never run"
+    );
+    await builder.api.permissions.request(playbookFor(source));
+    await builder.api.apps.blueprints.mark(source, version);
+    const created = await builder.api.apps.blueprints.create(source, version, {
+      name: `Copy ${unique()}`,
+    });
+    const copy = appIdSchema.parse(created.app.id);
+    const [asked] = created.permissions;
+    await grantReviewed(admin.api, asked?.id ?? "");
+
+    await builder.api.apps.versions.setCurrent(copy, 1);
+    const listed = await permissionsOf(admin, copy);
+
+    expect(listed.map(({ status }) => status)).toStrictEqual(["requested"]);
+  });
+
   it("is asked again for its first version whatever blueprint its creator names", async () => {
     const [admin, builder] = await Promise.all([
       personApi("admin"),
@@ -1006,7 +1078,7 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     });
     const app = appIdSchema.parse(id);
     const asked = await builder.api.permissions.request(playbookFor(app));
-    await admin.api.permissions.grant(asked.id);
+    await grantReviewed(admin.api, asked.id);
     await changedBy(builder, app, "Its own code.");
 
     const [write] = await permissionsOf(admin, app);
