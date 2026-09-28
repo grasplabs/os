@@ -4,15 +4,15 @@ import {
 } from "@grasp-os/shared/knowledge";
 import { log } from "@grasp-os/shared/log";
 import { signalKinds, signalWindowDays } from "@grasp-os/shared/signals";
-import { and, asc, desc, eq, gt, lt } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, gte, lt, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
-import { improvementSignals } from "../db/core/schema.ts";
+import { improvementSignals, workflowRuns } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { documents, versions } from "../db/knowledge/schema.ts";
 import { featureEnabled } from "../features.ts";
-import { latestComputation, runsSince, workflowKey } from "../signals.ts";
+import { latestComputation, workflowKey } from "../signals.ts";
 import {
   FrontmatterError,
   parseFrontmatter,
@@ -45,8 +45,8 @@ const minutesPerHour = 60;
 /** Workflow records read at a time, with their text (up to 1 MB each). */
 const recordsPerPage = 10;
 
-/** The most earlier versions of a designed workflow read for its drawn one. */
-const historyDepth = 50;
+/** Linked App workflows whose runs one batch counts. */
+const countsPerBatch = 50;
 
 /** A step's numbers, as a workflow record keeps them. */
 interface Step {
@@ -177,16 +177,17 @@ const currentWorkflows = async (db: DrizzleD1Database): Promise<Current[]> => {
 };
 
 /**
- * The latest drawn version of the designed workflow `current`, looking
- * back at most `historyDepth` versions; undefined without one.
+ * The latest drawn version of the designed workflow `current`, however far
+ * back; undefined without one. Newest first, a page at a time, reading
+ * only versions whose text says `drawn` at all: each is then parsed, as
+ * the word can be in a step's name too.
  */
 const drawnVersion = async (
   db: DrizzleD1Database,
   current: Current
 ): Promise<{ version: number; workflow: Workflow } | undefined> => {
-  const oldest = Math.max(1, current.version - historyDepth);
   let before = current.version;
-  while (before > oldest) {
+  for (;;) {
     // oxlint-disable-next-line no-await-in-loop -- newest first, until the drawn one
     const rows = await db
       .select({ number: versions.number, text: versions.text })
@@ -195,7 +196,7 @@ const drawnVersion = async (
         and(
           eq(versions.documentId, current.id),
           lt(versions.number, before),
-          gt(versions.number, oldest - 1)
+          sql`instr(${versions.text}, 'drawn') > 0`
         )
       )
       .orderBy(desc(versions.number))
@@ -206,12 +207,52 @@ const drawnVersion = async (
         return { version: number, workflow };
       }
     }
-    if (rows.length < recordsPerPage) {
+    const last = rows.at(-1);
+    if (rows.length < recordsPerPage || last === undefined) {
       return undefined;
     }
-    before = rows.at(-1)?.number ?? oldest;
+    before = last.number;
   }
-  return undefined;
+};
+
+/**
+ * How many runs of each App workflow in `linked` (`[appId, workflowId]`)
+ * started since `from`, by `workflowKey`: one count for each, each read
+ * by the index of an App's runs of one workflow, in batches.
+ */
+const linkedRuns = async (
+  db: DrizzleD1Database,
+  from: Date,
+  linked: readonly (readonly [string, string])[]
+): Promise<Map<string, number>> => {
+  const counts = new Map<string, number>();
+  for (let start = 0; start < linked.length; start += countsPerBatch) {
+    const page = linked.slice(start, start + countsPerBatch);
+    const [first, ...rest] = page.map(([appId, workflowId]) =>
+      db
+        .select({ runs: count() })
+        .from(workflowRuns)
+        .where(
+          and(
+            eq(workflowRuns.appId, appId),
+            eq(workflowRuns.workflowId, workflowId),
+            gte(workflowRuns.createdAt, from)
+          )
+        )
+    );
+    if (first === undefined) {
+      break;
+    }
+    // oxlint-disable-next-line no-await-in-loop -- a batch at a time, within D1's limits
+    const results = await db.batch([first, ...rest]);
+    for (const [index, [appId, workflowId]] of page.entries()) {
+      counts.set(
+        workflowKey(appId, workflowId),
+        results[index]?.[0]?.runs ?? 0
+      );
+    }
+  }
+  return counts;
 };
 
 /** The title of each team record in the Playbook, by path. */
@@ -310,7 +351,7 @@ const figuresOf = (
   record: Current,
   drawn: Version | undefined,
   teams: ReadonlyMap<string, string>,
-  runs: ReadonlyMap<string, { runs: number }>
+  runs: ReadonlyMap<string, number>
 ): Record<string, unknown> => {
   const { workflow, version } = record;
   const teamTitle =
@@ -319,7 +360,7 @@ const figuresOf = (
   const started =
     app === undefined
       ? 0
-      : (runs.get(workflowKey(app.appId, app.workflowId))?.runs ?? 0);
+      : (runs.get(workflowKey(app.appId, app.workflowId)) ?? 0);
   const weeks = snapshotWindowDays / daysPerWeek;
   return {
     path: record.path,
@@ -370,13 +411,9 @@ export const snapshotFigures = async (
   now: Date
 ): Promise<SnapshotFigures> => {
   const db = drizzle(env.KNOWLEDGE);
-  const [current, teams, runs] = await Promise.all([
+  const [current, teams] = await Promise.all([
     currentWorkflows(db),
     teamTitles(db),
-    runsSince(
-      drizzle(env.DB),
-      new Date(now.getTime() - snapshotWindowDays * dayMs)
-    ),
   ]);
   if (current.length > snapshotMaxFigures) {
     throw knowledgeErrors.create("knowledge.invalid", {
@@ -385,6 +422,18 @@ export const snapshotFigures = async (
       ],
     });
   }
+  const pairs = new Map<string, readonly [string, string]>();
+  for (const { workflow } of current) {
+    if (workflow.app !== undefined) {
+      const { appId, workflowId } = workflow.app;
+      pairs.set(workflowKey(appId, workflowId), [appId, workflowId]);
+    }
+  }
+  const runs = await linkedRuns(
+    drizzle(env.DB),
+    new Date(now.getTime() - snapshotWindowDays * dayMs),
+    [...pairs.values()]
+  );
   const linked = new Map<string, string>();
   const apps = new Set<string>();
   const frozen: SnapshotFigures["workflows"] = [];

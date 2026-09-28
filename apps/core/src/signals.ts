@@ -346,11 +346,8 @@ interface Started {
   runs: number;
 }
 
-/**
- * How many runs of each App workflow started since `from`, by
- * `workflowKey`.
- */
-export const runsSince = async (
+/** How many runs of each App workflow started since `from`. */
+const runsSince = async (
   db: DrizzleD1Database,
   from: Date
 ): Promise<Map<string, Started>> => {

@@ -25,8 +25,9 @@ import { auditedDuring, signedInApi, unique } from "./sign-in.ts";
 // changing a snapshot taken before it; a save of the snapshot changing
 // what it froze, or an App writing figures of its own; a signal's subject
 // (a person) or another App's signals copied into a record everyone
-// reads; a workflow that no longer reads as one, or a designed one never
-// drawn, stopping a snapshot or frozen as what it isn't; someone who may
+// reads; a workflow that no longer reads as one, a designed one never
+// drawn, or drawn many versions ago, stopping a snapshot or frozen as
+// what it isn't; someone who may
 // not change the Playbook taking one; and a Playbook with more workflows
 // than one snapshot holds.
 
@@ -661,6 +662,66 @@ describe("snapshots the platform takes", { timeout: 60_000 }, () => {
       },
       broken: undefined,
       frozen: [{ path: designedOnly.path, version: 1 }],
+    });
+  });
+
+  it("find a designed workflow's drawn version however many versions ago it was", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const app = await snapshotApp(admin);
+    const path = `long-${unique()}/designed.md`;
+    const drawn = await save(app, admin, path, {
+      type: "workflow",
+      title: "Redesigned often",
+      state: "drawn",
+      steps: [
+        {
+          name: "Check",
+          numbers: { frequency: estimated(6), minutes: estimated(20) },
+        },
+      ],
+    });
+    // 60 designed versions since, as that many saves would leave them,
+    // each with a step whose name says "drawn", which isn't its state.
+    const designed = [
+      "---",
+      "type: workflow",
+      "title: Redesigned often",
+      "state: designed",
+      "steps:",
+      "  - name: Check what was drawn",
+      "    numbers:",
+      "      frequency: { value: 6, basis: estimated }",
+      "      minutes: { value: 5, basis: estimated }",
+      "---",
+      "",
+    ].join("\n");
+    const later = 60;
+    await env.KNOWLEDGE.batch([
+      env.KNOWLEDGE.prepare(
+        `WITH RECURSIVE n(i) AS (SELECT 2 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+         INSERT INTO versions (document_id, number, text, author, created_at)
+         SELECT ?, i, ?, ?, 0 FROM n`
+      ).bind(later + 1, drawn.id, designed, admin.userId),
+      env.KNOWLEDGE.prepare(
+        "UPDATE documents SET current_version = ? WHERE id = ?"
+      ).bind(later + 1, drawn.id),
+    ]);
+
+    const taken = okOf(
+      await call(app, admin.userId, "snapshot", { maturity: 1 }),
+      savedSchema
+    );
+    const { record } = okOf(
+      await call(app, admin.userId, "record", taken.id),
+      recordSchema
+    );
+    expect(figuresOf(record, path)).toStrictEqual({
+      path,
+      title: "Redesigned often",
+      state: "designed",
+      // 6 times × 20 minutes, as drawn 60 versions back.
+      drawn: { version: 1, hoursPerWeek: 2, basis: "estimated" },
+      designed: { version: later + 1, hoursPerWeek: 0.5, basis: "estimated" },
     });
   });
 
