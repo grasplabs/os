@@ -545,6 +545,72 @@ describe("the built-in blueprints", () => {
     });
   });
 
+  it("leave what a copy was granted as its builder makes its first version current and a release changes them, but not its next version", async () => {
+    await reinstall();
+    const admin = await signedInApi(idp, "admin");
+    const builder = await signedInApi(idp, "builder");
+    const { collectionId } = await collectionWithNote(admin.api, {
+      name: `Granted ${unique()}`,
+      access: "everyone",
+    });
+    const declaring = releaseWith({ permissions: [notesOf(collectionId)] });
+    await expect(install(declaring)).resolves.toBeTruthy();
+    const { versions } = await helloState();
+    const created = await builder.api.apps.blueprints.create(
+      helloApp,
+      versions.at(-1) ?? 1,
+      { name: "Granted" }
+    );
+    const [asked] = created.permissions;
+    const granted = await admin.api.permissions.grant(asked?.id ?? "");
+    const copy = { type: "app", appId: created.app.id } as const;
+
+    // Its first version is the blueprint's code, which the admin granted
+    // it for; a new release changes the built-in, not the copy.
+    const kept = await auditedDuring(async () => {
+      await builder.api.apps.versions.setCurrent(created.app.id, 1);
+      await expect(
+        install(
+          releaseWith({
+            files: {
+              ...hello().files,
+              "app/server.ts": `${hello().files["app/server.ts"]}\n// Changed.\n`,
+            },
+            permissions: [notesOf(collectionId)],
+          })
+        )
+      ).resolves.toBeTruthy();
+    });
+    const afterRelease = await admin.api.permissions.list(copy);
+
+    // Code of the builder's own is asked for again.
+    await builder.api.apps.files.write(created.app.id, {
+      "app/server.ts": `${hello().files["app/server.ts"]}\n// Mine.\n`,
+    });
+    const { version } = await builder.api.apps.files.commit(
+      created.app.id,
+      "Mine"
+    );
+    await builder.api.apps.versions.setCurrent(created.app.id, version);
+    const next = await admin.api.permissions.list(copy);
+
+    expect({
+      audited: kept.filter(
+        ({ action, detail }) =>
+          action.startsWith("permission.") &&
+          detail?.subjectId === created.app.id
+      ),
+      afterRelease,
+      next: next.map(({ status, requestedBy }) => ({ status, requestedBy })),
+    }).toStrictEqual({
+      audited: [],
+      afterRelease: [granted],
+      next: [{ status: "requested", requestedBy: builder.userId }],
+    });
+
+    await reinstall();
+  });
+
   it("take a declaration again the same with its actions reordered, and in its place when changed under the same binding", async () => {
     await reinstall();
     const admin = await signedInApi(idp, "admin");

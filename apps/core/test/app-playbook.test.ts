@@ -18,7 +18,9 @@ import {
   auditedDuring,
   openRpc,
   outcome,
+  signedIn,
   signedInApi,
+  staffPerson,
   unique,
 } from "./sign-in.ts";
 
@@ -33,7 +35,10 @@ import {
 // acted for, how and the App version; the App reads a record it can't
 // parse back; the
 // Playbook can't be given to an App before an admin first saved into it;
-// or it can be asked for while its flag is off.
+// or it can be asked for while its flag is off. And a builder who can't
+// grant the permission ships other code under it: the next version they
+// make current writes as the admin who uses it, under a grant that admin
+// gave the code before.
 
 const idp = mockIdp();
 
@@ -79,6 +84,10 @@ export class App extends DurableObject {
 
   async read(caller: Caller, binding: string, id: string): Promise<unknown> {
     return await outcome(async () => await this.stub(binding).getDocument(caller, id));
+  }
+
+  bindings(): string[] {
+    return Object.keys(this.env as object).toSorted();
   }
 }
 `;
@@ -717,5 +726,185 @@ describe("App server code writing the Playbook", { timeout: 60_000 }, () => {
       after: { error: "permission.restricted" },
       hinted: { ok: false },
     });
+  });
+});
+
+/**
+ * An App `builder` built and released, which `admin` granted the Playbook
+ * to write, and to read only.
+ */
+const builtBy = async (builder: Person, admin: Person): Promise<AppId> => {
+  const { id } = await builder.api.apps.create({ name: `Map ${unique()}` });
+  const app = appIdSchema.parse(id);
+  await serverBuilt(
+    id,
+    await release(builder, id, { "app/server.ts": serverCode })
+  );
+  for (const request of [
+    playbookFor(app),
+    playbookFor(app, ["read"], "PLAYBOOK_READ"),
+  ]) {
+    // oxlint-disable-next-line no-await-in-loop -- one at a time, in order
+    const { id: permission } = await builder.api.permissions.request(request);
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    await admin.api.permissions.grant(permission);
+  }
+  return app;
+};
+
+/** `by` releases other server code for `app`, built ahead. */
+const changedBy = async (
+  by: Pick<Person, "api">,
+  app: AppId,
+  change: string
+): Promise<void> => {
+  await serverBuilt(
+    app,
+    await release(by, app, { "app/server.ts": `${serverCode}\n// ${change}\n` })
+  );
+};
+
+/** The App's permissions, as an admin lists them. */
+const permissionsOf = async (admin: Person, app: AppId) => {
+  const listed = await admin.api.permissions.list({ type: "app", appId: app });
+  return listed.map(({ id, binding, status, requestedBy, grantedBy }) => ({
+    id,
+    binding,
+    status,
+    requestedBy,
+    grantedBy,
+  }));
+};
+
+describe("An App's next version", { timeout: 60_000 }, () => {
+  it("is asked again for its permission to write the Playbook when a builder makes it current, and keeps reading", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    const app = await builtBy(builder, admin);
+    const [write, read] = await permissionsOf(admin, app);
+    const path = `workflows/pay-${unique()}.md`;
+    const before = await callApp(
+      env,
+      app,
+      as(admin.userId),
+      "save",
+      saveArgs(path, drawn)
+    );
+
+    // The attack: the builder ships other code, which the admin's next
+    // call runs, under the grant the admin gave the code before.
+    const events = await auditedDuring(async () => {
+      await changedBy(builder, app, "Rewrites every rule.");
+    });
+    const after = await callApp(
+      env,
+      app,
+      as(admin.userId),
+      "save",
+      saveArgs(path, drawn, 1)
+    );
+
+    expect({
+      before: answered(before, savedShape),
+      after,
+      bindings: await callApp(env, app, as(admin.userId), "bindings", []),
+      permissions: await permissionsOf(admin, app),
+      audited: events
+        .filter(({ action }) => action.startsWith("permission."))
+        .map(({ action, actor, target, detail }) => ({
+          action,
+          actor,
+          target,
+          detail,
+        })),
+    }).toStrictEqual({
+      before: { ok: { path, currentVersion: 1 } },
+      // The new version has no Playbook stub to write with.
+      after: { error: "failed" },
+      bindings: ["PLAYBOOK_READ"],
+      // Asked for again, it is the newest request.
+      permissions: [
+        read,
+        {
+          id: write?.id,
+          binding: "PLAYBOOK",
+          status: "requested",
+          requestedBy: builder.userId,
+          grantedBy: null,
+        },
+      ],
+      audited: [
+        {
+          action: "permission.requested",
+          actor: { type: "person", userId: builder.userId },
+          target: { type: "permission", id: write?.id },
+          detail: {
+            subjectType: "app",
+            subjectId: app,
+            objectType: "collection",
+            collectionId: playbookCollectionId,
+            actions: "read write",
+            binding: "PLAYBOOK",
+            version: 2,
+            previous: 1,
+            grantedBy: admin.userId,
+          },
+        },
+      ],
+    });
+
+    // Granted again, by an admin who saw the new code, it writes again.
+    await admin.api.permissions.grant(write?.id ?? "");
+    await expect(
+      callApp(env, app, as(admin.userId), "save", saveArgs(path, drawn, 1))
+    ).resolves.toMatchObject({ ok: { path, currentVersion: 2 } });
+  });
+
+  it("keeps its permissions when an admin makes it current, as they could grant them, and not when Grasp staff do", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    const app = await builtBy(builder, admin);
+    const granted = await permissionsOf(admin, app);
+
+    const events = await auditedDuring(async () => {
+      await changedBy(admin, app, "Reviewed by an admin.");
+    });
+    const path = `workflows/pay-${unique()}.md`;
+
+    expect({
+      permissions: await permissionsOf(admin, app),
+      audited: events.filter(({ action }) => action.startsWith("permission.")),
+      saved: answered(
+        await callApp(
+          env,
+          app,
+          as(admin.userId),
+          "save",
+          saveArgs(path, drawn)
+        ),
+        savedShape
+      ),
+    }).toStrictEqual({
+      permissions: granted,
+      audited: [],
+      saved: { ok: { path, currentVersion: 1 } },
+    });
+
+    // Grasp staff are admins, but never decide a client's permissions.
+    const { core } = await openRpc(
+      await signedIn(idp, "grasp-staff", staffPerson())
+    );
+    await changedBy({ api: core.authenticate() }, app, "Changed by staff.");
+    const byStaff = await permissionsOf(admin, app);
+    expect(
+      byStaff.map(({ binding, status }) => ({ binding, status }))
+    ).toStrictEqual([
+      { binding: "PLAYBOOK_READ", status: "active" },
+      { binding: "PLAYBOOK", status: "requested" },
+    ]);
   });
 });

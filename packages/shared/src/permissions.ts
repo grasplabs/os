@@ -254,6 +254,10 @@ export type DeclaredPermission = z.infer<typeof declaredPermissionSchema>;
 /**
  * Requested: asked for, allows nothing yet. Active: granted, allows its
  * actions. Revoked: allows nothing, for good (ask again for a new one).
+ * An App's active permission on a connection, to write a collection or to
+ * start a workflow goes back to requested when someone who couldn't grant
+ * it makes another version of the App current (`AppVersionsApi.setCurrent`),
+ * until an admin grants it again.
  */
 export const permissionStatusSchema = z.enum([
   "requested",

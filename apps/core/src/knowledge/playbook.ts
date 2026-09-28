@@ -396,6 +396,8 @@ const linkWorkflowAs = async (
     ifVersion,
     message: "Linked to its App workflow",
     restoredFrom: null,
+    // The one write that sets it: every other save keeps it.
+    sets: { app: { appId, workflowId } },
     ...lastCheckOf(writer),
     also: [
       outboxed(db, {

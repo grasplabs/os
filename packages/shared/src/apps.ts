@@ -159,7 +159,13 @@ export interface AppVersionsApi {
   diff: (app: string, from: number, to: number) => Promise<FileDiff[]>;
   /** Puts a version up for review. */
   propose: (app: string, version: number) => Promise<App>;
-  /** Makes a version the one that runs, after review or to roll back. */
+  /**
+   * Makes a version the one that runs, after review or to roll back. By
+   * anyone but an admin, it asks again for the App's permissions on a
+   * connection, to write a collection or to start a workflow: they allow
+   * nothing until an admin grants them again. Not for the first version
+   * of an App created from a blueprint, the code its requests came with.
+   */
   setCurrent: (app: string, version: number) => Promise<App>;
 }
 

@@ -23,6 +23,7 @@ import type {
   PermissionSubject,
 } from "@grasp-os/shared/permissions";
 import {
+  isAdmin,
   requireAdmin,
   requireBuilder,
   roleErrors,
@@ -709,6 +710,90 @@ export const grantPermission = async (
   const permission = toPermission(granted);
   await restartApp(env, permission.subject);
   return permission;
+};
+
+/**
+ * Whether a permission lets an App change things for the person using it:
+ * any on a connection (core can't tell a connector's writes from its
+ * reads; connect knows), writing a collection, or starting a workflow.
+ * Only reading Knowledge or a workflow's runs doesn't.
+ */
+const changesThings = (row: Row): boolean =>
+  row.objectType === "connection" ||
+  stringListSchema
+    .parse(JSON.parse(row.actions))
+    .some((action) => action !== "read");
+
+/**
+ * The statements, for the batch that makes `version` the current version
+ * of `app` (apps.ts), that ask again for each of the App's active
+ * permissions that lets it change things for the person using it
+ * (`changesThings`), unless `by` could grant it themselves: an admin, not
+ * Grasp staff, still an admin when the batch runs. An admin grants a
+ * permission trusting the code that will use it, and an App's code runs as
+ * whoever uses it, so a builder's next version could otherwise write the
+ * Playbook, say, as the next admin who opens it. Each goes back to
+ * requested, asked for by `by`, only if `version` is current when the batch
+ * runs, and is audited with the version, the one it replaced and who had
+ * granted it. Reading only is kept: the code reads what the person may.
+ */
+export const requestedAgainFor = async (
+  env: Env,
+  by: Identity,
+  app: AppId,
+  version: number,
+  previous: number | null
+): Promise<BatchItem<"sqlite">[]> => {
+  const db = drizzle(env.DB);
+  const active = await db
+    .select()
+    .from(permissions)
+    .where(
+      and(
+        ofSubject({ type: "app", appId: app }),
+        eq(permissions.status, "active")
+      )
+    )
+    .orderBy(asc(permissions.requestedAt), asc(permissions.id));
+  const mayGrant = isAdmin(by.role) && !by.staff;
+  const requestedAt = new Date();
+  return active.filter(changesThings).flatMap((row) => {
+    const again: Row = {
+      ...row,
+      status: "requested",
+      requestedBy: by.userId,
+      requestedAt,
+      grantedBy: null,
+      grantedAt: null,
+    };
+    return [
+      db
+        .update(permissions)
+        .set({
+          status: again.status,
+          requestedBy: again.requestedBy,
+          requestedAt: again.requestedAt,
+          grantedBy: null,
+          grantedAt: null,
+        })
+        .where(
+          and(
+            eq(permissions.id, row.id),
+            eq(permissions.status, "active"),
+            sql`EXISTS (SELECT 1 FROM ${apps} WHERE ${apps.id} = ${app} AND ${apps.currentVersion} = ${version})`,
+            mayGrant ? sql`NOT ${stillAdmin(by)}` : undefined
+          )
+        ),
+      outboxedIfChanged(
+        db,
+        changeEntry(by, "permission.requested", toPermission(again), {
+          version,
+          previous,
+          grantedBy: row.grantedBy,
+        })
+      ),
+    ];
+  });
 };
 
 /**

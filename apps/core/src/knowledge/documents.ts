@@ -5,6 +5,7 @@ import type {
 } from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
 import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
+import { canonicalJson } from "@grasp-os/shared/json";
 import {
   documentTypeOf,
   historyOptionsSchema,
@@ -469,12 +470,123 @@ export interface Write {
   /** Set only by the sync of the Grasp skills, their one writer. */
   graspSync?: true;
   /**
+   * Fields of `keptFields` this version sets instead of keeping them, by
+   * name: only the function that owns a field passes it, and a purge
+   * (`keptFieldsOf`).
+   */
+  sets?: Record<string, unknown>;
+  /**
    * Checked last, just before the batch is sent, with nothing awaited in
    * between: throws to refuse the write, such as a delegate's context that
    * became restricted while the save was being prepared.
    */
   lastCheck?: () => Promise<void>;
 }
+
+/**
+ * The frontmatter fields of each Playbook record type that one function of
+ * its own sets, having checked them, by field with that function's name:
+ * every other save or restore, of raw text too, keeps them from the
+ * version it goes over (none for a new document), and is refused
+ * otherwise (`requireFieldsKept`).
+ */
+const keptFields: Partial<Record<DocumentType, Record<string, string>>> = {
+  // A workflow's link to an App workflow (playbook.ts): it checks that the
+  // person may use the App and that the App runs the workflow.
+  workflow: { app: "linkWorkflow" },
+};
+
+/** A frontmatter field's value, if it has one. */
+const fieldOf = (frontmatter: object | undefined, field: string): unknown =>
+  frontmatter === undefined
+    ? undefined
+    : Object.entries(frontmatter).find(([key]) => key === field)?.[1];
+
+/** A field's value as JSON, comparable whatever the order of its keys. */
+const comparable = (value: unknown): string | undefined =>
+  value === undefined ? undefined : canonicalJson(z.json().parse(value));
+
+/**
+ * The `keptFields` of the record `text` at `path`, as it has them: for a
+ * write that sets them to what its text says. Only a purge does: removing
+ * personal data comes before keeping a link, and it rewrites whatever text
+ * holds a term.
+ */
+export const keptFieldsOf = (
+  path: string,
+  text: string
+): Record<string, unknown> => {
+  const parsed = savedFrontmatter(path, text);
+  if (parsed === undefined) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.keys(keptFields[parsed.type] ?? {}).map((field) => [
+      field,
+      fieldOf(parsed.frontmatter, field),
+    ])
+  );
+};
+
+/**
+ * Refuses with `knowledge.invalid` a Playbook version of `type` that
+ * changes one of its `keptFields` from the version it goes over
+ * (`ifVersion`), unless the write `sets` it. The version it goes over is
+ * the one the write's batch requires is still current, so nothing saved
+ * in between is compared against.
+ */
+const requireFieldsKept = async (
+  db: DrizzleD1Database,
+  {
+    existing,
+    ifVersion,
+    path,
+    text,
+    type,
+  }: {
+    existing: DocumentRow | undefined;
+    ifVersion: number;
+    path: string;
+    text: string;
+    type: DocumentType;
+  },
+  sets: Record<string, unknown> = {}
+): Promise<void> => {
+  const fields = Object.entries(keptFields[type] ?? {});
+  if (fields.length === 0) {
+    return;
+  }
+  const before = existing
+    ? await db
+        .select({ text: versions.text })
+        .from(versions)
+        .where(
+          and(
+            eq(versions.documentId, existing.id),
+            eq(versions.number, ifVersion)
+          )
+        )
+        .get()
+    : undefined;
+  const was =
+    before === undefined
+      ? undefined
+      : savedFrontmatter(path, before.text)?.frontmatter;
+  const now = savedFrontmatter(path, text)?.frontmatter;
+  const changed = fields.filter(
+    ([field]) =>
+      comparable(fieldOf(now, field)) !==
+      comparable(fieldOf(Object.hasOwn(sets, field) ? sets : was, field))
+  );
+  if (changed.length > 0) {
+    throw invalid(
+      changed.map(
+        ([field, owner]) =>
+          `frontmatter.${field}: only ${owner} changes it; a save keeps the version before's`
+      )
+    );
+  }
+};
 
 /**
  * Writes the next version, if the document is still at `ifVersion`
@@ -500,6 +612,13 @@ export const writeVersion = async (
   const existing = await findByPath(db, collection.id, path);
   if ((existing?.currentVersion ?? 0) !== ifVersion) {
     throw conflict(existing);
+  }
+  if (collection.source === "playbook") {
+    await requireFieldsKept(
+      db,
+      { existing, ifVersion, path, text, type: prepared.type },
+      write.sets
+    );
   }
   const now = new Date();
   const number = ifVersion + 1;

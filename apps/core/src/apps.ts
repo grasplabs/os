@@ -36,6 +36,7 @@ import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
 import { featureEnabled } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
+import { requestedAgainFor } from "./permissions.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";
 
 // The App registry and each App's code. The registry, the versions and the
@@ -736,7 +737,11 @@ export const proposeVersion = async (
 /**
  * Makes a version the one that runs: the pending one after review, or any
  * other, such as an earlier one to roll back. The pending version is
- * cleared once it is current.
+ * cleared once it is current. Made current by someone who couldn't grant
+ * them, the App's permissions that change things for the person using it
+ * are asked for again (`requestedAgainFor`), but for an App's first
+ * version when it was created from a blueprint: that is the code its
+ * requests came with, which the admin who granted them was shown.
  */
 export const setCurrentVersion = async (
   env: Env,
@@ -758,6 +763,10 @@ export const setCurrentVersion = async (
     await versionFiles(env, appId, number)
   );
   const previous = found.currentVersion;
+  const blueprintCode = found.blueprint !== null && number === 1;
+  const requestedAgain = blueprintCode
+    ? []
+    : await requestedAgainFor(env, by, appId, number, previous);
   const db = drizzle(env.DB);
   // Only over the current version read above, so the event's `previous`
   // is the version this replaced.
@@ -779,6 +788,7 @@ export const setCurrentVersion = async (
         previous,
       })
     ),
+    ...requestedAgain,
   ]);
   if (!changed) {
     throw appErrors.create("app.conflict");
