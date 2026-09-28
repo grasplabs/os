@@ -1,9 +1,9 @@
-// Deployed to grasp-os-staging on every merge and to grasp-os-ops by hand, behind
-// Cloudflare Access (company sign-in + MFA). The Worker verifies the Access JWT
-// on every request itself (src/access.ts), against the CF_ACCESS_AUD and
-// CF_ACCESS_ISS vars; without them it refuses everything. Deploy-ops passes
-// them from the grasp-os-ops environment's variables with `--var`, and stops
-// if either is missing.
+// Deployed only to grasp-os-ops, by hand with deploy-ops (never to staging, where
+// it would have no route), behind Cloudflare Access (company sign-in + MFA).
+// The Worker verifies the Access JWT on every request itself (src/access.ts),
+// against the CF_ACCESS_AUD and CF_ACCESS_ISS vars; without them it refuses
+// everything. Deploy-ops passes them from the grasp-os-ops environment's
+// variables with `--var`, and stops if either is missing.
 // Client account tokens live in Secrets Store, never in the database.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",

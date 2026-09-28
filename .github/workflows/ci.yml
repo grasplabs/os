@@ -53,6 +53,10 @@ jobs:
       - run: vp test
         timeout-minutes: 10
       - run: vp run -r build
+      # The console isn't deployed from here (see deploy-staging): check that
+      # its build is a Worker wrangler would deploy. No credentials needed.
+      - run: vp exec wrangler deploy --dry-run
+        working-directory: apps/console
       # Generated files (Worker types, route trees, migrations) must be committed.
       - run: vp run -r typegen && vp run -r db:generate
       - run: git diff --exit-code && test -z "$(git status --porcelain)"
@@ -180,7 +184,7 @@ jobs:
       - name: Create the D1 databases in the EU
         run: |
           existing=$(vp exec wrangler d1 list --json)
-          for db in grasp-os-core grasp-os-knowledge grasp-os-connect grasp-os-console; do
+          for db in grasp-os-core grasp-os-knowledge grasp-os-connect; do
             jurisdiction=$(jq -r --arg db "$db" '.[] | select(.name == $db) | .jurisdiction // "none"' <<< "$existing")
             if [ -z "$jurisdiction" ]; then
               vp exec wrangler d1 create "$db" --jurisdiction eu
@@ -201,13 +205,16 @@ jobs:
       - run: vp run --filter @grasp-os/connect deploy
       - run: vp run --filter @grasp-os/core db:migrate
       - run: vp run --filter @grasp-os/core deploy
-      - run: vp run --filter @grasp-os/console db:migrate
-      - run: vp run --filter @grasp-os/console deploy
+      # The console is deliberately not deployed to staging: it has no route
+      # there and refuses every request without an Access application
+      # (apps/console/src/access.ts). It deploys only to grasp-os-ops, with
+      # deploy-ops. A real staging console would need a route and its own
+      # Access application first. The check job still proves it builds.
 
   # The router on its own: its deploy needs the account's Secrets Store
   # (scripts/wrangler-deploy.ts), and an account not set up for it yet
-  # mustn't hold back the console, nor publishing, which waits only for
-  # deploy-staging. It isn't part of a release.
+  # mustn't hold back core and connect, nor publishing, which waits only
+  # for deploy-staging. It isn't part of a release.
   deploy-staging-router:
     name: deploy-staging-router
     if: github.event_name == 'push'
