@@ -25,6 +25,7 @@ export { ChatApi } from "./agent-apis.ts";
 export { AppsApi } from "./agent-apps.ts";
 export { ConnectionsApi } from "./agent-connections.ts";
 export { KnowledgeApi } from "./agent-knowledge.ts";
+export { MemoryApi } from "./agent-memory.ts";
 export { WorkflowsApi } from "./agent-workflows.ts";
 export { Builtins } from "./builtins.ts";
 export { AppConnectionBinding } from "./app-bindings.ts";

@@ -129,6 +129,8 @@ describe("chat agent", () => {
     expect(reply).toStrictEqual({
       outcome: "answered",
       answer: "You are the person this chat belongs to.",
+      // It read nothing: nothing to label it with.
+      provenance: { sources: [], restricted: false },
     });
     // The code ran with the API core gave it, which knows whom it acts for.
     await expect(codeResults(stub, chat.id)).resolves.toStrictEqual([
@@ -322,7 +324,7 @@ describe("chat agent sandbox", () => {
 
     expect(result).toStrictEqual({
       isError: false,
-      text: `Returned:\n${JSON.stringify({ given: ["chat", "knowledge", "connections", "apps", "workflows"], imported: [], exports: [] })}`,
+      text: `Returned:\n${JSON.stringify({ given: ["chat", "knowledge", "connections", "apps", "workflows", "memory"], imported: [], exports: [] })}`,
     });
   });
 
@@ -333,7 +335,7 @@ describe("chat agent sandbox", () => {
 
     expect(result?.isError).toBeTruthy();
     expect(result?.text).toContain(
-      "This chat has no API named env.mailbox. It has: env.chat, env.knowledge, env.connections, env.apps, env.workflows."
+      "This chat has no API named env.mailbox. It has: env.chat, env.knowledge, env.connections, env.apps, env.workflows, env.memory."
     );
   });
 

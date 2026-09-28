@@ -108,9 +108,11 @@ describe("a chat's Knowledge", setUpTime, () => {
 
     const reply = await ask("How long is parental leave?");
 
+    // Labelled with the collection it read.
     expect(reply).toStrictEqual({
       outcome: "answered",
       answer: "Sixteen weeks (Handbook, leave.md).",
+      provenance: { sources: [collectionId], restricted: false },
     });
     // The model read the API's declaration before it wrote the code.
     const declared = JSON.stringify(gateway.requests[0]?.body);

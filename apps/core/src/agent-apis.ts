@@ -4,6 +4,7 @@ import { z } from "zod";
 import { appsApi } from "./agent-apps.ts";
 import { connectionsApi } from "./agent-connections.ts";
 import { knowledgeApi } from "./agent-knowledge.ts";
+import { memoryApi } from "./agent-memory.ts";
 import { requireOpenRun } from "./agent-scope.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
 import { workflowsApi } from "./agent-workflows.ts";
@@ -54,7 +55,9 @@ const apiNameSchema = z
 
 /** The APIs a chat's code gets. */
 export const agentApis = (): readonly AgentApi[] =>
-  [chatApi, knowledgeApi, connectionsApi, appsApi, workflowsApi].map((api) => ({
-    ...api,
-    name: apiNameSchema.parse(api.name),
-  }));
+  [chatApi, knowledgeApi, connectionsApi, appsApi, workflowsApi, memoryApi].map(
+    (api) => ({
+      ...api,
+      name: apiNameSchema.parse(api.name),
+    })
+  );
