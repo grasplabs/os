@@ -128,7 +128,8 @@ const requireFreeAddresses = async (
  * The triggers of an App version's workflows (with its `files`), to
  * register if it is made current now: each schedule with the cron
  * expression its parameter holds now, and when it next fires after `now`;
- * each email trigger with its address, which no other App may have.
+ * each email trigger with its address, which no other App may have; each
+ * event trigger with its event type and filter.
  */
 export const triggerRegistration = async (
   env: Env,
@@ -152,6 +153,19 @@ export const triggerRegistration = async (
           position,
           type: "email",
           address: trigger.address,
+          createdAt: now,
+        });
+      }
+      if (trigger.type === "event") {
+        rows.push({
+          id: crypto.randomUUID(),
+          appId: app,
+          version,
+          workflowId: workflow,
+          position,
+          type: "event",
+          event: trigger.event,
+          filter: trigger.filter ?? null,
           createdAt: now,
         });
       }
@@ -199,7 +213,8 @@ export const triggerRegistration = async (
 
 /**
  * What a registration registers, for the audit event of the version made
- * current: how many schedules, and the addresses it receives mail at.
+ * current: how many schedules, the addresses it receives mail at, and the
+ * event types it starts on.
  */
 export const triggerSummary = ({
   rows,
@@ -207,6 +222,16 @@ export const triggerSummary = ({
   schedules: rows.filter(({ type }) => type === "schedule").length,
   // Each address once, space-separated, cut to what a detail value holds.
   emails: [...new Set(addressesOf(rows))]
+    .join(" ")
+    .slice(0, identifierMaxLength),
+  // Each event type once, the same way.
+  events: [
+    ...new Set(
+      rows.flatMap(({ event }) =>
+        event === null || event === undefined ? [] : [event]
+      )
+    ),
+  ]
     .join(" ")
     .slice(0, identifierMaxLength),
 });

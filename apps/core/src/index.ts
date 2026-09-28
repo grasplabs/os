@@ -27,6 +27,7 @@ export { ConnectionBinding } from "./bindings.ts";
 export { AppCollectionBinding } from "./knowledge/app-binding.ts";
 export { CollectionBinding } from "./knowledge/binding.ts";
 export { KnowledgeBinding } from "./knowledge/tools-binding.ts";
+export { ConnectorEvents } from "./workflows/connector-events.ts";
 export { WorkflowDispatcher } from "./workflows/dispatcher.ts";
 export { DynamicWorkflowBinding } from "./workflows/engine.ts";
 export { Workspace } from "./workspace.ts";

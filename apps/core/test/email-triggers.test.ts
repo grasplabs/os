@@ -613,7 +613,9 @@ describe("email triggers", () => {
         ({ action, target }) =>
           action === "app.version.current" && target?.id === app
       )
-    ).toMatchObject([{ detail: { schedules: 0, emails: "audited" } }]);
+    ).toMatchObject([
+      { detail: { schedules: 0, emails: "audited", events: "" } },
+    ]);
   });
 
   it("go to one App: another can't take an address that's taken", async () => {

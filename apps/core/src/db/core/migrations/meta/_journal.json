@@ -169,6 +169,13 @@
       "when": 1790614979613,
       "tag": "0023_email_triggers",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1790615683379,
+      "tag": "0024_event_triggers",
+      "breakpoints": true
     }
   ]
 }
