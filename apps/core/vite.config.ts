@@ -50,6 +50,7 @@ export const screenTests = [
   "test/decisions.test.ts",
   "test/decisions-switched-off.test.ts",
   "test/workflow-params.test.ts",
+  "test/build-on-save.test.ts",
   "test/workflow-overview.test.ts",
   "test/triggers.test.ts",
   "test/email-triggers.test.ts",
@@ -130,6 +131,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               model_settings: true,
               improvement_signals: true,
               triggers: true,
+              build_on_save: true,
               agent: true,
             },
             // One memory limit set, the others at their defaults.

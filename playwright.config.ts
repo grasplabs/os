@@ -69,6 +69,7 @@ export default defineConfig({
             knowledge_uploads: true,
             model_rules: true,
             model_settings: true,
+            build_on_save: true,
           })
         ),
         // `--local` has no Workers AI: a deployment kept in the EU extracts
