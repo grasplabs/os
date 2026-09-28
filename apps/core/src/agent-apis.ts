@@ -15,9 +15,10 @@ import type { AgentApi, AgentScope } from "./agent-scope.ts";
 // An API that reaches a person's data acts as the chat's agent on behalf
 // of the chat's person (`chatAuthority`), under the agent's permissions
 // and never past what the person may do themselves, checked again on every
-// call, with the chat as its context: where restricted mode is kept. What
-// it reads is recorded in the audit log, and what it read from is recorded
-// with the chat before the call hands it over (`recordSources`).
+// call, with the chat as its context: where restricted mode is kept. Every
+// call is recorded in the audit log, by what serves it or as `agent.call`
+// (`auditAgentCall`), and what it read from is recorded with the chat
+// before the call hands it over (`recordSources`).
 
 /** The chat the code runs in, for the code: `await env.chat.info()`. */
 export class ChatApi extends WorkerEntrypoint<Env, AgentScope> {
