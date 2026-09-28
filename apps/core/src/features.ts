@@ -158,7 +158,13 @@ export type Feature =
    * rolled out: a release from before it still syncs its own skills on
    * the cron trigger, which the install would not undo.
    */
-  | "builtins";
+  | "builtins"
+  /**
+   * Triggers starting runs on their own (workflows/triggers.ts). While
+   * off, they start none; a schedule that missed times starts one run
+   * once it's back on.
+   */
+  | "triggers";
 
 /** Whether `feature` is switched on for this deployment. */
 export const featureEnabled = (

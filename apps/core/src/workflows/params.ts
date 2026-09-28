@@ -1,19 +1,29 @@
 import { paramValueSchemas } from "@grasp-os/sdk/params";
+import type { AppFiles } from "@grasp-os/shared/apps";
 import { actorOf } from "@grasp-os/shared/audit";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
 import { roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { workflowErrors } from "@grasp-os/shared/workflows";
+import {
+  defaultTimeZone,
+  nextScheduledRun,
+  workflowErrors,
+} from "@grasp-os/shared/workflows";
 import type { ParamValue, WorkflowParam } from "@grasp-os/shared/workflows";
 import { and, eq, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { appFor, versionFiles } from "../apps.ts";
 import { auditedBatch, outboxedIfChanged } from "../audit-outbox.ts";
-import { apps, workflowParamValues } from "../db/core/schema.ts";
-import { declaredParams, hasWorkflow } from "./code.ts";
+import {
+  apps,
+  workflowParamValues,
+  workflowTriggers,
+} from "../db/core/schema.ts";
+import { declaredParams, declaredTriggers, hasWorkflow } from "./code.ts";
 import type { DeclaredParam } from "./code.ts";
+import { paramValues } from "./param-values.ts";
 
 // The values people set for a workflow's parameters, over the defaults in
 // its code. Which parameters there are, and of what kind, is what the
@@ -26,14 +36,13 @@ import type { DeclaredParam } from "./code.ts";
 //
 // Versions can disagree about a parameter's kind, and a builder can make
 // any version current. So what a version reads goes by that version's own
-// declarations (`paramValues`): a stored value that isn't of the kind it
-// declares doesn't count. Runs read them the same way, as the version they
-// are pinned to declares them (dispatcher.ts).
+// declarations (`paramValues`, param-values.ts): a stored value that isn't
+// of the kind it declares doesn't count. Runs read them the same way, as
+// the version they are pinned to declares them (dispatcher.ts). Setting a
+// schedule parameter reschedules the schedule triggers on it.
 
 /** The longest value kept, as JSON text. */
 const maxValueLength = 4096;
-
-type ValueRow = typeof workflowParamValues.$inferSelect;
 
 /** A workflow of an App's current version, with what its code declares. */
 interface CurrentWorkflow {
@@ -41,6 +50,8 @@ interface CurrentWorkflow {
   workflow: WorkflowId;
   version: number;
   params: DeclaredParam[];
+  /** The version's files. */
+  files: AppFiles;
 }
 
 /** The workflow `workflow` of App `app`'s current version, for `by`. */
@@ -69,63 +80,8 @@ const currentWorkflow = async (
     workflow: workflowId,
     version,
     params: await declaredParams(env, found.id, version, workflowId, files),
+    files,
   };
-};
-
-/** The stored values of a workflow's parameters, as rows. */
-const valueRows = async (
-  env: Env,
-  app: AppId,
-  workflow: WorkflowId
-): Promise<ValueRow[]> =>
-  await drizzle(env.DB)
-    .select()
-    .from(workflowParamValues)
-    .where(
-      and(
-        eq(workflowParamValues.appId, app),
-        eq(workflowParamValues.workflowId, workflow)
-      )
-    );
-
-/**
- * The stored value that counts for `param` as a version declares it: one
- * of its kind. Otherwise none, and the code's default applies.
- */
-const valueFor = (
-  param: DeclaredParam,
-  row: ValueRow | undefined
-): ParamValue | undefined => {
-  if (!row) {
-    return undefined;
-  }
-  const parsed = paramValueSchemas[param.kind].safeParse(row.value);
-  return parsed.success ? parsed.data : undefined;
-};
-
-/**
- * The values that count for a workflow's parameters, as the version that
- * reads them declares them (`params`), by name; a parameter missing here
- * has its code's default. The one way values are read.
- */
-export const paramValues = async (
-  env: Env,
-  app: AppId,
-  workflow: WorkflowId,
-  params: readonly DeclaredParam[]
-): Promise<Map<string, ParamValue>> => {
-  const rows = await valueRows(env, app, workflow);
-  const values = new Map<string, ParamValue>();
-  for (const param of params) {
-    const value = valueFor(
-      param,
-      rows.find((row) => row.param === param.name)
-    );
-    if (value !== undefined) {
-      values.set(param.name, value);
-    }
-  }
-  return values;
 };
 
 /** The workflow's parameters with their values. */
@@ -171,6 +127,28 @@ const setDirectly = async (
   value: ParamValue
 ): Promise<void> => {
   const db = drizzle(env.DB);
+  const now = new Date();
+  // The schedule triggers on the parameter go on from the next time after
+  // now in its new expression, in each time zone the code reads it in
+  // (triggers.ts): every registered row of the version on it, whichever.
+  const triggers =
+    param.kind === "schedule"
+      ? await declaredTriggers(
+          env,
+          current.app,
+          current.version,
+          current.workflow,
+          current.files
+        )
+      : [];
+  const timeZones = new Set(
+    triggers.flatMap((trigger) =>
+      trigger.type === "schedule" && trigger.param === param.name
+        ? [trigger.timeZone ?? defaultTimeZone]
+        : []
+    )
+  );
+  const cron = String(value);
   const [set] = await auditedBatch(env, db, [
     db
       .insert(workflowParamValues)
@@ -207,6 +185,23 @@ const setDirectly = async (
         version: current.version,
       },
     }),
+    ...[...timeZones].map((timeZone) =>
+      db
+        .update(workflowTriggers)
+        .set({
+          cron,
+          nextRunAt: nextScheduledRun({ cron, timeZone }, now) ?? null,
+        })
+        .where(
+          and(
+            eq(workflowTriggers.appId, current.app),
+            eq(workflowTriggers.version, current.version),
+            eq(workflowTriggers.workflowId, current.workflow),
+            eq(workflowTriggers.param, param.name),
+            eq(workflowTriggers.timeZone, timeZone)
+          )
+        )
+    ),
   ]);
   if (set.length === 0) {
     throw workflowErrors.create("workflow.param_conflict");

@@ -7,6 +7,7 @@ import {
   paramDeclarationSchema,
   paramDeclarationsSchema,
   stepIdempotencyKey,
+  triggerDeclarationsSchema,
 } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
@@ -180,7 +181,7 @@ export const number = param("number");
 export const text = param("text");
 /** A person or group, e.g. who reviews; required by `step.decision`. */
 export const person = param("person");
-/** A schedule, as a cron expression; referenced by schedule triggers. */
+/** A schedule, as five cron fields; what a schedule trigger runs on. */
 export const schedule = param("schedule");
 /** A model from the model gateway; required by `step.llm`. */
 export const model = param("model");
@@ -603,11 +604,35 @@ export const appServer = <Server = Record<string, BindingMethod>>(
 
 // Definition
 
-/** What starts a run. */
+/**
+ * What starts a run, besides a person starting it by hand. Triggers only
+ * ever start workflows: screens can't declare them. They take effect when
+ * the App's version is made current, and stop when another version that
+ * doesn't declare them is. A run a trigger starts acts for the App's
+ * owner, and fails if the owner has left the organization.
+ *
+ * ```ts
+ * workflow("weekly-report", {
+ *   params: { every: schedule({ label: "Runs", default: "0 8 * * 1" }) },
+ *   triggers: [{ type: "schedule", param: "every", timeZone: "Europe/Amsterdam" }],
+ * }, async (step) => ...);
+ * ```
+ */
 export type Trigger<ScheduleParam extends string = string> =
   | { type: "manual" }
-  /** On the schedule held by a schedule parameter. */
-  | { type: "schedule"; param: ScheduleParam }
+  /**
+   * On the schedule a schedule parameter holds, so people can change when
+   * it runs without changing the code. Its cron expression is read in
+   * `timeZone` (an IANA name, e.g. `Europe/Amsterdam`; UTC when missing),
+   * so `0 8 * * 1` is 8:00 on Mondays there, summer time or not. A time
+   * the change to summer time skips runs an hour later (2:30 at 3:30); in
+   * the hour the change back repeats, times run once, in its first pass. A
+   * scheduled run starts with no input. A time missed (while triggers are
+   * switched off, say) starts one run late, however many times were
+   * missed; a schedule set or made current starts from the next time
+   * after, never one already past.
+   */
+  | { type: "schedule"; param: ScheduleParam; timeZone?: string }
   /** When an event of this type arrives, e.g. from a connector. */
   | { type: "event"; event: string };
 
@@ -683,6 +708,26 @@ const validateParams = (params: Params): void => {
         definition.currency,
         "workflow.invalid_definition",
         `Currency of parameter "${name}"`
+      );
+    }
+  }
+};
+
+const validateTriggers = (params: Params, triggers: Trigger[]): void => {
+  parseOrThrow(
+    triggerDeclarationsSchema,
+    triggers,
+    "workflow.invalid_definition",
+    "Triggers"
+  );
+  for (const trigger of triggers) {
+    if (
+      trigger.type === "schedule" &&
+      params[trigger.param]?.kind !== "schedule"
+    ) {
+      throw new WorkflowError(
+        "workflow.invalid_definition",
+        `Schedule trigger: "${trigger.param}" isn't a schedule parameter`
       );
     }
   }
@@ -1031,6 +1076,8 @@ export const workflow = <
     "Workflow ID"
   );
   validateParams(config.params);
+  const triggers: Trigger[] = config.triggers ?? [{ type: "manual" }];
+  validateTriggers(config.params, triggers);
   const inputSchema: z.ZodType = config.input ?? z.undefined();
 
   const runOnce = async (
@@ -1077,7 +1124,7 @@ export const workflow = <
     metadata: {
       id: workflowId,
       params: describeParams(config.params),
-      triggers: config.triggers ?? [{ type: "manual" }],
+      triggers,
     },
     run: async (engine, rawInput) => {
       try {

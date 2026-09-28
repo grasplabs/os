@@ -39,6 +39,7 @@
     "./workflows": "./src/workflows.ts"
   },
   "dependencies": {
+    "croner": "catalog:",
     "zod": "catalog:"
   }
 }

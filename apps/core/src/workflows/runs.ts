@@ -30,6 +30,7 @@ import { hasWorkflow } from "./code.ts";
 import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
 import { tellScreens } from "./run-changes.ts";
+import type { TriggerType } from "./trigger-registry.ts";
 
 // Runs of Apps' workflows, as core keeps them: one row each (the App
 // version it is pinned to, who started it, where it was last seen), next
@@ -177,17 +178,87 @@ export interface RunRequest {
    * screens (`screen`). The audit log says so (`via`).
    */
   via?: "screen";
+  /**
+   * The trigger that started it, with the key of what it started it for
+   * (triggers.ts): while a run has that key, it is the run, and no other
+   * starts. `version` is the App version that registered it: it starts a
+   * run only of that version, while it is current.
+   */
+  trigger?: { type: TriggerType; key: string; version: number };
 }
+
+/**
+ * How long a run's row may go without its engine instance before a
+ * trigger delivered again creates it: longer than a start takes between
+ * writing the row and creating the instance, so a start still under way
+ * is left to finish.
+ */
+const orphanAfterMs = 60_000;
+
+/**
+ * Makes sure a triggered run found by its key has its engine instance.
+ * A row that says `running` without one is a start under way, or one
+ * that stopped after its row was written (core stopped in between):
+ * - younger than `orphanAfterMs`, it may still be under way, so this
+ *   refuses for now (`workflow.start_pending`): the delivery is tried
+ *   again (a schedule stays due, mail and events are retried), and a
+ *   start that stopped is caught once it's old enough;
+ * - older, it creates the instance under the run's own ID and pinned
+ *   version, so it is the same run, started once: two deliveries doing
+ *   this at once both try, and the engine keeps one.
+ * Manual starts have no key to be delivered again by, so this covers
+ * only triggered runs.
+ */
+const restartOrphan = async (
+  env: Env,
+  row: RunRow,
+  input: Json | undefined
+): Promise<void> => {
+  if (
+    row.status !== "running" ||
+    (await runEngine(env).status(row.id)) !== undefined
+  ) {
+    return;
+  }
+  if (Date.now() - row.createdAt.getTime() <= orphanAfterMs) {
+    throw workflowErrors.create("workflow.start_pending");
+  }
+  log.warn("workflow.run_restarted", { runId: row.id });
+  try {
+    await runEngine(env).create({
+      id: row.id,
+      pinned: {
+        app: appIdSchema.parse(row.appId),
+        workflow: workflowIdSchema.parse(row.workflowId),
+        version: row.version,
+      },
+      input,
+    });
+  } catch (error) {
+    // Another delivery created it first: that is the run.
+    if ((await runEngine(env).status(row.id)) === undefined) {
+      throw error;
+    }
+  }
+};
 
 /**
  * Starts a run on the App's current version, which it keeps until it ends.
  * The row and its audit event are written before the run is created, so
  * the dispatcher always finds the row; a run that can't be created is
- * marked failed, audited as a failed run.
+ * marked failed, audited as a failed run. A trigger's key already taken
+ * returns the run that took it, whatever became of it, once it has its
+ * engine instance (`restartOrphan`; `workflow.start_pending` until
+ * then). A trigger of a
+ * version that is no longer current starts nothing
+ * (`workflow.trigger_gone`): the version that replaced it may not declare
+ * it. The run is pinned to the version checked, so at worst a trigger
+ * starts its own version's run as that version is being replaced, as a
+ * person starting it by hand then would.
  */
 export const startRun = async (
   env: Env,
-  { app, workflow, input, startedBy, actor, via }: RunRequest
+  { app, workflow, input, startedBy, actor, via, trigger }: RunRequest
 ): Promise<WorkflowRun> => {
   // Every way a run starts, a trigger's too, stops with the kill switch.
   requireFeature(env, "workflows");
@@ -195,6 +266,9 @@ export const startRun = async (
   const { currentVersion: version } = await appRecord(env, app);
   if (version === null) {
     throw appErrors.create("app.not_running");
+  }
+  if (trigger && trigger.version !== version) {
+    throw workflowErrors.create("workflow.trigger_gone");
   }
   if (!hasWorkflow(await versionFiles(env, app, version), workflow)) {
     throw workflowErrors.create("workflow.not_found", { workflow, version });
@@ -209,17 +283,36 @@ export const startRun = async (
     createdAt: new Date(),
     endedAt: null,
     failure: null,
+    triggerKey: trigger?.key ?? null,
   } satisfies RunFields & typeof workflowRuns.$inferInsert;
-  await auditedBatch(env, db, [
-    db.insert(workflowRuns).values(row),
-    outboxed(
+  // Nothing is written, audit event included, for a key a run has.
+  const [inserted] = await auditedBatch(env, db, [
+    db
+      .insert(workflowRuns)
+      .values(row)
+      .onConflictDoNothing({ target: workflowRuns.triggerKey })
+      .returning({ id: workflowRuns.id }),
+    outboxedIfChanged(
       db,
       runEntry(actor, "workflow.run.started", row, {
         startedBy: startedBy === null ? "trigger" : "person",
         ...(via === undefined ? {} : { via }),
+        ...(trigger ? { trigger: trigger.type } : {}),
       })
     ),
   ]);
+  if (inserted.length === 0) {
+    const started = await db
+      .select()
+      .from(workflowRuns)
+      .where(eq(workflowRuns.triggerKey, row.triggerKey ?? ""))
+      .get();
+    if (!started) {
+      throw new Error(`No run has the trigger key of run ${row.id}`);
+    }
+    await restartOrphan(env, started, input);
+    return toRun(started);
+  }
   try {
     await runEngine(env).create({
       id: row.id,

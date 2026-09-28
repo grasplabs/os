@@ -144,11 +144,11 @@
     },
   ],
   // Every minute: appends the audit events waiting in core's outboxes and
-  // connect's to the AuditLog object, records platform updates, and more
-  // (src/index.ts). Every 15 minutes, on its own: the day's improvement
-  // signals, until they're computed (src/signals.ts), and Apps whose entry
-  // in the Apps collection isn't of their current version
-  // (src/knowledge/apps-collection.ts).
+  // connect's to the AuditLog object, records platform updates, starts
+  // workflows' schedules as they come due, and more (src/index.ts). Every
+  // 15 minutes, on its own: the day's improvement signals, until they're
+  // computed (src/signals.ts), and Apps whose entry in the Apps collection
+  // isn't of their current version (src/knowledge/apps-collection.ts).
   "triggers": { "crons": ["* * * * *", "*/15 * * * *"] },
   // The model gateway's transport to AI Gateway (src/models.ts); core never
   // holds a raw provider key.

@@ -4,12 +4,21 @@ import { vi } from "vite-plus/test";
 
 import worker from "../src/index.ts";
 
-/** Runs core's cron trigger, as Cloudflare does every minute, on an env with `changes`. */
-export const runCron = async (changes: Partial<Env> = {}): Promise<void> => {
-  await worker.scheduled(createScheduledController({ cron: "* * * * *" }), {
-    ...env,
-    ...changes,
-  });
+/**
+ * Runs core's cron trigger, as Cloudflare does every minute, on an env with
+ * `changes`, for the minute `at` (now by default).
+ */
+export const runCron = async (
+  changes: Partial<Env> = {},
+  at = new Date()
+): Promise<void> => {
+  await worker.scheduled(
+    createScheduledController({
+      cron: "* * * * *",
+      scheduledTime: at.getTime(),
+    }),
+    { ...env, ...changes }
+  );
 };
 
 /**
