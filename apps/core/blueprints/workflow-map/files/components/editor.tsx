@@ -1,4 +1,3 @@
-import { callServer } from "@grasp-os/sdk/screen";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -13,8 +12,9 @@ import { useState } from "react";
 
 import { LinkForm } from "./link-form";
 import { ParametersEditor } from "./parameters";
-import { recordOf, refusal } from "./playbook";
-import type { Opened, Outcome, Team, Workflow } from "./playbook";
+import { whilePending } from "./pending";
+import { ask, recordOf, refusal } from "./playbook";
+import type { Opened, Team, Workflow } from "./playbook";
 import { draftChanged, draftOf, draftProblem, recordToSave } from "./record";
 import type { Draft } from "./record";
 import { StepsEditor } from "./steps";
@@ -310,18 +310,13 @@ export const WorkflowEditor = ({
   const whileBusy = async (
     run: () => Promise<string | undefined>
   ): Promise<void> => {
-    setBusy(true);
     setProblem("");
-    try {
+    await whilePending(setBusy, async () => {
       const saved = await run();
       if (saved !== undefined) {
         await onSaved(saved);
       }
-    } catch {
-      // The page couldn't reach core: nothing was saved.
-      refused("app.unreachable");
-    }
-    setBusy(false);
+    });
   };
 
   const save = async (
@@ -329,8 +324,10 @@ export const WorkflowEditor = ({
   ): Promise<string | undefined> => {
     const toDesign = to === "designed";
     const baseline = baselineFor(to);
-    const answer = await callServer<Outcome<Saved>>("save", {
-      ...(current === undefined ? {} : { path: current.path }),
+    const answer = await ask<Saved>("save", {
+      ...(current === undefined
+        ? {}
+        : { documentId: current.id, path: current.path }),
       ifVersion: current?.version ?? 0,
       record: recordToSave(current?.record ?? {}, draft, to, baseline),
       body,

@@ -1,4 +1,3 @@
-import { callServer } from "@grasp-os/sdk/screen";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -10,7 +9,7 @@ import {
 import { Input } from "@grasp-os/ui/components/input";
 import { useState } from "react";
 
-import { recordOf } from "./playbook";
+import { ask, recordOf } from "./playbook";
 import type { Outcome, Workflow } from "./playbook";
 
 /**
@@ -38,7 +37,7 @@ export const LinkForm = ({
   const [appId, setAppId] = useState(linked?.appId ?? "");
   const [workflowId, setWorkflowId] = useState(linked?.workflowId ?? "");
   const link = async (): Promise<Outcome<unknown>> =>
-    await callServer<Outcome<unknown>>("link", {
+    await ask<unknown>("link", {
       documentId: workflow.id,
       ifVersion: workflow.version,
       appId: appId.trim(),

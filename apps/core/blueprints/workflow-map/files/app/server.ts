@@ -93,6 +93,18 @@ const codeOf = (error: unknown): string =>
     ? error.code
     : "app.failed";
 
+/** Refuses a call with `code`, which the screen explains. */
+const refuse = (code: string, message: string): never => {
+  throw Object.assign(new Error(message), { code });
+};
+
+/** Refuses a document the map reads or writes as a workflow when it isn't one. */
+const requireWorkflow = (read: RecordRead): void => {
+  if (read.record.type !== "workflow") {
+    refuse("map.not_workflow", `${read.path} isn't a workflow.`);
+  }
+};
+
 const outcome = async <T>(run: () => Promise<T>): Promise<Outcome<T>> => {
   try {
     return { ok: await run() };
@@ -226,7 +238,8 @@ export class App extends DurableObject<Env> {
 
   /**
    * A workflow, and for a designed one, the last version of it that was
-   * drawn, to set beside it.
+   * drawn, to set beside it. Any other document is refused
+   * (`map.not_workflow`): the map never shows one as a workflow.
    */
   async open(
     caller: Caller,
@@ -234,7 +247,9 @@ export class App extends DurableObject<Env> {
   ): Promise<Outcome<{ current: Workflow; drawn: Workflow | null }>> {
     return await outcome(async () => {
       const playbook = this.#playbook();
-      const current = workflowOf(await playbook.getRecord(caller, id));
+      const read = await playbook.getRecord(caller, id);
+      requireWorkflow(read);
+      const current = workflowOf(read);
       if (current.record.state !== "designed") {
         return { current, drawn: null };
       }
@@ -256,11 +271,16 @@ export class App extends DurableObject<Env> {
   /**
    * Saves a workflow's record as its next version (`ifVersion`, 0 for a
    * new one at a path of its own). Refused with `knowledge.conflict` when
-   * someone saved it meanwhile.
+   * someone saved it meanwhile. It writes only workflows: a record of
+   * another type, or a version of a document that isn't a workflow (named
+   * by `documentId`, which a save from `ifVersion` 1 on needs, at `path`),
+   * is refused with `map.not_workflow`, so the map never turns a team or
+   * any other record into a workflow.
    */
   async save(
     caller: Caller,
     input: {
+      documentId?: string;
       path?: string;
       ifVersion: number;
       record: Record<string, unknown>;
@@ -269,12 +289,27 @@ export class App extends DurableObject<Env> {
     }
   ): Promise<Outcome<Summary>> {
     return await outcome(async () => {
+      const playbook = this.#playbook();
+      const { documentId, ...save } = input;
+      if (save.record.type !== "workflow") {
+        refuse("map.not_workflow", "The map saves only workflows.");
+      }
+      if (save.ifVersion > 0) {
+        const stored =
+          documentId === undefined
+            ? refuse("map.not_workflow", "Name the workflow to save.")
+            : await playbook.getRecord(caller, documentId);
+        requireWorkflow(stored);
+        if (stored.path !== save.path) {
+          refuse("map.not_workflow", `${stored.path} isn't at ${save.path}.`);
+        }
+      }
       const title =
-        typeof input.record.title === "string" ? input.record.title : "";
+        typeof save.record.title === "string" ? save.record.title : "";
       const path =
-        input.path ??
+        save.path ??
         `workflows/${slugOf(title)}-${crypto.randomUUID().slice(0, 8)}.md`;
-      return await this.#playbook().saveRecord(caller, { ...input, path });
+      return await playbook.saveRecord(caller, { ...save, path });
     });
   }
 

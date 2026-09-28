@@ -1,5 +1,7 @@
 // What the map's server answers (app/server.ts), as its screen reads it.
 
+import { callServer } from "@grasp-os/sdk/screen";
+
 import type { WorkflowRecord } from "./totals";
 
 /** A workflow record, at its current version or an earlier one. */
@@ -56,6 +58,30 @@ export const recordOf = (workflow: Workflow): WorkflowRecord => {
   };
 };
 
+const codeOf = (error: unknown): string =>
+  typeof error === "object" &&
+  error !== null &&
+  "code" in error &&
+  typeof error.code === "string"
+    ? error.code
+    : "app.unreachable";
+
+/**
+ * Calls the server's `method`: its answer, or, when the call itself fails
+ * (the connection, the platform), why, as a refusal the map shows. So no
+ * call ends in an unhandled rejection.
+ */
+export const ask = async <T>(
+  method: string,
+  ...args: unknown[]
+): Promise<Outcome<T>> => {
+  try {
+    return await callServer<Outcome<T>>(method, ...args);
+  } catch (error) {
+    return { error: codeOf(error) };
+  }
+};
+
 /** What a refusal means to the person using the map. */
 export const refusal = (code: string): string => {
   switch (code) {
@@ -75,7 +101,13 @@ export const refusal = (code: string): string => {
       return "The map read restricted data, so it can't write to the Playbook, which everyone reads.";
     }
     case "app.unreachable": {
-      return "Grasp can't be reached right now, so nothing was saved. Try again in a moment.";
+      return "Grasp can't be reached right now. Try again in a moment.";
+    }
+    case "app.failed": {
+      return "The map failed. Try again in a moment.";
+    }
+    case "map.not_workflow": {
+      return "That document isn't a workflow.";
     }
     case "app.not_found": {
       return "There's no such App, or you can't open it.";
