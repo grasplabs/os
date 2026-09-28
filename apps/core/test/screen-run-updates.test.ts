@@ -245,7 +245,7 @@ describe("run status on screens", { timeout: 60_000 }, () => {
             throw new Error("Still following");
           }
         },
-        { timeout: 15_000, interval: 500 }
+        { timeout: 3000, interval: 250 }
       );
     });
     const received = screen.received.length;

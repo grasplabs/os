@@ -8,21 +8,27 @@ import { env } from "cloudflare:workers";
 import { vi } from "vite-plus/test";
 
 import { versionFiles } from "../src/apps.ts";
-import { recheckMs } from "../src/screens-rpc.ts";
 import { buildServer } from "../src/screens.ts";
 import type { Idp } from "./idp.ts";
 import { signedInApi } from "./sign-in.ts";
 
 /**
- * What `run` returns, run with core's clock at the end of the time its
- * last answer to whether someone may still use an App holds
- * (`recheckMs`): the next push to their screen checks again. Waiting that
- * out for real took five seconds a test, and raced a loaded runner.
+ * How soon a screen stops hearing from an App once its person lost access
+ * to it: the platform promises within seconds, and checks again every 5 s.
+ */
+const promisedWithinMs = 5000;
+
+/**
+ * What `run` returns, run with core's clock `promisedWithinMs` on: past
+ * the time the last answer to whether someone may still use an App holds,
+ * so the next push to their screen checks again. Waiting that out for real
+ * took five seconds a test, and raced a loaded runner. Tests wait at most
+ * 3 s for the push that is refused, so only the moved clock can get there.
  */
 export const pastAccessRecheck = async <T>(
   run: () => Promise<T>
 ): Promise<T> => {
-  vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + recheckMs });
+  vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + promisedWithinMs });
   try {
     return await run();
   } finally {

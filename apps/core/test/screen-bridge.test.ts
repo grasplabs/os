@@ -412,7 +412,7 @@ describe("screens", { timeout: 60_000 }, () => {
             }
             return count;
           },
-          { timeout: 15_000, interval: 1000 }
+          { timeout: 3000, interval: 250 }
         )
     );
     const received = watching.received.length;
@@ -464,7 +464,7 @@ describe("screens", { timeout: 60_000 }, () => {
             }
             return count;
           },
-          { timeout: 15_000, interval: 1000 }
+          { timeout: 3000, interval: 250 }
         )
     );
     expect({ isStaff, pushed, left }).toStrictEqual({
