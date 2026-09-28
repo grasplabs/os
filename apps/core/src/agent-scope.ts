@@ -1,12 +1,16 @@
 import { agentErrors } from "@grasp-os/shared/agent";
+import { delegateActorOf } from "@grasp-os/shared/audit";
+import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import {
   authoritySchema,
   permissionErrors,
 } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
+import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import { keepAuditEvent } from "./audit-outbox.ts";
 import { workspace } from "./durable-objects.ts";
 import type { WorkContext } from "./restricted.ts";
 
@@ -131,4 +135,34 @@ export const recordSources = async (
   if (!recorded) {
     throw agentErrors.create("agent.run_ended");
   }
+};
+
+/** One call of a chat's code, as the audit log records it. */
+export interface AgentCall {
+  /** The API and method, such as `connections.list`. */
+  method: string;
+  target?: AuditEntry["target"];
+  /** Identifiers and counts, never what was read. */
+  detail?: Record<string, AuditDetailValue>;
+}
+
+/**
+ * Records a call of the chat's code as `agent.call`, by the chat's agent
+ * acting for its person: for the calls nothing below records (a Knowledge
+ * read, a connection call and a model request record themselves). After
+ * the call and before it hands anything over, through core's outbox, which
+ * never fails the call (`keepAuditEvent`).
+ */
+export const auditAgentCall = async (
+  env: Env,
+  scope: AgentScope,
+  { method, target, detail = {} }: AgentCall
+): Promise<void> => {
+  await keepAuditEvent(env, drizzle(env.DB), {
+    actor: delegateActorOf(chatAuthority(scope)),
+    action: "agent.call",
+    target,
+    // The actor is the workspace's agent, in every chat: which chat called.
+    detail: { ...detail, method, chat: scope.chatId },
+  });
 };

@@ -302,7 +302,7 @@ describe("chat agent sandbox", () => {
 
     expect(result).toStrictEqual({
       isError: false,
-      text: `Returned:\n${JSON.stringify({ given: ["chat", "knowledge"], imported: [], exports: [] })}`,
+      text: `Returned:\n${JSON.stringify({ given: ["chat", "knowledge", "connections"], imported: [], exports: [] })}`,
     });
   });
 
@@ -313,7 +313,7 @@ describe("chat agent sandbox", () => {
 
     expect(result?.isError).toBeTruthy();
     expect(result?.text).toContain(
-      "This chat has no API named env.mailbox. It has: env.chat, env.knowledge."
+      "This chat has no API named env.mailbox. It has: env.chat, env.knowledge, env.connections."
     );
   });
 

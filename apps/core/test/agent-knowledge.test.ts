@@ -219,6 +219,17 @@ describe("a chat's Knowledge", setUpTime, () => {
         ],
       })}`
     );
+    // The catalog, which Knowledge doesn't record, is recorded as a call.
+    const events = await eventsOf(agent.agentId, (all) =>
+      all.some(({ action }) => action === "agent.call")
+    );
+    expect(
+      events
+        .filter(({ action }) => action === "agent.call")
+        .map(({ detail }) => detail)
+    ).toStrictEqual([
+      { method: "knowledge.catalog", collections: 1, skills: 0, chat: chat.id },
+    ]);
   });
 
   it("judges every later request by what the chat read, in later turns and after a restart", async () => {

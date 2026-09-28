@@ -9,6 +9,7 @@ import type {
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import {
+  auditAgentCall,
   chatAuthority,
   chatContext,
   recordSources,
@@ -59,12 +60,21 @@ export class KnowledgeApi
 
   /**
    * The catalog names what may be read, and holds nothing of a sensitive
-   * collection (knowledge/tools.ts): nothing to record.
+   * collection (knowledge/tools.ts): no source to record with the chat.
+   * Knowledge doesn't record it; the call is, as every call of the chat's.
    */
   async catalog(): Promise<KnowledgeCatalog> {
-    return await this.#asAgent(
+    const listed = await this.#asAgent(
       async (reader) => await catalog(this.env, reader)
     );
+    await auditAgentCall(this.env, this.ctx.props, {
+      method: "knowledge.catalog",
+      detail: {
+        collections: listed.collections.length,
+        skills: listed.skills.length,
+      },
+    });
+    return listed;
   }
 
   async search(query: unknown, options?: unknown): Promise<SearchResults> {

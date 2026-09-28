@@ -1,6 +1,7 @@
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
+import { connectionsApi } from "./agent-connections.ts";
 import { knowledgeApi } from "./agent-knowledge.ts";
 import { requireOpenRun } from "./agent-scope.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
@@ -50,7 +51,7 @@ const apiNameSchema = z
 
 /** The APIs a chat's code gets. */
 export const agentApis = (): readonly AgentApi[] =>
-  [chatApi, knowledgeApi].map((api) => ({
+  [chatApi, knowledgeApi, connectionsApi].map((api) => ({
     ...api,
     name: apiNameSchema.parse(api.name),
   }));
