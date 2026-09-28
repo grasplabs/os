@@ -69,7 +69,7 @@ export default {
             ...(featureEnabled(env, "builtins") ? [] : [syncGraspSkills(env)]),
             sweepUploads(env),
             // Deploys apply migrations first (CI's db:migrate, and the
-            // console's deploy), so `platform_version` exists. A version
+            // console's deploy), so `platform_versions` exists. A version
             // running before it does records nothing, and the first run
             // after the migration records the version then running: only a
             // version that came and went in between goes unrecorded.
