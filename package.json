@@ -15,7 +15,8 @@
     "github:setup": "node scripts/github-setup.ts",
     "check:branch": "node scripts/check-branch-name.ts",
     "check:secrets": "secretlint \"**/*\"",
-    "release:build": "node scripts/release/build-release.ts"
+    "release:build": "node scripts/release/build-release.ts",
+    "release:upload": "node scripts/release/upload-release.ts"
   },
   "devDependencies": {
     "@commitlint/cli": "catalog:",
@@ -25,6 +26,7 @@
     "@secretlint/secretlint-rule-preset-recommend": "catalog:",
     "@shadcn/lint": "catalog:",
     "@types/node": "catalog:",
+    "aws4fetch": "catalog:",
     "capnweb": "catalog:",
     "secretlint": "catalog:",
     "typescript": "catalog:",
