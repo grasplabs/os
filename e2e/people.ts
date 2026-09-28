@@ -126,6 +126,7 @@ const cast = {
   workflowMap: { admin: "admin", reader: "user" },
   boardPage: { admin: "admin" },
   models: { admin: "admin", builder: "builder" },
+  workflows: { builder: "builder", user: "user" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;
