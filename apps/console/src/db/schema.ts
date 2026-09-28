@@ -83,6 +83,36 @@ export const clientWorkers = sqliteTable(
   (table) => [primaryKey({ columns: [table.clientId, table.worker] })]
 );
 
+/**
+ * Making a client's account run a release (src/deploy/deploy.ts): how far
+ * it got. Every step can run again, so a deploy that failed is resumed by
+ * running it again from the start.
+ */
+export const clientDeploys = sqliteTable(
+  "client_deploys",
+  {
+    id: text().primaryKey(),
+    clientId: text("client_id")
+      .notNull()
+      .references(() => clients.id),
+    releaseId: text("release_id")
+      .notNull()
+      .references(() => releases.id),
+    status: text({ enum: ["running", "done", "failed"] }).notNull(),
+    /** The last step that finished, such as `resources`; null before the first. */
+    step: text(),
+    /** Why it failed: an error code, never a token or a response body. */
+    error: text(),
+    /** The staff member who started it, or `system`. */
+    startedBy: text("started_by").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    index("client_deploys_client_idx").on(table.clientId, table.createdAt),
+  ]
+);
+
 /** Rolling a release (or only new secrets) out to clients, ring by ring. */
 export const rollouts = sqliteTable(
   "rollouts",

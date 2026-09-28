@@ -108,6 +108,16 @@ export const buildRelease = async (
       async ([name, content]) => await file(name, content, migrationKey, blobs)
     )
   );
+  // The databases core and connect also bind, as in the real release.
+  const [knowledge, connectDb] = await Promise.all([
+    file(
+      "0000_knowledge.sql",
+      "CREATE TABLE k (id TEXT);",
+      migrationKey,
+      blobs
+    ),
+    file("0000_connect.sql", "CREATE TABLE c (id TEXT);", migrationKey, blobs),
+  ]);
   const assetManifest: Record<string, { hash: string; size: number }> = {};
   const assets: ReleaseManifest["assets"] = {};
   for (const [path, content] of Object.entries(
@@ -137,12 +147,41 @@ export const buildRelease = async (
       connect: {
         ...worker("grasp-os-connect", []),
         modules: [await module(spec.connect ?? "export default {};")],
+        bindings: [{ type: "d1", name: "DB", id: "$D1_DB_ID" }],
+        d1Databases: [
+          {
+            binding: "DB",
+            databaseName: "grasp-os-connect",
+            migrations: [connectDb],
+          },
+        ],
       },
       core: {
         ...worker("grasp-os-core", spec.crons ?? ["* * * * *"]),
         modules: [await module(spec.core ?? "export default { core: 1 };")],
+        bindings: [
+          { type: "d1", name: "DB", id: "$D1_DB_ID" },
+          { type: "d1", name: "KNOWLEDGE", id: "$D1_KNOWLEDGE_ID" },
+          {
+            type: "r2_bucket",
+            name: "FILES",
+            bucket_name: "grasp-os-files",
+            jurisdiction: "eu",
+          },
+          {
+            type: "r2_bucket",
+            name: "AUDIT_ARCHIVE",
+            bucket_name: "grasp-os-audit-archive",
+            jurisdiction: "eu",
+          },
+        ],
         d1Databases: [
           { binding: "DB", databaseName: "grasp-os-core", migrations },
+          {
+            binding: "KNOWLEDGE",
+            databaseName: "grasp-os-knowledge",
+            migrations: [knowledge],
+          },
         ],
         assets: { config: {}, manifest: assetManifest },
       },
