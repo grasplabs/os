@@ -164,6 +164,7 @@ describe("the workflow map", { timeout: 60_000 }, () => {
     ];
     okOf(
       await call(app, admin.userId, "save", {
+        documentId: first.id,
         path: openedDrawn.current.path,
         ifVersion: 1,
         record: {
@@ -189,6 +190,7 @@ describe("the workflow map", { timeout: 60_000 }, () => {
     const { team: _team, ...withoutTeam } = openedDesigned.current.record;
     okOf(
       await call(app, admin.userId, "save", {
+        documentId: first.id,
         path: openedDesigned.current.path,
         ifVersion: 2,
         record: withoutTeam,
@@ -197,6 +199,7 @@ describe("the workflow map", { timeout: 60_000 }, () => {
       savedSchema
     );
     const stale = await call(app, admin.userId, "save", {
+      documentId: first.id,
       path: openedDesigned.current.path,
       ifVersion: 2,
       record: withoutTeam,
@@ -394,6 +397,69 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
       pageFits: true,
       events: readsFor(workflows) + readsFor(teams),
     });
+  });
+
+  it("opens and saves only workflows, never turning another record into one", async () => {
+    const { admin, app } = await setUp();
+    const team = okOf(
+      await call(app, admin.userId, "addTeam", `Finance ${unique()}`),
+      z.object({ path: z.string(), title: z.string() })
+    );
+    const teamRow = await env.KNOWLEDGE.prepare(
+      "SELECT id FROM documents WHERE collection_id = ? AND path = ?"
+    )
+      .bind(playbookCollectionId, team.path)
+      .first<{ id: string }>();
+    const teamId = teamRow?.id ?? "";
+    const workflow = okOf(
+      await call(app, admin.userId, "save", {
+        ifVersion: 0,
+        record: drawn,
+        body: "",
+      }),
+      z.object({ id: z.string(), path: z.string() })
+    );
+    const saveOver = async (input: Record<string, unknown>) =>
+      await call(app, admin.userId, "save", {
+        ifVersion: 1,
+        record: drawn,
+        body: "",
+        ...input,
+      });
+
+    expect({
+      openTeam: await call(app, admin.userId, "open", teamId),
+      overTeam: await saveOver({ documentId: teamId, path: team.path }),
+      unnamed: await saveOver({ path: workflow.path }),
+      elsewhere: await saveOver({
+        documentId: workflow.id,
+        path: team.path,
+      }),
+      asTeam: await call(app, admin.userId, "save", {
+        ifVersion: 0,
+        record: { type: "team", title: "Not a workflow" },
+        body: "",
+      }),
+      // What it may: the workflow, by its ID at its path.
+      workflow: okOf(
+        await saveOver({ documentId: workflow.id, path: workflow.path }),
+        z.object({ currentVersion: z.number() })
+      ),
+    }).toStrictEqual({
+      openTeam: { error: "map.not_workflow" },
+      overTeam: { error: "map.not_workflow" },
+      unnamed: { error: "map.not_workflow" },
+      elsewhere: { error: "map.not_workflow" },
+      asTeam: { error: "map.not_workflow" },
+      workflow: { currentVersion: 2 },
+    });
+    // The team is as it was: one version, still a team.
+    const { results } = await env.KNOWLEDGE.prepare(
+      "SELECT type, current_version AS version FROM documents WHERE id = ?"
+    )
+      .bind(teamId)
+      .all();
+    expect(results).toStrictEqual([{ type: "team", version: 1 }]);
   });
 
   it("says it has no Playbook until an admin grants it", async () => {

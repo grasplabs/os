@@ -13,7 +13,8 @@ import type { Person } from "./people.ts";
 // Playbook's limits say so instead of failing the save, nothing can be
 // typed while a save is on its way (the saved version replaces the editor
 // once it is open), and linking or going back never drops unsaved edits
-// unseen.
+// unseen. An answer to an earlier open, arriving late, never replaces the
+// workflow opened since.
 
 const workflowMap = "builtin-workflow-map";
 
@@ -253,4 +254,85 @@ test("keeps numbers within the Playbook's limits, and never drops what is typed 
   await expect(
     screen.getByRole("button", { name: "All workflows" })
   ).toBeVisible();
+});
+
+test("an answer to an earlier open, arriving late, never replaces the workflow opened since", async ({
+  browser,
+}) => {
+  const { admin } = peopleIn("workflowMap");
+  const app = await mapFor(admin);
+  const run = crypto.randomUUID().slice(0, 8);
+  const [first, second] = [`Slow ${run}`, `Quick ${run}`];
+  const { core, api } = apiOf(admin);
+  try {
+    for (const title of [first, second]) {
+      // oxlint-disable-next-line no-await-in-loop -- one after the other
+      await api.screens.call(app, "save", [
+        {
+          ifVersion: 0,
+          record: {
+            type: "workflow",
+            title,
+            state: "drawn",
+            steps: [],
+            parameters: [],
+          },
+          body: "",
+        },
+      ]);
+    }
+  } finally {
+    core[Symbol.dispose]();
+  }
+  const page = await pageOf(browser, admin);
+  // Core's answers that name `slow` wait until the test lets them through:
+  // the listing has come by then, so only the first workflow's opening.
+  let slow: string | undefined;
+  const held: (() => void)[] = [];
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const toCore = socket.connectToServer();
+    toCore.onMessage((message) => {
+      if (slow !== undefined && String(message).includes(slow)) {
+        held.push(() => {
+          socket.send(message);
+        });
+        return;
+      }
+      socket.send(message);
+    });
+  });
+  const screen = await openMap(page, app);
+  await expect(
+    screen.getByRole("button", { name: first, exact: true })
+  ).toBeVisible();
+
+  slow = first;
+  await screen.getByRole("button", { name: first, exact: true }).click();
+  await expect.poll(() => held.length).toBeGreaterThan(0);
+  await screen.getByRole("button", { name: second, exact: true }).click();
+  await expect(screen.getByLabel("Title", { exact: true })).toHaveValue(second);
+
+  // The first answer lands, then one to a call after it: by then the map
+  // has had the first, and still shows the second workflow.
+  slow = undefined;
+  for (const answer of held.splice(0)) {
+    answer();
+  }
+  const team = `Team ${run}`;
+  await screen.getByLabel("New team").fill(team);
+  // A double click adds the team once.
+  await screen.getByRole("button", { name: "Add team" }).dblclick();
+  await expect(screen.getByRole("combobox", { name: "Team" })).toContainText(
+    team
+  );
+  await expect(screen.getByLabel("Title", { exact: true })).toHaveValue(second);
+  const check = apiOf(admin);
+  try {
+    const overview: unknown = await check.api.screens.call(app, "overview", []);
+    expect(JSON.stringify(overview).split(`"title":"${team}"`).length - 1).toBe(
+      1
+    );
+  } finally {
+    check.core[Symbol.dispose]();
+  }
 });

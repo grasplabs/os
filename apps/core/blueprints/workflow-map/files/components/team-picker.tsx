@@ -1,4 +1,3 @@
-import { callServer } from "@grasp-os/sdk/screen";
 import { Button } from "@grasp-os/ui/components/button";
 import { Input } from "@grasp-os/ui/components/input";
 import {
@@ -8,9 +7,11 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@grasp-os/ui/components/select";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
-import type { Outcome, Team } from "./playbook";
+import { whilePending } from "./pending";
+import { ask } from "./playbook";
+import type { Team } from "./playbook";
 import { shortTextMax } from "./totals";
 
 /** A workflow's team, picked from the Playbook's teams, or a new one. */
@@ -27,6 +28,14 @@ export const TeamPicker = ({
 }) => {
   const [added, setAdded] = useState<Team[]>([]);
   const [name, setName] = useState("");
+  // While a team is being added: its button is off, and a second click
+  // that lands before it is (a double click) adds nothing more.
+  const [adding, setAdding] = useState(false);
+  const addingNow = useRef(false);
+  const pending = (on: boolean): void => {
+    addingNow.current = on;
+    setAdding(on);
+  };
   const items = [
     { value: null, label: "No team" },
     ...[...teams, ...added].map(({ path, title }) => ({
@@ -35,7 +44,13 @@ export const TeamPicker = ({
     })),
   ];
   const add = async (): Promise<void> => {
-    const answer = await callServer<Outcome<Team>>("addTeam", name.trim());
+    if (addingNow.current) {
+      return;
+    }
+    const answer = await whilePending(
+      pending,
+      async () => await ask<Team>("addTeam", name.trim())
+    );
     if ("error" in answer) {
       onRefused(answer.error);
       return;
@@ -75,7 +90,7 @@ export const TeamPicker = ({
       />
       <Button
         variant="outline"
-        disabled={name.trim() === ""}
+        disabled={adding || name.trim() === ""}
         onClick={() => {
           void add();
         }}

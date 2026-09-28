@@ -1,21 +1,19 @@
-import { callServer } from "@grasp-os/sdk/screen";
 import { Button } from "@grasp-os/ui/components/button";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { WorkflowEditor } from "../components/editor";
 import { WorkflowList } from "../components/overview";
-import { refusal } from "../components/playbook";
-import type { Opened, Outcome, Overview } from "../components/playbook";
+import { ask, refusal } from "../components/playbook";
+import type { Opened, Overview } from "../components/playbook";
 
-/** What the screen shows: every workflow, a new one, or one opened. */
+/**
+ * What the screen shows: every workflow, a new one (the `draw`-th drawn
+ * since the screen opened), or one opened.
+ */
 type View =
   | { kind: "list" }
-  | { kind: "new" }
+  | { kind: "new"; draw: number }
   | { kind: "open"; opened: Opened };
-
-/** Every workflow and team, as the server answers them. */
-const loadOverview = async (): Promise<Outcome<Overview>> =>
-  await callServer<Outcome<Overview>>("overview");
 
 /** The map's title, and drawing a new workflow for who may (`canDraw`). */
 const MapHeader = ({
@@ -31,6 +29,24 @@ const MapHeader = ({
   </div>
 );
 
+/** What a view is of, as `selected` holds it. */
+const selectionOf = (view: View): string | null => {
+  switch (view.kind) {
+    case "list": {
+      return null;
+    }
+    case "new": {
+      return `new:${view.draw}`;
+    }
+    case "open": {
+      return view.opened.current.id;
+    }
+    default: {
+      return view satisfies never;
+    }
+  }
+};
+
 /**
  * The workflow map: the Playbook's workflows by team, with their totals,
  * and an editor for each, drawn and designed side by side.
@@ -39,21 +55,43 @@ const WorkflowMap = () => {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [view, setView] = useState<View>({ kind: "list" });
   const [problem, setProblem] = useState("");
+  // What the person asked for last (a workflow's ID, a new drawing, or
+  // the list, null), and each opening and listing asked for, numbered: an
+  // answer to any but the latest, arriving late, is dropped, as it would
+  // show what they moved away from, or an older version.
+  const selected = useRef<string | null>(null);
+  const openings = useRef(0);
+  const listings = useRef(0);
+  const draws = useRef(0);
 
-  const show = (answer: Outcome<Overview>): void => {
+  // Asks for what the person chose, and forgets any opening on its way.
+  const choose = (next: View): void => {
+    selected.current = selectionOf(next);
+    openings.current += 1;
+    setView(next);
+  };
+
+  const list = async (): Promise<void> => {
+    listings.current += 1;
+    const asked = listings.current;
+    const answer = await ask<Overview>("overview");
+    if (asked !== listings.current) {
+      return;
+    }
     if ("error" in answer) {
       setProblem(refusal(answer.error));
       return;
     }
-    setProblem("");
     setOverview(answer.ok);
   };
 
   useEffect(() => {
     let mounted = true;
     const first = async (): Promise<void> => {
-      const answer = await loadOverview();
-      if (!mounted) {
+      listings.current += 1;
+      const asked = listings.current;
+      const answer = await ask<Overview>("overview");
+      if (!mounted || asked !== listings.current) {
         return;
       }
       if ("error" in answer) {
@@ -69,8 +107,14 @@ const WorkflowMap = () => {
   }, []);
 
   const open = async (id: string): Promise<void> => {
+    selected.current = id;
+    openings.current += 1;
+    const asked = openings.current;
     setProblem("");
-    const answer = await callServer<Outcome<Opened>>("open", id);
+    const answer = await ask<Opened>("open", id);
+    if (asked !== openings.current) {
+      return;
+    }
     if ("error" in answer) {
       setProblem(refusal(answer.error));
       return;
@@ -79,18 +123,17 @@ const WorkflowMap = () => {
   };
 
   const showList = async (): Promise<void> => {
-    setView({ kind: "list" });
-    show(await loadOverview());
+    setProblem("");
+    choose({ kind: "list" });
+    await list();
   };
 
-  // Opens what was saved, with the teams as they are now: one added while
-  // editing is among them.
-  const saved = async (id: string): Promise<void> => {
-    await open(id);
-    const answer = await loadOverview();
-    if ("ok" in answer) {
-      setOverview(answer.ok);
-    }
+  // After a save from `from`: the teams as they are now (one added while
+  // editing is among them), and what was saved opened, only while the
+  // person is still on what they saved.
+  const saved = async (from: View, id: string): Promise<void> => {
+    const still = selected.current === selectionOf(from);
+    await Promise.all([list(), still ? open(id) : Promise.resolve()]);
   };
 
   const teams = overview?.teams ?? [];
@@ -104,7 +147,8 @@ const WorkflowMap = () => {
       <MapHeader
         canDraw={view.kind === "list" && writable}
         onDraw={() => {
-          setView({ kind: "new" });
+          draws.current += 1;
+          choose({ kind: "new", draw: draws.current });
         }}
       />
       {problem === "" ? null : (
@@ -138,13 +182,15 @@ const WorkflowMap = () => {
         <WorkflowEditor
           key={
             view.kind === "new"
-              ? "new"
+              ? `new:${view.draw}`
               : `${view.opened.current.id}@${view.opened.current.version}`
           }
           opened={view.kind === "new" ? null : view.opened}
           teams={teams}
           writable={writable}
-          onSaved={saved}
+          onSaved={async (id) => {
+            await saved(view, id);
+          }}
           onBack={() => {
             void showList();
           }}
