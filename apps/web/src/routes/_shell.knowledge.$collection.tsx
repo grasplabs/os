@@ -9,17 +9,15 @@ import type {
 import { createFileRoute, Link } from "@tanstack/react-router";
 
 import type { Session } from "../core.ts";
-import {
-  CollectionMarkers,
-  isReadOnly,
-} from "../knowledge/collection-markers.tsx";
+import { CollectionMarkers } from "../knowledge/collection-markers.tsx";
 import { DocumentView } from "../knowledge/document.tsx";
+import { Uploads } from "../knowledge/uploads.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 
-// One collection: its files, and the one open (`?doc=<id>`) with its
-// details, text and history. Core decides what the person may read and
-// change on every call; the page leaves out editing and restoring only
-// where nobody may change the collection here.
+// One collection: its files, the one open (`?doc=<id>`) with its details,
+// text and history, and uploading more. Core decides what the person may
+// read and change on every call; the page offers editing, restoring and
+// uploading only where core says the person may change the collection.
 
 interface CollectionPage {
   collection: Collection;
@@ -116,8 +114,10 @@ const CollectionView = () => {
   const { collection, open } = Route.useLoaderData();
   const { doc } = Route.useSearch();
   const { identity } = Route.useRouteContext();
+  // Core says whether the person may change it, by the rule it applies to
+  // every change: the page offers only the changes core would take.
   const writable =
-    collection.state === "ready" && !isReadOnly(collection.data.collection);
+    collection.state === "ready" && collection.data.collection.writable;
   // `[[links]]` name paths in the collection: those in the file list open
   // here; any other stays as written.
   const paths = new Map(
@@ -152,6 +152,14 @@ const CollectionView = () => {
                 </h2>
                 <FileList documents={collection.data.documents} open={doc} />
               </section>
+              {writable ? (
+                <Uploads
+                  // Another collection starts with no uploads to follow.
+                  key={collection.data.collection.id}
+                  collectionId={collection.data.collection.id}
+                  listed={new Set(paths.values())}
+                />
+              ) : null}
             </div>
             <div className="min-w-0 flex-1">
               {open === undefined ? null : <NotLoaded page={open} />}

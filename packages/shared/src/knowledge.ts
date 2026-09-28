@@ -103,6 +103,11 @@ export interface Collection {
   source: CollectionSource;
   /** ISO 8601. */
   createdAt: string;
+  /**
+   * Whether the person who asked may change it: save, restore and upload
+   * into it. Always `false` for an App or agent reading it.
+   */
+  writable: boolean;
 }
 
 /** Longest document path, in characters. */

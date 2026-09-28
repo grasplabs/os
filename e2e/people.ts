@@ -121,6 +121,8 @@ const cast = {
   membersRecover: { admin: "admin" },
   connections: { admin: "admin", user: "user" },
   knowledge: { one: "user", two: "user" },
+  knowledgeUploads: { one: "user" },
+  knowledgeReader: { admin: "admin", reader: "user" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;

@@ -6,6 +6,9 @@ import { origin, testAuthSecret } from "./e2e/people.ts";
 const port = 8787;
 const ci = process.env.CI === "true";
 
+/** The one model the stack's gateway allows; no test calls it. */
+const e2eModel = "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast";
+
 /** A `--var` for wrangler dev, quoted once for the shell. */
 const devVar = (name: string, value: string): string =>
   `--var '${name}:${value}'`;
@@ -58,6 +61,18 @@ export default defineConfig({
             permissions: true,
             knowledge: true,
             memory: true,
+            knowledge_uploads: true,
+          })
+        ),
+        // `--local` has no Workers AI: a deployment kept in the EU extracts
+        // uploads' text in the Worker instead (knowledge/extract.ts). No
+        // test calls a model.
+        devVar(
+          "MODEL_GATEWAY",
+          JSON.stringify({
+            gateway: "grasp-os-e2e",
+            models: [e2eModel],
+            eu: { models: [e2eModel], deployment: true },
           })
         ),
       ].join(" "),
