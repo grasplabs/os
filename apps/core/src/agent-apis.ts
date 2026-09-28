@@ -1,6 +1,5 @@
 import { agentErrors } from "@grasp-os/shared/agent";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
-import { log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
@@ -41,18 +40,26 @@ export interface AgentApi {
 }
 
 /**
- * Refuses a call from a code run that has ended: the turn moved on, or
- * the run was cancelled or timed out while its code kept running. Every
+ * What the Workspace object says of one API call of a code run: it may go
+ * on, the run has made all the calls it may, or the run has ended.
+ */
+export type CodeRunCall = "open" | "spent" | "ended";
+
+/**
+ * Counts the call with the Workspace object, and refuses it from a code
+ * run that has ended (the turn moved on, or the run was cancelled or timed
+ * out while its code kept running) or made all the calls it may. Every
  * API checks it first, on every call.
  */
 export const requireOpenRun = async (
   env: Env,
   { workspaceId, chatId, runId }: AgentScope
 ): Promise<void> => {
-  const open = await workspace(env, workspaceId).isCodeRunOpen(chatId, runId);
-  if (!open) {
-    // Code still acting after its run ended: worth seeing in the logs.
-    log.warn("agent.run_ended", { chatId });
+  const call = await workspace(env, workspaceId).callFromCodeRun(chatId, runId);
+  if (call === "spent") {
+    throw agentErrors.create("agent.run_calls_spent");
+  }
+  if (call === "ended") {
     throw agentErrors.create("agent.run_ended");
   }
 };

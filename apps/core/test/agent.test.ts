@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { maxRunsPerResponse, maxRunsPerTurn, maxSteps } from "../src/agent.ts";
+import { codeLimits } from "../src/code-mode.ts";
 import { workspace } from "../src/durable-objects.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
@@ -298,9 +299,11 @@ describe("chat agent", () => {
   });
 
   it("stops the turn when the person leaves during it", async () => {
+    // Long enough that they always leave while the code runs, however slow
+    // the runner.
     const { stub, chat, personId, gateway, ask } = await newChat(
       codeStep(
-        "export default async () => { await scheduler.wait(300); return 'done'; };"
+        "export default async () => { await scheduler.wait(5_000); return 'done'; };"
       ),
       says("Never asked.")
     );
@@ -315,6 +318,24 @@ describe("chat agent", () => {
 
     await expect(turn).resolves.toBe("permission.person_inactive");
     // No request for them after they left.
+    expect(gateway.requests).toHaveLength(1);
+  });
+
+  it("stops the turn when the agent is switched off during it", async () => {
+    const { stub, chat, gateway, ask } = await newChat(
+      codeStep(
+        "export default async () => { await scheduler.wait(5_000); return 'done'; };"
+      ),
+      says("Never asked.")
+    );
+
+    const turn = codeOf(ask("Wait."));
+    await vi.waitFor(async () => {
+      await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
+    });
+    await pointAtGateway(stub, gateway, { agentOn: false });
+
+    await expect(turn).resolves.toBe("feature.disabled");
     expect(gateway.requests).toHaveLength(1);
   });
 });
@@ -391,9 +412,11 @@ describe("chat agent sandbox", () => {
 
   it("gets APIs that stop answering once its run was cancelled", async () => {
     const warned = vi.spyOn(console, "warn");
+    // Long enough that the cancel always comes first, however slow the
+    // runner: the cancel ends the run, not the wait.
     const { stub, chat, ask } = await newChat(
       codeStep(
-        "export default async (env) => { await scheduler.wait(300); return await env.chat.info(); };"
+        "export default async (env) => { await scheduler.wait(5_000); await env.chat.info(); await env.chat.info(); };"
       )
     );
 
@@ -404,13 +427,41 @@ describe("chat agent sandbox", () => {
     await stub.cancel(chat.id);
     await expect(reply).resolves.toMatchObject({ outcome: "cancelled" });
 
-    // The code goes on after its run was cancelled; its API refuses it.
-    await vi.waitFor(() => {
-      expect(warned).toHaveBeenCalledWith(
-        expect.objectContaining({ event: "agent.run_ended", chatId: chat.id })
-      );
-    });
+    // The code goes on after its run was cancelled; its API refuses it,
+    // and the call after its end is logged once, not for every call.
+    await vi.waitFor(
+      () => {
+        expect(warned).toHaveBeenCalledWith(
+          expect.objectContaining({ event: "agent.run_ended", chatId: chat.id })
+        );
+      },
+      { timeout: 15_000, interval: 100 }
+    );
+    await expect(
+      runInDurableObject(stub, (instance) =>
+        instance.callFromCodeRun(chat.id, "not-a-run")
+      )
+    ).resolves.toBe("ended");
+    expect(
+      warned.mock.calls.filter(([entry]) =>
+        JSON.stringify(entry).includes(chat.id)
+      )
+    ).toHaveLength(1);
     warned.mockRestore();
+  });
+
+  it("stops a run's API calls at the most one run may make", async () => {
+    const result = await runStep(
+      "export default async (env) => { let answered = 0; for (let i = 0; i < 150; i++) { try { await env.chat.info(); answered += 1; } catch (error) { return { answered, refused: String(error.message) }; } } return { answered }; };"
+    );
+
+    expect(result?.isError).toBeFalsy();
+    expect(
+      JSON.parse(result?.text.replace("Returned:\n", "") ?? "")
+    ).toStrictEqual({
+      answered: codeLimits.subRequests,
+      refused: agentErrors.create("agent.run_calls_spent").message,
+    });
   });
 
   it("has no Cache API to hand data to another chat", async () => {
@@ -419,26 +470,43 @@ describe("chat agent sandbox", () => {
     ).resolves.toStrictEqual({ isError: false, text: "Returned:\nundefined" });
   });
 
-  it("can't store more than the model reads, even with the language patched", async () => {
-    const { stub, chat, ask } = await newChat(
-      codeStep(
-        "String.prototype.slice = function () { return String(this); }; Array.prototype.push = function (...items) { for (const item of items) this[this.length] = item; return this.length; }; export default async () => { for (let i = 0; i < 5000; i++) console.log('x'.repeat(1000)); return 'y'.repeat(5_000_000); };"
-      ),
-      says("Done.")
-    );
+  it.each([
+    [
+      "patched string and array methods",
+      "String.prototype.slice = function () { return String(this); }; Array.prototype.push = function (...items) { for (const item of items) this[this.length] = item; return this.length; }; export default async () => { for (let i = 0; i < 5000; i++) console.log('x'.repeat(1000)); return 'y'.repeat(5_000_000); };",
+      /^Logs:\nx+/u,
+    ],
+    [
+      "a value that makes itself huge text",
+      "export default async () => { const value = () => {}; value.toString = () => 'z'.repeat(30_000_000); return value; };",
+      /^Returned:\nz{32000,}\n… \(cut: longer than 32768 characters\)$/u,
+    ],
+    [
+      "a forged result through Object.prototype.then",
+      "Object.prototype.then = function (resolve) { delete Object.prototype.then; resolve({ ok: true, logs: Array.from({ length: 1000 }, () => 'q'.repeat(31_000)), result: 'forged' }); }; export default async () => 'mine';",
+      /^Returned:\nmine$/u,
+    ],
+  ])(
+    "can't store more than the model reads, even with %s",
+    async (_, code, read) => {
+      const { stub, chat, ask } = await newChat(codeStep(code), says("Done."));
 
-    await ask("Flood it.");
+      await ask("Flood it.");
 
-    const [row] = await runInDurableObject(stub, (_instance, state) =>
-      state.storage.sql
-        .exec<{ longest: number }>(
-          "SELECT max(length(message)) AS longest FROM chat_messages WHERE chat_id = ?",
-          chat.id
-        )
-        .toArray()
-    );
-    expect(row?.longest).toBeLessThan(40_000);
-  });
+      // What the model read is the run's own output, cut to what it reads.
+      const [result] = await codeResults(stub, chat.id);
+      expect(result?.text).toMatch(read);
+      const [row] = await runInDurableObject(stub, (_instance, state) =>
+        state.storage.sql
+          .exec<{ longest: number }>(
+            "SELECT max(length(message)) AS longest FROM chat_messages WHERE chat_id = ?",
+            chat.id
+          )
+          .toArray()
+      );
+      expect(row?.longest).toBeLessThan(40_000);
+    }
+  );
 
   it("reports code that doesn't load", async () => {
     const result = await runStep("export default async () => {");

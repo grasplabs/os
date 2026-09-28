@@ -1,8 +1,10 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { agentErrors } from "@grasp-os/shared/agent";
 import { delegateActorOf } from "@grasp-os/shared/audit";
+import { featureErrors } from "@grasp-os/shared/errors";
 import { chatIdSchema, workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { ChatId } from "@grasp-os/shared/ids";
+import { log } from "@grasp-os/shared/log";
 import {
   authoritySchema,
   permissionErrors,
@@ -13,13 +15,15 @@ import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
 
 import { agentApis } from "./agent-apis.ts";
+import type { CodeRunCall } from "./agent-apis.ts";
 import { isMessage, runTurn } from "./agent.ts";
 import type { TurnResult } from "./agent.ts";
 import { memberRole } from "./auth/identity.ts";
+import { codeLimits } from "./code-mode.ts";
 import { migrateOnWake } from "./db/migrate.ts";
 import migrations from "./db/workspace/migrations/migrations.js";
 import { chatMessages, chats } from "./db/workspace/schema.ts";
-import { requireFeature } from "./features.ts";
+import { featureEnabled, requireFeature } from "./features.ts";
 import { models } from "./models.ts";
 
 export type Chat = typeof chats.$inferSelect;
@@ -81,6 +85,12 @@ const transcriptQuery = `
   )
   ORDER BY id`;
 
+/**
+ * Most ended code runs an object remembers, to refuse and log a call from
+ * one: a few turns' worth (at most 30 runs each).
+ */
+const endedRunsKept = 1000;
+
 /** A person's or team's workspace: chats and the Code Mode agent on Pi. */
 export class Workspace extends DurableObject<Env> {
   readonly #db = drizzle(this.ctx.storage);
@@ -92,10 +102,13 @@ export class Workspace extends DurableObject<Env> {
   readonly #turns = new Map<ChatId, AbortController>();
 
   /**
-   * The code runs going on now, as `<chat>/<run>`: their stubs answer only
-   * while they are here. In memory too, so a restart ends every run.
+   * Code runs, as `<chat>/<run>`: the API calls an open run has made, or
+   * that it ended (`reported` once a call after its end was logged). Their
+   * stubs answer only while a run is open and has calls left. In memory, so
+   * a restart ends every run. Ended runs are kept, oldest first, only up to
+   * {@link endedRunsKept}: a run forgotten answers as ended, unlogged.
    */
-  readonly #codeRuns = new Set<string>();
+  readonly #codeRuns = new Map<string, number | "ended" | "reported">();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -182,39 +195,43 @@ export class Workspace extends DurableObject<Env> {
         onBehalfOf: personId,
         mode: "interactive",
       });
-      // What the turn reads; the chat's APIs add to it (see agent.ts).
-      const provenance: string[] = [];
       // Refuses a model the deployment or its rules don't allow before
-      // anything is kept.
-      const model = await models(this.env).agent(
-        {
-          model: parsed.data.model,
-          purpose: "chat.turn",
-          trigger: delegateActorOf(authority),
-          work: {
-            authority,
-            context: { type: "chat", workspaceId, chatId: chat.id },
-          },
+      // anything is kept. Nothing the chat's APIs read feeds a request yet
+      // (the sample API reads nothing): the first API that reads data
+      // passes what it read as the requests' provenance.
+      const model = await models(this.env).agent({
+        model: parsed.data.model,
+        purpose: "chat.turn",
+        trigger: delegateActorOf(authority),
+        work: {
+          authority,
+          context: { type: "chat", workspaceId, chatId: chat.id },
         },
-        () => provenance
-      );
+      });
       return await runTurn({
         history: this.#transcript(chat.id),
         question: parsed.data.text,
         model,
         apis: agentApis(),
         scope: { workspaceId, chatId: chat.id, personId },
-        provenance,
-        stillActing: async () =>
-          (await memberRole(this.env.DB, personId)) !== undefined,
+        whyStop: async () => {
+          if (!featureEnabled(this.env, "agent")) {
+            return featureErrors.create("feature.disabled", {
+              feature: "agent",
+            });
+          }
+          return (await memberRole(this.env.DB, personId)) === undefined
+            ? permissionErrors.create("permission.person_inactive")
+            : undefined;
+        },
         runs: {
           open: () => {
             const runId = crypto.randomUUID();
-            this.#codeRuns.add(`${chat.id}/${runId}`);
+            this.#codeRuns.set(`${chat.id}/${runId}`, 0);
             return runId;
           },
           close: (runId) => {
-            this.#codeRuns.delete(`${chat.id}/${runId}`);
+            this.#endCodeRun(`${chat.id}/${runId}`);
           },
         },
         loader: this.env.LOADER,
@@ -235,6 +252,20 @@ export class Workspace extends DurableObject<Env> {
     }
   }
 
+  /** Marks a code run ended, and forgets the oldest ended runs past the cap. */
+  #endCodeRun(key: string): void {
+    // Moved to the end, so the map keeps ended runs oldest first.
+    this.#codeRuns.delete(key);
+    this.#codeRuns.set(key, "ended");
+    const ended = [...this.#codeRuns.keys()].filter(
+      (run) => typeof this.#codeRuns.get(run) !== "number"
+    );
+    const [oldest] = ended;
+    if (ended.length > endedRunsKept && oldest !== undefined) {
+      this.#codeRuns.delete(oldest);
+    }
+  }
+
   /**
    * Stops the chat's running turn, if there is one: the model request or
    * code run in flight ends, and the turn answers `cancelled`.
@@ -245,9 +276,30 @@ export class Workspace extends DurableObject<Env> {
     return turn !== undefined;
   }
 
-  /** Whether a code run of the chat is still going on (see agent-apis.ts). */
-  isCodeRunOpen(chatId: ChatId, runId: string): boolean {
-    return this.#codeRuns.has(`${chatId}/${runId}`);
+  /**
+   * Counts one API call of a code run of the chat, and says whether it may
+   * go on (see agent-apis.ts): `open` while the run is open and has made
+   * fewer than {@link codeLimits}' `subRequests` calls, `spent` past that,
+   * and `ended` once the run has ended, or for a run this object doesn't
+   * know (one from before a restart). A call after a run's end is logged
+   * once per run.
+   */
+  callFromCodeRun(chatId: ChatId, runId: string): CodeRunCall {
+    const key = `${chatId}/${runId}`;
+    const state = this.#codeRuns.get(key);
+    if (typeof state === "number") {
+      if (state >= codeLimits.subRequests) {
+        return "spent";
+      }
+      this.#codeRuns.set(key, state + 1);
+      return "open";
+    }
+    if (state === "ended") {
+      // Code still acting after its run ended: worth seeing in the logs.
+      log.warn("agent.run_ended", { chatId });
+      this.#codeRuns.set(key, "reported");
+    }
+    return "ended";
   }
 
   /** The chat's transcript, oldest first. */

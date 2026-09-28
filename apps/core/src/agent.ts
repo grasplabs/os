@@ -6,7 +6,6 @@ import type {
   Message,
   SystemMessage,
 } from "@earendil-works/pi-ai";
-import { permissionErrors } from "@grasp-os/shared/permissions";
 
 import type { AgentApi, AgentScope } from "./agent-apis.ts";
 import { describeRun, runCode } from "./code-mode.ts";
@@ -192,12 +191,11 @@ export interface Turn {
   /** Keeps a finished message: called in order, as each one finishes. */
   keep: (message: Message) => void;
   /**
-   * IDs of the resources the turn has read, which feed every later model
-   * request; the chat's APIs add to it as they read.
+   * Why the turn may not go on, if it may not: asked before every model
+   * request, so a person who left, or the agent switched off, stops a turn
+   * under way.
    */
-  provenance: string[];
-  /** Whether the person the agent acts for may still have it act. */
-  stillActing: () => Promise<boolean>;
+  whyStop: () => Promise<Error | undefined>;
 }
 
 const messageRoles = new Set<unknown>([
@@ -219,22 +217,26 @@ interface Progress {
   /** Code runs started. */
   runs: number;
   last?: AssistantMessage;
-  /** The person left during the turn. */
-  personLeft?: boolean;
+  /** The response whose code runs are being asked for, and how many so far. */
+  asking?: { response: AssistantMessage; calls: number };
+  /** Why the turn was stopped before a request, if it was. */
+  stopped?: Error;
 }
 
 /**
  * Why a code run the model asked for isn't started, if it isn't: too many
- * in one response or one turn, or its result would never be read.
+ * in one response or one turn, or its result would never be read. Counts
+ * the response's calls as they come, whatever IDs the model gave them.
  */
 const refusal = (
   progress: Progress,
-  response: AssistantMessage,
-  callId: string
+  response: AssistantMessage
 ): string | undefined => {
-  const position = response.content
-    .filter((block) => block.type === "toolCall")
-    .findIndex(({ id }) => id === callId);
+  if (progress.asking?.response !== response) {
+    progress.asking = { response, calls: 0 };
+  }
+  const position = progress.asking.calls;
+  progress.asking.calls += 1;
   if (position >= maxRunsPerResponse) {
     return `Not run: one response may run code at most ${maxRunsPerResponse} times. Run the rest in your next response.`;
   }
@@ -283,9 +285,9 @@ export const runTurn = async ({
   loader,
   signal: cancelled,
   keep,
-  stillActing,
+  whyStop,
 }: Turn): Promise<TurnResult> => {
-  // Cancelled by the caller, or stopped here when the person leaves.
+  // Cancelled by the caller, or stopped here (see `whyStop`).
   const stop = new AbortController();
   const signal = AbortSignal.any([cancelled, stop.signal]);
   const prompts: Message[] = [
@@ -304,16 +306,16 @@ export const runTurn = async ({
       // The transcript holds only pi's own messages.
       convertToLlm: (messages) => messages.filter(isMessage),
       toolExecution: "sequential",
-      // The agent acts for its person only while they are a member: checked
-      // again before every model request.
+      // Checked again before every model request.
       prepareRequest: async () => {
-        if (!(await stillActing())) {
-          progress.personLeft = true;
+        const reason = await whyStop();
+        if (reason !== undefined) {
+          progress.stopped = reason;
           stop.abort();
         }
       },
-      beforeToolCall: async ({ assistantMessage, toolCall }) => {
-        const reason = refusal(progress, assistantMessage, toolCall.id);
+      beforeToolCall: async ({ assistantMessage }) => {
+        const reason = refusal(progress, assistantMessage);
         if (reason === undefined) {
           progress.runs += 1;
         }
@@ -337,8 +339,8 @@ export const runTurn = async ({
     signal,
     model.stream
   );
-  if (progress.personLeft === true) {
-    throw permissionErrors.create("permission.person_inactive");
+  if (progress.stopped !== undefined) {
+    throw progress.stopped;
   }
   const { steps, last } = progress;
   const outcome = outcomeOf(last, steps, signal);

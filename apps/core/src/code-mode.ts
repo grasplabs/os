@@ -21,9 +21,11 @@ import { sandbox } from "./sandbox.ts";
 
 /**
  * How far one run may go beyond App code's CPU limit: calls out of the
- * isolate (its stubs) as the runtime counts them, and wall-clock time,
- * which also ends a run that waits forever. Memory is the runtime's
- * per-isolate limit; Worker Loader has no setting for less.
+ * isolate (its API calls, which the Workspace object counts on every call,
+ * `callFromCodeRun`; the runtime's own cap too, where it enforces one:
+ * plain workerd doesn't), and wall-clock time, which also ends a run that
+ * waits forever. Memory is the runtime's per-isolate limit; Worker Loader
+ * has no setting for less.
  */
 export const codeLimits = {
   subRequests: 100,
@@ -60,11 +62,11 @@ const tooLarge = new Error("too large");
 
 Object.defineProperty(globalThis, "caches", { value: undefined });
 
-// A value as text, never much longer than room: serializing stops as soon
-// as it would pass it, instead of building all of a huge value first.
-const show = (value) => {
+// A value as text: serializing stops as soon as it would pass room,
+// instead of building all of a huge value first.
+const render = (value) => {
   if (typeof value === "string") {
-    return slice(value, 0, room);
+    return value;
   }
   let size = 0;
   try {
@@ -80,9 +82,13 @@ const show = (value) => {
   } catch (error) {
     return error === tooLarge
       ? "(a value too large to show, over " + room + " characters)"
-      : slice(toText(value), 0, room);
+      : toText(value);
   }
 };
+
+// Never longer than room, whatever the value makes of itself (a
+// \`toString\` of its own, say).
+const show = (value) => slice(toText(render(value)), 0, room);
 
 export default class extends WorkerEntrypoint {
   async run() {
@@ -120,9 +126,12 @@ export default class extends WorkerEntrypoint {
         throw new TypeError("The module's default export must be an async function: export default async (env) => { ... }");
       }
       const value = await code(env);
-      return { ok: true, logs, result: value === undefined ? undefined : show(value) };
+      // An own \`then\`, so an \`Object.prototype.then\` the code set can't
+      // make the result a thenable that resolves to something else.
+      return { then: undefined, ok: true, logs, result: value === undefined ? undefined : show(value) };
     } catch (error) {
       return {
+        then: undefined,
         ok: false,
         logs,
         error: error instanceof Error ? show(error.stack ?? toText(error)) : show(error),
@@ -136,12 +145,22 @@ export default class extends WorkerEntrypoint {
  * What the isolate sends back, bounded here whatever the harness did: the
  * agent's code runs in the same isolate and can change anything there.
  */
-const runSchema = z.object({
-  ok: z.boolean(),
-  logs: z.array(z.string().max(room)).max(codeLimits.logLines),
-  result: z.string().max(room).optional(),
-  error: z.string().max(room).optional(),
-});
+const runSchema = z
+  .object({
+    ok: z.boolean(),
+    logs: z.array(z.string().max(room)).max(codeLimits.logLines),
+    result: z.string().max(room).optional(),
+    error: z.string().max(room).optional(),
+  })
+  // All of it: the logs share one room, the result or error has another.
+  .refine(
+    ({ logs, result, error }) =>
+      logs.reduce((total, line) => total + line.length, 0) +
+        (result?.length ?? 0) +
+        (error?.length ?? 0) <=
+      2 * room,
+    { message: "More than a run may send back" }
+  );
 
 /** One run of the agent's code. */
 export type CodeRun = z.infer<typeof runSchema>;
@@ -221,20 +240,36 @@ export const runCode = async (
   }
 };
 
-const truncate = (text: string, max: number): string =>
-  text.length <= max
+/**
+ * A run as the model reads it: its logs, then its result or error, at most
+ * `outputChars` of it. Built only that far, however much the run sent.
+ */
+export const describeRun = ({ ok, logs, result, error }: CodeRun): string => {
+  const max = codeLimits.outputChars;
+  let text = "";
+  // One character past `max` at most: enough to know it was cut.
+  const add = (piece: string) => {
+    text += piece.slice(0, Math.max(0, max + 1 - text.length));
+  };
+  const part = (title: string, lines: readonly string[]) => {
+    add(text === "" ? `${title}:` : `\n\n${title}:`);
+    for (const line of lines) {
+      add(`\n${line}`);
+    }
+  };
+  if (logs.length > 0) {
+    part("Logs", logs);
+  }
+  if (ok && result !== undefined) {
+    part("Returned", [result]);
+  }
+  if (!ok) {
+    part("Error", [error ?? "The run failed."]);
+  }
+  if (text === "") {
+    return "(no logs, returned nothing)";
+  }
+  return text.length <= max
     ? text
     : `${text.slice(0, max)}\n… (cut: longer than ${max} characters)`;
-
-/** A run as the model reads it: its logs, then its result or error. */
-export const describeRun = ({ ok, logs, result, error }: CodeRun): string => {
-  const parts = [
-    ...(logs.length > 0 ? [`Logs:\n${logs.join("\n")}`] : []),
-    ...(ok && result !== undefined ? [`Returned:\n${result}`] : []),
-    ...(ok ? [] : [`Error:\n${error ?? "The run failed."}`]),
-  ];
-  return truncate(
-    parts.length === 0 ? "(no logs, returned nothing)" : parts.join("\n\n"),
-    codeLimits.outputChars
-  );
 };

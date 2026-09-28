@@ -12,4 +12,6 @@ export const agentErrors = defineErrorFamily({
     "This chat is too long to go on. Start a new chat to ask more.",
   "agent.run_ended":
     "This code run has ended, so its APIs don't answer any more.",
+  "agent.run_calls_spent":
+    "This code run has made all the API calls one run may. Run the rest in another code step.",
 });
