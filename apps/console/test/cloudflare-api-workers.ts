@@ -156,12 +156,87 @@ const isDatabase = (value: unknown): value is D1Database =>
   "prepare" in value &&
   "batch" in value;
 
-/** Where the fake keeps every account's D1 data: one real D1 for all. */
-const clientD1 = (): D1Database => {
-  const database: unknown = Reflect.get(env, "CLIENT_D1");
+/** The real D1 databases the fake keeps its databases in (vite.test.config.ts). */
+const clientD1Count = 4;
+
+/** The real D1 database number `slot`. */
+const clientD1 = (slot: number): D1Database => {
+  const database: unknown = Reflect.get(env, `CLIENT_D1_${slot}`);
   if (!isDatabase(database)) {
-    throw new TypeError("Expected the fake's D1 database as CLIENT_D1");
+    throw new TypeError(`Expected the fake's D1 database as CLIENT_D1_${slot}`);
   }
+  return database;
+};
+
+/** The order to drop things in: triggers and views, virtual tables, tables. */
+const dropRank = ({ type, sql }: { type: string; sql: string | null }) => {
+  if (type !== "table") {
+    return 0;
+  }
+  return sql?.startsWith("CREATE VIRTUAL TABLE") === true ? 1 : 2;
+};
+
+/** Drops everything in `database`: triggers, views, virtual and plain tables. */
+const emptied = async (database: D1Database): Promise<void> => {
+  const { results } = await database
+    .prepare(
+      "SELECT type, name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' AND name NOT LIKE '_cf_%' AND type IN ('table', 'view', 'trigger')"
+    )
+    .all<{ type: string; name: string; sql: string | null }>();
+  const drops = results
+    .toSorted((a, b) => dropRank(a) - dropRank(b))
+    .map(({ type, name }) =>
+      database.prepare(
+        `DROP ${type.toUpperCase()} IF EXISTS "${name.replaceAll('"', '""')}"`
+      )
+    );
+  if (drops.length > 0) {
+    await database.batch([
+      database.prepare("PRAGMA defer_foreign_keys = true"),
+      ...drops,
+    ]);
+  }
+};
+
+/** Slots of databases in use, by the fake database's id. */
+const slots = new Map<string, number>();
+
+/**
+ * The real D1 database the fake database `uuid` of `account` keeps its
+ * data in: its own, emptied when it's first used, so no two databases of
+ * an account see each other's tables. Slots of databases no account holds
+ * any more (from earlier tests) are reused.
+ */
+const databaseOf = async (
+  account: AccountState,
+  uuid: string
+): Promise<D1Database> => {
+  const held = slots.get(uuid);
+  if (held !== undefined) {
+    return clientD1(held);
+  }
+  const live = new Set(
+    account.d1.flatMap((database) => {
+      const slot = slots.get(database.uuid);
+      return slot === undefined ? [] : [slot];
+    })
+  );
+  const slot = Array.from({ length: clientD1Count }, (_, index) => index).find(
+    (index) => !live.has(index)
+  );
+  if (slot === undefined) {
+    throw new Error(
+      `The fake holds at most ${clientD1Count} databases at once`
+    );
+  }
+  for (const [id, used] of slots) {
+    if (used === slot) {
+      slots.delete(id);
+    }
+  }
+  slots.set(uuid, slot);
+  const database = clientD1(slot);
+  await emptied(database);
   return database;
 };
 
@@ -184,6 +259,21 @@ export const workerRoutes: Route[] = [
       const version = newVersion(script, upload, secretsOf(script, upload));
       deploy(script, [{ version_id: version.id, percentage: 100 }], {});
       return envelope({ id: name });
+    },
+  },
+  {
+    method: "GET",
+    path: /^\/workers\/scripts\/(?<script>[^/]+)\/versions$/u,
+    answer: ({ account, params }) => {
+      const script = scriptOf(account, params);
+      if (script instanceof Response) {
+        return script;
+      }
+      // The latest first, as the API lists them.
+      const items = script.versions
+        .toReversed()
+        .map(({ id, number }) => ({ id, number }));
+      return envelope({ items });
     },
   },
   {
@@ -440,7 +530,7 @@ export const workerRoutes: Route[] = [
       if (!account.d1.some(({ uuid }) => uuid === params.database)) {
         return notFound();
       }
-      const d1 = clientD1();
+      const d1 = await databaseOf(account, params.database ?? "");
       try {
         const results = await d1.batch(
           sqlStatements(text(json, "sql")).map((statement) =>

@@ -59,9 +59,14 @@ export default defineProject({
           CONSOLE_MIGRATIONS: migrations,
           KNOWLEDGE_MIGRATION_FILES: knowledgeMigrationFiles,
         },
-        // Where the fake Cloudflare API runs client D1 queries
-        // (test/cloudflare-api.ts).
-        d1Databases: { CLIENT_D1: "client-d1" },
+        // Where the fake Cloudflare API runs client D1 queries, one for
+        // each database it holds at once (test/cloudflare-api-workers.ts).
+        d1Databases: Object.fromEntries(
+          Array.from({ length: 4 }, (_, slot) => [
+            `CLIENT_D1_${slot}`,
+            `client-d1-${slot}`,
+          ])
+        ),
       },
     }),
   ],

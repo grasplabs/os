@@ -43,6 +43,11 @@ export interface AccountState {
   d1: { uuid: string; name: string; jurisdiction?: string }[];
   /** Buckets by jurisdiction: a name is unique only within one. */
   buckets: { name: string; jurisdiction: string }[];
+  /**
+   * The jurisdiction R2 reports for every bucket, whatever it's in: a test
+   * of an API that answers other than asked.
+   */
+  r2Reports?: string;
   gateways: Json[];
   scripts: Map<string, ScriptState>;
   workflows: Map<string, { class_name: string; script_name: string }>;

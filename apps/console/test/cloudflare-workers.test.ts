@@ -9,11 +9,13 @@ import {
   deleteSecret,
   deployVersion,
   isSecretsConflict,
+  latestIsDeployed,
   listDeployments,
   listSecretNames,
   putSchedules,
   putSecret,
   putWorkflow,
+  RolledBackError,
   setScriptSubdomain,
   queryD1,
   uploadScript,
@@ -255,8 +257,9 @@ describe("uploads that fail part way", () => {
     const files = Array.from({ length: 15 }, (_, index) =>
       file(`/file-${index}.js`, `export default ${index};`)
     );
-    // The session, then the first bucket's upload fails once.
-    cloudflare.failCall(2, 500);
+    // The versions lookup, the session, then the first bucket's upload
+    // fails once.
+    cloudflare.failCall(3, 500);
     await uploadScript(
       api,
       account.id,
@@ -274,7 +277,8 @@ describe("uploads that fail part way", () => {
 
   it("retries a script upload after a server error, unless it migrates Durable Objects", async () => {
     const account = cloudflare.addAccount();
-    cloudflare.failCall(1, 500);
+    // The versions lookup (none yet), then the upload, which fails once.
+    cloudflare.failCall(2, 500);
     await uploadScript(
       api,
       account.id,
@@ -282,12 +286,14 @@ describe("uploads that fail part way", () => {
       release("r000001-aaaaaaa")
     );
     expect(cloudflare.calls.map(({ method }) => method)).toStrictEqual([
+      "GET",
       "PUT",
       "PUT",
     ]);
 
     const migrating = release("r000002-bbbbbbb");
-    cloudflare.failCall(1, 500);
+    // The versions and deployments lookups, then the upload.
+    cloudflare.failCall(3, 500);
     await expect(
       uploadScript(api, account.id, "grasp-os-core", {
         ...migrating,
@@ -297,7 +303,7 @@ describe("uploads that fail part way", () => {
         },
       })
     ).rejects.toMatchObject({ status: 500 });
-    expect(cloudflare.calls).toHaveLength(3);
+    expect(cloudflare.calls).toHaveLength(6);
   });
 });
 
@@ -332,7 +338,7 @@ describe("secrets, schedules and workflows", () => {
     ).resolves.toBeUndefined();
   });
 
-  it("carries secrets to every new version, and adds a rollout's own", async () => {
+  it("carries secrets to every new version, and gives a rollout's version exactly its own", async () => {
     const account = cloudflare.addAccount();
     await uploadScript(
       api,
@@ -448,6 +454,68 @@ describe("secrets, schedules and workflows", () => {
         value: "newer",
       })
     ).rejects.toMatchObject({ status: 400, codes: [10_215] });
+  });
+
+  it("never brings back a rolled-back secret in the next version", async () => {
+    const account = cloudflare.addAccount();
+    await uploadScript(
+      api,
+      account.id,
+      "grasp-os-core",
+      release("r000001-aaaaaaa")
+    );
+    await putSecret(api, account.id, "grasp-os-core", {
+      name: "ROUTER_SECRET",
+      value: "v1",
+    });
+    const [, first] = account.scripts.get("grasp-os-core")?.versions ?? [];
+    // v2 adds a credential; the rollback to v1 takes it out of service.
+    const second = await uploadVersionWithSecrets(
+      api,
+      account.id,
+      "grasp-os-core",
+      release("r000002-bbbbbbb"),
+      [
+        { name: "ROUTER_SECRET", value: "v2" },
+        { name: "LEAKED_KEY", value: "revoked" },
+      ]
+    );
+    await deployVersion(api, account.id, "grasp-os-core", second.id, {
+      message: "Rollout",
+    });
+    await deployVersion(api, account.id, "grasp-os-core", first?.id ?? "", {
+      message: "Rollback",
+      force: true,
+    });
+
+    // Keeping secrets now would keep v2's, the latest: refused.
+    await expect(
+      latestIsDeployed(api, account.id, "grasp-os-core")
+    ).resolves.toBeFalsy();
+    await expect(
+      uploadVersion(
+        api,
+        account.id,
+        "grasp-os-core",
+        release("r000003-ccccccc")
+      )
+    ).rejects.toBeInstanceOf(RolledBackError);
+    await expect(
+      uploadScript(api, account.id, "grasp-os-core", release("r000003-ccccccc"))
+    ).rejects.toBeInstanceOf(RolledBackError);
+
+    // With every secret given, the new version has exactly those.
+    const third = await uploadVersionWithSecrets(
+      api,
+      account.id,
+      "grasp-os-core",
+      release("r000003-ccccccc"),
+      [{ name: "ROUTER_SECRET", value: "v1" }]
+    );
+    const uploaded = account.scripts
+      .get("grasp-os-core")
+      ?.versions.find(({ id }) => id === third.id);
+    expect(uploaded?.secrets).toStrictEqual(new Map([["ROUTER_SECRET", "v1"]]));
   });
 
   it("keeps a secret's value out of the error when it's refused", async () => {
@@ -567,6 +635,42 @@ describe("D1 migrations", () => {
       "SELECT name FROM sqlite_master WHERE type = 'trigger' AND name LIKE 'sections_search_%' ORDER BY name;"
     );
     expect(triggers?.length).toBeGreaterThan(0);
+  });
+
+  it("keeps each database's tables to itself", async () => {
+    const account = cloudflare.addAccount();
+    const core = await ensureD1Database(api, account.id, "grasp-os-core");
+    const knowledge = await ensureD1Database(
+      api,
+      account.id,
+      "grasp-os-knowledge"
+    );
+    await applyD1Migrations(api, account.id, core.uuid, [
+      { name: "0000_only_core.sql", sql: "CREATE TABLE only_core (id TEXT);" },
+    ]);
+    const tablesOf = async (uuid: string) => {
+      const [rows] = await queryD1(
+        api,
+        account.id,
+        uuid,
+        "SELECT name FROM sqlite_master WHERE name IN ('only_core', 'd1_migrations') ORDER BY name;"
+      );
+      return rows;
+    };
+    await expect(tablesOf(core.uuid)).resolves.toStrictEqual([
+      { name: "d1_migrations" },
+      { name: "only_core" },
+    ]);
+    await expect(tablesOf(knowledge.uuid)).resolves.toStrictEqual([]);
+  });
+
+  it("fails a query when a statement in it failed, though the answer succeeded", async () => {
+    const account = cloudflare.addAccount();
+    const { uuid } = await ensureD1Database(api, account.id, "grasp-os-core");
+    cloudflare.failCall(1, "statement-failed");
+    await expect(
+      queryD1(api, account.id, uuid, "SELECT 1; SELECT 2;")
+    ).rejects.toThrow(`D1 query on ${uuid} failed at statement 2 of 2`);
   });
 
   it("stops at a migration that fails, recording none after it", async () => {

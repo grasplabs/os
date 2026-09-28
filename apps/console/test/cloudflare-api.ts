@@ -6,8 +6,9 @@
  * Nth call answers 429 or 500) and read every call it got.
  *
  * It replaces `fetch` in the tests' isolate, which is also where the
- * console's Workflow steps run. D1 queries run on a real D1 database, one
- * for every account's databases (`CLIENT_D1`, vite.test.config.ts).
+ * console's Workflow steps run. D1 queries run on real D1 databases, one
+ * for each database the fake holds at once (`CLIENT_D1_<n>`,
+ * vite.test.config.ts).
  */
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 
@@ -90,7 +91,12 @@ const accountRoutes: Route[] = [
         ({ name, jurisdiction }) =>
           name === params.name && jurisdiction === jurisdictionOf(call)
       );
-      return bucket === undefined ? notFound() : envelope(bucket);
+      return bucket === undefined
+        ? notFound()
+        : envelope({
+            name: bucket.name,
+            jurisdiction: account.r2Reports ?? bucket.jurisdiction,
+          });
     },
   },
   {
@@ -102,7 +108,10 @@ const accountRoutes: Route[] = [
         jurisdiction: jurisdictionOf(call),
       };
       account.buckets.push(bucket);
-      return envelope(bucket);
+      return envelope({
+        ...bucket,
+        jurisdiction: account.r2Reports ?? bucket.jurisdiction,
+      });
     },
   },
   {
@@ -155,14 +164,45 @@ const routeOf = (
 };
 
 /**
- * How a planned call fails: rate-limited (429), a server error in the
- * envelope (500, 503), the edge's HTML error page (502), or no answer.
+ * How a planned call fails: rate-limited (429, optionally with a
+ * `Retry-After`), a server error in the envelope (500, 503), the edge's
+ * HTML error page (502), no answer before it ran (`network`), or no answer
+ * after it ran (`lost`: the change is made, its response never arrives),
+ * or, for a D1 query, an answer that succeeds with a statement that didn't
+ * (`statement-failed`).
  */
-export type Failure = 429 | 500 | 502 | 503 | "network";
+export type Failure =
+  | 429
+  | 500
+  | 502
+  | 503
+  | "network"
+  | "lost"
+  | "statement-failed"
+  | { retryAfter: string };
 
-const failed = (failure: Failure): Response => {
+const lostConnection = (): never => {
+  throw new TypeError("Network connection lost.");
+};
+
+const failed = (failure: Exclude<Failure, "lost">): Response => {
   if (failure === "network") {
-    throw new TypeError("Network connection lost.");
+    return lostConnection();
+  }
+  if (failure === "statement-failed") {
+    return envelope([
+      { results: [], success: true, meta: {} },
+      { results: [], success: false, meta: {} },
+    ]);
+  }
+  if (typeof failure === "object") {
+    const response = refusal(
+      429,
+      971,
+      "Please wait and consider throttling your request speed"
+    );
+    response.headers.set("retry-after", failure.retryAfter);
+    return response;
   }
   if (failure === 502) {
     return new Response("<html>Bad gateway</html>", {
@@ -205,20 +245,11 @@ export const mockCloudflareApi = (token: string) => {
   /** Calls being answered now, and the most at once. */
   const load = { now: 0, peak: 0 };
 
-  const answer = async (request: Request): Promise<Response> => {
-    const url = new URL(request.url);
-    const call: ApiCall = {
-      method: request.method,
-      path: url.pathname.slice(new URL(base).pathname.length),
-      query: url.searchParams,
-      headers: request.headers,
-      body: await readBody(request),
-    };
-    calls.push(call);
-    const failure = planned.get(calls.length);
-    if (failure !== undefined) {
-      return failed(failure);
-    }
+  /** Answers `call` as the API would. */
+  const respond = async (
+    request: Request,
+    call: ApiCall
+  ): Promise<Response> => {
     const authorized =
       request.headers.get("authorization") === `Bearer ${token}`;
     if (call.path === "/accounts" && call.method === "GET") {
@@ -255,6 +286,27 @@ export const mockCloudflareApi = (token: string) => {
       params: found.params,
       json,
     });
+  };
+
+  const answer = async (request: Request): Promise<Response> => {
+    const url = new URL(request.url);
+    const call: ApiCall = {
+      method: request.method,
+      path: url.pathname.slice(new URL(base).pathname.length),
+      query: url.searchParams,
+      headers: request.headers,
+      body: await readBody(request),
+    };
+    calls.push(call);
+    const failure = planned.get(calls.length);
+    if (failure === "lost") {
+      await respond(request, call);
+      return lostConnection();
+    }
+    if (failure !== undefined) {
+      return failed(failure);
+    }
+    return await respond(request, call);
   };
 
   beforeEach(() => {
