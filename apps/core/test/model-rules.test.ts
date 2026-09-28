@@ -165,6 +165,7 @@ describe("model rules", { timeout: 60_000 }, () => {
         subject: { type: "app", appId },
         onBehalfOf: builder.userId,
         mode: "interactive",
+        appVersion: 1,
       },
       context: { type: "app", appId },
     };
@@ -461,6 +462,7 @@ describe("model rules", { timeout: 60_000 }, () => {
             subject: { type: "app", appId: app },
             onBehalfOf: "person-1",
             mode: "workflow",
+            appVersion: 1,
           },
           context: { type: "app", appId: other },
         },
@@ -605,6 +607,7 @@ describe("model rules", { timeout: 60_000 }, () => {
             subject: { type: "app", appId },
             onBehalfOf: ada.userId,
             mode: "workflow",
+            appVersion: 1,
           },
           context: { type: "run", appId, runId: runIdSchema.parse(run.id) },
         },

@@ -342,19 +342,28 @@ export interface PermissionsApi {
  * lives: connect limits personal connections to their owner, and the
  * Knowledge queries limit collections to what the person may read.
  */
-export const authoritySchema = z.strictObject({
-  subject: permissionSubjectSchema,
-  onBehalfOf: identifierSchema,
-  mode: z.enum(["interactive", "workflow"]),
-  /**
-   * For a call from an App's code: the App version whose code made it, set
-   * by the host, so the audit log can trace each call to the code that
-   * made it (threat model SB9). It never decides access. Optional, so a
-   * connect that knows it still accepts the capabilities of a core that
-   * doesn't set it yet; connect deploys first.
-   */
-  appVersion: z.int().positive().optional(),
-});
+export const authoritySchema = z
+  .strictObject({
+    subject: permissionSubjectSchema,
+    onBehalfOf: identifierSchema,
+    mode: z.enum(["interactive", "workflow"]),
+    /**
+     * For a call from an App's code: the App version whose code made it,
+     * set by the host. Required for an App, and it decides access: a
+     * version no admin approved changes nothing (core's `authorize`). The
+     * audit log traces each call to the code that made it (threat model
+     * SB9). An agent has none.
+     */
+    appVersion: z.int().positive().optional(),
+  })
+  .refine(
+    ({ subject, appVersion }) =>
+      (subject.type === "app") === (appVersion !== undefined),
+    {
+      path: ["appVersion"],
+      message: "An App's call names its version; an agent's none",
+    }
+  );
 export type Authority = z.infer<typeof authoritySchema>;
 
 /**

@@ -99,6 +99,7 @@ export const appFor = (person: string, appId = "app-crm"): Authority =>
     subject: { type: "app", appId },
     onBehalfOf: person,
     mode: "workflow",
+    appVersion: 1,
   });
 
 /** A call as core states it, with plain string IDs. */

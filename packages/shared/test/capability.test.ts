@@ -19,6 +19,7 @@ const authority = authoritySchema.parse({
   subject: { type: "app", appId: "app-invoices" },
   onBehalfOf: "user-anna",
   mode: "workflow",
+  appVersion: 1,
 });
 
 const scope: CapabilityScope = {

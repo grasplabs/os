@@ -1,5 +1,6 @@
 import { signCapability } from "@grasp-os/shared/capability";
 import {
+  authoritySchema,
   bindingNameSchema,
   permissionObjectSchema,
 } from "@grasp-os/shared/permissions";
@@ -304,6 +305,37 @@ describe("permissions", () => {
     await expect(
       Promise.all([callStub(held), callThrough(authority, "OUTLOOK_TOO")])
     ).resolves.toStrictEqual(["permission.denied", reached]);
+  });
+
+  it("refuse an App's call that changes things when it names no version of its code", async () => {
+    const admin = await permissionApi("admin");
+    const app = await newApp(admin.api);
+    const { id } = await admin.api.permissions.request(outlook(app.appId));
+    await grantReviewed(admin.api, id);
+    const check = async (authority: Authority) =>
+      await outcome(
+        authorize(
+          env,
+          authority,
+          permissionObjectSchema.parse(outlook(app.appId).object),
+          "mail.list",
+          id
+        )
+      );
+    const unversioned: Authority = {
+      subject: app,
+      onBehalfOf: admin.userId,
+      mode: "interactive",
+    };
+
+    await expect(
+      Promise.all([
+        check(unversioned),
+        check({ ...unversioned, appVersion: 1 }),
+      ])
+    ).resolves.toStrictEqual(["permission.denied", "ok"]);
+    // Nor does one pass as an App's authority.
+    expect(authoritySchema.safeParse(unversioned).success).toBeFalsy();
   });
 
   it("are granted to an agent with no version reviewed, as it has none", async () => {

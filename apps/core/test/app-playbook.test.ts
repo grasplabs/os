@@ -598,6 +598,7 @@ describe("App server code writing the Playbook", { timeout: 60_000 }, () => {
       subject: { type: "app" as const, appId: app },
       onBehalfOf: admin.userId,
       mode: "interactive" as const,
+      appVersion: 1,
     };
     const context = { type: "app" as const, appId: app };
     const path = `workflows/pay-${unique()}.md`;
@@ -671,6 +672,7 @@ describe("App server code writing the Playbook", { timeout: 60_000 }, () => {
             subject: { type: "app", appId: app },
             onBehalfOf: admin.userId,
             mode: "interactive",
+            appVersion: 1,
           },
           { type: "app", appId: app },
           permissionIdSchema.parse(permissionId),

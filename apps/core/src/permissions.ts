@@ -1116,13 +1116,15 @@ export const authorize = async (
   // An App's code changes things only from a version an admin approved
   // (`madeCurrent`): a run keeps the version it started on, which may be
   // one made current since without, its permissions granted again for
-  // another.
-  const unapproved =
-    subject.type === "app" &&
-    appVersion !== undefined &&
-    changesThings(object, action)
-      ? sql`NOT ${unapprovedSql(subject.appId, appVersion)}`
-      : undefined;
+  // another. Without a version, which the host always sets for an App,
+  // nothing is approved: it fails closed.
+  let unapproved: SQL | undefined;
+  if (subject.type === "app" && changesThings(object, action)) {
+    unapproved =
+      appVersion === undefined
+        ? sql`0`
+        : sql`NOT ${unapprovedSql(subject.appId, appVersion)}`;
+  }
   const rows = await drizzle(env.DB)
     .select({
       id: permissions.id,

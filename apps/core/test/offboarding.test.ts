@@ -160,6 +160,7 @@ describe("removing a member", () => {
       subject: app,
       onBehalfOf: person.userId,
       mode: "workflow",
+      appVersion: 1,
     });
     const held = await envOf(authority);
     const call = async () =>

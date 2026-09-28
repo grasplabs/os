@@ -58,6 +58,7 @@ const work = {
     subject: { type: "app", appId: appIdSchema.parse("app-models") },
     onBehalfOf: "person-models",
     mode: "interactive",
+    appVersion: 1,
   },
   context: { type: "app", appId: appIdSchema.parse("app-models") },
 } as const;

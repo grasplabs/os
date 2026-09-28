@@ -767,6 +767,7 @@ describe("snapshots the platform takes", { timeout: 60_000 }, () => {
         subject: { type: "app", appId: app },
         onBehalfOf: admin.userId,
         mode: "interactive",
+        appVersion: 1,
       },
       { type: "app", appId: app },
       permissionIdSchema.parse(permissionId),
