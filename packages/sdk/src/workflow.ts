@@ -410,10 +410,9 @@ export interface StepRunner {
   /**
    * Durably waits for an event of `type`, e.g. from a connector. Each wait
    * takes the first event of its type that no earlier wait took, including
-   * one sent before the wait began. Events carry no ID, so an event
-   * delivered twice (a sender retrying) answers this wait and then a later
-   * wait for the same type too. A workflow that waits more than once should
-   * use a distinct event type for each wait.
+   * one sent before the wait began. An event delivered twice (a sender
+   * retrying) is taken once: its copy answers no later wait, so a workflow
+   * may wait for the same type more than once.
    */
   waitFor: <Payload extends z.ZodType = z.ZodUnknown>(
     name: string,

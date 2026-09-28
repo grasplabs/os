@@ -1,6 +1,7 @@
 import { wrapWorkflowBinding } from "@cloudflare/dynamic-workflows";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
+import { z } from "zod";
 
 // The engine that runs Apps' workflow runs, behind the little core asks of
 // it: create a run, see where it is, terminate it, send it an event. This
@@ -55,12 +56,27 @@ export interface RunEngine {
    * no instance of, stays as it is.
    */
   terminate: (id: string) => Promise<void>;
-  /** Sends the run an event, for a wait on it to see. */
+  /**
+   * Sends the run an event, for a wait on it to see. `event.id` names the
+   * event, not the delivery: a sender that tries again sends the same ID,
+   * and the run takes the event once (`RunHost.waitForEvent`).
+   */
   sendEvent: (
     id: string,
-    event: { type: string; payload: unknown }
+    event: { type: string; id: string; payload: unknown }
   ) => Promise<void>;
 }
+
+/**
+ * The payload of an event as the engine carries it: the event's own ID
+ * next to its payload. The engine keeps a run's events by type only, with
+ * no ID, so a copy of one delivered twice would otherwise pass for a new
+ * event.
+ */
+export const sentEventSchema = z.strictObject({
+  id: z.string().min(1),
+  payload: z.unknown(),
+});
 
 /** How Workflows says it has no instance of that ID. */
 const instanceNotFound = /\binstance\.not_found\b/u;
@@ -136,8 +152,13 @@ export const runEngine = (env: Env): RunEngine => ({
       }
     }
   },
-  sendEvent: async (id, event) => {
+  sendEvent: async (id, { type, id: eventId, payload }) => {
     const instance = await env.WORKFLOWS.get(id);
-    await instance.sendEvent(event);
+    await instance.sendEvent({
+      type,
+      payload: { id: eventId, payload } satisfies z.input<
+        typeof sentEventSchema
+      >,
+    });
   },
 });

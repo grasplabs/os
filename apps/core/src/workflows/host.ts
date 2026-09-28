@@ -45,6 +45,7 @@ import type { Feature } from "../features.ts";
 import { models } from "../models.ts";
 import { requireActivePerson, requireApprovedVersion } from "../permissions.ts";
 import type { Settled, StepError } from "./code.ts";
+import { sentEventSchema } from "./engine.ts";
 
 // The engine a run's workflow code runs on, as core's side of it: the SDK's
 // `WorkflowEngine` (`@grasp-os/sdk/engine`) on Cloudflare's `step` API. The
@@ -375,6 +376,13 @@ const coreStepReserve = 5;
 const offStepPrefix = `${coreStepPrefix}off:`;
 
 /**
+ * The steps a wait for an event takes besides its own: its deadline, and
+ * a wait again for each copy of an event it passes over. Core's, and
+ * counted as the run's own against the reserve, as the sleeps above.
+ */
+const waitStepPrefix = `${coreStepPrefix}wait:`;
+
+/**
  * How long a run first waits before it checks a switched-off feature
  * again; each wait after doubles, up to {@link maxOffWaits} times this.
  */
@@ -449,7 +457,9 @@ export const watchedStep = (
   const take = (name: string): void => {
     taken += 1;
     const reserved =
-      name.startsWith(coreStepPrefix) && !name.startsWith(offStepPrefix);
+      name.startsWith(coreStepPrefix) &&
+      !name.startsWith(offStepPrefix) &&
+      !name.startsWith(waitStepPrefix);
     if (!reserved && taken > stepLimit - coreStepReserve) {
       throw workflowErrors.create("workflow.too_many_steps");
     }
@@ -662,6 +672,12 @@ export class RunHost extends RpcTarget {
    * abandoned attempt that ends late can't clear a newer one's.
    */
   #running: StepAttempt | undefined;
+  /**
+   * The IDs of the events this run's waits took, as far as this execution
+   * has come: every execution replays the waits before, in order, so a
+   * wait sees the IDs of all that came before it.
+   */
+  readonly #takenEvents = new Set<string>();
 
   constructor(env: Env, step: RunStep, run: HostedRun, hooks: HostHooks) {
     super();
@@ -1064,7 +1080,12 @@ export class RunHost extends RpcTarget {
 
   /**
    * The first event of `type` for this run that no earlier wait took, or
-   * `received: false` at the timeout.
+   * `received: false` at the timeout. The engine keeps a run's events by
+   * type only, so a copy of an event delivered twice stays for the next
+   * wait of its type: a wait passes over an event whose ID an earlier one
+   * took, and waits again for what is left of its timeout. The deadline
+   * is recorded, so a wait that passes over a copy after a restart waits
+   * no longer than it would have.
    */
   async waitForEvent(
     name: unknown,
@@ -1078,14 +1099,37 @@ export class RunHost extends RpcTarget {
       // Held before it begins, so it neither takes an event nor times out
       // while workflows are off: an event sent meanwhile waits for it.
       await this.#waitWhileOff(step, ["workflows"]);
-      try {
-        const event = await this.#step.waitForEvent(step, { type, timeout });
-        return { received: true, payload: event.payload };
-      } catch (error) {
-        if (isTimeout(error)) {
-          return { received: false };
+      const prefix = `${waitStepPrefix}${await offKeyOf(step)}`;
+      const deadline = z
+        .number()
+        .parse(
+          await this.#step.do(
+            `${prefix}:deadline`,
+            {},
+            async () => await Promise.resolve(Date.now() + timeout)
+          )
+        );
+      for (let copies = 0; ; copies += 1) {
+        let event: { payload: unknown };
+        try {
+          // oxlint-disable-next-line no-await-in-loop -- one wait at a time
+          event = await this.#step.waitForEvent(
+            copies === 0 ? step : `${prefix}:${copies}`,
+            // At least 1 ms: the engine takes none as its default of a
+            // day. A replayed wait answers as it did, whatever it's given.
+            { type, timeout: Math.max(deadline - Date.now(), 1) }
+          );
+        } catch (error) {
+          if (isTimeout(error)) {
+            return { received: false };
+          }
+          throw error;
         }
-        throw error;
+        const { id, payload } = sentEventSchema.parse(event.payload);
+        if (!this.#takenEvents.has(id)) {
+          this.#takenEvents.add(id);
+          return { received: true, payload };
+        }
       }
     });
   }

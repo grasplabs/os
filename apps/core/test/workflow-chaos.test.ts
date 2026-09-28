@@ -13,8 +13,10 @@ import { mailConnection } from "./mail-connection.ts";
 import {
   endLiveRuns,
   finished,
+  listening,
   liveStatus,
   resumed,
+  sent,
   sleeping,
   stepDone,
   stopped,
@@ -47,9 +49,10 @@ import {
 //   that step, which runs it again from scratch;
 // - a long sleep: a day's sleep, cut short while the run is stopped (the
 //   engine's test introspection);
-// - an event or a start delivered twice: the engine's own `sendEvent`, and
-//   a second create of the run's instance under its ID (triggers aren't in
-//   yet; a trigger's duplicate events are for its own tests);
+// - an event or a start delivered twice: the same event (its ID) sent
+//   again through core's `sendEvent`, and a second create of the run's
+//   instance under its ID (a trigger's duplicate events are for its own
+//   tests);
 // - a failure trying again may fix: the mail server turning calls away.
 // Failures trying again can't fix (a refused call, the workflow's own
 // error) stop a run at once: workflows.test.ts has them, with the report
@@ -455,7 +458,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     ]);
   });
 
-  it("take an event delivered twice once, send once, and leave the copy for a later wait of its type", async () => {
+  it("take an event delivered twice once, however late or often its copies come, send once, and still take new events of its type", async () => {
     const admin = await personApi("admin");
     const mail = await mailConnection();
     const app = await appWith(
@@ -471,22 +474,34 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       return JSON.parse((await env.MAIL.call("mail.send", mail, { idempotencyKey })).output);
     }
   );
-  // A later wait for the same type, which the copy answers.
-  const again = await step.waitFor("again", { description: "Wait again", type: "approved", timeout: 500 });
-  return { approval: approval.received && approval.payload, again: again.received, sent };`,
+  const again = await step.waitFor("again", { description: "Wait again", type: "approved", timeout: "1 day" });
+  await step.waitFor("release", { description: "Wait for the test", type: "release", timeout: "1 day" });
+  const last = await step.waitFor("last", { description: "Wait once more", type: "approved", timeout: 1000 });
+  return { approval: approval.received && approval.payload, again: again.received && again.payload, last: last.received, sent };`,
         { send: { messageId: "mocked" } }
       )
     );
     await grantMail(idp, admin, app, mail.id);
     const run = await admin.api.workflows.start(app, "approved");
-    // Delivered twice at once, as an event source that retries may. The
-    // copy answering the later wait is the documented contract of
-    // `step.waitFor` (packages/sdk/src/workflow.ts): events carry no ID to
-    // tell a copy by, so a workflow that waits twice uses a type per wait.
-    const instance = await env.WORKFLOWS.get(run.id);
-    const event = { type: "approved", payload: { by: "anna" } };
-    await Promise.all([instance.sendEvent(event), instance.sendEvent(event)]);
-    await finished(run.id);
+    // Delivered twice at once, as an event source that retries may.
+    const first = { type: "approved", id: "first", payload: { by: "anna" } };
+    await Promise.all([sent(run.id, first), sent(run.id, first)]);
+    // Delivered again once the wait it answered has moved on, and again
+    // after a restart: the new execution replays the waits before, and
+    // knows the event as taken.
+    await listening(run.id, "again");
+    await sent(run.id, first);
+    await stopped(run.id);
+    await resumed(run.id);
+    await sent(run.id, first);
+    // A new event of the type, and more copies of both, in the engine
+    // before the last wait begins: it passes over them all, and waits
+    // out its timeout.
+    const second = { type: "approved", id: "second", payload: { by: "ben" } };
+    await sent(run.id, second);
+    await sent(run.id, second);
+    await sent(run.id, first);
+    await finished(run.id, { type: "release", payload: null });
 
     expect({
       run: await admin.api.workflows.status(run.id),
@@ -497,7 +512,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
         status: "completed",
         output: {
           approval: { by: "anna" },
-          again: true,
+          again: { by: "ben" },
+          last: false,
           sent: { messageId: "message-1" },
         },
       },

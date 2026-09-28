@@ -26,6 +26,7 @@ import {
   listening,
   liveStatus,
   resumed,
+  sent,
   failingGoingOn,
   sleepingOnceResumed,
   stepDone,
@@ -1056,7 +1057,6 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     // Past a step before it waits, as a run mostly is: the new execution
     // below replays that step first.
     await stepDone(run.id, "$params");
-    const instance = await env.WORKFLOWS.get(run.id);
     const { FEATURES: features } = env;
     const off = {
       ...z.record(z.string(), z.boolean()).parse(features),
@@ -1070,7 +1070,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     try {
       try {
         env.FEATURES = off;
-        await instance.sendEvent({ type: "go", payload: null });
+        await sent(run.id, { type: "go", payload: null });
         await runEvents(run.id, "workflow.run.waiting");
         // Stopped and resumed while it waits, as a deploy or a crash does:
         // the new execution waits on, before the first step it replays,
@@ -1100,7 +1100,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     await listening(run.id, "again");
     try {
       env.FEATURES = off;
-      await instance.sendEvent({ type: "again", payload: null });
+      await sent(run.id, { type: "again", payload: null });
       await vi.waitFor(
         async () => {
           const waits = await runEvents(run.id, "workflow.run.waiting");
@@ -1154,7 +1154,6 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
     const run = await builder.api.workflows.start(app, "gated");
     // Past its first step, it waits for "ready".
     await stepDone(run.id, "$params");
-    const instance = await env.WORKFLOWS.get(run.id);
     const { FEATURES: features } = env;
     try {
       env.FEATURES = {
@@ -1163,9 +1162,9 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       };
       // The wait under way takes its event; the next is held before it
       // begins, and the event sent for it meanwhile waits.
-      await instance.sendEvent({ type: "ready", payload: null });
+      await sent(run.id, { type: "ready", payload: null });
       await runEvents(run.id, "workflow.run.waiting");
-      await instance.sendEvent({ type: "go", payload: "sent while off" });
+      await sent(run.id, { type: "go", payload: "sent while off" });
     } finally {
       env.FEATURES = features;
     }
