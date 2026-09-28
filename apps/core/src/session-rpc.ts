@@ -5,7 +5,7 @@ import { AppsRpc } from "./apps-rpc.ts";
 import { AuditRpc } from "./audit-rpc.ts";
 import { ConnectionsRpc } from "./connections.ts";
 import { DecisionsRpc } from "./decisions/rpc.ts";
-import { requireFeature } from "./features.ts";
+import { requireFeature, uploadFeatures } from "./features.ts";
 import type { Feature } from "./features.ts";
 import { MemoryRpc } from "./knowledge/memory-rpc.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
@@ -73,10 +73,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     // Memory files are Knowledge documents: that kill switch stops them too.
     this.#memory = new MemoryRpc(env, checkWith("knowledge", "memory"));
     // Uploads become Knowledge documents: that kill switch stops them too.
-    this.#uploads = new UploadsRpc(
-      env,
-      checkWith("knowledge", "knowledge_uploads")
-    );
+    this.#uploads = new UploadsRpc(env, checkWith(...uploadFeatures));
     this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
     this.#connections = new ConnectionsRpc(env, checkWith("connections"));
     this.#workflows = new WorkflowsRpc(env, checkWith("workflows"));

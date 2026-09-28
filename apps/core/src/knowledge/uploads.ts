@@ -38,7 +38,7 @@ import {
   uploads,
 } from "../db/knowledge/schema.ts";
 import { errorResponse } from "../errors.ts";
-import { requireFeature } from "../features.ts";
+import { requireFeature, uploadFeatures } from "../features.ts";
 import { runEngine } from "../workflows/engine.ts";
 import { allowedCollections, noteProvenance } from "./access.ts";
 import {
@@ -135,8 +135,9 @@ const toUpload = (row: UploadRow): Upload => ({
 
 /** Refuses while uploads, or Knowledge itself, are switched off. */
 const requireUploads = (env: Env): void => {
-  requireFeature(env, "knowledge");
-  requireFeature(env, "knowledge_uploads");
+  for (const feature of uploadFeatures) {
+    requireFeature(env, feature);
+  }
 };
 
 /**

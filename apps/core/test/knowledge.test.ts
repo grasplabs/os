@@ -640,6 +640,9 @@ describe("collections", () => {
       name: `Handbook ${unique()}`,
       access: "everyone",
     });
+    // What the collection offers, and, where it offers no upload, what
+    // core does with one that passes every other check. (Uploads core
+    // takes are in uploads.test.ts.)
     const offered = async (
       session: string,
       features: Record<string, boolean>
@@ -647,12 +650,25 @@ describe("collections", () => {
       const { core } = await openRpc(session, {
         coreEnv: { ...env, FEATURES: features },
       });
-      const listed = await core.authenticate().knowledge.listCollections();
-      const collection = listed.find(({ id }) => id === collectionId);
-      return {
-        writable: collection?.writable,
-        uploadable: collection?.uploadable,
-      };
+      try {
+        const api = core.authenticate();
+        const listed = await api.knowledge.listCollections();
+        const collection = listed.find(({ id }) => id === collectionId);
+        const uploadable = collection?.uploadable;
+        const upload =
+          uploadable === false
+            ? await outcome(
+                api.uploads.upload({
+                  collectionId,
+                  name: "a.pdf",
+                  bytes: new TextEncoder().encode("%PDF-"),
+                })
+              )
+            : "offered";
+        return { writable: collection?.writable, uploadable, upload };
+      } finally {
+        core[Symbol.dispose]();
+      }
     };
     const uploadsOn = { knowledge: true, knowledge_uploads: true };
     const uploadsOff = { knowledge: true };
@@ -662,9 +678,17 @@ describe("collections", () => {
       ownerWithUploadsOff: await offered(owner.session, uploadsOff),
       reader: await offered(reader.session, uploadsOn),
     }).toStrictEqual({
-      owner: { writable: true, uploadable: true },
-      ownerWithUploadsOff: { writable: true, uploadable: false },
-      reader: { writable: false, uploadable: false },
+      owner: { writable: true, uploadable: true, upload: "offered" },
+      ownerWithUploadsOff: {
+        writable: true,
+        uploadable: false,
+        upload: "feature.disabled",
+      },
+      reader: {
+        writable: false,
+        uploadable: false,
+        upload: "knowledge.forbidden",
+      },
     });
   });
 

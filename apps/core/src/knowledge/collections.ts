@@ -19,7 +19,7 @@ import { organizationId } from "../auth/auth.ts";
 import { teams } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
-import { featureEnabled, requireFeature } from "../features.ts";
+import { featureEnabled, requireFeature, uploadFeatures } from "../features.ts";
 import { allowedCollections, canCreate, canWrite } from "./access.ts";
 import type { Reader } from "./access.ts";
 
@@ -27,13 +27,18 @@ export type CollectionRow = typeof collections.$inferSelect;
 
 /** Whether uploads, and Knowledge itself, are switched on. */
 export const uploadsOn = (env: Env): boolean =>
-  featureEnabled(env, "knowledge") && featureEnabled(env, "knowledge_uploads");
+  uploadFeatures.every((feature) => featureEnabled(env, feature));
 
+/**
+ * A collection as the API returns it: `writable` for the person who asked,
+ * and `uploadable` too while `uploads` (`uploadsOn`) are switched on, as an
+ * upload is a change like any other (uploads.ts).
+ */
 const toCollection = (
-  env: Env,
   row: CollectionRow,
   teamIds: string[],
-  writable: boolean
+  writable: boolean,
+  uploads: boolean
 ): Collection => ({
   id: collectionIdSchema.parse(row.id),
   name: row.name,
@@ -45,8 +50,7 @@ const toCollection = (
   source: row.source,
   createdAt: row.createdAt.toISOString(),
   writable,
-  // An upload is a change like any other (uploads.ts), and needs its flag.
-  uploadable: writable && uploadsOn(env),
+  uploadable: writable && uploads,
 });
 
 /**
@@ -113,14 +117,15 @@ export const listCollections = async (
     .innerJoin(collections, eq(collections.id, collectionTeams.collectionId))
     .where(allowed)
     .orderBy(asc(collectionTeams.teamId));
+  const uploads = uploadsOn(env);
   return rows.map((row) =>
     toCollection(
-      env,
       row,
       shared
         .filter(({ collectionId }) => collectionId === row.id)
         .map(({ teamId }) => teamId),
-      reader.type === "person" && isWritable(env, reader.person, row)
+      reader.type === "person" && isWritable(env, reader.person, row),
+      uploads
     )
   );
 };
@@ -211,7 +216,12 @@ export const createCollection = async (
       detail: { access, sensitive, source },
     }),
   ]);
-  return toCollection(env, row, teamIds, isWritable(env, person, row));
+  return toCollection(
+    row,
+    teamIds,
+    isWritable(env, person, row),
+    uploadsOn(env)
+  );
 };
 
 /**
