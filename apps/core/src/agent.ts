@@ -210,6 +210,66 @@ export const isMessage = (
   message: AgentMessage | { role?: unknown }
 ): message is Message => messageRoles.has(message.role);
 
+/**
+ * Most characters of a chat's earlier turns sent with each request, as
+ * JSON: about 75,000 tokens, well within the models' windows, with room
+ * for the turn under way.
+ */
+export const historyChars = 300_000;
+
+/** Where a request leaves a chat's earlier turns out. */
+const leftOut =
+  "Earlier messages of this chat are left out: the chat is longer than what each request sends. Say so if a question needs them.";
+
+/**
+ * What a request sends of a long chat: the system messages (instructions
+ * and API declarations), the newest turns that fit in {@link historyChars}
+ * and always the turn under way, with a note where earlier turns were left
+ * out. A turn is a question and everything after it up to the next, so a
+ * tool call is never parted from its result.
+ */
+export const recentHistory = (messages: readonly Message[]): Message[] => {
+  const turns: number[] = [];
+  const sizes: number[] = [];
+  let turn = -1;
+  for (const message of messages) {
+    if (message.role === "user") {
+      turn += 1;
+      sizes.push(0);
+    }
+    turns.push(turn);
+    if (message.role !== "system" && turn >= 0) {
+      sizes[turn] = (sizes[turn] ?? 0) + JSON.stringify(message).length;
+    }
+  }
+  // The turn under way, whatever its size, then earlier ones while they fit.
+  let first = turn;
+  let used = sizes[turn] ?? 0;
+  while (first > 0 && used + (sizes[first - 1] ?? 0) <= historyChars) {
+    first -= 1;
+    used += sizes[first] ?? 0;
+  }
+  if (first <= 0) {
+    return [...messages];
+  }
+  const sent: Message[] = [];
+  for (const [index, message] of messages.entries()) {
+    const at = turns[index] ?? -1;
+    // The question that starts the first turn sent: one per turn.
+    if (at === first && message.role === "user") {
+      sent.push({
+        role: "system",
+        content: leftOut,
+        timestamp: message.timestamp,
+      });
+    }
+    if (message.role === "system" || at >= first) {
+      sent.push(message);
+    }
+  }
+  return sent;
+};
+
 /** What the turn has done so far. */
 interface Progress {
   /** Model responses. */
@@ -304,7 +364,7 @@ export const runTurn = async ({
     {
       model: model.model,
       // The transcript holds only pi's own messages.
-      convertToLlm: (messages) => messages.filter(isMessage),
+      convertToLlm: (messages) => recentHistory(messages.filter(isMessage)),
       toolExecution: "sequential",
       // Checked again before every model request.
       prepareRequest: async () => {

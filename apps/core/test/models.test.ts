@@ -544,6 +544,27 @@ describe("model gateway", { timeout: 30_000 }, () => {
     });
   });
 
+  it("leaves no timer behind once a call has answered", async () => {
+    const { gatewayEnv } = withGateway([answer("Hello.")]);
+    // Only the timers: everything else, the gateway's stream included,
+    // runs as it would.
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    try {
+      await models(gatewayEnv).call({
+        model: anthropic,
+        input: "Hello.",
+        purpose: "chat.turn",
+        trigger: newPerson(),
+        work,
+      });
+
+      // A timer left would keep a Durable Object awake for the timeout.
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("caps the answer's length at the call's limit, or a default, never above the model's", async () => {
     const { gateway, gatewayEnv } = withGateway([
       answer("One"),

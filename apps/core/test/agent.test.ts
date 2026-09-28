@@ -10,7 +10,12 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
-import { maxRunsPerResponse, maxRunsPerTurn, maxSteps } from "../src/agent.ts";
+import {
+  historyChars,
+  maxRunsPerResponse,
+  maxRunsPerTurn,
+  maxSteps,
+} from "../src/agent.ts";
 import { codeLimits } from "../src/code-mode.ts";
 import { workspace } from "../src/durable-objects.ts";
 import { fakeGateway } from "./ai-gateway.ts";
@@ -655,41 +660,73 @@ describe("chat agent turns", () => {
     expect(gateway.requests).toStrictEqual([]);
   });
 
-  it("shortens old code results in a long chat, and stops a chat that is too long", async () => {
+  it("sends only a long chat's recent turns, and stops a chat that is too long", async () => {
     const { stub, chat, gateway, ask } = await newChat(
       codeStep("export default async () => 'early' + '-result';"),
       says("Noted."),
       says("Still here.")
     );
     await ask("Remember this.");
-    // A long chat since: questions of 30,000 characters each.
-    const addQuestions = async (count: number) => {
+    // A long chat since: questions of 30,000 characters, each answered.
+    const answer = JSON.stringify({
+      role: "assistant",
+      content: [{ type: "text", text: "Answered." }],
+      api: "anthropic-messages",
+      provider: "anthropic",
+      model: "claude-sonnet-4-5",
+      usage: {
+        input: 0,
+        output: 0,
+        cacheRead: 0,
+        cacheWrite: 0,
+        totalTokens: 0,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+      },
+      stopReason: "stop",
+      timestamp: 1,
+    });
+    const addTurns = async (count: number) => {
       await runInDurableObject(stub, (_instance, state) => {
-        const message = JSON.stringify({
+        const question = JSON.stringify({
           role: "user",
           content: "q".repeat(30_000),
           timestamp: 1,
         });
         for (let i = 0; i < count; i += 1) {
-          state.storage.sql.exec(
-            "INSERT INTO chat_messages (chat_id, message, created_at) VALUES (?, ?, ?)",
-            chat.id,
-            message,
-            Date.now()
-          );
+          for (const message of [question, answer]) {
+            state.storage.sql.exec(
+              "INSERT INTO chat_messages (chat_id, message, created_at) VALUES (?, ?, ?)",
+              chat.id,
+              message,
+              Date.now()
+            );
+          }
         }
       });
     };
-    await addQuestions(40);
+    await addTurns(40);
 
-    await ask("And now?");
+    await expect(ask("And now?")).resolves.toMatchObject({
+      outcome: "answered",
+      answer: "Still here.",
+    });
     const sent = JSON.stringify(gateway.requests.at(-1)?.body);
     expect({
-      early: sent.includes("early-result"),
-      note: sent.includes("An earlier result, left out of a long chat."),
-    }).toStrictEqual({ early: false, note: true });
+      early: sent.includes("Remember this.") || sent.includes("early-result"),
+      note: sent.includes("Earlier messages of this chat are left out"),
+      question: sent.includes("And now?"),
+      // The instructions always go along.
+      instructions: sent.includes("You are the Grasp assistant"),
+      withinWindow: sent.length < historyChars + 50_000,
+    }).toStrictEqual({
+      early: false,
+      note: true,
+      question: true,
+      instructions: true,
+      withinWindow: true,
+    });
 
-    await addQuestions(100);
+    await addTurns(100);
     await expect(codeOf(ask("More?"))).resolves.toBe("agent.chat_full");
   });
 

@@ -37,3 +37,24 @@ export const deadline = (ms: number, caller?: AbortSignal): Deadline => {
     },
   };
 };
+
+/**
+ * Rejects with the signal's reason once it aborts: to race work against a
+ * deadline that doesn't stop the work itself. It no longer listens once
+ * it has settled.
+ */
+export const whenAborted = async (signal: AbortSignal): Promise<never> => {
+  const aborted = Promise.withResolvers<never>();
+  const abort = () => {
+    aborted.reject(signal.reason);
+  };
+  if (signal.aborted) {
+    abort();
+  }
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    return await aborted.promise;
+  } finally {
+    signal.removeEventListener("abort", abort);
+  }
+};

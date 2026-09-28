@@ -19,6 +19,7 @@ import { DurableObject } from "cloudflare:workers";
 import { appBindings } from "./app-bindings.ts";
 import { addToErrorLog, readErrorLog } from "./app-error-log.ts";
 import { findApp, versionFiles } from "./apps.ts";
+import { deadline, whenAborted } from "./deadline.ts";
 import { appHost } from "./durable-objects.ts";
 import { requireFeature } from "./features.ts";
 import { sandbox } from "./sandbox.ts";
@@ -304,10 +305,7 @@ export class App extends DurableObject<Env> {
       return plainAnswer(answer, running.version, method);
     };
 
-    const deadline = Promise.withResolvers<never>();
-    const timer = setTimeout(() => {
-      deadline.reject(new Error("Timed out"));
-    }, callTimeoutMs(this.env));
+    const limit = deadline(callTimeoutMs(this.env));
     // Never rejects: when the deadline wins, the call goes on without a
     // caller, and how it ends is nobody's business any more.
     const settled = async (): Promise<
@@ -321,14 +319,14 @@ export class App extends DurableObject<Env> {
     };
     let outcome: { answer: AppAnswer } | { error: unknown };
     try {
-      outcome = await Promise.race([settled(), deadline.promise]);
+      outcome = await Promise.race([settled(), whenAborted(limit.signal)]);
     } catch {
       throw appErrors.create("app.timed_out", {
         version: version ?? null,
         method,
       });
     } finally {
-      clearTimeout(timer);
+      limit.clear();
       this.#calls.delete(token);
     }
     if ("error" in outcome) {

@@ -10,7 +10,7 @@ import {
   permissionErrors,
 } from "@grasp-os/shared/permissions";
 import { DurableObject } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
 
@@ -46,44 +46,10 @@ const storedMessageSchema = z.custom<Message>(
 
 /**
  * Most characters a chat's transcript may hold: a chat past it takes no
- * more questions, so loading one never parses more than this.
+ * more questions, so loading one never parses more than this and one turn.
+ * The model reads only its most recent part (`recentHistory` in agent.ts).
  */
 export const maxChatChars = 4_000_000;
-
-/**
- * Most characters of a transcript loaded in full. Older code results are
- * loaded as a short note instead: the model rarely needs them, and a long
- * chat stays within what it can read.
- */
-export const transcriptChars = 1_000_000;
-
-/**
- * A chat's messages, oldest first, with the code results before the newest
- * {@link transcriptChars} characters shortened to a note, in SQL, so they
- * are never parsed whole.
- */
-const transcriptQuery = `
-  SELECT CASE
-    WHEN newer > ? AND json_extract(message, '$.role') = 'toolResult'
-    THEN json_object(
-      'role', 'toolResult',
-      'toolCallId', json_extract(message, '$.toolCallId'),
-      'toolName', json_extract(message, '$.toolName'),
-      'content', json_array(json_object(
-        'type', 'text',
-        'text', '(An earlier result, left out of a long chat.)'
-      )),
-      'isError', json(CASE WHEN json_extract(message, '$.isError') THEN 'true' ELSE 'false' END),
-      'timestamp', json_extract(message, '$.timestamp')
-    )
-    ELSE message
-  END AS message
-  FROM (
-    SELECT id, message,
-      SUM(length(message)) OVER (ORDER BY id DESC) AS newer
-    FROM chat_messages WHERE chat_id = ?
-  )
-  ORDER BY id`;
 
 /**
  * Most ended code runs an object remembers, to refuse and log a call from
@@ -332,9 +298,12 @@ export class Workspace extends DurableObject<Env> {
   }
 
   #transcript(chatId: ChatId): Message[] {
-    return this.ctx.storage.sql
-      .exec<{ message: string }>(transcriptQuery, transcriptChars, chatId)
-      .toArray()
+    return this.#db
+      .select({ message: chatMessages.message })
+      .from(chatMessages)
+      .where(eq(chatMessages.chatId, chatId))
+      .orderBy(asc(chatMessages.id))
+      .all()
       .map(({ message }) => storedMessageSchema.parse(JSON.parse(message)));
   }
 }

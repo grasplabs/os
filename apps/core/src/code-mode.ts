@@ -1,7 +1,7 @@
 import type { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
 
-import { deadline } from "./deadline.ts";
+import { deadline, whenAborted } from "./deadline.ts";
 import { sandbox } from "./sandbox.ts";
 
 // Code Mode: the agent acts by writing code against typed APIs, and the
@@ -175,23 +175,6 @@ interface Harness extends WorkerEntrypoint {
 
 const failed = (error: string): CodeRun => ({ ok: false, logs: [], error });
 
-/** A run that was stopped, as it ends: when the deadline passes. */
-const stoppedRun = async (signal: AbortSignal): Promise<never> => {
-  const stopped = Promise.withResolvers<never>();
-  const stop = () => {
-    stopped.reject(signal.reason);
-  };
-  if (signal.aborted) {
-    stop();
-  }
-  signal.addEventListener("abort", stop, { once: true });
-  try {
-    return await stopped.promise;
-  } finally {
-    signal.removeEventListener("abort", stop);
-  }
-};
-
 /**
  * Runs `code`, an ES module whose default export is an async function of
  * `env`, in a fresh locked isolate with `env` as its only way out. Never
@@ -215,7 +198,7 @@ export const runCode = async (
   try {
     const outcome: unknown = await Promise.race([
       worker.getEntrypoint<Harness>().run(),
-      stoppedRun(limit.signal),
+      whenAborted(limit.signal),
     ]);
     const parsed = runSchema.safeParse(outcome);
     return parsed.success

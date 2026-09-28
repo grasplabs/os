@@ -853,29 +853,15 @@ const admit = async (
   };
 };
 
-const callModel = async <Output>(
+/** A call's requests: one, or a second when the answer doesn't fit its schema. */
+const answerCall = async <Output>(
   env: ModelsEnv,
-  { schema, ...fields }: ModelCall<Output>
+  request: Request,
+  schema: z.ZodType<Output> | undefined,
+  budgetsNow: () => Budgeted[],
+  limit: Deadline
 ): Promise<ModelAnswer<Output>> => {
-  const call = parseCall(callSchema, fields);
-  const { ref, judged, budgetsNow, model, transport } = await admit(env, call);
-  const signal = AbortSignal.timeout(call.timeoutMs ?? defaultTimeoutMs);
-  const request: Request = {
-    model,
-    ref,
-    call,
-    judged,
-    transport,
-    signal,
-    system:
-      schema === undefined
-        ? call.system
-        : [call.system, structuredInstructions(schema)]
-            .filter((part) => part !== undefined)
-            .join("\n\n"),
-    messages: toMessages(call, model),
-  };
-
+  const { call } = request;
   const usage = { inputTokens: 0, outputTokens: 0 };
   let cost = 0;
   // A call with a schema asks once more when the answer doesn't fit it.
@@ -908,7 +894,7 @@ const callModel = async <Output>(
     const truncated = answer.stopReason === "length";
 
     if (hasFailed(answer)) {
-      const failure = failureOf(sent, signal.aborted ? "timeout" : undefined);
+      const failure = failureOf(sent, limit.stopped());
       log.warn("model.failed", {
         model: call.model,
         status: failure.status,
@@ -954,6 +940,40 @@ const callModel = async <Output>(
     });
   }
   throw modelErrors.create("model.invalid_output");
+};
+
+const callModel = async <Output>(
+  env: ModelsEnv,
+  { schema, ...fields }: ModelCall<Output>
+): Promise<ModelAnswer<Output>> => {
+  const call = parseCall(callSchema, fields);
+  const { ref, judged, budgetsNow, model, transport } = await admit(env, call);
+  const limit = deadline(call.timeoutMs ?? defaultTimeoutMs);
+  try {
+    return await answerCall(
+      env,
+      {
+        model,
+        ref,
+        call,
+        judged,
+        transport,
+        signal: limit.signal,
+        system:
+          schema === undefined
+            ? call.system
+            : [call.system, structuredInstructions(schema)]
+                .filter((part) => part !== undefined)
+                .join("\n\n"),
+        messages: toMessages(call, model),
+      },
+      schema,
+      budgetsNow,
+      limit
+    );
+  } finally {
+    limit.clear();
+  }
 };
 
 /** A failed answer in our own words, for a request that got none. */
