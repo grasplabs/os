@@ -144,27 +144,45 @@ export type FileDiff =
   | { path: string; change: "deleted"; before: string }
   | { path: string; change: "modified"; before: string; after: string };
 
-/** A problem a build found in an App's code, where it is, and how bad. */
+/**
+ * A problem a build found in an App's code: where it is, what found it,
+ * how bad it is, and a fix when the check suggests one. What an agent
+ * repairs from.
+ */
 export interface BuildDiagnostic {
   /** The App file; null when it is about the App as a whole. */
   file: string | null;
   /** 1-based; null when it is about the whole file. */
   line: number | null;
+  /** 1-based, when the check knows it. */
+  column?: number;
+  /**
+   * What found it: a TypeScript error code (`TS2322`), a lint rule
+   * (`shadcn/no-restyle`), or a compiler stage (`imports`, `compile`).
+   */
+  rule?: string;
   severity: "error" | "warning";
   message: string;
+  /** A change that would fix it, when the check suggests one. */
+  fix?: string;
 }
 
 /**
  * How one build of a saved version went:
- * - `ok`: built, with any warnings in `diagnostics`.
+ * - `ok`: built.
  * - `failed`: it doesn't build; `diagnostics` says why.
  * - `none`: the version has no files of this kind.
- * - `pending`: not done by the time the save answered, or it couldn't
- *   start. It builds on in the background, or at its first use.
+ * - `pending`: not built by the time the save answered: still building
+ *   after the save's wait (it lands in the background), or building on
+ *   save is switched off. It builds at its first use otherwise.
+ * - `error`: the build couldn't run (the compiler unreachable, or out of
+ *   CPU); `error` says so. It runs again at its first use.
  */
 export interface SavedBuild {
-  status: "ok" | "failed" | "none" | "pending";
+  status: "ok" | "failed" | "none" | "pending" | "error";
   diagnostics: BuildDiagnostic[];
+  /** Why a build couldn't run, with `error`. */
+  error?: string;
 }
 
 /** A committed version, with how its builds went (`AppFilesApi.commit`). */
@@ -189,7 +207,8 @@ export interface AppFilesApi {
    * Commits the working copy as the App's next version, and starts its
    * screen, server and workflow builds at once, so the version opens
    * without building. Answers with how they went (`builds`) once they are
-   * done, or after a few seconds with those still building as `pending`.
+   * done, or after a few seconds with those still building as `pending`
+   * (all three `pending` while `build_on_save` is off).
    * A build never fails or holds up the commit.
    */
   commit: (app: string, message: string) => Promise<CommittedVersion>;

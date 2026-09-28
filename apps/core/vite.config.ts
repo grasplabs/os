@@ -131,6 +131,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               model_settings: true,
               improvement_signals: true,
               triggers: true,
+              build_on_save: true,
               agent: true,
             },
             // One memory limit set, the others at their defaults.

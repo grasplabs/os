@@ -2,6 +2,7 @@ import type { SavedBuild } from "@grasp-os/shared/apps";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import { commitFiles, versionFiles } from "../src/apps.ts";
 import { buildOnSave } from "../src/save-builds.ts";
@@ -51,7 +52,7 @@ const noBuilds: WorkerLoader = {
 /** Where each problem is, and how bad, as the agent's repair loop reads it. */
 const where = (build: SavedBuild): string[] =>
   build.diagnostics.map(
-    ({ file, line, severity }) => `${file}:${line} ${severity}`
+    ({ file, line, rule, severity }) => `${file}:${line} ${rule} ${severity}`
   );
 
 /** A new App of `builder`'s with `files` in its working copy. */
@@ -116,26 +117,28 @@ export class App {}
 
     const { screens, server: serverBuild, workflows } = committed.builds;
 
+    const [typeError] = screens.diagnostics;
+
     expect({
       screens: [screens.status, ...where(screens)],
       server: [serverBuild.status, ...where(serverBuild)],
       workflows: workflows.status,
-      typeError:
-        screens.diagnostics[0]?.message.includes(
-          "not assignable to type 'number'"
-        ) ?? false,
+      column: typeError?.column,
+      message:
+        typeError?.message.includes("not assignable to type 'number'") ?? false,
     }).toStrictEqual({
-      screens: ["failed", "screens/desk.tsx:2 error"],
-      server: ["failed", "app/server.ts:1 error"],
+      screens: ["failed", "screens/desk.tsx:2 TS2322 error"],
+      server: ["failed", "app/server.ts:1 imports error"],
       workflows: "none",
-      typeError: true,
+      column: 9,
+      message: true,
     });
     await expect(
       builder.api.apps.versions.get(app, committed.version)
     ).resolves.toMatchObject({ version: committed.version });
   });
 
-  it("commits when the compiler can't be reached, leaving the builds to their first use", async () => {
+  it("says a build couldn't run when the compiler can't be reached, commits, and leaves it to its first use", async () => {
     const builder = await signedInApi(idp, "builder");
     const app = await appWith(builder, screen(crypto.randomUUID()));
     const by = await builder.api.whoami();
@@ -158,7 +161,12 @@ export class App {}
     expect(committed).toMatchObject({
       version: 1,
       builds: {
-        screens: { status: "pending", diagnostics: [] },
+        screens: {
+          status: "error",
+          diagnostics: [],
+          error:
+            "The build couldn't run now. It runs again when this is first used.",
+        },
         server: { status: "none" },
         workflows: { status: "none" },
       },
@@ -167,6 +175,34 @@ export class App {}
     await expect(buildScreens(env, files)).resolves.toMatchObject({
       ok: true,
     });
+  });
+
+  it("builds nothing on save while build_on_save is off, leaving the builds to their first use", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const app = await appWith(builder, {
+      ...screen(crypto.randomUUID()),
+      ...server(crypto.randomUUID()),
+    });
+    const by = await builder.api.whoami();
+    const features = z.record(z.string(), z.boolean()).parse(env.FEATURES);
+
+    const committed = await commitFiles(
+      { ...env, FEATURES: { ...features, build_on_save: false } },
+      by,
+      app,
+      "Save"
+    );
+    const files = await versionFiles(env, appIdSchema.parse(app), 1);
+
+    expect(committed.builds).toStrictEqual({
+      screens: { status: "pending", diagnostics: [] },
+      server: { status: "pending", diagnostics: [] },
+      workflows: { status: "pending", diagnostics: [] },
+    });
+    // Nothing was built: the first open builds.
+    await expect(
+      buildScreens({ ...env, LOADER: noBuilds }, files)
+    ).rejects.toThrow("Built again");
   });
 
   it("answers after at most its wait, and builds on in the background", async () => {
@@ -189,7 +225,11 @@ export class App {}
       },
     });
 
-    const builds = await buildOnSave({ ...env, FILES: holding }, files, 50);
+    const builds = await buildOnSave(
+      { ...env, FILES: holding },
+      { app: appIdSchema.parse(crypto.randomUUID()), version: 1, files },
+      50
+    );
     held.resolve(true);
 
     expect(builds.screens).toStrictEqual({

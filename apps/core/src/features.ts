@@ -166,6 +166,13 @@ export type Feature =
    */
   | "triggers"
   /**
+   * Building an App's code as it is committed (save-builds.ts), and
+   * answering the commit with how the builds went. While off, a commit
+   * builds nothing and answers each build as `pending`: they build at
+   * their first use, as before.
+   */
+  | "build_on_save"
+  /**
    * The chat agent (workspace.ts, agent.ts): asking a chat's agent. It
    * stays off on-prem: plain workerd doesn't enforce the CPU limit of the
    * isolates Code Mode runs the agent's code in (code-mode.ts), and has no

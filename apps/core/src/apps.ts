@@ -44,7 +44,7 @@ import { inList, isUniqueViolation } from "./db/d1.ts";
 import { featureEnabled } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
 import { madeCurrent } from "./permissions.ts";
-import { buildOnSave } from "./save-builds.ts";
+import { buildOnSave, notBuiltOnSave } from "./save-builds.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";
 import {
   registerTriggers,
@@ -654,10 +654,17 @@ export const commitFiles = async (
     throw error;
   }
   // Committed: now built, so the version opens without building, and
-  // whoever saved hears what doesn't build (save-builds.ts).
+  // whoever saved hears what doesn't build (save-builds.ts). Its kill
+  // switch leaves the builds to their first use, as before.
   return {
     ...toVersion(row),
-    builds: await buildOnSave(env, Object.fromEntries(files)),
+    builds: featureEnabled(env, "build_on_save")
+      ? await buildOnSave(env, {
+          app: appId,
+          version: row.version,
+          files: Object.fromEntries(files),
+        })
+      : notBuiltOnSave,
   };
 };
 

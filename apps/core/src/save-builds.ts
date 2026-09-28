@@ -5,6 +5,7 @@ import type {
   CommittedVersion,
   SavedBuild,
 } from "@grasp-os/shared/apps";
+import type { AppId } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import { waitUntil } from "cloudflare:workers";
 
@@ -22,33 +23,58 @@ type SavedBuilds = CommittedVersion["builds"];
 
 const pending: SavedBuild = { status: "pending", diagnostics: [] };
 
+/** What a save answers while `build_on_save` is off: nothing built yet. */
+export const notBuiltOnSave: SavedBuilds = {
+  screens: pending,
+  server: pending,
+  workflows: pending,
+};
+
+/** What a save says of a build that couldn't run; nothing of App code. */
+const couldNotRun =
+  "The build couldn't run now. It runs again when this is first used.";
+
+/** A saved version: its App and number, for the log, and its files. */
+interface SavedSource {
+  app: AppId;
+  version: number;
+  files: Record<string, string>;
+}
+
 const toDiagnostic = ({
   file,
   line,
+  column,
+  rule,
   severity,
   message,
+  fix,
 }: Diagnostic): BuildDiagnostic => ({
   file: file ?? null,
   line: line ?? null,
+  ...(column === undefined ? {} : { column }),
+  rule,
   severity,
   message,
+  ...(fix === undefined ? {} : { fix }),
 });
 
 /**
  * One build of saved files, as the save reports it: `none` when there is
- * nothing of its kind to build, and `pending` when the build threw (the
- * compiler couldn't be reached): it builds again at its first use.
+ * nothing of its kind to build, and `error` when the build threw (the
+ * compiler couldn't be reached, or ran out of CPU): it runs again at its
+ * first use.
  */
 const savedBuild = async (
   kind: keyof SavedBuilds,
-  files: Record<string, string>,
+  { app, version, files }: SavedSource,
   select: (files: Record<string, string>) => Record<string, string>,
   build: () => Promise<{ ok: boolean; diagnostics?: Diagnostic[] }>
 ): Promise<SavedBuild> => {
-  if (Object.keys(select(files)).length === 0) {
-    return { status: "none", diagnostics: [] };
-  }
   try {
+    if (Object.keys(select(files)).length === 0) {
+      return { status: "none", diagnostics: [] };
+    }
     const built = await build();
     return {
       status: built.ok ? "ok" : "failed",
@@ -56,10 +82,12 @@ const savedBuild = async (
     };
   } catch (error) {
     log.warn("app.save_build_failed", {
+      appId: app,
+      version,
       kind,
       errorName: error instanceof Error ? error.name : typeof error,
     });
-    return pending;
+    return { status: "error", diagnostics: [], error: couldNotRun };
   }
 };
 
@@ -74,9 +102,10 @@ const savedBuild = async (
  */
 export const buildOnSave = async (
   env: Env,
-  files: Record<string, string>,
+  source: SavedSource,
   waitMs = saveBuildWaitMs
 ): Promise<SavedBuilds> => {
+  const { files } = source;
   const done: Partial<SavedBuilds> = {};
   const record = async (
     kind: keyof SavedBuilds,
@@ -89,7 +118,7 @@ export const buildOnSave = async (
       "screens",
       savedBuild(
         "screens",
-        files,
+        source,
         buildFiles,
         async () => await buildScreens(env, files)
       )
@@ -98,7 +127,7 @@ export const buildOnSave = async (
       "server",
       savedBuild(
         "server",
-        files,
+        source,
         serverFiles,
         async () => await buildServer(env, files)
       )
@@ -107,7 +136,7 @@ export const buildOnSave = async (
       "workflows",
       savedBuild(
         "workflows",
-        files,
+        source,
         workflowFiles,
         async () => await buildWorkflows(env, files)
       )
