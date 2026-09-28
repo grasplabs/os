@@ -165,8 +165,8 @@ export interface WorkflowEngine {
   /**
    * Durably waits for the first event of `type` sent to this run that no
    * earlier wait took, for at most `timeout` milliseconds (the SDK keeps it
-   * within 365 days). A copy of an event delivered twice is left for the
-   * next wait of its type (see `step.waitFor`).
+   * within 365 days). An event delivered twice is taken once: a copy of
+   * one an earlier wait took answers no later wait.
    */
   waitForEvent: (
     name: string,

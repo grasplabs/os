@@ -5,6 +5,7 @@
 import { env } from "cloudflare:workers";
 import { expect, vi } from "vite-plus/test";
 
+import { runEngine } from "../src/workflows/engine.ts";
 import { allEvents } from "./audit-events.ts";
 
 /** What runs a statement against the database: each fails when broken. */
@@ -103,16 +104,35 @@ export const resumed = async (run: string): Promise<void> => {
   await instance.resume();
 };
 
-/** Sends `event` until the run ends: it may not wait for it yet. */
+/** An event for a run; each has an ID of its own unless it names one. */
+interface TestEvent {
+  type: string;
+  id?: string;
+  payload: unknown;
+}
+
+/** Sends `event` to the run, as core's senders do (`runEngine`). */
+export const sent = async (
+  run: string,
+  { id = crypto.randomUUID(), ...event }: TestEvent
+): Promise<void> => {
+  await runEngine(env).sendEvent(run, { ...event, id });
+};
+
+/**
+ * Sends `event` until the run ends, as one event delivered again and
+ * again: the run may not wait for it yet.
+ */
 export const finished = async (
   run: string,
-  event?: { type: string; payload: unknown }
+  event?: TestEvent
 ): Promise<void> => {
   const instance = await env.WORKFLOWS.get(run);
+  const once = event && { id: crypto.randomUUID(), ...event };
   await vi.waitFor(
     async () => {
-      if (event) {
-        await instance.sendEvent(event);
+      if (once) {
+        await sent(run, once);
       }
       const { status } = await instance.status();
       expect(["complete", "errored", "terminated"]).toContain(status);

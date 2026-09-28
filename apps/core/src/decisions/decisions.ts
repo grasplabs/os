@@ -559,6 +559,7 @@ const wake = async (env: Env, row: DecisionRow): Promise<void> => {
   try {
     await runEngine(env).sendEvent(row.runId, {
       type: decisionEventType(row.id),
+      id: row.id,
       payload: null,
     });
   } catch (error) {
