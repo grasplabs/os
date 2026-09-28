@@ -102,16 +102,21 @@ const WorkflowRow = ({
 export const WorkflowList = ({
   workflows,
   teams,
+  writable,
   onOpen,
 }: {
   workflows: Workflow[];
   teams: Team[];
+  /** Whether the person may draw one: only then are they asked to. */
+  writable: boolean;
   onOpen: (id: string) => void;
 }) => {
   if (workflows.length === 0) {
     return (
       <p className="text-muted-foreground text-sm">
-        No workflows yet. Draw the first one.
+        {writable
+          ? "No workflows yet. Draw the first one."
+          : "No workflows yet."}
       </p>
     );
   }

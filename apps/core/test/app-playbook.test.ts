@@ -69,6 +69,10 @@ export class App extends DurableObject {
     return await outcome(async () => await this.stub(binding).linkWorkflow(caller, input));
   }
 
+  async canWrite(caller: Caller, binding: string): Promise<unknown> {
+    return await outcome(async () => await this.stub(binding).canWrite(caller));
+  }
+
   async record(caller: Caller, binding: string, id: string, version?: number): Promise<unknown> {
     return await outcome(async () => await this.stub(binding).getRecord(caller, id, version));
   }
@@ -497,13 +501,32 @@ describe("App server code writing the Playbook", { timeout: 60_000 }, () => {
         saveArgs(path, drawn, 0, binding)
       );
 
+    // What the stub says of each before the save, which it must match.
+    const mayWrite = async (userId: string, binding = "PLAYBOOK") =>
+      await callApp(env, app, as(userId), "canWrite", [binding]);
+    const hinted = {
+      user: await mayWrite(user.userId),
+      builder: await mayWrite(builder.userId),
+      readOnly: await mayWrite(admin.userId, "PLAYBOOK_READ"),
+      otherCollection: await mayWrite(admin.userId, "HANDBOOK"),
+      admin: await mayWrite(admin.userId),
+    };
+
     expect({
+      hinted,
       user: await saveAs(user.userId),
       builder: await saveAs(builder.userId),
       readOnly: await saveAs(admin.userId, "PLAYBOOK_READ"),
       otherCollection: await saveAs(admin.userId, "HANDBOOK"),
       admin: answered(await saveAs(admin.userId), savedShape),
     }).toStrictEqual({
+      hinted: {
+        user: { ok: false },
+        builder: { ok: false },
+        readOnly: { ok: false },
+        otherCollection: { ok: false },
+        admin: { ok: true },
+      },
       user: { error: "knowledge.forbidden" },
       builder: { error: "knowledge.forbidden" },
       readOnly: { error: "permission.denied" },
@@ -686,9 +709,13 @@ describe("App server code writing the Playbook", { timeout: 60_000 }, () => {
     expect({
       before: answered(before, savedShape),
       after,
+      hinted: await callApp(env, app, as(admin.userId), "canWrite", [
+        "PLAYBOOK",
+      ]),
     }).toStrictEqual({
       before: { ok: { path, currentVersion: 1 } },
       after: { error: "permission.restricted" },
+      hinted: { ok: false },
     });
   });
 });

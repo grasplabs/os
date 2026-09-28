@@ -123,7 +123,7 @@ const cast = {
   knowledge: { one: "user", two: "user" },
   knowledgeUploads: { one: "user" },
   knowledgeReader: { admin: "admin", reader: "user" },
-  workflowMap: { admin: "admin" },
+  workflowMap: { admin: "admin", reader: "user" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;

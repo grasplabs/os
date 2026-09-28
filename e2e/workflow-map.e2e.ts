@@ -7,7 +7,8 @@ import type { Person } from "./people.ts";
 
 // The workflow map, the built-in App, end to end: an admin creates an App
 // from it, approves the Playbook permission it asks for, draws a workflow
-// with numbers and sees its totals, then designs it and sees the gain.
+// with numbers and sees its totals, then designs it and sees the gain;
+// someone it's shared with who can't change the Playbook reads it only.
 // And the editor keeps what is typed: numbers that would pass the
 // Playbook's limits say so instead of failing the save, nothing can be
 // typed while a save is on its way (the saved version replaces the editor
@@ -79,7 +80,7 @@ const openMap = async (page: Page, app: string) => {
 test("an admin copies the workflow map, approves its Playbook, draws a workflow and sees its totals, then its expected gain", async ({
   browser,
 }) => {
-  const { admin } = peopleIn("workflowMap");
+  const { admin, reader } = peopleIn("workflowMap");
   // The Playbook is the deployment's: other runs' workflows are in it too.
   const title = `Pay supplier invoices ${crypto.randomUUID().slice(0, 8)}`;
   const app = await mapFor(admin);
@@ -129,6 +130,45 @@ test("an admin copies the workflow map, approves its Playbook, draws a workflow 
   await expect(
     screen.getByRole("row").filter({ hasText: title }).getByRole("cell")
   ).toHaveText([title, "designed", "1 h", "1", "1", "9 h"]);
+
+  // Shared with someone who isn't an admin: they read it, and are offered
+  // no change the Playbook would refuse.
+  const { core, api } = apiOf(admin);
+  try {
+    await api.apps.members.add(app, {
+      type: "person",
+      id: reader.userId,
+      role: "user",
+    });
+  } finally {
+    core[Symbol.dispose]();
+  }
+  const readerPage = await pageOf(browser, reader);
+  const readerScreen = await openMap(readerPage, app);
+  const listed = readerScreen.getByRole("row").filter({ hasText: title });
+  await expect(listed.getByRole("cell")).toHaveText([
+    title,
+    "designed",
+    "1 h",
+    "1",
+    "1",
+    "9 h",
+  ]);
+  await expect(
+    readerScreen.getByRole("button", { name: "Draw a workflow" })
+  ).toHaveCount(0);
+  await listed.getByRole("button", { name: title }).click();
+  await expect(
+    readerScreen.getByText(
+      "You can read this workflow, but not change it here."
+    )
+  ).toBeVisible();
+  await expect(
+    readerScreen.getByLabel("Title", { exact: true })
+  ).toBeDisabled();
+  await expect(readerScreen.getByRole("button", { name: "Save" })).toHaveCount(
+    0
+  );
 });
 
 test("keeps numbers within the Playbook's limits, and never drops what is typed while saving, linking or going back", async ({

@@ -1,5 +1,6 @@
 import { actorOf, delegateActorOf } from "@grasp-os/shared/audit";
 import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
+import { isExpectedError } from "@grasp-os/shared/errors";
 import {
   appIdSchema,
   documentIdSchema,
@@ -9,15 +10,21 @@ import type { PermissionId } from "@grasp-os/shared/ids";
 import {
   documentPathSchema,
   knowledgeErrors,
+  listRecordsOptionsSchema,
   playbookCollectionId,
   playbookRecordTypes,
 } from "@grasp-os/shared/knowledge";
-import type { DocumentSummary, RecordRead } from "@grasp-os/shared/knowledge";
+import type {
+  DocumentSummary,
+  RecordPage,
+  RecordRead,
+  RecordSummary,
+} from "@grasp-os/shared/knowledge";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { Authority, WorkContext } from "@grasp-os/shared/permissions";
 import { isAdmin } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq, gt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { stringify } from "yaml";
 import { z } from "zod";
@@ -30,11 +37,23 @@ import { collections, documents, versions } from "../db/knowledge/schema.ts";
 import { requireFeature } from "../features.ts";
 import { authorize } from "../permissions.ts";
 import { isRestricted } from "../restricted.ts";
+import { noteProvenance } from "./access.ts";
 import type { Reader } from "./access.ts";
-import { ensureCollection, requireWritable } from "./collections.ts";
+import { allowedFor } from "./app-entries.ts";
+import {
+  ensureCollection,
+  isWritable,
+  readableCollection,
+  requireWritable,
+} from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
-import { findByPath, getDocument, writeVersion } from "./documents.ts";
-import type { Writer } from "./documents.ts";
+import {
+  findByPath,
+  getDocument,
+  toSummary,
+  writeVersion,
+} from "./documents.ts";
+import type { DocumentRow, Writer } from "./documents.ts";
 import {
   FrontmatterError,
   parseFrontmatter,
@@ -110,6 +129,14 @@ const requirePlaybook = (env: Env): void => {
   requireFeature(env, "playbook");
 };
 
+/** The Playbook collection, if it exists yet. */
+const storedPlaybook = async (env: Env): Promise<CollectionRow | undefined> =>
+  await drizzle(env.KNOWLEDGE)
+    .select()
+    .from(collections)
+    .where(eq(collections.id, playbookCollectionId))
+    .get();
+
 /**
  * The Playbook collection, created for `person` (by `actor`) if they are
  * an admin and it doesn't exist yet (they own it then; every admin can
@@ -129,11 +156,7 @@ export const playbookCollection = async (
       detail
     );
   }
-  const found = await drizzle(env.KNOWLEDGE)
-    .select()
-    .from(collections)
-    .where(eq(collections.id, playbookCollectionId))
-    .get();
+  const found = await storedPlaybook(env);
   if (!found) {
     throw knowledgeErrors.create("knowledge.not_found");
   }
@@ -568,6 +591,34 @@ export const takeSnapshotAsDelegate = async (
   );
 
 /**
+ * Whether `saveRecordAsDelegate` and `linkWorkflowAsDelegate` would write
+ * for the person `authority` names, under `permissionId`, in `context`:
+ * the same checks (`delegateWriter`, then `requireWritable` on the
+ * Playbook, or on the one their first save would set up), for showing
+ * only the changes core would take. Writes nothing, and records nothing:
+ * each write is checked and recorded as it is made.
+ */
+export const canWriteAsDelegate = async (
+  env: Env,
+  authority: Authority,
+  context: WorkContext,
+  permissionId: PermissionId
+): Promise<boolean> => {
+  let person: Person;
+  try {
+    ({ person } = await delegateWriter(env, authority, context, permissionId));
+  } catch (error) {
+    if (isExpectedError(error)) {
+      return false;
+    }
+    throw error;
+  }
+  const collection =
+    (await storedPlaybook(env)) ?? playbookCollectionRow(person.userId);
+  return isWritable(env, person, collection);
+};
+
+/**
  * A document as `reader` may read it (`getDocument`), with its frontmatter
  * as data (`record`: its type, and the fields its type's schema reads,
  * defaults filled in), and the Markdown after it (`body`): how code with
@@ -596,4 +647,121 @@ export const getRecord = async (
   }
   const { type, frontmatter, body } = parsed;
   return { ...read, record: { type, ...frontmatter }, body };
+};
+
+/**
+ * The record `text` holds, as `document`'s current version, or
+ * `undefined` when there is none or it doesn't fit its type any more (see
+ * `getRecord`).
+ */
+const recordOf = (
+  document: DocumentRow,
+  text: string | null
+): RecordSummary | undefined => {
+  if (text === null) {
+    return undefined;
+  }
+  try {
+    const { type, frontmatter, body } = parseFrontmatter(document.path, text);
+    return { ...toSummary(document), record: { type, ...frontmatter }, body };
+  } catch (error) {
+    if (error instanceof FrontmatterError) {
+      return undefined;
+    }
+    throw error;
+  }
+};
+
+/**
+ * A page of the collection `collectionId`'s documents (of `type`, if
+ * given), in path order, each read as `getRecord` reads its current
+ * version, in one read: one access check, and one read in the audit log
+ * for the page, naming the documents it read. How code that needs many
+ * records reads them without a read, and an audit event, for each.
+ */
+export const listRecords = async (
+  env: Env,
+  reader: Reader,
+  collectionId: unknown,
+  options?: unknown
+): Promise<RecordPage> => {
+  const { after, limit, type } = knowledgeErrors.parse(
+    "knowledge.invalid",
+    listRecordsOptionsSchema,
+    options
+  );
+  const db = drizzle(env.KNOWLEDGE);
+  const allowed = await allowedFor(env, db, reader, collectionId);
+  const collection = await readableCollection(
+    db,
+    allowed.collections,
+    collectionId
+  );
+  // The documents of the page, or of the rest of the collection, after
+  // the path `from`.
+  const listed = (from: string | undefined) =>
+    and(
+      eq(documents.collectionId, collection.id),
+      allowed.documents(),
+      from === undefined ? undefined : gt(documents.path, from),
+      type === undefined ? undefined : eq(documents.type, type)
+    );
+  // The text is read in the same query as the access check, as
+  // `getDocument` reads it.
+  const rows = await db
+    .select({ document: documents, text: versions.text })
+    .from(documents)
+    .innerJoin(collections, eq(collections.id, documents.collectionId))
+    .leftJoin(
+      versions,
+      and(
+        eq(versions.documentId, documents.id),
+        eq(versions.number, documents.currentVersion)
+      )
+    )
+    .where(listed(after))
+    .orderBy(asc(documents.path))
+    .limit(limit);
+  const last = rows.at(-1);
+  // Whether another page follows, only after a full one: by ID alone, so
+  // nothing is read that this page's audit event doesn't name.
+  const more =
+    rows.length === limit && last !== undefined
+      ? await db
+          .select({ id: documents.id })
+          .from(documents)
+          .innerJoin(collections, eq(collections.id, documents.collectionId))
+          .where(listed(last.document.path))
+          .limit(1)
+          .get()
+      : undefined;
+  const provenance = await noteProvenance(
+    env,
+    reader,
+    {
+      action: "knowledge.read",
+      target: { type: "collection", id: collection.id },
+      // At most `recordPageMaxLimit` (20) and the collection: they fit the
+      // event's provenance.
+      documentIds: rows.map(({ document }) => document.id),
+      detail: { read: "records", count: rows.length },
+    },
+    collection
+  );
+  const records: RecordSummary[] = [];
+  const unreadable: DocumentSummary[] = [];
+  for (const { document, text } of rows) {
+    const record = recordOf(document, text);
+    if (record === undefined) {
+      unreadable.push(toSummary(document));
+    } else {
+      records.push(record);
+    }
+  }
+  return {
+    records,
+    unreadable,
+    next: more === undefined || last === undefined ? null : last.document.path,
+    provenance,
+  };
 };
