@@ -88,21 +88,22 @@ export const ensureD1Database = async (
   const path = `/accounts/${accountId}/d1/database`;
   // The API matches `name` as a substring: pick the exact one.
   const matches = await listAll(api, path, d1Schema, { name });
-  const found = matches.find((database) => database.name === name);
-  if (found === undefined) {
-    return await api.call(
+  const database =
+    matches.find((found) => found.name === name) ??
+    (await api.call(
       { method: "POST", path, json: { name, jurisdiction: eu } },
       d1Schema
-    );
-  }
-  if (found.jurisdiction !== eu) {
+    ));
+  // Whichever call answered, only a database Cloudflare reports in the EU
+  // is used.
+  if (database.jurisdiction !== eu) {
     throw new OutsideEuError(
       "D1 database",
       name,
-      found.jurisdiction ?? undefined
+      database.jurisdiction ?? undefined
     );
   }
-  return found;
+  return database;
 };
 
 const bucketSchema = z.object({

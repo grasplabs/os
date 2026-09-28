@@ -73,7 +73,7 @@ const accountRoutes: Route[] = [
     method: "POST",
     path: /^\/d1\/database$/u,
     answer: ({ account, json }) => {
-      const jurisdiction = text(json, "jurisdiction");
+      const jurisdiction = account.d1Reports ?? text(json, "jurisdiction");
       const database = {
         uuid: crypto.randomUUID(),
         name: text(json, "name"),
