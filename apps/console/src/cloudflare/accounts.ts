@@ -123,8 +123,9 @@ export const ensureR2Bucket = async (
 ): Promise<R2BucketInfo> => {
   const headers = { "cf-r2-jurisdiction": eu };
   const path = `/accounts/${accountId}/r2/buckets`;
+  let bucket: R2BucketInfo | undefined = undefined;
   try {
-    return await api.call(
+    bucket = await api.call(
       { method: "GET", path: `${path}/${name}`, headers },
       bucketSchema
     );
@@ -133,10 +134,20 @@ export const ensureR2Bucket = async (
       throw error;
     }
   }
-  return await api.call(
+  bucket ??= await api.call(
     { method: "POST", path, headers, json: { name } },
     bucketSchema
   );
+  // Whichever call answered, only a bucket Cloudflare reports in the EU is
+  // used.
+  if (bucket.jurisdiction !== eu) {
+    throw new OutsideEuError(
+      "R2 bucket",
+      name,
+      bucket.jurisdiction ?? undefined
+    );
+  }
+  return bucket;
 };
 
 /**

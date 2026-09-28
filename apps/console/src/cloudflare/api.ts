@@ -17,6 +17,28 @@ const maxAttempts = 4;
 /** Waits before retry n (0-based): `retryDelayMs * 2^n`. */
 const defaultRetryDelayMs = 500;
 
+/** The longest a 429's `Retry-After` makes a call wait. */
+const maxRetryAfterMs = 60_000;
+
+/**
+ * How long a 429 asks to wait, in ms, capped: its `Retry-After` in seconds,
+ * as Cloudflare sends it. Undefined when it names none, or no number.
+ */
+const retryAfterMs = (response: Response | null): number | undefined => {
+  const header =
+    response?.status === 429 ? response.headers.get("retry-after") : null;
+  const seconds = Number(header ?? "");
+  if (
+    header === null ||
+    header.trim() === "" ||
+    !Number.isFinite(seconds) ||
+    seconds < 0
+  ) {
+    return undefined;
+  }
+  return Math.min(seconds * 1000, maxRetryAfterMs);
+};
+
 /**
  * Methods Cloudflare applies at most once however often they're sent. Only
  * these are retried after a server error, whose request may have been
@@ -170,7 +192,7 @@ export const cloudflareApi = ({
         envelope?.errors ?? []
       );
     }
-    await scheduler.wait(retryDelayMs * 2 ** attempt);
+    await scheduler.wait(retryAfterMs(response) ?? retryDelayMs * 2 ** attempt);
     return await page(call, schema, attempt + 1);
   };
 

@@ -183,6 +183,28 @@ describe("EU resources", () => {
       { name: "grasp-os-files", jurisdiction: "eu" },
     ]);
   });
+
+  it("refuses a bucket R2 reports outside the EU, found or created", async () => {
+    const account = cloudflare.addAccount();
+    account.r2Reports = "default";
+    // Created: the create answers with the wrong jurisdiction.
+    await expect(
+      ensureR2Bucket(api, account.id, "grasp-os-files")
+    ).rejects.toThrow(
+      "R2 bucket grasp-os-files exists outside the EU jurisdiction (default)"
+    );
+    // Found: the lookup does too.
+    await expect(
+      ensureR2Bucket(api, account.id, "grasp-os-files")
+    ).rejects.toThrow(
+      "R2 bucket grasp-os-files exists outside the EU jurisdiction (default)"
+    );
+    expect(cloudflare.calls.map(({ method }) => method)).toStrictEqual([
+      "GET",
+      "POST",
+      "GET",
+    ]);
+  });
 });
 
 describe("retries", () => {
@@ -235,6 +257,38 @@ describe("retries", () => {
       "GET",
       "POST",
     ]);
+  });
+
+  it("adopts what a create made when its answer was lost", async () => {
+    const account = cloudflare.addAccount();
+    // The lookup, then the create, which runs but never answers.
+    cloudflare.failCall(2, "lost");
+    await expect(
+      ensureD1Database(api, account.id, "grasp-os-core")
+    ).rejects.toMatchObject({ status: 0 });
+    cloudflare.failCall(2, "lost");
+    await expect(
+      ensureR2Bucket(api, account.id, "grasp-os-files")
+    ).rejects.toMatchObject({ status: 0 });
+
+    // The step runs again and finds both, creating nothing more.
+    const database = await ensureD1Database(api, account.id, "grasp-os-core");
+    await ensureR2Bucket(api, account.id, "grasp-os-files");
+    expect(account.d1).toStrictEqual([database]);
+    expect(account.buckets).toStrictEqual([
+      { name: "grasp-os-files", jurisdiction: "eu" },
+    ]);
+  });
+
+  it("waits as long as a 429's Retry-After asks, up to a minute", async () => {
+    const account = cloudflare.addAccount();
+    const wait = vi.spyOn(scheduler, "wait").mockResolvedValue();
+    cloudflare.failCall(1, { retryAfter: "7" });
+    cloudflare.failCall(2, { retryAfter: "3600" });
+    cloudflare.failCall(3, { retryAfter: "soon" });
+    await getAccount(api, account.id);
+    // Seven seconds; capped at a minute; no number, so the usual backoff.
+    expect(wait.mock.calls).toStrictEqual([[7000], [60_000], [0]]);
   });
 
   it("gives up after four attempts, waiting twice as long each time", async () => {

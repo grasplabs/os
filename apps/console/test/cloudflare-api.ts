@@ -21,6 +21,11 @@ interface AccountState {
   d1: { uuid: string; name: string; jurisdiction?: string }[];
   /** Buckets by jurisdiction: a name is unique only within one. */
   buckets: { name: string; jurisdiction: string }[];
+  /**
+   * The jurisdiction R2 reports for every bucket, whatever it's in: a test
+   * of an API that answers other than asked.
+   */
+  r2Reports?: string;
   gateways: Json[];
 }
 
@@ -147,7 +152,12 @@ const routes: Route[] = [
         ({ name, jurisdiction }) =>
           name === params.name && jurisdiction === jurisdictionOf(call)
       );
-      return bucket === undefined ? notFound() : envelope(bucket);
+      return bucket === undefined
+        ? notFound()
+        : envelope({
+            name: bucket.name,
+            jurisdiction: account.r2Reports ?? bucket.jurisdiction,
+          });
     },
   },
   {
@@ -159,7 +169,10 @@ const routes: Route[] = [
         jurisdiction: jurisdictionOf(call),
       };
       account.buckets.push(bucket);
-      return envelope(bucket);
+      return envelope({
+        ...bucket,
+        jurisdiction: account.r2Reports ?? bucket.jurisdiction,
+      });
     },
   },
   {
@@ -214,14 +227,36 @@ const routeAccount = (
 };
 
 /**
- * How a planned call fails: rate-limited (429), a server error in the
- * envelope (500, 503), the edge's HTML error page (502), or no answer.
+ * How a planned call fails: rate-limited (429, optionally with a
+ * `Retry-After`), a server error in the envelope (500, 503), the edge's
+ * HTML error page (502), no answer before it ran (`network`), or no answer
+ * after it ran (`lost`: the change is made, its response never arrives).
  */
-export type Failure = 429 | 500 | 502 | 503 | "network";
+export type Failure =
+  | 429
+  | 500
+  | 502
+  | 503
+  | "network"
+  | "lost"
+  | { retryAfter: string };
 
-const failed = (failure: Failure): Response => {
+const lostConnection = (): never => {
+  throw new TypeError("Network connection lost.");
+};
+
+const failed = (failure: Exclude<Failure, "lost">): Response => {
   if (failure === "network") {
-    throw new TypeError("Network connection lost.");
+    return lostConnection();
+  }
+  if (typeof failure === "object") {
+    const response = refusal(
+      429,
+      971,
+      "Please wait and consider throttling your request speed"
+    );
+    response.headers.set("retry-after", failure.retryAfter);
+    return response;
   }
   if (failure === 502) {
     return new Response("<html>Bad gateway</html>", {
@@ -261,20 +296,8 @@ export const mockCloudflareApi = (token: string) => {
   const calls: ApiCall[] = [];
   const planned = new Map<number, Failure>();
 
-  const answer = async (request: Request): Promise<Response> => {
-    const url = new URL(request.url);
-    const call: ApiCall = {
-      method: request.method,
-      path: url.pathname.slice(new URL(base).pathname.length),
-      query: url.searchParams,
-      headers: request.headers,
-      body: await readBody(request),
-    };
-    calls.push(call);
-    const failure = planned.get(calls.length);
-    if (failure !== undefined) {
-      return failed(failure);
-    }
+  /** Answers `call` as the API would. */
+  const respond = (request: Request, call: ApiCall): Response => {
     if (request.headers.get("authorization") !== `Bearer ${token}`) {
       return refusal(403, 10_000, "Authentication error");
     }
@@ -290,6 +313,27 @@ export const mockCloudflareApi = (token: string) => {
       return refusal(403, 9109, "Unauthorized to access requested resource");
     }
     return routeAccount(account, call, match?.rest ?? "");
+  };
+
+  const answer = async (request: Request): Promise<Response> => {
+    const url = new URL(request.url);
+    const call: ApiCall = {
+      method: request.method,
+      path: url.pathname.slice(new URL(base).pathname.length),
+      query: url.searchParams,
+      headers: request.headers,
+      body: await readBody(request),
+    };
+    calls.push(call);
+    const failure = planned.get(calls.length);
+    if (failure === "lost") {
+      respond(request, call);
+      return lostConnection();
+    }
+    if (failure !== undefined) {
+      return failed(failure);
+    }
+    return respond(request, call);
   };
 
   beforeEach(() => {
