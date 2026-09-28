@@ -9,6 +9,12 @@
  * run on the release's own manifest, as imported, and read its blobs
  * checked against it.
  *
+ * A deploy expects to be its client's only runner: the provisioning
+ * Workflow runs one instance per client. Databases and buckets are unique
+ * by name, so two runs at once couldn't make one twice, but a D1
+ * migration could be applied twice, since reading what a database has
+ * applied and applying the rest aren't one step.
+ *
  * The Cloudflare API token is in `api` alone: never in a row, an audit
  * event or a log line (threat model R17, CO3). A failure is recorded as a
  * code, never as a message or a response body.
@@ -22,6 +28,7 @@ import { act } from "../db/act.ts";
 import type { Actor, ConsoleDatabase } from "../db/act.ts";
 import { clientDeploys, clients } from "../db/schema.ts";
 import type { ReleaseStore } from "../releases/import.ts";
+import { DeployError } from "./errors.ts";
 import { migrateDatabases } from "./migrations.ts";
 import { importedManifest } from "./release.ts";
 import { ensureResources } from "./resources.ts";
@@ -39,12 +46,19 @@ export interface DeployContext {
 export const deploySteps = ["resources", "migrations"] as const;
 export type DeployStep = (typeof deploySteps)[number];
 
-/** A failure as a deploy records it: a code, never a message. */
+/**
+ * A failure as a deploy records it: a code, never a message. A step's own
+ * failure has its `DeployError` code; the API's is `cloudflare_<status>`
+ * and its error codes; anything else is `unexpected`.
+ */
 const errorCode = (error: unknown): string => {
+  if (error instanceof DeployError) {
+    return error.code;
+  }
   if (error instanceof CloudflareApiError) {
     return ["cloudflare", error.status, ...error.codes].join("_");
   }
-  return error instanceof Error ? error.name : "unknown";
+  return "unexpected";
 };
 
 const actorName = (actor: Actor): string =>
@@ -161,7 +175,10 @@ export const runDeploy = async (
   const { clientId, releaseId, accountId } = deploy;
   const manifest = await importedManifest(db, releaseId);
   if (manifest === null) {
-    throw new Error(`Release ${releaseId} isn't imported`);
+    throw new DeployError(
+      "release_not_imported",
+      `Release ${releaseId} isn't imported`
+    );
   }
 
   /** Records that `step` finished, with what it did. */

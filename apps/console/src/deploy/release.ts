@@ -11,6 +11,7 @@ import { eq } from "drizzle-orm";
 import type { ConsoleDatabase } from "../db/act.ts";
 import { releases } from "../db/schema.ts";
 import type { ReleaseStore } from "../releases/import.ts";
+import { DeployError } from "./errors.ts";
 
 /** Release `id`'s manifest, as imported; null when it isn't imported. */
 export const importedManifest = async (
@@ -44,15 +45,24 @@ export const readBlob = async (
 ): Promise<Bytes> => {
   const object = await store.get(file.r2Key);
   if (object === null) {
-    throw new Error(`${file.r2Key} (${file.name}) is missing from the release`);
+    throw new DeployError(
+      "release_blob_mismatch",
+      `${file.r2Key} (${file.name}) is missing from the release`
+    );
   }
   if (object.size !== file.size) {
     await object.body.cancel();
-    throw new Error(`${file.r2Key} (${file.name}) doesn't match its size`);
+    throw new DeployError(
+      "release_blob_mismatch",
+      `${file.r2Key} (${file.name}) doesn't match its size`
+    );
   }
   const bytes = new Uint8Array(await object.arrayBuffer());
   if ((await sha256OfBytes(bytes)) !== file.sha256) {
-    throw new Error(`${file.r2Key} (${file.name}) doesn't match its hash`);
+    throw new DeployError(
+      "release_blob_mismatch",
+      `${file.r2Key} (${file.name}) doesn't match its hash`
+    );
   }
   return bytes;
 };

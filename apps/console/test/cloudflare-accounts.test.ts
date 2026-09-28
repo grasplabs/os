@@ -174,6 +174,17 @@ describe("EU resources", () => {
     expect(account.d1).toHaveLength(1);
   });
 
+  it("refuses a D1 database created outside the EU", async () => {
+    const account = cloudflare.addAccount();
+    account.d1Reports = "fedramp";
+
+    await expect(
+      ensureD1Database(api, account.id, "grasp-os-core")
+    ).rejects.toThrow(
+      "D1 database grasp-os-core exists outside the EU jurisdiction (fedramp)"
+    );
+  });
+
   it("never uses a bucket of the same name outside the EU", async () => {
     const account = cloudflare.addAccount();
     account.buckets.push({ name: "grasp-os-files", jurisdiction: "default" });

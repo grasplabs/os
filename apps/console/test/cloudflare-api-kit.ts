@@ -48,6 +48,8 @@ export interface AccountState {
    * of an API that answers other than asked.
    */
   r2Reports?: string;
+  /** The jurisdiction D1 reports for a database it creates, whatever was asked. */
+  d1Reports?: string;
   gateways: Json[];
   scripts: Map<string, ScriptState>;
   workflows: Map<string, { class_name: string; script_name: string }>;

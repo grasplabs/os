@@ -6,8 +6,14 @@
  */
 import type { ReleaseManifest } from "@grasp-os/shared/release";
 
-import { ensureD1Database, ensureR2Bucket } from "../cloudflare/accounts.ts";
+import {
+  ensureD1Database,
+  ensureR2Bucket,
+  OutsideEuError,
+} from "../cloudflare/accounts.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
+import { DeployError } from "./errors.ts";
+import type { DeployErrorCode } from "./errors.ts";
 
 /** What a release's Workers bind to in one account. */
 export interface AccountResources {
@@ -40,7 +46,8 @@ const bucketNames = (manifest: ReleaseManifest): string[] => {
       }
       const { bucket_name: name, jurisdiction } = binding;
       if (typeof name !== "string" || jurisdiction !== "eu") {
-        throw new Error(
+        throw new DeployError(
+          "bucket_outside_eu",
           `${worker.name} binds ${binding.name} to a bucket outside the EU`
         );
       }
@@ -50,10 +57,25 @@ const bucketNames = (manifest: ReleaseManifest): string[] => {
   return [...names];
 };
 
+/** `task`, with a resource outside the EU turned into the deploy's `code`. */
+const inEu = async <T>(
+  code: DeployErrorCode,
+  task: () => Promise<T>
+): Promise<T> => {
+  try {
+    return await task();
+  } catch (error) {
+    if (error instanceof OutsideEuError) {
+      throw new DeployError(code, error.message, { cause: error });
+    }
+    throw error;
+  }
+};
+
 /**
  * Ensures every D1 database and R2 bucket the release binds exists in the
- * account, in the EU, one at a time. Throws `OutsideEuError` for one that
- * exists elsewhere.
+ * account, in the EU, one at a time. Throws a `DeployError` for one that
+ * exists, or was made, elsewhere.
  */
 export const ensureResources = async (
   api: CloudflareApi,
@@ -63,13 +85,19 @@ export const ensureResources = async (
   const databases = new Map<string, string>();
   for (const name of databaseNames(manifest)) {
     // oxlint-disable-next-line no-await-in-loop -- one at a time, in order
-    const database = await ensureD1Database(api, accountId, name);
+    const database = await inEu(
+      "database_outside_eu",
+      async () => await ensureD1Database(api, accountId, name)
+    );
     databases.set(name, database.uuid);
   }
   const buckets = bucketNames(manifest);
   for (const name of buckets) {
     // oxlint-disable-next-line no-await-in-loop -- one at a time, in order
-    await ensureR2Bucket(api, accountId, name);
+    await inEu(
+      "bucket_outside_eu",
+      async () => await ensureR2Bucket(api, accountId, name)
+    );
   }
   return { databases, buckets };
 };

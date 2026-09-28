@@ -198,7 +198,7 @@ describe("deploying a release to a client's account", () => {
     await expect(deployRow(deployId)).resolves.toMatchObject({
       status: "failed",
       step: "resources",
-      error: "Error",
+      error: "d1_migration_failed",
     });
     await expect(appliedMigrations(account)).resolves.toMatchObject({
       "grasp-os-connect": [],
@@ -221,7 +221,7 @@ describe("deploying a release to a client's account", () => {
 
     await expect(deployRow(deployId)).resolves.toMatchObject({
       status: "failed",
-      error: "OutsideEuError",
+      error: "database_outside_eu",
     });
     expect(account.buckets).toStrictEqual([]);
   });
@@ -265,6 +265,12 @@ describe("deploying a release to a client's account", () => {
           eq(auditEvents.target, release.id)
         )
       );
-    expect(event?.detail).toContain('"step":"migrations"');
+    expect(event?.detail).toBe(
+      JSON.stringify({
+        deploy: deployId,
+        step: "migrations",
+        error: "release_blob_mismatch",
+      })
+    );
   });
 });
