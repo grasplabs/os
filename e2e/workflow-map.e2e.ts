@@ -336,3 +336,71 @@ test("an answer to an earlier open, arriving late, never replaces the workflow o
     check.core[Symbol.dispose]();
   }
 });
+
+test("a failed overview shows only with the list, and goes once an overview comes", async ({
+  browser,
+}) => {
+  const { admin } = peopleIn("workflowMap");
+  const app = await mapFor(admin);
+  const title = `Failing ${crypto.randomUUID().slice(0, 8)}`;
+  const { core, api } = apiOf(admin);
+  try {
+    await api.screens.call(app, "save", [
+      {
+        ifVersion: 0,
+        record: {
+          type: "workflow",
+          title,
+          state: "drawn",
+          steps: [],
+          parameters: [],
+        },
+        body: "",
+      },
+    ]);
+  } finally {
+    core[Symbol.dispose]();
+  }
+  const page = await pageOf(browser, admin);
+  // While `failing`, the page asks core for a method the map doesn't have
+  // in place of its overview, which core refuses.
+  let failing = false;
+  await page.routeWebSocket("**/rpc", (socket) => {
+    const toCore = socket.connectToServer();
+    socket.onMessage((message) => {
+      const text = String(message);
+      toCore.send(
+        failing ? text.replaceAll('"overview"', '"overviewGone"') : text
+      );
+    });
+  });
+  const screen = await openMap(page, app);
+  const alert = screen.getByRole("alert");
+  await screen.getByRole("button", { name: title, exact: true }).click();
+  await expect(screen.getByLabel("Title", { exact: true })).toHaveValue(title);
+
+  // The save's overview fails: the editor it reopened shows no alert.
+  failing = true;
+  await screen.getByLabel("Title", { exact: true }).fill(`${title} again`);
+  await screen.getByRole("button", { name: "Save" }).click();
+  await expect(screen.getByText("Version 2")).toBeVisible();
+  await expect(alert).toHaveCount(0);
+
+  // It shows with the list (the one it last had, under the old title),
+  // and not with a workflow opened from it.
+  await screen.getByRole("button", { name: "All workflows" }).click();
+  await expect(alert).toHaveCount(1);
+  await screen.getByRole("button", { name: title, exact: true }).click();
+  await expect(screen.getByLabel("Title", { exact: true })).toHaveValue(
+    `${title} again`
+  );
+  await expect(alert).toHaveCount(0);
+
+  // The next overview comes: the alert goes.
+  failing = false;
+  await screen.getByRole("button", { name: "All workflows" }).click();
+  await expect(
+    screen.getByRole("button", { name: `${title} again`, exact: true })
+  ).toBeVisible();
+  await expect(alert).toHaveCount(0);
+});

@@ -29,6 +29,14 @@ const MapHeader = ({
   </div>
 );
 
+/** Why something failed, while `shown` and there is a reason. */
+const Problem = ({ text, shown }: { text: string; shown: boolean }) =>
+  shown && text !== "" ? (
+    <p role="alert" className="text-destructive text-sm">
+      {text}
+    </p>
+  ) : null;
+
 /** What a view is of, as `selected` holds it. */
 const selectionOf = (view: View): string | null => {
   switch (view.kind) {
@@ -54,7 +62,11 @@ const selectionOf = (view: View): string | null => {
 const WorkflowMap = () => {
   const [overview, setOverview] = useState<Overview | null>(null);
   const [view, setView] = useState<View>({ kind: "list" });
-  const [problem, setProblem] = useState("");
+  // Why the overview, or an opening, failed: each cleared when its own
+  // call next succeeds. The overview's shows only with the list, which it
+  // is about.
+  const [listProblem, setListProblem] = useState("");
+  const [openProblem, setOpenProblem] = useState("");
   // What the person asked for last (a workflow's ID, a new drawing, or
   // the list, null), and each opening and listing asked for, numbered: an
   // answer to any but the latest, arriving late, is dropped, as it would
@@ -64,10 +76,12 @@ const WorkflowMap = () => {
   const listings = useRef(0);
   const draws = useRef(0);
 
-  // Asks for what the person chose, and forgets any opening on its way.
+  // Asks for what the person chose, and forgets any opening on its way
+  // (and why the last one failed).
   const choose = (next: View): void => {
     selected.current = selectionOf(next);
     openings.current += 1;
+    setOpenProblem("");
     setView(next);
   };
 
@@ -79,9 +93,10 @@ const WorkflowMap = () => {
       return;
     }
     if ("error" in answer) {
-      setProblem(refusal(answer.error));
+      setListProblem(refusal(answer.error));
       return;
     }
+    setListProblem("");
     setOverview(answer.ok);
   };
 
@@ -95,9 +110,10 @@ const WorkflowMap = () => {
         return;
       }
       if ("error" in answer) {
-        setProblem(refusal(answer.error));
+        setListProblem(refusal(answer.error));
         return;
       }
+      setListProblem("");
       setOverview(answer.ok);
     };
     void first();
@@ -110,20 +126,19 @@ const WorkflowMap = () => {
     selected.current = id;
     openings.current += 1;
     const asked = openings.current;
-    setProblem("");
     const answer = await ask<Opened>("open", id);
     if (asked !== openings.current) {
       return;
     }
     if ("error" in answer) {
-      setProblem(refusal(answer.error));
+      setOpenProblem(refusal(answer.error));
       return;
     }
+    setOpenProblem("");
     setView({ kind: "open", opened: answer.ok });
   };
 
   const showList = async (): Promise<void> => {
-    setProblem("");
     choose({ kind: "list" });
     await list();
   };
@@ -151,11 +166,8 @@ const WorkflowMap = () => {
           choose({ kind: "new", draw: draws.current });
         }}
       />
-      {problem === "" ? null : (
-        <p role="alert" className="text-destructive text-sm">
-          {problem}
-        </p>
-      )}
+      <Problem text={listProblem} shown={view.kind === "list"} />
+      <Problem text={openProblem} shown />
       {overview?.access === "none" ? (
         <p className="text-muted-foreground text-sm">
           The map needs the Playbook: an admin approves its permission first.
