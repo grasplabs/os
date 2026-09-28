@@ -1560,6 +1560,62 @@ describe("workflow side effects and failures", { timeout: 60_000 }, () => {
     });
   });
 
+  it("fail, recorded and reported, once a run's waits have passed over as many copies of an event as its steps allow", async () => {
+    const admin = await personApi("admin");
+    const app = await appWith(
+      admin,
+      workflowFiles(
+        "flooded",
+        `  await step.waitFor("first", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.waitFor("second", { description: "Wait again", type: "go", timeout: "1 day" });`
+      )
+    );
+    const run = await admin.api.workflows.start(app, "flooded");
+    // One event, delivered more often than the run has steps: the first
+    // wait takes it, and each copy costs the second a wait of its own.
+    const event = { type: "go", id: "flood", payload: null };
+    await Promise.all(
+      Array.from({ length: 80 }, async () => {
+        await sent(run.id, event);
+      })
+    );
+    await finished(run.id);
+
+    const { status, failure } = await admin.api.workflows.status(run.id);
+    expect({
+      status,
+      row: await listedStatus(admin, app, run.id),
+      failure: failure?.error.code,
+    }).toStrictEqual({
+      status: "failed",
+      row: "failed",
+      failure: "workflow.too_many_steps",
+    });
+  });
+
+  it("fail a run, as unexpected, whose wait gets an event sent without an ID", async () => {
+    const admin = await personApi("admin");
+    const app = await appWith(
+      admin,
+      workflowFiles(
+        "unnamed",
+        `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });`
+      )
+    );
+    const run = await admin.api.workflows.start(app, "unnamed");
+    // Straight to the engine, past core's `sendEvent`, which gives each
+    // event its ID.
+    const instance = await env.WORKFLOWS.get(run.id);
+    await instance.sendEvent({ type: "go", payload: "no ID" });
+    await finished(run.id);
+
+    const { status, failure } = await admin.api.workflows.status(run.id);
+    expect({ status, failure }).toMatchObject({
+      status: "failed",
+      failure: { error: { code: "internal.unexpected" } },
+    });
+  });
+
   it("fail, recorded and reported, once a run has taken as many steps as it may", async () => {
     const admin = await personApi("admin");
     // More steps than the engine takes in one execution (vite.config.ts).
