@@ -13,3 +13,4 @@ test-results/
 .DS_Store
 .vite-hooks/_/
 release-out/
+wrangler.deploy.jsonc

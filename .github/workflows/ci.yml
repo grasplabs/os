@@ -201,4 +201,8 @@ jobs:
       - run: vp run --filter @grasp-os/core db:migrate
       - run: vp run --filter @grasp-os/core deploy
       - run: vp run --filter @grasp-os/console db:migrate
-      - run: vp run --filter @grasp-os/console --filter @grasp-os/router deploy
+      # Console first, each on its own: the router's deploy needs the
+      # account's Secrets Store (scripts/wrangler-deploy.ts), and an account
+      # not set up for it yet mustn't hold back the console.
+      - run: vp run --filter @grasp-os/console deploy
+      - run: vp run --filter @grasp-os/router deploy

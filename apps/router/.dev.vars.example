@@ -1,2 +1,0 @@
-# Copy to .dev.vars for local development. Never commit real values.
-ROUTER_SECRET=
