@@ -456,9 +456,11 @@ export type TestRun<Output = unknown> = (
 };
 
 /**
- * Runs a workflow once in memory. Side-effect steps are recorded, never run;
- * every other step runs unless it's mocked. Never throws for the workflow:
- * a run that fails comes back with its error.
+ * Runs a workflow once in memory. Side-effect steps are recorded, never run,
+ * whatever the options say: a test's options come from the App's code, and
+ * a dry run (`dryRun`) runs on them too. Every other step runs unless it's
+ * mocked. Never throws for the workflow: a run that fails comes back with
+ * its error.
  */
 export const testRun = async <Output>(
   definition: WorkflowDefinition<Output>,
@@ -467,6 +469,9 @@ export const testRun = async <Output>(
   const { engine, steps, state } = createTestEngine({
     ...options,
     state: createTestState(initialState),
+    // Last, so no option sets it: `TestRunOptions` has no `sideEffects`,
+    // but untyped options (a test file's, sent to core) may.
+    sideEffects: "record",
   });
   let outcome:
     | { status: "completed"; output: Output }

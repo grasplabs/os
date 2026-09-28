@@ -841,6 +841,40 @@ describe("the Workflows page", buildTime, () => {
     });
   });
 
+  it("never runs a side effect in a Test, even where the workflow's test asks for it", async () => {
+    const owner = await personApi("builder");
+    const app = await appOf(owner, `Cards ${unique()}`, {
+      "workflows/charge.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow("charge", { params: {}, input: z.unknown() }, async (step) =>
+  await step.do(
+    "charge",
+    { description: "Charge the card", sideEffect: true, input: { amount: 5 } },
+    async () => "charged"
+  )
+);
+`,
+      // Its test asks for its side effects to run, as the SDK's test
+      // engine can: no test or dry run of a workflow's own does.
+      "workflows/charge.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./charge.ts";
+
+export default workflowTests(definition, [
+  { name: "charges", sideEffects: "run", expect: {} },
+] as never);
+`,
+    });
+    const { runs } = await owner.api.workflows.test(app, "charge");
+    const [charges] = runs;
+    expect({
+      recorded: charges?.report.includes(
+        '- charge {"amount":5}: would change something, not run'
+      ),
+      ran: charges?.report.includes('"charged"'),
+    }).toStrictEqual({ recorded: true, ran: false });
+  });
+
   it("tests a workflow with the values set now, changing nothing, for its builders only", async () => {
     const [owner, user] = await Promise.all([
       personApi("builder"),
