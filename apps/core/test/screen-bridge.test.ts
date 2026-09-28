@@ -4,7 +4,7 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { removeMember } from "../src/app-members.ts";
-import { release } from "./apps.ts";
+import { pastAccessRecheck, release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import {
   openRpc,
@@ -401,16 +401,19 @@ describe("screens", { timeout: 60_000 }, () => {
     // The App wasn't restarted, so it still holds their subscription: the
     // next push after their access was checked again releases it, and the
     // App lets it go.
-    const left = await vi.waitFor(
-      async () => {
-        await owner.api.screens.call(app, "addNote", ["Meanwhile"]);
-        const count = await owner.api.screens.call(app, "watching", []);
-        if (count !== 0) {
-          throw new Error("Still watching");
-        }
-        return count;
-      },
-      { timeout: 15_000, interval: 1000 }
+    const left = await pastAccessRecheck(
+      async () =>
+        await vi.waitFor(
+          async () => {
+            await owner.api.screens.call(app, "addNote", ["Meanwhile"]);
+            const count = await owner.api.screens.call(app, "watching", []);
+            if (count !== 0) {
+              throw new Error("Still watching");
+            }
+            return count;
+          },
+          { timeout: 3000, interval: 250 }
+        )
     );
     const received = watching.received.length;
     await owner.api.screens.call(app, "addNote", ["After it was released"]);
@@ -450,16 +453,19 @@ describe("screens", { timeout: 60_000 }, () => {
     await env.DB.prepare("DELETE FROM sessions WHERE user_id = ?")
       .bind(userId)
       .run();
-    const left = await vi.waitFor(
-      async () => {
-        await owner.api.screens.call(app, "addNote", ["After it ended"]);
-        const count = await owner.api.screens.call(app, "watching", []);
-        if (count !== 0) {
-          throw new Error("Still watching");
-        }
-        return count;
-      },
-      { timeout: 15_000, interval: 1000 }
+    const left = await pastAccessRecheck(
+      async () =>
+        await vi.waitFor(
+          async () => {
+            await owner.api.screens.call(app, "addNote", ["After it ended"]);
+            const count = await owner.api.screens.call(app, "watching", []);
+            if (count !== 0) {
+              throw new Error("Still watching");
+            }
+            return count;
+          },
+          { timeout: 3000, interval: 250 }
+        )
     );
     expect({ isStaff, pushed, left }).toStrictEqual({
       isStaff: true,
