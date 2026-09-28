@@ -324,8 +324,14 @@ export interface PermissionsApi {
    * own permissions (`permission.builtin`), which only a release changes.
    */
   revoke: (id: string) => Promise<Permission>;
-  /** Every permission, or one App's or agent's. Admins and builders. */
-  list: (subject?: PermissionSubjectInput) => Promise<Permission[]>;
+  /**
+   * Every permission, or one App's or agent's, oldest first; only those in
+   * `status` when given. Admins and builders.
+   */
+  list: (
+    subject?: PermissionSubjectInput,
+    status?: PermissionStatus
+  ) => Promise<Permission[]>;
 }
 
 /**

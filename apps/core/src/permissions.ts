@@ -15,6 +15,7 @@ import {
   permissionErrors,
   permissionObjectSchema,
   permissionRequestSchema,
+  permissionStatusSchema,
   permissionSubjectSchema,
 } from "@grasp-os/shared/permissions";
 import type {
@@ -998,18 +999,31 @@ export const revokePermission = async (
 };
 
 /**
- * Every permission, or those of one App or agent, oldest first. With
- * `openApps` (a condition on `apps`: the Apps the person has a role in, as
- * `appsListedFor` in apps.ts says), one that names an App, as its subject
- * or as a workflow's, only if that App is one of them.
+ * Every permission, or those of one App or agent, oldest first; only those
+ * in `status` when given. With `openApps` (a condition on `apps`: the Apps
+ * the person has a role in, as `appsListedFor` in apps.ts says), one that
+ * names an App, as its subject or as a workflow's, only if that App is one
+ * of them.
  */
 export const listPermissions = async (
   env: Env,
   by: Identity,
   subject?: unknown,
-  openApps?: SQL
+  openApps?: SQL,
+  status?: unknown
 ): Promise<Permission[]> => {
   requireBuilder(by);
+  const inStatus =
+    status === undefined
+      ? undefined
+      : eq(
+          permissions.status,
+          permissionErrors.parse(
+            "permission.invalid",
+            permissionStatusSchema,
+            status
+          )
+        );
   const db = drizzle(env.DB);
   const open = db.select({ id: apps.id }).from(apps).where(openApps);
   // Both Apps a permission names, its subject and a workflow's, must be
@@ -1041,7 +1055,7 @@ export const listPermissions = async (
   const rows = await db
     .select()
     .from(permissions)
-    .where(and(ofOne, ofOpenApp))
+    .where(and(ofOne, ofOpenApp, inStatus))
     .orderBy(asc(permissions.requestedAt), asc(permissions.id));
   return rows.map(toPermission);
 };

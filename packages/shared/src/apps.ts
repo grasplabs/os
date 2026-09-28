@@ -81,6 +81,13 @@ export const commitMessageSchema = z
   .min(1)
   .max(appLimits.messageLength);
 
+/**
+ * The owner of the built-in blueprints' Apps: Grasp, never a person. A
+ * built-in never runs: its permissions say what the Apps created from it
+ * ask for, and nobody grants or revokes them (`permission.builtin`).
+ */
+export const builtinOwner = "grasp";
+
 /** An App in the registry. Times are ISO 8601. */
 export interface App {
   id: AppId;

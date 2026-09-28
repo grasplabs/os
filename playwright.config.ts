@@ -59,6 +59,7 @@ export default defineConfig({
             screens: true,
             screen_workflows: true,
             members: true,
+            audit: true,
             workflows: true,
             decisions: true,
             connections: true,

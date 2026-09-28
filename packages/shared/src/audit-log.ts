@@ -115,7 +115,10 @@ export const auditEventTypeOf = (
   )?.type ?? null;
 
 /** A dotted action or the start of one: `connection` or `connection.call`. */
-const actionPrefixPattern = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u;
+export const auditActionPrefixSchema = z
+  .string()
+  .max(identifierMaxLength)
+  .regex(/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u);
 
 /** An ISO 8601 time, as the log writes its own (`toISOString`), to compare. */
 const timeSchema = z.iso
@@ -147,11 +150,7 @@ export const auditFilterSchema = z
     actorId: identifierSchema.optional(),
     type: auditEventTypeSchema.optional(),
     /** The action or a dotted prefix of it: `connection` finds `connection.call`. */
-    action: z
-      .string()
-      .max(identifierMaxLength)
-      .regex(actionPrefixPattern)
-      .optional(),
+    action: auditActionPrefixSchema.optional(),
     targetType: identifierSchema.optional(),
     targetId: identifierSchema.optional(),
     /** A resource the event names in its provenance or as `detail.resource`. */
@@ -284,6 +283,14 @@ export interface AuditApi {
   /** One step of verifying the whole chain, archived stretches included. */
   verify: (after?: number) => Promise<ChainVerification>;
 }
+
+/**
+ * Where a browser downloads an export: `GET` with `format` (`json` or
+ * `csv`) and the filter's fields as query parameters, on the admin's
+ * session cookie. The same export as `AuditApi.export`, written to disk as
+ * it arrives.
+ */
+export const auditExportPath = "/api/audit/export";
 
 /** Most records one export holds. */
 export const auditExportMaxRecords = 100_000;
