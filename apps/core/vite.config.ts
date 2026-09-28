@@ -50,6 +50,7 @@ export const screenTests = [
   "test/decisions.test.ts",
   "test/decisions-switched-off.test.ts",
   "test/workflow-params.test.ts",
+  "test/workflow-overview.test.ts",
 ];
 
 /** Core's Worker test setup, shared by both of core's test projects. */

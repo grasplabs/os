@@ -208,6 +208,181 @@ export interface WorkflowRun {
 }
 
 /**
+ * How a step works: `exact` is plain code, `ai` asks a model for output of a
+ * fixed shape, `decision` waits for a person, `wait` waits for time or an
+ * event.
+ */
+export type StepKind = "exact" | "ai" | "decision" | "wait";
+
+/** An option written as a literal, or an object of literals. */
+export type OptionValue =
+  | string
+  | number
+  | boolean
+  | { [key: string]: OptionValue };
+
+/** A step as the UI shows it. */
+export interface StepOutline {
+  type: "step";
+  name: string;
+  kind: StepKind;
+  description: string;
+  /** Source of the per-item key, e.g. `invoice.id`; only on keyed steps. */
+  key?: string;
+  /** Changes something outside Grasp; a decision's `ask` always does. */
+  sideEffect: boolean;
+  /** Deterministic, with no model involvement. */
+  locked: boolean;
+  /** Parameters the call reads (options and callback), in source order. */
+  params: string[];
+  /** Other options written as literals, e.g. `retries` or `instructions`. */
+  options: Record<string, OptionValue>;
+  line: number;
+}
+
+/** Steps that run only when a condition holds. */
+export interface BranchOutline {
+  type: "branch";
+  /** The condition as written, e.g. `extracted.total > params.threshold`. */
+  condition: string;
+  /** Parameters the condition reads. */
+  params: string[];
+  /** Steps when the condition holds. */
+  steps: OutlineNode[];
+  /** Steps when it doesn't (the `else`). */
+  otherwise: OutlineNode[];
+  line: number;
+}
+
+/** Steps that run once per item. */
+export interface LoopOutline {
+  type: "loop";
+  /** The loop's head as written, e.g. `for (const invoice of input.invoices)`. */
+  header: string;
+  /** Parameters the head reads. */
+  params: string[];
+  steps: OutlineNode[];
+  line: number;
+}
+
+export type OutlineNode = StepOutline | BranchOutline | LoopOutline;
+
+/**
+ * A workflow's steps, as its code runs them: read from the code by the
+ * SDK's describer (`@grasp-os/sdk/describe`), never kept apart from it.
+ */
+export interface WorkflowOutline {
+  steps: OutlineNode[];
+}
+
+/**
+ * What the Runs list is filtered by: runs waiting for a decision, running
+ * otherwise (paused ones too), failed, or done (completed or cancelled).
+ */
+export const runFilterStatuses = [
+  "waiting",
+  "running",
+  "failed",
+  "done",
+] as const;
+
+export type RunFilterStatus = (typeof runFilterStatuses)[number];
+
+/** Which runs `WorkflowsApi.runs` lists; each field narrows it. */
+export interface RunFilter {
+  app?: string;
+  workflow?: string;
+  status?: RunFilterStatus;
+}
+
+/**
+ * A run as the Runs list has it, with its App's name. While it waits for
+ * a decision its `status` is `waiting`.
+ */
+export interface ListedRun extends WorkflowRun {
+  appName: string;
+  /**
+   * An open decision it waits for that the person may answer now (the
+   * latest such), answered on its own page (`/decisions/<id>`); none when
+   * they may answer none of them.
+   */
+  decision?: string;
+}
+
+/** Most runs one `runs` call returns. */
+export const runsPageSize = 100;
+
+/** A page of runs, and whether more matched than it holds. */
+export interface RunsPage {
+  runs: ListedRun[];
+  more: boolean;
+}
+
+/** How many days back a workflow's failed runs are counted. */
+export const failedRunDays = 7;
+
+/** A workflow of an App's current version, as the Workflows page lists it. */
+export interface WorkflowSummary {
+  app: AppId;
+  appName: string;
+  workflow: WorkflowId;
+  /** The App's current version, which new runs run. */
+  version: number;
+  /** The App's owner: whom a run no person started acts for. */
+  owner: { userId: string; name: string | null };
+  /**
+   * Its latest run, of any version, `waiting` while it waits for a
+   * decision; null before its first.
+   */
+  lastRun: { id: RunId; status: RunStatus; createdAt: string } | null;
+  /** Its runs waiting for a decision now. */
+  waiting: number;
+  /** Its runs that failed in the last {@link failedRunDays} days. */
+  failed: number;
+}
+
+/**
+ * One workflow, as its view shows it: its summary, its steps as its code
+ * reads (or why they can't be read), and, for the App's builders, its
+ * parameters.
+ */
+export interface WorkflowDetail {
+  summary: WorkflowSummary;
+  /**
+   * For anyone who doesn't build the App, the outline without its code:
+   * no conditions, loop heads, per-item keys, parameters read or literal
+   * options, only each step's description, name and kind.
+   */
+  steps:
+    | { ok: true; outline: WorkflowOutline }
+    | { ok: false; message: string };
+  /**
+   * Its parameters, for those who build the App; null for anyone else,
+   * who neither sees nor sets them.
+   */
+  params: WorkflowParam[] | null;
+  /** Whether the person sets its parameters: a builder, not Grasp staff. */
+  setsParams: boolean;
+}
+
+/**
+ * A dry run of each of a workflow's tests, with the parameter values
+ * people set now over the test's own: what each run did and would have
+ * changed, as the test harness reports it (`dryRun`). It makes no state
+ * changes: side effects are recorded, never made.
+ */
+export interface WorkflowDryRun {
+  /** The App version whose code ran. */
+  version: number;
+  runs: {
+    /** The test the run is of. */
+    name: string;
+    status: "completed" | "failed";
+    report: string;
+  }[];
+}
+
+/**
  * A signed-in person's workflows. Anyone with a role in the App
  * (`AppsApi`) starts and follows its runs, and its builders cancel them;
  * every call checks the session and the person's role again.
@@ -231,6 +406,26 @@ export interface WorkflowsApi {
   list: (app: string) => Promise<WorkflowRun[]>;
   /** Stops a run for good; a run that ended stays as it ended. */
   cancel: (run: string) => Promise<WorkflowRun>;
+  /**
+   * Every workflow of the current version of every App the person can
+   * open, with its latest run and its waiting and failed runs, by App
+   * name and workflow.
+   */
+  overview: () => Promise<WorkflowSummary[]>;
+  /**
+   * Runs of the Apps the person can open, as `filter` narrows them:
+   * waiting first (latest to wait first), then failed (latest ended
+   * first), then the rest, newest first; at most {@link runsPageSize},
+   * with `more` when more matched.
+   */
+  runs: (filter?: RunFilter) => Promise<RunsPage>;
+  /** One workflow of an App's current version. */
+  get: (app: string, workflow: string) => Promise<WorkflowDetail>;
+  /**
+   * Dry-runs a workflow's tests at the App's current version, with the
+   * parameter values set now; for the App's builders.
+   */
+  test: (app: string, workflow: string) => Promise<WorkflowDryRun>;
   /** The values people set for a workflow's parameters. */
   readonly params: WorkflowParamsApi;
 }

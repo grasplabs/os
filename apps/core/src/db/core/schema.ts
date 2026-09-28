@@ -427,6 +427,16 @@ export const appVersions = sqliteTable(
      * and for one never made current, which never runs.
      */
     approved: integer(),
+    /**
+     * The IDs of the version's workflows (JSON), written when it is
+     * committed, as a version never changes: so listing an App's
+     * workflows reads no files (workflows/overview.ts). A row the
+     * previous release writes gets none (the default).
+     */
+    workflows: text({ mode: "json" })
+      .$type<string[]>()
+      .notNull()
+      .default(sql`'[]'`),
   },
   (table) => [primaryKey({ columns: [table.appId, table.version] })]
 );
@@ -474,6 +484,9 @@ export const workflowRuns = sqliteTable(
   },
   (table) => [
     index("workflow_runs_app_idx").on(table.appId, table.createdAt),
+    // Runs across Apps, newest first: the Workflows page's Runs tab
+    // (src/workflows/overview.ts).
+    index("workflow_runs_created_idx").on(table.createdAt, table.id),
     // An App's runs of one workflow, newest first: what its screens list.
     index("workflow_runs_app_workflow_idx").on(
       table.appId,
@@ -525,6 +538,8 @@ export const workflowDecisions = sqliteTable(
   },
   (table) => [
     uniqueIndex("workflow_decisions_run_step_idx").on(table.runId, table.step),
+    // A run's open decisions (src/workflows/overview.ts): whether it waits.
+    index("workflow_decisions_run_status_idx").on(table.runId, table.status),
     // The improvement signals (src/signals.ts): open decisions, oldest
     // first, and decisions answered in a window, latest first.
     index("workflow_decisions_status_opened_idx").on(

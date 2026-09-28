@@ -130,6 +130,22 @@ const decisionEntry = (
   },
 });
 
+/** A table of decisions, or an alias of it, as `stillOpen` reads it. */
+interface DecisionColumns {
+  status: SQLiteColumn;
+  expiresAt: SQLiteColumn;
+}
+
+/**
+ * That a decision can still be answered at `now`, as a condition on
+ * `decisions` (the table, or an alias of it): it is open, and its deadline
+ * hasn't passed. One the run hasn't timed out yet, past its deadline, is
+ * answered by nobody. The one place this rule lives: answering, and
+ * whether a run waits for anyone (workflows/overview.ts), go by it.
+ */
+export const stillOpen = (decisions: DecisionColumns, now: Date): SQL =>
+  and(eq(decisions.status, "open"), gt(decisions.expiresAt, now)) ?? sql`0`;
+
 /** That the decision's run hasn't ended, as a condition. */
 const runUnended = (): SQL => sql`EXISTS (
   SELECT 1 FROM ${workflowRuns}
@@ -645,8 +661,7 @@ export const answerDecision = async (
       .where(
         and(
           eq(workflowDecisions.id, row.id),
-          eq(workflowDecisions.status, "open"),
-          gt(workflowDecisions.expiresAt, now),
+          stillOpen(workflowDecisions, now),
           runUnended(),
           mayAnswer(db, by.userId, row.deciders)
         )

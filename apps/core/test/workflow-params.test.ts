@@ -8,7 +8,7 @@ import { z } from "zod";
 import { startRun } from "../src/workflows/runs.ts";
 import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import { endLiveRuns, finished, resumed, stopped } from "./runs.ts";
+import { endLiveRuns, finished, resumed, stepDone, stopped } from "./runs.ts";
 import {
   auditedDuring,
   openRpc,
@@ -85,6 +85,37 @@ const paramOf = async (person: Person, app: string, name: string) => {
     throw new Error(`No parameter ${name}`);
   }
   return found;
+};
+
+/**
+ * The invoice workflow, but waiting for an event after it has recorded
+ * its values (its first step) and before it reads the limit.
+ */
+const waiting = {
+  "workflows/invoices.ts": `import { money, workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "invoices",
+  {
+    input: z.unknown(),
+    params: {
+      limit: money({ label: "Review invoices above", currency: "EUR", default: 500_000 }),
+    },
+  },
+  async (step, { params }) => {
+    await step.waitFor("go", { description: "Wait to go", type: "go", timeout: "1 day" });
+    return await step.do("limit", { description: "Read the limit" }, async () => params.limit);
+  }
+);
+`,
+  "workflows/invoices.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./invoices.ts";
+
+export default workflowTests(definition, [
+  { name: "runs", mocks: { limit: 1 }, events: [{ type: "go", payload: null }], expect: { output: 1 } },
+]);
+`,
 };
 
 /** The invoice workflow with its limit as text, not money. */
@@ -308,6 +339,34 @@ describe("runs", buildTime, () => {
       after: 700_000,
     });
   });
+
+  // Its waits, at their longest, add up to 40 s, past room for the build
+  // in the describe block's 60 s.
+  it(
+    "keep the values they started with when one is set while they run",
+    {
+      timeout: 90_000,
+    },
+    async () => {
+      const builder = await personApi("builder");
+      const { id: app } = await builder.api.apps.create({ name: "Invoices" });
+      await release(builder, app, waiting);
+      const run = await builder.api.workflows.start(app, "invoices");
+      // Its values are recorded in its first step, before it waits.
+      await stepDone(run.id, "$params");
+      await builder.api.workflows.params.set(app, "invoices", "limit", 700_000);
+      // Loaded anew, as after a deploy: the dispatcher reads the new value,
+      // and the run replays the one it recorded.
+      await stopped(run.id);
+      await resumed(run.id);
+      await finished(run.id, { type: "go", payload: null });
+      const { status, output } = await builder.api.workflows.status(run.id);
+      expect({ status, output }).toStrictEqual({
+        status: "completed",
+        output: 500_000,
+      });
+    }
+  );
 
   it("use a sensitive value as soon as it's set", async () => {
     const builder = await personApi("builder");

@@ -1,17 +1,13 @@
 // What the runtime and the describer agree on about steps. Internal to the
 // SDK: neither workflow code nor the runtime imports this module.
 
+import type { StepKind } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import { paramValueSchemas } from "./params.ts";
 import type { DecisionRequest } from "./workflow.ts";
 
-/**
- * How a step works: `exact` is plain code, `ai` asks a model for output of a
- * fixed shape, `decision` waits for a person, `wait` waits for time or an
- * event.
- */
-export type StepKind = "exact" | "ai" | "decision" | "wait";
+export type { StepKind } from "@grasp-os/shared/workflows";
 
 // Step names become part of engine step names and idempotency keys
 // (`runId:name`), so they never contain `:`, `#` or `$`, which the SDK uses

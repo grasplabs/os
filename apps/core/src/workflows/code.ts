@@ -138,6 +138,31 @@ const workflowSandbox = {
 const runModule = "grasp-run.js";
 const testsModule = "grasp-tests.js";
 const paramsModule = "grasp-params.js";
+const dryRunModule = "grasp-dry-run.js";
+
+/** Most of a workflow's tests one dry run runs. */
+const maxDryRuns = 50;
+
+/** The most of one dry run's report core keeps, in characters. */
+const maxDryRunReport = 20_000;
+
+/** Each test's dry run, as `dryRunMain` reports it; checked, and bounded. */
+const dryRunsSchema = z
+  .array(
+    z.object({
+      name: z.string().max(200),
+      status: z.enum(["completed", "failed"]),
+      report: z.string().max(maxDryRunReport),
+    })
+  )
+  .max(maxDryRuns);
+
+/** Each test's dry run of a workflow. */
+export type DryRuns = z.infer<typeof dryRunsSchema>;
+
+interface DryRunsEntrypoint extends Rpc.WorkerEntrypointBranded {
+  run: (params: Record<string, string | number>) => Promise<Settled<unknown>>;
+}
 
 /**
  * The shared part of both main modules: settling a call into plain data
@@ -251,6 +276,34 @@ export class Tests extends WorkerEntrypoint {
         throw new Error(${JSON.stringify(`workflows/${id}.workflow-tests.ts must export the tests of "${id}" as its default export.`)});
       }
       return JSON.parse(JSON.stringify(await runWorkflowTests(tests)));
+    });
+  }
+}
+`;
+
+/**
+ * The main module that dry-runs each of workflow `id`'s tests
+ * (`dryRun`), with the parameter values core passes over each test's own.
+ * Each report is cut to what core keeps of it.
+ */
+const dryRunMain = (
+  id: WorkflowId
+): string => `import { WorkerEntrypoint } from "cloudflare:workers";
+import { dryRun } from ${JSON.stringify(kitModuleName("@grasp-os/sdk/testing"))};
+import tests from ${JSON.stringify(appModuleName(workflowPaths(id).tests))};
+${settling}
+export class DryRuns extends WorkerEntrypoint {
+  async run(params) {
+    return await settled(async () => {
+      if (tests?.definition?.metadata?.id !== ${JSON.stringify(id)}) {
+        throw new Error(${JSON.stringify(`workflows/${id}.workflow-tests.ts must export the tests of "${id}" as its default export.`)});
+      }
+      const runs = [];
+      for (const { name, expect: _expect, ...options } of tests.tests.slice(0, ${maxDryRuns})) {
+        const run = await dryRun(tests.definition, { ...options, params: { ...options.params, ...params } });
+        runs.push({ name: String(name).slice(0, 200), status: run.status, report: run.report.slice(0, ${maxDryRunReport}) });
+      }
+      return runs;
     });
   }
 }
@@ -460,6 +513,52 @@ const testFailures = async (
     : results.flatMap(({ name, failures }) =>
         failures.map((failure) => `${id}, "${name}": ${failure}`)
       );
+};
+
+/**
+ * Dry-runs each of workflow `id`'s tests at an App version (with its
+ * `files`), with `params` over each test's own values, in an isolate of
+ * their own with an empty env: nothing a dry run does leaves it. The
+ * loader keeps the isolate for that version, whose code never changes;
+ * the values go with each call. A current version's workflows all have
+ * tests (`requireWorkflowTestsPass`).
+ */
+export const dryRunTests = async (
+  env: Env,
+  app: AppId,
+  version: number,
+  id: WorkflowId,
+  files: AppFiles,
+  params: Record<string, string | number>
+): Promise<DryRuns> => {
+  const code = env.LOADER.get(
+    `workflow-dry-run:${app}:${version}:${id}:${compilerVersion}`,
+    async () => ({
+      ...workflowSandbox,
+      mainModule: dryRunModule,
+      modules: {
+        ...(await modulesOf(env, app, version, files)),
+        [dryRunModule]: dryRunMain(id),
+      },
+      env: {},
+    })
+  ).getEntrypoint<DryRunsEntrypoint>("DryRuns");
+  let outcome: Settled<unknown>;
+  try {
+    outcome = fromIsolate(await code.run(params));
+  } catch (error) {
+    // As for parameters: a module that threw as it loaded is the code's
+    // failure, anything else the platform's.
+    if (startFailure(error) === undefined) {
+      throw error;
+    }
+    throw workflowErrors.create("workflow.invalid");
+  }
+  const runs = outcome.ok ? dryRunsSchema.safeParse(outcome.value) : undefined;
+  if (runs?.success !== true) {
+    throw workflowErrors.create("workflow.invalid");
+  }
+  return runs.data;
 };
 
 /**
