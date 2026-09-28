@@ -306,6 +306,21 @@ describe("permissions", () => {
     ).resolves.toStrictEqual(["permission.denied", reached]);
   });
 
+  it("are granted to an agent with no version reviewed, as it has none", async () => {
+    const admin = await permissionApi("admin");
+    const { id } = await admin.api.permissions.request({
+      ...outlook("unused"),
+      subject: { type: "agent", agentId: `agent-${crypto.randomUUID()}` },
+    });
+
+    await expect(
+      Promise.all([
+        outcome(admin.api.permissions.grant(id, { version: 1 })),
+        outcome(admin.api.permissions.grant(id, { version: null })),
+      ])
+    ).resolves.toStrictEqual(["permission.invalid", "ok"]);
+  });
+
   it("belong to their subject alone: not another App, not an agent with the same ID", async () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);

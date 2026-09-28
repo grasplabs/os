@@ -716,10 +716,15 @@ export const grantPermission = async (
     "core"
   );
   const isApp = found.subjectType === "app";
+  if (!isApp && version !== null) {
+    throw permissionErrors.create("permission.invalid", {
+      issues: ["version: an agent has no versions to review"],
+    });
+  }
   // The version reviewed is still the one current (an agent has none).
   const stillReviewed = isApp
     ? sql`(SELECT ${apps.currentVersion} FROM ${apps} WHERE ${apps.id} = ${found.subjectId}) IS ${version}`
-    : sql`${version} IS NULL`;
+    : undefined;
   const [[granted]] = await auditedBatch(env, db, [
     db
       .update(permissions)
