@@ -125,6 +125,7 @@ const recordsPerPage = 10;
 
 /** Statuses of a run that hasn't ended. */
 const unended: (typeof workflowRuns.$inferSelect)["status"][] = [
+  "starting",
   "running",
   "paused",
 ];

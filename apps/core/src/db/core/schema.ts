@@ -477,7 +477,16 @@ export const workflowRuns = sqliteTable(
     version: integer().notNull(),
     startedBy: text("started_by"),
     status: text({
-      enum: ["running", "paused", "completed", "failed", "cancelled"],
+      // `starting`: written, its engine instance not yet known to exist
+      // (src/workflows/runs.ts, `startRun`).
+      enum: [
+        "starting",
+        "running",
+        "paused",
+        "completed",
+        "failed",
+        "cancelled",
+      ],
     }).notNull(),
     ownerWaits: integer("owner_waits").notNull().default(0),
     createdAt: timestamp("created_at").notNull(),

@@ -150,7 +150,7 @@ export const stillOpen = (decisions: DecisionColumns, now: Date): SQL =>
 const runUnended = (): SQL => sql`EXISTS (
   SELECT 1 FROM ${workflowRuns}
   WHERE ${workflowRuns.id} = ${workflowDecisions.runId}
-    AND ${workflowRuns.status} IN ('running', 'paused')
+    AND ${workflowRuns.status} IN ('starting', 'running', 'paused')
 )`;
 
 // Run side: the host (workflows/host.ts) calls these for its run only.
@@ -514,7 +514,7 @@ const allowedDecision = async (
 };
 
 /** Statuses of a run that hasn't ended. */
-const unended: ReadonlySet<string> = new Set(["running", "paused"]);
+const unended: ReadonlySet<string> = new Set(["starting", "running", "paused"]);
 
 const toView = ({
   decision,
