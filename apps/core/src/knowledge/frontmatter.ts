@@ -60,8 +60,11 @@ const fileSchema = baseSchema.extend({
 // which a purge leaves (`frozenPathRanges`): the snapshot must name
 // versions the Playbook has.
 
+/** Longest short value a person writes. */
+export const shortTextMax = 200;
+
 /** A short value a person writes: a name, a role, a tool. */
-const shortText = z.string().trim().min(1).max(200);
+const shortText = z.string().trim().min(1).max(shortTextMax);
 
 /** Another record, by its path in the Playbook: `people/anna.md`. */
 const recordPath = documentPathSchema;
@@ -169,8 +172,81 @@ const workflowSchema = baseSchema
 const snapshotMaxWorkflows = 500;
 
 /**
+ * Most workflows one snapshot's figures hold: each freezes up to two
+ * versions of its record (drawn and designed), within `workflows`.
+ */
+export const snapshotMaxFigures = snapshotMaxWorkflows / 2;
+
+/** Most improvement signals one snapshot's figures hold. */
+export const snapshotMaxSignals = 50;
+
+/** Most hours a week a snapshot holds for one workflow. */
+export const snapshotMaxHoursPerWeek = gainMaxHoursPerWeek;
+
+/** Hours a week, as a snapshot freezes them. */
+const hoursPerWeek = z.number().min(0).max(snapshotMaxHoursPerWeek);
+
+/** A version of a workflow record, and the hours a week its steps take. */
+const versionHours = z.strictObject({
+  version: z.int().min(1),
+  hoursPerWeek,
+  /** Observed only when every number of its steps was. */
+  basis: z.enum(["estimated", "observed"]),
+});
+
+/**
+ * What a snapshot froze of one workflow record (knowledge/snapshots.ts):
+ * its hours as drawn (its latest drawn version), as designed (a designed
+ * one's current version), and as it runs: its designed steps at the runs
+ * a week its App workflow was observed to start.
+ */
+const workflowFiguresSchema = z.strictObject({
+  path: recordPath,
+  title: shortText,
+  /** Its team's title, then. */
+  team: shortText.optional(),
+  state: z.enum(["drawn", "designed"]),
+  drawn: versionHours.optional(),
+  designed: versionHours.optional(),
+  running: z
+    .strictObject({
+      appId: appIdSchema,
+      workflowId: workflowIdSchema,
+      /** Runs started in the `windowDays` before the snapshot. */
+      runs: z.int().min(1),
+      hoursPerWeek,
+    })
+    .optional(),
+});
+
+/**
+ * The numbers a snapshot froze when it was taken (`takeSnapshot`), which
+ * nothing later changes: each workflow's hours, and the improvement
+ * signals of the App workflows the Playbook links to, by the record
+ * linked (its kind and value only). Only the platform writes them.
+ */
+const figuresSchema = z.strictObject({
+  /** Days of runs the observed numbers are from. */
+  windowDays: z.int().min(1).max(366),
+  workflows: z.array(workflowFiguresSchema).max(snapshotMaxFigures),
+  signals: z
+    .array(
+      z.strictObject({
+        path: recordPath,
+        // Any kind's name, so a kind a later release adds still reads
+        // after a rollback.
+        kind: z.string().regex(/^[a-z_]{1,64}$/u),
+        value: z.number().min(0),
+      })
+    )
+    .max(snapshotMaxSignals),
+});
+
+/**
  * A dated freeze of the Playbook: the workflow records at the versions it
  * was taken from, which later saves don't change, and the maturity then.
+ * One taken by the platform also holds its `figures`, and the decision it
+ * puts to the board.
  */
 const snapshotSchema = baseSchema.extend({
   date: z.iso.date(),
@@ -179,6 +255,9 @@ const snapshotSchema = baseSchema.extend({
     .array(z.strictObject({ path: recordPath, version: z.int().min(1) }))
     .max(snapshotMaxWorkflows)
     .default([]),
+  figures: figuresSchema.optional(),
+  /** The one decision it asks for, in plain words. */
+  decisionNeeded: z.string().trim().max(1000).optional(),
 });
 
 /** A step of the plan, and where it stands. */
