@@ -87,6 +87,9 @@ describe("App code", { timeout: 60_000 }, () => {
       "screens/inbox.tsx": "export default () => <p>Invoices</p>;\n",
       "components/row.tsx": "export const Row = () => null;\n",
     });
+    // A version reads back as committed; the commit's answer adds how its
+    // builds went (build-on-save.test.ts).
+    const { builds: _builds, ...committedV1 } = v1;
     const [newestFirst, beforeTwo, one] = await Promise.all([
       apps.versions.list(app.id),
       apps.versions.list(app.id, 2),
@@ -104,8 +107,8 @@ describe("App code", { timeout: 60_000 }, () => {
         [2, "Change"],
         [1, "First screen"],
       ],
-      beforeTwo: [v1],
-      one: v1,
+      beforeTwo: [committedV1],
+      one: committedV1,
     });
   });
 

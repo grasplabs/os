@@ -1,7 +1,7 @@
 import type {
   AppFiles,
   AppFilesApi,
-  AppVersion,
+  CommittedVersion,
   FileChanges,
 } from "@grasp-os/shared/apps";
 import { RpcTarget } from "capnweb";
@@ -34,7 +34,7 @@ export class AppFilesRpc extends RpcTarget implements AppFilesApi {
     });
   }
 
-  async commit(app: string, message: string): Promise<AppVersion> {
+  async commit(app: string, message: string): Promise<CommittedVersion> {
     return await withPerson(
       this.#check,
       async (by) => await commitFiles(this.#env, by, app, message)

@@ -13,6 +13,7 @@ import type {
   AppFiles,
   AppRole,
   AppVersion,
+  CommittedVersion,
   FileDiff,
 } from "@grasp-os/shared/apps";
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
@@ -43,6 +44,7 @@ import { inList, isUniqueViolation } from "./db/d1.ts";
 import { featureEnabled } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
 import { madeCurrent } from "./permissions.ts";
+import { buildOnSave } from "./save-builds.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";
 import {
   registerTriggers,
@@ -595,7 +597,7 @@ export const commitFiles = async (
   by: Identity,
   app: unknown,
   message: unknown
-): Promise<AppVersion> => {
+): Promise<CommittedVersion> => {
   const { id: appId } = await appFor(env, by, app, "builder");
   const text = appErrors.parse("app.invalid", commitMessageSchema, message);
   const { latest, rows, files } = await workingCopy(env, appId);
@@ -651,7 +653,12 @@ export const commitFiles = async (
     }
     throw error;
   }
-  return toVersion(row);
+  // Committed: now built, so the version opens without building, and
+  // whoever saved hears what doesn't build (save-builds.ts).
+  return {
+    ...toVersion(row),
+    builds: await buildOnSave(env, Object.fromEntries(files)),
+  };
 };
 
 /** An App's versions, newest first, a page at a time. */

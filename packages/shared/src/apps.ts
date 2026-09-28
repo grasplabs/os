@@ -144,6 +144,38 @@ export type FileDiff =
   | { path: string; change: "deleted"; before: string }
   | { path: string; change: "modified"; before: string; after: string };
 
+/** A problem a build found in an App's code, where it is, and how bad. */
+export interface BuildDiagnostic {
+  /** The App file; null when it is about the App as a whole. */
+  file: string | null;
+  /** 1-based; null when it is about the whole file. */
+  line: number | null;
+  severity: "error" | "warning";
+  message: string;
+}
+
+/**
+ * How one build of a saved version went:
+ * - `ok`: built, with any warnings in `diagnostics`.
+ * - `failed`: it doesn't build; `diagnostics` says why.
+ * - `none`: the version has no files of this kind.
+ * - `pending`: not done by the time the save answered, or it couldn't
+ *   start. It builds on in the background, or at its first use.
+ */
+export interface SavedBuild {
+  status: "ok" | "failed" | "none" | "pending";
+  diagnostics: BuildDiagnostic[];
+}
+
+/** A committed version, with how its builds went (`AppFilesApi.commit`). */
+export interface CommittedVersion extends AppVersion {
+  builds: {
+    screens: SavedBuild;
+    server: SavedBuild;
+    workflows: SavedBuild;
+  };
+}
+
 /** An App's files and their working copy. */
 export interface AppFilesApi {
   /**
@@ -153,8 +185,14 @@ export interface AppFilesApi {
   read: (app: string, version?: number) => Promise<AppFiles>;
   /** Writes changes (`FileChanges`) to the working copy. */
   write: (app: string, changes: FileChanges) => Promise<void>;
-  /** Commits the working copy as the App's next version. */
-  commit: (app: string, message: string) => Promise<AppVersion>;
+  /**
+   * Commits the working copy as the App's next version, and starts its
+   * screen, server and workflow builds at once, so the version opens
+   * without building. Answers with how they went (`builds`) once they are
+   * done, or after a few seconds with those still building as `pending`.
+   * A build never fails or holds up the commit.
+   */
+  commit: (app: string, message: string) => Promise<CommittedVersion>;
 }
 
 /** An App's versions and which of them runs. */
