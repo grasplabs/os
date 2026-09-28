@@ -127,6 +127,7 @@ const cast = {
   boardPage: { admin: "admin" },
   models: { admin: "admin", builder: "builder" },
   workflows: { builder: "builder", user: "user" },
+  activity: { admin: "admin", builder: "builder" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;
