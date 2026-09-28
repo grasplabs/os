@@ -36,6 +36,8 @@ export const workflowErrors = defineErrorFamily({
     "The trigger belongs to a version of the App that is no longer current.",
   "workflow.start_pending":
     "The run this was delivered for is still starting. Try again shortly.",
+  "workflow.email_taken":
+    "Another App's workflow already receives mail at this address.",
   // What a step or run failed with when its error named no code of its
   // own: the audit log and failure reports carry these instead.
   "workflow.step_failed": "A step of the workflow failed.",
@@ -128,6 +130,51 @@ export const isCronExpression = (cron: string): boolean =>
   nextScheduledRun({ cron, timeZone: defaultTimeZone }, new Date()) !==
   undefined;
 
+/**
+ * The part of an address before the `@` that an email trigger receives
+ * mail at, e.g. `invoices`: lower case letters, digits, `.`, `_`, `+` and
+ * `-`, with no dot first, last or twice in a row.
+ */
+export const emailLocalPartSchema = z
+  .string()
+  .regex(/^[a-z0-9_+-]+(?:\.[a-z0-9_+-]+)*$/u)
+  .max(64);
+
+/** A name and address, as a message's headers give them. */
+const mailboxSchema = z.object({ name: z.string(), address: z.string() });
+
+/**
+ * A message an email trigger received, as its run gets it as input. `id`
+ * is the SHA-256 of its bytes. `from` is what the message's header says,
+ * which its sender can write anything in: nothing vouches for it. Bounded
+ * to fit a run's input (128 KiB of JSON): at most 100 each of `to`, `cc` and
+ * `attachments` (listed, never included), names, addresses and file names
+ * cut at 256 characters and the subject at 1,000, and as much of its
+ * plain text as fits (for a message with only HTML, its text),
+ * `truncated` when cut.
+ */
+export const inboundEmailSchema = z.object({
+  id: z.string(),
+  from: mailboxSchema,
+  to: z.array(mailboxSchema),
+  cc: z.array(mailboxSchema),
+  subject: z.string(),
+  /** ISO 8601, as the message dates itself; null without a date. */
+  date: z.string().nullable(),
+  text: z.string(),
+  truncated: z.boolean(),
+  attachments: z.array(
+    z.object({
+      filename: z.string().nullable(),
+      mimeType: z.string(),
+      size: z.int(),
+    })
+  ),
+});
+
+/** A message an email trigger received. */
+export type InboundEmail = z.infer<typeof inboundEmailSchema>;
+
 /** Most triggers one workflow declares. */
 const maxTriggerDeclarations = 20;
 
@@ -150,6 +197,7 @@ export const triggerDeclarationSchema = z.discriminatedUnion("type", [
       .optional(),
   }),
   z.object({ type: z.literal("event"), event: z.string().min(1).max(200) }),
+  z.object({ type: z.literal("email"), address: emailLocalPartSchema }),
 ]);
 
 /** A trigger as a workflow's code declares it. */

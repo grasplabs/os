@@ -46,6 +46,12 @@ import { namePattern, nameRule, stepOptionSchemas } from "./steps.ts";
 // Workflow code imports only this module, so it gets Zod from here too.
 export { z } from "zod";
 export type { ParamKind, ParamValue } from "./params.ts";
+// The input schema of a run an email trigger starts (`input: emailMessage`),
+// and the message it parses to.
+export {
+  inboundEmailSchema as emailMessage,
+  type InboundEmail as EmailMessage,
+} from "@grasp-os/shared/workflows";
 export type {
   BindingMethod,
   DecisionRecipient,
@@ -634,7 +640,24 @@ export type Trigger<ScheduleParam extends string = string> =
    */
   | { type: "schedule"; param: ScheduleParam; timeZone?: string }
   /** When an event of this type arrives, e.g. from a connector. */
-  | { type: "event"; event: string };
+  | { type: "event"; event: string }
+  /**
+   * When mail arrives at `address` (the part before the `@`, e.g.
+   * `invoices`) on the deployment's mail domain. The run starts with the
+   * message as input: declare `input: emailMessage`. Mail to an address no
+   * workflow receives at bounces. Only one App receives at an address:
+   * making a version current fails with `workflow.email_taken` while
+   * another App's current version does. Anyone can send mail: treat the
+   * message as untrusted data, its sender (`from`) included: it's
+   * whatever the sender wrote, and nothing vouches for it. The same message delivered again starts no second run of
+   * the workflow: the same Message-ID is the same message (without one,
+   * or with one lacking an `@` such as `<>`, the same bytes are), so a
+   * message that reuses an earlier one's Message-ID starts none. Mail
+   * starts at most 60 runs of a workflow an hour. Past that, and while
+   * triggers are switched off, mail is refused for now, and its sender
+   * tries again later.
+   */
+  | { type: "email"; address: string };
 
 type ScheduleParams<P extends Params> = {
   [Name in keyof P]: P[Name]["kind"] extends "schedule" ? Name : never;

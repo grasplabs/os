@@ -484,7 +484,8 @@ export const workflowRuns = sqliteTable(
     /**
      * What a trigger started it for (src/workflows/triggers.ts): one key
      * per scheduled time, so the same one delivered twice starts one run.
-     * Null for a run a person started.
+     * Null for a run a person started, and for one whose start failed,
+     * which gives its key up for the delivery tried again.
      */
     triggerKey: text("trigger_key"),
   },
@@ -517,7 +518,8 @@ export const workflowRuns = sqliteTable(
  * current and removed when another is. `position` is the trigger's place
  * among its workflow's. A schedule keeps its cron expression as its
  * parameter holds it now (`cron`), in its time zone, and when it next
- * fires (`next_run_at`).
+ * fires (`next_run_at`). An email trigger keeps the address it receives
+ * mail at (`address`, the part before the `@`).
  */
 export const workflowTriggers = sqliteTable(
   "workflow_triggers",
@@ -529,12 +531,13 @@ export const workflowTriggers = sqliteTable(
     version: integer().notNull(),
     workflowId: text("workflow_id").notNull(),
     position: integer().notNull(),
-    type: text({ enum: ["schedule"] }).notNull(),
+    type: text({ enum: ["schedule", "email"] }).notNull(),
     param: text(),
     cron: text(),
     timeZone: text("time_zone"),
     nextRunAt: timestamp("next_run_at"),
     createdAt: timestamp("created_at").notNull(),
+    address: text(),
   },
   (table) => [
     uniqueIndex("workflow_triggers_position_idx").on(
@@ -544,6 +547,7 @@ export const workflowTriggers = sqliteTable(
       table.position
     ),
     index("workflow_triggers_next_run_idx").on(table.nextRunAt),
+    index("workflow_triggers_address_idx").on(table.address),
   ]
 );
 

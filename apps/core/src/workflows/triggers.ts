@@ -8,7 +8,8 @@ import { apps, workflowTriggers } from "../db/core/schema.ts";
 import { featureEnabled } from "../features.ts";
 import { startRun } from "./runs.ts";
 
-// Starting the runs of registered triggers (trigger-registry.ts).
+// Starting the runs of registered triggers (trigger-registry.ts): here
+// schedules; mail in inbound-email.ts.
 //
 // A run a trigger starts has no starter: it acts for the App's owner, and
 // fails if they have left (dispatcher.ts). Its `workflow.run.started`
@@ -73,9 +74,9 @@ const startScheduled = async (
       log.info("workflow.start_pending", { trigger: schedule.id });
       return;
     }
-    // The time stays due, so the next minute tries its key again: a run
-    // the failed attempt recorded (and audited, as started, then as failed
-    // to start) is the run, and a key starts no second one.
+    // The time stays due, so the next minute tries its key again. A run
+    // whose start failed (audited as started, then as failed to start)
+    // gave its key up, so that try starts the run anew.
     log.error("workflow.trigger_failed", {
       trigger: schedule.id,
       type: "schedule",

@@ -153,6 +153,10 @@
   // The model gateway's transport to AI Gateway (src/models.ts); core never
   // holds a raw provider key.
   "ai": { "binding": "AI", "remote": true },
+  // Sends mail. Mail in comes from Email Routing: a catch-all rule for the
+  // deployment's mail domain that sends every message to this Worker's
+  // `email` handler (src/workflows/inbound-email.ts), set up with the
+  // domain, outside this file.
   "send_email": [{ "name": "EMAIL" }],
   // The running version's ID, which the cron records once per version to
   // audit platform updates (src/platform-updates.ts).

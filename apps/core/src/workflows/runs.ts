@@ -47,7 +47,7 @@ export const unended: RunRow["status"][] = ["running", "paused"];
 export const runsPerPage = 100;
 
 /** The most input a run starts with, as JSON text. */
-const maxInputLength = 128 * 1024;
+export const maxInputLength = 128 * 1024;
 
 const invalid = () => workflowErrors.create("workflow.invalid");
 
@@ -247,14 +247,16 @@ const restartOrphan = async (
  * The row and its audit event are written before the run is created, so
  * the dispatcher always finds the row; a run that can't be created is
  * marked failed, audited as a failed run. A trigger's key already taken
- * returns the run that took it, whatever became of it, once it has its
- * engine instance (`restartOrphan`; `workflow.start_pending` until
- * then). A trigger of a
+ * returns the run that took it, whatever became of it since, once it has
+ * its engine instance (`restartOrphan`; `workflow.start_pending` until
+ * then); a run whose start failed gives its key up, so the delivery
+ * tried again starts it anew. A trigger of a
  * version that is no longer current starts nothing
  * (`workflow.trigger_gone`): the version that replaced it may not declare
  * it. The run is pinned to the version checked, so at worst a trigger
  * starts its own version's run as that version is being replaced, as a
- * person starting it by hand then would.
+ * person starting it by hand then would. Input over
+ * {@link maxInputLength} is refused (`workflow.invalid`), whoever starts it.
  */
 export const startRun = async (
   env: Env,
@@ -262,6 +264,9 @@ export const startRun = async (
 ): Promise<WorkflowRun> => {
   // Every way a run starts, a trigger's too, stops with the kill switch.
   requireFeature(env, "workflows");
+  if (input !== undefined && JSON.stringify(input).length > maxInputLength) {
+    throw invalid();
+  }
   const db = drizzle(env.DB);
   const { currentVersion: version } = await appRecord(env, app);
   if (version === null) {
@@ -297,7 +302,9 @@ export const startRun = async (
       runEntry(actor, "workflow.run.started", row, {
         startedBy: startedBy === null ? "trigger" : "person",
         ...(via === undefined ? {} : { via }),
-        ...(trigger ? { trigger: trigger.type } : {}),
+        // The key names what started it: a time, a hash, an ID; never
+        // what a message or event says.
+        ...(trigger ? { trigger: trigger.type, key: trigger.key } : {}),
       })
     ),
   ]);
@@ -322,7 +329,9 @@ export const startRun = async (
   } catch (error) {
     // The instance may exist all the same: the dispatcher refuses to run
     // a failed run's row. Its report says only that it didn't start: the
-    // platform's error stays in the log.
+    // platform's error stays in the log. It gives up its trigger key, so
+    // the delivery tried again (a schedule stays due, mail and events are
+    // retried) starts the run as a new one, rather than finding this one.
     log.error("workflow.start_failed", {
       runId: row.id,
       ...errorFields(error),
@@ -344,7 +353,12 @@ export const startRun = async (
     await auditedBatch(env, db, [
       db
         .update(workflowRuns)
-        .set({ status: "failed", endedAt: failedAt, failure })
+        .set({
+          status: "failed",
+          endedAt: failedAt,
+          failure,
+          triggerKey: null,
+        })
         .where(
           and(
             eq(workflowRuns.id, row.id),
@@ -380,14 +394,10 @@ export const startWorkflow = async (
   via?: "screen"
 ): Promise<WorkflowRun> => {
   await appFor(env, by, app, "user");
-  const json = parse(z.json().optional(), input);
-  if (json !== undefined && JSON.stringify(json).length > maxInputLength) {
-    throw invalid();
-  }
   return await startRun(env, {
     app: parse(appIdSchema, app),
     workflow: parse(workflowInputSchema, workflow),
-    input: json,
+    input: parse(z.json().optional(), input),
     startedBy: by.userId,
     actor: actorOf(by),
     ...(via === undefined ? {} : { via }),
