@@ -120,6 +120,7 @@ const wranglerConfigSchema = z.strictObject({
     .strictObject({ binding: bindingName, remote: z.boolean().optional() })
     .optional(),
   send_email: z.array(z.strictObject({ name: bindingName })).default([]),
+  version_metadata: z.strictObject({ binding: bindingName }).optional(),
   services: z
     .array(
       z.strictObject({
@@ -292,6 +293,9 @@ const bindingsOf = (
     type: "send_email",
     name: email.name,
   })),
+  ...(config.version_metadata
+    ? [{ type: "version_metadata", name: config.version_metadata.binding }]
+    : []),
   ...config.services.map((service) => {
     if (!releaseNames.has(service.service)) {
       throw new Error(

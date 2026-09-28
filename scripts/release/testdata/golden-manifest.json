@@ -160,6 +160,10 @@
           "type": "send_email"
         },
         {
+          "name": "CF_VERSION_METADATA",
+          "type": "version_metadata"
+        },
+        {
           "name": "CONNECT",
           "service": "grasp-os-connect",
           "type": "service"
