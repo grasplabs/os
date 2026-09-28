@@ -218,6 +218,9 @@ importers:
       wrangler:
         specifier: 'catalog:'
         version: 4.136.0(@cloudflare/workers-types@5.20260921.1)(@types/node@26.6.2)
+      zod:
+        specifier: 'catalog:'
+        version: 4.6.5
 
   apps/connect:
     dependencies:

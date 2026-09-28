@@ -1,0 +1,264 @@
+{
+  "assets": {
+    "1a87128382005f1640e1498d4bd0e8d7": {
+      "r2Key": "blobs/assets/1a87128382005f1640e1498d4bd0e8d7",
+      "size": 90
+    },
+    "747a6a1882cb304afef2907abae53532": {
+      "r2Key": "blobs/assets/747a6a1882cb304afef2907abae53532",
+      "size": 21
+    }
+  },
+  "commit": "0000000000000000000000000000000000000000",
+  "compatibilityDate": "2026-09-15",
+  "createdAt": "2026-01-01T00:00:00.000Z",
+  "manifestVersion": 1,
+  "notes": "feat(core): a fixture",
+  "packages": {
+    "zod": "0.0.0-fixture"
+  },
+  "releaseId": "r000001-0000000",
+  "workers": {
+    "connect": {
+      "bindings": [
+        {
+          "name": "LOADER",
+          "type": "worker_loader"
+        },
+        {
+          "id": "$D1_DB_ID",
+          "name": "DB",
+          "type": "d1"
+        }
+      ],
+      "compatibilityFlags": [
+        "nodejs_compat",
+        "global_fetch_strictly_public"
+      ],
+      "crons": [
+        "* * * * *"
+      ],
+      "d1Databases": [
+        {
+          "binding": "DB",
+          "databaseName": "grasp-os-connect",
+          "migrations": [
+            {
+              "name": "0000_fixture.sql",
+              "r2Key": "blobs/migrations/b27a2967d05b98ee4aedc868dd1130d7f2a67e615d567b752fd5dd966dda951b",
+              "sha256": "b27a2967d05b98ee4aedc868dd1130d7f2a67e615d567b752fd5dd966dda951b",
+              "size": 51
+            }
+          ]
+        }
+      ],
+      "durableObjectMigrations": [],
+      "keepVars": true,
+      "mainModule": "index.js",
+      "modules": [
+        {
+          "name": "index.js",
+          "r2Key": "blobs/modules/2aac040f765eefcc0f2bb80470ebbe8c26ebbd6a45a58e98406b6728013d5e2d",
+          "sha256": "2aac040f765eefcc0f2bb80470ebbe8c26ebbd6a45a58e98406b6728013d5e2d",
+          "size": 57,
+          "type": "esm"
+        }
+      ],
+      "name": "grasp-os-connect",
+      "observability": {
+        "enabled": true,
+        "logs": {
+          "invocation_logs": false
+        },
+        "redact_query_string": true,
+        "traces": {
+          "enabled": true
+        }
+      },
+      "previewUrls": false,
+      "requiredSecrets": [
+        "CAPABILITY_SIGNING_KEY"
+      ],
+      "workersDev": false
+    },
+    "core": {
+      "assets": {
+        "config": {
+          "not_found_handling": "single-page-application",
+          "run_worker_first": true
+        },
+        "manifest": {
+          "/assets/app.js": {
+            "hash": "747a6a1882cb304afef2907abae53532",
+            "size": 21
+          },
+          "/index.html": {
+            "hash": "1a87128382005f1640e1498d4bd0e8d7",
+            "size": 90
+          }
+        }
+      },
+      "bindings": [
+        {
+          "class_name": "Workspace",
+          "name": "WORKSPACES",
+          "type": "durable_object_namespace"
+        },
+        {
+          "class_name": "App",
+          "name": "APPS",
+          "type": "durable_object_namespace"
+        },
+        {
+          "class_name": "AuditLog",
+          "name": "AUDIT_LOG",
+          "type": "durable_object_namespace"
+        },
+        {
+          "class_name": "Builtins",
+          "name": "BUILTINS",
+          "type": "durable_object_namespace"
+        },
+        {
+          "class_name": "WorkflowDispatcher",
+          "name": "WORKFLOWS",
+          "type": "workflow",
+          "workflow_name": "grasp-os-workflows"
+        },
+        {
+          "name": "LOADER",
+          "type": "worker_loader"
+        },
+        {
+          "id": "$D1_DB_ID",
+          "name": "DB",
+          "type": "d1"
+        },
+        {
+          "id": "$D1_KNOWLEDGE_ID",
+          "name": "KNOWLEDGE",
+          "type": "d1"
+        },
+        {
+          "bucket_name": "grasp-os-files",
+          "jurisdiction": "eu",
+          "name": "FILES",
+          "type": "r2_bucket"
+        },
+        {
+          "bucket_name": "grasp-os-audit-archive",
+          "jurisdiction": "eu",
+          "name": "AUDIT_ARCHIVE",
+          "type": "r2_bucket"
+        },
+        {
+          "name": "AI",
+          "type": "ai"
+        },
+        {
+          "name": "EMAIL",
+          "type": "send_email"
+        },
+        {
+          "name": "CF_VERSION_METADATA",
+          "type": "version_metadata"
+        },
+        {
+          "name": "CONNECT",
+          "service": "grasp-os-connect",
+          "type": "service"
+        },
+        {
+          "name": "ASSETS",
+          "type": "assets"
+        }
+      ],
+      "compatibilityFlags": [
+        "nodejs_compat"
+      ],
+      "crons": [
+        "* * * * *",
+        "*/15 * * * *"
+      ],
+      "d1Databases": [
+        {
+          "binding": "DB",
+          "databaseName": "grasp-os-core",
+          "migrations": [
+            {
+              "name": "0000_fixture.sql",
+              "r2Key": "blobs/migrations/b27a2967d05b98ee4aedc868dd1130d7f2a67e615d567b752fd5dd966dda951b",
+              "sha256": "b27a2967d05b98ee4aedc868dd1130d7f2a67e615d567b752fd5dd966dda951b",
+              "size": 51
+            }
+          ]
+        },
+        {
+          "binding": "KNOWLEDGE",
+          "databaseName": "grasp-os-knowledge",
+          "migrations": [
+            {
+              "name": "0000_fixture.sql",
+              "r2Key": "blobs/migrations/b27a2967d05b98ee4aedc868dd1130d7f2a67e615d567b752fd5dd966dda951b",
+              "sha256": "b27a2967d05b98ee4aedc868dd1130d7f2a67e615d567b752fd5dd966dda951b",
+              "size": 51
+            }
+          ]
+        }
+      ],
+      "durableObjectMigrations": [
+        {
+          "new_sqlite_classes": [
+            "Workspace",
+            "App",
+            "AuditLog"
+          ],
+          "tag": "v1"
+        },
+        {
+          "new_sqlite_classes": [
+            "Builtins"
+          ],
+          "tag": "v2"
+        }
+      ],
+      "keepVars": true,
+      "mainModule": "index.js",
+      "modules": [
+        {
+          "name": "0123abcd-0000_events.sql",
+          "r2Key": "blobs/modules/f6c1911553237e4309875d4e4000761e09b1122c4ec12808bf78d97d2745f24d",
+          "sha256": "f6c1911553237e4309875d4e4000761e09b1122c4ec12808bf78d97d2745f24d",
+          "size": 50,
+          "type": "text"
+        },
+        {
+          "name": "index.js",
+          "r2Key": "blobs/modules/7ac96f5a0ece825a5fb01994a3d80500e9ff2a0e65aef885dd45d087924ecb26",
+          "sha256": "7ac96f5a0ece825a5fb01994a3d80500e9ff2a0e65aef885dd45d087924ecb26",
+          "size": 54,
+          "type": "esm"
+        }
+      ],
+      "name": "grasp-os-core",
+      "observability": {
+        "enabled": true,
+        "logs": {
+          "invocation_logs": false
+        },
+        "redact_query_string": true,
+        "traces": {
+          "enabled": true
+        }
+      },
+      "previewUrls": false,
+      "requiredSecrets": [
+        "ROUTER_SECRET",
+        "BETTER_AUTH_SECRET",
+        "CAPABILITY_SIGNING_KEY"
+      ],
+      "workersDev": true
+    }
+  },
+  "wranglerVersion": "0.0.0-fixture"
+}
