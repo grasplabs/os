@@ -83,6 +83,14 @@ describe("router secret", () => {
     expect(response.status).toBe(200);
   });
 
+  it("names the version answering in its health check", async () => {
+    const response = await routed("/health");
+    await expect(response.json()).resolves.toStrictEqual({
+      ok: true,
+      version: env.CF_VERSION_METADATA.id,
+    });
+  });
+
   it("refuses everything while no secret is configured", async () => {
     const unconfigured = { ...env, ROUTER_SECRET: "" };
     const responses = await Promise.all(

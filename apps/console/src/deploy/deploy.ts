@@ -1,8 +1,9 @@
 /**
  * Making a client's account run a release: its resources in the EU, its
- * database migrations, then its Workers, each uploaded with its secrets
- * and sent all traffic before the next (connect before core, which binds
- * it). A deploy is a `client_deploys` row that records how far it got, and
+ * database migrations, its Workers (each uploaded with its secrets and
+ * sent all traffic before the next: connect before core, which binds it),
+ * a smoke check that core answers as the new version, as the router
+ * reaches it, and the client's hostname in the router's map. A deploy is a `client_deploys` row that records how far it got, and
  * each step it finishes is audited with it.
  *
  * Every step finds what it made before and makes only what's missing, so
@@ -32,7 +33,8 @@ import { deploymentConfigVars } from "@grasp-os/shared/deployment-config";
 import { log } from "@grasp-os/shared/log";
 import type { PlatformChange } from "@grasp-os/shared/platform-change";
 import type { ReleaseManifest } from "@grasp-os/shared/release";
-import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
+import { deriveRouterSecret, newClientIdSchema } from "@grasp-os/shared/router";
+import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { CloudflareApiError } from "../cloudflare/api.ts";
@@ -50,6 +52,13 @@ import { DeployError } from "./errors.ts";
 import { migrateDatabases } from "./migrations.ts";
 import { importedManifest } from "./release.ts";
 import { ensureResources } from "./resources.ts";
+import {
+  coreOrigin,
+  registerHostname,
+  smokeCheck,
+  workersSubdomain,
+} from "./router.ts";
+import type { RouterHosts, SmokeOptions } from "./router.ts";
 import { workerSecrets } from "./secrets.ts";
 import type { DeploySecrets } from "./secrets.ts";
 import {
@@ -70,10 +79,24 @@ export interface DeployContext {
   secrets: DeploySecrets;
   /** The time now: `new Date()` unless a test sets it. */
   now?: () => Date;
+  router: {
+    /** The router's hostname map. */
+    hosts: RouterHosts;
+    /** The domain clients are served under: a client is `<id>.<domain>`. */
+    domain: string;
+    /** How the smoke check reaches core. */
+    smoke?: SmokeOptions;
+  };
 }
 
 /** The steps a deploy runs, in order. */
-export const deploySteps = ["resources", "migrations", "workers"] as const;
+export const deploySteps = [
+  "resources",
+  "migrations",
+  "workers",
+  "smoke",
+  "router",
+] as const;
 export type DeployStep = (typeof deploySteps)[number];
 
 /**
@@ -97,7 +120,8 @@ const actorName = (actor: Actor): string =>
 /**
  * Starts deploying release `releaseId` to client `clientId`, and returns
  * the deploy's id for `runDeploy`. The client's older deploys that hadn't
- * finished are superseded in the same batch.
+ * finished are superseded in the same batch. A client whose id can't be
+ * its hostname (`newClientIdSchema`) is refused.
  */
 export const startDeploy = async (
   db: ConsoleDatabase,
@@ -105,6 +129,12 @@ export const startDeploy = async (
   clientId: string,
   releaseId: string
 ): Promise<string> => {
+  if (!newClientIdSchema.safeParse(clientId).success) {
+    throw new DeployError(
+      "invalid_client_id",
+      `${clientId} can't be a client's hostname`
+    );
+  }
   const id = crypto.randomUUID();
   const now = new Date();
   await act(
@@ -244,8 +274,11 @@ type Recorded = z.infer<typeof recordedSchema>["byApp"];
 /** The Workers a deploy knows, by app: `client_workers` records these. */
 const appSchema = z.enum(clientWorkers.worker.enumValues);
 
-/** The app whose Worker gets the deployment config vars: core reads them. */
-const varsApp = "core";
+/**
+ * The app whose Worker gets the deployment config vars (core reads them),
+ * and which the router reaches.
+ */
+const coreApp = "core";
 
 const configVarNames: ReadonlySet<string> = new Set(deploymentConfigVars);
 
@@ -330,7 +363,7 @@ const deployWorkers = async (
   deploy: Deploy,
   manifest: ReleaseManifest,
   databases: ReadonlyMap<string, string>
-): Promise<number> => {
+): Promise<Record<string, string>> => {
   const { api, db, store, secrets } = context;
   const { accountId, clientId, releaseId } = deploy;
   const now = context.now?.() ?? new Date();
@@ -365,7 +398,7 @@ const deployWorkers = async (
       },
       now
     );
-    const workerVars = app === varsApp ? vars : {};
+    const workerVars = app === coreApp ? vars : {};
     checkBindingNames(worker, workerVars, workerSecretValues);
     // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
     const fingerprint = await uploadFingerprint(secrets.clientKey, {
@@ -466,7 +499,34 @@ const deployWorkers = async (
       }
     );
   }
-  return order.length;
+  return Object.fromEntries(
+    Object.entries(versions).map(([app, { version }]) => [app, version])
+  );
+};
+
+/** Records the account's workers.dev subdomain on the client, audited when it changes. */
+const recordSubdomain = async (
+  db: ConsoleDatabase,
+  clientId: string,
+  subdomain: string
+): Promise<void> => {
+  await actIfChanged(
+    db,
+    "system",
+    db
+      .update(clients)
+      .set({ workersSubdomain: subdomain, updatedAt: new Date() })
+      .where(
+        and(
+          eq(clients.id, clientId),
+          or(
+            isNull(clients.workersSubdomain),
+            ne(clients.workersSubdomain, subdomain)
+          )
+        )
+      ),
+    { action: "client.workers_subdomain", clientId, target: subdomain }
+  );
 };
 
 /**
@@ -487,8 +547,8 @@ const runSteps = async (
     ) => Promise<void>;
   }
 ): Promise<void> => {
-  const { api, store } = context;
-  const { accountId } = deploy;
+  const { api, db, store, secrets, router } = context;
+  const { accountId, clientId } = deploy;
   hooks.current("resources");
   const resources = await ensureResources(api, accountId, manifest);
   await hooks.finished("resources", {
@@ -509,14 +569,67 @@ const runSteps = async (
   });
 
   hooks.current("workers");
-  const workers = await deployWorkers(
+  const versions = await deployWorkers(
     context,
     id,
     deploy,
     manifest,
     resources.databases
   );
-  await hooks.finished("workers", { workers });
+  await hooks.finished("workers", { workers: Object.keys(versions).length });
+
+  hooks.current("smoke");
+  const core = manifest.workers[coreApp];
+  const coreVersion = versions[coreApp];
+  if (core === undefined || coreVersion === undefined) {
+    throw new DeployError(
+      "unknown_worker",
+      `Release ${deploy.releaseId} has no core Worker`
+    );
+  }
+  const subdomain = await workersSubdomain(api, accountId, clientId);
+  await recordSubdomain(db, clientId, subdomain);
+  const origin = coreOrigin(core.name, subdomain);
+  const attempts = await smokeCheck(
+    origin,
+    await deriveRouterSecret(secrets.routerKey, clientId, deploy.generation),
+    coreVersion,
+    router.smoke
+  );
+  await hooks.finished("smoke", { attempts });
+
+  hooks.current("router");
+  await assertLatest(db, id, clientId);
+  await registerHostname(router.hosts, `${clientId}.${router.domain}`, {
+    clientId,
+    coreUrl: origin,
+    generation: deploy.generation,
+  });
+  // The map now has the new generation, so the router sends the new
+  // secret: a raised generation is live from here, and its previous keys
+  // are kept for a window from now (src/deploy/secrets.ts).
+  const liveAt = context.now?.() ?? new Date();
+  await actIfChanged(
+    db,
+    "system",
+    db
+      .update(clients)
+      .set({ rotationLiveAt: liveAt, updatedAt: liveAt })
+      .where(
+        and(
+          eq(clients.id, clientId),
+          eq(clients.generation, deploy.generation),
+          gt(clients.generation, 1),
+          isNull(clients.rotationLiveAt)
+        )
+      ),
+    {
+      action: "client.rotation_live",
+      clientId,
+      detail: { generation: deploy.generation },
+    }
+  );
+  await hooks.finished("router", { generation: deploy.generation });
 };
 
 /**

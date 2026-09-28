@@ -67,6 +67,8 @@ export default defineProject({
             `client-d1-${slot}`,
           ])
         ),
+        // The router's hostname map, as a deploy writes it (src/deploy/router.ts).
+        kvNamespaces: ["ROUTER_HOSTS"],
       },
     }),
   ],

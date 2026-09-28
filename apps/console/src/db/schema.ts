@@ -61,6 +61,11 @@ export const clients = sqliteTable("clients", {
    * keys are kept for a window from here (src/deploy/secrets.ts).
    */
   rotationLiveAt: timestamp("rotation_live_at"),
+  /**
+   * The account's workers.dev subdomain, where its core answers
+   * (`https://<core>.<subdomain>.workers.dev`); null before the first deploy.
+   */
+  workersSubdomain: text("workers_subdomain"),
   /** The rollout ring it's in: 0 first. */
   ring: integer().notNull().default(1),
   status: text({ enum: ["provisioning", "active", "offboarded"] })

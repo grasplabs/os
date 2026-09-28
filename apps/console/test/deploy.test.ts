@@ -36,7 +36,24 @@ const secrets: DeploySecrets = {
     connect: { COMPOSIO_API_KEY: "composio" },
   },
 };
-const context = { api, db, store: env.RELEASES, secrets };
+const isKv = (value: unknown): value is KVNamespace =>
+  typeof value === "object" &&
+  value !== null &&
+  "get" in value &&
+  "put" in value;
+/** The router's hostname map in the test pool (vite.test.config.ts). */
+const hosts: unknown = Reflect.get(env, "ROUTER_HOSTS");
+if (!isKv(hosts)) {
+  throw new TypeError("Expected the router's hostname map as ROUTER_HOSTS");
+}
+const domain = "grasp.test";
+const context = {
+  api,
+  db,
+  store: env.RELEASES,
+  secrets,
+  router: { hosts, domain, smoke: { retryDelayMs: 0 } },
+};
 const staff = { email: "staff@grasp.test", sub: "sub-staff" };
 
 /** A client on a new account in the fake, and a release imported to deploy to it. */
@@ -150,7 +167,7 @@ describe("deploying a release to a client's account", () => {
     });
     await expect(deployRow(deployId)).resolves.toMatchObject({
       status: "done",
-      step: "workers",
+      step: "router",
       error: null,
     });
     const events = await deployEvents(clientId);
@@ -163,6 +180,8 @@ describe("deploying a release to a client's account", () => {
       "deploy.version",
       "deploy.worker_live",
       "deploy.workers",
+      "deploy.smoke",
+      "deploy.router",
       "deploy.done",
     ]);
   });
@@ -199,6 +218,8 @@ describe("deploying a release to a client's account", () => {
       "deploy.version",
       "deploy.worker_live",
       "deploy.workers",
+      "deploy.smoke",
+      "deploy.router",
       "deploy.done",
     ]);
   });
@@ -858,5 +879,222 @@ describe("resuming and superseding, Worker by Worker", () => {
       after: live?.secrets.has("TOKEN_ENCRYPTION_KEY_PREVIOUS"),
       reuploaded: live?.id !== first?.id,
     }).toStrictEqual({ before: true, after: false, reuploaded: true });
+  });
+});
+
+describe("making a client reachable", () => {
+  it("checks core answers as the new version, as the router reaches it, then points the client's hostname at it", async () => {
+    const { account, clientId, deployId } = await setUp();
+    // A new Worker answers only after a moment.
+    account.unhealthy = 2;
+
+    await runDeploy(context, deployId);
+
+    const [client] = await db
+      .select({ subdomain: clients.workersSubdomain })
+      .from(clients)
+      .where(eq(clients.id, clientId));
+    expect({
+      account: account.subdomain,
+      recorded: client?.subdomain,
+      entry: await hosts.get(`${clientId}.${domain}`, "json"),
+    }).toStrictEqual({
+      account: `grasp-${clientId}`,
+      recorded: `grasp-${clientId}`,
+      entry: {
+        clientId,
+        coreUrl: `https://grasp-os-core.grasp-${clientId}.workers.dev`,
+        generation: 1,
+      },
+    });
+    const [smoke] = await db
+      .select({ detail: auditEvents.detail })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.action, "deploy.smoke"),
+          eq(auditEvents.clientId, clientId)
+        )
+      );
+    expect(smoke?.detail).toBe(
+      JSON.stringify({ deploy: deployId, attempts: 3 })
+    );
+  });
+
+  it("fails while core answers as another version, leaving the hostname out, and adds it on resume", async () => {
+    const { account, clientId, deployId } = await setUp();
+    account.answeringVersion = "an-older-version";
+
+    await failingDeploy(deployId);
+
+    await expect(deployRow(deployId)).resolves.toMatchObject({
+      status: "failed",
+      step: "workers",
+      error: "smoke_check_failed",
+    });
+    await expect(hosts.get(`${clientId}.${domain}`)).resolves.toBeNull();
+
+    account.answeringVersion = undefined;
+    await runDeploy(context, deployId);
+
+    await expect(
+      hosts.get(`${clientId}.${domain}`, "json")
+    ).resolves.toMatchObject({ clientId });
+  });
+
+  it("keeps the subdomain an account has, and tries another when grasp-<id> is someone else's", async () => {
+    const { account, clientId, deployId } = await setUp();
+    cloudflare.takeSubdomain(`grasp-${clientId}`);
+
+    await runDeploy(context, deployId);
+
+    const chosen = account.subdomain ?? "";
+    expect(chosen).toMatch(new RegExp(`^grasp-${clientId}-[0-9a-f]{6}$`, "u"));
+    await expect(
+      hosts.get(`${clientId}.${domain}`, "json")
+    ).resolves.toMatchObject({
+      coreUrl: `https://grasp-os-core.${chosen}.workers.dev`,
+    });
+  });
+
+  it("refuses a hostname another client has, and leaves it theirs", async () => {
+    const { clientId, deployId } = await setUp();
+    const theirs = JSON.stringify({
+      clientId: "someone-else",
+      coreUrl: "https://grasp-os-core.elsewhere.workers.dev",
+      generation: 4,
+    });
+    await hosts.put(`${clientId}.${domain}`, theirs);
+
+    await failingDeploy(deployId);
+
+    await expect(deployRow(deployId)).resolves.toMatchObject({
+      error: "hostname_taken",
+    });
+    await expect(hosts.get(`${clientId}.${domain}`)).resolves.toBe(theirs);
+  });
+
+  it("refuses to take the map back to an earlier generation", async () => {
+    const { clientId, deployId } = await setUp();
+    const later = JSON.stringify({
+      clientId,
+      coreUrl: `https://grasp-os-core.grasp-${clientId}.workers.dev`,
+      generation: 2,
+    });
+    await hosts.put(`${clientId}.${domain}`, later);
+
+    await failingDeploy(deployId);
+
+    await expect(deployRow(deployId)).resolves.toMatchObject({
+      error: "generation_behind",
+    });
+    await expect(hosts.get(`${clientId}.${domain}`)).resolves.toBe(later);
+  });
+
+  it("refuses to deploy a client whose id can't be its hostname", async () => {
+    const { release } = await setUp();
+
+    const refused = await Promise.all(
+      ["Acme", "acme_corp", "console", "a".repeat(51)].map(async (id) => {
+        try {
+          await startDeploy(db, staff, id, release.id);
+          return "started";
+        } catch (error) {
+          return error instanceof Error && "code" in error
+            ? error.code
+            : "other";
+        }
+      })
+    );
+
+    expect(refused).toStrictEqual([
+      "invalid_client_id",
+      "invalid_client_id",
+      "invalid_client_id",
+      "invalid_client_id",
+    ]);
+  });
+});
+
+describe("rotating a client's secrets", () => {
+  const day = 24 * 60 * 60 * 1000;
+
+  it("marks a rotation live only once the router map has the new generation", async () => {
+    const { account, clientId, release, deployId } = await setUp();
+    await runDeploy(context, deployId);
+    await rotateClientSecrets(db, staff, clientId, new Date());
+    const liveAt = async () => {
+      const [client] = await db
+        .select({ at: clients.rotationLiveAt })
+        .from(clients)
+        .where(eq(clients.id, clientId));
+      return client?.at ?? null;
+    };
+
+    // Core never answers as the new version: the map keeps generation 1.
+    account.answeringVersion = "an-older-version";
+    await failingDeploy(await startDeploy(db, staff, clientId, release.id));
+    const beforeMap = await liveAt();
+    const generationOf = async () =>
+      z
+        .object({ generation: z.int() })
+        .parse(await hosts.get(`${clientId}.${domain}`, "json")).generation;
+    const entryBefore = await generationOf();
+    account.answeringVersion = undefined;
+    await runDeploy(
+      context,
+      await startDeploy(db, staff, clientId, release.id)
+    );
+
+    expect({
+      beforeMap,
+      entryBefore,
+      entryAfter: await generationOf(),
+      live: (await liveAt()) instanceof Date,
+    }).toStrictEqual({
+      beforeMap: null,
+      entryBefore: 1,
+      entryAfter: 2,
+      live: true,
+    });
+  });
+
+  it("keeps the previous keys until a week after the new generation went live, however late it's deployed", async () => {
+    const { account, clientId, release, deployId } = await setUp();
+    await runDeploy(context, deployId);
+    const now = Date.now();
+    const at = (days: number) => new Date(now + days * day);
+    // Raised eight days before it's deployed.
+    await rotateClientSecrets(db, staff, clientId, at(-8));
+
+    const previousAt = async (days: number) => {
+      await runDeploy(
+        { ...context, now: () => at(days) },
+        await startDeploy(db, staff, clientId, release.id)
+      );
+      return liveVersionOf(account, "grasp-os-core")?.secrets.has(
+        "ROUTER_SECRET_PREVIOUS"
+      );
+    };
+    // Live from now: the first deploy, then three days on, keep them.
+    const whenLive = await previousAt(0);
+    const threeDaysOn = await previousAt(3);
+    const tooSoon = await rotateClientSecrets(db, staff, clientId, at(3));
+    const eightDaysOn = await previousAt(8);
+    const later = await rotateClientSecrets(db, staff, clientId, at(8));
+
+    expect({
+      whenLive,
+      threeDaysOn,
+      tooSoon,
+      eightDaysOn,
+      later,
+    }).toStrictEqual({
+      whenLive: true,
+      threeDaysOn: true,
+      tooSoon: false,
+      eightDaysOn: false,
+      later: true,
+    });
   });
 });

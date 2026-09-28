@@ -1,0 +1,203 @@
+/**
+ * The last steps of a deploy: checking that the client's core runs the
+ * version this deploy made live, as the router reaches it, then pointing
+ * the client's hostname at it in the router's map.
+ *
+ * The check comes first, so the router never sends a client's people to a
+ * core that doesn't answer: a first deploy's hostname appears only once
+ * its core works.
+ */
+import {
+  routerHostKey,
+  routerHostSchema,
+  routerSecretHeader,
+} from "@grasp-os/shared/router";
+import type { RouterHost } from "@grasp-os/shared/router";
+import { z } from "zod";
+
+import { CloudflareApiError, isNotFound } from "../cloudflare/api.ts";
+import type { CloudflareApi } from "../cloudflare/api.ts";
+import { DeployError } from "./errors.ts";
+
+/** The router's hostname map, as the console uses it (the router's `HOSTS`). */
+export type RouterHosts = Pick<KVNamespace, "get" | "put">;
+
+const subdomainSchema = z.object({ subdomain: z.string() });
+
+/** Tries at a free workers.dev subdomain: `grasp-<clientId>`, then with a suffix. */
+const subdomainTries = 3;
+
+/**
+ * Cloudflare's error code for a workers.dev subdomain another account
+ * has, as Wrangler reads it when it registers one (10032 means free).
+ */
+const subdomainUnavailableCode = 10_031;
+
+/** Whether Cloudflare refused a subdomain as another account's. */
+const isTaken = (error: unknown): boolean =>
+  error instanceof CloudflareApiError &&
+  error.codes.includes(subdomainUnavailableCode);
+
+const randomSuffix = (): string =>
+  Array.from(crypto.getRandomValues(new Uint8Array(3)), (byte) =>
+    byte.toString(16).padStart(2, "0")
+  ).join("");
+
+/**
+ * The account's workers.dev subdomain: the one it has, or else
+ * `grasp-<clientId>`, set now. A subdomain is unique across Cloudflare,
+ * so one another account has (error 10031) is tried again with a short
+ * random suffix (`subdomain_unavailable` after a few tries).
+ */
+export const workersSubdomain = async (
+  api: CloudflareApi,
+  accountId: string,
+  clientId: string
+): Promise<string> => {
+  const path = `/accounts/${accountId}/workers/subdomain`;
+  try {
+    const { subdomain } = await api.call(
+      { method: "GET", path },
+      subdomainSchema
+    );
+    return subdomain;
+  } catch (error) {
+    if (!isNotFound(error)) {
+      throw error;
+    }
+  }
+  for (let attempt = 0; attempt < subdomainTries; attempt += 1) {
+    const wanted =
+      attempt === 0
+        ? `grasp-${clientId}`
+        : `grasp-${clientId}-${randomSuffix()}`;
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- one name at a time
+      const { subdomain } = await api.call(
+        { method: "PUT", path, json: { subdomain: wanted } },
+        subdomainSchema
+      );
+      return subdomain;
+    } catch (error) {
+      if (!isTaken(error)) {
+        throw error;
+      }
+    }
+  }
+  throw new DeployError(
+    "subdomain_unavailable",
+    `No free workers.dev subdomain for ${clientId}`
+  );
+};
+
+/**
+ * A client's core on its account's workers.dev subdomain, checked to be
+ * an `https://*.workers.dev` origin before anything is sent to it.
+ */
+export const coreOrigin = (coreScript: string, subdomain: string): string => {
+  const origin = `https://${coreScript}.${subdomain}.workers.dev`;
+  if (!routerHostSchema.shape.coreUrl.safeParse(origin).success) {
+    throw new DeployError(
+      "invalid_core_origin",
+      `${origin} isn't a workers.dev origin`
+    );
+  }
+  return origin;
+};
+
+/** How the smoke check reaches core, and how long it waits between tries. */
+export interface SmokeOptions {
+  /** `fetch` by default. */
+  fetch?: typeof fetch;
+  /** The first retry's wait, doubling after; tests pass 0. */
+  retryDelayMs?: number;
+}
+
+/** Tries of the smoke check: a new workers.dev hostname can take a moment. */
+const smokeAttempts = 5;
+const defaultSmokeDelayMs = 2000;
+
+/** What core's `/health` answers: the version answering (core's src/entry.ts). */
+const healthSchema = z.object({ ok: z.literal(true), version: z.string() });
+
+/** The version core's `/health` at `origin` names, or undefined when it doesn't answer. */
+const answeringVersion = async (
+  fetchCore: typeof fetch,
+  origin: string,
+  routerSecret: string
+): Promise<string | undefined> => {
+  try {
+    const response = await fetchCore(`${origin}/health`, {
+      headers: { [routerSecretHeader]: routerSecret },
+      redirect: "manual",
+    });
+    if (!response.ok) {
+      return undefined;
+    }
+    const health = healthSchema.safeParse(await response.json());
+    return health.success ? health.data.version : undefined;
+  } catch {
+    return undefined;
+  }
+};
+
+/**
+ * Checks that core at `origin` answers its health check as version
+ * `versionId`, to a request carrying the client's router secret as the
+ * router sends it: so the version this deploy made live is the one
+ * answering, and it has the secret the router will derive. Tries a few
+ * times, waiting longer each time (a new hostname, or the old version
+ * still answering, can take a moment); returns how many tries it took.
+ */
+export const smokeCheck = async (
+  origin: string,
+  routerSecret: string,
+  versionId: string,
+  {
+    fetch: fetchCore = fetch,
+    retryDelayMs = defaultSmokeDelayMs,
+  }: SmokeOptions = {}
+): Promise<number> => {
+  for (let attempt = 1; attempt <= smokeAttempts; attempt += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- tries in turn
+    const answering = await answeringVersion(fetchCore, origin, routerSecret);
+    if (answering === versionId) {
+      return attempt;
+    }
+    if (attempt < smokeAttempts) {
+      // oxlint-disable-next-line no-await-in-loop -- waits between tries
+      await scheduler.wait(retryDelayMs * 2 ** (attempt - 1));
+    }
+  }
+  throw new DeployError(
+    "smoke_check_failed",
+    `Core at ${origin} didn't answer as version ${versionId}`
+  );
+};
+
+/**
+ * Points `hostname` at the client's core in the router's map. Writing the
+ * same entry again changes nothing. As a guard, it refuses a hostname the
+ * map gives another client (`hostname_taken`: client ids, and so
+ * hostnames, are one client's each), and a generation below the one the
+ * map has (`generation_behind`: the router would derive a secret core no
+ * longer has).
+ */
+export const registerHostname = async (
+  hosts: RouterHosts,
+  hostname: string,
+  entry: RouterHost
+): Promise<void> => {
+  const key = routerHostKey(hostname);
+  const current = routerHostSchema.safeParse(await hosts.get(key, "json"));
+  if (current.success && current.data.clientId !== entry.clientId) {
+    throw new DeployError("hostname_taken", `${key} routes to another client`);
+  }
+  if (current.success && current.data.generation > entry.generation) {
+    throw new DeployError(
+      "generation_behind",
+      `${key} is at a later generation than this deploy`
+    );
+  }
+  await hosts.put(key, JSON.stringify(routerHostSchema.parse(entry)));
+};

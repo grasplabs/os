@@ -1,0 +1,1 @@
+ALTER TABLE `clients` ADD `workers_subdomain` text;

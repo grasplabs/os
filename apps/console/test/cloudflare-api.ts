@@ -37,6 +37,12 @@ const subdomainOf = (account: AccountState): Response =>
     ? notFound()
     : envelope({ subdomain: account.subdomain });
 
+/**
+ * The workers.dev subdomains taken across Cloudflare: a subdomain is one
+ * account's only.
+ */
+const takenSubdomains = new Set<string>();
+
 /** What each account holds, at the paths the API serves it. */
 const accountRoutes: Route[] = [
   {
@@ -53,7 +59,12 @@ const accountRoutes: Route[] = [
     method: "PUT",
     path: /^\/workers\/subdomain$/u,
     answer: ({ account, json }) => {
-      account.subdomain = text(json, "subdomain");
+      const wanted = text(json, "subdomain");
+      if (takenSubdomains.has(wanted) && account.subdomain !== wanted) {
+        return refusal(400, 10_031, "Subdomain is unavailable");
+      }
+      takenSubdomains.add(wanted);
+      account.subdomain = wanted;
       return subdomainOf(account);
     },
   },
@@ -314,9 +325,58 @@ export const mockCloudflareApi = (token: string) => {
     return await respond(request, call);
   };
 
+  /**
+   * What a Worker on an account's workers.dev subdomain answers: its live
+   * version's `/health`, as core answers it, to a request carrying the
+   * router secret that version has. Undefined for any other host.
+   */
+  const workersDev = (request: Request): Response | undefined => {
+    const url = new URL(request.url);
+    const host = /^(?<script>[^.]+)\.(?<subdomain>[^.]+)\.workers\.dev$/u.exec(
+      url.hostname
+    )?.groups;
+    if (host === undefined) {
+      return undefined;
+    }
+    const account = [...accounts.values()].find(
+      ({ subdomain }) => subdomain === host.subdomain
+    );
+    const script = account?.scripts.get(host.script ?? "");
+    const [only] = script?.deployments[0]?.versions ?? [];
+    const live = script?.versions.find(({ id }) => id === only?.version_id);
+    if (
+      account === undefined ||
+      live === undefined ||
+      script?.subdomain?.enabled !== true
+    ) {
+      return new Response("There is nothing here yet", { status: 404 });
+    }
+    if (account.unhealthy !== undefined && account.unhealthy > 0) {
+      account.unhealthy -= 1;
+      return new Response("Starting", { status: 503 });
+    }
+    const secret = live.secrets.get("ROUTER_SECRET");
+    if (
+      secret === undefined ||
+      request.headers.get("x-grasp-router-secret") !== secret
+    ) {
+      return new Response("Forbidden", { status: 403 });
+    }
+    return url.pathname === "/health"
+      ? Response.json({
+          ok: true,
+          version: account.answeringVersion ?? live.id,
+        })
+      : new Response("Not found", { status: 404 });
+  };
+
   beforeEach(() => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const request = new Request(input, init);
+      const served = workersDev(request);
+      if (served !== undefined) {
+        return served;
+      }
       if (!request.url.startsWith(`${base}/`)) {
         throw new Error(`Unexpected outbound request to ${request.url}`);
       }
@@ -335,6 +395,7 @@ export const mockCloudflareApi = (token: string) => {
     forgetDatabases();
     calls.length = 0;
     planned.clear();
+    takenSubdomains.clear();
     matched.length = 0;
     load.peak = 0;
   });
@@ -365,6 +426,10 @@ export const mockCloudflareApi = (token: string) => {
     /** Fails the `n`th call from now as `failure` says, whatever it asks. */
     failCall: (n: number, failure: Failure) => {
       planned.set(calls.length + n, failure);
+    },
+    /** Takes `subdomain` for an account outside the test, as another customer's. */
+    takeSubdomain: (subdomain: string) => {
+      takenSubdomains.add(subdomain);
     },
     /** Fails the next call `matches` picks out as `failure` says, once. */
     failNext: (matches: (call: ApiCall) => boolean, failure: Failure) => {
