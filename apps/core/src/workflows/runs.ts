@@ -16,7 +16,19 @@ import type {
   RunStatus,
   WorkflowRun,
 } from "@grasp-os/shared/workflows";
-import { and, asc, desc, eq, inArray, isNull, lt, ne, or } from "drizzle-orm";
+import {
+  and,
+  asc,
+  desc,
+  eq,
+  gte,
+  inArray,
+  isNull,
+  lt,
+  ne,
+  or,
+} from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
@@ -355,6 +367,11 @@ const orphansPerRun = 50;
  *   version was replaced); it gives up its key, so a delivery after this
  *   starts a new run.
  *
+ * Each cron run takes at most `orphansPerRun` of them, in ID order from
+ * a random ID (`from`), wrapping round: rows the engine keeps failing to
+ * answer for can't hold every run's budget, and every row is reached in
+ * time.
+ *
  * An instance created after the check (its start, or a delivery racing
  * this) finds its row failed, and the dispatcher refuses it before any
  * step (dispatcher.ts); or its first execution marked the row running
@@ -362,23 +379,41 @@ const orphansPerRun = 50;
  * a delivery that `restartOrphan` answered with the run just before is
  * left with a run that failed: accepted, and audited.
  */
-export const failOrphans = async (env: Env): Promise<void> => {
+export const failOrphans = async (
+  env: Env,
+  from: string = crypto.randomUUID()
+): Promise<void> => {
   // Nothing while the kill switch is on, nor on-prem, which has no engine.
   if (!featureEnabled(env, "workflows")) {
     return;
   }
-  const rows = await drizzle(env.DB)
-    .select()
-    .from(workflowRuns)
-    .where(
-      and(
-        eq(workflowRuns.status, "starting"),
-        isNull(workflowRuns.endedAt),
-        lt(workflowRuns.createdAt, new Date(Date.now() - orphanFailsAfterMs))
+  const db = drizzle(env.DB);
+  const cutoff = new Date(Date.now() - orphanFailsAfterMs);
+  const slice = async (side: SQL, limit: number): Promise<RunRow[]> =>
+    await db
+      .select()
+      .from(workflowRuns)
+      .where(
+        and(
+          eq(workflowRuns.status, "starting"),
+          isNull(workflowRuns.endedAt),
+          lt(workflowRuns.createdAt, cutoff),
+          side
+        )
       )
-    )
-    .orderBy(asc(workflowRuns.id))
-    .limit(orphansPerRun);
+      .orderBy(asc(workflowRuns.id))
+      .limit(limit);
+  const onward = await slice(gte(workflowRuns.id, from), orphansPerRun);
+  const rows =
+    onward.length < orphansPerRun
+      ? [
+          ...onward,
+          ...(await slice(
+            lt(workflowRuns.id, from),
+            orphansPerRun - onward.length
+          )),
+        ]
+      : onward;
   // Each on its own: one the engine or D1 fails on is tried again by the
   // next cron run, and holds up none of the others.
   await Promise.all(
@@ -500,7 +535,17 @@ export const startRun = async (
     await failStart(env, row, "start_failed");
     throw error;
   }
-  await markRunning(env, row.id);
+  try {
+    await markRunning(env, row.id);
+  } catch (error) {
+    // The run exists: failing now would have it started again, twice.
+    // Its row stays starting until its first execution, or the sweep
+    // (`failOrphans`), finds the instance and marks it running.
+    log.warn("workflow.running_not_recorded", {
+      runId: row.id,
+      ...errorFields(error),
+    });
+  }
   // Only now: a screen told of the run reads it from the engine too.
   await tellScreens(env, row);
   return toRun(row);

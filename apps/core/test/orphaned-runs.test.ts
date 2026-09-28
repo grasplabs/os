@@ -5,7 +5,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { runEngine } from "../src/workflows/engine.ts";
-import { startRun } from "../src/workflows/runs.ts";
+import { failOrphans, startRun } from "../src/workflows/runs.ts";
 import { allEvents } from "./audit-events.ts";
 import { runCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
@@ -48,9 +48,9 @@ const orphanOf = async (
   person: Person | null,
   app: string,
   age: number,
-  triggerKey: string | null = null
+  triggerKey: string | null = null,
+  run: string = crypto.randomUUID()
 ): Promise<string> => {
-  const run = crypto.randomUUID();
   await env.DB.prepare(
     "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, trigger_key) VALUES (?, ?, 'waits', 1, ?, 'starting', ?, ?)"
   )
@@ -104,6 +104,61 @@ const actionsOf = async (run: string): Promise<string[]> => {
 const failedAtAll = async (run: string): Promise<boolean> => {
   const actions = await actionsOf(run);
   return actions.includes("workflow.run.failed");
+};
+
+/** `target`'s `key`, a method bound to it, as a proxy passes it through. */
+const through = (target: object, key: PropertyKey): unknown => {
+  const value: unknown = Reflect.get(target, key);
+  if (typeof value !== "function") {
+    return value;
+  }
+  const bound: unknown = value.bind(target);
+  return bound;
+};
+
+/** What runs a statement against the database. */
+const statementRuns = new Set<PropertyKey>(["run", "all", "raw", "first"]);
+
+/** Marking a starting run running, as drizzle writes it. */
+const marksRunning = 'update "workflow_runs" set "status" = ? where ';
+
+/**
+ * Core's database, refusing to mark a starting run running, as D1 can
+ * (overloaded, timed out); everything else goes through. `refused` counts
+ * the writes it refused.
+ */
+const refusingRunning = (): { db: D1Database; refused: () => number } => {
+  let refused = 0;
+  const refusing = (statement: D1PreparedStatement): D1PreparedStatement =>
+    new Proxy(statement, {
+      get: (target, key) => {
+        if (statementRuns.has(key)) {
+          return async () => {
+            refused += 1;
+            await Promise.resolve();
+            throw new Error("D1_ERROR: broken for the test");
+          };
+        }
+        if (key === "bind") {
+          return (...values: unknown[]) => refusing(target.bind(...values));
+        }
+        return through(target, key);
+      },
+    });
+  const db = new Proxy(env.DB, {
+    get: (target, key) => {
+      if (key === "prepare") {
+        return (query: string) => {
+          const statement = target.prepare(query);
+          return query.startsWith(marksRunning)
+            ? refusing(statement)
+            : statement;
+        };
+      }
+      return through(target, key);
+    },
+  });
+  return { db, refused: () => refused };
 };
 
 const endedStatuses = new Set(["complete", "errored", "terminated"]);
@@ -181,9 +236,14 @@ describe("runs that never reached the engine", () => {
 
     expect({ stats: stats.results, plans }).toStrictEqual({
       stats: [],
+      // From a random ID on, then, one row being fewer than a sweep
+      // takes, up to it.
       plans: [
         [
-          "SEARCH workflow_runs USING INDEX workflow_runs_status_ended_idx (status=? AND ended_at=?)",
+          "SEARCH workflow_runs USING INDEX workflow_runs_status_ended_idx (status=? AND ended_at=? AND id>?)",
+        ],
+        [
+          "SEARCH workflow_runs USING INDEX workflow_runs_status_ended_idx (status=? AND ended_at=? AND id<?)",
         ],
       ],
     });
@@ -295,5 +355,94 @@ describe("runs that never reached the engine", () => {
       newRun: again.id !== orphan,
       again: await rowStatus(again.id),
     }).toStrictEqual({ orphan: "failed", newRun: true, again: "running" });
+  });
+
+  it("start a run whose running can't be recorded, and record it once it runs", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, waiting);
+    const { db, refused } = refusingRunning();
+
+    const run = await startRun(
+      { ...env, DB: db },
+      {
+        app: appIdSchema.parse(app),
+        workflow: workflowIdSchema.parse("waits"),
+        input: undefined,
+        startedBy: builder.userId,
+        actor: { type: "system" },
+      }
+    );
+    // Its first execution records it.
+    await rowSays(run.id, "running");
+
+    expect({
+      status: run.status,
+      refused: refused(),
+      ended: endedStatuses.has(await liveStatus(run.id)),
+      failed: await failedAtAll(run.id),
+    }).toStrictEqual({
+      status: "running",
+      refused: 1,
+      ended: false,
+      failed: false,
+    });
+  });
+
+  it("reach a later orphan past rows the engine keeps failing to answer for", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, waiting);
+    // As many as a sweep takes, first in ID order.
+    const unanswered = await Promise.all(
+      Array.from(
+        { length: 50 },
+        async (_, index) =>
+          await orphanOf(
+            builder,
+            app,
+            20 * minute,
+            null,
+            `00000000-0000-4000-8000-${String(index).padStart(12, "0")}`
+          )
+      )
+    );
+    const orphan = await orphanOf(
+      builder,
+      app,
+      20 * minute,
+      null,
+      "80000000-0000-4000-8000-000000000000"
+    );
+    const failing = new Set(unanswered);
+    const workflows = env.WORKFLOWS;
+    const get = workflows.get.bind(workflows);
+    const broken = vi.spyOn(workflows, "get").mockImplementation(async (id) => {
+      if (failing.has(id)) {
+        throw new Error("The engine can't be reached");
+      }
+      return await get(id);
+    });
+    let fromFirst: string | undefined;
+    try {
+      // From the first ID, the rows it can't check fill the sweep.
+      await failOrphans(env, "00000000-0000-4000-8000-000000000000");
+      fromFirst = await rowStatus(orphan);
+      // From an ID past them, the orphan comes first.
+      await failOrphans(env, "40000000-0000-4000-8000-000000000000");
+    } finally {
+      broken.mockRestore();
+    }
+    const stillStarting = await Promise.all(
+      unanswered.map(async (run) => await rowStatus(run))
+    );
+
+    expect({
+      fromFirst,
+      fromLater: await rowStatus(orphan),
+      unanswered: new Set(stillStarting),
+    }).toStrictEqual({
+      fromFirst: "starting",
+      fromLater: "failed",
+      unanswered: new Set(["starting"]),
+    });
   });
 });
