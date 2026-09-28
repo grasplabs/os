@@ -1,3 +1,5 @@
+import { readdirSync, readFileSync } from "node:fs";
+
 import {
   cloudflareTest,
   readD1Migrations,
@@ -11,6 +13,20 @@ import { accessTeam } from "./test/access-config.ts";
 const migrations = await readD1Migrations(
   `${import.meta.dirname}/src/db/migrations`
 );
+
+/**
+ * Core's Knowledge migrations as their files hold them, for the test that
+ * applies real migrations through the console's client (FTS5 tables,
+ * triggers, comments).
+ */
+const knowledgeMigrationsDir = `${import.meta.dirname}/../core/src/db/knowledge/migrations`;
+const knowledgeMigrationFiles = readdirSync(knowledgeMigrationsDir)
+  .filter((name) => name.endsWith(".sql"))
+  .toSorted()
+  .map((name) => ({
+    name,
+    sql: readFileSync(`${knowledgeMigrationsDir}/${name}`, "utf-8"),
+  }));
 
 /**
  * The console's tests, in workerd. The Cloudflare Vite plugin (vite.config.ts)
@@ -41,7 +57,16 @@ export default defineProject({
           // bypass set it themselves.
           DEV_ACCESS_EMAIL: "",
           CONSOLE_MIGRATIONS: migrations,
+          KNOWLEDGE_MIGRATION_FILES: knowledgeMigrationFiles,
         },
+        // Where the fake Cloudflare API runs client D1 queries, one for
+        // each database it holds at once (test/cloudflare-api-workers.ts).
+        d1Databases: Object.fromEntries(
+          Array.from({ length: 4 }, (_, slot) => [
+            `CLIENT_D1_${slot}`,
+            `client-d1-${slot}`,
+          ])
+        ),
       },
     }),
   ],

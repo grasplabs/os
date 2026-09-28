@@ -6,88 +6,27 @@
  * Nth call answers 429 or 500) and read every call it got.
  *
  * It replaces `fetch` in the tests' isolate, which is also where the
- * console's Workflow steps run.
+ * console's Workflow steps run. D1 queries run on real D1 databases, one
+ * for each database the fake holds at once (`CLIENT_D1_<n>`,
+ * vite.test.config.ts).
  */
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 
-const base = "https://api.cloudflare.com/client/v4";
-
-type Json = Record<string, unknown>;
-
-interface AccountState {
-  id: string;
-  name: string;
-  subdomain?: string;
-  d1: { uuid: string; name: string; jurisdiction?: string }[];
-  /** Buckets by jurisdiction: a name is unique only within one. */
-  buckets: { name: string; jurisdiction: string }[];
-  /**
-   * The jurisdiction R2 reports for every bucket, whatever it's in: a test
-   * of an API that answers other than asked.
-   */
-  r2Reports?: string;
-  gateways: Json[];
-}
-
-/** A call the fake got. */
-export interface ApiCall {
-  method: string;
-  /** Below the API base, without the query. */
-  path: string;
-  query: URLSearchParams;
-  headers: Headers;
-  body: unknown;
-}
-
-const envelope = (result: unknown, resultInfo?: Json): Response =>
-  Response.json({
-    success: true,
-    errors: [],
-    messages: [],
-    result,
-    ...(resultInfo === undefined ? {} : { result_info: resultInfo }),
-  });
-
-const refusal = (status: number, code: number, message: string): Response =>
-  Response.json(
-    { success: false, errors: [{ code, message }], messages: [], result: null },
-    { status }
-  );
-
-const notFound = (): Response => refusal(404, 10_007, "Not found");
-
-/** One page of `items`, as the API pages its lists. */
-const paged = (items: readonly unknown[], query: URLSearchParams): Response => {
-  const page = Number(query.get("page") ?? "1");
-  const perPage = Number(query.get("per_page") ?? "20");
-  const slice = items.slice((page - 1) * perPage, page * perPage);
-  return envelope(slice, {
-    page,
-    per_page: perPage,
-    count: slice.length,
-    total_count: items.length,
-  });
-};
-
-const text = (body: Json, key: string): string => {
-  const value = body[key];
-  return typeof value === "string" ? value : "";
-};
-
-/** What a route gets: the account, the call, its path's named parts and its JSON body. */
-interface RouteInput {
-  account: AccountState;
-  call: ApiCall;
-  params: Record<string, string>;
-  json: Json;
-}
-
-interface Route {
-  method: string;
-  /** Matched against the path below `/accounts/<id>`. */
-  path: RegExp;
-  answer: (input: RouteInput) => Response;
-}
+import {
+  base,
+  envelope,
+  notFound,
+  paged,
+  refusal,
+  text,
+} from "./cloudflare-api-kit.ts";
+import type {
+  AccountState,
+  ApiCall,
+  Json,
+  Route,
+} from "./cloudflare-api-kit.ts";
+import { forgetDatabases, workerRoutes } from "./cloudflare-api-workers.ts";
 
 /** The R2 jurisdiction a call names, as the API reads its header. */
 const jurisdictionOf = (call: ApiCall): string =>
@@ -99,7 +38,7 @@ const subdomainOf = (account: AccountState): Response =>
     : envelope({ subdomain: account.subdomain });
 
 /** What each account holds, at the paths the API serves it. */
-const routes: Route[] = [
+const accountRoutes: Route[] = [
   {
     method: "GET",
     path: /^$/u,
@@ -208,29 +147,29 @@ const routes: Route[] = [
   },
 ];
 
-/** Answers a call to one of `account`'s resources: `rest` is the path below it. */
-const routeAccount = (
-  account: AccountState,
+const routes = [...accountRoutes, ...workerRoutes];
+
+/** The route that serves `call`, with its path's named parts. */
+const routeOf = (
   call: ApiCall,
   rest: string
-): Response => {
-  const json: Json =
-    typeof call.body === "object" && call.body !== null ? { ...call.body } : {};
+): { route: Route; params: Record<string, string> } | null => {
   for (const route of routes) {
     const match = route.method === call.method ? route.path.exec(rest) : null;
     if (match !== null) {
-      return route.answer({ account, call, params: { ...match.groups }, json });
+      return { route, params: { ...match.groups } };
     }
   }
-  // As the API answers a path it doesn't serve.
-  return refusal(400, 7003, "No route for the URI");
+  return null;
 };
 
 /**
  * How a planned call fails: rate-limited (429, optionally with a
  * `Retry-After`), a server error in the envelope (500, 503), the edge's
  * HTML error page (502), no answer before it ran (`network`), or no answer
- * after it ran (`lost`: the change is made, its response never arrives).
+ * after it ran (`lost`: the change is made, its response never arrives),
+ * or, for a D1 query, an answer that succeeds with a statement that didn't
+ * (`statement-failed`).
  */
 export type Failure =
   | 429
@@ -239,6 +178,7 @@ export type Failure =
   | 503
   | "network"
   | "lost"
+  | "statement-failed"
   | { retryAfter: string };
 
 const lostConnection = (): never => {
@@ -248,6 +188,12 @@ const lostConnection = (): never => {
 const failed = (failure: Exclude<Failure, "lost">): Response => {
   if (failure === "network") {
     return lostConnection();
+  }
+  if (failure === "statement-failed") {
+    return envelope([
+      { results: [], success: true, meta: {} },
+      { results: [], success: false, meta: {} },
+    ]);
   }
   if (typeof failure === "object") {
     const response = refusal(
@@ -296,23 +242,50 @@ export const mockCloudflareApi = (token: string) => {
   const calls: ApiCall[] = [];
   const planned = new Map<number, Failure>();
 
+  /** Calls being answered now, and the most at once. */
+  const load = { now: 0, peak: 0 };
+
   /** Answers `call` as the API would. */
-  const respond = (request: Request, call: ApiCall): Response => {
-    if (request.headers.get("authorization") !== `Bearer ${token}`) {
-      return refusal(403, 10_000, "Authentication error");
-    }
+  const respond = async (
+    request: Request,
+    call: ApiCall
+  ): Promise<Response> => {
+    const authorized =
+      request.headers.get("authorization") === `Bearer ${token}`;
     if (call.path === "/accounts" && call.method === "GET") {
+      if (!authorized) {
+        return refusal(403, 10_000, "Authentication error");
+      }
       return paged(
         [...accounts.values()].map(({ id, name }) => ({ id, name })),
         call.query
       );
     }
     const match = accountRoute.exec(call.path)?.groups;
+    const found = routeOf(call, match?.rest ?? "");
+    // An upload session's token opens its upload, and nothing else; the
+    // account's token doesn't open the upload.
+    if (found?.route.session === true ? authorized : !authorized) {
+      return refusal(403, 10_000, "Authentication error");
+    }
     const account = accounts.get(match?.id ?? "");
     if (account === undefined) {
       return refusal(403, 9109, "Unauthorized to access requested resource");
     }
-    return routeAccount(account, call, match?.rest ?? "");
+    if (found === null) {
+      // As the API answers a path it doesn't serve.
+      return refusal(400, 7003, "No route for the URI");
+    }
+    const json: Json =
+      typeof call.body === "object" && call.body !== null
+        ? { ...call.body }
+        : {};
+    return await found.route.answer({
+      account,
+      call,
+      params: found.params,
+      json,
+    });
   };
 
   const answer = async (request: Request): Promise<Response> => {
@@ -327,13 +300,13 @@ export const mockCloudflareApi = (token: string) => {
     calls.push(call);
     const failure = planned.get(calls.length);
     if (failure === "lost") {
-      respond(request, call);
+      await respond(request, call);
       return lostConnection();
     }
     if (failure !== undefined) {
       return failed(failure);
     }
-    return respond(request, call);
+    return await respond(request, call);
   };
 
   beforeEach(() => {
@@ -342,19 +315,29 @@ export const mockCloudflareApi = (token: string) => {
       if (!request.url.startsWith(`${base}/`)) {
         throw new Error(`Unexpected outbound request to ${request.url}`);
       }
-      return await answer(request);
+      load.now += 1;
+      load.peak = Math.max(load.peak, load.now);
+      try {
+        return await answer(request);
+      } finally {
+        load.now -= 1;
+      }
     });
   });
   afterEach(() => {
     vi.restoreAllMocks();
     accounts.clear();
+    forgetDatabases();
     calls.length = 0;
     planned.clear();
+    load.peak = 0;
   });
 
   return {
     /** Every call the fake got in this test, in order. */
     calls,
+    /** The most calls it was answering at once in this test. */
+    peakConcurrency: () => load.peak,
     /** Adds an account the token is a member of, and returns what it holds. */
     addAccount: (name = "Client"): AccountState => {
       const account: AccountState = {
@@ -363,6 +346,11 @@ export const mockCloudflareApi = (token: string) => {
         d1: [],
         buckets: [],
         gateways: [],
+        scripts: new Map(),
+        workflows: new Map(),
+        assets: new Set(),
+        sessions: new Map(),
+        completions: new Set(),
       };
       accounts.set(account.id, account);
       return account;
