@@ -17,12 +17,13 @@ import { Route as ShellActivityRouteImport } from './routes/_shell.activity'
 import { Route as ShellConnectionsRouteImport } from './routes/_shell.connections'
 import { Route as ShellMembersRouteImport } from './routes/_shell.members'
 import { Route as ShellModelsRouteImport } from './routes/_shell.models'
-import { Route as ShellWorkflowsRouteImport } from './routes/_shell.workflows'
 import { Route as DecisionsDecisionRouteImport } from './routes/decisions.$decision'
 import { Route as ShellAppsIndexRouteImport } from './routes/_shell.apps.index'
 import { Route as ShellAppsAppRouteImport } from './routes/_shell.apps.$app'
 import { Route as ShellKnowledgeIndexRouteImport } from './routes/_shell.knowledge.index'
 import { Route as ShellKnowledgeCollectionRouteImport } from './routes/_shell.knowledge.$collection'
+import { Route as ShellWorkflowsIndexRouteImport } from './routes/_shell.workflows.index'
+import { Route as ShellWorkflowsAppWorkflowRouteImport } from './routes/_shell.workflows.$app.$workflow'
 import { Route as AppsAppScreensScreenRouteImport } from './routes/apps.$app.screens.$screen'
 
 const ShellRoute = ShellRouteImport.update({
@@ -64,11 +65,6 @@ const ShellModelsRoute = ShellModelsRouteImport.update({
   path: '/models',
   getParentRoute: () => ShellRoute,
 } as any)
-const ShellWorkflowsRoute = ShellWorkflowsRouteImport.update({
-  id: '/workflows',
-  path: '/workflows',
-  getParentRoute: () => ShellRoute,
-} as any)
 const DecisionsDecisionRoute = DecisionsDecisionRouteImport.update({
   id: '/decisions/$decision',
   path: '/decisions/$decision',
@@ -95,6 +91,17 @@ const ShellKnowledgeCollectionRoute =
     path: '/knowledge/$collection',
     getParentRoute: () => ShellRoute,
   } as any)
+const ShellWorkflowsIndexRoute = ShellWorkflowsIndexRouteImport.update({
+  id: '/workflows/',
+  path: '/workflows/',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellWorkflowsAppWorkflowRoute =
+  ShellWorkflowsAppWorkflowRouteImport.update({
+    id: '/workflows/$app/$workflow',
+    path: '/workflows/$app/$workflow',
+    getParentRoute: () => ShellRoute,
+  } as any)
 const AppsAppScreensScreenRoute = AppsAppScreensScreenRouteImport.update({
   id: '/apps/$app/screens/$screen',
   path: '/apps/$app/screens/$screen',
@@ -109,12 +116,13 @@ export interface FileRoutesByFullPath {
   '/connections': typeof ShellConnectionsRoute
   '/members': typeof ShellMembersRoute
   '/models': typeof ShellModelsRoute
-  '/workflows': typeof ShellWorkflowsRoute
   '/decisions/$decision': typeof DecisionsDecisionRoute
   '/apps/$app': typeof ShellAppsAppRoute
   '/knowledge/$collection': typeof ShellKnowledgeCollectionRoute
   '/apps/': typeof ShellAppsIndexRoute
   '/knowledge/': typeof ShellKnowledgeIndexRoute
+  '/workflows/': typeof ShellWorkflowsIndexRoute
+  '/workflows/$app/$workflow': typeof ShellWorkflowsAppWorkflowRoute
   '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRoutesByTo {
@@ -124,13 +132,14 @@ export interface FileRoutesByTo {
   '/connections': typeof ShellConnectionsRoute
   '/members': typeof ShellMembersRoute
   '/models': typeof ShellModelsRoute
-  '/workflows': typeof ShellWorkflowsRoute
   '/decisions/$decision': typeof DecisionsDecisionRoute
   '/': typeof ShellIndexRoute
   '/apps/$app': typeof ShellAppsAppRoute
   '/knowledge/$collection': typeof ShellKnowledgeCollectionRoute
   '/apps': typeof ShellAppsIndexRoute
   '/knowledge': typeof ShellKnowledgeIndexRoute
+  '/workflows': typeof ShellWorkflowsIndexRoute
+  '/workflows/$app/$workflow': typeof ShellWorkflowsAppWorkflowRoute
   '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRoutesById {
@@ -142,13 +151,14 @@ export interface FileRoutesById {
   '/_shell/connections': typeof ShellConnectionsRoute
   '/_shell/members': typeof ShellMembersRoute
   '/_shell/models': typeof ShellModelsRoute
-  '/_shell/workflows': typeof ShellWorkflowsRoute
   '/decisions/$decision': typeof DecisionsDecisionRoute
   '/_shell/': typeof ShellIndexRoute
   '/_shell/apps/$app': typeof ShellAppsAppRoute
   '/_shell/knowledge/$collection': typeof ShellKnowledgeCollectionRoute
   '/_shell/apps/': typeof ShellAppsIndexRoute
   '/_shell/knowledge/': typeof ShellKnowledgeIndexRoute
+  '/_shell/workflows/': typeof ShellWorkflowsIndexRoute
+  '/_shell/workflows/$app/$workflow': typeof ShellWorkflowsAppWorkflowRoute
   '/apps/$app/screens/$screen': typeof AppsAppScreensScreenRoute
 }
 export interface FileRouteTypes {
@@ -161,12 +171,13 @@ export interface FileRouteTypes {
     | '/connections'
     | '/members'
     | '/models'
-    | '/workflows'
     | '/decisions/$decision'
     | '/apps/$app'
     | '/knowledge/$collection'
     | '/apps/'
     | '/knowledge/'
+    | '/workflows/'
+    | '/workflows/$app/$workflow'
     | '/apps/$app/screens/$screen'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -176,13 +187,14 @@ export interface FileRouteTypes {
     | '/connections'
     | '/members'
     | '/models'
-    | '/workflows'
     | '/decisions/$decision'
     | '/'
     | '/apps/$app'
     | '/knowledge/$collection'
     | '/apps'
     | '/knowledge'
+    | '/workflows'
+    | '/workflows/$app/$workflow'
     | '/apps/$app/screens/$screen'
   id:
     | '__root__'
@@ -193,13 +205,14 @@ export interface FileRouteTypes {
     | '/_shell/connections'
     | '/_shell/members'
     | '/_shell/models'
-    | '/_shell/workflows'
     | '/decisions/$decision'
     | '/_shell/'
     | '/_shell/apps/$app'
     | '/_shell/knowledge/$collection'
     | '/_shell/apps/'
     | '/_shell/knowledge/'
+    | '/_shell/workflows/'
+    | '/_shell/workflows/$app/$workflow'
     | '/apps/$app/screens/$screen'
   fileRoutesById: FileRoutesById
 }
@@ -269,13 +282,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellModelsRouteImport
       parentRoute: typeof ShellRoute
     }
-    '/_shell/workflows': {
-      id: '/_shell/workflows'
-      path: '/workflows'
-      fullPath: '/workflows'
-      preLoaderRoute: typeof ShellWorkflowsRouteImport
-      parentRoute: typeof ShellRoute
-    }
     '/decisions/$decision': {
       id: '/decisions/$decision'
       path: '/decisions/$decision'
@@ -311,6 +317,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellKnowledgeCollectionRouteImport
       parentRoute: typeof ShellRoute
     }
+    '/_shell/workflows/': {
+      id: '/_shell/workflows/'
+      path: '/workflows'
+      fullPath: '/workflows/'
+      preLoaderRoute: typeof ShellWorkflowsIndexRouteImport
+      parentRoute: typeof ShellRoute
+    }
+    '/_shell/workflows/$app/$workflow': {
+      id: '/_shell/workflows/$app/$workflow'
+      path: '/workflows/$app/$workflow'
+      fullPath: '/workflows/$app/$workflow'
+      preLoaderRoute: typeof ShellWorkflowsAppWorkflowRouteImport
+      parentRoute: typeof ShellRoute
+    }
     '/apps/$app/screens/$screen': {
       id: '/apps/$app/screens/$screen'
       path: '/apps/$app/screens/$screen'
@@ -326,12 +346,13 @@ interface ShellRouteChildren {
   ShellConnectionsRoute: typeof ShellConnectionsRoute
   ShellMembersRoute: typeof ShellMembersRoute
   ShellModelsRoute: typeof ShellModelsRoute
-  ShellWorkflowsRoute: typeof ShellWorkflowsRoute
   ShellIndexRoute: typeof ShellIndexRoute
   ShellAppsAppRoute: typeof ShellAppsAppRoute
   ShellKnowledgeCollectionRoute: typeof ShellKnowledgeCollectionRoute
   ShellAppsIndexRoute: typeof ShellAppsIndexRoute
   ShellKnowledgeIndexRoute: typeof ShellKnowledgeIndexRoute
+  ShellWorkflowsIndexRoute: typeof ShellWorkflowsIndexRoute
+  ShellWorkflowsAppWorkflowRoute: typeof ShellWorkflowsAppWorkflowRoute
 }
 
 const ShellRouteChildren: ShellRouteChildren = {
@@ -339,12 +360,13 @@ const ShellRouteChildren: ShellRouteChildren = {
   ShellConnectionsRoute: ShellConnectionsRoute,
   ShellMembersRoute: ShellMembersRoute,
   ShellModelsRoute: ShellModelsRoute,
-  ShellWorkflowsRoute: ShellWorkflowsRoute,
   ShellIndexRoute: ShellIndexRoute,
   ShellAppsAppRoute: ShellAppsAppRoute,
   ShellKnowledgeCollectionRoute: ShellKnowledgeCollectionRoute,
   ShellAppsIndexRoute: ShellAppsIndexRoute,
   ShellKnowledgeIndexRoute: ShellKnowledgeIndexRoute,
+  ShellWorkflowsIndexRoute: ShellWorkflowsIndexRoute,
+  ShellWorkflowsAppWorkflowRoute: ShellWorkflowsAppWorkflowRoute,
 }
 
 const ShellRouteWithChildren = ShellRoute._addFileChildren(ShellRouteChildren)
