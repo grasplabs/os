@@ -8,8 +8,7 @@ import { drizzle } from "drizzle-orm/d1";
 
 import { auditedBatch, outboxed } from "./audit-outbox.ts";
 import { apps, workflowRuns } from "./db/core/schema.ts";
-import { appHost } from "./durable-objects.ts";
-import { workspace } from "./workspace.ts";
+import { appHost, workspace } from "./durable-objects.ts";
 
 // Restricted mode. Once a chat or an App reads restricted data (in
 // Knowledge: what a sensitive collection holds), it is restricted for good,

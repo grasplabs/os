@@ -12,15 +12,18 @@ import { env } from "cloudflare:workers";
 
 import { bindingsFor } from "../src/bindings.ts";
 import type { ConnectionBinding } from "../src/bindings.ts";
+import { workspace } from "../src/durable-objects.ts";
 import type { WorkContext } from "../src/restricted.ts";
-import { workspace } from "../src/workspace.ts";
 
 /** A new chat in a new workspace, where an agent works. */
 export const newChat = async (): Promise<
   Extract<WorkContext, { type: "chat" }>
 > => {
   const workspaceId = workspaceIdSchema.parse(crypto.randomUUID());
-  const { id } = await workspace(env, workspaceId).createChat("Chat");
+  const { id } = await workspace(env, workspaceId).createChat(
+    "Chat",
+    "person-1"
+  );
   return { type: "chat", workspaceId, chatId: id };
 };
 

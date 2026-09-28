@@ -7,9 +7,9 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
+import { workspace } from "../src/durable-objects.ts";
 import { catalogMaxCharacters } from "../src/knowledge/tools.ts";
 import type { WorkContext } from "../src/restricted.ts";
-import { workspace } from "../src/workspace.ts";
 import { requestGranted } from "./apps.ts";
 import {
   actingFor,

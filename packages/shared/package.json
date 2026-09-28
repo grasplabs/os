@@ -6,6 +6,7 @@
   "type": "module",
   "sideEffects": false,
   "exports": {
+    "./agent": "./src/agent.ts",
     "./app-limits": "./src/app-limits.ts",
     "./apps": "./src/apps.ts",
     "./audit": "./src/audit.ts",

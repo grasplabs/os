@@ -17,9 +17,8 @@ import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
-import { appHost } from "../src/durable-objects.ts";
+import { appHost, workspace } from "../src/durable-objects.ts";
 import type { WorkContext } from "../src/restricted.ts";
-import { workspace } from "../src/workspace.ts";
 import { grantReviewed, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import {
