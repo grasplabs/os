@@ -91,6 +91,24 @@ describe("sign-in rate limit", () => {
     expect(cores.received).toHaveLength(4);
   });
 
+  it("counts every IPv6 address in one /64 against one budget", async () => {
+    const limiter = limiterAllowing(2);
+    const signIn = "https://acme.limit.test/api/auth/sign-in/sso";
+
+    const first = await signInFrom("2001:db8:1:2::1", signIn, limiter);
+    const second = await signInFrom("2001:db8:1:2:aaaa::7", signIn, limiter);
+    const refused = await signInFrom(
+      "2001:db8:1:2:ffff:ffff:ffff:ffff",
+      signIn,
+      limiter
+    );
+    const otherPrefix = await signInFrom("2001:db8:1:3::1", signIn, limiter);
+
+    expect(
+      [first, second, refused, otherPrefix].map(({ status }) => status)
+    ).toStrictEqual([200, 200, 429, 200]);
+  });
+
   it("never limits signing out", async () => {
     const limiter = limiterAllowing(0);
 

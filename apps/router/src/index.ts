@@ -13,6 +13,7 @@ import {
   routerSecretHeader,
 } from "@grasp-os/shared/router";
 
+import { clientAddress } from "./client-address.ts";
 import { routeCache } from "./route-cache.ts";
 
 /** Where one hostname goes, and the secret its core expects. */
@@ -77,18 +78,22 @@ const signInLimitPeriodS = 60;
 
 /**
  * Whether a request to core's sign-in routes is within the limit for its
- * hostname and client IP. Better Auth's own limiter is off in core: behind
- * the router, every request comes from the router's address. Keyed by
- * hostname too, so one office behind one address signing in to two clients
- * counts separately for each. When the limiter itself fails, the request
- * goes through (and is logged): sign-in stays up.
+ * hostname and client address. Better Auth's own limiter is off in core:
+ * behind the router, every request comes from the router's address. Keyed
+ * by the client's IPv4 address or IPv6 /64 (`clientAddress`), so rotating
+ * through a /64 buys no fresh budget, and by hostname too, so one office
+ * behind one address signing in to two clients counts separately for
+ * each. When the limiter itself fails, the request goes through (and is
+ * logged): sign-in stays up.
  */
 const withinSignInLimit = async (
   request: Request,
   host: string,
   env: Env
 ): Promise<boolean> => {
-  const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+  const ip = clientAddress(
+    request.headers.get("cf-connecting-ip") ?? "unknown"
+  );
   try {
     const { success } = await env.AUTH_RATE_LIMIT.limit({
       key: `${host}|${ip}`,
