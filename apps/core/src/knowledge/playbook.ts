@@ -697,10 +697,18 @@ export const listRecords = async (
     allowed.collections,
     collectionId
   );
+  // The documents of the page, or of the rest of the collection, after
+  // the path `from`.
+  const listed = (from: string | undefined) =>
+    and(
+      eq(documents.collectionId, collection.id),
+      allowed.documents(),
+      from === undefined ? undefined : gt(documents.path, from),
+      type === undefined ? undefined : eq(documents.type, type)
+    );
   // The text is read in the same query as the access check, as
-  // `getDocument` reads it. One row past the page says whether another
-  // follows.
-  const found = await db
+  // `getDocument` reads it.
+  const rows = await db
     .select({ document: documents, text: versions.text })
     .from(documents)
     .innerJoin(collections, eq(collections.id, documents.collectionId))
@@ -711,17 +719,22 @@ export const listRecords = async (
         eq(versions.number, documents.currentVersion)
       )
     )
-    .where(
-      and(
-        eq(documents.collectionId, collection.id),
-        allowed.documents(),
-        after === undefined ? undefined : gt(documents.path, after),
-        type === undefined ? undefined : eq(documents.type, type)
-      )
-    )
+    .where(listed(after))
     .orderBy(asc(documents.path))
-    .limit(limit + 1);
-  const rows = found.slice(0, limit);
+    .limit(limit);
+  const last = rows.at(-1);
+  // Whether another page follows, only after a full one: by ID alone, so
+  // nothing is read that this page's audit event doesn't name.
+  const more =
+    rows.length === limit && last !== undefined
+      ? await db
+          .select({ id: documents.id })
+          .from(documents)
+          .innerJoin(collections, eq(collections.id, documents.collectionId))
+          .where(listed(last.document.path))
+          .limit(1)
+          .get()
+      : undefined;
   const provenance = await noteProvenance(
     env,
     reader,
@@ -745,12 +758,10 @@ export const listRecords = async (
       records.push(record);
     }
   }
-  const last = rows.at(-1);
   return {
     records,
     unreadable,
-    next:
-      found.length > limit && last !== undefined ? last.document.path : null,
+    next: more === undefined || last === undefined ? null : last.document.path,
     provenance,
   };
 };

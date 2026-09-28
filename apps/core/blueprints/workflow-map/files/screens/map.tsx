@@ -128,6 +128,7 @@ const WorkflowMap = () => {
         <WorkflowList
           workflows={overview.workflows}
           teams={teams}
+          writable={writable}
           onOpen={(id) => {
             void open(id);
           }}
