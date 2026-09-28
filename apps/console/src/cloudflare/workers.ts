@@ -396,6 +396,45 @@ export const uploadScript = async (
   );
 };
 
+const serviceSchema = z.object({
+  default_environment: z.object({
+    script: z.object({ migration_tag: z.string().nullish() }),
+  }),
+});
+
+/**
+ * Whether `scriptName` exists, and the tag of the last Durable Object
+ * migration it ran, if any: what decides which of a release's migrations
+ * its next upload carries. Read as Wrangler reads it.
+ */
+export const scriptMigrationState = async (
+  api: CloudflareApi,
+  accountId: string,
+  scriptName: string
+): Promise<{ exists: boolean; migrationTag?: string }> => {
+  try {
+    const { default_environment: environment } = await api.call(
+      {
+        method: "GET",
+        path: `/accounts/${accountId}/workers/services/${scriptName}`,
+      },
+      serviceSchema
+    );
+    const tag = environment.script.migration_tag;
+    return {
+      exists: true,
+      ...(tag === null || tag === undefined || tag === ""
+        ? {}
+        : { migrationTag: tag }),
+    };
+  } catch (error) {
+    if (isNotFound(error)) {
+      return { exists: false };
+    }
+    throw error;
+  }
+};
+
 /**
  * Makes `scriptName` reachable on the account's workers.dev subdomain, or
  * not; its preview URLs stay off (each would serve an older version).

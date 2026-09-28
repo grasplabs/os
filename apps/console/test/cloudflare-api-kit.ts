@@ -34,6 +34,8 @@ export interface ScriptState {
   deployments: DeploymentState[];
   schedules: string[];
   subdomain?: { enabled: boolean; previews_enabled: boolean };
+  /** The last Durable Object migration a script upload ran. */
+  migrationTag?: string;
 }
 
 export interface AccountState {

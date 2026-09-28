@@ -103,6 +103,12 @@ export const clientDeploys = sqliteTable(
     step: text(),
     /** Why it failed: an error code, never a token or a response body. */
     error: text(),
+    /**
+     * The version this deploy uploaded of each Worker, by app, such as
+     * `{"connect": "<version id>"}`: JSON. A resumed deploy deploys these
+     * rather than upload again.
+     */
+    versions: text(),
     /** The staff member who started it, or `system`. */
     startedBy: text("started_by").notNull(),
     createdAt: timestamp("created_at").notNull(),

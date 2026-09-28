@@ -31,6 +31,8 @@ export interface ReleaseSpec {
   assets?: Record<string, string>;
   packages?: Record<string, string>;
   crons?: string[];
+  /** core's Durable Object migration tags, in order: `v1` by default. */
+  durableObjectMigrations?: string[];
 }
 
 /** A built release: its manifest and every blob, by R2 key. */
@@ -146,6 +148,7 @@ export const buildRelease = async (
     workers: {
       connect: {
         ...worker("grasp-os-connect", []),
+        requiredSecrets: ["CAPABILITY_SIGNING_KEY"],
         modules: [await module(spec.connect ?? "export default {};")],
         bindings: [{ type: "d1", name: "DB", id: "$D1_DB_ID" }],
         d1Databases: [
@@ -158,8 +161,31 @@ export const buildRelease = async (
       },
       core: {
         ...worker("grasp-os-core", spec.crons ?? ["* * * * *"]),
+        workersDev: true,
+        requiredSecrets: [
+          "ROUTER_SECRET",
+          "BETTER_AUTH_SECRET",
+          "CAPABILITY_SIGNING_KEY",
+        ],
+        durableObjectMigrations: (spec.durableObjectMigrations ?? ["v1"]).map(
+          (tag) => ({ tag, new_sqlite_classes: [`Class${tag}`] })
+        ),
         modules: [await module(spec.core ?? "export default { core: 1 };")],
         bindings: [
+          {
+            type: "durable_object_namespace",
+            name: "WORKSPACES",
+            class_name: "Workspace",
+          },
+          {
+            type: "workflow",
+            name: "WORKFLOWS",
+            workflow_name: "grasp-os-workflows",
+            class_name: "WorkflowDispatcher",
+          },
+          { type: "service", name: "CONNECT", service: "grasp-os-connect" },
+          { type: "version_metadata", name: "CF_VERSION_METADATA" },
+          { type: "assets", name: "ASSETS" },
           { type: "d1", name: "DB", id: "$D1_DB_ID" },
           { type: "d1", name: "KNOWLEDGE", id: "$D1_KNOWLEDGE_ID" },
           {

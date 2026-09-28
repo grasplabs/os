@@ -1,0 +1,1 @@
+ALTER TABLE `client_deploys` ADD `versions` text;
