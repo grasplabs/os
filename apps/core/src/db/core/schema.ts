@@ -417,6 +417,16 @@ export const appVersions = sqliteTable(
     authorId: text("author_id").notNull(),
     message: text().notNull(),
     createdAt: timestamp("created_at").notNull(),
+    /**
+     * Whether an admin approved this version's code for the App's
+     * permissions to change things with (permissions.ts, `authorize`): 1
+     * once an admin made it current or granted a permission while it was,
+     * or it is an App's first version copied from a blueprint; 0 once
+     * someone who couldn't grant made it current, until then. Null for a
+     * version made current before this column, which counts as approved,
+     * and for one never made current, which never runs.
+     */
+    approved: integer(),
   },
   (table) => [primaryKey({ columns: [table.appId, table.version] })]
 );

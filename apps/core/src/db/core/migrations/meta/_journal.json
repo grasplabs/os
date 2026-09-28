@@ -141,6 +141,13 @@
       "when": 1790603720997,
       "tag": "0019_model_spend_top",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "6",
+      "when": 1790606248892,
+      "tag": "0020_app_version_approved",
+      "breakpoints": true
     }
   ]
 }

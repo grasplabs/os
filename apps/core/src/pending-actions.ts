@@ -7,7 +7,10 @@ import type {
 import { isExpectedError } from "@grasp-os/shared/errors";
 import { connectionIdSchema, permissionIdSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { authoritySchema } from "@grasp-os/shared/permissions";
+import {
+  authoritySchema,
+  permissionErrors,
+} from "@grasp-os/shared/permissions";
 import type { Authority, WorkContext } from "@grasp-os/shared/permissions";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { runOfStepKey } from "@grasp-os/shared/workflows";
@@ -98,14 +101,21 @@ export const confirmPendingAction = async (
     await env.CONNECT.dropForEndedRun({ person, id: held.id });
     throw connectErrors.create("connect.run_ended");
   }
-  const authority = authoritySchema.parse({
-    subject: held.subject,
-    onBehalfOf: identity.userId,
-    mode: held.mode,
-    ...(held.appVersion === null ? {} : { appVersion: held.appVersion }),
-  });
   let capability: string;
   try {
+    // An App's action names the version whose code asked for it, or no
+    // version was approved for it: refused, as `authorize` would.
+    if (held.subject.type === "app" && held.appVersion === null) {
+      throw permissionErrors.create("permission.denied", {
+        action: held.action,
+      });
+    }
+    const authority = authoritySchema.parse({
+      subject: held.subject,
+      onBehalfOf: identity.userId,
+      mode: held.mode,
+      ...(held.appVersion === null ? {} : { appVersion: held.appVersion }),
+    });
     ({ capability } = await signedCall(
       env,
       {
@@ -164,15 +174,26 @@ const withRestricted = async (
 ): Promise<PendingAction[]> => {
   const lookups = new Map<string, Promise<boolean>>();
   const restrictedNow = async (held: PendingAction): Promise<boolean> => {
-    const key = JSON.stringify([held.subject, held.context]);
+    const key = JSON.stringify([held.subject, held.context, held.appVersion]);
     let lookup = lookups.get(key);
     if (lookup === undefined) {
-      const authority = authoritySchema.parse({
-        subject: held.subject,
-        onBehalfOf: userId,
-        mode: held.mode,
-      });
-      lookup = restrictedOrUnknown(env, authority, held.context);
+      // An App's action names the version whose code asked for it; one
+      // that doesn't can't be confirmed, and counts as restricted.
+      lookup =
+        held.subject.type === "app" && held.appVersion === null
+          ? Promise.resolve(true)
+          : restrictedOrUnknown(
+              env,
+              authoritySchema.parse({
+                subject: held.subject,
+                onBehalfOf: userId,
+                mode: held.mode,
+                ...(held.appVersion === null
+                  ? {}
+                  : { appVersion: held.appVersion }),
+              }),
+              held.context
+            );
       lookups.set(key, lookup);
     }
     return await lookup;

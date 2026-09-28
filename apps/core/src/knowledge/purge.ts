@@ -34,7 +34,12 @@ import { requireFeature } from "../features.ts";
 import { appOfEntry } from "./app-entries.ts";
 import { entryNow } from "./apps-collection.ts";
 import type { CollectionRow } from "./collections.ts";
-import { checkedText, personWriter, writeVersion } from "./documents.ts";
+import {
+  checkedText,
+  keptFieldsOf,
+  personWriter,
+  writeVersion,
+} from "./documents.ts";
 import type { DocumentRow } from "./documents.ts";
 import { frozenPathRanges } from "./frontmatter.ts";
 import { personalCollectionId } from "./memory-files.ts";
@@ -944,13 +949,17 @@ const purgeDocument = async (
     await db.batch(forgetUploads(db, uploadsNamed(document)));
     return counts;
   }
+  const text = changed?.text ?? current.text;
   await writeVersion(env, personWriter(person), {
     collection,
     path: document.path,
-    text: changed?.text ?? current.text,
+    text,
     ifVersion: at,
     message: "Personal data removed",
     restoredFrom: null,
+    // What a Playbook record keeps from version to version, such as a
+    // workflow's link, a term is removed from too.
+    sets: keptFieldsOf(document.path, text),
     also: [
       ...(changed === undefined
         ? []

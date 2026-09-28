@@ -9,7 +9,7 @@ import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
 import { builtinAppId } from "../src/builtin-app-id.ts";
 import { builtins, fingerprintOf, release } from "../src/builtins.ts";
-import { release as releaseFiles, serverBuilt } from "./apps.ts";
+import { grantReviewed, release as releaseFiles, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { auditedDuring, signedInApi, unique } from "./sign-in.ts";
 
@@ -107,7 +107,7 @@ const setUp = async () => {
   );
   for (const { id } of created.permissions) {
     // oxlint-disable-next-line no-await-in-loop -- one grant at a time
-    await admin.api.permissions.grant(id);
+    await grantReviewed(admin.api, id);
   }
   await admin.api.apps.versions.setCurrent(created.app.id, 1);
   await serverBuilt(created.app.id, 1);

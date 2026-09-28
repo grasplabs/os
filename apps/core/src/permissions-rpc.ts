@@ -1,4 +1,5 @@
 import type {
+  GrantReview,
   Permission,
   PermissionRequest,
   PermissionsApi,
@@ -51,10 +52,10 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
     );
   }
 
-  async grant(id: string): Promise<Permission> {
+  async grant(id: string, reviewed: GrantReview): Promise<Permission> {
     return await withPerson(
       this.#check,
-      async (person) => await grantPermission(this.#env, person, id)
+      async (person) => await grantPermission(this.#env, person, id, reviewed)
     );
   }
 

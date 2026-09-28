@@ -16,7 +16,7 @@ import {
 } from "../src/builtins.ts";
 import type { Release } from "../src/builtins.ts";
 import { buildScreens } from "../src/screens.ts";
-import { serverBuilt } from "./apps.ts";
+import { grantReviewed, racingDb, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote } from "./knowledge.ts";
 import {
@@ -144,36 +144,11 @@ const permissionEvents = (events: Awaited<ReturnType<typeof auditedDuring>>) =>
 const insertsVersion = /^insert into "app_versions"/iu;
 const insertsPermission = /^insert into "permissions"/iu;
 
-/**
- * Core's database, with `first` run once, just before the first batch
- * that writes an App version (or what `writes` matches) lands: another
- * writer getting there first.
- */
+/** `racingDb`, racing the batch that writes an App version by default. */
 const dbRacing = (
   first: () => Promise<unknown>,
   writes: RegExp = insertsVersion
-): D1Database => {
-  const real = env.DB;
-  let writing = false;
-  let raced = false;
-  return {
-    prepare: (query) => {
-      writing ||= writes.test(query);
-      return real.prepare(query);
-    },
-    batch: async <T>(statements: D1PreparedStatement[]) => {
-      if (writing && !raced) {
-        raced = true;
-        await first();
-      }
-      return await real.batch<T>(statements);
-    },
-    exec: async (query) => await real.exec(query),
-    // oxlint-disable-next-line typescript/no-deprecated -- D1Database still has it
-    dump: async () => await real.dump(),
-    withSession: (constraint) => real.withSession(constraint),
-  };
-};
+): D1Database => racingDb(first, writes);
 
 describe("the built-in blueprints", () => {
   it("are every folder under apps/core/blueprints, and the tests' own", () => {
@@ -483,7 +458,7 @@ describe("the built-in blueprints", () => {
         requestedBy: builder.userId,
       }),
     ]);
-    const granted = await admin.api.permissions.grant(asked?.id ?? "");
+    const granted = await grantReviewed(admin.api, asked?.id ?? "");
 
     // The built-in's own request is the release's: an admin neither grants
     // nor revokes it, so every copy keeps asking for it.
@@ -493,7 +468,7 @@ describe("the built-in blueprints", () => {
       .bind(helloApp)
       .first<{ id: string }>();
     const refusedOwn = await Promise.all([
-      outcome(admin.api.permissions.grant(own?.id ?? "")),
+      outcome(grantReviewed(admin.api, own?.id ?? "")),
       outcome(admin.api.permissions.revoke(own?.id ?? "")),
     ]);
     const second = await builder.api.apps.blueprints.create(
@@ -543,6 +518,81 @@ describe("the built-in blueprints", () => {
       copy: [granted],
       later: [],
     });
+  });
+
+  it("leave what a copy was granted as its builder makes its first version current and a release changes them, but not its next version or a rollback", async () => {
+    await reinstall();
+    const admin = await signedInApi(idp, "admin");
+    const builder = await signedInApi(idp, "builder");
+    const { collectionId } = await collectionWithNote(admin.api, {
+      name: `Granted ${unique()}`,
+      access: "everyone",
+    });
+    const declaring = releaseWith({ permissions: [notesOf(collectionId)] });
+    await expect(install(declaring)).resolves.toBeTruthy();
+    const { versions } = await helloState();
+    const created = await builder.api.apps.blueprints.create(
+      helloApp,
+      versions.at(-1) ?? 1,
+      { name: "Granted" }
+    );
+    const [asked] = created.permissions;
+    const granted = await grantReviewed(admin.api, asked?.id ?? "");
+    const copy = { type: "app", appId: created.app.id } as const;
+
+    // Its first version is the blueprint's code, which the admin granted
+    // it for; a new release changes the built-in, not the copy.
+    const kept = await auditedDuring(async () => {
+      await builder.api.apps.versions.setCurrent(created.app.id, 1);
+      await expect(
+        install(
+          releaseWith({
+            files: {
+              ...hello().files,
+              "app/server.ts": `${hello().files["app/server.ts"]}\n// Changed.\n`,
+            },
+            permissions: [notesOf(collectionId)],
+          })
+        )
+      ).resolves.toBeTruthy();
+    });
+    const afterRelease = await admin.api.permissions.list(copy);
+
+    // Code of the builder's own is asked for again.
+    await builder.api.apps.files.write(created.app.id, {
+      "app/server.ts": `${hello().files["app/server.ts"]}\n// Mine.\n`,
+    });
+    const { version } = await builder.api.apps.files.commit(
+      created.app.id,
+      "Mine"
+    );
+    await builder.api.apps.versions.setCurrent(created.app.id, version);
+    const next = await admin.api.permissions.list(copy);
+
+    // Granted again for the builder's code, then rolled back to the first
+    // version by the builder: asked for again, as for any version but the
+    // first one's first time.
+    await grantReviewed(admin.api, asked?.id ?? "");
+    await builder.api.apps.versions.setCurrent(created.app.id, 1);
+    const rolledBack = await admin.api.permissions.list(copy);
+
+    expect({
+      audited: kept.filter(
+        ({ action, detail }) =>
+          action.startsWith("permission.") &&
+          detail?.subjectId === created.app.id
+      ),
+      afterRelease,
+      next: next.map(({ status, requestedBy }) => ({ status, requestedBy })),
+      rolledBack: rolledBack.map(({ status }) => status),
+    }).toStrictEqual({
+      audited: [],
+      afterRelease: [granted],
+      next: [{ status: "requested", requestedBy: builder.userId }],
+      rolledBack: ["requested"],
+    });
+
+    await reinstall();
   });
 
   it("take a declaration again the same with its actions reordered, and in its place when changed under the same binding", async () => {

@@ -109,6 +109,7 @@ describe("model settings", { timeout: 60_000 }, () => {
         subject: { type: "app", appId },
         onBehalfOf: userId,
         mode: "interactive",
+        appVersion: 1,
       },
       context: { type: "app", appId },
     });
@@ -137,6 +138,7 @@ describe("model settings", { timeout: 60_000 }, () => {
             subject: { type: "app", appId },
             onBehalfOf: builder.userId,
             mode: "workflow",
+            appVersion: 1,
           },
           context: { type: "run", appId, runId: runIdSchema.parse(run.id) },
         },

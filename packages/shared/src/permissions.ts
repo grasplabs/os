@@ -254,6 +254,10 @@ export type DeclaredPermission = z.infer<typeof declaredPermissionSchema>;
 /**
  * Requested: asked for, allows nothing yet. Active: granted, allows its
  * actions. Revoked: allows nothing, for good (ask again for a new one).
+ * An App's active permission on a connection, to write a collection or to
+ * start a workflow goes back to requested when someone who couldn't grant
+ * it (Grasp staff included) makes another version of the App current
+ * (`AppVersionsApi.setCurrent`), until an admin grants it again.
  */
 export const permissionStatusSchema = z.enum([
   "requested",
@@ -261,6 +265,15 @@ export const permissionStatusSchema = z.enum([
   "revoked",
 ]);
 export type PermissionStatus = z.infer<typeof permissionStatusSchema>;
+
+/**
+ * What an admin reviewed as they grant a permission: the version of its
+ * App current then, or null for an agent's, or an App with none current.
+ */
+export const grantReviewSchema = z.strictObject({
+  version: z.int().positive().nullable(),
+});
+export type GrantReview = z.infer<typeof grantReviewSchema>;
 
 /** One permission, as the API returns it. */
 export interface Permission {
@@ -273,6 +286,11 @@ export interface Permission {
   /** User IDs, and when (ISO 8601). */
   requestedBy: string;
   requestedAt: string;
+  /**
+   * Who granted it last, and when. On a requested permission, it was
+   * granted before and is asked for again (`AppVersionsApi.setCurrent`);
+   * only `status` says what it allows.
+   */
   grantedBy: string | null;
   grantedAt: string | null;
   revokedBy: string | null;
@@ -293,9 +311,13 @@ export interface PermissionsApi {
    * Grants a requested permission, the admin's own request included.
    * Admins only, never Grasp staff; audited. Refused for a built-in
    * blueprint's own permissions (`permission.builtin`): they are granted on
-   * the Apps created from it.
+   * the Apps created from it. `reviewed.version` is the version of the App
+   * the admin reviewed, the one current as they decided (null for an
+   * agent's permission, or an App with none current): the grant approves
+   * it, and is refused with `app.conflict`, changing nothing, once another
+   * version is current.
    */
-  grant: (id: string) => Promise<Permission>;
+  grant: (id: string, reviewed: GrantReview) => Promise<Permission>;
   /**
    * Revokes a permission; the next call that needs it is refused. Admins
    * only, never Grasp staff; audited. Refused for a built-in blueprint's
@@ -320,19 +342,28 @@ export interface PermissionsApi {
  * lives: connect limits personal connections to their owner, and the
  * Knowledge queries limit collections to what the person may read.
  */
-export const authoritySchema = z.strictObject({
-  subject: permissionSubjectSchema,
-  onBehalfOf: identifierSchema,
-  mode: z.enum(["interactive", "workflow"]),
-  /**
-   * For a call from an App's code: the App version whose code made it, set
-   * by the host, so the audit log can trace each call to the code that
-   * made it (threat model SB9). It never decides access. Optional, so a
-   * connect that knows it still accepts the capabilities of a core that
-   * doesn't set it yet; connect deploys first.
-   */
-  appVersion: z.int().positive().optional(),
-});
+export const authoritySchema = z
+  .strictObject({
+    subject: permissionSubjectSchema,
+    onBehalfOf: identifierSchema,
+    mode: z.enum(["interactive", "workflow"]),
+    /**
+     * For a call from an App's code: the App version whose code made it,
+     * set by the host. Required for an App, and it decides access: a
+     * version no admin approved changes nothing (core's `authorize`). The
+     * audit log traces each call to the code that made it (threat model
+     * SB9). An agent has none.
+     */
+    appVersion: z.int().positive().optional(),
+  })
+  .refine(
+    ({ subject, appVersion }) =>
+      (subject.type === "app") === (appVersion !== undefined),
+    {
+      path: ["appVersion"],
+      message: "An App's call names its version; an agent's none",
+    }
+  );
 export type Authority = z.infer<typeof authoritySchema>;
 
 /**

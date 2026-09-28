@@ -316,6 +316,27 @@ export const sweepPendingCopies = async (env: Env): Promise<void> => {
 };
 
 /**
+ * Whether version `number` of the blueprint's App `source` is one an admin
+ * approved (`madeCurrent`): a built-in's release, one approved (1), or
+ * one from before approvals (null) that is current in its App. A copy's
+ * first version is approved only then, so a blueprint of code no admin
+ * approved doesn't pass as approved in its copies.
+ */
+const approvedSource = async (
+  env: Env,
+  source: { id: AppId; owner: string; currentVersion: number | null },
+  number: number
+): Promise<boolean> => {
+  if (source.owner === builtinOwner) {
+    return true;
+  }
+  const { approved } = await findVersion(env, source.id, number);
+  return (
+    approved === 1 || (approved === null && source.currentVersion === number)
+  );
+};
+
+/**
  * Creates an App of `by`'s own from the blueprint of App `app` at
  * `version`: the code at that version as its first version (its AGENTS.md
  * a stub), and requests for what that App was given or asked for. All of
@@ -377,6 +398,10 @@ export const createFromBlueprint = async (
     authorId: by.userId,
     message: `Created from the blueprint of ${source.name}, version ${number}.`,
     createdAt: now,
+    // The blueprint's code, which its requests came with: approved
+    // (`madeCurrent`) only when that version was, unlike a version its
+    // builder commits; otherwise approved as any version is.
+    approved: (await approvedSource(env, source, number)) ? 1 : null,
   };
   const requests = await blueprintRequests(env, by, source.id, id);
   const db = drizzle(env.DB);
@@ -584,6 +609,7 @@ export const installBuiltinBlueprint = async (
           authorId: builtinOwner,
           message: "From the release",
           createdAt: now,
+          approved: 1,
         }),
         outboxed(
           db,

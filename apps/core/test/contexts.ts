@@ -29,7 +29,13 @@ export const actingFor = (
   subject: PermissionSubjectInput,
   userId: string
 ): Authority =>
-  authoritySchema.parse({ subject, onBehalfOf: userId, mode: "interactive" });
+  authoritySchema.parse({
+    subject,
+    onBehalfOf: userId,
+    mode: "interactive",
+    // An App code runs a version: its first, in these tests.
+    ...(subject.type === "app" ? { appVersion: 1 } : {}),
+  });
 
 type Bindings = Awaited<ReturnType<typeof bindingsFor>>;
 

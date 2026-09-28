@@ -98,28 +98,25 @@ describe("the audit log", () => {
     expect(recorded).not.toContain("Quarterly numbers");
   });
 
-  it("records the App version that made a call, when its capability names one", async () => {
+  it("records the App version that made a call, and takes no App's capability without one", async () => {
     const connectionId = await addConnection();
     const call = write(connectionId, "mail.list");
     await callAs({ ...appFor("user-anna"), appVersion: 3 }, call);
-    // As an earlier core signs it: without one.
-    await callAs(appFor("user-anna"), call);
+    // The version decides access (core's authorize): a capability for an
+    // App without one isn't even signed.
+    const { appVersion: _appVersion, ...unversioned } = appFor("user-anna");
+    await expect(callAs(unversioned, call)).rejects.toThrow(/appVersion/u);
     const audited = await audit.events();
     expect(
-      audited.map(({ action, actor, detail }) => ({ action, actor, detail }))
+      audited
+        .filter(({ action }) => action === "connection.call")
+        .map(({ actor, detail }) => ({ actor, detail }))
     ).toMatchObject([
       {
-        action: "connection.call",
         actor: { type: "app", appId: "app-crm" },
         detail: { action: "mail.list", appVersion: 3 },
       },
-      {
-        action: "connection.call",
-        actor: { type: "app", appId: "app-crm" },
-        detail: { action: "mail.list" },
-      },
     ]);
-    expect(audited[1]?.detail).not.toHaveProperty("appVersion");
   });
 
   it("records every resource a large read touched", async () => {

@@ -1,15 +1,17 @@
+import { appErrors } from "@grasp-os/shared/apps";
 import type { AppRole } from "@grasp-os/shared/apps";
 import type {
   AuditActor,
   AuditDetailValue,
   AuditEntry,
 } from "@grasp-os/shared/audit";
-import { actorOf } from "@grasp-os/shared/audit";
+import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
 import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
+  grantReviewSchema,
   permissionErrors,
   permissionObjectSchema,
   permissionRequestSchema,
@@ -23,6 +25,7 @@ import type {
   PermissionSubject,
 } from "@grasp-os/shared/permissions";
 import {
+  isAdmin,
   requireAdmin,
   requireBuilder,
   roleErrors,
@@ -34,12 +37,23 @@ import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
-import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
+import {
+  auditedBatch,
+  outboxed,
+  outboxedEventWhere,
+  outboxedIfChanged,
+  storedEvent,
+} from "./audit-outbox.ts";
 import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { connectionOwnersOf } from "./connections.ts";
-import { apps, permissions } from "./db/core/schema.ts";
+import {
+  apps,
+  appVersions,
+  auditOutbox,
+  permissions,
+} from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
 import { appHost } from "./durable-objects.ts";
@@ -667,13 +681,25 @@ const requireNotBuiltin = async (env: Env, row: Row): Promise<void> => {
  * Grants a requested permission, the admin's own request included. Only
  * from requested: an active or revoked one is refused, so a revoke is for
  * good. Audited with who asked for it.
+ *
+ * `reviewed` names the version of the App the admin reviewed: the one
+ * current as they decided (null for an agent's permission, or an App with
+ * none current). The grant lands only while it still is, and approves it
+ * (`madeCurrent`); otherwise it is refused with `app.conflict` and changes
+ * nothing, so a builder can't swap the code while the admin looks.
  */
 export const grantPermission = async (
   env: Env,
   by: Identity,
-  id: unknown
+  id: unknown,
+  reviewed: unknown
 ): Promise<Permission> => {
   requireMemberAdmin(by);
+  const { version } = permissionErrors.parse(
+    "permission.invalid",
+    grantReviewSchema,
+    reviewed
+  );
   const found = await findRow(env, parseId(id));
   if (!found) {
     throw permissionErrors.create("permission.not_found");
@@ -683,6 +709,22 @@ export const grantPermission = async (
   // the Apps collection, however old its request.
   await requireCollection(env, subjectOf(found), objectOf(found));
   const db = drizzle(env.DB);
+  const event = createAuditEvent(
+    changeEntry(by, "permission.granted", toPermission(found), {
+      requestedBy: found.requestedBy,
+    }),
+    "core"
+  );
+  const isApp = found.subjectType === "app";
+  if (!isApp && version !== null) {
+    throw permissionErrors.create("permission.invalid", {
+      issues: ["version: an agent has no versions to review"],
+    });
+  }
+  // The version reviewed is still the one current (an agent has none).
+  const stillReviewed = isApp
+    ? sql`(SELECT ${apps.currentVersion} FROM ${apps} WHERE ${apps.id} = ${found.subjectId}) IS ${version}`
+    : undefined;
   const [[granted]] = await auditedBatch(env, db, [
     db
       .update(permissions)
@@ -691,24 +733,225 @@ export const grantPermission = async (
         and(
           eq(permissions.id, found.id),
           eq(permissions.status, "requested"),
-          stillAdmin(by)
+          stillAdmin(by),
+          stillReviewed
         )
       )
       .returning(),
-    outboxedIfChanged(
-      db,
-      changeEntry(by, "permission.granted", toPermission(found), {
-        requestedBy: found.requestedBy,
-      })
-    ),
+    outboxedEventWhere(db, event, sql`changes() > 0`),
+    // An admin granting an App's permission approves the version they
+    // reviewed (`madeCurrent`), as they would by making it current.
+    db
+      .update(appVersions)
+      .set({ approved: 1 })
+      .where(
+        and(
+          eq(appVersions.appId, found.subjectId),
+          eq(appVersions.version, version ?? 0),
+          eq(appVersions.approved, 0),
+          isApp ? storedEvent(event.id) : sql`0`,
+          stillReviewed
+        )
+      ),
   ]);
   if (!granted) {
     await requireStillAdmin(env, by);
+    // Still requested: then the version reviewed is no longer current.
+    const now = await findRow(env, found.id);
+    if (now?.status === "requested") {
+      throw appErrors.create("app.conflict");
+    }
     throw permissionErrors.create("permission.not_requested");
   }
   const permission = toPermission(granted);
   await restartApp(env, permission.subject);
   return permission;
+};
+
+/** A stored JSON list of strings, joined by spaces, as SQL. */
+const joined = (list: SQL | typeof permissions.actions): SQL =>
+  sql`(SELECT group_concat(value, ' ') FROM json_each(${list}))`;
+
+/**
+ * The ID of the audit event one statement stores for the permission row,
+ * as SQL: a random UUID (`fresh`, one per statement) whose last part is
+ * the permission's own ID's, so each row's event has its own ID, and every
+ * statement's are new. A UUID still: the version and variant are `fresh`'s,
+ * and a permission's ID is a UUID too.
+ */
+const eventIdSql = (fresh: string): SQL =>
+  sql`${fresh.slice(0, 24)} || lower(substr(${permissions.id}, 25, 12))`;
+
+/**
+ * What `auditDetail` records of a permission row, as SQL: its IDs by name
+ * (connectionId, resource and mask; collectionId; appId and workflowId),
+ * its actions and its binding.
+ */
+const auditDetailSql = sql`json_patch(
+  json_object('subjectType', ${permissions.subjectType}, 'subjectId', ${permissions.subjectId}, 'objectType', ${permissions.objectType}),
+  CASE ${permissions.objectType}
+    WHEN 'connection' THEN json_patch(
+      json_object('connectionId', ${permissions.objectId}),
+      json_patch(
+        CASE WHEN ${permissions.resource} IS NULL THEN '{}' ELSE json_object('resource', ${permissions.resource}) END,
+        CASE WHEN ${permissions.mask} IS NULL THEN '{}' ELSE json_object('mask', ${joined(sql`${permissions.mask}`)}) END
+      )
+    )
+    WHEN 'collection' THEN json_object('collectionId', ${permissions.objectId})
+    ELSE json_object('appId', ${permissions.objectId}, 'workflowId', ${permissions.resource})
+  END
+)`;
+
+/**
+ * That `by` could grant a permission as the batch runs, as SQL: an admin
+ * of the organization, not Grasp staff, still an admin then.
+ */
+const canGrantSql = (by: Identity): SQL =>
+  isAdmin(by.role) && !by.staff ? stillAdmin(by) : sql`0`;
+
+/**
+ * That a permission lets an App change things for the person using it,
+ * as SQL on its row: any on a connection (core can't tell a connector's
+ * writes from its reads; connect knows), or with an action other than
+ * `read`, such as writing a collection or starting a workflow.
+ */
+const changesThingsSql = or(
+  eq(permissions.objectType, "connection"),
+  sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value <> 'read')`
+);
+
+/** `changesThingsSql` for one action of a permission on `object`. */
+const changesThings = (object: PermissionObject, action: string): boolean =>
+  object.type === "connection" || action !== "read";
+
+/**
+ * That `version` of `app` is one no admin approved (`madeCurrent`), as
+ * SQL. A version from before approvals (null) counts as approved.
+ */
+const unapprovedSql = (app: string, version: number): SQL =>
+  sql`EXISTS (SELECT 1 FROM ${appVersions} WHERE ${appVersions.appId} = ${app} AND ${appVersions.version} = ${version} AND ${appVersions.approved} = 0)`;
+
+/**
+ * Refuses with `permission.denied` code of `version` of `app` that no admin
+ * approved, while the App holds a permission that changes things, as
+ * `authorize` does: for a run on it calling its App's server methods
+ * (workflows/host.ts), which run the current version as the run's person
+ * and can't be told apart by what they change. An App with no such
+ * permission changes nothing for the person but its own data.
+ */
+export const requireApprovedVersion = async (
+  env: Env,
+  app: AppId,
+  version: number
+): Promise<void> => {
+  const changing = and(
+    ofSubject({ type: "app", appId: app }),
+    eq(permissions.status, "active"),
+    changesThingsSql
+  );
+  const row = await drizzle(env.DB).get<{ unapproved: number }>(
+    sql`SELECT (${unapprovedSql(app, version)} AND EXISTS (SELECT 1 FROM ${permissions} WHERE ${changing})) AS unapproved`
+  );
+  if (row.unapproved !== 0) {
+    throw permissionErrors.create("permission.denied", { action: "call" });
+  }
+};
+
+/** A version of an App becoming current (`madeCurrent`). */
+export interface MadeCurrent {
+  app: AppId;
+  version: number;
+  /** The version it replaces. */
+  previous: number | null;
+  /** That the batch did make it current, as SQL (apps.ts). */
+  changed: SQL;
+  /**
+   * Whether the App's permissions stay as they are, whoever makes it
+   * current: only for an App's first version copied from a blueprint,
+   * made current for the first time, which was approved as it was created.
+   */
+  keep: boolean;
+}
+
+/**
+ * The statements, for the batch that makes a version the current version
+ * of an App (apps.ts), for its approval and the App's permissions, each
+ * only if the batch did make it current (`changed`). An admin grants a
+ * permission trusting the code that will use it, and an App's code runs
+ * as whoever uses it, so a builder's next version could otherwise write
+ * the Playbook, say, as the next admin who opens it.
+ *
+ * The version is approved (`app_versions.approved`, which `authorize`
+ * reads) if `by` could grant the permissions themselves (`canGrantSql`),
+ * and unapproved otherwise. And unless `by` could, or the permissions are
+ * kept (`keep`), each of the App's permissions active when the batch runs
+ * that lets it change things for the person using it (`changesThingsSql`)
+ * is asked for again: first an audit event for each
+ * (`permission.requested`, by `by`, with the version, the one it replaced
+ * and who had granted it), then the update, back to requested, asked for
+ * by `by`, keeping who granted it and when. Both select their rows with the same condition when the batch
+ * runs, nothing read before it, so a grant made just before is asked for
+ * again too. Reading only is kept: the code reads what the person may.
+ * Core's database has no full-text index, so nothing in the batch moves
+ * `changes()` under them.
+ */
+export const madeCurrent = (
+  env: Env,
+  by: Identity,
+  { app, version, previous, changed, keep }: MadeCurrent
+): BatchItem<"sqlite">[] => {
+  const db = drizzle(env.DB);
+  const approval = db
+    .update(appVersions)
+    .set({
+      approved: keep ? 1 : sql`CASE WHEN ${canGrantSql(by)} THEN 1 ELSE 0 END`,
+    })
+    .where(
+      and(eq(appVersions.appId, app), eq(appVersions.version, version), changed)
+    );
+  if (keep) {
+    return [approval];
+  }
+  const requestedAgain = and(
+    ofSubject({ type: "app", appId: app }),
+    eq(permissions.status, "active"),
+    changesThingsSql,
+    changed,
+    sql`NOT ${canGrantSql(by)}`
+  );
+  const now = new Date();
+  const eventId = eventIdSql(crypto.randomUUID());
+  const event = sql`json_object(
+    'id', ${eventId},
+    'at', ${now.toISOString()},
+    'source', 'core',
+    'actor', json(${JSON.stringify(actorOf(by))}),
+    'action', 'permission.requested',
+    'target', json_object('type', 'permission', 'id', ${permissions.id}),
+    'provenance', json('[]'),
+    'detail', json_set(
+      ${auditDetailSql},
+      '$.actions', ${joined(permissions.actions)},
+      '$.binding', ${permissions.binding},
+      '$.version', ${version},
+      '$.previous', ${previous},
+      '$.grantedBy', ${permissions.grantedBy}
+    )
+  )`;
+  return [
+    approval,
+    db
+      .insert(auditOutbox)
+      .select(
+        sql`SELECT ${eventId}, ${event}, ${now.getTime()} FROM ${permissions} WHERE ${requestedAgain}`
+      ),
+    db
+      .update(permissions)
+      // Who granted it, and when, stay: a request with them is one asked
+      // for again (`Permission.grantedBy`). Only the status allows.
+      .set({ status: "requested", requestedBy: by.userId, requestedAt: now })
+      .where(requestedAgain),
+  ];
 };
 
 /**
@@ -849,7 +1092,10 @@ export const grantedPermissions = async (
  * covers the object and allows the action. Only that permission counts, so
  * revoking it stops its stubs even when another permission covers the same
  * thing. A permission for a whole connection covers each resource in it;
- * one for a resource covers only that resource. Throws `permission.denied`
+ * one for a resource covers only that resource. For an App's code, an
+ * action that changes things (on a connection, or other than `read`) also
+ * needs the version it runs to be one an admin approved (`madeCurrent`).
+ * Throws `permission.denied`
  * or `permission.person_inactive` otherwise. Returns the fields that
  * permission masks in a connection's results (none for other objects).
  *
@@ -866,6 +1112,19 @@ export const authorize = async (
 ): Promise<{ mask: string[] }> => {
   await requireActivePerson(env, authority);
   const { objectType, objectId, resource } = objectColumns(object);
+  const { subject, appVersion } = authority;
+  // An App's code changes things only from a version an admin approved
+  // (`madeCurrent`): a run keeps the version it started on, which may be
+  // one made current since without, its permissions granted again for
+  // another. Without a version, which the host always sets for an App,
+  // nothing is approved: it fails closed.
+  let unapproved: SQL | undefined;
+  if (subject.type === "app" && changesThings(object, action)) {
+    unapproved =
+      appVersion === undefined
+        ? sql`0`
+        : sql`NOT ${unapprovedSql(subject.appId, appVersion)}`;
+  }
   const rows = await drizzle(env.DB)
     .select({
       id: permissions.id,
@@ -882,7 +1141,11 @@ export const authorize = async (
         eq(permissions.objectId, objectId),
         resource === null
           ? isNull(permissions.resource)
-          : or(isNull(permissions.resource), eq(permissions.resource, resource))
+          : or(
+              isNull(permissions.resource),
+              eq(permissions.resource, resource)
+            ),
+        unapproved
       )
     );
   const allowing = rows.find((row) =>

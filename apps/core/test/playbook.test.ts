@@ -37,7 +37,8 @@ import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 // or breaks out of its frontmatter; a record lands outside the Playbook,
 // where code from before record types would read it; a workflow loses its
 // history or its link on the way from drawn to designed to built, or a
-// save from an old version carries an old link; someone other than an
+// save from an old version carries an old link, or a save or restore of
+// raw text sets or changes a link, past linkWorkflow's checks; someone other than an
 // admin changes the Playbook; a link names a workflow that isn't there, or
 // a snapshot a version that isn't; a link or save runs while the feature
 // is off; and a purge can't remove a person's name from their record, or
@@ -700,6 +701,123 @@ describe("Playbook records", () => {
           "frontmatter.app: Only a designed workflow links to an App workflow",
         ],
       });
+    }
+  );
+
+  it(
+    "keep a workflow's link as linkWorkflow set it, whatever text a save or restore brings",
+    setUpTime,
+    async () => {
+      const admin = await personOf("admin");
+      const appId = await appWithWorkflow(admin);
+      const path = `${unique()}/pay.designed.md`;
+      const designed = { ...records.workflow.record, state: "designed" };
+      const saved = await save(admin, {
+        path,
+        record: designed,
+        body: records.workflow.body,
+      });
+      const raw = async (
+        record: Record<string, unknown>,
+        ifVersion: number,
+        at = path
+      ) =>
+        await outcome(
+          admin.api.knowledge.saveDocument({
+            collectionId: playbookCollectionId,
+            path: at,
+            text: textOf({ record, body: records.workflow.body }),
+            ifVersion,
+          })
+        );
+      const restore = async (version: number, ifVersion: number) =>
+        await outcome(
+          admin.api.knowledge.restoreVersion({
+            documentId: saved.id,
+            version,
+            ifVersion,
+          })
+        );
+      const linkedTo = (workflowId: string) => ({
+        ...designed,
+        app: { appId, workflowId },
+      });
+      // Linked by hand, to a workflow the App doesn't run, or at all.
+      const unlinked = {
+        created: await raw(linkedTo("refund"), 0, `${unique()}/new.md`),
+        saved: await raw(linkedTo("pay"), 1),
+      };
+      await link(admin, {
+        documentId: saved.id,
+        ifVersion: 1,
+        appId,
+        workflowId: "pay",
+      });
+      const linked = {
+        // Kept as it is: saved.
+        kept: await raw({ ...linkedTo("pay"), title: "Pay invoices" }, 2),
+        relinked: await raw(linkedTo("refund"), 3),
+        dropped: await raw(designed, 3),
+        // Saved as another type, which has no link.
+        retyped: await raw(records.team.record, 3),
+        // Restored from before the link, or with the same link.
+        restoredUnlinked: await restore(1, 3),
+        restoredLinked: await restore(2, 3),
+      };
+      const latest = await admin.api.knowledge.getDocument(saved.id);
+      const { frontmatter } = parseFrontmatter(path, latest.version.text);
+      expect({
+        unlinked,
+        linked,
+        latest: {
+          title: frontmatter.title,
+          app: "app" in frontmatter ? frontmatter.app : undefined,
+        },
+      }).toStrictEqual({
+        unlinked: {
+          created: "knowledge.invalid",
+          saved: "knowledge.invalid",
+        },
+        linked: {
+          kept: "ok",
+          relinked: "knowledge.invalid",
+          dropped: "knowledge.invalid",
+          retyped: "knowledge.invalid",
+          restoredUnlinked: "knowledge.invalid",
+          restoredLinked: "ok",
+        },
+        // Restored: version 2's title, from before version 3's.
+        latest: {
+          title: records.workflow.record.title,
+          app: { appId, workflowId: "pay" },
+        },
+      });
+      await expect(
+        refusal(
+          admin.api.knowledge.saveDocument({
+            collectionId: playbookCollectionId,
+            path,
+            text: textOf({ record: linkedTo("refund"), body: "" }),
+            ifVersion: 4,
+          })
+        )
+      ).resolves.toMatchObject({
+        code: "knowledge.invalid",
+        issues: [
+          "frontmatter.app: only linkWorkflow changes it; a save keeps the version before's",
+        ],
+      });
+      // A purge removes a term from the link too: personal data comes first.
+      const input = {
+        type: "content" as const,
+        documentIds: [saved.id],
+        terms: [appId],
+        reason: "erasure_request" as const,
+      };
+      const { token } = await admin.api.knowledge.preparePurge(input);
+      await admin.api.knowledge.purge(input, token);
+      const purged = await admin.api.knowledge.getDocument(saved.id);
+      expect(purged.version.text).not.toContain(appId);
     }
   );
 
