@@ -1,18 +1,12 @@
 /**
- * The release manifest: the contract between CI, which builds core and
- * connect once per commit, and the console, which deploys those exact bytes
- * into each client's account through the Workers API.
+ * Generates the release manifest (@grasp-os/shared/release, the contract
+ * with the console) from each Worker's wrangler.jsonc and build, and writes
+ * and verifies a release directory.
  *
- * It's generated from each Worker's wrangler.jsonc. Names (Workers, D1
- * databases, R2 buckets, the workflow) are the same in every client account;
- * what differs per account is a placeholder the console fills in for the
- * Worker it deploys:
- *
- *   $D1_<BINDING>_ID   the id of the D1 database that binding names
- *
- * The placeholder list is closed: the console refuses a `$` token it doesn't
- * know, so this file and the console change together, behind
- * MANIFEST_VERSION.
+ * Names (Workers, D1 databases, R2 buckets, the workflow) are the same in
+ * every client account; what differs per account is a placeholder the
+ * console fills in for the Worker it deploys (see the manifest's header
+ * comment).
  */
 import {
   existsSync,
@@ -22,29 +16,30 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 
+import {
+  assetKey,
+  bindingNameSchema as bindingName,
+  MANIFEST_VERSION,
+  migrationKey,
+  moduleKey,
+  observabilitySchema,
+  releaseManifestSchema,
+  verifyReleaseBlobs,
+} from "@grasp-os/shared/release";
+import type { ReleaseManifest, WorkerEntry } from "@grasp-os/shared/release";
 import { z } from "zod";
 
-import { cfAssetHash, sha256Hex, stableStringify } from "./hash-lib.ts";
+import { stableStringify } from "./hash-lib.ts";
 import type {
   CollectedAssets,
   CollectedFile,
   CollectedModule,
 } from "./hash-lib.ts";
 
-/** The manifest shape the console must understand (see the header comment). */
-export const MANIFEST_VERSION = 1;
-
-const bindingName = z.string().regex(/^[A-Z][A-Z0-9_]*$/u);
 const named = z.strictObject({ binding: bindingName });
-
-const observabilitySchema = z.strictObject({
-  enabled: z.boolean().optional(),
-  redact_query_string: z.boolean().optional(),
-  logs: z.strictObject({ invocation_logs: z.boolean().optional() }).optional(),
-  traces: z.strictObject({ enabled: z.boolean().optional() }).optional(),
-});
 
 // Every wrangler.jsonc key a released Worker may use, and the shape of each.
 // Strict at every level: a key this generator doesn't handle fails the build,
@@ -149,100 +144,6 @@ export const parseWranglerConfig = (
   return result.data;
 };
 
-const sha256 = z.string().regex(/^[0-9a-f]{64}$/u);
-const assetHash = z.string().regex(/^[0-9a-f]{32}$/u);
-const size = z.int().nonnegative();
-
-const fileRef = z.strictObject({
-  name: z.string(),
-  sha256,
-  size,
-  r2Key: z.string(),
-});
-
-// `r<run>-<sha7>` from CI, `dev-<time>` locally. It becomes an R2 prefix, so
-// nothing else is allowed in it.
-const RELEASE_ID = /^(?:r\d{6,}-[0-9a-f]{7}|dev-[0-9a-z]+)$/u;
-
-const workerEntrySchema = z.strictObject({
-  /** The Worker's name in every client account. */
-  name: z.string(),
-  /** The entry module, one of `modules`. */
-  mainModule: z.string(),
-  modules: z.array(
-    fileRef.extend({ type: z.enum(["esm", "text", "wasm", "data"]) })
-  ),
-  compatibilityFlags: z.array(z.string()),
-  /** Script-upload API bindings, account-specific values as placeholders. */
-  bindings: z.array(z.looseObject({ type: z.string(), name: bindingName })),
-  /** Each D1 database: created by name, migrated in order before deploying. */
-  d1Databases: z.array(
-    z.strictObject({
-      binding: bindingName,
-      databaseName: z.string(),
-      migrations: z.array(fileRef),
-    })
-  ),
-  /** The whole ordered Durable Object migration history. */
-  durableObjectMigrations: z.array(z.looseObject({ tag: z.string() })),
-  crons: z.array(z.string()),
-  /** Secrets that must be set before this Worker can be deployed. */
-  requiredSecrets: z.array(bindingName),
-  /** Keep the vars the console set on the previous version. */
-  keepVars: z.boolean(),
-  workersDev: z.boolean(),
-  previewUrls: z.boolean(),
-  observability: observabilitySchema,
-  /** Static assets: the API's `assets.config` and upload manifest. */
-  assets: z
-    .strictObject({
-      config: z.strictObject({
-        not_found_handling: z.string().optional(),
-        run_worker_first: z
-          .union([z.boolean(), z.array(z.string())])
-          .optional(),
-      }),
-      manifest: z.record(z.string(), z.strictObject({ hash: assetHash, size })),
-    })
-    .optional(),
-});
-
-/** Everything the manifest says about one Worker. */
-export type WorkerEntry = z.infer<typeof workerEntrySchema>;
-
-/** The release manifest (see the header comment). */
-export const releaseManifestSchema = z.strictObject({
-  manifestVersion: z.literal(MANIFEST_VERSION),
-  releaseId: z.string().regex(RELEASE_ID),
-  /** The full commit SHA it was built from. */
-  commit: z.string().regex(/^[0-9a-f]{40}$/u),
-  createdAt: z.iso.datetime(),
-  /** The squash commit's subject: the merged pull request's title. */
-  notes: z.string(),
-  wranglerVersion: z.string(),
-  /** One compatibility date for the whole platform. */
-  compatibilityDate: z.iso.date(),
-  /** Installed versions of the Workers' and frontend's dependencies. */
-  packages: z.record(z.string(), z.string()),
-  /** By app: `core`, `connect`. */
-  workers: z.record(z.string(), workerEntrySchema),
-  /** Every asset blob, by content key. */
-  assets: z.record(assetHash, z.strictObject({ size, r2Key: z.string() })),
-});
-
-export type ReleaseManifest = z.infer<typeof releaseManifestSchema>;
-
-/** Where a Worker module is stored, in the release directory and in R2. */
-export const moduleKey = (hash: string): string => `blobs/modules/${hash}`;
-/** Where a D1 migration is stored. */
-export const migrationKey = (hash: string): string =>
-  `blobs/migrations/${hash}`;
-/** Where a static asset is stored. */
-export const assetKey = (hash: string): string => `blobs/assets/${hash}`;
-/** Where a release's manifest is stored; written last. */
-export const manifestKey = (releaseId: string): string =>
-  `releases/${releaseId}/manifest.json`;
-
 /** One Worker's build output, as {@link generateManifest} takes it. */
 export interface WorkerBuild {
   /** The app, e.g. `core`. */
@@ -319,7 +220,7 @@ const bindingsOf = (
 const fileRefs = (
   files: CollectedFile[],
   key: (hash: string) => string
-): z.infer<typeof fileRef>[] =>
+): WorkerEntry["d1Databases"][number]["migrations"] =>
   files.map((file) => ({
     name: file.name,
     sha256: file.sha256,
@@ -485,19 +386,6 @@ export const writeRelease = (
   writeFileSync(path.join(outDir, "manifest.json"), stableStringify(manifest));
 };
 
-const readBlob = (outDir: string, key: string, expectedKey: string): Buffer => {
-  // Only the content-addressed form, which is plain hex under blobs/: an
-  // r2Key can never name a path outside the release directory.
-  if (key !== expectedKey) {
-    throw new Error(`${key} isn't stored at its content address`);
-  }
-  try {
-    return readFileSync(path.join(outDir, key));
-  } catch (error) {
-    throw new Error(`${key} is missing from the release`, { cause: error });
-  }
-};
-
 /** A release directory checked against its manifest (see {@link verifyRelease}). */
 export interface VerifiedRelease {
   manifest: ReleaseManifest;
@@ -508,71 +396,28 @@ export interface VerifiedRelease {
 }
 
 /**
- * Checks a release directory against its manifest: every module, migration
- * and asset is present at its content address, and its bytes hash to it;
- * every entry in the asset index is one a Worker serves. Each file is read
- * once, and those bytes are returned, so what's published is what was
- * checked.
+ * Checks a release directory against its manifest, as the console checks
+ * a release in R2 (`verifyReleaseBlobs`). Each file is read once, and
+ * those bytes are returned, so what's published is what was checked.
  */
-export const verifyRelease = (outDir: string): VerifiedRelease => {
+export const verifyRelease = async (
+  outDir: string
+): Promise<VerifiedRelease> => {
   const manifestBytes = readFileSync(path.join(outDir, "manifest.json"));
   const manifest = releaseManifestSchema.parse(
     JSON.parse(manifestBytes.toString("utf-8"))
   );
   const blobs = new Map<string, Buffer>();
-
-  for (const [hash, blob] of Object.entries(manifest.assets)) {
-    const bytes = readBlob(outDir, blob.r2Key, assetKey(hash));
-    if (bytes.length !== blob.size) {
-      throw new Error(`${blob.r2Key} doesn't match its hash`);
+  // Keys are content addresses under blobs/ by the time they're read:
+  // `verifyReleaseBlobs` refuses any other, so none names a path outside
+  // the release directory.
+  await verifyReleaseBlobs(manifest, async (key) => {
+    const file = path.join(outDir, key);
+    const bytes = existsSync(file) ? await readFile(file) : undefined;
+    if (bytes !== undefined) {
+      blobs.set(key, bytes);
     }
-    blobs.set(blob.r2Key, bytes);
-  }
-
-  const served = new Set<string>();
-  for (const worker of Object.values(manifest.workers)) {
-    const files = [
-      ...worker.modules.map((file) => ({ file, key: moduleKey })),
-      ...worker.d1Databases.flatMap((database) =>
-        database.migrations.map((file) => ({ file, key: migrationKey }))
-      ),
-    ];
-    for (const { file, key } of files) {
-      if (file.r2Key !== key(file.sha256)) {
-        throw new Error(`${file.r2Key} isn't stored at its content address`);
-      }
-      // Two Workers may list the same blob; it is read once.
-      const bytes =
-        blobs.get(file.r2Key) ?? readBlob(outDir, file.r2Key, file.r2Key);
-      if (sha256Hex(bytes) !== file.sha256 || bytes.length !== file.size) {
-        throw new Error(`${file.r2Key} (${file.name}) doesn't match its hash`);
-      }
-      blobs.set(file.r2Key, bytes);
-    }
-    for (const [assetPath, entry] of Object.entries(
-      worker.assets?.manifest ?? {}
-    )) {
-      const bytes = blobs.get(assetKey(entry.hash));
-      if (bytes === undefined) {
-        throw new Error(`${assetPath} isn't in the release's asset index`);
-      }
-      if (
-        cfAssetHash(bytes, assetPath) !== entry.hash ||
-        bytes.length !== entry.size
-      ) {
-        throw new Error(`${assetPath} doesn't match its hash`);
-      }
-      served.add(entry.hash);
-    }
-  }
-
-  const unserved = Object.keys(manifest.assets).filter(
-    (hash) => !served.has(hash)
-  );
-  if (unserved.length > 0) {
-    throw new Error(
-      `The asset index lists blobs no Worker serves: ${unserved.join(", ")}`
-    );
-  }
+    return bytes;
+  });
   return { manifest, manifestBytes, blobs };
 };

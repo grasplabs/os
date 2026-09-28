@@ -225,6 +225,60 @@ describe("static assets", () => {
     );
   });
 
+  it("names each file by the key the release manifest gives it (Wrangler's shape and extension rule, with SHA-256), dot-files included", async () => {
+    const account = cloudflare.addAccount();
+    await uploadScript(
+      api,
+      account.id,
+      "grasp-os-core",
+      release("r000001-aaaaaaa", [
+        file("/index.html", "<html></html>"),
+        file("/.hidden", "x"),
+        file("/.well-known/security.txt", "x"),
+        file("/a.tar.gz", "x"),
+      ])
+    );
+
+    const session = cloudflare.calls.find(({ path }) =>
+      path.endsWith("/assets-upload-session")
+    );
+    // Wrangler's key with SHA-256 in place of BLAKE3: base64 of the
+    // contents, then the extension as Node's path.extname finds it (none
+    // for a dot-file, the last for a.tar.gz). Worked out with Node.
+    expect(session?.body).toStrictEqual({
+      manifest: {
+        "/index.html": { hash: "d4c01ae8630098078a961cef6cb9e3b3", size: 13 },
+        "/.hidden": { hash: "5e21d86b709b6aa2d5fff6d7cfed56ab", size: 1 },
+        "/.well-known/security.txt": {
+          hash: "18bc01c2f3ff74fee5bf89429d922436",
+          size: 1,
+        },
+        "/a.tar.gz": { hash: "c1a6faede032be6f91315fcad5b29e55", size: 1 },
+      },
+    });
+    expect(account.assets.size).toBe(4);
+    // Each file goes up as the base64 of its contents.
+    const parts: [string, FormDataEntryValue][] = cloudflare.calls
+      .filter(({ path }) => path.endsWith("/workers/assets/upload"))
+      .flatMap(({ body }) =>
+        body instanceof FormData ? [...body.entries()] : []
+      );
+    const uploaded = Object.fromEntries(
+      await Promise.all(
+        parts.map(async ([hash, part]): Promise<[string, string]> => [
+          hash,
+          part instanceof Blob ? await part.text() : part,
+        ])
+      )
+    );
+    expect(uploaded).toStrictEqual({
+      d4c01ae8630098078a961cef6cb9e3b3: btoa("<html></html>"),
+      "5e21d86b709b6aa2d5fff6d7cfed56ab": btoa("x"),
+      "18bc01c2f3ff74fee5bf89429d922436": btoa("x"),
+      c1a6faede032be6f91315fcad5b29e55: btoa("x"),
+    });
+  });
+
   it("names files the account already holds by the session's token", async () => {
     const account = cloudflare.addAccount();
     const files = [file("/index.html", "<!doctype html>")];

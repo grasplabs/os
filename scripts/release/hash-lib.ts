@@ -1,19 +1,23 @@
 /**
- * Hashing and collection helpers for release bundles.
- *
- * Two hash schemes, on purpose:
- * - Worker modules and D1 migrations are addressed by their full SHA-256
- *   (hex): our own scheme, for deduplication in R2 and for checking that
- *   what the console deploys is what CI built.
- * - Static assets use the content key of Cloudflare's assets-upload API:
- *   SHA-256 of base64(contents) plus the file's extension, hex, cut to 32
- *   characters. The API treats it as an opaque key per file (Wrangler
- *   computes the same shape with BLAKE3), so CI and the console only have to
- *   agree with each other, byte for byte.
+ * Collection helpers for release bundles: read a build's modules, D1
+ * migrations and static assets, each addressed by its contents. The hash
+ * schemes are the manifest's (@grasp-os/shared/release), and the console
+ * verifies a release with the same code.
  */
-import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
+
+import {
+  assetContentKey,
+  mapConcurrently,
+  sha256OfBytes,
+} from "@grasp-os/shared/release";
+
+/**
+ * Files read and hashed at once: each holds its bytes, and an asset its
+ * base64 too, until it's hashed.
+ */
+const COLLECT_CONCURRENCY = 8;
 
 /** A file read into a release: its name, content address and bytes. */
 export interface CollectedFile {
@@ -34,7 +38,7 @@ export interface CollectedModule extends CollectedFile {
 
 /** One static asset in the assets-upload API's manifest. */
 export interface AssetEntry {
-  /** The asset content key (see {@link cfAssetHash}). */
+  /** The asset content key (`assetContentKey`). */
   hash: string;
   size: number;
 }
@@ -46,19 +50,6 @@ export interface CollectedAssets {
   /** Contents by content key. */
   blobs: Map<string, Buffer>;
 }
-
-export const sha256Hex = (bytes: Uint8Array): string =>
-  createHash("sha256").update(bytes).digest("hex");
-
-/** The static-asset content key (see the header comment). */
-export const cfAssetHash = (bytes: Uint8Array, filePath: string): string =>
-  createHash("sha256")
-    .update(
-      `${Buffer.from(bytes).toString("base64")}${path.extname(filePath).slice(1)}`,
-      "utf-8"
-    )
-    .digest("hex")
-    .slice(0, 32);
 
 // Module types by extension, as core's `rules` bundle them: the Durable
 // Object migrations (.sql) and the Grasp skills (SKILL.md) are text.
@@ -96,9 +87,17 @@ const walkFiles = (dir: string): string[] =>
     )
     .toSorted();
 
-const readCollected = (dir: string, name: string): CollectedFile => {
+const readCollected = async (
+  dir: string,
+  name: string
+): Promise<CollectedFile> => {
   const bytes = readFileSync(path.join(dir, name));
-  return { name, sha256: sha256Hex(bytes), size: bytes.length, bytes };
+  return {
+    name,
+    sha256: await sha256OfBytes(bytes),
+    size: bytes.length,
+    bytes,
+  };
 };
 
 /**
@@ -106,20 +105,25 @@ const readCollected = (dir: string, name: string): CollectedFile => {
  * extension it doesn't know: a bundle shape this pipeline hasn't seen needs
  * a decision, not a guess.
  */
-export const collectModules = (
+export const collectModules = async (
   outDir: string
-): { mainModule: string; modules: CollectedModule[] } => {
-  const modules = walkFiles(outDir)
-    .filter((name) => !isDryRunExtra(name))
-    .map((name): CollectedModule => {
+): Promise<{ mainModule: string; modules: CollectedModule[] }> => {
+  const modules = await mapConcurrently(
+    walkFiles(outDir).filter((name) => !isDryRunExtra(name)),
+    COLLECT_CONCURRENCY,
+    async (name): Promise<CollectedModule> => {
       const extension = path.extname(name);
       if (!isModuleExtension(extension)) {
         throw new Error(
           `Unrecognised module in the dry-run output: ${name} (${outDir})`
         );
       }
-      return { ...readCollected(outDir, name), type: MODULE_TYPES[extension] };
-    });
+      return {
+        ...(await readCollected(outDir, name)),
+        type: MODULE_TYPES[extension],
+      };
+    }
+  );
   const esm = modules.filter((module) => module.type === "esm");
   const [main] = esm;
   if (main === undefined || esm.length > 1) {
@@ -131,10 +135,14 @@ export const collectModules = (
 };
 
 /** A D1 migrations directory's SQL files, in the order Wrangler applies them. */
-export const collectSqlFiles = (dir: string): CollectedFile[] =>
-  walkFiles(dir)
-    .filter((name) => !name.includes("/") && name.endsWith(".sql"))
-    .map((name) => readCollected(dir, name));
+export const collectSqlFiles = async (dir: string): Promise<CollectedFile[]> =>
+  await mapConcurrently(
+    walkFiles(dir).filter(
+      (name) => !name.includes("/") && name.endsWith(".sql")
+    ),
+    COLLECT_CONCURRENCY,
+    async (name) => await readCollected(dir, name)
+  );
 
 // Files Wrangler reads as configuration rather than serving: the release
 // would ship them as plain assets, so they need a decision first.
@@ -146,17 +154,27 @@ const ASSET_CONFIG_FILES = new Set([
 ]);
 
 /** Reads a built static-asset directory. */
-export const collectAssets = (distDir: string): CollectedAssets => {
+export const collectAssets = async (
+  distDir: string
+): Promise<CollectedAssets> => {
+  const names = walkFiles(distDir);
+  const configFile = names.find((name) => ASSET_CONFIG_FILES.has(name));
+  if (configFile !== undefined) {
+    throw new Error(
+      `${distDir}/${configFile} configures assets, which releases don't carry yet`
+    );
+  }
+  const files = await mapConcurrently(
+    names,
+    COLLECT_CONCURRENCY,
+    async (name) => {
+      const bytes = readFileSync(path.join(distDir, name));
+      return { name, bytes, hash: await assetContentKey(bytes, name) };
+    }
+  );
   const manifest: Record<string, AssetEntry> = {};
   const blobs = new Map<string, Buffer>();
-  for (const name of walkFiles(distDir)) {
-    if (ASSET_CONFIG_FILES.has(name)) {
-      throw new Error(
-        `${distDir}/${name} configures assets, which releases don't carry yet`
-      );
-    }
-    const bytes = readFileSync(path.join(distDir, name));
-    const hash = cfAssetHash(bytes, name);
+  for (const { name, bytes, hash } of files) {
     manifest[`/${name}`] = { hash, size: bytes.length };
     blobs.set(hash, bytes);
   }

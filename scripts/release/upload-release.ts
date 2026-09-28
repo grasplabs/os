@@ -27,9 +27,10 @@ import { createHash } from "node:crypto";
 import path from "node:path";
 import { parseArgs } from "node:util";
 
+import { manifestKey } from "@grasp-os/shared/release";
 import { AwsClient } from "aws4fetch";
 
-import { manifestKey, verifyRelease } from "./manifest-lib.ts";
+import { verifyRelease } from "./manifest-lib.ts";
 
 const UPLOAD_CONCURRENCY = 8;
 const HTTP_NOT_FOUND = 404;
@@ -46,7 +47,7 @@ if (args.release === undefined) {
 }
 const releaseDir = path.resolve(args.release);
 
-const { manifest, manifestBytes, blobs } = verifyRelease(releaseDir);
+const { manifest, manifestBytes, blobs } = await verifyRelease(releaseDir);
 const published = manifestKey(manifest.releaseId);
 
 /** SHA-256, base64: the form of R2's `x-amz-checksum-sha256`. */

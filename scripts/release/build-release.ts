@@ -23,6 +23,7 @@ import { z } from "zod";
 
 import { parseJsonc } from "../wrangler-config-rules.ts";
 import { collectAssets, collectModules, collectSqlFiles } from "./hash-lib.ts";
+import type { CollectedFile } from "./hash-lib.ts";
 import {
   assertReleaseDir,
   generateManifest,
@@ -100,7 +101,10 @@ const packageVersions = (apps: readonly string[]): Record<string, string> => {
   return versions;
 };
 
-const buildWorker = (app: string, bundleDir: string): WorkerBuild => {
+const buildWorker = async (
+  app: string,
+  bundleDir: string
+): Promise<WorkerBuild> => {
   const dir = path.join(ROOT, "apps", app);
   const configFile = path.join(dir, "wrangler.jsonc");
   const config = parseWranglerConfig(
@@ -114,15 +118,21 @@ const buildWorker = (app: string, bundleDir: string): WorkerBuild => {
   return {
     key: app,
     config,
-    ...collectModules(outDir),
+    ...(await collectModules(outDir)),
     d1Migrations: Object.fromEntries(
-      config.d1_databases.map((database) => [
-        database.binding,
-        collectSqlFiles(path.join(dir, database.migrations_dir)),
-      ])
+      await Promise.all(
+        config.d1_databases.map(
+          async (database): Promise<[string, CollectedFile[]]> => [
+            database.binding,
+            await collectSqlFiles(path.join(dir, database.migrations_dir)),
+          ]
+        )
+      )
     ),
     ...(config.assets
-      ? { assets: collectAssets(path.join(dir, config.assets.directory)) }
+      ? {
+          assets: await collectAssets(path.join(dir, config.assets.directory)),
+        }
       : {}),
   };
 };
@@ -143,15 +153,21 @@ assertReleaseDir(out);
 runVisibly("vp", ["run", "--filter", `@grasp-os/${FRONTEND}`, "build"]);
 
 // Collecting reads every bundle into memory, so the dry-run output can go.
-const buildWorkers = (): WorkerBuild[] => {
+const buildWorkers = async (): Promise<WorkerBuild[]> => {
   const bundleDir = mkdtempSync(path.join(tmpdir(), "grasp-os-release-"));
   try {
-    return RELEASED_APPS.map((app) => buildWorker(app, bundleDir));
+    const built: WorkerBuild[] = [];
+    // One at a time: each build prints as it goes.
+    for (const app of RELEASED_APPS) {
+      // oxlint-disable-next-line no-await-in-loop -- builds run in turn
+      built.push(await buildWorker(app, bundleDir));
+    }
+    return built;
   } finally {
     rmSync(bundleDir, { force: true, recursive: true });
   }
 };
-const workers = buildWorkers();
+const workers = await buildWorkers();
 
 const manifest = generateManifest(
   {
@@ -165,7 +181,7 @@ const manifest = generateManifest(
   workers
 );
 writeRelease(out, manifest, workers);
-verifyRelease(out);
+await verifyRelease(out);
 
 const moduleCount = workers.reduce((n, w) => n + w.modules.length, 0);
 console.info(

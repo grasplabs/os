@@ -70,7 +70,8 @@ export const act = async (
 
 /**
  * Runs `statement`, a conditional change (an update or delete with a
- * `WHERE` that may match nothing), and records `event` by `actor` only if
+ * `WHERE` that may match nothing, or an insert that ignores a conflict,
+ * as the release import's), and records `event` by `actor` only if
  * it changed a row, in the same batch. Returns whether it did, read from
  * the batch's own results: nothing runs after the batch commits.
  *

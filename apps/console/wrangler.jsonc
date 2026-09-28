@@ -33,4 +33,16 @@
       "migrations_dir": "src/db/migrations",
     },
   ],
+  // The releases CI publishes (scripts/release/upload-release.ts), in the
+  // EU. The console only reads them: src/releases/import.ts takes the
+  // binding as a store with nothing but `get` and `list`.
+  "r2_buckets": [
+    {
+      "binding": "RELEASES",
+      "bucket_name": "grasp-os-releases",
+      "jurisdiction": "eu",
+    },
+  ],
+  // Imports newly published releases (src/releases/import.ts).
+  "triggers": { "crons": ["*/5 * * * *"] },
 }

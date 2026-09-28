@@ -20,10 +20,11 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { buffer, text } from "node:stream/consumers";
 
+import { moduleKey } from "@grasp-os/shared/release";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { builds, info } from "./fixture-release.ts";
-import { generateManifest, moduleKey, writeRelease } from "./manifest-lib.ts";
+import { generateManifest, writeRelease } from "./manifest-lib.ts";
 
 /** Runs a script in Node, resolving with its stdout; failing with its stderr. */
 const run = async (args: string[], env: NodeJS.ProcessEnv): Promise<string> => {
@@ -45,7 +46,8 @@ const HTTP_OK = 200;
 const HTTP_NOT_FOUND = 404;
 const HTTP_PRECONDITION_FAILED = 412;
 
-const manifest = generateManifest(info, builds());
+const fixture = await builds();
+const manifest = generateManifest(info, fixture);
 const published = `releases/${manifest.releaseId}/manifest.json`;
 
 const HTTP_BAD_REQUEST = 400;
@@ -133,7 +135,7 @@ describe("publishing a release", () => {
 
   beforeEach(async () => {
     dir = mkdtempSync(path.join(tmpdir(), "grasp-os-upload-test-"));
-    writeRelease(dir, manifest, builds());
+    writeRelease(dir, manifest, fixture);
     bucket = emptyBucket();
     const current = bucket;
     server = createServer((request, response) => {

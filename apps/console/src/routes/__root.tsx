@@ -1,4 +1,9 @@
-import { createRootRoute, HeadContent, Scripts } from "@tanstack/react-router";
+import {
+  createRootRoute,
+  HeadContent,
+  Link,
+  Scripts,
+} from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
 import styles from "../styles.css?url";
@@ -9,6 +14,18 @@ const RootDocument = ({ children }: { children: ReactNode }) => (
       <HeadContent />
     </head>
     <body>
+      <nav aria-label="Console" className="flex gap-4 border-b px-6 py-3">
+        <Link
+          to="/"
+          activeOptions={{ exact: true }}
+          activeProps={{ className: "font-medium" }}
+        >
+          Clients
+        </Link>
+        <Link to="/releases" activeProps={{ className: "font-medium" }}>
+          Releases
+        </Link>
+      </nav>
       {children}
       <Scripts />
     </body>
