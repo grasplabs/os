@@ -197,8 +197,11 @@ export class Workspace extends DurableObject<Env> {
       });
       // Refuses a model the deployment or its rules don't allow before
       // anything is kept. Nothing the chat's APIs read feeds a request yet
-      // (the sample API reads nothing): the first API that reads data
-      // passes what it read as the requests' provenance.
+      // (the sample API reads nothing). The first API that reads data must
+      // record its sources per chat, persisted and only from open runs, and
+      // pass the chat's whole set as every later request's provenance, so a
+      // later turn can't send what an earlier one read to a model the rules
+      // forbid.
       const model = await models(this.env).agent({
         model: parsed.data.model,
         purpose: "chat.turn",
@@ -296,7 +299,7 @@ export class Workspace extends DurableObject<Env> {
     }
     if (state === "ended") {
       // Code still acting after its run ended: worth seeing in the logs.
-      log.warn("agent.run_ended", { chatId });
+      log.warn("agent.run_ended", { chatId, runId });
       this.#codeRuns.set(key, "reported");
     }
     return "ended";

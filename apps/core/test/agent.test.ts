@@ -167,6 +167,12 @@ const codeOf = async (call: Promise<unknown>) => {
   return "answered";
 };
 
+/** The one warning a call from an ended run logs. */
+const runEndedSchema = z.object({
+  event: z.literal("agent.run_ended"),
+  runId: z.string(),
+});
+
 describe("chat agent", () => {
   it("answers a question with a code step against the chat's API", async () => {
     const { stub, chat, personId, gateway, ask } = await newChat(
@@ -442,6 +448,22 @@ describe("chat agent sandbox", () => {
         instance.callFromCodeRun(chat.id, "not-a-run")
       )
     ).resolves.toBe("ended");
+    const { runId } = runEndedSchema.parse(
+      warned.mock.calls
+        .map(([entry]: unknown[]) => entry)
+        .find((entry) => runEndedSchema.safeParse(entry).success)
+    );
+    // More calls from the same ended run: still refused, not logged again.
+    await expect(
+      Promise.all(
+        [1, 2].map(
+          async () =>
+            await runInDurableObject(stub, (instance) =>
+              instance.callFromCodeRun(chat.id, runId)
+            )
+        )
+      )
+    ).resolves.toStrictEqual(["ended", "ended"]);
     expect(
       warned.mock.calls.filter(([entry]) =>
         JSON.stringify(entry).includes(chat.id)
