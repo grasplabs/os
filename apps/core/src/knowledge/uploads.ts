@@ -38,10 +38,14 @@ import {
   uploads,
 } from "../db/knowledge/schema.ts";
 import { errorResponse } from "../errors.ts";
-import { featureEnabled, requireFeature } from "../features.ts";
+import { requireFeature } from "../features.ts";
 import { runEngine } from "../workflows/engine.ts";
 import { allowedCollections, noteProvenance } from "./access.ts";
-import { readableCollection, requireWritable } from "./collections.ts";
+import {
+  readableCollection,
+  requireWritable,
+  uploadsOn,
+} from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
 import { findByPath, writeVersion } from "./documents.ts";
 import { ExtractorUnavailableError, extractorFor } from "./extract.ts";
@@ -134,10 +138,6 @@ const requireUploads = (env: Env): void => {
   requireFeature(env, "knowledge");
   requireFeature(env, "knowledge_uploads");
 };
-
-/** Whether uploads, and Knowledge itself, are switched on. */
-const uploadsOn = (env: Env): boolean =>
-  featureEnabled(env, "knowledge") && featureEnabled(env, "knowledge_uploads");
 
 /**
  * How long after an upload is recorded its original may still be being

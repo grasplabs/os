@@ -19,13 +19,18 @@ import { organizationId } from "../auth/auth.ts";
 import { teams } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
-import { requireFeature } from "../features.ts";
+import { featureEnabled, requireFeature } from "../features.ts";
 import { allowedCollections, canCreate, canWrite } from "./access.ts";
 import type { Reader } from "./access.ts";
 
 export type CollectionRow = typeof collections.$inferSelect;
 
+/** Whether uploads, and Knowledge itself, are switched on. */
+export const uploadsOn = (env: Env): boolean =>
+  featureEnabled(env, "knowledge") && featureEnabled(env, "knowledge_uploads");
+
 const toCollection = (
+  env: Env,
   row: CollectionRow,
   teamIds: string[],
   writable: boolean
@@ -40,6 +45,8 @@ const toCollection = (
   source: row.source,
   createdAt: row.createdAt.toISOString(),
   writable,
+  // An upload is a change like any other (uploads.ts), and needs its flag.
+  uploadable: writable && uploadsOn(env),
 });
 
 /**
@@ -108,6 +115,7 @@ export const listCollections = async (
     .orderBy(asc(collectionTeams.teamId));
   return rows.map((row) =>
     toCollection(
+      env,
       row,
       shared
         .filter(({ collectionId }) => collectionId === row.id)
@@ -203,7 +211,7 @@ export const createCollection = async (
       detail: { access, sensitive, source },
     }),
   ]);
-  return toCollection(row, teamIds, isWritable(env, person, row));
+  return toCollection(env, row, teamIds, isWritable(env, person, row));
 };
 
 /**

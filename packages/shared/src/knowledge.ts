@@ -104,10 +104,15 @@ export interface Collection {
   /** ISO 8601. */
   createdAt: string;
   /**
-   * Whether the person who asked may change it: save, restore and upload
-   * into it. Always `false` for an App or agent reading it.
+   * Whether the person who asked may change it: save and restore its
+   * documents. Always `false` for an App or agent reading it.
    */
   writable: boolean;
+  /**
+   * Whether they may also upload files into it: `writable`, while uploads
+   * are switched on.
+   */
+  uploadable: boolean;
 }
 
 /** Longest document path, in characters. */

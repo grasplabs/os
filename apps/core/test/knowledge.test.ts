@@ -12,6 +12,7 @@ import { mockIdp } from "./idp.ts";
 import { newTeam } from "./knowledge.ts";
 import {
   auditedDuring,
+  openRpc,
   outcome,
   signedInApi,
   unique,
@@ -589,33 +590,81 @@ describe("collections", () => {
   it("managed by Grasp or derived from Apps can't be written, even by an admin", async () => {
     const admin = await knowledgeOf("admin");
     const identity = await whoami(admin.session);
+    const created = await Promise.all(
+      (["grasp", "apps"] as const).map(
+        async (source) =>
+          await createCollection(
+            env,
+            identity,
+            { name: `Managed ${source}`, access: "everyone" },
+            source
+          )
+      )
+    );
     const refused = await Promise.all(
-      (["grasp", "apps"] as const).map(async (source) => {
-        const { id } = await createCollection(
-          env,
-          identity,
-          { name: `Managed ${source}`, access: "everyone" },
-          source
-        );
-        return await outcome(
-          admin.api.saveDocument({
-            collectionId: id,
-            path: "SKILL.md",
-            text: "---\nname: pdf\ndescription: Read PDFs.\n---",
-            ifVersion: 0,
-          })
-        );
-      })
+      created.map(
+        async ({ id }) =>
+          await outcome(
+            admin.api.saveDocument({
+              collectionId: id,
+              path: "SKILL.md",
+              text: "---\nname: pdf\ndescription: Read PDFs.\n---",
+              ifVersion: 0,
+            })
+          )
+      )
     );
     const listed = await admin.api.listCollections();
     expect({
       refused,
-      writable: listed
-        .filter(({ source }) => source === "grasp" || source === "apps")
-        .some(({ writable }) => writable),
+      listed: created.map(({ id }) => {
+        const collection = listed.find((each) => each.id === id);
+        return {
+          writable: collection?.writable,
+          uploadable: collection?.uploadable,
+        };
+      }),
     }).toStrictEqual({
       refused: ["knowledge.read_only", "knowledge.read_only"],
-      writable: false,
+      listed: [
+        { writable: false, uploadable: false },
+        { writable: false, uploadable: false },
+      ],
+    });
+  });
+
+  it("take uploads from those who may change them, while uploads are on", async () => {
+    const owner = await knowledgeOf("admin");
+    const reader = await knowledgeOf("user");
+    const { id: collectionId } = await owner.api.createCollection({
+      name: `Handbook ${unique()}`,
+      access: "everyone",
+    });
+    const offered = async (
+      session: string,
+      features: Record<string, boolean>
+    ) => {
+      const { core } = await openRpc(session, {
+        coreEnv: { ...env, FEATURES: features },
+      });
+      const listed = await core.authenticate().knowledge.listCollections();
+      const collection = listed.find(({ id }) => id === collectionId);
+      return {
+        writable: collection?.writable,
+        uploadable: collection?.uploadable,
+      };
+    };
+    const uploadsOn = { knowledge: true, knowledge_uploads: true };
+    const uploadsOff = { knowledge: true };
+
+    expect({
+      owner: await offered(owner.session, uploadsOn),
+      ownerWithUploadsOff: await offered(owner.session, uploadsOff),
+      reader: await offered(reader.session, uploadsOn),
+    }).toStrictEqual({
+      owner: { writable: true, uploadable: true },
+      ownerWithUploadsOff: { writable: true, uploadable: false },
+      reader: { writable: false, uploadable: false },
     });
   });
 
