@@ -158,10 +158,13 @@ export class App extends DurableObject<Env> {
     });
   }
 
-  /** A snapshot, at its current version. */
+  /**
+   * A snapshot, at its current version; refused with `board.not_snapshot`
+   * for any other document.
+   */
   async open(caller: Caller, id: string): Promise<Outcome<Snapshot>> {
     return await outcome(async () =>
-      snapshotOf(await this.#playbook().getRecord(caller, id))
+      snapshotOf(await this.#snapshot(caller, id))
     );
   }
 
@@ -181,6 +184,7 @@ export class App extends DurableObject<Env> {
   /**
    * Saves a snapshot's narrative and the decision it asks for as its next
    * version (`ifVersion`): what it froze stays as it was taken. Refused
+   * with `board.not_snapshot` for a document that isn't a snapshot, and
    * with `knowledge.conflict` when someone saved it meanwhile.
    */
   async write(
@@ -194,7 +198,8 @@ export class App extends DurableObject<Env> {
   ): Promise<Outcome<Summary>> {
     return await outcome(async () => {
       const playbook = this.#playbook();
-      const current = await playbook.getRecord(caller, input.id);
+      // Only a snapshot's narrative: never another record it was handed.
+      const current = await this.#snapshot(caller, input.id);
       // The platform keeps what it froze, and refuses figures sent back.
       const {
         figures: _figures,
@@ -205,14 +210,27 @@ export class App extends DurableObject<Env> {
       return await playbook.saveRecord(caller, {
         path: current.path,
         ifVersion: input.ifVersion,
+        // Saved as a snapshot, which the Playbook checks it against.
         record: {
           ...kept,
+          type: "snapshot",
           ...(decisionNeeded === "" ? {} : { decisionNeeded }),
         },
         body: input.body,
         message: "Narrative",
       });
     });
+  }
+
+  /** The document `id`, refused unless it is a snapshot. */
+  async #snapshot(caller: Caller, id: string): Promise<RecordRead> {
+    const read = await this.#playbook().getRecord(caller, id);
+    if (read.type !== "snapshot") {
+      throw Object.assign(new Error("That document isn't a snapshot."), {
+        code: "board.not_snapshot",
+      });
+    }
+    return read;
   }
 
   #playbook(): Playbook {

@@ -1,4 +1,3 @@
-import { callServer } from "@grasp-os/sdk/screen";
 import { Button } from "@grasp-os/ui/components/button";
 import {
   Card,
@@ -18,7 +17,9 @@ import { Textarea } from "@grasp-os/ui/components/textarea";
 import { useState } from "react";
 
 import { maturityLevels, snapshotRecordOf } from "./board";
-import type { Outcome, Snapshot } from "./snapshot";
+import { whilePending } from "./pending";
+import { ask } from "./snapshot";
+import type { Snapshot } from "./snapshot";
 
 /** What a take or a save answers: the snapshot's document. */
 interface Saved {
@@ -44,11 +45,10 @@ export const TakeSnapshot = ({
   const [maturity, setMaturity] = useState<string | null>(null);
   const [taking, setTaking] = useState(false);
   const take = async (): Promise<void> => {
-    setTaking(true);
-    const answer = await callServer<Outcome<Saved>>("take", {
-      maturity: Number(maturity),
-    });
-    setTaking(false);
+    const answer = await whilePending(
+      setTaking,
+      async () => await ask<Saved>("take", { maturity: Number(maturity) })
+    );
     if ("error" in answer) {
       onRefused(answer.error);
       return;
@@ -105,13 +105,18 @@ export const NarrativeEditor = ({
     snapshotRecordOf(snapshot.record).decisionNeeded ?? ""
   );
   const [body, setBody] = useState(snapshot.body);
+  const [saving, setSaving] = useState(false);
   const save = async (): Promise<void> => {
-    const answer = await callServer<Outcome<Saved>>("write", {
-      id: snapshot.id,
-      ifVersion: snapshot.version,
-      decisionNeeded: decision,
-      body,
-    });
+    const answer = await whilePending(
+      setSaving,
+      async () =>
+        await ask<Saved>("write", {
+          id: snapshot.id,
+          ifVersion: snapshot.version,
+          decisionNeeded: decision,
+          body,
+        })
+    );
     if ("error" in answer) {
       onRefused(answer.error);
       return;
@@ -144,6 +149,7 @@ export const NarrativeEditor = ({
           <div>
             <Button
               variant="outline"
+              disabled={saving}
               onClick={() => {
                 void save();
               }}

@@ -1,4 +1,3 @@
-import { callServer } from "@grasp-os/sdk/screen";
 import {
   Select,
   SelectContent,
@@ -6,13 +5,13 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@grasp-os/ui/components/select";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { snapshotRecordOf } from "../components/board";
 import { BoardPage } from "../components/board-page";
 import { NarrativeEditor, TakeSnapshot } from "../components/controls";
-import { refusal } from "../components/snapshot";
-import type { Outcome, Snapshot, Snapshots } from "../components/snapshot";
+import { ask, refusal } from "../components/snapshot";
+import type { Snapshot, Snapshots } from "../components/snapshot";
 
 /**
  * The board page: a snapshot of the Playbook on one page, the newest by
@@ -23,9 +22,36 @@ const Board = () => {
   const [listed, setListed] = useState<Snapshots | null>(null);
   const [opened, setOpened] = useState<Snapshot | null>(null);
   const [problem, setProblem] = useState("");
+  // The snapshot the person asked for last, and each opening asked for,
+  // numbered: an answer to any but the latest, arriving late, is dropped,
+  // as it would show what they moved away from, or an older version.
+  const selected = useRef<string | null>(null);
+  const openings = useRef(0);
+  // Each listing asked for, numbered: an older one arriving late is dropped.
+  const listings = useRef(0);
+
+  const list = async (): Promise<void> => {
+    listings.current += 1;
+    const asked = listings.current;
+    const answer = await ask<Snapshots>("snapshots");
+    if (asked !== listings.current) {
+      return;
+    }
+    if ("error" in answer) {
+      setProblem(refusal(answer.error));
+      return;
+    }
+    setListed(answer.ok);
+  };
 
   const open = async (id: string): Promise<void> => {
-    const answer = await callServer<Outcome<Snapshot>>("open", id);
+    selected.current = id;
+    openings.current += 1;
+    const asked = openings.current;
+    const answer = await ask<Snapshot>("open", id);
+    if (asked !== openings.current) {
+      return;
+    }
     if ("error" in answer) {
       setProblem(refusal(answer.error));
       return;
@@ -36,19 +62,25 @@ const Board = () => {
 
   // Lists the snapshots again, with one just taken, and opens it.
   const taken = async (id: string): Promise<void> => {
-    const answer = await callServer<Outcome<Snapshots>>("snapshots");
-    if ("ok" in answer) {
-      setListed(answer.ok);
-    }
-    await open(id);
+    await Promise.all([list(), open(id)]);
   };
 
-  // On opening: the snapshots, and the newest of them.
+  // A save shows its new version, unless another snapshot is open by then.
+  const saved = async (id: string): Promise<void> => {
+    if (selected.current === id) {
+      await open(id);
+    }
+  };
+
+  // On opening: the snapshots, and the newest of them, unless the person
+  // opened one first.
   useEffect(() => {
     let mounted = true;
     const first = async (): Promise<void> => {
-      const answer = await callServer<Outcome<Snapshots>>("snapshots");
-      if (!mounted) {
+      listings.current += 1;
+      const asked = listings.current;
+      const answer = await ask<Snapshots>("snapshots");
+      if (!mounted || asked !== listings.current) {
         return;
       }
       if ("error" in answer) {
@@ -57,11 +89,14 @@ const Board = () => {
       }
       setListed(answer.ok);
       const newest = answer.ok.snapshots[0]?.id;
-      if (newest === undefined) {
+      if (newest === undefined || selected.current !== null) {
         return;
       }
-      const snapshot = await callServer<Outcome<Snapshot>>("open", newest);
-      if (!mounted) {
+      selected.current = newest;
+      openings.current += 1;
+      const opening = openings.current;
+      const snapshot = await ask<Snapshot>("open", newest);
+      if (!mounted || opening !== openings.current) {
         return;
       }
       if ("error" in snapshot) {
@@ -151,7 +186,7 @@ const Board = () => {
               key={`${opened.id}@${opened.version}`}
               snapshot={opened}
               onSaved={(id) => {
-                void open(id);
+                void saved(id);
               }}
               onRefused={refused}
             />

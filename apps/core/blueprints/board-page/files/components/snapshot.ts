@@ -1,6 +1,8 @@
 // What the board page's server answers (app/server.ts), as its screen
 // reads it.
 
+import { callServer } from "@grasp-os/sdk/screen";
+
 /** A snapshot as the page lists it. */
 export interface Listed {
   id: string;
@@ -26,6 +28,29 @@ export interface Snapshot {
 /** A server call's answer, or the code of why it was refused. */
 export type Outcome<T> = { ok: T } | { error: string };
 
+const codeOf = (error: unknown): string =>
+  typeof error === "object" &&
+  error !== null &&
+  "code" in error &&
+  typeof error.code === "string"
+    ? error.code
+    : "app.failed";
+
+/**
+ * Calls the server's `method`: its answer, or, when the call itself fails
+ * (the connection, the platform), why, as a refusal the page shows.
+ */
+export const ask = async <T>(
+  method: string,
+  ...args: unknown[]
+): Promise<Outcome<T>> => {
+  try {
+    return await callServer<Outcome<T>>(method, ...args);
+  } catch (error) {
+    return { error: codeOf(error) };
+  }
+};
+
 /** What a refusal means to the person using the page. */
 export const refusal = (code: string): string => {
   switch (code) {
@@ -37,6 +62,12 @@ export const refusal = (code: string): string => {
     }
     case "knowledge.invalid": {
       return "That can't be saved: check the decision is under 1,000 characters.";
+    }
+    case "knowledge.not_found": {
+      return "There's no such snapshot, or you can't open it.";
+    }
+    case "board.not_snapshot": {
+      return "That document isn't a snapshot.";
     }
     case "permission.denied": {
       return "The page can't use the Playbook: an admin approves its permission first.";

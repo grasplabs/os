@@ -201,6 +201,51 @@ describe("the board page", { timeout: 60_000 }, () => {
     });
   });
 
+  it("lists the snapshot taken last first, however many were taken that day", async () => {
+    const { admin, app } = await setUp();
+    const take = async () =>
+      okOf(await call(app, admin.userId, "take", { maturity: 1 }), savedSchema);
+    const first = await take();
+    const second = await take();
+    const third = await take();
+    const listed = okOf(
+      await call(app, admin.userId, "snapshots"),
+      listedSchema
+    );
+    expect(
+      listed.snapshots
+        .map(({ id }) => id)
+        .filter((id) => [first.id, second.id, third.id].includes(id))
+    ).toStrictEqual([third.id, second.id, first.id]);
+  });
+
+  it("opens and writes a narrative only into a snapshot", async () => {
+    const { admin, app } = await setUp();
+    const identity = await admin.api.whoami();
+    const workflow = await saveRecord(env, identity, {
+      path: `workflows/not-a-snapshot-${unique()}.md`,
+      ifVersion: 0,
+      record: { type: "workflow", title: "Not a snapshot", state: "drawn" },
+      body: "Kept as it is.",
+    });
+    const written = await call(app, admin.userId, "write", {
+      id: workflow.id,
+      ifVersion: 1,
+      decisionNeeded: "Anything?",
+      body: "Overwritten?",
+    });
+    const after = await admin.api.knowledge.getDocument(workflow.id);
+    expect({
+      opened: await call(app, admin.userId, "open", workflow.id),
+      written,
+      after: after.currentVersion,
+    }).toStrictEqual({
+      opened: { error: "board.not_snapshot" },
+      written: { error: "board.not_snapshot" },
+      after: 1,
+    });
+  });
+
   it("refuses whoever may not change the Playbook, and says it has no Playbook until an admin grants it", async () => {
     const { app } = await setUp();
     const user = await signedInApi(idp, "user");
