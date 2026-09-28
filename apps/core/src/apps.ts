@@ -766,7 +766,7 @@ export const setCurrentVersion = async (
   const blueprintCode = found.blueprint !== null && number === 1;
   const requestedAgain = blueprintCode
     ? []
-    : await requestedAgainFor(env, by, appId, number, previous);
+    : requestedAgainFor(env, by, appId, number, previous);
   const db = drizzle(env.DB);
   // Only over the current version read above, so the event's `previous`
   // is the version this replaced.

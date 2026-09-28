@@ -16,7 +16,7 @@ import {
 } from "../src/builtins.ts";
 import type { Release } from "../src/builtins.ts";
 import { buildScreens } from "../src/screens.ts";
-import { serverBuilt } from "./apps.ts";
+import { racingDb, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote } from "./knowledge.ts";
 import {
@@ -144,36 +144,11 @@ const permissionEvents = (events: Awaited<ReturnType<typeof auditedDuring>>) =>
 const insertsVersion = /^insert into "app_versions"/iu;
 const insertsPermission = /^insert into "permissions"/iu;
 
-/**
- * Core's database, with `first` run once, just before the first batch
- * that writes an App version (or what `writes` matches) lands: another
- * writer getting there first.
- */
+/** `racingDb`, racing the batch that writes an App version by default. */
 const dbRacing = (
   first: () => Promise<unknown>,
   writes: RegExp = insertsVersion
-): D1Database => {
-  const real = env.DB;
-  let writing = false;
-  let raced = false;
-  return {
-    prepare: (query) => {
-      writing ||= writes.test(query);
-      return real.prepare(query);
-    },
-    batch: async <T>(statements: D1PreparedStatement[]) => {
-      if (writing && !raced) {
-        raced = true;
-        await first();
-      }
-      return await real.batch<T>(statements);
-    },
-    exec: async (query) => await real.exec(query),
-    // oxlint-disable-next-line typescript/no-deprecated -- D1Database still has it
-    dump: async () => await real.dump(),
-    withSession: (constraint) => real.withSession(constraint),
-  };
-};
+): D1Database => racingDb(first, writes);
 
 describe("the built-in blueprints", () => {
   it("are every folder under apps/core/blueprints, and the tests' own", () => {

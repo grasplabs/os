@@ -73,3 +73,34 @@ export const requestGranted = async (
   }
   return id;
 };
+
+/**
+ * Core's database, with `first` run once, just before the first batch
+ * after a statement that `writes` matches was prepared lands: another
+ * writer getting there first.
+ */
+export const racingDb = (
+  first: () => Promise<unknown>,
+  writes: RegExp
+): D1Database => {
+  const real = env.DB;
+  let writing = false;
+  let raced = false;
+  return {
+    prepare: (query) => {
+      writing ||= writes.test(query);
+      return real.prepare(query);
+    },
+    batch: async <T>(statements: D1PreparedStatement[]) => {
+      if (writing && !raced) {
+        raced = true;
+        await first();
+      }
+      return await real.batch<T>(statements);
+    },
+    exec: async (query) => await real.exec(query),
+    // oxlint-disable-next-line typescript/no-deprecated -- D1Database still has it
+    dump: async () => await real.dump(),
+    withSession: (constraint) => real.withSession(constraint),
+  };
+};

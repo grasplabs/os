@@ -9,9 +9,10 @@ import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
+import { setCurrentVersion } from "../src/apps.ts";
 import { saveRecordAsDelegate } from "../src/knowledge/playbook.ts";
 import { restrict } from "../src/restricted.ts";
-import { release, requestGranted, serverBuilt } from "./apps.ts";
+import { racingDb, release, requestGranted, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote, newTeam, readCollection } from "./knowledge.ts";
 import {
@@ -764,6 +765,17 @@ const changedBy = async (
   );
 };
 
+/** The detail of each `action` event in `events`, by its target's ID. */
+const details = (
+  events: Awaited<ReturnType<typeof auditedDuring>>,
+  action: string
+): Map<string | undefined, Record<string, unknown>> =>
+  new Map(
+    events
+      .filter((event) => event.action === action)
+      .map(({ target, detail }) => [target?.id, detail])
+  );
+
 /** The App's permissions, as an admin lists them. */
 const permissionsOf = async (admin: Person, app: AppId) => {
   const listed = await admin.api.permissions.list({ type: "app", appId: app });
@@ -860,6 +872,126 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     await expect(
       callApp(env, app, as(admin.userId), "save", saveArgs(path, drawn, 1))
     ).resolves.toMatchObject({ ok: { path, currentVersion: 2 } });
+  });
+
+  it("records each permission it asks for again by the IDs its grant was recorded with", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    const app = await builtBy(builder, admin);
+    const subject = { type: "app", appId: app } as const;
+    const requests: PermissionRequest[] = [
+      {
+        subject,
+        object: {
+          type: "connection",
+          connectionId: "connection-outlook",
+          resource: "inbox",
+          mask: ["body", "subject"],
+        },
+        actions: ["mail.list", "mail.send"],
+        binding: "OUTLOOK",
+      },
+      {
+        subject,
+        object: { type: "connection", connectionId: "connection-shared" },
+        actions: ["mail.list"],
+        binding: "SHARED",
+      },
+      {
+        subject,
+        object: { type: "workflow", appId: app, workflowId: "pay" },
+        actions: ["start"],
+        binding: "PAY",
+      },
+    ];
+    const granted = await auditedDuring(async () => {
+      for (const request of requests) {
+        // oxlint-disable-next-line no-await-in-loop -- one at a time
+        const { id } = await builder.api.permissions.request(request);
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        await admin.api.permissions.grant(id);
+      }
+    });
+    const events = await auditedDuring(async () => {
+      await changedBy(builder, app, "Uses everything.");
+    });
+    const requested = details(events, "permission.requested");
+
+    expect({
+      count: requested.size,
+      asked: [...details(granted, "permission.granted")].map(
+        ([id, detail]) => requested.get(id) ?? { missing: id, detail }
+      ),
+    }).toStrictEqual({
+      // With the Playbook's permission to write.
+      count: 4,
+      asked: [...details(granted, "permission.granted").values()].map(
+        ({ requestedBy: _requestedBy, ...detail }) => ({
+          ...detail,
+          version: 2,
+          previous: 1,
+          grantedBy: admin.userId,
+        })
+      ),
+    });
+  });
+
+  it("is asked again for a permission an admin grants just before the batch that makes it current", async () => {
+    const [admin, builder] = await Promise.all([
+      personApi("admin"),
+      personApi("builder"),
+    ]);
+    const app = await builtBy(builder, admin);
+    const late = await builder.api.permissions.request(
+      playbookFor(app, ["read", "write"], "PLAYBOOK_LATE")
+    );
+    await builder.api.apps.files.write(app, {
+      "app/server.ts": `${serverCode}\n// Asks for more.\n`,
+    });
+    const { version } = await builder.api.apps.files.commit(app, "More");
+    // The admin grants the request after everything the change reads, and
+    // before its batch lands.
+    const racing: Env = {
+      ...env,
+      DB: racingDb(async () => {
+        await admin.api.permissions.grant(late.id);
+      }, /^update "apps"/iu),
+    };
+
+    const events = await auditedDuring(async () => {
+      await setCurrentVersion(racing, await builder.api.whoami(), app, version);
+    });
+    const listed = await permissionsOf(admin, app);
+
+    expect({
+      // Asked for again at the same time: in no particular order.
+      permissions: listed
+        .map(({ binding, status }) => ({ binding, status }))
+        .toSorted((a, b) => a.binding.localeCompare(b.binding)),
+      audited: events
+        .filter(({ action }) => action === "permission.requested")
+        .map(({ actor, detail }) => ({
+          actor,
+          binding: detail.binding,
+          version: detail.version,
+          grantedBy: detail.grantedBy,
+        }))
+        .toSorted((a, b) => String(a.binding).localeCompare(String(b.binding))),
+    }).toStrictEqual({
+      permissions: [
+        { binding: "PLAYBOOK", status: "requested" },
+        { binding: "PLAYBOOK_LATE", status: "requested" },
+        { binding: "PLAYBOOK_READ", status: "active" },
+      ],
+      audited: ["PLAYBOOK", "PLAYBOOK_LATE"].map((binding) => ({
+        actor: { type: "person", userId: builder.userId },
+        binding,
+        version,
+        grantedBy: admin.userId,
+      })),
+    });
   });
 
   it("keeps its permissions when an admin makes it current, as they could grant them, and not when Grasp staff do", async () => {

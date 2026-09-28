@@ -40,7 +40,7 @@ import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { connectionOwnersOf } from "./connections.ts";
-import { apps, permissions } from "./db/core/schema.ts";
+import { apps, auditOutbox, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
 import { appHost } from "./durable-objects.ts";
@@ -712,88 +712,116 @@ export const grantPermission = async (
   return permission;
 };
 
+/** A stored JSON list of strings, joined by spaces, as SQL. */
+const joined = (list: SQL | typeof permissions.actions): SQL =>
+  sql`(SELECT group_concat(value, ' ') FROM json_each(${list}))`;
+
 /**
- * Whether a permission lets an App change things for the person using it:
- * any on a connection (core can't tell a connector's writes from its
- * reads; connect knows), writing a collection, or starting a workflow.
- * Only reading Knowledge or a workflow's runs doesn't.
+ * The ID of the audit event one statement stores for the permission row,
+ * as SQL: a random UUID (`fresh`, one per statement) whose last part is
+ * the permission's own ID's, so each row's event has its own ID, and every
+ * statement's are new. A UUID still: the version and variant are `fresh`'s,
+ * and a permission's ID is a UUID too.
  */
-const changesThings = (row: Row): boolean =>
-  row.objectType === "connection" ||
-  stringListSchema
-    .parse(JSON.parse(row.actions))
-    .some((action) => action !== "read");
+const eventIdSql = (fresh: string): SQL =>
+  sql`${fresh.slice(0, 24)} || lower(substr(${permissions.id}, 25, 12))`;
+
+/**
+ * What `auditDetail` records of a permission row, as SQL: its IDs by name
+ * (connectionId, resource and mask; collectionId; appId and workflowId),
+ * its actions and its binding.
+ */
+const auditDetailSql = sql`json_patch(
+  json_object('subjectType', ${permissions.subjectType}, 'subjectId', ${permissions.subjectId}, 'objectType', ${permissions.objectType}),
+  CASE ${permissions.objectType}
+    WHEN 'connection' THEN json_patch(
+      json_object('connectionId', ${permissions.objectId}),
+      json_patch(
+        CASE WHEN ${permissions.resource} IS NULL THEN '{}' ELSE json_object('resource', ${permissions.resource}) END,
+        CASE WHEN ${permissions.mask} IS NULL THEN '{}' ELSE json_object('mask', ${joined(sql`${permissions.mask}`)}) END
+      )
+    )
+    WHEN 'collection' THEN json_object('collectionId', ${permissions.objectId})
+    ELSE json_object('appId', ${permissions.objectId}, 'workflowId', ${permissions.resource})
+  END
+)`;
 
 /**
  * The statements, for the batch that makes `version` the current version
- * of `app` (apps.ts), that ask again for each of the App's active
- * permissions that lets it change things for the person using it
- * (`changesThings`), unless `by` could grant it themselves: an admin, not
- * Grasp staff, still an admin when the batch runs. An admin grants a
- * permission trusting the code that will use it, and an App's code runs as
- * whoever uses it, so a builder's next version could otherwise write the
- * Playbook, say, as the next admin who opens it. Each goes back to
- * requested, asked for by `by`, only if `version` is current when the batch
- * runs, and is audited with the version, the one it replaced and who had
- * granted it. Reading only is kept: the code reads what the person may.
+ * of `app` (apps.ts), that ask again for each of the App's permissions
+ * active when the batch runs that lets it change things for the person
+ * using it: any on a connection (core can't tell a connector's writes from
+ * its reads; connect knows), writing a collection, or starting a workflow.
+ * Unless `by` could grant them themselves: an admin, not Grasp staff, still
+ * an admin when the batch runs. An admin grants a permission trusting the
+ * code that will use it, and an App's code runs as whoever uses it, so a
+ * builder's next version could otherwise write the Playbook, say, as the
+ * next admin who opens it. Reading only is kept: the code reads what the
+ * person may.
+ *
+ * Both statements select their rows with the same condition when the
+ * batch runs, nothing read before it, so a grant made just before is asked
+ * for again too: first an audit event for each (`permission.requested`,
+ * by `by`, with the version, the one it replaced and who had granted it),
+ * then the update, back to requested, asked for by `by`. Only while
+ * `version` is current. Core's database has no full-text index, so
+ * nothing in the batch moves `changes()` under them.
  */
-export const requestedAgainFor = async (
+export const requestedAgainFor = (
   env: Env,
   by: Identity,
   app: AppId,
   version: number,
   previous: number | null
-): Promise<BatchItem<"sqlite">[]> => {
+): [BatchItem<"sqlite">, BatchItem<"sqlite">] => {
   const db = drizzle(env.DB);
-  const active = await db
-    .select()
-    .from(permissions)
-    .where(
-      and(
-        ofSubject({ type: "app", appId: app }),
-        eq(permissions.status, "active")
-      )
-    )
-    .orderBy(asc(permissions.requestedAt), asc(permissions.id));
   const mayGrant = isAdmin(by.role) && !by.staff;
-  const requestedAt = new Date();
-  return active.filter(changesThings).flatMap((row) => {
-    const again: Row = {
-      ...row,
-      status: "requested",
-      requestedBy: by.userId,
-      requestedAt,
-      grantedBy: null,
-      grantedAt: null,
-    };
-    return [
-      db
-        .update(permissions)
-        .set({
-          status: again.status,
-          requestedBy: again.requestedBy,
-          requestedAt: again.requestedAt,
-          grantedBy: null,
-          grantedAt: null,
-        })
-        .where(
-          and(
-            eq(permissions.id, row.id),
-            eq(permissions.status, "active"),
-            sql`EXISTS (SELECT 1 FROM ${apps} WHERE ${apps.id} = ${app} AND ${apps.currentVersion} = ${version})`,
-            mayGrant ? sql`NOT ${stillAdmin(by)}` : undefined
-          )
-        ),
-      outboxedIfChanged(
-        db,
-        changeEntry(by, "permission.requested", toPermission(again), {
-          version,
-          previous,
-          grantedBy: row.grantedBy,
-        })
+  const requestedAgain = and(
+    ofSubject({ type: "app", appId: app }),
+    eq(permissions.status, "active"),
+    or(
+      eq(permissions.objectType, "connection"),
+      sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value <> 'read')`
+    ),
+    sql`EXISTS (SELECT 1 FROM ${apps} WHERE ${apps.id} = ${app} AND ${apps.currentVersion} = ${version})`,
+    mayGrant ? sql`NOT ${stillAdmin(by)}` : undefined
+  );
+  const now = new Date();
+  const eventId = eventIdSql(crypto.randomUUID());
+  const event = sql`json_object(
+    'id', ${eventId},
+    'at', ${now.toISOString()},
+    'source', 'core',
+    'actor', json(${JSON.stringify(actorOf(by))}),
+    'action', 'permission.requested',
+    'target', json_object('type', 'permission', 'id', ${permissions.id}),
+    'provenance', json('[]'),
+    'detail', json_set(
+      ${auditDetailSql},
+      '$.actions', ${joined(permissions.actions)},
+      '$.binding', ${permissions.binding},
+      '$.version', ${version},
+      '$.previous', ${previous},
+      '$.grantedBy', ${permissions.grantedBy}
+    )
+  )`;
+  return [
+    db
+      .insert(auditOutbox)
+      .select(
+        sql`SELECT ${eventId}, ${event}, ${now.getTime()} FROM ${permissions} WHERE ${requestedAgain}`
       ),
-    ];
-  });
+    db
+      .update(permissions)
+      .set({
+        status: "requested",
+        requestedBy: by.userId,
+        requestedAt: now,
+        grantedBy: null,
+        grantedAt: null,
+      })
+      .where(requestedAgain),
+  ];
 };
 
 /**
