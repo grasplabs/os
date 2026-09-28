@@ -1,3 +1,5 @@
+import { toHex } from "@grasp-os/shared/encoding";
+import { canonicalJson } from "@grasp-os/shared/json";
 /**
  * One of a release's Workers as the Workers API takes it: its metadata
  * with the account's resources filled in, and its modules and static
@@ -10,6 +12,7 @@ import {
   d1IdPlaceholder,
 } from "@grasp-os/shared/release";
 import type { ReleaseManifest, WorkerEntry } from "@grasp-os/shared/release";
+import { z } from "zod";
 
 import type {
   AssetFile,
@@ -181,4 +184,61 @@ export const checkBindingNames = (
       `${worker.name} has more than one binding named ${taken}`
     );
   }
+};
+
+const encoder = new TextEncoder();
+
+/** What goes into one Worker's upload, as `uploadFingerprint` takes it. */
+export interface UploadInputs {
+  manifest: ReleaseManifest;
+  worker: WorkerEntry;
+  databases: ReadonlyMap<string, string>;
+  vars: Readonly<Record<string, unknown>>;
+  secrets: readonly Secret[];
+}
+
+/**
+ * A fingerprint of everything that goes into a Worker's upload: its
+ * secrets' names and values (the previous keys included, when given), its
+ * vars, its bindings as filled in for the account, its code, static files,
+ * settings and pins. HMAC-SHA256 under `key` (`CLIENT_KEY`), so the
+ * fingerprint stored with a recorded version tells nothing about the
+ * secret values that went into it. A resumed deploy reuses a version only
+ * while this is the same.
+ */
+export const uploadFingerprint = async (
+  key: string,
+  { manifest, worker, databases, vars, secrets }: UploadInputs
+): Promise<string> => {
+  const inputs = z.json().parse({
+    compatibilityDate: manifest.compatibilityDate,
+    compatibilityFlags: worker.compatibilityFlags,
+    mainModule: worker.mainModule,
+    modules: worker.modules.map(({ name, type, sha256 }) => [
+      name,
+      type,
+      sha256,
+    ]),
+    assets: worker.assets ?? null,
+    observability: worker.observability,
+    durableObjectMigrations: worker.durableObjectMigrations,
+    bindings: renderBindings(worker, databases),
+    vars,
+    secrets: secrets
+      .map(({ name, value }) => [name, value])
+      .toSorted(([a = ""], [b = ""]) => (a < b ? -1 : 1)),
+  });
+  const hmacKey = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    hmacKey,
+    encoder.encode(canonicalJson(inputs))
+  );
+  return toHex(new Uint8Array(mac));
 };

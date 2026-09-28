@@ -93,7 +93,33 @@ describe("a Worker's bindings", () => {
   });
 });
 
+/** A binding of the Worker named `target` as a service. */
+const service = (target: string) => ({
+  type: "service",
+  name: "UPSTREAM",
+  service: target,
+});
+
 describe("the order Workers deploy in", () => {
+  it("puts each Worker after every Worker it binds, down a chain", () => {
+    expect(
+      deployOrder({
+        a: worker("worker-a", [service("worker-b")]),
+        b: worker("worker-b", [service("worker-c")]),
+        c: worker("worker-c", []),
+      })
+    ).toStrictEqual(["c", "b", "a"]);
+  });
+
+  it("refuses Workers that bind each other in a cycle", () => {
+    expect(() =>
+      deployOrder({
+        a: worker("worker-a", [service("worker-b")]),
+        b: worker("worker-b", [service("worker-a")]),
+      })
+    ).toThrow(expect.objectContaining({ code: "service_binding_cycle" }));
+  });
+
   it("puts a Worker another binds as a service first", () => {
     expect(
       deployOrder({

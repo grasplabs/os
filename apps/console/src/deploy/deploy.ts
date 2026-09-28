@@ -32,7 +32,7 @@ import { deploymentConfigVars } from "@grasp-os/shared/deployment-config";
 import { log } from "@grasp-os/shared/log";
 import type { PlatformChange } from "@grasp-os/shared/platform-change";
 import type { ReleaseManifest } from "@grasp-os/shared/release";
-import { and, desc, eq, gt, inArray, isNull, ne, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, ne, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import { CloudflareApiError } from "../cloudflare/api.ts";
@@ -52,7 +52,11 @@ import { importedManifest } from "./release.ts";
 import { ensureResources } from "./resources.ts";
 import { workerSecrets } from "./secrets.ts";
 import type { DeploySecrets } from "./secrets.ts";
-import { checkBindingNames, workerUpload } from "./upload.ts";
+import {
+  checkBindingNames,
+  uploadFingerprint,
+  workerUpload,
+} from "./upload.ts";
 import { deployOrder, deployWorker, uploadWorker } from "./versions.ts";
 
 /** What a deploy works with. */
@@ -225,11 +229,17 @@ const recordFailure = async (
   }
 };
 
-/** The versions a deploy uploaded, and the secrets generation they carry. */
+/**
+ * The versions a deploy uploaded, by app, each with the fingerprint of
+ * everything that went into it (`uploadFingerprint`).
+ */
 const recordedSchema = z.object({
-  generation: z.int(),
-  byApp: z.record(z.string(), z.string()),
+  byApp: z.record(
+    z.string(),
+    z.object({ version: z.string(), fingerprint: z.string() })
+  ),
 });
+type Recorded = z.infer<typeof recordedSchema>["byApp"];
 
 /** The Workers a deploy knows, by app: `client_workers` records these. */
 const appSchema = z.enum(clientWorkers.worker.enumValues);
@@ -274,21 +284,45 @@ const coreVars = async (
   };
 };
 
-/** The versions `deploy` uploaded before, if they carry today's secrets. */
-const recordedVersions = (deploy: Deploy): Record<string, string> => {
+/** The versions `deploy` uploaded before, with their fingerprints. */
+const recordedVersions = (deploy: Deploy): Recorded => {
   const recorded = recordedSchema.safeParse(
     JSON.parse(deploy.versions ?? "null")
   );
-  return recorded.success && recorded.data.generation === deploy.generation
-    ? recorded.data.byApp
-    : {};
+  return recorded.success ? recorded.data.byApp : {};
+};
+
+/**
+ * Throws `deploy_superseded` unless deploy `id` is still its client's
+ * latest and not superseded: checked right before each thing that goes
+ * live, so a deploy superseded while it runs makes nothing more live. (A
+ * deploy's single runner is still the precondition: this closes the
+ * window, not the race.)
+ */
+const assertLatest = async (
+  db: ConsoleDatabase,
+  id: string,
+  clientId: string
+): Promise<void> => {
+  const [row] = await db
+    .select({ status: clientDeploys.status })
+    .from(clientDeploys)
+    .where(eq(clientDeploys.id, id));
+  if (
+    row === undefined ||
+    row.status === "superseded" ||
+    (await latestDeployOf(db, clientId)) !== id
+  ) {
+    throw superseded(id);
+  }
 };
 
 /**
  * Uploads and deploys each of the release's Workers in turn, each live
- * before the next is uploaded; a Worker whose version this deploy already
- * uploaded (with today's secrets generation) is deployed, not uploaded
- * again.
+ * before the next is uploaded. A Worker whose version this deploy already
+ * uploaded is deployed, not uploaded again, but only if everything that
+ * went into that version is the same now (its fingerprint): secrets,
+ * vars, bindings and code.
  */
 const deployWorkers = async (
   context: DeployContext,
@@ -319,22 +353,32 @@ const deployWorkers = async (
     if (worker === undefined) {
       continue;
     }
-    let versionId = versions[app];
+    // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
+    const workerSecretValues = await workerSecrets(
+      app,
+      worker,
+      secrets,
+      {
+        id: clientId,
+        generation: deploy.generation,
+        rotationLiveAt: deploy.rotationLiveAt,
+      },
+      now
+    );
+    const workerVars = app === varsApp ? vars : {};
+    checkBindingNames(worker, workerVars, workerSecretValues);
+    // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
+    const fingerprint = await uploadFingerprint(secrets.clientKey, {
+      manifest,
+      worker,
+      databases,
+      vars: workerVars,
+      secrets: workerSecretValues,
+    });
+    const recorded = versions[app];
+    let versionId =
+      recorded?.fingerprint === fingerprint ? recorded.version : undefined;
     if (versionId === undefined) {
-      // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-      const workerSecretValues = await workerSecrets(
-        app,
-        worker,
-        secrets,
-        {
-          id: clientId,
-          generation: deploy.generation,
-          rotationLiveAt: deploy.rotationLiveAt,
-        },
-        now
-      );
-      const workerVars = app === varsApp ? vars : {};
-      checkBindingNames(worker, workerVars, workerSecretValues);
       // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
       const upload = await workerUpload(
         store,
@@ -343,6 +387,9 @@ const deployWorkers = async (
         databases,
         workerVars
       );
+      // A script upload goes live at once.
+      // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
+      await assertLatest(db, id, clientId);
       // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
       versionId = await uploadWorker(
         api,
@@ -351,7 +398,7 @@ const deployWorkers = async (
         upload,
         workerSecretValues
       );
-      versions[app] = versionId;
+      versions[app] = { version: versionId, fingerprint };
       // oxlint-disable-next-line no-await-in-loop -- recorded before it's deployed
       await act(
         db,
@@ -360,10 +407,7 @@ const deployWorkers = async (
           db
             .update(clientDeploys)
             .set({
-              versions: JSON.stringify({
-                generation: deploy.generation,
-                byApp: versions,
-              }),
+              versions: JSON.stringify({ byApp: versions }),
               updatedAt: new Date(),
             })
             .where(eq(clientDeploys.id, id)),
@@ -376,6 +420,8 @@ const deployWorkers = async (
         }
       );
     }
+    // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
+    await assertLatest(db, id, clientId);
     // oxlint-disable-next-line no-await-in-loop -- live before the next Worker
     await deployWorker(
       api,
@@ -385,6 +431,8 @@ const deployWorkers = async (
       `Release ${releaseId} (deploy ${id})`
     );
     const liveAt = new Date();
+    // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
+    await assertLatest(db, id, clientId);
     // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
     await act(
       db,
@@ -567,27 +615,4 @@ export const runDeploy = async (
   if (!done) {
     throw superseded(id);
   }
-  // A rotated generation is live from now: its previous keys are kept for
-  // a window from here (src/deploy/secrets.ts).
-  const liveAt = context.now?.() ?? new Date();
-  await actIfChanged(
-    db,
-    "system",
-    db
-      .update(clients)
-      .set({ rotationLiveAt: liveAt, updatedAt: liveAt })
-      .where(
-        and(
-          eq(clients.id, clientId),
-          eq(clients.generation, deploy.generation),
-          gt(clients.generation, 1),
-          isNull(clients.rotationLiveAt)
-        )
-      ),
-    {
-      action: "client.rotation_live",
-      clientId,
-      detail: { generation: deploy.generation },
-    }
-  );
 };

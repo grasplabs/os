@@ -31,6 +31,8 @@ export const deployErrorCodes = [
   "missing_secret",
   /** The release has a Worker the console doesn't deploy. */
   "unknown_worker",
+  /** The release's Workers bind each other as services in a cycle. */
+  "service_binding_cycle",
 ] as const;
 
 export type DeployErrorCode = (typeof deployErrorCodes)[number];

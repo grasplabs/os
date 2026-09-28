@@ -153,20 +153,48 @@ export const deployWorker = async (
 };
 
 /**
- * The order to upload and deploy a release's Workers in, by app: a Worker
- * another one binds as a service goes before it, as connect before core.
+ * The order to upload and deploy a release's Workers in, by app: each
+ * Worker after every Worker it binds as a service (connect before core),
+ * so none goes live before what it calls. Apps with no such tie keep
+ * their name order. A cycle of service bindings has no such order, and is
+ * refused (`service_binding_cycle`).
  */
 export const deployOrder = (workers: Record<string, WorkerEntry>): string[] => {
-  const bound = new Set(
-    Object.values(workers).flatMap((worker) =>
-      worker.bindings.flatMap((binding) =>
-        binding.type === "service" && typeof binding.service === "string"
-          ? [binding.service]
-          : []
-      )
-    )
+  const appByName = new Map(
+    Object.entries(workers).map(([app, worker]) => [worker.name, app])
   );
-  const apps = Object.keys(workers).toSorted();
-  const first = apps.filter((app) => bound.has(workers[app]?.name ?? ""));
-  return [...first, ...apps.filter((app) => !first.includes(app))];
+  /** The apps `app` binds as services, in the release. */
+  const dependencies = (app: string): string[] =>
+    (workers[app]?.bindings ?? []).flatMap((binding) => {
+      const bound =
+        binding.type === "service" && typeof binding.service === "string"
+          ? appByName.get(binding.service)
+          : undefined;
+      return bound === undefined ? [] : [bound];
+    });
+  const order: string[] = [];
+  const done = new Set<string>();
+  const visiting = new Set<string>();
+  const visit = (app: string): void => {
+    if (done.has(app)) {
+      return;
+    }
+    if (visiting.has(app)) {
+      throw new DeployError(
+        "service_binding_cycle",
+        `The release's Workers bind each other in a cycle through ${app}`
+      );
+    }
+    visiting.add(app);
+    for (const dependency of dependencies(app).toSorted()) {
+      visit(dependency);
+    }
+    visiting.delete(app);
+    done.add(app);
+    order.push(app);
+  };
+  for (const app of Object.keys(workers).toSorted()) {
+    visit(app);
+  }
+  return order;
 };

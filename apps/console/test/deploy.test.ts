@@ -729,45 +729,134 @@ describe("deploying safely", () => {
   });
 });
 
-describe("rotating a client's secrets", () => {
-  const day = 24 * 60 * 60 * 1000;
-
-  it("keeps the previous keys until a week after the new generation went live, however late it's deployed", async () => {
+describe("resuming and superseding, Worker by Worker", () => {
+  it("makes nothing more live once a newer deploy supersedes it between two Workers", async () => {
     const { account, clientId, release, deployId } = await setUp();
-    await runDeploy(context, deployId);
-    const now = Date.now();
-    const at = (days: number) => new Date(now + days * day);
-    // Raised eight days before it's deployed.
-    await rotateClientSecrets(db, staff, clientId, at(-8));
-
-    const previousAt = async (days: number) => {
-      await runDeploy(
-        { ...context, now: () => at(days) },
-        await startDeploy(db, staff, clientId, release.id)
-      );
-      return liveVersionOf(account, "grasp-os-core")?.secrets.has(
-        "ROUTER_SECRET_PREVIOUS"
-      );
+    const coreModule = release.manifest.workers.core?.modules[0]?.r2Key;
+    let newer = "";
+    // The newer deploy starts once connect is live, while core's code is read.
+    const store: ReleaseStore = {
+      list: async (options) => await env.RELEASES.list(options),
+      get: async (key: string) => {
+        if (key === coreModule && newer === "") {
+          newer = await startDeploy(db, staff, clientId, release.id);
+        }
+        return await env.RELEASES.get(key);
+      },
     };
-    // Live from now: the first deploy, then three days on, keep them.
-    const whenLive = await previousAt(0);
-    const threeDaysOn = await previousAt(3);
-    const tooSoon = await rotateClientSecrets(db, staff, clientId, at(3));
-    const eightDaysOn = await previousAt(8);
-    const later = await rotateClientSecrets(db, staff, clientId, at(8));
+
+    await expect(
+      runDeploy({ ...context, store }, deployId)
+    ).rejects.toMatchObject({ code: "deploy_superseded" });
 
     expect({
-      whenLive,
-      threeDaysOn,
-      tooSoon,
-      eightDaysOn,
-      later,
-    }).toStrictEqual({
-      whenLive: true,
-      threeDaysOn: true,
-      tooSoon: false,
-      eightDaysOn: false,
-      later: true,
+      connect: liveVersionOf(account, "grasp-os-connect") !== undefined,
+      core: account.scripts.has("grasp-os-core"),
+    }).toStrictEqual({ connect: true, core: false });
+  });
+
+  it("uploads a recorded version again when a shared secret or a setting changed since", async () => {
+    const { account, clientId, deployId } = await setUp({
+      notes: "feat(core): needs a shared secret",
+      coreSecrets: ["ENTRA_CLIENT_SECRET"],
     });
+    // Connect is uploaded and recorded; core stops the deploy.
+    await failingDeploy(deployId);
+    const changed = {
+      ...context,
+      secrets: {
+        ...secrets,
+        shared: {
+          connect: { COMPOSIO_API_KEY: "a-new-composio-key" },
+          core: { ENTRA_CLIENT_SECRET: "entra" },
+        },
+      },
+    };
+
+    await runDeploy(changed, deployId);
+
+    const connect = liveVersionOf(account, "grasp-os-connect");
+    expect({
+      versions: account.scripts.get("grasp-os-connect")?.versions.length,
+      key: connect?.secrets.get("COMPOSIO_API_KEY"),
+    }).toStrictEqual({ versions: 2, key: "a-new-composio-key" });
+
+    // Core's new version is recorded, but its deployment fails; then a
+    // setting changes, so the resume uploads core again.
+    const next = await nextDeploy(clientId, {
+      notes: "feat(core): needs a shared secret",
+      coreSecrets: ["ENTRA_CLIENT_SECRET"],
+    });
+    cloudflare.failNext(
+      (call) =>
+        call.method === "POST" &&
+        call.path.endsWith("/grasp-os-core/deployments"),
+      500
+    );
+    const failing = vi.spyOn(console, "error").mockImplementation(() => {
+      // The failure is logged; the test reads the row instead.
+    });
+    await expect(runDeploy(changed, next)).rejects.toBeInstanceOf(Error);
+    failing.mockRestore();
+    await db.insert(settings).values({
+      clientId,
+      key: "FEATURES",
+      value: JSON.stringify({ apps: true }),
+      updatedBy: staff.email,
+      updatedAt: new Date(),
+    });
+    const coreVersions = account.scripts.get("grasp-os-core")?.versions.length;
+    await runDeploy(changed, next);
+    expect({
+      uploaded:
+        (account.scripts.get("grasp-os-core")?.versions.length ?? 0) -
+        (coreVersions ?? 0),
+      features: bindingsOf(liveVersionOf(account, "grasp-os-core")).get(
+        "FEATURES"
+      ),
+    }).toStrictEqual({
+      uploaded: 1,
+      features: { type: "json", name: "FEATURES", json: { apps: true } },
+    });
+  });
+
+  it("uploads again without the previous keys once the rotation's week has closed", async () => {
+    const { account, clientId, deployId } = await setUp({
+      notes: "feat(core): needs a shared secret",
+      coreSecrets: ["ENTRA_CLIENT_SECRET"],
+    });
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    await rotateClientSecrets(db, staff, clientId, new Date(now - 9 * day));
+    // Live a day ago: within the week, so connect gets the previous keys.
+    await db
+      .update(clients)
+      .set({ rotationLiveAt: new Date(now - day) })
+      .where(eq(clients.id, clientId));
+    await failingDeploy(deployId);
+    const first = account.scripts.get("grasp-os-connect")?.versions.at(-1);
+
+    // Live eight days ago: the week has closed.
+    await db
+      .update(clients)
+      .set({ rotationLiveAt: new Date(now - 8 * day) })
+      .where(eq(clients.id, clientId));
+    await runDeploy(
+      {
+        ...context,
+        secrets: {
+          ...secrets,
+          shared: { ...secrets.shared, core: { ENTRA_CLIENT_SECRET: "entra" } },
+        },
+      },
+      deployId
+    );
+
+    const live = liveVersionOf(account, "grasp-os-connect");
+    expect({
+      before: first?.secrets.has("TOKEN_ENCRYPTION_KEY_PREVIOUS"),
+      after: live?.secrets.has("TOKEN_ENCRYPTION_KEY_PREVIOUS"),
+      reuploaded: live?.id !== first?.id,
+    }).toStrictEqual({ before: true, after: false, reuploaded: true });
   });
 });
