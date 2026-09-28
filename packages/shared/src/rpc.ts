@@ -5,6 +5,7 @@ import type { DecisionsApi } from "./decisions.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
 import type { MembersApi } from "./members.ts";
 import type { MemoryApi } from "./memory.ts";
+import type { ModelsApi } from "./models.ts";
 import type { PermissionsApi } from "./permissions.ts";
 import type { Role } from "./roles.ts";
 import type { ScreensApi } from "./screens.ts";
@@ -76,6 +77,11 @@ export interface SessionApi {
   readonly members: MembersApi;
   /** The audit log: search, export and chain verification. Admins only. */
   readonly audit: AuditApi;
+  /**
+   * The model gateway's settings, which Grasp sets for the client, and this
+   * month's spend against its budgets. Admins only.
+   */
+  readonly models: ModelsApi;
   /**
    * Side effects the person's agents, Apps and runs asked for, held until
    * the person confirms or declines them: from chat, from a person using

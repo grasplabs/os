@@ -25,7 +25,8 @@ import { featureErrors } from "@grasp-os/shared/errors";
 // (`apps`), starting runs and every step of one (`workflows`), opening
 // or asking a decision (`decisions`), and screens' calls on their App's
 // runs (`screen_workflows`). `model_rules` stops the model
-// gateway checking the client's rules beyond the allowlist, and
+// gateway checking the client's rules beyond the allowlist,
+// `model_settings` admins reading those rules and the month's spend, and
 // `improvement_signals` the daily signals and reading them. `builtins`
 // moves installing what ships with the release (builtins.ts) from the
 // cron trigger to the first request.
@@ -135,6 +136,12 @@ export type Feature =
    * deployment in the EU whether this is on or not (knowledge/extract.ts).
    */
   | "model_rules"
+  /**
+   * Admins reading the model gateway's settings and this month's spend
+   * against its budgets (models-rpc.ts). While off, nobody reads them; the
+   * gateway goes on checking every call as before.
+   */
+  | "model_settings"
   /**
    * Improvement signals (signals.ts): computing them daily, and reading
    * them. While off, nothing is computed and nobody reads what was.
