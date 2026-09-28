@@ -12,6 +12,11 @@ import { BoardPage } from "../components/board-page";
 import { NarrativeEditor, TakeSnapshot } from "../components/controls";
 import { ask, refusal } from "../components/snapshot";
 import type { Snapshot, Snapshots } from "../components/snapshot";
+import { viewer } from "../components/viewer";
+import type { Shown } from "../components/viewer";
+
+/** Opens a snapshot on the server. */
+const openSnapshot = async (id: string) => await ask<Snapshot>("open", id);
 
 /**
  * The board page: a snapshot of the Playbook on one page, the newest by
@@ -22,11 +27,17 @@ const Board = () => {
   const [listed, setListed] = useState<Snapshots | null>(null);
   const [opened, setOpened] = useState<Snapshot | null>(null);
   const [problem, setProblem] = useState("");
-  // The snapshot the person asked for last, and each opening asked for,
-  // numbered: an answer to any but the latest, arriving late, is dropped,
-  // as it would show what they moved away from, or an older version.
-  const selected = useRef<string | null>(null);
-  const openings = useRef(0);
+  // Which snapshot is shown, from the answers as they come (viewer.ts).
+  const snapshots = useRef(viewer(openSnapshot));
+  const to: Shown = {
+    show: (snapshot) => {
+      setProblem("");
+      setOpened(snapshot);
+    },
+    refuse: (code) => {
+      setProblem(refusal(code));
+    },
+  };
   // Each listing asked for, numbered: an older one arriving late is dropped.
   const listings = useRef(0);
 
@@ -44,32 +55,9 @@ const Board = () => {
     setListed(answer.ok);
   };
 
-  const open = async (id: string): Promise<void> => {
-    selected.current = id;
-    openings.current += 1;
-    const asked = openings.current;
-    const answer = await ask<Snapshot>("open", id);
-    if (asked !== openings.current) {
-      return;
-    }
-    if ("error" in answer) {
-      setProblem(refusal(answer.error));
-      return;
-    }
-    setProblem("");
-    setOpened(answer.ok);
-  };
-
   // Lists the snapshots again, with one just taken, and opens it.
   const taken = async (id: string): Promise<void> => {
-    await Promise.all([list(), open(id)]);
-  };
-
-  // A save shows its new version, unless another snapshot is open by then.
-  const saved = async (id: string): Promise<void> => {
-    if (selected.current === id) {
-      await open(id);
-    }
+    await Promise.all([list(), snapshots.current.open(id, to)]);
   };
 
   // On opening: the snapshots, and the newest of them, unless the person
@@ -89,21 +77,16 @@ const Board = () => {
       }
       setListed(answer.ok);
       const newest = answer.ok.snapshots[0]?.id;
-      if (newest === undefined || selected.current !== null) {
-        return;
+      if (newest !== undefined) {
+        await snapshots.current.first(newest, {
+          show: (snapshot) => {
+            setOpened(snapshot);
+          },
+          refuse: (code) => {
+            setProblem(refusal(code));
+          },
+        });
       }
-      selected.current = newest;
-      openings.current += 1;
-      const opening = openings.current;
-      const snapshot = await ask<Snapshot>("open", newest);
-      if (!mounted || opening !== openings.current) {
-        return;
-      }
-      if ("error" in snapshot) {
-        setProblem(refusal(snapshot.error));
-        return;
-      }
-      setOpened(snapshot.ok);
     };
     void first();
     return () => {
@@ -131,7 +114,7 @@ const Board = () => {
                 value={opened?.id ?? null}
                 onValueChange={(id: string | null) => {
                   if (id !== null) {
-                    void open(id);
+                    void snapshots.current.open(id, to);
                   }
                 }}
               >
@@ -186,7 +169,7 @@ const Board = () => {
               key={`${opened.id}@${opened.version}`}
               snapshot={opened}
               onSaved={(id) => {
-                void saved(id);
+                void snapshots.current.saved(id, to);
               }}
               onRefused={refused}
             />
