@@ -1,3 +1,4 @@
+import type { AuditPage } from "@grasp-os/shared/audit-log";
 import { isAdmin } from "@grasp-os/shared/roles";
 import {
   Tabs,
@@ -24,6 +25,14 @@ import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 // itself recorded in it.
 
 type ActivitySearch = LogSearch & { tab?: "pending" };
+
+/**
+ * The records' key: their filters and the first page read, so the log read
+ * again, with new filters or the same ones, starts from its own first page
+ * and drops the older pages loaded under the last.
+ */
+const logKey = (filters: LogSearch, { records, next }: AuditPage): string =>
+  JSON.stringify([filters, records[0]?.seq ?? null, next]);
 
 const Activity = () => {
   const data = Route.useLoaderData();
@@ -58,7 +67,7 @@ const Activity = () => {
                 <LogRecords
                   directory={data.log.data.directory}
                   first={data.log.data.page}
-                  key={JSON.stringify(filters)}
+                  key={logKey(filters, data.log.data.page)}
                   search={filters}
                 />
               ) : null}
@@ -84,8 +93,10 @@ const Activity = () => {
 };
 
 export const Route = createFileRoute("/_shell/activity")({
-  validateSearch: (search: Record<string, unknown>): ActivitySearch =>
-    search.tab === "pending" ? { tab: "pending" } : logSearchOf(search),
+  validateSearch: (search: Record<string, unknown>): ActivitySearch => ({
+    ...logSearchOf(search),
+    tab: search.tab === "pending" ? "pending" : undefined,
+  }),
   loaderDeps: ({ search }) => search,
   loader: async ({ deps }) => {
     if (deps.tab === "pending") {

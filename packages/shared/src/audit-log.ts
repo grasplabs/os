@@ -115,7 +115,10 @@ export const auditEventTypeOf = (
   )?.type ?? null;
 
 /** A dotted action or the start of one: `connection` or `connection.call`. */
-const actionPrefixPattern = /^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u;
+export const auditActionPrefixSchema = z
+  .string()
+  .max(identifierMaxLength)
+  .regex(/^[a-z][a-z0-9_]*(?:\.[a-z][a-z0-9_]*)*$/u);
 
 /** An ISO 8601 time, as the log writes its own (`toISOString`), to compare. */
 const timeSchema = z.iso
@@ -147,11 +150,7 @@ export const auditFilterSchema = z
     actorId: identifierSchema.optional(),
     type: auditEventTypeSchema.optional(),
     /** The action or a dotted prefix of it: `connection` finds `connection.call`. */
-    action: z
-      .string()
-      .max(identifierMaxLength)
-      .regex(actionPrefixPattern)
-      .optional(),
+    action: auditActionPrefixSchema.optional(),
     targetType: identifierSchema.optional(),
     targetId: identifierSchema.optional(),
     /** A resource the event names in its provenance or as `detail.resource`. */

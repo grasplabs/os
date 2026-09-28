@@ -7,6 +7,7 @@ import {
 import type {
   Authority,
   PermissionRequest,
+  PermissionStatus,
   PermissionSubjectInput,
 } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
@@ -643,6 +644,41 @@ describe("permissions", () => {
     await expect(
       outcome(admin.api.permissions.request(outlook(app.appId)))
     ).resolves.toBe("ok");
+  });
+
+  it("are listed by status when asked, and refuse a status that isn't one", async () => {
+    const admin = await permissionApi("admin");
+    const app = await newApp(admin.api);
+    const ask = async (binding: string) =>
+      await admin.api.permissions.request({ ...outlook(app.appId), binding });
+    await ask("ASKED");
+    const granted = await ask("GRANTED");
+    const revoked = await ask("REVOKED");
+    await admin.api.permissions.grant(granted.id);
+    await admin.api.permissions.revoke(revoked.id);
+    const bindingsIn = async (status?: PermissionStatus) => {
+      const listed = await admin.api.permissions.list(app, status);
+      return new Set(listed.map(({ binding }) => binding));
+    };
+
+    expect({
+      all: await bindingsIn(),
+      requested: await bindingsIn("requested"),
+      active: await bindingsIn("active"),
+      revoked: await bindingsIn("revoked"),
+    }).toStrictEqual({
+      all: new Set(["ASKED", "GRANTED", "REVOKED"]),
+      requested: new Set(["ASKED"]),
+      active: new Set(["GRANTED"]),
+      revoked: new Set(["REVOKED"]),
+    });
+    await expect(
+      outcome(
+        // SAFETY: a status the type rules out, as a client could send it.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+        admin.api.permissions.list(app, "pending" as never)
+      )
+    ).resolves.toBe("permission.invalid");
   });
 
   it("keep their audit event when the audit log is down, and append it later, once", async () => {

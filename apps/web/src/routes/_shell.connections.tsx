@@ -5,8 +5,8 @@ import { connectionErrorMessage } from "../connection-errors.ts";
 import { Catalog } from "../connections/catalog.tsx";
 import { ConnectionList } from "../connections/connection-list.tsx";
 import type { HeldPermissions } from "../connections/connection-list.tsx";
-import { timeoutMs, withTimeout } from "../core.ts";
 import type { Session } from "../core.ts";
+import { listedOrNone } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
@@ -17,30 +17,20 @@ import type { Loaded } from "../load-from-core.tsx";
 // `connectionError=<code>` when it didn't.
 
 /**
- * How long the Apps' names may take: half the page's own limit, so a list
- * that hangs costs only the names, never the permissions beside them.
- */
-const appNamesTimeoutMs = timeoutMs / 2;
-
-/**
  * The Apps' names by ID; IDs stand in for them if the Apps can't be read
  * in time.
  */
 const appNamesOf = async (
   session: Session
 ): Promise<ReadonlyMap<string, string>> => {
-  try {
-    const apps = await withTimeout(session.apps.list(), appNamesTimeoutMs);
-    return new Map(apps.map(({ id, name }) => [id, name]));
-  } catch {
-    return new Map();
-  }
+  const apps = await listedOrNone(session.apps.list());
+  return new Map(apps.map(({ id, name }) => [id, name]));
 };
 
-/** Every permission the person may list, with the Apps' names. */
+/** Every active permission the person may list, with the Apps' names. */
 const heldPermissions = async (session: Session): Promise<HeldPermissions> => {
   const [permissions, appNames] = await Promise.all([
-    session.permissions.list(),
+    session.permissions.list(undefined, "active"),
     appNamesOf(session),
   ]);
   return { permissions, appNames };

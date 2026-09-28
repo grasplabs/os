@@ -75,6 +75,7 @@ test("an admin approves a permission request, finds it in the audit log, and exp
   await expect(
     page.getByRole("cell", { name: "Workflow map", exact: true })
   ).toHaveCount(0);
+  await expect(page.getByText(workflowMap)).toHaveCount(0);
   const reading = rows.filter({
     has: page.getByRole("cell", { name: "read", exact: true }),
   });
@@ -94,7 +95,21 @@ test("an admin approves a permission request, finds it in the audit log, and exp
   await expect(page.getByRole("status")).toContainText(`Rejected: ${appName}`);
   await expect(rows).toHaveCount(0);
 
-  // The approval is in the log, found by what it granted.
+  // The approval is in the log, found by what it granted, once the log has
+  // taken its events from core's outbox, which it does in the background.
+  const reader = apiOf(admin);
+  try {
+    await expect
+      .poll(async () => {
+        const { records } = await reader.api.audit.search({
+          targetId: approved,
+        });
+        return new Set(records.map(({ event }) => event?.action));
+      })
+      .toStrictEqual(new Set(["permission.granted", "permission.requested"]));
+  } finally {
+    reader.core[Symbol.dispose]();
+  }
   await page.goto(`/activity?target=${approved}`);
   await expect(page.getByRole("textbox", { name: "Target ID" })).toHaveValue(
     approved
@@ -115,12 +130,13 @@ test("an admin approves a permission request, finds it in the audit log, and exp
     page.getByText(`"requestedBy": "${builder.userId}"`)
   ).toBeVisible();
 
-  // Narrowed to grants, the request drops out.
+  // Narrowed to grants, the request drops out; the action is taken as
+  // core takes it, whatever its case and a trailing dot.
   await page.getByRole("combobox", { name: "Type" }).click();
   await page.getByRole("option", { name: "Permission" }).click();
   await page
     .getByRole("textbox", { name: "Action" })
-    .fill("permission.granted");
+    .fill("Permission.Granted.");
   await page.getByRole("button", { name: "Filter" }).click();
   await expect(page).toHaveURL(/action=permission\.granted/u);
   await expect(
@@ -140,4 +156,12 @@ test("an admin approves a permission request, finds it in the audit log, and exp
   expect(lines[0]).toMatch(/^seq,received_at,at,type,action,/u);
   expect(lines[1]).toContain(",permission,permission.granted,");
   expect(lines[1]).toContain(approved);
+
+  // Text that can't start an action is dropped, not refused by core.
+  await page.goto(
+    `/activity?target=${approved}&action=${encodeURIComponent("no such action!")}`
+  );
+  await expect(page.getByRole("textbox", { name: "Action" })).toHaveValue("");
+  await expect(granted).toHaveCount(1);
+  await expect(page.getByRole("alert")).toHaveCount(0);
 });

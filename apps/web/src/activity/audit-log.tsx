@@ -1,5 +1,8 @@
 import type { AuditActor } from "@grasp-os/shared/audit";
-import { auditEventTypeSchema } from "@grasp-os/shared/audit-log";
+import {
+  auditActionPrefixSchema,
+  auditEventTypeSchema,
+} from "@grasp-os/shared/audit-log";
 import type {
   AuditEventType,
   AuditExportFormat,
@@ -30,10 +33,15 @@ import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
 import type { Session } from "../core.ts";
+import {
+  appName,
+  formatTime,
+  personName,
+  readDirectory,
+} from "../directory.ts";
+import type { Directory } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
 import { useCoreAction } from "../use-core-action.ts";
-import { appName, personName, readDirectory } from "./directory.ts";
-import type { Directory } from "./directory.ts";
 
 // The audit log, for admins: its events newest first, narrowed by the
 // filters in the page's address, a page at a time, each with its details
@@ -63,6 +71,18 @@ const textFilter = (value: unknown): string | undefined => {
   return text === "" ? undefined : text;
 };
 
+const trailingDots = /\.+$/u;
+
+/**
+ * An action filter as typed, as core takes it: lower case, without a
+ * trailing dot (`Connection.` finds `connection.call`), and none for text
+ * that can't start an action, rather than a search core refuses whole.
+ */
+const actionFilter = (value: unknown): string | undefined => {
+  const text = textFilter(value)?.toLowerCase().replace(trailingDots, "");
+  return auditActionPrefixSchema.safeParse(text).data;
+};
+
 /** A day as the date inputs give it, and none for anything else. */
 const dayFilter = (value: unknown): string | undefined =>
   typeof value === "string" &&
@@ -71,21 +91,20 @@ const dayFilter = (value: unknown): string | undefined =>
     ? value
     : undefined;
 
-/** The log's filters in `search`, dropping what isn't one. */
-export const logSearchOf = (search: Record<string, unknown>): LogSearch => {
-  const type = auditEventTypeSchema.safeParse(search.type).data;
-  const fields = {
-    type,
-    action: textFilter(search.action),
-    actor: textFilter(search.actor),
-    target: textFilter(search.target),
-    from: dayFilter(search.from),
-    to: dayFilter(search.to),
-  };
-  return Object.fromEntries(
-    Object.entries(fields).filter(([, value]) => value !== undefined)
-  );
-};
+/**
+ * The log's filters in `search`, each one `undefined` where the address
+ * has none or one that isn't a filter: every key is there, as the router
+ * merges what a route validates over the address's own search, and a key
+ * left out would keep the address's value.
+ */
+export const logSearchOf = (search: Record<string, unknown>): LogSearch => ({
+  type: auditEventTypeSchema.safeParse(search.type).data,
+  action: actionFilter(search.action),
+  actor: textFilter(search.actor),
+  target: textFilter(search.target),
+  from: dayFilter(search.from),
+  to: dayFilter(search.to),
+});
 
 /** Midnight starting `day`, `days` later, in the viewer's time zone. */
 const midnight = (day: string, days = 0): string => {
@@ -319,8 +338,6 @@ const actorOf = (
   return { label: "Grasp" };
 };
 
-const formatTime = (iso: string): string => new Date(iso).toLocaleString();
-
 /** The event as stored, laid out to read; the stored text if it isn't JSON. */
 const readable = (json: string): string => {
   try {
@@ -431,8 +448,8 @@ const RecordRow = ({
 
 /**
  * The events that match, newest first: the first page as the page read
- * it, then each older page asked for. Keyed by the filters where it's
- * used, so new filters start from their own first page.
+ * it, then each older page asked for. Keyed by the filters and the first
+ * page where it's used, so every new read starts from its own first page.
  */
 export const LogRecords = ({
   first,

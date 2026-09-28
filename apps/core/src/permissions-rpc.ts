@@ -3,6 +3,7 @@ import type {
   Permission,
   PermissionRequest,
   PermissionsApi,
+  PermissionStatus,
   PermissionSubjectInput,
 } from "@grasp-os/shared/permissions";
 import { RpcTarget } from "capnweb";
@@ -66,13 +67,17 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
     );
   }
 
-  async list(subject?: PermissionSubjectInput): Promise<Permission[]> {
+  async list(
+    subject?: PermissionSubjectInput,
+    status?: PermissionStatus
+  ): Promise<Permission[]> {
     return await withPerson(this.#check, async (person) => {
       const listed = await listPermissions(
         this.#env,
         person,
         subject,
-        appsListedFor(this.#env, person)
+        appsListedFor(this.#env, person),
+        status
       );
       if (!featureEnabled(this.#env, "app_sharing")) {
         return listed;

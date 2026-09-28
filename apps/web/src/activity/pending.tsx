@@ -23,10 +23,16 @@ import { useState } from "react";
 
 import { changeThenRefresh } from "../change-then-refresh.ts";
 import type { Session } from "../core.ts";
+import {
+  appName,
+  appsById,
+  formatTime,
+  personName,
+  readPeople,
+} from "../directory.ts";
+import type { Directory } from "../directory.ts";
 import { ErrorText } from "../error-text.tsx";
 import { useCoreAction } from "../use-core-action.ts";
-import { appName, personName, readDirectory } from "./directory.ts";
-import type { Directory } from "./directory.ts";
 
 // Pending approvals: the permissions Apps and agents asked for, which an
 // admin grants or rejects. Core checks the role on every call; the page
@@ -46,17 +52,23 @@ const isBuiltins = ({ subject }: Permission, directory: Directory): boolean =>
   subject.type === "app" &&
   directory.apps.get(subject.appId)?.owner === builtinOwner;
 
-/** Every request waiting for an admin, oldest first as core lists them. */
+/**
+ * Every request waiting for an admin, oldest first as core lists them. The
+ * Apps are read in full, not only for names: they say which requests are
+ * the built-ins' and which version an admin reviews, so the tab fails
+ * without them rather than offer the wrong decisions.
+ */
 export const readPendingRequests = async (
   session: Session
 ): Promise<PendingRequests> => {
-  const [permissions, directory] = await Promise.all([
-    session.permissions.list(),
-    readDirectory(session),
+  const [requested, apps, people] = await Promise.all([
+    session.permissions.list(undefined, "requested"),
+    session.apps.list(),
+    readPeople(session),
   ]);
-  const requests = permissions.filter(
-    (permission) =>
-      permission.status === "requested" && !isBuiltins(permission, directory)
+  const directory = { people, apps: appsById(apps) };
+  const requests = requested.filter(
+    (permission) => !isBuiltins(permission, directory)
   );
   return { requests, directory };
 };
@@ -92,13 +104,14 @@ const reviewedVersion = (
   if (subject.type !== "app") {
     return "–";
   }
-  const version = directory.apps.get(subject.appId)?.currentVersion;
-  return version === null || version === undefined
+  const app = directory.apps.get(subject.appId);
+  if (app === undefined) {
+    return "Unknown";
+  }
+  return app.currentVersion === null
     ? "None current"
-    : String(version);
+    : String(app.currentVersion);
 };
-
-const formatTime = (iso: string): string => new Date(iso).toLocaleString();
 
 /** What a decision did, with a way to find it in the log. */
 interface Decided {
