@@ -512,9 +512,10 @@ export const declaredTriggers = async (
 
 /**
  * Why workflow `id`'s tests fail on a version's `modules`, one line each;
- * none if they pass. They run once, as the version is made current, in an
- * isolate with no name, which goes once they are done: workerd keeps a
- * named isolate, the SDK's modules in it, for as long as the process runs.
+ * none if they pass. They run App code, once, as the version is made
+ * current, in an isolate with no name, which nothing else shares and which
+ * goes once they are done: workerd keeps a named isolate, the SDK's
+ * modules in it, for as long as the process runs.
  */
 const testFailures = async (
   env: Env,

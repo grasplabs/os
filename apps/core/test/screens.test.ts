@@ -225,17 +225,27 @@ export default function Desk() {
   });
 
   it("builds the same files once and serves them from the cache after", async () => {
-    const built = await buildScreens(env, sampleApp);
-    expect(built.ok).toBeTruthy();
+    // Files of this test's own, so no earlier build is in the cache.
+    const files = screen(`once ${crypto.randomUUID()}`);
+    let started = 0;
+    const counting: WorkerLoader = {
+      get: (name, code) => {
+        started += 1;
+        return env.LOADER.get(name, code);
+      },
+      load: (code) => env.LOADER.load(code),
+    };
+    const built = await buildScreens({ ...env, LOADER: counting }, files);
+    expect({ ok: built.ok, started }).toStrictEqual({ ok: true, started: 1 });
 
     // A build is its files': whichever App or version they come from, the
     // same files, next to any the build doesn't read, are built already.
-    const cached = await buildScreens({ ...env, LOADER: noBuilds }, sampleApp);
+    const cached = await buildScreens({ ...env, LOADER: noBuilds }, files);
     expect(cached).toStrictEqual(built);
     await expect(
       buildScreens(
         { ...env, LOADER: noBuilds },
-        { ...sampleApp, "app/server.ts": "export class App {}\n" }
+        { ...files, "app/server.ts": "export class App {}\n" }
       )
     ).resolves.toStrictEqual(built);
 
@@ -243,7 +253,7 @@ export default function Desk() {
     await expect(
       buildScreens(
         { ...env, LOADER: noBuilds },
-        { ...sampleApp, "components/extra.ts": "export {};\n" }
+        { ...files, "components/extra.ts": "export {};\n" }
       )
     ).rejects.toThrow("Built again");
   });

@@ -122,19 +122,22 @@ export const isolateSettings = {
 } satisfies Omit<WorkerLoaderWorkerCode, "mainModule" | "modules">;
 
 /**
- * Starts the compiler in a new isolate of its own, with its code read from
- * core's static assets. The isolate has no name, so the loader keeps it
- * for nothing else: no two builds share one, and it goes once its build is
- * done. workerd keeps a named isolate for as long as the process runs, so
- * one per build, each holding the compiler and its type checker, would
- * grow core by about 100 MB with every build.
+ * The compiler, in one isolate per release that every build shares, with
+ * its code read from core's static assets. Kept warm, a build doesn't load
+ * the compiler and the kit again, so a change to an App shows at once. It
+ * is safe to share: the compiler parses and transforms App code but never
+ * runs it, and the isolate has no bindings, no network and no subrequests
+ * (`isolateSettings`). App code itself never runs here. The name holds
+ * only the release's compiler version: workerd keeps a named isolate for
+ * as long as the process runs, so a name per build would keep one
+ * compiler for every build ever made.
  */
 export const startScreenCompiler = (
   loader: WorkerLoader,
   assets: Fetcher
 ): Service<ScreenCompiler> =>
   loader
-    .get(null, async () => {
+    .get(`compiler:${version}`, async () => {
       const [source, kitJson] = await Promise.all([
         readCompilerFile(assets, compilerAssets.source, "javascript"),
         readCompilerFile(assets, compilerAssets.kit, "json"),
