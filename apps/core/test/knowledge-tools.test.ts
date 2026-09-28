@@ -733,7 +733,9 @@ describe("Knowledge reads in the audit log", setUpTime, () => {
     const { collectionId, noteId } = handbook;
     await requestGranted(idp, admin, readCollection(agent, collectionId));
     await requestGranted(idp, admin, readCollection(app, collectionId));
-    const knowledge = await toolsOf(agent, admin);
+    // The chat the agent reads in, which each of its reads names.
+    const chat = await newChat();
+    const knowledge = await toolsOf(agent, admin, chat);
     const appReader = collectionIn(
       await envOf(actingFor(app, admin.userId), app),
       "HANDBOOK"
@@ -779,21 +781,37 @@ describe("Knowledge reads in the audit log", setUpTime, () => {
         target: undefined,
         // The collection it read from, and each document it returned.
         provenance: [collectionId, ...new Set(found)],
-        detail: { terms: 1, hits: found.length, sensitive: false },
+        detail: {
+          terms: 1,
+          hits: found.length,
+          sensitive: false,
+          chat: chat.chatId,
+        },
       },
       {
         actor: agentActor,
         action: "knowledge.read",
         target: note,
         provenance: fromHandbook,
-        detail: { read: "section", version: 1, section: 0, sensitive: false },
+        detail: {
+          read: "section",
+          version: 1,
+          section: 0,
+          sensitive: false,
+          chat: chat.chatId,
+        },
       },
       {
         actor: agentActor,
         action: "knowledge.read",
         target: note,
         provenance: fromHandbook,
-        detail: { read: "document", version: 1, sensitive: false },
+        detail: {
+          read: "document",
+          version: 1,
+          sensitive: false,
+          chat: chat.chatId,
+        },
       },
       {
         actor: agentActor,
@@ -806,6 +824,7 @@ describe("Knowledge reads in the audit log", setUpTime, () => {
           backlinks: 1,
           files: 0,
           sensitive: false,
+          chat: chat.chatId,
         },
       },
       {

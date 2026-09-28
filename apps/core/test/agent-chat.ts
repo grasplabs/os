@@ -82,7 +82,8 @@ export const chatOf = async (personId: string, ...replies: GatewayReply[]) => {
   const gateway = fakeGateway(...replies);
   await pointAtGateway(stub, gateway);
   const ask = async (text: string) => await stub.ask(chat.id, { text, model });
-  const agent = { type: "agent" as const, agentId: `${id}/${chat.id}` };
+  // The workspace's agent: its grants hold in all the workspace's chats.
+  const agent = { type: "agent" as const, agentId: id };
   return { id, stub, chat, personId, gateway, ask, agent };
 };
 

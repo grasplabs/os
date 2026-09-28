@@ -2,6 +2,7 @@ import { agentErrors } from "@grasp-os/shared/agent";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import { authoritySchema } from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
+import { z } from "zod";
 
 import { workspace } from "./durable-objects.ts";
 import type { WorkContext } from "./restricted.ts";
@@ -40,18 +41,31 @@ export interface AgentApi {
 }
 
 /**
- * The chat's agent, acting for the chat's person: the one acting on every
- * call its code makes, in the audit log and in every permission check.
- * Its permissions are the agent's own, and every one reaches only as far
- * as the person may go themselves.
+ * A workspace's ID as its agent's ID: letters, digits and `-` only (a
+ * UUID, as core names workspaces), so it reads the same in a permission,
+ * an audit event and a memory path (`agents/<id>/AGENTS.md`), and never
+ * reaches into another's.
+ */
+const workspaceAgentIdSchema = z.string().regex(/^[A-Za-z0-9-]{1,64}$/u);
+
+/**
+ * The workspace's agent, acting for the chat's person: the one acting on
+ * every call its code makes, in the audit log and in every permission
+ * check. One agent per workspace, so what an admin grants it holds in all
+ * the workspace's chats; each chat still keeps its own sources, restricted
+ * mode and code runs (the chat is the context, `chatContext`). Its
+ * permissions are the agent's own, and every one reaches only as far as
+ * the person may go themselves.
  */
 export const chatAuthority = ({
   workspaceId,
-  chatId,
   personId,
-}: Omit<AgentScope, "runId">): Authority =>
+}: Omit<AgentScope, "runId" | "chatId">): Authority =>
   authoritySchema.parse({
-    subject: { type: "agent", agentId: `${workspaceId}/${chatId}` },
+    subject: {
+      type: "agent",
+      agentId: workspaceAgentIdSchema.parse(workspaceId),
+    },
     onBehalfOf: personId,
     mode: "interactive",
   });

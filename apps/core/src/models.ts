@@ -637,6 +637,13 @@ interface Recorded {
   errorType: string | undefined;
 }
 
+/**
+ * The chat a call works in, if it works in one: its actor is the
+ * workspace's agent, for every chat of the workspace.
+ */
+const chatOf = ({ work }: Session): string | null =>
+  work?.context.type === "chat" ? work.context.chatId : null;
+
 /** Whether `entry` makes an event the audit log takes. */
 const fitsAuditLog = (entry: AuditEntry): boolean => {
   try {
@@ -702,6 +709,7 @@ const auditEntry = (
       // Why it carried sensitive data, if a data rule asked and it did.
       sensitive: judged.sensitive ?? null,
       provenanceDropped: dropped,
+      chat: chatOf(call),
     },
   }));
 };
@@ -788,6 +796,7 @@ const refusedEntry = (
       because: because ?? null,
       model,
       provenanceDropped: dropped,
+      chat: chatOf(call),
     },
   }));
 };

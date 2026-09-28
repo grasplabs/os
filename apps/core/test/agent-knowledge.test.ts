@@ -1,8 +1,11 @@
 import type { AuditEvent } from "@grasp-os/shared/audit";
+import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
-import { evictDurableObject } from "cloudflare:test";
+import { evictDurableObject, runInDurableObject } from "cloudflare:test";
+import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { workspace } from "../src/durable-objects.ts";
 import {
   chatOf,
   codeResults,
@@ -303,6 +306,82 @@ describe("a chat's Knowledge", setUpTime, () => {
       { because: "collection", provenance: [payroll.collectionId] },
     ]);
     await expect(stub.isChatRestricted(chat.id)).resolves.toBeTruthy();
+  });
+
+  it("reads in every chat of the workspace under one grant, each chat keeping its own sources", async () => {
+    const admin = await newAdmin();
+    const person = await newPerson();
+    const { collectionId, noteId } = await collectionWithNote(admin, {
+      name: `Handbook ${unique()}`,
+      access: "everyone",
+    });
+    const read = codeStep(
+      `export default async (env) => (await env.knowledge.read(${JSON.stringify(noteId)})).title;`
+    );
+    const { stub, chat, ask, agent } = await chatOf(
+      person.userId,
+      read,
+      says("Note."),
+      says("Hi."),
+      read,
+      says("Note here too.")
+    );
+    const other = await stub.createChat("Other", person.userId);
+    // Granted once, to the workspace's agent.
+    await grantRead(admin, agent, collectionId);
+
+    const first = await ask("Read the note.");
+    // Another chat of the workspace hasn't read anything yet: its first
+    // request carries nothing the first chat read.
+    const hello = await stub.ask(other.id, { text: "Hi.", model });
+    const second = await stub.ask(other.id, { text: "Read it.", model });
+
+    expect({
+      first: first.outcome,
+      hello: hello.outcome,
+      second: second.outcome,
+      results: [
+        ...(await codeResults(stub, chat.id)),
+        ...(await codeResults(stub, other.id)),
+      ].map(({ text }) => text),
+    }).toStrictEqual({
+      first: "answered",
+      hello: "answered",
+      second: "answered",
+      results: ["Returned:\nNote", "Returned:\nNote"],
+    });
+    const events = await eventsOf(
+      agent.agentId,
+      (all) => modelCalls(all).length === 5
+    );
+    // Every request names its chat, and carries that chat's sources only.
+    expect(
+      modelCalls(events).map(({ detail, provenance }) => ({
+        chat: detail.chat,
+        provenance,
+      }))
+    ).toStrictEqual([
+      { chat: chat.id, provenance: [] },
+      { chat: chat.id, provenance: [collectionId] },
+      { chat: other.id, provenance: [] },
+      { chat: other.id, provenance: [] },
+      { chat: other.id, provenance: [collectionId] },
+    ]);
+  });
+
+  it("acts for no workspace whose ID isn't a plain identifier", async () => {
+    const person = await newPerson();
+    // What no workspace core names looks like: it would reach into
+    // another agent's memory path.
+    const stub = workspace(env, workspaceIdSchema.parse("../other"));
+    const chat = await stub.createChat("Questions", person.userId);
+
+    await expect(
+      outcome(stub.ask(chat.id, { text: "Hi.", model }))
+    ).resolves.not.toBe("ok");
+    await expect(
+      runInDurableObject(stub, (instance) => instance.messages(chat.id))
+    ).resolves.toStrictEqual([]);
   });
 
   it("records nothing for a code run that isn't open", async () => {

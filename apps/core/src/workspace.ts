@@ -166,8 +166,8 @@ export class Workspace extends DurableObject<Env> {
       // durable-objects.ts).
       const workspaceId = workspaceIdSchema.parse(this.ctx.id.name);
       const scope = { workspaceId, chatId: chat.id, personId };
-      // The chat's agent, acting for the chat's person, in this chat: the
-      // audit log's actor, and the rules' context (its restricted mode).
+      // The workspace's agent, acting for the chat's person, in this chat:
+      // the audit log's actor, and the rules' context (its restricted mode).
       const authority = chatAuthority(scope);
       // Refuses a model the deployment or its rules don't allow before
       // anything is kept. Every request carries everything the chat has

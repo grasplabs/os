@@ -430,6 +430,8 @@ describe("memory for a context", setUpTime, () => {
         appId,
         appVersion,
         sensitive: false,
+        // Which chat of its workspace read it.
+        chat: work.type === "chat" ? work.chatId : null,
       },
     };
     expect({

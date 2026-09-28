@@ -132,7 +132,7 @@ describe("chat agent", () => {
     ]);
   });
 
-  it("audits every model request as the chat's agent, acting for the chat's person", async () => {
+  it("audits every model request as the workspace's agent, acting for the chat's person, in the chat", async () => {
     const { id, chat, personId, ask } = await newChat(
       codeStep("export default async () => 1 + 1;"),
       says("Two.")
@@ -142,12 +142,20 @@ describe("chat agent", () => {
 
     const events = await modelCallsBy(personId, 2);
     expect(events.map(({ actor }) => actor)).toStrictEqual([
-      { type: "agent", agentId: `${id}/${chat.id}`, onBehalfOf: personId },
-      { type: "agent", agentId: `${id}/${chat.id}`, onBehalfOf: personId },
+      { type: "agent", agentId: id, onBehalfOf: personId },
+      { type: "agent", agentId: id, onBehalfOf: personId },
     ]);
     expect(events.map(({ detail }) => detail)).toStrictEqual([
-      expect.objectContaining({ purpose: "chat.turn", outcome: "answered" }),
-      expect.objectContaining({ purpose: "chat.turn", outcome: "answered" }),
+      expect.objectContaining({
+        purpose: "chat.turn",
+        outcome: "answered",
+        chat: chat.id,
+      }),
+      expect.objectContaining({
+        purpose: "chat.turn",
+        outcome: "answered",
+        chat: chat.id,
+      }),
     ]);
     // Metadata only: never the question or the code.
     expect(JSON.stringify(events)).not.toContain("1 + 1");
