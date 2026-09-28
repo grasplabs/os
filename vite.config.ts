@@ -89,10 +89,12 @@ export default defineConfig({
     ignorePatterns: [...(ultracite.ignorePatterns ?? []), ...generated],
   },
   test: {
-    // The console's Cloudflare Vite plugin cannot load as a Vitest project.
+    // The console's Cloudflare Vite plugin cannot load as a Vitest project;
+    // its tests have a config of their own.
     projects: [
       "apps/*",
       "!apps/console",
+      "apps/console/vite.test.config.ts",
       "apps/core/vite.screens.config.ts",
       "packages/*",
       "packages/connectors/*",

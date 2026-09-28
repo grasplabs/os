@@ -138,7 +138,25 @@ jobs:
       # Console first, each on its own: the router's deploy needs the
       # account's Secrets Store (scripts/wrangler-deploy.ts), and an account
       # not set up for it yet mustn't hold back the console.
-      - if: ${{ !inputs.secrets-only }}
-        run: vp run --filter @grasp-os/console deploy
+      # The console verifies every request's Access JWT against its Access
+      # application (apps/console/src/access.ts) and refuses everyone
+      # without these, so a deploy without them would lock staff out: stop
+      # before deploying. They're the `grasp-os-ops` environment's variables,
+      # not secrets: the AUD tag and the team URL identify the app, they
+      # grant nothing.
+      - name: Deploy the console with its Access settings
+        if: ${{ !inputs.secrets-only }}
+        env:
+          CF_ACCESS_AUD: ${{ vars.CF_ACCESS_AUD }}
+          CF_ACCESS_ISS: ${{ vars.CF_ACCESS_ISS }}
+        run: |
+          set -euo pipefail
+          if [ -z "$CF_ACCESS_AUD" ] || [ -z "$CF_ACCESS_ISS" ]; then
+            echo "::error::Set CF_ACCESS_AUD and CF_ACCESS_ISS as variables of the grasp-os-ops environment; nothing deployed"
+            exit 1
+          fi
+          vp run --filter @grasp-os/console build
+          cd apps/console
+          vp exec wrangler deploy --var "CF_ACCESS_AUD:$CF_ACCESS_AUD" --var "CF_ACCESS_ISS:$CF_ACCESS_ISS"
       - if: ${{ !inputs.secrets-only }}
         run: vp run --filter @grasp-os/router deploy

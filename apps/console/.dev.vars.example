@@ -1,0 +1,5 @@
+# Copy to .dev.vars for local development. Never commit real values.
+# Local dev runs without Cloudflare Access: every request to localhost comes
+# from this staff member. Honoured only for requests to this machine; a
+# deployment that has it refuses every request.
+DEV_ACCESS_EMAIL=you@example.com

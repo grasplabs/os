@@ -59,6 +59,8 @@ catalog:
   "@earendil-works/pi-ai": 0.87.1
   "@modelcontextprotocol/sdk": 1.30.0
   better-auth: 1.7.5
+  # The console's Cloudflare Access check.
+  jose: 6.2.12
 
   # Frontend
   # Babel 7 until babel-plugin-react-compiler supports Babel 8.
