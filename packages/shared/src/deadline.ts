@@ -13,7 +13,7 @@ export interface Deadline {
 
 /**
  * Ends work after `ms`, or when its caller cancels it. Its timer is cleared
- * when the work ends, so none outlives it to keep a Durable Object awake
+ * when the work ends, so none outlives it (in core, to keep a Durable Object awake)
  * (`AbortSignal.timeout` can't be cleared).
  */
 export const deadline = (ms: number, caller?: AbortSignal): Deadline => {

@@ -974,6 +974,22 @@ describe("making a client reachable", () => {
     await expect(hosts.get(`${clientId}.${domain}`)).resolves.toBe(theirs);
   });
 
+  it("refuses to overwrite an entry the router can't read, and leaves it for staff to fix", async () => {
+    const { clientId, deployId } = await setUp();
+    // An entry in an older shape, without a client id.
+    const old = JSON.stringify({
+      coreUrl: `https://grasp-os-core.grasp-${clientId}.workers.dev`,
+    });
+    await hosts.put(`${clientId}.${domain}`, old);
+
+    await failingDeploy(deployId);
+
+    await expect(deployRow(deployId)).resolves.toMatchObject({
+      error: "router_entry_invalid",
+    });
+    await expect(hosts.get(`${clientId}.${domain}`)).resolves.toBe(old);
+  });
+
   it("refuses to take the map back to an earlier generation", async () => {
     const { clientId, deployId } = await setUp();
     const later = JSON.stringify({

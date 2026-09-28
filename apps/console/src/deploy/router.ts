@@ -1,3 +1,4 @@
+import { deadline, whenAborted } from "@grasp-os/shared/deadline";
 /**
  * The last steps of a deploy: checking that the client's core runs the
  * version this deploy made live, as the router reaches it, then pointing
@@ -19,8 +20,11 @@ import { CloudflareApiError, isNotFound } from "../cloudflare/api.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
 import { DeployError } from "./errors.ts";
 
-/** The router's hostname map, as the console uses it (the router's `HOSTS`). */
-export type RouterHosts = Pick<KVNamespace, "get" | "put">;
+/** The router's hostname map, as the console uses it (the router's `HOSTS`, a KV namespace). */
+export interface RouterHosts {
+  get: (key: string, type: "json") => Promise<unknown>;
+  put: (key: string, value: string) => Promise<void>;
+}
 
 const subdomainSchema = z.object({ subdomain: z.string() });
 
@@ -111,33 +115,53 @@ export interface SmokeOptions {
   fetch?: typeof fetch;
   /** The first retry's wait, doubling after; tests pass 0. */
   retryDelayMs?: number;
+  /** How long one try may take, its body included; tests pass less. */
+  attemptTimeoutMs?: number;
 }
 
 /** Tries of the smoke check: a new workers.dev hostname can take a moment. */
 const smokeAttempts = 5;
 const defaultSmokeDelayMs = 2000;
+/**
+ * How long one try may take. With the waits between them, the check takes
+ * at most about 80 s (5 tries of 10 s, and 30 s of waiting).
+ */
+const defaultAttemptTimeoutMs = 10_000;
 
 /** What core's `/health` answers: the version answering (core's src/entry.ts). */
 const healthSchema = z.object({ ok: z.literal(true), version: z.string() });
 
-/** The version core's `/health` at `origin` names, or undefined when it doesn't answer. */
+/**
+ * The version core's `/health` at `origin` names, or undefined when it
+ * doesn't answer, answers otherwise, or takes longer than `timeoutMs`
+ * (its body included): a stalled connection ends this try, not the check.
+ */
 const answeringVersion = async (
   fetchCore: typeof fetch,
   origin: string,
-  routerSecret: string
+  routerSecret: string,
+  timeoutMs: number
 ): Promise<string | undefined> => {
+  const limit = deadline(timeoutMs);
   try {
-    const response = await fetchCore(`${origin}/health`, {
-      headers: { [routerSecretHeader]: routerSecret },
-      redirect: "manual",
-    });
-    if (!response.ok) {
-      return undefined;
-    }
-    const health = healthSchema.safeParse(await response.json());
+    const answer = async () => {
+      const response = await fetchCore(`${origin}/health`, {
+        headers: { [routerSecretHeader]: routerSecret },
+        redirect: "manual",
+        signal: limit.signal,
+      });
+      return response.ok ? await response.json() : undefined;
+    };
+    const body: unknown = await Promise.race([
+      answer(),
+      whenAborted(limit.signal),
+    ]);
+    const health = healthSchema.safeParse(body);
     return health.success ? health.data.version : undefined;
   } catch {
     return undefined;
+  } finally {
+    limit.clear();
   }
 };
 
@@ -146,8 +170,9 @@ const answeringVersion = async (
  * `versionId`, to a request carrying the client's router secret as the
  * router sends it: so the version this deploy made live is the one
  * answering, and it has the secret the router will derive. Tries a few
- * times, waiting longer each time (a new hostname, or the old version
- * still answering, can take a moment); returns how many tries it took.
+ * times, each with its own deadline, waiting longer between them (a new
+ * hostname, or the old version still answering, can take a moment);
+ * returns how many tries it took.
  */
 export const smokeCheck = async (
   origin: string,
@@ -156,11 +181,17 @@ export const smokeCheck = async (
   {
     fetch: fetchCore = fetch,
     retryDelayMs = defaultSmokeDelayMs,
+    attemptTimeoutMs = defaultAttemptTimeoutMs,
   }: SmokeOptions = {}
 ): Promise<number> => {
   for (let attempt = 1; attempt <= smokeAttempts; attempt += 1) {
     // oxlint-disable-next-line no-await-in-loop -- tries in turn
-    const answering = await answeringVersion(fetchCore, origin, routerSecret);
+    const answering = await answeringVersion(
+      fetchCore,
+      origin,
+      routerSecret,
+      attemptTimeoutMs
+    );
     if (answering === versionId) {
       return attempt;
     }
@@ -175,29 +206,76 @@ export const smokeCheck = async (
   );
 };
 
-/**
- * Points `hostname` at the client's core in the router's map. Writing the
- * same entry again changes nothing. As a guard, it refuses a hostname the
- * map gives another client (`hostname_taken`: client ids, and so
- * hostnames, are one client's each), and a generation below the one the
- * map has (`generation_behind`: the router would derive a secret core no
- * longer has).
- */
-export const registerHostname = async (
+/** The entry the map has for `key`: absent, or checked against the router's schema. */
+const storedEntry = async (
   hosts: RouterHosts,
-  hostname: string,
+  key: string
+): Promise<RouterHost | null> => {
+  const stored: unknown = await hosts.get(key, "json");
+  if (stored === null) {
+    return null;
+  }
+  const parsed = routerHostSchema.safeParse(stored);
+  if (!parsed.success) {
+    throw new DeployError(
+      "router_entry_invalid",
+      `${key}'s entry in the router's map isn't one the router reads: fix it by hand`
+    );
+  }
+  return parsed.data;
+};
+
+/** Throws unless `current` may be replaced by `entry`. */
+const checkReplaceable = (
+  key: string,
+  current: RouterHost | null,
   entry: RouterHost
-): Promise<void> => {
-  const key = routerHostKey(hostname);
-  const current = routerHostSchema.safeParse(await hosts.get(key, "json"));
-  if (current.success && current.data.clientId !== entry.clientId) {
+): void => {
+  if (current !== null && current.clientId !== entry.clientId) {
     throw new DeployError("hostname_taken", `${key} routes to another client`);
   }
-  if (current.success && current.data.generation > entry.generation) {
+  if (current !== null && current.generation > entry.generation) {
     throw new DeployError(
       "generation_behind",
       `${key} is at a later generation than this deploy`
     );
   }
-  await hosts.put(key, JSON.stringify(routerHostSchema.parse(entry)));
+};
+
+/**
+ * Points `hostname` at the client's core in the router's map. Writing the
+ * same entry again changes nothing. It refuses an entry that isn't one the
+ * router reads (`router_entry_invalid`, for staff to fix by hand), a
+ * hostname the map gives another client (`hostname_taken`: client ids, and
+ * so hostnames, are one client's each), and a generation below the one the
+ * map has (`generation_behind`: the router would derive a secret core no
+ * longer has). `beforeWrite` runs as the last thing before the write: the
+ * deploy checks there that it's still the client's latest.
+ *
+ * KV has no compare-and-set, so the write can't be made conditional: one
+ * runner per client (the provisioning Workflow) is the precondition, as
+ * for D1 migrations. After the write the entry is read back, and one at a
+ * lower generation than this deploy's fails loudly (`generation_behind`)
+ * rather than passing as written. Should one runner ever not be enough,
+ * the map moves into a Durable Object, which can compare and set.
+ */
+export const registerHostname = async (
+  hosts: RouterHosts,
+  hostname: string,
+  entry: RouterHost,
+  beforeWrite: () => Promise<void>
+): Promise<void> => {
+  const key = routerHostKey(hostname);
+  checkReplaceable(key, await storedEntry(hosts, key), entry);
+  const value = JSON.stringify(routerHostSchema.parse(entry));
+  await beforeWrite();
+  await hosts.put(key, value);
+  const written = await storedEntry(hosts, key);
+  if (written === null || written.generation < entry.generation) {
+    throw new DeployError(
+      "generation_behind",
+      `${key} reads back below this deploy's generation after the write`
+    );
+  }
+  checkReplaceable(key, written, entry);
 };

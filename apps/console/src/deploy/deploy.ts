@@ -599,12 +599,15 @@ const runSteps = async (
   await hooks.finished("smoke", { attempts });
 
   hooks.current("router");
-  await assertLatest(db, id, clientId);
-  await registerHostname(router.hosts, `${clientId}.${router.domain}`, {
-    clientId,
-    coreUrl: origin,
-    generation: deploy.generation,
-  });
+  await registerHostname(
+    router.hosts,
+    `${clientId}.${router.domain}`,
+    { clientId, coreUrl: origin, generation: deploy.generation },
+    // The last thing before the write: KV can't make it conditional.
+    async () => {
+      await assertLatest(db, id, clientId);
+    }
+  );
   // The map now has the new generation, so the router sends the new
   // secret: a raised generation is live from here, and its previous keys
   // are kept for a window from now (src/deploy/secrets.ts).

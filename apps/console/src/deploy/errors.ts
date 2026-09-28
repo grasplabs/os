@@ -45,6 +45,8 @@ export const deployErrorCodes = [
   "hostname_taken",
   /** The router's map is at a later secrets generation than this deploy. */
   "generation_behind",
+  /** The router's map has an entry for the hostname the router can't read. */
+  "router_entry_invalid",
 ] as const;
 
 export type DeployErrorCode = (typeof deployErrorCodes)[number];
