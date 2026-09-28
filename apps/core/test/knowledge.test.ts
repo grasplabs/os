@@ -640,9 +640,10 @@ describe("collections", () => {
       name: `Handbook ${unique()}`,
       access: "everyone",
     });
-    // What the collection offers, and, where it offers no upload, what
-    // core does with one that passes every other check. (Uploads core
-    // takes are in uploads.test.ts.)
+    // What the collection offers, and what core does with an upload there
+    // that passes every other check, on the same connection and flags:
+    // taken (`ok`) exactly where it is offered. (What becomes of one taken
+    // is in uploads.test.ts.)
     const offered = async (
       session: string,
       features: Record<string, boolean>
@@ -654,18 +655,18 @@ describe("collections", () => {
         const api = core.authenticate();
         const listed = await api.knowledge.listCollections();
         const collection = listed.find(({ id }) => id === collectionId);
-        const uploadable = collection?.uploadable;
-        const upload =
-          uploadable === false
-            ? await outcome(
-                api.uploads.upload({
-                  collectionId,
-                  name: "a.pdf",
-                  bytes: new TextEncoder().encode("%PDF-"),
-                })
-              )
-            : "offered";
-        return { writable: collection?.writable, uploadable, upload };
+        const upload = await outcome(
+          api.uploads.upload({
+            collectionId,
+            name: "a.pdf",
+            bytes: new TextEncoder().encode("%PDF-"),
+          })
+        );
+        return {
+          writable: collection?.writable,
+          uploadable: collection?.uploadable,
+          upload,
+        };
       } finally {
         core[Symbol.dispose]();
       }
@@ -678,7 +679,7 @@ describe("collections", () => {
       ownerWithUploadsOff: await offered(owner.session, uploadsOff),
       reader: await offered(reader.session, uploadsOn),
     }).toStrictEqual({
-      owner: { writable: true, uploadable: true, upload: "offered" },
+      owner: { writable: true, uploadable: true, upload: "ok" },
       ownerWithUploadsOff: {
         writable: true,
         uploadable: false,
