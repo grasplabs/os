@@ -1,10 +1,12 @@
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
+import { appsApi } from "./agent-apps.ts";
 import { connectionsApi } from "./agent-connections.ts";
 import { knowledgeApi } from "./agent-knowledge.ts";
 import { requireOpenRun } from "./agent-scope.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
+import { workflowsApi } from "./agent-workflows.ts";
 
 // The typed APIs the agent's code gets in its env (Code Mode). Each is a
 // loopback entrypoint of core whose props core sets for one code run of one
@@ -52,7 +54,7 @@ const apiNameSchema = z
 
 /** The APIs a chat's code gets. */
 export const agentApis = (): readonly AgentApi[] =>
-  [chatApi, knowledgeApi, connectionsApi].map((api) => ({
+  [chatApi, knowledgeApi, connectionsApi, appsApi, workflowsApi].map((api) => ({
     ...api,
     name: apiNameSchema.parse(api.name),
   }));
