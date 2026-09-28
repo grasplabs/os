@@ -1,8 +1,8 @@
 # Trunk-based: feature branch -> pull request into main -> merge queue, which
 # tests it on top of the latest main and squash-merges it. Checks run on pull
 # requests and in the merge queue; a push to main only deploys what those
-# checks already tested, to grasp-os-staging, and publishes it as a release
-# for the console. grasp-os-ops is deployed by hand
+# checks already tested, to grasp-os-staging, and once that succeeds
+# publishes it as a release for the console. grasp-os-ops is deployed by hand
 # with the Deploy grasp-os-ops workflow. Jobs with secrets never run for pull
 # requests from forks. CI never deploys to a client account: the console
 # rolls releases out.
@@ -210,15 +210,22 @@ jobs:
 
   # Every merge to main is a release: built once, verified against its
   # manifest and published to R2 in grasp-os-ops, where the console imports
-  # it. Deploys nothing. The R2 key is loaded after the build and passed only
-  # to the upload step, which keeps it out of the build's environment; all
-  # steps share one runner, so that isn't a security boundary. Skipped until the repository variable
-  # PUBLISH_RELEASES is `true`, set once the bucket, key and environment
-  # exist. Pushes to main share the workflow's concurrency group, which keeps
-  # only the newest pending run: in a burst of merges a middle commit may
-  # never be published, and its changes ship in the next release.
+  # it. Deploys nothing itself, and runs only once deploy-staging has
+  # deployed the same commit (this run's): a commit whose staging migrations
+  # or deploys fail is never published, so the console can't roll it out to
+  # a client. When deploy-staging fails, is cancelled or is skipped, this job
+  # is skipped too, and the commit's changes ship in the next release that
+  # passes staging. The R2 key is loaded after the build and passed only to
+  # the upload step, which keeps it out of the build's environment; all
+  # steps share one runner, so that isn't a security boundary. Skipped until
+  # the repository variable PUBLISH_RELEASES is `true`, set once the bucket,
+  # key and environment exist, and staging deploys. Pushes to main share the
+  # workflow's concurrency group, which keeps only the newest pending run: in
+  # a burst of merges a middle commit may never be published, and its
+  # changes ship in the next release.
   publish-release:
     name: publish-release
+    needs: deploy-staging
     if: github.event_name == 'push' && vars.PUBLISH_RELEASES == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 15
