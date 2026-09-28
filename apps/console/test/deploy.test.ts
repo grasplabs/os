@@ -1,3 +1,4 @@
+import { deriveClientSecret } from "@grasp-os/shared/client-secrets";
 import { deriveRouterSecret } from "@grasp-os/shared/router";
 import { env } from "cloudflare:workers";
 import { and, asc, eq, sql } from "drizzle-orm";
@@ -14,7 +15,7 @@ import {
   clientWorkers,
 } from "../src/db/schema.ts";
 import { runDeploy, startDeploy } from "../src/deploy/deploy.ts";
-import type { DeploySecrets } from "../src/deploy/upload.ts";
+import type { DeploySecrets } from "../src/deploy/secrets.ts";
 import { importReleases } from "../src/releases/import.ts";
 import type { AccountState } from "./cloudflare-api-kit.ts";
 import { mockCloudflareApi } from "./cloudflare-api.ts";
@@ -27,9 +28,9 @@ const api = cloudflareApi({ token, retryDelayMs: 0 });
 const db = consoleDatabase(env.DB);
 const secrets: DeploySecrets = {
   routerKey: "test-router-key",
-  byApp: {
-    core: { BETTER_AUTH_SECRET: "auth-secret", CAPABILITY_SIGNING_KEY: "cap" },
-    connect: { CAPABILITY_SIGNING_KEY: "cap", TOKEN_ENCRYPTION_KEY: "seal" },
+  clientKey: "test-client-key",
+  shared: {
+    connect: { COMPOSIO_API_KEY: "composio" },
   },
 };
 const context = { api, db, store: env.RELEASES, secrets };
@@ -329,15 +330,38 @@ describe("deploying a release's Workers", () => {
     await runDeploy(context, deployId);
 
     const connect = liveVersionOf(account, "grasp-os-connect");
+    // Core signs capabilities with what connect checks them with.
+    const capability = await deriveClientSecret(
+      "test-client-key",
+      "capability",
+      clientId,
+      1
+    );
     const core = liveVersionOf(account, "grasp-os-core");
     expect({
       connect: Object.fromEntries(connect?.secrets ?? []),
       core: Object.fromEntries(core?.secrets ?? []),
     }).toStrictEqual({
-      connect: { CAPABILITY_SIGNING_KEY: "cap", TOKEN_ENCRYPTION_KEY: "seal" },
+      // Derived for the client's first generation, and the shared one.
+      connect: {
+        CAPABILITY_SIGNING_KEY: capability,
+        COMPOSIO_API_KEY: "composio",
+        TOKEN_ENCRYPTION_KEY: await deriveClientSecret(
+          "test-client-key",
+          "token-encryption",
+          clientId,
+          1,
+          "base64"
+        ),
+      },
       core: {
-        BETTER_AUTH_SECRET: "auth-secret",
-        CAPABILITY_SIGNING_KEY: "cap",
+        BETTER_AUTH_SECRET: await deriveClientSecret(
+          "test-client-key",
+          "better-auth",
+          clientId,
+          1
+        ),
+        CAPABILITY_SIGNING_KEY: capability,
         // The first router secret generation, as a new client has.
         ROUTER_SECRET: await deriveRouterSecret("test-router-key", clientId, 1),
       },
@@ -438,16 +462,20 @@ describe("deploying a release's Workers", () => {
   });
 
   it("refuses to upload without a required secret, and resumes without uploading connect again", async () => {
-    const { account, deployId } = await setUp();
-    const withoutAuth = {
+    const { account, deployId } = await setUp({
+      notes: "feat(core): needs a shared secret",
+      coreSecrets: ["ENTRA_CLIENT_SECRET"],
+    });
+    const withoutEntra = context;
+    const withEntra = {
       ...context,
       secrets: {
         ...secrets,
-        byApp: { ...secrets.byApp, core: { CAPABILITY_SIGNING_KEY: "cap" } },
+        shared: { ...secrets.shared, core: { ENTRA_CLIENT_SECRET: "entra" } },
       },
     };
 
-    await expect(runDeploy(withoutAuth, deployId)).rejects.toMatchObject({
+    await expect(runDeploy(withoutEntra, deployId)).rejects.toMatchObject({
       name: "MissingSecretError",
     });
     await expect(deployRow(deployId)).resolves.toMatchObject({
@@ -457,7 +485,7 @@ describe("deploying a release's Workers", () => {
     });
     expect(account.scripts.has("grasp-os-core")).toBeFalsy();
 
-    await runDeploy(context, deployId);
+    await runDeploy(withEntra, deployId);
 
     expect(
       [...account.scripts].map(([name, script]) => [

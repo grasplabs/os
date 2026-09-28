@@ -43,8 +43,9 @@ import { DeployError } from "./errors.ts";
 import { migrateDatabases } from "./migrations.ts";
 import { importedManifest } from "./release.ts";
 import { ensureResources } from "./resources.ts";
-import { workerSecrets, workerUpload } from "./upload.ts";
-import type { DeploySecrets } from "./upload.ts";
+import { workerSecrets } from "./secrets.ts";
+import type { DeploySecrets } from "./secrets.ts";
+import { workerUpload } from "./upload.ts";
 import { deployOrder, deployWorker, uploadWorker } from "./versions.ts";
 
 /** What a deploy works with. */

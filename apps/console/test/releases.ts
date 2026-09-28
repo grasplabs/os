@@ -31,6 +31,8 @@ export interface ReleaseSpec {
   assets?: Record<string, string>;
   packages?: Record<string, string>;
   crons?: string[];
+  /** Secrets core requires besides its derived ones. */
+  coreSecrets?: string[];
   /** core's Durable Object migration tags, in order: `v1` by default. */
   durableObjectMigrations?: string[];
 }
@@ -166,6 +168,7 @@ export const buildRelease = async (
           "ROUTER_SECRET",
           "BETTER_AUTH_SECRET",
           "CAPABILITY_SIGNING_KEY",
+          ...(spec.coreSecrets ?? []),
         ],
         durableObjectMigrations: (spec.durableObjectMigrations ?? ["v1"]).map(
           (tag) => ({ tag, new_sqlite_classes: [`Class${tag}`] })

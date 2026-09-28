@@ -1,15 +1,14 @@
-import { assetContentKey, assetKey } from "@grasp-os/shared/release";
-import type { ReleaseManifest, WorkerEntry } from "@grasp-os/shared/release";
 /**
  * One of a release's Workers as the Workers API takes it: its metadata
- * with the account's resources filled in, its modules and static files
- * read from R2 and checked against the manifest, and its secrets.
+ * with the account's resources filled in, and its modules and static
+ * files read from R2 and checked against the manifest. Its secrets are in
+ * src/deploy/secrets.ts.
  */
-import { deriveRouterSecret } from "@grasp-os/shared/router";
+import { assetContentKey, assetKey } from "@grasp-os/shared/release";
+import type { ReleaseManifest, WorkerEntry } from "@grasp-os/shared/release";
 
 import type {
   AssetFile,
-  Secret,
   WorkerMetadata,
   WorkerModule,
   WorkerUpload,
@@ -151,53 +150,4 @@ export const workerUpload = async (
       ? {}
       : { assets: await readAssets(store, worker) }),
   };
-};
-
-/** The secrets a deploy gives each Worker. */
-export interface DeploySecrets {
-  /** `ROUTER_KEY` from Secrets Store: each client's router secret is derived from it. */
-  routerKey: string;
-  /**
-   * Every other secret, by app (`core`, `connect`), then by name, such as
-   * the ones Secrets Store holds for all clients.
-   */
-  byApp: Readonly<Record<string, Readonly<Record<string, string>>>>;
-}
-
-/** A Worker's required secret that the deploy wasn't given. */
-export class MissingSecretError extends Error {
-  constructor(worker: string, name: string) {
-    super(`No value for ${worker}'s secret ${name}`);
-    this.name = "MissingSecretError";
-  }
-}
-
-/** The router secret's name on core (core's src/router-secret.ts). */
-const routerSecretName = "ROUTER_SECRET";
-
-/**
- * Every secret the Worker `app` runs with: `ROUTER_SECRET`, where it needs
- * it, derived for the client and its router secret generation, and the
- * ones given for it. Throws `MissingSecretError` for a required one it
- * wasn't given, so nothing is uploaded without it.
- */
-export const workerSecrets = async (
-  app: string,
-  worker: WorkerEntry,
-  secrets: DeploySecrets,
-  client: { id: string; generation: number }
-): Promise<Secret[]> => {
-  const given = new Map(Object.entries(secrets.byApp[app] ?? {}));
-  if (worker.requiredSecrets.includes(routerSecretName)) {
-    given.set(
-      routerSecretName,
-      await deriveRouterSecret(secrets.routerKey, client.id, client.generation)
-    );
-  }
-  for (const name of worker.requiredSecrets) {
-    if (!given.has(name)) {
-      throw new MissingSecretError(worker.name, name);
-    }
-  }
-  return [...given].map(([name, value]) => ({ name, value }));
 };

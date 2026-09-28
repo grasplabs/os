@@ -1,3 +1,4 @@
+import { deriveClientSecret } from "@grasp-os/shared/client-secrets";
 import type { ConnectionPerson } from "@grasp-os/shared/connect";
 import { env, exports } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
@@ -540,5 +541,36 @@ describe("when something breaks", () => {
           action === "connection.disconnect" && detail.outcome === "ok"
       )
     ).toHaveLength(1);
+  });
+});
+
+/** A vault key as the console derives it for generation `generation`. */
+const derivedKey = async (generation: number) =>
+  await deriveClientSecret(
+    "test-client-key",
+    "token-encryption",
+    "acme",
+    generation,
+    "base64"
+  );
+
+describe("a vault key the console derives", () => {
+  it("seals and opens, and still opens what the previous generation sealed", async () => {
+    const [first, second] = await Promise.all([derivedKey(1), derivedKey(2)]);
+    const before = await vaultFor({ ...env, TOKEN_ENCRYPTION_KEY: first });
+    const after = await vaultFor({
+      ...env,
+      TOKEN_ENCRYPTION_KEY: second,
+      TOKEN_ENCRYPTION_KEY_PREVIOUS: first,
+    });
+    if (before === undefined || after === undefined) {
+      throw new Error("expected the derived keys to make vaults");
+    }
+    const sealed = await before.seal("refresh-token", "connection-1");
+
+    await expect(after.open(sealed, "connection-1")).resolves.toBe(
+      "refresh-token"
+    );
+    expect(after.keyId).not.toBe(before.keyId);
   });
 });
