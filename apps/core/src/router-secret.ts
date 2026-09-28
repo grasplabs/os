@@ -34,9 +34,24 @@ const matchesSecret = async (
 };
 
 /**
+ * The secrets core accepts: the current one, and the previous one while
+ * rotating. Rotating a client's secret: set the current one as
+ * `ROUTER_SECRET_PREVIOUS` and the new one as `ROUTER_SECRET`, then raise
+ * the client's generation in the router's map, and remove the previous one
+ * once every router isolate sends the new one: at least 2 minutes after the
+ * map changed (the router's 30 s cache plus KV's propagation, about 60 s).
+ * Optional, so it isn't in `secrets.required`.
+ */
+const acceptedSecrets = (env: Env): string[] =>
+  [env.ROUTER_SECRET, env.ROUTER_SECRET_PREVIOUS].filter(
+    (secret): secret is string => typeof secret === "string" && secret !== ""
+  );
+
+/**
  * Checks that a request came through the router, and returns it without the
  * secret header, so nothing after this check can see, forward or log it.
- * Fails closed: without a configured secret every request is refused.
+ * Fails closed: without a configured secret every request is refused; a
+ * previous secret alone doesn't count.
  */
 export const checkRouterSecret = async (
   request: Request,
@@ -56,7 +71,14 @@ export const checkRouterSecret = async (
   if (presented === null) {
     return { ok: false, reason: "missing" };
   }
-  if (!(await matchesSecret(presented, env.ROUTER_SECRET))) {
+  // Compared with every accepted secret, so the time taken doesn't tell
+  // which one matched.
+  const matches = await Promise.all(
+    acceptedSecrets(env).map(
+      async (secret) => await matchesSecret(presented, secret)
+    )
+  );
+  if (!matches.includes(true)) {
     return { ok: false, reason: "mismatch" };
   }
   return { ok: true, request: stripped };

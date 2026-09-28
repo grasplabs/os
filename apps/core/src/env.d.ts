@@ -44,6 +44,8 @@ interface __BaseEnv_Env {
   MODEL_BUDGET_MONTH?: string;
   /** Tests only: a shorter limit for one call into an App (src/app.ts). */
   APP_CALL_TIMEOUT_MS?: string;
+  /** The router secret before the current one, while rotating (src/router-secret.ts). */
+  ROUTER_SECRET_PREVIOUS?: string;
   /** Local dev only (src/router-secret.ts). */
   DEV_SKIP_ROUTER_SECRET?: string;
   /** Local dev and e2e only: a stand-in for Entra (src/auth/config.ts). */
