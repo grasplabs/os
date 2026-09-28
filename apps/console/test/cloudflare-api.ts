@@ -26,7 +26,7 @@ import type {
   Json,
   Route,
 } from "./cloudflare-api-kit.ts";
-import { workerRoutes } from "./cloudflare-api-workers.ts";
+import { forgetDatabases, workerRoutes } from "./cloudflare-api-workers.ts";
 
 /** The R2 jurisdiction a call names, as the API reads its header. */
 const jurisdictionOf = (call: ApiCall): string =>
@@ -327,6 +327,7 @@ export const mockCloudflareApi = (token: string) => {
   afterEach(() => {
     vi.restoreAllMocks();
     accounts.clear();
+    forgetDatabases();
     calls.length = 0;
     planned.clear();
     load.peak = 0;

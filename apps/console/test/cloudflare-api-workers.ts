@@ -198,41 +198,35 @@ const emptied = async (database: D1Database): Promise<void> => {
   }
 };
 
-/** Slots of databases in use, by the fake database's id. */
+/**
+ * The slot each fake database of this test keeps its data in, by its id:
+ * across every account, so no two databases share one.
+ */
 const slots = new Map<string, number>();
 
+/** Frees every slot, once a test's accounts are gone (test/cloudflare-api.ts). */
+export const forgetDatabases = (): void => {
+  slots.clear();
+};
+
 /**
- * The real D1 database the fake database `uuid` of `account` keeps its
- * data in: its own, emptied when it's first used, so no two databases of
- * an account see each other's tables. Slots of databases no account holds
- * any more (from earlier tests) are reused.
+ * The real D1 database the fake database `uuid` keeps its data in: its
+ * own, emptied when it's first used, so no two databases the fake holds,
+ * in any account, see each other's tables.
  */
-const databaseOf = async (
-  account: AccountState,
-  uuid: string
-): Promise<D1Database> => {
+const databaseOf = async (uuid: string): Promise<D1Database> => {
   const held = slots.get(uuid);
   if (held !== undefined) {
     return clientD1(held);
   }
-  const live = new Set(
-    account.d1.flatMap((database) => {
-      const slot = slots.get(database.uuid);
-      return slot === undefined ? [] : [slot];
-    })
-  );
+  const taken = new Set(slots.values());
   const slot = Array.from({ length: clientD1Count }, (_, index) => index).find(
-    (index) => !live.has(index)
+    (index) => !taken.has(index)
   );
   if (slot === undefined) {
     throw new Error(
       `The fake holds at most ${clientD1Count} databases at once`
     );
-  }
-  for (const [id, used] of slots) {
-    if (used === slot) {
-      slots.delete(id);
-    }
   }
   slots.set(uuid, slot);
   const database = clientD1(slot);
@@ -530,7 +524,7 @@ export const workerRoutes: Route[] = [
       if (!account.d1.some(({ uuid }) => uuid === params.database)) {
         return notFound();
       }
-      const d1 = await databaseOf(account, params.database ?? "");
+      const d1 = await databaseOf(params.database ?? "");
       try {
         const results = await d1.batch(
           sqlStatements(text(json, "sql")).map((statement) =>

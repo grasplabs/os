@@ -369,8 +369,12 @@ export const uploadVersion = async (
  * Uploads `scriptName` and deploys it at once: a Worker's first upload, or
  * a release with a Durable Object migration, which a version can't carry.
  *
- * It keeps the latest version's secrets, so, like `uploadVersion`, it's
- * refused after a rollback.
+ * Without `secrets` it keeps the latest version's secrets, so, like
+ * `uploadVersion`, it's refused after a rollback. With `secrets`, every
+ * secret the Worker needs, it has exactly those and keeps none, as
+ * `uploadVersionWithSecrets` does: how a Durable Object migration, which
+ * only a script upload can carry, deploys after a rollback. The metadata
+ * is the same as a version's (Wrangler builds both with one form).
  *
  * Such a release isn't retried after a server error or no answer: if the
  * upload went through, its migration ran, and sending it again would be
@@ -381,16 +385,26 @@ export const uploadScript = async (
   api: CloudflareApi,
   accountId: string,
   scriptName: string,
-  upload: WorkerUpload
+  upload: WorkerUpload,
+  secrets?: readonly Secret[]
 ): Promise<void> => {
-  if (!(await latestIsDeployed(api, accountId, scriptName))) {
+  if (
+    secrets === undefined &&
+    !(await latestIsDeployed(api, accountId, scriptName))
+  ) {
     throw new RolledBackError(scriptName);
   }
   await api.call(
     {
       method: "PUT",
       path: scriptPath(accountId, scriptName),
-      body: await uploadForm(api, accountId, scriptName, upload, "keep"),
+      body: await uploadForm(
+        api,
+        accountId,
+        scriptName,
+        upload,
+        secrets ?? "keep"
+      ),
       idempotent: upload.metadata.migrations === undefined,
     },
     z.unknown()

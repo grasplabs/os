@@ -518,6 +518,59 @@ describe("secrets, schedules and workflows", () => {
     expect(uploaded?.secrets).toStrictEqual(new Map([["ROUTER_SECRET", "v1"]]));
   });
 
+  it("deploys a Durable Object migration after a rollback with exactly the secrets given", async () => {
+    const account = cloudflare.addAccount();
+    await uploadScript(
+      api,
+      account.id,
+      "grasp-os-core",
+      release("r000001-aaaaaaa")
+    );
+    const [first] = account.scripts.get("grasp-os-core")?.versions ?? [];
+    const second = await uploadVersionWithSecrets(
+      api,
+      account.id,
+      "grasp-os-core",
+      release("r000002-bbbbbbb"),
+      [{ name: "LEAKED_KEY", value: "revoked" }]
+    );
+    await deployVersion(api, account.id, "grasp-os-core", second.id, {
+      message: "Rollout",
+    });
+    await deployVersion(api, account.id, "grasp-os-core", first?.id ?? "", {
+      message: "Rollback",
+      force: true,
+    });
+
+    // A release with a migration can only go as a script upload.
+    const migrating = release("r000003-ccccccc");
+    await uploadScript(
+      api,
+      account.id,
+      "grasp-os-core",
+      {
+        ...migrating,
+        metadata: {
+          ...migrating.metadata,
+          migrations: { new_tag: "v2", new_sqlite_classes: ["Uploads"] },
+        },
+      },
+      [{ name: "ROUTER_SECRET", value: "current" }]
+    );
+
+    const [current] = await deployedVersions(account.id, "grasp-os-core");
+    const live = account.scripts
+      .get("grasp-os-core")
+      ?.versions.find(({ id }) => id === current?.[0]?.version_id);
+    expect(live?.metadata.migrations).toStrictEqual({
+      new_tag: "v2",
+      new_sqlite_classes: ["Uploads"],
+    });
+    expect(live?.secrets).toStrictEqual(
+      new Map([["ROUTER_SECRET", "current"]])
+    );
+  });
+
   it("keeps a secret's value out of the error when it's refused", async () => {
     const account = cloudflare.addAccount();
     const refused = putSecret(api, account.id, "grasp-os-missing", {
@@ -662,6 +715,34 @@ describe("D1 migrations", () => {
       { name: "only_core" },
     ]);
     await expect(tablesOf(knowledge.uuid)).resolves.toStrictEqual([]);
+  });
+
+  it("keeps each account's databases apart too", async () => {
+    const acme = cloudflare.addAccount("Acme");
+    const globex = cloudflare.addAccount("Globex");
+    const first = await ensureD1Database(api, acme.id, "grasp-os-core");
+    const second = await ensureD1Database(api, globex.id, "grasp-os-core");
+    await applyD1Migrations(api, acme.id, first.uuid, [
+      { name: "0000_acme.sql", sql: "CREATE TABLE acme_only (id TEXT);" },
+    ]);
+    await applyD1Migrations(api, globex.id, second.uuid, [
+      { name: "0000_globex.sql", sql: "CREATE TABLE globex_only (id TEXT);" },
+    ]);
+    const tables = async (accountId: string, uuid: string) => {
+      const [rows] = await queryD1(
+        api,
+        accountId,
+        uuid,
+        "SELECT name FROM sqlite_master WHERE name LIKE '%_only' ORDER BY name;"
+      );
+      return rows;
+    };
+    await expect(tables(acme.id, first.uuid)).resolves.toStrictEqual([
+      { name: "acme_only" },
+    ]);
+    await expect(tables(globex.id, second.uuid)).resolves.toStrictEqual([
+      { name: "globex_only" },
+    ]);
   });
 
   it("fails a query when a statement in it failed, though the answer succeeded", async () => {
