@@ -46,7 +46,7 @@ export interface TestRelease {
 // newest in the bucket. Nine digits keep the ids sorting by run.
 const firstRun = 100_000_000 + Math.floor(Math.random() * 800_000_000);
 let runs = 0;
-// Build times a minute apart, in the order the releases are built: never
+// Build times a minute apart, in the order of the releases' ids: never
 // the same millisecond, however fast the test runs.
 const firstBuild = Date.now();
 
@@ -125,7 +125,10 @@ export const buildRelease = async (
     manifestVersion: MANIFEST_VERSION,
     releaseId: id,
     commit,
-    createdAt: new Date(firstBuild + runs * 60_000).toISOString(),
+    // From the id's run, so releases built at once still get their order.
+    createdAt: new Date(
+      firstBuild + (Number(id.slice(1, id.indexOf("-"))) - firstRun) * 60_000
+    ).toISOString(),
     notes: spec.notes,
     wranglerVersion: "4.0.0",
     compatibilityDate: "2026-09-15",

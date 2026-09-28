@@ -1,7 +1,7 @@
 /** Reading imported releases from the console's database. */
 import { releaseManifestSchema } from "@grasp-os/shared/release";
 import type { ReleaseManifest } from "@grasp-os/shared/release";
-import { and, desc, eq, gt, lte, sql } from "drizzle-orm";
+import { and, count, desc, eq, gt, lte, sql } from "drizzle-orm";
 
 import type { ConsoleDatabase } from "../db/act.ts";
 import { releases } from "../db/schema.ts";
@@ -154,10 +154,13 @@ export interface ReleaseComparison {
   to: ReleaseSummary;
   diff: ReleaseDiff;
   /**
-   * Every release built after the older one, up to and including the newer
-   * one, newest first: their notes are what changes between the two.
+   * The releases built after the older one, up to and including the newer
+   * one, newest first, at most {@link RELEASE_LIST_LIMIT}: their notes are
+   * what changes between the two.
    */
   between: ReleaseSummary[];
+  /** How many more releases lie between them than `between` holds. */
+  moreBetween: number;
 }
 
 /**
@@ -178,20 +181,24 @@ export const compareReleases = async (
   }
   const [older, newer] =
     from.builtAt.getTime() <= to.builtAt.getTime() ? [from, to] : [to, from];
-  const between = await db
-    .select(summaryColumns)
-    .from(releases)
-    .where(
-      and(
-        gt(releases.builtAt, older.builtAt),
-        lte(releases.builtAt, newer.builtAt)
-      )
-    )
-    .orderBy(desc(releases.builtAt), desc(releases.id));
+  const inBetween = and(
+    gt(releases.builtAt, older.builtAt),
+    lte(releases.builtAt, newer.builtAt)
+  );
+  const [between, [counted]] = await Promise.all([
+    db
+      .select(summaryColumns)
+      .from(releases)
+      .where(inBetween)
+      .orderBy(desc(releases.builtAt), desc(releases.id))
+      .limit(RELEASE_LIST_LIMIT),
+    db.select({ total: count() }).from(releases).where(inBetween),
+  ]);
   return {
     from: summaryOf(from),
     to: summaryOf(to),
     diff: diffReleases(from.manifest, to.manifest),
     between,
+    moreBetween: Math.max((counted?.total ?? 0) - between.length, 0),
   };
 };

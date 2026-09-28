@@ -67,7 +67,7 @@ const WorkerChanges = ({ worker }: { worker: WorkerDiff }) => (
 );
 
 const Comparison = () => {
-  const { from, to, diff, between } = Route.useLoaderData();
+  const { from, to, diff, between, moreBetween } = Route.useLoaderData();
   return (
     <main className="flex flex-col gap-6 p-6">
       <div className="flex flex-col gap-1">
@@ -108,6 +108,11 @@ const Comparison = () => {
                   </span>
                 </li>
               ))}
+              {moreBetween > 0 ? (
+                <li className="text-muted-foreground">
+                  {`and ${moreBetween} more`}
+                </li>
+              ) : null}
             </ul>
           )}
         </CardContent>

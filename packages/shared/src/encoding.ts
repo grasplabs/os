@@ -19,16 +19,6 @@ export const fromBase64Url = (text: string): Uint8Array<ArrayBuffer> => {
   return Uint8Array.from(binary, (char) => char.codePointAt(0) ?? 0);
 };
 
-/** Bytes as base64, a chunk at a time: an asset can be megabytes. */
-export const toBase64 = (bytes: Uint8Array): string => {
-  const chunk = 0x80_00;
-  let binary = "";
-  for (let start = 0; start < bytes.length; start += chunk) {
-    binary += String.fromCodePoint(...bytes.subarray(start, start + chunk));
-  }
-  return btoa(binary);
-};
-
 /** Bytes as lowercase hex. */
 export const toHex = (bytes: Uint8Array): string =>
   Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");

@@ -9,8 +9,7 @@
  * Durable Object migration, go as a script upload instead, which deploys at
  * once.
  */
-import { toBase64 } from "@grasp-os/shared/encoding";
-import { assetContentKey } from "@grasp-os/shared/release";
+import { encodeAsset } from "@grasp-os/shared/release";
 import { z } from "zod";
 
 import { CloudflareApiError, isNotFound } from "./api.ts";
@@ -93,10 +92,10 @@ export const uploadAssets = async (
 ): Promise<string> => {
   const encoded = await Promise.all(
     files.map(async (file) => {
-      // Named by the key the release's manifest gives it, which is the
-      // key Wrangler would upload it under.
-      const hash = await assetContentKey(file.content, file.path);
-      return { ...file, base64: toBase64(file.content), hash };
+      // Named by the key the release manifest gives it (Wrangler's shape
+      // and extension rule, with SHA-256), and encoded once for both.
+      const { key, base64 } = await encodeAsset(file.content, file.path);
+      return { ...file, base64, hash: key };
     })
   );
   const session = await api.call(

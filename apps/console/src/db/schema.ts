@@ -26,6 +26,19 @@ export const releases = sqliteTable("releases", {
   importedAt: timestamp("imported_at").notNull(),
 });
 
+/**
+ * A published release that didn't verify, and when the import tries it
+ * again (src/releases/import.ts). Gone once it's imported.
+ */
+export const releaseImportFailures = sqliteTable("release_import_failures", {
+  /** The release's id, as its R2 prefix names it. */
+  releaseId: text("release_id").primaryKey(),
+  /** Failed attempts so far: the wait before the next one doubles each time. */
+  attempts: integer().notNull(),
+  failedAt: timestamp("failed_at").notNull(),
+  nextAttemptAt: timestamp("next_attempt_at").notNull(),
+});
+
 /** A client: one deployment of Grasp OS in its own Cloudflare account. */
 export const clients = sqliteTable("clients", {
   /** The client's slug: its subdomain, `<slug>.<domain>`. */

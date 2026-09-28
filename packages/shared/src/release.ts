@@ -27,7 +27,7 @@
  */
 import { z } from "zod";
 
-import { toBase64, toHex } from "./encoding.ts";
+import { toHex } from "./encoding.ts";
 
 /** The manifest shape the console must understand (see the header comment). */
 export const MANIFEST_VERSION = 1;
@@ -145,11 +145,36 @@ export const assetKey = (hash: string): string => `blobs/assets/${hash}`;
 export const manifestKey = (releaseId: string): string =>
   `releases/${releaseId}/manifest.json`;
 
+/** Bytes whose buffer is a plain `ArrayBuffer`, as Web Crypto takes them. */
+export type Bytes = Uint8Array<ArrayBuffer>;
+
 /** SHA-256 of `bytes`, lowercase hex. */
-export const sha256OfBytes = async (bytes: Uint8Array): Promise<string> =>
-  toHex(
-    new Uint8Array(await crypto.subtle.digest("SHA-256", new Uint8Array(bytes)))
-  );
+export const sha256OfBytes = async (bytes: Bytes): Promise<string> =>
+  toHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
+
+/** Bytes encoded at a time: a multiple of 3, so no chunk but the last pads. */
+const BASE64_CHUNK = 0x60_00;
+
+/**
+ * Base64 of `bytes` followed by `suffix`, written straight into one buffer
+ * a chunk at a time: an asset of n bytes costs about n * 4/3 more while
+ * it's hashed, not whole-file strings.
+ */
+const base64Then = (bytes: Uint8Array, suffix: string): Bytes => {
+  const encoder = new TextEncoder();
+  const tail = encoder.encode(suffix);
+  const length = Math.ceil(bytes.length / 3) * 4;
+  const out = new Uint8Array(length + tail.length);
+  let at = 0;
+  for (let start = 0; start < bytes.length; start += BASE64_CHUNK) {
+    const chunk = btoa(
+      String.fromCodePoint(...bytes.subarray(start, start + BASE64_CHUNK))
+    );
+    at += encoder.encodeInto(chunk, out.subarray(at)).written;
+  }
+  out.set(tail, length);
+  return out;
+};
 
 /**
  * A path's extension without its dot, as Wrangler finds it for the same
@@ -162,20 +187,46 @@ const extensionOf = (filePath: string): string => {
   return dot <= 0 ? "" : base.slice(dot + 1);
 };
 
+/** An asset, encoded once for its content key and its upload. */
+export interface EncodedAsset {
+  /** The static-asset content key (see the header comment). */
+  key: string;
+  /** Its contents as base64 (ASCII bytes): the assets-upload API's body. */
+  base64: Bytes;
+}
+
+/** Encodes an asset at `filePath`: its content key and its base64. */
+export const encodeAsset = async (
+  bytes: Uint8Array,
+  filePath: string
+): Promise<EncodedAsset> => {
+  const extension = extensionOf(filePath);
+  const input = base64Then(bytes, extension);
+  const hash = await crypto.subtle.digest("SHA-256", input);
+  return {
+    key: toHex(new Uint8Array(hash)).slice(0, 32),
+    base64: input.subarray(0, Math.ceil(bytes.length / 3) * 4),
+  };
+};
+
 /** The static-asset content key (see the header comment). */
 export const assetContentKey = async (
   bytes: Uint8Array,
   filePath: string
 ): Promise<string> => {
-  const input = new TextEncoder().encode(
-    `${toBase64(bytes)}${extensionOf(filePath)}`
-  );
-  const hash = await crypto.subtle.digest("SHA-256", input);
-  return toHex(new Uint8Array(hash)).slice(0, 32);
+  const { key } = await encodeAsset(bytes, filePath);
+  return key;
 };
 
-/** Reads the blob at an R2 key; undefined when there's none. */
-export type ReadBlob = (key: string) => Promise<Uint8Array | undefined>;
+/**
+ * Reads the blob at an R2 key, whose manifest says it's `size` bytes;
+ * undefined when there's none. A reader may refuse a blob of another size
+ * before reading it.
+ */
+export type ReadBlob = (
+  key: string,
+  size: number
+) => Promise<Bytes | undefined>;
 
 /** What a blob's bytes must be, for one place the manifest names it. */
 type Expectation =
@@ -183,7 +234,7 @@ type Expectation =
   | { kind: "asset"; size: number }
   | { kind: "served"; path: string; hash: string; size: number };
 
-/** Blobs read at once while verifying. */
+/** Blobs read at once while verifying, unless the caller says otherwise. */
 const VERIFY_CONCURRENCY = 8;
 
 /** Every blob the manifest names, with what its bytes must be. */
@@ -253,7 +304,7 @@ const expectationsOf = (
 /** Throws unless `bytes` is what `expectation` says the blob at `key` is. */
 const check = async (
   key: string,
-  bytes: Uint8Array,
+  bytes: Bytes,
   expectation: Expectation
 ): Promise<void> => {
   switch (expectation.kind) {
@@ -291,20 +342,24 @@ const check = async (
  * Checks a release's blobs against its manifest: every module, migration
  * and asset is stored at its content address, is present, and its bytes
  * hash to it; every entry in the asset index is one a Worker serves. Each
- * blob is read once, through `read`, and checked for every place the
- * manifest names it; a reader that keeps what it returns holds exactly the
- * bytes that were checked. Throws on the first mismatch.
+ * blob is read once, through `read`, at most `concurrency` at a time, and
+ * checked for every place the manifest names it; a reader that keeps what
+ * it returns holds exactly the bytes that were checked. Throws on the
+ * first mismatch.
  */
 export const verifyReleaseBlobs = async (
   manifest: ReleaseManifest,
-  read: ReadBlob
+  read: ReadBlob,
+  { concurrency = VERIFY_CONCURRENCY }: { concurrency?: number } = {}
 ): Promise<void> => {
   const queue = [...expectationsOf(manifest)];
   const verifyOne = async (
     key: string,
     expectations: Expectation[]
   ): Promise<void> => {
-    const bytes = await read(key);
+    // Every place names the blob's size; they differ only in a broken
+    // manifest, which the checks below then refuse.
+    const bytes = await read(key, expectations[0]?.size ?? 0);
     if (bytes === undefined) {
       throw new Error(`${key} is missing from the release`);
     }
@@ -325,5 +380,5 @@ export const verifyReleaseBlobs = async (
       }
     }
   };
-  await Promise.all(Array.from({ length: VERIFY_CONCURRENCY }, work));
+  await Promise.all(Array.from({ length: concurrency }, work));
 };

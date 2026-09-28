@@ -140,20 +140,22 @@ describe("the release pages", () => {
     expect(statuses).toStrictEqual([404, 404, 404, 404]);
   });
 
-  it("say when there are more releases than the list shows", async () => {
+  it("say when there are more releases than the list or the notes show", async () => {
     const db = consoleDatabase(env.DB);
-    const [statement, ...statements] = Array.from(
+    const ids = Array.from(
       { length: RELEASE_LIST_LIMIT + 1 },
-      (_, index) =>
-        db.insert(releases).values({
-          id: `dev-old${index}x${crypto.randomUUID().slice(0, 8)}`,
-          commitSha: "0".repeat(40),
-          manifest: "{}",
-          manifestSha256: "0".repeat(64),
-          // Older than every release the other tests show.
-          builtAt: new Date(Date.UTC(2000, 0, 1, 0, index)),
-          importedAt: new Date(),
-        })
+      (_, index) => `dev-old${index}x${crypto.randomUUID().slice(0, 8)}`
+    );
+    const [statement, ...statements] = ids.map((id, index) =>
+      db.insert(releases).values({
+        id,
+        commitSha: "0".repeat(40),
+        manifest: first.manifestText,
+        manifestSha256: "0".repeat(64),
+        // Older than every release the other tests show.
+        builtAt: new Date(Date.UTC(2000, 0, 1, 0, index)),
+        importedAt: new Date(),
+      })
     );
     if (statement === undefined) {
       throw new Error("expected rows to insert");
@@ -164,5 +166,12 @@ describe("the release pages", () => {
 
     expect(html).toContain(`The newest ${RELEASE_LIST_LIMIT} releases.`);
     expect(html).toContain(third.id);
+
+    // From the oldest: the other 100 old ones and the three above lie
+    // between, and the notes show the newest 100 of them.
+    const diff = await page(`/releases/diff?from=${ids[0]}&to=${third.id}`);
+    expect(diff.status).toBe(200);
+    expect(diff.html).toContain("and 3 more");
+    expect(diff.html).toContain(third.id);
   });
 });

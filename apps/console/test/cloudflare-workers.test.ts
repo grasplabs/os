@@ -225,7 +225,7 @@ describe("static assets", () => {
     );
   });
 
-  it("names each file by the key Wrangler uploads it under, dot-files included", async () => {
+  it("names each file by the key the release manifest gives it (Wrangler's shape and extension rule, with SHA-256), dot-files included", async () => {
     const account = cloudflare.addAccount();
     await uploadScript(
       api,
@@ -257,6 +257,26 @@ describe("static assets", () => {
       },
     });
     expect(account.assets.size).toBe(4);
+    // Each file goes up as the base64 of its contents.
+    const parts: [string, FormDataEntryValue][] = cloudflare.calls
+      .filter(({ path }) => path.endsWith("/workers/assets/upload"))
+      .flatMap(({ body }) =>
+        body instanceof FormData ? [...body.entries()] : []
+      );
+    const uploaded = Object.fromEntries(
+      await Promise.all(
+        parts.map(async ([hash, part]): Promise<[string, string]> => [
+          hash,
+          part instanceof Blob ? await part.text() : part,
+        ])
+      )
+    );
+    expect(uploaded).toStrictEqual({
+      d4c01ae8630098078a961cef6cb9e3b3: btoa("<html></html>"),
+      "5e21d86b709b6aa2d5fff6d7cfed56ab": btoa("x"),
+      "18bc01c2f3ff74fee5bf89429d922436": btoa("x"),
+      c1a6faede032be6f91315fcad5b29e55: btoa("x"),
+    });
   });
 
   it("names files the account already holds by the session's token", async () => {
