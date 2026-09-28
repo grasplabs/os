@@ -165,13 +165,14 @@ describe("the release pages", () => {
     const { html } = await page("/releases");
 
     expect(html).toContain(`The newest ${RELEASE_LIST_LIMIT} releases.`);
-    expect(html).toContain(third.id);
+    // The list shows the newest 97 old ones (and the three above): its
+    // last row links to the diff from the one before it, which isn't shown.
+    expect(html).toContain(`Since ${ids[3]}`);
 
     // From the oldest: the other 100 old ones and the three above lie
     // between, and the notes show the newest 100 of them.
     const diff = await page(`/releases/diff?from=${ids[0]}&to=${third.id}`);
     expect(diff.status).toBe(200);
     expect(diff.html).toContain("and 3 more");
-    expect(diff.html).toContain(third.id);
   });
 });

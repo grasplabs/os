@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { assetContentKey, encodeAsset } from "../src/release.ts";
+import {
+  assetContentKey,
+  encodeAsset,
+  mapConcurrently,
+} from "../src/release.ts";
 
 /** The platform's base64 of `bytes`, to compare with. */
 const btoaOf = (bytes: Uint8Array): string => {
@@ -42,5 +46,45 @@ describe("asset encoding", () => {
       "5e21d86b709b6aa2d5fff6d7cfed56ab",
       "c1a6faede032be6f91315fcad5b29e55",
     ]);
+  });
+});
+
+describe("bounded concurrency", () => {
+  it("runs at most the limit at once, and keeps the results in order", async () => {
+    let running = 0;
+    let peak = 0;
+    const results = await mapConcurrently(
+      [5, 1, 4, 2, 3, 0],
+      2,
+      async (value) => {
+        running += 1;
+        peak = Math.max(peak, running);
+        // Let the other worker start before this one finishes.
+        await Promise.resolve();
+        await Promise.resolve();
+        running -= 1;
+        return value * 10;
+      }
+    );
+
+    expect({ results, peak }).toStrictEqual({
+      results: [50, 10, 40, 20, 30, 0],
+      peak: 2,
+    });
+  });
+
+  it("takes no more after a failure, and throws it", async () => {
+    const started: number[] = [];
+    const run = mapConcurrently([1, 2, 3, 4, 5, 6], 2, async (value) => {
+      started.push(value);
+      await Promise.resolve();
+      if (value === 2) {
+        throw new Error("two failed");
+      }
+      return value;
+    });
+
+    await expect(run).rejects.toThrow("two failed");
+    expect(started).toStrictEqual([1, 2, 3]);
   });
 });

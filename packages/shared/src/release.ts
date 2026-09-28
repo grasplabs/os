@@ -237,6 +237,40 @@ type Expectation =
 /** Blobs read at once while verifying, unless the caller says otherwise. */
 const VERIFY_CONCURRENCY = 8;
 
+/**
+ * Runs `task` on each of `items`, at most `limit` at a time, and returns
+ * the results in the order of `items`. The first failure stops it taking
+ * more (the tasks already running finish) and is what it throws.
+ */
+export const mapConcurrently = async <T, R>(
+  items: readonly T[],
+  limit: number,
+  task: (item: T) => Promise<R>
+): Promise<R[]> => {
+  const results: R[] = [];
+  // One iterator shared by every worker: each takes the next item.
+  const entries = items.entries();
+  let failed = false;
+  const work = async (): Promise<void> => {
+    for (const [index, item] of entries) {
+      if (failed) {
+        return;
+      }
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- each worker runs one task at a time
+        results[index] = await task(item);
+      } catch (error) {
+        failed = true;
+        throw error;
+      }
+    }
+  };
+  await Promise.all(
+    Array.from({ length: Math.min(limit, items.length) }, work)
+  );
+  return results;
+};
+
 /** Every blob the manifest names, with what its bytes must be. */
 const expectationsOf = (
   manifest: ReleaseManifest
@@ -352,11 +386,10 @@ export const verifyReleaseBlobs = async (
   read: ReadBlob,
   { concurrency = VERIFY_CONCURRENCY }: { concurrency?: number } = {}
 ): Promise<void> => {
-  const queue = [...expectationsOf(manifest)];
-  const verifyOne = async (
-    key: string,
-    expectations: Expectation[]
-  ): Promise<void> => {
+  const verifyOne = async ([key, expectations]: [
+    string,
+    Expectation[],
+  ]): Promise<void> => {
     // Every place names the blob's size; they differ only in a broken
     // manifest, which the checks below then refuse.
     const bytes = await read(key, expectations[0]?.size ?? 0);
@@ -368,17 +401,9 @@ export const verifyReleaseBlobs = async (
       await check(key, bytes, expectation);
     }
   };
-  const work = async (): Promise<void> => {
-    for (let next = queue.shift(); next !== undefined; next = queue.shift()) {
-      try {
-        // oxlint-disable-next-line no-await-in-loop -- each worker reads one blob at a time
-        await verifyOne(...next);
-      } catch (error) {
-        // The first failure decides: the other workers stop reading.
-        queue.length = 0;
-        throw error;
-      }
-    }
-  };
-  await Promise.all(Array.from({ length: concurrency }, work));
+  await mapConcurrently([...expectationsOf(manifest)], concurrency, verifyOne);
 };
+
+/** How many blobs a release names: what verifying it reads, besides its manifest. */
+export const blobCount = (manifest: ReleaseManifest): number =>
+  expectationsOf(manifest).size;

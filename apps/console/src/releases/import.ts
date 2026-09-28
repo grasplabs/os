@@ -20,6 +20,7 @@
  */
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
+  blobCount,
   manifestKey,
   releaseIdSchema,
   releaseManifestSchema,
@@ -27,11 +28,11 @@ import {
   verifyReleaseBlobs,
 } from "@grasp-os/shared/release";
 import type { Bytes, ReleaseManifest } from "@grasp-os/shared/release";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 
-import { act, actIfChanged } from "../db/act.ts";
+import { actIfChanged } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import { releaseImportFailures, releases } from "../db/schema.ts";
+import { auditEvents, releaseImportFailures, releases } from "../db/schema.ts";
 
 /**
  * The releases bucket, as the import uses it: reading only, so the import
@@ -50,11 +51,18 @@ const RELEASES_PREFIX = "releases/";
 export const MAX_IMPORTS_PER_RUN = 5;
 
 /**
- * Most R2 reads a run starts a release with: each release is one read per
- * blob (about 70 today), and a run's reads count towards the Worker's
- * subrequest limit. A release that starts under it may finish over it.
+ * Most R2 reads a run makes, which count towards the Worker's subrequest
+ * limit. A release costs its manifest plus one read per blob (about 70
+ * today); it's verified only if all of them fit in what the run has left,
+ * and otherwise waits for the next run.
  */
 export const MAX_READS_PER_RUN = 500;
+
+/**
+ * Most blobs a release may name. Below the per-run reads, less the
+ * manifest's, so a release that starts a run always fits in it.
+ */
+export const MAX_BLOBS_PER_RELEASE = 400;
 
 /**
  * Blobs read at once. A release's largest module is about 10 MB today:
@@ -168,23 +176,33 @@ const parseManifest = (
 };
 
 /**
- * Verifies release `id` and records it. Returns false when it has no
- * manifest (yet); throws when it doesn't verify.
+ * Verifies release `id` and records it: `absent` when it has no manifest
+ * (yet), `deferred` when its blobs don't fit in the run's reads. Throws
+ * when it doesn't verify.
  */
 const importRelease = async (
   reader: Reader,
   db: ConsoleDatabase,
   id: string
-): Promise<boolean> => {
+): Promise<"imported" | "absent" | "deferred"> => {
   const manifestBytes = await reader.read(
     manifestKey(id),
     (size) => size <= MAX_MANIFEST_BYTES,
     `at most ${MAX_MANIFEST_BYTES}`
   );
   if (manifestBytes === undefined) {
-    return false;
+    return "absent";
   }
   const { manifest, text } = parseManifest(id, manifestBytes);
+  const blobs = blobCount(manifest);
+  if (blobs > MAX_BLOBS_PER_RELEASE) {
+    throw new Error(
+      `Release ${id} names ${blobs} blobs; at most ${MAX_BLOBS_PER_RELEASE} are read`
+    );
+  }
+  if (reader.reads + blobs > MAX_READS_PER_RUN) {
+    return "deferred";
+  }
   await verifyReleaseBlobs(
     manifest,
     async (key, size) =>
@@ -216,40 +234,54 @@ const importRelease = async (
   await db
     .delete(releaseImportFailures)
     .where(eq(releaseImportFailures.releaseId, id));
-  return true;
+  return "imported";
 };
 
-/** Records a failed attempt at `id`, the `attempts`th, and when to try again. */
+/** Past this many doublings the wait is at its longest anyway. */
+const MAX_DOUBLINGS = 20;
+
+/**
+ * Records a failed attempt at `id` and when to try again, and audits it,
+ * in one batch. The count goes up in SQL, and the audit event reads it
+ * back from the row, so runs that fail the same release at once each count.
+ */
 const recordFailure = async (
   db: ConsoleDatabase,
   id: string,
-  attempts: number,
   now: Date
 ): Promise<void> => {
-  const wait = Math.min(FIRST_RETRY_MS * 2 ** (attempts - 1), MAX_RETRY_MS);
-  const row = {
-    releaseId: id,
-    attempts,
-    failedAt: now,
-    nextAttemptAt: new Date(now.getTime() + wait),
-  };
-  await act(
-    db,
-    "system",
-    [
-      db.insert(releaseImportFailures).values(row).onConflictDoUpdate({
-        target: releaseImportFailures.releaseId,
-        set: row,
-      }),
-    ],
-    { action: "release.import_failed", target: id, detail: { attempts } }
-  );
+  const at = now.getTime();
+  const { attempts } = releaseImportFailures;
+  // The wait after the nth attempt is FIRST_RETRY_MS * 2^(n - 1): in the
+  // update, `attempts` is still the count before this one.
+  const record = db
+    .insert(releaseImportFailures)
+    .values({
+      releaseId: id,
+      attempts: 1,
+      failedAt: now,
+      nextAttemptAt: new Date(at + FIRST_RETRY_MS),
+    })
+    .onConflictDoUpdate({
+      target: releaseImportFailures.releaseId,
+      set: {
+        attempts: sql`${attempts} + 1`,
+        failedAt: now,
+        nextAttemptAt: sql`${at} + min(${FIRST_RETRY_MS} * (1 << min(${attempts}, ${MAX_DOUBLINGS})), ${MAX_RETRY_MS})`,
+      },
+    });
+  const audit = db
+    .insert(auditEvents)
+    .select(
+      sql`SELECT ${crypto.randomUUID()}, ${at}, 'system', 'release.import_failed', NULL, ${id}, json_object('attempts', ${attempts}) FROM ${releaseImportFailures} WHERE ${releaseImportFailures.releaseId} = ${id}`
+    );
+  await db.batch([record, audit]);
 };
 
 /**
  * Imports the releases published to `store` that `db` doesn't hold yet,
- * newest first: until {@link MAX_IMPORTS_PER_RUN} are imported or
- * {@link MAX_READS_PER_RUN} reads are spent. A release that failed is
+ * newest first: until {@link MAX_IMPORTS_PER_RUN} are imported or the
+ * next one's reads don't fit in {@link MAX_READS_PER_RUN}. A release that failed is
  * passed over until its next attempt is due.
  */
 export const importReleases = async (
@@ -260,13 +292,13 @@ export const importReleases = async (
   const imported = await db.select({ id: releases.id }).from(releases);
   const known = new Set(imported.map((row) => row.id));
   const failed = await db.select().from(releaseImportFailures);
-  const failures = new Map(failed.map((row) => [row.releaseId, row]));
+  const due = new Map(
+    failed.map((row) => [row.releaseId, row.nextAttemptAt.getTime()])
+  );
   const published = await publishedIds(store);
   const pending = published
     .filter((id) => !known.has(id))
-    .filter(
-      (id) => (failures.get(id)?.nextAttemptAt.getTime() ?? 0) <= now.getTime()
-    )
+    .filter((id) => (due.get(id) ?? 0) <= now.getTime())
     .toSorted(newestFirst);
 
   const reader = new Reader(store);
@@ -279,11 +311,10 @@ export const importReleases = async (
     ) {
       break;
     }
+    let outcome: Awaited<ReturnType<typeof importRelease>>;
     try {
       // oxlint-disable-next-line no-await-in-loop -- one release at a time
-      if (await importRelease(reader, db, id)) {
-        result.imported.push(id);
-      }
+      outcome = await importRelease(reader, db, id);
     } catch (error) {
       result.failed.push(id);
       log.error("release.import_failed", {
@@ -291,7 +322,15 @@ export const importReleases = async (
         ...errorFields(error),
       });
       // oxlint-disable-next-line no-await-in-loop -- one release at a time
-      await recordFailure(db, id, (failures.get(id)?.attempts ?? 0) + 1, now);
+      await recordFailure(db, id, now);
+      continue;
+    }
+    if (outcome === "deferred") {
+      // Its blobs don't fit in the reads left: it goes first next run.
+      break;
+    }
+    if (outcome === "imported") {
+      result.imported.push(id);
     }
   }
   return result;

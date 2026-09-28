@@ -19,6 +19,7 @@ import {
   importReleases,
   MAX_IMPORTS_PER_RUN,
   MAX_MANIFEST_BYTES,
+  MAX_BLOBS_PER_RELEASE,
   MAX_READS_PER_RUN,
 } from "../src/releases/import.ts";
 import type { ReleaseStore } from "../src/releases/import.ts";
@@ -369,9 +370,69 @@ CREATE TABLE t (id TEXT);`,
     expect(second.imported).toContain(oldest);
   });
 
-  it("stops a run once it has spent its reads, and goes on in the next", async () => {
-    // Each release reads more than half the budget: a run starts two.
-    const assetCount = Math.ceil(MAX_READS_PER_RUN / 2);
+  it("counts two runs' failures of the same release at once as two attempts", async () => {
+    const broken = nextReleaseId();
+    await env.RELEASES.put(manifestKey(broken), "{ not json");
+    // Both runs have seen the release as due before either records its
+    // failure: each waits at the manifest until the other has reached it.
+    let arrived = 0;
+    const { promise: barrier, resolve: bothArrived } =
+      Promise.withResolvers<boolean>();
+    const store: ReleaseStore = {
+      list: async (options) => await env.RELEASES.list(options),
+      get: async (key: string) => {
+        if (key === manifestKey(broken)) {
+          arrived += 1;
+          if (arrived === 2) {
+            bothArrived(true);
+          }
+          await barrier;
+        }
+        return await env.RELEASES.get(key);
+      },
+    };
+    const now = inMinutes(0);
+
+    await Promise.all([runImport(store, { now }), runImport(store, { now })]);
+
+    // The second attempt's wait is ten minutes.
+    await expect(failureRow(broken)).resolves.toMatchObject({
+      attempts: 2,
+      nextAttemptAt: new Date(now.getTime() + 10 * MINUTE),
+    });
+    const events = await eventsFor("release.import_failed", broken);
+    const details = events.map((event) => event.detail ?? "");
+    expect(details.toSorted((a, b) => a.localeCompare(b))).toStrictEqual([
+      JSON.stringify({ attempts: 1 }),
+      JSON.stringify({ attempts: 2 }),
+    ]);
+  });
+
+  it("refuses a release naming more blobs than a run may read for one, before reading them", async () => {
+    const token = crypto.randomUUID();
+    const release = await publishRelease({
+      notes: "feat(core): too many blobs",
+      assets: Object.fromEntries(
+        Array.from({ length: MAX_BLOBS_PER_RELEASE + 1 }, (_, index) => [
+          `/asset-${index}.txt`,
+          `${token} ${index}`,
+        ])
+      ),
+    });
+    const { store, reads } = countingStore();
+
+    const result = await runImport(store);
+
+    expect(result.failed).toContain(release.id);
+    expect(
+      [...reads.keys()].filter((key) => key.startsWith("blobs/"))
+    ).toStrictEqual([]);
+  });
+
+  it("stops a run before a release whose reads don't fit, and imports it next run", async () => {
+    // Each release reads a third of the budget and a little more: a run
+    // has room for two.
+    const assetCount = Math.floor(MAX_READS_PER_RUN / 3);
     const token = crypto.randomUUID();
     const assets = Object.fromEntries(
       Array.from({ length: assetCount }, (_, index) => [

@@ -51,7 +51,7 @@ const Compare = ({ releases }: { releases: ReleaseSummary[] }) => (
 );
 
 const Releases = () => {
-  const { releases, more } = Route.useLoaderData();
+  const { releases, older } = Route.useLoaderData();
   return (
     <main className="flex flex-col gap-6 p-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -76,7 +76,7 @@ const Releases = () => {
           </TableHeader>
           <TableBody>
             {releases.map((release, index) => {
-              const previous = releases[index + 1];
+              const previous = releases[index + 1] ?? older;
               return (
                 <TableRow key={release.id}>
                   <TableCell>
@@ -96,13 +96,13 @@ const Releases = () => {
                   </TableCell>
                   <TableCell>{formatTime(release.builtAt)}</TableCell>
                   <TableCell>
-                    {previous === undefined ? null : (
+                    {previous === null ? null : (
                       <Link
                         to="/releases/diff"
                         search={{ from: previous.id, to: release.id }}
                         className="underline-offset-4 hover:underline"
                       >
-                        Since {previous.id}
+                        {`Since ${previous.id}`}
                       </Link>
                     )}
                   </TableCell>
@@ -112,11 +112,11 @@ const Releases = () => {
           </TableBody>
         </Table>
       )}
-      {more ? (
+      {older === null ? null : (
         <p className="text-muted-foreground text-sm">
           {`The newest ${releases.length} releases.`}
         </p>
-      ) : null}
+      )}
     </main>
   );
 };

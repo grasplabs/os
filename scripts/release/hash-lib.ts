@@ -7,7 +7,17 @@
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 
-import { assetContentKey, sha256OfBytes } from "@grasp-os/shared/release";
+import {
+  assetContentKey,
+  mapConcurrently,
+  sha256OfBytes,
+} from "@grasp-os/shared/release";
+
+/**
+ * Files read and hashed at once: each holds its bytes, and an asset its
+ * base64 too, until it's hashed.
+ */
+const COLLECT_CONCURRENCY = 8;
 
 /** A file read into a release: its name, content address and bytes. */
 export interface CollectedFile {
@@ -98,21 +108,21 @@ const readCollected = async (
 export const collectModules = async (
   outDir: string
 ): Promise<{ mainModule: string; modules: CollectedModule[] }> => {
-  const modules = await Promise.all(
-    walkFiles(outDir)
-      .filter((name) => !isDryRunExtra(name))
-      .map(async (name): Promise<CollectedModule> => {
-        const extension = path.extname(name);
-        if (!isModuleExtension(extension)) {
-          throw new Error(
-            `Unrecognised module in the dry-run output: ${name} (${outDir})`
-          );
-        }
-        return {
-          ...(await readCollected(outDir, name)),
-          type: MODULE_TYPES[extension],
-        };
-      })
+  const modules = await mapConcurrently(
+    walkFiles(outDir).filter((name) => !isDryRunExtra(name)),
+    COLLECT_CONCURRENCY,
+    async (name): Promise<CollectedModule> => {
+      const extension = path.extname(name);
+      if (!isModuleExtension(extension)) {
+        throw new Error(
+          `Unrecognised module in the dry-run output: ${name} (${outDir})`
+        );
+      }
+      return {
+        ...(await readCollected(outDir, name)),
+        type: MODULE_TYPES[extension],
+      };
+    }
   );
   const esm = modules.filter((module) => module.type === "esm");
   const [main] = esm;
@@ -126,10 +136,12 @@ export const collectModules = async (
 
 /** A D1 migrations directory's SQL files, in the order Wrangler applies them. */
 export const collectSqlFiles = async (dir: string): Promise<CollectedFile[]> =>
-  await Promise.all(
-    walkFiles(dir)
-      .filter((name) => !name.includes("/") && name.endsWith(".sql"))
-      .map(async (name) => await readCollected(dir, name))
+  await mapConcurrently(
+    walkFiles(dir).filter(
+      (name) => !name.includes("/") && name.endsWith(".sql")
+    ),
+    COLLECT_CONCURRENCY,
+    async (name) => await readCollected(dir, name)
   );
 
 // Files Wrangler reads as configuration rather than serving: the release
@@ -152,11 +164,13 @@ export const collectAssets = async (
       `${distDir}/${configFile} configures assets, which releases don't carry yet`
     );
   }
-  const files = await Promise.all(
-    names.map(async (name) => {
+  const files = await mapConcurrently(
+    names,
+    COLLECT_CONCURRENCY,
+    async (name) => {
       const bytes = readFileSync(path.join(distDir, name));
       return { name, bytes, hash: await assetContentKey(bytes, name) };
-    })
+    }
   );
   const manifest: Record<string, AssetEntry> = {};
   const blobs = new Map<string, Buffer>();

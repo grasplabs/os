@@ -64,10 +64,14 @@ const summaryColumns = {
   importedAt: releases.importedAt,
 };
 
-/** The newest releases, newest first, and whether there are more. */
+/**
+ * The newest releases, newest first, and the release before the oldest of
+ * them, if there is one: the list's last "since" link, and the sign that
+ * there are more.
+ */
 export const listReleases = async (
   db: ConsoleDatabase
-): Promise<{ releases: ReleaseSummary[]; more: boolean }> => {
+): Promise<{ releases: ReleaseSummary[]; older: ReleaseSummary | null }> => {
   const rows = await db
     .select(summaryColumns)
     .from(releases)
@@ -75,7 +79,7 @@ export const listReleases = async (
     .limit(RELEASE_LIST_LIMIT + 1);
   return {
     releases: rows.slice(0, RELEASE_LIST_LIMIT),
-    more: rows.length > RELEASE_LIST_LIMIT,
+    older: rows[RELEASE_LIST_LIMIT] ?? null,
   };
 };
 
