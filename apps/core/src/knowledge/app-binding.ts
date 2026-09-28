@@ -21,6 +21,7 @@ import {
   getRecord,
   linkWorkflowAsDelegate,
   saveRecordAsDelegate,
+  takeSnapshotAsDelegate,
 } from "./playbook.ts";
 
 /**
@@ -33,10 +34,10 @@ import {
  * read of restricted data puts the App in restricted mode first, for
  * everyone using it.
  *
- * The Playbook's stub also writes records (`saveRecord`, `linkWorkflow`),
- * under a permission with `write`, for the caller and with their rights
- * (playbook.ts). Other collections have no writes: a save through any
- * other stub is refused by the permission check.
+ * The Playbook's stub also writes records (`saveRecord`, `linkWorkflow`,
+ * `takeSnapshot`), under a permission with `write`, for the caller and
+ * with their rights (playbook.ts). Other collections have no writes: a
+ * save through any other stub is refused by the permission check.
  */
 export class AppCollectionBinding extends WorkerEntrypoint<
   Env,
@@ -161,6 +162,30 @@ export class AppCollectionBinding extends WorkerEntrypoint<
       caller,
       async (authority, grant) =>
         await linkWorkflowAsDelegate(
+          this.env,
+          authority,
+          grant.context,
+          grant.permissionId,
+          input
+        )
+    );
+  }
+
+  /**
+   * Takes a dated snapshot of the Playbook for `caller`
+   * (`takeSnapshotAsDelegate` in playbook.ts: `{ maturity, title?,
+   * decisionNeeded?, body? }`), freezing its workflows' hours, as drawn,
+   * designed and observed in runs, and their improvement signals: as
+   * `saveRecord`.
+   */
+  async takeSnapshot(
+    caller: unknown,
+    input: unknown
+  ): Promise<DocumentSummary> {
+    return await this.#write(
+      caller,
+      async (authority, grant) =>
+        await takeSnapshotAsDelegate(
           this.env,
           authority,
           grant.context,

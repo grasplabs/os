@@ -15,7 +15,7 @@ import type {
   SignalsApi,
 } from "@grasp-os/shared/signals";
 import { RpcTarget } from "capnweb";
-import { and, asc, desc, eq, ne, notLike, sql } from "drizzle-orm";
+import { and, asc, desc, eq, ne, notLike } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { appContents, appFor } from "./apps.ts";
@@ -26,7 +26,7 @@ import {
 } from "./db/core/schema.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
-import { peopleSubject } from "./signals.ts";
+import { latestComputation, peopleSubject } from "./signals.ts";
 
 // Reading the improvement signals (signals.ts). Admins read every one
 // whole: they read the audit log and every run's details already. An
@@ -144,26 +144,19 @@ export const listSignals = async (
     action: "improvement.signals.read",
     detail: { app: app ?? null, workflow: workflow ?? null },
   });
-  // The finished computation started last, read in the same batch as its
-  // signals, so a computation finishing meanwhile can't empty them.
-  const latest = sql`(
-    SELECT ${computations.id} FROM ${computations}
-    WHERE ${computations.finishedAt} IS NOT NULL
-    ORDER BY ${computations.startedAt} DESC, ${computations.id} DESC
-    LIMIT 1
-  )`;
+  // The computation and its signals in one batch (`latestComputation`).
   const [current, ...kinds] = await db.batch([
     db
       .select({ finishedAt: computations.finishedAt })
       .from(computations)
-      .where(eq(computations.id, latest)),
+      .where(eq(computations.id, latestComputation)),
     ...signalKinds.map((kind) =>
       db
         .select()
         .from(improvementSignals)
         .where(
           and(
-            eq(improvementSignals.computation, latest),
+            eq(improvementSignals.computation, latestComputation),
             eq(improvementSignals.kind, kind),
             kind === "waiting_for_person" ? waitsFor(by) : undefined,
             app === undefined ? undefined : eq(improvementSignals.appId, app),

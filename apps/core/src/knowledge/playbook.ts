@@ -40,6 +40,7 @@ import {
   parseFrontmatter,
   withFrontmatter,
 } from "./frontmatter.ts";
+import { snapshotFigures } from "./snapshots.ts";
 
 // The Playbook: the company's records (its vision, teams, people, tools,
 // what people said, its workflows drawn and designed, snapshots, the plan,
@@ -49,9 +50,10 @@ import {
 // frontmatter schemas are in frontmatter.ts.
 //
 // These helpers are how the Playbook Apps and the agent write them: a
-// record as data and a Markdown body, and the link from a designed
-// workflow to the App workflow built from it. They are behind the
-// `playbook` flag; reads go through Knowledge as for any document.
+// record as data and a Markdown body, the link from a designed workflow
+// to the App workflow built from it, and a snapshot the platform takes
+// (snapshots.ts). They are behind the `playbook` flag; reads go through
+// Knowledge as for any document.
 //
 // A person saves and links as themselves. An App (its server code, knowledge/app-binding.ts)
 // does it for the person whose call it runs in, as a delegate: only under
@@ -145,7 +147,9 @@ const recordTypeSchema = z.enum([...playbookRecordTypes, "decision"]);
  * A record to save at `path` in the Playbook, from `ifVersion` (0 for a
  * new one): its frontmatter as data, which its type's schema checks, and
  * the Markdown a person reads. A workflow's link to an App workflow isn't
- * part of it: `linkWorkflow` sets that, and a save keeps it.
+ * part of it: `linkWorkflow` sets that, and a save keeps it. Nor is what
+ * a snapshot froze when the platform took it: `takeSnapshot` sets that,
+ * and a save keeps it.
  */
 const recordInputSchema = z.strictObject({
   path: documentPathSchema,
@@ -155,6 +159,10 @@ const recordInputSchema = z.strictObject({
     .refine((record) => !("app" in record), {
       path: ["app"],
       message: "Link a workflow to an App workflow with linkWorkflow",
+    })
+    .refine((record) => !("figures" in record), {
+      path: ["figures"],
+      message: "Only a snapshot the platform takes has figures: takeSnapshot",
     }),
   body: z.string(),
   /** What changed, for the history. */
@@ -182,12 +190,78 @@ const versionText = async (
 };
 
 /**
- * The App workflow the saved record `text` at `path` links to, if any.
- * Saved text fits its type: the save pipeline checked it.
+ * What a save of a `type` record keeps from the saved `text` at `path`
+ * when that was a `type` record too, whatever the record it saves says:
+ * only the platform writes these. A
+ * workflow keeps the App workflow it links to (`linkWorkflow`); a
+ * snapshot the platform took (`takeSnapshot`) keeps what it froze, its
+ * date, maturity, workflow versions and figures. Saved text fits its
+ * type: the save pipeline checked it.
  */
-const appLinkOf = (path: string, text: string): unknown => {
-  const { frontmatter } = parseFrontmatter(path, text);
-  return "app" in frontmatter ? frontmatter.app : undefined;
+const keptFrom = (
+  type: string,
+  path: string,
+  text: string
+): Record<string, unknown> => {
+  // Only these types have fields the platform writes: any other save
+  // doesn't read the text it goes over.
+  if (type !== "workflow" && type !== "snapshot") {
+    return {};
+  }
+  const saved = parseFrontmatter(path, text);
+  if (saved.type !== type) {
+    return {};
+  }
+  const { frontmatter } = saved;
+  if ("app" in frontmatter && frontmatter.app) {
+    return { app: frontmatter.app };
+  }
+  if ("figures" in frontmatter && frontmatter.figures) {
+    const { date, maturity, workflows, figures } = frontmatter;
+    return {
+      date,
+      ...(maturity === undefined ? {} : { maturity }),
+      workflows,
+      figures,
+    };
+  }
+  return {};
+};
+
+/** A record to write, its input checked. */
+type RecordInput = z.output<typeof recordInputSchema>;
+
+/**
+ * Writes `record` as `writer`, from `ifVersion` of `path`, keeping what
+ * only the platform writes of the version it goes over (`keptFrom`).
+ */
+const writeRecord = async (
+  env: Env,
+  writer: RecordWriter,
+  { path, ifVersion, record, body, message }: RecordInput
+): Promise<DocumentSummary> => {
+  const collection = await playbookCollection(env, writer);
+  requireWritable(env, writer.person, collection);
+  const db = drizzle(env.KNOWLEDGE);
+  const existing =
+    ifVersion === 0 ? undefined : await findByPath(db, collection.id, path);
+  // Only from the current version: from any other, the save below refuses
+  // it as a conflict, and nothing older is carried into it.
+  const previous =
+    existing?.currentVersion === ifVersion
+      ? await versionText(env, existing.id, ifVersion)
+      : undefined;
+  const kept =
+    previous === undefined ? {} : keptFrom(record.type, path, previous);
+  return await writeVersion(env, versionWriter(writer), {
+    collection,
+    path,
+    text: recordText({ ...record, ...kept }, body),
+    ifVersion,
+    message: message === undefined || message === "" ? null : message,
+    restoredFrom: null,
+    ...lastCheckOf(writer),
+  });
 };
 
 /** Saves a record as `writer` (see `saveRecord`). */
@@ -197,39 +271,11 @@ const saveRecordAs = async (
   input: unknown
 ): Promise<DocumentSummary> => {
   requirePlaybook(env);
-  const { path, ifVersion, record, body, message } = knowledgeErrors.parse(
-    "knowledge.invalid",
-    recordInputSchema,
-    input
+  return await writeRecord(
+    env,
+    writer,
+    knowledgeErrors.parse("knowledge.invalid", recordInputSchema, input)
   );
-  const collection = await playbookCollection(env, writer);
-  requireWritable(env, writer.person, collection);
-  const db = drizzle(env.KNOWLEDGE);
-  const existing =
-    ifVersion === 0 ? undefined : await findByPath(db, collection.id, path);
-  // Only from the current version: from any other, the save below refuses
-  // it as a conflict, and no older link is carried into it.
-  const previous =
-    existing?.currentVersion === ifVersion
-      ? await versionText(env, existing.id, ifVersion)
-      : undefined;
-  const app =
-    previous === undefined || record.type !== "workflow"
-      ? undefined
-      : appLinkOf(path, previous);
-  const text = recordText(
-    app === undefined ? record : { ...record, app },
-    body
-  );
-  return await writeVersion(env, versionWriter(writer), {
-    collection,
-    path,
-    text,
-    ifVersion,
-    message: message === undefined || message === "" ? null : message,
-    restoredFrom: null,
-    ...lastCheckOf(writer),
-  });
 };
 
 /**
@@ -238,7 +284,7 @@ const saveRecordAs = async (
  * doesn't fit its type, `knowledge.conflict` when `ifVersion` isn't
  * current), and only by those who may change the Playbook (its admins).
  * A workflow keeps the App workflow the version it was edited from links
- * to.
+ * to, and a snapshot the platform took keeps what it froze.
  */
 export const saveRecord = async (
   env: Env,
@@ -444,6 +490,78 @@ export const linkWorkflowAsDelegate = async (
   input: unknown
 ): Promise<DocumentSummary> =>
   await linkWorkflowAs(
+    env,
+    await delegateWriter(env, authority, context, permissionId),
+    input
+  );
+
+/**
+ * A snapshot to take (`takeSnapshot`): the maturity it records, from 0 to
+ * 5; its title (`Snapshot <date>` when none); the decision it asks for;
+ * and its Markdown, such as the board page's narrative.
+ */
+export const snapshotInputSchema = z.strictObject({
+  title: z.string().trim().min(1).max(200).optional(),
+  maturity: z.int().min(0).max(5),
+  decisionNeeded: z.string().trim().max(1000).optional(),
+  body: z.string().default(""),
+});
+export type SnapshotInput = z.input<typeof snapshotInputSchema>;
+
+/** Takes a snapshot as `writer` (see `takeSnapshotAsDelegate`). */
+const takeSnapshotAs = async (
+  env: Env,
+  writer: RecordWriter,
+  input: unknown
+): Promise<DocumentSummary> => {
+  requirePlaybook(env);
+  const { title, maturity, decisionNeeded, body } = knowledgeErrors.parse(
+    "knowledge.invalid",
+    snapshotInputSchema,
+    input
+  );
+  // Refused before the Playbook's workflows and runs are read.
+  requireWritable(env, writer.person, await playbookCollection(env, writer));
+  const now = new Date();
+  const date = now.toISOString().slice(0, 10);
+  const { workflows, figures } = await snapshotFigures(env, now);
+  return await writeRecord(env, writer, {
+    // Its own path each time: two taken at once are two snapshots.
+    path: `snapshots/${date}-${crypto.randomUUID().slice(0, 8)}.md`,
+    ifVersion: 0,
+    record: {
+      type: "snapshot",
+      title: title ?? `Snapshot ${date}`,
+      date,
+      maturity,
+      workflows,
+      figures,
+      ...(decisionNeeded === undefined || decisionNeeded === ""
+        ? {}
+        : { decisionNeeded }),
+    },
+    body,
+    message: "Taken",
+  });
+};
+
+/**
+ * Takes a dated snapshot of the Playbook, by an App or agent for the
+ * person `authority` names, under the permission `permissionId` (see
+ * `delegateWriter`): a new `snapshot` record that freezes every workflow
+ * record at its current version (and a designed one's drawn version),
+ * with the hours each takes, drawn, designed and as it runs by the runs
+ * observed, and the improvement signals of the App workflows they link to
+ * (snapshots.ts). Saving it again keeps what it froze (`saveRecord`).
+ */
+export const takeSnapshotAsDelegate = async (
+  env: Env,
+  authority: Authority,
+  context: WorkContext,
+  permissionId: PermissionId,
+  input: unknown
+): Promise<DocumentSummary> =>
+  await takeSnapshotAs(
     env,
     await delegateWriter(env, authority, context, permissionId),
     input

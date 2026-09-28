@@ -93,6 +93,18 @@ const attemptsPerDay = 3;
  */
 export const peopleSubject = "person";
 
+/**
+ * The finished computation started last, whose signals are the current
+ * ones: read in the same batch as them, so one finishing meanwhile can't
+ * empty them.
+ */
+export const latestComputation = sql`(
+  SELECT ${computations.id} FROM ${computations}
+  WHERE ${computations.finishedAt} IS NOT NULL
+  ORDER BY ${computations.startedAt} DESC, ${computations.id} DESC
+  LIMIT 1
+)`;
+
 /** Rows one read of runs or decisions returns. */
 const pageRows = 500;
 
@@ -141,7 +153,7 @@ const signalRow = <Kind extends SignalKind>(
 ): SignalRow => ({ kind, ...where, value, evidence });
 
 /** An App's workflow, as a map key. */
-const workflowKey = (appId: string, workflowId: string): string =>
+export const workflowKey = (appId: string, workflowId: string): string =>
   JSON.stringify([appId, workflowId]);
 
 /** Money rounded to millionths of a dollar, as model spend is counted. */
@@ -334,8 +346,11 @@ interface Started {
   runs: number;
 }
 
-/** How many runs of each App workflow started since `from`. */
-const runsSince = async (
+/**
+ * How many runs of each App workflow started since `from`, by
+ * `workflowKey`.
+ */
+export const runsSince = async (
   db: DrizzleD1Database,
   from: Date
 ): Promise<Map<string, Started>> => {
