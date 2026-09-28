@@ -72,23 +72,26 @@ const deliver = async (event: unknown): Promise<{ runs: number }> =>
 
 /**
  * An App with the inbox workflow, granted Outlook: on `resource` when
- * given, for `actions` (listing mail by default), masking `mask`.
+ * given, for `actions` (listing mail by default), masking `mask`. The
+ * workflow's `triggers` replace its one, on `filter`, when given.
  */
 const inboxApp = async (
   builder: Person,
   {
     filter,
+    triggers,
     resource,
     actions,
     mask,
   }: {
     filter?: string;
+    triggers?: string;
     resource?: string;
     actions?: string[];
     mask?: string[];
   } = {}
 ): Promise<string> => {
-  const app = await appWith(builder, inbox(filter));
+  const app = await appWith(builder, inbox(filter, triggers));
   const request = outlook(app);
   await requestGranted(idp, builder, {
     ...request,
@@ -137,6 +140,23 @@ describe("event triggers", () => {
           /^event:[\w-]+:inbox:[0-9a-f]{64}$/u.test(String(detail.key)),
         ])
     ).toStrictEqual([["system", "event", true]]);
+  });
+
+  it("start a workflow once for an event two of its triggers match, and count it once", async () => {
+    const builder = await personApi("builder");
+    const app = await inboxApp(builder, {
+      triggers: `[
+        { type: "event", event: "m365.mail.received", filter: { folder: "both" } },
+        { type: "event", event: "m365.mail.received", filter: { folder: "both", subject: "Invoice INV-7" } },
+      ]`,
+    });
+
+    await expect(deliver(mailEvent({ folder: "both" }))).resolves.toStrictEqual(
+      {
+        runs: 1,
+      }
+    );
+    await expect(runsOf(builder, app)).resolves.toHaveLength(1);
   });
 
   it("start nothing for an event its filter doesn't match", async () => {

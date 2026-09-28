@@ -107,9 +107,19 @@ export const deliverConnectorEvent = async (
     input
   );
   const triggered = await receiversOf(env, event);
-  const receivers = triggered.filter(({ filter }) =>
-    matchesFilter(filter, event.payload)
-  );
+  // Each workflow once, however many of its triggers match: the event
+  // starts one run of it (its key is by workflow), counted once, and two
+  // starts of it at once would find each other's run still starting.
+  const receivers = [
+    ...new Map(
+      triggered
+        .filter(({ filter }) => matchesFilter(filter, event.payload))
+        .map((receiver) => [
+          `${receiver.appId}:${receiver.workflowId}`,
+          receiver,
+        ])
+    ).values(),
+  ];
   // A hash, so the key (in the audit log too) stays short and says
   // nothing of the event.
   const same = await sha256Hex(JSON.stringify([event.connection, event.id]));

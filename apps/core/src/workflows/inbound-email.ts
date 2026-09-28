@@ -279,10 +279,15 @@ const inputOf = (
   });
 };
 
-/** The email triggers of Apps' current versions at `address`. */
+/**
+ * The workflows of Apps' current versions with an email trigger at
+ * `address`, each once however many of its triggers are there: a message
+ * starts a workflow's run once, and two starts of it at once would find
+ * each other's run still starting.
+ */
 const receiversAt = async (env: Env, address: string) =>
   await drizzle(env.DB)
-    .select({
+    .selectDistinct({
       appId: workflowTriggers.appId,
       version: workflowTriggers.version,
       workflowId: workflowTriggers.workflowId,

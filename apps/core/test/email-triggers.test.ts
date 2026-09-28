@@ -24,18 +24,20 @@ const personApi = async (role: Role) => await signedInApi(idp, role);
 type Person = Awaited<ReturnType<typeof personApi>>;
 
 /**
- * The invoice intake workflow, receiving mail at `address`: it returns
- * what it read of the message it started with.
+ * The invoice intake workflow, receiving mail at `address` (through
+ * `times` triggers there): it returns what it read of the message it
+ * started with.
  */
 const intake = (
   address = "invoices",
-  id = "intake"
+  id = "intake",
+  times = 1
 ): Record<string, string> => ({
   [`workflows/${id}.ts`]: `import { emailMessage, workflow } from "@grasp-os/sdk/workflow";
 
 export default workflow(
   "${id}",
-  { params: {}, input: emailMessage, triggers: [{ type: "email", address: "${address}" }] },
+  { params: {}, input: emailMessage, triggers: [${Array.from({ length: times }, () => `{ type: "email", address: "${address}" }`).join(", ")}] },
   async (step, { input }) =>
     await step.do("read", { description: "Read the invoice mail" }, async () => ({
       id: input.id,
@@ -371,6 +373,18 @@ describe("email triggers", () => {
       third: "ok",
       runs: ["failed start: failed", "new: completed"],
     });
+  });
+
+  it("start a workflow once for a message two of its triggers receive", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, intake("doubled", "intake", 2));
+
+    await expect(
+      outcome(
+        deliver("doubled@grasp.test", invoiceMail({ to: "doubled@grasp.test" }))
+      )
+    ).resolves.toBe("ok");
+    await expect(runsOf(builder, app)).resolves.toHaveLength(1);
   });
 
   it("keep a < that starts no tag as text", async () => {
