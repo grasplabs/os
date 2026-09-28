@@ -1,8 +1,11 @@
 import { authErrors } from "@grasp-os/shared/errors";
+import { routerClientIpHeader } from "@grasp-os/shared/router";
+import { createExecutionContext } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import worker from "../src/index.ts";
 import { createIdp } from "./fake-idp.ts";
 import { mockIdp } from "./idp.ts";
 import type { Claims } from "./idp.ts";
@@ -386,6 +389,66 @@ describe("login CSRF, session fixation and replay", () => {
       const refusal = await whoami(cookie).catch((error: unknown) => error);
       expect(authErrors.codeOf(refusal)).toBe("auth.unauthenticated");
     }
+  });
+});
+
+/** The client IP kept on the session behind a session cookie, if any. */
+const sessionIp = async (cookie: string) => {
+  const [token = ""] = decodeURIComponent(cookie.split("=")[1] ?? "").split(
+    "."
+  );
+  const row = await env.DB.prepare(
+    "SELECT ip_address AS ip FROM sessions WHERE token = ?"
+  )
+    .bind(token)
+    .first<{ ip: string | null }>();
+  return row?.ip;
+};
+
+describe("the client's IP", () => {
+  it("is taken from the router's header, not from x-forwarded-for", async () => {
+    const started = await startSignIn("microsoft");
+    const callback = idp.authorize(
+      started.authorizationUrl,
+      entraPerson(acmeTenant)
+    );
+    const response = await routed(`${callback.pathname}${callback.search}`, {
+      headers: {
+        cookie: started.cookie,
+        [routerClientIpHeader]: "203.0.113.7",
+        // The router's own hop, as a proxy in front of core would add it.
+        "x-forwarded-for": "198.51.100.9",
+      },
+    });
+    const session = response.headers
+      .getSetCookie()
+      .find((cookie) => cookie.startsWith(`${sessionCookieName}=`))
+      ?.split(";")[0];
+
+    expect(session).toBeDefined();
+    await expect(sessionIp(session ?? "")).resolves.toBe("203.0.113.7");
+  });
+
+  it("can't be claimed by a request that skips the router", async () => {
+    const started = await startSignIn("microsoft");
+    const callback = idp.authorize(
+      started.authorizationUrl,
+      entraPerson(acmeTenant)
+    );
+    // Straight to core's own address: the client's header, no router secret.
+    const direct = new Request(
+      `${coreOrigin}${callback.pathname}${callback.search}`,
+      {
+        redirect: "manual",
+        headers: { cookie: started.cookie, [routerClientIpHeader]: "10.0.0.1" },
+      }
+    );
+    const response = await worker.fetch(direct, env, createExecutionContext());
+
+    expect(response.status).toBe(403);
+    expect(response.headers.getSetCookie().join(",")).not.toContain(
+      `${sessionCookieName}=`
+    );
   });
 });
 

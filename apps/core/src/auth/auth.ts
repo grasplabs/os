@@ -5,6 +5,7 @@ import { staffWindowOpen } from "@grasp-os/shared/deployment-config";
 import type { SignInConfig } from "@grasp-os/shared/deployment-config";
 import { fromBase64Url } from "@grasp-os/shared/encoding";
 import { log } from "@grasp-os/shared/log";
+import { routerClientIpHeader } from "@grasp-os/shared/router";
 import type { SignInRefusal } from "@grasp-os/shared/sign-in";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import {
@@ -389,10 +390,9 @@ const createAuth = (
     // One door out (R13): nothing leaves core but the sign-in itself.
     telemetry: { enabled: false },
     logger: authLogger,
-    // Better Auth limits by client IP, but behind the router every request
-    // arrives from the router's address, so its limits would throttle the
-    // whole deployment as one client (and its store is per isolate). Rate
-    // limits on sign-in belong where the client's IP is known: the router.
+    // Better Auth keeps its counts per isolate, so its limits would limit
+    // nothing across a deployment. Rate limits on sign-in belong at the
+    // router, in front of every core.
     rateLimit: { enabled: false },
     session: {
       expiresIn: sessionMs / 1000,
@@ -409,6 +409,12 @@ const createAuth = (
       },
     },
     advanced: {
+      // The client's IP, kept on its session, comes from the router's header
+      // alone, never `x-forwarded-for`. Trusted because nothing reaches
+      // Better Auth without the router secret (entry.ts) and the router
+      // replaces any copy the client sent. A local stack has no router, so
+      // nothing sets it there and its sessions carry no client IP.
+      ipAddress: { ipAddressHeaders: [routerClientIpHeader] },
       // Host-only cookies (`__Host-`): no Domain, so no other client's
       // hostname under the product domain can read or plant them.
       useSecureCookies: false,
