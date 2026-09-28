@@ -32,14 +32,6 @@ export { appModuleName, kitModuleName, screenRuntime } from "./kit.ts";
 /** Part of every build's cache key: a new compiler or kit builds again. */
 export { version as compilerVersion } from "#version";
 
-/** An App's files at one version, to build. */
-export interface AppSource {
-  app: string;
-  version: string;
-  /** By path; each build reads only its own (see inputs.ts). */
-  files: Record<string, string>;
-}
-
 /**
  * One of this release's compiler files, from core's static assets. The
  * assets answer unknown paths with the frontend's index.html, so anything
@@ -130,18 +122,19 @@ export const isolateSettings = {
 } satisfies Omit<WorkerLoaderWorkerCode, "mainModule" | "modules">;
 
 /**
- * Starts the compiler in its own isolate, one per build, named `build`,
- * with its code read from core's static assets. The loader reuses a
- * running isolate with the same name, so `build` must name what is built
- * (see core's screens.ts).
+ * Starts the compiler in a new isolate of its own, with its code read from
+ * core's static assets. The isolate has no name, so the loader keeps it
+ * for nothing else: no two builds share one, and it goes once its build is
+ * done. workerd keeps a named isolate for as long as the process runs, so
+ * one per build, each holding the compiler and its type checker, would
+ * grow core by about 100 MB with every build.
  */
 export const startScreenCompiler = (
   loader: WorkerLoader,
-  assets: Fetcher,
-  build: string
+  assets: Fetcher
 ): Service<ScreenCompiler> =>
   loader
-    .get(`screen-compiler:${build}`, async () => {
+    .get(null, async () => {
       const [source, kitJson] = await Promise.all([
         readCompilerFile(assets, compilerAssets.source, "javascript"),
         readCompilerFile(assets, compilerAssets.kit, "json"),

@@ -356,15 +356,10 @@ export const hasWorkflow = (files: AppFiles, id: string): boolean =>
  */
 const modulesOf = async (
   env: Env,
-  app: AppId,
   version: number,
   files: AppFiles
 ): Promise<Record<string, string>> => {
-  const build = await buildWorkflows(env, {
-    app,
-    version: String(version),
-    files,
-  });
+  const build = await buildWorkflows(env, files);
   if (!build.ok) {
     throw workflowErrors.create("workflow.build_failed", {
       version,
@@ -381,7 +376,6 @@ const modulesOf = async (
 
 /** What a run's isolate is loaded for: its code, and its env. */
 export interface RunCode {
-  app: AppId;
   /** The version the run is pinned to. */
   version: number;
   workflow: WorkflowId;
@@ -400,13 +394,13 @@ export interface RunCode {
  */
 export const loadRun = (
   env: Env,
-  { app, version, workflow, files, env: runEnv }: RunCode
+  { version, workflow, files, env: runEnv }: RunCode
 ) =>
   env.LOADER.get(null, async () => ({
     ...workflowSandbox,
     mainModule: runModule,
     modules: {
-      ...(await modulesOf(env, app, version, files)),
+      ...(await modulesOf(env, version, files)),
       [runModule]: runMain(workflow),
     },
     env: runEnv,
@@ -454,7 +448,7 @@ const declaredMetadata = async (
       ...workflowSandbox,
       mainModule: metadataModule,
       modules: {
-        ...(await modulesOf(env, app, version, files)),
+        ...(await modulesOf(env, version, files)),
         [metadataModule]: metadataMain(id),
       },
       env: {},
@@ -586,7 +580,7 @@ export const dryRunTests = async (
       ...workflowSandbox,
       mainModule: dryRunModule,
       modules: {
-        ...(await modulesOf(env, app, version, files)),
+        ...(await modulesOf(env, version, files)),
         [dryRunModule]: dryRunMain(id),
       },
       env: {},
@@ -625,7 +619,7 @@ export const requireWorkflowTestsPass = async (
   if (ids.length === 0) {
     return;
   }
-  const modules = await modulesOf(env, app, version, files);
+  const modules = await modulesOf(env, version, files);
   const failures: string[] = [];
   for (const id of ids) {
     if (Object.hasOwn(files, workflowPaths(id).tests)) {

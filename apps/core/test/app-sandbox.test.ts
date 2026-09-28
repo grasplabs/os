@@ -816,10 +816,7 @@ export default class extends WorkerEntrypoint {
       (error: unknown) => error
     );
     // The same files fail the same way: from the cache, without a compiler.
-    const again = await buildServer(
-      { ...env, LOADER: noLoader },
-      { app: empty, version: "1", files: broken }
-    );
+    const again = await buildServer({ ...env, LOADER: noLoader }, broken);
     const unknownApp = await outcome(
       callApp(
         env,

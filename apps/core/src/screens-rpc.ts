@@ -99,11 +99,7 @@ const openScreen = async (
   if (!Object.hasOwn(files, path)) {
     throw screenErrors.create("screen.not_found");
   }
-  const build = await buildScreens(env, {
-    app: id,
-    version: String(version),
-    files,
-  });
+  const build = await buildScreens(env, files);
   if (!build.ok) {
     throw screenErrors.create(
       "screen.build_failed",

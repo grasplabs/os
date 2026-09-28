@@ -7,7 +7,6 @@ import {
   workflowFiles,
 } from "@grasp-os/compiler";
 import type {
-  AppSource,
   Diagnostic,
   ScreenBuild,
   ServerBuild,
@@ -24,14 +23,19 @@ const hashOf = async (files: Record<string, string>): Promise<string> =>
     )
   );
 
+/** An App's files at one version, by path. */
+type AppFiles = Record<string, string>;
+
 /**
- * What a build is: the App and version it is filed under, the compiler
- * that builds it (a release with a new compiler or kit builds every App
- * again) and a hash of the files, so different files under one version
- * never share a build.
+ * What a build is: the compiler that builds it (a release with a new
+ * compiler or kit builds every App again) and a hash of the files it
+ * reads. Nothing else goes into a build, so the same files build the same
+ * whichever App or version they are in: an App made from a blueprint, or
+ * a version that changed only its screens, takes the server build it
+ * already has.
  */
-const buildKey = async ({ app, version, files }: AppSource): Promise<string> =>
-  `${encodeURIComponent(app)}/${encodeURIComponent(version)}/${compilerVersion}/${await hashOf(files)}`;
+const buildKey = async (files: AppFiles): Promise<string> =>
+  `${compilerVersion}/${await hashOf(files)}`;
 
 /** A build refused before it started, or one that failed. */
 interface FailedBuild {
@@ -51,29 +55,24 @@ interface FailedBuild {
 const cachedBuild = async <Build>(
   env: Env,
   kind: "screen" | "server" | "workflow",
-  source: AppSource,
-  select: (files: Record<string, string>) => Record<string, string>,
+  appFiles: AppFiles,
+  select: (files: AppFiles) => AppFiles,
   build: (
     compiler: ReturnType<typeof startScreenCompiler>,
-    files: Record<string, string>
+    files: AppFiles
   ) => Promise<Build>
 ): Promise<Build | FailedBuild> => {
-  const files = select(source.files);
+  const files = select(appFiles);
   const tooMuch = limitErrors(files);
   if (tooMuch.length > 0) {
     return { ok: false, diagnostics: tooMuch };
   }
-  const key = await buildKey({ ...source, files });
-  const cacheKey = `${kind}-builds/${key}.json`;
+  const cacheKey = `${kind}-builds/${await buildKey(files)}.json`;
   const cached = await env.FILES.get(cacheKey);
   if (cached) {
     return await cached.json<Build>();
   }
-  const compiler = startScreenCompiler(
-    env.LOADER,
-    env.ASSETS,
-    `${kind}:${key}`
-  );
+  const compiler = startScreenCompiler(env.LOADER, env.ASSETS);
   const built = await build(compiler, files);
   await env.FILES.put(cacheKey, JSON.stringify(built));
   return built;
@@ -87,12 +86,12 @@ const cachedBuild = async <Build>(
  */
 export const buildScreens = async (
   env: Env,
-  source: AppSource
+  appFiles: AppFiles
 ): Promise<ScreenBuild> =>
   await cachedBuild(
     env,
     "screen",
-    source,
+    appFiles,
     buildFiles,
     async (compiler, files) => await compiler.build(files)
   );
@@ -103,12 +102,12 @@ export const buildScreens = async (
  */
 export const buildServer = async (
   env: Env,
-  source: AppSource
+  appFiles: AppFiles
 ): Promise<ServerBuild> =>
   await cachedBuild(
     env,
     "server",
-    source,
+    appFiles,
     serverFiles,
     async (compiler, files) => await compiler.buildServer(files)
   );
@@ -119,12 +118,12 @@ export const buildServer = async (
  */
 export const buildWorkflows = async (
   env: Env,
-  source: AppSource
+  appFiles: AppFiles
 ): Promise<WorkflowBuild> =>
   await cachedBuild(
     env,
     "workflow",
-    source,
+    appFiles,
     workflowFiles,
     async (compiler, files) => await compiler.buildWorkflows(files)
   );
