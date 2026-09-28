@@ -231,6 +231,9 @@ describe("platform updates", () => {
     ).toStrictEqual([]);
   });
 
+  // The isolate warns once in its life (`warnedMissingTable`), and other
+  // files share it (`isolate: false` in vite.config.ts): only this test
+  // may take the table away, or the warning here was spent already.
   it("wait for their table, warning once, and record the running version once it exists", async () => {
     const version = newVersion();
     // As before the migration that adds it ran.

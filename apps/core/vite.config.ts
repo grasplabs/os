@@ -63,8 +63,12 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
       // Writes the assets the tests serve and bundles connect, once per run,
       // so each project also runs on its own.
       globalSetup: ["./test/global-setup.ts"],
-      // Brings the D1 databases up to the committed migrations.
-      setupFiles: ["./test/apply-migrations.ts"],
+      // A worker's test files share one runtime, which loads core once:
+      // starting workerd and loading core took longer than most files'
+      // tests. Each file still starts with empty storage and the env as
+      // configured here (start-each-file.ts).
+      isolate: false,
+      setupFiles: ["./test/start-each-file.ts"],
       // Logs go straight to workerd's output, not to Vitest over RPC. A log
       // from another request (a workflow run, a cron run, a Durable
       // Object) can't use the test's socket, so the pool holds it until the

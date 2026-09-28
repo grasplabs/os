@@ -154,6 +154,9 @@ const request = async (coreEnv: Env): Promise<void> => {
 
 describe("the built-ins", () => {
   // First in the file: the isolate counts at most one install as done.
+  // Other files share this isolate (`isolate: false` in vite.config.ts)
+  // and its module state, which start-each-file.ts doesn't reset: none may
+  // switch `builtins` on, or this finds an install already counted.
   it("are installed by the first request, and after a failed start, or one of another release, by the first request a minute later", async () => {
     const changed = otherRelease(...firstPaths(1));
     await forgetInstall(...firstPaths(1));
