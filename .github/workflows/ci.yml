@@ -202,10 +202,38 @@ jobs:
       - run: vp run --filter @grasp-os/core db:migrate
       - run: vp run --filter @grasp-os/core deploy
       - run: vp run --filter @grasp-os/console db:migrate
-      # Console first, each on its own: the router's deploy needs the
-      # account's Secrets Store (scripts/wrangler-deploy.ts), and an account
-      # not set up for it yet mustn't hold back the console.
       - run: vp run --filter @grasp-os/console deploy
+
+  # The router on its own: its deploy needs the account's Secrets Store
+  # (scripts/wrangler-deploy.ts), and an account not set up for it yet
+  # mustn't hold back the console, nor publishing, which waits only for
+  # deploy-staging. It isn't part of a release.
+  deploy-staging-router:
+    name: deploy-staging-router
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment: grasp-os-staging
+    concurrency:
+      group: deploy-grasp-os-staging-router
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: voidzero-dev/setup-vp@3754dd7dbdb32bd8f6d28b6043de13ad3a75f21f # v1.21.1
+        with:
+          node-version-file: .node-version
+          cache: true
+          run-install: |
+            - args: ["--frozen-lockfile"]
+      - uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
+        with:
+          export-env: true
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: op://grasp-os-staging/cloudflare/account-id
+          CLOUDFLARE_API_TOKEN: op://grasp-os-staging/cloudflare/api-token
       - run: vp run --filter @grasp-os/router deploy
 
   # Every merge to main is a release: built once, verified against its
