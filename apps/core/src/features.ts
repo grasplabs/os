@@ -42,6 +42,17 @@ import { featureErrors } from "@grasp-os/shared/errors";
 // longer one fails the step. A decision's wait goes on while decisions
 // are off; one that runs out ends timed out, never approved.
 
+/**
+ * What uploading into Knowledge needs switched on: uploads become
+ * Knowledge documents, so its kill switch stops them too. The upload RPCs,
+ * the upload paths, and what a collection offers (`uploadable`) all go by
+ * this one list.
+ */
+export const uploadFeatures = [
+  "knowledge",
+  "knowledge_uploads",
+] as const satisfies readonly Feature[];
+
 /** Every feature behind a flag. */
 export type Feature =
   | "apps"
