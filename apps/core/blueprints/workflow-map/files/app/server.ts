@@ -3,9 +3,9 @@ import { DurableObject } from "cloudflare:workers";
 // The workflow map's server: it reads and writes the Playbook's workflow
 // and team records for the person using the map, through the App's
 // Playbook permission (`PLAYBOOK`, which an admin approves). Only admins
-// change the Playbook; everyone else who can open the map reads it. It
-// keeps nothing of its own: the Playbook is where the records live, with
-// their versions.
+// change the Playbook; everyone else who can open the map reads it, and
+// the Playbook says which the caller is (`canWrite`). It keeps nothing of
+// its own: the Playbook is where the records live, with their versions.
 
 /** Whoever the method runs for, as the platform passes it. */
 interface Caller {
@@ -21,19 +21,28 @@ interface Summary {
   currentVersion: number;
 }
 
-/** A document read as a record: its frontmatter as data, and its Markdown. */
-interface RecordRead extends Summary {
+/** A record at its current version, as a page of records lists it. */
+interface RecordSummary extends Summary {
   record: Record<string, unknown>;
   body: string;
+}
+
+/** A document read as a record: its frontmatter as data, and its Markdown. */
+interface RecordRead extends RecordSummary {
   version: { number: number };
 }
 
 /** The Playbook, as the App's permission gives it. */
 interface Playbook {
-  listDocuments: (
+  listRecords: (
     caller: Caller,
-    options?: { after?: string; limit?: number }
-  ) => Promise<{ documents: Summary[] }>;
+    options?: { after?: string; limit?: number; type?: string }
+  ) => Promise<{
+    records: RecordSummary[];
+    unreadable: Summary[];
+    next: string | null;
+  }>;
+  canWrite: (caller: Caller) => Promise<boolean>;
   getRecord: (
     caller: Caller,
     documentId: string,
@@ -70,8 +79,8 @@ interface Team {
 /** Why a read or write was refused, by its code, or what it answered. */
 type Outcome<T> = { ok: T } | { error: string };
 
-/** The most documents one page of the Playbook lists. */
-const pageSize = 200;
+/** The most records one page of the Playbook lists. */
+const pageSize = 20;
 
 /** The most versions of a workflow the map looks back for its drawn one. */
 const historyDepth = 50;
@@ -100,44 +109,53 @@ const workflowOf = (read: RecordRead): Workflow => ({
   body: read.body,
 });
 
+/** A record of a page, as the map lists it: at its current version. */
+const listedOf = (listed: RecordSummary): Workflow => ({
+  id: listed.id,
+  path: listed.path,
+  version: listed.currentVersion,
+  record: listed.record,
+  body: listed.body,
+});
+
+/** The records of `type` in the Playbook, and those that can't be read. */
+interface Records {
+  records: RecordSummary[];
+  unreadable: Summary[];
+}
+
 /**
- * A page of the Playbook's documents, after the path `after`; none while
- * the Playbook doesn't exist yet.
+ * Every record of `type` in the Playbook, a page (one read) at a time;
+ * none while the Playbook doesn't exist yet.
  */
-const pageOf = async (
+const recordsOf = async (
   playbook: Playbook,
   caller: Caller,
-  after: string | undefined
-): Promise<Summary[]> => {
-  try {
-    const { documents } = await playbook.listDocuments(caller, {
-      ...(after === undefined ? {} : { after }),
-      limit: pageSize,
-    });
-    return documents;
-  } catch (error) {
-    if (codeOf(error) === "knowledge.not_found") {
-      return [];
-    }
-    throw error;
-  }
-};
-
-/** Every document in the Playbook, a page at a time. */
-const documentsOf = async (
-  playbook: Playbook,
-  caller: Caller
-): Promise<Summary[]> => {
-  const all: Summary[] = [];
+  type: string
+): Promise<Records> => {
+  const all: Records = { records: [], unreadable: [] };
   let after: string | undefined;
   for (;;) {
-    // oxlint-disable-next-line no-await-in-loop -- each page starts after the last
-    const page = await pageOf(playbook, caller, after);
-    all.push(...page);
-    if (page.length < pageSize) {
+    let page: Records & { next: string | null };
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- each page starts after the last
+      page = await playbook.listRecords(caller, {
+        ...(after === undefined ? {} : { after }),
+        limit: pageSize,
+        type,
+      });
+    } catch (error) {
+      if (codeOf(error) === "knowledge.not_found") {
+        return all;
+      }
+      throw error;
+    }
+    all.records.push(...page.records);
+    all.unreadable.push(...page.unreadable);
+    if (page.next === null) {
       return all;
     }
-    after = page.at(-1)?.path;
+    after = page.next;
   }
 };
 
@@ -151,16 +169,19 @@ const slugOf = (name: string): string =>
 
 export class App extends DurableObject<Env> {
   /**
-   * Every workflow in the Playbook, with its record, and every team.
-   * `access: "none"` until an admin approves the App's Playbook
-   * permission; no workflows while the Playbook has none, or doesn't exist
-   * yet (an admin's first save sets it up). A workflow whose record can't
-   * be read (removed or changed since the listing, say) is left out and
-   * named in `unreadable`, and the others are still listed.
+   * Every workflow in the Playbook, with its record, every team, and
+   * whether the caller may change them (`writable`). `access: "none"`
+   * until an admin approves the App's Playbook permission; no workflows
+   * while the Playbook has none, or doesn't exist yet (an admin's first
+   * save sets it up). A workflow whose record can't be read any more
+   * (saved under other schemas, say) is left out and named in
+   * `unreadable`, and the others are still listed. Read a page of records
+   * at a time, so a Playbook of any size takes a few reads.
    */
   async overview(caller: Caller): Promise<
     Outcome<{
       access: "none" | "ok";
+      writable: boolean;
       workflows: Workflow[];
       unreadable: { path: string; title: string }[];
       teams: Team[];
@@ -169,25 +190,35 @@ export class App extends DurableObject<Env> {
     const playbook = this.env.PLAYBOOK;
     if (!playbook) {
       return {
-        ok: { access: "none", workflows: [], unreadable: [], teams: [] },
+        ok: {
+          access: "none",
+          writable: false,
+          workflows: [],
+          unreadable: [],
+          teams: [],
+        },
       };
     }
     return await outcome(async () => {
-      const documents = await documentsOf(playbook, caller);
-      const listed = documents.filter(({ type }) => type === "workflow");
-      const reads = await Promise.allSettled(
-        listed.map(async ({ id }) => await playbook.getRecord(caller, id))
-      );
-      const workflows = reads.flatMap((read) =>
-        read.status === "fulfilled" ? [workflowOf(read.value)] : []
-      );
-      const unreadable = listed.flatMap(({ path, title }, index) =>
-        reads[index]?.status === "rejected" ? [{ path, title }] : []
-      );
-      const teams = documents
-        .filter(({ type }) => type === "team")
-        .map(({ path, title }) => ({ path, title }));
-      return { access: "ok" as const, workflows, unreadable, teams };
+      const [workflows, teams, writable] = await Promise.all([
+        recordsOf(playbook, caller, "workflow"),
+        recordsOf(playbook, caller, "team"),
+        playbook.canWrite(caller),
+      ]);
+      return {
+        access: "ok" as const,
+        writable,
+        workflows: workflows.records.map(listedOf),
+        unreadable: workflows.unreadable.map(({ path, title }) => ({
+          path,
+          title,
+        })),
+        // A team is its path and title: one whose record can't be read
+        // still groups workflows.
+        teams: [...teams.records, ...teams.unreadable]
+          .map(({ path, title }) => ({ path, title }))
+          .toSorted((a, b) => (a.path < b.path ? -1 : 1)),
+      };
     });
   }
 

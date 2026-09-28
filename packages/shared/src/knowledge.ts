@@ -329,6 +329,23 @@ export type DocumentType = z.infer<typeof documentTypeSchema>;
 export const documentTypeOf = (stored: string): DocumentType =>
   documentTypeSchema.safeParse(stored).data ?? "doc";
 
+/**
+ * Most records one page of records holds. Each is read with its text, up
+ * to a document's size (1 MB), and a page crosses RPC whole: 20 keep the
+ * largest page well under what one RPC message carries.
+ */
+export const recordPageMaxLimit = 20;
+
+/** A page of records: in path order, after `after`, of `type` if given. */
+export const listRecordsOptionsSchema = z
+  .strictObject({
+    after: documentPathSchema.optional(),
+    limit: z.int().min(1).max(recordPageMaxLimit).default(recordPageMaxLimit),
+    type: documentTypeSchema.optional(),
+  })
+  .default({ limit: recordPageMaxLimit });
+export type ListRecordsOptions = z.input<typeof listRecordsOptionsSchema>;
+
 /** A document's current state, without its text. */
 export interface DocumentSummary {
   id: DocumentId;
@@ -397,6 +414,25 @@ export interface DocumentRead extends DocumentSummary {
 export interface RecordRead extends DocumentRead {
   record: Record<string, unknown>;
   body: string;
+}
+
+/** A record at its current version, as a page of records lists it. */
+export interface RecordSummary extends DocumentSummary {
+  record: Record<string, unknown>;
+  body: string;
+}
+
+/**
+ * A page of a collection's records, read in one read. A document listed
+ * whose text doesn't fit its type any more (under another release's
+ * schemas, say) is in `unreadable`, and the others are still read.
+ */
+export interface RecordPage {
+  records: RecordSummary[];
+  unreadable: DocumentSummary[];
+  /** The `after` of the next page, or `null` when this is the last. */
+  next: string | null;
+  provenance: Provenance;
 }
 
 /** A page of a collection's documents. */

@@ -11,7 +11,7 @@ import { builtinAppId } from "../src/builtin-app-id.ts";
 import { builtins, fingerprintOf, release } from "../src/builtins.ts";
 import { release as releaseFiles, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import { signedInApi, unique } from "./sign-in.ts";
+import { auditedDuring, signedInApi, unique } from "./sign-in.ts";
 
 // The workflow map, the built-in App (apps/core/blueprints/workflow-map/):
 // an App created from it asks for the Playbook, and once an admin grants
@@ -49,10 +49,17 @@ const openedSchema = z.object({
 
 const overviewSchema = z.object({
   access: z.enum(["none", "ok"]),
+  writable: z.boolean(),
   workflows: z.array(workflowSchema),
   unreadable: z.array(z.object({ path: z.string(), title: z.string() })),
   teams: z.array(z.object({ path: z.string(), title: z.string() })),
 });
+
+/**
+ * How many pages of records (20 each) the overview reads for `records`:
+ * the last is the first with fewer than 20, none if need be.
+ */
+const pagesFor = (records: number): number => Math.floor(records / 20) + 1;
 
 const savedSchema = z.object({ id: z.string(), currentVersion: z.number() });
 
@@ -277,9 +284,18 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
       await call(app, admin.userId, "open", designed.id),
       openedSchema
     );
+    const writableFor = async (userId: string) => {
+      const listed = okOf(await call(app, userId, "overview"), overviewSchema);
+      return listed.writable;
+    };
     expect({
       linked: linked.currentVersion,
       app: opened.current.record.app,
+      // The map is read only for whoever may not change the Playbook.
+      writable: {
+        admin: await writableFor(admin.userId),
+        user: await writableFor(user.userId),
+      },
       user: await call(app, user.userId, "save", {
         ifVersion: 0,
         record: drawn,
@@ -289,6 +305,7 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
     }).toStrictEqual({
       linked: 2,
       app: { appId: payables, workflowId: "pay" },
+      writable: { admin: true, user: false },
       user: { error: "knowledge.forbidden" },
       team: { error: "knowledge.forbidden" },
     });
@@ -307,10 +324,11 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
       );
     const kept = await save(`Kept ${unique()}`);
     const gone = await save(`Gone ${unique()}`);
-    // Listed, but its text gone by the time it is read: as a workflow
-    // removed between the listing and the read.
-    await env.KNOWLEDGE.prepare("DELETE FROM versions WHERE document_id = ?")
-      .bind(gone.id)
+    // As a rollback to a release with other schemas would leave it.
+    await env.KNOWLEDGE.prepare(
+      "UPDATE versions SET text = ? WHERE document_id = ?"
+    )
+      .bind("---\ntype: workflow\nstate: sketched\n---\n", gone.id)
       .run();
 
     const listed = okOf(
@@ -324,6 +342,46 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
         title.startsWith("Gone")
       ).length,
     }).toStrictEqual({ kept: true, gone: false, unreadable: 1 });
+  });
+
+  it("reads its overview a page of records at a time, each page one read in the audit log", async () => {
+    const { admin, app } = await setUp();
+    // More than a page (20), so the overview reads at least two.
+    await Promise.all(
+      Array.from(
+        { length: 21 },
+        async (_, index) =>
+          await call(app, admin.userId, "save", {
+            ifVersion: 0,
+            record: { ...drawn, title: `Paged ${index} ${unique()}` },
+            body: "",
+          })
+      )
+    );
+
+    let listed: z.infer<typeof overviewSchema> | undefined;
+    const events = await auditedDuring(async () => {
+      listed = okOf(await call(app, admin.userId, "overview"), overviewSchema);
+    });
+    const reads = events.filter(({ action }) => action === "knowledge.read");
+    const counted = z.object({ read: z.string(), count: z.number() });
+    const workflows =
+      (listed?.workflows.length ?? 0) + (listed?.unreadable.length ?? 0);
+    const teams = listed?.teams.length ?? 0;
+    expect({
+      kinds: [
+        ...new Set(reads.map(({ detail }) => counted.parse(detail).read)),
+      ],
+      read: reads.reduce(
+        (sum, { detail }) => sum + counted.parse(detail).count,
+        0
+      ),
+      events: reads.length,
+    }).toStrictEqual({
+      kinds: ["records"],
+      read: workflows + teams,
+      events: pagesFor(workflows) + pagesFor(teams),
+    });
   });
 
   it("says it has no Playbook until an admin grants it", async () => {
@@ -344,7 +402,13 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
       }),
     }).toStrictEqual({
       overview: {
-        ok: { access: "none", workflows: [], unreadable: [], teams: [] },
+        ok: {
+          access: "none",
+          writable: false,
+          workflows: [],
+          unreadable: [],
+          teams: [],
+        },
       },
       save: { error: "permission.denied" },
     });

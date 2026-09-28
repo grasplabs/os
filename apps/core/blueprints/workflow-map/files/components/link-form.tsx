@@ -18,15 +18,18 @@ import type { Outcome, Workflow } from "./playbook";
  * App's and the workflow's IDs, as its next version. Linking opens that
  * version, so it waits while the editor holds unsaved changes (`blocked`),
  * which would be lost, and while anything else is on its way (`busy`).
- * `onLink` runs the link it is given, and opens what it saved.
+ * `onLink` runs the link it is given, and opens what it saved. For someone
+ * who can't change the Playbook (`writable`), only the link it has.
  */
 export const LinkForm = ({
   workflow,
+  writable,
   blocked,
   busy,
   onLink,
 }: {
   workflow: Workflow;
+  writable: boolean;
   blocked: boolean;
   busy: boolean;
   onLink: (link: () => Promise<Outcome<unknown>>) => void;
@@ -42,10 +45,15 @@ export const LinkForm = ({
       workflowId: workflowId.trim(),
     });
   const empty = appId.trim() === "" || workflowId.trim() === "";
+  if (!writable && linked === undefined) {
+    return null;
+  }
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Link to an App workflow</CardTitle>
+        <CardTitle>
+          {writable ? "Link to an App workflow" : "App workflow"}
+        </CardTitle>
       </CardHeader>
       <CardContent>
         <fieldset
@@ -60,38 +68,40 @@ export const LinkForm = ({
               <Badge variant="secondary">{linked.appId}</Badge>
             </p>
           )}
-          <div className="flex flex-wrap items-end gap-2">
-            <Input
-              aria-label="App ID"
-              placeholder="App ID"
-              value={appId}
-              onChange={(event) => {
-                setAppId(event.target.value);
-              }}
-            />
-            <Input
-              aria-label="Workflow ID"
-              placeholder="Workflow ID"
-              value={workflowId}
-              onChange={(event) => {
-                setWorkflowId(event.target.value);
-              }}
-            />
-            <Button
-              variant="outline"
-              disabled={empty || blocked}
-              onClick={() => {
-                onLink(link);
-              }}
-            >
-              Link
-            </Button>
-            {blocked ? (
-              <span className="text-muted-foreground self-center text-sm">
-                Save first, then link it.
-              </span>
-            ) : null}
-          </div>
+          {writable ? (
+            <div className="flex flex-wrap items-end gap-2">
+              <Input
+                aria-label="App ID"
+                placeholder="App ID"
+                value={appId}
+                onChange={(event) => {
+                  setAppId(event.target.value);
+                }}
+              />
+              <Input
+                aria-label="Workflow ID"
+                placeholder="Workflow ID"
+                value={workflowId}
+                onChange={(event) => {
+                  setWorkflowId(event.target.value);
+                }}
+              />
+              <Button
+                variant="outline"
+                disabled={empty || blocked}
+                onClick={() => {
+                  onLink(link);
+                }}
+              >
+                Link
+              </Button>
+              {blocked ? (
+                <span className="text-muted-foreground self-center text-sm">
+                  Save first, then link it.
+                </span>
+              ) : null}
+            </div>
+          ) : null}
         </fieldset>
       </CardContent>
     </Card>

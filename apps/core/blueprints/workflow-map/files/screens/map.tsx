@@ -17,6 +17,20 @@ type View =
 const loadOverview = async (): Promise<Outcome<Overview>> =>
   await callServer<Outcome<Overview>>("overview");
 
+/** The map's title, and drawing a new workflow for who may (`canDraw`). */
+const MapHeader = ({
+  canDraw,
+  onDraw,
+}: {
+  canDraw: boolean;
+  onDraw: () => void;
+}) => (
+  <div className="flex items-center justify-between gap-2">
+    <h1 className="text-lg font-medium">Workflow map</h1>
+    {canDraw ? <Button onClick={onDraw}>Draw a workflow</Button> : null}
+  </div>
+);
+
 /**
  * The workflow map: the Playbook's workflows by team, with their totals,
  * and an editor for each, drawn and designed side by side.
@@ -80,21 +94,17 @@ const WorkflowMap = () => {
   };
 
   const teams = overview?.teams ?? [];
+  // Only admins change the Playbook: for anyone else the map reads it.
+  const writable = overview?.writable === true;
 
   return (
     <main className="flex flex-col gap-4 p-6">
-      <div className="flex items-center justify-between gap-2">
-        <h1 className="text-lg font-medium">Workflow map</h1>
-        {view.kind === "list" && overview?.access === "ok" ? (
-          <Button
-            onClick={() => {
-              setView({ kind: "new" });
-            }}
-          >
-            Draw a workflow
-          </Button>
-        ) : null}
-      </div>
+      <MapHeader
+        canDraw={view.kind === "list" && writable}
+        onDraw={() => {
+          setView({ kind: "new" });
+        }}
+      />
       {problem === "" ? null : (
         <p role="alert" className="text-destructive text-sm">
           {problem}
@@ -130,6 +140,7 @@ const WorkflowMap = () => {
           }
           opened={view.kind === "new" ? null : view.opened}
           teams={teams}
+          writable={writable}
           onSaved={saved}
           onBack={() => {
             void showList();

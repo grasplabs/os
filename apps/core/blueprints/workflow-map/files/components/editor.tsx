@@ -85,6 +85,7 @@ const DraftCard = ({
   drawnSteps,
   wide,
   teams,
+  writable,
   onSave,
   onDesign,
   designBlocked,
@@ -102,6 +103,8 @@ const DraftCard = ({
   /** Whether it has the whole width: nothing is set beside it. */
   wide: boolean;
   teams: Team[];
+  /** Whether it can be saved: read only for who can't change the Playbook. */
+  writable: boolean;
   onSave: () => void;
   /** Saves it as designed; undefined when a workflow can't be designed. */
   onDesign: (() => void) | undefined;
@@ -123,7 +126,7 @@ const DraftCard = ({
     <CardContent>
       <fieldset
         aria-label="Workflow"
-        disabled={busy}
+        disabled={busy || !writable}
         className="flex min-w-0 flex-col gap-4"
       >
         <div className="flex flex-wrap items-end gap-2">
@@ -148,7 +151,7 @@ const DraftCard = ({
         <StepsEditor
           steps={draft.steps}
           designed={designed}
-          disabled={busy}
+          disabled={busy || !writable}
           onChange={(steps) => {
             onDraft({ ...draft, steps });
           }}
@@ -177,7 +180,12 @@ const DraftCard = ({
             onBody(event.target.value);
           }}
         />
-        {saveProblem === undefined ? null : (
+        {writable ? null : (
+          <p className="text-muted-foreground text-sm">
+            Only admins change the Playbook: you can read this workflow.
+          </p>
+        )}
+        {!writable || saveProblem === undefined ? null : (
           <p
             aria-label="Why it can't be saved"
             className="text-destructive text-sm"
@@ -185,27 +193,29 @@ const DraftCard = ({
             {saveProblem}
           </p>
         )}
-        <div className="flex flex-wrap gap-2">
-          <Button disabled={saveProblem !== undefined} onClick={onSave}>
-            Save
-          </Button>
-          {onDesign === undefined ? null : (
-            <>
-              <Button
-                variant="outline"
-                disabled={designBlocked || saveProblem !== undefined}
-                onClick={onDesign}
-              >
-                Design it
-              </Button>
-              {designBlocked ? (
-                <span className="text-muted-foreground self-center text-sm">
-                  Save first, then design it.
-                </span>
-              ) : null}
-            </>
-          )}
-        </div>
+        {writable ? (
+          <div className="flex flex-wrap gap-2">
+            <Button disabled={saveProblem !== undefined} onClick={onSave}>
+              Save
+            </Button>
+            {onDesign === undefined ? null : (
+              <>
+                <Button
+                  variant="outline"
+                  disabled={designBlocked || saveProblem !== undefined}
+                  onClick={onDesign}
+                >
+                  Design it
+                </Button>
+                {designBlocked ? (
+                  <span className="text-muted-foreground self-center text-sm">
+                    Save first, then design it.
+                  </span>
+                ) : null}
+              </>
+            )}
+          </div>
+        ) : null}
       </fieldset>
     </CardContent>
   </Card>
@@ -249,16 +259,19 @@ const EditorHeader = ({
 /**
  * A workflow's editor: its title, team, steps with their numbers, and
  * parameters. A designed one shows its expected gain against the drawn
- * version beside it. `opened` is null for a new, drawn, workflow.
+ * version beside it. `opened` is null for a new, drawn, workflow. Read
+ * only for someone who can't change the Playbook (`writable`).
  */
 export const WorkflowEditor = ({
   opened,
   teams,
+  writable,
   onSaved,
   onBack,
 }: {
   opened: Opened | null;
   teams: Team[];
+  writable: boolean;
   /** Opens the saved version, which replaces this editor. */
   onSaved: (id: string) => Promise<void>;
   onBack: () => void;
@@ -349,6 +362,7 @@ export const WorkflowEditor = ({
           drawnSteps={designed ? drawnSteps : undefined}
           wide={drawn === undefined}
           teams={teams}
+          writable={writable}
           onSave={() => {
             void whileBusy(async () => await save(state));
           }}
@@ -368,6 +382,7 @@ export const WorkflowEditor = ({
       {current !== undefined && designed ? (
         <LinkForm
           workflow={current}
+          writable={writable}
           blocked={unsaved}
           busy={busy}
           onLink={(link) => {

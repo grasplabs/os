@@ -7,6 +7,7 @@ import type {
   FollowResult,
   HistoryPage,
   KnowledgeRead,
+  RecordPage,
   RecordRead,
   SearchResults,
 } from "@grasp-os/shared/knowledge";
@@ -18,8 +19,10 @@ import { forSandbox } from "../bindings.ts";
 import { collectionReads, readAsDelegate } from "./binding.ts";
 import type { CollectionGrant } from "./binding.ts";
 import {
+  canWriteAsDelegate,
   getRecord,
   linkWorkflowAsDelegate,
+  listRecords,
   saveRecordAsDelegate,
   takeSnapshotAsDelegate,
 } from "./playbook.ts";
@@ -36,8 +39,10 @@ import {
  *
  * The Playbook's stub also writes records (`saveRecord`, `linkWorkflow`,
  * `takeSnapshot`), under a permission with `write`, for the caller and
- * with their rights (playbook.ts). Other collections have no writes: a
- * save through any other stub is refused by the permission check.
+ * with their rights (playbook.ts), and says whether it would
+ * (`canWrite`), so App screens offer only the changes core takes. Other
+ * collections have no writes: a save through any other stub is refused by
+ * the permission check, and `canWrite` is `false` there.
  */
 export class AppCollectionBinding extends WorkerEntrypoint<
   Env,
@@ -125,6 +130,44 @@ export class AppCollectionBinding extends WorkerEntrypoint<
       context,
       permissionId,
       async (reader) => await getRecord(this.env, reader, documentId, version)
+    );
+  }
+
+  /**
+   * A page of records (`{ after?, limit?, type? }`, at most 20), each read
+   * as `getRecord` reads its current version, in one read with one audit
+   * event: how App code reads many records without a read for each. Those
+   * that don't fit their type any more are in `unreadable`.
+   */
+  async listRecords(caller: unknown, options?: unknown): Promise<RecordPage> {
+    const { context, permissionId, collectionId } = this.ctx.props;
+    return await readAsDelegate(
+      this.env,
+      this.#authorityOf(caller),
+      context,
+      permissionId,
+      async (reader) =>
+        await listRecords(this.env, reader, collectionId, options)
+    );
+  }
+
+  /**
+   * Whether `saveRecord` and `linkWorkflow` would write for `caller` now,
+   * by the checks they make (`canWriteAsDelegate` in playbook.ts): a
+   * permission to write the Playbook, a caller who may change it
+   * themselves (an admin), and an App that hasn't read restricted data.
+   * A hint for showing only what core takes: each write is checked again.
+   */
+  async canWrite(caller: unknown): Promise<boolean> {
+    return await this.#write(
+      caller,
+      async (authority, grant) =>
+        await canWriteAsDelegate(
+          this.env,
+          authority,
+          grant.context,
+          grant.permissionId
+        )
     );
   }
 

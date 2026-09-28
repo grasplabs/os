@@ -22,6 +22,11 @@ export type Outcome<T> = { ok: T } | { error: string };
 
 export interface Overview {
   access: "none" | "ok";
+  /**
+   * Whether the person using the map may change the Playbook, as the
+   * Playbook says (only admins may): when not, the map is read only.
+   */
+  writable: boolean;
   workflows: Workflow[];
   /** Workflows listed whose record couldn't be read, by path and title. */
   unreadable: { path: string; title: string }[];
