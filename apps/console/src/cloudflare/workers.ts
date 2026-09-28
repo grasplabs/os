@@ -9,7 +9,8 @@
  * Durable Object migration, go as a script upload instead, which deploys at
  * once.
  */
-import { sha256Hex } from "@grasp-os/shared/encoding";
+import { toBase64 } from "@grasp-os/shared/encoding";
+import { assetContentKey } from "@grasp-os/shared/release";
 import { z } from "zod";
 
 import { CloudflareApiError, isNotFound } from "./api.ts";
@@ -56,23 +57,6 @@ export interface WorkerUpload {
 const scriptPath = (accountId: string, scriptName: string) =>
   `/accounts/${accountId}/workers/scripts/${scriptName}`;
 
-/** Bytes as base64, a chunk at a time: an asset can be megabytes. */
-const toBase64 = (bytes: Uint8Array): string => {
-  const chunk = 0x80_00;
-  let binary = "";
-  for (let start = 0; start < bytes.length; start += chunk) {
-    binary += String.fromCodePoint(...bytes.subarray(start, start + chunk));
-  }
-  return btoa(binary);
-};
-
-/** An asset's hash, as Cloudflare's direct upload takes it: 32 hex characters. */
-const assetHash = async (base64: string, path: string): Promise<string> => {
-  const extension = /\.(?<extension>[^./]+)$/u.exec(path)?.groups?.extension;
-  const hash = await sha256Hex(`${base64}${extension ?? ""}`);
-  return hash.slice(0, 32);
-};
-
 const uploadSessionSchema = z.object({
   jwt: z.string(),
   /** The hashes it lacks, in groups to upload together. */
@@ -109,8 +93,10 @@ export const uploadAssets = async (
 ): Promise<string> => {
   const encoded = await Promise.all(
     files.map(async (file) => {
-      const base64 = toBase64(file.content);
-      return { ...file, base64, hash: await assetHash(base64, file.path) };
+      // Named by the key the release's manifest gives it, which is the
+      // key Wrangler would upload it under.
+      const hash = await assetContentKey(file.content, file.path);
+      return { ...file, base64: toBase64(file.content), hash };
     })
   );
   const session = await api.call(

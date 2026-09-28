@@ -27,7 +27,7 @@
  */
 import { z } from "zod";
 
-import { toHex } from "./encoding.ts";
+import { toBase64, toHex } from "./encoding.ts";
 
 /** The manifest shape the console must understand (see the header comment). */
 export const MANIFEST_VERSION = 1;
@@ -151,17 +151,11 @@ export const sha256OfBytes = async (bytes: Uint8Array): Promise<string> =>
     new Uint8Array(await crypto.subtle.digest("SHA-256", new Uint8Array(bytes)))
   );
 
-/** Bytes as base64, a chunk at a time: an asset can be megabytes. */
-const toBase64 = (bytes: Uint8Array): string => {
-  const chunk = 0x80_00;
-  let binary = "";
-  for (let start = 0; start < bytes.length; start += chunk) {
-    binary += String.fromCodePoint(...bytes.subarray(start, start + chunk));
-  }
-  return btoa(binary);
-};
-
-/** A path's extension without its dot, as Node's `path.extname` finds it. */
+/**
+ * A path's extension without its dot, as Wrangler finds it for the same
+ * key (Node's `path.extname`): none for a dot-file such as `.hidden`, and
+ * only the last one for `a.tar.gz`.
+ */
 const extensionOf = (filePath: string): string => {
   const base = filePath.slice(filePath.lastIndexOf("/") + 1);
   const dot = base.lastIndexOf(".");
