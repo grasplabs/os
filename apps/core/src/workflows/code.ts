@@ -14,8 +14,10 @@ import type { AppId, RunId, WorkflowId } from "@grasp-os/shared/ids";
 import {
   paramDeclarationSchema,
   paramDeclarationsSchema,
+  triggerDeclarationsSchema,
   workflowErrors,
 } from "@grasp-os/shared/workflows";
+import type { TriggerDeclaration } from "@grasp-os/shared/workflows";
 import type { RpcTarget } from "cloudflare:workers";
 import { z } from "zod";
 
@@ -121,7 +123,13 @@ const declaredParamsSchema = paramDeclarationsSchema(
 /** A parameter as a workflow's code declares it. */
 export type DeclaredParam = z.infer<typeof declaredParamsSchema>[number];
 
-interface ParamsEntrypoint extends Rpc.WorkerEntrypointBranded {
+/** A workflow's metadata as its isolate sends it; its readers check each part. */
+const declaredMetadataSchema = z.object({
+  params: z.unknown().optional(),
+  triggers: z.unknown().optional(),
+});
+
+interface MetadataEntrypoint extends Rpc.WorkerEntrypointBranded {
   read: () => Promise<Settled<unknown>>;
 }
 
@@ -137,7 +145,7 @@ const workflowSandbox = {
 
 const runModule = "grasp-run.js";
 const testsModule = "grasp-tests.js";
-const paramsModule = "grasp-params.js";
+const metadataModule = "grasp-metadata.js";
 const dryRunModule = "grasp-dry-run.js";
 
 /** Most of a workflow's tests one dry run runs. */
@@ -309,26 +317,30 @@ export class DryRuns extends WorkerEntrypoint {
 }
 `;
 
-/** The main module that reads workflow `id`'s parameters from its code. */
-const paramsMain = (
+/**
+ * The main module that reads workflow `id`'s metadata from its code: its
+ * parameters and its triggers.
+ */
+const metadataMain = (
   id: WorkflowId
 ): string => `import { WorkerEntrypoint } from "cloudflare:workers";
 import definition from ${JSON.stringify(appModuleName(workflowPaths(id).workflow))};
 ${settling}
-export class Params extends WorkerEntrypoint {
+export class Metadata extends WorkerEntrypoint {
   async read() {
     return await settled(async () => {
       if (definition?.metadata?.id !== ${JSON.stringify(id)}) {
         throw new Error(${JSON.stringify(`workflows/${id}.ts must export the workflow "${id}" as its default export.`)});
       }
-      return JSON.parse(JSON.stringify(definition.metadata.params));
+      const { params, triggers } = definition.metadata;
+      return JSON.parse(JSON.stringify({ params, triggers }));
     });
   }
 }
 `;
 
 /** The workflows in an App version's files, by ID. */
-const workflowIdsIn = (files: AppFiles): WorkflowId[] =>
+export const workflowIdsIn = (files: AppFiles): WorkflowId[] =>
   Object.keys(files).flatMap((path) => {
     const id = workflowIdOf(path);
     return id === undefined ? [] : [workflowIdSchema.parse(id)];
@@ -423,29 +435,31 @@ const startFailure = (error: unknown): string | undefined => {
 };
 
 /**
- * The parameters workflow `id` declares at an App version (with its
- * `files`), read from its code in an isolate of their own, kept by the
- * loader for that version: a version's code never changes.
+ * What workflow `id` declares at an App version (with its `files`), read
+ * from its code in an isolate of their own, kept by the loader for that
+ * version: a version's code never changes. Each part is checked by
+ * whoever reads it, so a part one reader doesn't know stops only that
+ * reader. `workflow.invalid` for code that doesn't load or say.
  */
-export const declaredParams = async (
+const declaredMetadata = async (
   env: Env,
   app: AppId,
   version: number,
   id: WorkflowId,
   files: AppFiles
-): Promise<DeclaredParam[]> => {
+): Promise<{ params?: unknown; triggers?: unknown }> => {
   const code = env.LOADER.get(
-    `workflow-params:${app}:${version}:${id}:${compilerVersion}`,
+    `workflow-metadata:${app}:${version}:${id}:${compilerVersion}`,
     async () => ({
       ...workflowSandbox,
-      mainModule: paramsModule,
+      mainModule: metadataModule,
       modules: {
         ...(await modulesOf(env, app, version, files)),
-        [paramsModule]: paramsMain(id),
+        [metadataModule]: metadataMain(id),
       },
       env: {},
     })
-  ).getEntrypoint<ParamsEntrypoint>("Params");
+  ).getEntrypoint<MetadataEntrypoint>("Metadata");
   let outcome: Settled<unknown>;
   try {
     outcome = fromIsolate(await code.read());
@@ -458,13 +472,48 @@ export const declaredParams = async (
     }
     throw workflowErrors.create("workflow.invalid");
   }
-  const params = outcome.ok
-    ? declaredParamsSchema.safeParse(outcome.value)
+  const metadata = outcome.ok
+    ? declaredMetadataSchema.safeParse(outcome.value)
     : undefined;
-  if (params?.success !== true) {
+  if (metadata?.success !== true) {
     throw workflowErrors.create("workflow.invalid");
   }
-  return params.data;
+  return metadata.data;
+};
+
+/** The parameters workflow `id` declares at an App version. */
+export const declaredParams = async (
+  env: Env,
+  app: AppId,
+  version: number,
+  id: WorkflowId,
+  files: AppFiles
+): Promise<DeclaredParam[]> => {
+  const { params } = await declaredMetadata(env, app, version, id, files);
+  const parsed = declaredParamsSchema.safeParse(params);
+  if (!parsed.success) {
+    throw workflowErrors.create("workflow.invalid");
+  }
+  return parsed.data;
+};
+
+/**
+ * The triggers workflow `id` declares at an App version; none for a
+ * definition that doesn't say (one not written with the SDK).
+ */
+export const declaredTriggers = async (
+  env: Env,
+  app: AppId,
+  version: number,
+  id: WorkflowId,
+  files: AppFiles
+): Promise<TriggerDeclaration[]> => {
+  const { triggers } = await declaredMetadata(env, app, version, id, files);
+  const parsed = triggerDeclarationsSchema.optional().safeParse(triggers);
+  if (!parsed.success) {
+    throw workflowErrors.create("workflow.invalid");
+  }
+  return parsed.data ?? [];
 };
 
 /** Why workflow `id`'s tests at `version` fail, one line each; none if they pass. */

@@ -1,3 +1,4 @@
+import { Cron } from "croner";
 import { z } from "zod";
 
 import { defineErrorFamily } from "./errors.ts";
@@ -31,6 +32,10 @@ export const workflowErrors = defineErrorFamily({
   "workflow.param_invalid": "That isn't a valid value for this parameter.",
   "workflow.param_conflict":
     "The App's current version changed while the value was set. Try again.",
+  "workflow.trigger_gone":
+    "The trigger belongs to a version of the App that is no longer current.",
+  "workflow.start_pending":
+    "The run this was delivered for is still starting. Try again shortly.",
   // What a step or run failed with when its error named no code of its
   // own: the audit log and failure reports carry these instead.
   "workflow.step_failed": "A step of the workflow failed.",
@@ -74,6 +79,86 @@ export const paramDeclarationsSchema = <
         new Set(params.map(({ name }) => name)).size === params.length,
       { message: "Each name once" }
     );
+
+/** Whether the runtime knows `timeZone`, an IANA name like `Europe/Amsterdam`. */
+const isTimeZone = (timeZone: string): boolean => {
+  try {
+    // oxlint-disable-next-line no-new -- constructing it is the check
+    new Intl.DateTimeFormat("en", { timeZone });
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/** The time zone of a schedule trigger that names none. */
+export const defaultTimeZone = "UTC";
+
+/** A schedule: a five-field cron expression, read in a time zone. */
+export interface CronSchedule {
+  cron: string;
+  timeZone: string;
+}
+
+/**
+ * When `schedule` next fires strictly after `after`, to the minute;
+ * undefined for an expression that isn't five cron fields, a time zone the
+ * runtime doesn't know, or an expression that names no time to come (the
+ * 30th of February).
+ */
+export const nextScheduledRun = (
+  { cron, timeZone }: CronSchedule,
+  after: Date
+): Date | undefined => {
+  if (!isTimeZone(timeZone)) {
+    return undefined;
+  }
+  try {
+    return (
+      new Cron(cron, { timezone: timeZone, mode: "5-part" }).nextRun(after) ??
+      undefined
+    );
+  } catch {
+    return undefined;
+  }
+};
+
+/** Whether `cron` is five cron fields that name a time to come. */
+export const isCronExpression = (cron: string): boolean =>
+  nextScheduledRun({ cron, timeZone: defaultTimeZone }, new Date()) !==
+  undefined;
+
+/** Most triggers one workflow declares. */
+const maxTriggerDeclarations = 20;
+
+/**
+ * A trigger as a workflow's code declares it (the SDK's `Trigger`), within
+ * the bounds core keeps: the SDK refuses a definition outside them, so a
+ * version whose triggers core would refuse never passes its tests. Which
+ * parameter a schedule names, and whether it is a schedule, is the SDK's
+ * to check.
+ */
+export const triggerDeclarationSchema = z.discriminatedUnion("type", [
+  z.object({ type: z.literal("manual") }),
+  z.object({
+    type: z.literal("schedule"),
+    param: paramDeclarationSchema.shape.name,
+    timeZone: z
+      .string()
+      .max(64)
+      .refine(isTimeZone, "Not a time zone the runtime knows")
+      .optional(),
+  }),
+  z.object({ type: z.literal("event"), event: z.string().min(1).max(200) }),
+]);
+
+/** A trigger as a workflow's code declares it. */
+export type TriggerDeclaration = z.infer<typeof triggerDeclarationSchema>;
+
+/** A workflow's triggers: at most {@link maxTriggerDeclarations}. */
+export const triggerDeclarationsSchema = z
+  .array(triggerDeclarationSchema)
+  .max(maxTriggerDeclarations);
 
 /**
  * The idempotency key of a run's step, as the SDK hands it to the step

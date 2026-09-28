@@ -56,7 +56,8 @@ import {
 } from "../db/core/schema.ts";
 import { answerableBy, stillOpen } from "../decisions/decisions.ts";
 import { declaredParams, dryRunTests, hasWorkflow } from "./code.ts";
-import { listParams, paramValues } from "./params.ts";
+import { paramValues } from "./param-values.ts";
+import { listParams } from "./params.ts";
 import { runFor, unended, workflowInputSchema } from "./runs.ts";
 import type { RunRow } from "./runs.ts";
 

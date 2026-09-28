@@ -12,6 +12,7 @@ import { sweepUploads } from "./knowledge/uploads.ts";
 import { retryDisconnects } from "./members.ts";
 import { recordPlatformUpdate } from "./platform-updates.ts";
 import { refreshSignalsIfDue } from "./signals.ts";
+import { startDueSchedules } from "./workflows/triggers.ts";
 
 /** The cron trigger that runs every 15 minutes (wrangler.jsonc). */
 const quarterHourCron = "*/15 * * * *";
@@ -42,8 +43,9 @@ export default {
   // pending (see src/app-blueprints.ts), the release's Grasp skills while
   // `builtins` is off (see src/knowledge/grasp-skills.ts; once it's on, the
   // first request installs them, src/builtins.ts), uploads left behind
-  // (see src/knowledge/uploads.ts), and a new version of core, audited as
-  // a platform update (see src/platform-updates.ts).
+  // (see src/knowledge/uploads.ts), a new version of core, audited as
+  // a platform update (see src/platform-updates.ts), and workflows'
+  // schedules due by the minute it runs for (see src/workflows/triggers.ts).
   //
   // Every 15 minutes, on a trigger of its own so neither shares an
   // invocation with the jobs above: the day's improvement signals, until
@@ -74,6 +76,7 @@ export default {
             // after the migration records the version then running: only a
             // version that came and went in between goes unrecorded.
             recordPlatformUpdate(env),
+            startDueSchedules(env, new Date(controller.scheduledTime)),
           ];
     const results = await Promise.allSettled(jobs);
     for (const result of results) {

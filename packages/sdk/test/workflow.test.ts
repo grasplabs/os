@@ -49,6 +49,23 @@ const labelled = (label: string) =>
     async () => null
   );
 
+/** A workflow scheduled on its parameter `every`, by default `every`. */
+const scheduledOn = (every: string, timeZone?: string) =>
+  workflow(
+    "scheduled",
+    {
+      params: { every: schedule({ label: "Runs", default: every }) },
+      triggers: [
+        {
+          type: "schedule",
+          param: "every",
+          ...(timeZone === undefined ? {} : { timeZone }),
+        },
+      ],
+    },
+    async () => null
+  );
+
 describe("workflow definitions", () => {
   it("rejects an empty ID and a default that doesn't fit its kind", () => {
     expect(() => workflow("", { params: noParams }, async () => null)).toThrow(
@@ -103,6 +120,35 @@ describe("workflow definitions", () => {
     expect(scheduled.metadata.triggers).toStrictEqual([
       { type: "schedule", param: "every" },
     ]);
+  });
+
+  it("rejects a schedule trigger on anything but a schedule of five cron fields, or in a time zone nobody knows", () => {
+    expect(
+      scheduledOn("0 8 * * 1", "Europe/Amsterdam").metadata.triggers
+    ).toStrictEqual([
+      { type: "schedule", param: "every", timeZone: "Europe/Amsterdam" },
+    ]);
+    for (const refused of [
+      () =>
+        workflow(
+          "scheduled",
+          {
+            params: { limit: number({ label: "Limit", default: 1 }) },
+            // @ts-expect-error -- as code the type checker doesn't see says
+            triggers: [{ type: "schedule", param: "limit" }],
+          },
+          async () => null
+        ),
+      () => scheduledOn("0 8 * * 1", "Mars/Olympus"),
+      // Seconds, then a day that never comes.
+      () => scheduledOn("0 0 8 * * 1"),
+      () => scheduledOn("0 8 30 2 *"),
+      () => scheduledOn("every monday"),
+    ]) {
+      expect(refused).toThrow(
+        expect.objectContaining({ code: "workflow.invalid_definition" })
+      );
+    }
   });
 
   it("treats parameters as not sensitive unless declared so", () => {

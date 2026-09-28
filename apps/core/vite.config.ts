@@ -51,6 +51,7 @@ export const screenTests = [
   "test/decisions-switched-off.test.ts",
   "test/workflow-params.test.ts",
   "test/workflow-overview.test.ts",
+  "test/triggers.test.ts",
 ];
 
 /** Core's Worker test setup, shared by both of core's test projects. */
@@ -122,6 +123,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               model_rules: true,
               model_settings: true,
               improvement_signals: true,
+              triggers: true,
             },
             // One memory limit set, the others at their defaults.
             MEMORY_LIMITS: { "USER.md": 500 },

@@ -44,6 +44,12 @@ import { featureEnabled } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
 import { madeCurrent } from "./permissions.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";
+import {
+  registerTriggers,
+  registrationHolds,
+  triggerRegistration,
+  triggerSummary,
+} from "./workflows/trigger-registry.ts";
 
 // The App registry and each App's code. The registry, the versions and the
 // working copy (files written since the latest version) are rows in the
@@ -772,24 +778,25 @@ export const setCurrentVersion = async (
     return found;
   }
   // Tested whatever the workflows flag says, so switching it on never runs untested code.
-  await requireWorkflowTestsPass(
-    env,
-    appId,
-    number,
-    await versionFiles(env, appId, number)
-  );
+  const files = await versionFiles(env, appId, number);
+  await requireWorkflowTestsPass(env, appId, number, files);
+  // Registered whatever the triggers flag says, so switching it on starts
+  // the triggers of the version current then.
+  const triggers = await triggerRegistration(env, appId, number, files);
   const previous = found.currentVersion;
   const event = createAuditEvent(
     changeEntry(by, "app.version.current", appId, {
       version: number,
       previous,
+      ...triggerSummary(triggers),
     }),
     "core"
   );
   const db = drizzle(env.DB);
   // Only over the current version read above, so the event's `previous`
-  // is the version this replaced. The event is stored only if this batch
-  // made it current, and what follows it only then.
+  // is the version this replaced, and only while what its triggers were
+  // worked out from still holds (trigger-registry.ts). The event is stored
+  // only if this batch made it current, and what follows it only then.
   const [[changed]] = await auditedBatch(env, db, [
     db
       .update(apps)
@@ -798,7 +805,11 @@ export const setCurrentVersion = async (
         pendingVersion: sql`CASE WHEN ${apps.pendingVersion} = ${number} THEN NULL ELSE ${apps.pendingVersion} END`,
       })
       .where(
-        and(eq(apps.id, appId), sql`${apps.currentVersion} IS ${previous}`)
+        and(
+          eq(apps.id, appId),
+          sql`${apps.currentVersion} IS ${previous}`,
+          registrationHolds(appId, triggers)
+        )
       )
       .returning(),
     outboxedEventWhere(db, event, sql`changes() > 0`),
@@ -811,6 +822,7 @@ export const setCurrentVersion = async (
       // blueprint (app-blueprints.ts), made current for the first time.
       keep: previous === null && approved === 1,
     }),
+    ...registerTriggers(db, appId, number, triggers, storedEvent(event.id)),
   ]);
   if (!changed) {
     throw appErrors.create("app.conflict");

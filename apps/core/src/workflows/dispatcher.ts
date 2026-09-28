@@ -25,7 +25,7 @@ import {
   watchedStep,
 } from "./host.ts";
 import type { FailedStep, HostedRun, RunStep } from "./host.ts";
-import { paramValues } from "./params.ts";
+import { paramValues } from "./param-values.ts";
 import {
   appRecord,
   endRun,

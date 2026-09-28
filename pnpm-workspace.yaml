@@ -42,6 +42,8 @@ catalog:
   "@cloudflare/vitest-pool-workers": 0.22.0
   "@cloudflare/workers-types": 5.20260921.1
   capnweb: 0.12.0
+  # Schedule triggers: cron expressions, in a time zone.
+  croner: 10.0.1
   drizzle-kit: 0.31.11
   drizzle-orm: 0.45.3
   # Knowledge frontmatter.

@@ -1,4 +1,5 @@
 import { decidersSchema } from "@grasp-os/shared/decisions";
+import { isCronExpression } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 /**
@@ -19,8 +20,14 @@ export const paramValueSchemas = {
    * role (`role:admin`) or in a team (`team:<team ID>`).
    */
   person: decidersSchema.brand<"Person">(),
-  /** When something happens, as a cron expression. */
-  schedule: z.string().min(1).brand<"Schedule">(),
+  /**
+   * When something happens, as five cron fields (minute, hour, day of
+   * month, month, day of week), e.g. `0 8 * * 1` for Mondays at 8:00.
+   */
+  schedule: z
+    .string()
+    .refine(isCronExpression, "Not five cron fields that name a time to come")
+    .brand<"Schedule">(),
   /** A model offered by the model gateway. */
   model: z.string().min(1).brand<"Model">(),
   /** A template, e.g. for an email. */

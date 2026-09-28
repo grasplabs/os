@@ -481,6 +481,12 @@ export const workflowRuns = sqliteTable(
     failure: text({ mode: "json" }).$type<RunFailure>(),
     actingFor: text("acting_for"),
     waitingFor: text("waiting_for"),
+    /**
+     * What a trigger started it for (src/workflows/triggers.ts): one key
+     * per scheduled time, so the same one delivered twice starts one run.
+     * Null for a run a person started.
+     */
+    triggerKey: text("trigger_key"),
   },
   (table) => [
     index("workflow_runs_app_idx").on(table.appId, table.createdAt),
@@ -501,6 +507,43 @@ export const workflowRuns = sqliteTable(
       table.endedAt,
       table.id
     ),
+    uniqueIndex("workflow_runs_trigger_key_idx").on(table.triggerKey),
+  ]
+);
+
+/**
+ * The triggers of the workflows in each App's current version
+ * (src/workflows/trigger-registry.ts), written when a version is made
+ * current and removed when another is. `position` is the trigger's place
+ * among its workflow's. A schedule keeps its cron expression as its
+ * parameter holds it now (`cron`), in its time zone, and when it next
+ * fires (`next_run_at`).
+ */
+export const workflowTriggers = sqliteTable(
+  "workflow_triggers",
+  {
+    id: text().primaryKey(),
+    appId: text("app_id")
+      .notNull()
+      .references(() => apps.id),
+    version: integer().notNull(),
+    workflowId: text("workflow_id").notNull(),
+    position: integer().notNull(),
+    type: text({ enum: ["schedule"] }).notNull(),
+    param: text(),
+    cron: text(),
+    timeZone: text("time_zone"),
+    nextRunAt: timestamp("next_run_at"),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("workflow_triggers_position_idx").on(
+      table.appId,
+      table.version,
+      table.workflowId,
+      table.position
+    ),
+    index("workflow_triggers_next_run_idx").on(table.nextRunAt),
   ]
 );
 
