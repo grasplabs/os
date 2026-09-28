@@ -2,6 +2,7 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -20,15 +21,26 @@ import { writeBlueprints } from "./build-blueprints.ts";
 
 const made: string[] = [];
 
-/** A folder of one built-in, `id`, with `files` by path; returns it. */
-const fixture = (id: string, files: Record<string, string>): string => {
+/**
+ * A folder of one built-in, `id`, with `files` by path and `manifest`
+ * added to its `blueprint.json`; returns it.
+ */
+const fixture = (
+  id: string,
+  files: Record<string, string>,
+  manifest: Record<string, unknown> = {}
+): string => {
   const dir = mkdtempSync(path.join(tmpdir(), "grasp-blueprints-"));
   made.push(dir);
   const folder = path.join(dir, id);
   mkdirSync(path.join(folder, "files"), { recursive: true });
   writeFileSync(
     path.join(folder, "blueprint.json"),
-    JSON.stringify({ name: "Fixture", description: "A test's built-in." })
+    JSON.stringify({
+      name: "Fixture",
+      description: "A test's built-in.",
+      ...manifest,
+    })
   );
   for (const [file, text] of Object.entries(files)) {
     const where = path.join(folder, "files", file);
@@ -46,6 +58,21 @@ const build = (dir: string): string => {
 };
 
 const server = { "app/server.ts": "export class App {}\n" };
+
+/** A permission to read and write the Playbook, under `binding`. */
+const playbook = (binding = "PLAYBOOK", actions = ["read", "write"]) => ({
+  object: { type: "collection", collectionId: "playbook" },
+  actions,
+  binding,
+});
+
+/** The built-ins a module embeds. */
+const embedded = (out: string): unknown =>
+  JSON.parse(
+    readFileSync(out, "utf-8")
+      .replace(/^export default /u, "")
+      .replace(/;\n$/u, "")
+  );
 
 /** `count` files of `length` characters each. */
 const many = (count: number, length: number): Record<string, string> =>
@@ -65,7 +92,40 @@ describe("the built-in blueprints' build", () => {
 
   it("embeds a built-in that passes every check", () => {
     const out = build(fixture("fine", server));
-    expect(existsSync(out)).toBeTruthy();
+    expect(embedded(out)).toStrictEqual([
+      {
+        id: "fine",
+        name: "Fixture",
+        description: "A test's built-in.",
+        permissions: [],
+        files: server,
+      },
+    ]);
+  });
+
+  it("embeds the permissions a built-in declares", () => {
+    const out = build(fixture("asks", server, { permissions: [playbook()] }));
+    expect(embedded(out)).toMatchObject([{ permissions: [playbook()] }]);
+  });
+
+  it.each([
+    ["an action a collection doesn't have", [playbook("PLAYBOOK", ["delete"])]],
+    ["a binding name twice", [playbook(), playbook("PLAYBOOK", ["read"])]],
+    ["a platform binding name", [playbook("KNOWLEDGE")]],
+    [
+      "a connection, whose ID differs in each deployment",
+      [
+        {
+          object: { type: "connection", connectionId: "connection-outlook" },
+          actions: ["mail.list"],
+          binding: "OUTLOOK",
+        },
+      ],
+    ],
+  ])("fails for a declared permission with %s", (_case, permissions) => {
+    const dir = fixture("asks", server, { permissions });
+    expect(() => build(dir)).toThrow("blueprint.json");
+    expect(existsSync(path.join(dir, "blueprints.js"))).toBeFalsy();
   });
 
   it.each([

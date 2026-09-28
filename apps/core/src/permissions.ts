@@ -1,5 +1,9 @@
 import type { AppRole } from "@grasp-os/shared/apps";
-import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
+import type {
+  AuditActor,
+  AuditDetailValue,
+  AuditEntry,
+} from "@grasp-os/shared/audit";
 import { actorOf } from "@grasp-os/shared/audit";
 import { permissionIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
@@ -12,6 +16,7 @@ import {
 } from "@grasp-os/shared/permissions";
 import type {
   Authority,
+  DeclaredPermission,
   Permission,
   PermissionObject,
   PermissionSubject,
@@ -24,12 +29,14 @@ import {
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
+import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { outboxed, outboxedIfChanged, auditedBatch } from "./audit-outbox.ts";
 import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
+import { builtinOwner } from "./builtin-app-id.ts";
 import { connectionOwnersOf } from "./connections.ts";
 import { apps, permissions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
@@ -181,21 +188,31 @@ const auditDetail = ({
   };
 };
 
+type PermissionAction = `permission.${"requested" | "granted" | "revoked"}`;
+
 /**
- * The audit entry of a change to `permission` by `by`, with `extra` detail
- * such as who asked for it.
+ * The audit entry of a change to `permission` by `actor`, with `extra`
+ * detail such as who asked for it.
  */
-const changeEntry = (
-  by: Identity,
-  action: `permission.${"requested" | "granted" | "revoked"}`,
+const permissionEntry = (
+  actor: AuditActor,
+  action: PermissionAction,
   permission: Permission,
   extra: Record<string, AuditDetailValue> = {}
 ): AuditEntry => ({
-  actor: actorOf(by),
+  actor,
   action,
   target: { type: "permission", id: permission.id },
   detail: { ...auditDetail(permission), ...extra },
 });
+
+/** The audit entry of a change to `permission` by the person `by`. */
+const changeEntry = (
+  by: Identity,
+  action: PermissionAction,
+  permission: Permission,
+  extra: Record<string, AuditDetailValue> = {}
+): AuditEntry => permissionEntry(actorOf(by), action, permission, extra);
 
 /**
  * Refuses anyone but one of the organization's own admins: who may grant
@@ -414,6 +431,114 @@ export const requestPermission = async (
   return permission;
 };
 
+/**
+ * What makes two permissions the same grant: all but who and when, with
+ * the actions in any order.
+ */
+const grantKey = (
+  row: Pick<
+    Row,
+    "objectType" | "objectId" | "resource" | "mask" | "actions" | "binding"
+  >
+): string =>
+  JSON.stringify([
+    row.objectType,
+    row.objectId,
+    row.resource,
+    row.mask,
+    stringListSchema.parse(JSON.parse(row.actions)).toSorted(),
+    row.binding,
+  ]);
+
+/**
+ * The statements that make the requests of the built-in App `app` what
+ * its release declares (`declared`, from its `blueprint.json`), for the
+ * install's batch (app-blueprints.ts), with their audit entries by the
+ * system: a request, by `owner`, for each declared permission it doesn't
+ * have live (requested or active) yet, and a revoke of each it has live
+ * that the release no longer declares. A declared permission with only a
+ * revoked row (revoked before admins were refused that, or in the
+ * database) gets a new request, and the revoked row stays as history. The
+ * release's fingerprint covers the declarations (builtins.ts), so the
+ * first install of a release restores them. The revokes come first, so a declaration
+ * changed under the same binding name takes its place. A built-in never
+ * runs, so its requests only say what an App created from it asks for
+ * (`blueprintRequests`), each waiting for an admin there. Two installs
+ * at once both insert the same binding, and the second batch is refused
+ * by its unique index, writing nothing.
+ */
+export const declaredRequests = async (
+  env: Env,
+  owner: string,
+  app: AppId,
+  declared: readonly DeclaredPermission[]
+): Promise<BatchItem<"sqlite">[]> => {
+  const subject: PermissionSubject = { type: "app", appId: app };
+  const db = drizzle(env.DB);
+  const live = await db
+    .select()
+    .from(permissions)
+    .where(
+      and(
+        ofSubject(subject),
+        inArray(permissions.status, ["requested", "active"])
+      )
+    );
+  const requestedAt = new Date();
+  const wanted = declared.map(({ object, actions, binding }): Row => ({
+    id: crypto.randomUUID(),
+    ...subjectColumns(subject),
+    ...objectColumns(object),
+    actions: JSON.stringify(actions),
+    binding,
+    status: "requested",
+    requestedBy: owner,
+    requestedAt,
+    grantedBy: null,
+    grantedAt: null,
+    revokedBy: null,
+    revokedAt: null,
+  }));
+  const liveKeys = new Set(live.map(grantKey));
+  const wantedKeys = new Set(wanted.map(grantKey));
+  const system = { type: "system" } as const;
+  const revokes = live.flatMap((row) =>
+    wantedKeys.has(grantKey(row))
+      ? []
+      : [
+          db
+            .update(permissions)
+            .set({
+              status: "revoked",
+              revokedBy: owner,
+              revokedAt: requestedAt,
+            })
+            .where(
+              and(
+                eq(permissions.id, row.id),
+                inArray(permissions.status, ["requested", "active"])
+              )
+            ),
+          outboxedIfChanged(
+            db,
+            permissionEntry(system, "permission.revoked", toPermission(row))
+          ),
+        ]
+  );
+  const requests = wanted.flatMap((row) =>
+    liveKeys.has(grantKey(row))
+      ? []
+      : [
+          db.insert(permissions).values(row),
+          outboxed(
+            db,
+            permissionEntry(system, "permission.requested", toPermission(row))
+          ),
+        ]
+  );
+  return [...revokes, ...requests];
+};
+
 /** A connection a blueprint's App was given that a copy doesn't ask for. */
 export interface DroppedConnection {
   connectionId: string;
@@ -503,6 +628,28 @@ export const blueprintRequests = async (
 };
 
 /**
+ * Refuses a grant or revoke of a built-in blueprint's own permission (its
+ * App is owned by `builtinOwner`). A built-in never runs: its requests are
+ * what its copies ask for, which only the release changes
+ * (`declaredRequests`). Granting one would do nothing, and revoking one
+ * would stop copies asking for it until a release declared it again. An
+ * App's owner never changes, so reading it first is enough.
+ */
+const requireNotBuiltin = async (env: Env, row: Row): Promise<void> => {
+  if (row.subjectType !== "app") {
+    return;
+  }
+  const app = await drizzle(env.DB)
+    .select({ ownerId: apps.ownerId })
+    .from(apps)
+    .where(eq(apps.id, row.subjectId))
+    .get();
+  if (app?.ownerId === builtinOwner) {
+    throw permissionErrors.create("permission.builtin");
+  }
+};
+
+/**
  * Grants a requested permission, the admin's own request included. Only
  * from requested: an active or revoked one is refused, so a revoke is for
  * good. Audited with who asked for it.
@@ -517,6 +664,7 @@ export const grantPermission = async (
   if (!found) {
     throw permissionErrors.create("permission.not_found");
   }
+  await requireNotBuiltin(env, found);
   // No grant ever names a missing or personal collection, nor gives an App
   // the Apps collection, however old its request.
   await requireCollection(env, subjectOf(found), objectOf(found));
@@ -563,6 +711,7 @@ export const revokePermission = async (
   if (!found) {
     throw permissionErrors.create("permission.not_found");
   }
+  await requireNotBuiltin(env, found);
   const db = drizzle(env.DB);
   const [[revoked]] = await auditedBatch(env, db, [
     db

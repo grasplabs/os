@@ -22,7 +22,7 @@ import { drizzle } from "drizzle-orm/d1";
 
 import type { BuiltinBlueprint } from "#blueprints";
 
-import { builtinOwner, stillOpenTo } from "./app-access.ts";
+import { stillOpenTo } from "./app-access.ts";
 import {
   appFor,
   appsListedFor,
@@ -36,7 +36,7 @@ import {
 } from "./apps.ts";
 import type { AppRow, VersionRow } from "./apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
-import { builtinAppId } from "./builtin-app-id.ts";
+import { builtinAppId, builtinOwner } from "./builtin-app-id.ts";
 import {
   appBlueprints,
   apps,
@@ -45,7 +45,11 @@ import {
 } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
 import { appMemoryPath } from "./knowledge/memory-files.ts";
-import { blueprintRequests, toPermission } from "./permissions.ts";
+import {
+  blueprintRequests,
+  declaredRequests,
+  toPermission,
+} from "./permissions.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -481,13 +485,15 @@ const installEntry = (
  * it is found, listed and created from as any blueprint is, by everyone
  * who builds, and changed by nobody but the install (app-access.ts): the App, if it
  * doesn't exist; its files as the App's next version, if its latest
- * version's differ; that version marked, and any other unmarked; and its
- * name and description, if they changed. Each is audited, in the one
- * batch that writes it all, and only what differs from what's stored is
+ * version's differ; that version marked, and any other unmarked; its
+ * name and description, if they changed; and its requests, as the release
+ * declares them (`declaredRequests`). Each is audited, in the one batch
+ * that writes it all, and only what differs from what's stored is
  * written, so installing it again writes nothing. The App never runs (it
- * has no current version, and nobody may make one current) and asks for
- * no permissions, so neither does an App created from it. Apps created
- * from it earlier keep their code.
+ * has no current version, and nobody may make one current), so its
+ * requests allow nothing: they are what an App created from it asks for,
+ * each waiting for an admin there. Apps created from it earlier keep
+ * their code and their permissions.
  *
  * Two installs at once both try the same version number, and the second
  * is refused by the version's primary key, writing nothing: the next
@@ -628,12 +634,19 @@ export const installBuiltinBlueprint = async (
           ),
         ]
   );
+  const requested = await declaredRequests(
+    env,
+    builtinOwner,
+    id,
+    blueprint.permissions
+  );
   const [first, ...rest] = [
     ...created,
     ...described,
     ...committed,
     ...markedNow,
     ...unmarked,
+    ...requested,
   ];
   if (first !== undefined) {
     await auditedBatch(env, db, [first, ...rest]);

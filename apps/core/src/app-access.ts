@@ -9,6 +9,7 @@ import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { sourcesOf, sourcesOfApps, unreadableBy } from "./app-provenance.ts";
+import { builtinOwner } from "./builtin-app-id.ts";
 import { apps, appMembers, teamMembers } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
 import { featureEnabled } from "./features.ts";
@@ -44,9 +45,6 @@ import { featureEnabled } from "./features.ts";
 // nobody changes, runs, shares or asks permissions for them. Users have
 // no role in them. That holds whether `app_sharing` is on or off
 // (apps.ts `appFor`).
-
-/** The owner of the built-in blueprints' Apps: Grasp, never a person. */
-export const builtinOwner = "grasp";
 
 /** Who asks, as far as their role in an App goes. */
 export type Person = Pick<Identity, "userId" | "role" | "teams">;
