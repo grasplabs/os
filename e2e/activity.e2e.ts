@@ -10,6 +10,15 @@ import { apiOf, pageOf, peopleIn } from "./people.ts";
 // and exports what the log's filters match. Search, export and the grant
 // themselves are core's tests.
 
+/** The built-in workflow map's App: its requests are decided on copies. */
+const workflowMap = "builtin-workflow-map";
+
+/**
+ * How long the release's install may take to list the built-in: it runs
+ * on the first request, in the background.
+ */
+const installedMs = 30_000;
+
 test("an admin approves a permission request, finds it in the audit log, and exports it", async ({
   browser,
 }) => {
@@ -37,6 +46,25 @@ test("an admin approves a permission request, finds it in the audit log, and exp
   } finally {
     core[Symbol.dispose]();
   }
+  // A built-in blueprint's own request, installed with the release on the
+  // first request, waits too; the page leaves it out.
+  const asAdmin = apiOf(admin);
+  try {
+    await expect
+      .poll(
+        async () => {
+          const held = await asAdmin.api.permissions.list({
+            type: "app",
+            appId: workflowMap,
+          });
+          return held.some(({ status }) => status === "requested");
+        },
+        { timeout: installedMs }
+      )
+      .toBeTruthy();
+  } finally {
+    asAdmin.core[Symbol.dispose]();
+  }
 
   const page = await pageOf(browser, admin);
   await page.goto("/activity");
@@ -44,6 +72,9 @@ test("an admin approves a permission request, finds it in the audit log, and exp
   // Other tests' requests wait here too: only this App's rows count.
   const rows = page.getByRole("row").filter({ hasText: appName });
   await expect(rows).toHaveCount(2);
+  await expect(
+    page.getByRole("cell", { name: "Workflow map", exact: true })
+  ).toHaveCount(0);
   const reading = rows.filter({
     has: page.getByRole("cell", { name: "read", exact: true }),
   });
