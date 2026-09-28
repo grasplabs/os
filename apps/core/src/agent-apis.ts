@@ -1,68 +1,22 @@
-import { agentErrors } from "@grasp-os/shared/agent";
-import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
-import { workspace } from "./durable-objects.ts";
+import { knowledgeApi } from "./agent-knowledge.ts";
+import { requireOpenRun } from "./agent-scope.ts";
+import type { AgentApi, AgentScope } from "./agent-scope.ts";
 
 // The typed APIs the agent's code gets in its env (Code Mode). Each is a
 // loopback entrypoint of core whose props core sets for one code run of one
-// chat, so the code can call it but never say who it acts for. The model
-// sees each API as a TypeScript declaration and writes code against it.
+// chat (agent-scope.ts), so the code can call it but never say who it acts
+// for. The model sees each API as a TypeScript declaration and writes code
+// against it.
 //
-// Every chat starts with the APIs below and nothing else. An API that
-// reaches a person's data (Knowledge, connections, Apps, workflows) comes
-// from that person's permissions and checks them on every call, as the
-// connection bindings do (src/bindings.ts), with the chat as its context:
-// `{ type: "chat", workspaceId, chatId }`.
-
-/** Whom and where an agent's code acts for, as core sets it. */
-export interface AgentScope {
-  workspaceId: WorkspaceId;
-  chatId: ChatId;
-  /** The person the chat belongs to, whom the agent acts for. */
-  personId: string;
-  /** The code run the stub was made for: it answers only while that runs. */
-  runId: string;
-}
-
-/** One typed API the agent's code can call. */
-export interface AgentApi {
-  /** Its name in the code's `env`: a JavaScript identifier. */
-  name: string;
-  /**
-   * What the model sees: members of `interface Env`, with their doc
-   * comments.
-   */
-  declaration: string;
-  /** Its stub for one code run. */
-  stub: (scope: AgentScope) => Fetcher;
-}
-
-/**
- * What the Workspace object says of one API call of a code run: it may go
- * on, the run has made all the calls it may, or the run has ended.
- */
-export type CodeRunCall = "open" | "spent" | "ended";
-
-/**
- * Counts the call with the Workspace object, and refuses it from a code
- * run that has ended (the turn moved on, or the run was cancelled or timed
- * out while its code kept running) or made all the calls it may. Every
- * API checks it first, on every call.
- */
-export const requireOpenRun = async (
-  env: Env,
-  { workspaceId, chatId, runId }: AgentScope
-): Promise<void> => {
-  const call = await workspace(env, workspaceId).callFromCodeRun(chatId, runId);
-  if (call === "spent") {
-    throw agentErrors.create("agent.run_calls_spent");
-  }
-  if (call === "ended") {
-    throw agentErrors.create("agent.run_ended");
-  }
-};
+// An API that reaches a person's data acts as the chat's agent on behalf
+// of the chat's person (`chatAuthority`), under the agent's permissions
+// and never past what the person may do themselves, checked again on every
+// call, with the chat as its context: where restricted mode is kept. Every
+// call is audited, and what it read from is recorded with the chat before
+// the call hands it over (`recordSources`).
 
 /** The chat the code runs in, for the code: `await env.chat.info()`. */
 export class ChatApi extends WorkerEntrypoint<Env, AgentScope> {
@@ -96,4 +50,7 @@ const apiNameSchema = z
 
 /** The APIs a chat's code gets. */
 export const agentApis = (): readonly AgentApi[] =>
-  [chatApi].map((api) => ({ ...api, name: apiNameSchema.parse(api.name) }));
+  [chatApi, knowledgeApi].map((api) => ({
+    ...api,
+    name: apiNameSchema.parse(api.name),
+  }));

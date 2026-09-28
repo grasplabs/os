@@ -3,7 +3,13 @@
  * first wake-up after a release.
  */
 import type { ChatId } from "@grasp-os/shared/ids";
-import { index, integer, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import {
+  index,
+  integer,
+  primaryKey,
+  sqliteTable,
+  text,
+} from "drizzle-orm/sqlite-core";
 
 export const chats = sqliteTable("chats", {
   id: text().$type<ChatId>().primaryKey(),
@@ -35,4 +41,24 @@ export const chatMessages = sqliteTable(
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   },
   (table) => [index("chat_messages_chat").on(table.chatId, table.id)]
+);
+
+/**
+ * What a chat's agent has read from, each source once: the collections and
+ * connections its code read through the chat's APIs. Every model request
+ * of the chat carries all of them as provenance, so the client's model
+ * rules judge a later turn by what an earlier one read. Written only for a
+ * code run that is still open (`recordSources` in workspace.ts).
+ */
+export const chatSources = sqliteTable(
+  "chat_sources",
+  {
+    chatId: text("chat_id")
+      .$type<ChatId>()
+      .notNull()
+      .references(() => chats.id),
+    sourceId: text("source_id").notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.chatId, table.sourceId] })]
 );

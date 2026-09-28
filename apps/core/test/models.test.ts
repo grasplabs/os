@@ -357,24 +357,6 @@ describe("model gateway", { timeout: 30_000 }, () => {
       "a trigger the audit log doesn't know",
       { input: "Hi.", trigger: { type: "admin" } },
     ],
-    [
-      "too much provenance",
-      {
-        input: "Hi.",
-        provenance: Array.from({ length: 101 }, (_, i) => `doc-${i}`),
-      },
-    ],
-    [
-      // Within every field's bound, but two bytes a character: the audit
-      // event would be too large, and the call would go unrecorded.
-      "provenance too large to record",
-      {
-        input: "Hi.",
-        provenance: Array.from({ length: 100 }, (_, i) =>
-          `${i}`.padEnd(256, "é")
-        ),
-      },
-    ],
   ])("refuses a call with %s", async (_, fields) => {
     const { gateway, gatewayEnv } = withGateway([answer("Hi.")]);
     // SAFETY: invalid on purpose: what a caller that isn't type-checked (a
@@ -392,6 +374,54 @@ describe("model gateway", { timeout: 30_000 }, () => {
     );
     expect(gateway.requests).toStrictEqual([]);
   });
+
+  it.each([
+    [
+      "more IDs than an event names",
+      [
+        ...Array.from({ length: 150 }, (_, i) => `doc-${i}`),
+        // Each ID once.
+        "doc-0",
+      ],
+      { kept: 100, dropped: 50 },
+    ],
+    [
+      // Within the count, but two bytes a character: an event with all of
+      // them would be too large for the audit log.
+      "IDs too large to record together",
+      Array.from({ length: 100 }, (_, i) => `${i}`.padEnd(256, "é")),
+      { kept: 50, dropped: 50 },
+    ],
+  ])(
+    "sends a call whose provenance has %s, and records as much of it as fits",
+    async (_, provenance, { kept, dropped }) => {
+      const trigger = newPerson();
+      const { gateway, gatewayEnv } = withGateway([answer("Hi.")]);
+
+      await expect(
+        outcome(
+          models(gatewayEnv).call({
+            model: anthropic,
+            input: "Hi.",
+            purpose: "chat.turn",
+            trigger,
+            work,
+            provenance,
+          })
+        )
+      ).resolves.toBe("ok");
+
+      expect(gateway.requests).toHaveLength(1);
+      const [event] = await auditedFor(trigger.userId, 1);
+      expect({
+        provenance: event?.provenance,
+        dropped: event?.detail.provenanceDropped,
+      }).toStrictEqual({
+        provenance: [...new Set(provenance)].slice(0, kept),
+        dropped,
+      });
+    }
+  );
 
   it("audits every call as metadata: who asked, why, model, tokens, cost, provenance", async () => {
     const trigger = newPerson();
