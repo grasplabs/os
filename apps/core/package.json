@@ -30,6 +30,7 @@
     "capnweb": "catalog:",
     "drizzle-orm": "catalog:",
     "fflate": "catalog:",
+    "postal-mime": "catalog:",
     "unpdf": "catalog:",
     "yaml": "catalog:",
     "zod": "catalog:"

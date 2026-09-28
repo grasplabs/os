@@ -8,7 +8,8 @@ import { apps, workflowTriggers } from "../db/core/schema.ts";
 import { featureEnabled } from "../features.ts";
 import { startRun } from "./runs.ts";
 
-// Starting the runs of registered triggers (trigger-registry.ts).
+// Starting the runs of registered triggers (trigger-registry.ts): here
+// schedules; mail in inbound-email.ts.
 //
 // A run a trigger starts has no starter: it acts for the App's owner, and
 // fails if they have left (dispatcher.ts). Its `workflow.run.started`

@@ -435,7 +435,7 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
         action: "app.version.current",
         on: target,
         // With what it registered: this version has no workflows.
-        detail: { version: 1, previous: null, schedules: 0 },
+        detail: { version: 1, previous: null, schedules: 0, emails: "" },
       },
     ]);
   });

@@ -12,6 +12,7 @@ import { sweepUploads } from "./knowledge/uploads.ts";
 import { retryDisconnects } from "./members.ts";
 import { recordPlatformUpdate } from "./platform-updates.ts";
 import { refreshSignalsIfDue } from "./signals.ts";
+import { receiveEmail } from "./workflows/inbound-email.ts";
 import { startDueSchedules } from "./workflows/triggers.ts";
 
 /** The cron trigger that runs every 15 minutes (wrangler.jsonc). */
@@ -37,6 +38,11 @@ export default {
   // release.
   queue: async (batch, env) => {
     await consumeLeftoverAuditQueue(batch, env);
+  },
+  // Mail Email Routing sends to workflows' email triggers (see
+  // src/workflows/inbound-email.ts).
+  email: async (message, env) => {
+    await receiveEmail(message, env);
   },
   // Every minute: audit events waiting in core's outboxes and connect's
   // (see src/audit-outbox.ts), personal connections of removed people still

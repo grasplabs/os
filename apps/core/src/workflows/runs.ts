@@ -47,7 +47,7 @@ export const unended: RunRow["status"][] = ["running", "paused"];
 export const runsPerPage = 100;
 
 /** The most input a run starts with, as JSON text. */
-const maxInputLength = 128 * 1024;
+export const maxInputLength = 128 * 1024;
 
 const invalid = () => workflowErrors.create("workflow.invalid");
 
@@ -254,7 +254,8 @@ const restartOrphan = async (
  * (`workflow.trigger_gone`): the version that replaced it may not declare
  * it. The run is pinned to the version checked, so at worst a trigger
  * starts its own version's run as that version is being replaced, as a
- * person starting it by hand then would.
+ * person starting it by hand then would. Input over
+ * {@link maxInputLength} is refused (`workflow.invalid`), whoever starts it.
  */
 export const startRun = async (
   env: Env,
@@ -262,6 +263,9 @@ export const startRun = async (
 ): Promise<WorkflowRun> => {
   // Every way a run starts, a trigger's too, stops with the kill switch.
   requireFeature(env, "workflows");
+  if (input !== undefined && JSON.stringify(input).length > maxInputLength) {
+    throw invalid();
+  }
   const db = drizzle(env.DB);
   const { currentVersion: version } = await appRecord(env, app);
   if (version === null) {
@@ -297,7 +301,9 @@ export const startRun = async (
       runEntry(actor, "workflow.run.started", row, {
         startedBy: startedBy === null ? "trigger" : "person",
         ...(via === undefined ? {} : { via }),
-        ...(trigger ? { trigger: trigger.type } : {}),
+        // The key names what started it: a time, a hash, an ID; never
+        // what a message or event says.
+        ...(trigger ? { trigger: trigger.type, key: trigger.key } : {}),
       })
     ),
   ]);
@@ -380,14 +386,10 @@ export const startWorkflow = async (
   via?: "screen"
 ): Promise<WorkflowRun> => {
   await appFor(env, by, app, "user");
-  const json = parse(z.json().optional(), input);
-  if (json !== undefined && JSON.stringify(json).length > maxInputLength) {
-    throw invalid();
-  }
   return await startRun(env, {
     app: parse(appIdSchema, app),
     workflow: parse(workflowInputSchema, workflow),
-    input: json,
+    input: parse(z.json().optional(), input),
     startedBy: by.userId,
     actor: actorOf(by),
     ...(via === undefined ? {} : { via }),

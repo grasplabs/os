@@ -132,6 +132,9 @@ catalogs:
     lucide-react:
       specifier: 1.47.0
       version: 1.47.0
+    postal-mime:
+      specifier: 3.0.0
+      version: 3.0.0
     react:
       specifier: 19.3.0
       version: 19.3.0
@@ -394,6 +397,9 @@ importers:
       fflate:
         specifier: 'catalog:'
         version: 0.8.3
+      postal-mime:
+        specifier: 'catalog:'
+        version: 3.0.0
       unpdf:
         specifier: 'catalog:'
         version: 1.8.1
@@ -5853,6 +5859,9 @@ packages:
   pngjs@7.0.0:
     resolution: {integrity: sha512-LKWqWJRhstyYo9pGvgor/ivk2w94eSjE3RGVuzLGlr3NmD8bf7RcYGze1mNdEHRP6TRP6rMuDHk5t44hnTRyow==}
     engines: {node: '>=14.19.0'}
+
+  postal-mime@3.0.0:
+    resolution: {integrity: sha512-Z4a9ar2Bv3YpK3IXag+Yda30k7bMZfpRuUGyqtHnZ2pjHG8Bl62EhZIk4n1dzv00gfzP9g+94e9kd8+XmjVWLA==}
 
   postcss-selector-parser@7.1.6:
     resolution: {integrity: sha512-7qASPzhKF2l2KLboRZux8CCTRMdGiV08vWmyKzPz22qZ7ZjQBOeY7rNzNoCLSUiftJ7HUq0GERHmxw/t0dCdMw==}
@@ -11717,6 +11726,8 @@ snapshots:
   pluralize@8.0.0: {}
 
   pngjs@7.0.0: {}
+
+  postal-mime@3.0.0: {}
 
   postcss-selector-parser@7.1.6:
     dependencies:

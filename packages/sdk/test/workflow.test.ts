@@ -151,6 +151,31 @@ describe("workflow definitions", () => {
     }
   });
 
+  it("receives mail at the part of an address before the @, in lower case", () => {
+    const mailedAt = (address: string) =>
+      workflow(
+        "mailed",
+        { params: noParams, triggers: [{ type: "email", address }] },
+        async () => null
+      );
+
+    expect(mailedAt("invoices.nl+eu").metadata.triggers).toStrictEqual([
+      { type: "email", address: "invoices.nl+eu" },
+    ]);
+    for (const address of [
+      "",
+      "Invoices",
+      "invoices@acme.test",
+      ".invoices",
+      "in..voices",
+      "i".repeat(65),
+    ]) {
+      expect(() => mailedAt(address)).toThrow(
+        expect.objectContaining({ code: "workflow.invalid_definition" })
+      );
+    }
+  });
+
   it("treats parameters as not sensitive unless declared so", () => {
     const { metadata } = workflow(
       "greeting",
