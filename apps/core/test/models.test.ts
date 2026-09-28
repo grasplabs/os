@@ -1,4 +1,6 @@
+import { Type } from "@earendil-works/pi-ai";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
@@ -630,5 +632,220 @@ describe("model gateway", { timeout: 30_000 }, () => {
         })
       )
     ).resolves.toBe("model.unconfigured");
+  });
+});
+
+describe("model gateway for agents", () => {
+  const codeTool = {
+    name: "executeCode",
+    description: "Runs code.",
+    parameters: Type.Object({ code: Type.String() }),
+  };
+
+  /** A conversation that offers the model the code tool. */
+  const withTool = (question: string) =>
+    normalizeContext({
+      systemPrompt: "Use the tools.",
+      messages: [{ role: "user", content: question, timestamp: Date.now() }],
+      tools: [codeTool],
+    });
+
+  it.each([workersAi, anthropic, openai])(
+    "streams a tool call from %s through the gateway, and audits the request",
+    async (model) => {
+      const trigger = newPerson();
+      const { gateway, gatewayEnv } = withGateway([
+        {
+          text: "Let me check.",
+          toolCalls: [
+            { id: "call_1", name: "executeCode", arguments: { code: "1 + 1" } },
+          ],
+          inputTokens: 1000,
+          outputTokens: 100,
+        },
+      ]);
+      const agent = await models(gatewayEnv).agent({
+        model,
+        purpose: "chat.turn",
+        trigger,
+        work,
+      });
+
+      const stream = agent.stream(agent.model, withTool("What is 1 + 1?"));
+      const types = new Set<string>();
+      for await (const event of stream) {
+        types.add(event.type);
+      }
+      const final = await stream.result();
+
+      const [request] = gateway.requests;
+      expect({
+        streamed: types.has("toolcall_end"),
+        stopReason: final.stopReason,
+        toolCalls: final.content.flatMap((block) =>
+          block.type === "toolCall" ? [[block.name, block.arguments]] : []
+        ),
+        // The tool went along, to the deployment's gateway.
+        gateway: new URL(request?.url ?? "").pathname.split("/")[3],
+        offered: JSON.stringify(request?.body).includes("Runs code."),
+      }).toStrictEqual({
+        streamed: true,
+        stopReason: "toolUse",
+        toolCalls: [["executeCode", { code: "1 + 1" }]],
+        gateway: "grasp-os-test",
+        offered: true,
+      });
+      const [event] = await auditedFor(trigger.userId, 1);
+      expect(event).toMatchObject({
+        action: "model.call",
+        actor: trigger,
+        detail: { purpose: "chat.turn", outcome: "answered", attempt: 1 },
+      });
+    }
+  );
+
+  it("refuses a model the deployment doesn't allow before the loop sends anything", async () => {
+    const { gateway, gatewayEnv } = withGateway([], {
+      gateway: "grasp-os-test",
+      models: [workersAi],
+    });
+
+    await expect(
+      outcome(
+        models(gatewayEnv).agent({
+          model: anthropic,
+          purpose: "chat.turn",
+          trigger: newPerson(),
+          work,
+        })
+      )
+    ).resolves.toBe("model.not_allowed");
+    expect(gateway.requests).toStrictEqual([]);
+  });
+
+  it("admits each request by the rules as they stand then, and audits a refusal", async () => {
+    const trigger = newPerson();
+    const { gateway, gatewayEnv } = withGateway([answer("One.")]);
+    const agent = await models(gatewayEnv).agent({
+      model: anthropic,
+      purpose: "chat.turn",
+      trigger,
+      work,
+    });
+
+    await agent.stream(agent.model, withTool("First.")).result();
+    // The deployment stops allowing the model while the loop runs.
+    gatewayEnv.MODEL_GATEWAY = {
+      gateway: "grasp-os-test",
+      models: [workersAi],
+    };
+    const second = await agent
+      .stream(agent.model, withTool("Second."))
+      .result();
+
+    expect(second).toMatchObject({
+      stopReason: "error",
+      errorMessage: "The model call was refused (model.not_allowed).",
+    });
+    expect(gateway.requests).toHaveLength(1);
+    const events = await auditedFor(trigger.userId, 2);
+    expect(events.map(({ action }) => action).toSorted()).toStrictEqual([
+      "model.call",
+      "model.refused",
+    ]);
+  });
+
+  it("ends a refused request with a failure in its own words, and audits it", async () => {
+    const trigger = newPerson();
+    const { gatewayEnv } = withGateway([
+      { status: 401, errorType: "authentication_error" },
+    ]);
+    const agent = await models(gatewayEnv).agent({
+      model: anthropic,
+      purpose: "chat.turn",
+      trigger,
+      work,
+    });
+
+    const final = await agent.stream(agent.model, withTool("Hello.")).result();
+
+    expect(final).toMatchObject({
+      stopReason: "error",
+      errorMessage: "The model call failed (401 authentication_error).",
+    });
+    const [event] = await auditedFor(trigger.userId, 1);
+    expect(event?.detail).toMatchObject({
+      outcome: "failed",
+      status: 401,
+      errorType: "authentication_error",
+    });
+  });
+
+  it("records what fed each request, as the loop has read it by then", async () => {
+    const trigger = newPerson();
+    const { gatewayEnv } = withGateway([answer("One."), answer("Two.")]);
+    const read: string[] = [];
+    const agent = await models(gatewayEnv).agent(
+      { model: anthropic, purpose: "chat.turn", trigger, work },
+      () => read
+    );
+
+    await agent.stream(agent.model, withTool("First.")).result();
+    read.push("doc-policy");
+    await agent.stream(agent.model, withTool("Second.")).result();
+
+    const events = await auditedFor(trigger.userId, 2);
+    expect(events.map(({ provenance }) => provenance)).toStrictEqual(
+      expect.arrayContaining([[], ["doc-policy"]])
+    );
+  });
+
+  it("sends nothing for a request cancelled before it starts", async () => {
+    const { gateway, gatewayEnv } = withGateway([answer("Hi.")]);
+    const agent = await models(gatewayEnv).agent({
+      model: anthropic,
+      purpose: "chat.turn",
+      trigger: newPerson(),
+      work,
+    });
+
+    const final = await agent
+      .stream(agent.model, withTool("Hello."), {
+        signal: AbortSignal.abort(),
+      })
+      .result();
+
+    expect(final.stopReason).toBe("aborted");
+    expect(gateway.requests).toStrictEqual([]);
+  });
+
+  it("stops a request its caller cancels, and audits it as cancelled", async () => {
+    const trigger = newPerson();
+    const { gateway, gatewayEnv } = withGateway([{ hang: true }]);
+    const agent = await models(gatewayEnv).agent({
+      model: openai,
+      purpose: "chat.turn",
+      trigger,
+      work,
+    });
+    const cancel = new AbortController();
+
+    const stream = agent.stream(agent.model, withTool("Hello."), {
+      signal: cancel.signal,
+    });
+    await vi.waitFor(() => {
+      expect(gateway.requests).toHaveLength(1);
+    });
+    cancel.abort();
+
+    await expect(stream.result()).resolves.toMatchObject({
+      stopReason: "aborted",
+      errorMessage: "The model call was cancelled.",
+    });
+    const [event] = await auditedFor(trigger.userId, 1);
+    expect(event?.detail).toMatchObject({
+      outcome: "cancelled",
+      errorType: "cancelled",
+    });
   });
 });

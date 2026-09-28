@@ -1,4 +1,4 @@
-import type { AppId } from "@grasp-os/shared/ids";
+import type { AppId, WorkspaceId } from "@grasp-os/shared/ids";
 
 /**
  * Durable Objects keep their data in the EU. workerd doesn't implement
@@ -21,3 +21,9 @@ export const appHost = (
   env: Pick<Env, "APPS" | "DURABLE_OBJECT_JURISDICTION">,
   app: AppId
 ) => inJurisdiction(env, env.APPS).getByName(app);
+
+/** A workspace's object (workspace.ts): its chats and their agent. */
+export const workspace = (
+  env: Pick<Env, "WORKSPACES" | "DURABLE_OBJECT_JURISDICTION">,
+  id: WorkspaceId
+) => inJurisdiction(env, env.WORKSPACES).getByName(id);

@@ -19,6 +19,7 @@ const quarterHourCron = "*/15 * * * *";
 
 export { App } from "./app.ts";
 export { AuditLog } from "./audit-log.ts";
+export { ChatApi } from "./agent-apis.ts";
 export { Builtins } from "./builtins.ts";
 export { AppConnectionBinding } from "./app-bindings.ts";
 export { ConnectionBinding } from "./bindings.ts";

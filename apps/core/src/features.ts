@@ -164,7 +164,14 @@ export type Feature =
    * off, they start none; a schedule that missed times starts one run
    * once it's back on.
    */
-  | "triggers";
+  | "triggers"
+  /**
+   * The chat agent (workspace.ts, agent.ts): asking a chat's agent. It
+   * stays off on-prem: plain workerd doesn't enforce the CPU limit of the
+   * isolates Code Mode runs the agent's code in (code-mode.ts), and has no
+   * AI binding for its model calls either.
+   */
+  | "agent";
 
 /** Whether `feature` is switched on for this deployment. */
 export const featureEnabled = (
