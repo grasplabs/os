@@ -548,9 +548,12 @@ const takeSnapshotAs = async (
   const now = new Date();
   const date = now.toISOString().slice(0, 10);
   const { workflows, figures } = await snapshotFigures(env, now);
+  // Its own path each time, by the time it was taken, so paths sort as
+  // snapshots were taken (`2026-09-28T101530123Z`, after an older path of
+  // that day, `2026-09-28-…`); two taken at once are two snapshots.
+  const taken = `${date}T${now.toISOString().slice(11, 23).replaceAll(/[:.]/gu, "")}Z`;
   return await writeRecord(env, writer, {
-    // Its own path each time: two taken at once are two snapshots.
-    path: `snapshots/${date}-${crypto.randomUUID().slice(0, 8)}.md`,
+    path: `snapshots/${taken}-${crypto.randomUUID().slice(0, 8)}.md`,
     ifVersion: 0,
     record: {
       type: "snapshot",

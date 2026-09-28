@@ -303,6 +303,9 @@ const snapshotCount = async () =>
     .bind(playbookCollectionId)
     .first<{ count: number }>();
 
+/** Where the platform puts a snapshot: by the time it was taken, to the millisecond. */
+const snapshotPath = /^snapshots\/\d{4}-\d{2}-\d{2}T\d{9}Z-[0-9a-f]{8}\.md$/u;
+
 /** Today's UTC date, as a snapshot is dated. */
 const today = (): string => new Date().toISOString().slice(0, 10);
 
@@ -407,7 +410,9 @@ describe("snapshots the platform takes", { timeout: 60_000 }, () => {
       expect({
         // The day it was taken, whichever side of midnight the call was.
         date: [dayBefore, dayAfter].includes(date),
-        path: taken.path.startsWith(`snapshots/${date}-`),
+        path:
+          snapshotPath.test(taken.path) &&
+          taken.path.startsWith(`snapshots/${date}T`),
         title: taken.title,
         currentVersion: taken.currentVersion,
         maturity: record.maturity,

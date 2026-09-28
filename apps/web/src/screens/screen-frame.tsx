@@ -34,7 +34,7 @@ const ScreenStatus = ({ state, onReload }: StatusProps) => {
     message = failureMessages[state.reason];
   }
   return (
-    <div className="flex items-center justify-between gap-4 border-b p-3">
+    <div className="flex items-center justify-between gap-4 border-b p-3 print:hidden">
       <output className="text-sm">{message}</output>
       {state.status === "signed-out" ? null : (
         <Button onClick={onReload} size="sm" variant="outline">
@@ -91,7 +91,9 @@ const Frame = ({ app, screen, onState, onOpened }: FrameProps) => {
  * An App's screen, running in a sandboxed frame, inside the page's own
  * chrome: the App's name and a label that says an App drew what's below.
  * A screen can draw anything in its frame, a fake sign-in prompt too; the
- * chrome is how a person tells the App's part from Grasp's.
+ * chrome is how a person tells the App's part from Grasp's. It doesn't
+ * print: printed, the page is the screen alone, filling the paper, and
+ * the screen's own print styles decide what's on it.
  */
 export const ScreenFrame = ({
   app,
@@ -110,7 +112,7 @@ export const ScreenFrame = ({
   };
   return (
     <div className="flex flex-1 flex-col">
-      <header className="flex items-center gap-2 border-b p-3">
+      <header className="flex items-center gap-2 border-b p-3 print:hidden">
         <Badge variant="secondary">App screen</Badge>
         <Title className="text-sm font-medium">{appName}</Title>
       </header>
