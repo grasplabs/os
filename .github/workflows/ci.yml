@@ -27,8 +27,8 @@ jobs:
     name: check
     if: github.event_name != 'push'
     runs-on: ubuntu-latest
-    # A passing run takes about 6 minutes.
-    timeout-minutes: 15
+    # A passing run takes 7 to 13 minutes, most of it `vp test`.
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -46,12 +46,15 @@ jobs:
       - run: vp run check:docs
       - run: vp run check:migrations
       - run: vp run check:wrangler-configs
-      # About 5 minutes when it passes. Nothing in Vitest times out a test
-      # worker stuck after its tests (see apps/core/vite.config.ts): this
-      # step timeout is the only backstop, so a hang fails here after 10
-      # minutes, with no earlier warning, instead of at the job's limit.
-      - run: vp test
-        timeout-minutes: 10
+      # 6 to 9.5 minutes when it passes. Vitest's default runs a worker per
+      # CPU but one, which left a third of the runner's CPU idle; a worker
+      # per CPU measured about 6% faster.
+      # Nothing in Vitest times out a test worker stuck after its tests (see
+      # apps/core/vite.config.ts): this step timeout is the only backstop, so
+      # a hang fails here after 13 minutes, with no earlier warning, instead
+      # of at the job's limit. That leaves a third over the slowest pass.
+      - run: vp test --maxWorkers=100%
+        timeout-minutes: 13
       - run: vp run -r build
       # The console isn't deployed from here (see deploy-staging): check that
       # its build is a Worker wrangler would deploy. No credentials needed.
