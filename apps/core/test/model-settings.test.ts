@@ -1,5 +1,6 @@
 import { runActorOf } from "@grasp-os/shared/audit";
 import { appIdSchema, runIdSchema } from "@grasp-os/shared/ids";
+import { modelSpendListed } from "@grasp-os/shared/models";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -8,7 +9,14 @@ import type { ModelCall, ModelsEnv } from "../src/models.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import { mockIdp } from "./idp.ts";
 import { finished } from "./runs.ts";
-import { openRpc, outcome, signedInApi, signedInWithRole } from "./sign-in.ts";
+import {
+  openRpc,
+  outcome,
+  signedIn,
+  signedInApi,
+  signedInWithRole,
+  staffPerson,
+} from "./sign-in.ts";
 import { appWith, workflowFiles } from "./workflow-apps.ts";
 
 // Admins read the model gateway's settings: the allowlist, the client's
@@ -156,6 +164,7 @@ describe("model settings", { timeout: 60_000 }, () => {
             limit: 100,
             alertAt: 80,
             spent: [{ of: { type: "deployment" }, amount: 0.018 }],
+            more: false,
           },
           {
             scope: "workflow",
@@ -172,6 +181,7 @@ describe("model settings", { timeout: 60_000 }, () => {
                 amount: 0.0045,
               },
             ],
+            more: false,
           },
           {
             scope: "user",
@@ -195,6 +205,7 @@ describe("model settings", { timeout: 60_000 }, () => {
                 amount: 0.0045,
               },
             ],
+            more: false,
           },
         ],
       },
@@ -225,5 +236,83 @@ describe("model settings", { timeout: 60_000 }, () => {
     await expect(outcome(settingsIn(envWith(config), "builder"))).resolves.toBe(
       "role.forbidden"
     );
+  });
+
+  it("list the most who spent, most first and ties by key, say more spent, and name nobody who's gone", async () => {
+    const coreEnv = envWith({
+      gateway: "grasp-os-test",
+      models: [workersAi],
+      budgets: { workflow: { limit: 5 }, user: { limit: 1 } },
+    });
+    const period = coreEnv.MODEL_BUDGET_MONTH;
+    // Spend already counted for people and an App no longer here: one more
+    // person than are listed, the two who spent most tied.
+    const people = Array.from({ length: modelSpendListed + 1 }, (_, index) => ({
+      key: `gone-${String(index).padStart(3, "0")}`,
+      micros: index < 2 ? 900_000 : 1000 + index,
+    }));
+    const spend = env.DB.prepare(
+      "INSERT INTO model_spend (scope, key, period, spent_micros) VALUES (?, ?, ?, ?)"
+    );
+    await env.DB.batch([
+      ...people.map(({ key, micros }) =>
+        spend.bind("user", key, period, micros)
+      ),
+      spend.bind(
+        "workflow",
+        JSON.stringify(["gone-app", "digest"]),
+        period,
+        5000
+      ),
+    ]);
+
+    const settings = await settingsIn(coreEnv);
+    if (settings.rules.state !== "on") {
+      throw new Error(`Expected the rules on, got ${settings.rules.state}`);
+    }
+    const [workflow, user] = settings.rules.budgets;
+    expect(workflow).toStrictEqual({
+      scope: "workflow",
+      limit: 5,
+      alertAt: 80,
+      spent: [
+        {
+          of: {
+            type: "workflow",
+            appId: "gone-app",
+            appName: null,
+            workflowId: "digest",
+          },
+          amount: 0.005,
+        },
+      ],
+      more: false,
+    });
+    expect(user?.more).toBeTruthy();
+    // Most first; the tie goes by key, descending; the least is left out.
+    expect(user?.spent.map(({ of }) => of)).toStrictEqual(
+      [
+        "gone-001",
+        "gone-000",
+        ...people
+          .slice(2)
+          .map(({ key }) => key)
+          .toReversed()
+          .slice(0, modelSpendListed - 2),
+      ].map((userId) => ({ type: "user", userId, name: null }))
+    );
+    expect(user?.spent[0]?.amount).toBe(0.9);
+  });
+
+  it("read to Grasp staff too, through the admin role their access gives", async () => {
+    const coreEnv = envWith({ gateway: "grasp-os-test", models: [workersAi] });
+    const session = await signedIn(idp, "grasp-staff", staffPerson());
+    const { core } = await openRpc(session, { coreEnv });
+    const staff = core.authenticate();
+    await expect(staff.whoami()).resolves.toMatchObject({ staff: true });
+    await expect(staff.models.settings()).resolves.toMatchObject({
+      models: [workersAi],
+      rules: { state: "on", budgets: [] },
+    });
   });
 });

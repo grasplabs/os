@@ -525,7 +525,7 @@ describe("model rules", { timeout: 60_000 }, () => {
     expect(outcomes).toStrictEqual(["ok", "ok", "ok", "model.over_budget"]);
     await expect(call(ada)).rejects.toMatchObject({
       message:
-        "This month's model budget is used up, so no more model calls can be made for this. To raise the budget, contact Grasp.",
+        "This month's model budget is used up, so no more model calls can be made for this. Ask your admin to have Grasp raise the budget.",
       details: { because: "user" },
     });
     await expect(outcome(call(hello(anthropic)))).resolves.toBe("ok");
@@ -944,7 +944,7 @@ describe("model rules", { timeout: 60_000 }, () => {
         status: "failed",
         error: {
           message:
-            "This month's model budget is used up, so no more model calls can be made for this. To raise the budget, contact Grasp.",
+            "This month's model budget is used up, so no more model calls can be made for this. Ask your admin to have Grasp raise the budget.",
         },
       },
     ]);

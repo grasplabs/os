@@ -10,7 +10,7 @@ export const modelErrors = defineErrorFamily({
   "model.sensitive_data":
     "This call carries sensitive data, and that model may not take it. Choose one this deployment allows for sensitive data.",
   "model.over_budget":
-    "This month's model budget is used up, so no more model calls can be made for this. To raise the budget, contact Grasp.",
+    "This month's model budget is used up, so no more model calls can be made for this. Ask your admin to have Grasp raise the budget.",
   "model.failed": "The model call failed. Try again later.",
   "model.invalid_output":
     "The model's answer didn't match the expected shape, also when asked again.",
@@ -55,6 +55,8 @@ export interface ModelBudget {
    * {@link modelSpendListed} of them. Empty while nothing was spent.
    */
   spent: { of: ModelSpender; amount: number }[];
+  /** More workflows or people spent than `spent` lists. */
+  more: boolean;
 }
 
 /** The client's rules beyond the allowlist, while they apply. */

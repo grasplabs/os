@@ -162,6 +162,11 @@ const BudgetTable = ({ budget }: { budget: ModelBudget }) => {
         {dollars.format(budget.limit)} a month, admins alerted at{" "}
         {budget.alertAt}%. Calls stop once it&apos;s used up.
       </p>
+      {budget.more ? (
+        <p className="text-sm">
+          The {budget.spent.length} who spent most; more spent less.
+        </p>
+      ) : null}
       {budget.spent.length === 0 ? (
         <p className="text-muted-foreground text-sm">Nothing spent yet.</p>
       ) : (
