@@ -10,33 +10,64 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
+import { Route as ReleasesIndexRouteImport } from './routes/releases/index'
+import { Route as ReleasesReleaseIdRouteImport } from './routes/releases/$releaseId'
+import { Route as ReleasesDiffRouteImport } from './routes/releases/diff'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ReleasesIndexRoute = ReleasesIndexRouteImport.update({
+  id: '/releases/',
+  path: '/releases/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReleasesReleaseIdRoute = ReleasesReleaseIdRouteImport.update({
+  id: '/releases/$releaseId',
+  path: '/releases/$releaseId',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ReleasesDiffRoute = ReleasesDiffRouteImport.update({
+  id: '/releases/diff',
+  path: '/releases/diff',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
+  '/releases/$releaseId': typeof ReleasesReleaseIdRoute
+  '/releases/diff': typeof ReleasesDiffRoute
+  '/releases/': typeof ReleasesIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
+  '/releases/$releaseId': typeof ReleasesReleaseIdRoute
+  '/releases/diff': typeof ReleasesDiffRoute
+  '/releases': typeof ReleasesIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
+  '/releases/$releaseId': typeof ReleasesReleaseIdRoute
+  '/releases/diff': typeof ReleasesDiffRoute
+  '/releases/': typeof ReleasesIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/'
+  fullPaths: '/' | '/releases/$releaseId' | '/releases/diff' | '/releases/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/'
-  id: '__root__' | '/'
+  to: '/' | '/releases/$releaseId' | '/releases/diff' | '/releases'
+  id:
+    '__root__' | '/' | '/releases/$releaseId' | '/releases/diff' | '/releases/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
+  ReleasesReleaseIdRoute: typeof ReleasesReleaseIdRoute
+  ReleasesDiffRoute: typeof ReleasesDiffRoute
+  ReleasesIndexRoute: typeof ReleasesIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -48,11 +79,35 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/releases/': {
+      id: '/releases/'
+      path: '/releases'
+      fullPath: '/releases/'
+      preLoaderRoute: typeof ReleasesIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/releases/$releaseId': {
+      id: '/releases/$releaseId'
+      path: '/releases/$releaseId'
+      fullPath: '/releases/$releaseId'
+      preLoaderRoute: typeof ReleasesReleaseIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/releases/diff': {
+      id: '/releases/diff'
+      path: '/releases/diff'
+      fullPath: '/releases/diff'
+      preLoaderRoute: typeof ReleasesDiffRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
+  ReleasesReleaseIdRoute: ReleasesReleaseIdRoute,
+  ReleasesDiffRoute: ReleasesDiffRoute,
+  ReleasesIndexRoute: ReleasesIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

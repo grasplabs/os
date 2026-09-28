@@ -15,19 +15,20 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+import { assetKey, moduleKey } from "@grasp-os/shared/release";
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { builds, fixtureBuild, info, rawConfig } from "./fixture-release.ts";
 import { stableStringify } from "./hash-lib.ts";
 import {
   assertReleaseDir,
-  assetKey,
   generateManifest,
-  moduleKey,
   parseWranglerConfig,
   verifyRelease,
   writeRelease,
 } from "./manifest-lib.ts";
+
+const fixture = await builds();
 
 /** Every string anywhere in `value`. */
 const stringsIn = (value: unknown): string[] => {
@@ -43,12 +44,12 @@ const stringsIn = (value: unknown): string[] => {
 describe("the release manifest", () => {
   it("matches the golden manifest for the real wrangler configs", async () => {
     await expect(
-      stableStringify(generateManifest(info, builds()))
+      stableStringify(generateManifest(info, fixture))
     ).toMatchFileSnapshot("testdata/golden-manifest.json");
   });
 
   it("leaves only placeholders the console knows", () => {
-    const { workers } = generateManifest(info, builds());
+    const { workers } = generateManifest(info, fixture);
     const tokens = Object.values(workers)
       .flatMap((worker) => stringsIn(worker.bindings))
       .filter((value) => value.includes("$"));
@@ -89,14 +90,13 @@ describe("the release manifest", () => {
     ).toThrow(/jurisdiction/u);
   });
 
-  it("refuses a service binding to a Worker outside the release", () => {
-    expect(() => generateManifest(info, [fixtureBuild("core")])).toThrow(
-      /grasp-os-connect/u
-    );
+  it("refuses a service binding to a Worker outside the release", async () => {
+    const core = await fixtureBuild("core");
+    expect(() => generateManifest(info, [core])).toThrow(/grasp-os-connect/u);
   });
 
   it("refuses Workers on different compatibility dates", () => {
-    const [connect, core] = builds();
+    const [connect, core] = fixture;
     if (connect === undefined || core === undefined) {
       throw new Error("expected two builds");
     }
@@ -111,12 +111,12 @@ describe("the release manifest", () => {
 
   it("refuses a release id that isn't a plain R2 prefix", () => {
     expect(() =>
-      generateManifest({ ...info, releaseId: "../r000001-0000000" }, builds())
+      generateManifest({ ...info, releaseId: "../r000001-0000000" }, fixture)
     ).toThrow(/releaseId/u);
   });
 
   it("refuses a build without its D1 migrations or static assets", () => {
-    const [connect, core] = builds();
+    const [connect, core] = fixture;
     if (connect === undefined || core === undefined) {
       throw new Error("expected two builds");
     }
@@ -138,7 +138,7 @@ describe("the release manifest", () => {
 
 describe("a written release", () => {
   let out = "";
-  const manifest = generateManifest(info, builds());
+  const manifest = generateManifest(info, fixture);
   const [coreModule] = manifest.workers.core?.modules ?? [];
   const [assetHash] = Object.keys(manifest.assets);
   if (coreModule === undefined || assetHash === undefined) {
@@ -147,38 +147,50 @@ describe("a written release", () => {
 
   beforeEach(() => {
     out = mkdtempSync(path.join(tmpdir(), "grasp-os-release-test-"));
-    writeRelease(out, manifest, builds());
+    writeRelease(out, manifest, fixture);
   });
 
   afterEach(() => {
     rmSync(out, { force: true, recursive: true });
   });
 
-  it("verifies against its manifest", () => {
-    expect(verifyRelease(out).manifest).toStrictEqual(manifest);
+  it("verifies against its manifest", async () => {
+    await expect(verifyRelease(out)).resolves.toHaveProperty(
+      "manifest",
+      manifest
+    );
   });
 
-  it("replaces an earlier release in the same directory", () => {
+  it("replaces an earlier release in the same directory", async () => {
     const stale = path.join(out, moduleKey("0".repeat(64)));
     writeFileSync(stale, "from an earlier release");
-    writeRelease(out, manifest, builds());
+    writeRelease(out, manifest, fixture);
     expect(existsSync(stale)).toBeFalsy();
-    expect(verifyRelease(out).manifest).toStrictEqual(manifest);
+    await expect(verifyRelease(out)).resolves.toHaveProperty(
+      "manifest",
+      manifest
+    );
   });
 
-  it("creates the directory when it's absent", () => {
+  it("creates the directory when it's absent", async () => {
     const nested = path.join(out, "nested", "release");
-    writeRelease(nested, manifest, builds());
-    expect(verifyRelease(nested).manifest).toStrictEqual(manifest);
+    writeRelease(nested, manifest, fixture);
+    await expect(verifyRelease(nested)).resolves.toHaveProperty(
+      "manifest",
+      manifest
+    );
   });
 
-  it("keeps the previous release when the next build fails", () => {
+  it("keeps the previous release when the next build fails", async () => {
     // What build-release does: check --out first, build, then write.
     assertReleaseDir(out);
     expect(() =>
-      generateManifest({ ...info, commit: "not a commit" }, builds())
+      generateManifest({ ...info, commit: "not a commit" }, fixture)
     ).toThrow(/commit/u);
-    expect(verifyRelease(out).manifest).toStrictEqual(manifest);
+    await expect(verifyRelease(out)).resolves.toHaveProperty(
+      "manifest",
+      manifest
+    );
   });
 
   it("refuses a directory that isn't a release before building", () => {
@@ -201,7 +213,7 @@ describe("a written release", () => {
     try {
       writeFileSync(path.join(other, "keep.txt"), "someone's work");
       expect(() => {
-        writeRelease(other, manifest, builds());
+        writeRelease(other, manifest, fixture);
       }).toThrow(/refusing to delete it/u);
       expect(readFileSync(path.join(other, "keep.txt"), "utf-8")).toBe(
         "someone's work"
@@ -212,20 +224,20 @@ describe("a written release", () => {
     }
   });
 
-  it("fails verification when a module changed", () => {
+  it("fails verification when a module changed", async () => {
     writeFileSync(path.join(out, moduleKey(coreModule.sha256)), "tampered");
-    expect(() => verifyRelease(out)).toThrow(/doesn't match its hash/u);
+    await expect(verifyRelease(out)).rejects.toThrow(/doesn't match its hash/u);
   });
 
-  it("fails verification when an asset changed or is missing", () => {
+  it("fails verification when an asset changed or is missing", async () => {
     const asset = path.join(out, assetKey(assetHash));
     writeFileSync(asset, "tampered");
-    expect(() => verifyRelease(out)).toThrow(/doesn't match its hash/u);
+    await expect(verifyRelease(out)).rejects.toThrow(/doesn't match its hash/u);
     unlinkSync(asset);
-    expect(() => verifyRelease(out)).toThrow(/missing/u);
+    await expect(verifyRelease(out)).rejects.toThrow(/missing/u);
   });
 
-  it("checks every asset index entry, served or not, inside the release", () => {
+  it("checks every asset index entry, served or not, inside the release", async () => {
     const write = (assets: Record<string, unknown>): void => {
       writeFileSync(
         path.join(out, "manifest.json"),
@@ -237,7 +249,7 @@ describe("a written release", () => {
       throw new Error("expected an asset");
     }
     write({ ...manifest.assets, [hash]: { ...blob, r2Key: "../../outside" } });
-    expect(() => verifyRelease(out)).toThrow(/content address/u);
+    await expect(verifyRelease(out)).rejects.toThrow(/content address/u);
 
     const unserved = "f".repeat(32);
     writeFileSync(path.join(out, assetKey(unserved)), "served by nothing");
@@ -245,10 +257,10 @@ describe("a written release", () => {
       ...manifest.assets,
       [unserved]: { size: 17, r2Key: assetKey(unserved) },
     });
-    expect(() => verifyRelease(out)).toThrow(/no Worker serves/u);
+    await expect(verifyRelease(out)).rejects.toThrow(/no Worker serves/u);
   });
 
-  it("fails verification when the manifest points a blob elsewhere", () => {
+  it("fails verification when the manifest points a blob elsewhere", async () => {
     const moved = readFileSync(
       path.join(out, "manifest.json"),
       "utf-8"
@@ -257,6 +269,6 @@ describe("a written release", () => {
       `"r2Key": "${assetKey(assetHash)}"`
     );
     writeFileSync(path.join(out, "manifest.json"), moved);
-    expect(() => verifyRelease(out)).toThrow(/content address/u);
+    await expect(verifyRelease(out)).rejects.toThrow(/content address/u);
   });
 });

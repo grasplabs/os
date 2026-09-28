@@ -25,20 +25,18 @@ export const rawConfig = (app: string): Record<string, unknown> =>
       )
     );
 
-export const fixtureBuild = (app: string): WorkerBuild => {
+export const fixtureBuild = async (app: string): Promise<WorkerBuild> => {
   const config = parseWranglerConfig(app, rawConfig(app));
+  const migrations = await collectSqlFiles(path.join(TESTDATA, "migrations"));
   return {
     key: app,
     config,
-    ...collectModules(path.join(TESTDATA, "bundles", app)),
+    ...(await collectModules(path.join(TESTDATA, "bundles", app))),
     d1Migrations: Object.fromEntries(
-      config.d1_databases.map((database) => [
-        database.binding,
-        collectSqlFiles(path.join(TESTDATA, "migrations")),
-      ])
+      config.d1_databases.map((database) => [database.binding, migrations])
     ),
     ...(config.assets
-      ? { assets: collectAssets(path.join(TESTDATA, "assets")) }
+      ? { assets: await collectAssets(path.join(TESTDATA, "assets")) }
       : {}),
   };
 };
@@ -52,5 +50,5 @@ export const info: ReleaseInfo = {
   packages: { zod: "0.0.0-fixture" },
 };
 
-export const builds = (): WorkerBuild[] =>
-  ["connect", "core"].map(fixtureBuild);
+export const builds = async (): Promise<WorkerBuild[]> =>
+  await Promise.all(["connect", "core"].map(fixtureBuild));
