@@ -181,7 +181,11 @@ describe("platform updates", () => {
       throw new Error("Migration 0018 is missing");
     }
     // As before the migration that adds `platform_versions` ran, with the
-    // running version in the one row the first release kept.
+    // running version in the one row the first release kept. That row is
+    // put back as it was afterwards, so later tests see what they did.
+    const oldRow = await env.DB.prepare(
+      "SELECT version_id, recorded_at FROM platform_version WHERE id = 1"
+    ).first<{ version_id: string; recorded_at: number }>();
     await env.DB.exec(
       "ALTER TABLE platform_versions RENAME TO platform_versions_away"
     );
@@ -202,6 +206,13 @@ describe("platform updates", () => {
       await env.DB.exec(
         "ALTER TABLE platform_versions_away RENAME TO platform_versions"
       );
+      await (
+        oldRow === null
+          ? env.DB.prepare("DELETE FROM platform_version WHERE id = 1")
+          : env.DB.prepare(
+              "INSERT OR REPLACE INTO platform_version (id, version_id, recorded_at) VALUES (1, ?, ?)"
+            ).bind(oldRow.version_id, oldRow.recorded_at)
+      ).run();
     }
 
     await expect(updatesOf(running)).resolves.toHaveLength(0);
