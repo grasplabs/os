@@ -779,7 +779,7 @@ export const setCurrentVersion = async (
   }
   // Tested whatever the workflows flag says, so switching it on never runs untested code.
   const files = await versionFiles(env, appId, number);
-  await requireWorkflowTestsPass(env, appId, number, files);
+  await requireWorkflowTestsPass(env, number, files);
   // Registered whatever the triggers flag says, so switching it on starts
   // the triggers of the version current then.
   const triggers = await triggerRegistration(env, appId, number, files);

@@ -1,5 +1,4 @@
 import { kitModules } from "@grasp-os/compiler";
-import type { AppSource } from "@grasp-os/compiler";
 import { compatibilityDate } from "@grasp-os/shared/runtime";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
@@ -58,11 +57,6 @@ export default function Inbox() {
 `,
 };
 
-const app = (
-  files: Record<string, string>,
-  version = crypto.randomUUID()
-): AppSource => ({ app: "sample", version, files });
-
 /** These of the kit's modules, by flat name. */
 const kitModulesNamed = async (
   names: string[]
@@ -119,7 +113,7 @@ const noBuilds: WorkerLoader = {
 // Every build starts an isolate with the compiler in it.
 describe("screen builds", { timeout: 60_000 }, () => {
   it("builds every screen into modules that run on the kit's", async () => {
-    const built = await buildScreens(env, app(sampleApp));
+    const built = await buildScreens(env, sampleApp);
     if (!built.ok) {
       throw new Error(JSON.stringify(built.diagnostics, null, 2));
     }
@@ -147,7 +141,7 @@ describe("screen builds", { timeout: 60_000 }, () => {
   });
 
   it("names only the kit modules the App needs", async () => {
-    const built = await buildScreens(env, app(sampleApp));
+    const built = await buildScreens(env, sampleApp);
 
     expect(built.ok && built.kitModules).toContain(
       "lucide-react~icons~inbox.js"
@@ -168,18 +162,15 @@ describe("screen builds", { timeout: 60_000 }, () => {
   });
 
   it("runs screens through the React Compiler", async () => {
-    const built = await buildScreens(
-      env,
-      app({
-        "screens/counter.tsx": `import { useState } from "react";
+    const built = await buildScreens(env, {
+      "screens/counter.tsx": `import { useState } from "react";
 
 export default function Counter() {
   const [count, setCount] = useState(0);
   return <button onClick={() => setCount(count + 1)}>{count}</button>;
 }
 `,
-      })
-    );
+    });
 
     expect(built.ok && built.modules["app~screens~counter.js"]).toContain(
       '"react~compiler-runtime.js"'
@@ -187,10 +178,8 @@ export default function Counter() {
   });
 
   it("refuses imports from outside the kit, saying where", async () => {
-    const built = await buildScreens(
-      env,
-      app({
-        "screens/desk.tsx": `import leftPad from "left-pad";
+    const built = await buildScreens(env, {
+      "screens/desk.tsx": `import leftPad from "left-pad";
 import { Dialog } from "@base-ui/react/dialog";
 import { Nope } from "@grasp-os/ui/components/nope";
 import { secret } from "../../outside";
@@ -204,8 +193,7 @@ export default function Desk() {
   return <p>{leftPad(Dialog, Nope, secret, remote, InboxIcon, NotAnIcon, icons)}</p>;
 }
 `,
-      })
-    );
+    });
 
     expect(built.ok).toBeFalsy();
     expect(
@@ -237,35 +225,42 @@ export default function Desk() {
   });
 
   it("builds the same files once and serves them from the cache after", async () => {
-    const source = app(sampleApp);
-    const built = await buildScreens(env, source);
-    expect(built.ok).toBeTruthy();
+    // Files of this test's own, so no earlier build is in the cache.
+    const files = screen(`once ${crypto.randomUUID()}`);
+    let started = 0;
+    const counting: WorkerLoader = {
+      get: (name, code) => {
+        started += 1;
+        return env.LOADER.get(name, code);
+      },
+      load: (code) => env.LOADER.load(code),
+    };
+    const built = await buildScreens({ ...env, LOADER: counting }, files);
+    expect({ ok: built.ok, started }).toStrictEqual({ ok: true, started: 1 });
 
-    const cached = await buildScreens({ ...env, LOADER: noBuilds }, source);
+    // A build is its files': whichever App or version they come from, the
+    // same files, next to any the build doesn't read, are built already.
+    const cached = await buildScreens({ ...env, LOADER: noBuilds }, files);
     expect(cached).toStrictEqual(built);
-
-    // Another version, or other files under the same version, build again.
     await expect(
       buildScreens(
         { ...env, LOADER: noBuilds },
-        { ...source, version: crypto.randomUUID() }
+        { ...files, "app/server.ts": "export class App {}\n" }
       )
-    ).rejects.toThrow("Built again");
+    ).resolves.toStrictEqual(built);
+
+    // Other files it reads build again.
     await expect(
       buildScreens(
         { ...env, LOADER: noBuilds },
-        {
-          ...source,
-          files: { ...source.files, "components/extra.ts": "export {};\n" },
-        }
+        { ...files, "components/extra.ts": "export {};\n" }
       )
     ).rejects.toThrow("Built again");
   });
 
-  it("builds other files under the same version on their own", async () => {
-    const version = crypto.randomUUID();
-    const first = await buildScreens(env, app(screen("first"), version));
-    const second = await buildScreens(env, app(screen("second"), version));
+  it("builds other files on their own", async () => {
+    const first = await buildScreens(env, screen("first"));
+    const second = await buildScreens(env, screen("second"));
 
     expect(first.ok && first.modules["app~screens~desk.js"]).toContain("first");
     expect(second.ok && second.modules["app~screens~desk.js"]).toContain(

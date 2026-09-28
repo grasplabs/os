@@ -1,15 +1,9 @@
 import { isolateSettings } from "@grasp-os/compiler";
-import type { Diagnostic, AppSource } from "@grasp-os/compiler";
+import type { Diagnostic } from "@grasp-os/compiler";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { buildScreens } from "../src/screens.ts";
-
-const app = (files: Record<string, string>): AppSource => ({
-  app: "sandbox",
-  version: crypto.randomUUID(),
-  files,
-});
 
 /** A screen with this code before its component. */
 const screen = (code: string): Record<string, string> => ({
@@ -25,7 +19,7 @@ const summary = ({ file, line, rule, message }: Diagnostic) =>
   `${file}:${line} ${rule}: ${message}`;
 
 const summaries = async (files: Record<string, string>) => {
-  const built = await buildScreens(env, app(files));
+  const built = await buildScreens(env, files);
   expect(built.ok).toBeFalsy();
   return built.diagnostics.map((diagnostic) => summary(diagnostic));
 };
@@ -83,11 +77,9 @@ export default function Desk() {
   it("builds a file of huge tokens quickly, keeping the classes in them", async () => {
     const built = await buildScreens(
       env,
-      app(
-        screen(
-          `export const noise = "${")".repeat(150_000)}x";
+      screen(
+        `export const noise = "${")".repeat(150_000)}x";
 export const classes = ["mt-7","${"(".repeat(400)}"];`
-        )
       )
     );
 
@@ -109,7 +101,7 @@ export const classes = ["mt-7","${"(".repeat(400)}"];`
       Object.keys(many).map((path) => [`workflows/${path}`, "x".repeat(10_000)])
     );
     await expect(
-      buildScreens(env, app({ ...screen(""), ...unread }))
+      buildScreens(env, { ...screen(""), ...unread })
     ).resolves.toMatchObject({ ok: true });
 
     const long = `// ${"x".repeat(200_001)}\n`;

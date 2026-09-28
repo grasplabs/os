@@ -179,11 +179,7 @@ const loadServer = async (
   generation: number
 ): Promise<DurableObjectClass> => {
   const files = await versionFiles(env, app, version);
-  const build = await buildServer(env, {
-    app,
-    version: String(version),
-    files,
-  });
+  const build = await buildServer(env, files);
   if (!build.ok) {
     throw appErrors.create("app.build_failed", buildFailed(version, build));
   }

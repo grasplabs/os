@@ -38,11 +38,7 @@ export const serverBuilt = async (
   version: number
 ): Promise<void> => {
   const id = appIdSchema.parse(app);
-  const build = await buildServer(env, {
-    app: id,
-    version: String(version),
-    files: await versionFiles(env, id, version),
-  });
+  const build = await buildServer(env, await versionFiles(env, id, version));
   if (!build.ok) {
     throw new Error(`Version ${version} of the App doesn't build`);
   }

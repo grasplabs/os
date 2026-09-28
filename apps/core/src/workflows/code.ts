@@ -356,15 +356,10 @@ export const hasWorkflow = (files: AppFiles, id: string): boolean =>
  */
 const modulesOf = async (
   env: Env,
-  app: AppId,
   version: number,
   files: AppFiles
 ): Promise<Record<string, string>> => {
-  const build = await buildWorkflows(env, {
-    app,
-    version: String(version),
-    files,
-  });
+  const build = await buildWorkflows(env, files);
   if (!build.ok) {
     throw workflowErrors.create("workflow.build_failed", {
       version,
@@ -381,7 +376,6 @@ const modulesOf = async (
 
 /** What a run's isolate is loaded for: its code, and its env. */
 export interface RunCode {
-  app: AppId;
   /** The version the run is pinned to. */
   version: number;
   workflow: WorkflowId;
@@ -400,13 +394,13 @@ export interface RunCode {
  */
 export const loadRun = (
   env: Env,
-  { app, version, workflow, files, env: runEnv }: RunCode
+  { version, workflow, files, env: runEnv }: RunCode
 ) =>
   env.LOADER.get(null, async () => ({
     ...workflowSandbox,
     mainModule: runModule,
     modules: {
-      ...(await modulesOf(env, app, version, files)),
+      ...(await modulesOf(env, version, files)),
       [runModule]: runMain(workflow),
     },
     env: runEnv,
@@ -454,7 +448,7 @@ const declaredMetadata = async (
       ...workflowSandbox,
       mainModule: metadataModule,
       modules: {
-        ...(await modulesOf(env, app, version, files)),
+        ...(await modulesOf(env, version, files)),
         [metadataModule]: metadataMain(id),
       },
       env: {},
@@ -516,23 +510,24 @@ export const declaredTriggers = async (
   return parsed.data ?? [];
 };
 
-/** Why workflow `id`'s tests at `version` fail, one line each; none if they pass. */
+/**
+ * Why workflow `id`'s tests fail on a version's `modules`, one line each;
+ * none if they pass. They run App code, once, as the version is made
+ * current, in an isolate with no name, which nothing else shares and which
+ * goes once they are done: workerd keeps a named isolate, the SDK's
+ * modules in it, for as long as the process runs.
+ */
 const testFailures = async (
   env: Env,
-  app: AppId,
-  version: number,
   id: WorkflowId,
   modules: Record<string, string>
 ): Promise<string[]> => {
-  const tests = env.LOADER.get(
-    `workflow-tests:${app}:${version}:${id}:${compilerVersion}`,
-    () => ({
-      ...workflowSandbox,
-      mainModule: testsModule,
-      modules: { ...modules, [testsModule]: testsMain(id) },
-      env: {},
-    })
-  ).getEntrypoint<TestsEntrypoint>("Tests");
+  const tests = env.LOADER.get(null, () => ({
+    ...workflowSandbox,
+    mainModule: testsModule,
+    modules: { ...modules, [testsModule]: testsMain(id) },
+    env: {},
+  })).getEntrypoint<TestsEntrypoint>("Tests");
   let outcome: Settled<unknown>;
   try {
     outcome = fromIsolate(await tests.run());
@@ -586,7 +581,7 @@ export const dryRunTests = async (
       ...workflowSandbox,
       mainModule: dryRunModule,
       modules: {
-        ...(await modulesOf(env, app, version, files)),
+        ...(await modulesOf(env, version, files)),
         [dryRunModule]: dryRunMain(id),
       },
       env: {},
@@ -617,7 +612,6 @@ export const dryRunTests = async (
  */
 export const requireWorkflowTestsPass = async (
   env: Env,
-  app: AppId,
   version: number,
   files: AppFiles
 ): Promise<void> => {
@@ -625,12 +619,12 @@ export const requireWorkflowTestsPass = async (
   if (ids.length === 0) {
     return;
   }
-  const modules = await modulesOf(env, app, version, files);
+  const modules = await modulesOf(env, version, files);
   const failures: string[] = [];
   for (const id of ids) {
     if (Object.hasOwn(files, workflowPaths(id).tests)) {
       // oxlint-disable-next-line no-await-in-loop -- one isolate at a time
-      failures.push(...(await testFailures(env, app, version, id, modules)));
+      failures.push(...(await testFailures(env, id, modules)));
     } else {
       // Often a helper, not a workflow: say where shared code goes.
       failures.push(

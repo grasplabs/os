@@ -1,5 +1,5 @@
 import { startScreenCompiler } from "@grasp-os/compiler";
-import type { Diagnostic, AppSource } from "@grasp-os/compiler";
+import type { Diagnostic } from "@grasp-os/compiler";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -108,10 +108,10 @@ export interface Ticket {
 `,
 };
 
-const app = (files: Record<string, string>): AppSource => ({
-  app: "tickets",
-  version: crypto.randomUUID(),
-  files: { ...typicalApp, ...files },
+/** The typical App with `files` added or replaced. */
+const app = (files: Record<string, string>): Record<string, string> => ({
+  ...typicalApp,
+  ...files,
 });
 
 /** Where a diagnostic is, what found it and what it says, on one line. */
@@ -259,7 +259,7 @@ describe("screen checks", { timeout: 60_000 }, () => {
   });
 
   it("checks a typical screen quickly once the isolate is warm", async () => {
-    const compiler = startScreenCompiler(env.LOADER, env.ASSETS, "timing");
+    const compiler = startScreenCompiler(env.LOADER, env.ASSETS);
     // The first check parses the kit's declarations; later ones reuse them.
     await expect(compiler.check(typicalApp)).resolves.toStrictEqual([]);
 

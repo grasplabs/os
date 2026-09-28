@@ -187,7 +187,6 @@ const runWorkflow = async (
       await declaredParams(env, run.app, run.version, run.workflow, files)
     );
     const code = loadRun(env, {
-      app: run.app,
       version: run.version,
       workflow: run.workflow,
       files,
