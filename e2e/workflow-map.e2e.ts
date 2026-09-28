@@ -159,7 +159,9 @@ test("an admin copies the workflow map, approves its Playbook, draws a workflow 
   ).toHaveCount(0);
   await listed.getByRole("button", { name: title }).click();
   await expect(
-    readerScreen.getByText("Only admins change the Playbook")
+    readerScreen.getByText(
+      "You can read this workflow, but not change it here."
+    )
   ).toBeVisible();
   await expect(
     readerScreen.getByLabel("Title", { exact: true })

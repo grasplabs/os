@@ -176,7 +176,7 @@ export class App extends DurableObject<Env> {
    * save sets it up). A workflow whose record can't be read any more
    * (saved under other schemas, say) is left out and named in
    * `unreadable`, and the others are still listed. Read a page of records
-   * at a time, so a Playbook of any size takes a few reads.
+   * at a time: one read, and one audit event, for every 20.
    */
   async overview(caller: Caller): Promise<
     Outcome<{
@@ -203,7 +203,9 @@ export class App extends DurableObject<Env> {
       const [workflows, teams, writable] = await Promise.all([
         recordsOf(playbook, caller, "workflow"),
         recordsOf(playbook, caller, "team"),
-        playbook.canWrite(caller),
+        // Only a hint: when it can't be had, the map is read only, and
+        // still lists what it read.
+        playbook.canWrite(caller).catch(() => false),
       ]);
       return {
         access: "ok" as const,

@@ -55,13 +55,18 @@ const overviewSchema = z.object({
   teams: z.array(z.object({ path: z.string(), title: z.string() })),
 });
 
-/**
- * How many pages of records (20 each) the overview reads for `records`:
- * the last is the first with fewer than 20, none if need be.
- */
-const pagesFor = (records: number): number => Math.floor(records / 20) + 1;
+/** The most records one read of the overview lists. */
+const pageMax = 20;
 
-const savedSchema = z.object({ id: z.string(), currentVersion: z.number() });
+/** The fewest reads that list `records`: at least one, even for none. */
+const readsFor = (records: number): number =>
+  Math.max(1, Math.ceil(records / pageMax));
+
+const savedSchema = z.object({
+  id: z.string(),
+  path: z.string(),
+  currentVersion: z.number(),
+});
 
 const numbers = (frequency: number, minutes: number, people: number) => ({
   frequency: { value: frequency, basis: "estimated" },
@@ -311,7 +316,7 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
     });
   });
 
-  it("lists the workflows it can read when one can't be, and names that one", async () => {
+  it("lists the workflows it can read when some can't be, and names those", async () => {
     const { admin, app } = await setUp();
     const save = async (title: string) =>
       okOf(
@@ -323,25 +328,31 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
         savedSchema
       );
     const kept = await save(`Kept ${unique()}`);
+    const unfit = await save(`Unfit ${unique()}`);
     const gone = await save(`Gone ${unique()}`);
     // As a rollback to a release with other schemas would leave it.
     await env.KNOWLEDGE.prepare(
       "UPDATE versions SET text = ? WHERE document_id = ?"
     )
-      .bind("---\ntype: workflow\nstate: sketched\n---\n", gone.id)
+      .bind("---\ntype: workflow\nstate: sketched\n---\n", unfit.id)
+      .run();
+    // Its current version gone: listed, with no text to read.
+    await env.KNOWLEDGE.prepare("DELETE FROM versions WHERE document_id = ?")
+      .bind(gone.id)
       .run();
 
     const listed = okOf(
       await call(app, admin.userId, "overview"),
       overviewSchema
     );
+    const unreadable = new Set(listed.unreadable.map(({ path }) => path));
     expect({
       kept: listed.workflows.some(({ id }) => id === kept.id),
-      gone: listed.workflows.some(({ id }) => id === gone.id),
-      unreadable: listed.unreadable.filter(({ title }) =>
-        title.startsWith("Gone")
-      ).length,
-    }).toStrictEqual({ kept: true, gone: false, unreadable: 1 });
+      listed: listed.workflows.some(
+        ({ id }) => id === unfit.id || id === gone.id
+      ),
+      unreadable: [unfit.path, gone.path].map((path) => unreadable.has(path)),
+    }).toStrictEqual({ kept: true, listed: false, unreadable: [true, true] });
   });
 
   it("reads its overview a page of records at a time, each page one read in the audit log", async () => {
@@ -368,19 +379,20 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
     const workflows =
       (listed?.workflows.length ?? 0) + (listed?.unreadable.length ?? 0);
     const teams = listed?.teams.length ?? 0;
+    const counts = reads.map(({ detail }) => counted.parse(detail).count);
     expect({
       kinds: [
         ...new Set(reads.map(({ detail }) => counted.parse(detail).read)),
       ],
-      read: reads.reduce(
-        (sum, { detail }) => sum + counted.parse(detail).count,
-        0
-      ),
+      read: counts.reduce((sum, count) => sum + count, 0),
+      pageFits: counts.every((count) => count <= pageMax),
+      // One read for each page, never one for each workflow.
       events: reads.length,
     }).toStrictEqual({
       kinds: ["records"],
       read: workflows + teams,
-      events: pagesFor(workflows) + pagesFor(teams),
+      pageFits: true,
+      events: readsFor(workflows) + readsFor(teams),
     });
   });
 

@@ -94,7 +94,9 @@ const WorkflowMap = () => {
   };
 
   const teams = overview?.teams ?? [];
-  // Only admins change the Playbook: for anyone else the map reads it.
+  // Whether the Playbook takes this person's changes through the map
+  // (only an admin's, and only while the map may write it): if not, the
+  // map reads it.
   const writable = overview?.writable === true;
 
   return (
@@ -118,8 +120,8 @@ const WorkflowMap = () => {
       {view.kind === "list" && (overview?.unreadable.length ?? 0) > 0 ? (
         <output className="text-muted-foreground text-sm">
           Could not read{" "}
-          {overview?.unreadable.map(({ title }) => title).join(", ")}. Try again
-          in a moment.
+          {overview?.unreadable.map(({ title }) => title).join(", ")}. The map
+          no longer reads what is stored for it.
         </output>
       ) : null}
       {view.kind === "list" && overview?.access === "ok" ? (

@@ -182,7 +182,7 @@ const DraftCard = ({
         />
         {writable ? null : (
           <p className="text-muted-foreground text-sm">
-            Only admins change the Playbook: you can read this workflow.
+            You can read this workflow, but not change it here.
           </p>
         )}
         {!writable || saveProblem === undefined ? null : (

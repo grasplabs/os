@@ -42,6 +42,7 @@ import type { Reader } from "./access.ts";
 import { allowedFor } from "./app-entries.ts";
 import {
   ensureCollection,
+  isWritable,
   readableCollection,
   requireWritable,
 } from "./collections.ts";
@@ -603,23 +604,18 @@ export const canWriteAsDelegate = async (
   context: WorkContext,
   permissionId: PermissionId
 ): Promise<boolean> => {
+  let person: Person;
   try {
-    const { person } = await delegateWriter(
-      env,
-      authority,
-      context,
-      permissionId
-    );
-    const collection =
-      (await storedPlaybook(env)) ?? playbookCollectionRow(person.userId);
-    requireWritable(env, person, collection);
-    return true;
+    ({ person } = await delegateWriter(env, authority, context, permissionId));
   } catch (error) {
     if (isExpectedError(error)) {
       return false;
     }
     throw error;
   }
+  const collection =
+    (await storedPlaybook(env)) ?? playbookCollectionRow(person.userId);
+  return isWritable(env, person, collection);
 };
 
 /**
@@ -655,12 +651,16 @@ export const getRecord = async (
 
 /**
  * The record `text` holds, as `document`'s current version, or
- * `undefined` when it doesn't fit its type any more (see `getRecord`).
+ * `undefined` when there is none or it doesn't fit its type any more (see
+ * `getRecord`).
  */
 const recordOf = (
   document: DocumentRow,
-  text: string
+  text: string | null
 ): RecordSummary | undefined => {
+  if (text === null) {
+    return undefined;
+  }
   try {
     const { type, frontmatter, body } = parseFrontmatter(document.path, text);
     return { ...toSummary(document), record: { type, ...frontmatter }, body };
@@ -698,12 +698,13 @@ export const listRecords = async (
     collectionId
   );
   // The text is read in the same query as the access check, as
-  // `getDocument` reads it.
-  const rows = await db
+  // `getDocument` reads it. One row past the page says whether another
+  // follows.
+  const found = await db
     .select({ document: documents, text: versions.text })
     .from(documents)
     .innerJoin(collections, eq(collections.id, documents.collectionId))
-    .innerJoin(
+    .leftJoin(
       versions,
       and(
         eq(versions.documentId, documents.id),
@@ -719,7 +720,8 @@ export const listRecords = async (
       )
     )
     .orderBy(asc(documents.path))
-    .limit(limit);
+    .limit(limit + 1);
+  const rows = found.slice(0, limit);
   const provenance = await noteProvenance(
     env,
     reader,
@@ -747,7 +749,8 @@ export const listRecords = async (
   return {
     records,
     unreadable,
-    next: rows.length < limit || last === undefined ? null : last.document.path,
+    next:
+      found.length > limit && last !== undefined ? last.document.path : null,
     provenance,
   };
 };

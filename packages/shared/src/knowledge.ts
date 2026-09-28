@@ -425,7 +425,8 @@ export interface RecordSummary extends DocumentSummary {
 /**
  * A page of a collection's records, read in one read. A document listed
  * whose text doesn't fit its type any more (under another release's
- * schemas, say) is in `unreadable`, and the others are still read.
+ * schemas, say), or has no current version, is in `unreadable`, and the
+ * others are still read.
  */
 export interface RecordPage {
   records: RecordSummary[];
