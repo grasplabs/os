@@ -10,6 +10,7 @@
     "typegen": "wrangler types --include-runtime=false"
   },
   "dependencies": {
+    "@better-auth/core": "catalog:",
     "@grasp-os/shared": "workspace:*"
   },
   "devDependencies": {

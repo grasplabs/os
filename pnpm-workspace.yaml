@@ -52,6 +52,9 @@ catalog:
   zod: 4.6.5
 
   # Identity, agents, connections
+  # Better Auth's core, for its IP normalisation in the router; same release
+  # as better-auth.
+  "@better-auth/core": 1.7.5
   "@better-auth/sso": 1.7.5
   "@earendil-works/pi-ai": 0.87.1
   "@modelcontextprotocol/sdk": 1.30.0
