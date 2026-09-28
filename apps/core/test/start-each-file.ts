@@ -1,8 +1,12 @@
 /**
  * Runs before each test file. Files share a runtime, one per Vitest worker
- * (`isolate: false` in vite.config.ts), so each starts where a runtime of
- * its own would: empty storage, the env as configured, real timers, and
- * the databases at the committed migrations.
+ * (`isolate: false` in vite.config.ts), so each starts from empty storage,
+ * the env as configured, real timers, no spies, and the databases at the
+ * committed migrations. Module state in core's isolate carries over, as it
+ * does between requests in production: caches keyed by IDs a reset never
+ * reuses, and once-per-isolate state, such as the built-ins' install
+ * (builtins.test.ts) and the missing-table warning (platform-updates.test.ts),
+ * which only those files may trip.
  */
 import { applyD1Migrations, reset } from "cloudflare:test";
 import { env } from "cloudflare:workers";
@@ -32,6 +36,7 @@ for (const [name, value] of configuredEnv) {
 }
 
 vi.useRealTimers();
+vi.restoreAllMocks();
 
 await applyD1Migrations(
   env.DB,
