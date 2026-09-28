@@ -510,23 +510,23 @@ export const declaredTriggers = async (
   return parsed.data ?? [];
 };
 
-/** Why workflow `id`'s tests at `version` fail, one line each; none if they pass. */
+/**
+ * Why workflow `id`'s tests fail on a version's `modules`, one line each;
+ * none if they pass. They run once, as the version is made current, in an
+ * isolate with no name, which goes once they are done: workerd keeps a
+ * named isolate, the SDK's modules in it, for as long as the process runs.
+ */
 const testFailures = async (
   env: Env,
-  app: AppId,
-  version: number,
   id: WorkflowId,
   modules: Record<string, string>
 ): Promise<string[]> => {
-  const tests = env.LOADER.get(
-    `workflow-tests:${app}:${version}:${id}:${compilerVersion}`,
-    () => ({
-      ...workflowSandbox,
-      mainModule: testsModule,
-      modules: { ...modules, [testsModule]: testsMain(id) },
-      env: {},
-    })
-  ).getEntrypoint<TestsEntrypoint>("Tests");
+  const tests = env.LOADER.get(null, () => ({
+    ...workflowSandbox,
+    mainModule: testsModule,
+    modules: { ...modules, [testsModule]: testsMain(id) },
+    env: {},
+  })).getEntrypoint<TestsEntrypoint>("Tests");
   let outcome: Settled<unknown>;
   try {
     outcome = fromIsolate(await tests.run());
@@ -611,7 +611,6 @@ export const dryRunTests = async (
  */
 export const requireWorkflowTestsPass = async (
   env: Env,
-  app: AppId,
   version: number,
   files: AppFiles
 ): Promise<void> => {
@@ -624,7 +623,7 @@ export const requireWorkflowTestsPass = async (
   for (const id of ids) {
     if (Object.hasOwn(files, workflowPaths(id).tests)) {
       // oxlint-disable-next-line no-await-in-loop -- one isolate at a time
-      failures.push(...(await testFailures(env, app, version, id, modules)));
+      failures.push(...(await testFailures(env, id, modules)));
     } else {
       // Often a helper, not a workflow: say where shared code goes.
       failures.push(
