@@ -2,7 +2,9 @@ import { env, exports } from "cloudflare:workers";
 import { beforeAll, describe, expect, it } from "vite-plus/test";
 
 import { consoleDatabase } from "../src/db/act.ts";
+import { releases } from "../src/db/schema.ts";
 import { importReleases } from "../src/releases/import.ts";
+import { RELEASE_LIST_LIMIT } from "../src/releases/queries.ts";
 import { accessJwt, mockAccess } from "./access.ts";
 import { publishRelease } from "./releases.ts";
 import type { TestRelease } from "./releases.ts";
@@ -11,14 +13,20 @@ mockAccess();
 
 const origin = "https://console.grasp.test";
 
-/** The page at `path`, as a staff member sees it. */
+const scripts = /<script\b[^>]*>[\s\S]*?<\/script>/gu;
+
+/**
+ * The page at `path`, as a staff member sees it: its markup without its
+ * scripts, so the data sent along for hydration doesn't count as shown.
+ */
 const page = async (path: string) => {
   const response = await exports.default.fetch(`${origin}${path}`, {
     headers: {
       "cf-access-jwt-assertion": await accessJwt("staff@grasp.test"),
     },
   });
-  return { status: response.status, html: await response.text() };
+  const html = await response.text();
+  return { status: response.status, html: html.replaceAll(scripts, "") };
 };
 
 // React escapes text, so compare with it escaped the same way.
@@ -84,6 +92,7 @@ describe("the release pages", () => {
       "grasp-os-core",
       "grasp-os-connect",
       "index.js",
+      `${second.manifest.workers.core?.modules[0]?.size} B`,
       "0001_more.sql",
     ]) {
       expect(html).toContain(escaped(text));
@@ -96,7 +105,6 @@ describe("the release pages", () => {
     );
 
     expect(status).toBe(200);
-    // The rendered notes, not the page data sent along for hydration.
     const notes = html.slice(
       html.indexOf("Release notes"),
       html.indexOf("Compatibility date and packages")
@@ -130,5 +138,31 @@ describe("the release pages", () => {
     );
 
     expect(statuses).toStrictEqual([404, 404, 404, 404]);
+  });
+
+  it("say when there are more releases than the list shows", async () => {
+    const db = consoleDatabase(env.DB);
+    const [statement, ...statements] = Array.from(
+      { length: RELEASE_LIST_LIMIT + 1 },
+      (_, index) =>
+        db.insert(releases).values({
+          id: `dev-old${index}x${crypto.randomUUID().slice(0, 8)}`,
+          commitSha: "0".repeat(40),
+          manifest: "{}",
+          manifestSha256: "0".repeat(64),
+          // Older than every release the other tests show.
+          builtAt: new Date(Date.UTC(2000, 0, 1, 0, index)),
+          importedAt: new Date(),
+        })
+    );
+    if (statement === undefined) {
+      throw new Error("expected rows to insert");
+    }
+    await db.batch([statement, ...statements]);
+
+    const { html } = await page("/releases");
+
+    expect(html).toContain(`The newest ${RELEASE_LIST_LIMIT} releases.`);
+    expect(html).toContain(third.id);
   });
 });

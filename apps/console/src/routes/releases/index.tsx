@@ -114,7 +114,7 @@ const Releases = () => {
       )}
       {more ? (
         <p className="text-muted-foreground text-sm">
-          The newest {releases.length} releases.
+          {`The newest ${releases.length} releases.`}
         </p>
       ) : null}
     </main>

@@ -36,9 +36,11 @@ const RELEASES_PREFIX = "releases/";
 /**
  * Most releases one run imports. Every merge is a release, so a run
  * normally finds one or none; this bounds the first run, or one after an
- * outage, and the rest follow on the next runs.
+ * outage, and the rest follow on the next runs. Each release is one R2 read
+ * per blob (about 70 today), and a run's reads count towards the Worker's
+ * subrequest limit.
  */
-export const MAX_IMPORTS_PER_RUN = 10;
+export const MAX_IMPORTS_PER_RUN = 5;
 
 /** What one run did, by release id. */
 export interface ImportResult {
