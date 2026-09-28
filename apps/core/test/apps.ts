@@ -5,11 +5,30 @@ import type {
   PermissionRequest,
 } from "@grasp-os/shared/permissions";
 import { env } from "cloudflare:workers";
+import { vi } from "vite-plus/test";
 
 import { versionFiles } from "../src/apps.ts";
+import { recheckMs } from "../src/screens-rpc.ts";
 import { buildServer } from "../src/screens.ts";
 import type { Idp } from "./idp.ts";
 import { signedInApi } from "./sign-in.ts";
+
+/**
+ * What `run` returns, run with core's clock at the end of the time its
+ * last answer to whether someone may still use an App holds
+ * (`recheckMs`): the next push to their screen checks again. Waiting that
+ * out for real took five seconds a test, and raced a loaded runner.
+ */
+export const pastAccessRecheck = async <T>(
+  run: () => Promise<T>
+): Promise<T> => {
+  vi.useFakeTimers({ toFake: ["Date"], now: Date.now() + recheckMs });
+  try {
+    return await run();
+  } finally {
+    vi.useRealTimers();
+  }
+};
 
 /** Someone signed in, with their API (`signedInApi`). */
 type Builder = Pick<Awaited<ReturnType<typeof signedInApi>>, "api">;

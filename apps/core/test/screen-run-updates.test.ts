@@ -4,6 +4,7 @@ import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { appHost } from "../src/durable-objects.ts";
+import { pastAccessRecheck } from "./apps.ts";
 import { approvalApp, week } from "./decisions.ts";
 import type { Person } from "./decisions.ts";
 import { mockIdp } from "./idp.ts";
@@ -236,15 +237,17 @@ describe("run status on screens", { timeout: 60_000 }, () => {
     await owner.api.apps.members.remove(app, them);
     // Their access is checked again at most every few seconds: a push
     // before that may still reach them, and the first after it doesn't.
-    await vi.waitFor(
-      async () => {
-        await nudge(app);
-        if (!screen.state.released) {
-          throw new Error("Still following");
-        }
-      },
-      { timeout: 15_000, interval: 500 }
-    );
+    await pastAccessRecheck(async () => {
+      await vi.waitFor(
+        async () => {
+          await nudge(app);
+          if (!screen.state.released) {
+            throw new Error("Still following");
+          }
+        },
+        { timeout: 15_000, interval: 500 }
+      );
+    });
     const received = screen.received.length;
     await nudge(app);
     await nudge(app);

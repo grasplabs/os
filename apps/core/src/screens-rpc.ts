@@ -65,7 +65,7 @@ import {
 // a few seconds, whatever the App does.
 
 /** How long one answer to whether the person may still use an App holds. */
-const recheckMs = 5000;
+export const recheckMs = 5000;
 
 /**
  * Most run subscriptions (`watchRuns`) one connection keeps at once. A
