@@ -1,3 +1,4 @@
+import { auditExportPath } from "@grasp-os/shared/audit-log";
 import { connectionCallbackPath } from "@grasp-os/shared/connect";
 import { internalErrors, requestErrors } from "@grasp-os/shared/errors";
 import { requestIdHeader } from "@grasp-os/shared/http";
@@ -5,6 +6,7 @@ import { errorFields, log } from "@grasp-os/shared/log";
 import type { LogFields } from "@grasp-os/shared/log";
 import { screenFramePath } from "@grasp-os/shared/screens";
 
+import { auditExportResponse } from "./audit-rpc.ts";
 import { authBasePath } from "./auth/auth.ts";
 import { handleAuthRequest } from "./auth/routes.ts";
 import { installBuiltinsOnce } from "./builtins.ts";
@@ -46,6 +48,9 @@ const route = async (
     if (response !== undefined) {
       return response;
     }
+  }
+  if (pathname === auditExportPath) {
+    return await auditExportResponse(request, env, requestId);
   }
   const original = originalPath.exec(pathname)?.groups?.id;
   if (original !== undefined) {

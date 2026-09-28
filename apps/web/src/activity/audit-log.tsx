@@ -1,6 +1,7 @@
 import type { AuditActor } from "@grasp-os/shared/audit";
 import {
   auditActionPrefixSchema,
+  auditExportPath,
   auditEventTypeSchema,
 } from "@grasp-os/shared/audit-log";
 import type {
@@ -12,7 +13,7 @@ import type {
 } from "@grasp-os/shared/audit-log";
 import { identifierMaxLength } from "@grasp-os/shared/ids";
 import { Badge } from "@grasp-os/ui/components/badge";
-import { Button } from "@grasp-os/ui/components/button";
+import { Button, buttonVariants } from "@grasp-os/ui/components/button";
 import { Input } from "@grasp-os/ui/components/input";
 import {
   Select,
@@ -31,6 +32,7 @@ import {
 } from "@grasp-os/ui/components/table";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
+import { z } from "zod";
 
 import type { Session } from "../core.ts";
 import {
@@ -60,7 +62,7 @@ export interface LogSearch {
   to?: string;
 }
 
-const dayPattern = /^\d{4}-\d{2}-\d{2}$/u;
+const daySchema = z.iso.date();
 
 /** A text filter as typed: trimmed, identifier-sized, and none when empty. */
 const textFilter = (value: unknown): string | undefined => {
@@ -83,13 +85,14 @@ const actionFilter = (value: unknown): string | undefined => {
   return auditActionPrefixSchema.safeParse(text).data;
 };
 
-/** A day as the date inputs give it, and none for anything else. */
+/**
+ * A day as the date inputs give it (`yyyy-mm-dd`), and none for anything
+ * else, a day no calendar has (`2024-02-30`) included: a date rolls it on
+ * into the next month, which the filter would search while showing the
+ * day typed.
+ */
 const dayFilter = (value: unknown): string | undefined =>
-  typeof value === "string" &&
-  dayPattern.test(value) &&
-  !Number.isNaN(Date.parse(value))
-    ? value
-    : undefined;
+  daySchema.safeParse(value).data;
 
 /**
  * The log's filters in `search`, each one `undefined` where the address
@@ -245,63 +248,41 @@ export const LogFilters = ({ search }: { search: LogSearch }) => {
 };
 
 /**
- * How long a download's blob is kept for the browser to take it: some
- * browsers read it only after the click has returned.
+ * Where the browser downloads what `search` matches as `format`: core's
+ * export route, which it writes to disk as it arrives, however long.
  */
-const downloadKeepMs = 60_000;
-
-/** Saves `blob` as a file called `name`, as a download. */
-const save = (blob: Blob, name: string): void => {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement("a");
-  link.href = url;
-  link.download = name;
-  link.click();
-  setTimeout(() => {
-    URL.revokeObjectURL(url);
-  }, downloadKeepMs);
+const exportHref = (search: LogSearch, format: AuditExportFormat): string => {
+  const params = new URLSearchParams();
+  params.set("format", format);
+  for (const [name, value] of Object.entries(auditFilterOf(search) ?? {})) {
+    if (typeof value === "string") {
+      params.set(name, value);
+    }
+  }
+  return `${auditExportPath}?${params.toString()}`;
 };
 
-/** Everything the filters match, as a download, oldest first. */
-export const LogExport = ({ search }: { search: LogSearch }) => {
-  const { busy, failure, run } = useCoreAction();
-  const exportAs = async (format: AuditExportFormat): Promise<void> => {
-    await run(async (session) => {
-      // Read in full on the session that asked: core streams it a page at
-      // a time, checking the session again before each.
-      const stream = await session.audit.export(auditFilterOf(search), format);
-      const blob = await new Response(stream).blob();
-      const day = new Date().toISOString().slice(0, "yyyy-mm-dd".length);
-      save(blob, `audit-log-${day}.${format}`);
-    });
-  };
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="flex gap-2">
-        <Button
-          variant="outline"
-          disabled={busy}
-          onClick={() => {
-            void exportAs("csv");
-          }}
-        >
-          Export CSV
-        </Button>
-        <Button
-          variant="outline"
-          disabled={busy}
-          onClick={() => {
-            void exportAs("json");
-          }}
-        >
-          Export JSON
-        </Button>
-      </div>
-      {busy ? <output className="text-sm">Exporting…</output> : null}
-      <ErrorText>{failure}</ErrorText>
-    </div>
-  );
-};
+/**
+ * Everything the filters match, oldest first, as a download. Core records
+ * the export before it sends anything, and checks the session again as it
+ * reads each page.
+ */
+export const LogExport = ({ search }: { search: LogSearch }) => (
+  <div className="flex gap-2">
+    <a
+      className={buttonVariants({ variant: "outline" })}
+      href={exportHref(search, "csv")}
+    >
+      Export CSV
+    </a>
+    <a
+      className={buttonVariants({ variant: "outline" })}
+      href={exportHref(search, "json")}
+    >
+      Export JSON
+    </a>
+  </div>
+);
 
 /** Who did it, by name where the page knows it, and the ID to filter by. */
 const actorOf = (
@@ -332,7 +313,7 @@ const actorOf = (
   if (actor.type === "workflow") {
     return {
       label: `${appName(directory, actor.appId)}: run of ${actor.workflowId}`,
-      id: actor.appId,
+      id: actor.runId,
     };
   }
   return { label: "Grasp" };

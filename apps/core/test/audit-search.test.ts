@@ -1,5 +1,6 @@
 import { auditEventSchema } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
+import { auditExportPath } from "@grasp-os/shared/audit-log";
 import type {
   AuditEventType,
   AuditExportFormat,
@@ -19,6 +20,7 @@ import { mockIdp } from "./idp.ts";
 import {
   auditedDuring,
   outcome,
+  routed,
   signedInApi,
   signedInWithRole,
   unique,
@@ -304,6 +306,26 @@ describe("audit log search", () => {
   });
 });
 
+/** Downloads an export as a browser does, on the session `cookie`. */
+const download = async (
+  cookie: string | undefined,
+  query: string,
+  headers: Record<string, string> = {}
+): Promise<Response> =>
+  await routed(`${auditExportPath}?${query}`, {
+    headers: { ...headers, ...(cookie === undefined ? {} : { cookie }) },
+  });
+
+/** A response's body as the chunks it arrived in, each as text. */
+const chunksOf = async (response: Response): Promise<string[]> => {
+  const chunks: string[] = [];
+  const text = response.body?.pipeThrough(new TextDecoderStream());
+  for await (const chunk of text ?? []) {
+    chunks.push(chunk);
+  }
+  return chunks;
+};
+
 describe("audit log export", () => {
   it("exports what the search found, and verifies against the live chain", async () => {
     const { api } = await signedInApi(idp, "admin");
@@ -414,6 +436,69 @@ describe("audit log export", () => {
     expect(
       row?.endsWith(`"${canonicalJson(sent).replaceAll('"', '""')}"`)
     ).toBeTruthy();
+  });
+
+  it("downloads as a file for admins only, with the filter applied, sent as it's read", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const builder = await signedInWithRole(idp, "builder");
+    const targetId = `doc-${unique()}`;
+    const found = await logged(
+      event({ target: { type: "document", id: targetId } }),
+      event({ target: { type: "document", id: targetId } })
+    );
+    await logged(
+      event({ target: { type: "document", id: `doc-${unique()}` } })
+    );
+    let chunks: string[] = [];
+    const events = await auditedDuring(async () => {
+      const response = await download(
+        admin.session,
+        `format=json&targetId=${targetId}`,
+        { "sec-fetch-site": "same-origin" }
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("content-type")).toBe("application/json");
+      expect(response.headers.get("content-disposition")).toMatch(
+        /^attachment; filename="audit-log-\d{4}-\d{2}-\d{2}\.json"$/u
+      );
+      chunks = await chunksOf(response);
+    });
+    // The start of the export comes on its own, before any record is
+    // read: the export is sent as it's read, never held whole.
+    const [first = ""] = chunks;
+    expect(first).toMatch(/^\{"exportedAt":/u);
+    expect(first).not.toContain('"eventJson"');
+    const document = exportSchema.parse(JSON.parse(chunks.join("")));
+    expect(document.records.map(exportedId)).toStrictEqual(
+      found.map(({ id }) => id)
+    );
+    expect(events).toMatchObject([
+      {
+        actor: { type: "person", userId: admin.userId },
+        action: "audit.exported",
+        detail: { "filter.targetId": targetId, format: "json" },
+      },
+    ]);
+
+    const statusOf = async (...args: Parameters<typeof download>) => {
+      const response = await download(...args);
+      return response.status;
+    };
+    expect({
+      builder: await statusOf(builder.session, "format=csv"),
+      nobody: await statusOf(undefined, "format=csv"),
+      otherSite: await statusOf(admin.session, "format=csv", {
+        "sec-fetch-site": "cross-site",
+      }),
+      unknownFilter: await statusOf(admin.session, "format=csv&colour=red"),
+      unknownFormat: await statusOf(admin.session, "format=xml"),
+    }).toStrictEqual({
+      builder: 403,
+      nobody: 401,
+      otherSite: 403,
+      unknownFilter: 400,
+      unknownFormat: 400,
+    });
   });
 });
 

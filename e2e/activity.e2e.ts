@@ -147,7 +147,7 @@ test("an admin approves a permission request, finds it in the audit log, and exp
   await expect(granted).toHaveCount(1);
 
   const downloading = page.waitForEvent("download");
-  await page.getByRole("button", { name: "Export CSV" }).click();
+  await page.getByRole("link", { name: "Export CSV" }).click();
   const download = await downloading;
   expect(download.suggestedFilename()).toMatch(/^audit-log-.+\.csv$/u);
   const csv = await readFile(await download.path(), "utf-8");
@@ -157,11 +157,15 @@ test("an admin approves a permission request, finds it in the audit log, and exp
   expect(lines[1]).toContain(",permission,permission.granted,");
   expect(lines[1]).toContain(approved);
 
-  // Text that can't start an action is dropped, not refused by core.
+  // Text that can't start an action is dropped, not refused by core, and
+  // so is a day no calendar has, rather than searched as the next month's.
   await page.goto(
-    `/activity?target=${approved}&action=${encodeURIComponent("no such action!")}`
+    `/activity?target=${approved}&action=${encodeURIComponent("no such action!")}&from=2024-02-29&to=2099-02-29`
   );
   await expect(page.getByRole("textbox", { name: "Action" })).toHaveValue("");
+  // A leap day is a day; 2099 has none.
+  await expect(page.getByLabel("From")).toHaveValue("2024-02-29");
+  await expect(page.getByLabel("To", { exact: true })).toHaveValue("");
   await expect(granted).toHaveCount(1);
   await expect(page.getByRole("alert")).toHaveCount(0);
 });

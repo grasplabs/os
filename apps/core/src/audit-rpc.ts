@@ -16,13 +16,17 @@ import type {
   ChainVerification,
   ParsedAuditFilter,
 } from "@grasp-os/shared/audit-log";
-import { requireAdmin } from "@grasp-os/shared/roles";
+import { authErrors, requestErrors } from "@grasp-os/shared/errors";
+import { requireAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
 
 import { actorIdsOf, auditLog } from "./audit-log.ts";
 import type { SearchRange } from "./audit-log.ts";
 import { appendAuditEvent } from "./audit-outbox.ts";
+import { identify } from "./auth/identity.ts";
+import { errorResponse } from "./errors.ts";
+import { featureEnabled, requireFeature } from "./features.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -255,6 +259,128 @@ const exportStream = (
 };
 
 /**
+ * Starts an export for `person`, an admin: checks the filter and format,
+ * records the export in the log before anything is read, and returns the
+ * stream, which checks again with `recheck` before every read. Over
+ * `/rpc` (`AuditRpc.export`) and as a download (`auditExportResponse`).
+ */
+const startExport = async (
+  env: Env,
+  person: Identity,
+  filter: unknown,
+  format: unknown,
+  recheck: () => Promise<void>
+): Promise<{
+  stream: ReadableStream<Uint8Array>;
+  format: AuditExportFormat;
+}> => {
+  requireAdmin(person);
+  const parsed = parseFilter(filter);
+  const parsedFormat = auditErrors.parse(
+    "audit.invalid",
+    auditExportFormatSchema,
+    format
+  );
+  await recordRead(env, person, "audit.exported", {
+    ...filterDetail(parsed),
+    format: parsedFormat,
+  });
+  return {
+    stream: exportStream(env, parsed, parsedFormat, recheck),
+    format: parsedFormat,
+  };
+};
+
+/** `Sec-Fetch-Site` values of a request this site's own pages made. */
+const sameSiteFetches = new Set(["same-origin", "none"]);
+
+const exportTypes: Record<AuditExportFormat, string> = {
+  json: "application/json",
+  csv: "text/csv; charset=utf-8",
+};
+
+/**
+ * `GET /api/audit/export?format=<json|csv>&<filter>`: an export as a
+ * download, which the browser writes to disk as it arrives, the same
+ * export `AuditApi.export` streams over `/rpc`: for admins, recorded
+ * before anything is read, and the session, role and flag checked again
+ * before every page. The filter's fields are query parameters, as
+ * `auditFilterSchema` names them; any other parameter is refused. The
+ * session cookie is `SameSite=Lax`, so a link from another site would
+ * send it: a request the browser marks as from another site
+ * (`Sec-Fetch-Site`) is refused, so no other site starts an export. An
+ * export only reads and records its own event.
+ */
+export const auditExportResponse = async (
+  request: Request,
+  env: Env,
+  requestId: string
+): Promise<Response> => {
+  const fetchSite = request.headers.get("sec-fetch-site");
+  const fromElsewhere = fetchSite !== null && !sameSiteFetches.has(fetchSite);
+  if (request.method !== "GET" || !featureEnabled(env, "audit")) {
+    return errorResponse(
+      404,
+      requestErrors.create("request.not_found"),
+      requestId
+    );
+  }
+  if (fromElsewhere) {
+    return errorResponse(
+      403,
+      requestErrors.create("request.forbidden"),
+      requestId
+    );
+  }
+  const person = await identify(env, request.headers);
+  if (person === undefined) {
+    return errorResponse(
+      401,
+      authErrors.create("auth.unauthenticated"),
+      requestId
+    );
+  }
+  const { searchParams } = new URL(request.url);
+  const filter = Object.fromEntries(
+    [...searchParams].filter(([name]) => name !== "format")
+  );
+  const recheck = async (): Promise<void> => {
+    requireFeature(env, "audit");
+    const now = await identify(env, request.headers);
+    if (now?.userId !== person.userId) {
+      throw authErrors.create("auth.unauthenticated");
+    }
+    requireAdmin(now);
+  };
+  try {
+    const { stream, format } = await startExport(
+      env,
+      person,
+      filter,
+      searchParams.get("format"),
+      recheck
+    );
+    const day = new Date().toISOString().slice(0, "yyyy-mm-dd".length);
+    return new Response(stream, {
+      headers: {
+        "content-type": exportTypes[format],
+        "content-disposition": `attachment; filename="audit-log-${day}.${format}"`,
+        "cache-control": "private, no-store",
+      },
+    });
+  } catch (error) {
+    if (roleErrors.codeOf(error) !== undefined) {
+      return errorResponse(403, roleErrors.create("role.forbidden"), requestId);
+    }
+    const code = auditErrors.codeOf(error);
+    if (code !== undefined) {
+      return errorResponse(400, auditErrors.create(code), requestId);
+    }
+    throw error;
+  }
+};
+
+/**
  * The audit log over `/rpc`, for admins. Built once per session with core's
  * env and a session check; every method checks the session first.
  */
@@ -298,21 +424,17 @@ export class AuditRpc extends RpcTarget implements AuditApi {
     format: AuditExportFormat
   ): Promise<ReadableStream<Uint8Array>> {
     return await withPerson(this.#check, async (person) => {
-      requireAdmin(person);
-      const parsed = parseFilter(filter);
-      const parsedFormat = auditErrors.parse(
-        "audit.invalid",
-        auditExportFormatSchema,
-        format
-      );
-      await recordRead(this.#env, person, "audit.exported", {
-        ...filterDetail(parsed),
-        format: parsedFormat,
-      });
       const recheck = async (): Promise<void> => {
         await withPerson(this.#check, requireAdmin);
       };
-      return exportStream(this.#env, parsed, parsedFormat, recheck);
+      const started = await startExport(
+        this.#env,
+        person,
+        filter,
+        format,
+        recheck
+      );
+      return started.stream;
     });
   }
 

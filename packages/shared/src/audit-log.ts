@@ -284,6 +284,14 @@ export interface AuditApi {
   verify: (after?: number) => Promise<ChainVerification>;
 }
 
+/**
+ * Where a browser downloads an export: `GET` with `format` (`json` or
+ * `csv`) and the filter's fields as query parameters, on the admin's
+ * session cookie. The same export as `AuditApi.export`, written to disk as
+ * it arrives.
+ */
+export const auditExportPath = "/api/audit/export";
+
 /** Most records one export holds. */
 export const auditExportMaxRecords = 100_000;
 
