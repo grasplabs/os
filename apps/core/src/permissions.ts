@@ -33,7 +33,7 @@ import {
 } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
-import type { SQL } from "drizzle-orm";
+import type { SQL, SQLWrapper } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
@@ -827,10 +827,61 @@ const changesThings = (object: PermissionObject, action: string): boolean =>
 
 /**
  * That `version` of `app` is one no admin approved (`madeCurrent`), as
- * SQL. A version from before approvals (null) counts as approved.
+ * SQL; each a value, or a column of the query it runs in. A version from
+ * before approvals (null) counts as approved.
  */
-const unapprovedSql = (app: string, version: number): SQL =>
+const unapprovedSql = (
+  app: string | SQLWrapper,
+  version: number | SQLWrapper
+): SQL =>
   sql`EXISTS (SELECT 1 FROM ${appVersions} WHERE ${appVersions.appId} = ${app} AND ${appVersions.version} = ${version} AND ${appVersions.approved} = 0)`;
+
+/**
+ * The permissions that allow `action` on `object` for `subject`, as SQL
+ * for a WHERE on `permissions`: the one rule every check goes by
+ * (`authorize`, and connector events reaching Apps). Active, of that
+ * subject, on that object (a permission for a whole connection covers each
+ * resource in it; one for a resource only that resource), and listing the
+ * action. For an App's code, an action that changes things (on a
+ * connection, or other than `read`) also needs `appVersion`, the version
+ * it runs, to be one an admin approved (`madeCurrent`): a run keeps the
+ * version it started on, which may be one made current since without,
+ * its permissions granted again for another. Without a version, which the
+ * host always sets for an App, nothing is approved: it fails closed. The
+ * App and its version may be columns of the query it runs in.
+ */
+export const allowingPermissionSql = (
+  subject: PermissionSubject | { type: "app"; appId: SQLWrapper },
+  appVersion: number | SQLWrapper | undefined,
+  object: PermissionObject,
+  action: string
+): SQL => {
+  const { objectType, objectId, resource } = objectColumns(object);
+  let unapproved: SQL | undefined;
+  if (subject.type === "app" && changesThings(object, action)) {
+    unapproved =
+      appVersion === undefined
+        ? sql`0`
+        : sql`NOT ${unapprovedSql(subject.appId, appVersion)}`;
+  }
+  return (
+    and(
+      eq(permissions.subjectType, subject.type),
+      eq(
+        permissions.subjectId,
+        subject.type === "app" ? subject.appId : subject.agentId
+      ),
+      eq(permissions.status, "active"),
+      eq(permissions.objectType, objectType),
+      eq(permissions.objectId, objectId),
+      resource === null
+        ? isNull(permissions.resource)
+        : or(isNull(permissions.resource), eq(permissions.resource, resource)),
+      sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value = ${action})`,
+      unapproved
+    ) ?? sql`0`
+  );
+};
 
 /**
  * Refuses with `permission.denied` code of `version` of `app` that no admin
@@ -1125,46 +1176,21 @@ export const authorize = async (
   permissionId: PermissionId
 ): Promise<{ mask: string[] }> => {
   await requireActivePerson(env, authority);
-  const { objectType, objectId, resource } = objectColumns(object);
-  const { subject, appVersion } = authority;
-  // An App's code changes things only from a version an admin approved
-  // (`madeCurrent`): a run keeps the version it started on, which may be
-  // one made current since without, its permissions granted again for
-  // another. Without a version, which the host always sets for an App,
-  // nothing is approved: it fails closed.
-  let unapproved: SQL | undefined;
-  if (subject.type === "app" && changesThings(object, action)) {
-    unapproved =
-      appVersion === undefined
-        ? sql`0`
-        : sql`NOT ${unapprovedSql(subject.appId, appVersion)}`;
-  }
-  const rows = await drizzle(env.DB)
-    .select({
-      id: permissions.id,
-      actions: permissions.actions,
-      mask: permissions.mask,
-    })
+  const allowing = await drizzle(env.DB)
+    .select({ mask: permissions.mask })
     .from(permissions)
     .where(
       and(
-        ofSubject(authority.subject),
-        eq(permissions.status, "active"),
-        eq(permissions.id, permissionId),
-        eq(permissions.objectType, objectType),
-        eq(permissions.objectId, objectId),
-        resource === null
-          ? isNull(permissions.resource)
-          : or(
-              isNull(permissions.resource),
-              eq(permissions.resource, resource)
-            ),
-        unapproved
+        allowingPermissionSql(
+          authority.subject,
+          authority.appVersion,
+          object,
+          action
+        ),
+        eq(permissions.id, permissionId)
       )
-    );
-  const allowing = rows.find((row) =>
-    stringListSchema.parse(JSON.parse(row.actions)).includes(action)
-  );
+    )
+    .get();
   if (!allowing) {
     throw permissionErrors.create("permission.denied", { action });
   }

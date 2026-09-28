@@ -2,8 +2,10 @@ import { Cron } from "croner";
 import { z } from "zod";
 
 import { defineErrorFamily } from "./errors.ts";
+import { connectionIdSchema, identifierSchema } from "./ids.ts";
 import type { AppId, RunId, WorkflowId } from "./ids.ts";
 import type { Json } from "./json.ts";
+import { permissionActionSchema } from "./permissions.ts";
 
 // A workflow is code in an App (`workflows/<id>.ts`), written with the
 // workflow SDK. Each run is pinned to the App version it started on, and
@@ -175,6 +177,74 @@ export const inboundEmailSchema = z.object({
 /** A message an email trigger received. */
 export type InboundEmail = z.infer<typeof inboundEmailSchema>;
 
+/** An event's type, e.g. `m365.mail.received`. */
+const eventTypeSchema = z.string().min(1).max(200);
+
+/** Most fields an event trigger's filter names. */
+const maxFilterFields = 20;
+
+/**
+ * An event trigger's filter: each field it names must hold that value at
+ * the top of the event's payload, compared as is.
+ */
+export const eventFilterSchema = z
+  .record(
+    z.string().min(1).max(64),
+    z.union([z.string().max(200), z.number(), z.boolean(), z.null()])
+  )
+  .refine((filter) => Object.keys(filter).length <= maxFilterFields, {
+    message: `At most ${maxFilterFields} fields`,
+  });
+
+/** An event trigger's filter. */
+export type EventFilter = z.infer<typeof eventFilterSchema>;
+
+/** Whether `payload` holds every value `filter` names, at its top. */
+export const matchesFilter = (
+  filter: EventFilter | null | undefined,
+  payload: Json
+): boolean => {
+  const isObject =
+    typeof payload === "object" && payload !== null && !Array.isArray(payload);
+  const fields = new Map(isObject ? Object.entries(payload) : []);
+  return Object.entries(filter ?? {}).every(
+    ([field, value]) => fields.has(field) && fields.get(field) === value
+  );
+};
+
+/** The most JSON text an event's payload takes. */
+const maxEventPayloadLength = 64 * 1024;
+
+/**
+ * An event a connection reported, as connect delivers it to core, and as
+ * the run an event trigger starts gets it as input (the SDK's
+ * `connectorEvent`). `id` is the source's own ID of the event, the same
+ * for the same event delivered again. `resource` narrows it to a part of
+ * the connection (a mailbox, a site), when the source says. `action` is
+ * the connector's read action whose data the event carries (such as
+ * `mail.list`): an App hears the event only through a permission that
+ * allows it, as it could only read the data with one. `owner` is a
+ * personal connection's owner (their user ID), whom only their own Apps
+ * hear from; null for a shared connection.
+ */
+export const connectorEventSchema = z.object({
+  id: z.string().min(1).max(200),
+  connection: connectionIdSchema,
+  owner: identifierSchema.nullable(),
+  resource: identifierSchema.optional(),
+  action: permissionActionSchema,
+  type: eventTypeSchema,
+  payload: z
+    .json()
+    .refine(
+      (payload) => JSON.stringify(payload).length <= maxEventPayloadLength,
+      { message: `At most ${maxEventPayloadLength} characters of JSON` }
+    ),
+});
+
+/** An event a connection reported. */
+export type ConnectorEvent = z.infer<typeof connectorEventSchema>;
+
 /** Most triggers one workflow declares. */
 const maxTriggerDeclarations = 20;
 
@@ -196,7 +266,11 @@ export const triggerDeclarationSchema = z.discriminatedUnion("type", [
       .refine(isTimeZone, "Not a time zone the runtime knows")
       .optional(),
   }),
-  z.object({ type: z.literal("event"), event: z.string().min(1).max(200) }),
+  z.object({
+    type: z.literal("event"),
+    event: eventTypeSchema,
+    filter: eventFilterSchema.optional(),
+  }),
   z.object({ type: z.literal("email"), address: emailLocalPartSchema }),
 ]);
 

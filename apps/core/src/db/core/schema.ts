@@ -1,7 +1,11 @@
 import { auditRejectReasons } from "@grasp-os/shared/audit";
 import type { Json } from "@grasp-os/shared/json";
 import { signalKinds } from "@grasp-os/shared/signals";
-import type { ParamValue, RunFailure } from "@grasp-os/shared/workflows";
+import type {
+  EventFilter,
+  ParamValue,
+  RunFailure,
+} from "@grasp-os/shared/workflows";
 /**
  * Core D1 database: identity (Better Auth), permissions and the App registry.
  *
@@ -519,7 +523,8 @@ export const workflowRuns = sqliteTable(
  * among its workflow's. A schedule keeps its cron expression as its
  * parameter holds it now (`cron`), in its time zone, and when it next
  * fires (`next_run_at`). An email trigger keeps the address it receives
- * mail at (`address`, the part before the `@`).
+ * mail at (`address`, the part before the `@`); an event trigger its event
+ * type (`event`) and filter (`filter`, JSON).
  */
 export const workflowTriggers = sqliteTable(
   "workflow_triggers",
@@ -531,13 +536,15 @@ export const workflowTriggers = sqliteTable(
     version: integer().notNull(),
     workflowId: text("workflow_id").notNull(),
     position: integer().notNull(),
-    type: text({ enum: ["schedule", "email"] }).notNull(),
+    type: text({ enum: ["schedule", "email", "event"] }).notNull(),
     param: text(),
     cron: text(),
     timeZone: text("time_zone"),
     nextRunAt: timestamp("next_run_at"),
     createdAt: timestamp("created_at").notNull(),
     address: text(),
+    event: text(),
+    filter: text({ mode: "json" }).$type<EventFilter>(),
   },
   (table) => [
     uniqueIndex("workflow_triggers_position_idx").on(
@@ -548,6 +555,7 @@ export const workflowTriggers = sqliteTable(
     ),
     index("workflow_triggers_next_run_idx").on(table.nextRunAt),
     index("workflow_triggers_address_idx").on(table.address),
+    index("workflow_triggers_event_idx").on(table.event),
   ]
 );
 

@@ -53,6 +53,7 @@ export const screenTests = [
   "test/workflow-overview.test.ts",
   "test/triggers.test.ts",
   "test/email-triggers.test.ts",
+  "test/event-triggers.test.ts",
 ];
 
 /** Core's Worker test setup, shared by both of core's test projects. */

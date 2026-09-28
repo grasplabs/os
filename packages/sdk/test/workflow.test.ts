@@ -176,6 +176,29 @@ describe("workflow definitions", () => {
     }
   });
 
+  it("filters events on at most 20 fields of plain values", () => {
+    const onEvent = (
+      filter: Record<string, string | number | boolean | null>
+    ) =>
+      workflow(
+        "evented",
+        {
+          params: noParams,
+          triggers: [{ type: "event", event: "m365.mail.received", filter }],
+        },
+        async () => null
+      );
+    const fields = Object.fromEntries(
+      Array.from({ length: 21 }, (_, index) => [`field${index}`, index])
+    );
+    const { field20: _dropped, ...twenty } = fields;
+
+    expect(onEvent(twenty).metadata.triggers).toHaveLength(1);
+    expect(() => onEvent(fields)).toThrow(
+      expect.objectContaining({ code: "workflow.invalid_definition" })
+    );
+  });
+
   it("treats parameters as not sensitive unless declared so", () => {
     const { metadata } = workflow(
       "greeting",

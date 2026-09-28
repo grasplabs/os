@@ -46,10 +46,12 @@ import { namePattern, nameRule, stepOptionSchemas } from "./steps.ts";
 // Workflow code imports only this module, so it gets Zod from here too.
 export { z } from "zod";
 export type { ParamKind, ParamValue } from "./params.ts";
-// The input schema of a run an email trigger starts (`input: emailMessage`),
-// and the message it parses to.
+// The input schemas of runs an email trigger (`input: emailMessage`) and an
+// event trigger (`input: connectorEvent`) start, and what they parse to.
 export {
+  connectorEventSchema as connectorEvent,
   inboundEmailSchema as emailMessage,
+  type ConnectorEvent,
   type InboundEmail as EmailMessage,
 } from "@grasp-os/shared/workflows";
 export type {
@@ -638,8 +640,24 @@ export type Trigger<ScheduleParam extends string = string> =
    * after, never one already past.
    */
   | { type: "schedule"; param: ScheduleParam; timeZone?: string }
-  /** When an event of this type arrives, e.g. from a connector. */
-  | { type: "event"; event: string }
+  /**
+   * When a connection reports an event of this type, e.g.
+   * `m365.mail.received`, and only what the App could read: through a
+   * permission on the connection (or on the part of it the event is
+   * about) that allows the read action the event names, e.g. `mail.list`,
+   * and masks no fields; from someone's personal connection, only if the
+   * App's owner is that person. `filter` narrows it: each field it names must hold
+   * that value at the top of the event's payload, e.g.
+   * `{ folder: "inbox" }`. The run starts with the event as input: declare
+   * `input: connectorEvent`. The same event delivered again starts no
+   * second run. Which connections report which events is up to their
+   * connectors.
+   */
+  | {
+      type: "event";
+      event: string;
+      filter?: Record<string, string | number | boolean | null>;
+    }
   /**
    * When mail arrives at `address` (the part before the `@`, e.g.
    * `invoices`) on the deployment's mail domain. The run starts with the
