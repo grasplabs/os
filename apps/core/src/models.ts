@@ -220,6 +220,19 @@ const modelRules = (env: ModelsEnv): ModelRules | undefined => {
 };
 
 /**
+ * The allowlist and the rules as they apply now, for admins to read
+ * (models-rpc.ts): the allowed models, none while models aren't set up;
+ * and the rules, `off` while `model_rules` is, `undefined` when they
+ * don't parse.
+ */
+export const gatewaySettings = (
+  env: ModelsEnv
+): { models: string[]; rules: ModelRules | "off" | undefined } => ({
+  models: modelGatewayConfig(env)?.models ?? [],
+  rules: featureEnabled(env, "model_rules") ? modelRules(env) : "off",
+});
+
+/**
  * Whether the deployment's config keeps every call in the EU
  * (`eu.deployment`), read as deployment config whatever `model_rules`
  * says: for what sends data out of the Worker without being a model call,

@@ -622,7 +622,8 @@ export const workflowParamValues = sqliteTable(
  * or `user`), `key` what it counts within it (the deployment, a workflow
  * or a person, as JSON), and `period` the UTC month, such as `2026-09`.
  * Only ever added to, in one statement, so concurrent calls never lose
- * each other's cost.
+ * each other's cost. `model_spend_top_idx` reads a budget's month most
+ * first, ties by `key` descending, without sorting (`budgetSpend`).
  */
 export const modelSpend = sqliteTable(
   "model_spend",
@@ -632,7 +633,15 @@ export const modelSpend = sqliteTable(
     period: text().notNull(),
     spentMicros: integer("spent_micros").notNull(),
   },
-  (table) => [primaryKey({ columns: [table.scope, table.key, table.period] })]
+  (table) => [
+    primaryKey({ columns: [table.scope, table.key, table.period] }),
+    index("model_spend_top_idx").on(
+      table.scope,
+      table.period,
+      table.spentMicros,
+      table.key
+    ),
+  ]
 );
 
 /**

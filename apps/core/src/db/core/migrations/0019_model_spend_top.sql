@@ -1,0 +1,1 @@
+CREATE INDEX `model_spend_top_idx` ON `model_spend` (`scope`,`period`,`spent_micros`,`key`);

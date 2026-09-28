@@ -11,6 +11,7 @@ import { MemoryRpc } from "./knowledge/memory-rpc.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
 import { UploadsRpc } from "./knowledge/uploads-rpc.ts";
 import { MembersRpc } from "./members.ts";
+import { ModelsRpc } from "./models-rpc.ts";
 import { PendingActionsRpc } from "./pending-actions.ts";
 import { PermissionsRpc } from "./permissions-rpc.ts";
 import { ScreensRpc } from "./screens-rpc.ts";
@@ -43,6 +44,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #screens: ScreensRpc;
   readonly #members: MembersRpc;
   readonly #audit: AuditRpc;
+  readonly #models: ModelsRpc;
   readonly #pendingActions: PendingActionsRpc;
   readonly #signals: SignalsRpc;
 
@@ -86,6 +88,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#screens = new ScreensRpc(env, checkWith("apps", "screens"));
     this.#members = new MembersRpc(env, checkWith("members"));
     this.#audit = new AuditRpc(env, checkWith("audit"));
+    this.#models = new ModelsRpc(env, checkWith("model_settings"));
     // Held actions are calls on connections: that kill switch stops them
     // too. With the flag off, connect still holds side effects, and nobody
     // can confirm them: nothing runs without the person.
@@ -138,6 +141,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get audit(): AuditRpc {
     return this.#audit;
+  }
+
+  get models(): ModelsRpc {
+    return this.#models;
   }
 
   get pendingActions(): PendingActionsRpc {

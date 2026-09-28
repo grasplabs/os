@@ -66,17 +66,20 @@ export default defineConfig({
             knowledge: true,
             memory: true,
             knowledge_uploads: true,
+            model_rules: true,
+            model_settings: true,
           })
         ),
         // `--local` has no Workers AI: a deployment kept in the EU extracts
         // uploads' text in the Worker instead (knowledge/extract.ts). No
-        // test calls a model.
+        // test calls a model; the Models page shows the rules and budgets.
         devVar(
           "MODEL_GATEWAY",
           JSON.stringify({
             gateway: "grasp-os-e2e",
             models: [e2eModel],
             eu: { models: [e2eModel], deployment: true },
+            budgets: { deployment: { limit: 250 }, user: { limit: 20 } },
           })
         ),
       ].join(" "),

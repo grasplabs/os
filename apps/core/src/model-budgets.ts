@@ -1,15 +1,26 @@
 import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
 import type { budgetsSchema } from "@grasp-os/shared/deployment-config";
 import { errorFields, log } from "@grasp-os/shared/log";
+import { modelSpendListed } from "@grasp-os/shared/models";
+import type {
+  ModelBudget,
+  ModelBudgetScope,
+  ModelSpender,
+} from "@grasp-os/shared/models";
 import type { Authority } from "@grasp-os/shared/permissions";
-import { and, eq, or, sql } from "drizzle-orm";
+import { and, desc, eq, inArray, or, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import type { OutboxEnv } from "./audit-outbox.ts";
-import { modelBudgetAlerts, modelSpend } from "./db/core/schema.ts";
+import {
+  apps,
+  modelBudgetAlerts,
+  modelSpend,
+  users,
+} from "./db/core/schema.ts";
 
 // Model budgets, one of the client's rules for model calls (model-rules.ts):
 // what the deployment's calls may cost in a UTC month, all together, per
@@ -47,7 +58,7 @@ const microsPerDollar = 1_000_000;
 type Budgets = z.output<typeof budgetsSchema>;
 
 /** Whose spend a budget counts. */
-export type BudgetScope = "deployment" | "workflow" | "user";
+type BudgetScope = ModelBudgetScope;
 
 /** One budget a call counts against, this month. */
 export interface Budgeted {
@@ -353,4 +364,134 @@ export const chargeBudgets = async (
     return;
   }
   logAlerts(results);
+};
+
+/** A workflow budget's key, as `budgetsFor` writes it: its App and workflow. */
+const workflowKeySchema = z.tuple([z.string(), z.string()]);
+
+/** The App and workflow a workflow budget's `key` counts; none for a bad key. */
+const workflowOf = (key: string): [string, string] | undefined => {
+  try {
+    return workflowKeySchema.safeParse(JSON.parse(key)).data;
+  } catch {
+    return undefined;
+  }
+};
+
+/** Names of Apps and people, by ID, as core still has them. */
+interface Names {
+  apps: ReadonlyMap<string, string>;
+  people: ReadonlyMap<string, string>;
+}
+
+/** What a spend row counted, by its scope and key; none for a bad key. */
+const spenderOf = (
+  scope: BudgetScope,
+  key: string,
+  names: Names
+): ModelSpender | undefined => {
+  if (scope === "deployment") {
+    return { type: "deployment" };
+  }
+  if (scope === "user") {
+    return { type: "user", userId: key, name: names.people.get(key) ?? null };
+  }
+  const workflow = workflowOf(key);
+  if (workflow === undefined) {
+    return undefined;
+  }
+  const [appId, workflowId] = workflow;
+  return {
+    type: "workflow",
+    appId,
+    appName: names.apps.get(appId) ?? null,
+    workflowId,
+  };
+};
+
+/** The names of the Apps and people `rows` count spend for. */
+const namesOf = async (
+  db: DrizzleD1Database,
+  rows: readonly { scope: BudgetScope; key: string }[]
+): Promise<Names> => {
+  const appIds = [
+    ...new Set(
+      rows.flatMap(({ scope, key }) => {
+        const workflow = scope === "workflow" ? workflowOf(key) : undefined;
+        return workflow === undefined ? [] : [workflow[0]];
+      })
+    ),
+  ];
+  const userIds = rows
+    .filter(({ scope }) => scope === "user")
+    .map(({ key }) => key);
+  const [appRows, userRows] = await Promise.all([
+    appIds.length === 0
+      ? []
+      : db
+          .select({ id: apps.id, name: apps.name })
+          .from(apps)
+          .where(inArray(apps.id, appIds)),
+    userIds.length === 0
+      ? []
+      : db
+          .select({ id: users.id, name: users.name })
+          .from(users)
+          .where(inArray(users.id, userIds)),
+  ]);
+  return {
+    apps: new Map(appRows.map(({ id, name }) => [id, name])),
+    people: new Map(userRows.map(({ id, name }) => [id, name])),
+  };
+};
+
+/**
+ * Each budget `budgets` sets, with its spend in `period`, most first (at
+ * most `modelSpendListed`, and whether more spent), and the names of the
+ * Apps and people it counts for where core still has them: for admins to
+ * read (models-rpc.ts). Spend is counted only for the scopes a budget is
+ * set for, so there is none to show for the others.
+ */
+export const budgetSpend = async (
+  env: Pick<Env, "DB">,
+  budgets: Budgets,
+  period: string
+): Promise<ModelBudget[]> => {
+  const db = drizzle(env.DB);
+  const set = (["deployment", "workflow", "user"] as const).flatMap((scope) => {
+    const budget = budgets?.[scope];
+    return budget === undefined ? [] : [{ scope, budget }];
+  });
+  // One more than are listed, to tell whether any are left out. Ties go
+  // by key, descending, so `model_spend_top_idx` gives the order as is.
+  const read = await Promise.all(
+    set.map(async ({ scope, budget }) => {
+      const rows = await db
+        .select({ key: modelSpend.key, micros: modelSpend.spentMicros })
+        .from(modelSpend)
+        .where(and(eq(modelSpend.scope, scope), eq(modelSpend.period, period)))
+        .orderBy(desc(modelSpend.spentMicros), desc(modelSpend.key))
+        .limit(modelSpendListed + 1);
+      return {
+        scope,
+        budget,
+        rows: rows.slice(0, modelSpendListed),
+        more: rows.length > modelSpendListed,
+      };
+    })
+  );
+  const names = await namesOf(
+    db,
+    read.flatMap(({ scope, rows }) => rows.map(({ key }) => ({ scope, key })))
+  );
+  return read.map(({ scope, budget, rows, more }) => ({
+    scope,
+    limit: budget.limit,
+    alertAt: budget.alertAt,
+    spent: rows.flatMap(({ key, micros }) => {
+      const of = spenderOf(scope, key, names);
+      return of === undefined ? [] : [{ of, amount: micros / microsPerDollar }];
+    }),
+    more,
+  }));
 };
