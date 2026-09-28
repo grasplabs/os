@@ -1,0 +1,12 @@
+{
+  // The built-ins' screens and components run in the browser, on the kit
+  // (React and @grasp-os/ui), not in the Worker: checked here, as the
+  // compiler checks them when an App builds. Their server code and
+  // workflows are core's (../tsconfig.json).
+  "extends": "../../../tsconfig.base.json",
+  "compilerOptions": {
+    "lib": ["es2024", "dom", "dom.iterable"],
+    "jsx": "react-jsx"
+  },
+  "include": ["*/files/screens", "*/files/components"]
+}

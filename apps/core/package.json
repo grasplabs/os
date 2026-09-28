@@ -37,8 +37,11 @@
     "@cloudflare/vitest-pool-workers": "catalog:",
     "@cloudflare/workers-types": "catalog:",
     "@grasp-os/connect": "workspace:*",
+    "@grasp-os/ui": "workspace:*",
     "@grasp-os/web": "workspace:*",
+    "@types/react": "catalog:",
     "drizzle-kit": "catalog:",
+    "react": "catalog:",
     "vite-plus": "catalog:",
     "wrangler": "catalog:"
   }

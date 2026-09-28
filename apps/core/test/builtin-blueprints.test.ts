@@ -15,6 +15,7 @@ import {
   release,
 } from "../src/builtins.ts";
 import type { Release } from "../src/builtins.ts";
+import { buildScreens } from "../src/screens.ts";
 import { serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote } from "./knowledge.ts";
@@ -296,6 +297,22 @@ describe("the built-in blueprints", () => {
       if ("app/server.ts" in blueprint.files) {
         // oxlint-disable-next-line no-await-in-loop -- as above
         await serverBuilt(created.app.id, 1);
+      }
+      // Its screens pass the compiler's checks, as they do when opened.
+      if (
+        Object.keys(blueprint.files).some((path) => path.startsWith("screens/"))
+      ) {
+        // oxlint-disable-next-line no-await-in-loop -- as above
+        const screens = await buildScreens(env, {
+          app: created.app.id,
+          version: "1",
+          files: { ...blueprint.files },
+        });
+        if (!screens.ok || screens.diagnostics.length > 0) {
+          throw new Error(
+            `The screens of ${blueprint.id} don't pass: ${JSON.stringify(screens.diagnostics)}`
+          );
+        }
       }
     }
   });

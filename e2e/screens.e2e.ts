@@ -52,16 +52,27 @@ const serveAttacker = async (): Promise<{
   return { url: `http://127.0.0.1:${address.port}`, hits, server };
 };
 
-/** A new App named `name` running the sample, released by `builder`. */
+/**
+ * A new App named `name` running the sample, released by `builder`, and
+ * shared with `sharedWith` to use.
+ */
 const releaseApp = async (
   builder: Person,
   attacker: string,
-  name = "Notes"
+  name = "Notes",
+  sharedWith?: Person
 ): Promise<string> => {
   const { core, api } = apiOf(builder);
   try {
     const { id } = await api.apps.create({ name });
     await release(api, id, screenAppFiles(attacker), name);
+    if (sharedWith !== undefined) {
+      await api.apps.members.add(id, {
+        type: "person",
+        id: sharedWith.userId,
+        role: "user",
+      });
+    }
     return id;
   } finally {
     core[Symbol.dispose]();
@@ -90,7 +101,7 @@ let app: string;
 test.beforeAll(async () => {
   attacker = await serveAttacker();
   ({ one, two } = peopleIn("screens"));
-  app = await releaseApp(one, attacker.url);
+  app = await releaseApp(one, attacker.url, "Notes", two);
 });
 
 test.afterAll(() => {

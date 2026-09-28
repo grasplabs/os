@@ -17,5 +17,7 @@
     "blueprints",
     "worker-configuration.d.ts",
     "*.ts"
-  ]
+  ],
+  // The built-ins' screens: blueprints/tsconfig.json.
+  "exclude": ["blueprints/*/files/screens", "blueprints/*/files/components"]
 }
