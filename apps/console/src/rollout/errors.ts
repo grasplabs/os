@@ -12,6 +12,25 @@ export const rolloutErrorCodes = [
   "rollout_running",
   /** The rollout isn't waiting for approval. */
   "not_waiting",
+  /** The rollout's run isn't going, so it can't be paused. */
+  "not_running",
+  /** The rollout's run isn't paused. */
+  "not_paused",
+  /** No such client. */
+  "unknown_client",
+  /** The rollout didn't reach the client, or recorded nothing to go back to. */
+  "nothing_to_roll_back",
+  /** Something newer was deployed to the client after the rollout. */
+  "superseded",
+  /**
+   * What the client ran before isn't the release right before the
+   * rollout's: its migrations only keep that one working.
+   */
+  "too_far_back",
+  /** The client's secrets rotated since, which its previous versions don't have. */
+  "rotated_since",
+  /** Another runner (provisioning, another rollout, a rollback) has the client. */
+  "client_busy",
 ] as const;
 export type RolloutErrorCode = (typeof rolloutErrorCodes)[number];
 

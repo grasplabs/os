@@ -19,6 +19,7 @@ import { consoleDatabase } from "./db/act.ts";
 import { importReleases } from "./releases/import.ts";
 
 export { ProvisionClient } from "./provision/workflow.ts";
+export { RollbackClient } from "./rollout/rollback.ts";
 export { Rollout } from "./rollout/workflow.ts";
 
 declare module "@tanstack/react-start" {

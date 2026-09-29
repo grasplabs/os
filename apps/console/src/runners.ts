@@ -1,17 +1,20 @@
 /**
  * A client's runner: the one thing that may change what its account runs,
  * as `client_runs` names it. A provisioning run (a Workflow instance per
- * attempt, `<clientId>-<random>`, src/provision/workflow.ts) or a rollout
+ * attempt, `<clientId>-<random>`, src/provision/workflow.ts), a rollout
  * while it deploys the client (the rollout's instance,
- * src/rollout/workflow.ts). Instances are never deleted or reused.
+ * src/rollout/workflow.ts), or a rollback of the client (its instance,
+ * src/rollout/rollback.ts). Instances are never deleted or reused.
  *
  * A runner claims the client with one conditional write that names the
  * runner it replaces (none, for a client without one), audited in the
  * same batch. However many act at once, one claim wins and only its
  * caller goes on, so a client has one runner: the precondition of a
  * deploy's D1 migrations and router map write (src/deploy/deploy.ts). A
- * rollout releases its claim once it's done with the client; a
- * provisioning run's stays, naming the client's last run.
+ * rollout or a rollback releases its claim once it's done with the
+ * client; a provisioning run's stays, naming the client's last run. Only
+ * a rollback takes a client from a runner still going, and only from the
+ * rollout it rolls back.
  *
  * One set of rules for every runner: each is a Workflow instance, and it
  * holds the client while `client_runs` names it and its instance hasn't
@@ -83,8 +86,11 @@ const isMissingInstance = (error: unknown): boolean =>
   error instanceof Error && error.message.includes("instance.not_found");
 
 /** The Workflow a runner of `kind` is an instance of. */
-const workflowOf = (env: Env, kind: RunKind): Workflow =>
-  kind === "rollout" ? env.ROLLOUT : env.PROVISION_CLIENT;
+const workflows: Readonly<Record<RunKind, (env: Env) => Workflow>> = {
+  provision: (env) => env.PROVISION_CLIENT,
+  rollout: (env) => env.ROLLOUT,
+  rollback: (env) => env.ROLLBACK_CLIENT,
+};
 
 /**
  * Where instance `id` of `workflow`, created (or about to be) at
@@ -126,7 +132,7 @@ export const currentRun = async (
     return null;
   }
   const where = await instanceStatus(
-    workflowOf(env, claim.kind),
+    workflows[claim.kind](env),
     claim.runId,
     claim.claimedAt
   );
