@@ -174,6 +174,14 @@ export type Feature =
    */
   | "triggers"
   /**
+   * Connections' events starting workflows (workflows/connector-events.ts):
+   * connect listening where Apps' event triggers and permissions say, and
+   * the events it reads delivered; needs `triggers` and `workflows` on
+   * too. While off, connect reads nothing and nothing is delivered; the
+   * events it read before wait, and are delivered once it's back on.
+   */
+  | "connector_events"
+  /**
    * Building an App's code as it is committed (save-builds.ts), and
    * answering the commit with how the builds went. While off, a commit
    * builds nothing and answers each build as `pending`: they build at

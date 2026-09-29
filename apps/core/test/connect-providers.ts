@@ -5,9 +5,12 @@
  * PKCE and Grasp's client secret as Entra does, and issues tokens for the
  * account the code names; Composio's API answers as test/composio-api.ts
  * says; a mail provider's MCP server answers as
- * test/mail-server.ts says. Imported by vite.config.ts (Node) and the tests
+ * test/mail-server.ts says; Microsoft Graph's delta queries answer as
+ * connect's test/graph-events-fake.ts says, with mail tests post to
+ * `graphControlUrl`. Imported by vite.config.ts (Node) and the tests
  * (workerd), so it only holds data.
  */
+import { graphEventsFake } from "../../connect/test/graph-events-fake.ts";
 import { clients } from "../../connect/test/provider-config.ts";
 import { composioApiScript } from "./composio-api.ts";
 import { mailServerScript } from "./mail-server.ts";
@@ -23,6 +26,12 @@ export const connectClient = clients.microsoft;
 export const consentCode = (url: URL, tenant: string, subject: string) =>
   [url.searchParams.get("code_challenge"), tenant, subject].join(".");
 
+/**
+ * Where tests post a message arriving in a mailbox's inbox:
+ * `{ mailbox, message }`, as Graph's delta queries then show it.
+ */
+export const graphControlUrl = "https://graph-control.test/receive";
+
 /** The tokens the fake issues for `subject`, to look for where they mustn't be. */
 export const tokensFor = (subject: string): string[] => [
   `access.${subject}`,
@@ -37,6 +46,7 @@ const base64Url = (bytes) =>
     .replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/u, "");
 const encoded = (value) =>
   base64Url(new TextEncoder().encode(JSON.stringify(value)));
+const graphEvents = (${graphEventsFake.toString()})();
 
 export default {
   async fetch(request) {
@@ -46,6 +56,14 @@ export default {
     }
     if (url.hostname === "backend.composio.dev" || url.hostname === "mail-control.test") {
       return await mailServer(request, url);
+    }
+    if (url.hostname === "graph.microsoft.com") {
+      return graphEvents.answer(request, url);
+    }
+    if (request.method === "POST" && url.href === ${JSON.stringify(graphControlUrl)}) {
+      const { mailbox, message } = await request.json();
+      graphEvents.receive(mailbox, message);
+      return new Response(null, { status: 204 });
     }
     if (request.method !== "POST" || url.hostname !== "login.microsoftonline.com") {
       return new Response("Not found", { status: 404 });

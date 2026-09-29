@@ -12,6 +12,7 @@ import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import { sweepUploads } from "./knowledge/uploads.ts";
 import { retryDisconnects } from "./members.ts";
 import { recordPlatformUpdate } from "./platform-updates.ts";
+import { pumpConnectorEvents } from "./workflows/connector-events.ts";
 import { receiveEmail } from "./workflows/inbound-email.ts";
 import { failOrphans } from "./workflows/runs.ts";
 import { startDueSchedules } from "./workflows/triggers.ts";
@@ -34,7 +35,6 @@ export { ConnectionBinding } from "./bindings.ts";
 export { AppCollectionBinding } from "./knowledge/app-binding.ts";
 export { CollectionBinding } from "./knowledge/binding.ts";
 export { KnowledgeBinding } from "./knowledge/tools-binding.ts";
-export { ConnectorEvents } from "./workflows/connector-events.ts";
 export { WorkflowDispatcher } from "./workflows/dispatcher.ts";
 export { DynamicWorkflowBinding } from "./workflows/engine.ts";
 export { Workspace } from "./workspace.ts";
@@ -61,8 +61,10 @@ export default {
   // (see src/knowledge/uploads.ts), a new version of core, audited as
   // a platform update (see src/platform-updates.ts), and workflows'
   // schedules due by the minute it runs for (see src/workflows/triggers.ts),
-  // and runs whose start stopped before the engine had them, marked failed
-  // (see `failOrphans`, src/workflows/runs.ts).
+  // runs whose start stopped before the engine had them, marked failed
+  // (see `failOrphans`, src/workflows/runs.ts), and connector events:
+  // where connect listens, and the events it read, delivered (see
+  // src/workflows/connector-events.ts).
   //
   // Every 15 minutes, on a trigger of its own so neither shares an
   // invocation with the jobs above: the day's improvement signals and
@@ -96,6 +98,7 @@ export default {
             recordPlatformUpdate(env),
             startDueSchedules(env, new Date(controller.scheduledTime)),
             failOrphans(env),
+            pumpConnectorEvents(env),
           ];
     const results = await Promise.allSettled(jobs);
     for (const result of results) {

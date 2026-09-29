@@ -24,9 +24,11 @@ import {
   gte,
   inArray,
   isNull,
+  like,
   lt,
   ne,
   or,
+  sql,
 } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -850,4 +852,53 @@ export const recordGoingOn = async (
         inArray(workflowRuns.waitingFor, [...features])
       )
     );
+};
+
+/**
+ * The most runs mail, or connector events, start of one workflow in an
+ * hour, each counted on its own.
+ */
+const triggeredRunsPerHour = 60;
+
+const hourMs = 60 * 60 * 1000;
+
+/**
+ * Whether App `app`'s workflow `workflow` is at its hourly limit for the
+ * message or event whose run has trigger key `key`: triggers of `type`
+ * started `triggeredRunsPerHour` of its runs in the past hour (counted on
+ * its index by App, workflow and time), and none of them is this one's. A
+ * workflow that has this one's run already is never capped for it, so a
+ * delivery tried again because another workflow was capped isn't refused
+ * by the run it started itself. Checked before the starts, not with them,
+ * so what's delivered at the same moment can go a few over.
+ */
+export const atHourlyCap = async (
+  env: Env,
+  app: string,
+  workflow: string,
+  key: string,
+  type: "email" | "event"
+): Promise<boolean> => {
+  const recent = and(
+    gte(workflowRuns.createdAt, new Date(Date.now() - hourMs)),
+    like(workflowRuns.triggerKey, `${type}:%`)
+  );
+  const mine = eq(workflowRuns.triggerKey, key);
+  const counted = await drizzle(env.DB)
+    .select({
+      runs: sql<number | null>`sum(case when ${recent} then 1 else 0 end)`,
+      delivered: sql<number | null>`max(case when ${mine} then 1 else 0 end)`,
+    })
+    .from(workflowRuns)
+    .where(
+      and(
+        eq(workflowRuns.appId, app),
+        eq(workflowRuns.workflowId, workflow),
+        or(recent, mine)
+      )
+    )
+    .get();
+  return (
+    counted?.delivered !== 1 && (counted?.runs ?? 0) >= triggeredRunsPerHour
+  );
 };

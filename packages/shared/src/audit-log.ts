@@ -57,6 +57,14 @@ const typeRules: readonly {
   { action: "connection.offer_changed", type: "config" },
   // A connection's tokens stopped working: it needs signing in again.
   { action: "connection.needs_reauth", type: "config" },
+  // Connect reading what changed at a connection for workflows' event
+  // triggers, dropping an event it couldn't deliver, and starting or
+  // stopping listening there.
+  { action: "connection.events.read", type: "read" },
+  // An event dropped after its last try: a workflow it would have started
+  // didn't start.
+  { action: "connection.events.dropped", type: "action" },
+  { action: "connection.events", type: "config" },
   // A held action dropped because nobody can confirm it any more, then a
   // person confirming or declining one (or being refused that).
   { action: "connection.action.dropped", type: "action" },

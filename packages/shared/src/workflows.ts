@@ -178,7 +178,7 @@ export const inboundEmailSchema = z.object({
 export type InboundEmail = z.infer<typeof inboundEmailSchema>;
 
 /** An event's type, e.g. `m365.mail.received`. */
-const eventTypeSchema = z.string().min(1).max(200);
+export const eventTypeSchema = z.string().min(1).max(200);
 
 /** Most fields an event trigger's filter names. */
 const maxFilterFields = 20;
@@ -216,11 +216,11 @@ export const matchesFilter = (
 const maxEventPayloadLength = 64 * 1024;
 
 /**
- * An event a connection reported, as connect delivers it to core, and as
- * the run an event trigger starts gets it as input (the SDK's
+ * An event a connection reported, as core takes it from connect and
+ * delivers it, and as the run an event trigger starts gets it as input (the SDK's
  * `connectorEvent`). `id` is the source's own ID of the event, the same
  * for the same event delivered again. `resource` narrows it to a part of
- * the connection (a mailbox, a site), when the source says. `action` is
+ * the connection (a mailbox, a drive), when the source says. `action` is
  * the connector's read action whose data the event carries (such as
  * `mail.list`): an App hears the event only through a permission that
  * allows it, as it could only read the data with one. `owner` is a

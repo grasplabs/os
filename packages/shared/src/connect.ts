@@ -11,6 +11,7 @@ import {
 import { permissionActionSchema } from "./permissions.ts";
 import type { PermissionSubject, WorkContext } from "./permissions.ts";
 import { roleSchema } from "./roles.ts";
+import { eventTypeSchema } from "./workflows.ts";
 
 /**
  * One call from core to connect, over the service binding: an action on a
@@ -531,6 +532,58 @@ export interface PendingActionsApi {
   decline: (id: string) => Promise<void>;
 }
 
+/** Most listeners core sends connect at once (`syncEventSources`). */
+export const eventListenersMax = 5000;
+
+/**
+ * Who listens for events of `type` on a connection: an App whose current
+ * version has an event trigger for `type` and holds an active, unmasked
+ * permission on the connection, from a version an admin approved. The
+ * permission is on the whole connection (`resource` null) or on one
+ * resource of it (a mailbox, a drive), and allows `actions`. `owner` is
+ * the App's owner, whom its triggered runs act for. Connect listens only
+ * where a listener's permission allows the event's read action and, on a
+ * personal connection, only for its owner's Apps; core checks each event
+ * again as it delivers it.
+ */
+export const eventListenerSchema = z.strictObject({
+  type: eventTypeSchema,
+  connection: connectionIdSchema,
+  resource: identifierSchema.nullable(),
+  owner: identifierSchema,
+  actions: z.array(permissionActionSchema).max(100),
+});
+export type EventListener = z.infer<typeof eventListenerSchema>;
+
+export const eventListenersSchema = z
+  .array(eventListenerSchema)
+  .max(eventListenersMax);
+
+/** Most connector events connect hands core at once. */
+export const connectorEventsTakeMax = 100;
+
+/** A connector event waiting in connect's outbox: the event as JSON. */
+export interface OutboxedConnectorEvent {
+  id: string;
+  event: string;
+}
+
+/**
+ * What core settles of the events it took: those it delivered, or that
+ * will never be taken (`done`, removed), and those whose delivery failed
+ * (`failed`, tried again later).
+ */
+export const connectorEventsAckSchema = z
+  .strictObject({
+    done: z.array(z.uuid()),
+    failed: z.array(z.uuid()),
+  })
+  .refine(
+    ({ done, failed }) => done.length + failed.length <= connectorEventsTakeMax,
+    { message: `At most ${connectorEventsTakeMax} events` }
+  );
+export type ConnectorEventsAck = z.infer<typeof connectorEventsAckSchema>;
+
 /** What core reaches in connect, over the `CONNECT` service binding. */
 export interface ConnectApi {
   call: (call: ConnectCall) => Promise<ConnectResult>;
@@ -647,6 +700,23 @@ export interface ConnectApi {
     appended: readonly string[],
     rejected?: readonly OutboxRejected[]
   ) => Promise<void>;
+  /**
+   * Listens for events where `listeners` say, and only there: starts
+   * listening where it didn't, stops where no listener is left, then reads
+   * what changed at the sources that are due, into the event outbox. Core
+   * sends every listener each time, so a workflow removed, a version made
+   * current without the trigger, or a permission revoked stops its
+   * listening at the next call.
+   */
+  syncEventSources: (listeners: readonly EventListener[]) => Promise<void>;
+  /**
+   * The oldest connector events due for delivery, at most
+   * `connectorEventsTakeMax`. Taking removes nothing: core settles them
+   * with `ackConnectorEvents`.
+   */
+  takeConnectorEvents: () => Promise<OutboxedConnectorEvent[]>;
+  /** Settles taken events; IDs already settled are ignored. */
+  ackConnectorEvents: (ack: ConnectorEventsAck) => Promise<void>;
 }
 
 /** Why connecting or disconnecting an account didn't work. */

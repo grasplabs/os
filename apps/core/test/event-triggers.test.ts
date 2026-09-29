@@ -1,5 +1,5 @@
 import type { Role } from "@grasp-os/shared/roles";
-import { env, exports } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
@@ -11,10 +11,11 @@ import { endLiveRuns, finished } from "./runs.ts";
 import { outcome, signedInApi } from "./sign-in.ts";
 import { appWith } from "./workflow-apps.ts";
 
-// Event triggers: connect delivers the events connections report to
-// core's `ConnectorEvents` entrypoint, which starts the workflows whose
-// trigger names the event, in Apps with a permission on its connection.
-// Tests deliver events to the entrypoint as connect would.
+// Event triggers: core delivers the events connections report, which
+// start the workflows whose trigger names the event, in Apps with a
+// permission on its connection. Tests deliver events as core's cron
+// trigger does with those it takes from connect (event-sources.test.ts
+// goes the whole way, from the provider).
 
 const idp = mockIdp();
 
@@ -66,9 +67,9 @@ const mailEvent = (
   payload: { folder: changes.folder ?? "inbox", subject: "Invoice INV-7" },
 });
 
-/** Delivers `event`, as connect does. */
+/** Delivers `event`, as core does with those connect read. */
 const deliver = async (event: unknown): Promise<{ runs: number }> =>
-  await exports.ConnectorEvents.deliver(event);
+  await deliverConnectorEvent(env, event);
 
 /**
  * An App with the inbox workflow, granted Outlook: on `resource` when

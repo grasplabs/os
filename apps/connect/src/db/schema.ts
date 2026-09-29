@@ -2,7 +2,8 @@ import { auditRejectReasons } from "@grasp-os/shared/audit";
 /**
  * Connect D1 schema: the connection registry, OAuth and Composio flows under
  * way, the connections' sealed tokens, the stored answers of side effects, the side
- * effects held for their person and the audit outbox.
+ * effects held for their person, the audit outbox, and where connect
+ * listens for events and the events it read.
  */
 import { sql } from "drizzle-orm";
 import {
@@ -334,4 +335,61 @@ export const auditOutboxRejected = sqliteTable(
     rejectedAt: timestamp("rejected_at").notNull(),
   },
   (table) => [index("audit_outbox_rejected_id").on(table.id)]
+);
+
+/**
+ * Where connect listens for events a workflow's trigger waits for
+ * (src/events.ts): one row per connection, event type and resource,
+ * while some App listens there. `resource` is the mailbox or drive a
+ * permission names, or `''` for the account's own, which a permission on
+ * the whole connection covers. `cursor` is where reading what changed
+ * goes on from: the provider's delta or next-page link, null until the
+ * first read sets it. Reading is due at `poll_at`; `failures` counts reads
+ * that failed in a row, each waiting longer. Events are only of what the
+ * source got after `created_at`.
+ */
+export const eventSources = sqliteTable(
+  "event_sources",
+  {
+    id: text().primaryKey(),
+    connectionId: text("connection_id").notNull(),
+    type: text().notNull(),
+    resource: text().notNull(),
+    cursor: text(),
+    pollAt: timestamp("poll_at").notNull(),
+    failures: integer().notNull().default(0),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("event_sources_key_idx").on(
+      table.connectionId,
+      table.type,
+      table.resource
+    ),
+    index("event_sources_poll_idx").on(table.pollAt),
+  ]
+);
+
+/**
+ * Events sources reported that core hasn't delivered yet: core takes those
+ * due (`retry_at`), delivers them to workflows, and settles them. One per
+ * source and the provider's ID of the item (`key`), so an item read twice
+ * waits once. A failed delivery is tried again later, `attempts` making
+ * each wait longer. `event` is the event as JSON.
+ */
+export const connectorEvents = sqliteTable(
+  "connector_events",
+  {
+    id: text().primaryKey(),
+    key: text().notNull(),
+    event: text().notNull(),
+    attempts: integer().notNull().default(0),
+    retryAt: timestamp("retry_at").notNull(),
+    createdAt: timestamp("created_at").notNull(),
+  },
+  (table) => [
+    uniqueIndex("connector_events_key_idx").on(table.key),
+    index("connector_events_retry_idx").on(table.retryAt),
+  ]
 );
