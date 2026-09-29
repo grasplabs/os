@@ -75,8 +75,16 @@ export interface Draft {
   base: number | null;
   changes: Record<string, string | null>;
   revision: number;
-  /** Checks of it that failed in a row this turn. */
-  failedChecks: number;
+}
+
+/**
+ * What a chat's agent spent building Apps this turn (agent-builds.ts):
+ * the Apps it created, and for each App's draft the checks that failed in
+ * a row and those running now.
+ */
+interface TurnBuilds {
+  created: number;
+  drafts: Map<string, { failed: number; running: number }>;
 }
 
 /** A question for a chat's agent, and the model to answer it with. */
@@ -225,11 +233,11 @@ export class Workspace extends DurableObject<Env> {
   readonly #heldVersions = new Map<ChatId, number>();
 
   /**
-   * Checks of each chat's drafts that failed in a row this turn, by App:
-   * the repair loop's count (agent-builds.ts). In memory: a restart ends
-   * the turn, and the next question starts the count again anyway.
+   * What each chat's agent spent building Apps this turn: the repair
+   * loop's count and the Apps it created (agent-builds.ts). In memory: a
+   * restart ends the turn, and the next question starts them again anyway.
    */
-  readonly #failedChecks = new Map<ChatId, Map<string, number>>();
+  readonly #builds = new Map<ChatId, TurnBuilds>();
 
   /** Who follows each chat (`watch`), by chat and watch ID. */
   readonly #watchers = new Map<ChatId, Map<string, ChatWatch>>();
@@ -464,7 +472,7 @@ export class Workspace extends DurableObject<Env> {
       );
       this.#stopped.delete(chat.id);
       // Each question gives the repair loop its full count again.
-      this.#failedChecks.delete(chat.id);
+      this.#builds.delete(chat.id);
       started?.();
       this.#changed(chat.id);
       const result = await runTurn({
@@ -833,7 +841,7 @@ export class Workspace extends DurableObject<Env> {
       this.#stopped.delete(id);
       this.#provenanceVersions.delete(id);
       this.#heldVersions.delete(id);
-      this.#failedChecks.delete(id);
+      this.#builds.delete(id);
       for (const watch of this.#watchers.get(id)?.values() ?? []) {
         watch[Symbol.dispose]();
       }
@@ -916,9 +924,8 @@ export class Workspace extends DurableObject<Env> {
       .from(chatDrafts)
       .where(and(eq(chatDrafts.chatId, chatId), eq(chatDrafts.appId, appId)))
       .get();
-    const failedChecks = this.#failedChecks.get(chatId)?.get(appId) ?? 0;
     if (row === undefined) {
-      return { base: null, changes: {}, revision: 0, failedChecks };
+      return { base: null, changes: {}, revision: 0 };
     }
     const files = this.#db
       .select({ path: chatDraftFiles.path, content: chatDraftFiles.content })
@@ -933,22 +940,22 @@ export class Workspace extends DurableObject<Env> {
         files.map(({ path, content }) => [path, content])
       ),
       revision: row.revision,
-      failedChecks,
     };
   }
 
   /**
    * Writes `changes` into the chat's draft of App `appId`, over version
-   * `base`, only over the revision `revision` the write read (0: there was
-   * none): `false`, and nothing written, when another write landed since,
-   * or the chat is gone. A write doesn't give the repair loop its count
-   * back.
+   * `base`, and drops its changes to the paths in `unchanged` (back as the
+   * base has them), only over the revision `revision` the write read (0:
+   * there was none): `false`, and nothing written, when another write
+   * landed since, or the chat is gone.
    */
   saveDraft(
     chatId: ChatId,
     appId: string,
     base: number | null,
     changes: Record<string, string | null>,
+    unchanged: readonly string[],
     revision: number
   ): boolean {
     return this.ctx.storage.transactionSync(() => {
@@ -986,6 +993,18 @@ export class Workspace extends DurableObject<Env> {
           })
           .run();
       }
+      for (const path of unchanged) {
+        this.#db
+          .delete(chatDraftFiles)
+          .where(
+            and(
+              eq(chatDraftFiles.chatId, chatId),
+              eq(chatDraftFiles.appId, appId),
+              eq(chatDraftFiles.path, path)
+            )
+          )
+          .run();
+      }
       return true;
     });
   }
@@ -1017,17 +1036,57 @@ export class Workspace extends DurableObject<Env> {
     this.#db.delete(chatDrafts).where(drafts).run();
   }
 
+  /** What the chat's agent spent building Apps this turn. */
+  #turnBuilds(chatId: ChatId): TurnBuilds {
+    const found = this.#builds.get(chatId);
+    if (found !== undefined) {
+      return found;
+    }
+    const made: TurnBuilds = { created: 0, drafts: new Map() };
+    this.#builds.set(chatId, made);
+    return made;
+  }
+
   /**
-   * Counts a check of the chat's draft of App `appId`: a failed one adds
-   * to the checks that failed in a row this turn, a passing one starts
-   * them again. How many failed in a row now.
+   * Takes one of the checks of the chat's draft of App `appId` this turn,
+   * before it runs: `false` once those that failed in a row and those
+   * running now together reach `limit`, so checks started at once can't
+   * run past it. Each check taken is settled (`settleCheck`) once it ends.
    */
-  draftChecked(chatId: ChatId, appId: string, passed: boolean): number {
-    const byApp = this.#failedChecks.get(chatId) ?? new Map<string, number>();
-    const failed = passed ? 0 : (byApp.get(appId) ?? 0) + 1;
-    byApp.set(appId, failed);
-    this.#failedChecks.set(chatId, byApp);
+  takeCheck(chatId: ChatId, appId: string, limit: number): boolean {
+    const { drafts } = this.#turnBuilds(chatId);
+    const draft = drafts.get(appId) ?? { failed: 0, running: 0 };
+    if (draft.failed + draft.running >= limit) {
+      return false;
+    }
+    drafts.set(appId, { ...draft, running: draft.running + 1 });
+    return true;
+  }
+
+  /**
+   * Settles a check taken with `takeCheck`: a failed one adds to the
+   * checks that failed in a row, a passing one starts them again. How
+   * many failed in a row now.
+   */
+  settleCheck(chatId: ChatId, appId: string, passed: boolean): number {
+    const { drafts } = this.#turnBuilds(chatId);
+    const draft = drafts.get(appId) ?? { failed: 0, running: 0 };
+    const failed = passed ? 0 : draft.failed + 1;
+    drafts.set(appId, { failed, running: Math.max(0, draft.running - 1) });
     return failed;
+  }
+
+  /**
+   * Takes one of the Apps the chat's agent may create this turn: `false`
+   * once it created `limit`.
+   */
+  takeCreate(chatId: ChatId, limit: number): boolean {
+    const turn = this.#turnBuilds(chatId);
+    if (turn.created >= limit) {
+      return false;
+    }
+    turn.created += 1;
+    return true;
   }
 
   /** Tells the chat's watchers it changed, with the messages just stored. */

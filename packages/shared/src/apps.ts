@@ -434,7 +434,9 @@ export const appErrors = defineErrorFamily({
   "app.caller_invalid":
     "Pass the caller of the App method this runs in, while that call runs.",
   "app.checks_exhausted":
-    "This draft failed its checks too many times in a row this turn. Stop, and tell the person what still fails.",
+    "This draft has had as many checks and dry runs as it may without passing this turn. Stop, and tell the person what still fails.",
+  "app.creates_exhausted":
+    "This chat created as many Apps as one question may. Tell the person what you made.",
 });
 
 /**

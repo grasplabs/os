@@ -2,17 +2,16 @@ import { appErrors } from "@grasp-os/shared/apps";
 import type { App, SavedBuild } from "@grasp-os/shared/apps";
 import { delegateActorOf } from "@grasp-os/shared/audit";
 import type { AuditDetailValue } from "@grasp-os/shared/audit";
-import { sha256Hex } from "@grasp-os/shared/encoding";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
-import { canonicalJson } from "@grasp-os/shared/json";
+import { errorFields, log } from "@grasp-os/shared/log";
 import type { Permission } from "@grasp-os/shared/permissions";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
 import { asPerson } from "./agent-person.ts";
-import { chatAuthority } from "./agent-scope.ts";
+import { chatAuthority, chatContext } from "./agent-scope.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
 import {
   appFor,
@@ -27,6 +26,7 @@ import { workspace } from "./durable-objects.ts";
 import { requireFeature } from "./features.ts";
 import { appsCollectionEnabled } from "./knowledge/access.ts";
 import { appsCollectionId } from "./knowledge/app-entries.ts";
+import { isRestricted } from "./restricted.ts";
 import { buildOnSave } from "./save-builds.ts";
 import {
   dryRunTests,
@@ -50,7 +50,11 @@ import type { Draft } from "./workspace.ts";
 // The repair loop is the agent loop itself: a check answers with what
 // fails, the agent writes a fix and checks again, until it passes or
 // `maxFailedChecks` checks of one draft failed in a row in one turn, when
-// checking refuses and the agent tells the person what still fails.
+// checking refuses and the agent tells the person what still fails. Each
+// check takes its place against the limit before it runs (in the
+// Workspace object, so checks started at once can't pass it), and a dry
+// run counts as a check that didn't pass. A turn creates at most
+// `maxCreatesPerTurn` Apps.
 //
 // The person's rights bound every call, read again each time: creating an
 // App needs a role that builds, and changing one a builder's role in it.
@@ -63,10 +67,14 @@ import type { Draft } from "./workspace.ts";
 
 /**
  * Most checks of one draft that may fail in a row in one turn: the repair
- * loop's step limit. Each check is a code run, and a turn has at most 30
- * (agent.ts), so this leaves the turn room to answer.
+ * loop's step limit. Checks running at once count against it before they
+ * run, and each dry run counts as a check that didn't pass. A turn has at
+ * most 30 code runs (agent.ts), so this leaves it room to answer.
  */
 export const maxFailedChecks = 5;
+
+/** Most Apps the chat's agent may create in one turn. */
+export const maxCreatesPerTurn = 3;
 
 /**
  * How long a check waits for its builds. A code run has 30 seconds
@@ -188,6 +196,37 @@ const testsOf = async (
   };
 };
 
+/** Logs a check that couldn't be settled; the check's own error goes on. */
+const logSettleFailure = (failure: unknown): void => {
+  log.warn("agent.check_settle_failed", errorFields(failure));
+};
+
+/** Builds a draft's `files` and runs their workflows' tests (`check`). */
+const checkFiles = async (
+  env: Env,
+  app: AppId,
+  base: number | null,
+  files: Record<string, string>
+): Promise<Omit<DraftCheck, "failedInARow" | "maxFailedChecks">> => {
+  const builds = await buildOnSave(
+    env,
+    { app, version: base ?? 0, files },
+    checkWaitMs
+  );
+  const tests = await testsOf(env, base, files, builds.workflows);
+  return {
+    passed:
+      buildPassed(builds.screens) &&
+      buildPassed(builds.server) &&
+      buildPassed(builds.workflows) &&
+      tests.status !== "failed",
+    screens: reported(builds.screens),
+    server: reported(builds.server),
+    workflows: reported(builds.workflows),
+    tests,
+  };
+};
+
 /** Building Apps, as a chat's code does it. */
 export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   /**
@@ -209,11 +248,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
       method,
       read: async (person: Member) => {
         requireFeature(env, "apps");
-        const restricted = await workspace(
-          env,
-          scope.workspaceId
-        ).isChatRestricted(scope.chatId);
-        if (restricted !== false) {
+        if (await isRestricted(env, chatAuthority(scope), chatContext(scope))) {
           throw permissionErrors.create("permission.restricted");
         }
         return await run({
@@ -231,13 +266,55 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
     return id;
   }
 
-  /** A new App, with no versions yet, owned by the person. */
+  /**
+   * A new App, with no versions yet, owned by the person: at most
+   * {@link maxCreatesPerTurn} a turn.
+   */
   async create(input: unknown): Promise<App> {
     return await this.#build(
       "build.create",
-      async (by) => await createApp(this.env, by, input),
+      async (by) => {
+        const { workspaceId, chatId } = this.ctx.props;
+        const taken = await workspace(this.env, workspaceId).takeCreate(
+          chatId,
+          maxCreatesPerTurn
+        );
+        if (!taken) {
+          throw appErrors.create("app.creates_exhausted");
+        }
+        return await createApp(this.env, by, input);
+      },
       (created) => ({ app: created.id })
     );
+  }
+
+  /**
+   * Runs `run`, one check or dry run of the chat's draft of App `app`,
+   * once it takes one of the draft's checks this turn (`takeCheck`, before
+   * anything runs, so checks started at once can't pass the limit), and
+   * settles it however it ends: passed only when `run` says so.
+   */
+  async #counted<T>(
+    app: AppId,
+    run: () => Promise<T>,
+    passed: (result: T) => boolean
+  ): Promise<{ result: T; failedInARow: number }> {
+    const { workspaceId, chatId } = this.ctx.props;
+    const chats = workspace(this.env, workspaceId);
+    if (!(await chats.takeCheck(chatId, app, maxFailedChecks))) {
+      throw appErrors.create("app.checks_exhausted");
+    }
+    let result: T;
+    try {
+      result = await run();
+    } catch (error) {
+      // Settled as failed; a failure to settle is logged, never in the way
+      // of why the check failed.
+      await chats.settleCheck(chatId, app, false).catch(logSettleFailure);
+      throw error;
+    }
+    const failedInARow = await chats.settleCheck(chatId, app, passed(result));
+    return { result, failedInARow };
   }
 
   /** The chat's draft of `app`: all its files, and what it changed. */
@@ -274,10 +351,24 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
       async (by) => {
         const id = await this.#buildable(by, app);
         const draft = await draftOf(this.env, this.ctx.props, id);
+        const base = await filesOf(this.env, id, {
+          base: draft.base,
+          changes: {},
+        });
         const written = applyChanges(
           this.env,
           await filesOf(this.env, id, draft),
           changes
+        );
+        // Only what differs from the base is kept: a path written back as
+        // the base has it (a deleted file that isn't there, too) is a
+        // change no more. A draft holds at most the base's paths and the
+        // files it adds, which the App's limits bound.
+        const kept = written.filter(
+          ([path, content]) => (content ?? undefined) !== base.get(path)
+        );
+        const unchanged = written.flatMap(([path, content]) =>
+          (content ?? undefined) === base.get(path) ? [path] : []
         );
         const saved = await workspace(
           this.env,
@@ -286,7 +377,8 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
           this.ctx.props.chatId,
           id,
           draft.base,
-          Object.fromEntries(written),
+          Object.fromEntries(kept),
+          unchanged,
           draft.revision
         );
         if (!saved) {
@@ -294,8 +386,11 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
         }
         const changed = new Set([
           ...Object.keys(draft.changes),
-          ...written.map(([path]) => path),
+          ...kept.map(([path]) => path),
         ]);
+        for (const path of unchanged) {
+          changed.delete(path);
+        }
         return { base: draft.base, changed: [...changed].toSorted() };
       },
       (written) => ({
@@ -321,50 +416,22 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   /**
    * Checks the chat's draft of `app`: builds its screens, server code and
    * workflows, and runs its workflows' tests. Refused once
-   * {@link maxFailedChecks} checks of it failed in a row this turn.
+   * {@link maxFailedChecks} checks of it failed in a row this turn, those
+   * still running counted.
    */
   async check(app: unknown): Promise<DraftCheck> {
     return await this.#build(
       "build.check",
       async (by) => {
         const id = await this.#buildable(by, app);
-        const { workspaceId, chatId } = this.ctx.props;
         const draft = await draftOf(this.env, this.ctx.props, id);
-        if (draft.failedChecks >= maxFailedChecks) {
-          throw appErrors.create("app.checks_exhausted", {
-            failedInARow: draft.failedChecks,
-          });
-        }
         const files = Object.fromEntries(await filesOf(this.env, id, draft));
-        const builds = await buildOnSave(
-          this.env,
-          { app: id, version: draft.base ?? 0, files },
-          checkWaitMs
+        const { result, failedInARow } = await this.#counted(
+          id,
+          async () => await checkFiles(this.env, id, draft.base, files),
+          ({ passed }) => passed
         );
-        const tests = await testsOf(
-          this.env,
-          draft.base,
-          files,
-          builds.workflows
-        );
-        const passed =
-          buildPassed(builds.screens) &&
-          buildPassed(builds.server) &&
-          buildPassed(builds.workflows) &&
-          tests.status !== "failed";
-        const failedInARow = await workspace(
-          this.env,
-          workspaceId
-        ).draftChecked(chatId, id, passed);
-        return {
-          passed,
-          screens: reported(builds.screens),
-          server: reported(builds.server),
-          workflows: reported(builds.workflows),
-          tests,
-          failedInARow,
-          maxFailedChecks,
-        };
+        return { ...result, failedInARow, maxFailedChecks };
       },
       (checked) => ({
         app: typeof app === "string" ? app : null,
@@ -377,7 +444,8 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   /**
    * Dry-runs each test of workflow `workflow` in the chat's draft of
    * `app`, with `params` over each test's own values: what it would do,
-   * with every step's side effect recorded, never made.
+   * with every step's side effect recorded, never made. Counted with the
+   * draft's checks, as one that didn't pass.
    */
   async dryRun(
     app: unknown,
@@ -401,17 +469,23 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
             issues: ["workflow: The draft has no such workflow."],
           });
         }
-        // Named by what it runs: the same files, the same isolate.
-        const hash = await sha256Hex(canonicalJson(files));
-        return await dryRunTests(
-          this.env,
+        // Counted as a check that didn't pass: dry runs never give the
+        // repair loop its count back, so a turn runs only so many.
+        const { result } = await this.#counted(
           id,
-          draft.base ?? 0,
-          workflowId.data,
-          files,
-          values,
-          hash
+          async () =>
+            await dryRunTests(
+              this.env,
+              id,
+              draft.base ?? 0,
+              workflowId.data,
+              files,
+              values,
+              { draft: true }
+            ),
+          () => false
         );
+        return result;
       },
       (runs) => ({
         app: typeof app === "string" ? app : null,
@@ -455,7 +529,7 @@ const buildDeclaration = `/**
  * \`workflows/<id>.ts\` with its tests in \`workflows/<id>.workflow-tests.ts\`.
  */
 build: {
-  /** Creates an App owned by the person, with no files yet. */
+  /** Creates an App owned by the person, with no files yet: at most ${maxCreatesPerTurn} a question. */
   create(app: { name: string; description?: string }): Promise<{ id: string; name: string }>;
   /**
    * This chat's draft of an App: every file as the draft has them, the
@@ -470,8 +544,8 @@ build: {
   /**
    * Builds the draft's screens, server code and workflows (type errors,
    * lint and build errors) and runs its workflows' tests. Fix what fails
-   * and check again; after ${maxFailedChecks} failed checks in a row, stop and tell the person
-   * what still fails.
+   * and check again; after ${maxFailedChecks} checks in a row that didn't pass (dry runs count as
+   * such), checking refuses: stop and tell the person what still fails.
    */
   check(app: string): Promise<{
     passed: boolean;

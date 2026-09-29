@@ -303,6 +303,92 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     expect(returned(results[2]?.text)).toBe(1);
   });
 
+  it("holds checks started at once to the repair loop's limit", async () => {
+    const { chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        const app = await env.build.create({ name: ${JSON.stringify(appName)} });
+        await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": restyled })});
+        const tried = async () => { try { return (await env.build.check(app.id)).passed; } catch (error) { return error.message; } };
+        return await Promise.all(Array.from({ length: 12 }, tried));
+      };`),
+      says("It still fails."),
+    ]);
+    await grant();
+
+    await chat.ask("Build an invoice desk");
+
+    const [result] = await codeResults(chat.stub, chat.chat.id);
+    const outcomes = z.array(z.unknown()).parse(returned(result?.text));
+    const exhausted = appErrors.create("app.checks_exhausted").message;
+    // Five ran and failed; the other seven were refused before they ran.
+    expect({
+      ran: outcomes.filter((outcome) => outcome === false).length,
+      refused: outcomes.filter((outcome) => outcome === exhausted).length,
+    }).toStrictEqual({ ran: 5, refused: 7 });
+  });
+
+  it("counts dry runs with the draft's checks, and caps the Apps created in a turn", async () => {
+    const { chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        const tried = async (call) => { try { return await call(); } catch (error) { return error.message; } };
+        const created = [];
+        for (let count = 0; count < 4; count += 1) {
+          created.push(await tried(async () => (await env.build.create({ name: ${JSON.stringify(appName)} + count })).name));
+        }
+        const app = (await env.apps.list()).find(({ name }) => name === ${JSON.stringify(`${appName}0`)});
+        await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": fixed, ...intake })});
+        const runs = [];
+        for (let count = 0; count < 6; count += 1) {
+          runs.push(await tried(async () => (await env.build.dryRun(app.id, "intake")).length));
+        }
+        return { created, runs, check: await tried(async () => (await env.build.check(app.id)).passed) };
+      };`),
+      says("Done."),
+    ]);
+    await grant();
+
+    await chat.ask("Build three desks");
+
+    const [result] = await codeResults(chat.stub, chat.chat.id);
+    const exhausted = appErrors.create("app.checks_exhausted").message;
+    expect(returned(result?.text)).toStrictEqual({
+      created: [
+        `${appName}0`,
+        `${appName}1`,
+        `${appName}2`,
+        appErrors.create("app.creates_exhausted").message,
+      ],
+      runs: [1, 1, 1, 1, 1, exhausted],
+      check: exhausted,
+    });
+  });
+
+  it("keeps no change that leaves a file as the base has it", async () => {
+    const ledger = `const [app] = (await env.apps.list()).filter(({ name }) => name === "Ledger");`;
+    const { existing, chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        ${ledger}
+        const steps = [];
+        steps.push((await env.build.write(app.id, { "notes.md": "new", "gone.md": null })).changed);
+        // Back as the base has it, and a missing file deleted again.
+        steps.push((await env.build.write(app.id, { "notes.md": null, "AGENTS.md": "# Ledger\\n", "gone.md": null })).changed);
+        return steps;
+      };`),
+      says("Nothing changed."),
+    ]);
+    await grant();
+
+    await chat.ask("Try some notes");
+
+    const [result] = await codeResults(chat.stub, chat.chat.id);
+    expect(returned(result?.text)).toStrictEqual([["notes.md"], []]);
+    await expect(
+      runInDurableObject(chat.stub, (instance) =>
+        instance.draft(chatIdSchema.parse(chat.chat.id), existing)
+      )
+    ).resolves.toMatchObject({ changes: {} });
+  });
+
   it("refuses to build without the agent's own permission, or for someone who doesn't build", async () => {
     const calls = tryEach({
       create: `(await env.build.create({ name: "Refused" })).name`,
@@ -402,10 +488,10 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     const chatId = chatIdSchema.parse(chat.chat.id);
 
     const saved = await runInDurableObject(chat.stub, (instance) => [
-      instance.saveDraft(chatId, "app-1", null, { "a.md": "a" }, 0),
+      instance.saveDraft(chatId, "app-1", null, { "a.md": "a" }, [], 0),
       // Another write read revision 0 too, and lost.
-      instance.saveDraft(chatId, "app-1", null, { "a.md": "b" }, 0),
-      instance.saveDraft(chatId, "app-1", null, { "b.md": "b" }, 1),
+      instance.saveDraft(chatId, "app-1", null, { "a.md": "b" }, [], 0),
+      instance.saveDraft(chatId, "app-1", null, { "b.md": "b" }, [], 1),
       instance.draft(chatId, "app-1"),
     ]);
 
@@ -417,7 +503,6 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
         base: null,
         changes: { "a.md": "a", "b.md": "b" },
         revision: 2,
-        failedChecks: 0,
       },
     ]);
   });

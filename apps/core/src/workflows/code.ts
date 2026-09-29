@@ -574,8 +574,8 @@ const testFailures = async (
  * `files`), with `params` over each test's own values, in an isolate of
  * their own with an empty env: nothing a dry run does leaves it. The
  * loader keeps the isolate for that version, whose code never changes;
- * the values go with each call (a draft's by its hash). A current
- * version's workflows all have tests (`requireWorkflowTestsPass`).
+ * the values go with each call. A current version's workflows all have
+ * tests (`requireWorkflowTestsPass`).
  */
 export const dryRunTests = async (
   env: Env,
@@ -585,13 +585,15 @@ export const dryRunTests = async (
   files: AppFiles,
   params: Record<string, string | number>,
   /**
-   * For a chat's draft over `version` (agent-builds.ts): its files' hash,
-   * which names the isolate the loader keeps instead of the version.
+   * For a chat's draft over `version` (agent-builds.ts): its isolate is
+   * loaded unnamed, never kept, as a draft's code changes with each write.
    */
-  draft?: string
+  { draft = false }: { draft?: boolean } = {}
 ): Promise<DryRuns> => {
   const code = env.LOADER.get(
-    `workflow-dry-run:${app}:${draft === undefined ? version : `draft-${draft}`}:${id}:${compilerVersion}`,
+    draft
+      ? null
+      : `workflow-dry-run:${app}:${version}:${id}:${compilerVersion}`,
     async () => ({
       ...workflowSandbox,
       mainModule: dryRunModule,
