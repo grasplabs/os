@@ -23,6 +23,7 @@ import { useCoreAction } from "../use-core-action.ts";
 import {
   pendingToShow,
   readyToMakeCurrent,
+  stillMadeCurrent,
   serverFileLabels,
   serverFileOf,
   versionKey,
@@ -502,6 +503,9 @@ export const ChatBuilds = ({
       const found = await readBuilds(chatId);
       if (latest.current === read) {
         setBuilds(found);
+        if (found.state === "ready") {
+          setMadeCurrent((made) => stillMadeCurrent(made, found.data.apps));
+        }
       }
     };
     void load();
@@ -534,7 +538,7 @@ export const ChatBuilds = ({
           app={app}
           key={versionKey(app.id, app.pendingVersion)}
           onDone={(made) => {
-            setMadeCurrent(new Set([...madeCurrent, made]));
+            setMadeCurrent((before) => new Set([...before, made]));
             setReads(reads + 1);
           }}
           version={app.pendingVersion}

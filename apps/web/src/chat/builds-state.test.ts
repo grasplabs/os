@@ -7,6 +7,7 @@ import {
   readyToMakeCurrent,
   serverFileLabels,
   serverFileOf,
+  stillMadeCurrent,
   versionKey,
 } from "./builds-state.ts";
 
@@ -74,6 +75,23 @@ describe("the Being built section", () => {
         ({ pendingVersion }) => pendingVersion
       )
     ).toStrictEqual([3]);
+  });
+
+  it("forgets a version made current once a read no longer lists it pending, so it shows when proposed again", () => {
+    const made = new Set([versionKey("app-1", 2)]);
+
+    // A read from before the change still lists it: still hidden.
+    const early = stillMadeCurrent(made, [app("app-1", 2)]);
+    expect(pendingToShow([app("app-1", 2)], early)).toStrictEqual([]);
+    // A read after it: forgotten.
+    const after = stillMadeCurrent(early, [app("app-1", null)]);
+    expect([...after]).toStrictEqual([]);
+    // Rolled back and put up for review again: shown.
+    expect(
+      pendingToShow([app("app-1", 2)], after).map(
+        ({ pendingVersion }) => pendingVersion
+      )
+    ).toStrictEqual([2]);
   });
 
   it("labels what runs now, what would run after approval, and a file that would no longer run", () => {

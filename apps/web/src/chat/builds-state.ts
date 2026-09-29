@@ -60,6 +60,24 @@ export const versionKey = (app: string, version: number): string =>
   `${app}:${version}`;
 
 /**
+ * What the panel still remembers having made current, once a fresh read
+ * lists `apps`: only those still listed as pending (the read may predate
+ * the change). One no longer pending is forgotten, so the same version
+ * put up for review again later (after a rollback, say) shows again.
+ */
+export const stillMadeCurrent = (
+  madeCurrent: ReadonlySet<string>,
+  apps: readonly App[]
+): ReadonlySet<string> => {
+  const pending = new Set(
+    apps.flatMap(({ id, pendingVersion }) =>
+      pendingVersion === null ? [] : [versionKey(id, pendingVersion)]
+    )
+  );
+  return new Set([...madeCurrent].filter((key) => pending.has(key)));
+};
+
+/**
  * The Apps with a version up for review to show: all but those the panel
  * made current itself (`madeCurrent`, by `versionKey`), which go at once,
  * before the next read says so, whatever the agent is doing.
