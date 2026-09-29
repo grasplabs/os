@@ -89,8 +89,10 @@ const callsOf = async (agentId: string, count: number): Promise<AuditEvent[]> =>
     async () => {
       const events = await allEvents();
       const calls = events.filter(
-        ({ actor, action }) =>
+        ({ actor, action, detail }) =>
           action === "agent.call" &&
+          // Not the catalog each turn reads for its skills.
+          detail.turn !== true &&
           actor.type === "agent" &&
           actor.agentId === agentId
       );
