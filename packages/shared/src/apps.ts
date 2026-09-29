@@ -155,6 +155,41 @@ export type FileDiff =
   | { path: string; change: "deleted"; before: string }
   | { path: string; change: "modified"; before: string; after: string };
 
+/** How something differs from the current version. */
+export type ReviewChange = "added" | "modified" | "removed";
+
+/**
+ * What a version changes, as its reviewer reads it before making it
+ * current (`AppVersionsApi.review`): worked out by core from the version
+ * and the App as they are now, never written by whoever proposed it.
+ */
+export interface VersionReview {
+  version: AppVersion;
+  /** What it is compared with: the current version; null while none is. */
+  current: number | null;
+  /** Its files that differ from the current version's, by path. */
+  files: { path: string; change: ReviewChange }[];
+  /** Its workflows that differ from the current version's. */
+  workflows: {
+    id: string;
+    change: ReviewChange;
+    /**
+     * Its steps that differ, by name, and whether each changes something
+     * outside Grasp; null when the code can't be read as steps.
+     */
+    steps: { name: string; change: ReviewChange; sideEffect: boolean }[] | null;
+    /** Its parameters that differ, by name; null when they can't be read. */
+    params: { name: string; change: ReviewChange }[] | null;
+  }[];
+  /**
+   * What the App asks for that no admin has granted yet: each waits for
+   * an admin, whether the version is made current or not.
+   */
+  permissions: Permission[];
+  /** Its workflows' tests, run now: what making it current needs. */
+  tests: { status: "passed" | "failed" | "none"; failures: string[] };
+}
+
 /**
  * A problem a build found in an App's code: where it is, what found it,
  * how bad it is, and a fix when the check suggests one. What an agent
@@ -236,6 +271,11 @@ export interface AppVersionsApi {
   diff: (app: string, from: number, to: number) => Promise<FileDiff[]>;
   /** Puts a version up for review. */
   propose: (app: string, version: number) => Promise<App>;
+  /**
+   * What a version changes against the current one (`VersionReview`),
+   * for its builders to review before they make it current.
+   */
+  review: (app: string, version: number) => Promise<VersionReview>;
   /**
    * Makes a version the one that runs, after review or to roll back. By
    * anyone but one of the organization's admins (Grasp staff too, and a

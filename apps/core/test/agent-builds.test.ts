@@ -14,7 +14,6 @@ import { release, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { signedInApi } from "./sign-in.ts";
-import { workflowFiles } from "./workflow-apps.ts";
 
 // `env.build` in a chat's code: the chat's agent building Apps for its
 // person in a draft of its own, and repairing what its checks report.
@@ -48,11 +47,22 @@ const fixed = restyled.replace(
 );
 
 /** A workflow of the draft, with its tests. */
-const intake = workflowFiles(
-  "intake",
-  `  return await step.do("read", { description: "Read the invoice" }, async () => 1);`,
-  { read: 1 }
-);
+const intake = {
+  "workflows/intake.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow("intake", { params: {}, input: z.unknown() }, async (step, { input }) => {
+  return await step.do("read", { description: "Read the invoice" }, async () => input);
+});
+`,
+  "workflows/intake.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./intake.ts";
+
+export default workflowTests(definition, [
+  { name: "runs", mocks: { read: 1 }, events: [{ type: "go", payload: null }], expect: {} },
+]);
+`,
+};
 
 /** Code that finds the App the agent created, by its name, as `app`. */
 const findApp = `const [app] = (await env.apps.list()).filter(({ name }) => name === ${JSON.stringify(appName)});`;
@@ -146,6 +156,28 @@ const createdApp = async (
   }
   return app;
 };
+
+/** The invoices workflow, with a limit and, when `booked`, a booking. */
+const invoices = (limit: number, booked: boolean) => ({
+  "workflows/invoices.ts": `import { money, workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "invoices",
+  { input: z.unknown(), params: { limit: money({ label: "Limit", currency: "EUR", default: ${limit} }) } },
+  async (step, { params }) => {
+const limit = await step.do("limit", { description: "Read the limit" }, async () => params.limit);
+${booked ? `await step.do("book", { description: "Book it", sideEffect: true, input: { limit } }, async () => 1);` : ""}
+return limit;
+  }
+);
+`,
+  "workflows/invoices.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./invoices.ts";
+
+export default workflowTests(definition, [{ name: "runs", mocks: { limit: 1, book: 1 }, expect: { output: 1 } }]);
+`,
+});
 
 describe("building Apps from a chat", { timeout: 120_000 }, () => {
   it("repairs a restyled button without the person, in a draft nobody else sees, and puts nothing live", async () => {
@@ -636,5 +668,226 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       pending: false,
       failedInARow: 0,
     });
+  });
+
+  it("proposes a passing draft for review, and nothing goes live until a builder makes it current", async () => {
+    const { person, chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        const app = await env.build.create({ name: ${JSON.stringify(appName)} });
+        await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": fixed, ...intake })});
+        const permission = await env.build.requestPermission(app.id, {
+          object: { type: "connection", connectionId: "connection-outlook" },
+          actions: ["mail.list"],
+          binding: "INVOICES",
+        });
+        const proposal = await env.build.propose(app.id, "An invoice desk for invoices@");
+        const tried = async (call) => { try { await call(); return "done"; } catch (error) { return "refused"; } };
+        return {
+          permission: permission.status,
+          version: proposal.version,
+          passed: proposal.check.passed,
+          review: proposal.review,
+          // No way to make it current, under any name.
+          setCurrent: await tried(() => env.build.setCurrent(app.id, proposal.version)),
+          appsSetCurrent: await tried(() => env.apps.setCurrent(app.id, proposal.version)),
+          left: (await env.build.files(app.id)).changed,
+        };
+      };`),
+      says("Proposed: a builder makes it current."),
+    ]);
+    await grant();
+
+    await chat.ask("Build an invoice desk for invoices@");
+
+    const [result] = await codeResults(chat.stub, chat.chat.id);
+    const app = await createdApp(person.api);
+    const review = await person.api.apps.versions.review(app.id, 1);
+    expect(returned(result?.text)).toStrictEqual({
+      permission: "requested",
+      version: 1,
+      passed: true,
+      review: structuredClone(review),
+      setCurrent: "refused",
+      appsSetCurrent: "refused",
+      left: [],
+    });
+    expect(review).toMatchObject({
+      version: { version: 1, parent: null, author: person.userId },
+      current: null,
+      files: [
+        { path: "screens/desk.tsx", change: "added" },
+        { path: "workflows/intake.ts", change: "added" },
+        { path: "workflows/intake.workflow-tests.ts", change: "added" },
+      ],
+      workflows: [
+        {
+          id: "intake",
+          change: "added",
+          steps: [{ name: "read", change: "added", sideEffect: false }],
+          params: [],
+        },
+      ],
+      permissions: [
+        {
+          subject: { type: "app", appId: app.id },
+          binding: "INVOICES",
+          status: "requested",
+        },
+      ],
+      tests: { status: "passed", failures: [] },
+    });
+    // Pending, not live, until a builder makes it current.
+    await expect(createdApp(person.api)).resolves.toMatchObject({
+      currentVersion: null,
+      pendingVersion: 1,
+    });
+    await expect(
+      person.api.apps.versions.setCurrent(app.id, 1)
+    ).resolves.toMatchObject({ currentVersion: 1, pendingVersion: null });
+    // Committed and proposed by the agent, acting for the person.
+    await vi.waitFor(
+      async () => {
+        const events = await allEvents();
+        const actors = Object.fromEntries(
+          events
+            .filter(({ target }) => target?.id === app.id)
+            .map(({ action, actor }) => [action, actor])
+        );
+        const agent = {
+          type: "agent",
+          agentId: chat.agent.agentId,
+          onBehalfOf: person.userId,
+        };
+        expect(actors).toMatchObject({
+          "app.committed": agent,
+          "app.version.proposed": agent,
+          "app.version.current": { type: "person", userId: person.userId },
+        });
+      },
+      { timeout: 10_000, interval: 50 }
+    );
+  });
+
+  it("proposes nothing that fails its checks", async () => {
+    const { person, chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        const app = await env.build.create({ name: ${JSON.stringify(appName)} });
+        await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": restyled })});
+        const proposal = await env.build.propose(app.id, "A desk");
+        return { version: proposal.version, passed: proposal.check.passed, review: proposal.review };
+      };`),
+      says("It doesn't pass yet."),
+    ]);
+    await grant();
+
+    await chat.ask("Build an invoice desk");
+
+    const [result] = await codeResults(chat.stub, chat.chat.id);
+    expect(returned(result?.text)).toStrictEqual({
+      version: null,
+      passed: false,
+      review: null,
+    });
+    const app = await createdApp(person.api);
+    expect({
+      app,
+      versions: await person.api.apps.versions.list(app.id),
+    }).toMatchObject({ app: { pendingVersion: null }, versions: [] });
+  });
+
+  it("proposes over what builders committed since, and never undoes it", async () => {
+    const ledger = `const [app] = (await env.apps.list()).filter(({ name }) => name === "Ledger");`;
+    const propose = `export default async (env) => {
+      ${ledger}
+      try {
+        return (await env.build.propose(app.id, "Notes")).version;
+      } catch (error) {
+        return error.message;
+      }
+    };`;
+    const { builder, existing, chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        ${ledger}
+        await env.build.write(app.id, { "notes.md": "the agent's", "AGENTS.md": "# Ledger, by the agent\\n" });
+      };`),
+      says("Written."),
+      codeStep(propose),
+      says("Someone changed it meanwhile."),
+      codeStep(`export default async (env) => {
+        ${ledger}
+        await env.build.write(app.id, { "AGENTS.md": "# Ledger\\n\\nWith notes.\\n" });
+      };`),
+      codeStep(propose),
+      says("Proposed."),
+    ]);
+    await grant();
+
+    await chat.ask("Add notes to the Ledger");
+    // A builder commits a change to a file the draft changes too, and one
+    // to a file it doesn't.
+    await release(builder, existing, {
+      "AGENTS.md": "# Ledger\n\nWith notes.\n",
+      "board.md": "the builder's",
+    });
+    await chat.ask("Propose it");
+    await chat.ask("Take theirs, and propose again");
+
+    const results = await codeResults(chat.stub, chat.chat.id);
+    expect(results[1]?.text).toBe(
+      `Returned:\n${appErrors.create("app.conflict").message}`
+    );
+    expect(returned(results[3]?.text)).toBe(3);
+    await expect(
+      builder.api.apps.files.read(existing, 3)
+    ).resolves.toStrictEqual({
+      "AGENTS.md": "# Ledger\n\nWith notes.\n",
+      "board.md": "the builder's",
+      "notes.md": "the agent's",
+    });
+  });
+
+  it("reviews what a version changes against the current one, for its builders only", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const user = await signedInApi(idp, "user");
+    const { id: app } = await builder.api.apps.create({ name: "Invoices" });
+    await release(builder, app, {
+      ...invoices(500, false),
+      "notes.md": "old",
+    });
+    await builder.api.apps.files.write(app, {
+      ...invoices(900, true),
+      "notes.md": null,
+    });
+    const { version } = await builder.api.apps.files.commit(app, "Book them");
+
+    const review = await builder.api.apps.versions.review(app, version);
+
+    expect(review).toMatchObject({
+      version: { version: 2, parent: 1, message: "Book them" },
+      current: 1,
+      files: [
+        { path: "notes.md", change: "removed" },
+        { path: "workflows/invoices.ts", change: "modified" },
+      ],
+      workflows: [
+        {
+          id: "invoices",
+          change: "modified",
+          steps: [{ name: "book", change: "added", sideEffect: true }],
+          params: [{ name: "limit", change: "modified" }],
+        },
+      ],
+      permissions: [],
+      tests: { status: "passed", failures: [] },
+    });
+    // Someone who uses its screens, but doesn't build it.
+    await builder.api.apps.members.add(app, {
+      type: "person",
+      id: user.userId,
+      role: "user",
+    });
+    await expect(user.api.apps.versions.review(app, version)).rejects.toThrow(
+      roleErrors.create("role.forbidden").message
+    );
   });
 });

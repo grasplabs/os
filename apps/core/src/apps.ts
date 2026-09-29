@@ -17,11 +17,7 @@ import type {
   CommittedVersion,
   FileDiff,
 } from "@grasp-os/shared/apps";
-import type {
-  AuditActor,
-  AuditDetailValue,
-  AuditEntry,
-} from "@grasp-os/shared/audit";
+import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
 import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 import { appIdSchema } from "@grasp-os/shared/ids";
@@ -44,7 +40,7 @@ import {
   outboxedIfChanged,
   storedEvent,
 } from "./audit-outbox.ts";
-import type { Member } from "./auth/identity.ts";
+import type { Acting, Member } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
@@ -126,16 +122,9 @@ export const toVersion = (row: VersionRow): AppVersion => ({
   createdAt: row.createdAt.toISOString(),
 });
 
-/**
- * Who changes an App: a person, or the chat's agent acting for them
- * (agent-builds.ts) with the person's role and rights, as `actor`, the
- * audit log's name for it.
- */
-export type AppChanger = Member & { actor?: AuditActor };
-
 /** The audit entry of a change to `app` by `by`: identifiers only. */
 export const changeEntry = (
-  by: Pick<AppChanger, "userId" | "staff" | "actor">,
+  by: Pick<Acting, "userId" | "staff" | "actor">,
   action:
     | "app.created"
     | "app.committed"
@@ -426,7 +415,7 @@ export const versionFiles = async (
 /** Creates an App, with no versions yet. */
 export const createApp = async (
   env: Env,
-  by: AppChanger,
+  by: Acting,
   input: unknown
 ): Promise<App> => {
   requireBuilder(by);
@@ -736,6 +725,140 @@ export const commitFiles = async (
   };
 };
 
+/** A chat's draft of an App (agent-builds.ts), as a commit takes it. */
+export interface DraftChanges {
+  /** The version it began over; null for an App that had none. */
+  base: number | null;
+  /** New content by path, or null to delete a file. */
+  changes: Record<string, string | null>;
+}
+
+/** The files a draft commits, and the version they follow. */
+export interface DraftOverLatest {
+  parent: number | null;
+  files: Map<string, string>;
+}
+
+/**
+ * A chat's draft over the App's latest version: its changes over its base
+ * while that is still the latest; otherwise over the latest, only if no
+ * version since changed a path the draft changes (to other content):
+ * `app.conflict` naming them, when one did. So a draft never undoes what
+ * a builder committed after it began.
+ */
+export const draftOverLatest = async (
+  env: Env,
+  app: AppId,
+  { base, changes }: DraftChanges
+): Promise<DraftOverLatest> => {
+  const db = drizzle(env.DB);
+  const latest = await db
+    .select()
+    .from(appVersions)
+    .where(eq(appVersions.appId, app))
+    .orderBy(desc(appVersions.version))
+    .limit(1)
+    .get();
+  const files = latest
+    ? await readTree(env, app, latest.tree)
+    : new Map<string, string>();
+  const parent = latest?.version ?? null;
+  if (parent !== base) {
+    const baseRow =
+      base === null ? undefined : await findVersion(env, app, base);
+    const before =
+      baseRow === undefined
+        ? new Map<string, string>()
+        : await readTree(env, app, baseRow.tree);
+    const clashes = Object.entries(changes).flatMap(([path, content]) =>
+      before.get(path) !== files.get(path) &&
+      (content ?? undefined) !== files.get(path)
+        ? [`${path}: Changed in a version committed since this draft began`]
+        : []
+    );
+    if (clashes.length > 0) {
+      throw appErrors.create("app.conflict", { issues: clashes.toSorted() });
+    }
+  }
+  for (const [path, content] of Object.entries(changes)) {
+    if (content === null) {
+      files.delete(path);
+    } else {
+      files.set(path, content);
+    }
+  }
+  return { parent, files };
+};
+
+/**
+ * Commits a chat's draft (`draftOverLatest`) as the App's next version,
+ * by `by` (the chat's agent, acting for its person) with `message`, and
+ * builds it as a save does. Builders' working copy stays as it is: as
+ * after any commit, it is the new latest version with their changes over
+ * it. A version committed meanwhile takes the number: `app.conflict`.
+ */
+export const commitDraft = async (
+  env: Env,
+  by: Acting,
+  app: unknown,
+  { parent, files }: DraftOverLatest,
+  message: unknown
+): Promise<CommittedVersion> => {
+  const { id: appId } = await appFor(env, by, app, "builder");
+  const text = appErrors.parse("app.invalid", commitMessageSchema, message);
+  const { tree, json } = await versionTree(files);
+  const latest =
+    parent === null ? undefined : await findVersion(env, appId, parent);
+  if (tree === latest?.tree) {
+    throw appErrors.create("app.nothing_to_commit");
+  }
+  const exported = exportsIn(files);
+  await storeTree(env, appId, { tree, json });
+  const row: VersionRow = {
+    appId,
+    version: (parent ?? 0) + 1,
+    parent,
+    tree,
+    files: files.size,
+    authorId: by.userId,
+    message: text,
+    createdAt: new Date(),
+    approved: null,
+    workflows: workflowsIn(files),
+    exports: exported,
+  };
+  const db = drizzle(env.DB);
+  try {
+    await auditedBatch(env, db, [
+      db.insert(appVersions).values(row),
+      outboxed(
+        db,
+        changeEntry(by, "app.committed", appId, {
+          version: row.version,
+          parent,
+          tree,
+          files: row.files,
+        })
+      ),
+    ]);
+  } catch (error) {
+    if (isUniqueViolation(error)) {
+      throw appErrors.create("app.conflict");
+    }
+    throw error;
+  }
+  return {
+    ...toVersion(row),
+    builds: featureEnabled(env, "build_on_save")
+      ? await buildOnSave(env, {
+          app: appId,
+          version: row.version,
+          files: Object.fromEntries(files),
+        })
+      : notBuiltOnSave,
+  };
+};
+
 /** An App's versions, newest first, a page at a time. */
 export const listVersions = async (
   env: Env,
@@ -805,7 +928,7 @@ export const diffVersions = async (
 /** Puts a version up for review. The current version can't be. */
 export const proposeVersion = async (
   env: Env,
-  by: AppChanger,
+  by: Acting,
   app: unknown,
   version: unknown
 ): Promise<App> => {

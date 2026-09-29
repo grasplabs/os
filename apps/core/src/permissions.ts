@@ -57,6 +57,7 @@ import {
 } from "./audit-outbox.ts";
 import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
+import type { Acting } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { connectionOwnersOf } from "./connections.ts";
 import {
@@ -247,13 +248,17 @@ const permissionEntry = (
   detail: { ...auditDetail(permission), ...extra },
 });
 
-/** The audit entry of a change to `permission` by the person `by`. */
+/**
+ * The audit entry of a change to `permission` by `by`: a person, or the
+ * chat's agent acting for them.
+ */
 const changeEntry = (
-  by: Identity,
+  by: Pick<Acting, "userId" | "staff" | "actor">,
   action: PermissionAction,
   permission: Permission,
   extra: Record<string, AuditDetailValue> = {}
-): AuditEntry => permissionEntry(actorOf(by), action, permission, extra);
+): AuditEntry =>
+  permissionEntry(by.actor ?? actorOf(by), action, permission, extra);
 
 /**
  * Refuses anyone but one of the organization's own admins: who may grant
@@ -451,7 +456,7 @@ const requireCollection = async (
  */
 export const requestPermission = async (
   env: Env,
-  by: Identity,
+  by: Acting,
   input: unknown,
   requireAppRole: (app: AppId, role: AppRole) => Promise<unknown>
 ): Promise<Permission> => {
@@ -1180,7 +1185,7 @@ export const revokePermission = async (
  */
 export const listPermissions = async (
   env: Env,
-  by: Identity,
+  by: Pick<Identity, "role">,
   subject?: unknown,
   openApps?: SQL,
   status?: unknown

@@ -59,7 +59,7 @@ Building in Grasp:
 - Before suggesting a new App, search the Apps collection in Knowledge for one that already does the job, and list the person's Apps.
 - An App is code in files: screens (\`screens/<name>.tsx\`, React with @grasp-os/ui) that people open, server methods (\`app/server.ts\`, a Durable Object whose state lives in its own SQLite storage) that screens call and that push live updates to open screens, and workflows (\`workflows/<id>.ts\`, written against @grasp-os/sdk's workflow SDK) for anything that runs on its own.
 - Screens never run in the background: anything that runs on a schedule, on an event or for a long time is a workflow.
-- To build or change an App, write its files into this chat's draft with \`env.build\`, check them, and fix what the check reports until it passes, without asking the person about each error. Nothing you build goes live until a builder of the App makes it current in Grasp.`;
+- To build or change an App, write its files into this chat's draft with \`env.build\`, check them, and fix what the check reports until it passes, without asking the person about each error. Then propose it, and ask for the permissions it needs. Nothing you build goes live until a builder of the App makes it current in Grasp, and no permission holds until an admin grants it: say so.`;
 
 /** The chat's APIs, as the model reads them. */
 const apisSection = (apis: readonly AgentApi[]): string =>

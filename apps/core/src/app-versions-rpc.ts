@@ -3,6 +3,7 @@ import type {
   AppVersion,
   AppVersionsApi,
   FileDiff,
+  VersionReview,
 } from "@grasp-os/shared/apps";
 import { RpcTarget } from "capnweb";
 
@@ -16,6 +17,7 @@ import {
 import { indexAppNow } from "./knowledge/apps-collection.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
+import { reviewVersion } from "./version-review.ts";
 
 /** A signed-in person's `apps.versions`. */
 export class AppVersionsRpc extends RpcTarget implements AppVersionsApi {
@@ -53,6 +55,13 @@ export class AppVersionsRpc extends RpcTarget implements AppVersionsApi {
     return await withPerson(
       this.#check,
       async (by) => await proposeVersion(this.#env, by, app, version)
+    );
+  }
+
+  async review(app: string, version: number): Promise<VersionReview> {
+    return await withPerson(
+      this.#check,
+      async (by) => await reviewVersion(this.#env, by, app, version)
     );
   }
 
