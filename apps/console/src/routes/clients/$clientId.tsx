@@ -1,0 +1,225 @@
+import { newClientIdSchema } from "@grasp-os/shared/router";
+import { Badge } from "@grasp-os/ui/components/badge";
+import { Button } from "@grasp-os/ui/components/button";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@grasp-os/ui/components/card";
+import { createFileRoute, notFound, useRouter } from "@tanstack/react-router";
+import { useEffect } from "react";
+
+import {
+  confirmClientWorkersPaid,
+  fetchProvisioning,
+  retryClient,
+} from "../../provision/functions.ts";
+import type { ProvisioningView } from "../../provision/queries.ts";
+import { useAction } from "../../provision/use-action.ts";
+import { formatTime } from "../../releases/format.ts";
+
+/** How often the page reads the run again while it's working on its own. */
+const refreshMs = 5000;
+
+const dashboard = (accountId: string): string =>
+  `https://dash.cloudflare.com/${accountId}`;
+
+const Facts = ({ view }: { view: ProvisioningView }) => {
+  const facts: [string, string][] = [
+    ["Hostname", view.hostname ?? "no CLIENT_DOMAIN set"],
+    ["Cloudflare account", view.client?.accountId ?? "not yet"],
+    ["Ring", view.client === null ? "" : String(view.client.ring)],
+    ["Release", view.deploy?.releaseId ?? "not deployed yet"],
+    ["Created by", view.client?.createdBy ?? ""],
+    [
+      "Created (UTC)",
+      view.client === null ? "" : formatTime(view.client.createdAt),
+    ],
+  ];
+  return (
+    <dl className="flex flex-col gap-1 text-sm">
+      {facts.map(([term, value]) => (
+        <div key={term} className="flex flex-wrap gap-x-4">
+          <dt className="text-muted-foreground w-48">{term}</dt>
+          <dd className="font-mono break-all">{value}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+};
+
+/** What staff do while the run waits for Workers Paid. */
+const WorkersPaid = ({ view }: { view: ProvisioningView }) => {
+  const router = useRouter();
+  const { busy, failure, run } = useAction();
+  const accountId = view.client?.accountId ?? "";
+  const confirm = () => {
+    void run(async () => {
+      await confirmClientWorkersPaid({ data: { clientId: view.clientId } });
+      await router.invalidate({ sync: true });
+    });
+  };
+  return (
+    <div className="flex flex-col gap-4">
+      <ol className="flex list-decimal flex-col gap-2 pl-5 text-sm">
+        <li>
+          <a
+            href={dashboard(accountId)}
+            target="_blank"
+            rel="noopener noreferrer"
+            className="underline underline-offset-4"
+          >
+            Open the account in the Cloudflare dashboard
+          </a>{" "}
+          and upgrade it to Workers Paid.
+        </li>
+        <li>Turn on R2 in the same account: the deploy creates buckets.</li>
+        <li>Confirm below; the deploy starts at once.</li>
+      </ol>
+      <div className="flex items-center gap-4">
+        <Button disabled={busy} onClick={confirm}>
+          Workers Paid is on
+        </Button>
+        {failure === null ? null : (
+          <p role="alert" className="text-destructive text-sm">
+            {failure}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+};
+
+/** Why the run stopped, and resuming it. */
+const Failed = ({ view }: { view: ProvisioningView }) => {
+  const router = useRouter();
+  const { busy, failure, run } = useAction();
+  const retry = () => {
+    void run(async () => {
+      await retryClient({ data: { clientId: view.clientId } });
+      await router.invalidate({ sync: true });
+    });
+  };
+  return (
+    <div className="flex flex-col gap-4 text-sm">
+      <p>
+        The run stopped
+        {view.deploy?.error === null || view.deploy === null
+          ? ""
+          : ` while deploying (${view.deploy.error})`}
+        : {view.run?.error ?? "no reason given"}
+      </p>
+      <p className="text-muted-foreground">
+        Fix what it says, then resume: it picks up from the deploy if it got
+        that far, and makes nothing twice.
+      </p>
+      <div className="flex items-center gap-4">
+        <Button disabled={busy} onClick={retry}>
+          Resume
+        </Button>
+        {failure === null ? null : (
+          <p role="alert" className="text-destructive">
+            {failure}
+          </p>
+        )}
+      </div>
+    </div>
+  );
+};
+
+const Progress = ({ view }: { view: ProvisioningView }) => {
+  switch (view.phase) {
+    case "account": {
+      return (
+        <p className="text-sm">Creating or reading the Cloudflare account.</p>
+      );
+    }
+    case "workers_paid": {
+      return <WorkersPaid view={view} />;
+    }
+    case "deploying": {
+      return (
+        <p className="text-sm">
+          {`Deploying ${view.deploy?.releaseId ?? "the release"}: ${
+            view.deploy?.step === null || view.deploy === null
+              ? "starting"
+              : `${view.deploy.step} done`
+          }.`}
+        </p>
+      );
+    }
+    case "failed": {
+      return <Failed view={view} />;
+    }
+    case "active": {
+      return (
+        <p className="text-sm">
+          {`Live at https://${view.hostname ?? ""}, and passed its smoke check.`}
+        </p>
+      );
+    }
+    default: {
+      return null;
+    }
+  }
+};
+
+/** Phases the run moves through on its own, which the page follows. */
+const working: ReadonlySet<ProvisioningView["phase"]> = new Set([
+  "account",
+  "deploying",
+]);
+
+const Client = () => {
+  const view = Route.useLoaderData();
+  const router = useRouter();
+  const following = working.has(view.phase);
+  useEffect(() => {
+    const timer = following
+      ? setInterval(() => {
+          void router.invalidate();
+        }, refreshMs)
+      : undefined;
+    return () => {
+      clearInterval(timer);
+    };
+  }, [following, router]);
+  return (
+    <main className="flex max-w-3xl flex-col gap-6 p-6">
+      <div className="flex flex-wrap items-center gap-4">
+        <h1 className="text-2xl font-medium">
+          {view.client?.name ?? view.clientId}
+        </h1>
+        <Badge variant={view.phase === "failed" ? "destructive" : "secondary"}>
+          {view.client?.status ?? "provisioning"}
+        </Badge>
+      </div>
+      <Facts view={view} />
+      <Card>
+        <CardHeader>
+          <CardTitle>Provisioning</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <Progress view={view} />
+        </CardContent>
+      </Card>
+    </main>
+  );
+};
+
+export const Route = createFileRoute("/clients/$clientId")({
+  loader: async ({ params }) => {
+    if (!newClientIdSchema.safeParse(params.clientId).success) {
+      throw notFound();
+    }
+    const view = await fetchProvisioning({
+      data: { clientId: params.clientId },
+    });
+    if (view === null) {
+      throw notFound();
+    }
+    return view;
+  },
+  component: Client,
+});
