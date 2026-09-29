@@ -236,9 +236,10 @@ export class PreviewReports {
 
   /**
    * How the preview of the draft of `app` at `revision` ran: waiting up
-   * to `waitMs`, while the person has it open, for it to report, and past
-   * rendering until it settles. Out of time, a preview that rendered with
-   * no problem yet passes.
+   * to `waitMs`, while the person has it open, for it to report. A
+   * preview that rendered is waited on until it settles, even past
+   * `waitMs` (at most {@link settleMs} after it rendered): it never
+   * passes before, so an error in that window still fails it.
    */
   async outcome(
     chatId: ChatId,
@@ -259,17 +260,22 @@ export class PreviewReports {
         if (now.status !== "unseen") {
           return now;
         }
-        if (limit.signal.aborted || (!open && settlesAt === undefined)) {
-          return settlesAt === undefined ? now : { ...now, status: "passed" };
+        // Rendered and settling: waited out whatever the deadline, as it
+        // ends within `settleMs` of rendering; never passed before.
+        if (settlesAt !== undefined) {
+          // oxlint-disable-next-line no-await-in-loop -- until it settles, or reports again
+          await Promise.race([
+            (reports ?? this.#waitFor(key)).next.promise,
+            scheduler.wait(Math.max(0, settlesAt - Date.now())),
+          ]);
+          continue;
         }
-        const settled =
-          settlesAt === undefined
-            ? []
-            : [scheduler.wait(Math.max(0, settlesAt - Date.now()))];
-        // oxlint-disable-next-line no-await-in-loop -- until it reports or settles, or the wait ends
+        if (limit.signal.aborted || !open) {
+          return now;
+        }
+        // oxlint-disable-next-line no-await-in-loop -- until it reports, or the wait ends
         await Promise.race([
           (reports ?? this.#waitFor(key)).next.promise,
-          ...settled,
           whenAborted(limit.signal),
         ]).catch(() => {
           // The wait ended: answered as it is now, above.

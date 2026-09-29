@@ -91,8 +91,11 @@ export class Previews {
    * `app` at its revision, with `args`, for `personId`, whom the chat is
    * theirs: answers as an App's call does (`App.call`), with `app.failed`
    * for an error of the draft's code, and `app.timed_out` for a call that
-   * isn't answered in time. `ran.refused` says, once it ended, whether a
-   * stub of the preview refused a call of it (`refused`).
+   * isn't answered in time. `ran.refused` says, once it ended, whether it
+   * failed for a refusal: a stub of the preview refused a call of it
+   * (`refused`), and the error the draft's code let out is that
+   * refusal's (`app.preview_side_effect`), passed on. Any other error, a
+   * TypeError after a refusal it caught say, is the draft's.
    */
   async call(
     chatId: ChatId,
@@ -110,6 +113,7 @@ export class Previews {
     const call = { name, refused: false };
     this.#calls.set(token, call);
     let running: Running | undefined;
+    let passedOn = false;
     try {
       // Starting the code counts against the call's time, as for an App.
       const started = await Promise.race([
@@ -124,7 +128,10 @@ export class Previews {
           // this call, for what they refuse of it (`refused`).
           { userId: personId, mode: "interactive", token },
           args,
-          { app, version: null, method }
+          { app, version: null, method },
+          (error) => {
+            passedOn = appErrors.codeOf(error) === "app.preview_side_effect";
+          }
         ),
         whenAborted(limit.signal),
       ]);
@@ -141,7 +148,7 @@ export class Previews {
     } finally {
       limit.clear();
       this.#calls.delete(token);
-      ran.refused = call.refused;
+      ran.refused = call.refused && passedOn;
     }
   }
 

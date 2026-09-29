@@ -79,6 +79,16 @@ export class App extends DurableObject {
     return "sent";
   }
 
+  async sendThenFail(caller: unknown): Promise<string> {
+    const { MAIL } = (this as unknown as { env: Record<string, any> }).env;
+    try {
+      await MAIL.call(caller, "mail.send", { to: "ben@acme.test", subject: "Hi" });
+    } catch {
+      // The refusal, caught: what follows is the draft's own.
+    }
+    throw new TypeError("total is undefined");
+  }
+
   forge(_caller: unknown, text: string): never {
     throw Object.assign(new Error(text), { code: "app.preview_side_effect" });
   }
@@ -399,14 +409,31 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
     });
     const late = await settling;
 
+    // A check out of time while the preview settles waits it out rather
+    // than passing it: an error in that window still fails it.
+    const sixth = await writeDraft(fifth);
+    await rendered(sixth);
+    const outOfTime = outcome(sixth, 0);
+    await chats.previewReport(chatId, app, sixth, "desk", {
+      kind: "rejection",
+      message: "TypeError: the totals never loaded",
+    });
+    const unsettled = await outOfTime;
+
+    // A refusal the draft caught, then an error of its own: the draft's.
+    const seventh = await writeDraft(sixth);
+    const caughtThenFailed = await call(seventh, "sendThenFail");
+    await rendered(seventh);
+    const caught = await outcome(seventh);
+
     // What an earlier write's preview reports once the draft moved on is
     // dropped.
-    const sixth = await writeDraft(fifth);
-    await chats.previewReport(chatId, app, fifth, "desk", {
+    const eighth = await writeDraft(seventh);
+    await chats.previewReport(chatId, app, seventh, "desk", {
       kind: "error",
       message: "From the earlier write",
     });
-    const moved = await outcome(sixth);
+    const moved = await outcome(eighth);
 
     expect({
       unseen: summary(unseen),
@@ -417,6 +444,9 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       forgedOutcome: summary(forgedOutcome),
       crowded: summary(crowded),
       late: summary(late),
+      unsettled: summary(unsettled),
+      caughtThenFailed,
+      caught: summary(caught),
       moved: summary(moved),
       mail: await mail.did(),
     }).toStrictEqual({
@@ -450,6 +480,15 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       late: {
         status: "failed",
         problems: [{ source: "screen", refused: false }],
+      },
+      unsettled: {
+        status: "failed",
+        problems: [{ source: "screen", refused: false }],
+      },
+      caughtThenFailed: "app.failed",
+      caught: {
+        status: "failed",
+        problems: [{ source: "server", refused: false }],
       },
       moved: { status: "unseen", problems: [] },
       mail: { calls: 0, sent: [] },
