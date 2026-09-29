@@ -1,6 +1,6 @@
 {
-  "name": "Workflow map",
-  "description": "Draws the company's workflows as steps with numbers, designs how they should run, and shows the hours each would save. Its workflows live in the Playbook.",
+  "name": "Intake",
+  "description": "Turns what people say about their work into the statements a baseline rests on: each a claim from a source, tagged as a goal, a blocker, a time sink, a handover, a tool or a rule. Statements are reviewed and edited before they are saved to the Playbook.",
   "collections": [
     {
       "id": "playbook",

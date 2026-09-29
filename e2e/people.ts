@@ -124,6 +124,7 @@ const cast = {
   knowledgeReader: { admin: "admin", reader: "user" },
   workflowMap: { admin: "admin", reader: "user" },
   boardPage: { admin: "admin" },
+  intake: { admin: "admin" },
   models: { admin: "admin", builder: "builder" },
   workflows: { builder: "builder", user: "user" },
   activity: { admin: "admin", builder: "builder" },

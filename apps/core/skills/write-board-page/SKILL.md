@@ -13,7 +13,7 @@ One page a board member reads in two minutes. Every claim comes from the Playboo
 2. **What changed.** Workflows designed or built since the last snapshot, with the hours a week they save. A snapshot the board page took has `figures`: each workflow's hours `drawn`, `designed`, and `running` (its designed steps at the runs a week observed). Use those numbers as they are, frozen when it was taken. Elsewhere use their `gain.hoursPerWeek`, and their steps' `observed` numbers where there are any. Say plainly which are estimates.
 3. **The plan.** What the plan's notes (under `plan/`) say is under way, and what comes next, each with its due date. Name any that slipped.
 4. **Decisions needed.** The snapshot's `decisionNeeded`, and `decision` records that are `proposed`, each in one sentence with the choice it asks for.
-5. **Risks.** Blockers from the statements (under `statements/`) that the plan doesn't address yet, and the snapshot's improvement signals (`figures.signals`) that are high.
+5. **Risks.** `statement` records tagged `blocker` that the plan doesn't address yet, and the snapshot's improvement signals (`figures.signals`) that are high.
 
 ## Where it goes
 

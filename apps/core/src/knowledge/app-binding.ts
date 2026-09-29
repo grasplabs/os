@@ -18,6 +18,7 @@ import { callerOf } from "../app-bindings.ts";
 import { forSandbox } from "../bindings.ts";
 import { collectionReads, readAsDelegate } from "./binding.ts";
 import type { CollectionGrant } from "./binding.ts";
+import { declaredTypes } from "./record-types.ts";
 import {
   canWriteAsDelegate,
   getRecord,
@@ -183,6 +184,28 @@ export class AppCollectionBinding extends WorkerEntrypoint<
           collectionId
         )
     );
+  }
+
+  /**
+   * The record types this App owns in the collection now, of those it
+   * declares there (record-types.ts): only the owner's saves may set a
+   * type's kept fields, so an App checks it owns the types it is about to
+   * write before it starts a write of several records. None while
+   * `record_types` is off. A hint, like `canWrite`: each save is checked
+   * again.
+   */
+  async ownedTypes(caller: unknown): Promise<string[]> {
+    const { app, collectionId } = this.ctx.props;
+    try {
+      await callerOf(this.env, app, caller);
+      const declared = await declaredTypes(this.env, collectionId);
+      return [...declared]
+        .filter(([, rule]) => rule.app === app)
+        .map(([type]) => type)
+        .toSorted();
+    } catch (error) {
+      throw forSandbox(error);
+    }
   }
 
   /**
