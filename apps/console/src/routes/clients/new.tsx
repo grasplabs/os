@@ -39,7 +39,7 @@ const NewClient = () => {
   const start = (form: FormData) => {
     const accountId = textOf(form, "accountId");
     void run(async () => {
-      const clientId = await startClient({
+      const result = await startClient({
         data: {
           clientId: textOf(form, "clientId"),
           name: textOf(form, "name"),
@@ -48,7 +48,13 @@ const NewClient = () => {
           ...(accountId === "" ? {} : { accountId }),
         },
       });
-      await navigate({ to: "/clients/$clientId", params: { clientId } });
+      if (result.clientId !== null) {
+        await navigate({
+          to: "/clients/$clientId",
+          params: { clientId: result.clientId },
+        });
+      }
+      return result;
     });
   };
   const [newest] = releases;

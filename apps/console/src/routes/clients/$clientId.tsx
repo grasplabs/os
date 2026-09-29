@@ -7,7 +7,12 @@ import {
   CardHeader,
   CardTitle,
 } from "@grasp-os/ui/components/card";
-import { createFileRoute, notFound, useRouter } from "@tanstack/react-router";
+import {
+  createFileRoute,
+  Link,
+  notFound,
+  useRouter,
+} from "@tanstack/react-router";
 import { useEffect } from "react";
 
 import {
@@ -56,8 +61,11 @@ const WorkersPaid = ({ view }: { view: ProvisioningView }) => {
   const accountId = view.client?.accountId ?? "";
   const confirm = () => {
     void run(async () => {
-      await confirmClientWorkersPaid({ data: { clientId: view.clientId } });
+      const result = await confirmClientWorkersPaid({
+        data: { clientId: view.clientId },
+      });
       await router.invalidate({ sync: true });
+      return result;
     });
   };
   return (
@@ -97,19 +105,39 @@ const Failed = ({ view }: { view: ProvisioningView }) => {
   const { busy, failure, run } = useAction();
   const retry = () => {
     void run(async () => {
-      await retryClient({ data: { clientId: view.clientId } });
+      const result = await retryClient({ data: { clientId: view.clientId } });
       await router.invalidate({ sync: true });
+      return result;
     });
   };
+  if (view.client === null) {
+    // It stopped before it recorded the client: nothing to resume.
+    return (
+      <div className="flex flex-col gap-4 text-sm">
+        <p>{`The run stopped: ${view.stopped?.error ?? "before it recorded the client"}.`}</p>
+        <p className="text-muted-foreground">
+          Fix what it says, or pick another account, and{" "}
+          <Link to="/clients/new" className="underline underline-offset-4">
+            start again
+          </Link>{" "}
+          with the same client id.
+        </p>
+      </div>
+    );
+  }
+  let reason = "its run is gone (Workflows keeps a run for a while only)";
+  if (view.stopped !== null) {
+    reason = `${view.stopped.step} step: ${view.stopped.error}`;
+  } else if (view.run !== null) {
+    reason = `it failed after its retries${
+      view.deploy === null || view.deploy.error === null
+        ? ""
+        : ` (${view.deploy.error})`
+    }`;
+  }
   return (
     <div className="flex flex-col gap-4 text-sm">
-      <p>
-        The run stopped
-        {view.deploy?.error === null || view.deploy === null
-          ? ""
-          : ` while deploying (${view.deploy.error})`}
-        : {view.run?.error ?? "no reason given"}
-      </p>
+      <p>{`The run stopped: ${reason}.`}</p>
       <p className="text-muted-foreground">
         Fix what it says, then resume: it picks up from the deploy if it got
         that far, and makes nothing twice.
@@ -165,9 +193,13 @@ const Progress = ({ view }: { view: ProvisioningView }) => {
   }
 };
 
-/** Phases the run moves through on its own, which the page follows. */
+/**
+ * Phases the page follows, since they move on without the page: the run
+ * works on its own, or (Workers Paid) goes on once staff confirm.
+ */
 const working: ReadonlySet<ProvisioningView["phase"]> = new Set([
   "account",
+  "workers_paid",
   "deploying",
 ]);
 
