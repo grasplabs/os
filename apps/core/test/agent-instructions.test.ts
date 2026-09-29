@@ -1,11 +1,15 @@
+import { collectionIdSchema, documentIdSchema } from "@grasp-os/shared/ids";
 import { permissionErrors } from "@grasp-os/shared/permissions";
+import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { noteListedSkills } from "../src/knowledge/tools.ts";
 import { chatOf, codeResults, codeStep, says } from "./agent-chat.ts";
 import { requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
+import { actingFor } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
-import { readCollection } from "./knowledge.ts";
+import { newTeam, readCollection } from "./knowledge.ts";
 import { signedInApi, unique } from "./sign-in.ts";
 
 // What a chat's agent reads before each question, and what its answer is
@@ -104,6 +108,129 @@ describe("a chat's instructions and memory", setUpTime, () => {
       first: [true, true, true, false],
       third: [true, true, true],
       unchanged: true,
+    });
+  });
+
+  it("carry the collections whose skills the prompt lists as the chat's sources, and only those", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
+    const [withSkill, withoutSkill] = await Promise.all(
+      ["Skills", "Notes"].map(
+        async (name) =>
+          await admin.api.knowledge.createCollection({
+            name: `${name} ${unique()}`,
+            access: "everyone",
+          })
+      )
+    );
+    if (withSkill === undefined || withoutSkill === undefined) {
+      throw new Error("Two collections");
+    }
+    const skill = await admin.api.knowledge.saveDocument({
+      collectionId: withSkill.id,
+      path: "invoices/SKILL.md",
+      text: "---\nname: book-invoices\ndescription: How we book invoices.\n---\n# Steps",
+      ifVersion: 0,
+    });
+    await admin.api.knowledge.saveDocument({
+      collectionId: withoutSkill.id,
+      path: "note.md",
+      text: "# A note",
+      ifVersion: 0,
+    });
+    const { ask, agent, chat } = await chatOf(person.userId, says("Hi."));
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(agent, withSkill.id, "SKILLS")
+    );
+    await requestGranted(
+      idp,
+      admin,
+      readCollection(agent, withoutSkill.id, "NOTES")
+    );
+
+    const answer = await ask("Hi.");
+
+    // Listed: a read of the skill's collection, recorded as one.
+    const [read] = await vi.waitFor(
+      async () => {
+        const events = await allEvents();
+        const found = events.filter(
+          ({ action, actor, detail }) =>
+            action === "knowledge.read" &&
+            actor.type === "agent" &&
+            actor.agentId === agent.agentId &&
+            detail.read === "skills"
+        );
+        expect(found).toHaveLength(1);
+        return found;
+      },
+      { timeout: 10_000, interval: 50 }
+    );
+    expect({
+      sources: {
+        skills: answer.provenance.sources.includes(withSkill.id),
+        notes: answer.provenance.sources.includes(withoutSkill.id),
+      },
+      read: {
+        provenance: read?.provenance,
+        detail: read?.detail,
+      },
+    }).toStrictEqual({
+      sources: { skills: true, notes: false },
+      read: {
+        provenance: [withSkill.id, skill.id],
+        detail: { read: "skills", skills: 1, sensitive: false, chat: chat.id },
+      },
+    });
+  });
+
+  it("restrict the chat before listing a skill of a sensitive collection", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
+    const teamId = await newTeam(admin, [person]);
+    const { id: collectionId } = await admin.api.knowledge.createCollection({
+      name: `Payroll ${unique()}`,
+      access: "teams",
+      teams: [teamId],
+      sensitive: true,
+    });
+    const skill = await admin.api.knowledge.saveDocument({
+      collectionId,
+      path: "pay/SKILL.md",
+      text: "---\nname: run-payroll\ndescription: How we run payroll.\n---\n# Steps",
+      ifVersion: 0,
+    });
+    const { stub, agent, chat, id: workspaceId } = await chatOf(person.userId);
+    const authority = actingFor(agent, person.userId);
+    const context = { type: "chat", workspaceId, chatId: chat.id } as const;
+
+    // The catalog never lists a sensitive collection's skills; were one
+    // listed, the read that lists it restricts the chat first.
+    const provenance = await noteListedSkills(
+      env,
+      { type: "delegate", authority, context },
+      [
+        {
+          documentId: documentIdSchema.parse(skill.id),
+          collectionId: collectionIdSchema.parse(collectionId),
+          name: "run-payroll",
+          description: "How we run payroll.",
+        },
+      ]
+    );
+
+    expect({
+      provenance,
+      restricted: await stub.isChatRestricted(chat.id),
+    }).toStrictEqual({
+      provenance: {
+        collectionIds: [collectionId],
+        sensitive: true,
+        restricted: true,
+      },
+      restricted: true,
     });
   });
 

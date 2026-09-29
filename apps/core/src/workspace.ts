@@ -31,7 +31,7 @@ import { chatMessages, chatSources, chats } from "./db/workspace/schema.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
 import { readAsDelegate } from "./knowledge/binding.ts";
 import { forContext } from "./knowledge/memory.ts";
-import { catalog } from "./knowledge/tools.ts";
+import { catalog, noteListedSkills } from "./knowledge/tools.ts";
 import { models } from "./models.ts";
 import type { WorkContext } from "./restricted.ts";
 
@@ -273,13 +273,23 @@ export class Workspace extends DurableObject<Env> {
     if (!featureEnabled(this.env, "knowledge")) {
       return { memory, skills: [] };
     }
-    const { collections, skills } = await readAsDelegate(
+    // The skills listed go into the prompt: a read of their collections,
+    // noted as any Knowledge read is (restricting the chat first were any
+    // sensitive), and carried as the chat's sources like memory.
+    const { collections, skills, listed } = await readAsDelegate(
       this.env,
       authority,
       work,
       undefined,
-      async (reader) => await catalog(this.env, reader)
+      async (reader) => {
+        const found = await catalog(this.env, reader);
+        return {
+          ...found,
+          listed: await noteListedSkills(this.env, reader, found.skills),
+        };
+      }
     );
+    this.#keepSources(work.chatId, listed.collectionIds);
     // Recorded as the code's catalog call is: what the agent saw listed.
     await auditAgentCall(this.env, scope, {
       method: "knowledge.catalog",

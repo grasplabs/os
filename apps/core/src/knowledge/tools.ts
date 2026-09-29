@@ -12,6 +12,7 @@ import type {
   FollowResult,
   KnowledgeCatalog,
   KnowledgeRead,
+  Provenance,
   SkillFile,
 } from "@grasp-os/shared/knowledge";
 import { and, asc, eq, gte, lt, ne } from "drizzle-orm";
@@ -19,6 +20,7 @@ import { drizzle } from "drizzle-orm/d1";
 import { alias } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
+import { inList } from "../db/d1.ts";
 import {
   collections,
   documents,
@@ -370,4 +372,37 @@ export const follow = async (
     collection
   );
   return { links: linked, backlinks, files, truncated, provenance };
+};
+
+/**
+ * Notes the skills a turn lists in an agent's prompt (names and
+ * descriptions, from `catalog`) as a read of the collections they are
+ * in, as any Knowledge read is (`noteProvenance`): recorded in the audit
+ * log with the skills as its provenance, and restricting the context
+ * first if any of them were sensitive. Returns the collections, only
+ * those that listed a skill, for the context to carry as sources.
+ */
+export const noteListedSkills = async (
+  env: Env,
+  reader: Reader,
+  skills: readonly CatalogSkill[]
+): Promise<Provenance> => {
+  const ids = [...new Set(skills.map(({ collectionId }) => collectionId))];
+  if (ids.length === 0) {
+    return { collectionIds: [], sensitive: false, restricted: false };
+  }
+  const sources = await drizzle(env.KNOWLEDGE)
+    .select({ id: collections.id, sensitive: collections.sensitive })
+    .from(collections)
+    .where(inList(collections.id, ids));
+  return await noteProvenance(
+    env,
+    reader,
+    {
+      action: "knowledge.read",
+      documentIds: skills.map(({ documentId }) => documentId),
+      detail: { read: "skills", skills: skills.length },
+    },
+    ...sources
+  );
 };
