@@ -74,9 +74,6 @@ export default defineProject({
           // Grasp's key for Composio, as test/composio-api.ts checks it.
           COMPOSIO_API_KEY: testComposioKey,
           CONNECT_MIGRATIONS: migrations,
-          // As a deployment of an earlier release may still have it: nothing
-          // reads it, and downloads to other hosts go all the same.
-          DOWNLOAD_HOSTS: JSON.stringify(["example.sharepoint.com"]),
           ...smokeBindings,
         },
       },

@@ -168,7 +168,6 @@ const platformBindingNames: ReadonlySet<string> = new Set([
   "CONNECT",
   "DB",
   "DEV_SKIP_ROUTER_SECRET",
-  "DOWNLOAD_HOSTS",
   "DURABLE_OBJECT_JURISDICTION",
   "EMAIL",
   "FEATURES",

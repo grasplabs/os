@@ -32,9 +32,7 @@
   // project (src/composio.ts): while it is unset, nothing of Composio is
   // offered or reached. Their types are in src/env.d.ts.
   "secrets": { "required": ["CAPABILITY_SIGNING_KEY"] },
-  // Vars the console set through the API survive a deploy (keep_vars),
-  // such as a DOWNLOAD_HOSTS from an earlier release, which nothing reads
-  // any more.
+  // Vars the console set through the API survive a deploy (keep_vars).
   "keep_vars": true,
   // Loads a native connector into an isolate of its own for each call
   // (src/connectors.ts); a new connector needs no entry here.

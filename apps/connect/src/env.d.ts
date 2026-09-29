@@ -24,11 +24,4 @@ interface __BaseEnv_Env {
    * offered or reached.
    */
   COMPOSIO_API_KEY?: string;
-  /**
-   * Deployment config the console used to set: the hosts a connector's
-   * download could be redirected to. No longer read: a download follows
-   * its route's own redirect hosts (src/egress.ts). An existing value is
-   * left alone, and harmless.
-   */
-  DOWNLOAD_HOSTS?: unknown;
 }

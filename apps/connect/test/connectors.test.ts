@@ -633,8 +633,7 @@ describe("a connector's code", { timeout: 60_000 }, () => {
       bytes: 4,
       error: null,
     });
-    // Any of the route's storage hosts, whatever the deployment's config
-    // (DOWNLOAD_HOSTS, no longer read, names only another).
+    // Any of the route's storage hosts.
     await expect(download("others")).resolves.toMatchObject({ status: 200 });
     // Another host, a storage host on another port or with credentials in
     // its URL, and a second redirect: each withheld.
