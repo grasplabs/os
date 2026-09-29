@@ -545,6 +545,24 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     ]);
   });
 
+  it("lands no first write that read the draft before a discard", async () => {
+    const { chat } = await setUp([]);
+    const chatId = chatIdSchema.parse(chat.chat.id);
+
+    const saved = await runInDurableObject(chat.stub, (instance) => [
+      // A first write reads revision 0; a discard runs before it lands.
+      instance.dropDraft(chatId, "app-1"),
+      instance.saveDraft(chatId, "app-1", null, { "a.md": "a" }, [], 0),
+      instance.draft(chatId, "app-1"),
+    ]);
+
+    expect(saved).toStrictEqual([
+      true,
+      false,
+      { base: null, changes: {}, revision: 1 },
+    ]);
+  });
+
   it("counts no check whose builds are still going as failed, up to ten a turn", async () => {
     const checks = `export default async (env) => {
       ${findApp}

@@ -1018,7 +1018,7 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Drops the chat's draft of App `appId`; with `revision`, only while it
    * is still at that revision (what a proposal committed): `false` when it
-   * changed since.
+   * changed since, or the chat is gone.
    */
   dropDraft(chatId: ChatId, appId: string, revision?: number): boolean {
     return this.ctx.storage.transactionSync(() => {
@@ -1026,8 +1026,12 @@ export class Workspace extends DurableObject<Env> {
       if (revision !== undefined && now.revision !== revision) {
         return false;
       }
-      // Its changes go; its revision stays, one on, so a write that read
-      // an earlier one still lands on nothing (`saveDraft`).
+      if (this.chatState(chatId) === undefined) {
+        return false;
+      }
+      // Its changes go; its revision goes on, a row made for it if there
+      // was none, so a write that read an earlier one (0, before the
+      // draft's first write landed, too) lands on nothing (`saveDraft`).
       this.#db
         .delete(chatDraftFiles)
         .where(
@@ -1037,10 +1041,20 @@ export class Workspace extends DurableObject<Env> {
           )
         )
         .run();
+      const updatedAt = new Date();
       this.#db
-        .update(chatDrafts)
-        .set({ revision: now.revision + 1, updatedAt: new Date() })
-        .where(and(eq(chatDrafts.chatId, chatId), eq(chatDrafts.appId, appId)))
+        .insert(chatDrafts)
+        .values({
+          chatId,
+          appId,
+          base: null,
+          revision: now.revision + 1,
+          updatedAt,
+        })
+        .onConflictDoUpdate({
+          target: [chatDrafts.chatId, chatDrafts.appId],
+          set: { revision: now.revision + 1, updatedAt },
+        })
         .run();
       return true;
     });
