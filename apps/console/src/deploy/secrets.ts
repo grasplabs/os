@@ -136,22 +136,25 @@ export const reservedSecretNames: ReadonlySet<string> = new Set(
 );
 
 /**
- * The fingerprint of the shared secrets `secrets` gives the Worker `app`
- * (`secretsFingerprint`): the same for every client, and for a version
- * that runs them and for Secrets Store as it is now, so comparing the two
- * says whether a client runs the shared secrets in the store
- * (src/rollout/shared-secrets.ts).
+ * The fingerprint of each shared secret `secrets` gives the Worker `app`,
+ * by name (`secretsFingerprint` of that secret alone): the same for every
+ * client, and for a version that runs it and for Secrets Store as it is
+ * now, so comparing the two says, secret by secret, whether a client runs
+ * the value in the store (src/rollout/shared-secrets.ts).
  */
-export const sharedSecretsFingerprint = async (
+export const sharedSecretPrints = async (
   secrets: Pick<DeploySecrets, "clientKey" | "shared">,
   app: string
-): Promise<string> =>
-  await secretsFingerprint(
-    secrets.clientKey,
-    Object.entries(secrets.shared[app] ?? {}).map(([name, value]) => ({
-      name,
-      value,
-    }))
+): Promise<Record<string, string>> =>
+  Object.fromEntries(
+    await Promise.all(
+      Object.entries(secrets.shared[app] ?? {}).map(
+        async ([name, value]): Promise<[string, string]> => [
+          name,
+          await secretsFingerprint(secrets.clientKey, [{ name, value }]),
+        ]
+      )
+    )
   );
 
 /** The client whose secrets are derived, and its rotation. */

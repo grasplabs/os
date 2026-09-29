@@ -148,27 +148,44 @@ const Controls = ({ rollout }: { rollout: RolloutView }) => {
   );
 };
 
-/** Why a revocation check says to keep the old shared secrets, in words. */
-const keepReasons = (check: RevocationCheck): string[] => [
-  ...(check.storeChanged
+/** Why a rotated secret's old value must be kept, in words; null when it can go. */
+const keepReason = (check: RevocationCheck, name: string): string | null => {
+  if (check.storeChanged.includes(name)) {
+    return `Keep the old ${name}: Secrets Store changed it again since this rollout started, so roll that out first.`;
+  }
+  const behind = check.behind[name] ?? [];
+  if (behind.length > 0) {
+    return `Keep the old ${name}: ${behind.join(", ")} ${behind.length === 1 ? "doesn't" : "don't"} run the new value yet, read live.`;
+  }
+  return null;
+};
+
+/** What a revocation check says, secret by secret, then what else it found, in words. */
+const checkLines = (check: RevocationCheck): string[] => [
+  ...(check.rotated.length === 0
     ? [
-        "Secrets Store changed since this rollout started: roll the new values out with another secrets rollout first.",
+        "Secrets Store held what the clients this rollout reached already ran: it hasn't changed, so deploy-ops may not have run, and there's nothing to revoke yet.",
       ]
     : []),
-  ...(check.unchanged.length === 0
+  ...(check.revocable.length === 0
     ? []
     : [
-        `Secrets Store held what ${check.unchanged.join(", ")} already ran when this rollout started: it hasn't changed, so deploy-ops may not have run, and there's nothing to revoke yet.`,
+        `The old ${check.revocable.join(", ")} can be revoked at ${check.revocable.length === 1 ? "its provider" : "their providers"}: every active client runs the new value, read live.`,
       ]),
+  ...check.rotated.flatMap((name) => {
+    const reason = keepReason(check, name);
+    return reason === null ? [] : [reason];
+  }),
+  ...check.storeChanged
+    .filter((name) => !check.rotated.includes(name))
+    .map(
+      (name) =>
+        `Secrets Store changed ${name} since this rollout started: roll it out first.`
+    ),
   ...(check.unproven.length === 0
     ? []
     : [
-        `What ${check.unproven.join(", ")} ran before isn't on record, so the rotation can't be proven for them.`,
-      ]),
-  ...(check.behind.length === 0
-    ? []
-    : [
-        `${check.behind.join(", ")} ${check.behind.length === 1 ? "doesn't" : "don't"} run the shared secrets in Secrets Store now, read live from ${check.behind.length === 1 ? "its account" : "their accounts"}.`,
+        `What ${check.unproven.join(", ")} ran before isn't on record, so the rotation can't be told from them.`,
       ]),
   ...(check.skipped.length === 0
     ? []
@@ -209,17 +226,13 @@ const verdictOf = (
   if (result === "not_secrets_rollout") {
     return { safe: false, lines: ["This isn't a secrets rollout."] };
   }
-  if (result.safe) {
-    return {
-      safe: true,
-      lines: [
-        "The rotation reached every active client: the old shared secrets can be revoked at their providers.",
-      ],
-    };
-  }
+  // Safe only when every secret it rotated can go: anything else is a
+  // warning, whatever else can.
   return {
-    safe: false,
-    lines: ["Keep the old shared secrets.", ...keepReasons(result)],
+    safe:
+      result.rotated.length > 0 &&
+      result.revocable.length === result.rotated.length,
+    lines: checkLines(result),
   };
 };
 

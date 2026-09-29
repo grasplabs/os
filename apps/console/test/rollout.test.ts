@@ -1270,14 +1270,16 @@ describe("rolling new secrets out", () => {
         "rollout.done",
       ],
     });
-    // The rotation reached every active client, read live: the old one can go.
+    // The rotation reached every active client, read live: the old
+    // Microsoft secret can go, and only it. Core's secrets didn't change,
+    // so nothing is said of them.
     const view = await checkRevocation(env, rolloutId);
     expect(view).toStrictEqual({
-      safe: true,
-      storeChanged: false,
-      unchanged: [],
+      revocable: ["MICROSOFT_CLIENT_SECRET"],
+      rotated: ["MICROSOFT_CLIENT_SECRET"],
+      storeChanged: [],
+      behind: { MICROSOFT_CLIENT_SECRET: [] },
       unproven: [],
-      behind: [],
       skipped: [],
       outOfScope: [],
     });
@@ -1309,7 +1311,7 @@ describe("rolling new secrets out", () => {
 
   it("never says the old secrets can go after a rollout that started before deploy-ops wrote a new value, nor once the store changes after it", async () => {
     const release = await importedRelease("feat(core): what they run");
-    const internal = await activeClient(0, release);
+    await activeClient(0, release);
     const acme = await activeClient(2, release);
     await using run = await followRollouts();
 
@@ -1322,24 +1324,23 @@ describe("rolling new secrets out", () => {
     await rotateMicrosoftSecret();
     const changed = await checkRevocation(env, rolloutId);
 
+    // Nothing rotated, so nothing is revocable, before or after.
     expect({ unchanged, changed }).toStrictEqual({
       unchanged: {
-        safe: false,
-        storeChanged: false,
-        unchanged: [internal.clientId],
+        revocable: [],
+        rotated: [],
+        storeChanged: [],
+        behind: {},
         unproven: [],
-        behind: [],
         skipped: [],
         outOfScope: [acme.clientId],
       },
       changed: {
-        safe: false,
-        storeChanged: true,
-        unchanged: [internal.clientId],
+        revocable: [],
+        rotated: [],
+        storeChanged: ["MICROSOFT_CLIENT_SECRET"],
+        behind: {},
         unproven: [],
-        behind: [internal.clientId, acme.clientId].toSorted((a, b) =>
-          a.localeCompare(b)
-        ),
         skipped: [],
         outOfScope: [acme.clientId],
       },
@@ -1370,8 +1371,16 @@ describe("rolling new secrets out", () => {
       first: firstCheck,
       second: secondCheck,
     }).toMatchObject({
-      first: { safe: false, storeChanged: true, unchanged: [], behind: [] },
-      second: { safe: true, storeChanged: false, unchanged: [], behind: [] },
+      first: {
+        revocable: [],
+        rotated: ["MICROSOFT_CLIENT_SECRET"],
+        storeChanged: ["MICROSOFT_CLIENT_SECRET"],
+        behind: { MICROSOFT_CLIENT_SECRET: [] },
+      },
+      second: {
+        revocable: ["MICROSOFT_CLIENT_SECRET"],
+        storeChanged: [],
+      },
     });
   });
 
@@ -1418,38 +1427,30 @@ describe("rolling new secrets out", () => {
       ],
       { message: "split by hand" }
     );
-    // The console lost its record of core.
+    // The console lost its record of connect, which holds the secret.
     await db
       .delete(clientWorkers)
       .where(
         and(
           eq(clientWorkers.clientId, unrecorded.clientId),
-          eq(clientWorkers.worker, "core")
+          eq(clientWorkers.worker, "connect")
         )
       );
 
     const after = await checkRevocation(env, rolloutId);
 
-    expect({
-      reached:
-        reached !== "not_secrets_rollout" &&
-        reached !== "store_unreadable" &&
-        reached.safe,
-      after,
-    }).toStrictEqual({
-      reached: true,
+    expect({ reached, after }).toMatchObject({
+      reached: { revocable: ["MICROSOFT_CLIENT_SECRET"] },
       after: {
-        safe: false,
-        storeChanged: false,
-        unchanged: [],
-        unproven: [],
-        behind: [
-          outside.clientId,
-          split.clientId,
-          unrecorded.clientId,
-        ].toSorted((a, b) => a.localeCompare(b)),
-        skipped: [],
-        outOfScope: [],
+        revocable: [],
+        rotated: ["MICROSOFT_CLIENT_SECRET"],
+        behind: {
+          MICROSOFT_CLIENT_SECRET: [
+            outside.clientId,
+            split.clientId,
+            unrecorded.clientId,
+          ].toSorted((a, b) => a.localeCompare(b)),
+        },
       },
     });
   });

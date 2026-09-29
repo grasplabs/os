@@ -73,7 +73,7 @@ import {
   workersSubdomain,
 } from "./router.ts";
 import type { RouterHosts, SmokeOptions } from "./router.ts";
-import { sharedSecretsFingerprint, workerSecrets } from "./secrets.ts";
+import { sharedSecretPrints, workerSecrets } from "./secrets.ts";
 import type { DeploySecrets } from "./secrets.ts";
 import {
   checkBindingNames,
@@ -311,7 +311,7 @@ const recordFailure = async (
  * The versions a deploy uploaded, by app, each with the fingerprint of
  * everything that went into it (`uploadFingerprint`), of its secrets
  * alone (`secretsFingerprint`), and of the shared secrets among them
- * (`sharedSecretsFingerprint`).
+ * (`sharedSecretPrints`, secret by secret).
  */
 const recordedSchema = z.object({
   byApp: z.record(
@@ -320,7 +320,7 @@ const recordedSchema = z.object({
       version: z.string(),
       fingerprint: z.string(),
       secrets: z.string(),
-      shared: z.string(),
+      shared: z.record(z.string(), z.string()),
     })
   ),
 });
@@ -668,7 +668,7 @@ const uploadApp = async (
     secrets.clientKey,
     workerSecretValues
   );
-  const sharedPrint = await sharedSecretsFingerprint(secrets, app);
+  const sharedPrint = await sharedSecretPrints(secrets, app);
   const versions = await recordedNow(db, id);
   const recorded = versions[app];
   if (recorded?.fingerprint === fingerprint) {
@@ -995,7 +995,8 @@ export interface UploadedWorker {
 /**
  * The fingerprint `print` (of all its secrets, or of its shared ones) the
  * latest of client `clientId`'s deploys to record `app`'s version
- * `version` recorded for it; null when none did (a version uploaded
+ * `version` recorded for it (for `shared`, the JSON of its by-name map);
+ * null when none did (a version uploaded
  * outside the console, or before deploys recorded one).
  */
 export const recordedPrintOf = async (

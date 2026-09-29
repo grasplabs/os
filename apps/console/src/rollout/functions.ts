@@ -14,6 +14,7 @@ import {
   deploySecrets,
   MissingStoreSecretError,
 } from "../deploy/context.ts";
+import type { DeploySecrets } from "../deploy/secrets.ts";
 import {
   approveRollout,
   cancelRollout,
@@ -31,12 +32,7 @@ import type { RolloutErrorCode } from "./errors.ts";
 import { getRollout, listRollouts, rolloutOptions } from "./queries.ts";
 import { rollbackClientAndWait, rollbackRingAndWait } from "./rollback.ts";
 import type { RingRollback } from "./rollback.ts";
-import {
-  checkRevocation,
-  runsSharedSecrets,
-  storePrints,
-} from "./shared-secrets.ts";
-import type { SharedPrints } from "./shared-secrets.ts";
+import { checkRevocation, runsSharedSecrets } from "./shared-secrets.ts";
 
 const rolloutSchema = z.object({ rolloutId: z.uuid() });
 const clientSchema = z.object({ clientId: z.string().min(1) });
@@ -175,9 +171,9 @@ export const fetchDrift = createServerFn({ method: "GET" })
     if (drift === null) {
       return null;
     }
-    let store: SharedPrints | null = null;
+    let store: DeploySecrets | null = null;
     try {
-      store = await storePrints(await deploySecrets(env));
+      store = await deploySecrets(env);
     } catch (error) {
       if (!(error instanceof MissingStoreSecretError)) {
         throw error;
