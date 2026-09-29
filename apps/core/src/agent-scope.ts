@@ -92,28 +92,13 @@ export const chatContext = ({
 
 /**
  * What the Workspace object says of one API call of a code run: it may go
- * on, the run has made all the calls it may, or the run has ended.
+ * on, the run has made all the calls it may, or the run has ended; and
+ * whether it is the run's first call refused so, which alone is audited.
  */
-export type CodeRunCall = "open" | "spent" | "ended";
-
-/**
- * Counts the call with the Workspace object, and refuses it from a code
- * run that has ended (the turn moved on, or the run was cancelled or timed
- * out while its code kept running) or made all the calls it may. Every
- * API checks it first, on every call.
- */
-export const requireOpenRun = async (
-  env: Env,
-  { workspaceId, chatId, runId }: AgentScope
-): Promise<void> => {
-  const call = await workspace(env, workspaceId).callFromCodeRun(chatId, runId);
-  if (call === "spent") {
-    throw agentErrors.create("agent.run_calls_spent");
-  }
-  if (call === "ended") {
-    throw agentErrors.create("agent.run_ended");
-  }
-};
+export interface CodeRunCall {
+  call: "open" | "spent" | "ended";
+  first: boolean;
+}
 
 /**
  * Records with the chat what a call read from (collections, a
@@ -176,6 +161,43 @@ export const auditAgentCall = async (
       reason: ended?.reason ?? null,
     },
   });
+};
+
+/**
+ * Counts the call with the Workspace object, and refuses it from a code
+ * run that has ended (the turn moved on, or the run was cancelled or timed
+ * out while its code kept running) or made all the calls it may. Every
+ * API checks it first, on every call.
+ */
+export const requireOpenRun = async (
+  env: Env,
+  scope: AgentScope,
+  method: string
+): Promise<void> => {
+  const { workspaceId, chatId, runId } = scope;
+  const { call, first } = await workspace(env, workspaceId).callFromCodeRun(
+    chatId,
+    runId
+  );
+  if (call === "open") {
+    return;
+  }
+  const refusal = agentErrors.create(
+    call === "spent" ? "agent.run_calls_spent" : "agent.run_ended"
+  );
+  // Once per run: code that goes on calling can't flood the audit log.
+  if (first) {
+    await auditAgentCall(
+      env,
+      scope,
+      { method },
+      {
+        outcome: "refused",
+        reason: refusal.code,
+      }
+    );
+  }
+  throw refusal;
 };
 
 /** How a call that threw ended, and why, as the audit log names it. */

@@ -24,7 +24,7 @@ import type { AgentApi, AgentScope } from "./agent-scope.ts";
 export class ChatApi extends WorkerEntrypoint<Env, AgentScope> {
   /** The chat, the person it acts for, and the time now. */
   async info(): Promise<{ chatId: string; personId: string; now: string }> {
-    await requireOpenRun(this.env, this.ctx.props);
+    await requireOpenRun(this.env, this.ctx.props, "chat.info");
     const { chatId, personId } = this.ctx.props;
     return { chatId, personId, now: new Date().toISOString() };
   }

@@ -2,6 +2,7 @@ import type { AuditEvent } from "@grasp-os/shared/audit";
 import { connectErrors } from "@grasp-os/shared/connect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { chatKeyMaxLength } from "../src/agent-connections.ts";
 import {
   chatOf,
   codeResults,
@@ -222,6 +223,60 @@ describe("a chat's connections", setUpTime, () => {
           String(one.target).localeCompare(String(other.target))
       )
     );
+  });
+
+  it("refuse a key too long to be the chat's, and every call refused before connect, each audited once", async () => {
+    const { mail, chat, grant } = await setUp(
+      codeStep(
+        `export default async (env) => {
+          const max = ${chatKeyMaxLength(crypto.randomUUID())};
+          const tried = async (action, key) => { try { await env.connections.call("MAIL", action, { query: "invoice" }, { idempotencyKey: key }); return "ok"; } catch (error) { return error.message; } };
+          return {
+            longest: await tried("mail.search", "k".repeat(max)),
+            tooLong: await tried("mail.search", "k".repeat(max + 1)),
+            badAction: await tried("not an action!", "k"),
+          };
+        };`
+      ),
+      says("Done.")
+    );
+    await grant(mail.id, "MAIL");
+
+    await chat.ask("Try them.");
+
+    const invalid = connectErrors.create("connect.invalid").message;
+    const [result] = await codeResults(chat.stub, chat.chat.id);
+    expect(result?.text).toBe(
+      `Returned:\n${JSON.stringify({ longest: "ok", tooLong: invalid, badAction: invalid })}`
+    );
+    // The two refused before connect, by core, once each; the one connect
+    // took, by connect alone.
+    const events = await eventsOf(
+      chat.agent.agentId,
+      (all) =>
+        all.filter(
+          ({ action, detail }) =>
+            (action === "agent.call" && detail.method === "connections.call") ||
+            action === "connection.call"
+        ).length === 3
+    );
+    expect(
+      events
+        .filter(
+          ({ action, detail }) =>
+            (action === "agent.call" && detail.method === "connections.call") ||
+            action === "connection.call"
+        )
+        .map(
+          ({ action, detail }) =>
+            `${action} ${String(detail.outcome)} ${String(detail.reason ?? "")}`
+        )
+        .toSorted()
+    ).toStrictEqual([
+      "agent.call refused connect.invalid",
+      "agent.call refused connect.invalid",
+      "connection.call ok ",
+    ]);
   });
 
   it("keep each chat's idempotency keys its own, in one workspace", async () => {

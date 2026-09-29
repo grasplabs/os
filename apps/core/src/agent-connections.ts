@@ -1,5 +1,6 @@
 import { connectErrors } from "@grasp-os/shared/connect";
-import type { PendingReference } from "@grasp-os/shared/connect";
+import type { ConnectResult, PendingReference } from "@grasp-os/shared/connect";
+import { identifierMaxLength } from "@grasp-os/shared/ids";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import {
@@ -11,7 +12,7 @@ import {
   requireOpenRun,
 } from "./agent-scope.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
-import { connectionGrantOf, forSandbox, runStubCall } from "./bindings.ts";
+import { connectionGrantOf, forSandbox, signedStubCall } from "./bindings.ts";
 import type { ConnectionGrant } from "./bindings.ts";
 import { connectionOwnersOf } from "./connections.ts";
 import { requireFeature } from "./features.ts";
@@ -62,15 +63,33 @@ const connectionGrants = async (
   });
 };
 
-/** `options` with its idempotency key, if it has one, made the chat's own. */
+/**
+ * The longest idempotency key a chat's code may choose: connect's limit
+ * less the chat's prefix (`<chatId>:`), which `chatKeyed` adds.
+ */
+export const chatKeyMaxLength = (chatId: string): number =>
+  identifierMaxLength - chatId.length - 1;
+
+/**
+ * `options` with its idempotency key, if it has one, made the chat's own.
+ * A key too long to take the prefix is refused as the invalid call it
+ * would become, saying how long a key may be.
+ */
 const chatKeyed = (scope: AgentScope, options: unknown): unknown => {
   if (typeof options !== "object" || options === null) {
     return options;
   }
   const key: unknown = Reflect.get(options, "idempotencyKey");
-  return typeof key === "string"
-    ? { ...options, idempotencyKey: `${scope.chatId}:${key}` }
-    : options;
+  if (typeof key !== "string") {
+    return options;
+  }
+  const max = chatKeyMaxLength(scope.chatId);
+  if (key.length > max) {
+    throw connectErrors.create("connect.invalid", {
+      issues: [`options.idempotencyKey: At most ${max} characters`],
+    });
+  }
+  return { ...options, idempotencyKey: `${scope.chatId}:${key}` };
 };
 
 /** Connections, as a chat's code calls them. */
@@ -95,7 +114,7 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
    */
   async list(): Promise<AgentConnection[]> {
     const scope = this.ctx.props;
-    await requireOpenRun(this.env, scope);
+    await requireOpenRun(this.env, scope, "connections.list");
     try {
       return await auditedCall(
         this.env,
@@ -144,8 +163,23 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
     options?: unknown
   ): Promise<AgentCallResult> {
     const scope = this.ctx.props;
-    await requireOpenRun(this.env, scope);
-    const grant = await this.#grantNamed(connection).catch(
+    await requireOpenRun(this.env, scope, "connections.call");
+    // Everything before connect sees the call: refused here, it is
+    // recorded here, once; what connect takes, connect records.
+    const { grant, request } = await (async () => {
+      const named = await this.#grantNamed(connection);
+      // Connect keeps a side effect's answer, and its held action, under
+      // the agent and the key: the agent is the workspace's, so each
+      // chat's keys are its own, and one chat never gets another's answer
+      // or held action.
+      const signed = await signedStubCall(
+        this.env,
+        chatAuthority(scope),
+        named,
+        [action, input, chatKeyed(scope, options)]
+      );
+      return { grant: named, request: signed };
+    })().catch(
       async (error: unknown) =>
         await auditRefusal(
           this.env,
@@ -159,14 +193,12 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
           forSandbox(error)
         )
     );
-    // Connect keeps a side effect's answer, and its held action, under the
-    // agent and the key: the agent is the workspace's, so each chat's keys
-    // are its own, and one chat never gets another's answer or held action.
-    const result = await runStubCall(this.env, chatAuthority(scope), grant, [
-      action,
-      input,
-      chatKeyed(scope, options),
-    ]);
+    let result: ConnectResult;
+    try {
+      result = await this.env.CONNECT.call(request);
+    } catch (error) {
+      throw forSandbox(error);
+    }
     if (result.pending !== undefined) {
       return { output: null, pending: result.pending };
     }
@@ -188,8 +220,9 @@ connections: {
   list(): Promise<{ name: string; connectionId: string; resource: string | null; actions: string[] }[]>;
   /**
    * Calls one of a connection's actions with its input. A change needs an
-   * \`idempotencyKey\` of your own: calling again with the same key returns
-   * the first call's answer instead of doing it twice.
+   * \`idempotencyKey\` of your own (at most 200 characters): calling again
+   * with the same key returns the first call's answer instead of doing it
+   * twice.
    */
   call(
     name: string,

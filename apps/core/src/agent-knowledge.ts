@@ -36,9 +36,12 @@ export class KnowledgeApi
   implements KnowledgeTools
 {
   /** Runs one read as the chat's agent, after the run's check. */
-  async #asAgent<T>(run: (reader: Reader) => Promise<T>): Promise<T> {
+  async #asAgent<T>(
+    method: string,
+    run: (reader: Reader) => Promise<T>
+  ): Promise<T> {
     const scope = this.ctx.props;
-    await requireOpenRun(this.env, scope);
+    await requireOpenRun(this.env, scope, method);
     return await readAsDelegate(
       this.env,
       chatAuthority(scope),
@@ -65,7 +68,7 @@ export class KnowledgeApi
    */
   async catalog(): Promise<KnowledgeCatalog> {
     const scope = this.ctx.props;
-    await requireOpenRun(this.env, scope);
+    await requireOpenRun(this.env, scope, "knowledge.catalog");
     return await auditedCall(
       this.env,
       scope,
@@ -90,6 +93,7 @@ export class KnowledgeApi
   async search(query: unknown, options?: unknown): Promise<SearchResults> {
     return await this.#recorded(
       await this.#asAgent(
+        "knowledge.search",
         async (reader) => await search(this.env, reader, query, options)
       )
     );
@@ -98,6 +102,7 @@ export class KnowledgeApi
   async read(documentId: unknown, options?: unknown): Promise<KnowledgeRead> {
     return await this.#recorded(
       await this.#asAgent(
+        "knowledge.read",
         async (reader) => await read(this.env, reader, documentId, options)
       )
     );
@@ -106,6 +111,7 @@ export class KnowledgeApi
   async follow(documentId: unknown): Promise<FollowResult> {
     return await this.#recorded(
       await this.#asAgent(
+        "knowledge.follow",
         async (reader) => await follow(this.env, reader, documentId)
       )
     );
