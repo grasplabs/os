@@ -42,7 +42,7 @@ const media = sourceMedia.map((value) => ({
 }));
 
 /** The source: its title, medium, date, who it came from, and its notes. */
-const SourceFields = ({
+export const SourceFields = ({
   source,
   disabled,
   onChange,

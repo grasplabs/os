@@ -58,8 +58,12 @@ export interface Draft {
   statements: DraftStatement[];
 }
 
-/** Where a draft came from. */
-export type Origin = "manual";
+/** Where a draft came from, and how the screen names each. */
+export const originLabels = {
+  manual: "Typed in",
+  notes: "Notes",
+} as const;
+export type Origin = keyof typeof originLabels;
 
 export interface DraftSummary {
   id: string;
@@ -164,6 +168,18 @@ const codeOf = (error: unknown): string =>
   typeof error.code === "string"
     ? error.code
     : "app.unreachable";
+
+/**
+ * What `run` resolves with, or the code of why it rejected: for the
+ * platform's calls (a run started, read), which reject when refused.
+ */
+export const settle = async <T>(run: () => Promise<T>): Promise<Outcome<T>> => {
+  try {
+    return { ok: await run() };
+  } catch (error) {
+    return { error: codeOf(error) };
+  }
+};
 
 /**
  * Calls the server's `method`: its answer, or, when the call itself fails
