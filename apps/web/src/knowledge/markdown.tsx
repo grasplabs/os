@@ -8,6 +8,7 @@ import {
   TableRow,
 } from "@grasp-os/ui/components/table";
 import { Link } from "@tanstack/react-router";
+import type { ReactNode } from "react";
 import Markdown from "react-markdown";
 import type { Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -23,7 +24,8 @@ import type { ResolveLink } from "./wiki-links.ts";
 // as `javascript:`), and opens in a tab of its own without this page as
 // its opener. Images show their alt text: loading one would tell its host
 // who read the document, and when. A `[[link]]` to a document of the
-// collection opens it here (wiki-links.ts).
+// collection opens it here (wiki-links.ts). The agent's answers render the
+// same way (`PlainMarkdown`): they may repeat whatever the agent read.
 
 /**
  * A document's Markdown without its frontmatter, found as core finds it.
@@ -45,6 +47,31 @@ const documentOf = (href: string): string | undefined =>
   documentLink.test(href)
     ? (new URLSearchParams(href.slice(1)).get("doc") ?? undefined)
     : undefined;
+
+/**
+ * A link that leaves the page: in a tab of its own, without this page as
+ * its opener. An address the transform emptied was unsafe: the text stays,
+ * as text.
+ */
+const OutsideLink = ({
+  href,
+  children,
+}: {
+  href?: string | undefined;
+  children?: ReactNode;
+}) =>
+  href === undefined || href === "" ? (
+    <span>{children}</span>
+  ) : (
+    <a
+      className="underline"
+      href={href}
+      rel="noopener noreferrer"
+      target="_blank"
+    >
+      {children}
+    </a>
+  );
 
 const components: Components = {
   h1: ({ children }) => <h1 className="text-2xl font-medium">{children}</h1>,
@@ -73,11 +100,7 @@ const components: Components = {
   th: ({ children }) => <TableHead>{children}</TableHead>,
   td: ({ children }) => <TableCell>{children}</TableCell>,
   a: ({ href, children }) => {
-    // An address the transform emptied was unsafe: the text stays, as text.
-    if (href === undefined || href === "") {
-      return <span>{children}</span>;
-    }
-    const documentId = documentOf(href);
+    const documentId = href === undefined ? undefined : documentOf(href);
     if (documentId !== undefined) {
       return (
         <Link
@@ -90,20 +113,32 @@ const components: Components = {
       );
     }
     // Any other, a `#heading` too, opens apart from this page.
-    return (
-      <a
-        className="underline"
-        href={href}
-        rel="noopener noreferrer"
-        target="_blank"
-      >
-        {children}
-      </a>
-    );
+    return <OutsideLink href={href}>{children}</OutsideLink>;
   },
   img: ({ alt }) =>
     alt === undefined || alt === "" ? null : <span>{alt}</span>,
 };
+
+/**
+ * The same, for text that isn't a document of a collection (the agent's
+ * answers): every link leaves the page.
+ */
+const plainComponents: Components = {
+  ...components,
+  a: ({ href, children }) => <OutsideLink href={href}>{children}</OutsideLink>,
+};
+
+/**
+ * Markdown that isn't a Knowledge document, such as the agent's answers,
+ * as safely as a document: no raw HTML, safe links only, no images.
+ */
+export const PlainMarkdown = ({ text }: { text: string }) => (
+  <div className="flex flex-col gap-3">
+    <Markdown components={plainComponents} remarkPlugins={[remarkGfm]} skipHtml>
+      {text}
+    </Markdown>
+  </div>
+);
 
 /**
  * A document's text, frontmatter left out, as safe rendered Markdown, its

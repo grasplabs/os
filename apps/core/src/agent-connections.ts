@@ -1,6 +1,7 @@
 import { connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectResult, PendingReference } from "@grasp-os/shared/connect";
 import { identifierMaxLength } from "@grasp-os/shared/ids";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import {
@@ -15,6 +16,7 @@ import type { AgentApi, AgentScope } from "./agent-scope.ts";
 import { connectionGrantOf, forSandbox, signedStubCall } from "./bindings.ts";
 import type { ConnectionGrant } from "./bindings.ts";
 import { connectionOwnersOf } from "./connections.ts";
+import { workspace } from "./durable-objects.ts";
 import { requireFeature } from "./features.ts";
 import { grantedPermissions } from "./permissions.ts";
 
@@ -90,6 +92,22 @@ const chatKeyed = (scope: AgentScope, options: unknown): unknown => {
     });
   }
   return { ...options, idempotencyKey: `${scope.chatId}:${key}` };
+};
+
+/**
+ * Tells the chat's watchers a write was held, so the person sees it to
+ * confirm at once. A failure is logged: the write is held either way, and
+ * the page reads it at its next change.
+ */
+const heldInChat = async (env: Env, scope: AgentScope): Promise<void> => {
+  try {
+    await workspace(env, scope.workspaceId).heldChanged(scope.chatId);
+  } catch (error) {
+    log.warn("chat.held_push_failed", {
+      chatId: scope.chatId,
+      ...errorFields(error),
+    });
+  }
 };
 
 /** Connections, as a chat's code calls them. */
@@ -200,6 +218,7 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
       throw forSandbox(error);
     }
     if (result.pending !== undefined) {
+      await heldInChat(this.env, scope);
       return { output: null, pending: result.pending };
     }
     await recordSources(this.env, scope, [grant.connection.connectionId]);

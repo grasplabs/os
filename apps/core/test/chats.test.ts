@@ -112,6 +112,7 @@ const follow = async (
         : {
             running: last.running,
             stopped: last.stopped,
+            held: last.held,
             partial,
             provenance,
           };
@@ -348,6 +349,40 @@ describe("chats", () => {
       oldLeft: old.filter(({ id }) => ids.has(id)).length,
       newerLeft: newer.filter(({ id }) => ids.has(id)).length,
     }).toStrictEqual({ oldLeft: 0, newerLeft: newer.length });
+  });
+
+  it("tell a follower the moment its agent has a write held, mid-turn", async () => {
+    const ann = await person();
+    const admin = await signedInApi(idp, "admin");
+    const mail = await mailConnection();
+    await requestGranted(idp, admin, {
+      subject: { type: "agent", agentId: chatAgentId },
+      object: { type: "connection", connectionId: mail.id },
+      actions: ["mail.send"],
+      binding: "HELD_MAIL",
+    });
+    const { reply, release } = pausedReply("It waits for you.", 2);
+    await answering(
+      ann,
+      codeStep(
+        'export default async (env) => await env.connections.call("HELD_MAIL", "mail.send", { to: "ben@acme.test", subject: "Invoice" }, { idempotencyKey: "invoice" });'
+      ),
+      reply
+    );
+    const chat = await ann.chats.create("Held");
+    const follower = await follow(ann.chats, chat.id);
+    await ann.chats.send(chat.id, { text: "Send Ben the invoice.", model });
+
+    // Still answering: the follower already knows a write waits.
+    await vi.waitFor(
+      () => {
+        expect(follower.now()).toMatchObject({ running: true, held: 1 });
+      },
+      { timeout: 10_000 }
+    );
+    await expect(ann.api.pendingActions.list()).resolves.toHaveLength(1);
+    release();
+    await settled(follower);
   });
 
   it("are refused to anyone but their person, as if there were none", async () => {
@@ -635,7 +670,7 @@ describe("chats", () => {
     expect(
       last?.role === "assistant" ? [last.end, typeof last.error] : last
     ).toStrictEqual(["failed", "string"]);
-    expect(follower.now()?.stopped).toBeUndefined();
+    expect(follower.now()?.stopped).toBeNull();
   });
 
   it("keep their object up while a turn nobody waits on runs", async () => {

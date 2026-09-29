@@ -138,9 +138,15 @@ export interface ChatUpdate {
   /**
    * Why the last question stopped before the agent answered, when it
    * wasn't the model (the person left, the agent was switched off). Kept
-   * until the next question, and not over a restart.
+   * until the next question starts (then `null`), and not over a restart.
    */
-  stopped?: string;
+  stopped: string | null;
+  /**
+   * Changes whenever the chat's agent has a write held for the person to
+   * confirm: read the held writes again then. Only a count, from when the
+   * object last started; never what was held.
+   */
+  held: number;
 }
 
 /** A question for the chat's agent, and the model to answer it with. */
