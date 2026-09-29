@@ -17,8 +17,9 @@ export interface SourceRead {
   /**
    * Goes through a provider's pages from `start`, each fetched with the
    * connection's token by `page`, until the provider says it's at the end
-   * (`end`, a link to read on from next time) or `readMaxItems` are read
-   * (`next`, a link to the rest). The items read, and where to go on.
+   * (`end`, a link to read on from next time) or it has `readMaxItems`
+   * (`next`, a link to the rest), at most a page more. The items read, and
+   * where to go on.
    */
   pages: <Item>(
     page: (
@@ -48,8 +49,6 @@ export interface EventKind {
   /** The provider and native connector whose connections report it. */
   provider: string;
   server: string;
-  /** The connector's read action whose data an event carries. */
-  action: string;
   /** Whether a permission's resource is one of this type's sources. */
   isResource: (resource: string) => boolean;
   read: (read: SourceRead) => Promise<ReadEvents>;
@@ -59,21 +58,27 @@ export interface EventKind {
 export class SourceError extends Error {
   /** The provider asked to wait this long. */
   readonly retryAfterMs: number | undefined;
-  /** The cursor expired: the next read starts over, from now. */
+  /** The cursor can't be read on from: the next read starts over. */
   readonly resync: boolean;
+  /** The provider's HTTP status, when it answered with an error. */
+  readonly status: number | undefined;
 
   constructor(
     message: string,
-    options: { retryAfterMs?: number; resync?: boolean } = {}
+    options: { retryAfterMs?: number; resync?: boolean; status?: number } = {}
   ) {
     super(message);
     this.name = "SourceError";
     this.retryAfterMs = options.retryAfterMs;
     this.resync = options.resync ?? false;
+    this.status = options.status;
   }
 }
 
-/** Most items one read of a source takes, which bounds its events too. */
+/**
+ * Items after which one read of a source stops, which bounds its events
+ * too: at most a page past it.
+ */
 export const readMaxItems = 100;
 /** How long one request to a provider may take. */
 const requestTimeoutMs = 15_000;
@@ -81,6 +86,33 @@ const requestTimeoutMs = 15_000;
 const answerMaxBytes = 4 * 1024 * 1024;
 /** The longest a source that fails, or an event whose delivery does, waits. */
 export const maxWaitMs = 60 * 60_000;
+/**
+ * How long before the last read an item may be dated and still be new: a
+ * provider can show an item a little after the time it gives it.
+ */
+const lateItemMs = 10 * 60_000;
+
+/**
+ * The earliest an item may be dated and still be new to `source`: after
+ * it started, and not long before its last read, so an item shown again
+ * only because it changed (read, flagged, edited) isn't reported again.
+ */
+export const newSince = ({ createdAt, readAt }: EventSource): Date =>
+  new Date(
+    Math.max(
+      createdAt.getTime(),
+      readAt === null ? 0 : readAt.getTime() - lateItemMs
+    )
+  );
+
+/** At or after `since`, by an ISO timestamp the provider wrote; false without one. */
+export const isSince = (
+  at: string | null | undefined,
+  since: Date
+): boolean => {
+  const time = Date.parse(at ?? "");
+  return Number.isFinite(time) && time >= since.getTime();
+};
 
 /** Seconds a `retry-after` header says, as milliseconds, up to an hour. */
 const retryAfterMs = (header: string | null): number | undefined => {
@@ -88,6 +120,38 @@ const retryAfterMs = (header: string | null): number | undefined => {
   return header === null || !Number.isFinite(seconds) || seconds < 0
     ? undefined
     : Math.min(seconds * 1000, maxWaitMs);
+};
+
+/** Whether `url` is one to send the token to: HTTPS, on `hosts`, no credentials. */
+const isProviderUrl = (url: string, hosts: readonly string[]): boolean => {
+  let target: URL;
+  try {
+    target = new URL(url);
+  } catch {
+    return false;
+  }
+  return (
+    target.protocol === "https:" &&
+    hosts.includes(target.hostname) &&
+    target.username === "" &&
+    target.password === ""
+  );
+};
+
+/**
+ * A link a provider handed back, to keep as a cursor: only one on its own
+ * hosts. Any other starts the source over rather than being stored.
+ */
+export const providerLink = (
+  url: string | undefined,
+  hosts: readonly string[]
+): string | undefined => {
+  if (url !== undefined && !isProviderUrl(url, hosts)) {
+    throw new SourceError("The provider handed back a link to another host", {
+      resync: true,
+    });
+  }
+  return url;
 };
 
 /**
@@ -107,41 +171,40 @@ export const readFromProvider =
     headers?: Record<string, string>;
   }) =>
   async (token: string, url: string): Promise<unknown> => {
-    let target: URL;
-    try {
-      target = new URL(url);
-    } catch {
-      throw new SourceError(`${name} handed back a link that isn't a URL`);
+    if (!isProviderUrl(url, hosts)) {
+      throw new SourceError(`${name} handed back a link to another host`, {
+        resync: true,
+      });
     }
-    if (
-      target.protocol !== "https:" ||
-      !hosts.includes(target.hostname) ||
-      target.username !== "" ||
-      target.password !== ""
-    ) {
-      throw new SourceError(`${name} handed back a link to another host`);
-    }
-    const response = await fetch(target, {
+    const response = await fetch(url, {
       headers: { ...headers, authorization: `Bearer ${token}` },
       redirect: "manual",
       signal: AbortSignal.timeout(requestTimeoutMs),
     });
-    if (response.status === 429 || response.status === 503) {
+    const { status } = response;
+    if (status === 429 || status === 503) {
       throw new SourceError(`${name} is throttling reads`, {
         retryAfterMs: retryAfterMs(response.headers.get("retry-after")),
+        status,
       });
     }
-    if (response.status === 410) {
+    if (status === 410) {
       throw new SourceError(`${name} no longer has the cursor`, {
         resync: true,
+        status,
       });
     }
     if (!response.ok) {
-      throw new SourceError(`${name} answered ${response.status}`);
+      throw new SourceError(`${name} answered ${status}`, { status });
     }
-    const text = await response.text();
-    if (text.length > answerMaxBytes) {
+    const bytes = await response.arrayBuffer();
+    if (bytes.byteLength > answerMaxBytes) {
       throw new SourceError(`${name}'s answer is too large`);
     }
-    return JSON.parse(text);
+    try {
+      return JSON.parse(new TextDecoder().decode(bytes));
+    } catch {
+      // Not the parser's message: it quotes the answer.
+      throw new SourceError(`${name}'s answer isn't JSON`);
+    }
   };

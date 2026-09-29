@@ -42,6 +42,11 @@ interface __BaseEnv_Env {
    * (src/model-budgets.ts).
    */
   MODEL_BUDGET_MONTH?: string;
+  /**
+   * Tests only: fewer connector events one cron run delivers
+   * (src/workflows/connector-events.ts).
+   */
+  CONNECTOR_EVENTS_PER_RUN?: string;
   /** Tests only: a shorter limit for one call into an App (src/app.ts). */
   APP_CALL_TIMEOUT_MS?: string;
   /** The router secret before the current one, while rotating (src/router-secret.ts). */

@@ -1,5 +1,5 @@
 import {
-  connectorEventsTakeMax,
+  connectorEventActions,
   eventListenerSchema,
   eventListenersMax,
 } from "@grasp-os/shared/connect";
@@ -17,7 +17,7 @@ import {
   workflowErrors,
 } from "@grasp-os/shared/workflows";
 import type { ConnectorEvent } from "@grasp-os/shared/workflows";
-import { and, eq, isNotNull, sql } from "drizzle-orm";
+import { and, eq, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { apps, permissions, workflowTriggers } from "../db/core/schema.ts";
@@ -35,15 +35,18 @@ import { atHourlyCap, startRun } from "./runs.ts";
 // tells connect who listens for events where (`listenersOf`), which is
 // where connect listens and nowhere else, then takes the events connect
 // read, delivers each here, and settles them (`pumpConnectorEvents`).
-// Which connectors report which events is connect's to say (its
-// events.ts).
+// The event types and their read actions are `connectorEventActions`;
+// connect reads them (its events.ts).
 //
 // An event starts the workflows of Apps' current versions whose trigger
 // names its type and whose filter its payload matches, and only in Apps
 // that could read what it says, by the one rule calls are authorized by
 // (`allowingPermissionSql`, permissions.ts, which `authorize` uses too):
-// - an active permission on its connection: on the whole connection, or
-//   on the part of it (`resource`) the event is about;
+// - an active permission on its connection: on exactly the part of it
+//   (`resource`) the event is about, or, for an event of the account's own
+//   mailbox or drive (no `resource`), on the whole connection. A
+//   permission on the whole connection doesn't hear events of mailboxes
+//   connect reads for other Apps' permissions;
 // - that allows the read action the event names (`action`);
 // - from the App's current version only if an admin approved it, as for
 //   any call on a connection;
@@ -99,7 +102,11 @@ const receiversOf = async (env: Env, event: ConnectorEvent) =>
               : { resource: event.resource }),
           },
           event.action
-        )} AND ${unmaskedSql})`
+        )} AND ${unmaskedSql} AND ${
+          event.resource === undefined
+            ? isNull(permissions.resource)
+            : eq(permissions.resource, event.resource)
+        })`
       )
     );
 
@@ -208,92 +215,106 @@ export const deliverConnectorEvent = async (
 };
 
 /**
- * Who listens for events where: every App's current version's event
- * trigger, with each permission on a connection that could let the App
- * hear it (`listeningPermissionSql`) and masks nothing, and the App's
- * owner. Connect narrows it to the event types' read actions and
- * personal connections' owners.
+ * Who listens for events of `type` where: each active, unmasked
+ * permission on a connection that allows the type's read action
+ * (`action`), held by an App whose current version has an event trigger
+ * for `type` and was approved (`listeningPermissionSql`), with the App's
+ * owner. One row per permission, however many of the App's workflows
+ * listen, so the rows are as many as such permissions at most.
  */
-export const listenersOf = async (env: Env): Promise<EventListener[]> => {
-  const rows = await drizzle(env.DB)
+const listenersFor = async (env: Env, type: string, action: string) =>
+  await drizzle(env.DB)
     .select({
-      type: workflowTriggers.event,
       connection: permissions.objectId,
       resource: permissions.resource,
       owner: apps.ownerId,
-      actions: permissions.actions,
     })
-    .from(workflowTriggers)
-    .innerJoin(
-      apps,
-      and(
-        eq(apps.id, workflowTriggers.appId),
-        eq(apps.currentVersion, workflowTriggers.version)
-      )
-    )
-    .innerJoin(
-      permissions,
-      and(
-        listeningPermissionSql(
-          workflowTriggers.appId,
-          workflowTriggers.version
-        ),
-        unmaskedSql
-      )
-    )
+    .from(permissions)
+    .innerJoin(apps, eq(apps.id, permissions.subjectId))
     .where(
-      and(eq(workflowTriggers.type, "event"), isNotNull(workflowTriggers.event))
+      and(
+        listeningPermissionSql(apps.id, apps.currentVersion),
+        unmaskedSql,
+        sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value = ${action})`,
+        sql`EXISTS (SELECT 1 FROM ${workflowTriggers} WHERE ${workflowTriggers.appId} = ${apps.id} AND ${workflowTriggers.version} = ${apps.currentVersion} AND ${workflowTriggers.type} = 'event' AND ${workflowTriggers.event} = ${type})`
+      )
     )
     .limit(eventListenersMax + 1);
-  // Never a list cut short: connect would stop listening for the rest.
-  if (rows.length > eventListenersMax) {
-    throw new Error("More event listeners than connect takes at once");
-  }
-  const listeners = new Map<string, EventListener>();
-  for (const { actions, ...row } of rows) {
-    const parsed: unknown = JSON.parse(actions);
-    const listener = eventListenerSchema.safeParse({
-      ...row,
-      actions: parsed,
-    });
-    if (listener.success) {
-      listeners.set(JSON.stringify(listener.data), listener.data);
-    }
-  }
-  return [...listeners.values()];
-};
-
-/** Most batches of events one cron run delivers: 1,000 events. */
-const pumpMaxBatches = 10;
 
 /**
- * Delivers one event connect read: done once it started its runs, or when
- * it never will be taken (`workflow.invalid`); failed otherwise, to be
- * delivered again later.
+ * Who listens for events where, for every event type connections report:
+ * each listener once. Past `eventListenersMax` the rest are left out and
+ * logged: connect stops listening for them (and says so in the audit
+ * log), while everyone else goes on hearing their events.
+ */
+export const listenersOf = async (env: Env): Promise<EventListener[]> => {
+  const listeners = new Map<string, EventListener>();
+  for (const [type, action] of Object.entries(connectorEventActions)) {
+    // oxlint-disable-next-line no-await-in-loop -- one query per event type, few
+    const rows = await listenersFor(env, type, action);
+    for (const row of rows) {
+      const listener = eventListenerSchema.safeParse({ type, ...row });
+      if (listener.success) {
+        listeners.set(JSON.stringify(listener.data), listener.data);
+      }
+    }
+  }
+  const all = [...listeners.values()];
+  if (all.length > eventListenersMax) {
+    log.error("workflow.event_listeners_capped", {
+      listeners: all.length,
+      kept: eventListenersMax,
+    });
+  }
+  return all.slice(0, eventListenersMax);
+};
+
+/** Events one cron run delivers, at most: one take's worth. */
+const defaultEventsPerRun = 100;
+
+/** Events one cron run delivers: fewer in tests (`CONNECTOR_EVENTS_PER_RUN`). */
+const eventsPerRun = (env: Env): number => {
+  const configured = Number(env.CONNECTOR_EVENTS_PER_RUN);
+  return Number.isInteger(configured) && configured > 0
+    ? configured
+    : defaultEventsPerRun;
+};
+
+/**
+ * Delivers one event connect read: `done` once it started its runs,
+ * `rejected` when it never will be taken (`workflow.invalid`, or not
+ * JSON), `failed` otherwise, to be delivered again later.
  */
 const deliverOne = async (
   env: Env,
   { event }: OutboxedConnectorEvent
-): Promise<boolean> => {
+): Promise<"done" | "failed" | "rejected"> => {
+  let parsed: unknown;
   try {
-    await deliverConnectorEvent(env, JSON.parse(event));
-    return true;
+    parsed = JSON.parse(event);
+  } catch {
+    log.error("workflow.event_invalid", {});
+    return "rejected";
+  }
+  try {
+    await deliverConnectorEvent(env, parsed);
+    return "done";
   } catch (error) {
     if (workflowErrors.codeOf(error) === "workflow.invalid") {
       log.error("workflow.event_invalid", errorFields(error));
-      return true;
+      return "rejected";
     }
-    return false;
+    return "failed";
   }
 };
 
 /**
  * Every minute, from the cron trigger: tells connect who listens for
- * events where, then delivers the events it read, a batch at a time, and
- * settles each batch; those read before are delivered even when telling
- * connect fails. Nothing while `connector_events`, `triggers` or
- * `workflows` is off: connect then reads nothing, and the events it holds
- * wait.
+ * events where, then delivers at most `eventsPerRun` of the events it
+ * read and settles them; the rest wait for the next run. Those read
+ * before are delivered even when telling connect fails. Nothing while
+ * `connector_events`, `triggers` or `workflows` is off: connect then reads
+ * nothing, and the events it holds wait.
  */
 export const pumpConnectorEvents = async (env: Env): Promise<void> => {
   const on = (["connector_events", "triggers", "workflows"] as const).every(
@@ -307,23 +328,17 @@ export const pumpConnectorEvents = async (env: Env): Promise<void> => {
   } catch (error) {
     log.error("workflow.event_sync_failed", errorFields(error));
   }
-  for (let batch = 0; batch < pumpMaxBatches; batch += 1) {
-    // oxlint-disable-next-line no-await-in-loop -- each batch settled before the next
-    const taken = await env.CONNECT.takeConnectorEvents();
-    if (taken.length === 0) {
-      return;
-    }
-    const done: string[] = [];
-    const failed: string[] = [];
-    for (const outboxed of taken) {
-      // oxlint-disable-next-line no-await-in-loop -- one event at a time
-      const delivered = await deliverOne(env, outboxed);
-      (delivered ? done : failed).push(outboxed.id);
-    }
-    // oxlint-disable-next-line no-await-in-loop -- each batch settled before the next
-    await env.CONNECT.ackConnectorEvents({ done, failed });
-    if (taken.length < connectorEventsTakeMax) {
-      return;
-    }
+  const taken = await env.CONNECT.takeConnectorEvents();
+  const settled: Record<"done" | "failed" | "rejected", string[]> = {
+    done: [],
+    failed: [],
+    rejected: [],
+  };
+  for (const outboxed of taken.slice(0, eventsPerRun(env))) {
+    // oxlint-disable-next-line no-await-in-loop -- one event at a time
+    settled[await deliverOne(env, outboxed)].push(outboxed.id);
+  }
+  if (taken.length > 0) {
+    await env.CONNECT.ackConnectorEvents(settled);
   }
 };

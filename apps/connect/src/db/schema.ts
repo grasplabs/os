@@ -345,8 +345,9 @@ export const auditOutboxRejected = sqliteTable(
  * the whole connection covers. `cursor` is where reading what changed
  * goes on from: the provider's delta or next-page link, null until the
  * first read sets it. Reading is due at `poll_at`; `failures` counts reads
- * that failed in a row, each waiting longer. Events are only of what the
- * source got after `created_at`.
+ * that failed in a row, each waiting longer. `read_at` is when the last
+ * read that succeeded began. Events are only of what the source got after
+ * `created_at`.
  */
 export const eventSources = sqliteTable(
   "event_sources",
@@ -358,6 +359,7 @@ export const eventSources = sqliteTable(
     cursor: text(),
     pollAt: timestamp("poll_at").notNull(),
     failures: integer().notNull().default(0),
+    readAt: timestamp("read_at"),
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },

@@ -3,8 +3,10 @@
  * a mailbox's inbox and a drive, each a list of what arrived in order,
  * served in the shapes Graph's v1.0 reference documents (`@odata.context`,
  * `@odata.nextLink` and `@odata.deltaLink`, a delta link naming the inbox
- * its own way). A test adds mail and files, then reads what connect asked
- * for.
+ * its own way). A message moved between folders gets a new ID, as in
+ * Graph, but keeps its immutable one, which Graph gives instead when asked
+ * (`Prefer: IdType="ImmutableId"`). A test adds mail and files, can make
+ * pages shorter, then reads what connect asked for.
  *
  * Self-contained, with nothing from outside the function: core's tests
  * run it inside the Worker that stands in for the internet behind connect
@@ -28,13 +30,25 @@ export const graphEventsFake = () => {
     }
     return list;
   };
-  // oxlint-disable-next-line unicorn/consistent-function-scoping -- self-contained: core's tests embed this function's source
+  /** A page size shorter than asked for, as Graph may answer with. */
+  let shortPages: number | undefined;
   const pageSizeOf = (request: Request): number => {
     const size = /odata\.maxpagesize=(?<size>\d+)/u.exec(
       request.headers.get("prefer") ?? ""
     )?.groups?.size;
-    return size === undefined ? 10 : Number(size);
+    const asked = size === undefined ? 10 : Number(size);
+    return Math.min(asked, shortPages ?? asked);
   };
+  /** An item as Graph shows it: by its immutable ID when asked for one. */
+  // oxlint-disable-next-line unicorn/consistent-function-scoping -- self-contained: core's tests embed this function's source
+  const shown = (
+    request: Request,
+    { immutableId, ...item }: Record<string, unknown>
+  ): Record<string, unknown> =>
+    immutableId !== undefined &&
+    (request.headers.get("prefer") ?? "").includes('IdType="ImmutableId"')
+      ? { ...item, id: immutableId }
+      : item;
   /** One page of `list` from `from`, and the link to go on from. */
   const page = (
     request: Request,
@@ -43,7 +57,9 @@ export const graphEventsFake = () => {
     from: number,
     link: (query: string) => string
   ): Response => {
-    const value = list.slice(from, from + pageSizeOf(request));
+    const value = list
+      .slice(from, from + pageSizeOf(request))
+      .map((item) => shown(request, item));
     const to = from + value.length;
     return Response.json({
       "@odata.context": context,
@@ -127,7 +143,29 @@ export const graphEventsFake = () => {
     },
     /** A message arriving in `mailbox`'s inbox, or shown again as changed. */
     receive: (mailbox: string, message: Record<string, unknown>): void => {
-      listOf(inboxes, mailbox.toLowerCase()).push(message);
+      listOf(inboxes, mailbox.toLowerCase()).push({
+        immutableId: message.id,
+        ...message,
+      });
+    },
+    /**
+     * A message moved out of `mailbox`'s inbox and back: shown again under
+     * the new ID `movedTo`, with its immutable ID unchanged.
+     */
+    moveBack: (
+      mailbox: string,
+      message: Record<string, unknown>,
+      movedTo: string
+    ): void => {
+      listOf(inboxes, mailbox.toLowerCase()).push({
+        ...message,
+        immutableId: message.id,
+        id: movedTo,
+      });
+    },
+    /** Pages of at most `size` items from now on. */
+    shortenPages: (size: number): void => {
+      shortPages = size;
     },
     /** An item created or changed in `drive` (`user:<id>` for a OneDrive). */
     change: (drive: string, item: Record<string, unknown>): void => {

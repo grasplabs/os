@@ -156,6 +156,20 @@ describe("connector events", () => {
     ]);
   });
 
+  it("deliver only so many events a run, and the rest the next", async () => {
+    const { builder, app, mailbox } = await listening();
+    await runCron();
+    await receive(mailbox, invoiceMail(mailbox, 1, new Date().toISOString()));
+    await receive(mailbox, invoiceMail(mailbox, 2, new Date().toISOString()));
+    await aMinuteLater();
+    await runCron({ CONNECTOR_EVENTS_PER_RUN: "1" });
+    const first = await builder.api.workflows.list(app);
+    await runCron({ CONNECTOR_EVENTS_PER_RUN: "1" });
+    const second = await builder.api.workflows.list(app);
+
+    expect([first.length, second.length]).toStrictEqual([1, 2]);
+  });
+
   it("stop listening once the workflow no longer listens", async () => {
     const { builder, connection, app } = await listening();
     await runCron();
@@ -180,14 +194,16 @@ describe("connector events", () => {
 
   it("find who listens by index, reading no table whole", async () => {
     await listening();
-    const [recorded] = await recordedQueries(
-      async () => await listenersOf(env)
+    const recorded = await recordedQueries(async () => await listenersOf(env));
+    const plans = await Promise.all(
+      recorded.map(async (query) => await planOf(query))
     );
-    const plan = recorded === undefined ? [] : await planOf(recorded);
+    const steps = plans.flat();
 
-    expect(plan).not.toHaveLength(0);
-    expect(plan.filter((step) => fullScan.test(step))).toStrictEqual([]);
-    expect(plan.filter((step) => step.includes("TEMP B-TREE"))).toStrictEqual(
+    // One query per event type.
+    expect(plans).toHaveLength(2);
+    expect(steps.filter((step) => fullScan.test(step))).toStrictEqual([]);
+    expect(steps.filter((step) => step.includes("TEMP B-TREE"))).toStrictEqual(
       []
     );
   });

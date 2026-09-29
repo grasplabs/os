@@ -1,6 +1,8 @@
+import { auditProvenanceMaxItems } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import {
   connectErrors,
+  connectorEventActions,
   connectorEventsAckSchema,
   connectorEventsTakeMax,
   eventListenersSchema,
@@ -40,17 +42,19 @@ import { accessTokenFor } from "./tokens.ts";
 //
 // Where connect listens is only ever what a listener's permission
 // covers: the mailbox or drive the permission names, or the account's own
-// for a permission on the whole connection; only for event types whose
-// read action (such as `mail.list`) the permission allows; and on a
-// personal connection only for its owner's Apps. Core checks every event
-// again as it delivers it, by the rule calls are authorized by.
+// for a permission on the whole connection; and on a personal connection
+// only for its owner's Apps. Core sends only permissions that allow the
+// event type's read action (`connectorEventActions`), and checks every
+// event again as it delivers it, by the rule calls are authorized by.
 //
 // Reads use the connection's token, which never leaves connect. A read
-// takes at most `readMaxItems` items; more waits for the next read, which
-// is due at once. A source that fails waits longer after each failure,
-// up to an hour, or as long as the provider asks. While the outbox holds
-// `outboxMax` events, nothing is read: the sources' cursors keep their
-// place, and nothing is lost.
+// stops once it has `readMaxItems` items (at most a page more); more waits
+// for the next read, which is due at once. A read that fails, or whose
+// result can't be kept, waits longer after each failure, up to an hour, or
+// as long as the provider asks; one refused access (401, 403, 404)
+// `refusedLimit` times in a row is recorded in the audit log and read only
+// daily from then on. While the outbox holds `outboxMax` events, nothing
+// is read: the sources' cursors keep their place, and nothing is lost.
 
 /** Every event type connect reports, by type. */
 const kinds: Readonly<Record<string, EventKind>> = {
@@ -60,6 +64,10 @@ const kinds: Readonly<Record<string, EventKind>> = {
 /** The type `type` names, if connect reports it. */
 const kindOf = (type: string): EventKind | undefined =>
   Object.hasOwn(kinds, type) ? kinds[type] : undefined;
+
+/** The read action whose data an event of `type` carries. */
+const actionOf = (type: string): string | undefined =>
+  Object.entries(connectorEventActions).find(([name]) => name === type)?.[1];
 
 /** Most pages one read goes through. */
 const readMaxPages = 5;
@@ -73,6 +81,12 @@ const inactiveWaitMs = 15 * 60_000;
 const readsPerSync = 25;
 /** Events the outbox holds before sources stop being read. */
 export const outboxMax = 10_000;
+/** Refusals in a row after which a source is read only daily. */
+export const refusedLimit = 10;
+/** How long a source refused that often waits. */
+const refusedWaitMs = 24 * 60 * 60_000;
+/** The statuses that say the connection can't read the source. */
+const refusedStatuses = new Set([401, 403, 404]);
 
 /** The wait after `failures` failures in a row: a minute, doubling, to an hour. */
 const backoffMs = (failures: number): number =>
@@ -95,7 +109,6 @@ const mayListen = (
   connection.server === kind.server &&
   (connection.scope === "shared" ||
     connection.ownerUserId === listener.owner) &&
-  listener.actions.includes(kind.action) &&
   (listener.resource === null || kind.isResource(listener.resource));
 
 /** D1 binds at most 100 values a statement. */
@@ -120,19 +133,21 @@ const connectionsOf = async (
   return found;
 };
 
-/** Where connect starts or stops listening, for the audit log. */
+type SourceKey = Pick<EventSource, "connectionId" | "type" | "resource">;
+
+/** What the audit log says of a source: its connection, type and resource. */
 const sourceEntry = (
-  action: "connection.events.started" | "connection.events.stopped",
-  {
-    connectionId,
-    type,
-    resource,
-  }: Pick<EventSource, "connectionId" | "type" | "resource">
+  action:
+    | "connection.events.started"
+    | "connection.events.stopped"
+    | "connection.events.refused",
+  { connectionId, type, resource }: SourceKey,
+  detail: Record<string, number> = {}
 ): AuditEntry => ({
   actor: { type: "system" },
   action,
   target: { type: "connection", id: connectionId },
-  detail: { type, ...(resource === "" ? {} : { resource }) },
+  detail: { type, ...(resource === "" ? {} : { resource }), ...detail },
 });
 
 /**
@@ -148,10 +163,7 @@ const reconcile = async (
   const found = await connectionsOf(env.DB, [
     ...new Set(listeners.map(({ connection }) => connection)),
   ]);
-  const wanted = new Map<
-    string,
-    Pick<EventSource, "connectionId" | "type" | "resource">
-  >();
+  const wanted = new Map<string, SourceKey>();
   for (const listener of listeners) {
     const kind = kindOf(listener.type);
     const connection = found.get(listener.connection);
@@ -275,75 +287,23 @@ const pagesWith =
     return { items, cursor: url, more: true };
   };
 
-/** The event core gets for what a read of `source` found. */
-const eventOf = (
-  kind: EventKind,
-  source: EventSource,
-  connection: Connection,
-  { id, payload }: ReadEvent
-) => ({
-  id,
-  connection: connection.id,
-  owner: connection.ownerUserId,
-  ...(source.resource === "" ? {} : { resource: source.resource }),
-  action: kind.action,
-  type: source.type,
-  payload,
-});
-
 /** Longest provider ID an event takes (core's `connectorEventSchema`). */
 const eventIdMaxLength = 200;
 
 /**
- * Reads one source that is due, and keeps what it found in the outbox,
- * with where to read on from and when, in one batch with its audit event.
+ * What a read found, kept: the events in the outbox, where to read on
+ * from and when, in one batch with its audit events, one per hundred
+ * events, so each names every item it read.
  */
-const readSource = async (
+const keepRead = async (
   env: Env,
   source: EventSource,
-  connection: Connection
+  connection: Connection,
+  found: ReadEvents,
+  readAt: Date
 ): Promise<void> => {
   const db = drizzle(env.DB);
-  const now = Date.now();
-  const kind = kindOf(source.type);
-  if (kind === undefined || connection.status !== "active") {
-    await db
-      .update(eventSources)
-      .set({ pollAt: new Date(now + inactiveWaitMs) })
-      .where(eq(eventSources.id, source.id));
-    return;
-  }
-  if (!(await takeSource(env.DB, source, now))) {
-    return;
-  }
-  let found: ReadEvents;
-  try {
-    const token = await accessTokenFor(env, connection.id);
-    found = await kind.read({ source, connection, pages: pagesWith(token) });
-  } catch (error) {
-    const failures = source.failures + 1;
-    const wait =
-      error instanceof SourceError && error.retryAfterMs !== undefined
-        ? error.retryAfterMs
-        : backoffMs(failures);
-    log.warn("events.read_failed", {
-      type: source.type,
-      failures,
-      ...errorFields(error),
-    });
-    await db
-      .update(eventSources)
-      .set({
-        failures,
-        pollAt: new Date(Date.now() + wait),
-        ...(error instanceof SourceError && error.resync
-          ? { cursor: null, createdAt: new Date() }
-          : {}),
-        updatedAt: new Date(),
-      })
-      .where(eq(eventSources.id, source.id));
-    return;
-  }
+  const action = actionOf(source.type) ?? "";
   const events = found.events.filter(({ id }) => {
     const fits = id.length <= eventIdMaxLength;
     if (!fits) {
@@ -357,43 +317,139 @@ const readSource = async (
     .set({
       cursor: found.cursor,
       failures: 0,
+      readAt,
       pollAt: new Date(done.getTime() + (found.more ? 0 : pollIntervalMs)),
       updatedAt: done,
     })
     .where(eq(eventSources.id, source.id));
-  if (events.length === 0) {
-    await update;
-    return;
-  }
-  const inserts: BatchItem<"sqlite">[] = events.map((event) =>
+  const inserts: BatchItem<"sqlite">[] = events.map((event: ReadEvent) =>
     db
       .insert(connectorEvents)
       .values({
         id: crypto.randomUUID(),
         key: JSON.stringify([source.id, event.id]),
-        event: JSON.stringify(eventOf(kind, source, connection, event)),
+        event: JSON.stringify({
+          id: event.id,
+          connection: connection.id,
+          owner: connection.ownerUserId,
+          ...(source.resource === "" ? {} : { resource: source.resource }),
+          action,
+          type: source.type,
+          payload: event.payload,
+        }),
         retryAt: done,
         createdAt: done,
       })
       .onConflictDoNothing()
   );
-  await recordEvents(
-    env,
-    [
-      {
-        actor: { type: "system" },
-        action: "connection.events.read",
-        target: { type: "connection", id: connection.id },
-        provenance: events.map(({ id }) => id),
-        detail: {
-          type: source.type,
-          ...(source.resource === "" ? {} : { resource: source.resource }),
-          count: events.length,
-        },
+  const entries: AuditEntry[] = [];
+  for (let at = 0; at < events.length; at += auditProvenanceMaxItems) {
+    const group = events.slice(at, at + auditProvenanceMaxItems);
+    entries.push({
+      actor: { type: "system" },
+      action: "connection.events.read",
+      target: { type: "connection", id: connection.id },
+      provenance: group.map(({ id }) => id),
+      detail: {
+        type: source.type,
+        ...(source.resource === "" ? {} : { resource: source.resource }),
+        count: group.length,
       },
-    ],
-    [...inserts, update]
-  );
+    });
+  }
+  const [first, ...rest] = entries;
+  if (first === undefined) {
+    await update;
+    return;
+  }
+  await recordEvents(env, [first, ...rest], [...inserts, update]);
+};
+
+/**
+ * A read that failed, or whose result couldn't be kept: the source waits
+ * longer, or as long as the provider asked, and starts over when its
+ * cursor is gone (from its last read, where the provider can). Refused
+ * `refusedLimit` times in a row, it's recorded in the audit log and read
+ * only daily from then on.
+ */
+const failRead = async (
+  env: Env,
+  source: EventSource,
+  error: unknown
+): Promise<void> => {
+  const db = drizzle(env.DB);
+  const failures = source.failures + 1;
+  const sourceError = error instanceof SourceError ? error : undefined;
+  const refused =
+    sourceError?.status !== undefined &&
+    refusedStatuses.has(sourceError.status) &&
+    failures >= refusedLimit;
+  let wait = sourceError?.retryAfterMs ?? backoffMs(failures);
+  if (refused) {
+    wait = refusedWaitMs;
+  }
+  log.warn("events.read_failed", {
+    type: source.type,
+    failures,
+    ...(sourceError?.status === undefined
+      ? {}
+      : { status: sourceError.status }),
+    ...errorFields(error),
+  });
+  const update = db
+    .update(eventSources)
+    .set({
+      failures,
+      pollAt: new Date(Date.now() + wait),
+      ...(sourceError?.resync === true ? { cursor: null } : {}),
+      updatedAt: new Date(),
+    })
+    .where(eq(eventSources.id, source.id));
+  if (refused && failures === refusedLimit) {
+    await recordEvents(
+      env,
+      [
+        sourceEntry("connection.events.refused", source, {
+          status: sourceError?.status ?? 0,
+          failures,
+        }),
+      ],
+      [update]
+    );
+    return;
+  }
+  await update;
+};
+
+/** Reads one source that is due, and keeps what it found. */
+const readSource = async (
+  env: Env,
+  source: EventSource,
+  connection: Connection
+): Promise<void> => {
+  const now = Date.now();
+  const kind = kindOf(source.type);
+  if (kind === undefined || connection.status !== "active") {
+    await drizzle(env.DB)
+      .update(eventSources)
+      .set({ pollAt: new Date(now + inactiveWaitMs) })
+      .where(eq(eventSources.id, source.id));
+    return;
+  }
+  if (!(await takeSource(env.DB, source, now))) {
+    return;
+  }
+  try {
+    const token = await accessTokenFor(env, connection.id);
+    const found = await kind.read({
+      source,
+      connection,
+      pages: pagesWith(token),
+    });
+    await keepRead(env, source, connection, found, new Date(now));
+  } catch (error) {
+    await failRead(env, source, error);
+  }
 };
 
 /** Reads the sources that are due, the longest due first. */
@@ -455,35 +511,61 @@ const outboxedEventSchema = z.object({
   type: z.string(),
 });
 
-/** An event dropped after its last try, for the audit log. */
-const droppedEntry = (event: string, attempts: number): AuditEntry => {
-  const parsed = outboxedEventSchema.safeParse(JSON.parse(event));
+/** An event dropped, and why, for the audit log. */
+const droppedEntry = (
+  event: string,
+  detail: Record<string, string | number>
+): AuditEntry => {
+  let parsed: z.infer<typeof outboxedEventSchema> | undefined;
+  try {
+    parsed = outboxedEventSchema.safeParse(JSON.parse(event)).data;
+  } catch {
+    parsed = undefined;
+  }
   return {
     actor: { type: "system" },
     action: "connection.events.dropped",
-    ...(parsed.success
-      ? { target: { type: "connection", id: parsed.data.connection } }
-      : {}),
+    ...(parsed === undefined
+      ? {}
+      : { target: { type: "connection", id: parsed.connection } }),
     detail: {
-      ...(parsed.success ? { type: parsed.data.type } : {}),
-      attempts,
+      ...(parsed === undefined ? {} : { type: parsed.type }),
+      ...detail,
     },
   };
+};
+
+/** The outboxed events `ids` name, with their attempts so far. */
+const outboxedRows = async (db: D1Database, ids: readonly string[]) => {
+  const rows: { id: string; event: string; attempts: number }[] = [];
+  for (let at = 0; at < ids.length; at += idsPerQuery) {
+    // oxlint-disable-next-line no-await-in-loop -- one chunk at most, in practice
+    const found = await drizzle(db)
+      .select({
+        id: connectorEvents.id,
+        event: connectorEvents.event,
+        attempts: connectorEvents.attempts,
+      })
+      .from(connectorEvents)
+      .where(inArray(connectorEvents.id, ids.slice(at, at + idsPerQuery)));
+    rows.push(...found);
+  }
+  return rows;
 };
 
 /**
  * `ConnectApi.ackConnectorEvents`: removes the events done, and has each
  * that failed wait before it is taken again, longer after each attempt,
  * up to an hour: a workflow at its hourly limit, say, gets it later. One
- * that failed `maxDeliveryAttempts` times is dropped, and the audit log
- * says so, so an event that can never start its runs doesn't hold its
- * place in the outbox for ever.
+ * that failed `maxDeliveryAttempts` times, or that core will never take
+ * (`rejected`), is dropped, and the audit log says so, so it doesn't hold
+ * its place in the outbox for ever.
  */
 export const ackConnectorEvents = async (
   env: Env,
   request: unknown
 ): Promise<void> => {
-  const { done, failed } = connectErrors.parse(
+  const { done, failed, rejected } = connectErrors.parse(
     "connect.invalid",
     connectorEventsAckSchema,
     request
@@ -492,47 +574,43 @@ export const ackConnectorEvents = async (
   const now = Date.now();
   const statements: BatchItem<"sqlite">[] = [];
   const dropped: AuditEntry[] = [];
-  for (let at = 0; at < done.length; at += idsPerQuery) {
-    statements.push(
-      db
-        .delete(connectorEvents)
-        .where(inArray(connectorEvents.id, done.slice(at, at + idsPerQuery)))
-    );
-  }
-  for (let at = 0; at < failed.length; at += idsPerQuery) {
-    // oxlint-disable-next-line no-await-in-loop -- one chunk at most, in practice
-    const rows = await db
-      .select({
-        id: connectorEvents.id,
-        event: connectorEvents.event,
-        attempts: connectorEvents.attempts,
-      })
-      .from(connectorEvents)
-      .where(inArray(connectorEvents.id, failed.slice(at, at + idsPerQuery)));
-    const last = rows.filter(
-      ({ attempts }) => attempts + 1 >= maxDeliveryAttempts
-    );
-    const retried = rows
-      .filter(({ attempts }) => attempts + 1 < maxDeliveryAttempts)
-      .map(({ id }) => id);
-    for (const { id, event, attempts } of last) {
-      log.error("events.dropped", { attempts: attempts + 1 });
-      dropped.push(droppedEntry(event, attempts + 1));
-      statements.push(
-        db.delete(connectorEvents).where(eq(connectorEvents.id, id))
-      );
-    }
-    if (retried.length > 0) {
+  const remove = (ids: readonly string[]): void => {
+    for (let at = 0; at < ids.length; at += idsPerQuery) {
       statements.push(
         db
-          .update(connectorEvents)
-          .set({
-            attempts: sql`${connectorEvents.attempts} + 1`,
-            retryAt: sql`${now} + min(60000 * (1 << min(${connectorEvents.attempts}, 6)), ${maxWaitMs})`,
-          })
-          .where(inArray(connectorEvents.id, retried))
+          .delete(connectorEvents)
+          .where(inArray(connectorEvents.id, ids.slice(at, at + idsPerQuery)))
       );
     }
+  };
+  remove(done);
+  const refusedRows = await outboxedRows(env.DB, rejected);
+  for (const { event } of refusedRows) {
+    dropped.push(droppedEntry(event, { reason: "invalid" }));
+  }
+  remove(refusedRows.map(({ id }) => id));
+  const failedRows = await outboxedRows(env.DB, failed);
+  const last = failedRows.filter(
+    ({ attempts }) => attempts + 1 >= maxDeliveryAttempts
+  );
+  for (const { event, attempts } of last) {
+    log.error("events.dropped", { attempts: attempts + 1 });
+    dropped.push(droppedEntry(event, { attempts: attempts + 1 }));
+  }
+  remove(last.map(({ id }) => id));
+  const retried = failedRows
+    .filter(({ attempts }) => attempts + 1 < maxDeliveryAttempts)
+    .map(({ id }) => id);
+  for (let at = 0; at < retried.length; at += idsPerQuery) {
+    statements.push(
+      db
+        .update(connectorEvents)
+        .set({
+          attempts: sql`${connectorEvents.attempts} + 1`,
+          retryAt: sql`${now} + min(60000 * (1 << min(${connectorEvents.attempts}, 6)), ${maxWaitMs})`,
+        })
+        .where(inArray(connectorEvents.id, retried.slice(at, at + idsPerQuery)))
+    );
   }
   const [firstDropped, ...moreDropped] = dropped;
   if (firstDropped !== undefined) {

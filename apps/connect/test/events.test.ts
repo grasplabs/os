@@ -15,6 +15,7 @@ import {
   maxDeliveryAttempts,
   outboxMax,
   pollIntervalMs,
+  refusedLimit,
 } from "../src/events.ts";
 import { accessTokenFor } from "../src/tokens.ts";
 import {
@@ -87,7 +88,6 @@ const listener = (
   connection: id,
   resource: null,
   owner: person.userId,
-  actions: ["mail.list"],
   ...changes,
 });
 
@@ -293,18 +293,14 @@ describe("connector events", () => {
       connectionId: gone.id,
     });
     await sync([
-      // Its permission doesn't allow reading mail.
-      listener(outlook, { actions: ["mail.send"] }),
       // Someone else's App, on a personal connection.
       listener(outlook, { owner: someone().userId }),
       // Not a mailbox.
       listener(outlook, { resource: "a/b" }),
       // A drive's events, on a permission for a mailbox.
-      listener(outlook, {
-        type: "m365.file.created",
-        actions: ["files.list"],
-        resource: invoices,
-      }),
+      listener(outlook, { type: "m365.file.created", resource: invoices }),
+      // A mailbox that is a dot segment.
+      listener(outlook, { resource: ".." }),
       // An event type nothing reports.
       listener(outlook, { type: "m365.mail.sent" }),
       // A connection no native Microsoft 365 connector carries.
@@ -341,10 +337,7 @@ describe("connector events", () => {
 
   it("report files created in a drive after they started, not folders or deletions", async () => {
     const outlook = await connected();
-    const own = listener(outlook, {
-      type: "m365.file.created",
-      actions: ["files.list"],
-    });
+    const own = listener(outlook, { type: "m365.file.created" });
     const finance = { ...own, resource: financeDrive };
     await sync([own, finance]);
     const file = createdFile(financeDrive, 1, now());
@@ -472,19 +465,142 @@ describe("connector events", () => {
     await expect(sources()).resolves.toMatchObject([{ failures: 0 }]);
   });
 
-  it("start over from now when Graph no longer has the cursor", async () => {
+  it("start mail over from the last read when Graph no longer has the cursor, losing nothing", async () => {
     const outlook = await connected();
     await sync([listener(outlook)]);
+    const lastRead = new Date().toISOString();
+    later();
+    const mail = invoiceMail(outlook.oid, 1, now());
+    graph.receive(outlook.oid, mail);
     instead = () =>
       Response.json({ error: { code: "SyncStateNotFound" } }, { status: 410 });
-    later();
     await sync([listener(outlook)]);
     const gone = await sources();
     later();
     await sync([listener(outlook)]);
+    const events = await outboxed();
 
     expect(gone).toMatchObject([{ cursor: null, failures: 1 }]);
-    expect(graphPaths().at(-1)).toContain("receivedDateTime ge ");
+    expect({
+      fromLastRead: graphPaths()
+        .at(-1)
+        ?.includes(`receivedDateTime ge ${lastRead}`),
+      events: events.map(({ id }) => id),
+    }).toStrictEqual({
+      fromLastRead: true,
+      events: [mail.id],
+    });
+  });
+
+  it("report a message moved out of the inbox and back once, by its immutable ID", async () => {
+    const outlook = await connected();
+    await sync([listener(outlook)]);
+    const mail = invoiceMail(outlook.oid, 1, now());
+    graph.receive(outlook.oid, mail);
+    later();
+    await sync([listener(outlook)]);
+    const [taken] = await exports.default.takeConnectorEvents();
+    await exports.default.ackConnectorEvents({
+      done: [taken?.id ?? ""],
+      failed: [],
+    });
+    graph.moveBack(outlook.oid, mail, `${mail.id.slice(0, -1)}Mvd=`);
+    later();
+    await sync([listener(outlook)]);
+    const events = await outboxed();
+
+    expect({
+      prefer: internet.sent.at(-1)?.headers.prefer,
+      again: events.map(({ id }) => id),
+    }).toStrictEqual({
+      prefer: 'odata.maxpagesize=50, IdType="ImmutableId"',
+      // The same ID as before: core starts nothing for it again.
+      again: [mail.id],
+    });
+  });
+
+  it("leave out a message shown again long after it arrived, only because it changed", async () => {
+    const outlook = await connected();
+    await sync([listener(outlook)]);
+    const mail = invoiceMail(outlook.oid, 1, now());
+    graph.receive(outlook.oid, mail);
+    later();
+    await sync([listener(outlook)]);
+    await env.DB.prepare("DELETE FROM connector_events").run();
+    later(15 * 60_000);
+    await sync([listener(outlook)]);
+    graph.receive(outlook.oid, { ...mail, isRead: true, flag: "flagged" });
+    later();
+    await sync([listener(outlook)]);
+
+    await expect(outboxed()).resolves.toStrictEqual([]);
+  });
+
+  it("put every item of a read with short pages in the audit log, a hundred to an event", async () => {
+    const outlook = await connected();
+    await sync([listener(outlook)]);
+    graph.shortenPages(30);
+    for (let n = 1; n <= 120; n += 1) {
+      graph.receive(outlook.oid, invoiceMail(outlook.oid, n, now()));
+    }
+    later();
+    await sync([listener(outlook)]);
+    const reads = await listening();
+    const events = await outboxed();
+
+    expect({
+      reads: reads
+        .filter(({ action }) => action === "connection.events.read")
+        .map(({ provenance }) => provenance.length),
+      events: events.length,
+    }).toStrictEqual({ reads: [100, 20], events: 120 });
+    const [source] = await sources();
+
+    expect({
+      failures: source?.failures,
+      cursorAtEnd: source?.cursor?.includes("$deltatoken=120"),
+    }).toStrictEqual({ failures: 0, cursorAtEnd: true });
+  });
+
+  it("read a source refused access only daily after ten refusals in a row, and say so once", async () => {
+    const outlook = await connected();
+    await sync([listener(outlook, { resource: invoices })]);
+    const refusedAt: number[] = [];
+    for (let attempt = 1; attempt <= refusedLimit + 1; attempt += 1) {
+      instead = () =>
+        Response.json(
+          { error: { code: "ErrorAccessDenied" } },
+          { status: 403 }
+        );
+      // oxlint-disable-next-line no-await-in-loop -- each read after the last one's wait
+      const [source] = await sources();
+      vi.setSystemTime(Math.max(Date.now(), source?.poll_at ?? 0));
+      refusedAt.push(Date.now());
+      // oxlint-disable-next-line no-await-in-loop -- reads in turn
+      await sync([listener(outlook, { resource: invoices })]);
+    }
+    const [source] = await sources();
+    const listed = await listening();
+    const refused = listed.filter(
+      ({ action }) => action === "connection.events.refused"
+    );
+
+    expect({
+      failures: source?.failures,
+      wait: (source?.poll_at ?? 0) - (refusedAt.at(-1) ?? 0),
+      refused: refused.map(({ detail }) => detail),
+    }).toStrictEqual({
+      failures: refusedLimit + 1,
+      wait: 24 * 60 * 60_000,
+      refused: [
+        {
+          type: "m365.mail.received",
+          resource: invoices,
+          status: 403,
+          failures: refusedLimit,
+        },
+      ],
+    });
   });
 
   it("never send the token anywhere but Graph, whatever link it hands back", async () => {
@@ -496,13 +612,14 @@ describe("connector events", () => {
           "https://graph.example.com/v1.0/users/x/mailFolders('inbox')/messages/delta?$deltatoken=1",
       });
     await sync([listener(outlook)]);
-    later();
-    await sync([listener(outlook)]);
 
     expect(
       internet.sent.filter(({ host }) => host !== "graph.microsoft.com")
     ).toStrictEqual([]);
-    await expect(sources()).resolves.toMatchObject([{ failures: 1 }]);
+    // Never kept: the source starts over instead.
+    await expect(sources()).resolves.toMatchObject([
+      { cursor: null, failures: 1 },
+    ]);
   });
 
   it("hand core the events due, and have each that failed wait longer", async () => {
@@ -567,6 +684,30 @@ describe("connector events", () => {
       target: outlook.id,
       detail: { type: "m365.mail.received", attempts: maxDeliveryAttempts },
       provenance: [],
+    });
+  });
+
+  it("drop an event core will never take at once, and say so in the audit log", async () => {
+    const outlook = await connected();
+    await sync([listener(outlook)]);
+    graph.receive(outlook.oid, invoiceMail(outlook.oid, 1, now()));
+    later();
+    await sync([listener(outlook)]);
+    const [taken] = await exports.default.takeConnectorEvents();
+    await exports.default.ackConnectorEvents({
+      done: [],
+      failed: [],
+      rejected: [taken?.id ?? ""],
+    });
+    const events = await listening();
+
+    await expect(exports.default.takeConnectorEvents()).resolves.toStrictEqual(
+      []
+    );
+    expect(events.at(-1)).toMatchObject({
+      action: "connection.events.dropped",
+      target: outlook.id,
+      detail: { type: "m365.mail.received", reason: "invalid" },
     });
   });
 

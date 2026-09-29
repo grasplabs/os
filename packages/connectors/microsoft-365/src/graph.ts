@@ -45,12 +45,18 @@ export const idSchema = z
   .max(512)
   .regex(/^[\w=!.-]+$/u);
 
-/** A mailbox: its address (`invoices@example.com`) or its user ID. */
+/**
+ * A mailbox: its address (`invoices@example.com`) or its user ID. Never
+ * a dot segment (`.`, `..`), which would be a path of its own.
+ */
 export const mailboxSchema = z
   .string()
   .min(1)
   .max(256)
-  .regex(segmentValuePattern);
+  .regex(segmentValuePattern)
+  .refine((mailbox) => mailbox !== "." && mailbox !== "..", {
+    message: "Not a mailbox",
+  });
 
 /** A drive: a OneDrive's or a SharePoint document library's ID, `b!...`. */
 export const driveSchema = z

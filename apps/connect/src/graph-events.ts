@@ -1,25 +1,42 @@
 import { segmentValuePattern } from "@grasp-os/connector-kit/manifest";
 import { z } from "zod";
 
-import { SourceError, readFromProvider } from "./event-kinds.ts";
+import {
+  SourceError,
+  isSince,
+  newSince,
+  providerLink,
+  readFromProvider,
+} from "./event-kinds.ts";
 import type { EventKind, ReadEvents, SourceRead } from "./event-kinds.ts";
 
 // Microsoft 365's events, read from Microsoft Graph with the connection's
 // token, which stays in connect: Graph's delta queries say what changed in
 // a mailbox's inbox or a drive since the last read, from the link the last
 // read handed back. Nothing but graph.microsoft.com is ever sent the token:
-// a link Graph hands back is followed only on that host.
+// a link Graph hands back is kept only if it is on that host.
 //
 // A source is the resource a permission names (a mailbox, a drive) or,
 // for a permission on the whole connection, the account's own mailbox or
 // OneDrive (`''`), reached by its Entra object ID.
+//
+// Messages are asked for by their immutable IDs (`IdType="ImmutableId"`):
+// a message's usual ID changes when it moves between folders, so one
+// moved out of the inbox and back would be another event.
 
 const graphHost = "graph.microsoft.com";
+const hosts = [graphHost];
 const v1 = `https://${graphHost}/v1.0`;
 
-/** A mailbox, as the connector's mail tools take it: an address or user ID. */
+/**
+ * A mailbox, as the connector's mail tools take it: an address or user
+ * ID, never a dot segment.
+ */
 const isMailbox = (resource: string): boolean =>
-  resource.length <= 256 && segmentValuePattern.test(resource);
+  resource.length <= 256 &&
+  segmentValuePattern.test(resource) &&
+  resource !== "." &&
+  resource !== "..";
 
 /** A drive, as the connector's file tools take it: `b!...`. */
 const isDrive = (resource: string): boolean =>
@@ -52,9 +69,9 @@ const pageOf = <Item extends z.ZodType>(item: Item) =>
 /** Graph, sent the token: only on its own host, over HTTPS. */
 const graph = readFromProvider({
   name: "Microsoft Graph",
-  hosts: [graphHost],
-  // Graph's pages hold up to this many items: a read takes a few pages.
-  headers: { prefer: "odata.maxpagesize=50" },
+  hosts,
+  // Pages of up to 50 items: a read takes a few. Immutable message IDs.
+  headers: { prefer: 'odata.maxpagesize=50, IdType="ImmutableId"' },
 });
 
 /** Graph's page, as one read of a delta query goes through them. */
@@ -64,8 +81,8 @@ const graphPage =
     const page = pageOf(item).parse(await graph(token, url));
     return {
       items: page.value,
-      next: page["@odata.nextLink"],
-      end: page["@odata.deltaLink"],
+      next: providerLink(page["@odata.nextLink"], hosts),
+      end: providerLink(page["@odata.deltaLink"], hosts),
     };
   };
 
@@ -103,24 +120,18 @@ const messageFields = [
   "webLink",
 ].join(",");
 
-/** At or after `since`, by an ISO timestamp Graph wrote; false without one. */
-const isSince = (at: string | null | undefined, since: Date): boolean => {
-  if (at === null || at === undefined) {
-    return false;
-  }
-  const time = Date.parse(at);
-  return Number.isFinite(time) && time >= since.getTime();
-};
-
 /**
  * `m365.mail.received`: mail that arrived in the mailbox's inbox after the
- * source started. A message a delta read shows again (read, flagged) has
- * the same ID, so core starts nothing for it twice.
+ * source started. A message a delta read shows again (read, flagged) is
+ * left out once it's dated well before the last read, and has the same
+ * ID anyway, so core starts nothing for it twice. A read that starts over
+ * (its cursor gone) starts from the last read that succeeded: nothing
+ * that arrived in between is lost, and what came before it is the same
+ * events again.
  */
 const mailReceived: EventKind = {
   provider: "microsoft",
   server: "microsoft-365",
-  action: "mail.list",
   isResource: isMailbox,
   read: async (read): Promise<ReadEvents> => {
     const { source } = read;
@@ -128,20 +139,20 @@ const mailReceived: EventKind = {
       source.resource === ""
         ? ownUser(read)
         : encodeURIComponent(source.resource);
-    const since = source.createdAt.toISOString();
+    const from = (source.readAt ?? source.createdAt).toISOString();
     const start = `${v1}/users/${mailbox}/mailFolders/inbox/messages/delta?${queryOf(
       {
         $select: messageFields,
-        $filter: `receivedDateTime ge ${since}`,
+        $filter: `receivedDateTime ge ${from}`,
       }
     )}`;
     const { items, cursor, more } = await read.pages(
       graphPage(message),
       source.cursor ?? start
     );
+    const since = newSince(source);
     const events = items.flatMap((item) =>
-      item["@removed"] === undefined &&
-      isSince(item.receivedDateTime, source.createdAt)
+      item["@removed"] === undefined && isSince(item.receivedDateTime, since)
         ? [
             {
               id: item.id,
@@ -203,11 +214,12 @@ const driveItemFields = [
  * `m365.file.created`: files created in the drive after the source
  * started, in any folder of it. Graph's first read of a drive starts from
  * now (`token=latest`), so what the drive already holds is never read.
+ * A drive's delta can't start from a time: when its cursor is gone, it
+ * starts from now again, and files created in between aren't reported.
  */
 const fileCreated: EventKind = {
   provider: "microsoft",
   server: "microsoft-365",
-  action: "files.list",
   isResource: isDrive,
   read: async (read): Promise<ReadEvents> => {
     const { source } = read;
@@ -223,11 +235,12 @@ const fileCreated: EventKind = {
       graphPage(driveItem),
       source.cursor ?? start
     );
+    const since = newSince(source);
     const events = items.flatMap((item) =>
       item.deleted === undefined &&
       item.file !== null &&
       item.file !== undefined &&
-      isSince(item.createdDateTime, source.createdAt)
+      isSince(item.createdDateTime, since)
         ? [
             {
               id: item.id,

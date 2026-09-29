@@ -3,7 +3,10 @@ import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
-import { deliverConnectorEvent } from "../src/workflows/connector-events.ts";
+import {
+  deliverConnectorEvent,
+  listenersOf,
+} from "../src/workflows/connector-events.ts";
 import { outlook, release, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
@@ -170,7 +173,7 @@ describe("event triggers", () => {
     await expect(runsOf(builder, app)).resolves.toHaveLength(0);
   });
 
-  it("reach only Apps with a permission on the event's connection, or on its part", async () => {
+  it("reach only Apps with a permission on exactly the event's part, or on the whole connection for the account's own", async () => {
     const builder = await personApi("builder");
     // Declares the trigger, but may not read Outlook.
     const unpermitted = await appWith(builder, inbox());
@@ -178,15 +181,96 @@ describe("event triggers", () => {
       filter: `{ folder: "ben" }`,
       resource: "mailbox-ben",
     });
+    const whole = await inboxApp(builder, { filter: `{ folder: "ben" }` });
 
     await deliver(mailEvent({ folder: "ben", resource: "mailbox-ann" }));
-
-    await expect(runsOf(builder, bens)).resolves.toHaveLength(0);
-
     await deliver(mailEvent({ folder: "ben", resource: "mailbox-ben" }));
+    // The account's own mailbox: no resource.
+    await deliver(mailEvent({ folder: "ben" }));
+    const counts = await Promise.all(
+      [bens, whole, unpermitted].map(async (app) => {
+        const runs = await runsOf(builder, app);
+        return runs.length;
+      })
+    );
 
-    await expect(runsOf(builder, bens)).resolves.toHaveLength(1);
-    await expect(runsOf(builder, unpermitted)).resolves.toHaveLength(0);
+    // A permission on the whole connection hears only the account's own
+    // mailbox, not another that connect reads for someone else's.
+    expect(counts).toStrictEqual([1, 1, 0]);
+  });
+
+  it("start at most 60 runs of a workflow an hour, and the rest once the hour allows", async () => {
+    const builder = await personApi("builder");
+    const app = await inboxApp(builder, { filter: `{ folder: "busy" }` });
+    const now = Date.now();
+    const seeded = Array.from({ length: 60 }, (_, index) => ({
+      id: crypto.randomUUID(),
+      index,
+    }));
+    await env.DB.batch(
+      seeded.map(({ id, index }) =>
+        env.DB.prepare(
+          "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at, trigger_key) VALUES (?, ?, 'inbox', 1, NULL, 'completed', ?, ?, ?)"
+        ).bind(id, app, now - index * 1000, now, `event:${app}:inbox:${index}`)
+      )
+    );
+    const event = mailEvent({ folder: "busy" });
+    const first = await outcome(deliver(event));
+    const whileCapped = await runsOf(builder, app);
+    // The hour moves on; connect delivers the event again.
+    await env.DB.prepare(
+      "UPDATE workflow_runs SET created_at = ? WHERE app_id = ?"
+    )
+      .bind(now - 2 * 60 * 60 * 1000, app)
+      .run();
+    const again = await outcome(deliver(event));
+    const afterwards = await runsOf(builder, app);
+
+    expect({
+      first: first.includes("over a workflow's hourly limit"),
+      whileCapped: whileCapped.length,
+      again,
+      afterwards: afterwards.length,
+    }).toStrictEqual({
+      first: true,
+      whileCapped: 60,
+      again: "ok",
+      afterwards: 61,
+    });
+  });
+
+  it("tell connect only of listeners whose permission lets them hear the event, once each", async () => {
+    const builder = await personApi("builder");
+    const twice = `[
+      { type: "event", event: "m365.mail.received", filter: { folder: "a" } },
+      { type: "event", event: "m365.mail.received", filter: { folder: "b" } },
+    ]`;
+    await inboxApp(builder, { triggers: twice, resource: "mailbox-reader" });
+    await inboxApp(builder, {
+      resource: "mailbox-sender",
+      actions: ["mail.send"],
+    });
+    await inboxApp(builder, { resource: "mailbox-masked", mask: ["body"] });
+    const unapproved = await inboxApp(builder, {
+      resource: "mailbox-unapproved",
+    });
+    await env.DB.prepare(
+      "UPDATE app_versions SET approved = 0 WHERE app_id = ?"
+    )
+      .bind(unapproved)
+      .run();
+    const listeners = await listenersOf(env);
+
+    expect(
+      listeners.filter(({ owner }) => owner === builder.userId)
+    ).toStrictEqual([
+      {
+        type: "m365.mail.received",
+        connection: "connection-outlook",
+        resource: "mailbox-reader",
+        owner: builder.userId,
+      },
+    ]);
   });
 
   it("reach no App whose current version no admin approved, as no call on the connection would", async () => {
