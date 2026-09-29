@@ -1,3 +1,4 @@
+// oxlint-disable max-classes-per-file -- one stub per kind of binding, each with exactly its real binding's methods
 import { appErrors } from "@grasp-os/shared/apps";
 import type { AppId } from "@grasp-os/shared/ids";
 import type {
@@ -37,9 +38,6 @@ import { activePermissions } from "./permissions.ts";
 //   its App's runs go through the page, which answers them itself in a
 //   preview and starts none.
 
-/** What a preview stub stands in for. */
-type Stands = "connection" | "exports" | "collection" | "statistics";
-
 /** Refuses what a preview doesn't do, as the draft's code sees it. */
 const refused = (): Error => appErrors.create("app.preview_side_effect");
 
@@ -49,62 +47,93 @@ const nothingRead = { collectionIds: [], sensitive: false, restricted: false };
 /** A document of the preview's empty collection: never there. */
 const notFound = (): Error => knowledgeErrors.create("knowledge.not_found");
 
-/**
- * A binding, in a preview: every method of the stub it stands in for
- * (`stands`), answered as the list above says. A collection's `read` and
- * statistics' share a name, so the props tell them apart.
- */
-export class PreviewBinding extends WorkerEntrypoint<Env, { stands: Stands }> {
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
+// Each stub has exactly the methods of the binding it stands in for, so a
+// call the real one doesn't have fails in a preview as it would live: the
+// runtime refuses a method its receiver doesn't implement.
+
+/** A connection, in a preview (`AppConnectionBinding`'s methods). */
+export class PreviewConnection extends WorkerEntrypoint<Env> {
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
   call(): never {
     throw refused();
   }
+}
 
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
+/** Another App's exports, in a preview (`AppExportBinding`'s methods). */
+export class PreviewExports extends WorkerEntrypoint<Env> {
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  call(): never {
+    throw refused();
+  }
+}
+
+/** A collection, in a preview (`AppCollectionBinding`'s methods). */
+export class PreviewCollection extends WorkerEntrypoint<Env> {
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
   listDocuments(): DocumentPage {
     return { documents: [], provenance: nothingRead };
   }
 
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
-  search(): SearchResults {
-    return { hits: [], provenance: nothingRead };
-  }
-
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
-  listRecords(): RecordPage {
-    return { records: [], unreadable: [], next: null, provenance: nothingRead };
-  }
-
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
-  history(): never {
-    throw notFound();
-  }
-
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
-  backlinks(): never {
-    throw notFound();
-  }
-
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
   getDocument(): never {
     throw notFound();
   }
 
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
-  getRecord(): never {
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  history(): never {
     throw notFound();
   }
 
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  backlinks(): never {
+    throw notFound();
+  }
+
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  search(): SearchResults {
+    return { hits: [], provenance: nothingRead };
+  }
+
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  read(): never {
+    throw notFound();
+  }
+
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
   follow(): never {
     throw notFound();
   }
 
-  /** A collection's document, never there; or statistics, with no groups. */
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  getRecord(): never {
+    throw notFound();
+  }
+
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  listRecords(): RecordPage {
+    return { records: [], unreadable: [], next: null, provenance: nothingRead };
+  }
+
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  canWrite(): boolean {
+    return false;
+  }
+
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  saveRecord(): never {
+    throw refused();
+  }
+}
+
+/** Statistics, in a preview (`AppStatisticsBinding`'s methods). */
+export class PreviewStatistics extends WorkerEntrypoint<Env> {
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  record(): void {
+    // Dropped: a preview records nothing.
+  }
+
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
   read(_caller: unknown, query: unknown): StatisticAnswer {
-    if (this.ctx.props.stands !== "statistics") {
-      throw notFound();
-    }
     const measure =
       typeof query === "object" &&
       query !== null &&
@@ -115,26 +144,14 @@ export class PreviewBinding extends WorkerEntrypoint<Env, { stands: Stands }> {
     const today = new Date().toISOString().slice(0, 10);
     return { measure, from: today, to: today, groups: [], truncated: false };
   }
-
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
-  canWrite(): boolean {
-    return false;
-  }
-
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
-  saveRecord(): never {
-    throw refused();
-  }
-
-  // oxlint-disable-next-line class-methods-use-this -- the same for all
-  record(): void {
-    // Dropped: a preview records nothing.
-  }
 }
 
-/** A preview stub standing in for `stands`. */
-const standIn = (stands: Stands): Fetcher<PreviewBinding> =>
-  exports.PreviewBinding({ props: { stands } });
+/** A stub a draft's previewed server code holds. */
+type PreviewStub =
+  | Fetcher<PreviewConnection>
+  | Fetcher<PreviewExports>
+  | Fetcher<PreviewCollection>
+  | Fetcher<PreviewStatistics>;
 
 /**
  * The env of a preview of App `app`'s draft: a preview stub under each
@@ -144,24 +161,24 @@ const standIn = (stands: Stands): Fetcher<PreviewBinding> =>
 export const previewBindings = async (
   env: Env,
   app: AppId
-): Promise<Record<string, Fetcher<PreviewBinding>>> => {
+): Promise<Record<string, PreviewStub>> => {
   const collectionOf = collectionGrantOf({ type: "app", appId: app });
-  const granted = stubsOf(
+  const granted = stubsOf<PreviewStub>(
     await activePermissions(env, { type: "app", appId: app }),
     (permission) => {
       if (permission.object.type === "connection") {
-        return standIn("connection");
+        return exports.PreviewConnection({});
       }
       if (exportGrantOf(permission) !== undefined) {
-        return standIn("exports");
+        return exports.PreviewExports({});
       }
       if (permission.object.type === "platform") {
-        return standIn("statistics");
+        return exports.PreviewStatistics({});
       }
       return collectionOf(permission) === undefined
         ? undefined
-        : standIn("collection");
+        : exports.PreviewCollection({});
     }
   );
-  return { ...granted, STATISTICS: standIn("statistics") };
+  return { ...granted, STATISTICS: exports.PreviewStatistics({}) };
 };

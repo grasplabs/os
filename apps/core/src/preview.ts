@@ -53,6 +53,12 @@ const loadPreview = async (
   })).getDurableObjectClass("App");
 };
 
+/** What a preview's facet runs: the draft's revision, and its class once loaded. */
+interface Running {
+  revision: number;
+  loaded: Promise<DurableObjectClass>;
+}
+
 /** The previews of one Workspace object's chats (workspace.ts). */
 export class Previews {
   readonly #ctx: DurableObjectState;
@@ -63,10 +69,7 @@ export class Previews {
    * and its class once loaded. In memory: after a restart none is known
    * (see above).
    */
-  readonly #running = new Map<
-    string,
-    { revision: number; loaded: Promise<DurableObjectClass> }
-  >();
+  readonly #running = new Map<string, Running>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
@@ -89,16 +92,19 @@ export class Previews {
     args: unknown[]
   ): Promise<AppAnswer> {
     requireAppMethod(method);
+    const name = facetName(chatId, app);
     const limit = deadline(callTimeoutMs(this.#env));
+    let running: Running | undefined;
     try {
       // Starting the code counts against the call's time, as for an App.
-      const facet = await Promise.race([
+      const started = await Promise.race([
         this.#facet(chatId, app, draft),
         whenAborted(limit.signal),
       ]);
+      ({ running } = started);
       return await Promise.race([
         invokeServer(
-          facet,
+          started.facet,
           // The stubs of a preview act for no one: the token names nothing.
           { userId: personId, mode: "interactive", token: crypto.randomUUID() },
           args,
@@ -107,6 +113,11 @@ export class Previews {
         whenAborted(limit.signal),
       ]);
     } catch (error) {
+      // The draft changed (or went) while the call ran, and its preview was
+      // stopped under it: the call is out of date, not the draft's failure.
+      if (running !== undefined && this.#running.get(name) !== running) {
+        throw appErrors.create("app.preview_outdated");
+      }
       if (limit.signal.aborted) {
         throw appErrors.create("app.timed_out", { version: null, method });
       }
@@ -117,13 +128,17 @@ export class Previews {
   }
 
   /**
-   * The facet previewing `draft`: the one running, while it runs the
-   * draft's revision; otherwise a new one, the old one stopped and its
-   * database dropped first. One that failed to load is forgotten, so the
-   * next call loads it again; one replaced while it loaded (the draft
-   * changed meanwhile) is `app.preview_outdated`.
+   * The facet previewing `draft`, and what it runs: the one running,
+   * while it runs the draft's revision; otherwise a new one, the old one
+   * stopped and its database dropped first. One that failed to load is
+   * forgotten, so the next call loads it again; one replaced while it
+   * loaded (the draft changed meanwhile) is `app.preview_outdated`.
    */
-  async #facet(chatId: ChatId, app: AppId, draft: Draft): Promise<Fetcher> {
+  async #facet(
+    chatId: ChatId,
+    app: AppId,
+    draft: Draft
+  ): Promise<{ facet: Fetcher; running: Running }> {
     const name = facetName(chatId, app);
     let running = this.#running.get(name);
     if (running?.revision !== draft.revision) {
@@ -146,10 +161,18 @@ export class Previews {
     if (this.#running.get(name) !== running) {
       throw appErrors.create("app.preview_outdated");
     }
-    return this.#ctx.facets.get(name, () => ({ class: loaded, id: name }));
+    const facet = this.#ctx.facets.get(name, () => ({
+      class: loaded,
+      id: name,
+    }));
+    return { facet, running };
   }
 
-  /** Stops the chat's preview of `app`, if one runs, and drops its database. */
+  /**
+   * Stops the chat's preview of `app`, if one runs, and drops its
+   * database: as a change of revision, so a call it stops midway is
+   * `app.preview_outdated` (`call`).
+   */
   drop(chatId: ChatId, app: string): void {
     const name = facetName(chatId, app);
     this.#running.delete(name);

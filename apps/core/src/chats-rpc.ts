@@ -27,7 +27,7 @@ import { callbackFor, isStub, recheckedEvery } from "./page-callbacks.ts";
 import type { StillOpen } from "./page-callbacks.ts";
 import { fixQuestion, runToFix } from "./run-fixes.ts";
 import { RunSubscription } from "./run-subscription.ts";
-import { argumentsFor, screenCode } from "./screens-rpc.ts";
+import { argumentsFor, screenCode, stillHasRole } from "./screens-rpc.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 import { questionSchema } from "./workspace.ts";
@@ -300,8 +300,10 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
   /**
    * Calls a method of the draft's server code in its preview, with plain
    * data and the screen's callbacks, as a screen's call does
-   * (screens-rpc.ts); each push through a callback checks again that the
-   * connection may still follow chats.
+   * (screens-rpc.ts); each push through a callback checks again, at most
+   * every {@link recheckMs}, what the call itself needs: the session, a
+   * builder's role in the App, and previews switched on. Once any is gone,
+   * the callback is released and forwards nothing more.
    */
   async previewCall(
     chatId: string,
@@ -317,7 +319,15 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
       if (typeof method !== "string" || !Array.isArray(args)) {
         throw screenErrors.create("screen.invalid");
       }
-      const { passed, callbacks } = argumentsFor(args, this.#stillOpen);
+      const stillOpen = recheckedEvery(
+        recheckMs,
+        async () =>
+          await stillHasRole(this.#env, this.#check, id, "builder", [
+            "app_builder",
+            "app_preview",
+          ])
+      );
+      const { passed, callbacks } = argumentsFor(args, stillOpen);
       try {
         return await this.#chatsOf(by.userId).previewCall(
           chatIdOf(chatId),

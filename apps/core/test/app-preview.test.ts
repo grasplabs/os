@@ -2,14 +2,19 @@ import { appIdSchema, chatIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import { personalWorkspaceId } from "../src/chats-rpc.ts";
 import { workspace } from "../src/durable-objects.ts";
 import { readStatistics } from "../src/statistics.ts";
-import { release, requestGranted, serverBuilt } from "./apps.ts";
+import {
+  pastAccessRecheck,
+  release,
+  requestGranted,
+  serverBuilt,
+} from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote, readCollection } from "./knowledge.ts";
 import { mailConnection } from "./mail-connection.ts";
@@ -106,6 +111,53 @@ ${
 
   fail(): never {
     throw new Error("Invoice 7 has no total");
+  }
+
+  async kinds(caller: Caller): Promise<string[]> {
+    const { MAIL, HANDBOOK, LEDGER, STATISTICS } = env(this);
+    const said = async (call: () => Promise<unknown>): Promise<string> => {
+      try {
+        await call();
+        return "ok";
+      } catch (error) {
+        return String((error as Error).message);
+      }
+    };
+    return [
+      await said(() => MAIL.listDocuments(caller)),
+      await said(() => HANDBOOK.call(caller, "mail.send", {})),
+      await said(() => LEDGER.record(caller, {})),
+      await said(() => STATISTICS.getDocument(caller, "note")),
+    ];
+  }
+
+  #watcher: ((value: number) => Promise<void>) | undefined;
+  #pushed = 0;
+  #stopped = "no";
+
+  watch(_caller: Caller, onChange: { dup(): (value: number) => Promise<void> }): string {
+    this.#watcher = onChange.dup();
+    const push = async (): Promise<void> => {
+      try {
+        this.#pushed += 1;
+        await this.#watcher?.(this.#pushed);
+        setTimeout(push, 50);
+      } catch (error) {
+        this.#stopped = (error as { code?: string }).code ?? "failed";
+      }
+    };
+    void push();
+    return "watching";
+  }
+
+  stopped(): string {
+    return this.#stopped;
+  }
+
+  async slow(_caller: Caller, entered: (value: string) => Promise<void>): Promise<string> {
+    await entered("in");
+    await new Promise((resolve) => setTimeout(resolve, 5000));
+    return "done";
   }
 `
     : ""
@@ -407,6 +459,141 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
       empty: ["app.no_draft", "app.no_draft"],
       user: ["role.forbidden", "role.forbidden"],
       off: ["feature.disabled", "feature.disabled"],
+    });
+  });
+
+  it("gives each binding exactly its real binding's methods, so a wrong call fails as it would live", async () => {
+    const { builder, app, chatId, revision } = await setUp();
+    // The same code as the App's own: the live answers to compare with.
+    await serverBuilt(
+      app,
+      await release(builder, app, { "app/server.ts": serverCode(true) })
+    );
+
+    const preview = await builder.api.chats.previewCall(
+      chatId,
+      app,
+      revision,
+      "kinds",
+      []
+    );
+    const live = await callApp(
+      env,
+      app,
+      { userId: builder.userId, mode: "interactive" },
+      "kinds"
+    );
+    expect({ preview, live }).toStrictEqual({
+      preview: live,
+      live: [
+        expect.stringContaining("listDocuments"),
+        expect.stringContaining("call"),
+        expect.stringContaining("record"),
+        expect.stringContaining("getDocument"),
+      ],
+    });
+  });
+
+  it("answers a call the draft's next write stops as out of date, not as the draft's failure", async () => {
+    const { builder, app, chatId, revision, write } = await setUp();
+    const { chats } = builder.api;
+    const entered = Promise.withResolvers<boolean>();
+
+    const slow = answer(
+      chats.previewCall(chatId, app, revision, "slow", [
+        () => {
+          entered.resolve(true);
+        },
+      ])
+    );
+    await entered.promise;
+    await write({ "screens/list.tsx": screen }, revision);
+
+    await expect(slow).resolves.toBe("app.preview_outdated");
+  });
+
+  it("stops a preview's callbacks once their person no longer builds the App, or previews are off", async () => {
+    const { admin, app } = await setUp();
+    const other = await signedInApi(idp, "builder");
+    const role = async (member: "builder" | "user") => {
+      await admin.api.apps.members.add(app, {
+        type: "person",
+        id: other.userId,
+        role: member,
+      });
+    };
+    await role("builder");
+    const { chats } = other.api;
+
+    /** Watches pushes in a chat of theirs, then takes away what `lose` does. */
+    const stopsWhen = async (
+      lose: () => Promise<void>,
+      restore: () => Promise<void>
+    ) => {
+      const draft = await chatWithDraft(other, app, {
+        "app/server.ts": serverCode(true),
+      });
+      const received: unknown[] = [];
+      await chats.previewCall(draft.chatId, app, draft.revision, "watch", [
+        (value: unknown) => {
+          received.push(value);
+        },
+      ]);
+      await vi.waitFor(() => {
+        expect(received.length).toBeGreaterThan(1);
+      });
+      await lose();
+      // Past the time one answer holds: the next push checks again, and is
+      // refused, and every one after.
+      await pastAccessRecheck(async () => {
+        await vi.waitFor(
+          async () => {
+            const before = received.length;
+            await scheduler.wait(300);
+            expect(received).toHaveLength(before);
+          },
+          { timeout: 5000, interval: 0 }
+        );
+      });
+      await restore();
+      const stopped = await chats.previewCall(
+        draft.chatId,
+        app,
+        draft.revision,
+        "stopped",
+        []
+      );
+      return stopped;
+    };
+
+    const unshared = await stopsWhen(
+      async () => {
+        await role("user");
+      },
+      async () => {
+        await role("builder");
+      }
+    );
+    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
+    const { FEATURES: features } = env;
+    const switchedOff = await stopsWhen(
+      async () => {
+        await Promise.resolve();
+        env.FEATURES = { ...on, app_preview: false };
+      },
+      async () => {
+        await Promise.resolve();
+        env.FEATURES = features;
+      }
+    ).finally(() => {
+      env.FEATURES = features;
+    });
+
+    // Each push was refused by core, as a screen's is once its person may
+    // no longer use the App.
+    expect({ unshared, switchedOff }).toStrictEqual({
+      unshared: "app.not_found",
+      switchedOff: "app.not_found",
     });
   });
 });
