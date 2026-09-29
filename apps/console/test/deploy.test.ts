@@ -806,6 +806,37 @@ describe("deploying safely", () => {
     });
   });
 
+  it("refuses to deploy a sign-in no first admin could sign in with, naming no email where it's recorded", async () => {
+    const { account, clientId, deployId } = await setUp();
+    await db
+      .update(clients)
+      .set({
+        signIn: JSON.stringify({
+          domains: ["acme.test"],
+          admins: ["ada@elsewhere.test"],
+          entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
+        }),
+      })
+      .where(eq(clients.id, clientId));
+    const counts = account.scripts.size;
+
+    const logged = await failingDeploy(deployId);
+
+    const row = await deployRow(deployId);
+    const events = await deployEvents(clientId);
+    expect({
+      error: row?.error,
+      uploaded: account.scripts.size - counts,
+      named: JSON.stringify({ logged, row, events }).includes(
+        "ada@elsewhere.test"
+      ),
+    }).toStrictEqual({
+      error: "sign_in_incomplete",
+      uploaded: 0,
+      named: false,
+    });
+  });
+
   it("refuses a shared secret named like a binding", async () => {
     const { deployId } = await setUp();
 

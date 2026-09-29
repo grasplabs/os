@@ -10,6 +10,7 @@
 import {
   defaultGatewayModels,
   signInConfigSchema,
+  unreachableAdmins,
 } from "@grasp-os/shared/deployment-config";
 import type { SignInConfig } from "@grasp-os/shared/deployment-config";
 import { z } from "zod";
@@ -26,9 +27,21 @@ const { domains, admins } = signInConfigSchema.shape;
 const { hostedDomain } = signInConfigSchema.shape.google.unwrap().shape;
 
 /**
+ * Why a client's sign-in can't leave it with an admin: the code its issue
+ * carries (`params.code`), which the new-client form and a deploy report.
+ */
+export const adminUnreachable = "admin_unreachable";
+
+/**
  * How a client's people sign in, as its record keeps it: its own Entra
  * tenant, its Google Workspace (by its primary domain), or both; the email
  * domains they sign in with, and who gets the admin role on joining.
+ *
+ * Refused (`admin_unreachable`) without a first admin, and with one whose
+ * email isn't in the email domains: core signs in only those, whichever
+ * IdP they come from, so the client would have no admin who can ever
+ * sign in. The same check for the form, the server functions and every
+ * deploy.
  */
 export const clientSignInSchema = z
   .object({
@@ -44,7 +57,40 @@ export const clientSignInSchema = z
       message: "An Entra tenant or a Google Workspace",
       path: ["entraTenantId"],
     }
-  );
+  )
+  .superRefine((signIn, context) => {
+    if (signIn.admins.length === 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["admins"],
+        params: { code: adminUnreachable },
+        message:
+          "Name at least one first admin, with an email in the email domains.",
+      });
+      return;
+    }
+    const unreachable = unreachableAdmins(signIn);
+    if (unreachable.length > 0) {
+      context.addIssue({
+        code: "custom",
+        path: ["admins"],
+        params: { code: adminUnreachable },
+        message: `${unreachable.join(", ")} can't sign in: every first admin's email must be in the email domains (${signIn.domains.join(", ")}).`,
+      });
+    }
+  });
+
+/**
+ * Why `signIn` isn't a client's sign-in, in words; null when it is.
+ */
+export const signInProblem = (signIn: unknown): string | null => {
+  const parsed = clientSignInSchema.safeParse(signIn);
+  if (parsed.success) {
+    return null;
+  }
+  const [issue] = parsed.error.issues;
+  return issue?.message ?? "The sign-in isn't complete.";
+};
 export type ClientSignIn = z.input<typeof clientSignInSchema>;
 
 /**
@@ -60,8 +106,9 @@ export interface SignInApps {
 /**
  * Client `clientId`'s `SIGN_IN`, from its record's `signIn` (JSON), at
  * `https://<clientId>.<domain>`; undefined for a client without one.
- * Refused (`sign_in_incomplete`) when the record doesn't parse, or it
- * names an IdP the console has no app id for, so no deploy leaves its
+ * Refused (`sign_in_incomplete`) when the record doesn't parse (its
+ * message says `admin_unreachable` when no first admin could sign in), or
+ * it names an IdP the console has no app id for, so no deploy leaves its
  * people unable to sign in unnoticed.
  */
 const signInOf = (
@@ -83,7 +130,16 @@ const signInOf = (
   }
   const record = clientSignInSchema.safeParse(parsed);
   if (!record.success) {
-    throw incomplete("its record doesn't parse");
+    // Named by its code, never its emails: a deploy's error is audited.
+    const unreachable = record.error.issues.some(
+      (issue) =>
+        issue.code === "custom" && issue.params?.code === adminUnreachable
+    );
+    throw incomplete(
+      unreachable
+        ? `${adminUnreachable}: no first admin can sign in`
+        : "its record doesn't parse"
+    );
   }
   const { entraTenantId, googleHostedDomain } = record.data;
   if (entraTenantId !== undefined && apps.entraClientId === undefined) {

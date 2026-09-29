@@ -921,6 +921,14 @@ describe("provisioning a new client", () => {
     await expect(
       startProvisioning(env, staff, { ...other.input, clientId: "www" })
     ).rejects.toThrow("a reserved name");
+    // No first admin who could ever sign in: refused before any run.
+    await expect(
+      startProvisioning(env, staff, {
+        ...other.input,
+        signIn: { ...signIn, admins: ["ada@elsewhere.test"] },
+      })
+    ).rejects.toThrow("ada@elsewhere.test can't sign in");
+    await expect(actions(other.clientId)).resolves.toStrictEqual([]);
   });
 
   it("counts a run claimed a moment ago that Workflows doesn't have yet as starting, and one claimed long ago as gone", async () => {

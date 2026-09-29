@@ -79,7 +79,7 @@ const activeClient = async (
         status: "active",
         signIn: JSON.stringify({
           domains: ["acme.test"],
-          admins: [],
+          admins: ["ada@acme.test"],
           googleHostedDomain: "acme.test",
         }),
         createdAt: now,
@@ -815,7 +815,7 @@ describe("rolling a release out", () => {
       ring: 1,
       signIn: {
         domains: ["acme.test"],
-        admins: [],
+        admins: ["ada@acme.test"],
         googleHostedDomain: "acme.test",
       },
     });
