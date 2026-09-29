@@ -24,7 +24,9 @@ import type { SignalTotals } from "./signals.ts";
 // The 15-minute cron trigger claims each one's day (daily-claims.ts), and
 // whatever it claimed is computed from one pass over the audit log, the
 // object tallying a stretch at a time for each of them
-// (`AuditLog.tallyStretch`). One failing doesn't stop the other.
+// (`AuditLog.tallyStretch`). One failing to be claimed or stored doesn't
+// stop the other; the shared pass failing stops both, until a later run
+// takes their claims over once they lapse.
 
 /**
  * Where retention archived what a pass would read next: carries on from

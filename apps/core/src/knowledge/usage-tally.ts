@@ -55,11 +55,25 @@ export interface KnowledgeTally {
 }
 
 /**
+ * The reads (`detail.read`) of several documents at once that read what
+ * they say: an agent's memory files, a page of Playbook records. Listing
+ * an agent's skills names them, every turn, without reading one, so it
+ * doesn't count, nor does listing a collection's documents.
+ */
+const contentReads = new Set(["memory", "records"]);
+
+/** The documents a read of several at once read: in its provenance. */
+const readsInProvenance = ({ detail, provenance }: AuditEvent): string[] =>
+  typeof detail.read === "string" && contentReads.has(detail.read)
+    ? (provenance ?? [])
+    : [];
+
+/**
  * Tallies events, one after another, oldest first: every read of a
  * document from `readsFrom` (ISO 8601) on, and the searches that found
  * nothing from `questionsFrom` on. A read names its document as its
- * target, or, for reads of several at once (an agent's memory files), in
- * its provenance, beside the collections. A search that found nothing is
+ * target, or, for reads of several at once (`contentReads`), in its
+ * provenance, beside the collections. A search that found nothing is
  * put down to the collection it named, or else to those it came closest
  * in; a search with neither, or without words, is left out.
  */
@@ -79,7 +93,7 @@ export class KnowledgeTallier {
       const read =
         event.target?.type === "document"
           ? [event.target.id]
-          : (event.provenance ?? []);
+          : readsInProvenance(event);
       for (const id of read) {
         this.#read.add(id);
       }

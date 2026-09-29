@@ -8,6 +8,7 @@ import { stringify } from "yaml";
 import type { z } from "zod";
 
 import { auditLog } from "../src/audit-log.ts";
+import { chatAgentId } from "../src/chats-rpc.ts";
 import { refreshDailySignals } from "../src/daily-signals.ts";
 import worker from "../src/index.ts";
 import { allEvents, logHead } from "./audit-events.ts";
@@ -807,7 +808,7 @@ describe("improvement signals", () => {
     ]);
   });
 
-  it("group Knowledge searches that found nothing by their key, an App's with the App and people's with the deployment", async () => {
+  it("group Knowledge searches that found nothing by their key, an App's with the App and people's, through the agent too, with the deployment", async () => {
     const { api, app } = await builderWithApp();
     const admin = await signedInApi(idp, "admin");
     const now = nextDay();
@@ -836,10 +837,24 @@ describe("improvement signals", () => {
       vi.useRealTimers();
     }
     const [lastAsked = ""] = received.slice(-1);
+    // Someone asks, then asks again through the chat agent, as do two
+    // others: three askers, the agent asking for each of them.
+    const [someone, second, third] = [
+      `person-${unique()}`,
+      `person-${unique()}`,
+      `person-${unique()}`,
+    ];
+    const throughAgent = (userId: string) =>
+      emptySearch(
+        { type: "agent", agentId: chatAgentId, onBehalfOf: userId },
+        people
+      );
     await logged(
       emptySearch({ type: "app", appId: app, part: "screen" }, once),
-      emptySearch({ type: "person", userId: `person-${unique()}` }, people),
-      emptySearch({ type: "person", userId: `person-${unique()}` }, people)
+      emptySearch({ type: "person", userId: someone }, people),
+      throughAgent(someone),
+      throughAgent(second),
+      throughAgent(third)
     );
 
     await refreshDailySignals(env, now);
@@ -897,8 +912,8 @@ describe("improvement signals", () => {
             app: null,
             workflow: null,
             subject: people,
-            value: 2,
-            evidence: { searches: 2, askers: 2, terms: 3, collections: [] },
+            value: 4,
+            evidence: { searches: 4, askers: 3, terms: 3, collections: [] },
           },
         ],
       },

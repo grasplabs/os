@@ -21,7 +21,7 @@ import { runStatus } from "./workflows/runs.ts";
 // connections and collections, which the chat has no permission for, and
 // whose restricted mode it doesn't share; of a restricted App's run not
 // even where it failed, beyond a platform error code. Every call is
-// audited as the workspace's agent acting for the chat's person.
+// audited as the organization's agent acting for the chat's person.
 
 /** Whether the agent may read workflow `workflow` of App `app`. */
 const readsWorkflow =

@@ -37,7 +37,7 @@ import { ErrorText } from "../error-text.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 
-// Chat with the workspace's agent: the person's chats beside the one open,
+// Chat with the organization's agent: the person's chats beside the one open,
 // its messages streaming in as the agent writes them, the changes it holds
 // for the person to confirm, and a side panel. Functional only.
 

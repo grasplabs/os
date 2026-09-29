@@ -181,11 +181,12 @@ export type Feature =
    */
   | "build_on_save"
   /**
-   * Apps calling each other's exports (app-exports.ts): asking for a
-   * permission on another App's exports, and every call through one;
-   * needs `apps` on too. While off, no such permission can be asked for
-   * and every call is refused; granted ones stay, and work again once it's
-   * back on.
+   * Apps calling each other's exports (app-exports.ts): reading what an
+   * App exports (people and the agent alike), asking for a permission on
+   * another App's exports, and every call through one; needs `apps` on
+   * too. While off, no exports are read, no such permission can be asked
+   * for and every call is refused; granted ones stay, and work again once
+   * it's back on.
    */
   | "app_calls"
   /**

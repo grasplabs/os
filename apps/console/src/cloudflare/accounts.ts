@@ -28,10 +28,6 @@ export const getAccount = async (
     accountSchema
   );
 
-/** Every account the token is a member of. */
-export const listAccounts = async (api: CloudflareApi): Promise<Account[]> =>
-  await listAll(api, "/accounts", accountSchema);
-
 /**
  * The account named exactly `name` the token sees, or undefined. Two of
  * that name stop it rather than pick one.
@@ -125,36 +121,6 @@ export const ensureMember = async (
     },
     memberSchema
   );
-};
-
-const subdomainSchema = z.object({ subdomain: z.string() });
-
-/**
- * The account's workers.dev subdomain, set to `subdomain` if it has none.
- * Returns the one it has, which may differ.
- */
-export const ensureWorkersSubdomain = async (
-  api: CloudflareApi,
-  accountId: string,
-  subdomain: string
-): Promise<string> => {
-  const path = `/accounts/${accountId}/workers/subdomain`;
-  try {
-    const { subdomain: current } = await api.call(
-      { method: "GET", path },
-      subdomainSchema
-    );
-    return current;
-  } catch (error) {
-    if (!isNotFound(error)) {
-      throw error;
-    }
-  }
-  const created = await api.call(
-    { method: "PUT", path, json: { subdomain } },
-    subdomainSchema
-  );
-  return created.subdomain;
 };
 
 /** A resource Grasp needs in the EU that exists elsewhere. */

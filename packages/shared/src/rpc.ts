@@ -46,7 +46,7 @@ export interface SessionApi {
   /** The person behind the session, with their current role and teams. */
   whoami: () => Promise<Identity>;
   /**
-   * The person's chats with the workspace's agent: their list, questions,
+   * The person's chats with the organization's agent: their list, questions,
    * and each chat's messages as they stream in.
    */
   readonly chats: ChatsApi;

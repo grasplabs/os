@@ -8,6 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { z } from "zod";
 
 import { auditLog } from "../src/audit-log.ts";
+import { chatAgentId } from "../src/chats-rpc.ts";
 import { refreshDailySignals } from "../src/daily-signals.ts";
 import { agentKnowledgeSignals } from "../src/knowledge/signals.ts";
 import { allEvents, logHead } from "./audit-events.ts";
@@ -118,6 +119,16 @@ const emptySearch = (
   action: "knowledge.search.empty",
   target: { type: "collection", id: collectionId },
   detail: { terms: 2, queryKey, sensitive: false },
+});
+
+/** The same search, asked through the chat agent for `userId`. */
+const throughAgent = (
+  userId: string,
+  queryKey: string,
+  collectionId: string
+) => ({
+  ...emptySearch(userId, queryKey, collectionId),
+  actor: { type: "agent" as const, agentId: chatAgentId, onBehalfOf: userId },
 });
 
 /** The signals `person` lists about `collectionId`, without their IDs. */
@@ -314,6 +325,35 @@ describe("Knowledge usage signals", () => {
     });
   });
 
+  it("count each person asking through the chat agent as themselves, its owner too", async () => {
+    const owner = await newOwner();
+    const [first, second] = [await newReader(), await newReader()];
+    const own = await newCollection(owner);
+    const asked = await newCollection(owner);
+    const queryKey = `key-${unique()}`;
+    // The owner, again and again, through the agent: their own question.
+    await logged(
+      throughAgent(owner.userId, queryKey, own),
+      throughAgent(owner.userId, queryKey, own),
+      throughAgent(owner.userId, queryKey, own)
+    );
+    // Two people, through the same agent: two askers.
+    await logged(
+      throughAgent(first.userId, queryKey, asked),
+      throughAgent(second.userId, queryKey, asked)
+    );
+
+    await refreshDailySignals(env, nextDay());
+
+    expect({
+      own: await signalsOf(owner, own),
+      asked: questions(await signalsOf(owner, asked)),
+    }).toStrictEqual({
+      own: [],
+      asked: [{ value: 2, searches: 2, askers: 2 }],
+    });
+  });
+
   it("put a search of every collection that found nothing down to the collections it came closest in", async () => {
     const owner = await newOwner();
     const asker = await newReader();
@@ -427,7 +467,7 @@ describe("Knowledge usage signals", () => {
     });
   });
 
-  it("tell the owner about documents nobody read or changed for 90 days, memory files' reads included", async () => {
+  it("tell the owner about documents nobody read or changed for 90 days, memory files' reads included, listed skills not", async () => {
     const owner = await newOwner();
     const reader = await newReader();
     const collectionId = await newCollection(owner);
@@ -435,8 +475,9 @@ describe("Knowledge usage signals", () => {
     const unread = await newDocument(owner, collectionId, "unread.md");
     const read = await newDocument(owner, collectionId, "read.md");
     const memory = await newDocument(owner, collectionId, "AGENTS.md");
+    const skill = await newDocument(owner, collectionId, "skill.md");
     const recent = await newDocument(owner, collectionId, "recent.md");
-    for (const id of [unread, read, memory]) {
+    for (const id of [unread, read, memory, skill]) {
       // oxlint-disable-next-line no-await-in-loop -- one document at a time
       await changedAgo(id, day, 120 * dayMs);
     }
@@ -450,13 +491,35 @@ describe("Knowledge usage signals", () => {
       provenance: [collectionId, memory],
       detail: { read: "memory", sensitive: false },
     });
+    // The skills an agent is offered, listed every turn: named, not read.
+    await logged({
+      actor: { type: "agent", agentId: chatAgentId, onBehalfOf: reader.userId },
+      action: "knowledge.read",
+      provenance: [collectionId, skill],
+      detail: { read: "skills", skills: 1, sensitive: false },
+    });
     // The reader's read in the log, drained from the outbox.
     await allEvents();
 
     await refreshDailySignals(env, day);
 
-    await expect(signalsOf(owner, collectionId)).resolves.toStrictEqual([
-      {
+    const signals = await signalsOf(owner, collectionId);
+    expect({
+      unread: signals.find(
+        (signal) =>
+          signal.kind === "unread_document" &&
+          signal.evidence.document.id === unread
+      ),
+      documents: signals
+        .flatMap((signal) =>
+          signal.kind === "unread_document"
+            ? [signal.evidence.document.path]
+            : []
+        )
+        .toSorted(),
+      count: signals.length,
+    }).toStrictEqual({
+      unread: {
         kind: "unread_document",
         value: 120,
         evidence: {
@@ -465,7 +528,9 @@ describe("Knowledge usage signals", () => {
           days: 90,
         },
       },
-    ]);
+      documents: ["skill.md", "unread.md"],
+      count: 2,
+    });
   });
 
   it("count unread documents over the audit log's retention, where that's shorter", async () => {

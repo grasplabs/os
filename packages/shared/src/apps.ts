@@ -388,7 +388,8 @@ export interface AppsApi {
   contents: (app: string) => Promise<AppContents>;
   /**
    * What the App's current version exports to other Apps: read from its
-   * version alone, for anyone with a role in the App.
+   * version alone, for anyone with a role in the App. Refused with
+   * `feature.disabled` while calls between Apps are off.
    */
   exports: (app: string) => Promise<CurrentExports>;
   readonly files: AppFilesApi;
