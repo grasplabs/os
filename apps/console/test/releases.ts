@@ -226,7 +226,9 @@ export const buildRelease = async (
 };
 
 /** Stores a release's blobs, as CI does before its manifest. */
-export const putBlobs = async (release: TestRelease): Promise<void> => {
+export const putBlobs = async (
+  release: Pick<TestRelease, "blobs">
+): Promise<void> => {
   await Promise.all(
     [...release.blobs].map(
       async ([key, bytes]) => await env.RELEASES.put(key, bytes)

@@ -441,13 +441,23 @@ CREATE TABLE t (id TEXT);`,
       ])
     );
     // Ids are handed out in call order: oldest first.
-    const published = await Promise.all(
+    const built = await Promise.all(
       [0, 1, 2].map(
         async (count) =>
-          await publishRelease({ notes: `feat(core): big ${count}`, assets })
+          await buildRelease({ notes: `feat(core): big ${count}`, assets })
       )
     );
-    const [oldest, middle, newest] = published.map((release) => release.id);
+    // Blobs are content-addressed, so the three share their assets: each is
+    // stored once, not three times, which keeps the test well inside its
+    // timeout on a loaded machine.
+    const blobs = new Map(built.flatMap((release) => [...release.blobs]));
+    await putBlobs({ blobs });
+    await Promise.all(
+      built.map(async (release) => {
+        await putManifest(release);
+      })
+    );
+    const [oldest, middle, newest] = built.map((release) => release.id);
 
     const first = await runImport();
     const second = await runImport();
