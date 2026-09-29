@@ -191,9 +191,9 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
   /**
    * Starts a chat to fix a failed run (run-fixes.ts), and asks its agent
    * with `model`; only while `workflows` and `run_notifications` are on.
-   * The chat is made, with the report attached, before the question is
-   * asked: a question refused (a model the deployment doesn't allow, say)
-   * leaves it in the person's list, to ask again.
+   * A model the deployment doesn't allow is refused before any chat is
+   * made. A question refused past that (the client's model rules, say)
+   * leaves the chat, with its report, in the person's list, to ask again.
    */
   async fixRun(run: string, model: string): Promise<ChatSummary> {
     return await withPerson(this.#check, async (person) => {
@@ -202,12 +202,13 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
       const { userId } = person;
       const fix = await runToFix(this.#env, person, run);
       const chats = this.#chatsOf(userId);
-      const chat = await chats.createChat(
+      const chat = await chats.createFixChat(
         `Fix ${fix.report.workflow}`,
         userId,
         chatAgentId,
         actorOf(person),
-        fix
+        fix,
+        model
       );
       await chats.send(chat.id, userId, {
         text: fixQuestion(fix.report),

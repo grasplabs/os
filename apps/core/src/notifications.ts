@@ -1,19 +1,24 @@
 import type { AuditEntry } from "@grasp-os/shared/audit";
-import { listedNotifications } from "@grasp-os/shared/notifications";
+import {
+  listedNotifications,
+  notificationErrors,
+} from "@grasp-os/shared/notifications";
 import type {
   Notification,
   NotificationsApi,
 } from "@grasp-os/shared/notifications";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
-import { and, count, desc, eq, isNotNull, isNull, lt, sql } from "drizzle-orm";
+import { and, count, desc, eq, isNull, lt, lte, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
+import { z } from "zod";
 
 import { appsFoundBy } from "./app-access.ts";
 import { outboxedWhere } from "./audit-outbox.ts";
 import { apps, notifications } from "./db/core/schema.ts";
+import { inList } from "./db/d1.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -135,14 +140,27 @@ export const listNotifications = async (
   };
 };
 
+/** What `markRead` is told the person saw: IDs, and the newest time. */
+const shownSchema = z.object({
+  ids: z.array(z.string().max(64)).max(listedNotifications),
+  upTo: z.iso.datetime(),
+});
+
 /**
- * Marks all of the person's notifications read, and drops those they
- * read over {@link keptReadMs} ago.
+ * Marks read the person's notifications `ids` whose latest failure is no
+ * later than `upTo`, and drops those they read over {@link keptReadMs}
+ * ago.
  */
 export const markNotificationsRead = async (
   env: Env,
-  person: Identity
+  person: Identity,
+  ids: unknown,
+  upTo: unknown
 ): Promise<void> => {
+  const shown = shownSchema.safeParse({ ids, upTo });
+  if (!shown.success) {
+    throw notificationErrors.create("notification.invalid");
+  }
   const db = drizzle(env.DB);
   const now = new Date();
   await db.batch([
@@ -152,7 +170,9 @@ export const markNotificationsRead = async (
       .where(
         and(
           eq(notifications.personId, person.userId),
-          isNull(notifications.readAt)
+          isNull(notifications.readAt),
+          inList(notifications.id, shown.data.ids),
+          lte(notifications.updatedAt, new Date(shown.data.upTo))
         )
       ),
     db
@@ -160,8 +180,7 @@ export const markNotificationsRead = async (
       .where(
         and(
           eq(notifications.personId, person.userId),
-          lt(notifications.updatedAt, new Date(now.getTime() - keptReadMs)),
-          isNotNull(notifications.readAt)
+          lt(notifications.readAt, new Date(now.getTime() - keptReadMs))
         )
       ),
   ]);
@@ -185,9 +204,9 @@ export class NotificationsRpc extends RpcTarget implements NotificationsApi {
     );
   }
 
-  async markRead(): Promise<void> {
+  async markRead(ids: string[], upTo: string): Promise<void> {
     await withPerson(this.#check, async (person) => {
-      await markNotificationsRead(this.#env, person);
+      await markNotificationsRead(this.#env, person, ids, upTo);
     });
   }
 }

@@ -9,7 +9,7 @@ import { requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { actingFor } from "./contexts.ts";
 import { mockIdp } from "./idp.ts";
-import { newTeam, readCollection } from "./knowledge.ts";
+import { newTeam, readCollection, storedGrant } from "./knowledge.ts";
 import { signedInApi, unique } from "./sign-in.ts";
 
 // What a chat's agent reads before each question, and what its answer is
@@ -30,6 +30,39 @@ const systemOf = (body: unknown): string =>
     typeof body === "object" && body !== null && "system" in body
       ? body.system
       : null
+  );
+
+/**
+ * More collections than one statement of a chat's SQLite could take a row
+ * each of (its bound on values), each holding one document at `path`,
+ * everyone's to read, and the agent `agentId`'s too.
+ */
+const manyReadable = async (
+  admin: Awaited<ReturnType<typeof signedInApi>>,
+  agentId: string,
+  path: string,
+  text: (index: number) => string
+): Promise<string[]> =>
+  await Promise.all(
+    Array.from({ length: 40 }, async (_, index) => {
+      const { id } = await admin.api.knowledge.createCollection({
+        name: `Team ${index} ${unique()}`,
+        access: "everyone",
+      });
+      await admin.api.knowledge.saveDocument({
+        collectionId: id,
+        path,
+        text: text(index),
+        ifVersion: 0,
+      });
+      await storedGrant(
+        { type: "agent", id: agentId },
+        { type: "collection", id },
+        ["read"],
+        `TEAM_${index}`
+      );
+      return id;
+    })
   );
 
 /** Saves `text` at `path` in `collectionId`, over what is there now. */
@@ -299,6 +332,57 @@ describe("a chat's instructions and memory", setUpTime, () => {
       saved: [
         `Returned:\n${permissionErrors.create("permission.restricted").message}`,
       ],
+    });
+  });
+
+  it("carry every skill's collection a turn lists, however many at once", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
+    const { ask, agent } = await chatOf(person.userId, says("Hi."));
+    const collections = await manyReadable(
+      admin,
+      agent.agentId,
+      "howto/SKILL.md",
+      (index) =>
+        `---\nname: howto-${index}\ndescription: How team ${index} works.\n---\n# Steps`
+    );
+
+    const answer = await ask("Hi.");
+
+    expect(
+      collections.every((id) => answer.provenance.sources.includes(id))
+    ).toBeTruthy();
+  });
+
+  it("carry every collection one read finds, however many at once", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const person = await signedInApi(idp, "user");
+    const marker = `plover${unique()}`;
+    const { ask, agent, stub, chat } = await chatOf(
+      person.userId,
+      codeStep(
+        `export default async (env) => (await env.knowledge.search(${JSON.stringify(marker)}, { limit: 50 })).hits.length;`
+      ),
+      says("Found them.")
+    );
+    // Notes, not skills: the turn lists none, and the search finds them all.
+    const collections = await manyReadable(
+      admin,
+      agent.agentId,
+      "note.md",
+      () => `# ${marker}`
+    );
+
+    const answer = await ask(`Where is ${marker}?`);
+
+    expect({
+      ran: await codeResults(stub, chat.id),
+      carried: collections.every((id) =>
+        answer.provenance.sources.includes(id)
+      ),
+    }).toStrictEqual({
+      ran: [{ isError: false, text: "Returned:\n40" }],
+      carried: true,
     });
   });
 });

@@ -1,3 +1,10 @@
+import { defineErrorFamily } from "./errors.ts";
+
+/** Why a call on notifications was refused. */
+export const notificationErrors = defineErrorFamily({
+  "notification.invalid": "Those aren't notifications as the list showed them.",
+});
+
 // What core tells a signed-in person in the product (core's
 // notifications.ts): for now, that a workflow failed while acting for
 // them. Only they see their own; nobody else is told.
@@ -33,6 +40,11 @@ export interface NotificationsApi {
    * and how many of those are unread.
    */
   list: () => Promise<{ notifications: Notification[]; unread: number }>;
-  /** Marks all of them read. */
-  markRead: () => Promise<void>;
+  /**
+   * Marks read the notifications `list` showed (their IDs, at most
+   * {@link listedNotifications}) as they were shown: each only while its
+   * latest failure is no later than `upTo`, the newest `at` shown, so a
+   * failure counted on one since leaves it unread.
+   */
+  markRead: (ids: string[], upTo: string) => Promise<void>;
 }

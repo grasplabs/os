@@ -6,8 +6,8 @@ import { useEffect, useState } from "react";
 import { withSession, withTimeout } from "../core.ts";
 
 // The nav's way to the person's notifications, with how many are unread,
-// read again on every page the person opens. Only while core lists them:
-// switched off (or out of reach), the nav leaves it out.
+// read again on every other page the person opens. Only while core lists
+// them: switched off (or out of reach), the nav leaves it out.
 
 /**
  * How many of the person's notifications are unread; `undefined` when
@@ -41,10 +41,12 @@ export const NotificationsLink = () => {
       }
     };
     void read();
-    // Again once each page has loaded: the Notifications page reads them
-    // all first.
-    const unsubscribe = router.subscribe("onResolved", () => {
-      void read();
+    // Again once another page has loaded (the Notifications page reads
+    // them first); not when only the page's search changes.
+    const unsubscribe = router.subscribe("onResolved", ({ pathChanged }) => {
+      if (pathChanged) {
+        void read();
+      }
     });
     return () => {
       // Nothing read after this is shown.

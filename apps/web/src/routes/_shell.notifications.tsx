@@ -32,8 +32,12 @@ const readNotifications = async (
     session.notifications.list(),
     listedOrNone(session.chats.models()),
   ]);
-  if (unread > 0) {
-    await session.notifications.markRead();
+  const [newest] = notifications;
+  if (unread > 0 && newest !== undefined) {
+    await session.notifications.markRead(
+      notifications.map(({ id }) => id),
+      newest.at
+    );
   }
   return { notifications, model: models[0] };
 };

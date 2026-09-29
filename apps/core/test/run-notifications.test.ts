@@ -55,6 +55,55 @@ const listed = async (person: Person) => {
   };
 };
 
+/** Reads the person's notifications as the page does: listed, then read. */
+const readAll = async (person: Person): Promise<void> => {
+  const { notifications } = await person.api.notifications.list();
+  const [newest] = notifications;
+  if (newest !== undefined) {
+    await person.api.notifications.markRead(
+      notifications.map(({ id }) => id),
+      newest.at
+    );
+  }
+};
+
+const dayMs = 24 * 60 * 60 * 1000;
+
+/** A notification of `personId`'s, stored as it is. */
+const storedNotice = async (
+  personId: string,
+  app: string,
+  workflow: string,
+  { updatedAt, readAt }: { updatedAt: number; readAt: number | null }
+): Promise<string> => {
+  const id = crypto.randomUUID();
+  await env.DB.prepare(
+    "INSERT INTO notifications (id, person_id, type, app_id, workflow_id, run_id, failures, created_at, updated_at, read_at) VALUES (?, ?, 'run_failed', ?, ?, ?, 1, ?, ?, ?)"
+  )
+    .bind(
+      id,
+      personId,
+      app,
+      workflow,
+      crypto.randomUUID(),
+      updatedAt,
+      updatedAt,
+      readAt
+    )
+    .run();
+  return id;
+};
+
+/** The IDs of `personId`'s notifications as stored, whatever they list. */
+const storedOf = async (personId: string): Promise<string[]> => {
+  const { results } = await env.DB.prepare(
+    "SELECT id FROM notifications WHERE person_id = ? ORDER BY id"
+  )
+    .bind(personId)
+    .all<{ id: string }>();
+  return results.map(({ id }) => id);
+};
+
 describe("failed runs", slow, () => {
   it("notify the person each acted for, once per workflow until they read it", async () => {
     const owner = await signedInApi(idp, "builder");
@@ -70,7 +119,7 @@ describe("failed runs", slow, () => {
     const first = await failedRun(owner, app, "careless");
     const second = await failedRun(owner, app, "careless");
     const counted = await listed(owner);
-    await owner.api.notifications.markRead();
+    await readAll(owner);
     const third = await failedRun(owner, app, "careless");
     // A trigger's run acts for the App's owner; the user's for the user.
     const byTrigger = await startRun(env, {
@@ -179,6 +228,94 @@ describe("failed runs", slow, () => {
     });
   });
 
+  it("are marked read only as the page showed them: a failure since stays unread", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const app = await appWith(owner, failing("careless"));
+    await failedRun(owner, app, "careless");
+    const { notifications } = await owner.api.notifications.list();
+    const later = await failedRun(owner, app, "careless");
+    const [shown] = notifications;
+    if (shown === undefined) {
+      throw new Error("Expected the failure listed");
+    }
+    await owner.api.notifications.markRead([shown.id], shown.at);
+
+    await expect(listed(owner)).resolves.toStrictEqual({
+      unread: 1,
+      notifications: [
+        { workflow: "careless", run: later, failures: 2, read: false },
+      ],
+    });
+  });
+
+  it("keep what was read for 30 days, and what is unread however old", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const app = await appWith(owner, failing("careless"));
+    const now = Date.now();
+    const readLongAgo = await storedNotice(owner.userId, app, "old", {
+      updatedAt: now - 40 * dayMs,
+      readAt: now - 31 * dayMs,
+    });
+    const readLately = await storedNotice(owner.userId, app, "recent", {
+      updatedAt: now - 40 * dayMs,
+      readAt: now - dayMs,
+    });
+    // Failed long ago, read only now: kept 30 days from now.
+    const unreadOld = await storedNotice(owner.userId, app, "unread", {
+      updatedAt: now - 40 * dayMs,
+      readAt: null,
+    });
+    await readAll(owner);
+
+    expect({
+      stored: await storedOf(owner.userId),
+      gone: readLongAgo,
+    }).toStrictEqual({
+      stored: [readLately, unreadOld].toSorted((one, other) =>
+        one.localeCompare(other)
+      ),
+      gone: readLongAgo,
+    });
+  });
+
+  it("go with a person removed from the organization", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const user = await signedInApi(idp, "user");
+    const admin = await signedInApi(idp, "admin");
+    const app = await appWith(owner, failing("careless"));
+    await owner.api.apps.members.add(app, {
+      type: "person",
+      id: user.userId,
+      role: "user",
+    });
+    await failedRun(user, app, "careless");
+    const before = await storedOf(user.userId);
+    await admin.api.members.remove(user.userId);
+
+    expect({
+      before: before.length,
+      after: await storedOf(user.userId),
+    }).toStrictEqual({ before: 1, after: [] });
+  });
+
+  it("refuse marking read what no list showed", async () => {
+    const owner = await signedInApi(idp, "builder");
+    await expect(
+      Promise.all([
+        refusal(owner.api.notifications.markRead([], "yesterday")),
+        refusal(
+          owner.api.notifications.markRead(
+            Array.from({ length: 51 }, () => crypto.randomUUID()),
+            new Date().toISOString()
+          )
+        ),
+      ])
+    ).resolves.toMatchObject([
+      { code: "notification.invalid" },
+      { code: "notification.invalid" },
+    ]);
+  });
+
   it("tell nobody while switched off", async () => {
     const owner = await signedInApi(idp, "builder");
     const app = await appWith(owner, failing("careless"));
@@ -216,7 +353,10 @@ describe("failed runs", slow, () => {
     const owner = await signedInApi(idp, "builder");
     const queries = await recordedQueries(async () => {
       await owner.api.notifications.list();
-      await owner.api.notifications.markRead();
+      await owner.api.notifications.markRead(
+        [crypto.randomUUID()],
+        new Date().toISOString()
+      );
     });
     const plans = await Promise.all(
       queries

@@ -29,10 +29,11 @@ import {
 } from "@grasp-os/shared/ids";
 import type { ChatId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
+import { modelErrors } from "@grasp-os/shared/models";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { RunFailure } from "@grasp-os/shared/workflows";
 import { DurableObject } from "cloudflare:workers";
-import { and, asc, count, desc, eq, gt } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
@@ -68,7 +69,7 @@ import { featureEnabled, requireFeature } from "./features.ts";
 import { readAsDelegate } from "./knowledge/binding.ts";
 import { forContext } from "./knowledge/memory.ts";
 import { catalog, noteListedSkills } from "./knowledge/tools.ts";
-import { models } from "./models.ts";
+import { gatewaySettings, models } from "./models.ts";
 import type { WorkContext } from "./restricted.ts";
 
 export type Chat = typeof chats.$inferSelect;
@@ -337,6 +338,25 @@ export class Workspace extends DurableObject<Env> {
     });
     this.#deliverAudit();
     return chat;
+  }
+
+  /**
+   * A new chat of `personId`'s to fix a failed run (`createChat` with
+   * `fix`), made only if the deployment allows `model`, which its question
+   * will name: a refused model leaves no chat without a question.
+   */
+  createFixChat(
+    title: string,
+    personId: string,
+    agentId: string,
+    by: AuditActor,
+    fix: RunToFix,
+    model: string
+  ): Chat {
+    if (!gatewaySettings(this.env).models.includes(model)) {
+      throw modelErrors.create("model.not_allowed");
+    }
+    return this.createChat(title, personId, agentId, by, fix);
   }
 
   /**
@@ -842,15 +862,21 @@ export class Workspace extends DurableObject<Env> {
     return true;
   }
 
-  /** Keeps `sources` with the chat, each once, for good. */
+  /**
+   * Keeps `sources` with the chat, each once, for good: one statement
+   * whatever their number, the list bound as one JSON value, as the
+   * object's SQLite takes at most 100 bound values a statement.
+   */
   #keepSources(chatId: ChatId, sources: readonly string[]): void {
     if (sources.length === 0) {
       return;
     }
-    const createdAt = new Date();
+    // The WHERE keeps SQLite from reading ON CONFLICT as a join.
     this.#db
       .insert(chatSources)
-      .values(sources.map((sourceId) => ({ chatId, sourceId, createdAt })))
+      .select(
+        sql`SELECT ${chatId}, value, ${Date.now()} FROM json_each(${JSON.stringify(sources)}) WHERE true`
+      )
       .onConflictDoNothing()
       .run();
     this.#provenanceChanged(chatId);

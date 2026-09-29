@@ -44,6 +44,7 @@ import {
   storedEvent,
 } from "../audit-outbox.ts";
 import type { Member } from "../auth/identity.ts";
+import { builtinOwner } from "../builtin-app-id.ts";
 import { apps, workflowRuns } from "../db/core/schema.ts";
 import { appHost } from "../durable-objects.ts";
 import { featureEnabled, requireFeature } from "../features.ts";
@@ -201,7 +202,7 @@ export const runActor = (
  * nothing; and, while `run_notifications` is on, the notice to the person
  * it acted for (notifications.ts), only if the event was stored. That
  * person is who started it, or for a triggered run the App's owner, read
- * now.
+ * now; none for a built-in's App, which nobody owns.
  */
 const failureRecorded = async (
   env: Env,
@@ -221,6 +222,10 @@ const failureRecorded = async (
   if (personId === null) {
     const app = await appRecord(env, appIdSchema.parse(row.appId));
     personId = app.ownerId;
+  }
+  // A built-in's App is owned by nobody: there is no one to tell.
+  if (personId === builtinOwner) {
+    return [stored] as const;
   }
   return [
     stored,

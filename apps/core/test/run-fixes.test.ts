@@ -18,7 +18,11 @@ import type { GatewayReply } from "./ai-gateway.ts";
 import { requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
-import { collectionWithNote, readCollection } from "./knowledge.ts";
+import {
+  collectionWithNote,
+  readCollection,
+  storedGrant,
+} from "./knowledge.ts";
 import { finished } from "./runs.ts";
 import { openRpc, outcome, signedInApi } from "./sign-in.ts";
 import { appWith, workflowFiles } from "./workflow-apps.ts";
@@ -271,7 +275,7 @@ describe("asking the agent to fix a failed run", slow, () => {
       ),
     };
     const unrefusedChats = await owner.api.chats.list();
-    // A question the gateway refuses: the chat stays, to ask again.
+    // A model the deployment doesn't allow: refused before any chat.
     const badModel = await outcome(
       owner.api.chats.fixRun(failed, "nowhere/no-model")
     );
@@ -297,11 +301,11 @@ describe("asking the agent to fix a failed run", slow, () => {
       badModel: "model.not_allowed",
       asked: [[admin.userId, byAdmin.id]],
       chats: [0, 0, 0],
-      kept: ["Fix careless"],
+      kept: [],
     });
   });
 
-  it("carries what the report may hold from the start: the run, its App's sources and restricted mode", async () => {
+  it("carries what the report may hold from the start: the run, its App's sources and restricted mode, however many", async () => {
     const owner = await signedInApi(idp, "builder");
     const admin = await signedInApi(idp, "admin");
     const app = await appWith(owner, workflows("Customer c-1 is blocked"));
@@ -313,6 +317,20 @@ describe("asking the agent to fix a failed run", slow, () => {
       idp,
       admin,
       readCollection({ type: "app", appId: app }, collectionId)
+    );
+    // More than one statement of the object's SQLite could take a row
+    // each of: collections it was granted that Knowledge doesn't know.
+    const archives = Array.from({ length: 40 }, () => crypto.randomUUID());
+    await Promise.all(
+      archives.map(
+        async (id, index) =>
+          await storedGrant(
+            { type: "app", id: app },
+            { type: "collection", id },
+            ["read"],
+            `ARCHIVE_${index}`
+          )
+      )
     );
     await appHost(env, appIdSchema.parse(app)).restrict();
     const run = await endedRun(owner, app, "careless");
@@ -331,10 +349,14 @@ describe("asking the agent to fix a failed run", slow, () => {
       [run, collectionId].every((id) => ids?.includes(id) === true);
     expect({
       sources: namesBoth(provenance?.sources),
+      archives: archives.every(
+        (id) => provenance?.sources.includes(id) === true
+      ),
       restricted: provenance?.restricted,
       audited: restricted.map(({ provenance: read }) => namesBoth(read)),
     }).toStrictEqual({
       sources: true,
+      archives: true,
       restricted: true,
       // Entering restricted mode, recorded once, with what it read.
       audited: [true],
