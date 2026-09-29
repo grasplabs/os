@@ -7,9 +7,11 @@
  * Every Worker in a client's account is one the console deployed, so an
  * account's totals are the client's.
  */
+import { log } from "@grasp-os/shared/log";
 import { z } from "zod";
 
 import { clientGatewayId } from "../deploy/core-config.ts";
+import { errorCode } from "../deploy/deploy.ts";
 import type { CloudflareApi } from "./api.ts";
 
 /** A client account's usage, as the grid shows it. */
@@ -32,14 +34,21 @@ const accountsPerQuery = 10;
 const sumsOf = <T extends z.ZodRawShape>(shape: T) =>
   z.array(z.object({ sum: z.object(shape) }));
 
-const accountSchema = z.object({
-  month: sumsOf({ requests: z.number(), cpuTimeUs: z.number() }),
-  day: sumsOf({ requests: z.number(), errors: z.number() }),
-  ai: sumsOf({ cost: z.number() }),
-});
+/** One account's answer, as its alias holds it. */
+const accountSchema = z.array(
+  z.object({
+    month: sumsOf({ requests: z.number(), cpuTimeUs: z.number() }),
+    day: sumsOf({ requests: z.number(), errors: z.number() }),
+    ai: sumsOf({ cost: z.number() }),
+  })
+);
 
-/** The query for `count` accounts, `$a0` to `$a<count-1>`. */
-const usageQuery = (count: number): string => {
+/**
+ * The query for `count` accounts, `$a0` to `$a<count-1>`: the month's
+ * Workers requests and CPU time, the last day's requests and errors, and
+ * the month's spend on the client's AI Gateway.
+ */
+export const usageQuery = (count: number): string => {
   const aliases = Array.from(
     { length: count },
     (_, index) => `a${index}: accounts(filter: { accountTag: $a${index} }) {
@@ -65,17 +74,35 @@ const total = <T extends Record<string, number>>(
   zero: T
 ): T => groups[0]?.sum ?? zero;
 
-/** `accountIds` in chunks of `size`. */
+/** `items` in chunks of `size`. */
 const chunks = <T>(items: readonly T[], size: number): T[][] =>
   Array.from({ length: Math.ceil(items.length / size) }, (_, index) =>
     items.slice(index * size, (index + 1) * size)
   );
 
+/** The usage an account's answer says, or undefined when it doesn't say one. */
+const usageOf = (answer: unknown): AccountUsage | undefined => {
+  const parsed = accountSchema.safeParse(answer);
+  const [account] = parsed.success ? parsed.data : [];
+  if (account === undefined) {
+    return undefined;
+  }
+  const month = total(account.month, { requests: 0, cpuTimeUs: 0 });
+  const day = total(account.day, { requests: 0, errors: 0 });
+  return {
+    monthRequests: month.requests,
+    monthCpuMs: month.cpuTimeUs / 1000,
+    monthAiUsd: total(account.ai, { cost: 0 }).cost,
+    dayRequests: day.requests,
+    dayErrors: day.errors,
+  };
+};
+
 /**
- * Each of `accountIds`' usage, by account id, as of `now`. An account the
- * API doesn't answer for (the token isn't a member, analytics not read)
- * is left out, for the grid to show as unknown; a request that fails
- * throws.
+ * Each of `accountIds`' usage, by account id, as of `now`. Never throws:
+ * an account the API doesn't answer for (the token isn't a member, its
+ * answer doesn't parse), or one in a request that failed, is left out,
+ * for the grid to show as unknown, and the other accounts stand.
  */
 export const accountUsage = async (
   api: CloudflareApi,
@@ -86,40 +113,41 @@ export const accountUsage = async (
     Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), 1)
   );
   const dayStart = new Date(now.getTime() - 24 * 60 * 60 * 1000);
-  const usage = new Map<string, AccountUsage>();
-  for (const chunk of chunks(accountIds, accountsPerQuery)) {
-    const variables = {
-      ...Object.fromEntries(chunk.map((id, index) => [`a${index}`, id])),
-      monthStart: monthStart.toISOString(),
-      dayStart: dayStart.toISOString(),
-      now: now.toISOString(),
-      gateway: clientGatewayId,
-    };
-    // oxlint-disable-next-line no-await-in-loop -- a few accounts at a time
-    const viewer = await api.graphql(
-      usageQuery(chunk.length),
-      variables,
-      z.object({
-        viewer: z.record(z.string(), z.array(accountSchema).nullable()),
-      })
-    );
-    for (const [index, id] of chunk.entries()) {
-      const [account] = viewer.viewer[`a${index}`] ?? [];
-      if (account === undefined) {
-        continue;
+  const answers = await Promise.all(
+    chunks(accountIds, accountsPerQuery).map(async (chunk) => {
+      const variables = {
+        ...Object.fromEntries(chunk.map((id, index) => [`a${index}`, id])),
+        monthStart: monthStart.toISOString(),
+        dayStart: dayStart.toISOString(),
+        now: now.toISOString(),
+        gateway: clientGatewayId,
+      };
+      try {
+        const { viewer } = await api.graphql(
+          usageQuery(chunk.length),
+          variables,
+          z.object({ viewer: z.record(z.string(), z.unknown()) })
+        );
+        return chunk.map((id, index): [string, AccountUsage | undefined] => [
+          id,
+          usageOf(viewer[`a${index}`]),
+        ]);
+      } catch (error) {
+        log.warn("analytics.unread", {
+          accounts: chunk.length,
+          error: errorCode(error),
+        });
+        return [];
       }
-      const month = total(account.month, { requests: 0, cpuTimeUs: 0 });
-      const day = total(account.day, { requests: 0, errors: 0 });
-      usage.set(id, {
-        monthRequests: month.requests,
-        monthCpuMs: month.cpuTimeUs / 1000,
-        monthAiUsd: total(account.ai, { cost: 0 }).cost,
-        dayRequests: day.requests,
-        dayErrors: day.errors,
-      });
-    }
-  }
-  return usage;
+    })
+  );
+  return new Map(
+    answers
+      .flat()
+      .flatMap(([id, usage]): [string, AccountUsage][] =>
+        usage === undefined ? [] : [[id, usage]]
+      )
+  );
 };
 
 /**
@@ -138,8 +166,9 @@ const workersPaid = {
 /**
  * What `usage` costs this month so far, in USD, estimated: the account's
  * Workers Paid base and its requests and CPU time past what that
- * includes, and its AI Gateway spend. Storage (D1, R2, Durable Objects)
- * isn't in it.
+ * includes, counted from the calendar month's start (its included usage
+ * resets on its billing cycle, which may start on another day), and its
+ * AI Gateway spend. Storage (D1, R2) and Durable Objects aren't in it.
  */
 export const monthCostUsd = (
   usage: AccountUsage

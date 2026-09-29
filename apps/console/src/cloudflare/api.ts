@@ -137,6 +137,12 @@ export interface CloudflareApiOptions {
   token: string;
   /** The first retry's wait, doubling after; tests pass 0. */
   retryDelayMs?: number;
+  /**
+   * The most one call waits between its attempts, all waits together: a
+   * retry that would wait past it isn't made, and the call fails as its
+   * last attempt did. Unset, a call makes all its attempts.
+   */
+  waitBudgetMs?: number;
 }
 
 /**
@@ -174,6 +180,7 @@ const envelopeOf = async (response: Response): Promise<Envelope | null> => {
 export const cloudflareApi = ({
   token,
   retryDelayMs = defaultRetryDelayMs,
+  waitBudgetMs = Number.POSITIVE_INFINITY,
 }: CloudflareApiOptions): CloudflareApi => {
   const send = async (call: ApiCall): Promise<Response | null> => {
     const url = new URL(`${cloudflareApiBase}${call.path}`);
@@ -208,16 +215,26 @@ export const cloudflareApi = ({
       ((status === 0 || status >= 500) &&
         (call.idempotent ?? idempotentMethods.has(call.method))));
 
-  /** Waits before the attempt after `attempt`, as `response` asks or doubling. */
-  const backOff = async (response: Response | null, attempt: number) => {
-    await scheduler.wait(retryAfterMs(response) ?? retryDelayMs * 2 ** attempt);
+  /**
+   * How long to wait before the attempt after `attempt`, as `response`
+   * asks or doubling; undefined when that would take a call that waited
+   * `waited` already past its budget.
+   */
+  const waitBefore = (
+    response: Response | null,
+    attempt: number,
+    waited: number
+  ): number | undefined => {
+    const wait = retryAfterMs(response) ?? retryDelayMs * 2 ** attempt;
+    return waited + wait > waitBudgetMs ? undefined : wait;
   };
 
   /** Sends `call`, retrying what is safe to retry; `attempt` counts from 0. */
   const page = async <T>(
     call: ApiCall,
     schema: z.ZodType<T>,
-    attempt = 0
+    attempt = 0,
+    waited = 0
   ): Promise<Page<T>> => {
     const response = await send(call);
     const status = response?.status ?? 0;
@@ -230,7 +247,10 @@ export const cloudflareApi = ({
     }
     // No answer at all is retried like a server error: the call may or may
     // not have been applied.
-    if (!retryable(call, status, attempt)) {
+    const wait = retryable(call, status, attempt)
+      ? waitBefore(response, attempt, waited)
+      : undefined;
+    if (wait === undefined) {
       throw new CloudflareApiError(
         call.method,
         call.path,
@@ -238,8 +258,8 @@ export const cloudflareApi = ({
         envelope?.errors ?? []
       );
     }
-    await backOff(response, attempt);
-    return await page(call, schema, attempt + 1);
+    await scheduler.wait(wait);
+    return await page(call, schema, attempt + 1, waited + wait);
   };
 
   /** Sends a GraphQL query, retrying as `page` does; `attempt` counts from 0. */
@@ -247,7 +267,8 @@ export const cloudflareApi = ({
     query: string,
     variables: Record<string, unknown>,
     schema: z.ZodType<T>,
-    attempt = 0
+    attempt = 0,
+    waited = 0
   ): Promise<T> => {
     // A query changes nothing, so it's safe to send again.
     const call: ApiCall = {
@@ -270,11 +291,14 @@ export const cloudflareApi = ({
       }
       return schema.parse(answer.data);
     }
-    if (!retryable(call, status, attempt)) {
+    const wait = retryable(call, status, attempt)
+      ? waitBefore(response, attempt, waited)
+      : undefined;
+    if (wait === undefined) {
       throw new CloudflareApiError(call.method, call.path, status, []);
     }
-    await backOff(response, attempt);
-    return await graphql(query, variables, schema, attempt + 1);
+    await scheduler.wait(wait);
+    return await graphql(query, variables, schema, attempt + 1, waited + wait);
   };
 
   return {

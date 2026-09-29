@@ -139,21 +139,43 @@ const liveMatches = async (
 };
 
 /**
- * Whether the client whose drift is `drift` runs every shared secret in
- * `secrets`' store now (`storePrints`), on every Worker holding it, read
- * live.
+ * What Secrets Store holds, as clients are checked against it: the shared
+ * secrets each app holds, and their fingerprints (`storePrints`). Worked
+ * out once for however many clients are checked.
  */
-export const runsSharedSecrets = async (
+export interface StoreCheck {
+  holders: Record<string, string[]>;
+  expected: SharedPrints;
+}
+
+/** What `secrets`' store holds, to check clients against (`sharedSecretsStatus`). */
+export const storeCheck = async (
+  secrets: Pick<DeploySecrets, "clientKey" | "shared">
+): Promise<StoreCheck> => ({
+  holders: holdersOf(secrets),
+  expected: await storePrints(secrets),
+});
+
+/**
+ * Whether the client whose drift is `drift` (read live, `driftOf`) runs
+ * every shared secret in the store now (`check`), on every Worker holding
+ * it; null when that can't be told: its drift is unknown (nothing
+ * recorded, or its account didn't answer), or a Worker's live versions
+ * weren't read. Only what was read and differs is behind.
+ */
+export const sharedSecretsStatus = async (
   db: ConsoleDatabase,
   drift: ClientDrift | null,
-  secrets: Pick<DeploySecrets, "clientKey" | "shared">
-): Promise<boolean> => {
-  const matches = await liveMatches(
-    db,
-    drift,
-    holdersOf(secrets),
-    await storePrints(secrets)
-  );
+  check: StoreCheck
+): Promise<boolean | null> => {
+  if (
+    drift === null ||
+    drift.state === "unknown" ||
+    drift.workers.some(({ live }) => live === null)
+  ) {
+    return null;
+  }
+  const matches = await liveMatches(db, drift, check.holders, check.expected);
   return [...matches.values()].every(Boolean);
 };
 

@@ -84,11 +84,11 @@ const recordClient = async (
 const noSuchClient = (id: string) => `There&#x27;s no client ${id}.`;
 
 describe("the client pages", () => {
-  it("list every client in a grid with links to its deployment, account and Activity, a way to add one, and live columns it can't read as unknown", async () => {
+  it("list every client in a grid from what the console recorded, with links to its deployment, account and Activity, a way to add one, and its live columns still to read", async () => {
     const client = await recordClient();
     const live = await recordClient("active");
 
-    // The tests' Secrets Store holds no deployer token: nothing live is read.
+    // The live columns are read after the page shows (test/client-grid.test.ts).
     const { status, html } = await page("/");
 
     expect({
@@ -107,14 +107,14 @@ describe("the client pages", () => {
         `href="https://${live.id}.grasp.test/activity"`,
         `href="https://dash.cloudflare.com/${live.accountId}"`,
       ].every((link) => html.includes(link)),
-      unknown: html.includes(">unknown<"),
+      reading: html.includes("reading…"),
       add: html.includes('href="/clients/new"'),
     }).toStrictEqual({
       status: 200,
       listed: true,
       columns: true,
       links: true,
-      unknown: true,
+      reading: true,
       add: true,
     });
   });

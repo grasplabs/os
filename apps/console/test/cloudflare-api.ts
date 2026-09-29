@@ -362,6 +362,45 @@ const readBody = async (request: Request): Promise<unknown> => {
   return request.body === null ? undefined : await request.text();
 };
 
+/** A day, in ms. */
+const dayMs = 24 * 60 * 60 * 1000;
+
+/**
+ * Why the console's usage query (src/cloudflare/analytics.ts) isn't one
+ * the fake answers: a dataset, field or filter it doesn't read as the
+ * schema names them, or a window that isn't the month so far and the last
+ * day, or another gateway than the client's; null when it is. So a typo
+ * fails the tests rather than reads nothing.
+ */
+const analyticsMisread = (
+  query: string,
+  variables: Record<string, unknown>
+): string | null => {
+  const expected = [
+    "workersInvocationsAdaptive(limit: 1, filter: { datetime_geq: $monthStart, datetime_leq: $now }) { sum { requests cpuTimeUs } }",
+    "workersInvocationsAdaptive(limit: 1, filter: { datetime_geq: $dayStart, datetime_leq: $now }) { sum { requests errors } }",
+    "aiGatewayRequestsAdaptiveGroups(limit: 1, filter: { datetime_geq: $monthStart, datetime_leq: $now, gateway: $gateway }) { sum { cost } }",
+    "accounts(filter: { accountTag: $a0 })",
+  ];
+  const missing = expected.find((part) => !query.includes(part));
+  if (missing !== undefined) {
+    return `The query doesn't read ${missing}`;
+  }
+  const now = Date.parse(String(variables.now));
+  const month = new Date(now);
+  const monthStart = Date.UTC(month.getUTCFullYear(), month.getUTCMonth(), 1);
+  if (
+    Number.isNaN(now) ||
+    Date.parse(String(variables.monthStart)) !== monthStart ||
+    Date.parse(String(variables.dayStart)) !== now - dayMs
+  ) {
+    return "The query's window isn't the month so far and the last day";
+  }
+  return variables.gateway === "grasp-os"
+    ? null
+    : "The query doesn't filter the client's AI Gateway";
+};
+
 /**
  * A fake Cloudflare API that lets `token` (the deployer's) and
  * `tenantToken` (a tenant admin's, which alone creates accounts) in, each
@@ -411,8 +450,13 @@ export const mockCloudflareApi = (
     return account;
   };
 
-  /** Calls being answered now, and the most at once. */
-  const load = { now: 0, peak: 0 };
+  /**
+   * Calls being answered now, and the most at once; and the most accounts
+   * with a call being answered at once.
+   */
+  const load = { now: 0, peak: 0, peakAccounts: 0 };
+  /** Calls being answered now, by account. */
+  const busyAccounts = new Map<string, number>();
 
   /** Whose token a call carries: the deployer's or the tenant admin's. */
   const callers = new Map([
@@ -427,9 +471,18 @@ export const mockCloudflareApi = (
    */
   const answerAnalytics = (body: unknown, caller: string): Response => {
     const parsed = z
-      .object({ variables: z.record(z.string(), z.unknown()) })
+      .object({
+        query: z.string(),
+        variables: z.record(z.string(), z.unknown()),
+      })
       .safeParse(body);
+    const query = parsed.success ? parsed.data.query : "";
     const variables = parsed.success ? parsed.data.variables : {};
+    const misread = analyticsMisread(query, variables);
+    if (misread !== null) {
+      // As the API answers a query it can't run: errors, and no data.
+      return Response.json({ data: null, errors: [{ message: misread }] });
+    }
     const errors: { message: string }[] = [];
     const viewer = Object.fromEntries(
       Object.entries(variables)
@@ -659,10 +712,25 @@ export const mockCloudflareApi = (
       }
       load.now += 1;
       load.peak = Math.max(load.peak, load.now);
+      const accountId = accountRoute.exec(
+        new URL(request.url).pathname.slice(new URL(base).pathname.length)
+      )?.groups?.id;
+      if (accountId !== undefined) {
+        busyAccounts.set(accountId, (busyAccounts.get(accountId) ?? 0) + 1);
+        load.peakAccounts = Math.max(load.peakAccounts, busyAccounts.size);
+      }
       try {
         return await answer(request);
       } finally {
         load.now -= 1;
+        if (accountId !== undefined) {
+          const left = (busyAccounts.get(accountId) ?? 1) - 1;
+          if (left === 0) {
+            busyAccounts.delete(accountId);
+          } else {
+            busyAccounts.set(accountId, left);
+          }
+        }
       }
     });
   });
@@ -676,6 +744,8 @@ export const mockCloudflareApi = (
     matched.length = 0;
     interleaved.length = 0;
     load.peak = 0;
+    load.peakAccounts = 0;
+    busyAccounts.clear();
   });
 
   return {
@@ -683,6 +753,8 @@ export const mockCloudflareApi = (
     calls,
     /** The most calls it was answering at once in this test. */
     peakConcurrency: () => load.peak,
+    /** The most accounts it was answering calls for at once in this test. */
+    peakAccounts: () => load.peakAccounts,
     /** Adds an account the token is a member of, and returns what it holds. */
     addAccount,
     /** The accounts named `name`, as the fake holds them. */
