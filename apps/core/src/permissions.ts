@@ -678,7 +678,7 @@ export interface DroppedApp {
  */
 export const blueprintRequests = async (
   env: Env,
-  by: Identity,
+  by: Acting,
   from: AppId,
   app: AppId,
   openTo: (apps: AppId[]) => Promise<ReadonlySet<string>>
@@ -752,7 +752,7 @@ export const blueprintRequests = async (
       grantedAt: null,
       revokedBy: null,
       revokedAt: null,
-      requestedVia: null,
+      requestedVia: by.via ?? null,
     }));
   return {
     rows,

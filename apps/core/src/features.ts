@@ -231,7 +231,8 @@ export type Feature =
    */
   | "chat"
   /**
-   * The chat's agent building Apps (agent-builds.ts): creating one,
+   * The chat's agent building Apps (agent-builds.ts): creating one (from
+   * a blueprint too, while `app_blueprints` and `app_sharing` are on),
    * writing, checking and dry-running a draft of its own per chat, and
    * proposing it as a pending version for a builder to make current, with
    * the permissions it asks for; needs

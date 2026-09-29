@@ -45,6 +45,7 @@ import {
   outboxedIfChanged,
   outboxedWhere,
 } from "./audit-outbox.ts";
+import type { Acting } from "./auth/identity.ts";
 import { builtinAppId, builtinOwner } from "./builtin-app-id.ts";
 import {
   appBlueprints,
@@ -101,7 +102,7 @@ const copiedMemory = (name: string, version: number): string =>
  * Refuses Grasp staff: which of a client's Apps others copy, and copying
  * one (which asks for permissions), is the client's to decide.
  */
-const requireNotStaff = (by: Identity): void => {
+const requireNotStaff = (by: Pick<Acting, "staff">): void => {
   if (by.staff) {
     throw roleErrors.create("role.forbidden");
   }
@@ -133,7 +134,7 @@ const blueprintRow = async (
 /** The blueprints of the Apps `by` has a role in, newest first. */
 export const listBlueprints = async (
   env: Env,
-  by: Identity
+  by: Acting
 ): Promise<Blueprint[]> => {
   const rows = await drizzle(env.DB)
     .select({ blueprint: appBlueprints, app: apps })
@@ -266,7 +267,7 @@ const discardPending = async (
  */
 const activateCopy = async (
   env: Env,
-  by: Identity,
+  by: Acting,
   source: AppId,
   copy: AppId
 ): Promise<void> => {
@@ -354,7 +355,7 @@ const approvedSource = async (
  */
 const openedBy = async (
   env: Env,
-  by: Identity,
+  by: Acting,
   named: readonly AppId[]
 ): Promise<Set<string>> => {
   const opened = await Promise.all(
@@ -385,7 +386,7 @@ const openedBy = async (
  */
 export const createFromBlueprint = async (
   env: Env,
-  by: Identity,
+  by: Acting,
   app: unknown,
   version: unknown,
   input: unknown
