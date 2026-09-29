@@ -215,9 +215,10 @@ const driveItemFields = [
  * started, in any folder of it. A drive's delta can't start from a time,
  * only from now (`token=latest`): the source takes that position as soon
  * as it starts (`prime`), so what the drive already holds is never read,
- * and a first read that comes late misses nothing. When its cursor is
- * gone, it takes the position again, and files created in between aren't
- * reported.
+ * and a first read that comes late misses nothing. Files created while a
+ * source has no position (its first prime failing, or its cursor gone)
+ * aren't reported: priming is tried again within five minutes, and a
+ * late one is recorded (`connection.events.primed_late`, events.ts).
  */
 const fileCreated: EventKind = {
   provider: "microsoft",

@@ -115,6 +115,19 @@ const refusedStatuses = new Set([401, 403, 404]);
 const backoffMs = (failures: number): number =>
   Math.min(60_000 * 2 ** Math.max(failures - 1, 0), maxWaitMs);
 
+/**
+ * That `source`'s cursor is still the one it was read with, as SQL: every
+ * write of a cursor is conditional on it, so a sync never clears or
+ * replaces a position another one saved since.
+ */
+const sameCursor = (source: EventSource) =>
+  and(
+    eq(eventSources.id, source.id),
+    source.cursor === null
+      ? isNull(eventSources.cursor)
+      : eq(eventSources.cursor, source.cursor)
+  );
+
 /** A source's key: its connection, type and resource. */
 const keyOf = (connectionId: string, type: string, resource: string): string =>
   JSON.stringify([connectionId, type, resource]);
@@ -163,7 +176,8 @@ const sourceEntry = (
   action:
     | "connection.events.started"
     | "connection.events.stopped"
-    | "connection.events.refused",
+    | "connection.events.refused"
+    | "connection.events.primed_late",
   { connectionId, type, resource }: SourceKey,
   detail: Record<string, number> = {}
 ): AuditEntry => ({
@@ -333,7 +347,7 @@ const keepRead = async (
       pollAt: new Date(done.getTime() + (found.more ? 0 : pollIntervalMs)),
       updatedAt: done,
     })
-    .where(eq(eventSources.id, source.id));
+    .where(sameCursor(source));
   const inserts: BatchItem<"sqlite">[] = events.map((event: ReadEvent) =>
     db
       .insert(connectorEvents)
@@ -389,7 +403,8 @@ const keepRead = async (
 const failRead = async (
   env: Env,
   source: EventSource,
-  error: unknown
+  error: unknown,
+  maxWait = maxWaitMs
 ): Promise<void> => {
   const db = drizzle(env.DB);
   const failures = source.failures + 1;
@@ -398,7 +413,10 @@ const failRead = async (
     sourceError?.status !== undefined &&
     refusedStatuses.has(sourceError.status) &&
     failures >= refusedLimit;
-  let wait = sourceError?.retryAfterMs ?? backoffMs(failures);
+  let wait = Math.min(
+    sourceError?.retryAfterMs ?? backoffMs(failures),
+    maxWait
+  );
   if (refused) {
     wait = refusedWaitMs;
   }
@@ -418,7 +436,7 @@ const failRead = async (
       ...(sourceError?.resync === true ? { cursor: null } : {}),
       updatedAt: new Date(),
     })
-    .where(eq(eventSources.id, source.id));
+    .where(sameCursor(source));
   if (refused && failures === refusedLimit) {
     await recordEvents(
       env,
@@ -491,13 +509,26 @@ const readSource = async (
 const primesPerSync = 25;
 
 /**
+ * The longest a source waits to be primed again after a failure that
+ * isn't a refusal: the provider can't replay what arrives before its
+ * position is taken, so priming is tried again soon.
+ */
+export const primeMaxWaitMs = 5 * 60_000;
+
+/**
  * Takes where each new source of a type that reads on from a position
  * (`EventKind.prime`) stands now, as its first cursor: a request each,
  * on top of the reads, and before them, so it marks when the source
- * started however late its first read comes. The longest due first; one
- * that fails waits as a read that fails does, longer each time (and is
- * recorded as refused after repeated refusals), so it never holds up the
- * others. It reads nothing meanwhile.
+ * started however late its first read comes. The longest due first,
+ * each under the same lease as a read, so two syncs never prime one
+ * source at once.
+ *
+ * Such a provider can't replay what arrived before its position was
+ * taken. So a prime that fails is tried again after at most
+ * `primeMaxWaitMs` (a refusal still waits daily, as a read does), and one
+ * that succeeds after failing records the gap, how long the source went
+ * without a position, as `connection.events.primed_late`. A failing
+ * source never holds up the others, and reads nothing meanwhile.
  */
 const primeSources = async (env: Env): Promise<void> => {
   if (primedTypes.length === 0) {
@@ -519,7 +550,9 @@ const primeSources = async (env: Env): Promise<void> => {
     .limit(primesPerSync);
   for (const { source, connection } of due) {
     const prime = kindOf(source.type)?.prime;
-    if (prime === undefined) {
+    const now = Date.now();
+    // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
+    if (prime === undefined || !(await takeSource(env.DB, source, now))) {
       continue;
     }
     try {
@@ -532,16 +565,34 @@ const primeSources = async (env: Env): Promise<void> => {
         token,
         pages: pagesWith(token),
       });
-      // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
-      await db
+      const primed = db
         .update(eventSources)
-        .set({ cursor, failures: 0, updatedAt: new Date() })
-        .where(
-          and(eq(eventSources.id, source.id), isNull(eventSources.cursor))
-        );
+        .set({
+          cursor,
+          failures: 0,
+          pollAt: new Date(now),
+          updatedAt: new Date(),
+        })
+        .where(sameCursor(source));
+      if (source.failures === 0) {
+        // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
+        await primed;
+        continue;
+      }
+      const since = (source.readAt ?? source.createdAt).getTime();
+      // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
+      await recordEventIf(
+        env,
+        sourceEntry("connection.events.primed_late", source, {
+          failures: source.failures,
+          delayMs: now - since,
+        }),
+        { from: eventSources, where: sameCursor(source) ?? sql`0` },
+        [primed]
+      );
     } catch (error) {
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
-      await failRead(env, source, error);
+      await failRead(env, source, error, primeMaxWaitMs);
     }
   }
 };

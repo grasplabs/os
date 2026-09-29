@@ -52,7 +52,12 @@ let graph: GraphEventsFake = graphEventsFake();
 let instead: (() => Response) | undefined;
 /** Drives Graph fails every request for. */
 const failingDrives = new Set<string>();
-const internet = fakeInternet((request, url) => {
+/** Holds each request for where a drive stands until it resolves, when set. */
+let primeGate: Promise<null> | undefined;
+const internet = fakeInternet(async (request, url) => {
+  if (primeGate !== undefined && url.searchParams.get("token") === "latest") {
+    await primeGate;
+  }
   const answer = instead;
   if (answer !== undefined) {
     instead = undefined;
@@ -183,6 +188,7 @@ describe("connector events", () => {
     graph = graphEventsFake();
     instead = undefined;
     failingDrives.clear();
+    primeGate = undefined;
     vi.useFakeTimers({ toFake: ["Date"] });
     await env.DB.batch([
       env.DB.prepare("DELETE FROM event_sources"),
@@ -557,6 +563,73 @@ describe("connector events", () => {
         ),
       ],
     }).toStrictEqual({ primed: [financeDrive], failures: [1] });
+  });
+
+  it("prime a drive in one sync at a time, so no other clears the position it saves", async () => {
+    const outlook = await connected();
+    const files = listener(outlook, {
+      type: "m365.file.created",
+      resource: financeDrive,
+    });
+    const gate = Promise.withResolvers<null>();
+    primeGate = gate.promise;
+    const primes = () =>
+      graphPaths().filter((path) => path.includes("token=latest")).length;
+    const first = sync([files]);
+    await vi.waitFor(() => {
+      expect(primes()).toBe(1);
+    });
+    // Another sync meanwhile: the source is the first one's to prime.
+    await sync([files]);
+    gate.resolve(null);
+    await first;
+    const [source] = await sources();
+
+    expect({
+      primes: primes(),
+      cursor: source?.cursor?.includes("token=0"),
+    }).toStrictEqual({ primes: 1, cursor: true });
+  });
+
+  it("try priming again within five minutes, and record how long a drive went without a position", async () => {
+    const outlook = await connected();
+    const files = listener(outlook, {
+      type: "m365.file.created",
+      resource: financeDrive,
+    });
+    const started = Date.now();
+    failingDrives.add(financeDrive);
+    const waits: number[] = [];
+    for (let attempt = 1; attempt <= 6; attempt += 1) {
+      const before = Date.now();
+      // oxlint-disable-next-line no-await-in-loop -- each after the last one's wait
+      await sync([files]);
+      // oxlint-disable-next-line no-await-in-loop -- each after the last one's wait
+      const [source] = await sources();
+      waits.push((source?.poll_at ?? 0) - before);
+      vi.setSystemTime(source?.poll_at ?? Date.now());
+    }
+    failingDrives.clear();
+    await sync([files]);
+    const events = await listening();
+
+    expect({
+      // A minute, doubling, but never past five.
+      waits,
+      primedLate: events
+        .filter(({ action }) => action === "connection.events.primed_late")
+        .map(({ detail }) => detail),
+    }).toStrictEqual({
+      waits: [60_000, 120_000, 240_000, 300_000, 300_000, 300_000],
+      primedLate: [
+        {
+          type: "m365.file.created",
+          resource: financeDrive,
+          failures: 6,
+          delayMs: Date.now() - started,
+        },
+      ],
+    });
   });
 
   it("never hand core an event of a connection disconnected since, and drop it", async () => {
