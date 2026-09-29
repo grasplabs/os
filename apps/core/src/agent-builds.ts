@@ -52,9 +52,9 @@ import type { Draft } from "./workspace.ts";
 // `maxFailedChecks` checks of one draft failed in a row in one turn, when
 // checking refuses and the agent tells the person what still fails. Each
 // check takes its place against the limit before it runs (in the
-// Workspace object, so checks started at once can't pass it), and a dry
-// run counts as a check that didn't pass. A turn creates at most
-// `maxCreatesPerTurn` Apps.
+// Workspace object, so checks started at once can't pass it). A draft
+// takes at most `maxDryRunsPerTurn` dry runs a turn, and a turn creates at
+// most `maxCreatesPerTurn` Apps.
 //
 // The person's rights bound every call, read again each time: creating an
 // App needs a role that builds, and changing one a builder's role in it.
@@ -68,10 +68,13 @@ import type { Draft } from "./workspace.ts";
 /**
  * Most checks of one draft that may fail in a row in one turn: the repair
  * loop's step limit. Checks running at once count against it before they
- * run, and each dry run counts as a check that didn't pass. A turn has at
- * most 30 code runs (agent.ts), so this leaves it room to answer.
+ * run. A turn has at most 30 code runs (agent.ts), so this leaves it room
+ * to answer.
  */
 export const maxFailedChecks = 5;
+
+/** Most dry runs of one draft in one turn, apart from its checks. */
+export const maxDryRunsPerTurn = 10;
 
 /** Most Apps the chat's agent may create in one turn. */
 export const maxCreatesPerTurn = 3;
@@ -196,8 +199,8 @@ const testsOf = async (
   };
 };
 
-/** Logs a check that couldn't be settled; the check's own error goes on. */
-const logSettleFailure = (failure: unknown): void => {
+/** Logs a turn's count that couldn't be settled; the call's own error goes on. */
+const logCountFailure = (failure: unknown): void => {
   log.warn("agent.check_settle_failed", errorFields(failure));
 };
 
@@ -282,7 +285,15 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
         if (!taken) {
           throw appErrors.create("app.creates_exhausted");
         }
-        return await createApp(this.env, by, input);
+        try {
+          return await createApp(this.env, by, input);
+        } catch (error) {
+          // Refused (the person's role, say): it created nothing.
+          await workspace(this.env, workspaceId)
+            .releaseCreate(chatId)
+            .catch(logCountFailure);
+          throw error;
+        }
       },
       (created) => ({ app: created.id })
     );
@@ -310,7 +321,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
     } catch (error) {
       // Settled as failed; a failure to settle is logged, never in the way
       // of why the check failed.
-      await chats.settleCheck(chatId, app, false).catch(logSettleFailure);
+      await chats.settleCheck(chatId, app, false).catch(logCountFailure);
       throw error;
     }
     const failedInARow = await chats.settleCheck(chatId, app, passed(result));
@@ -444,8 +455,8 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   /**
    * Dry-runs each test of workflow `workflow` in the chat's draft of
    * `app`, with `params` over each test's own values: what it would do,
-   * with every step's side effect recorded, never made. Counted with the
-   * draft's checks, as one that didn't pass.
+   * with every step's side effect recorded, never made. At most
+   * {@link maxDryRunsPerTurn} a turn.
    */
   async dryRun(
     app: unknown,
@@ -469,23 +480,25 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
             issues: ["workflow: The draft has no such workflow."],
           });
         }
-        // Counted as a check that didn't pass: dry runs never give the
-        // repair loop its count back, so a turn runs only so many.
-        const { result } = await this.#counted(
+        // A turn runs only so many, apart from its checks.
+        const { workspaceId, chatId } = this.ctx.props;
+        const taken = await workspace(this.env, workspaceId).takeDryRun(
+          chatId,
           id,
-          async () =>
-            await dryRunTests(
-              this.env,
-              id,
-              draft.base ?? 0,
-              workflowId.data,
-              files,
-              values,
-              { draft: true }
-            ),
-          () => false
+          maxDryRunsPerTurn
         );
-        return result;
+        if (!taken) {
+          throw appErrors.create("app.dry_runs_exhausted");
+        }
+        return await dryRunTests(
+          this.env,
+          id,
+          draft.base ?? 0,
+          workflowId.data,
+          files,
+          values,
+          { draft: true }
+        );
       },
       (runs) => ({
         app: typeof app === "string" ? app : null,
@@ -544,8 +557,8 @@ build: {
   /**
    * Builds the draft's screens, server code and workflows (type errors,
    * lint and build errors) and runs its workflows' tests. Fix what fails
-   * and check again; after ${maxFailedChecks} checks in a row that didn't pass (dry runs count as
-   * such), checking refuses: stop and tell the person what still fails.
+   * and check again; after ${maxFailedChecks} checks in a row that didn't pass, checking
+   * refuses: stop and tell the person what still fails.
    */
   check(app: string): Promise<{
     passed: boolean;
@@ -559,6 +572,7 @@ build: {
   /**
    * Dry-runs a workflow's tests in the draft with \`params\` over each
    * test's values: what it would do, its side effects recorded, never made.
+   * At most ${maxDryRunsPerTurn} a question.
    */
   dryRun(app: string, workflow: string, params?: Record<string, string | number>): Promise<{
     name: string;

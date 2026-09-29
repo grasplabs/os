@@ -84,7 +84,7 @@ export interface Draft {
  */
 interface TurnBuilds {
   created: number;
-  drafts: Map<string, { failed: number; running: number }>;
+  drafts: Map<string, { failed: number; running: number; dryRuns: number }>;
 }
 
 /** A question for a chat's agent, and the model to answer it with. */
@@ -1005,6 +1005,27 @@ export class Workspace extends DurableObject<Env> {
           )
           .run();
       }
+      // A draft left with no change is no draft: the next write starts
+      // again over the App's latest version.
+      const [left] = this.#db
+        .select({ path: chatDraftFiles.path })
+        .from(chatDraftFiles)
+        .where(
+          and(
+            eq(chatDraftFiles.chatId, chatId),
+            eq(chatDraftFiles.appId, appId)
+          )
+        )
+        .limit(1)
+        .all();
+      if (left === undefined) {
+        this.#db
+          .delete(chatDrafts)
+          .where(
+            and(eq(chatDrafts.chatId, chatId), eq(chatDrafts.appId, appId))
+          )
+          .run();
+      }
       return true;
     });
   }
@@ -1054,12 +1075,38 @@ export class Workspace extends DurableObject<Env> {
    * run past it. Each check taken is settled (`settleCheck`) once it ends.
    */
   takeCheck(chatId: ChatId, appId: string, limit: number): boolean {
-    const { drafts } = this.#turnBuilds(chatId);
-    const draft = drafts.get(appId) ?? { failed: 0, running: 0 };
+    const draft = this.#draftBuilds(chatId, appId);
     if (draft.failed + draft.running >= limit) {
       return false;
     }
-    drafts.set(appId, { ...draft, running: draft.running + 1 });
+    draft.running += 1;
+    return true;
+  }
+
+  /** What the chat's agent spent on its draft of App `appId` this turn. */
+  #draftBuilds(chatId: ChatId, appId: string) {
+    const { drafts } = this.#turnBuilds(chatId);
+    const found = drafts.get(appId);
+    if (found !== undefined) {
+      return found;
+    }
+    const made = { failed: 0, running: 0, dryRuns: 0 };
+    drafts.set(appId, made);
+    return made;
+  }
+
+  /**
+   * Takes one of the dry runs of the chat's draft of App `appId` this
+   * turn, before it runs: `false` once it took `limit`. Counted apart from
+   * checks: a passing check doesn't give them back, and they never keep a
+   * check or a proposal from running.
+   */
+  takeDryRun(chatId: ChatId, appId: string, limit: number): boolean {
+    const draft = this.#draftBuilds(chatId, appId);
+    if (draft.dryRuns >= limit) {
+      return false;
+    }
+    draft.dryRuns += 1;
     return true;
   }
 
@@ -1069,11 +1116,10 @@ export class Workspace extends DurableObject<Env> {
    * many failed in a row now.
    */
   settleCheck(chatId: ChatId, appId: string, passed: boolean): number {
-    const { drafts } = this.#turnBuilds(chatId);
-    const draft = drafts.get(appId) ?? { failed: 0, running: 0 };
-    const failed = passed ? 0 : draft.failed + 1;
-    drafts.set(appId, { failed, running: Math.max(0, draft.running - 1) });
-    return failed;
+    const draft = this.#draftBuilds(chatId, appId);
+    draft.failed = passed ? 0 : draft.failed + 1;
+    draft.running = Math.max(0, draft.running - 1);
+    return draft.failed;
   }
 
   /**
@@ -1087,6 +1133,12 @@ export class Workspace extends DurableObject<Env> {
     }
     turn.created += 1;
     return true;
+  }
+
+  /** Gives back an App taken with `takeCreate` that wasn't created. */
+  releaseCreate(chatId: ChatId): void {
+    const turn = this.#turnBuilds(chatId);
+    turn.created = Math.max(0, turn.created - 1);
   }
 
   /** Tells the chat's watchers it changed, with the messages just stored. */

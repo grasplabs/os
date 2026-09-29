@@ -327,18 +327,19 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     }).toStrictEqual({ ran: 5, refused: 7 });
   });
 
-  it("counts dry runs with the draft's checks, and caps the Apps created in a turn", async () => {
+  it("caps a turn's dry runs apart from its checks, and the Apps it creates", async () => {
     const { chat, grant } = await setUp([
       codeStep(`export default async (env) => {
         const tried = async (call) => { try { return await call(); } catch (error) { return error.message; } };
-        const created = [];
+        // Refused as invalid: it creates nothing, and takes no App's place.
+        const created = [await tried(async () => (await env.build.create({ name: "" })).name)];
         for (let count = 0; count < 4; count += 1) {
           created.push(await tried(async () => (await env.build.create({ name: ${JSON.stringify(appName)} + count })).name));
         }
         const app = (await env.apps.list()).find(({ name }) => name === ${JSON.stringify(`${appName}0`)});
         await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": fixed, ...intake })});
         const runs = [];
-        for (let count = 0; count < 6; count += 1) {
+        for (let count = 0; count < 11; count += 1) {
           runs.push(await tried(async () => (await env.build.dryRun(app.id, "intake")).length));
         }
         return { created, runs, check: await tried(async () => (await env.build.check(app.id)).passed) };
@@ -350,16 +351,20 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     await chat.ask("Build three desks");
 
     const [result] = await codeResults(chat.stub, chat.chat.id);
-    const exhausted = appErrors.create("app.checks_exhausted").message;
     expect(returned(result?.text)).toStrictEqual({
       created: [
+        appErrors.create("app.invalid").message,
         `${appName}0`,
         `${appName}1`,
         `${appName}2`,
         appErrors.create("app.creates_exhausted").message,
       ],
-      runs: [1, 1, 1, 1, 1, exhausted],
-      check: exhausted,
+      runs: [
+        ...Array.from({ length: 10 }, () => 1),
+        appErrors.create("app.dry_runs_exhausted").message,
+      ],
+      // Dry runs keep no check from running.
+      check: true,
     });
   });
 
@@ -386,7 +391,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       runInDurableObject(chat.stub, (instance) =>
         instance.draft(chatIdSchema.parse(chat.chat.id), existing)
       )
-    ).resolves.toMatchObject({ changes: {} });
+    ).resolves.toStrictEqual({ base: null, changes: {}, revision: 0 });
   });
 
   it("refuses to build without the agent's own permission, or for someone who doesn't build", async () => {
