@@ -1,14 +1,7 @@
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { and, asc, eq, sql } from "drizzle-orm";
-import {
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { consoleDatabase } from "../src/db/act.ts";
 import {
@@ -23,15 +16,16 @@ import {
   startProvisioning,
 } from "../src/provision/control.ts";
 import type { ProvisionInput } from "../src/provision/control.ts";
-import { startingMs } from "../src/provision/runs.ts";
 import { accountName } from "../src/provision/workflow.ts";
 import { importReleases } from "../src/releases/import.ts";
+import { startingMs } from "../src/runners.ts";
 import {
   deployerEmail,
   mockCloudflareApi,
   tenantEmail,
 } from "./cloudflare-api.ts";
 import { publishRelease } from "./releases.ts";
+import { useStoreSecrets } from "./secrets-store.ts";
 
 const token = "test-deployer-token-provision-7f3a9c";
 const tenantToken = "test-tenant-admin-token-provision-2b8e41";
@@ -40,38 +34,6 @@ const db = consoleDatabase(env.DB);
 const staff = { email: "staff@grasp.test", sub: "sub-staff" };
 /** The console's CLIENT_DOMAIN in the test pool (vite.test.config.ts). */
 const domain = "grasp.test";
-
-/** What the local Secrets Store (Miniflare) offers tests to manage a secret. */
-interface SecretsStoreAdmin {
-  create: (value: string) => Promise<string>;
-  delete: (id: string) => Promise<void>;
-}
-
-/** The local Secrets Store's admin API for the secret `binding` names. */
-const adminOf = async (
-  binding: SecretsStoreSecret
-): Promise<SecretsStoreAdmin> => {
-  // SAFETY: Miniflare's local Secrets Store binding answers this method with
-  // its admin API, whose `create` and `delete` have these signatures.
-  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-  const admin = Reflect.get(
-    binding,
-    "SecretsStoreSecret::admin_api"
-  ) as () => Promise<SecretsStoreAdmin>;
-  return await admin();
-};
-
-/** Every secret the console reads, as deploy-ops puts them in the store. */
-const storeSecrets: [SecretsStoreSecret, string][] = [
-  [env.TENANT_ADMIN_TOKEN, tenantToken],
-  [env.DEPLOYER_API_TOKEN, token],
-  [env.ROUTER_KEY, "test-router-key"],
-  [env.CLIENT_KEY, "test-client-key"],
-  [env.ENTRA_CLIENT_SECRET, "entra-secret"],
-  [env.MICROSOFT_CLIENT_SECRET, "microsoft-secret"],
-  [env.GOOGLE_CLIENT_SECRET, "google-secret"],
-  [env.COMPOSIO_API_KEY, "composio-key"],
-];
 
 /** A release imported to provision with, and a new client's input. */
 const setUp = async (input: Partial<ProvisionInput> = {}) => {
@@ -262,22 +224,7 @@ const holdHostname = async (clientId: string): Promise<string> => {
 };
 
 describe("provisioning a new client", () => {
-  const stored: { admin: SecretsStoreAdmin; id: string }[] = [];
-
-  beforeEach(async () => {
-    for (const [binding, value] of storeSecrets) {
-      // oxlint-disable-next-line no-await-in-loop -- a few, in order
-      const admin = await adminOf(binding);
-      // oxlint-disable-next-line no-await-in-loop -- a few, in order
-      stored.push({ admin, id: await admin.create(value) });
-    }
-  });
-  afterEach(async () => {
-    for (const { admin, id } of stored.splice(0)) {
-      // oxlint-disable-next-line no-await-in-loop -- a few, in order
-      await admin.delete(id);
-    }
-  });
+  useStoreSecrets({ deployer: token, tenant: tenantToken });
 
   it("creates its account as the tenant admin, makes the deployer a member, waits for Workers Paid, then deploys the release and activates it, audited", async () => {
     const { clientId, input } = await setUp();
@@ -689,6 +636,44 @@ describe("provisioning a new client", () => {
       runs: 2,
       confirmations: 1,
       client: { status: "active" },
+    });
+  });
+
+  it("records no stop for a run paused or ended from outside: resumed, it goes on where it was", async () => {
+    const { clientId, input } = await setUp();
+    await using run = await followRuns();
+    await startProvisioning(env, staff, input);
+    await run.waitForStepResult({ name: "client" });
+    const waiting = await instanceOf(clientId);
+
+    // Paused while it waits for Workers Paid, then resumed.
+    await waiting.pause();
+    await run.waitForStatus("paused");
+    await waiting.resume();
+    await confirmWorkersPaid(env, staff, clientId);
+    await run.waitForStatus("complete");
+    const afterPause = await actions(clientId);
+
+    // Another client's run, ended from the dashboard while it waits.
+    const other = await setUp();
+    await startProvisioning(env, staff, other.input);
+    await run.waitForStepResult({ name: "client" });
+    const ending = await instanceOf(other.clientId);
+    await ending.terminate();
+    await run.waitForStatus("terminated");
+    const afterEnd = await actions(other.clientId);
+
+    expect({
+      paused: {
+        stops: afterPause.filter(
+          (action) => action === "client.provision_stop"
+        ),
+        client: await clientRow(clientId),
+      },
+      ended: afterEnd.filter((action) => action === "client.provision_stop"),
+    }).toMatchObject({
+      paused: { stops: [], client: { status: "active" } },
+      ended: [],
     });
   });
 

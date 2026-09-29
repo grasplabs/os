@@ -89,6 +89,9 @@ export const audit = async (
  * as the release import's), and records `event` by `actor` only if
  * it changed a row, in the same batch. Returns whether it did, read from
  * the batch's own results: nothing runs after the batch commits.
+ * `following` runs after the event in the same batch: statements whose
+ * own `WHERE` makes them depend on the change, such as rows that
+ * reference one it inserted.
  *
  * The event's insert comes right after the statement and reads its
  * `changes()`. That's sound in the console's database, which has no FTS
@@ -99,7 +102,8 @@ export const actIfChanged = async (
   db: ConsoleDatabase,
   actor: Actor,
   statement: BatchItem<"sqlite">,
-  event: ConsoleEvent
+  event: ConsoleEvent,
+  following: readonly BatchItem<"sqlite">[] = []
 ): Promise<boolean> => {
   const row = rowOf(actor, event);
   const record = db
@@ -108,6 +112,6 @@ export const actIfChanged = async (
       sql`SELECT ${row.id}, ${row.at.getTime()}, ${row.actor}, ${row.action}, ${row.clientId}, ${row.target}, ${row.detail} WHERE changes() > 0`
     )
     .returning({ id: auditEvents.id });
-  const [, recorded] = await db.batch([statement, record]);
+  const [, recorded] = await db.batch([statement, record, ...following]);
   return recorded.length > 0;
 };

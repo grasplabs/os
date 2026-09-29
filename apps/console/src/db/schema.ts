@@ -41,60 +41,74 @@ export const releaseImportFailures = sqliteTable("release_import_failures", {
 });
 
 /** A client: one deployment of Grasp OS in its own Cloudflare account. */
-export const clients = sqliteTable("clients", {
-  /** The client's slug: its subdomain, `<slug>.<domain>`. */
-  id: text().primaryKey(),
-  name: text().notNull(),
-  /** The Cloudflare account the console adopted for it. */
-  accountId: text("account_id").notNull().unique(),
-  /**
-   * The generation of the client's derived secrets: each is
-   * `HMAC(<master key>, "<purpose>:<id>:<generation>")`
-   * (src/deploy/secrets.ts), so raising it rotates them with nothing
-   * stored.
-   */
-  generation: integer().notNull().default(1),
-  /** When the generation last rose; null before the first rotation. */
-  rotatedAt: timestamp("rotated_at"),
-  /**
-   * When a deploy first made the current generation live; null while the
-   * last rotation hasn't reached the client yet. The previous generation's
-   * keys are kept for a window from here (src/deploy/secrets.ts).
-   */
-  rotationLiveAt: timestamp("rotation_live_at"),
-  /**
-   * The account's workers.dev subdomain, where its core answers
-   * (`https://<core>.<subdomain>.workers.dev`); null before the first deploy.
-   */
-  workersSubdomain: text("workers_subdomain"),
-  /** The rollout ring it's in: 0 first. */
-  ring: integer().notNull().default(1),
-  status: text({ enum: ["provisioning", "active", "offboarded"] })
-    .notNull()
-    .default("provisioning"),
-  /** The staff member who started provisioning it (src/provision/). */
-  createdBy: text("created_by"),
-  /** The release it stays on while pinned, whatever the rollouts. */
-  pinnedReleaseId: text("pinned_release_id").references(() => releases.id),
-  createdAt: timestamp("created_at").notNull(),
-  updatedAt: timestamp("updated_at").notNull(),
-});
+export const clients = sqliteTable(
+  "clients",
+  {
+    /** The client's slug: its subdomain, `<slug>.<domain>`. */
+    id: text().primaryKey(),
+    name: text().notNull(),
+    /** The Cloudflare account the console adopted for it. */
+    accountId: text("account_id").notNull().unique(),
+    /**
+     * The generation of the client's derived secrets: each is
+     * `HMAC(<master key>, "<purpose>:<id>:<generation>")`
+     * (src/deploy/secrets.ts), so raising it rotates them with nothing
+     * stored.
+     */
+    generation: integer().notNull().default(1),
+    /** When the generation last rose; null before the first rotation. */
+    rotatedAt: timestamp("rotated_at"),
+    /**
+     * When a deploy first made the current generation live; null while the
+     * last rotation hasn't reached the client yet. The previous generation's
+     * keys are kept for a window from here (src/deploy/secrets.ts).
+     */
+    rotationLiveAt: timestamp("rotation_live_at"),
+    /**
+     * The account's workers.dev subdomain, where its core answers
+     * (`https://<core>.<subdomain>.workers.dev`); null before the first deploy.
+     */
+    workersSubdomain: text("workers_subdomain"),
+    /** The rollout ring it's in: 0 first. */
+    ring: integer().notNull().default(1),
+    status: text({ enum: ["provisioning", "active", "offboarded"] })
+      .notNull()
+      .default("provisioning"),
+    /** The staff member who started provisioning it (src/provision/). */
+    createdBy: text("created_by"),
+    /** The release it stays on while pinned, whatever the rollouts. */
+    pinnedReleaseId: text("pinned_release_id").references(() => releases.id),
+    createdAt: timestamp("created_at").notNull(),
+    updatedAt: timestamp("updated_at").notNull(),
+  },
+  // What a rollout reaches: the active clients of a ring or two
+  // (src/rollout/targets.ts).
+  (table) => [index("clients_status_ring_idx").on(table.status, table.ring)]
+);
 
 /**
- * The provisioning run that's a client's current one (src/provision/): its
- * Workflow instance id, one per attempt. Starting or resuming claims the
- * next with one conditional write naming the run it replaces, so however
- * many staff act at once, one wins and only it creates a run: the single
- * runner a client's deploy relies on. No foreign key: the run is claimed
- * before its account step records the client.
+ * The runner that's a client's current one (src/runners.ts): the
+ * only one that may change what its account runs. A provisioning run (a
+ * Workflow instance per attempt), or a rollout while it deploys the client
+ * (its Workflow instance). Each claims it with one conditional write
+ * naming the runner it replaces, so however many act at once, one wins:
+ * the single runner a client's deploy relies on. No foreign key: a
+ * provisioning run is claimed before its account step records the client.
  */
 export const clientRuns = sqliteTable("client_runs", {
   /** The client's id, as it will be recorded. */
   clientId: text("client_id").primaryKey(),
-  /** The Workflow instance id: `<clientId>-<random>`. */
+  /**
+   * The runner's Workflow instance id: a provisioning run's
+   * (`<clientId>-<random>`) or a rollout's (the rollout's id).
+   */
   runId: text("run_id").notNull(),
   /** When it was claimed: a run not created yet counts as starting for a while. */
   claimedAt: timestamp("claimed_at").notNull(),
+  /** Which Workflow the runner is an instance of. */
+  kind: text({ enum: ["provision", "rollout"] })
+    .notNull()
+    .default("provision"),
 });
 
 /**
@@ -190,13 +204,28 @@ export const rolloutTargets = sqliteTable(
       .notNull()
       .references(() => clients.id),
     ring: integer().notNull(),
+    /** `skipped`: on the release already, or pinned to another. */
     status: text({
-      enum: ["pending", "deploying", "done", "failed", "rolled_back"],
+      enum: [
+        "pending",
+        "deploying",
+        "done",
+        "failed",
+        "rolled_back",
+        "skipped",
+      ],
     })
       .notNull()
       .default("pending"),
-    /** Why it failed: an error code, never a token or a response body. */
+    /** Why it failed or was skipped: a code, never a token or a response body. */
     error: text(),
+    /** The client's deploy of the release, once the rollout started it. */
+    deployId: text("deploy_id"),
+    /**
+     * What the client ran before the rollout reached it, which a rollback
+     * restores: JSON (`PreviousRun`, src/rollout/targets.ts).
+     */
+    previous: text(),
     updatedAt: timestamp("updated_at").notNull(),
   },
   (table) => [

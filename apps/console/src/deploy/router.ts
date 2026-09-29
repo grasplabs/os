@@ -225,6 +225,18 @@ const storedEntry = async (
   return parsed.data;
 };
 
+/**
+ * The secrets generation the router's map has for `hostname`, which the
+ * router derives the secret it sends core from; null when it has none.
+ */
+export const mappedGeneration = async (
+  hosts: RouterHosts,
+  hostname: string
+): Promise<number | null> => {
+  const entry = await storedEntry(hosts, routerHostKey(hostname));
+  return entry?.generation ?? null;
+};
+
 /** Throws unless `current` may be replaced by `entry`. */
 const checkReplaceable = (
   key: string,
@@ -250,10 +262,10 @@ const checkReplaceable = (
  * so hostnames, are one client's each), and a generation below the one the
  * map has (`generation_behind`: the router would derive a secret core no
  * longer has). `beforeWrite` runs as the last thing before the write: the
- * deploy checks there that it's still the client's latest.
+ * deploy checks there that it's still the client's latest, and its runner.
  *
  * KV has no compare-and-set, so the write can't be made conditional: one
- * runner per client (the provisioning Workflow) is the precondition, as
+ * runner per client (src/runners.ts) is the precondition, as
  * for D1 migrations. After the write the entry is read back, and one at a
  * lower generation than this deploy's fails loudly (`generation_behind`)
  * rather than passing as written. Should one runner ever not be enough,

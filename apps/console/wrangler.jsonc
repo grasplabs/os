@@ -47,13 +47,22 @@
   // Imports newly published releases (src/releases/import.ts).
   "triggers": { "crons": ["*/5 * * * *"] },
   // Onboards a client (src/provision/workflow.ts): an instance per attempt,
-  // each claimed in D1 first (src/provision/runs.ts), so two runs for one
+  // each claimed in D1 first (src/runners.ts), so two runs for one
   // client can't overlap.
   "workflows": [
     {
       "name": "grasp-os-provision-client",
       "binding": "PROVISION_CLIENT",
       "class_name": "ProvisionClient",
+    },
+    // Rolls a release out to clients, ring by ring (src/rollout/workflow.ts):
+    // an instance per rollout, which claims each client in D1 while it
+    // deploys it (src/runners.ts), so it never runs beside the
+    // client's provisioning or another rollout.
+    {
+      "name": "grasp-os-rollout",
+      "binding": "ROLLOUT",
+      "class_name": "Rollout",
     },
   ],
   // The router's hostname map, which a deploy writes (src/deploy/router.ts).

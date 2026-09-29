@@ -136,6 +136,8 @@ const Failed = ({ view }: { view: ProvisioningView }) => {
   let reason = "its run is gone (Workflows keeps a run for a while only)";
   if (view.stopped !== null) {
     reason = `${view.stopped.step} step: ${view.stopped.error}`;
+  } else if (view.run === "terminated") {
+    reason = "it was ended outside the console";
   } else if (view.run !== null && view.run !== "gone") {
     reason = `it failed after its retries${
       view.deploy === null || view.deploy.error === null

@@ -4,8 +4,9 @@
  * with it (secrets, cron schedules, workflows, D1 migrations).
  *
  * A deploy uploads a version, then sends all traffic to it in one
- * deployment; rolling back is a deployment back to the previous version,
- * its secrets included. A Worker's first upload, and a release that adds a
+ * deployment, or, in a rollout, in stages that split it with the previous
+ * version first (`deployVersions`); rolling back is a deployment back to
+ * the previous version, its secrets included. A Worker's first upload, and a release that adds a
  * Durable Object migration, go as a script upload instead, which deploys at
  * once.
  */
@@ -489,6 +490,33 @@ export const isSecretsConflict = (error: unknown): boolean =>
   error.codes.includes(secretsWouldChangeCode);
 
 /**
+ * Splits `scriptName`'s traffic between `versions` by their percentages,
+ * which add up to 100, noting why: a gradual deployment's step, or all of
+ * it to one version (`deployVersion`). Each version runs with its own
+ * secrets; `force` as for `deployVersion`.
+ */
+export const deployVersions = async (
+  api: CloudflareApi,
+  accountId: string,
+  scriptName: string,
+  versions: WorkerDeployment["versions"],
+  { message, force = false }: { message: string; force?: boolean }
+): Promise<WorkerDeployment> =>
+  await api.call(
+    {
+      method: "POST",
+      path: `${scriptPath(accountId, scriptName)}/deployments`,
+      ...(force ? { query: { force: "true" } } : {}),
+      json: {
+        strategy: "percentage",
+        versions,
+        annotations: { "workers/message": message },
+      },
+    },
+    deploymentSchema
+  );
+
+/**
  * Sends all of `scriptName`'s traffic to `versionId`, noting why. Secrets
  * belong to versions, so this deploys that version's secrets too: a
  * rollback reverts any secret changed since. Cloudflare refuses that
@@ -499,20 +527,14 @@ export const deployVersion = async (
   accountId: string,
   scriptName: string,
   versionId: string,
-  { message, force = false }: { message: string; force?: boolean }
+  options: { message: string; force?: boolean }
 ): Promise<WorkerDeployment> =>
-  await api.call(
-    {
-      method: "POST",
-      path: `${scriptPath(accountId, scriptName)}/deployments`,
-      ...(force ? { query: { force: "true" } } : {}),
-      json: {
-        strategy: "percentage",
-        versions: [{ version_id: versionId, percentage: 100 }],
-        annotations: { "workers/message": message },
-      },
-    },
-    deploymentSchema
+  await deployVersions(
+    api,
+    accountId,
+    scriptName,
+    [{ version_id: versionId, percentage: 100 }],
+    options
   );
 
 /**
