@@ -10,7 +10,7 @@
  */
 import { releaseIdSchema } from "@grasp-os/shared/release";
 import { newClientIdSchema } from "@grasp-os/shared/router";
-import { desc, eq } from "drizzle-orm";
+import { and, desc, eq, inArray, sql } from "drizzle-orm";
 import { z } from "zod";
 
 import type { Staff } from "../access.ts";
@@ -18,10 +18,10 @@ import { getAccount } from "../cloudflare/accounts.ts";
 import { CloudflareApiError } from "../cloudflare/api.ts";
 import { audit, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import { clients, releases } from "../db/schema.ts";
+import { auditEvents, clients, releases } from "../db/schema.ts";
 import { clientDomain, deployerApi } from "../deploy/context.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
-import { deployStep, scriptInTheWay, workersPaidEvent } from "./workflow.ts";
+import { scriptInTheWay, workersPaidEvent } from "./workflow.ts";
 import type { ProvisionParams } from "./workflow.ts";
 
 /** Why staff's action was refused, as the page shows it. */
@@ -263,7 +263,10 @@ export const confirmWorkersPaid = async (
   await run.sendEvent({ type: workersPaidEvent, payload: {} });
 };
 
-/** The release a new run for a client deploys: its latest deploy's, else the newest imported. */
+/**
+ * The release a client's new run deploys: its latest deploy's, else the
+ * one staff last started or resumed it with (the audit event's target).
+ */
 const releaseToResume = async (
   db: ConsoleDatabase,
   clientId: string
@@ -272,30 +275,60 @@ const releaseToResume = async (
   if (latest !== undefined) {
     return latest.releaseId;
   }
-  const [newest] = await db
-    .select({ id: releases.id })
-    .from(releases)
-    .orderBy(desc(releases.builtAt))
+  const [started] = await db
+    .select({ releaseId: auditEvents.target })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.clientId, clientId),
+        inArray(auditEvents.action, [
+          "client.provision_start",
+          "client.provision_retry",
+        ])
+      )
+    )
+    .orderBy(desc(auditEvents.at), desc(sql`rowid`))
     .limit(1);
-  if (newest === undefined) {
-    throw new ProvisionError("release_not_imported", "No release is imported");
+  if (started?.releaseId === null || started === undefined) {
+    throw new ProvisionError(
+      "release_not_imported",
+      `No release to resume ${clientId} with`
+    );
   }
-  return newest.id;
+  return started.releaseId;
+};
+
+/** Whether staff confirmed Workers Paid for client `clientId`, in any run. */
+const confirmedWorkersPaid = async (
+  db: ConsoleDatabase,
+  clientId: string
+): Promise<boolean> => {
+  const [confirmed] = await db
+    .select({ id: auditEvents.id })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.clientId, clientId),
+        eq(auditEvents.action, "client.workers_paid")
+      )
+    )
+    .limit(1);
+  return confirmed !== undefined;
 };
 
 /**
- * Resumes provisioning client `clientId`, as `staff`. Refused unless the
- * client is recorded and still provisioning (a run that failed before it
- * recorded the client is started again instead).
- * - A run that ended without finishing is restarted: from its deploy
- *   once it got that far, so the account and the Workers Paid
- *   confirmation stand, or else from the start.
- * - A client whose run is gone (Workflows dropped it after its retention)
- *   gets a new run, from the client's record and the release its latest
- *   deploy was of, which asks for Workers Paid again only if it never got
- *   to a deploy.
- * - A run still going is refused.
- * Everything a run makes it finds again, so nothing is made twice.
+ * Resumes provisioning client `clientId`, as `staff`, with a new run made
+ * from the client's record: the release its latest deploy was of (or the
+ * one it was started with), and no Workers Paid pause once staff
+ * confirmed it. A run that ended without finishing is deleted first; one
+ * that's gone (Workflows dropped it after its retention) needs nothing.
+ * One path for both, whichever step the old run stopped at: every step
+ * finds what an earlier run made, and the deploy resumes the client's
+ * failed deploy, so nothing is made twice.
+ *
+ * Refused unless the client is recorded and still provisioning (a run
+ * that stopped before it recorded the client is started again instead),
+ * and while its run is still going.
  */
 export const retryProvisioning = async (
   env: Env,
@@ -311,49 +344,43 @@ export const retryProvisioning = async (
     );
   }
   const run = await runOf(env, clientId);
-  const deployed = (await latestDeployOf(db, clientId)) !== undefined;
-  if (run === null) {
-    const releaseId = await releaseToResume(db, clientId);
-    await audit(db, staff, {
-      action: "client.provision_retry",
-      clientId,
-      target: releaseId,
-      detail: { from: "new_run" },
-    });
-    await env.PROVISION_CLIENT.create({
-      id: clientId,
-      params: {
-        clientId,
-        name: client.name,
-        accountId: client.accountId,
-        releaseId,
-        ring: client.ring,
-        startedBy: { email: staff.email, sub: staff.sub },
-        workersPaid: deployed,
-      } satisfies ProvisionParams,
-    });
-    return;
-  }
-  if (!endedStatuses.has(await statusOf(run))) {
+  const stillGoing = async () =>
+    run !== null && !endedStatuses.has(await statusOf(run));
+  if (await stillGoing()) {
     throw new ProvisionError(
       "already_running",
       `Client ${clientId}'s run is still going`
     );
   }
+  const releaseId = await releaseToResume(db, clientId);
+  const workersPaid = await confirmedWorkersPaid(db, clientId);
   await audit(db, staff, {
     action: "client.provision_retry",
     clientId,
-    detail: { from: deployed ? deployStep : "start" },
+    target: releaseId,
+    detail: { replaces: run !== null, workersPaid },
   });
-  if (!deployed) {
-    await run.restart();
-    return;
+  if (run !== null) {
+    // Read again right before: a resume that raced this one may have
+    // replaced the ended run already, and its new run must stay.
+    if (await stillGoing()) {
+      throw new ProvisionError(
+        "already_running",
+        `Client ${clientId}'s run is still going`
+      );
+    }
+    await run.delete();
   }
-  try {
-    await run.restart({ from: { name: deployStep } });
-  } catch {
-    // A run made after its predecessor was gone may have stopped before
-    // its own deploy step: it starts over, and its params skip the pause.
-    await run.restart();
-  }
+  await env.PROVISION_CLIENT.create({
+    id: clientId,
+    params: {
+      clientId,
+      name: client.name,
+      accountId: client.accountId,
+      releaseId,
+      ring: client.ring,
+      startedBy: { email: staff.email, sub: staff.sub },
+      workersPaid,
+    } satisfies ProvisionParams,
+  });
 };

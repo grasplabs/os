@@ -428,7 +428,7 @@ describe("provisioning a new client", () => {
     ).toStrictEqual([false, false, false, false, false, false]);
   });
 
-  it("stops a run at once on a failure no retry fixes, and resumes it from its deploy: nothing made twice, Workers Paid not asked again", async () => {
+  it("stops a run at once on a failure no retry fixes, and resumes it with a new run that picks up its deploy: nothing made twice, Workers Paid not asked again", async () => {
     const { clientId, input } = await setUp();
     await using run = await follow(clientId);
     const hostname = await holdHostname(clientId);
@@ -482,7 +482,8 @@ describe("provisioning a new client", () => {
       versions: [1, 1],
       deploys: [{ status: "done", error: null }],
       confirmations: 1,
-      retries: [{ from: "deploy" }],
+      // A new run in place of the stopped one, without the pause.
+      retries: [{ replaces: true, workersPaid: true }],
       client: { status: "active" },
     });
   });
@@ -510,8 +511,8 @@ describe("provisioning a new client", () => {
     await retryProvisioning(env, staff, clientId);
     await again.waitForStatus("errored");
     const stops = await detailsOf(clientId, "client.provision_stop");
-    // Resumed once it's back: from the start, since the new run never got
-    // to its deploy step, and still without asking for Workers Paid.
+    // Resumed once it's back, though the new run never got to its deploy
+    // step: replaced by another new run, still without the pause.
     account?.members.set(deployerEmail, "accepted");
     await retryProvisioning(env, staff, clientId);
     await again.waitForStatus("complete");
@@ -532,7 +533,10 @@ describe("provisioning a new client", () => {
       client: { status: "active" },
       accounts: 1,
       confirmations: 1,
-      retries: [{ from: "new_run" }, { from: "deploy" }],
+      retries: [
+        { replaces: false, workersPaid: true },
+        { replaces: true, workersPaid: true },
+      ],
       deploys: [{ status: "done" }],
     });
   });

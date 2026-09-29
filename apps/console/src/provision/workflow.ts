@@ -1,4 +1,3 @@
-import { log } from "@grasp-os/shared/log";
 /**
  * Onboarding a client, as a Cloudflare Workflow: its account (created, or
  * adopted by id), its client record, a pause while staff upgrade the
@@ -16,7 +15,8 @@ import { log } from "@grasp-os/shared/log";
  * before (src/deploy/deploy.ts). A step that fails for a reason a retry
  * can fix is retried; any other failure stops the run at once
  * (`NonRetryableError`, carrying its code), for staff to fix and resume
- * (`retryProvisioning`). Either way nothing is made twice.
+ * (`retryProvisioning`, a new run from the client's record). Either way
+ * nothing is made twice.
  *
  * Two tokens, by privilege, both from Secrets Store: the tenant admin's,
  * read only in the account step, creates the account and makes the
@@ -24,6 +24,7 @@ import { log } from "@grasp-os/shared/log";
  * everything else. Neither is ever returned from a step: a step's result
  * and the run's params are stored by Workflows (threat model R17, CO3).
  */
+import { log } from "@grasp-os/shared/log";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
@@ -71,8 +72,8 @@ export interface ProvisionParams {
   /** The staff member who started it. */
   startedBy: Staff;
   /**
-   * Staff confirmed Workers Paid for an earlier run of this client, which
-   * got as far as deploying: this run doesn't ask again.
+   * Staff confirmed Workers Paid for an earlier run of this client: this
+   * run, which resumes it, doesn't ask again.
    */
   workersPaid?: boolean;
 }
@@ -80,11 +81,8 @@ export interface ProvisionParams {
 /** The event staff send once the account is on Workers Paid. */
 export const workersPaidEvent = "workers-paid";
 
-/**
- * The step a failed run is resumed from once it got past the pause, so
- * staff don't confirm Workers Paid again.
- */
-export const deployStep = "deploy";
+/** The deploy step, as a stopped run's audit event names it. */
+const deployStep = "deploy";
 
 /** The name of the account a run creates for a client. */
 export const accountName = (clientId: string): string => `grasp-os-${clientId}`;
