@@ -1,3 +1,4 @@
+import { mapConcurrently } from "@grasp-os/shared/release";
 import type { Role } from "@grasp-os/shared/roles";
 import type { CoreApi } from "@grasp-os/shared/rpc";
 import { test } from "@playwright/test";
@@ -136,6 +137,18 @@ type Scene = keyof typeof cast;
 /** Each attempt's people, by scene and name. */
 export type Cast = Record<string, Record<string, Person>>[];
 
+/**
+ * Sign-ins `signInCast` runs at once. All of them at once (over a hundred)
+ * keep the one local core isolate so busy that, on a slow CI runner, a
+ * callback's fetch of the IdP's keys can wait past the 5 s the SSO plugin
+ * gives it (jose's `createRemoteJWKSet` default, which the plugin doesn't
+ * let us change). The plugin then refuses the sign-in as
+ * `token_not_verified`. Eight at a time keep that fetch well inside its
+ * 5 s on a starved core, and cost the setup about half a second when it
+ * isn't. At sixteen it came within a few milliseconds of the limit.
+ */
+const signInsAtOnce = 8;
+
 /** How `signInCast` hands everyone to the test workers. */
 const castVariable = "E2E_CAST";
 
@@ -148,7 +161,7 @@ const castVariable = "E2E_CAST";
  * runs it before any test, and returns them.
  */
 export const signInCast = async (attempts: number): Promise<Cast> => {
-  const people = await Promise.all(
+  const people = await mapConcurrently(
     Array.from({ length: attempts }, (_, attempt) =>
       Object.entries(cast).flatMap(([scene, roles]) =>
         Object.entries<Role>(roles).map(([name, role]) => ({
@@ -159,12 +172,9 @@ export const signInCast = async (attempts: number): Promise<Cast> => {
           email: `person.${crypto.randomUUID()}@acme.test`,
         }))
       )
-    )
-      .flat()
-      .map(async (person) => ({
-        ...person,
-        cookie: await signInAs(person.email),
-      }))
+    ).flat(),
+    signInsAtOnce,
+    async (person) => ({ ...person, cookie: await signInAs(person.email) })
   );
   const { core, api } = apiOf({ cookie: await signInAs(localAdmin) });
   try {
