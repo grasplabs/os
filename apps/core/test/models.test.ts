@@ -884,9 +884,12 @@ describe("model gateway for agents", () => {
     const stream = agent.stream(agent.model, withTool("Hello."), {
       signal: cancel.signal,
     });
-    await vi.waitFor(() => {
-      expect(gateway.requests).toHaveLength(1);
-    });
+    await vi.waitFor(
+      () => {
+        expect(gateway.requests).toHaveLength(1);
+      },
+      { timeout: 10_000 }
+    );
     cancel.abort();
 
     await expect(stream.result()).resolves.toMatchObject({

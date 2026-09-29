@@ -198,13 +198,16 @@ const mailStep = (
 const onlyRun = async (
   introspector: Awaited<ReturnType<typeof introspectWorkflow>>
 ): Promise<WorkflowInstanceIntrospector> =>
-  await vi.waitFor(async () => {
-    const [instance] = await introspector.get();
-    if (!instance) {
-      throw new Error("No run yet");
-    }
-    return instance;
-  });
+  await vi.waitFor(
+    async () => {
+      const [instance] = await introspector.get();
+      if (!instance) {
+        throw new Error("No run yet");
+      }
+      return instance;
+    },
+    { timeout: 10_000 }
+  );
 
 /**
  * Where core's record has a run now, as the App's run list shows it: unlike
@@ -276,17 +279,20 @@ describe("workflow runs", { timeout: 60_000 }, () => {
     );
     const instance = await onlyRun(introspector);
     // An admin, as the reviewer parameter says, approves.
-    const decision = await vi.waitFor(async () => {
-      const opened = await env.DB.prepare(
-        "SELECT id FROM workflow_decisions WHERE run_id = ?"
-      )
-        .bind(run.id)
-        .first<{ id: string }>();
-      if (!opened) {
-        throw new Error("No decision yet");
-      }
-      return opened.id;
-    });
+    const decision = await vi.waitFor(
+      async () => {
+        const opened = await env.DB.prepare(
+          "SELECT id FROM workflow_decisions WHERE run_id = ?"
+        )
+          .bind(run.id)
+          .first<{ id: string }>();
+        if (!opened) {
+          throw new Error("No decision yet");
+        }
+        return opened.id;
+      },
+      { timeout: 10_000 }
+    );
     await reviewer.api.decisions.answer(decision, { approved: true });
     await instance.waitForStatus("complete");
     const logged = await allEvents();

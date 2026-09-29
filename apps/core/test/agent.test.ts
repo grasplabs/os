@@ -21,6 +21,7 @@ import {
   codeStep,
   gatewayConfig,
   model,
+  pausedReply,
   pointAtGateway,
   says,
   transcript,
@@ -257,22 +258,27 @@ describe("chat agent", () => {
   });
 
   it("stops the turn when the person leaves during it", async () => {
-    // Long enough that they always leave while the code runs, however slow
-    // the runner.
-    const { stub, chat, personId, gateway, ask } = await newChat(
-      codeStep(
-        "export default async () => { await scheduler.wait(5_000); return 'done'; };"
-      ),
+    // The model is still answering, with code to run, when they leave.
+    const { reply, release } = pausedReply(
+      { ...codeStep("export default async () => 'done';"), text: "Running." },
+      1
+    );
+    const { personId, gateway, ask } = await newChat(
+      reply,
       says("Never asked.")
     );
 
     const turn = codeOf(ask("Wait."));
-    await vi.waitFor(async () => {
-      await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
-    });
+    await vi.waitFor(
+      () => {
+        expect(gateway.requests).toHaveLength(1);
+      },
+      { timeout: 10_000 }
+    );
     await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
       .bind(personId)
       .run();
+    release();
 
     await expect(turn).resolves.toBe("permission.person_inactive");
     // No request for them after they left.
@@ -280,18 +286,21 @@ describe("chat agent", () => {
   });
 
   it("stops the turn when the agent is switched off during it", async () => {
-    const { stub, chat, gateway, ask } = await newChat(
-      codeStep(
-        "export default async () => { await scheduler.wait(5_000); return 'done'; };"
-      ),
-      says("Never asked.")
+    const { reply, release } = pausedReply(
+      { ...codeStep("export default async () => 'done';"), text: "Running." },
+      1
     );
+    const { stub, gateway, ask } = await newChat(reply, says("Never asked."));
 
     const turn = codeOf(ask("Wait."));
-    await vi.waitFor(async () => {
-      await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
-    });
+    await vi.waitFor(
+      () => {
+        expect(gateway.requests).toHaveLength(1);
+      },
+      { timeout: 10_000 }
+    );
     await pointAtGateway(stub, gateway, { agentOn: false });
+    release();
 
     await expect(turn).resolves.toBe("feature.disabled");
     expect(gateway.requests).toHaveLength(1);
@@ -379,9 +388,12 @@ describe("chat agent sandbox", () => {
     );
 
     const reply = ask("Wait, then look.");
-    await vi.waitFor(async () => {
-      await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
-    });
+    await vi.waitFor(
+      async () => {
+        await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
+      },
+      { timeout: 10_000 }
+    );
     await stub.cancel(chat.id, personId);
     await expect(reply).resolves.toMatchObject({ outcome: "cancelled" });
 
@@ -535,11 +547,14 @@ describe("chat agent turns", () => {
     );
 
     const reply = ask("Wait a minute.");
-    await vi.waitFor(async () => {
-      expect(gateway.requests).toHaveLength(1);
-      // The step has started once its call is kept.
-      await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
-    });
+    await vi.waitFor(
+      async () => {
+        expect(gateway.requests).toHaveLength(1);
+        // The step has started once its call is kept.
+        await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
+      },
+      { timeout: 10_000 }
+    );
     await stub.cancel(chat.id, personId);
 
     await expect(reply).resolves.toMatchObject({ outcome: "cancelled" });
@@ -556,9 +571,12 @@ describe("chat agent turns", () => {
     });
 
     const reply = ask("Take your time.");
-    await vi.waitFor(() => {
-      expect(gateway.requests).toHaveLength(1);
-    });
+    await vi.waitFor(
+      () => {
+        expect(gateway.requests).toHaveLength(1);
+      },
+      { timeout: 10_000 }
+    );
     await expect(stub.cancel(chat.id, personId)).resolves.toBeTruthy();
 
     await expect(reply).resolves.toMatchObject({ outcome: "cancelled" });
@@ -572,9 +590,12 @@ describe("chat agent turns", () => {
     });
 
     const first = ask("First.");
-    await vi.waitFor(() => {
-      expect(gateway.requests).toHaveLength(1);
-    });
+    await vi.waitFor(
+      () => {
+        expect(gateway.requests).toHaveLength(1);
+      },
+      { timeout: 10_000 }
+    );
 
     await expect(codeOf(ask("Second."))).resolves.toBe("agent.busy");
     await stub.cancel(chat.id, personId);

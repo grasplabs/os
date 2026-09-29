@@ -6,7 +6,7 @@ import { z } from "zod";
 
 import { workspace } from "../src/durable-objects.ts";
 import { fakeGateway } from "./ai-gateway.ts";
-import type { GatewayReply } from "./ai-gateway.ts";
+import type { Answer, GatewayReply } from "./ai-gateway.ts";
 
 // A chat's agent, as the tests drive it: the Workspace object's loop, the
 // code it runs in isolates of their own, and the model gateway, all real.
@@ -17,7 +17,7 @@ import type { GatewayReply } from "./ai-gateway.ts";
 export const model = "anthropic/claude-sonnet-4-5";
 
 /** The model calls `executeCode` with `code`, `times` times at once. */
-export const codeStep = (code: string, times = 1): GatewayReply => ({
+export const codeStep = (code: string, times = 1): Answer => ({
   text: "",
   toolCalls: Array.from({ length: times }, () => ({
     id: `call_${crypto.randomUUID()}`,
@@ -29,11 +29,26 @@ export const codeStep = (code: string, times = 1): GatewayReply => ({
 });
 
 /** The model answers. */
-export const says = (text: string): GatewayReply => ({
+export const says = (text: string): Answer => ({
   text,
   inputTokens: 200,
   outputTokens: 20,
 });
+
+/**
+ * `answer`, its stream stopped after its text's first `at` characters until
+ * released: the model still answering, for as long as a test needs.
+ */
+export const pausedReply = (answer: Answer, at: number) => {
+  const release = Promise.withResolvers<boolean>();
+  const reply: Answer = { ...answer, pause: { at, until: release.promise } };
+  return {
+    reply,
+    release: () => {
+      release.resolve(true);
+    },
+  };
+};
 
 export type WorkspaceStub = ReturnType<typeof workspace>;
 

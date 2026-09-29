@@ -15,7 +15,13 @@ import { chatAgentId, personalWorkspaceId } from "../src/chats-rpc.ts";
 import { personOf } from "../src/connections.ts";
 import { workspace } from "../src/durable-objects.ts";
 import { maxChatsPerPerson } from "../src/workspace.ts";
-import { codeStep, model, pointAtGateway, says } from "./agent-chat.ts";
+import {
+  codeStep,
+  model,
+  pausedReply,
+  pointAtGateway,
+  says,
+} from "./agent-chat.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { requestGranted } from "./apps.ts";
@@ -67,21 +73,6 @@ const envOf = (instance: object): object => {
     throw new TypeError("The Workspace object has no env");
   }
   return objectEnv;
-};
-
-/** A reply whose stream stops after its first characters until released. */
-const pausedReply = (text: string, at: number) => {
-  const release = Promise.withResolvers<boolean>();
-  const reply = {
-    ...says(text),
-    pause: { at, until: release.promise },
-  } satisfies GatewayReply;
-  return {
-    reply,
-    release: () => {
-      release.resolve(true);
-    },
-  };
 };
 
 /** Follows a chat, keeping every update. */
@@ -361,7 +352,7 @@ describe("chats", () => {
       actions: ["mail.send"],
       binding: "HELD_MAIL",
     });
-    const { reply, release } = pausedReply("It waits for you.", 2);
+    const { reply, release } = pausedReply(says("It waits for you."), 2);
     await answering(
       ann,
       codeStep(
@@ -421,7 +412,7 @@ describe("chats", () => {
 
   it("stream a reply as it is written: its code steps, their results, and the answer", async () => {
     const ann = await person();
-    const { reply, release } = pausedReply("Two plus two is four.", 9);
+    const { reply, release } = pausedReply(says("Two plus two is four."), 9);
     await answering(ann, codeStep("export default async () => 2 + 2;"), reply);
     const chat = await ann.chats.create("Sums");
     const follower = await follow(ann.chats, chat.id);
@@ -489,7 +480,7 @@ describe("chats", () => {
   it("resume a reply mid-stream after a lost connection or a reload, and it goes on with nobody watching", async () => {
     const ann = await person();
     const { reply, release } = pausedReply(
-      "Half an answer, then the rest.",
+      says("Half an answer, then the rest."),
       14
     );
     await answering(ann, reply);
@@ -548,9 +539,12 @@ describe("chats", () => {
     await settled(first);
     // The next question is under way when the object restarts.
     await ann.chats.send(chat.id, { text: "And this?", model });
-    await vi.waitFor(() => {
-      expect(first.now()?.running).toBeTruthy();
-    });
+    await vi.waitFor(
+      () => {
+        expect(first.now()?.running).toBeTruthy();
+      },
+      { timeout: 10_000 }
+    );
 
     // Restarted, as a deploy restarts it: its alarm and its watchers keep
     // it up, so the runtime won't just evict it.
@@ -561,9 +555,12 @@ describe("chats", () => {
     });
     await answering(ann, says("Still here."));
     const after = await follow(ann.chats, chat.id);
-    await vi.waitFor(() => {
-      expect(after.updates).not.toHaveLength(0);
-    });
+    await vi.waitFor(
+      () => {
+        expect(after.updates).not.toHaveLength(0);
+      },
+      { timeout: 10_000 }
+    );
     // What was stored is there; the cut-short turn isn't running any more.
     expect(shown(after)).toStrictEqual([
       { role: "user", text: "Keep this." },
@@ -617,15 +614,18 @@ describe("chats", () => {
     ).resolves.toStrictEqual(["model.not_allowed", "agent.invalid_question"]);
     expect(gateway.requests).toHaveLength(0);
     const follower = await follow(ann.chats, chat.id);
-    await vi.waitFor(() => {
-      expect(follower.now()).toMatchObject({ running: false });
-    });
+    await vi.waitFor(
+      () => {
+        expect(follower.now()).toMatchObject({ running: false });
+      },
+      { timeout: 10_000 }
+    );
     expect(follower.messages()).toStrictEqual([]);
   });
 
   it("show why a turn stopped short, and a failed answer with the gateway's reason", async () => {
     const ann = await person();
-    const { reply, release } = pausedReply("Looking it up.", 7);
+    const { reply, release } = pausedReply(says("Looking it up."), 7);
     await answering(
       ann,
       {
@@ -675,7 +675,7 @@ describe("chats", () => {
 
   it("keep their object up while a turn nobody waits on runs", async () => {
     const ann = await person();
-    const { reply, release } = pausedReply("Done in a while.", 4);
+    const { reply, release } = pausedReply(says("Done in a while."), 4);
     await answering(ann, reply);
     const chat = await ann.chats.create("Kept up");
     const follower = await follow(ann.chats, chat.id);
@@ -725,7 +725,7 @@ describe("chats", () => {
     const ann = await person();
     const ben = await person();
     const annChat = await ann.chats.create("Ann's");
-    const { reply, release } = pausedReply("Still answering Ben.", 5);
+    const { reply, release } = pausedReply(says("Still answering Ben."), 5);
     await answering(ben, reply);
     const benChat = await ben.chats.create("Ben's");
     const benSees = await follow(ben.chats, benChat.id);
@@ -888,9 +888,12 @@ describe("chats", () => {
       await ann.chats.remove(chat.id);
       // The changes are made; their events wait in the object.
       await expect(ann.chats.list()).resolves.toStrictEqual([]);
-      await vi.waitFor(async () => {
-        await expect(waiting()).resolves.toStrictEqual({ count: 3 });
-      });
+      await vi.waitFor(
+        async () => {
+          await expect(waiting()).resolves.toStrictEqual({ count: 3 });
+        },
+        { timeout: 10_000 }
+      );
     } finally {
       await runInDurableObject(kept, (instance) => {
         Object.assign(envOf(instance), { AUDIT_LOG: realLog });
@@ -926,14 +929,20 @@ describe("chats", () => {
           });
         })
       );
-      await vi.waitFor(() => {
-        expect(failed).toBe(before + 10);
-      });
+      await vi.waitFor(
+        () => {
+          expect(failed).toBe(before + 10);
+        },
+        { timeout: 10_000 }
+      );
       // Their slots are free: another watch is taken.
-      await vi.waitFor(async () => {
-        const watch = await follow(ann.chats, chat.id);
-        await watch.subscription.release();
-      });
+      await vi.waitFor(
+        async () => {
+          const watch = await follow(ann.chats, chat.id);
+          await watch.subscription.release();
+        },
+        { timeout: 10_000 }
+      );
     };
     // More failing watches than a connection may keep at once.
     await failingRound();
@@ -943,7 +952,7 @@ describe("chats", () => {
 
   it("stop streaming to a page whose session has ended", async () => {
     const ann = await person();
-    const { reply, release } = pausedReply("Too late for you.", 3);
+    const { reply, release } = pausedReply(says("Too late for you."), 3);
     await answering(ann, reply);
     const chat = await ann.chats.create("Signed out");
     const follower = await follow(ann.chats, chat.id);

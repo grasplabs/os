@@ -92,7 +92,8 @@ const eventStream = (
   });
 };
 
-type Answer = Extract<GatewayReply, { text: string }>;
+/** A scripted answer, as opposed to a refusal or a hang. */
+export type Answer = Extract<GatewayReply, { text: string }>;
 
 /** How the answer stopped, as `[end_turn, max_tokens, tool_use]` name it. */
 const stopOf = (
