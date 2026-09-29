@@ -558,8 +558,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
               id,
               draft.base,
               Object.fromEntries(over.files)
-            ),
-          ({ passed }) => passed
+            )
         );
         const check = {
           ...counted.result,
@@ -768,7 +767,8 @@ build: {
    */
   propose(app: string, message: string): Promise<{
     version: number | null;
-    check: { passed: boolean; screens: Build; server: Build; workflows: Build; tests: { status: string; failures: string[] } };
+    /** \`pending\`: a build is still going; propose again shortly. */
+    check: { passed: boolean; pending: boolean; screens: Build; server: Build; workflows: Build; tests: { status: string; failures: string[] } };
     /** What the version changes, as its reviewer reads it; null when not proposed. */
     review: {
       current: number | null;
