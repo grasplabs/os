@@ -199,13 +199,41 @@ describe("the built-in blueprints' build", () => {
       `At most ${appRecordTypesMaxLength} characters`,
     ],
   ])("fails, naming the built-in, for %s", (_case, text, issue) => {
-    const dir = fixture("typed", { ...server, "app/records.json": text });
-    expect(() => build(dir)).toThrow(
-      `${path.join(dir, "typed")}: files/app/records.json`
+    const dir = fixture(
+      "typed",
+      { ...server, "app/records.json": text },
+      { collections: [tasks], permissions: [onTasks()] }
     );
-    expect(() => build(dir)).toThrow(issue);
+    expect(() => build(dir)).toThrow(
+      `${path.join(dir, "typed")}: files/app/records.json: ${issue}`
+    );
     expect(existsSync(path.join(dir, "blueprints.js"))).toBeFalsy();
   });
+
+  it.each([
+    ["a collection it doesn't declare", [], []],
+    [
+      "a collection it only asks to read",
+      [tasks],
+      [onTasks("TASKS", ["read"])],
+    ],
+  ])(
+    "fails for a record type kept in %s",
+    (_case, collections, permissions) => {
+      const dir = fixture(
+        "typed",
+        { ...server, ...records() },
+        {
+          collections,
+          permissions,
+        }
+      );
+      expect(() => build(dir)).toThrow(
+        `${path.join(dir, "typed")}: files/app/records.json: task: its collection tasks`
+      );
+      expect(existsSync(path.join(dir, "blueprints.js"))).toBeFalsy();
+    }
+  );
 
   it.each([
     ["a folder name too long for an App ID", "a".repeat(249), server, "App ID"],

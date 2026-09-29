@@ -28,7 +28,7 @@
  * files as any App's write checks them (paths, no hidden files, each
  * file's size and their number), their total size as any version's, and
  * its record types (`app/records.json`) as any version's commit reads
- * them.
+ * them, each in a collection its copies ask to write.
  */
 import {
   existsSync,
@@ -47,8 +47,10 @@ import {
   fileChangesSchema,
   fromBlueprintSchema,
 } from "@grasp-os/shared/apps";
+import type { AppRecordTypes } from "@grasp-os/shared/apps";
 import { declaredCollectionSchema } from "@grasp-os/shared/knowledge";
 import { declaredPermissionSchema } from "@grasp-os/shared/permissions";
+import type { DeclaredPermission } from "@grasp-os/shared/permissions";
 import { z } from "zod";
 
 import type { BuiltinBlueprint } from "#blueprints";
@@ -146,20 +148,48 @@ const issuesOf = (error: unknown): string[] => {
 };
 
 /**
- * Throws, naming each issue, for `files` whose record types the commit
- * would refuse: it reads them as the commit does.
+ * The record types `files` declare, read as the commit reads them, or
+ * throws naming each issue for ones it would refuse.
  */
-const checkRecordTypes = (where: string, files: Record<string, string>) => {
+const recordTypesOf = (
+  where: string,
+  files: Record<string, string>
+): AppRecordTypes => {
   try {
-    recordTypesIn(new Map(Object.entries(files)));
+    return recordTypesIn(new Map(Object.entries(files)));
   } catch (error) {
     if (appErrors.codeOf(error) !== "app.records_invalid") {
       throw error;
     }
     throw new Error(
-      `${where}: files/${appRecordTypesPath} ${issuesOf(error).join("; ")}`,
+      `${where}: files/${appRecordTypesPath}: ${issuesOf(error).join("; ")}`,
       { cause: error }
     );
+  }
+};
+
+/**
+ * Throws for a record type kept in a collection the built-in's copies
+ * can't write, such as a misspelt one: the install would take it, and
+ * knowledge would ignore it there (knowledge/record-types.ts).
+ */
+const requireWritable = (
+  where: string,
+  records: AppRecordTypes,
+  permissions: readonly DeclaredPermission[]
+) => {
+  for (const [type, { collection }] of Object.entries(records)) {
+    const writable = permissions.some(
+      ({ object, actions }) =>
+        object.type === "collection" &&
+        object.collectionId === collection &&
+        actions.includes("write")
+    );
+    if (!writable) {
+      throw new Error(
+        `${where}: files/${appRecordTypesPath}: ${type}: its collection ${collection} is none the blueprint declares and asks to write`
+      );
+    }
   }
 };
 
@@ -202,7 +232,11 @@ const blueprintsIn = (dir: string): BuiltinBlueprint[] =>
           `${where}: files/ holds ${length} characters, over an App's ${appLimits.totalLength}`
         );
       }
-      checkRecordTypes(where, files);
+      requireWritable(
+        where,
+        recordTypesOf(where, files),
+        manifest.data.permissions
+      );
       return { id: name, ...manifest.data, files };
     });
 
