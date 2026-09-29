@@ -10,6 +10,24 @@ import { apiOf, pageOf, peopleIn } from "./people.ts";
 // one (`env.build.propose`); the agent's drafts, checks and proposals
 // themselves are core's tests (apps/core/test/agent-builds.test.ts).
 
+/** A weekly workflow on a schedule, whose one step books: it acts. */
+const weekly = {
+  "workflows/weekly.ts": `import { schedule, workflow } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "weekly",
+  { params: { every: schedule({ label: "Runs", default: "0 8 * * 1" }) }, triggers: [{ type: "schedule", param: "every" }] },
+  async (step) => await step.do("book", { description: "Book the week", sideEffect: true, input: "week" }, async () => "booked")
+);
+`,
+  "workflows/weekly.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./weekly.ts";
+
+export default workflowTests(definition, [{ name: "runs", mocks: { book: "booked" }, expect: { output: "booked" } }]);
+`,
+};
+
 const screen = `import { Button } from "@grasp-os/ui/components/button";
 
 export default function Desk() {
@@ -32,6 +50,7 @@ test("the side panel shows an App being built, and a builder makes its version c
     const app = await api.apps.create({ name });
     await api.apps.files.write(app.id, {
       "screens/desk.tsx": screen,
+      ...weekly,
       // Server code the server build reads, though not app/server.ts.
       "app/lib/format.ts":
         "export const format = (total: number) => String(total);\n",
@@ -87,8 +106,15 @@ test("the side panel shows an App being built, and a builder makes its version c
       "In the proposer's wordsAn invoice desk for invoices@"
     );
     await expect(built.getByRole("region", { name: "Tests" })).toContainText(
-      "No workflows to test."
+      "All workflow tests pass."
     );
+    // Its workflow runs on its own now, and can change things.
+    const workflows = built.getByRole("region", { name: "Workflows" });
+    await expect(workflows).toContainText("Added workflow weekly");
+    await expect(workflows).toContainText(
+      "Now runs on a schedule (its parameter every)"
+    );
+    await expect(workflows).toContainText("May change something outside Grasp");
     // What other Apps may now call, flagged when it changes the App's data.
     const exported = built.getByRole("region", { name: "Exports" });
     await expect(exported).toContainText(

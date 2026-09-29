@@ -252,12 +252,18 @@ const ReviewDetails = ({
               <span className="flex items-center gap-2">
                 {changeWords[workflow.change]} workflow{" "}
                 <code className="font-mono">{workflow.id}</code>
-                {workflow.sideEffect ? (
+                {workflow.sideEffect && workflow.change !== "removed" ? (
                   <Badge variant="destructive">
                     May change something outside Grasp
                   </Badge>
                 ) : null}
               </span>
+              {workflow.change === "removed" ? (
+                <span className="text-muted-foreground">
+                  It no longer runs
+                  {workflow.sideEffect ? " (it could change things)" : ""}.
+                </span>
+              ) : null}
               {workflow.triggers === null ? (
                 <span className="text-muted-foreground">
                   What makes it run on its own can&apos;t be read from its code.

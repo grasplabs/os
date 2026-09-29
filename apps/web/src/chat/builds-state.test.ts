@@ -46,6 +46,14 @@ const labelsOf = (change: keyof typeof diffs) => {
   return { file, labels: serverFileLabels(file) };
 };
 
+/** A trigger change, from how many a workflow had and has. */
+const change = (countBefore: number, countAfter: number) => ({
+  change: countAfter > countBefore ? ("added" as const) : ("removed" as const),
+  count: Math.abs(countAfter - countBefore),
+  countBefore,
+  countAfter,
+});
+
 describe("the Being built section", () => {
   it("offers making a version current only once its review and changed server code have loaded", () => {
     const ready = { state: "ready" };
@@ -119,47 +127,47 @@ describe("the Being built section", () => {
     });
   });
 
-  it("says what makes a workflow run on its own now, and how many times", () => {
+  it("says what makes a workflow run on its own now, from how many it had and has", () => {
+    const schedule = { type: "schedule" as const, param: "every" };
+
     expect([
+      triggerChangeText({ trigger: schedule, ...change(0, 1) }),
       triggerChangeText({
-        trigger: { type: "schedule", param: "every" },
-        change: "added",
-        count: 1,
+        trigger: { ...schedule, timeZone: "Europe/Amsterdam" },
+        ...change(0, 2),
       }),
-      triggerChangeText({
-        trigger: {
-          type: "schedule",
-          param: "every",
-          timeZone: "Europe/Amsterdam",
-        },
-        change: "added",
-        count: 2,
-      }),
+      triggerChangeText({ trigger: schedule, ...change(1, 3) }),
+      // One of two identical ones removed: it still runs so.
+      triggerChangeText({ trigger: schedule, ...change(2, 1) }),
+      triggerChangeText({ trigger: schedule, ...change(2, 0) }),
       triggerChangeText({
         trigger: {
           type: "event",
           event: "mail.received",
           filter: { from: "a" },
         },
-        change: "removed",
-        count: 1,
+        ...change(1, 0),
+      }),
+      // An empty filter filters nothing.
+      triggerChangeText({
+        trigger: { type: "event", event: "mail.received", filter: {} },
+        ...change(0, 1),
       }),
       triggerChangeText({
         trigger: { type: "email", address: "invoices" },
-        change: "added",
-        count: 1,
+        ...change(0, 1),
       }),
-      triggerChangeText({
-        trigger: { type: "manual" },
-        change: "removed",
-        count: 3,
-      }),
+      triggerChangeText({ trigger: { type: "manual" }, ...change(1, 0) }),
     ]).toStrictEqual([
-      "Now also runs on a schedule (its parameter every)",
-      "Now also runs on a schedule (its parameter every, Europe/Amsterdam) (2 more times)",
+      "Now runs on a schedule (its parameter every)",
+      "Now runs on a schedule (its parameter every, Europe/Amsterdam), 2 times",
+      "Runs on a schedule (its parameter every) 2 more times (3 times now)",
+      "Runs on a schedule (its parameter every) 1 fewer time (once now)",
+      "No longer runs on a schedule (its parameter every)",
       "No longer runs on the event mail.received, filtered",
-      "Now also runs on mail to invoices@",
-      "No longer runs when someone starts it (3 fewer times)",
+      "Now runs on every mail.received event",
+      "Now runs on mail to invoices@",
+      "No longer runs when someone starts it",
     ]);
   });
 
@@ -195,6 +203,12 @@ describe("the Being built section", () => {
         access: "read",
         accessBefore: "read",
       }),
+      exportChangeText({
+        name: "purge",
+        change: "modified",
+        access: "read",
+        accessBefore: "write",
+      }),
     ]).toStrictEqual([
       {
         text: "Other Apps may now call book, which changes the App's data",
@@ -210,6 +224,10 @@ describe("the Being built section", () => {
         widens: true,
       },
       { text: "totals changed: it reads the App's data", widens: false },
+      {
+        text: "purge no longer changes the App's data (write → read)",
+        widens: false,
+      },
     ]);
   });
 });

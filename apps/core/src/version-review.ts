@@ -217,14 +217,20 @@ const triggerChanges = (
     const was = before.get(key);
     const is = now.get(key);
     const trigger = is?.trigger ?? was?.trigger;
-    const difference = (is?.count ?? 0) - (was?.count ?? 0);
+    const countBefore = was?.count ?? 0;
+    const countAfter = is?.count ?? 0;
+    const difference = countAfter - countBefore;
     if (trigger === undefined || difference === 0) {
       return [];
     }
     return [
-      difference > 0
-        ? { trigger, change: "added" as const, count: difference }
-        : { trigger, change: "removed" as const, count: -difference },
+      {
+        trigger,
+        change: difference > 0 ? ("added" as const) : ("removed" as const),
+        count: Math.abs(difference),
+        countBefore,
+        countAfter,
+      },
     ];
   });
 };

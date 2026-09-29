@@ -112,24 +112,42 @@ export const triggerText = (trigger: TriggerDeclaration): string => {
     return `on a schedule (its parameter ${trigger.param}${zone})`;
   }
   if (trigger.type === "event") {
-    const filtered = trigger.filter === undefined ? "" : ", filtered";
-    return `on the event ${trigger.event}${filtered}`;
+    // No filter, or an empty one: every such event.
+    const filtered =
+      trigger.filter !== undefined && Object.keys(trigger.filter).length > 0;
+    return filtered
+      ? `on the event ${trigger.event}, filtered`
+      : `on every ${trigger.event} event`;
   }
   return `on mail to ${trigger.address}@`;
 };
 
-/** A workflow's trigger change, as the panel says it. */
+/** How many times, as the panel says it: nothing for once. */
+const timesText = (count: number): string =>
+  count === 1 ? "once" : `${count} times`;
+
+/**
+ * A workflow's trigger change, as the panel says it, from how many of
+ * that trigger it had before and has after: only "no longer" once none
+ * are left, and only "now" where there were none.
+ */
 export const triggerChangeText = ({
   trigger,
-  change,
   count,
+  countBefore,
+  countAfter,
 }: TriggerChange): string => {
-  if (change === "added") {
-    const times = count === 1 ? "" : ` (${count} more times)`;
-    return `Now also runs ${triggerText(trigger)}${times}`;
+  const how = triggerText(trigger);
+  if (countBefore === 0) {
+    return countAfter === 1
+      ? `Now runs ${how}`
+      : `Now runs ${how}, ${timesText(countAfter)}`;
   }
-  const times = count === 1 ? "" : ` (${count} fewer times)`;
-  return `No longer runs ${triggerText(trigger)}${times}`;
+  if (countAfter === 0) {
+    return `No longer runs ${how}`;
+  }
+  const more = countAfter > countBefore;
+  return `Runs ${how} ${count} ${more ? "more" : "fewer"} ${count === 1 ? "time" : "times"} (${timesText(countAfter)} now)`;
 };
 
 /** What an export lets another App do, in a reviewer's words. */
@@ -163,6 +181,12 @@ export const exportChangeText = ({
     return {
       text: `${name} now changes the App's data (read → write)`,
       widens: true,
+    };
+  }
+  if (accessBefore === "write" && access === "read") {
+    return {
+      text: `${name} no longer changes the App's data (write → read)`,
+      widens: false,
     };
   }
   const does = access === null ? "" : `: it ${accessWords[access]}`;

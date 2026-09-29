@@ -237,15 +237,17 @@ export interface VersionReview {
     params: { name: string; change: ReviewChange }[] | null;
     /**
      * Its triggers added or removed, with how many of each (identical
-     * triggers each register): what makes it run on its own, such as a
-     * schedule, an event or mail to an address; null when they can't be
-     * read.
+     * triggers each register), and how many it had before and has after:
+     * what makes it run on its own, such as a schedule, an event or mail
+     * to an address; null when they can't be read.
      */
     triggers:
       | {
           trigger: TriggerDeclaration;
           change: "added" | "removed";
           count: number;
+          countBefore: number;
+          countAfter: number;
         }[]
       | null;
     /**
