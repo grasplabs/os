@@ -1,6 +1,7 @@
 import { z } from "zod";
 
 import { isExportName } from "./apps.ts";
+import type { AgentProposer } from "./apps.ts";
 import { defineErrorFamily } from "./errors.ts";
 import {
   agentIdSchema,
@@ -308,6 +309,11 @@ export interface Permission {
   grantedAt: string | null;
   revokedBy: string | null;
   revokedAt: string | null;
+  /**
+   * The chat's agent that asked for it, acting for `requestedBy`; null
+   * when that person asked themselves.
+   */
+  requestedVia: AgentProposer | null;
 }
 
 /**

@@ -117,10 +117,29 @@ export interface AppVersion {
   /** SHA-256 of the version's files, which identifies them exactly. */
   tree: string;
   files: number;
-  /** The user who committed it. */
+  /**
+   * The user who committed it, or whom the chat's agent that wrote it
+   * acted for (`proposedBy`).
+   */
   author: string;
+  /** What changed and why, in its author's words (the agent's, too). */
   message: string;
   createdAt: string;
+  /** The chat's agent that wrote and proposed it; null for a person's. */
+  proposedBy: AgentProposer | null;
+}
+
+/**
+ * The chat's agent, as the one that wrote a version or asked for a
+ * permission: the workspace agent, the person it acted for, and the chat
+ * (in that person's Workspace object) it acted in.
+ */
+export interface AgentProposer {
+  type: "agent";
+  agentId: string;
+  onBehalfOf: string;
+  workspaceId: string;
+  chatId: string;
 }
 
 /**
@@ -165,19 +184,45 @@ export type ReviewChange = "added" | "modified" | "removed";
  */
 export interface VersionReview {
   version: AppVersion;
+  /**
+   * The chat's agent that wrote it, and the chat's title for the person
+   * it acted for (null for anyone else: a title may quote their
+   * question); null for a version a person committed.
+   */
+  proposedBy: (AgentProposer & { chatTitle: string | null }) | null;
   /** What it is compared with: the current version; null while none is. */
   current: number | null;
   /** Its files that differ from the current version's, by path. */
   files: { path: string; change: ReviewChange }[];
-  /** Its workflows that differ from the current version's. */
+  /**
+   * How its server code (`app/server.ts`) differs, if it does: it runs as
+   * whoever uses the App, with every permission the App holds.
+   */
+  server: ReviewChange | null;
+  /**
+   * Its workflows that differ from the current version's: their own files,
+   * or code outside `screens/` they may import (`shared`), such as the
+   * server code their steps call.
+   */
   workflows: {
     id: string;
     change: ReviewChange;
+    /** The changed files outside screens and its own that it may use. */
+    shared: string[];
     /**
-     * Its steps that differ, by name, and whether each changes something
-     * outside Grasp; null when the code can't be read as steps.
+     * Its steps that differ, by name: whether each says it changes
+     * something outside Grasp, and the App's bindings its code calls
+     * (`APP`, a connection, another App's exports), which may too; null
+     * when the code can't be read as steps.
      */
-    steps: { name: string; change: ReviewChange; sideEffect: boolean }[] | null;
+    steps:
+      | {
+          name: string;
+          change: ReviewChange;
+          sideEffect: boolean;
+          calls: string[];
+        }[]
+      | null;
     /** Its parameters that differ, by name; null when they can't be read. */
     params: { name: string; change: ReviewChange }[] | null;
   }[];
@@ -186,7 +231,16 @@ export interface VersionReview {
    * an admin, whether the version is made current or not.
    */
   permissions: Permission[];
-  /** Its workflows' tests, run now: what making it current needs. */
+  /**
+   * What the App holds now, which the version's code uses once current;
+   * `askedAgain` for each that making it current would ask an admin for
+   * again, as this reviewer can't grant it (`AppVersionsApi.setCurrent`).
+   */
+  grants: { permission: Permission; askedAgain: boolean }[];
+  /**
+   * Its workflows' tests: what making it current needs. Run once per
+   * version's files, or taken from the check that proposed it.
+   */
   tests: { status: "passed" | "failed" | "none"; failures: string[] };
 }
 

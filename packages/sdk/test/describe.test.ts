@@ -230,6 +230,35 @@ describe(describeWorkflow, () => {
     }
   });
 
+  it("names the App's bindings each step calls, which may change things", () => {
+    const source = workflowSource(
+      [
+        `const total = await step.do("read", { description: "Read" }, async () => 1);`,
+        `await step.do("book", { description: "Book", input: total }, async () => await bindings.APP.call("book", total));`,
+        `await step.do("mail", { description: "Mail" }, async () => [await bindings.MAIL.call("mail.send", {}), await use(bindings)]);`,
+      ].join("\n"),
+      "step, { input, env: bindings }"
+    );
+
+    expect(
+      describeWorkflow(source).steps.map((node) =>
+        node.type === "step" ? { name: node.name, env: node.env } : node.type
+      )
+    ).toStrictEqual([
+      { name: "read", env: undefined },
+      { name: "book", env: ["APP"] },
+      { name: "mail", env: ["MAIL", "env"] },
+    ]);
+    expect(() =>
+      describeWorkflow(
+        workflowSource(
+          `await step.do("x", { description: "X" }, async () => 1);`,
+          "step, { env: { APP } }"
+        )
+      )
+    ).toThrow("Call the App's bindings as `env.NAME`");
+  });
+
   it("rejects a source without exactly one workflow, or that doesn't parse", () => {
     expect(() => describeWorkflow("export const x = 1;")).toThrow(
       "Expected one call to `workflow`"

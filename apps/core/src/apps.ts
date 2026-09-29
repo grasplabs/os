@@ -120,6 +120,7 @@ export const toVersion = (row: VersionRow): AppVersion => ({
   author: row.authorId,
   message: row.message,
   createdAt: row.createdAt.toISOString(),
+  proposedBy: row.proposedBy ?? null,
 });
 
 /** The audit entry of a change to `app` by `by`: identifiers only. */
@@ -678,6 +679,7 @@ export const commitFiles = async (
     approved: null,
     workflows: workflowsIn(files),
     exports: exported,
+    proposedBy: null,
   };
   // Only the rows this commit read: each write gives the rows it writes a
   // new revision, so a row written since has one this commit didn't read.
@@ -780,6 +782,11 @@ export const draftOverLatest = async (
       throw appErrors.create("app.conflict", { issues: clashes.toSorted() });
     }
   }
+  const added = new Set(
+    Object.entries(changes).flatMap(([path, content]) =>
+      content === null || files.has(path) ? [] : [path]
+    )
+  );
   for (const [path, content] of Object.entries(changes)) {
     if (content === null) {
       files.delete(path);
@@ -787,23 +794,27 @@ export const draftOverLatest = async (
       files.set(path, content);
     }
   }
+  // What builders committed since may clash with what the draft adds.
+  checkPaths(files.keys(), added);
   return { parent, files };
 };
 
 /**
  * Commits a chat's draft (`draftOverLatest`) as the App's next version,
- * by `by` (the chat's agent, acting for its person) with `message`, and
- * builds it as a save does. Builders' working copy stays as it is: as
- * after any commit, it is the new latest version with their changes over
- * it. A version committed meanwhile takes the number: `app.conflict`.
+ * by `by` (the chat's agent, acting for its person, `by.via`) with
+ * `message`, and puts it up for review, in one batch: it is never
+ * committed without being proposed. Its files were built as they were
+ * checked. Builders' working copy stays as it is: as after any commit, it
+ * is the new latest version with their changes over it. A version
+ * committed meanwhile takes the number: `app.conflict`.
  */
-export const commitDraft = async (
+export const proposeDraft = async (
   env: Env,
   by: Acting,
   app: unknown,
   { parent, files }: DraftOverLatest,
   message: unknown
-): Promise<CommittedVersion> => {
+): Promise<AppVersion> => {
   const { id: appId } = await appFor(env, by, app, "builder");
   const text = appErrors.parse("app.invalid", commitMessageSchema, message);
   const { tree, json } = await versionTree(files);
@@ -826,6 +837,7 @@ export const commitDraft = async (
     approved: null,
     workflows: workflowsIn(files),
     exports: exported,
+    proposedBy: by.via ?? null,
   };
   const db = drizzle(env.DB);
   try {
@@ -840,6 +852,16 @@ export const commitDraft = async (
           files: row.files,
         })
       ),
+      db
+        .update(apps)
+        .set({ pendingVersion: row.version })
+        .where(eq(apps.id, appId)),
+      outboxed(
+        db,
+        changeEntry(by, "app.version.proposed", appId, {
+          version: row.version,
+        })
+      ),
     ]);
   } catch (error) {
     if (isUniqueViolation(error)) {
@@ -847,16 +869,7 @@ export const commitDraft = async (
     }
     throw error;
   }
-  return {
-    ...toVersion(row),
-    builds: featureEnabled(env, "build_on_save")
-      ? await buildOnSave(env, {
-          app: appId,
-          version: row.version,
-          files: Object.fromEntries(files),
-        })
-      : notBuiltOnSave,
-  };
+  return toVersion(row);
 };
 
 /** An App's versions, newest first, a page at a time. */

@@ -151,11 +151,20 @@ interface Bindings {
   params: string | undefined;
   /** `state` in `async (step, { state }) => …`, or what it's renamed to. */
   state: string | undefined;
+  /** `env` in `async (step, { env }) => …`, or what it's renamed to. */
+  env: string | undefined;
 }
 
-const contextKeys = new Set(["params", "input", "state", "runId"]);
+const contextKeys = new Set(["params", "input", "state", "runId", "env"]);
 const contextHint =
   "Destructure the workflow function's context, e.g. `async (step, { params, input, state }) => …`";
+
+/** How to read what the workflow function's context holds, instead. */
+const destructuringHints = {
+  params: "Read parameters as `params.name`, without destructuring it",
+  state: "Read state as `state.get(…)`, without destructuring it",
+  env: "Call the App's bindings as `env.NAME`, without destructuring it",
+} as const;
 
 const bindingsOf = (params: Node[]): Bindings => {
   const [stepParam, contextParam] = params;
@@ -169,6 +178,7 @@ const bindingsOf = (params: Node[]): Bindings => {
     step: stepParam?.name,
     params: undefined,
     state: undefined,
+    env: undefined,
   };
   if (!contextParam) {
     return bindings;
@@ -189,14 +199,11 @@ const bindingsOf = (params: Node[]): Bindings => {
     ) {
       throw fail(property, contextHint);
     }
-    if (key !== "params" && key !== "state") {
+    if (key !== "params" && key !== "state" && key !== "env") {
       continue;
     }
     if (property.value.type !== "Identifier") {
-      throw fail(
-        property,
-        `Read ${key === "params" ? "parameters as `params.name`" : "state as `state.get(…)`"}, without destructuring it`
-      );
+      throw fail(property, destructuringHints[key]);
     }
     bindings[key] = property.value.name;
   }
@@ -253,6 +260,37 @@ const isObjectOfMember = (ancestor: Ancestor | undefined): boolean =>
   ancestor?.node.type === "MemberExpression" &&
   ancestor.key === "object" &&
   !ancestor.node.computed;
+
+/**
+ * The App's bindings `nodes` call (`env.NAME`), in source order; `env`
+ * itself when they use `env` other than to name a binding.
+ */
+const envCallsIn = (bindings: Bindings, nodes: Node[]): string[] => {
+  const names: string[] = [];
+  for (const node of nodes) {
+    visit(node, (candidate, ancestors) => {
+      if (
+        candidate.type !== "Identifier" ||
+        candidate.name !== bindings.env ||
+        isNamePosition(ancestors)
+      ) {
+        return;
+      }
+      const parent = ancestors.at(-1);
+      const name =
+        parent?.node.type === "MemberExpression" &&
+        parent.key === "object" &&
+        !parent.node.computed
+          ? nameOf(parent.node.property)
+          : undefined;
+      const called = name ?? "env";
+      if (!names.includes(called)) {
+        names.push(called);
+      }
+    });
+  }
+  return names;
+};
 
 // `step` may only be called as `step.method(…)`, parameters only read as
 // `params.name`: passed around or destructured, their use can't be read.
@@ -590,6 +628,7 @@ const describeCall = (
     return node ? literalOf(node) === true : false;
   };
   const description = options.get("description");
+  const env = envCallsIn(reader.bindings, call.arguments);
   return {
     type: "step",
     name,
@@ -601,6 +640,7 @@ const describeCall = (
     locked: method === "do" && flag("locked"),
     params: paramsIn(reader.bindings, call.arguments),
     options: literalOptions(options),
+    ...(env.length === 0 ? {} : { env }),
     line: lineOf(call),
   };
 };

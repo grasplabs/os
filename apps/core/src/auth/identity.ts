@@ -1,3 +1,4 @@
+import type { AgentProposer } from "@grasp-os/shared/apps";
 import type { AuditActor } from "@grasp-os/shared/audit";
 import { staffWindowOpen } from "@grasp-os/shared/deployment-config";
 import { roleSchema } from "@grasp-os/shared/roles";
@@ -55,7 +56,11 @@ export type Member = Pick<Identity, "userId" | "role" | "teams" | "staff">;
  * Who acts: a member, or the chat's agent acting for one (agent-builds.ts)
  * with their role and rights, as `actor`, the audit log's name for it.
  */
-export type Acting = Member & { actor?: AuditActor };
+export type Acting = Member & {
+  actor?: AuditActor;
+  /** The chat's agent acting, as what it writes records it. */
+  via?: AgentProposer;
+};
 
 /**
  * A member's role and teams, read now; `undefined` once they have no

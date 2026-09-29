@@ -1,13 +1,15 @@
-import { workflowPaths } from "@grasp-os/compiler";
+import { compilerVersion, workflowPaths } from "@grasp-os/compiler";
 import { describeWorkflow } from "@grasp-os/sdk/describe";
 import type {
   AppFiles,
   ReviewChange,
   VersionReview,
 } from "@grasp-os/shared/apps";
+import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import type { OutlineNode, StepOutline } from "@grasp-os/shared/workflows";
+import { z } from "zod";
 
 import {
   appFor,
@@ -16,8 +18,10 @@ import {
   toVersion,
   versionFiles,
 } from "./apps.ts";
+import type { VersionRow } from "./apps.ts";
 import type { Member } from "./auth/identity.ts";
-import { listPermissions } from "./permissions.ts";
+import { workspace } from "./durable-objects.ts";
+import { activeGrants, listPermissions } from "./permissions.ts";
 import {
   declaredParams,
   workflowIdsIn,
@@ -28,12 +32,19 @@ import {
 // it current: worked out here from the version and the App as they are
 // now, never taken from whoever proposed it (the chat's agent, say), so a
 // proposal can't describe itself as less than it is. Against the current
-// version: its files, its workflows with the steps and parameters that
-// differ, what the App asks for that no admin granted yet, and its
-// workflows' tests, run now.
+// version: who proposed it, its files and server code, its workflows with
+// the steps and parameters that differ (a workflow counts as changed when
+// code outside screens changed, which it may import; a step that calls
+// the App's bindings may change things whether it says so or not), what
+// the App asks for that no admin granted yet, what it holds and which of
+// that making it current would ask an admin for again, and its workflows'
+// tests, kept per version's files so they run once.
 
 /** Most test failures a review lists. */
 const maxFailures = 50;
+
+/** The App's server code, which acts for whoever uses the App. */
+const serverPath = "app/server.ts";
 
 /** How `now` differs from `before`, or undefined when it doesn't. */
 const changeOf = <T>(
@@ -131,27 +142,93 @@ const paramsOf = async (
   }
 };
 
-/** A version's workflows' tests, run now. */
+/** Where a version's tests are kept, by its files' hash and the compiler. */
+const testsKey = (app: AppId, tree: string): string =>
+  `apps/${app}/tests/${tree}-${compilerVersion}.json`;
+
+/** Test results as they are kept; anything else is run again. */
+const keptTestsSchema = z.object({
+  status: z.enum(["passed", "failed", "none"]),
+  failures: z.array(z.string()).max(maxFailures),
+});
+
+/**
+ * Keeps the test results of files with hash `tree`: what a check that
+ * ran them found (agent-builds.ts), so a review doesn't run them again.
+ */
+export const keepTests = async (
+  env: Env,
+  app: AppId,
+  tree: string,
+  tests: { status: string; failures: string[] }
+): Promise<void> => {
+  const kept = keptTestsSchema.safeParse({
+    ...tests,
+    failures: tests.failures.slice(0, maxFailures),
+  });
+  if (kept.success) {
+    await env.FILES.put(testsKey(app, tree), JSON.stringify(kept.data));
+  }
+};
+
+/**
+ * A version's workflows' tests: kept once per version's files (and
+ * compiler), run the first time only.
+ */
 const testsOf = async (
   env: Env,
-  version: number,
+  app: AppId,
+  { version, tree }: { version: number; tree: string },
   files: AppFiles
 ): Promise<VersionReview["tests"]> => {
   if (workflowIdsIn(files).length === 0) {
     return { status: "none", failures: [] };
   }
+  const stored = await env.FILES.get(testsKey(app, tree));
+  if (stored !== null) {
+    const kept = keptTestsSchema.safeParse(JSON.parse(await stored.text()));
+    if (kept.success) {
+      return kept.data;
+    }
+  }
+  let tests: VersionReview["tests"];
   try {
     const failures = await workflowTestFailures(env, version, files);
-    return {
+    tests = {
       status: failures.length === 0 ? "passed" : "failed",
       failures: failures.slice(0, maxFailures),
     };
   } catch (error) {
-    if (workflowErrors.codeOf(error) === "workflow.build_failed") {
-      return { status: "failed", failures: ["The workflows don't build."] };
+    if (workflowErrors.codeOf(error) !== "workflow.build_failed") {
+      throw error;
     }
-    throw error;
+    tests = { status: "failed", failures: ["The workflows don't build."] };
   }
+  await keepTests(env, app, tree, tests);
+  return tests;
+};
+
+/** A path of code a workflow may import: anything outside `screens/`. */
+const sharedCode = /^(?!screens\/).+\.(?:ts|tsx|js|mjs|json)$/u;
+
+/** The chat's agent that proposed `row`, with its chat's title for them. */
+const proposerOf = async (
+  env: Env,
+  by: Member,
+  { proposedBy }: VersionRow
+): Promise<VersionReview["proposedBy"]> => {
+  if (proposedBy === null) {
+    return null;
+  }
+  const workspaceId = workspaceIdSchema.safeParse(proposedBy.workspaceId);
+  const chatTitle =
+    by.userId === proposedBy.onBehalfOf && workspaceId.success
+      ? await workspace(env, workspaceId.data).chatTitle(
+          proposedBy.chatId,
+          by.userId
+        )
+      : null;
+  return { ...proposedBy, chatTitle };
 };
 
 /** What version `version` of App `app` changes, for its builders. */
@@ -182,15 +259,25 @@ export const reviewVersion = async (
       ...workflowIdsIn(before?.files ?? {}),
     ]),
   ].toSorted();
+  const ownPaths = new Set(
+    workflowIds.flatMap((id) => Object.values(workflowPaths(id)))
+  );
+  // Code outside screens a workflow may import, its server's too: when it
+  // changes, every workflow may do something else.
+  const shared = [...changedPaths].filter(
+    (path) => sharedCode.test(path) && !ownPaths.has(path)
+  );
   const workflows: VersionReview["workflows"] = [];
   for (const id of workflowIds) {
     const paths = workflowPaths(id);
+    const ownChanged =
+      changedPaths.has(paths.workflow) || changedPaths.has(paths.tests);
     const change = changeOf(
       before === undefined || !workflowIdsIn(before.files).includes(id)
         ? undefined
         : true,
       workflowIdsIn(files).includes(id) ? true : undefined,
-      () => !changedPaths.has(paths.workflow) && !changedPaths.has(paths.tests)
+      () => !ownChanged && shared.length === 0
     );
     if (change === undefined) {
       continue;
@@ -209,15 +296,23 @@ export const reviewVersion = async (
     workflows.push({
       id,
       change,
+      shared,
       steps:
         stepsBefore === null || stepsNow === null
           ? null
-          : differences(stepsBefore, stepsNow, (one, other) =>
-              sameJson(withoutLine(one), withoutLine(other))
+          : differences(
+              stepsBefore,
+              stepsNow,
+              // A step that calls the App's bindings may do something else
+              // once code it calls changed, its own unchanged.
+              (one, other) =>
+                sameJson(withoutLine(one), withoutLine(other)) &&
+                (shared.length === 0 || (other.env ?? []).length === 0)
             ).map(({ name, change: stepChange, now, before: was }) => ({
               name,
               change: stepChange,
               sideEffect: (now ?? was)?.sideEffect ?? false,
+              calls: (now ?? was)?.env ?? [],
             })),
       params:
         paramsBefore === null || paramsNow === null
@@ -227,10 +322,13 @@ export const reviewVersion = async (
             ),
     });
   }
+  const server = fileChanges.find(({ name }) => name === serverPath);
   return {
     version: toVersion(row),
+    proposedBy: await proposerOf(env, by, row),
     current,
     files: fileChanges.map(({ name, change }) => ({ path: name, change })),
+    server: server?.change ?? null,
     workflows,
     permissions: await listPermissions(
       env,
@@ -239,6 +337,7 @@ export const reviewVersion = async (
       appsListedFor(env, by),
       "requested"
     ),
-    tests: await testsOf(env, row.version, files),
+    grants: await activeGrants(env, by, found.id),
+    tests: await testsOf(env, found.id, row, files),
   };
 };

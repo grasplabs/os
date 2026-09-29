@@ -1,3 +1,4 @@
+import { compilerVersion } from "@grasp-os/compiler";
 import { appErrors } from "@grasp-os/shared/apps";
 import { featureErrors } from "@grasp-os/shared/errors";
 import { chatIdSchema } from "@grasp-os/shared/ids";
@@ -10,10 +11,11 @@ import { z } from "zod";
 
 import { chatOf, codeResults, codeStep, says } from "./agent-chat.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
-import { release, requestGranted } from "./apps.ts";
+import { outlook, release, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { signedInApi } from "./sign-in.ts";
+import { server } from "./workflow-apps.ts";
 
 // `env.build` in a chat's code: the chat's agent building Apps for its
 // person in a draft of its own, and repairing what its checks report.
@@ -681,7 +683,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
           binding: "INVOICES",
         });
         const proposal = await env.build.propose(app.id, "An invoice desk for invoices@");
-        const tried = async (call) => { try { await call(); return "done"; } catch (error) { return "refused"; } };
+        const tried = async (call) => { try { await call(); return "done"; } catch (error) { return error.message; } };
         return {
           permission: permission.status,
           version: proposal.version,
@@ -702,28 +704,51 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     const [result] = await codeResults(chat.stub, chat.chat.id);
     const app = await createdApp(person.api);
     const review = await person.api.apps.versions.review(app.id, 1);
+    const noSetCurrent = 'The RPC receiver does not implement "setCurrent".';
     expect(returned(result?.text)).toStrictEqual({
       permission: "requested",
       version: 1,
       passed: true,
       review: structuredClone(review),
-      setCurrent: "refused",
-      appsSetCurrent: "refused",
+      // Neither API has such a method: the call reaches nothing.
+      setCurrent: noSetCurrent,
+      appsSetCurrent: noSetCurrent,
       left: [],
     });
+    const agent = {
+      type: "agent",
+      agentId: chat.agent.agentId,
+      onBehalfOf: person.userId,
+    };
+    const proposer = {
+      ...agent,
+      workspaceId: chat.id,
+      chatId: chat.chat.id,
+    };
     expect(review).toMatchObject({
-      version: { version: 1, parent: null, author: person.userId },
+      version: {
+        version: 1,
+        parent: null,
+        author: person.userId,
+        proposedBy: proposer,
+      },
+      // The chat's title, for the person the agent acted for.
+      proposedBy: { ...proposer, chatTitle: "Questions" },
       current: null,
       files: [
         { path: "screens/desk.tsx", change: "added" },
         { path: "workflows/intake.ts", change: "added" },
         { path: "workflows/intake.workflow-tests.ts", change: "added" },
       ],
+      server: null,
       workflows: [
         {
           id: "intake",
           change: "added",
-          steps: [{ name: "read", change: "added", sideEffect: false }],
+          shared: [],
+          steps: [
+            { name: "read", change: "added", sideEffect: false, calls: [] },
+          ],
           params: [],
         },
       ],
@@ -732,8 +757,11 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
           subject: { type: "app", appId: app.id },
           binding: "INVOICES",
           status: "requested",
+          requestedBy: person.userId,
+          requestedVia: proposer,
         },
       ],
+      grants: [],
       tests: { status: "passed", failures: [] },
     });
     // Pending, not live, until a builder makes it current.
@@ -753,11 +781,6 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
             .filter(({ target }) => target?.id === app.id)
             .map(({ action, actor }) => [action, actor])
         );
-        const agent = {
-          type: "agent",
-          agentId: chat.agent.agentId,
-          onBehalfOf: person.userId,
-        };
         expect(actors).toMatchObject({
           "app.committed": agent,
           "app.version.proposed": agent,
@@ -889,5 +912,102 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     await expect(user.api.apps.versions.review(app, version)).rejects.toThrow(
       roleErrors.create("role.forbidden").message
     );
+  });
+
+  it("reviews code a workflow may use, the steps that call the App, and the grants the version uses", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const admin = await signedInApi(idp, "admin");
+    const notify = {
+      "workflows/notify.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow("notify", { params: {}, input: z.unknown() }, async (step, { env }) => {
+  return await step.do("save", { description: "Save it" }, async () => await env.APP.call("hits", "notify"));
+});
+`,
+      "workflows/notify.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./notify.ts";
+
+export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, expect: { output: 1 } }]);
+`,
+    };
+    const { id: app } = await builder.api.apps.create({ name: "Notes" });
+    await release(builder, app, { "app/server.ts": server, ...notify });
+    await requestGranted(idp, builder, outlook(app));
+    // Only the server changes: the workflow's steps call it.
+    await builder.api.apps.files.write(app, {
+      "app/server.ts": `${server}\n// Books twice now.\n`,
+    });
+    const { version } = await builder.api.apps.files.commit(app, "Server");
+
+    const review = await builder.api.apps.versions.review(app, version);
+
+    const grant = {
+      subject: { type: "app", appId: app },
+      binding: "OUTLOOK",
+      status: "active",
+    };
+    expect(review).toMatchObject({
+      proposedBy: null,
+      server: "modified",
+      workflows: [
+        {
+          id: "notify",
+          change: "modified",
+          shared: ["app/server.ts"],
+          steps: [
+            {
+              name: "save",
+              change: "modified",
+              sideEffect: false,
+              calls: ["APP"],
+            },
+          ],
+          params: [],
+        },
+      ],
+      // A builder can't grant it: making the version current asks again.
+      grants: [{ permission: grant, askedAgain: true }],
+      tests: { status: "passed", failures: [] },
+    });
+    // An admin can: nothing is asked for again.
+    await expect(
+      admin.api.apps.versions.review(app, version)
+    ).resolves.toMatchObject({
+      grants: [{ permission: grant, askedAgain: false }],
+    });
+  });
+
+  it("runs a version's tests once, and reviews nothing while the agent's building is off", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const { id: app } = await builder.api.apps.create({ name: "Invoices" });
+    await release(builder, app, invoices(500, false));
+    const [latest] = await builder.api.apps.versions.list(app);
+    const kept = `apps/${app}/tests/${latest?.tree ?? ""}-${compilerVersion}.json`;
+
+    await builder.api.apps.versions.review(app, 1);
+    // What the first review kept is what the next one reads.
+    await expect(env.FILES.get(kept)).resolves.not.toBeNull();
+    await env.FILES.put(
+      kept,
+      JSON.stringify({ status: "failed", failures: ["kept"] })
+    );
+    await expect(
+      builder.api.apps.versions.review(app, 1)
+    ).resolves.toMatchObject({
+      tests: { status: "failed", failures: ["kept"] },
+    });
+
+    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
+    const { FEATURES: features } = env;
+    try {
+      env.FEATURES = { ...on, app_builder: false };
+      await expect(builder.api.apps.versions.review(app, 1)).rejects.toThrow(
+        featureErrors.create("feature.disabled", { feature: "app_builder" })
+          .message
+      );
+    } finally {
+      env.FEATURES = features;
+    }
   });
 });

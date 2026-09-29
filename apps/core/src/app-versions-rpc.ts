@@ -14,6 +14,7 @@ import {
   proposeVersion,
   setCurrentVersion,
 } from "./apps.ts";
+import { requireFeature } from "./features.ts";
 import { indexAppNow } from "./knowledge/apps-collection.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
@@ -58,11 +59,12 @@ export class AppVersionsRpc extends RpcTarget implements AppVersionsApi {
     );
   }
 
+  /** Only while the agent builds Apps (`app_builder`), whose versions it reviews. */
   async review(app: string, version: number): Promise<VersionReview> {
-    return await withPerson(
-      this.#check,
-      async (by) => await reviewVersion(this.#env, by, app, version)
-    );
+    return await withPerson(this.#check, async (by) => {
+      requireFeature(this.#env, "app_builder");
+      return await reviewVersion(this.#env, by, app, version);
+    });
   }
 
   /**

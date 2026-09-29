@@ -16,11 +16,10 @@ import type { AgentApi, AgentScope } from "./agent-scope.ts";
 import {
   appFor,
   applyChanges,
-  commitDraft,
   createApp,
   draftOverLatest,
   latestVersion,
-  proposeVersion,
+  proposeDraft,
   versionFiles,
 } from "./apps.ts";
 import type { Acting, Member } from "./auth/identity.ts";
@@ -31,7 +30,7 @@ import { appsCollectionId } from "./knowledge/app-entries.ts";
 import { requestPermission } from "./permissions.ts";
 import { isRestricted } from "./restricted.ts";
 import { buildOnSave } from "./save-builds.ts";
-import { reviewVersion } from "./version-review.ts";
+import { keepTests, reviewVersion } from "./version-review.ts";
 import {
   dryRunTests,
   hasWorkflow,
@@ -318,9 +317,17 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
         if (await isRestricted(env, chatAuthority(scope), chatContext(scope))) {
           throw permissionErrors.create("permission.restricted");
         }
+        const authority = chatAuthority(scope);
         return await run({
           ...person,
-          actor: delegateActorOf(chatAuthority(scope)),
+          actor: delegateActorOf(authority),
+          via: {
+            type: "agent",
+            agentId: scope.agentId,
+            onBehalfOf: scope.personId,
+            workspaceId: scope.workspaceId,
+            chatId: scope.chatId,
+          },
         });
       },
       ...(detail === undefined ? {} : { detail }),
@@ -562,8 +569,12 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
         if (!check.passed) {
           return { version: null, check, review: null };
         }
-        const { version } = await commitDraft(this.env, by, id, over, message);
-        await proposeVersion(this.env, by, id, version);
+        const proposed = await proposeDraft(this.env, by, id, over, message);
+        // The check ran the tests of exactly these files: the review takes
+        // its result rather than running them again.
+        if (check.tests.status !== "not_run") {
+          await keepTests(this.env, id, proposed.tree, check.tests);
+        }
         // Only the revision committed: a write since stays a draft.
         await workspace(this.env, workspaceId).dropDraft(
           chatId,
@@ -571,9 +582,9 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
           draft.revision
         );
         return {
-          version,
+          version: proposed.version,
           check,
-          review: await reviewVersion(this.env, by, id, version),
+          review: await reviewVersion(this.env, by, id, proposed.version),
         };
       },
       (proposal) => ({
@@ -762,13 +773,19 @@ build: {
     review: {
       current: number | null;
       files: { path: string; change: "added" | "modified" | "removed" }[];
+      /** How app/server.ts changed: it acts for whoever uses the App. */
+      server: "added" | "modified" | "removed" | null;
       workflows: {
         id: string;
         change: "added" | "modified" | "removed";
-        steps: { name: string; change: string; sideEffect: boolean }[] | null;
+        /** Changed code outside screens it may use. */
+        shared: string[];
+        steps: { name: string; change: string; sideEffect: boolean; calls: string[] }[] | null;
         params: { name: string; change: string }[] | null;
       }[];
       permissions: { id: string; object: Record<string, unknown>; actions: string[]; binding: string }[];
+      /** What the App holds, and which making it current asks an admin for again. */
+      grants: { permission: { id: string; binding: string; actions: string[] }; askedAgain: boolean }[];
       tests: { status: "passed" | "failed" | "none"; failures: string[] };
     } | null;
   }>;

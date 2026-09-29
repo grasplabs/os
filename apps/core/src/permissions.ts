@@ -195,6 +195,7 @@ export const toPermission = (row: Row): Permission => ({
   grantedAt: row.grantedAt?.toISOString() ?? null,
   revokedBy: row.revokedBy,
   revokedAt: row.revokedAt?.toISOString() ?? null,
+  requestedVia: row.requestedVia ?? null,
 });
 
 /** Rows of `subject`, as a condition. */
@@ -505,6 +506,7 @@ export const requestPermission = async (
     grantedAt: null,
     revokedBy: null,
     revokedAt: null,
+    requestedVia: by.via ?? null,
   };
   const permission = toPermission(row);
   const db = drizzle(env.DB);
@@ -589,6 +591,7 @@ export const declaredRequests = async (
     grantedAt: null,
     revokedBy: null,
     revokedAt: null,
+    requestedVia: null,
   }));
   const liveKeys = new Set(live.map(grantKey));
   const wantedKeys = new Set(wanted.map(grantKey));
@@ -738,6 +741,7 @@ export const blueprintRequests = async (
       grantedAt: null,
       revokedBy: null,
       revokedAt: null,
+      requestedVia: null,
     }));
   return {
     rows,
@@ -1236,6 +1240,45 @@ export const listPermissions = async (
     .where(and(ofOne, ofOpenApp, inStatus))
     .orderBy(asc(permissions.requestedAt), asc(permissions.id));
   return rows.map(toPermission);
+};
+
+/**
+ * App `app`'s active permissions, oldest first, each with whether `by`
+ * making one of its versions current would ask an admin for it again, as
+ * `madeCurrent` does: one that changes things, unless `by` could grant it
+ * (one of the organization's own admins). A subject's permissions are
+ * few, so they are sorted here, off the subject's index.
+ */
+export const activeGrants = async (
+  env: Env,
+  by: Pick<Identity, "role" | "staff">,
+  app: AppId
+): Promise<{ permission: Permission; askedAgain: boolean }[]> => {
+  const rows = await drizzle(env.DB)
+    .select()
+    .from(permissions)
+    .where(
+      and(
+        ofSubject({ type: "app", appId: app }),
+        eq(permissions.status, "active")
+      )
+    );
+  const canGrant = isAdmin(by.role) && !by.staff;
+  return rows
+    .toSorted(
+      (one, other) =>
+        one.requestedAt.getTime() - other.requestedAt.getTime() ||
+        (one.id < other.id ? -1 : 1)
+    )
+    .map(toPermission)
+    .map((permission) => ({
+      permission,
+      askedAgain:
+        !canGrant &&
+        permission.actions.some((action) =>
+          changesThings(permission.object, action)
+        ),
+    }));
 };
 
 /**

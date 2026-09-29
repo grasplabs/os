@@ -438,6 +438,7 @@ export const createFromBlueprint = async (
     approved: (await approvedSource(env, source, number)) ? 1 : null,
     workflows: workflowsIn(files),
     exports: exportsIn(files),
+    proposedBy: null,
   };
   const requests = await blueprintRequests(
     env,
@@ -726,6 +727,7 @@ export const installBuiltinBlueprint = async (
           approved: 1,
           workflows: workflowsIn(files),
           exports: exportsIn(files),
+          proposedBy: null,
         }),
         outboxed(
           db,
