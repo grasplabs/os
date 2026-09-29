@@ -216,20 +216,29 @@ describe("Google Workspace connector events", () => {
     later();
     await sync([listener(gmail)]);
     const first = await outboxed();
+    const [split] = await sources();
     await sync([listener(gmail)]);
     const all = await outboxed();
     const events = await audit.events();
 
-    // The 34th record's first message is the hundredth: its other two come
-    // with the rest, each message once.
+    // The 34th record's first message is the hundredth: the read goes on
+    // from the 33rd record's history ID, one Gmail issued, skipping that
+    // message, so its other two come with the rest, each message once.
     expect({
       first: first.length,
+      resumeAfter: split?.cursor?.split("#")[1],
       reads: events
         .filter(({ action }) => action === "connection.events.read")
         .map(({ provenance }) => provenance.length),
       all: all.length,
       once: new Set(all.map(({ id }) => id)).size,
-    }).toStrictEqual({ first: 100, reads: [100, 20], all: 120, once: 120 });
+    }).toStrictEqual({
+      first: 100,
+      resumeAfter: "skip=1",
+      reads: [100, 20],
+      all: 120,
+      once: 120,
+    });
   });
 
   it("read a record of 600 messages a hundred at a time near a full outbox, never twice, and the others in between", async () => {
@@ -266,18 +275,23 @@ describe("Google Workspace connector events", () => {
         path.startsWith("/batch/") &&
         body.includes(`/users/${encodeURIComponent(big.address)}/`)
     );
+    const left = await sources();
 
+    // Gmail's fake issues history IDs seven apart and refuses any other:
+    // each resume names one it issued, so nothing is reset or lost.
     expect({
       delivered: delivered.length,
       once: new Set(delivered).size,
       // Each of the big record's messages' metadata read once: 600 / 50.
       bigBatches: bigBatches.length,
       smallBeforeBigDone: delivered.indexOf(gmailId(1000)) < 600,
+      failures: left.map(({ failures }) => failures),
     }).toStrictEqual({
       delivered: 601,
       once: 601,
       bigBatches: 12,
       smallBeforeBigDone: true,
+      failures: [0, 0],
     });
   });
 
@@ -500,7 +514,7 @@ describe("Google Workspace connector events", () => {
         "startHistoryId"
       ),
       failures: resynced?.failures,
-    }).toStrictEqual({ from: "1804001", failures: 0 });
+    }).toStrictEqual({ from: "1804007", failures: 0 });
   });
 
   it("report files created in a shared drive a permission names, not folders, the trash or other drives", async () => {

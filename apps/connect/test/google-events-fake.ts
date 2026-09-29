@@ -12,6 +12,9 @@ type Item = Record<string, unknown>;
 /** Where a mailbox's history IDs start. */
 const historyBase = 1_804_000;
 
+/** How far apart the history IDs of consecutive records are. */
+const historyStep = 7;
+
 const json = (body: unknown, status = 200): Response =>
   Response.json(body, { status });
 
@@ -49,7 +52,11 @@ export const googleEventsFake = () => {
       return notFound();
     }
     const mailbox = mailboxOf(found.address);
-    const now = String(historyBase + mailbox.records.length);
+    // History IDs aren't consecutive: record n (from 1) is `historyBase +
+    // n * historyStep`, and only IDs Gmail issued are taken.
+    const idOf = (records: number): string =>
+      String(historyBase + records * historyStep);
+    const now = idOf(mailbox.records.length);
     const messages = mailbox.records.flat();
     if (found.rest === "profile") {
       return json({
@@ -60,12 +67,17 @@ export const googleEventsFake = () => {
       });
     }
     if (found.rest === "history") {
-      const from =
-        Number(
-          url.searchParams.get("pageToken") ??
-            url.searchParams.get("startHistoryId")
-        ) - historyBase;
-      if (from < mailbox.forgotten) {
+      const token = url.searchParams.get("pageToken");
+      const after =
+        (Number(url.searchParams.get("startHistoryId")) - historyBase) /
+        historyStep;
+      // A page token is a position; a history ID must be one issued.
+      const from = token === null ? after : Number(token.slice(1));
+      if (
+        !Number.isInteger(from) ||
+        from > mailbox.records.length ||
+        from < mailbox.forgotten
+      ) {
         return notFound();
       }
       const size = Number(url.searchParams.get("maxResults") ?? "100");
@@ -73,15 +85,13 @@ export const googleEventsFake = () => {
       const to = from + page.length;
       return json({
         history: page.map((record, index) => ({
-          id: String(historyBase + from + index + 1),
+          id: idOf(from + index + 1),
           messages: record.map(({ id, threadId }) => ({ id, threadId })),
           messagesAdded: record.map(({ id, threadId, labelIds }) => ({
             message: { id, threadId, labelIds },
           })),
         })),
-        ...(to < mailbox.records.length
-          ? { nextPageToken: String(historyBase + to) }
-          : {}),
+        ...(to < mailbox.records.length ? { nextPageToken: `p${to}` } : {}),
         historyId: now,
       });
     }

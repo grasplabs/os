@@ -262,27 +262,29 @@ interface HistoryRecord {
 const skipMark = "#skip=";
 
 /**
- * Where a read inside record `record` goes on from: the history from just
- * before it (Gmail's history IDs grow, and a history read starts after
- * the ID it names), skipping the `skip` of its messages already read.
+ * Where a read inside a record goes on from: `before`, a position Gmail
+ * issued whose history starts with that record (the record before it, or
+ * where this read began), skipping the `skip` of its messages already
+ * read. Never an ID Gmail didn't issue: its IDs aren't consecutive, and
+ * it may refuse one it never gave.
  */
-const insideRecord = (
-  mailbox: string,
-  record: HistoryRecord,
-  skip: number
-): string =>
-  `${historyFrom(mailbox, (BigInt(record.id) - 1n).toString())}${skipMark}${skip}`;
+const insideRecord = (before: string, skip: number): string =>
+  `${before}${skipMark}${skip}`;
 
 /**
  * The messages of `records` a read takes, skipping the first `skip` of
  * the first record's (read before), at most `readMaxItems`: and, when
  * records are left, where it stopped: inside a record (`offset`, its
- * messages read so far), or after one it read in full.
+ * messages read so far, and `previous`, the record before it in this
+ * read, if any), or after one it read in full.
  */
 const takeMessages = (
   records: readonly HistoryRecord[],
   skip: number
-): { ids: string[]; stop?: { record: HistoryRecord; offset?: number } } => {
+): {
+  ids: string[];
+  stop?: { record: HistoryRecord; offset?: number; previous?: HistoryRecord };
+} => {
   const ids: string[] = [];
   for (const [index, record] of records.entries()) {
     const from = index === 0 ? skip : 0;
@@ -290,7 +292,10 @@ const takeMessages = (
     const messages = record.messages.slice(from);
     if (messages.length > room) {
       ids.push(...messages.slice(0, room));
-      return { ids, stop: { record, offset: from + room } };
+      return {
+        ids,
+        stop: { record, offset: from + room, previous: records[index - 1] },
+      };
     }
     ids.push(...messages);
     if (ids.length === readMaxItems && index < records.length - 1) {
@@ -373,13 +378,17 @@ const mailReceived: EventKind = {
     const taken = takeMessages(walked.items, skip);
     let { cursor, more } = walked;
     if (taken.stop !== undefined) {
-      const { record, offset } = taken.stop;
+      const { record, offset, previous } = taken.stop;
       more = true;
-      // Inside the record, or after it when it's all read.
+      // After the record when it's all read; else inside it, from the
+      // record before it, or from where this read began when it was the
+      // first.
+      const before =
+        previous === undefined ? start : historyFrom(mailbox, previous.id);
       cursor =
         offset === undefined
           ? historyFrom(mailbox, record.id)
-          : insideRecord(mailbox, record, offset);
+          : insideRecord(before, offset);
     }
     const { ids } = taken;
     const events = await mailEventsOf(read.access, mailbox, [...new Set(ids)]);
