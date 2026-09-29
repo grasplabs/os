@@ -950,6 +950,24 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
+   * The title of `personId`'s own chat `chatId`; `null` when it is gone,
+   * or not theirs. For a review of what the chat's agent proposed, read by
+   * the person it acted for alone: a title may quote their question.
+   */
+  chatTitle(chatId: unknown, personId: string): string | null {
+    const id = chatIdSchema.safeParse(chatId);
+    if (!id.success) {
+      return null;
+    }
+    const row = this.#db
+      .select({ title: chats.title, personId: chats.personId })
+      .from(chats)
+      .where(eq(chats.id, id.data))
+      .get();
+    return row?.personId === personId ? row.title : null;
+  }
+
+  /**
    * Writes `changes` into the chat's draft of App `appId`, over version
    * `base`, and drops its changes to the paths in `unchanged` (back as the
    * base has them), only over the revision `revision` the write read (0:

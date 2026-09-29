@@ -20,6 +20,11 @@ ${body}
 });
 `;
 
+// Two calls whose 32-bit FNV-1a hashes were the same: compared as
+// written, they differ.
+const mail = (to: string): string =>
+  `await step.do("mail", { description: "Mail" }, async () => await env.MAIL.call("mail.send", ${JSON.stringify(to)}));`;
+
 describe(describeWorkflow, () => {
   it("shows a step in a loop once, nested under the loop", () => {
     expect(outlineOf(payoutSource)).toStrictEqual([
@@ -78,7 +83,14 @@ describe(describeWorkflow, () => {
     timeout: params.signTimeout,
   });`);
 
-    expect(describeWorkflow(source).steps).toStrictEqual([
+    // Each step's code, as whether it is its call as written.
+    const steps = describeWorkflow(source).steps.map((node) =>
+      node.type === "step"
+        ? { ...node, code: node.code.startsWith(`step.`) }
+        : node
+    );
+
+    expect(steps).toStrictEqual([
       {
         type: "step",
         name: "pause",
@@ -88,6 +100,7 @@ describe(describeWorkflow, () => {
         locked: false,
         params: [],
         options: { duration: "1 hour" },
+        code: true,
         line: 6,
       },
       {
@@ -99,6 +112,7 @@ describe(describeWorkflow, () => {
         locked: false,
         params: ["signTimeout"],
         options: { type: "document.signed" },
+        code: true,
         line: 7,
       },
     ]);
@@ -228,6 +242,73 @@ describe(describeWorkflow, () => {
     for (const [body, message] of cases) {
       expect(() => describeWorkflow(workflowSource(body))).toThrow(message);
     }
+  });
+
+  it("names the App's bindings each step calls, which may change things", () => {
+    const source = workflowSource(
+      [
+        `const total = await step.do("read", { description: "Read" }, async () => 1);`,
+        `await step.do("book", { description: "Book", input: total }, async () => await bindings.APP.call("book", total));`,
+        `await step.do("mail", { description: "Mail" }, async () => [await bindings.MAIL.call("mail.send", {}), await use(bindings)]);`,
+      ].join("\n"),
+      "step, { input, env: bindings }"
+    );
+
+    expect(
+      describeWorkflow(source).steps.map((node) =>
+        node.type === "step" ? { name: node.name, env: node.env } : node.type
+      )
+    ).toStrictEqual([
+      { name: "read", env: undefined },
+      { name: "book", env: ["APP"] },
+      { name: "mail", env: ["MAIL", "env"] },
+    ]);
+    expect(() =>
+      describeWorkflow(
+        workflowSource(
+          `await step.do("x", { description: "X" }, async () => 1);`,
+          "step, { env: { APP } }"
+        )
+      )
+    ).toThrow("Call the App's bindings as `env.NAME`");
+  });
+
+  it("says every step may call the App's bindings when a helper or alias reads them", () => {
+    const envOf = (body: string): unknown[] =>
+      describeWorkflow(workflowSource(body, "step, { input, env }")).steps.map(
+        (node) => (node.type === "step" ? node.env : node.type)
+      );
+    const steps = [
+      `await step.do("read", { description: "Read" }, async () => 1);`,
+      `await step.do("book", { description: "Book" }, async () => await book());`,
+    ].join("\n");
+
+    // A helper that reads env, called from a step.
+    expect(
+      envOf(
+        `const book = async () => await env.APP.call("book", input);\n${steps}`
+      )
+    ).toStrictEqual([["env"], ["env"]]);
+    // An alias of env.
+    expect(
+      envOf(
+        `const bindings = env;\nconst book = async () => await bindings.APP.call("book");\n${steps}`
+      )
+    ).toStrictEqual([["env"], ["env"]]);
+  });
+
+  it("keeps each step's call as written, so any change to its code shows", () => {
+    const codeOf = (body: string): string | undefined => {
+      const [first] = describeWorkflow(
+        workflowSource(body, "step, { env }")
+      ).steps;
+      return first?.type === "step" ? first.code : undefined;
+    };
+
+    expect(codeOf(mail("hwczrv0to6"))).toBe(
+      mail("hwczrv0to6").replace("await ", "").replace(/;$/u, "")
+    );
+    expect(codeOf(mail("hwczrv0to6"))).not.toBe(codeOf(mail("flfoi83s5j")));
   });
 
   it("rejects a source without exactly one workflow, or that doesn't parse", () => {

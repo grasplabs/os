@@ -212,11 +212,14 @@ export type Feature =
    */
   | "chat"
   /**
-   * The chat's agent building Apps (agent-builds.ts): creating one, and
-   * writing, checking and dry-running a draft of its own per chat; needs
+   * The chat's agent building Apps (agent-builds.ts): creating one,
+   * writing, checking and dry-running a draft of its own per chat, and
+   * proposing it as a pending version for a builder to make current, with
+   * the permissions it asks for; needs
    * `apps`, `agent` and `apps_collection` on too (the agent's
    * permission to build is on the Apps collection). While off, it does
-   * none of that; drafts already written stay with their chats.
+   * none of that; drafts already written stay with their chats, and
+   * versions it proposed stay up for review.
    */
   | "app_builder";
 

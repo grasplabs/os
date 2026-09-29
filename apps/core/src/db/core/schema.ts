@@ -1,4 +1,4 @@
-import type { AppExports } from "@grasp-os/shared/apps";
+import type { AgentProposer, AppExports } from "@grasp-os/shared/apps";
 import { auditRejectReasons } from "@grasp-os/shared/audit";
 import type { Json } from "@grasp-os/shared/json";
 import { signalKinds } from "@grasp-os/shared/signals";
@@ -317,6 +317,14 @@ export const permissions = sqliteTable(
     grantedAt: timestamp("granted_at"),
     revokedBy: text("revoked_by"),
     revokedAt: timestamp("revoked_at"),
+    /**
+     * The chat's agent that asked for it, for `requested_by` (JSON,
+     * `AgentProposer`); null when the person asked themselves. A row the
+     * previous release writes gets none.
+     */
+    requestedVia: text("requested_via", {
+      mode: "json",
+    }).$type<AgentProposer>(),
   },
   (table) => [
     index("permissions_subject_idx").on(
@@ -455,6 +463,12 @@ export const appVersions = sqliteTable(
       .$type<AppExports>()
       .notNull()
       .default(sql`'{}'`),
+    /**
+     * The chat's agent that wrote and proposed it, for `author_id` (JSON,
+     * `AgentProposer`); null for a version a person committed. A row the
+     * previous release writes gets none.
+     */
+    proposedBy: text("proposed_by", { mode: "json" }).$type<AgentProposer>(),
   },
   (table) => [primaryKey({ columns: [table.appId, table.version] })]
 );

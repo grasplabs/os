@@ -612,7 +612,7 @@ const withoutCode = (nodes: readonly OutlineNode[]): OutlineNode[] =>
   nodes.map((node): OutlineNode => {
     if (node.type === "step") {
       const { key: _key, ...step } = node;
-      return { ...step, params: [], options: {} };
+      return { ...step, params: [], options: {}, code: "" };
     }
     if (node.type === "loop") {
       return {
