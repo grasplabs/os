@@ -207,6 +207,17 @@ export const skipReason = (
   return newer && client.pinnedReleaseId !== release.id ? "newer" : null;
 };
 
+/**
+ * The release every Worker of `client` runs, as the console last made it
+ * live; null when they don't run one release (none deployed yet, or a
+ * deploy stopped between them).
+ */
+export const runningRelease = (client: TargetClient): string | null => {
+  const onReleases = new Set(client.workers.map(({ releaseId }) => releaseId));
+  const [release = null] = onReleases.size === 1 ? onReleases : [];
+  return release;
+};
+
 /** A client whose Worker's traffic is split between versions: a rollout doesn't start on it. */
 export class TrafficSplitError extends Error {
   constructor(scriptName: string) {
@@ -236,10 +247,8 @@ export const previousRunOf = async (
     }
     versions[worker] = live;
   }
-  const onReleases = new Set(client.workers.map(({ releaseId }) => releaseId));
-  const [release = null] = onReleases.size === 1 ? onReleases : [];
   return {
-    release,
+    release: runningRelease(client),
     generation: await mappedGeneration(hosts, hostname),
     versions,
   };

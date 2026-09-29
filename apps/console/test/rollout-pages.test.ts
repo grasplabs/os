@@ -62,11 +62,12 @@ const recordClient = async (ring: number, pinnedReleaseId?: string) => {
 };
 
 /**
- * A rollout of `releaseId` waiting for approval after ring 0, which it
- * reached `reached` in, with `pending` in ring 1: as its run leaves it.
+ * A rollout of `releaseId` (a secrets rollout for null) waiting for
+ * approval after ring 0, which it reached `reached` in, with `pending` in
+ * ring 1: as its run leaves it.
  */
 const waitingRollout = async (
-  releaseId: string,
+  releaseId: string | null,
   reached: string,
   pending: string
 ): Promise<string> => {
@@ -75,7 +76,7 @@ const waitingRollout = async (
   await db.batch([
     db.insert(rollouts).values({
       id,
-      kind: "release",
+      kind: releaseId === null ? "secrets" : "release",
       releaseId,
       status: "waiting",
       ring: 0,
@@ -199,6 +200,35 @@ describe("the rollout pages", () => {
       clients: true,
       rollBackClient: 1,
       rollBackRing: [true, false],
+    });
+  });
+
+  it("offer a secrets rollout, and show one as secrets only in the list and on its page", async () => {
+    await importedRelease();
+    const reached = await recordClient(0);
+    const pending = await recordClient(1);
+    const rolloutId = await waitingRollout(null, reached, pending);
+
+    const [list, own] = await Promise.all([
+      page("/rollouts"),
+      page(`/rollouts/${rolloutId}`),
+    ]);
+
+    expect({
+      // The form's choice, and the listed rollout: the only secrets
+      // rollout this file starts.
+      shown: count(list.html, ">Secrets only<"),
+      listed: list.html.includes(`href="/rollouts/${rolloutId}"`),
+      own: {
+        says: own.html.includes(
+          "Secrets only, on each client&#x27;s own release"
+        ),
+        approve: own.html.includes("Approve the next ring"),
+      },
+    }).toStrictEqual({
+      shown: 2,
+      listed: true,
+      own: { says: true, approve: true },
     });
   });
 

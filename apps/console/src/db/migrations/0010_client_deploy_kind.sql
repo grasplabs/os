@@ -1,0 +1,1 @@
+ALTER TABLE `client_deploys` ADD `kind` text DEFAULT 'release' NOT NULL;

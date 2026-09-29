@@ -197,6 +197,29 @@ export interface UploadInputs {
   secrets: readonly Secret[];
 }
 
+/** HMAC-SHA256 of `inputs`, as canonical JSON, under `key`: hex. */
+const keyedHash = async (key: string, inputs: unknown): Promise<string> => {
+  const hmacKey = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    hmacKey,
+    encoder.encode(canonicalJson(z.json().parse(inputs)))
+  );
+  return toHex(new Uint8Array(mac));
+};
+
+/** Secrets as `[name, value]` pairs, by name. */
+const sortedSecrets = (secrets: readonly Secret[]): [string, string][] =>
+  secrets
+    .map(({ name, value }): [string, string] => [name, value])
+    .toSorted(([a], [b]) => (a < b ? -1 : 1));
+
 /**
  * A fingerprint of everything that goes into a Worker's upload: its
  * secrets' names and values (the previous keys included, when given), its
@@ -209,8 +232,8 @@ export interface UploadInputs {
 export const uploadFingerprint = async (
   key: string,
   { manifest, worker, databases, vars, secrets }: UploadInputs
-): Promise<string> => {
-  const inputs = z.json().parse({
+): Promise<string> =>
+  await keyedHash(key, {
     compatibilityDate: manifest.compatibilityDate,
     compatibilityFlags: worker.compatibilityFlags,
     mainModule: worker.mainModule,
@@ -224,21 +247,15 @@ export const uploadFingerprint = async (
     durableObjectMigrations: worker.durableObjectMigrations,
     bindings: renderBindings(worker, databases),
     vars,
-    secrets: secrets
-      .map(({ name, value }) => [name, value])
-      .toSorted(([a = ""], [b = ""]) => (a < b ? -1 : 1)),
+    secrets: sortedSecrets(secrets),
   });
-  const hmacKey = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const mac = await crypto.subtle.sign(
-    "HMAC",
-    hmacKey,
-    encoder.encode(canonicalJson(inputs))
-  );
-  return toHex(new Uint8Array(mac));
-};
+
+/**
+ * A fingerprint of a Worker's secrets alone, names and values, keyed as
+ * `uploadFingerprint` is: two versions with the same one run with the
+ * same secrets, so they may share traffic (src/rollout/workflow.ts).
+ */
+export const secretsFingerprint = async (
+  key: string,
+  secrets: readonly Secret[]
+): Promise<string> => await keyedHash(key, { secrets: sortedSecrets(secrets) });

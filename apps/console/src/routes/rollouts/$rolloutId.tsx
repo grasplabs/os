@@ -278,7 +278,12 @@ const Rollout = () => {
     };
   }, [going, router]);
   const facts: [string, string][] = [
-    ["Release", rollout.releaseId ?? ""],
+    [
+      "Release",
+      rollout.kind === "secrets"
+        ? "Secrets only, on each client's own release"
+        : (rollout.releaseId ?? ""),
+    ],
     ["Started by", rollout.startedBy],
     ["Started (UTC)", formatTime(rollout.createdAt)],
   ];

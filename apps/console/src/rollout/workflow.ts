@@ -11,8 +11,15 @@
  * a pause at each (`gradualStages`), then all of it; then the smoke check
  * and the router's map (src/deploy/deploy.ts). A Worker's first upload,
  * or one with Durable Object migrations, goes live at once, and so does
- * every Worker while a secrets rotation is still to go live: versions
- * with different secrets can't share traffic.
+ * every Worker whose new version has other secrets than the one before
+ * (a rotation still to go live, or shared secrets changed in Secrets
+ * Store): versions with different secrets can't share traffic.
+ *
+ * A secrets rollout (no release) takes the shared secrets in Secrets
+ * Store now to clients without a code release: it deploys each client's
+ * own release again, as a `secrets` deploy, every Worker live at once.
+ * Everything else is a release rollout's: claims, rings, approvals,
+ * cancelling, rollbacks and audit.
  *
  * One runner per client: the rollout claims each client in D1 before it
  * deploys it and releases it after (src/runners.ts), so it never
@@ -85,6 +92,7 @@ import {
   parsePrevious,
   previousRunOf,
   ringsOf,
+  runningRelease,
   skipReason,
   targetClient,
   TrafficSplitError,
@@ -94,7 +102,11 @@ import type { PreviousRun, TargetClient } from "./targets.ts";
 /** What a rollout's run is started with: identifiers only, since Workflows stores them. */
 export interface RolloutParams {
   rolloutId: string;
-  releaseId: string;
+  /**
+   * The release it rolls out; null for a secrets rollout, which deploys
+   * each client's own release again with the secrets in Secrets Store now.
+   */
+  releaseId: string | null;
   /** The staff member who started it. */
   startedBy: Staff;
 }
@@ -361,14 +373,50 @@ const readPrevious = async (
 };
 
 /**
+ * The release rollout `params` deploys to `client`, and why it skips the
+ * client instead, if it does: one no longer active (`not_active`); for a
+ * release rollout, its release, skipped as `skipReason` says; for a
+ * secrets rollout, the release the client runs (`runningRelease`),
+ * whatever it's pinned to, skipped (`no_release`) while its Workers don't
+ * run one release.
+ */
+const releaseFor = async (
+  db: ConsoleDatabase,
+  params: RolloutParams,
+  client: TargetClient
+): Promise<{ releaseId: string | null; skip: string | null }> => {
+  const active = client.status === "active";
+  if (params.releaseId === null) {
+    const running = runningRelease(client);
+    if (!active) {
+      return { releaseId: running, skip: "not_active" };
+    }
+    return { releaseId: running, skip: running === null ? "no_release" : null };
+  }
+  const [release] = await db
+    .select({ id: releases.id, builtAt: releases.builtAt })
+    .from(releases)
+    .where(eq(releases.id, params.releaseId));
+  if (release === undefined) {
+    throw stop(
+      "release_not_imported",
+      `Release ${params.releaseId} isn't imported`
+    );
+  }
+  return {
+    releaseId: release.id,
+    skip: active ? skipReason(client, release) : "not_active",
+  };
+};
+
+/**
  * Claims client `clientId` for the rollout, unless it skips it, and
  * returns the deploy it runs and what the client ran before. A client
- * that's no longer active, pinned to another release, or on this one
- * already (with no rotation waiting) or a newer one (`skipReason`), is
- * skipped, audited, unless the rollout is deploying it already; a
- * rollout staff stopped goes no further. What it ran before is read
- * once, before anything of the release is live, and kept on its target,
- * which stays `pending` until its first step starts (`markStarted`).
+ * the rollout has no release for, or skips (`releaseFor`), is skipped,
+ * audited, unless the rollout is deploying it already; a rollout staff
+ * stopped goes no further. What it ran before is read once, before
+ * anything of the release is live, and kept on its target, which stays
+ * `pending` until its first step starts (`markStarted`).
  */
 const claimTarget = async (
   env: Env,
@@ -376,7 +424,7 @@ const claimTarget = async (
   params: RolloutParams,
   clientId: string
 ): Promise<Claimed> => {
-  const { rolloutId, releaseId } = params;
+  const { rolloutId } = params;
   if (await isCancelled(db, rolloutId)) {
     return { state: "cancelled" };
   }
@@ -392,17 +440,16 @@ const claimTarget = async (
     return { state: "skipped" };
   }
   const client = await targetClient(db, clientId);
-  const [release] = await db
-    .select({ id: releases.id, builtAt: releases.builtAt })
-    .from(releases)
-    .where(eq(releases.id, releaseId));
-  if (release === undefined) {
-    throw stop("release_not_imported", `Release ${releaseId} isn't imported`);
-  }
-  const skip =
-    client?.status === "active" ? skipReason(client, release) : "not_active";
-  if (client === undefined || (skip !== null && target.status === "pending")) {
-    await skipTarget(db, rolloutId, clientId, skip ?? "not_active");
+  const { releaseId, skip } =
+    client === undefined
+      ? { releaseId: null, skip: "not_active" }
+      : await releaseFor(db, params, client);
+  if (
+    client === undefined ||
+    releaseId === null ||
+    (skip !== null && target.status === "pending")
+  ) {
+    await skipTarget(db, rolloutId, clientId, skip ?? "no_release");
     return { state: "skipped" };
   }
   await claimClient(env, db, rolloutId, clientId);
@@ -410,7 +457,13 @@ const claimTarget = async (
     parsePrevious(target.previous) ?? (await readPrevious(env, client));
   const deployId =
     target.deployId ??
-    (await startDeploy(db, params.startedBy, clientId, releaseId));
+    (await startDeploy(
+      db,
+      params.startedBy,
+      clientId,
+      releaseId,
+      params.releaseId === null ? "secrets" : "release"
+    ));
   // Still pending: claimed, but nothing of it started yet.
   await db
     .update(rolloutTargets)
@@ -522,6 +575,7 @@ const deployClaimed = async (
     }
   );
   for (const app of prepared?.apps ?? []) {
+    const before = previous.versions[app];
     // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
     const uploaded = await clientStep(
       step,
@@ -534,7 +588,8 @@ const deployClaimed = async (
           await context(),
           deployId,
           app,
-          prepared?.databases ?? {}
+          prepared?.databases ?? {},
+          before
         )
     );
     if (uploaded === null) {
@@ -542,11 +597,15 @@ const deployClaimed = async (
       // successors got that far.
       break;
     }
-    const before = previous.versions[app];
-    // Versions with different secrets can't share traffic: a rotation
-    // still to go live (the new versions carry a generation the router
-    // doesn't send yet) goes live at once.
-    const sameSecrets = prepared?.generation === previous.generation;
+    // Versions with different secrets can't share traffic, so new ones go
+    // live at once: a rotation still to go live (the new versions carry a
+    // generation the router doesn't send yet), shared secrets changed in
+    // Secrets Store since the version before, or one whose secrets aren't
+    // on record. A secrets rollout exists to change them: always at once.
+    const sameSecrets =
+      params.releaseId !== null &&
+      uploaded.sameSecrets &&
+      prepared?.generation === previous.generation;
     if (
       !uploaded.live &&
       sameSecrets &&

@@ -5,8 +5,9 @@
  * versions are there, with their own secrets, so nothing is uploaded.
  * Migrations only expand for the release after, so the previous code runs
  * on the database the release left, as long as the previous release is
- * the one right before it; a client further back isn't rolled back.
- * Crons and Workflows stay as the release set them.
+ * the one right before it (or the same one, after a secrets rollout,
+ * which puts the previous shared secrets back); a client further back
+ * isn't rolled back. Crons and Workflows stay as the release set them.
  *
  * A rollback is a runner like the others (src/runners.ts): a Workflow
  * instance, `RollbackClient`, that claims the client, taking it from the
@@ -309,7 +310,7 @@ const movedOffPrevious = async (
  * nothing to undo), the rollout's deploy is still its latest
  * (`superseded`) and past its resources and migrations
  * (`client_busy`: nothing of it is live before), what it ran before is the release right
- * before the rollout's (`too_far_back`), and its secrets generation is
+ * before the rollout's, or the same one (`too_far_back`), and its secrets generation is
  * the one the previous versions carry, in the console and the router's
  * map (`rotated_since`: the router would send a secret they don't have).
  */
@@ -373,7 +374,12 @@ const check = async (
       `${clientId} runs what it ran before rollout ${rolloutId} already`
     );
   }
-  if (!(await isReleaseBefore(db, latest.releaseId, previous.release))) {
+  // A secrets rollout's client ran the same release before: its code
+  // runs on the database as it is.
+  if (
+    previous.release !== latest.releaseId &&
+    !(await isReleaseBefore(db, latest.releaseId, previous.release))
+  ) {
     throw new RolloutError(
       "too_far_back",
       `${clientId} ran ${previous.release ?? "several releases"} before, not the release right before ${latest.releaseId}: roll out instead`

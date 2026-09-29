@@ -29,7 +29,7 @@ export const rolloutErrorCodes = [
   "superseded",
   /**
    * What the client ran before isn't the release right before the
-   * rollout's: its migrations only keep that one working.
+   * rollout's, or the same one: its migrations only keep those working.
    */
   "too_far_back",
   /** The client's secrets rotated since, which its previous versions don't have. */

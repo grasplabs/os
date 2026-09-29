@@ -15,6 +15,7 @@ const listed = 50;
 /** A rollout as the list shows it. */
 export interface RolloutSummary {
   id: string;
+  kind: (typeof rollouts.kind.enumValues)[number];
   releaseId: string | null;
   status: (typeof rollouts.status.enumValues)[number];
   ring: number;
@@ -29,6 +30,7 @@ export const listRollouts = async (
   await db
     .select({
       id: rollouts.id,
+      kind: rollouts.kind,
       releaseId: rollouts.releaseId,
       status: rollouts.status,
       ring: rollouts.ring,
@@ -65,6 +67,7 @@ export const getRollout = async (
   const [rollout] = await db
     .select({
       id: rollouts.id,
+      kind: rollouts.kind,
       releaseId: rollouts.releaseId,
       status: rollouts.status,
       ring: rollouts.ring,

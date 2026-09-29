@@ -1,3 +1,4 @@
+import { platformChangeSchema } from "@grasp-os/shared/platform-change";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { and, asc, eq, inArray, sql } from "drizzle-orm";
@@ -41,7 +42,11 @@ import {
 import type { AccountState } from "./cloudflare-api-kit.ts";
 import { mockCloudflareApi } from "./cloudflare-api.ts";
 import { publishRelease } from "./releases.ts";
-import { emptyStoreSecret, useStoreSecrets } from "./secrets-store.ts";
+import {
+  emptyStoreSecret,
+  setStoreSecret,
+  useStoreSecrets,
+} from "./secrets-store.ts";
 
 const token = "test-deployer-token-rollout-5d1e7a";
 const tenantToken = "test-tenant-admin-token-rollout-9c3f20";
@@ -255,7 +260,14 @@ const landLateDuringRollback = (
 const rollOut = async (
   releaseId: string,
   scope: StartRolloutInput["scope"]
-): Promise<string> => await startRollout(env, staff, { releaseId, scope });
+): Promise<string> =>
+  await startRollout(env, staff, { kind: "release", releaseId, scope });
+
+/** Starts a secrets rollout for `scope`, as staff. */
+const rollOutSecrets = async (
+  scope: StartRolloutInput["scope"]
+): Promise<string> =>
+  await startRollout(env, staff, { kind: "secrets", scope });
 
 /** The release and version each of the client's Workers runs, as the console recorded it. */
 const workersOf = async (clientId: string) =>
@@ -1089,6 +1101,250 @@ const cancelled = (
   runner: null,
 });
 
+/** The Microsoft OAuth app's secret after a rotation in 1Password. */
+const rotatedMicrosoft = "microsoft-secret-rotated-4b7e1c";
+
+/** Rotates the Microsoft OAuth app's secret in Secrets Store, as deploy-ops does. */
+const rotateMicrosoftSecret = async (): Promise<void> => {
+  await setStoreSecret(
+    env.MICROSOFT_CLIENT_SECRET,
+    "MICROSOFT_CLIENT_SECRET",
+    rotatedMicrosoft
+  );
+};
+
+/** The value of secret `name` on the version all of `script`'s traffic goes to. */
+const liveSecretOf = (
+  account: AccountState,
+  script: string,
+  name: string
+): string | undefined => {
+  const live = liveOf(account, script);
+  return account.scripts
+    .get(script)
+    ?.versions.find(({ id }) => id === live)
+    ?.secrets.get(name);
+};
+
+/**
+ * Each of the client's Workers' deployments after the first `skip`, by
+ * app: its live version's share of each, oldest first.
+ */
+const liveSharesOf = async (
+  clientId: string,
+  account: AccountState,
+  skip: Record<string, number>
+): Promise<Record<string, number[][]>> => {
+  const workers = await workersOf(clientId);
+  return Object.fromEntries(
+    workers.map(({ worker, scriptName, versionId }) => [
+      worker,
+      deploymentsOf(account, scriptName, skip[scriptName] ?? 0, [
+        versionId ?? "",
+      ]),
+    ])
+  );
+};
+
+describe("rolling new secrets out", () => {
+  useStoreSecrets({ deployer: token, tenant: tenantToken });
+  beforeEach(setAsideEarlierTests);
+
+  it("takes a rotated shared secret to every client on the release it runs, all traffic at once, ring by ring, audited", async () => {
+    const older = await importedRelease("feat(core): what ring 0 runs");
+    const newer = await importedRelease("feat(core): what ring 2 runs");
+    const internal = await activeClient(0, older);
+    const acme = await activeClient(2, newer);
+    // Pinned to another release than it runs: the secrets still reach it.
+    await db
+      .update(clients)
+      .set({ pinnedReleaseId: older })
+      .where(eq(clients.id, acme.clientId));
+    const [internalConnect] = await workersOf(internal.clientId);
+    const [acmeConnect] = await workersOf(acme.clientId);
+    const skip = {
+      internal: deploymentCounts(internal.account),
+      acme: deploymentCounts(acme.account),
+    };
+    await rotateMicrosoftSecret();
+    const logged: unknown[] = [];
+    const logs = (["info", "warn", "error", "log"] as const).map((level) =>
+      vi.spyOn(console, level).mockImplementation((...args: unknown[]) => {
+        logged.push(args);
+      })
+    );
+    await using run = await followRollouts();
+
+    const rolloutId = await rollOutSecrets({ scope: "all" });
+    await expect(
+      run.waitForStepResult({ name: "ring 2 approved" })
+    ).resolves.toBe("waiting");
+    const acmeBeforeApproval = deploymentCounts(acme.account);
+    await approveRollout(env, staff, rolloutId);
+    await run.waitForStatus("complete");
+    for (const spy of logs) {
+      spy.mockRestore();
+    }
+
+    const connectScript = internalConnect?.scriptName ?? "";
+    const internalWorkers = await workersOf(internal.clientId);
+    const acmeWorkers = await workersOf(acme.clientId);
+    const core = acmeWorkers.find(({ worker }) => worker === "core");
+    const coreVersion = acme.account.scripts
+      .get(core?.scriptName ?? "")
+      ?.versions.find(({ id }) => id === core?.versionId);
+    // What changed, and by whom; not when.
+    const change = platformChangeSchema.omit({ at: true }).parse(
+      z
+        .array(z.object({ name: z.string(), json: z.unknown().optional() }))
+        .parse(coreVersion?.metadata.bindings ?? [])
+        .find(({ name }) => name === "PLATFORM_CHANGE")?.json
+    );
+    const [start] = await db
+      .select({ detail: auditEvents.detail })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.target, rolloutId),
+          eq(auditEvents.action, "rollout.start")
+        )
+      );
+    expect({
+      acmeBeforeApproval,
+      releases: {
+        internal: internalWorkers.map(({ releaseId }) => releaseId),
+        acme: acmeWorkers.map(({ releaseId }) => releaseId),
+      },
+      microsoft: {
+        internal: liveSecretOf(
+          internal.account,
+          connectScript,
+          "MICROSOFT_CLIENT_SECRET"
+        ),
+        acme: liveSecretOf(
+          acme.account,
+          acmeConnect?.scriptName ?? "",
+          "MICROSOFT_CLIENT_SECRET"
+        ),
+      },
+      shares: {
+        internal: await liveSharesOf(
+          internal.clientId,
+          internal.account,
+          skip.internal
+        ),
+        acme: await liveSharesOf(acme.clientId, acme.account, skip.acme),
+      },
+      change,
+      start: parsedDetail(start?.detail ?? null),
+      rollout: await rolloutRow(rolloutId),
+      targets: await targetsOf(rolloutId),
+      actions: await rolloutActions(rolloutId),
+    }).toStrictEqual({
+      // Ring 2 waits for approval, untouched.
+      acmeBeforeApproval: skip.acme,
+      releases: { internal: [older, older], acme: [newer, newer] },
+      microsoft: { internal: rotatedMicrosoft, acme: rotatedMicrosoft },
+      // Every Worker straight to its new version: never split.
+      shares: {
+        internal: { connect: [[100]], core: [[100]] },
+        acme: { connect: [[100]], core: [[100]] },
+      },
+      // Core records new secrets on the release it runs, not a release.
+      change: { by: staff.email, what: "secrets", release: newer },
+      start: { kind: "secrets", scope: "all", targets: 2 },
+      rollout: { status: "done", ring: 2 },
+      targets: {
+        [internal.clientId]: { ring: 0, status: "done", error: null },
+        [acme.clientId]: { ring: 2, status: "done", error: null },
+      },
+      actions: [
+        "rollout.start",
+        "rollout.client_start",
+        "rollout.client_done",
+        "rollout.wait",
+        "rollout.approve",
+        "rollout.client_start",
+        "rollout.client_done",
+        "rollout.done",
+      ],
+    });
+    // The secret's value is in no log line, audit event or deploy record.
+    const events = await db.select().from(auditEvents);
+    const deploys = await db.select().from(clientDeploys);
+    expect(
+      JSON.stringify({
+        logged,
+        events,
+        deploys,
+      })
+    ).not.toContain(rotatedMicrosoft);
+  });
+
+  it("skips a client whose Workers don't run one release, deploying nothing to it", async () => {
+    const older = await importedRelease("feat(core): what connect runs");
+    const newer = await importedRelease("feat(core): what core runs");
+    const internal = await activeClient(0, older);
+    // A deploy of the newer release stopped after core went live.
+    await db
+      .update(clientWorkers)
+      .set({ releaseId: newer })
+      .where(
+        and(
+          eq(clientWorkers.clientId, internal.clientId),
+          eq(clientWorkers.worker, "core")
+        )
+      );
+    const counts = deploymentCounts(internal.account);
+    await rotateMicrosoftSecret();
+    await using run = await followRollouts();
+
+    const rolloutId = await rollOutSecrets({ scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    expect({
+      targets: await targetsOf(rolloutId),
+      deployments: deploymentCounts(internal.account),
+    }).toStrictEqual({
+      targets: {
+        [internal.clientId]: {
+          ring: 0,
+          status: "skipped",
+          error: "no_release",
+        },
+      },
+      deployments: counts,
+    });
+  });
+
+  it("sends a Worker all its traffic at once in a release rollout when a shared secret it has changed since, and the others by stages", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const skip = deploymentCounts(internal.account);
+    // Rotated in Secrets Store, and no secrets rollout since: only connect
+    // has the Microsoft app's secret.
+    await rotateMicrosoftSecret();
+    const release = await importedRelease("feat(core): after a rotation");
+    await using run = await followRollouts();
+
+    await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    const [connect] = await workersOf(internal.clientId);
+    expect({
+      shares: await liveSharesOf(internal.clientId, internal.account, skip),
+      microsoft: liveSecretOf(
+        internal.account,
+        connect?.scriptName ?? "",
+        "MICROSOFT_CLIENT_SECRET"
+      ),
+    }).toStrictEqual({
+      shares: { connect: [[100]], core: [[10], [50], [100]] },
+      microsoft: rotatedMicrosoft,
+    });
+  });
+});
+
 describe("controlling a rollout", () => {
   useStoreSecrets({ deployer: token, tenant: tenantToken });
   beforeEach(setAsideEarlierTests);
@@ -1624,6 +1880,37 @@ describe("controlling a rollout", () => {
       },
       counts,
       runner: { runId: "rollback-elsewhere", kind: "rollback" },
+    });
+  });
+
+  it("rolls a client back from a secrets rollout to the versions, and so the secrets, it ran before", async () => {
+    const release = await importedRelease("feat(core): what it runs");
+    const internal = await activeClient(0, release);
+    await activeClient(1, release);
+    const previous = await recordedVersionsOf(internal.clientId);
+    const [connect] = await workersOf(internal.clientId);
+    await rotateMicrosoftSecret();
+    await using run = await followRollouts();
+    await using rollbacks = await followRollbacks();
+    const rolloutId = await rollOutSecrets({ scope: "ring", ring: 1 });
+    await run.waitForStepResult({ name: "ring 1 approved" });
+
+    await rollbacks.rollBack(rolloutId, internal.clientId);
+
+    expect({
+      live: await liveVersionsOf(internal.clientId, internal.account),
+      microsoft: liveSecretOf(
+        internal.account,
+        connect?.scriptName ?? "",
+        "MICROSOFT_CLIENT_SECRET"
+      ),
+      targets: await targetsOf(rolloutId),
+      rollout: await rolloutRow(rolloutId),
+    }).toMatchObject({
+      live: previous,
+      microsoft: "microsoft-secret",
+      targets: { [internal.clientId]: { status: "rolled_back" } },
+      rollout: { status: "cancelled" },
     });
   });
 

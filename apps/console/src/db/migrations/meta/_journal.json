@@ -71,6 +71,13 @@
       "when": 1790694442195,
       "tag": "0009_client_sign_in",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "6",
+      "when": 1790701173652,
+      "tag": "0010_client_deploy_kind",
+      "breakpoints": true
     }
   ]
 }

@@ -28,7 +28,13 @@ import { z } from "zod";
 import type { Staff } from "../access.ts";
 import { actIfChanged, audit, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import { clients, releases, rollouts, rolloutTargets } from "../db/schema.ts";
+import {
+  clients,
+  clientWorkers,
+  releases,
+  rollouts,
+  rolloutTargets,
+} from "../db/schema.ts";
 import { clientDomain } from "../deploy/context.ts";
 import { errorCode } from "../deploy/deploy.ts";
 import { importedManifest } from "../deploy/release.ts";
@@ -39,11 +45,19 @@ import { firstRing, rolloutScopeSchema, targetsOf } from "./targets.ts";
 import { approvalEvent, rolloutSteps, stepBudget } from "./workflow.ts";
 import type { RolloutParams } from "./workflow.ts";
 
-/** What staff choose to start a rollout: a release, and whom it reaches after ring 0. */
-export const startRolloutSchema = z.object({
-  releaseId: releaseIdSchema,
-  scope: rolloutScopeSchema,
-});
+/**
+ * What staff choose to start a rollout: a release, or only the shared
+ * secrets in Secrets Store now (after a rotation), and whom it reaches
+ * after ring 0.
+ */
+export const startRolloutSchema = z.discriminatedUnion("kind", [
+  z.object({
+    kind: z.literal("release"),
+    releaseId: releaseIdSchema,
+    scope: rolloutScopeSchema,
+  }),
+  z.object({ kind: z.literal("secrets"), scope: rolloutScopeSchema }),
+]);
 export type StartRolloutInput = z.infer<typeof startRolloutSchema>;
 
 /** The statuses of a rollout that still has rings to deploy. */
@@ -103,12 +117,19 @@ const settleEnded = async (env: Env, db: ConsoleDatabase): Promise<void> => {
 };
 
 /**
- * Starts rolling release `input.releaseId` out, as `staff`, to ring 0
- * then `input.scope`, and returns the rollout's id. Refused while another
- * rollout is running or waiting (`rollout_running`), when no active
- * client is in scope, when a ring past 0 or a client it names adds no one
- * past ring 0 (`ring_zero_only`), and when its run would take more steps
- * than `stepBudget` (`too_large`).
+ * The most Workers a client runs: what a secrets rollout, which deploys
+ * each client's own release, budgets steps for.
+ */
+const mostWorkers = clientWorkers.worker.enumValues.length;
+
+/**
+ * Starts rolling release `input.releaseId` out, or with `kind: "secrets"`
+ * the shared secrets alone (src/rollout/workflow.ts), as `staff`, to
+ * ring 0 then `input.scope`, and returns the rollout's id. Refused while
+ * another rollout is running or waiting (`rollout_running`), when no
+ * active client is in scope, when a ring past 0 or a client it names adds
+ * no one past ring 0 (`ring_zero_only`), and when its run would take more
+ * steps than `stepBudget` (`too_large`).
  */
 export const startRollout = async (
   env: Env,
@@ -116,22 +137,26 @@ export const startRollout = async (
   input: StartRolloutInput
 ): Promise<string> => {
   const db = consoleDatabase(env.DB);
-  const { releaseId, scope } = startRolloutSchema.parse(input);
+  const parsed = startRolloutSchema.parse(input);
+  const { kind, scope } = parsed;
+  const releaseId = parsed.kind === "release" ? parsed.releaseId : null;
   if (clientDomain(env) === null) {
     throw new RolloutError(
       "domain_not_set",
       "Set CLIENT_DOMAIN on the console before rolling out"
     );
   }
-  const [release] = await db
-    .select({ id: releases.id })
-    .from(releases)
-    .where(eq(releases.id, releaseId));
-  if (release === undefined) {
-    throw new RolloutError(
-      "release_not_imported",
-      `Release ${releaseId} isn't imported`
-    );
+  if (releaseId !== null) {
+    const [release] = await db
+      .select({ id: releases.id })
+      .from(releases)
+      .where(eq(releases.id, releaseId));
+    if (release === undefined) {
+      throw new RolloutError(
+        "release_not_imported",
+        `Release ${releaseId} isn't imported`
+      );
+    }
   }
   await settleEnded(env, db);
   const targets = await targetsOf(db, scope);
@@ -151,11 +176,12 @@ export const startRollout = async (
     );
   }
   // Refused rather than left to stop part way at Workflows' step limit.
-  const manifest = await importedManifest(db, releaseId);
+  const manifest =
+    releaseId === null ? null : await importedManifest(db, releaseId);
   const steps = rolloutSteps(
     new Set(targets.map(({ ring }) => ring)).size,
     targets.length,
-    Object.keys(manifest?.workers ?? {}).length
+    manifest === null ? mostWorkers : Object.keys(manifest.workers).length
   );
   if (steps > stepBudget) {
     throw new RolloutError(
@@ -175,13 +201,14 @@ export const startRollout = async (
     db
       .insert(rollouts)
       .select(
-        sql`SELECT ${id}, 'release', ${releaseId}, 'running', ${first.ring}, ${staff.email}, ${now}, ${now} WHERE NOT EXISTS (SELECT 1 FROM ${rollouts} WHERE ${rollouts.status} IN (${active}))`
+        sql`SELECT ${id}, ${kind}, ${releaseId}, 'running', ${first.ring}, ${staff.email}, ${now}, ${now} WHERE NOT EXISTS (SELECT 1 FROM ${rollouts} WHERE ${rollouts.status} IN (${active}))`
       ),
     {
       action: "rollout.start",
       target: id,
       detail: {
-        release: releaseId,
+        kind,
+        ...(releaseId === null ? {} : { release: releaseId }),
         scope: scope.scope,
         ...(scope.scope === "ring" ? { ring: scope.ring } : {}),
         ...(scope.scope === "client" ? { client: scope.clientId } : {}),
