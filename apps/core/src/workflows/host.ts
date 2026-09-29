@@ -12,6 +12,7 @@ import type { Authority } from "@grasp-os/shared/permissions";
 import {
   isRetryable,
   stepIdempotencyKey,
+  inboundEmailMaxListed,
   storedEmailSchema,
   workflowErrors,
 } from "@grasp-os/shared/workflows";
@@ -23,6 +24,7 @@ import type {
 } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
 import { drizzle } from "drizzle-orm/d1";
+import type { Email } from "postal-mime";
 import { z } from "zod";
 
 import { callExport } from "../app-calls.ts";
@@ -48,7 +50,7 @@ import { models } from "../models.ts";
 import { requireActivePerson, requireApprovedVersion } from "../permissions.ts";
 import type { Settled, StepError } from "./code.ts";
 import { sentEventSchema } from "./engine.ts";
-import { maxListed, readStoredAttachment } from "./kept-email.ts";
+import { attachmentOf, keptMessage } from "./kept-email.ts";
 
 // The engine a run's workflow code runs on, as core's side of it: the SDK's
 // `WorkflowEngine` (`@grasp-os/sdk/engine`) on Cloudflare's `step` API. The
@@ -107,12 +109,15 @@ export const coreEventPrefix = "grasp-";
 
 /**
  * One attempt of a step, while its function runs: whether connect held a
- * side effect of it (`held`), and whether it called its App's methods.
+ * side effect of it (`held`), whether it called its App's methods, and
+ * the kept messages it read attachments of, parsed, by their name
+ * (`readAttachment`): each parsed once per attempt.
  */
 interface StepAttempt {
   step: string;
   held: boolean;
   calledApp: boolean;
+  keptMessages?: Map<string, Promise<Email>>;
 }
 
 /** Why a run waits before a step. */
@@ -1502,65 +1507,70 @@ export class RunHost extends RpcTarget {
    * for the run's App (`stored`, as the run's input names it), only inside
    * a step, for a person who is still there (kept-email.ts). Checked
    * against the run's own App, never one the isolate names: another App's
-   * message is found as none. Every read is audited as a read, one refused
-   * too (with its code); an attachment is handed on only once its read is
-   * recorded, and a read that can't be recorded fails, to be tried again.
+   * message is found as none. Every call is audited as a read, whatever
+   * refuses it (outside a step, switched off, a name or index that isn't
+   * one), with the name and index as sent; an attachment is handed on
+   * only once its read is recorded, and a read that can't be recorded
+   * fails, to be tried again. A step attempt parses each message it reads
+   * once, however many of its attachments it reads.
    */
   async readAttachment(
     stored: unknown,
     index: unknown
   ): Promise<Settled<Uint8Array>> {
     return await settle(async () => {
-      const { step } = this.#requireStep();
-      requireFeature(this.#env, "email_attachments");
-      await this.#requirePerson();
-      const message = checked(storedEmailSchema, stored);
-      const at = checked(
-        z
-          .int()
-          .min(0)
-          .max(maxListed - 1),
-        index
-      );
+      const step = this.#running?.step ?? null;
+      const sent = {
+        step,
+        message: typeof stored === "string" ? stored.slice(0, 256) : null,
+        index:
+          typeof index === "number" && Number.isFinite(index) ? index : null,
+      };
       let content: Uint8Array;
       try {
-        content = await readStoredAttachment(
-          this.#env,
-          this.#run.app,
-          message,
-          at
+        const attempt = this.#requireStep();
+        requireFeature(this.#env, "email_attachments");
+        await this.#requirePerson();
+        const message = checked(storedEmailSchema, stored);
+        const at = checked(
+          z
+            .int()
+            .min(0)
+            .max(inboundEmailMaxListed - 1),
+          index
         );
+        attempt.keptMessages ??= new Map();
+        let kept = attempt.keptMessages.get(message);
+        if (kept === undefined) {
+          kept = keptMessage(this.#env, this.#run.app, message);
+          attempt.keptMessages.set(message, kept);
+        }
+        content = attachmentOf(await kept, at);
       } catch (error) {
         const errorCode = isExpectedError(error)
           ? error.code
           : "internal.unexpected";
-        await this.#auditRead({ step, message, index: at, errorCode }).catch(
+        await this.#auditRead({ ...sent, errorCode }).catch(
           (auditError: unknown) => {
             // The refusal's own error is the one the run gets.
             log.error("workflow.email.audit_failed", {
               runId: this.#run.runId,
-              step,
               ...errorFields(auditError),
             });
           }
         );
         throw error;
       }
-      await this.#auditRead({
-        step,
-        message,
-        index: at,
-        bytes: content.byteLength,
-      });
+      await this.#auditRead({ ...sent, bytes: content.byteLength });
       return content;
     });
   }
 
   /** Records a read of a kept message's attachment, through the outbox. */
   async #auditRead(read: {
-    step: string;
-    message: string;
-    index: number;
+    step: string | null;
+    message: string | null;
+    index: number | null;
     bytes?: number;
     errorCode?: string;
   }): Promise<void> {

@@ -123,6 +123,29 @@ const unclosed = (subject: string, body: string): string =>
     "",
   ].join("\r\n");
 
+/** A message whose one attachment is inline: an image in its HTML. */
+const inlineOnly = [
+  "From: Ben <ben@acme.test>",
+  "To: unkept@grasp.test",
+  "Subject: Inline",
+  "MIME-Version: 1.0",
+  'Content-Type: multipart/related; boundary="r"',
+  "",
+  "--r",
+  "Content-Type: text/html; charset=utf-8",
+  "",
+  '<p>Logo: <img src="cid:logo"></p>',
+  "--r",
+  "Content-Type: image/png",
+  "Content-ID: <logo>",
+  "Content-Disposition: inline",
+  "Content-Transfer-Encoding: base64",
+  "",
+  "iVBORw0K",
+  "--r--",
+  "",
+].join("\r\n");
+
 /** A message of multiparts nested `depth` deep. */
 const nestedMail = (depth: number): string =>
   [
@@ -279,7 +302,7 @@ describe("email triggers", () => {
     ]);
   });
 
-  it("keep nothing of a message without attachments, or while keeping mail is off", async () => {
+  it("keep nothing of a message without attachments, with inline ones only, or while keeping mail is off", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, intake("unkept"));
     const before = await storedObjects();
@@ -290,20 +313,22 @@ describe("email triggers", () => {
       { changes: featuresWith({ email_attachments: false }) }
     );
     await deliver("unkept@grasp.test", unclosed("Plain", "<p>No files.</p>"));
+    await deliver("unkept@grasp.test", inlineOnly);
 
     const read = await readByRuns(builder, app);
     expect(
-      read.map(({ subject, stored, attachments }) => ({
-        subject,
-        stored,
-        attachments: attachments.length,
-      }))
-    ).toStrictEqual(
-      expect.arrayContaining([
-        { subject: "Off", stored: null, attachments: 1 },
-        { subject: "Plain", stored: null, attachments: 0 },
-      ])
-    );
+      read
+        .map(({ subject, stored, attachments }) => ({
+          subject,
+          stored,
+          attachments: attachments.length,
+        }))
+        .toSorted((a, b) => a.subject.localeCompare(b.subject))
+    ).toStrictEqual([
+      { subject: "Inline", stored: null, attachments: 1 },
+      { subject: "Off", stored: null, attachments: 1 },
+      { subject: "Plain", stored: null, attachments: 0 },
+    ]);
     await expect(addedSince(before)).resolves.toStrictEqual([]);
   });
 
@@ -803,6 +828,42 @@ export default workflowTests(definition, [
 `,
 };
 
+/**
+ * A workflow started by hand with reads to try: each a kept message's
+ * name and an attachment's index, as sent. It catches every refusal, as
+ * code probing for what it may read would, and returns their codes.
+ */
+const probe: Record<string, string> = {
+  "workflows/probe.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "probe",
+  { params: {}, input: z.object({ reads: z.array(z.object({ stored: z.string(), index: z.number() })) }) },
+  async (step, { input, readAttachment }) =>
+    await step.do("probe", { description: "Try some reads" }, async () => {
+      const codes: string[] = [];
+      for (const { stored, index } of input.reads) {
+        try {
+          await readAttachment({ stored }, index);
+          codes.push("read");
+        } catch (error) {
+          codes.push(String((error as { code?: unknown }).code));
+        }
+      }
+      return codes;
+    })
+);
+`,
+  "workflows/probe.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./probe.ts";
+
+export default workflowTests(definition, [
+  { name: "runs", input: { reads: [] }, mocks: { probe: [] }, expect: { output: [] } },
+]);
+`,
+};
+
 /** The audit log's reads of kept messages by run `run`. */
 const readsBy = async (run: string) => {
   const events = await allEvents();
@@ -911,8 +972,75 @@ describe("attachments of mail", () => {
       new Date(dayEnded + 30 * 24 * 60 * 60 * 1000 - 1)
     );
     await expect(kept()).resolves.toBeTruthy();
-    // Then the next run deletes it.
-    await runQuarterHourCron({}, new Date(dayEnded + 30 * 24 * 60 * 60 * 1000));
+    // Then the next run deletes it, whether or not keeping mail is on.
+    await runQuarterHourCron(
+      featuresWith({ email_attachments: false }),
+      new Date(dayEnded + 30 * 24 * 60 * 60 * 1000)
+    );
     await expect(kept()).resolves.toBeFalsy();
+  });
+
+  it("refuse, and audit, a read its code catches: a name that isn't one, or an attachment the message hasn't", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, { ...reader("probed"), ...probe });
+
+    await deliver(
+      "probed@grasp.test",
+      invoiceMail({ to: "probed@grasp.test" })
+    );
+    const runs = await runsOf(builder, app);
+    const received = runs.find(({ workflow }) => workflow === "reader");
+    await finished(received?.id ?? "");
+    const { output } = await builder.api.workflows.status(received?.id ?? "");
+    const { stored } = z.object({ stored: z.string() }).parse(output);
+    const [day, id] = stored.split("/");
+    const traversal = `${day}/../${app}/${id}`;
+    const { id: run } = await builder.api.workflows.start(app, "probe", {
+      reads: [
+        { stored, index: 5 },
+        { stored: traversal, index: 0 },
+        { stored, index: 0 },
+      ],
+    });
+    await finished(run);
+
+    await expect(builder.api.workflows.status(run)).resolves.toMatchObject({
+      status: "completed",
+      output: ["workflow.attachment_not_found", "workflow.invalid", "read"],
+    });
+    const audited = await readsBy(run);
+    const reads = audited.map(({ detail }) => detail);
+    expect(reads).toHaveLength(3);
+    expect(reads).toStrictEqual(
+      expect.arrayContaining([
+        {
+          app,
+          workflow: "probe",
+          version: 1,
+          step: "probe",
+          message: stored,
+          attachment: 0,
+          bytes: 5,
+        },
+        {
+          app,
+          workflow: "probe",
+          version: 1,
+          step: "probe",
+          message: traversal,
+          attachment: 0,
+          errorCode: "workflow.invalid",
+        },
+        {
+          app,
+          workflow: "probe",
+          version: 1,
+          step: "probe",
+          message: stored,
+          attachment: 5,
+          errorCode: "workflow.attachment_not_found",
+        },
+      ])
+    );
   });
 });

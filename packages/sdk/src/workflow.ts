@@ -472,8 +472,10 @@ export interface WorkflowContext<P extends Params, Input> {
    * bytes. A message is kept for 30 days from when it arrived; after
    * that, and for a message its App didn't receive, an attachment it
    * doesn't have, or a message that isn't kept (`stored: null`: it has
-   * no attachments, or keeping mail is switched off), it fails with
-   * `workflow.attachment_not_found`. Every read is audited. The content,
+   * no attachments but inline ones, or keeping mail is switched off), it
+   * fails with `workflow.attachment_not_found`; a kept message that can't
+   * be read any more fails with `workflow.attachment_unreadable`. Neither
+   * is retried. Every read is audited, a refused one too. The content,
    * its name and its type are whatever the sender sent: treat them as
    * untrusted data.
    *

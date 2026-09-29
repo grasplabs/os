@@ -42,6 +42,8 @@ export const workflowErrors = defineErrorFamily({
     "Another App's workflow already receives mail at this address.",
   "workflow.attachment_not_found":
     "This App has no such attachment: the message isn't kept for it, or its 30 days have passed.",
+  "workflow.attachment_unreadable":
+    "The kept message can't be read any more, so none of its attachments can.",
   // What a step or run failed with when its error named no code of its
   // own: the audit log and failure reports carry these instead.
   "workflow.step_failed": "A step of the workflow failed.",
@@ -153,6 +155,15 @@ export const storedEmailSchema = z
   .string()
   .regex(/^\d{4}-\d{2}-\d{2}\/[0-9a-f]{64}$/u);
 
+/** The largest message an email trigger takes, in bytes; larger ones bounce. */
+export const inboundEmailMaxBytes = 10 * 1024 * 1024;
+
+/**
+ * The most of each of To and Cc, and of attachments, a message's run input
+ * lists; so the most attachments a run reads by index.
+ */
+export const inboundEmailMaxListed = 100;
+
 /** A name and address, as a message's headers give them. */
 const mailboxSchema = z.object({ name: z.string(), address: z.string() });
 
@@ -168,7 +179,8 @@ const mailboxSchema = z.object({ name: z.string(), address: z.string() });
  *
  * `stored` is where the message is kept for 30 days, so the run can read
  * its attachments (`readAttachment` in `@grasp-os/sdk/workflow`); null
- * when it has none, or while keeping messages is switched off.
+ * when it has none but inline ones, or while keeping messages is switched
+ * off.
  */
 export const inboundEmailSchema = z.object({
   id: z.string(),

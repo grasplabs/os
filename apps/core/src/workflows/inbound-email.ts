@@ -2,6 +2,10 @@ import { sha256Hex, toHex } from "@grasp-os/shared/encoding";
 import { readAtMost } from "@grasp-os/shared/http";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
+import {
+  inboundEmailMaxBytes as maxMessageBytes,
+  inboundEmailMaxListed as maxListed,
+} from "@grasp-os/shared/workflows";
 import type { InboundEmail } from "@grasp-os/shared/workflows";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -9,12 +13,7 @@ import type { Address, Email } from "postal-mime";
 
 import { apps, workflowTriggers } from "../db/core/schema.ts";
 import { featureEnabled } from "../features.ts";
-import {
-  keepMessage,
-  maxListed,
-  maxMessageBytes,
-  parsedOf,
-} from "./kept-email.ts";
+import { isWorthKeeping, keepMessage, parsedOf } from "./kept-email.ts";
 import { atHourlyCap, maxInputLength, startRun } from "./runs.ts";
 
 // Mail to workflows' email triggers (trigger-registry.ts). Email Routing
@@ -34,9 +33,9 @@ import { atHourlyCap, maxInputLength, startRun } from "./runs.ts";
 // as fits (a message with only HTML, its text). Its `id` is the SHA-256
 // of its bytes.
 //
-// A message with attachments is kept for its runs to read them, while
-// `email_attachments` is on (kept-email.ts); its input names it
-// (`stored`), or says `stored: null`.
+// A message with an attachment that isn't inline is kept for its runs to
+// read its attachments, while `email_attachments` is on (kept-email.ts);
+// its input names it (`stored`), or says `stored: null`.
 //
 // The same message delivered again starts no second run: its key, per
 // App and workflow, is the SHA-256 of its Message-ID, or of its bytes
@@ -346,7 +345,8 @@ export const receiveEmail = async (
   // Kept before any run starts, so each finds it. Failing to keep it
   // fails the delivery for now: its sender tries again.
   const stored =
-    featureEnabled(env, "email_attachments") && parsed.attachments.length > 0
+    featureEnabled(env, "email_attachments") &&
+    isWorthKeeping(parsed.attachments)
       ? await keepMessage(
           env,
           withRoom.map(({ appId }) => appId),

@@ -1,26 +1,30 @@
+import { readAtMost } from "@grasp-os/shared/http";
 import { log } from "@grasp-os/shared/log";
-import { workflowErrors } from "@grasp-os/shared/workflows";
+import {
+  inboundEmailMaxBytes,
+  workflowErrors,
+} from "@grasp-os/shared/workflows";
 import PostalMime from "postal-mime";
-import type { Email } from "postal-mime";
+import type { Attachment, Email } from "postal-mime";
 
 // A message with attachments that an email trigger received
 // (inbound-email.ts) is kept while `email_attachments` is on, so its runs
-// can read them (`readStoredAttachment`, through workflows/host.ts): its
-// bytes as they arrived, in R2 (`FILES`, in the EU), for the App whose
-// runs it starts, before any starts, under the UTC day it was kept, the
-// App and its ID. The run's input names it by day and ID (`stored`),
-// never the App: a run reads only what its own App received, so a name
-// another App's run passes finds nothing. A message without attachments,
-// or one received while the feature is off, isn't kept (`stored: null`).
-// Only its day's name says when a message goes: the 15-minute cron
-// trigger deletes a day's messages once 30 days have passed since that
-// day ended (`deleteExpiredEmail`), so a message is kept 30 to 31 days.
-
-/** The largest message taken, in bytes; larger ones bounce. */
-export const maxMessageBytes = 10 * 1024 * 1024;
-
-/** The most of each of To and Cc, and of attachments, a run's input lists. */
-export const maxListed = 100;
+// can read them (`keptMessage` and `attachmentOf`, through
+// workflows/host.ts): its bytes as they arrived, in R2 (`FILES`, in the
+// EU), for the App whose runs it starts, before any starts, under the UTC
+// day it was kept, the App and its ID. The run's input names it by day and
+// ID (`stored`), never the App: a run reads only what its own App
+// received, so a name another App's run passes finds nothing. A message
+// with no attachment but inline ones (images in its HTML, say), or one
+// received while the feature is off, isn't kept (`stored: null`). Only its
+// day's name says when a message goes: the 15-minute cron trigger deletes
+// a day's messages once 30 days have passed since that day ended
+// (`deleteExpiredEmail`), so a message is kept 30 to 31 days.
+//
+// An attachment is read by its index in the run's input, which lists the
+// message's attachments in the order postal-mime gives them when the
+// message arrives; a read parses the kept bytes again with the same
+// parser, so the order is the same as long as postal-mime's is.
 
 /** Where kept messages are, in `FILES`: by day, then App, then ID. */
 const keptPrefix = "inbound-email/";
@@ -56,6 +60,14 @@ export const parsedOf = async (raw: Uint8Array): Promise<Email | undefined> => {
 };
 
 /**
+ * Whether a message with these attachments is kept: it has one that isn't
+ * inline. Its runs' input lists them all, inline ones too, so an index
+ * means the same whether or not it's kept.
+ */
+export const isWorthKeeping = (attachments: readonly Attachment[]): boolean =>
+  attachments.some(({ disposition }) => disposition !== "inline");
+
+/**
  * Keeps message `id` (`raw`, its bytes) for each of `appIds`, today, and
  * returns what its runs' input names it by; null when there are no Apps
  * to keep it for.
@@ -79,30 +91,40 @@ export const keepMessage = async (
 };
 
 /**
- * The content of attachment `index` of message `stored` (`day/id`), as
- * `app` received it: its bytes as the kept message holds them, counted as
- * read. Refuses with `workflow.attachment_not_found` when `app` has no such
- * message (never kept for it, or deleted) or it has no such attachment.
+ * Message `stored` (`day/id`) as `app` received it, parsed from the kept
+ * bytes, counted as they're read (never by the size R2 reports). Refuses
+ * with `workflow.attachment_not_found` when `app` has no such message
+ * (never kept for it, or deleted), and with `workflow.attachment_unreadable`
+ * when what's kept is over the limit or doesn't parse any more (a newer
+ * parser, say): trying again wouldn't change either.
  */
-export const readStoredAttachment = async (
+export const keptMessage = async (
   env: Env,
   app: string,
-  stored: string,
-  index: number
-): Promise<Uint8Array> => {
+  stored: string
+): Promise<Email> => {
   const object = await env.FILES.get(keptKey(app, stored));
   if (object === null) {
     throw workflowErrors.create("workflow.attachment_not_found");
   }
-  // Only a message within the limit was ever kept: its bytes are counted
-  // all the same, never the size R2 reports.
-  const raw = new Uint8Array(await object.arrayBuffer());
-  const parsed =
-    raw.byteLength > maxMessageBytes ? undefined : await parsedOf(raw);
+  const body = object.body.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>()
+  );
+  const raw = await readAtMost(body, inboundEmailMaxBytes);
+  const parsed = raw === undefined ? undefined : await parsedOf(raw);
   if (parsed === undefined) {
-    throw new Error(`Kept message ${stored} can't be read`);
+    log.error("workflow.email_unreadable", { app, stored });
+    throw workflowErrors.create("workflow.attachment_unreadable");
   }
-  const attachment = parsed.attachments[index];
+  return parsed;
+};
+
+/**
+ * The content of attachment `index` of `message`, as bytes; refuses with
+ * `workflow.attachment_not_found` for an index it has no attachment at.
+ */
+export const attachmentOf = (message: Email, index: number): Uint8Array => {
+  const attachment = message.attachments[index];
   if (attachment === undefined) {
     throw workflowErrors.create("workflow.attachment_not_found");
   }
@@ -116,7 +138,8 @@ export const readStoredAttachment = async (
  * Deletes kept messages once their days are over: up to
  * `maxDeletedPerRun` of the oldest day's at `now`, so a day of any size is
  * gone within a few runs, and days missed (an outage) one after another.
- * R2 lists a day only while it holds a message.
+ * R2 lists a day only while it holds a message. Whether or not
+ * `email_attachments` is on: what was kept goes when its days are over.
  */
 export const deleteExpiredEmail = async (
   env: Env,
