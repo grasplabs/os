@@ -12,7 +12,7 @@ import type { Authority } from "@grasp-os/shared/permissions";
 import {
   isRetryable,
   stepIdempotencyKey,
-  inboundEmailMaxListed,
+  inboundEmailIndexSchema,
   storedEmailSchema,
   workflowErrors,
 } from "@grasp-os/shared/workflows";
@@ -117,7 +117,7 @@ interface StepAttempt {
   step: string;
   held: boolean;
   calledApp: boolean;
-  keptMessages?: Map<string, Promise<Email>>;
+  keptMessages?: Map<string, Email>;
 }
 
 /** Why a run waits before a step. */
@@ -1509,10 +1509,13 @@ export class RunHost extends RpcTarget {
    * against the run's own App, never one the isolate names: another App's
    * message is found as none. Every call is audited as a read, whatever
    * refuses it (outside a step, switched off, a name or index that isn't
-   * one), with the name and index as sent; an attachment is handed on
-   * only once its read is recorded, and a read that can't be recorded
-   * fails, to be tried again. A step attempt parses each message it reads
-   * once, however many of its attachments it reads.
+   * one), with the name and index as sent. An attachment is handed on,
+   * and a refusal answered, only once it's recorded: one that can't be
+   * recorded fails as `internal.unexpected`, to be tried again. A step
+   * attempt parses each message it reads once, however many of its
+   * attachments it reads; a fetch that fails is tried again on its next
+   * read. `stored: null` (a message that isn't kept) is refused with
+   * `workflow.attachment_not_found`.
    */
   async readAttachment(
     stored: unknown,
@@ -1531,34 +1534,37 @@ export class RunHost extends RpcTarget {
         const attempt = this.#requireStep();
         requireFeature(this.#env, "email_attachments");
         await this.#requirePerson();
+        // A message that isn't kept names nothing to read.
+        if (stored === null) {
+          throw workflowErrors.create("workflow.attachment_not_found");
+        }
         const message = checked(storedEmailSchema, stored);
-        const at = checked(
-          z
-            .int()
-            .min(0)
-            .max(inboundEmailMaxListed - 1),
-          index
-        );
+        const at = checked(inboundEmailIndexSchema, index);
+        // Only a message read and parsed is kept for the attempt's next
+        // read: a fetch that failed is tried again.
         attempt.keptMessages ??= new Map();
         let kept = attempt.keptMessages.get(message);
         if (kept === undefined) {
-          kept = keptMessage(this.#env, this.#run.app, message);
+          kept = await keptMessage(this.#env, this.#run.app, message);
           attempt.keptMessages.set(message, kept);
         }
-        content = attachmentOf(await kept, at);
+        content = attachmentOf(kept, at);
       } catch (error) {
         const errorCode = isExpectedError(error)
           ? error.code
           : "internal.unexpected";
-        await this.#auditRead({ ...sent, errorCode }).catch(
-          (auditError: unknown) => {
-            // The refusal's own error is the one the run gets.
-            log.error("workflow.email.audit_failed", {
-              runId: this.#run.runId,
-              ...errorFields(auditError),
-            });
-          }
-        );
+        try {
+          await this.#auditRead({ ...sent, errorCode });
+        } catch (auditError) {
+          // No refusal goes unrecorded: the call fails as one that can be
+          // tried again, and the refusal it would have been is logged.
+          log.error("workflow.email.audit_failed", {
+            runId: this.#run.runId,
+            refusedWith: errorCode,
+            ...errorFields(auditError),
+          });
+          throw auditError;
+        }
         throw error;
       }
       await this.#auditRead({ ...sent, bytes: content.byteLength });

@@ -164,6 +164,12 @@ export const inboundEmailMaxBytes = 10 * 1024 * 1024;
  */
 export const inboundEmailMaxListed = 100;
 
+/** An attachment's index in a message's run input. */
+export const inboundEmailIndexSchema = z
+  .int()
+  .min(0)
+  .max(inboundEmailMaxListed - 1);
+
 /** A name and address, as a message's headers give them. */
 const mailboxSchema = z.object({ name: z.string(), address: z.string() });
 

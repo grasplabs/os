@@ -2,7 +2,12 @@ import { messageOf } from "@grasp-os/shared/errors";
 import { runIdSchema } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Json } from "@grasp-os/shared/json";
-import { isRetryable, workflowErrors } from "@grasp-os/shared/workflows";
+import {
+  inboundEmailIndexSchema,
+  isRetryable,
+  storedEmailSchema,
+  workflowErrors,
+} from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import type {
@@ -266,6 +271,9 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
     }
   };
 
+  // How many steps' functions run now: `readAttachment` works only inside one.
+  let stepsRunning = 0;
+
   const receive = (type: string): EngineEvent => {
     const index = events.findIndex((event) => event.type === type);
     if (index !== -1) {
@@ -305,7 +313,12 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         } else if (sideEffect && !runSideEffects) {
           status = "recorded";
         } else {
-          output = await attempt(retries?.limit ?? 0, fn);
+          stepsRunning += 1;
+          try {
+            output = await attempt(retries?.limit ?? 0, fn);
+          } finally {
+            stepsRunning -= 1;
+          }
         }
         const stored = toStored(step.name, output);
         results.set(name, stored);
@@ -433,15 +446,32 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
       }
       await Promise.resolve();
     },
+    // Refuses as the platform does, but records nothing.
     readAttachment: async (stored, index) => {
+      if (stepsRunning === 0) {
+        throw workflowErrors.create("workflow.outside_step");
+      }
+      if (stored === null) {
+        throw workflowErrors.create("workflow.attachment_not_found");
+      }
+      if (
+        !storedEmailSchema.safeParse(stored).success ||
+        !inboundEmailIndexSchema.safeParse(index).success
+      ) {
+        throw workflowErrors.create("workflow.invalid");
+      }
       const content =
-        options.attachments && Object.hasOwn(options.attachments, stored)
+        stored !== undefined &&
+        index !== undefined &&
+        options.attachments &&
+        Object.hasOwn(options.attachments, stored)
           ? options.attachments[stored]?.[index]
           : undefined;
       if (content === undefined) {
         throw workflowErrors.create("workflow.attachment_not_found");
       }
-      return await Promise.resolve(content);
+      // A copy of its own, as each read on the platform is.
+      return await Promise.resolve(new Uint8Array(content));
     },
   };
 

@@ -19,8 +19,6 @@ import {
 import type { DoOptions, Duration, StepRunner } from "../src/workflow.ts";
 import { createFakeEngine } from "./fakes.ts";
 
-const notFound = workflowErrors.create("workflow.attachment_not_found").message;
-
 const noParams = {};
 
 /** A workflow that runs `body` with the input it's given. */
@@ -1197,46 +1195,74 @@ describe(appExports, () => {
   });
 });
 
+/** The message the platform refuses an attachment's read with `code`. */
+const refusal = (
+  code:
+    | "workflow.outside_step"
+    | "workflow.invalid"
+    | "workflow.attachment_not_found"
+): string => workflowErrors.create(code).message;
+
 describe("readAttachment", () => {
-  /** Reads a message's first attachment in a step, or first `outside` it. */
-  const readsFirst = (outside = false) =>
+  /**
+   * Reads attachment `index` of the message in a step, or first `outside`
+   * one; `message` stands in for anything workflow code may pass.
+   */
+  const reads = (index: unknown = 0, outside = false) =>
     workflow(
       "reader",
-      { params: noParams, input: z.object({ stored: z.string().nullable() }) },
+      { params: noParams, input: z.unknown() },
       async (step, { input, readAttachment }) => {
+        // SAFETY: the test passes what code without types could.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+        const message = input as { stored: string | null };
+        // SAFETY: as above, for the index.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+        const at = index as number;
         if (outside) {
-          await readAttachment(input, 0);
+          await readAttachment(message, at);
         }
-        return await step.do("read", { description: "Read" }, async () =>
-          new TextDecoder().decode(await readAttachment(input, 0))
-        );
+        return await step.do("read", { description: "Read" }, async () => {
+          // What a read gives is its own: changing it changes no other.
+          const first = await readAttachment(message, at);
+          first.fill(0);
+          return new TextDecoder().decode(await readAttachment(message, at));
+        });
       }
     );
-  const attachments = { "2026-09-29/m": [new TextEncoder().encode("%PDF-")] };
+  const stored = `2026-09-29/${"a".repeat(64)}`;
+  const attachments = { [stored]: [new TextEncoder().encode("%PDF-")] };
 
-  it("reads a kept message's attachment inside a step", async () => {
+  it("reads a kept message's attachment inside a step, a copy each time", async () => {
     await expect(
-      testRun(readsFirst(), { input: { stored: "2026-09-29/m" }, attachments })
+      testRun(reads(), { input: { stored }, attachments })
     ).resolves.toMatchObject({ status: "completed", output: "%PDF-" });
   });
 
-  it("refuses one outside a step, and one of a message that isn't kept or has no such attachment", async () => {
+  it("passes every read on, and the engine refuses as the platform does", async () => {
     const runs = await Promise.all([
-      testRun(readsFirst(true), {
-        input: { stored: "2026-09-29/m" },
-        attachments,
-      }),
-      testRun(readsFirst(), { input: { stored: null }, attachments }),
-      testRun(readsFirst(), {
-        input: { stored: "2026-09-29/other" },
+      testRun(reads(0, true), { input: { stored }, attachments }),
+      testRun(reads(), { input: { stored: null }, attachments }),
+      testRun(reads(), { input: "not a message", attachments }),
+      testRun(reads("0"), { input: { stored }, attachments }),
+      testRun(reads(), { input: { stored: "2026-09-29/../x" }, attachments }),
+      testRun(reads(1), { input: { stored }, attachments }),
+      testRun(reads(), {
+        input: { stored: `2026-09-29/${"b".repeat(64)}` },
         attachments,
       }),
     ]);
 
-    expect(runs).toMatchObject([
-      { status: "failed", error: { code: "workflow.invalid_step_call" } },
-      { status: "failed", error: { message: notFound } },
-      { status: "failed", error: { message: notFound } },
+    expect(
+      runs.map((run) => (run.status === "failed" ? run.error.message : run))
+    ).toStrictEqual([
+      refusal("workflow.outside_step"),
+      refusal("workflow.attachment_not_found"),
+      refusal("workflow.invalid"),
+      refusal("workflow.invalid"),
+      refusal("workflow.invalid"),
+      refusal("workflow.attachment_not_found"),
+      refusal("workflow.attachment_not_found"),
     ]);
   });
 });

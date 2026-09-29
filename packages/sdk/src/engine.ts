@@ -135,8 +135,9 @@ export interface EngineStepOptions {
  * the recorded outcome when that name already completed in this run.
  *
  * The SDK reads `params` and calls `callModel`, `openDecision`,
- * `decisionRecipients`, `getState`, `setState` and `readAttachment` only
- * inside `do`, so they need not be durable themselves.
+ * `decisionRecipients`, `getState` and `setState` only inside `do`, so
+ * they need not be durable themselves; workflow code calls
+ * `readAttachment`, which the engine checks is inside a step.
  *
  * Engines may keep only a failed step's error name and message (Cloudflare
  * Workflows does); the SDK puts what it needs to recover into both.
@@ -222,8 +223,15 @@ export interface WorkflowEngine {
   /**
    * The content of attachment `index` of a message an email trigger kept
    * (`stored`, as its run's input names it), as the run's App received it.
-   * Called only inside a step; not recorded, so a replay that runs the
-   * step again reads it again.
+   * Not recorded, so a replay that runs the step again reads it again.
+   * The SDK passes every call on as the workflow made it, as far as it is
+   * data (anything else as `undefined`): the engine refuses each call it
+   * must (outside a step, `stored: null`, a name or index that isn't one,
+   * a message its App didn't receive) and records every call, refused or
+   * not.
    */
-  readAttachment: (stored: string, index: number) => Promise<Uint8Array>;
+  readAttachment: (
+    stored: string | null | undefined,
+    index: number | undefined
+  ) => Promise<Uint8Array>;
 }

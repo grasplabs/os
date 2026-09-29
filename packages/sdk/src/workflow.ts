@@ -12,7 +12,6 @@ import {
   paramDeclarationsSchema,
   stepIdempotencyKey,
   triggerDeclarationsSchema,
-  workflowErrors,
 } from "@grasp-os/shared/workflows";
 import type { InboundEmail } from "@grasp-os/shared/workflows";
 import { z } from "zod";
@@ -1226,24 +1225,21 @@ const createRunner = (
   };
 
   // Not a step of its own: bytes can't be recorded, so the step it runs in
-  // reads again whenever it runs again.
+  // reads again whenever it runs again. Every call goes to the engine,
+  // which refuses and records each one it must (see `WorkflowEngine`):
+  // only what isn't data is left out, so the call can cross to it.
   const readAttachment: WorkflowContext<
     Params,
     unknown
   >["readAttachment"] = async (message, index) => {
-    if (running === undefined) {
-      throw invalidCall("readAttachment runs only inside a step");
-    }
-    const stored: unknown = message?.stored;
-    if (stored === null) {
-      throw workflowErrors.create("workflow.attachment_not_found");
-    }
-    if (typeof stored !== "string" || !Number.isInteger(index)) {
-      throw invalidCall(
-        "readAttachment takes a message an email trigger received, and the index of one of its attachments"
-      );
-    }
-    return await engine.readAttachment(stored, index);
+    const stored: unknown =
+      typeof message === "object" && message !== null
+        ? message.stored
+        : undefined;
+    return await engine.readAttachment(
+      typeof stored === "string" || stored === null ? stored : undefined,
+      typeof index === "number" ? index : undefined
+    );
   };
 
   return { steps, state, readAttachment };
