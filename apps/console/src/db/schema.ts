@@ -84,6 +84,13 @@ export const clients = sqliteTable(
      * client without one, whose core gets no `SIGN_IN`.
      */
     signIn: text("sign_in"),
+    /**
+     * When staff last changed what a deploy sets on its core: its sign-in
+     * or a setting (src/clients/settings.ts). A rollout deploys a client
+     * whose latest done deploy started before this, even on the release
+     * already (src/rollout/targets.ts); null while nothing changed.
+     */
+    configChangedAt: timestamp("config_changed_at"),
     /** The release it stays on while pinned, whatever the rollouts. */
     pinnedReleaseId: text("pinned_release_id").references(() => releases.id),
     createdAt: timestamp("created_at").notNull(),

@@ -92,6 +92,8 @@ export const signInProblem = (signIn: unknown): string | null => {
   return issue?.message ?? "The sign-in isn't complete.";
 };
 export type ClientSignIn = z.input<typeof clientSignInSchema>;
+/** A client's sign-in as its record keeps it, once checked. */
+export type ClientSignInRecord = z.output<typeof clientSignInSchema>;
 
 /**
  * Grasp's multi-tenant OAuth apps' client ids (not secret: their secrets

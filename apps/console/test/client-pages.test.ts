@@ -3,6 +3,7 @@ import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vite-plus/test";
 
+import { setFeature, setSignIn } from "../src/clients/settings.ts";
 import { act, audit, consoleDatabase } from "../src/db/act.ts";
 import { clientDeploys, clientRuns, clients } from "../src/db/schema.ts";
 import { startProvisioning } from "../src/provision/control.ts";
@@ -274,6 +275,47 @@ describe("the client pages", () => {
       reason: true,
       startAgain: true,
       resume: false,
+    });
+  });
+
+  it("show a client's ring, flags and sign-in to change, what waits for its next deploy, and its history", async () => {
+    const client = await recordClient("active");
+    await setSignIn(env, staff, {
+      clientId: client.id,
+      signIn: {
+        domains: ["acme.test"],
+        admins: ["ada@acme.test"],
+        googleHostedDomain: "acme.test",
+      },
+    });
+    await setFeature(env, staff, {
+      clientId: client.id,
+      feature: "knowledge_uploads",
+      on: true,
+    });
+
+    const { status, html } = await page(`/clients/${client.id}`);
+
+    expect({
+      status,
+      ring: html.includes('name="ring"') && html.includes('value="3"'),
+      flag:
+        html.includes("knowledge_uploads") &&
+        html.includes('aria-label="Feature knowledge_uploads"'),
+      signIn:
+        html.includes('value="acme.test"') &&
+        html.includes('value="ada@acme.test"'),
+      pending: html.includes("the next rollout deploys it"),
+      history: ["client.feature", "client.sign_in", "client.create"].map(
+        (action) => html.includes(action)
+      ),
+    }).toStrictEqual({
+      status: 200,
+      ring: true,
+      flag: true,
+      signIn: true,
+      pending: true,
+      history: [true, true, true],
     });
   });
 

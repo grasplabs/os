@@ -5,6 +5,7 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { setFeature } from "../src/clients/settings.ts";
 import { cloudflareApi } from "../src/cloudflare/api.ts";
 import { deployVersion, deployVersions } from "../src/cloudflare/workers.ts";
 import { act, consoleDatabase } from "../src/db/act.ts";
@@ -791,6 +792,53 @@ describe("rolling a release out", () => {
       connect: [[100]],
       newVersion: true,
       rotationLive: true,
+    });
+  });
+
+  it("deploys a client on the release already once staff changed a flag, so its core gets the flag, and skips it again after", async () => {
+    const release = await importedRelease("feat(core): flagged on it");
+    const internal = await activeClient(0, release);
+    const [, before] = await workersOf(internal.clientId);
+    await setFeature(env, staff, {
+      clientId: internal.clientId,
+      feature: "apps",
+      on: true,
+    });
+    await using run = await followRollouts();
+
+    const deployed = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const [, core] = await workersOf(internal.clientId);
+    const again = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    const features = z
+      .array(z.object({ name: z.string(), json: z.unknown().optional() }))
+      .parse(
+        internal.account.scripts
+          .get(core?.scriptName ?? "")
+          ?.versions.find(({ id }) => id === core?.versionId)?.metadata
+          .bindings ?? []
+      )
+      .find(({ name }) => name === "FEATURES");
+    expect({
+      deployed: await targetsOf(deployed),
+      newVersion: core?.versionId !== before?.versionId,
+      features: features?.json,
+      again: await targetsOf(again),
+    }).toStrictEqual({
+      deployed: {
+        [internal.clientId]: { ring: 0, status: "done", error: null },
+      },
+      newVersion: true,
+      features: { apps: true },
+      again: {
+        [internal.clientId]: {
+          ring: 0,
+          status: "skipped",
+          error: "on_release",
+        },
+      },
     });
   });
 
