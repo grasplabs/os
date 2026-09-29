@@ -28,9 +28,10 @@ export type AuditEventType = z.infer<typeof auditEventTypeSchema>;
 /**
  * The type of each action. The first rule whose `action` is the event's
  * action, or a dotted prefix of it, gives the type (`knowledge` covers
- * `knowledge.document.saved`); a rule with `sideEffect` applies only to an
- * event whose `detail.sideEffect` is that value. An action no rule names has
- * no type: it is still found by every other filter. New actions add a rule.
+ * `knowledge.document.saved`); a rule with `sideEffect` or `access` applies
+ * only to an event whose `detail.sideEffect` or `detail.access` is that
+ * value. An action no rule names has no type: it is still found by every
+ * other filter. New actions add a rule.
  *
  * Actions are stored in the hash-chained log, so they are a data contract:
  * never rename one, add a rule instead. A new action is `noun.verbed`, in
@@ -43,6 +44,7 @@ const typeRules: readonly {
   action: string;
   type: AuditEventType;
   sideEffect?: boolean;
+  access?: "read" | "write";
 }[] = [
   // A connector call that changed something at the provider, or only read.
   { action: "connection.call", sideEffect: true, type: "action" },
@@ -87,6 +89,14 @@ const typeRules: readonly {
   // them, and a staff member signing in to the deployment.
   { action: "context.restricted", type: "permission" },
   { action: "staff.session", type: "permission" },
+  // A call of another App's export, by the calling App (`app.call`) and
+  // as the called App records it (`app.called`): a read for an export
+  // that only reads, and an action for one that writes, or one refused
+  // before its access was known.
+  { action: "app.call", access: "read", type: "read" },
+  { action: "app.call", type: "action" },
+  { action: "app.called", access: "read", type: "read" },
+  { action: "app.called", type: "action" },
   { action: "app", type: "config" },
   { action: "member", type: "config" },
   { action: "team", type: "config" },
@@ -121,9 +131,10 @@ export const auditEventTypeOf = (
   event: Pick<AuditEvent, "action" | "detail">
 ): AuditEventType | null =>
   typeRules.find(
-    ({ action, sideEffect }) =>
+    ({ action, sideEffect, access }) =>
       actionHasPrefix(event.action, action) &&
-      (sideEffect === undefined || event.detail.sideEffect === sideEffect)
+      (sideEffect === undefined || event.detail.sideEffect === sideEffect) &&
+      (access === undefined || event.detail.access === access)
   )?.type ?? null;
 
 /** A dotted action or the start of one: `connection` or `connection.call`. */
