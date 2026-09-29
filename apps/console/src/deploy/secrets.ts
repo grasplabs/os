@@ -105,6 +105,24 @@ const derivedSecrets: Readonly<Record<string, readonly DerivedSecret[]>> = {
 };
 
 /**
+ * Client `clientId`'s core auth secret at `generation`, as its core has
+ * it: what the console signs what it tells core with keys derived from
+ * (src/rollout/activity.ts).
+ */
+export const clientAuthSecret = async (
+  secrets: Pick<DeploySecrets, "routerKey" | "clientKey">,
+  clientId: string,
+  generation: number
+): Promise<string> =>
+  await deriveClientSecret(
+    secrets[authSecret.master],
+    authSecret.purpose,
+    clientId,
+    generation,
+    authSecret.encoding
+  );
+
+/**
  * Every name a derived secret or its previous value takes, on any Worker:
  * none can be given as a shared secret.
  */

@@ -10,6 +10,14 @@
  * for each database the fake holds at once (`CLIENT_D1_<n>`,
  * vite.test.config.ts).
  */
+import { hkdfHmacKey } from "@grasp-os/shared/client-secrets";
+import { toHex } from "@grasp-os/shared/encoding";
+import {
+  platformUpdateNoticeSchema,
+  platformUpdatePath,
+  platformUpdatePurpose,
+  platformUpdateSignatureHeader,
+} from "@grasp-os/shared/platform-change";
 import { afterEach, beforeEach, vi } from "vite-plus/test";
 
 import {
@@ -25,6 +33,7 @@ import type {
   ApiCall,
   Json,
   Route,
+  VersionState,
 } from "./cloudflare-api-kit.ts";
 import { forgetDatabases, workerRoutes } from "./cloudflare-api-workers.ts";
 
@@ -36,6 +45,43 @@ const subdomainOf = (account: AccountState): Response =>
   account.subdomain === undefined
     ? notFound()
     : envelope({ subdomain: account.subdomain });
+
+/**
+ * What a client's core answers a platform update notice with, as core
+ * does (core's src/platform-updates.ts): 204 once the signature checks
+ * out, with the key its live version's auth secret gives, and the notice
+ * parses; 403 otherwise. An account can have its core answer otherwise,
+ * as one from before the endpoint would (`noticeStatus`).
+ */
+const takeNotice = async (
+  account: AccountState,
+  live: VersionState,
+  request: Request
+): Promise<Response> => {
+  if (account.noticeStatus !== undefined) {
+    return new Response(null, { status: account.noticeStatus });
+  }
+  const body = await request.text();
+  const key = await hkdfHmacKey(
+    live.secrets.get("BETTER_AUTH_SECRET") ?? "",
+    platformUpdatePurpose,
+    ["sign"]
+  );
+  const expected = toHex(
+    new Uint8Array(
+      await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body))
+    )
+  );
+  const notice = platformUpdateNoticeSchema.safeParse(JSON.parse(body));
+  if (
+    request.headers.get(platformUpdateSignatureHeader) !== expected ||
+    !notice.success
+  ) {
+    return new Response("Forbidden", { status: 403 });
+  }
+  account.notices.push(notice.data);
+  return new Response(null, { status: 204 });
+};
 
 /**
  * The workers.dev subdomains taken across Cloudflare: a subdomain is one
@@ -358,6 +404,7 @@ export const mockCloudflareApi = (
       sessions: new Map(),
       completions: new Set(),
       scriptUploads: [],
+      notices: [],
     };
     accounts.set(account.id, account);
     return account;
@@ -479,9 +526,31 @@ export const mockCloudflareApi = (
   /**
    * What a Worker on an account's workers.dev subdomain answers: its live
    * version's `/health`, as core answers it, to a request carrying the
-   * router secret that version has. Undefined for any other host.
+   * router secret that version has, and the platform update notices it
+   * takes. Undefined for any other host.
    */
-  const workersDev = (request: Request): Response | undefined => {
+  /**
+   * The account and live version of the Worker a workers.dev `host`
+   * names, when it's on workers.dev and has a version with the first share
+   * of its traffic.
+   */
+  const workerAt = (host: { script?: string; subdomain?: string }) => {
+    const account = [...accounts.values()].find(
+      ({ subdomain }) => subdomain === host.subdomain
+    );
+    const script = account?.scripts.get(host.script ?? "");
+    const [only] = script?.deployments[0]?.versions ?? [];
+    const live = script?.versions.find(({ id }) => id === only?.version_id);
+    return account === undefined ||
+      live === undefined ||
+      script?.subdomain?.enabled !== true
+      ? undefined
+      : { account, live };
+  };
+
+  const workersDev = async (
+    request: Request
+  ): Promise<Response | undefined> => {
     const url = new URL(request.url);
     const host = /^(?<script>[^.]+)\.(?<subdomain>[^.]+)\.workers\.dev$/u.exec(
       url.hostname
@@ -489,19 +558,11 @@ export const mockCloudflareApi = (
     if (host === undefined) {
       return undefined;
     }
-    const account = [...accounts.values()].find(
-      ({ subdomain }) => subdomain === host.subdomain
-    );
-    const script = account?.scripts.get(host.script ?? "");
-    const [only] = script?.deployments[0]?.versions ?? [];
-    const live = script?.versions.find(({ id }) => id === only?.version_id);
-    if (
-      account === undefined ||
-      live === undefined ||
-      script?.subdomain?.enabled !== true
-    ) {
+    const worker = workerAt(host);
+    if (worker === undefined) {
       return new Response("There is nothing here yet", { status: 404 });
     }
+    const { account, live } = worker;
     if (account.unhealthy !== undefined && account.unhealthy > 0) {
       account.unhealthy -= 1;
       return new Response("Starting", { status: 503 });
@@ -512,6 +573,9 @@ export const mockCloudflareApi = (
       request.headers.get("x-grasp-router-secret") !== secret
     ) {
       return new Response("Forbidden", { status: 403 });
+    }
+    if (url.pathname === platformUpdatePath && request.method === "POST") {
+      return await takeNotice(account, live, request);
     }
     return url.pathname === "/health"
       ? Response.json({
@@ -524,7 +588,7 @@ export const mockCloudflareApi = (
   beforeEach(() => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
       const request = new Request(input, init);
-      const served = workersDev(request);
+      const served = await workersDev(request);
       if (served !== undefined) {
         return served;
       }

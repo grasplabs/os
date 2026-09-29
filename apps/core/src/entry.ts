@@ -4,6 +4,7 @@ import { internalErrors, requestErrors } from "@grasp-os/shared/errors";
 import { requestIdHeader } from "@grasp-os/shared/http";
 import { errorFields, log } from "@grasp-os/shared/log";
 import type { LogFields } from "@grasp-os/shared/log";
+import { platformUpdatePath } from "@grasp-os/shared/platform-change";
 import { screenFramePath } from "@grasp-os/shared/screens";
 
 import { auditExportResponse } from "./audit-rpc.ts";
@@ -13,6 +14,7 @@ import { installBuiltinsOnce } from "./builtins.ts";
 import { handleConnectionCallback } from "./connections.ts";
 import { errorResponse } from "./errors.ts";
 import { originalResponse } from "./knowledge/uploads.ts";
+import { platformUpdateResponse } from "./platform-updates.ts";
 import { checkRouterSecret } from "./router-secret.ts";
 import { rpcResponse } from "./rpc.ts";
 import { screenFrameResponse } from "./screen-frame.ts";
@@ -57,6 +59,9 @@ const route = async (
   }
   if (pathname === auditExportPath) {
     return await auditExportResponse(request, env, requestId);
+  }
+  if (pathname === platformUpdatePath) {
+    return await platformUpdateResponse(request, env, requestId);
   }
   const original = originalPath.exec(pathname)?.groups?.id;
   if (original !== undefined) {

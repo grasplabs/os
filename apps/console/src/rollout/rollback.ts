@@ -30,6 +30,7 @@ import { log } from "@grasp-os/shared/log";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { and, desc, eq, inArray, lt } from "drizzle-orm";
+import { z } from "zod";
 
 import type { Staff } from "../access.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
@@ -37,6 +38,7 @@ import { deployVersion, liveVersion } from "../cloudflare/workers.ts";
 import { actIfChanged, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
 import {
+  auditEvents,
   clientRuns,
   clients,
   clientWorkers,
@@ -44,7 +46,7 @@ import {
   rollouts,
   rolloutTargets,
 } from "../db/schema.ts";
-import { clientDomain, deployerApi } from "../deploy/context.ts";
+import { activityKeys, clientDomain, deployerApi } from "../deploy/context.ts";
 import { errorCode, latestDeployOf } from "../deploy/deploy.ts";
 import { importedManifest } from "../deploy/release.ts";
 import { mappedGeneration } from "../deploy/router.ts";
@@ -66,6 +68,7 @@ import {
   stop,
   stopReason,
 } from "../workflow-steps.ts";
+import { tellCore } from "./activity.ts";
 import { RolloutError } from "./errors.ts";
 import { parsePrevious } from "./targets.ts";
 import type { PreviousRun } from "./targets.ts";
@@ -105,6 +108,101 @@ export const restoreVersions = async (
       });
     }
   }
+};
+
+/**
+ * The version each Worker was confirmed live on, by app: null when it
+ * wasn't (its traffic split, or its deployments couldn't be read).
+ */
+export type Confirmed = Record<string, string | null>;
+
+/** How often a rollback tries to read what a Worker runs once it restored it. */
+const confirmAttempts = 3;
+
+/** A Worker the rollback couldn't confirm, as its record stores it. */
+const unconfirmed = "unknown";
+
+/** Where the rollback's record stores what `app` was confirmed live on. */
+const confirmedKey = (app: string): string => `confirmed_${app}`;
+
+/**
+ * The version `scriptName` sends all its traffic to, read live, tried a
+ * few times: null when its traffic is split, or it couldn't be read. A
+ * read that fails never fails the restore it follows.
+ */
+const confirmLive = async (
+  api: CloudflareApi,
+  accountId: string,
+  scriptName: string
+): Promise<string | null> => {
+  for (let attempt = 1; attempt <= confirmAttempts; attempt += 1) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- tried again only on failure
+      return (await liveVersion(api, accountId, scriptName)) ?? null;
+    } catch (error) {
+      log.warn("rollback.unconfirmed", {
+        scriptName,
+        attempt,
+        error: errorCode(error),
+      });
+    }
+  }
+  return null;
+};
+
+/** What each of `workers` is confirmed live on (`confirmLive`), by app. */
+const confirmVersions = async (
+  api: CloudflareApi,
+  accountId: string,
+  workers: readonly RestoredWorker[]
+): Promise<Confirmed> =>
+  Object.fromEntries(
+    await Promise.all(
+      workers.map(
+        async ({ app, scriptName }): Promise<[string, string | null]> => [
+          app,
+          await confirmLive(api, accountId, scriptName),
+        ]
+      )
+    )
+  );
+
+const detailSchema = z.record(z.string(), z.unknown());
+
+/**
+ * What rollback of client `clientId` from rollout `rolloutId` stored as
+ * confirmed live when it recorded itself (`recordRollback`): read back,
+ * never live again once the client is released.
+ */
+const storedConfirmed = async (
+  db: ConsoleDatabase,
+  rolloutId: string,
+  clientId: string,
+  workers: readonly RestoredWorker[]
+): Promise<Confirmed> => {
+  const [row] = await db
+    .select({ detail: auditEvents.detail })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.clientId, clientId),
+        eq(auditEvents.target, rolloutId),
+        eq(auditEvents.action, "rollout.client_rolled_back")
+      )
+    )
+    .orderBy(desc(auditEvents.at))
+    .limit(1);
+  const parsed = detailSchema.safeParse(JSON.parse(row?.detail ?? "null"));
+  const detail = parsed.success ? parsed.data : {};
+  return Object.fromEntries(
+    workers.map(({ app }) => {
+      const value = detail[confirmedKey(app)];
+      return [
+        app,
+        typeof value === "string" && value !== unconfirmed ? value : null,
+      ];
+    })
+  );
 };
 
 /**
@@ -391,7 +489,8 @@ const recordRollback = async (
   params: RollbackParams,
   held: HeldClient,
   previous: PreviousRun,
-  workers: readonly RestoredWorker[]
+  workers: readonly RestoredWorker[],
+  confirmed: Confirmed
 ): Promise<void> => {
   const { rolloutId, clientId, startedBy } = params;
   const now = new Date();
@@ -418,6 +517,14 @@ const recordRollback = async (
         release: previous.release ?? "unknown",
         ...Object.fromEntries(
           workers.map(({ app, version }) => [app, version])
+        ),
+        // What each Worker was confirmed live on before the release below:
+        // what the client's Activity is told, now and on any rerun.
+        ...Object.fromEntries(
+          workers.map(({ app }) => [
+            confirmedKey(app),
+            confirmed[app] ?? unconfirmed,
+          ])
         ),
       },
     },
@@ -583,26 +690,40 @@ export class RollbackClient extends WorkflowEntrypoint<Env, RollbackParams> {
           );
         })
       );
-      await step.do(
+      // What each Worker was confirmed live on, read last before the
+      // client was released and stored with the record: what the
+      // client's Activity is told.
+      const confirmed = await step.do(
         "record",
         quickStep,
-        guarded(async () => {
+        guarded(async (): Promise<Confirmed> => {
           // First: run again after its batch committed, it's done, and
-          // no longer holds the client it released.
+          // no longer holds the client it released; what it confirmed is
+          // what that batch stored, never read live after the release.
           if (await recordedAlready(db, rolloutId, held)) {
-            return;
+            return await storedConfirmed(db, rolloutId, clientId, plan.workers);
           }
+          const api = await deployerApi(this.env);
           // Read again, still holding the client, right before it's
           // released: a traffic change of the rollout's that was on its
           // way when the rollback took the client may have landed since.
           await restoreVersions(
-            await deployerApi(this.env),
+            api,
             plan.accountId,
             plan.workers,
             `Rollback of rollout ${rolloutId}`,
             holds
           );
-          await recordRollback(db, params, held, plan.previous, plan.workers);
+          const live = await confirmVersions(api, plan.accountId, plan.workers);
+          await recordRollback(
+            db,
+            params,
+            held,
+            plan.previous,
+            plan.workers,
+            live
+          );
+          return live;
         })
       );
       await step.do(
@@ -612,6 +733,31 @@ export class RollbackClient extends WorkflowEntrypoint<Env, RollbackParams> {
           await endIdleRollout(this.env, rolloutId);
         })
       );
+      // In the client's own Activity too, as the platform update it is:
+      // told once it's done, of the core version confirmed live, and never
+      // failing it (`tellCore`: its keys are read inside it, so even their
+      // absence is only an unrecorded notice).
+      const core = plan.workers.find(({ app }) => app === "core");
+      if (core !== undefined) {
+        await step.do("tell core", quickStep, async () => {
+          const live = confirmed[core.app] ?? null;
+          await tellCore(
+            { db, secrets: async () => await activityKeys(this.env) },
+            clientId,
+            live,
+            {
+              by: params.startedBy.email,
+              what: "rollback",
+              // The previous release, if that's what core was confirmed on.
+              release:
+                live === core.version
+                  ? (plan.previous.release ?? "unknown")
+                  : "unknown",
+              at: new Date(event.timestamp).toISOString(),
+            }
+          );
+        });
+      }
     } catch (error) {
       if (isEngineAbort(error)) {
         throw error;
