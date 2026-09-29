@@ -34,6 +34,7 @@ import { errorCode } from "../deploy/deploy.ts";
 import { importedManifest } from "../deploy/release.ts";
 import { hasEnded, instanceStatus } from "../runners.ts";
 import { RolloutError } from "./errors.ts";
+import { goOnToStop } from "./rollback.ts";
 import { rolloutScopeSchema, targetsOf } from "./targets.ts";
 import { approvalEvent, rolloutSteps, stepBudget } from "./workflow.ts";
 import type { RolloutParams } from "./workflow.ts";
@@ -364,6 +365,15 @@ export const pauseRollout = async (
   }
   await audit(db, staff, { action: "rollout.pause", target: rolloutId });
   await instance.pause();
+  // A rollback may have cancelled the rollout since it was checked: its
+  // run then goes on, to stop at its next step (`goOnToStop`).
+  const [now] = await db
+    .select({ status: rollouts.status })
+    .from(rollouts)
+    .where(eq(rollouts.id, rolloutId));
+  if (now?.status === "cancelled") {
+    await goOnToStop(env, rolloutId, run.row.createdAt);
+  }
 };
 
 /**
