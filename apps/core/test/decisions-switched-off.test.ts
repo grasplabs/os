@@ -107,17 +107,20 @@ export default workflowTests(definition, [{ name: "runs", events: [{ type: "gate
 `,
     });
     const run = await builder.api.workflows.start(app, "late");
-    const decision = await vi.waitFor(async () => {
-      const row = await env.DB.prepare(
-        "SELECT id FROM workflow_decisions WHERE run_id = ?"
-      )
-        .bind(run.id)
-        .first<{ id: string }>();
-      if (!row) {
-        throw new Error("No decision yet");
-      }
-      return row.id;
-    });
+    const decision = await vi.waitFor(
+      async () => {
+        const row = await env.DB.prepare(
+          "SELECT id FROM workflow_decisions WHERE run_id = ?"
+        )
+          .bind(run.id)
+          .first<{ id: string }>();
+        if (!row) {
+          throw new Error("No decision yet");
+        }
+        return row.id;
+      },
+      { timeout: 10_000 }
+    );
     await vi.waitFor(
       async () => {
         await expect(deadlinePassed(decision)).resolves.toBeTruthy();

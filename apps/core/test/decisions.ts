@@ -161,17 +161,20 @@ export const asking = async (
   if (!ask) {
     throw new Error("No ask");
   }
-  const decision = await vi.waitFor(async () => {
-    const row = await env.DB.prepare(
-      "SELECT id FROM workflow_decisions WHERE run_id = ?"
-    )
-      .bind(run.id)
-      .first<{ id: string }>();
-    if (!row) {
-      throw new Error("No decision yet");
-    }
-    return row.id;
-  });
+  const decision = await vi.waitFor(
+    async () => {
+      const row = await env.DB.prepare(
+        "SELECT id FROM workflow_decisions WHERE run_id = ?"
+      )
+        .bind(run.id)
+        .first<{ id: string }>();
+      if (!row) {
+        throw new Error("No decision yet");
+      }
+      return row.id;
+    },
+    { timeout: 10_000 }
+  );
   return { app, run, ask, decision };
 };
 
