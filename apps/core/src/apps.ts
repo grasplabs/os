@@ -17,7 +17,11 @@ import type {
   CommittedVersion,
   FileDiff,
 } from "@grasp-os/shared/apps";
-import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
+import type {
+  AuditActor,
+  AuditDetailValue,
+  AuditEntry,
+} from "@grasp-os/shared/audit";
 import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
 import { sha256Hex } from "@grasp-os/shared/encoding";
 import { appIdSchema } from "@grasp-os/shared/ids";
@@ -122,9 +126,16 @@ export const toVersion = (row: VersionRow): AppVersion => ({
   createdAt: row.createdAt.toISOString(),
 });
 
+/**
+ * Who changes an App: a person, or the chat's agent acting for them
+ * (agent-builds.ts) with the person's role and rights, as `actor`, the
+ * audit log's name for it.
+ */
+export type AppChanger = Member & { actor?: AuditActor };
+
 /** The audit entry of a change to `app` by `by`: identifiers only. */
 export const changeEntry = (
-  by: Identity,
+  by: Pick<AppChanger, "userId" | "staff" | "actor">,
   action:
     | "app.created"
     | "app.committed"
@@ -138,7 +149,7 @@ export const changeEntry = (
   app: AppId,
   detail: Record<string, AuditDetailValue>
 ): AuditEntry => ({
-  actor: actorOf(by),
+  actor: by.actor ?? actorOf(by),
   action,
   target: { type: "app", id: app },
   detail,
@@ -188,6 +199,21 @@ export const appFor = async (
   const app = await findApp(env, input);
   await requireAppRole(env, by, app, needed);
   return app;
+};
+
+/** The number of an App's latest version; null while it has none. */
+export const latestVersion = async (
+  env: Env,
+  app: AppId
+): Promise<number | null> => {
+  const row = await drizzle(env.DB)
+    .select({ version: appVersions.version })
+    .from(appVersions)
+    .where(eq(appVersions.appId, app))
+    .orderBy(desc(appVersions.version))
+    .limit(1)
+    .get();
+  return row?.version ?? null;
 };
 
 /** One of an App's versions, which must exist. */
@@ -400,7 +426,7 @@ export const versionFiles = async (
 /** Creates an App, with no versions yet. */
 export const createApp = async (
   env: Env,
-  by: Identity,
+  by: AppChanger,
   input: unknown
 ): Promise<App> => {
   requireBuilder(by);
@@ -540,26 +566,20 @@ export const readFiles = async (
 };
 
 /**
- * Writes changes to an App's working copy: new content by path, or null to
- * delete a file. Refused as a whole when the working copy would be over
- * the App's limits.
- *
- * Each write is a new revision of the working copy, and lands only over
- * the revision its limit check read: two writes at once can't together
- * take the App over its limits. The one that loses is refused as a
- * conflict, and nothing of it is written.
+ * Applies changes (`FileChanges`: new content by path, or null to delete a
+ * file) to an App's `files`, its working copy or a chat's draft of it
+ * (agent-builds.ts), refused as a whole when they would be over the App's
+ * limits, hold paths that can't both exist, or an AGENTS.md over its
+ * limit. The changes, checked.
  */
-export const writeFiles = async (
+export const applyChanges = (
   env: Env,
-  by: Identity,
-  app: unknown,
+  files: Map<string, string>,
   input: unknown
-): Promise<void> => {
-  const { id: appId } = await appFor(env, by, app, "builder");
+): [string, string | null][] => {
   const changes = Object.entries(
     appErrors.parse("app.invalid", fileChangesSchema, input)
   );
-  const { files, revision } = await workingCopy(env, appId);
   const before = sizeOf(files);
   const agentsBefore = files.get(appMemoryPath);
   const added = new Set(
@@ -577,6 +597,28 @@ export const writeFiles = async (
   checkLimits(files, before);
   checkPaths(files.keys(), added);
   checkMemory(env, agentsBefore, files.get(appMemoryPath));
+  return changes;
+};
+
+/**
+ * Writes changes to an App's working copy: new content by path, or null to
+ * delete a file. Refused as a whole when the working copy would be over
+ * the App's limits.
+ *
+ * Each write is a new revision of the working copy, and lands only over
+ * the revision its limit check read: two writes at once can't together
+ * take the App over its limits. The one that loses is refused as a
+ * conflict, and nothing of it is written.
+ */
+export const writeFiles = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  input: unknown
+): Promise<void> => {
+  const { id: appId } = await appFor(env, by, app, "builder");
+  const { files, revision } = await workingCopy(env, appId);
+  const changes = applyChanges(env, files, input);
 
   const db = drizzle(env.DB);
   const next = crypto.randomUUID();
@@ -763,7 +805,7 @@ export const diffVersions = async (
 /** Puts a version up for review. The current version can't be. */
 export const proposeVersion = async (
   env: Env,
-  by: Identity,
+  by: AppChanger,
   app: unknown,
   version: unknown
 ): Promise<App> => {

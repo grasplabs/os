@@ -2,6 +2,7 @@ import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
 import { appsApi } from "./agent-apps.ts";
+import { buildApi } from "./agent-builds.ts";
 import { connectionsApi } from "./agent-connections.ts";
 import { knowledgeApi } from "./agent-knowledge.ts";
 import { memoryApi } from "./agent-memory.ts";
@@ -55,9 +56,15 @@ const apiNameSchema = z
 
 /** The APIs a chat's code gets. */
 export const agentApis = (): readonly AgentApi[] =>
-  [chatApi, knowledgeApi, connectionsApi, appsApi, workflowsApi, memoryApi].map(
-    (api) => ({
-      ...api,
-      name: apiNameSchema.parse(api.name),
-    })
-  );
+  [
+    chatApi,
+    knowledgeApi,
+    connectionsApi,
+    appsApi,
+    buildApi,
+    workflowsApi,
+    memoryApi,
+  ].map((api) => ({
+    ...api,
+    name: apiNameSchema.parse(api.name),
+  }));

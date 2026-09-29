@@ -27,6 +27,7 @@ import { errorFields, log } from "@grasp-os/shared/log";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { DurableObject } from "cloudflare:workers";
 import { and, asc, count, desc, eq, gt } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
 
@@ -50,6 +51,8 @@ import { migrateOnWake } from "./db/migrate.ts";
 import migrations from "./db/workspace/migrations/migrations.js";
 import {
   auditOutbox,
+  chatDraftFiles,
+  chatDrafts,
   chatMessages,
   chatSources,
   chats,
@@ -62,6 +65,19 @@ import { models } from "./models.ts";
 import type { WorkContext } from "./restricted.ts";
 
 export type Chat = typeof chats.$inferSelect;
+
+/**
+ * A chat's draft of an App (agent-builds.ts): the version it started
+ * from, and the changes its agent wrote over it, by path (null deletes a
+ * file). `revision` is 0 while there is none.
+ */
+export interface Draft {
+  base: number | null;
+  changes: Record<string, string | null>;
+  revision: number;
+  /** Checks of it that failed in a row this turn. */
+  failedChecks: number;
+}
 
 /** A question for a chat's agent, and the model to answer it with. */
 export const questionSchema = z.strictObject({
@@ -207,6 +223,13 @@ export class Workspace extends DurableObject<Env> {
    * watchers read the held writes again. In memory only.
    */
   readonly #heldVersions = new Map<ChatId, number>();
+
+  /**
+   * Checks of each chat's drafts that failed in a row this turn, by App:
+   * the repair loop's count (agent-builds.ts). In memory: a restart ends
+   * the turn, and the next question starts the count again anyway.
+   */
+  readonly #failedChecks = new Map<ChatId, Map<string, number>>();
 
   /** Who follows each chat (`watch`), by chat and watch ID. */
   readonly #watchers = new Map<ChatId, Map<string, ChatWatch>>();
@@ -440,6 +463,8 @@ export class Workspace extends DurableObject<Env> {
         () => this.#sources(chat.id)
       );
       this.#stopped.delete(chat.id);
+      // Each question gives the repair loop its full count again.
+      this.#failedChecks.delete(chat.id);
       started?.();
       this.#changed(chat.id);
       const result = await runTurn({
@@ -797,6 +822,10 @@ export class Workspace extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         this.#db.delete(chatMessages).where(eq(chatMessages.chatId, id)).run();
         this.#db.delete(chatSources).where(eq(chatSources.chatId, id)).run();
+        this.#dropDrafts(
+          eq(chatDraftFiles.chatId, id),
+          eq(chatDrafts.chatId, id)
+        );
         this.#db.delete(chats).where(eq(chats.id, id)).run();
         this.#outboxed(by, "chat.deleted", id, { declined });
       });
@@ -804,6 +833,7 @@ export class Workspace extends DurableObject<Env> {
       this.#stopped.delete(id);
       this.#provenanceVersions.delete(id);
       this.#heldVersions.delete(id);
+      this.#failedChecks.delete(id);
       for (const watch of this.#watchers.get(id)?.values() ?? []) {
         watch[Symbol.dispose]();
       }
@@ -873,6 +903,131 @@ export class Workspace extends DurableObject<Env> {
   heldChanged(chatId: ChatId): void {
     this.#heldVersions.set(chatId, (this.#heldVersions.get(chatId) ?? 0) + 1);
     this.#changed(chatId);
+  }
+
+  // A chat's drafts of Apps (agent-builds.ts). Only core calls these, for
+  // the chat's agent, having checked the person's role in the App and the
+  // agent's permission first.
+
+  /** The chat's draft of App `appId`; revision 0 while it has none. */
+  draft(chatId: ChatId, appId: string): Draft {
+    const row = this.#db
+      .select()
+      .from(chatDrafts)
+      .where(and(eq(chatDrafts.chatId, chatId), eq(chatDrafts.appId, appId)))
+      .get();
+    const failedChecks = this.#failedChecks.get(chatId)?.get(appId) ?? 0;
+    if (row === undefined) {
+      return { base: null, changes: {}, revision: 0, failedChecks };
+    }
+    const files = this.#db
+      .select({ path: chatDraftFiles.path, content: chatDraftFiles.content })
+      .from(chatDraftFiles)
+      .where(
+        and(eq(chatDraftFiles.chatId, chatId), eq(chatDraftFiles.appId, appId))
+      )
+      .all();
+    return {
+      base: row.base,
+      changes: Object.fromEntries(
+        files.map(({ path, content }) => [path, content])
+      ),
+      revision: row.revision,
+      failedChecks,
+    };
+  }
+
+  /**
+   * Writes `changes` into the chat's draft of App `appId`, over version
+   * `base`, only over the revision `revision` the write read (0: there was
+   * none): `false`, and nothing written, when another write landed since,
+   * or the chat is gone. A write doesn't give the repair loop its count
+   * back.
+   */
+  saveDraft(
+    chatId: ChatId,
+    appId: string,
+    base: number | null,
+    changes: Record<string, string | null>,
+    revision: number
+  ): boolean {
+    return this.ctx.storage.transactionSync(() => {
+      const [row] = this.#db
+        .select({ revision: chatDrafts.revision })
+        .from(chatDrafts)
+        .where(and(eq(chatDrafts.chatId, chatId), eq(chatDrafts.appId, appId)))
+        .all();
+      if (
+        (row?.revision ?? 0) !== revision ||
+        this.chatState(chatId) === undefined
+      ) {
+        return false;
+      }
+      const updatedAt = new Date();
+      this.#db
+        .insert(chatDrafts)
+        .values({ chatId, appId, base, revision: revision + 1, updatedAt })
+        .onConflictDoUpdate({
+          target: [chatDrafts.chatId, chatDrafts.appId],
+          set: { base, revision: revision + 1, updatedAt },
+        })
+        .run();
+      for (const [path, content] of Object.entries(changes)) {
+        this.#db
+          .insert(chatDraftFiles)
+          .values({ chatId, appId, path, content })
+          .onConflictDoUpdate({
+            target: [
+              chatDraftFiles.chatId,
+              chatDraftFiles.appId,
+              chatDraftFiles.path,
+            ],
+            set: { content },
+          })
+          .run();
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Drops the chat's draft of App `appId`; with `revision`, only while it
+   * is still at that revision (what a proposal committed): `false` when it
+   * changed since.
+   */
+  dropDraft(chatId: ChatId, appId: string, revision?: number): boolean {
+    return this.ctx.storage.transactionSync(() => {
+      if (
+        revision !== undefined &&
+        this.draft(chatId, appId).revision !== revision
+      ) {
+        return false;
+      }
+      this.#dropDrafts(
+        and(eq(chatDraftFiles.chatId, chatId), eq(chatDraftFiles.appId, appId)),
+        and(eq(chatDrafts.chatId, chatId), eq(chatDrafts.appId, appId))
+      );
+      return true;
+    });
+  }
+
+  /** Deletes the draft files and drafts the conditions name, in that order. */
+  #dropDrafts(files: SQL | undefined, drafts: SQL | undefined): void {
+    this.#db.delete(chatDraftFiles).where(files).run();
+    this.#db.delete(chatDrafts).where(drafts).run();
+  }
+
+  /**
+   * Counts a check of the chat's draft of App `appId`: a failed one adds
+   * to the checks that failed in a row this turn, a passing one starts
+   * them again. How many failed in a row now.
+   */
+  draftChecked(chatId: ChatId, appId: string, passed: boolean): number {
+    const byApp = this.#failedChecks.get(chatId) ?? new Map<string, number>();
+    const failed = passed ? 0 : (byApp.get(appId) ?? 0) + 1;
+    byApp.set(appId, failed);
+    this.#failedChecks.set(chatId, byApp);
+    return failed;
   }
 
   /** Tells the chat's watchers it changed, with the messages just stored. */

@@ -11,10 +11,11 @@ import type { Feature } from "./features.ts";
 import { requireFeature } from "./features.ts";
 import { grantedPermissions } from "./permissions.ts";
 
-// Reads of a chat's code that go through the functions of the person's own
-// session (Apps, workflows): as the chat's person, read now, so the agent
-// sees no more of them than they would, and only once the agent holds a
-// permission for it, as for everything an agent reaches.
+// Calls of a chat's code that go through the functions of the person's own
+// session (reading Apps and workflows, building Apps): as the chat's
+// person, read now, so the agent sees and does no more than they could,
+// and only once the agent holds a permission for it, as for everything an
+// agent reaches.
 
 /** One read of the chat's code, as `asPerson` runs it. */
 export interface PersonRead<T> {
@@ -22,6 +23,8 @@ export interface PersonRead<T> {
   feature: Feature;
   /** Whether the agent's permissions, read now, allow it. */
   allowed: (permissions: Permission[]) => boolean;
+  /** What the permission it lacks would allow: `read` unless it writes. */
+  action?: "read" | "write";
   /** The API and method, for the audit log. */
   method: string;
   read: (person: Member, permissions: Permission[]) => Promise<T>;
@@ -29,9 +32,9 @@ export interface PersonRead<T> {
   detail?: (result: T) => Record<string, AuditDetailValue>;
 }
 
-/** The permission a read refuses without. */
-export const readDenied = () =>
-  permissionErrors.create("permission.denied", { action: "read" });
+/** The permission a read, or a write, refuses without. */
+export const readDenied = (action: "read" | "write" = "read") =>
+  permissionErrors.create("permission.denied", { action });
 
 /**
  * Runs one read as the chat's person, once the run's check passed and the
@@ -41,7 +44,7 @@ export const readDenied = () =>
 export const asPerson = async <T>(
   env: Env,
   scope: AgentScope,
-  { feature, allowed, method, read, detail }: PersonRead<T>
+  { feature, allowed, action, method, read, detail }: PersonRead<T>
 ): Promise<T> => {
   await requireOpenRun(env, scope, method);
   try {
@@ -53,7 +56,7 @@ export const asPerson = async <T>(
         requireFeature(env, feature);
         const permissions = await grantedPermissions(env, chatAuthority(scope));
         if (!allowed(permissions)) {
-          throw readDenied();
+          throw readDenied(action);
         }
         const person = await memberOf(env.DB, scope.personId);
         if (person === undefined) {

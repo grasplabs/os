@@ -22,7 +22,8 @@ import { featureErrors } from "@grasp-os/shared/errors";
 // into the Apps collection (`apps_collection`), connection calls
 // (`connections`), Composio's toolkits in the catalog and connecting them
 // (`composio`), App methods
-// (`apps`), starting runs and every step of one (`workflows`), opening
+// (`apps`), the chat's agent building Apps (`app_builder`), starting
+// runs and every step of one (`workflows`), opening
 // or asking a decision (`decisions`), and screens' calls on their App's
 // runs (`screen_workflows`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist,
@@ -209,7 +210,15 @@ export type Feature =
    * asking, and following a chat as it streams; needs `agent` on too.
    * While off, nobody reaches a chat; turns under way go on to their end.
    */
-  | "chat";
+  | "chat"
+  /**
+   * The chat's agent building Apps (agent-builds.ts): creating one, and
+   * writing, checking and dry-running a draft of its own per chat; needs
+   * `apps`, `agent` and `apps_collection` on too (the agent's
+   * permission to build is on the Apps collection). While off, it does
+   * none of that; drafts already written stay with their chats.
+   */
+  | "app_builder";
 
 /** Whether `feature` is switched on for this deployment. */
 export const featureEnabled = (

@@ -1,0 +1,502 @@
+import { appErrors } from "@grasp-os/shared/apps";
+import type { App, SavedBuild } from "@grasp-os/shared/apps";
+import { delegateActorOf } from "@grasp-os/shared/audit";
+import type { AuditDetailValue } from "@grasp-os/shared/audit";
+import { sha256Hex } from "@grasp-os/shared/encoding";
+import { workflowIdSchema } from "@grasp-os/shared/ids";
+import type { AppId } from "@grasp-os/shared/ids";
+import { canonicalJson } from "@grasp-os/shared/json";
+import type { Permission } from "@grasp-os/shared/permissions";
+import { permissionErrors } from "@grasp-os/shared/permissions";
+import { WorkerEntrypoint, exports } from "cloudflare:workers";
+import { z } from "zod";
+
+import { asPerson } from "./agent-person.ts";
+import { chatAuthority } from "./agent-scope.ts";
+import type { AgentApi, AgentScope } from "./agent-scope.ts";
+import {
+  appFor,
+  applyChanges,
+  createApp,
+  latestVersion,
+  versionFiles,
+} from "./apps.ts";
+import type { AppChanger } from "./apps.ts";
+import type { Member } from "./auth/identity.ts";
+import { workspace } from "./durable-objects.ts";
+import { requireFeature } from "./features.ts";
+import { appsCollectionEnabled } from "./knowledge/access.ts";
+import { appsCollectionId } from "./knowledge/app-entries.ts";
+import { buildOnSave } from "./save-builds.ts";
+import {
+  dryRunTests,
+  hasWorkflow,
+  workflowTestFailures,
+} from "./workflows/code.ts";
+import type { DryRuns } from "./workflows/code.ts";
+import type { Draft } from "./workspace.ts";
+
+// Building Apps from a chat: `await env.build.write(app, { ... })`. The
+// chat's agent creates Apps, and changes one in a draft of its own: one
+// per chat and App, kept with the chat in its Workspace object
+// (workspace.ts), over the App's latest version when it began. Builders'
+// working copy never sees a draft, so the agent's edits and a builder's
+// can't overwrite each other. It checks a draft as a save does (screens,
+// server code and workflows: type errors, @shadcn/lint and build errors)
+// and runs its workflows' tests, and dry-runs them with the values it
+// gives. Tests and dry runs run in isolates with an empty env: nothing
+// they do leaves them. Nothing here makes a version current.
+//
+// The repair loop is the agent loop itself: a check answers with what
+// fails, the agent writes a fix and checks again, until it passes or
+// `maxFailedChecks` checks of one draft failed in a row in one turn, when
+// checking refuses and the agent tells the person what still fails.
+//
+// The person's rights bound every call, read again each time: creating an
+// App needs a role that builds, and changing one a builder's role in it.
+// The agent needs a permission of its own too: `write` on the Apps
+// collection, the company's catalog of Apps, which no one writes as
+// Knowledge (it is read only), so granting it means only this. A chat
+// that read restricted data writes no App code: what it read would reach
+// everyone who builds the App. Every call is audited as `agent.call`, and
+// what changes an App (`app.created`) as the agent acting for the person.
+
+/**
+ * Most checks of one draft that may fail in a row in one turn: the repair
+ * loop's step limit. Each check is a code run, and a turn has at most 30
+ * (agent.ts), so this leaves the turn room to answer.
+ */
+export const maxFailedChecks = 5;
+
+/**
+ * How long a check waits for its builds. A code run has 30 seconds
+ * (code-mode.ts), and the tests run after the builds.
+ */
+const checkWaitMs = 15_000;
+
+/** Most diagnostics or test failures a check answers with, of each kind. */
+const maxReported = 50;
+
+/** Whether the agent may build Apps: `write` on the Apps collection. */
+const buildsApps =
+  (env: Env) =>
+  (permissions: Permission[]): boolean =>
+    appsCollectionEnabled(env) &&
+    permissions.some(
+      ({ object, actions }) =>
+        object.type === "collection" &&
+        object.collectionId === appsCollectionId &&
+        actions.includes("write")
+    );
+
+/** The values a dry run sets, by parameter name, over each test's own. */
+const dryRunParamsSchema = z
+  .record(
+    z.string().regex(/^[A-Za-z]\w{0,63}$/u),
+    z.union([z.string().max(10_000), z.number()])
+  )
+  .refine((params) => Object.keys(params).length <= 50, {
+    message: "At most 50 parameters",
+  });
+
+/** A chat's draft of an App, as the agent reads it. */
+export interface DraftFiles {
+  /** The version it is over; null for an App with none yet. */
+  base: number | null;
+  /** The paths it changed (null content: deleted), sorted. */
+  changed: string[];
+  /** Every file of the App as the draft has it, by path. */
+  files: Record<string, string>;
+}
+
+/** How a check of a draft went. */
+export interface DraftCheck {
+  /** It all builds and every workflow test passes: what proposing needs. */
+  passed: boolean;
+  screens: SavedBuild;
+  server: SavedBuild;
+  workflows: SavedBuild;
+  tests: {
+    /** `not_run` while the workflows don't build. */
+    status: "passed" | "failed" | "none" | "not_run";
+    failures: string[];
+  };
+  /** Checks of this draft that failed in a row this turn. */
+  failedInARow: number;
+  /** How many may fail in a row before checking refuses. */
+  maxFailedChecks: number;
+}
+
+/** The chat's draft of `app`, with the version it starts over when new. */
+const draftOf = async (
+  env: Env,
+  { workspaceId, chatId }: AgentScope,
+  app: AppId
+): Promise<Draft> => {
+  const draft = await workspace(env, workspaceId).draft(chatId, app);
+  return draft.revision === 0
+    ? { ...draft, base: await latestVersion(env, app) }
+    : draft;
+};
+
+/** A draft's files: its base version's, with its changes over them. */
+const filesOf = async (
+  env: Env,
+  app: AppId,
+  { base, changes }: Pick<Draft, "base" | "changes">
+): Promise<Map<string, string>> => {
+  const files = new Map(
+    base === null ? [] : Object.entries(await versionFiles(env, app, base))
+  );
+  for (const [path, content] of Object.entries(changes)) {
+    if (content === null) {
+      files.delete(path);
+    } else {
+      files.set(path, content);
+    }
+  }
+  return files;
+};
+
+/** Whether a build lets a draft through: it built, or had nothing to. */
+const buildPassed = ({ status }: SavedBuild): boolean =>
+  status === "ok" || status === "none";
+
+/** A build as a check answers it: its first diagnostics only. */
+const reported = (build: SavedBuild): SavedBuild => ({
+  ...build,
+  diagnostics: build.diagnostics.slice(0, maxReported),
+});
+
+/** The tests of a draft's workflows, once they build. */
+const testsOf = async (
+  env: Env,
+  base: number | null,
+  files: Record<string, string>,
+  workflows: SavedBuild
+): Promise<DraftCheck["tests"]> => {
+  if (workflows.status === "none") {
+    return { status: "none", failures: [] };
+  }
+  if (!buildPassed(workflows)) {
+    return { status: "not_run", failures: [] };
+  }
+  const failures = await workflowTestFailures(env, base ?? 0, files);
+  return {
+    status: failures.length === 0 ? "passed" : "failed",
+    failures: failures.slice(0, maxReported),
+  };
+};
+
+/** Building Apps, as a chat's code does it. */
+export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
+  /**
+   * Runs one build call as the chat's person, with the agent as the audit
+   * log's actor for what it changes: once the agent may build Apps, and
+   * only from a chat that hasn't read restricted data.
+   */
+  async #build<T>(
+    method: string,
+    run: (by: AppChanger) => Promise<T>,
+    detail?: (result: T) => Record<string, AuditDetailValue>
+  ): Promise<T> {
+    const { env } = this;
+    const scope = this.ctx.props;
+    return await asPerson(env, scope, {
+      feature: "app_builder",
+      allowed: buildsApps(env),
+      action: "write",
+      method,
+      read: async (person: Member) => {
+        requireFeature(env, "apps");
+        const restricted = await workspace(
+          env,
+          scope.workspaceId
+        ).isChatRestricted(scope.chatId);
+        if (restricted !== false) {
+          throw permissionErrors.create("permission.restricted");
+        }
+        return await run({
+          ...person,
+          actor: delegateActorOf(chatAuthority(scope)),
+        });
+      },
+      ...(detail === undefined ? {} : { detail }),
+    });
+  }
+
+  /** The App `app` names, which the person builds. */
+  async #buildable(by: AppChanger, app: unknown): Promise<AppId> {
+    const { id } = await appFor(this.env, by, app, "builder");
+    return id;
+  }
+
+  /** A new App, with no versions yet, owned by the person. */
+  async create(input: unknown): Promise<App> {
+    return await this.#build(
+      "build.create",
+      async (by) => await createApp(this.env, by, input),
+      (created) => ({ app: created.id })
+    );
+  }
+
+  /** The chat's draft of `app`: all its files, and what it changed. */
+  async files(app: unknown): Promise<DraftFiles> {
+    return await this.#build(
+      "build.files",
+      async (by) => {
+        const id = await this.#buildable(by, app);
+        const draft = await draftOf(this.env, this.ctx.props, id);
+        return {
+          base: draft.base,
+          changed: Object.keys(draft.changes).toSorted(),
+          files: Object.fromEntries(await filesOf(this.env, id, draft)),
+        };
+      },
+      (found) => ({
+        app: typeof app === "string" ? app : null,
+        base: found.base,
+      })
+    );
+  }
+
+  /**
+   * Writes `changes` (new content by path, or null to delete a file) into
+   * the chat's draft of `app`, refused as a whole as a write to the
+   * working copy would be. The version it is over, and what it changed.
+   */
+  async write(
+    app: unknown,
+    changes: unknown
+  ): Promise<Omit<DraftFiles, "files">> {
+    return await this.#build(
+      "build.write",
+      async (by) => {
+        const id = await this.#buildable(by, app);
+        const draft = await draftOf(this.env, this.ctx.props, id);
+        const written = applyChanges(
+          this.env,
+          await filesOf(this.env, id, draft),
+          changes
+        );
+        const saved = await workspace(
+          this.env,
+          this.ctx.props.workspaceId
+        ).saveDraft(
+          this.ctx.props.chatId,
+          id,
+          draft.base,
+          Object.fromEntries(written),
+          draft.revision
+        );
+        if (!saved) {
+          throw appErrors.create("app.conflict");
+        }
+        const changed = new Set([
+          ...Object.keys(draft.changes),
+          ...written.map(([path]) => path),
+        ]);
+        return { base: draft.base, changed: [...changed].toSorted() };
+      },
+      (written) => ({
+        app: typeof app === "string" ? app : null,
+        files: written.changed.length,
+      })
+    );
+  }
+
+  /** Drops the chat's draft of `app`: the next write starts over. */
+  async discard(app: unknown): Promise<void> {
+    await this.#build(
+      "build.discard",
+      async (by) => {
+        const id = await this.#buildable(by, app);
+        const { workspaceId, chatId } = this.ctx.props;
+        await workspace(this.env, workspaceId).dropDraft(chatId, id);
+      },
+      () => ({ app: typeof app === "string" ? app : null })
+    );
+  }
+
+  /**
+   * Checks the chat's draft of `app`: builds its screens, server code and
+   * workflows, and runs its workflows' tests. Refused once
+   * {@link maxFailedChecks} checks of it failed in a row this turn.
+   */
+  async check(app: unknown): Promise<DraftCheck> {
+    return await this.#build(
+      "build.check",
+      async (by) => {
+        const id = await this.#buildable(by, app);
+        const { workspaceId, chatId } = this.ctx.props;
+        const draft = await draftOf(this.env, this.ctx.props, id);
+        if (draft.failedChecks >= maxFailedChecks) {
+          throw appErrors.create("app.checks_exhausted", {
+            failedInARow: draft.failedChecks,
+          });
+        }
+        const files = Object.fromEntries(await filesOf(this.env, id, draft));
+        const builds = await buildOnSave(
+          this.env,
+          { app: id, version: draft.base ?? 0, files },
+          checkWaitMs
+        );
+        const tests = await testsOf(
+          this.env,
+          draft.base,
+          files,
+          builds.workflows
+        );
+        const passed =
+          buildPassed(builds.screens) &&
+          buildPassed(builds.server) &&
+          buildPassed(builds.workflows) &&
+          tests.status !== "failed";
+        const failedInARow = await workspace(
+          this.env,
+          workspaceId
+        ).draftChecked(chatId, id, passed);
+        return {
+          passed,
+          screens: reported(builds.screens),
+          server: reported(builds.server),
+          workflows: reported(builds.workflows),
+          tests,
+          failedInARow,
+          maxFailedChecks,
+        };
+      },
+      (checked) => ({
+        app: typeof app === "string" ? app : null,
+        passed: checked.passed,
+        failedInARow: checked.failedInARow,
+      })
+    );
+  }
+
+  /**
+   * Dry-runs each test of workflow `workflow` in the chat's draft of
+   * `app`, with `params` over each test's own values: what it would do,
+   * with every step's side effect recorded, never made.
+   */
+  async dryRun(
+    app: unknown,
+    workflow: unknown,
+    params: unknown = {}
+  ): Promise<DryRuns> {
+    return await this.#build(
+      "build.dryRun",
+      async (by) => {
+        const id = await this.#buildable(by, app);
+        const values = appErrors.parse(
+          "app.invalid",
+          dryRunParamsSchema,
+          params
+        );
+        const draft = await draftOf(this.env, this.ctx.props, id);
+        const files = Object.fromEntries(await filesOf(this.env, id, draft));
+        const workflowId = workflowIdSchema.safeParse(workflow);
+        if (!workflowId.success || !hasWorkflow(files, workflowId.data)) {
+          throw appErrors.create("app.invalid", {
+            issues: ["workflow: The draft has no such workflow."],
+          });
+        }
+        // Named by what it runs: the same files, the same isolate.
+        const hash = await sha256Hex(canonicalJson(files));
+        return await dryRunTests(
+          this.env,
+          id,
+          draft.base ?? 0,
+          workflowId.data,
+          files,
+          values,
+          hash
+        );
+      },
+      (runs) => ({
+        app: typeof app === "string" ? app : null,
+        workflow: typeof workflow === "string" ? workflow : null,
+        runs: runs.length,
+      })
+    );
+  }
+}
+
+/** The types `env.build` returns, as the model reads them. */
+const buildTypes = `/** One build's result: \`none\` when there's nothing of its kind. */
+interface Build {
+  status: "ok" | "failed" | "none" | "pending" | "error";
+  diagnostics: {
+    file: string | null;
+    line: number | null;
+    column?: number;
+    /** A TypeScript code (TS2322), a lint rule (shadcn/no-restyle) or a compiler stage. */
+    rule?: string;
+    severity: "error" | "warning";
+    message: string;
+    /** A change that would fix it, when the check suggests one. */
+    fix?: string;
+  }[];
+  /** Why it couldn't run, with \`error\`. */
+  error?: string;
+}`;
+
+/** What the model reads of `env.build`. */
+const buildDeclaration = `/**
+ * Building Apps for the person: create one, or change one they build, in
+ * this chat's own draft of it (builders' working copy never sees it). Write
+ * files, check them, fix what fails and check again. Nothing here makes a
+ * change live: a builder of the App does that in Grasp.
+ *
+ * Screens are \`screens/<name>.tsx\` on @grasp-os/ui components with their
+ * variants and sizes and the theme's tokens: no raw colours, arbitrary
+ * values or restyled components (the lint names what to use instead).
+ * Server methods are in \`app/server.ts\`. A workflow is
+ * \`workflows/<id>.ts\` with its tests in \`workflows/<id>.workflow-tests.ts\`.
+ */
+build: {
+  /** Creates an App owned by the person, with no files yet. */
+  create(app: { name: string; description?: string }): Promise<{ id: string; name: string }>;
+  /**
+   * This chat's draft of an App: every file as the draft has them, the
+   * version it is over (the App's latest when the draft began), and the
+   * paths it changed.
+   */
+  files(app: string): Promise<{ base: number | null; changed: string[]; files: Record<string, string> }>;
+  /** Writes files into the draft: new content by path, or null to delete one. */
+  write(app: string, changes: Record<string, string | null>): Promise<{ base: number | null; changed: string[] }>;
+  /** Drops the draft: the next write starts again from the App's latest version. */
+  discard(app: string): Promise<void>;
+  /**
+   * Builds the draft's screens, server code and workflows (type errors,
+   * lint and build errors) and runs its workflows' tests. Fix what fails
+   * and check again; after ${maxFailedChecks} failed checks in a row, stop and tell the person
+   * what still fails.
+   */
+  check(app: string): Promise<{
+    passed: boolean;
+    screens: Build;
+    server: Build;
+    workflows: Build;
+    tests: { status: "passed" | "failed" | "none" | "not_run"; failures: string[] };
+    failedInARow: number;
+    maxFailedChecks: number;
+  }>;
+  /**
+   * Dry-runs a workflow's tests in the draft with \`params\` over each
+   * test's values: what it would do, its side effects recorded, never made.
+   */
+  dryRun(app: string, workflow: string, params?: Record<string, string | number>): Promise<{
+    name: string;
+    status: "completed" | "failed";
+    report: string;
+  }[]>;
+};`;
+
+/** `env.build`. */
+export const buildApi: AgentApi = {
+  name: "build",
+  types: buildTypes,
+  declaration: buildDeclaration,
+  stub: (scope) => exports.BuildApi({ props: scope }),
+};
