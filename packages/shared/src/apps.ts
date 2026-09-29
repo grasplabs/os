@@ -5,6 +5,7 @@ import { defineErrorFamily } from "./errors.ts";
 import { identifierSchema } from "./ids.ts";
 import type { AppId } from "./ids.ts";
 import type { Permission } from "./permissions.ts";
+import type { TriggerDeclaration } from "./workflows.ts";
 
 // An App's code is a tree of text files, versioned as a whole: builders
 // write files into the App's working copy and commit it as the next
@@ -216,9 +217,9 @@ export interface VersionReview {
     shared: string[];
     /**
      * Its steps that differ, by name, each compared as its code is
-     * written: whether each may change something outside Grasp, and the
-     * App's bindings its code calls (`APP`, a connection, another App's
-     * exports). While `shared` code changed, every step is listed
+     * written: whether each may change something outside Grasp (it says
+     * so, or it calls any of the App's bindings), and the App's bindings
+     * its code calls (`APP`, a connection, another App's exports). While `shared` code changed, every step is listed
      * (`sharedCode`), as any may now behave differently through it, and
      * may change things if the workflow calls bindings at all. Null when
      * the code can't be read as steps.
@@ -234,6 +235,35 @@ export interface VersionReview {
       | null;
     /** Its parameters that differ, by name; null when they can't be read. */
     params: { name: string; change: ReviewChange }[] | null;
+    /**
+     * Its triggers added or removed, with how many of each (identical
+     * triggers each register): what makes it run on its own, such as a
+     * schedule, an event or mail to an address; null when they can't be
+     * read.
+     */
+    triggers:
+      | {
+          trigger: TriggerDeclaration;
+          change: "added" | "removed";
+          count: number;
+        }[]
+      | null;
+    /**
+     * The workflow can change something outside Grasp: any of its steps,
+     * changed or not, may, or its steps can't be read at all.
+     */
+    sideEffect: boolean;
+  }[];
+  /**
+   * Its exports (`app/exports.json`: the methods other Apps may call) that
+   * differ, by name, with their access (`read`, or `write`: changes the
+   * App's data) now and before; null where there is none.
+   */
+  exports: {
+    name: string;
+    change: ReviewChange;
+    access: "read" | "write" | null;
+    accessBefore: "read" | "write" | null;
   }[];
   /**
    * What the App asks for that no admin has granted yet: each waits for

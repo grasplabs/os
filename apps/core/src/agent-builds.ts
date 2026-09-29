@@ -252,6 +252,22 @@ const outcomeOf = ({
   return pending ? "pending" : "failed";
 };
 
+/**
+ * Logs what failed after a draft was proposed (committed, and up for
+ * review): the proposal stands, so the failure is no reason to fail it.
+ */
+const afterProposal =
+  (stage: string, app: AppId, version: number) =>
+  (error: unknown): undefined => {
+    log.warn("agent.after_proposal_failed", {
+      stage,
+      appId: app,
+      version,
+      ...errorFields(error),
+    });
+    return undefined;
+  };
+
 /** Logs a turn's count that couldn't be settled; the call's own error goes on. */
 const logCountFailure = (failure: unknown): void => {
   log.warn("agent.check_settle_failed", errorFields(failure));
@@ -289,8 +305,14 @@ export interface Proposal {
   /** The version it is now, pending review; null when it wasn't proposed. */
   version: number | null;
   check: DraftCheck;
-  /** What the version changes, as its reviewer reads it. */
+  /**
+   * What the version changes, as its reviewer reads it; null when it
+   * wasn't proposed, or its review couldn't be worked out now
+   * (`reviewUnavailable`: proposed all the same).
+   */
   review: VersionReview | null;
+  /** Proposed, but its review couldn't be worked out now: read it later. */
+  reviewUnavailable: boolean;
 }
 
 /** Building Apps, as a chat's code does it. */
@@ -566,24 +588,37 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
           maxFailedChecks,
         };
         if (!check.passed) {
-          return { version: null, check, review: null };
+          return {
+            version: null,
+            check,
+            review: null,
+            reviewUnavailable: false,
+          };
         }
         const proposed = await proposeDraft(this.env, by, id, over, message);
+        // Committed and up for review: from here on it is proposed, however
+        // the rest goes, and says so, so the agent doesn't try again (and
+        // meet nothing to commit). What follows is logged when it fails.
+        const { version, tree } = proposed;
         // The check ran the tests of exactly these files: the review takes
         // its result rather than running them again.
         if (check.tests.status !== "not_run") {
-          await keepTests(this.env, id, proposed.tree, check.tests);
+          await keepTests(this.env, id, tree, check.tests).catch(
+            afterProposal("keep_tests", id, version)
+          );
         }
         // Only the revision committed: a write since stays a draft.
-        await workspace(this.env, workspaceId).dropDraft(
-          chatId,
-          id,
-          draft.revision
+        await workspace(this.env, workspaceId)
+          .dropDraft(chatId, id, draft.revision)
+          .catch(afterProposal("drop_draft", id, version));
+        const review = await reviewVersion(this.env, by, id, version).catch(
+          afterProposal("review", id, version)
         );
         return {
-          version: proposed.version,
+          version,
           check,
-          review: await reviewVersion(this.env, by, id, proposed.version),
+          review: review ?? null,
+          reviewUnavailable: review === undefined,
         };
       },
       (proposal) => ({
@@ -764,6 +799,9 @@ build: {
    * \`message\` (what changed and why, for the reviewer). A builder of the App
    * reviews what it changes and makes it current in Grasp: tell the person
    * so. One that fails isn't proposed: \`version\` is null, and \`check\` says why.
+   * Once \`version\` is set, it is proposed: don't propose it again. When
+   * \`reviewUnavailable\`, its review couldn't be worked out now; the
+   * builder reads it in Grasp.
    */
   propose(app: string, message: string): Promise<{
     version: number | null;
@@ -784,12 +822,19 @@ build: {
         /** \`sharedCode\`: listed because code it may use changed. */
         steps: { name: string; change: string; sideEffect: boolean; calls: string[]; sharedCode: boolean }[] | null;
         params: { name: string; change: string }[] | null;
+        /** What makes it run on its own, added or removed. */
+        triggers: { trigger: Record<string, unknown>; change: "added" | "removed"; count: number }[] | null;
+        /** It can change something outside Grasp (any step may, or its steps can't be read). */
+        sideEffect: boolean;
       }[];
+      /** What other Apps may call (app/exports.json), with read/write access. */
+      exports: { name: string; change: string; access: "read" | "write" | null; accessBefore: "read" | "write" | null }[];
       permissions: { id: string; object: Record<string, unknown>; actions: string[]; binding: string }[];
       /** What the App holds, and which making it current asks an admin for again. */
       grants: { permission: { id: string; binding: string; actions: string[] }; askedAgain: boolean }[];
       tests: { status: "passed" | "failed" | "none"; failures: string[] };
     } | null;
+    reviewUnavailable: boolean;
   }>;
   /**
    * Asks for a permission the App needs, as its builders do: an admin
