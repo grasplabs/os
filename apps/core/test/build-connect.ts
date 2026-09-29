@@ -39,7 +39,7 @@ export const bundleConnect = async (): Promise<string> => {
     // The launcher reports its CLI dying of a signal as success.
     if (!existsSync(bundle)) {
       throw new Error(
-        "Wrangler exited without writing connect's bundle: its CLI was killed by a signal."
+        "Wrangler exited without writing connect's bundle. Its launcher reports a CLI killed by a signal as success, so check for a crash."
       );
     }
     return readFileSync(bundle, "utf-8");
