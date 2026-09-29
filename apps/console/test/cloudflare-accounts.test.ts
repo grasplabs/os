@@ -6,9 +6,8 @@ import {
   ensureD1Database,
   ensureMember,
   ensureR2Bucket,
-  ensureWorkersSubdomain,
+  findAccount,
   getAccount,
-  listAccounts,
 } from "../src/cloudflare/accounts.ts";
 import { CloudflareApiError, cloudflareApi } from "../src/cloudflare/api.ts";
 import {
@@ -46,14 +45,16 @@ describe("accounts", () => {
     });
   });
 
-  it("lists every account, page by page", async () => {
-    const added = Array.from({ length: 57 }, (_, index) =>
-      cloudflare.addAccount(`Client ${index}`)
-    );
-    const accounts = await listAccounts(api);
-    expect(accounts.map(({ id }) => id)).toStrictEqual(
-      added.map(({ id }) => id)
-    );
+  it("finds an account by its exact name, page by page", async () => {
+    // Every one of them matches the name loosely, as the API does.
+    for (let index = 0; index < 57; index += 1) {
+      cloudflare.addAccount(`Client ${index}`);
+    }
+    const exact = cloudflare.addAccount("Client");
+    await expect(findAccount(api, "Client")).resolves.toStrictEqual({
+      id: exact.id,
+      name: "Client",
+    });
     expect(
       cloudflare.calls.map(({ query }) => query.get("page"))
     ).toStrictEqual(["1", "2"]);
@@ -63,7 +64,7 @@ describe("accounts", () => {
     for (let index = 0; index <= 1000; index += 1) {
       cloudflare.addAccount(`Client ${index}`);
     }
-    await expect(listAccounts(api)).rejects.toThrow(
+    await expect(findAccount(api, "Client")).rejects.toThrow(
       "Listing /accounts passed 20 pages"
     );
   });
@@ -135,7 +136,6 @@ describe("EU resources", () => {
     const account = cloudflare.addAccount();
     const provision = async () =>
       await Promise.all([
-        ensureWorkersSubdomain(api, account.id, "grasp-acme"),
         ensureD1Database(api, account.id, "grasp-os-core"),
         ensureR2Bucket(api, account.id, "grasp-os-files"),
         ensureAiGateway(api, account.id, "grasp-os"),
@@ -146,7 +146,6 @@ describe("EU resources", () => {
 
     expect(again).toStrictEqual(first);
     expect(account).toMatchObject({
-      subdomain: "grasp-acme",
       d1: [{ name: "grasp-os-core", jurisdiction: "eu" }],
       buckets: [{ name: "grasp-os-files", jurisdiction: "eu" }],
       gateways: [
@@ -158,14 +157,6 @@ describe("EU resources", () => {
         },
       ],
     });
-  });
-
-  it("keeps the workers.dev subdomain an account already has", async () => {
-    const account = cloudflare.addAccount();
-    account.subdomain = "chosen-earlier";
-    await expect(
-      ensureWorkersSubdomain(api, account.id, "grasp-acme")
-    ).resolves.toBe("chosen-earlier");
   });
 
   it("switches authentication on for a gateway that has it off, keeping its settings", async () => {
