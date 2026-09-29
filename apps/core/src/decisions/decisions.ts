@@ -24,6 +24,7 @@ import { z } from "zod";
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
 import { notRemoved, organizationId } from "../auth/auth.ts";
 import { signInConfig } from "../auth/config.ts";
+import type { Member } from "../auth/identity.ts";
 import {
   apps,
   members,
@@ -578,7 +579,7 @@ const wake = async (env: Env, row: DecisionRow): Promise<void> => {
  */
 export const answerableBy = async (
   env: Env,
-  by: Identity,
+  by: Member,
   decisions: readonly { id: string; deciders: string }[]
 ): Promise<Set<string>> => {
   if (by.staff || decisions.length === 0) {

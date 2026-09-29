@@ -9,7 +9,7 @@ import type { SQLiteColumn } from "drizzle-orm/sqlite-core";
 
 import { appsFoundBy, appsReadableBy } from "../app-access.ts";
 import type { Person } from "../app-access.ts";
-import { memberRole, teamsOf } from "../auth/identity.ts";
+import { memberOf } from "../auth/identity.ts";
 import { apps } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { collections, documents } from "../db/knowledge/schema.ts";
@@ -75,12 +75,7 @@ const personOf = async (
   if (reader.type === "person") {
     return reader.person;
   }
-  const userId = reader.authority.onBehalfOf;
-  const [role, teams] = await Promise.all([
-    memberRole(env.DB, userId),
-    teamsOf(env.DB, userId),
-  ]);
-  return role === undefined ? undefined : { userId, role, teams };
+  return await memberOf(env.DB, reader.authority.onBehalfOf);
 };
 
 /** The entries a reader finds: every one, or those at these paths. */

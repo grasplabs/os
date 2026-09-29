@@ -1,9 +1,12 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import type { AuditEvent } from "@grasp-os/shared/audit";
+import { appIdSchema } from "@grasp-os/shared/ids";
 import { permissionErrors } from "@grasp-os/shared/permissions";
+import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { appHost } from "../src/durable-objects.ts";
 import { chatOf, codeResults, codeStep, says } from "./agent-chat.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { requestGranted } from "./apps.ts";
@@ -84,6 +87,56 @@ const callsOf = async (agentId: string, count: number): Promise<AuditEvent[]> =>
       return calls;
     },
     { timeout: 10_000, interval: 50 }
+  );
+
+/** A step named from what a run read, as a workflow may name one. */
+const secretStep = "total-for-acme-42000";
+
+/**
+ * A run of `app`'s report that failed at {@link secretStep} with `code`,
+ * as core keeps it; started by a trigger, so it acts for the App's owner.
+ */
+const failedRun = async (app: string, code: string): Promise<string> => {
+  const id = `run-${crypto.randomUUID()}`;
+  const at = Date.now();
+  await env.DB.prepare(
+    "INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at, failure) VALUES (?, ?, 'report', 1, NULL, 'failed', ?, ?, ?)"
+  )
+    .bind(
+      id,
+      app,
+      at,
+      at,
+      JSON.stringify({
+        run: id,
+        app,
+        workflow: "report",
+        version: 1,
+        step: secretStep,
+        input: null,
+        error: { code, message: "The total was 42000." },
+        failedAt: new Date(at).toISOString(),
+      })
+    )
+    .run();
+  return id;
+};
+
+/** The failures a code step returned, by run. */
+const failuresById = (text: string | undefined) =>
+  Object.fromEntries(
+    z
+      .array(
+        z.object({
+          id: z.string(),
+          failure: z.object({
+            step: z.string().nullable(),
+            code: z.string(),
+          }),
+        })
+      )
+      .parse(JSON.parse(text?.replace("Returned:\n", "") ?? "[]"))
+      .map(({ id, failure }) => [id, failure])
   );
 
 /** Code that makes each call in turn: what it returned, or its message. */
@@ -176,6 +229,94 @@ describe("a chat's Apps and workflows", () => {
         status: denied,
       })}`
     );
+    // Every call recorded once: the refused ones with why.
+    const calls = await callsOf(chat.agent.agentId, 6);
+    expect(
+      calls
+        .map(({ detail }) => ({
+          method: String(detail.method),
+          outcome: detail.outcome,
+          reason: detail.reason,
+        }))
+        .toSorted((one, other) => one.method.localeCompare(other.method))
+    ).toStrictEqual([
+      { method: "apps.files", outcome: "refused", reason: "permission.denied" },
+      { method: "apps.list", outcome: "refused", reason: "permission.denied" },
+      {
+        method: "apps.versions",
+        outcome: "refused",
+        reason: "permission.denied",
+      },
+      { method: "workflows.list", outcome: "ok", reason: null },
+      {
+        method: "workflows.runs",
+        outcome: "refused",
+        reason: "permission.denied",
+      },
+      {
+        method: "workflows.status",
+        outcome: "refused",
+        reason: "permission.denied",
+      },
+    ]);
+  });
+
+  it("show no App while the Apps collection is switched off", async () => {
+    const { chat, grant } = await setUp(() => [
+      codeStep(
+        "export default async (env) => { try { return await env.apps.list(); } catch (error) { return error.message; } };"
+      ),
+      says("None."),
+    ]);
+    await grant();
+    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
+    const { FEATURES: features } = env;
+    try {
+      env.FEATURES = { ...on, apps_collection: false };
+      await chat.ask("Which Apps are there?");
+    } finally {
+      env.FEATURES = features;
+    }
+
+    await expect(codeResults(chat.stub, chat.chat.id)).resolves.toStrictEqual([
+      { isError: false, text: `Returned:\n${denied}` },
+    ]);
+  });
+
+  it("show where a run failed, but of a restricted App's only a platform code", async () => {
+    const { app, chat, grant } = await setUp(({ app: made }) => {
+      const runsOf = `export default async (env) => (await env.workflows.runs(${JSON.stringify(made)}, "report")).filter(({ failure }) => failure !== null).map(({ id, failure }) => ({ id, failure }));`;
+      return [
+        codeStep(runsOf),
+        says("Before."),
+        codeStep(runsOf),
+        says("After."),
+      ];
+    });
+    await grant();
+    // Two failed runs: one with a code of the workflow's own, one of the
+    // platform's, both at a step named from what the run read.
+    const own = await failedRun(app, "acme.total_mismatch");
+    const platform = await failedRun(app, "connect.action_failed");
+
+    await chat.ask("Where did the report fail?");
+    await appHost(env, appIdSchema.parse(app)).restrict();
+    await chat.ask("And now?");
+
+    const [before, after] = await codeResults(chat.stub, chat.chat.id);
+    expect({
+      before: failuresById(before?.text),
+      after: failuresById(after?.text),
+    }).toStrictEqual({
+      before: {
+        [own]: { step: secretStep, code: "acme.total_mismatch" },
+        [platform]: { step: secretStep, code: "connect.action_failed" },
+      },
+      after: {
+        [own]: { step: null, code: "workflow.run_failed" },
+        [platform]: { step: null, code: "connect.action_failed" },
+      },
+    });
   });
 
   it("read no further than the person may, with every permission granted", async () => {

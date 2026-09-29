@@ -46,6 +46,7 @@ import { z } from "zod";
 
 import { appsReadableBy } from "../app-access.ts";
 import { appFor, appsListedFor, versionFiles } from "../apps.ts";
+import type { Member } from "../auth/identity.ts";
 import { builtinOwner } from "../builtin-app-id.ts";
 import {
   apps,
@@ -108,7 +109,7 @@ interface ListedApp {
  * have a role in (`appsListedFor`, which refuses users while `app_sharing`
  * is off) and whose data they can read (`appsReadableBy`).
  */
-const visibleApps = async (env: Env, by: Identity): Promise<ListedApp[]> => {
+const visibleApps = async (env: Env, by: Member): Promise<ListedApp[]> => {
   const rows = await drizzle(env.DB)
     .select({
       id: apps.id,
@@ -335,7 +336,7 @@ const summariesOf = async (
  */
 export const workflowOverview = async (
   env: Env,
-  by: Identity
+  by: Member
 ): Promise<WorkflowSummary[]> =>
   await summariesOf(env, workflowsOf(await visibleApps(env, by)));
 
@@ -444,7 +445,7 @@ const waitingRuns = async (
 const answerableDecisions = async (
   env: Env,
   db: Db,
-  by: Identity,
+  by: Member,
   runIds: readonly string[],
   now: Date
 ): Promise<Map<string, string>> => {
@@ -483,7 +484,7 @@ const answerableDecisions = async (
  */
 export const listAllRuns = async (
   env: Env,
-  by: Identity,
+  by: Member,
   input?: unknown
 ): Promise<RunsPage> => {
   const parsed = runFilterSchema.safeParse(input);

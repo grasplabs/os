@@ -1,9 +1,12 @@
+import { isExpectedCode } from "@grasp-os/shared/errors";
+import { appIdSchema } from "@grasp-os/shared/ids";
 import type { Permission } from "@grasp-os/shared/permissions";
 import type { WorkflowRun, WorkflowSummary } from "@grasp-os/shared/workflows";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import { asPerson, readDenied } from "./agent-person.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
+import { appHost } from "./durable-objects.ts";
 import { listAllRuns, workflowOverview } from "./workflows/overview.ts";
 import { runStatus } from "./workflows/runs.ts";
 
@@ -13,8 +16,9 @@ import { runStatus } from "./workflows/runs.ts";
 // object of its own. The agent sees runs' state, never what a run returned
 // or its error's words: those hold what the run read through its App's
 // connections and collections, which the chat has no permission for, and
-// whose restricted mode it doesn't share. Every call is audited as the
-// chat's agent acting for its person.
+// whose restricted mode it doesn't share; of a restricted App's run not
+// even where it failed, beyond a platform error code. Every call is
+// audited as the workspace's agent acting for the chat's person.
 
 /** Whether the agent may read workflow `workflow` of App `app`. */
 const readsWorkflow =
@@ -42,7 +46,30 @@ export interface AgentRun {
   failure: { step: string | null; code: string } | null;
 }
 
-const agentRun = (run: WorkflowRun): AgentRun => ({
+/**
+ * Where a run failed, as the chat may see it. A step's name is the
+ * workflow's to choose (from what it read, even) and an error's code may
+ * be its own, so of a restricted App's run, whose data the chat doesn't
+ * share, it sees only a code of the platform's.
+ */
+const failureOf = (
+  { failure }: WorkflowRun,
+  restricted: boolean
+): AgentRun["failure"] => {
+  if (failure === undefined) {
+    return null;
+  }
+  const { step, error } = failure;
+  if (!restricted) {
+    return { step, code: error.code };
+  }
+  return {
+    step: null,
+    code: isExpectedCode(error.code) ? error.code : "workflow.run_failed",
+  };
+};
+
+const agentRun = (run: WorkflowRun, restricted: boolean): AgentRun => ({
   id: run.id,
   app: run.app,
   workflow: run.workflow,
@@ -51,11 +78,12 @@ const agentRun = (run: WorkflowRun): AgentRun => ({
   startedBy: run.startedBy,
   createdAt: run.createdAt,
   endedAt: run.endedAt,
-  failure:
-    run.failure === undefined
-      ? null
-      : { step: run.failure.step, code: run.failure.error.code },
+  failure: failureOf(run, restricted),
 });
+
+/** Whether the App `app` has read restricted data (restricted.ts). */
+const appRestricted = async (env: Env, app: string): Promise<boolean> =>
+  await appHost(env, appIdSchema.parse(app)).isRestricted();
 
 /** Workflows, as a chat's code reads them. */
 export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {
@@ -83,7 +111,11 @@ export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {
       method: "workflows.runs",
       read: async (person) => {
         const { runs } = await listAllRuns(this.env, person, { app, workflow });
-        return runs.map(agentRun);
+        // All of one App's: its restricted mode, read once.
+        const [first] = runs;
+        const restricted =
+          first !== undefined && (await appRestricted(this.env, first.app));
+        return runs.map((run) => agentRun(run, restricted));
       },
       detail: (listed) => ({
         app: typeof app === "string" ? app : null,
@@ -104,7 +136,7 @@ export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {
         if (!readsWorkflow(found.app, found.workflow)(permissions)) {
           throw readDenied();
         }
-        return agentRun(found);
+        return agentRun(found, await appRestricted(this.env, found.app));
       },
       detail: (found) => ({ run: found.id }),
     });

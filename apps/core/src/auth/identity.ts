@@ -45,6 +45,30 @@ export const teamsOf = async (
     .orderBy(teams.name);
 
 /**
+ * A member of the organization, as the checks on what they may do see
+ * them: an {@link Identity} without its session.
+ */
+export type Member = Pick<Identity, "userId" | "role" | "teams" | "staff">;
+
+/**
+ * A member's role and teams, read now; `undefined` once they have no
+ * current membership. What `identify` finds of a signed-in member, for
+ * whoever acts on a member's behalf without their session (an agent).
+ */
+export const memberOf = async (
+  database: D1Database,
+  userId: string
+): Promise<Member | undefined> => {
+  const [role, memberTeams] = await Promise.all([
+    memberRole(database, userId),
+    teamsOf(database, userId),
+  ]);
+  return role === undefined
+    ? undefined
+    : { userId, role, teams: memberTeams, staff: false };
+};
+
+/**
  * A Grasp staff member's role now, from the sign-in config: `undefined`
  * once the staff window has closed, or they are no longer on the staff
  * list the console keeps (checked now, not only when they signed in).
@@ -107,10 +131,9 @@ export const identify = async (
       : { ...person, role, teams: [], staff: true };
   }
 
-  const role = await memberRole(env.DB, user.id);
-  if (!role) {
+  const member = await memberOf(env.DB, user.id);
+  if (member === undefined) {
     return undefined;
   }
-  const memberOf = await teamsOf(env.DB, user.id);
-  return { ...person, role, teams: memberOf, staff: false };
+  return { ...person, ...member, staff: false };
 };

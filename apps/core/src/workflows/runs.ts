@@ -34,6 +34,7 @@ import { z } from "zod";
 
 import { appFor, versionFiles } from "../apps.ts";
 import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
+import type { Member } from "../auth/identity.ts";
 import { apps, workflowRuns } from "../db/core/schema.ts";
 import { appHost } from "../durable-objects.ts";
 import { featureEnabled, requireFeature } from "../features.ts";
@@ -99,7 +100,7 @@ const iso = (date: Date | null): string | null => date?.toISOString() ?? null;
  * here: `status`, and `list` for all of an App's runs.
  */
 export const seesDetails = (
-  by: Identity,
+  by: Member,
   row: RunRow,
   ownerId: string
 ): boolean => by.role === "admin" || by.userId === (row.startedBy ?? ownerId);
@@ -598,7 +599,7 @@ const foundRun = async (env: Env, run: unknown): Promise<RunRow> => {
 
 /** A run, with its failure report when `by` sees its details. */
 export const runFor = (
-  by: Identity,
+  by: Member,
   row: RunRow,
   ownerId: string
 ): WorkflowRun =>
@@ -632,7 +633,7 @@ const liveOf = async (
  */
 export const runStatus = async (
   env: Env,
-  by: Identity,
+  by: Member,
   run: unknown
 ): Promise<WorkflowRun> => {
   const row = await foundRun(env, run);
