@@ -170,6 +170,49 @@ const signInOf = (
   return config.data;
 };
 
+/**
+ * Why `value` can't be core's `SIGN_IN`, as a code, or null when it can:
+ * `sign_in_invalid` when core wouldn't parse it, `admin_unreachable` when
+ * it names no admin, or one whose email isn't in its domains (the rule
+ * `clientSignInSchema` applies to a client's record). Checked on the
+ * `SIGN_IN` a deploy is about to set, whether derived or a setting that
+ * replaces it; whatever saves a `SIGN_IN` setting checks it the same way.
+ * A code, never the emails: a deploy's error is audited.
+ */
+export const signInSettingProblem = (
+  value: unknown
+): "sign_in_invalid" | typeof adminUnreachable | null => {
+  const config = signInConfigSchema.safeParse(value);
+  if (!config.success) {
+    return "sign_in_invalid";
+  }
+  return config.data.admins.length === 0 ||
+    unreachableAdmins(config.data).length > 0
+    ? adminUnreachable
+    : null;
+};
+
+/**
+ * Throws `sign_in_incomplete` unless `vars`, the config vars a deploy
+ * of client `clientId` is about to set on core, has no `SIGN_IN` or one
+ * with an admin who can sign in (`signInSettingProblem`).
+ */
+export const checkDeployedSignIn = (
+  clientId: string,
+  vars: Readonly<Record<string, unknown>>
+): void => {
+  if (vars.SIGN_IN === undefined) {
+    return;
+  }
+  const problem = signInSettingProblem(vars.SIGN_IN);
+  if (problem !== null) {
+    throw new DeployError(
+      "sign_in_incomplete",
+      `${clientId}'s SIGN_IN to deploy: ${problem}`
+    );
+  }
+};
+
 /** What a client's derived core config is made from. */
 export interface CoreConfigInputs {
   clientId: string;

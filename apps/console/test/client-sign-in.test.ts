@@ -4,6 +4,7 @@ import {
   adminUnreachable,
   clientSignInSchema,
   signInProblem,
+  signInSettingProblem,
 } from "../src/deploy/core-config.ts";
 
 const entra = {
@@ -50,6 +51,29 @@ describe("a client's sign-in", () => {
       outside: [adminUnreachable],
       subdomain: [adminUnreachable],
       mixed: [adminUnreachable],
+    });
+  });
+
+  it("refuses a SIGN_IN setting no admin could sign in with, as it would be saved or deployed", () => {
+    const setting = {
+      origin: "https://acme.grasp.test",
+      domains: ["acme.test"],
+      admins: ["ada@acme.test"],
+      google: { hostedDomain: "acme.test", clientId: "google-app" },
+    };
+    expect({
+      reachable: signInSettingProblem(setting),
+      none: signInSettingProblem({ ...setting, admins: [] }),
+      outside: signInSettingProblem({
+        ...setting,
+        admins: ["ada@elsewhere.test"],
+      }),
+      invalid: signInSettingProblem({ domains: ["acme.test"] }),
+    }).toStrictEqual({
+      reachable: null,
+      none: adminUnreachable,
+      outside: adminUnreachable,
+      invalid: "sign_in_invalid",
     });
   });
 
