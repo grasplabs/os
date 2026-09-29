@@ -51,7 +51,6 @@ import {
 } from "./db/core/schema.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
 import { authorize } from "./permissions.ts";
-import { latestComputation } from "./signals.ts";
 
 // Statistics (@grasp-os/shared/statistics): an App's server code records
 // named measures with a few dimensions, and reads aggregates of them over
@@ -299,6 +298,20 @@ const workflowRunsMeasure = async (
 };
 
 /**
+ * The computation of improvement signals started last among those
+ * finished by `end` (a read's `until`, or now): one subquery, so every
+ * page of a read held at `until` reads the same computation, whatever
+ * finishes after it.
+ */
+const latestFinishedBy = (end: Date): SQL => sql`(
+  SELECT ${improvementSignalComputations.id} FROM ${improvementSignalComputations}
+  WHERE ${improvementSignalComputations.finishedAt} IS NOT NULL
+    AND ${improvementSignalComputations.finishedAt} <= ${end.getTime()}
+  ORDER BY ${improvementSignalComputations.startedAt} DESC, ${improvementSignalComputations.id} DESC
+  LIMIT 1
+)`;
+
+/**
  * The improvement signals of the Apps `apps` of the latest computation,
  * if it started within the window, from `start` to `now`, as `query`
  * asks; none while they are off.
@@ -330,7 +343,7 @@ const signalsMeasure = async (
     .from(improvementSignals)
     .where(
       and(
-        eq(improvementSignals.computation, latestComputation),
+        eq(improvementSignals.computation, latestFinishedBy(now)),
         inArray(improvementSignals.appId, [...apps]),
         where.workflow === undefined
           ? undefined

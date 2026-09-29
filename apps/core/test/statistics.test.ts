@@ -686,31 +686,49 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     const reader = await statsApp(admin);
     await grantPlatform(admin, reader);
     const watched = await statsApp(admin);
-    const id = `computation-${unique()}`;
-    // The latest computation, within the day read.
-    const startedAt = Date.now() - 60_000;
-    await env.DB.batch([
-      env.DB.prepare(
-        "INSERT INTO improvement_signal_computations (id, day, started_at, finished_at) VALUES (?, ?, ?, ?)"
-      ).bind(
-        id,
-        new Date(startedAt).toISOString().slice(0, 10),
-        startedAt,
-        startedAt
-      ),
-      ...(
-        [
-          ["pay", "failing_step", "match", 4],
-          ["pay", "failing_step", "book", 2],
-          ["pay", "cost_per_run", "", 0.5],
-          ["remind", "failing_step", "send", 1],
-        ] as const
-      ).map(([workflow, kind, subject, value]) =>
+    /** A finished computation, started `ago` and finished `took` later, with `signals`. */
+    const seedComputation = async (
+      ago: number,
+      took: number,
+      signals: readonly (readonly [string, string, string, number])[]
+    ) => {
+      const id = `computation-${unique()}`;
+      const startedAt = Date.now() - ago;
+      await env.DB.batch([
         env.DB.prepare(
-          "INSERT INTO improvement_signals (computation, app_id, workflow_id, kind, subject, value, evidence) VALUES (?, ?, ?, ?, ?, ?, '{}')"
-        ).bind(id, watched, workflow, kind, subject, value)
-      ),
+          "INSERT INTO improvement_signal_computations (id, day, started_at, finished_at) VALUES (?, ?, ?, ?)"
+        ).bind(
+          id,
+          new Date(startedAt).toISOString().slice(0, 10),
+          startedAt,
+          startedAt + took
+        ),
+        ...signals.map(([workflow, kind, subject, value]) =>
+          env.DB.prepare(
+            "INSERT INTO improvement_signals (computation, app_id, workflow_id, kind, subject, value, evidence) VALUES (?, ?, ?, ?, ?, ?, '{}')"
+          ).bind(id, watched, workflow, kind, subject, value)
+        ),
+      ]);
+    };
+    // The latest computation, within the day read: two minutes ago.
+    await seedComputation(120_000, 10_000, [
+      ["pay", "failing_step", "match", 4],
+      ["pay", "failing_step", "book", 2],
+      ["pay", "cost_per_run", "", 0.5],
+      ["remind", "failing_step", "send", 1],
     ]);
+    // A snapshot's time, after it finished.
+    const until = new Date(Date.now() - 60_000).toISOString();
+    const signalsRead = async (held: boolean) =>
+      answerSchema.parse(
+        await platformRead(reader, admin.userId, {
+          measure: "platform.improvement_signals",
+          days: 1,
+          where: { app: watched, workflow: "pay" },
+          groupBy: ["kind"],
+          ...(held ? { until } : {}),
+        })
+      ).ok.groups;
     let answer: unknown;
     const recorded = await recordedQueries(async () => {
       answer = await platformRead(reader, admin.userId, {
@@ -726,37 +744,29 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
         groupBy: ["workflow"],
       });
     });
-    // A computation dated past the read's now is the latest: it answers
-    // nothing, and the one before isn't the latest any more.
-    const future = Date.now() + 1000 * dayMs;
-    await env.DB.prepare(
-      "INSERT INTO improvement_signal_computations (id, day, started_at, finished_at) VALUES (?, ?, ?, ?)"
-    )
-      .bind(
-        `computation-${unique()}`,
-        new Date(future).toISOString().slice(0, 10),
-        future,
-        future
-      )
-      .run();
-    await env.DB.prepare(
-      "INSERT INTO improvement_signals (computation, app_id, workflow_id, kind, subject, value, evidence) SELECT id, ?, 'pay', 'failing_step', 'later', 9, '{}' FROM improvement_signal_computations WHERE started_at = ?"
-    )
-      .bind(watched, future)
-      .run();
-    const later = await platformRead(reader, admin.userId, {
-      measure: "platform.improvement_signals",
-      days: 1,
-      where: { app: watched, workflow: "pay" },
-      groupBy: ["kind"],
-    });
+    const heldBefore = await signalsRead(true);
+    // Then one finishes after the snapshot's time, as between its pages,
+    // and another is dated after now.
+    await seedComputation(30_000, 10_000, [
+      ["pay", "failing_step", "later", 9],
+    ]);
+    await seedComputation(-1000 * dayMs, 0, [
+      ["pay", "failing_step", "future", 99],
+    ]);
+    const heldAfter = await signalsRead(true);
+    const current = await signalsRead(false);
     const measured = recorded.filter(({ query }) =>
       /from "(?:improvement_signals|workflow_runs)"/u.test(query)
     );
     const plans = await Promise.all(measured.map(planOf));
     expect({
       groups: answerSchema.parse(answer).ok.groups,
-      later: answerSchema.parse(later).ok.groups,
+      // Held at the snapshot's time: the same computation before and after
+      // another finished.
+      held: heldAfter,
+      same: JSON.stringify(heldAfter) === JSON.stringify(heldBefore),
+      // Not held: the latest finished by now, never one dated later.
+      current,
       reads: measured.length,
       // Which computation is the latest reads the computations, as every
       // read of the signals does: a finished one deletes those before it,
@@ -786,7 +796,32 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
           max: 4,
         },
       ],
-      later: [],
+      held: [
+        {
+          dimensions: { kind: "cost_per_run" },
+          count: 1,
+          sum: 0.5,
+          min: 0.5,
+          max: 0.5,
+        },
+        {
+          dimensions: { kind: "failing_step" },
+          count: 2,
+          sum: 6,
+          min: 2,
+          max: 4,
+        },
+      ],
+      same: true,
+      current: [
+        {
+          dimensions: { kind: "failing_step" },
+          count: 1,
+          sum: 9,
+          min: 9,
+          max: 9,
+        },
+      ],
       reads: 2,
       scans: [],
     });
