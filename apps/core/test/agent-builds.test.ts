@@ -204,6 +204,41 @@ export default workflowTests(definition, [{ name: "runs", mocks: { sum: 2, mail:
 `,
 });
 
+/**
+ * The weekly workflow, run by `triggers`; with `nested`, its step called
+ * from a function of its own, which the step list can't read.
+ */
+const weekly = (
+  triggers: string,
+  nested = false,
+  acting = false
+): Record<string, string> => ({
+  "workflows/weekly.ts": `import { schedule, workflow } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "weekly",
+  { params: { every: schedule({ label: "Runs", default: "0 8 * * 1" }) }, triggers: ${triggers} },
+  async (step) => {
+    ${nested ? 'const run = async () => await step.do("report", { description: "Write the report" }, async () => "sent");\n    return await run();' : `return await step.do("report", { description: "Write the report"${acting ? ', sideEffect: true, input: "report"' : ""} }, async () => "sent");`}
+  }
+);
+`,
+  "workflows/weekly.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./weekly.ts";
+
+export default workflowTests(definition, [{ name: "runs", mocks: { report: "sent" }, expect: { output: "sent" } }]);
+`,
+});
+
+/** An export of the App's, with its access. */
+const exported = (access: "read" | "write", description = "") => ({
+  access,
+  description,
+  input: { type: "object" },
+  output: { type: "object" },
+});
+
 describe("building Apps from a chat", { timeout: 120_000 }, () => {
   it("repairs a restyled button without the person, in a draft nobody else sees, and puts nothing live", async () => {
     const { builder, person, chat, grant } = await setUp([
@@ -736,6 +771,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
           version: proposal.version,
           passed: proposal.check.passed,
           review: proposal.review,
+          reviewUnavailable: proposal.reviewUnavailable,
           // No way to make it current, under any name.
           setCurrent: await tried(() => env.build.setCurrent(app.id, proposal.version)),
           appsSetCurrent: await tried(() => env.apps.setCurrent(app.id, proposal.version)),
@@ -757,6 +793,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       version: 1,
       passed: true,
       review: structuredClone(review),
+      reviewUnavailable: false,
       // Neither API has such a method: the call reaches nothing.
       setCurrent: noSetCurrent,
       appsSetCurrent: noSetCurrent,
@@ -839,13 +876,71 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     );
   });
 
+  it("stands by a proposal once committed, when what follows it fails", async () => {
+    const { person, chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        const app = await env.build.create({ name: ${JSON.stringify(appName)} });
+        await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": fixed, ...intake })});
+        const proposal = await env.build.propose(app.id, "A desk");
+        return {
+          version: proposal.version,
+          review: proposal.review,
+          reviewUnavailable: proposal.reviewUnavailable,
+          left: (await env.build.files(app.id)).changed,
+        };
+      };`),
+      says("Proposed; its review comes later."),
+    ]);
+    await grant();
+    // After the commit, keeping the check's tests and reading them for the
+    // review fail: the proposal is made all the same.
+    const { FILES: files } = env;
+    const failing = new Proxy(files, {
+      get: (target, property) => {
+        const value: unknown = Reflect.get(target, property);
+        if (
+          (property === "get" || property === "put") &&
+          typeof value === "function"
+        ) {
+          return (key: string, ...rest: unknown[]): unknown =>
+            key.includes("/tests/")
+              ? Promise.reject(new Error("The test results can't be reached"))
+              : Reflect.apply(value, target, [key, ...rest]);
+        }
+        return typeof value === "function"
+          ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
+          : value;
+      },
+    });
+    try {
+      env.FILES = failing;
+      await chat.ask("Build an invoice desk");
+    } finally {
+      env.FILES = files;
+    }
+
+    const [result] = await codeResults(chat.stub, chat.chat.id);
+    expect(returned(result?.text)).toStrictEqual({
+      version: 1,
+      review: null,
+      reviewUnavailable: true,
+      left: [],
+    });
+    // Pending, and its review reads once the test results can be reached.
+    const app = await createdApp(person.api);
+    expect(app).toMatchObject({ currentVersion: null, pendingVersion: 1 });
+    await expect(
+      person.api.apps.versions.review(app.id, 1)
+    ).resolves.toMatchObject({ tests: { status: "passed" } });
+  });
+
   it("proposes nothing that fails its checks", async () => {
     const { person, chat, grant } = await setUp([
       codeStep(`export default async (env) => {
         const app = await env.build.create({ name: ${JSON.stringify(appName)} });
         await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": restyled })});
         const proposal = await env.build.propose(app.id, "A desk");
-        return { version: proposal.version, passed: proposal.check.passed, review: proposal.review };
+        return { version: proposal.version, passed: proposal.check.passed, review: proposal.review, reviewUnavailable: proposal.reviewUnavailable };
       };`),
       says("It doesn't pass yet."),
     ]);
@@ -858,6 +953,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       version: null,
       passed: false,
       review: null,
+      reviewUnavailable: false,
     });
     const app = await createdApp(person.api);
     expect({
@@ -1088,11 +1184,14 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
           id: "digest",
           change: "modified",
           shared: [],
+          sideEffect: true,
+          triggers: [],
           steps: [
+            // Calls MAIL: may change things, though it doesn't say so.
             {
               name: "mail",
               change: "modified",
-              sideEffect: false,
+              sideEffect: true,
               calls: ["MAIL"],
               sharedCode: false,
             },
@@ -1105,6 +1204,8 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
           id: "digest",
           change: "modified",
           shared: ["workflows/lib/total.ts"],
+          sideEffect: true,
+          triggers: [],
           // Every step, and each may change things: the workflow calls
           // bindings, and the helper may too.
           steps: [
@@ -1127,6 +1228,107 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
         },
       ],
     });
+  });
+
+  it("calls out new triggers, changed exports, and steps it can't read as possibly acting", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const { id: app } = await builder.api.apps.create({ name: "Weekly" });
+    await release(builder, app, {
+      ...weekly(`[{ type: "manual" }]`),
+      "app/exports.json": JSON.stringify({
+        totals: exported("read"),
+        purge: exported("write"),
+      }),
+    });
+    await builder.api.apps.files.write(app, {
+      // Now on a schedule, and its step inside a function of its own.
+      ...weekly(`[{ type: "schedule", param: "every" }]`, true),
+      "app/exports.json": JSON.stringify({
+        totals: exported("write"),
+        book: exported("write"),
+      }),
+    });
+    const { version } = await builder.api.apps.files.commit(app, "Weekly");
+
+    const review = await builder.api.apps.versions.review(app, version);
+
+    expect({
+      workflows: review.workflows,
+      exports: review.exports,
+    }).toStrictEqual({
+      workflows: [
+        {
+          id: "weekly",
+          change: "modified",
+          // Code it may import: JSON too.
+          shared: ["app/exports.json"],
+          sideEffect: true,
+          steps: null,
+          params: [],
+          triggers: [
+            {
+              trigger: { type: "schedule", param: "every" },
+              change: "added",
+              count: 1,
+            },
+            { trigger: { type: "manual" }, change: "removed", count: 1 },
+          ],
+        },
+      ],
+      exports: [
+        { name: "book", change: "added", access: "write", accessBefore: null },
+        {
+          name: "purge",
+          change: "removed",
+          access: null,
+          accessBefore: "write",
+        },
+        {
+          name: "totals",
+          change: "modified",
+          access: "write",
+          accessBefore: "read",
+        },
+      ],
+    });
+  });
+
+  it("counts a second identical trigger as added, and a workflow with an unchanged acting step as acting", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const { id: app } = await builder.api.apps.create({ name: "Weekly" });
+    const once = `[{ type: "schedule", param: "every" }]`;
+    await release(builder, app, weekly(once, false, true));
+    // Only a second schedule, the same as the first: both run it.
+    await builder.api.apps.files.write(
+      app,
+      weekly(
+        `[{ type: "schedule", param: "every" }, { type: "schedule", param: "every" }]`,
+        false,
+        true
+      )
+    );
+    const { version } = await builder.api.apps.files.commit(app, "Twice");
+
+    const review = await builder.api.apps.versions.review(app, version);
+
+    expect(review.workflows).toStrictEqual([
+      {
+        id: "weekly",
+        change: "modified",
+        shared: [],
+        // Its step, unchanged, says it changes things: so the workflow can.
+        sideEffect: true,
+        steps: [],
+        params: [],
+        triggers: [
+          {
+            trigger: { type: "schedule", param: "every" },
+            change: "added",
+            count: 1,
+          },
+        ],
+      },
+    ]);
   });
 
   it("lists nothing naming an App its reviewer may not open, role or not", async () => {
