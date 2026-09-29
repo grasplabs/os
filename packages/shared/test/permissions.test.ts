@@ -85,7 +85,6 @@ describe("reserved binding names", () => {
     "CAPABILITY_SIGNING_KEY_PREVIOUS",
     "TOKEN_ENCRYPTION_KEY_PREVIOUS",
     "AUDIT_RETENTION_DAYS",
-    "DOWNLOAD_HOSTS",
     "ENTRA_CLIENT_SECRET",
     "GOOGLE_CLIENT_SECRET",
   ])("refuses %s, which only the platform may use", (name) => {

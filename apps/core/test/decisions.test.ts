@@ -196,14 +196,6 @@ describe("decisions", { timeout: 60_000 }, () => {
       "version",
       "workflow",
     ]);
-    // The row still names a channel, so the release before this one reads
-    // it as answered after a rollback.
-    const row = await env.DB.prepare(
-      "SELECT decided_via FROM workflow_decisions WHERE id = ?"
-    )
-      .bind(decision)
-      .first<{ decided_via: string | null }>();
-    expect(row?.decided_via).toBe("rpc");
   });
 
   it("refuse anyone the decision isn't from", async () => {

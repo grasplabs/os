@@ -183,7 +183,6 @@ export const openDecision = async (
     expiresAt: new Date(now + request.timeout),
     decidedBy: null,
     decidedAt: null,
-    decidedVia: null,
     payload: null,
   };
   const [[inserted]] = await auditedBatch(env, db, [
@@ -654,10 +653,6 @@ export const answerDecision = async (
         status,
         decidedBy: by.userId,
         decidedAt: now,
-        // Only so the previous release, which shows an answer only with a
-        // channel, still reads this row as answered after a rollback. It
-        // goes with the column in the contract release.
-        decidedVia: "rpc",
         payload: payload ?? null,
       })
       .where(

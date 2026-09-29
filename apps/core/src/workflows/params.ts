@@ -154,7 +154,7 @@ const setDirectly = async (
       .insert(workflowParamValues)
       .select(
         sql`SELECT ${current.app}, ${current.workflow}, ${param.name},
-            ${JSON.stringify(value)}, ${by.userId}, ${Date.now()}, NULL
+            ${JSON.stringify(value)}, ${by.userId}, ${Date.now()}
           WHERE EXISTS (
             SELECT 1 FROM ${apps}
             WHERE ${apps.id} = ${current.app}
@@ -171,7 +171,6 @@ const setDirectly = async (
           value: sql`excluded.value`,
           setBy: sql`excluded.set_by`,
           setAt: sql`excluded.set_at`,
-          approvalId: sql`excluded.approval_id`,
         },
       })
       .returning({ param: workflowParamValues.param }),

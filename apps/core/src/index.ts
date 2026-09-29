@@ -3,7 +3,6 @@ import { errorFields, log } from "@grasp-os/shared/log";
 import { sweepPendingCopies } from "./app-blueprints.ts";
 import { auditLog } from "./audit-log.ts";
 import { drainAuditOutboxes } from "./audit-outbox.ts";
-import { consumeLeftoverAuditQueue } from "./audit-queue-leftovers.ts";
 import { refreshDailySignals } from "./daily-signals.ts";
 import { handleRequest } from "./entry.ts";
 import { featureEnabled } from "./features.ts";
@@ -44,12 +43,6 @@ export { Workspace } from "./workspace.ts";
 
 export default {
   fetch: handleRequest,
-  // Audit events an older release left on the audit queues (see
-  // src/audit-queue-leftovers.ts). Remove it with the queues, in a later
-  // release.
-  queue: async (batch, env) => {
-    await consumeLeftoverAuditQueue(batch, env);
-  },
   // Mail Email Routing sends to workflows' email triggers (see
   // src/workflows/inbound-email.ts).
   email: async (message, env) => {

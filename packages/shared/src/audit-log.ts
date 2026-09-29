@@ -122,9 +122,8 @@ const typeRules: readonly {
   { action: "statistics.read", type: "read" },
   // The log's own events, each named, so an `audit` action added later has
   // no type until it gets a rule: retention moving events out and purging
-  // them, gaps (outbox rows the log can't take, moved aside, and events
-  // recovered from the old audit queue's dead letter queue or lost there),
-  // then reading the log.
+  // them, gaps (outbox rows the log can't take, moved aside), then reading
+  // the log.
   { action: "audit.archived", type: "action" },
   { action: "audit.purged", type: "action" },
   { action: "audit.gap", type: "action" },

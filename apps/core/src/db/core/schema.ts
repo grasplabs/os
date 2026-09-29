@@ -515,12 +515,6 @@ export const recordTypeOwners = sqliteTable(
  * run's report (JSON): where and why it stopped, without the values it
  * worked on.
  *
- * `owner_waits` and `acting_for`, and the `paused` status, were for a
- * triggered run that paused while its App had no owner. Nothing reads or
- * writes them any more; the previous release still may, and copes with
- * the defaults (0, null) new rows get. They go in a later release
- * (expand, then contract).
- *
  * `waiting_for` is the switched-off feature the run was last seen waiting
  * on, until it goes on: so a run stopped and resumed while it waits (a
  * deploy, a crash) records its wait once, though the resumed execution
@@ -548,11 +542,9 @@ export const workflowRuns = sqliteTable(
         "cancelled",
       ],
     }).notNull(),
-    ownerWaits: integer("owner_waits").notNull().default(0),
     createdAt: timestamp("created_at").notNull(),
     endedAt: timestamp("ended_at"),
     failure: text({ mode: "json" }).$type<RunFailure>(),
-    actingFor: text("acting_for"),
     waitingFor: text("waiting_for"),
     /**
      * What a trigger started it for (src/workflows/triggers.ts): one key
@@ -635,10 +627,7 @@ export const workflowTriggers = sqliteTable(
  * ended. `status` moves from `open` once, in one conditional update, to an
  * answer (`approved`, `rejected`) or `timed_out`, so the first answer is
  * the only one. An answer keeps who gave it, when, and the payload they
- * sent (JSON), which the run gets. `decided_via` is no longer read, as
- * links are plain; an answer still writes `rpc` so the previous release
- * reads the row as answered after a rollback. It goes in a later release
- * (expand, then contract).
+ * sent (JSON), which the run gets.
  */
 export const workflowDecisions = sqliteTable(
   "workflow_decisions",
@@ -657,7 +646,6 @@ export const workflowDecisions = sqliteTable(
     expiresAt: timestamp("expires_at").notNull(),
     decidedBy: text("decided_by"),
     decidedAt: timestamp("decided_at"),
-    decidedVia: text("decided_via", { enum: ["link", "rpc"] }),
     payload: text({ mode: "json" }).$type<Json>(),
   },
   (table) => [
@@ -696,56 +684,9 @@ export const appWorkingFiles = sqliteTable(
 );
 
 /**
- * Legacy, and a later release drops it: permission grants and workflow
- * parameter changes that once needed a second person's approval. Admins
- * grant permissions directly now (src/permissions.ts), and nothing reads or
- * writes this table. It stays, unchanged, so the release before this one
- * still runs against it after a rollback: that release opens an approval
- * for a requested permission that has none when it is granted, and reads
- * every permission by its own `status`, never by its approval.
- */
-export const approvals = sqliteTable(
-  "approvals",
-  {
-    id: text().primaryKey(),
-    kind: text({ enum: ["permission", "param"] }).notNull(),
-    permissionId: text("permission_id").references(() => permissions.id),
-    appId: text("app_id"),
-    workflowId: text("workflow_id"),
-    param: text(),
-    value: text({ mode: "json" }).$type<ParamValue>(),
-    previous: text({ mode: "json" }).$type<ParamValue>(),
-    approvers: text({ enum: ["admins", "builders"] }).notNull(),
-    status: text({
-      enum: ["pending", "approved", "declined", "withdrawn"],
-    }).notNull(),
-    requestedBy: text("requested_by").notNull(),
-    requestedAt: timestamp("requested_at").notNull(),
-    decidedBy: text("decided_by"),
-    decidedAt: timestamp("decided_at"),
-    breakGlass: integer("break_glass", { mode: "boolean" })
-      .notNull()
-      .default(false),
-    version: integer(),
-    decision: text(),
-  },
-  (table) => [
-    uniqueIndex("approvals_pending_permission_idx")
-      .on(table.permissionId)
-      .where(sql`status = 'pending'`),
-    uniqueIndex("approvals_pending_param_idx")
-      .on(table.appId, table.workflowId, table.param)
-      .where(sql`status = 'pending'`),
-    index("approvals_status_idx").on(table.status, table.requestedAt),
-  ]
-);
-
-/**
  * The values people set for workflows' parameters, one per App, workflow
  * and parameter; a parameter without one has its code's default. `set_by`
- * set it directly. `approval_id` is legacy, and a later release drops it
- * with `approvals`: set only by an approval from when sensitive values
- * needed one, and cleared by the next set.
+ * set it directly.
  */
 export const workflowParamValues = sqliteTable(
   "workflow_param_values",
@@ -758,7 +699,6 @@ export const workflowParamValues = sqliteTable(
     value: text({ mode: "json" }).$type<ParamValue>().notNull(),
     setBy: text("set_by").notNull(),
     setAt: timestamp("set_at").notNull(),
-    approvalId: text("approval_id"),
   },
   (table) => [
     primaryKey({ columns: [table.appId, table.workflowId, table.param] }),

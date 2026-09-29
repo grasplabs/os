@@ -243,25 +243,6 @@ describe("permissions", () => {
     });
   });
 
-  it("are granted directly with an approval still pending from the release before", async () => {
-    const admin = await permissionApi("admin");
-    const builder = await permissionApi("builder");
-    const app = await newApp(builder.api);
-    const { id } = await builder.api.permissions.request(outlook(app.appId));
-    // The approval the release before opened with each request.
-    await env.DB.prepare(
-      `INSERT INTO approvals (id, kind, permission_id, approvers, status,
-        requested_by, requested_at, break_glass)
-       VALUES (?, 'permission', ?, 'admins', 'pending', ?, ?, 0)`
-    )
-      .bind(crypto.randomUUID(), id, builder.userId, Date.now())
-      .run();
-    await expect(grantReviewed(admin.api, id)).resolves.toMatchObject({
-      status: "active",
-      grantedBy: admin.userId,
-    });
-  });
-
   it("stop working at the next call once revoked, in stubs already handed out", async () => {
     const admin = await permissionApi("admin");
     const app = await newApp(admin.api);
