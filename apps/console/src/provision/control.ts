@@ -1,12 +1,11 @@
 /**
  * What staff do with a client's provisioning (src/provision/workflow.ts):
  * start it, confirm the account is on Workers Paid, and resume a run that
- * failed or is gone. Each is audited before it acts on the Workflow, so an action
- * that then fails is still an audited attempt.
+ * stopped or is gone.
  *
- * A run's instance id is its client's id: Workflows refuses a second
- * instance of one id, so two starts for one client (two staff members at
- * once) end with one run.
+ * Starting and resuming claim the client's next run in D1, audited in the
+ * same batch (src/provision/runs.ts): of two staff members acting at once,
+ * one wins and creates a run, the other is refused (`already_running`).
  */
 import { releaseIdSchema } from "@grasp-os/shared/release";
 import { newClientIdSchema } from "@grasp-os/shared/router";
@@ -15,12 +14,13 @@ import { z } from "zod";
 
 import type { Staff } from "../access.ts";
 import { getAccount } from "../cloudflare/accounts.ts";
-import { CloudflareApiError } from "../cloudflare/api.ts";
+import { isRefused } from "../cloudflare/api.ts";
 import { audit, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
 import { auditEvents, clients, releases } from "../db/schema.ts";
 import { clientDomain, deployerApi } from "../deploy/context.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
+import { claimRun, currentRun, isReplaceable } from "./runs.ts";
 import { scriptInTheWay, workersPaidEvent } from "./workflow.ts";
 import type { ProvisionParams } from "./workflow.ts";
 
@@ -38,7 +38,7 @@ export const provisionErrorCodes = [
   "account_in_use",
   /** The deployer isn't a member of the account to adopt. */
   "account_unreachable",
-  /** A run for that client is still going. */
+  /** A run for that client is still going, or another staff member just started or resumed one. */
   "already_running",
   /** No run for that client, or it isn't where the action applies. */
   "not_provisioning",
@@ -69,11 +69,11 @@ export const provisionInputSchema = z.object({
 });
 export type ProvisionInput = z.infer<typeof provisionInputSchema>;
 
-/** A run that ended without finishing, which a new start may replace. */
-export const endedStatuses: ReadonlySet<InstanceStatus["status"]> = new Set([
-  "errored",
-  "terminated",
-]);
+const alreadyRunning = (clientId: string): ProvisionError =>
+  new ProvisionError(
+    "already_running",
+    `Client ${clientId} is being provisioned already`
+  );
 
 /** The client `id`'s row, if there is one. */
 const clientOf = async (env: Env, id: string) => {
@@ -88,28 +88,6 @@ const clientOf = async (env: Env, id: string) => {
     .from(clients)
     .where(eq(clients.id, id));
   return row;
-};
-
-/** The run of client `clientId`, or null when there's none. */
-export const runOf = async (
-  env: Env,
-  clientId: string
-): Promise<WorkflowInstance | null> => {
-  try {
-    return await env.PROVISION_CLIENT.get(clientId);
-  } catch {
-    // Workflows throws for an instance id it doesn't have, or no longer
-    // has (its retention passed).
-    return null;
-  }
-};
-
-/** Where `run` is. */
-const statusOf = async (
-  run: WorkflowInstance
-): Promise<InstanceStatus["status"]> => {
-  const { status } = await run.status();
-  return status;
 };
 
 /**
@@ -139,10 +117,7 @@ const checkAdoptable = async (
   try {
     await getAccount(api, accountId);
   } catch (error) {
-    if (
-      error instanceof CloudflareApiError &&
-      (error.status === 403 || error.status === 404)
-    ) {
+    if (isRefused(error)) {
       throw new ProvisionError(
         "account_unreachable",
         `The deployer isn't a member of account ${accountId}`
@@ -163,9 +138,9 @@ const checkAdoptable = async (
  * Starts provisioning the client `input` describes, as `staff`, and
  * returns its id. A client whose run is still going is refused, and so is
  * one that exists (its page resumes its run instead) and an account that
- * isn't free (`checkAdoptable`). A run for the id that ended before it
- * recorded the client (an account it couldn't create or read) is
- * replaced, so staff can start again with another account.
+ * isn't free (`checkAdoptable`). A run that stopped before it recorded the
+ * client (an account it couldn't create or read) is replaced, so staff
+ * can start again with another account.
  */
 export const startProvisioning = async (
   env: Env,
@@ -191,14 +166,10 @@ export const startProvisioning = async (
       `Release ${releaseId} isn't imported`
     );
   }
-  const existing = await runOf(env, clientId);
-  const status = existing === null ? null : await statusOf(existing);
+  const run = await currentRun(env, clientId);
   // A finished run leaves its client, refused next.
-  if (status !== null && status !== "complete" && !endedStatuses.has(status)) {
-    throw new ProvisionError(
-      "already_running",
-      `Client ${clientId} is being provisioned`
-    );
+  if (run !== null && run.status !== "complete" && !isReplaceable(run.status)) {
+    throw alreadyRunning(clientId);
   }
   if ((await clientOf(env, clientId)) !== undefined) {
     throw new ProvisionError("client_exists", `Client ${clientId} exists`);
@@ -206,42 +177,32 @@ export const startProvisioning = async (
   if (accountId !== undefined) {
     await checkAdoptable(env, clientId, accountId);
   }
-  const params: ProvisionParams = {
-    ...parsed,
-    startedBy: { email: staff.email, sub: staff.sub },
-  };
-  await audit(db, staff, {
+  const runId = await claimRun(db, staff, clientId, run?.runId ?? null, {
     action: "client.provision_start",
     clientId,
     target: releaseId,
     detail: {
       account: accountId ?? "new",
-      ring: params.ring,
-      replaces: existing !== null,
+      ring: parsed.ring,
+      ...(run === null ? {} : { replaces: run.runId }),
     },
   });
-  if (existing !== null) {
-    // Read again right before: a start that raced this one may have
-    // replaced the ended run already, and its new run must stay.
-    if (!endedStatuses.has(await statusOf(existing))) {
-      throw new ProvisionError(
-        "already_running",
-        `Client ${clientId} is being provisioned`
-      );
-    }
-    await existing.delete();
+  if (runId === undefined) {
+    throw alreadyRunning(clientId);
   }
-  // Two starts that raced past the checks above: Workflows refuses the
-  // second instance of an id, so one run goes on.
-  await env.PROVISION_CLIENT.create({ id: clientId, params });
+  const params: ProvisionParams = {
+    ...parsed,
+    startedBy: { email: staff.email, sub: staff.sub },
+  };
+  await env.PROVISION_CLIENT.create({ id: runId, params });
   return clientId;
 };
 
 /**
- * Tells client `clientId`'s run that its account is on Workers Paid, as
- * `staff`. Refused unless the client is being provisioned by a run.
- * Sending it again, or before the run waits for it, is harmless: the run
- * takes the first when it gets there.
+ * Tells client `clientId`'s current run that its account is on Workers
+ * Paid, as `staff`. Refused unless the client is being provisioned by a
+ * run Workflows has. Sending it again, or before the run waits for it, is
+ * harmless: the run takes the first when it gets there.
  */
 export const confirmWorkersPaid = async (
   env: Env,
@@ -249,8 +210,12 @@ export const confirmWorkersPaid = async (
   clientId: string
 ): Promise<void> => {
   const client = await clientOf(env, clientId);
-  const run = await runOf(env, clientId);
-  if (client?.status !== "provisioning" || run === null) {
+  const run = await currentRun(env, clientId);
+  if (
+    client?.status !== "provisioning" ||
+    run === null ||
+    run.instance === null
+  ) {
     throw new ProvisionError(
       "not_provisioning",
       `Client ${clientId} isn't waiting for Workers Paid`
@@ -260,7 +225,7 @@ export const confirmWorkersPaid = async (
     action: "client.workers_paid",
     clientId,
   });
-  await run.sendEvent({ type: workersPaidEvent, payload: {} });
+  await run.instance.sendEvent({ type: workersPaidEvent, payload: {} });
 };
 
 /**
@@ -320,15 +285,15 @@ const confirmedWorkersPaid = async (
  * Resumes provisioning client `clientId`, as `staff`, with a new run made
  * from the client's record: the release its latest deploy was of (or the
  * one it was started with), and no Workers Paid pause once staff
- * confirmed it. A run that ended without finishing is deleted first; one
- * that's gone (Workflows dropped it after its retention) needs nothing.
- * One path for both, whichever step the old run stopped at: every step
- * finds what an earlier run made, and the deploy resumes the client's
- * failed deploy, so nothing is made twice.
+ * confirmed it. One path whichever step the old run stopped at, and
+ * whether it stopped or is gone: every step finds what an earlier run
+ * made, and the deploy resumes the client's failed deploy, so nothing is
+ * made twice.
  *
  * Refused unless the client is recorded and still provisioning (a run
  * that stopped before it recorded the client is started again instead),
- * and while its run is still going.
+ * while its run is still going, and when another staff member's resume
+ * claimed the new run first.
  */
 export const retryProvisioning = async (
   env: Env,
@@ -343,36 +308,26 @@ export const retryProvisioning = async (
       `Client ${clientId} isn't being provisioned`
     );
   }
-  const run = await runOf(env, clientId);
-  const stillGoing = async () =>
-    run !== null && !endedStatuses.has(await statusOf(run));
-  if (await stillGoing()) {
-    throw new ProvisionError(
-      "already_running",
-      `Client ${clientId}'s run is still going`
-    );
+  const run = await currentRun(env, clientId);
+  if (run !== null && !isReplaceable(run.status)) {
+    throw alreadyRunning(clientId);
   }
   const releaseId = await releaseToResume(db, clientId);
   const workersPaid = await confirmedWorkersPaid(db, clientId);
-  await audit(db, staff, {
+  const runId = await claimRun(db, staff, clientId, run?.runId ?? null, {
     action: "client.provision_retry",
     clientId,
     target: releaseId,
-    detail: { replaces: run !== null, workersPaid },
+    detail: {
+      workersPaid,
+      ...(run === null ? {} : { replaces: run.runId }),
+    },
   });
-  if (run !== null) {
-    // Read again right before: a resume that raced this one may have
-    // replaced the ended run already, and its new run must stay.
-    if (await stillGoing()) {
-      throw new ProvisionError(
-        "already_running",
-        `Client ${clientId}'s run is still going`
-      );
-    }
-    await run.delete();
+  if (runId === undefined) {
+    throw alreadyRunning(clientId);
   }
   await env.PROVISION_CLIENT.create({
-    id: clientId,
+    id: runId,
     params: {
       clientId,
       name: client.name,

@@ -6,9 +6,11 @@
  * hostname in the router's map, src/deploy/deploy.ts), and the client
  * marked active.
  *
- * One instance per client, its id the client's id (src/provision/control.ts),
- * so a second start for the same client can't run beside the first: the
- * single runner that a deploy's D1 migrations and router map write rely on.
+ * One run per client at a time: each is an instance of its own, and
+ * starting or resuming claims it in D1 first (src/provision/runs.ts), so
+ * a second start or resume for the same client can't run beside the
+ * first: the single runner that a deploy's D1 migrations and router map
+ * write rely on.
  *
  * Every step can run again: the account is found by name before it's
  * created, the record is inserted once, and a deploy finds what it made
@@ -38,7 +40,7 @@ import {
   getAccount,
   tokenUserEmail,
 } from "../cloudflare/accounts.ts";
-import { CloudflareApiError } from "../cloudflare/api.ts";
+import { CloudflareApiError, isRefused } from "../cloudflare/api.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
 import { listScripts } from "../cloudflare/workers.ts";
 import { actIfChanged, audit, consoleDatabase } from "../db/act.ts";
@@ -130,39 +132,47 @@ const stop = (code: string, detail?: string): NonRetryableError =>
   new NonRetryableError(detail === undefined ? code : `${code}: ${detail}`);
 
 /**
- * `error` as a step fails with it: one a retry can't fix becomes a
- * `NonRetryableError` that carries its code and our own words, never a
- * response body. That's every deploy failure but the few a retry can fix,
- * a secret missing from Secrets Store, and any API refusal but a rate
- * limit or a timeout (the API client retries those already).
+ * `error` as a step fails with it, carrying its code and our own words,
+ * never a response body. One a retry can't fix is a `NonRetryableError`:
+ * every deploy failure but the few a retry can fix, a secret missing from
+ * Secrets Store, and any API refusal but a timeout or a rate limit
+ * (`isRefused`). Anything else is retried, as an `Error` saying what it
+ * was: a deploy code, `cloudflare_<status>_<codes>`, our own message, or
+ * only the name of an error we didn't throw (a parse error can quote what
+ * it parsed).
  */
-const asStepError = (error: unknown): unknown => {
+const asStepError = (error: unknown): Error => {
+  if (error instanceof NonRetryableError) {
+    return error;
+  }
   if (error instanceof DeployError) {
     return retryableDeployCodes.has(error.code)
-      ? error
+      ? new Error(`${error.code}: ${error.message}`)
       : stop(error.code, error.message);
   }
   if (error instanceof MissingStoreSecretError) {
     return stop("store_secret_missing", error.message);
   }
-  if (
-    error instanceof CloudflareApiError &&
-    error.status >= 400 &&
-    error.status < 500 &&
-    error.status !== 408 &&
-    error.status !== 429
-  ) {
+  if (isRefused(error)) {
     return stop(errorCode(error));
   }
-  return error;
+  if (error instanceof CloudflareApiError) {
+    return new Error(errorCode(error));
+  }
+  if (error instanceof Error && error.name === "Error") {
+    return new Error(error.message);
+  }
+  return new Error(
+    `unexpected: ${error instanceof Error ? error.name : typeof error}`
+  );
 };
 
 /**
  * Records that client `clientId`'s run stopped at `step` with `error` (its
  * code and our words), audited as `client.provision_stop`: Workflows
  * reports a stopped run only as stopped, so the page reads why from here.
- * A failure to record it is logged, not thrown, so the step fails with
- * its own error.
+ * A failure to record it is logged, not thrown, so the run fails with its
+ * own error.
  */
 const recordStop = async (
   db: ConsoleDatabase,
@@ -186,25 +196,19 @@ const recordStop = async (
 };
 
 /**
- * `task` as step `step` of client `clientId`'s run runs it, its failures
- * as `asStepError` makes them, and one that stops the run recorded.
+ * The error's class a step failure's message comes back to the run with
+ * (`NonRetryableError: <code>: ...`), left off what's recorded.
  */
+const errorNamePrefix = /^\w*Error: /u;
+
+/** `task` as a step runs it, its failures as `asStepError` makes them. */
 const guarded =
-  <T>(
-    db: ConsoleDatabase,
-    clientId: string,
-    step: string,
-    task: () => Promise<T>
-  ) =>
+  <T>(task: () => Promise<T>) =>
   async (): Promise<T> => {
     try {
       return await task();
     } catch (error) {
-      const failure = asStepError(error);
-      if (failure instanceof NonRetryableError) {
-        await recordStop(db, clientId, step, failure.message);
-      }
-      throw failure;
+      throw asStepError(error);
     }
   };
 
@@ -295,12 +299,7 @@ const settleAccount = async (
   try {
     await getAccount(deployer, accountId);
   } catch (error) {
-    if (
-      error instanceof CloudflareApiError &&
-      error.status >= 400 &&
-      error.status < 500 &&
-      error.status !== 429
-    ) {
+    if (isRefused(error)) {
       throw stop(
         "account_unreachable",
         `The deployer isn't a member of account ${accountId}`
@@ -433,53 +432,70 @@ export class ProvisionClient extends WorkflowEntrypoint<Env, ProvisionParams> {
     const { payload: params } = event;
     const db = consoleDatabase(this.env.DB);
 
-    const account = await step.do(
-      "account",
-      quickStep,
-      guarded(
-        db,
-        params.clientId,
+    // The step running now, so a run that stops, whatever stops it (a
+    // failure no retry fixes, retries used up, the pause timing out),
+    // records where.
+    let current = "account";
+    try {
+      const account = await step.do(
         "account",
-        async () => await settleAccount(this.env, db, params)
-      )
-    );
+        quickStep,
+        guarded(async () => await settleAccount(this.env, db, params))
+      );
 
-    await step.do(
-      "client",
-      quickStep,
-      guarded(db, params.clientId, "client", async () => {
-        await recordClient(db, params, account);
-      })
-    );
+      current = "client";
+      await step.do(
+        "client",
+        quickStep,
+        guarded(async () => {
+          await recordClient(db, params, account);
+        })
+      );
 
-    // Workers Paid can't be bought through the API yet: staff upgrade the
-    // account in the dashboard and confirm on the client's page.
-    if (params.workersPaid !== true) {
-      await step.waitForEvent("workers paid", {
-        type: workersPaidEvent,
-        timeout: workersPaidTimeout,
+      // Workers Paid can't be bought through the API yet: staff upgrade the
+      // account in the dashboard and confirm on the client's page.
+      current = "workers paid";
+      if (params.workersPaid !== true) {
+        await step.waitForEvent("workers paid", {
+          type: workersPaidEvent,
+          timeout: workersPaidTimeout,
+        });
+      }
+
+      current = deployStep;
+      const deployId = await step.do(
+        deployStep,
+        deployStepConfig,
+        guarded(async () => {
+          const context = await deployContext(this.env);
+          const id = await deployToRun(context.db, params);
+          await runDeploy(context, id);
+          return id;
+        })
+      );
+
+      current = "activate";
+      await step.do(
+        "activate",
+        quickStep,
+        guarded(async () => {
+          await activate(db, params.clientId);
+        })
+      );
+      return { accountId: account.accountId, deployId };
+    } catch (error) {
+      const failed = current;
+      await step.do("record stop", quickStep, async () => {
+        await recordStop(
+          db,
+          params.clientId,
+          failed,
+          error instanceof Error
+            ? error.message.replace(errorNamePrefix, "")
+            : "unexpected"
+        );
       });
+      throw error;
     }
-
-    const deployId = await step.do(
-      deployStep,
-      deployStepConfig,
-      guarded(db, params.clientId, deployStep, async () => {
-        const context = await deployContext(this.env);
-        const id = await deployToRun(context.db, params);
-        await runDeploy(context, id);
-        return id;
-      })
-    );
-
-    await step.do(
-      "activate",
-      quickStep,
-      guarded(db, params.clientId, "activate", async () => {
-        await activate(db, params.clientId);
-      })
-    );
-
-    return { accountId: account.accountId, deployId };
   }
 }

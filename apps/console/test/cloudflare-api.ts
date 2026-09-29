@@ -237,14 +237,15 @@ const routeOf = (
 };
 
 /**
- * How a planned call fails: rate-limited (429, optionally with a
- * `Retry-After`), a server error in the envelope (500, 503), the edge's
+ * How a planned call fails: timed out at the edge (408), rate-limited
+ * (429, optionally with a `Retry-After`), a server error in the envelope (500, 503), the edge's
  * HTML error page (502), no answer before it ran (`network`), or no answer
  * after it ran (`lost`: the change is made, its response never arrives),
  * or, for a D1 query, an answer that succeeds with a statement that didn't
  * (`statement-failed`).
  */
 export type Failure =
+  | 408
   | 429
   | 500
   | 502
@@ -276,6 +277,9 @@ const failed = (failure: Exclude<Failure, "lost">): Response => {
     );
     response.headers.set("retry-after", failure.retryAfter);
     return response;
+  }
+  if (failure === 408) {
+    return refusal(408, 10_000, "Request timeout");
   }
   if (failure === 502) {
     return new Response("<html>Bad gateway</html>", {

@@ -1,4 +1,4 @@
-import { introspectWorkflowInstance } from "cloudflare:test";
+import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { and, asc, eq, sql } from "drizzle-orm";
 import {
@@ -11,13 +11,19 @@ import {
 } from "vite-plus/test";
 
 import { consoleDatabase } from "../src/db/act.ts";
-import { auditEvents, clientDeploys, clients } from "../src/db/schema.ts";
+import {
+  auditEvents,
+  clientDeploys,
+  clientRuns,
+  clients,
+} from "../src/db/schema.ts";
 import {
   confirmWorkersPaid,
   retryProvisioning,
   startProvisioning,
 } from "../src/provision/control.ts";
 import type { ProvisionInput } from "../src/provision/control.ts";
+import { startingMs } from "../src/provision/runs.ts";
 import { accountName } from "../src/provision/workflow.ts";
 import { importReleases } from "../src/releases/import.ts";
 import {
@@ -84,14 +90,54 @@ const setUp = async (input: Partial<ProvisionInput> = {}) => {
   };
 };
 
-/** The run of `clientId`, as the test pool lets a test follow it. */
-const follow = async (clientId: string) => {
-  const run = await introspectWorkflowInstance(env.PROVISION_CLIENT, clientId);
-  // Retries go at once: the fake answers at once.
-  await run.modify(async (modifier) => {
+/**
+ * The runs the test creates, as the test pool lets a test follow them,
+ * retries going at once (the fake answers at once): each wait is on the
+ * latest run created, and `count` says how many there were.
+ */
+const followRuns = async () => {
+  const runs = await introspectWorkflow(env.PROVISION_CLIENT);
+  await runs.modifyAll(async (modifier) => {
     await modifier.disableRetryDelays();
   });
-  return run;
+  const latest = async () => {
+    const all = await runs.get();
+    const last = all.at(-1);
+    if (last === undefined) {
+      throw new Error("No run was created");
+    }
+    return last;
+  };
+  return {
+    waitForStepResult: async (step: { name: string }) => {
+      const run = await latest();
+      return await run.waitForStepResult(step);
+    },
+    waitForStatus: async (status: InstanceStatus["status"]) => {
+      const run = await latest();
+      await run.waitForStatus(status);
+    },
+    getOutput: async () => {
+      const run = await latest();
+      return await run.getOutput();
+    },
+    count: async () => {
+      const all = await runs.get();
+      return all.length;
+    },
+    [Symbol.asyncDispose]: async () => {
+      await runs.dispose();
+    },
+  };
+};
+
+/** Client `clientId`'s current run, as Workflows has it. */
+const instanceOf = async (clientId: string) => {
+  const [claim] = await db
+    .select({ runId: clientRuns.runId })
+    .from(clientRuns)
+    .where(eq(clientRuns.clientId, clientId));
+  return await env.PROVISION_CLIENT.get(claim?.runId ?? "none");
 };
 
 const clientRow = async (id: string) => {
@@ -189,6 +235,24 @@ const detailsOf = async (
   return rows.map(({ detail }): unknown => JSON.parse(detail ?? "null"));
 };
 
+/**
+ * The client's resumes, oldest first: whether each replaced a run, and
+ * whether it skipped the Workers Paid pause.
+ */
+const retriesOf = async (clientId: string) => {
+  const details = await detailsOf(clientId, "client.provision_retry");
+  return details.map((detail) => {
+    const field = (key: string): unknown =>
+      typeof detail === "object" && detail !== null
+        ? Reflect.get(detail, key)
+        : undefined;
+    return {
+      replaced: typeof field("replaces") === "string",
+      workersPaid: field("workersPaid"),
+    };
+  });
+};
+
 /** Another client's entry for `clientId`'s hostname, which holds it until cleared. */
 const holdHostname = async (clientId: string): Promise<string> => {
   const hostname = `${clientId}.${domain}`;
@@ -223,7 +287,7 @@ describe("provisioning a new client", () => {
 
   it("creates its account as the tenant admin, makes the deployer a member, waits for Workers Paid, then deploys the release and activates it, audited", async () => {
     const { clientId, input } = await setUp();
-    await using run = await follow(clientId);
+    await using run = await followRuns();
 
     await startProvisioning(env, staff, input);
     await run.waitForStepResult({ name: "client" });
@@ -309,7 +373,7 @@ describe("provisioning a new client", () => {
   it("adopts an account the deployer is a member of by its id, creating none", async () => {
     const account = cloudflare.addAccount("Acme's own");
     const { clientId, input } = await setUp({ accountId: account.id });
-    await using run = await follow(clientId);
+    await using run = await followRuns();
 
     await startProvisioning(env, staff, input);
     await run.waitForStepResult({ name: "client" });
@@ -360,7 +424,7 @@ describe("provisioning a new client", () => {
       deployments: [],
       schedules: [],
     });
-    await using run = await follow(clientId);
+    await using run = await followRuns();
 
     await startProvisioning(env, staff, input);
     await run.waitForStatus("errored");
@@ -386,10 +450,10 @@ describe("provisioning a new client", () => {
 
   it("resumes steps whose creates went through with their answers lost, making each thing once, and keeps both tokens out of the database, logs, step results and status", async () => {
     const { clientId, input } = await setUp();
-    await using run = await follow(clientId);
+    await using run = await followRuns();
     // The account's create, the deployer's membership and a database's go
     // through, and their answers never arrive: each step fails and runs
-    // again.
+    // run.
     cloudflare.failNext(isCreate("/accounts"), "lost");
     cloudflare.failNext(isCreate("/members"), "lost");
     cloudflare.failNext(isCreate("/d1/database"), "lost");
@@ -414,7 +478,7 @@ describe("provisioning a new client", () => {
       databases: ["grasp-os-connect", "grasp-os-core", "grasp-os-knowledge"],
       failureLogged: true,
     });
-    const instance = await env.PROVISION_CLIENT.get(clientId);
+    const instance = await instanceOf(clientId);
     const texts = [
       logs,
       await everyRow(),
@@ -430,7 +494,7 @@ describe("provisioning a new client", () => {
 
   it("stops a run at once on a failure no retry fixes, and resumes it with a new run that picks up its deploy: nothing made twice, Workers Paid not asked again", async () => {
     const { clientId, input } = await setUp();
-    await using run = await follow(clientId);
+    await using run = await followRuns();
     const hostname = await holdHostname(clientId);
 
     await logsOf(async () => {
@@ -439,7 +503,7 @@ describe("provisioning a new client", () => {
       await confirmWorkersPaid(env, staff, clientId);
       await run.waitForStatus("errored");
     });
-    // One attempt: a retry would have recorded the failure again.
+    // One attempt: a retry would have recorded the failure run.
     const failures = await detailsOf(clientId, "deploy.fail");
     expect({
       deploys: await deploysOf(clientId),
@@ -474,7 +538,7 @@ describe("provisioning a new client", () => {
       deploys: await deploysOf(clientId),
       confirmations: trail.filter((action) => action === "client.workers_paid")
         .length,
-      retries: await detailsOf(clientId, "client.provision_retry"),
+      retries: await retriesOf(clientId),
       client: await clientRow(clientId),
     }).toMatchObject({
       databases: 3,
@@ -483,7 +547,7 @@ describe("provisioning a new client", () => {
       deploys: [{ status: "done", error: null }],
       confirmations: 1,
       // A new run in place of the stopped one, without the pause.
-      retries: [{ replaces: true, workersPaid: true }],
+      retries: [{ replaced: true, workersPaid: true }],
       client: { status: "active" },
     });
   });
@@ -491,7 +555,7 @@ describe("provisioning a new client", () => {
   it("gives a client whose run is gone a new run, which doesn't ask for Workers Paid again once it got to a deploy", async () => {
     const { clientId, input } = await setUp();
     const hostname = await holdHostname(clientId);
-    await using run = await follow(clientId);
+    await using run = await followRuns();
     await logsOf(async () => {
       await startProvisioning(env, staff, input);
       await run.waitForStepResult({ name: "client" });
@@ -499,23 +563,26 @@ describe("provisioning a new client", () => {
       await run.waitForStatus("errored");
     });
     // As Workflows drops a run after its retention.
-    const gone = await env.PROVISION_CLIENT.get(clientId);
+    const gone = await instanceOf(clientId);
     await gone.delete();
+    await db
+      .update(clientRuns)
+      .set({ claimedAt: new Date(Date.now() - 24 * 60 * 60 * 1000) })
+      .where(eq(clientRuns.clientId, clientId));
     await env.ROUTER_HOSTS.delete(hostname);
 
     // The new run stops before its own deploy: the deployer lost its
     // membership meanwhile.
     const [account] = cloudflare.accountsNamed(accountName(clientId));
     account?.members.delete(deployerEmail);
-    await using again = await follow(clientId);
     await retryProvisioning(env, staff, clientId);
-    await again.waitForStatus("errored");
+    await run.waitForStatus("errored");
     const stops = await detailsOf(clientId, "client.provision_stop");
     // Resumed once it's back, though the new run never got to its deploy
     // step: replaced by another new run, still without the pause.
     account?.members.set(deployerEmail, "accepted");
     await retryProvisioning(env, staff, clientId);
-    await again.waitForStatus("complete");
+    await run.waitForStatus("complete");
 
     expect(stops.at(-1)).toStrictEqual({
       step: "account",
@@ -527,15 +594,17 @@ describe("provisioning a new client", () => {
       accounts: cloudflare.accountsNamed(accountName(clientId)).length,
       confirmations: trail.filter((action) => action === "client.workers_paid")
         .length,
-      retries: await detailsOf(clientId, "client.provision_retry"),
+      retries: await retriesOf(clientId),
       deploys: await deploysOf(clientId),
     }).toMatchObject({
       client: { status: "active" },
       accounts: 1,
       confirmations: 1,
       retries: [
-        { replaces: false, workersPaid: true },
-        { replaces: true, workersPaid: true },
+        // The first replaced the run that was gone, the second its
+        // successor that stopped.
+        { replaced: true, workersPaid: true },
+        { replaced: true, workersPaid: true },
       ],
       deploys: [{ status: "done" }],
     });
@@ -547,16 +616,15 @@ describe("provisioning a new client", () => {
     // the account step can't finish.
     const stuck = cloudflare.addAccount(accountName(clientId), tenantEmail);
     stuck.members.set(deployerEmail, "pending");
-    await using run = await follow(clientId);
+    await using run = await followRuns();
 
     await startProvisioning(env, staff, input);
     await run.waitForStatus("errored");
     const before = await clientRow(clientId);
 
     const account = cloudflare.addAccount("Acme");
-    await using again = await follow(clientId);
     await startProvisioning(env, staff, { ...input, accountId: account.id });
-    await again.waitForStepResult({ name: "client" });
+    await run.waitForStepResult({ name: "client" });
 
     expect({
       before,
@@ -569,30 +637,122 @@ describe("provisioning a new client", () => {
     });
   });
 
-  it("starts one run for a client however many starts race, and refuses another while it goes on", async () => {
+  it("starts one run for a client however many starts race, and refuses the rest", async () => {
     const { clientId, input } = await setUp();
-    await using run = await follow(clientId);
+    await using run = await followRuns();
 
-    // Both may pass the checks; the instance id is the client's, so there's
-    // one run whichever creates it (Workflows refuses the second create,
-    // the test pool ignores it).
-    await Promise.allSettled([
-      startProvisioning(env, staff, input),
-      startProvisioning(env, staff, input),
+    // Both may read that the client has no run: the claim in D1 lets one
+    // through, and only it creates a run.
+    const starts = await Promise.all([
+      codeOf(startProvisioning(env, staff, input)),
+      codeOf(startProvisioning(env, staff, input)),
     ]);
     await run.waitForStepResult({ name: "client" });
 
     const trail = await actions(clientId);
     expect({
+      starts: starts.map(String).toSorted((a, b) => a.localeCompare(b)),
+      runs: await run.count(),
       accounts: cloudflare.accountsNamed(accountName(clientId)).length,
-      records: trail.filter((action) => action === "client.create").length,
+      claims: trail.filter((action) => action === "client.provision_start")
+        .length,
       again: await codeOf(startProvisioning(env, staff, input)),
-    }).toStrictEqual({ accounts: 1, records: 1, again: "already_running" });
+    }).toStrictEqual({
+      starts: ["already_running", "resolved"],
+      runs: 1,
+      accounts: 1,
+      claims: 1,
+      again: "already_running",
+    });
+  });
+
+  it("resumes a stopped run once however many resumes race, and refuses the rest", async () => {
+    const { clientId, input } = await setUp();
+    const hostname = await holdHostname(clientId);
+    await using run = await followRuns();
+    await logsOf(async () => {
+      await startProvisioning(env, staff, input);
+      await run.waitForStepResult({ name: "client" });
+      await confirmWorkersPaid(env, staff, clientId);
+      await run.waitForStatus("errored");
+    });
+    await env.ROUTER_HOSTS.delete(hostname);
+
+    const resumes = await Promise.all([
+      codeOf(retryProvisioning(env, staff, clientId)),
+      codeOf(retryProvisioning(env, staff, clientId)),
+    ]);
+    await run.waitForStatus("complete");
+
+    const retries = await retriesOf(clientId);
+    expect({
+      resumes: resumes.map(String).toSorted((a, b) => a.localeCompare(b)),
+      runs: await run.count(),
+      claims: retries.length,
+      client: await clientRow(clientId),
+    }).toMatchObject({
+      resumes: ["already_running", "resolved"],
+      runs: 2,
+      claims: 1,
+      client: { status: "active" },
+    });
+  });
+
+  it("retries the account step when the account lookup times out, rather than stopping", async () => {
+    const account = cloudflare.addAccount("Acme's own");
+    const { clientId, input } = await setUp({ accountId: account.id });
+    const lookup = `/accounts/${account.id}`;
+    // The start reads the account first; the run's own read times out.
+    let reads = 0;
+    cloudflare.failNext((call) => {
+      if (call.method !== "GET" || call.path !== lookup) {
+        return false;
+      }
+      reads += 1;
+      return reads === 2;
+    }, 408);
+    await using run = await followRuns();
+
+    await startProvisioning(env, staff, input);
+    await run.waitForStepResult({ name: "client" });
+
+    expect({
+      reads: cloudflare.calls.filter(
+        ({ method, path }) => method === "GET" && path === lookup
+      ).length,
+      stops: await detailsOf(clientId, "client.provision_stop"),
+      client: await clientRow(clientId),
+    }).toMatchObject({
+      reads: 3,
+      stops: [],
+      client: { accountId: account.id },
+    });
+  });
+
+  it("records where a run stopped once a step used up its retries on a failure a retry could have fixed", async () => {
+    const { clientId, input } = await setUp();
+    // The account's create answers a server error, every time.
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      cloudflare.failNext(isCreate("/accounts"), 500);
+    }
+    await using run = await followRuns();
+
+    await startProvisioning(env, staff, input);
+    await run.waitForStatus("errored");
+
+    expect({
+      creates: cloudflare.calls.filter(isCreate("/accounts")).length,
+      stops: await detailsOf(clientId, "client.provision_stop"),
+    }).toStrictEqual({
+      // The first attempt and three retries.
+      creates: 4,
+      stops: [{ step: "account", error: "cloudflare_500_10000" }],
+    });
   });
 
   it("refuses a client that exists, an account another client has, a release not imported, a console without a domain and an id that can't be a hostname", async () => {
     const { clientId, input } = await setUp();
-    await using run = await follow(clientId);
+    await using run = await followRuns();
     await startProvisioning(env, staff, input);
     await run.waitForStepResult({ name: "client" });
     await confirmWorkersPaid(env, staff, clientId);
@@ -631,9 +791,31 @@ describe("provisioning a new client", () => {
     ).rejects.toThrow("a reserved name");
   });
 
+  it("counts a run claimed a moment ago that Workflows doesn't have yet as starting, and one claimed long ago as gone", async () => {
+    const { clientId, input } = await setUp();
+    await using run = await followRuns();
+    await startProvisioning(env, staff, input);
+    await run.waitForStepResult({ name: "client" });
+    // Another start claimed a run and hasn't created it yet.
+    const claim = (claimedAt: Date) =>
+      db
+        .update(clientRuns)
+        .set({ runId: `${clientId}-notcreatedyet`, claimedAt })
+        .where(eq(clientRuns.clientId, clientId));
+    await claim(new Date());
+    const starting = await codeOf(retryProvisioning(env, staff, clientId));
+    await claim(new Date(Date.now() - startingMs));
+    const gone = await codeOf(retryProvisioning(env, staff, clientId));
+
+    expect({ starting, gone }).toStrictEqual({
+      starting: "already_running",
+      gone: "resolved",
+    });
+  });
+
   it("refuses to confirm or resume what isn't being provisioned, or a run still going", async () => {
     const { clientId, input } = await setUp();
-    await using run = await follow(clientId);
+    await using run = await followRuns();
     await startProvisioning(env, staff, input);
     await run.waitForStepResult({ name: "client" });
 

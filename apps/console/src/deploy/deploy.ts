@@ -19,8 +19,8 @@
  * refused (`deploy_superseded`), so a stale deploy can't put an older
  * release or older secrets back live.
  *
- * A deploy expects to be its client's only runner: the provisioning
- * Workflow runs one instance per client. Databases and buckets are unique
+ * A deploy expects to be its client's only runner: provisioning claims
+ * one run per client in D1 (src/provision/runs.ts). Databases and buckets are unique
  * by name, so two runs at once couldn't make one twice, but a D1
  * migration could be applied twice, since reading what a database has
  * applied and applying the rest aren't one step.

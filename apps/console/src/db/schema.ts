@@ -81,6 +81,23 @@ export const clients = sqliteTable("clients", {
 });
 
 /**
+ * The provisioning run that's a client's current one (src/provision/): its
+ * Workflow instance id, one per attempt. Starting or resuming claims the
+ * next with one conditional write naming the run it replaces, so however
+ * many staff act at once, one wins and only it creates a run: the single
+ * runner a client's deploy relies on. No foreign key: the run is claimed
+ * before its account step records the client.
+ */
+export const clientRuns = sqliteTable("client_runs", {
+  /** The client's id, as it will be recorded. */
+  clientId: text("client_id").primaryKey(),
+  /** The Workflow instance id: `<clientId>-<random>`. */
+  runId: text("run_id").notNull(),
+  /** When it was claimed: a run not created yet counts as starting for a while. */
+  claimedAt: timestamp("claimed_at").notNull(),
+});
+
+/**
  * A Worker the console deployed to a client (core, connect), and what it
  * last deployed there: drift is a live version that differs from this.
  */

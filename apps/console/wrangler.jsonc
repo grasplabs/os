@@ -46,8 +46,9 @@
   ],
   // Imports newly published releases (src/releases/import.ts).
   "triggers": { "crons": ["*/5 * * * *"] },
-  // Onboards a client (src/provision/workflow.ts): one instance per client,
-  // its id the client's, so two runs for one client can't overlap.
+  // Onboards a client (src/provision/workflow.ts): an instance per attempt,
+  // each claimed in D1 first (src/provision/runs.ts), so two runs for one
+  // client can't overlap.
   "workflows": [
     {
       "name": "grasp-os-provision-client",
