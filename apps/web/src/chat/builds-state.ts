@@ -1,7 +1,16 @@
-import type { App, FileDiff } from "@grasp-os/shared/apps";
+import type { App, FileDiff, VersionReview } from "@grasp-os/shared/apps";
+import type { TriggerDeclaration } from "@grasp-os/shared/workflows";
 
 // What the side panel's "Being built" section decides (builds.tsx): pure
 // logic, so tested on its own.
+
+/** A workflow's trigger added or removed, as a version's review says. */
+type TriggerChange = NonNullable<
+  VersionReview["workflows"][number]["triggers"]
+>[number];
+
+/** An export added, removed or changed, as a version's review says. */
+type ExportChange = VersionReview["exports"][number];
 
 /** One changed file of a version's server code: before, and after. */
 export interface ServerFile {
@@ -92,3 +101,94 @@ export const pendingToShow = (
       ? []
       : [{ ...app, pendingVersion: app.pendingVersion }]
   );
+
+/** What makes a workflow run on its own, in a reviewer's words. */
+export const triggerText = (trigger: TriggerDeclaration): string => {
+  if (trigger.type === "manual") {
+    return "when someone starts it";
+  }
+  if (trigger.type === "schedule") {
+    const zone = trigger.timeZone === undefined ? "" : `, ${trigger.timeZone}`;
+    return `on a schedule (its parameter ${trigger.param}${zone})`;
+  }
+  if (trigger.type === "event") {
+    // No filter, or an empty one: every such event.
+    const filtered =
+      trigger.filter !== undefined && Object.keys(trigger.filter).length > 0;
+    return filtered
+      ? `on the event ${trigger.event}, filtered`
+      : `on every ${trigger.event} event`;
+  }
+  return `on mail to ${trigger.address}@`;
+};
+
+/** How many times, as the panel says it: nothing for once. */
+const timesText = (count: number): string =>
+  count === 1 ? "once" : `${count} times`;
+
+/**
+ * A workflow's trigger change, as the panel says it, from how many of
+ * that trigger it had before and has after: only "no longer" once none
+ * are left, and only "now" where there were none.
+ */
+export const triggerChangeText = ({
+  trigger,
+  count,
+  countBefore,
+  countAfter,
+}: TriggerChange): string => {
+  const how = triggerText(trigger);
+  if (countBefore === 0) {
+    return countAfter === 1
+      ? `Now runs ${how}`
+      : `Now runs ${how}, ${timesText(countAfter)}`;
+  }
+  if (countAfter === 0) {
+    return `No longer runs ${how}`;
+  }
+  const more = countAfter > countBefore;
+  return `Runs ${how} ${count} ${more ? "more" : "fewer"} ${count === 1 ? "time" : "times"} (${timesText(countAfter)} now)`;
+};
+
+/** What an export lets another App do, in a reviewer's words. */
+const accessWords = {
+  read: "reads the App's data",
+  write: "changes the App's data",
+} as const;
+
+/**
+ * An export's change, as the panel says it, and whether it opens more to
+ * other Apps (`widens`: a new export that changes data, or one that only
+ * read and now changes data), which the panel highlights.
+ */
+export const exportChangeText = ({
+  name,
+  change,
+  access,
+  accessBefore,
+}: ExportChange): { text: string; widens: boolean } => {
+  if (change === "added") {
+    const does = access === null ? "" : `, which ${accessWords[access]}`;
+    return {
+      text: `Other Apps may now call ${name}${does}`,
+      widens: access === "write",
+    };
+  }
+  if (change === "removed") {
+    return { text: `Other Apps may no longer call ${name}`, widens: false };
+  }
+  if (accessBefore === "read" && access === "write") {
+    return {
+      text: `${name} now changes the App's data (read → write)`,
+      widens: true,
+    };
+  }
+  if (accessBefore === "write" && access === "read") {
+    return {
+      text: `${name} no longer changes the App's data (write → read)`,
+      widens: false,
+    };
+  }
+  const does = access === null ? "" : `: it ${accessWords[access]}`;
+  return { text: `${name} changed${does}`, widens: false };
+};

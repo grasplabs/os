@@ -3,11 +3,13 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  exportChangeText,
   pendingToShow,
   readyToMakeCurrent,
   serverFileLabels,
   serverFileOf,
   stillMadeCurrent,
+  triggerChangeText,
   versionKey,
 } from "./builds-state.ts";
 
@@ -43,6 +45,14 @@ const labelsOf = (change: keyof typeof diffs) => {
   const file = serverFileOf(diffs[change]);
   return { file, labels: serverFileLabels(file) };
 };
+
+/** A trigger change, from how many a workflow had and has. */
+const change = (countBefore: number, countAfter: number) => ({
+  change: countAfter > countBefore ? ("added" as const) : ("removed" as const),
+  count: Math.abs(countAfter - countBefore),
+  countBefore,
+  countAfter,
+});
 
 describe("the Being built section", () => {
   it("offers making a version current only once its review and changed server code have loaded", () => {
@@ -115,5 +125,109 @@ describe("the Being built section", () => {
         after: "Would run after approval",
       },
     });
+  });
+
+  it("says what makes a workflow run on its own now, from how many it had and has", () => {
+    const schedule = { type: "schedule" as const, param: "every" };
+
+    expect([
+      triggerChangeText({ trigger: schedule, ...change(0, 1) }),
+      triggerChangeText({
+        trigger: { ...schedule, timeZone: "Europe/Amsterdam" },
+        ...change(0, 2),
+      }),
+      triggerChangeText({ trigger: schedule, ...change(1, 3) }),
+      // One of two identical ones removed: it still runs so.
+      triggerChangeText({ trigger: schedule, ...change(2, 1) }),
+      triggerChangeText({ trigger: schedule, ...change(2, 0) }),
+      triggerChangeText({
+        trigger: {
+          type: "event",
+          event: "mail.received",
+          filter: { from: "a" },
+        },
+        ...change(1, 0),
+      }),
+      // An empty filter filters nothing.
+      triggerChangeText({
+        trigger: { type: "event", event: "mail.received", filter: {} },
+        ...change(0, 1),
+      }),
+      triggerChangeText({
+        trigger: { type: "email", address: "invoices" },
+        ...change(0, 1),
+      }),
+      triggerChangeText({ trigger: { type: "manual" }, ...change(1, 0) }),
+    ]).toStrictEqual([
+      "Now runs on a schedule (its parameter every)",
+      "Now runs on a schedule (its parameter every, Europe/Amsterdam), 2 times",
+      "Runs on a schedule (its parameter every) 2 more times (3 times now)",
+      "Runs on a schedule (its parameter every) 1 fewer time (once now)",
+      "No longer runs on a schedule (its parameter every)",
+      "No longer runs on the event mail.received, filtered",
+      "Now runs on every mail.received event",
+      "Now runs on mail to invoices@",
+      "No longer runs when someone starts it",
+    ]);
+  });
+
+  it("says what other Apps may call, and highlights what now changes the App's data", () => {
+    expect([
+      exportChangeText({
+        name: "book",
+        change: "added",
+        access: "write",
+        accessBefore: null,
+      }),
+      exportChangeText({
+        name: "totals",
+        change: "added",
+        access: "read",
+        accessBefore: null,
+      }),
+      exportChangeText({
+        name: "purge",
+        change: "removed",
+        access: null,
+        accessBefore: "write",
+      }),
+      exportChangeText({
+        name: "totals",
+        change: "modified",
+        access: "write",
+        accessBefore: "read",
+      }),
+      exportChangeText({
+        name: "totals",
+        change: "modified",
+        access: "read",
+        accessBefore: "read",
+      }),
+      exportChangeText({
+        name: "purge",
+        change: "modified",
+        access: "read",
+        accessBefore: "write",
+      }),
+    ]).toStrictEqual([
+      {
+        text: "Other Apps may now call book, which changes the App's data",
+        widens: true,
+      },
+      {
+        text: "Other Apps may now call totals, which reads the App's data",
+        widens: false,
+      },
+      { text: "Other Apps may no longer call purge", widens: false },
+      {
+        text: "totals now changes the App's data (read → write)",
+        widens: true,
+      },
+      { text: "totals changed: it reads the App's data", widens: false },
+      {
+        text: "purge no longer changes the App's data (write → read)",
+        widens: false,
+      },
+    ]);
   });
 });
