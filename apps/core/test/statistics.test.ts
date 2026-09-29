@@ -6,7 +6,7 @@ import {
   statisticRowsPerDay,
 } from "@grasp-os/shared/statistics";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
@@ -155,11 +155,31 @@ const seedRun = async (app: string, workflow: string, ago = 0) => {
     .run();
 };
 
+/**
+ * Holds the clock from here to the end of the test, as it reads now: core
+ * and the App's host read the same `Date`, so the test's points, reads,
+ * runs and windows never cross a minute (the rate bounds' counters) or a
+ * UTC day, however slow the machine. A test moves it on only on purpose.
+ * Held once a test's setup is done: signing in and building an App wait
+ * on time passing.
+ */
+const holdClock = (): number => {
+  const at = Date.now();
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(at);
+  return at;
+};
+
 describe("an App's own statistics", { timeout: 60_000 }, () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("are recorded as they come and read back added up, by the dimensions asked, over the days asked", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
     const other = await statsApp(admin);
+    holdClock();
     const recorded = await callApp(env, app, as(admin.userId), "record", [
       [
         { measure: "invoices", value: 120, dimensions: { supplier: "acme" } },
@@ -249,6 +269,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("stay within their bounds, and are recorded only from a call of the App that's running", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     const record = async (point: unknown) =>
       await callApp(env, app, as(admin.userId), "record", [[point]]);
     const query = async (input: unknown) =>
@@ -304,6 +325,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("are recorded no faster than a call or a minute allows", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     // Lowered for tests (vite.config.ts).
     const {
       perCall: statisticPointsPerCall,
@@ -346,6 +368,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("are read no more often than a call or a minute allows", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     // Lowered for tests (vite.config.ts).
     const { perCall, perMinute } = statisticLimitsOf(
       "read",
@@ -374,6 +397,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("are swept past their retention, however many rows, in one run", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     const old = new Date(Date.now() - 500 * dayMs).toISOString().slice(0, 10);
     await env.DB.prepare(
       `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2500)
@@ -394,6 +418,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("are read, bounded and swept by their indexes, never a table whole", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     // Past the retention: swept.
     await recordStatistic(
       env,
@@ -434,6 +459,10 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
 });
 
 describe("the platform's statistics", { timeout: 60_000 }, () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("count an App's runs and signals for whoever may see its runs, audited, and nobody else", async () => {
     const admin = await signedInApi(idp, "admin");
     const builder = await signedInApi(idp, "builder");
@@ -461,6 +490,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
       })
     );
     await grantPlatform(builder, reader);
+    holdClock();
     await seedRun(watched, "pay");
     await seedRun(watched, "pay");
     await seedRun(watched, "remind");
@@ -549,6 +579,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     // The builder builds `theirs`, not `watched`; `gone` is no App at all.
     const watched = await statsApp(admin);
     const theirs = await statsApp(builder);
+    holdClock();
     const gone = crypto.randomUUID();
     await seedRun(watched, "pay");
     await seedRun(watched, "pay");
@@ -638,6 +669,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     const reader = await statsApp(admin);
     await grantPlatform(admin, reader);
     const watched = await statsApp(admin);
+    holdClock();
     // 101 workflows ran a minute ago: two pages of groups.
     await env.DB.prepare(
       "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 101) INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at) SELECT ?1 || i, ?2, 'w' || i, 1, NULL, 'completed', ?3, ?3 FROM n"
@@ -687,6 +719,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     const reader = await statsApp(admin);
     await grantPlatform(admin, reader);
     const watched = await statsApp(admin);
+    holdClock();
     /** A finished computation, started `ago` and finished `took` later, with `signals`. */
     const seedComputation = async (
       ago: number,
@@ -833,15 +866,13 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     const reader = await statsApp(admin);
     await grantPlatform(admin, reader);
     const watched = await statsApp(admin);
+    const held = holdClock();
     const days = (count: number) => new Date(Date.now() + count * dayMs);
     // The production computation: today's, finished before the snapshot.
     await refreshDailySignals(env, days(0));
-    const until = new Date().toISOString();
+    const until = new Date(held).toISOString();
     // Past the snapshot's time before anything else finishes.
-    while (Date.now() <= Date.parse(until)) {
-      // oxlint-disable-next-line no-await-in-loop -- time moves on I/O
-      await env.DB.prepare("SELECT 1").run();
-    }
+    vi.setSystemTime(held + 1000);
     const computationRead = async () =>
       z.object({ ok: z.object({ computation: z.string().nullable() }) }).parse(
         await platformRead(reader, admin.userId, {
@@ -884,6 +915,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     const reader = await statsApp(admin);
     await grantPlatform(admin, reader);
     const watched = await statsApp(admin);
+    const held = holdClock();
     const query = {
       measure: "platform.workflow_runs",
       days: 7,
@@ -925,20 +957,15 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
       ).catch((error: unknown) =>
         isExpectedError(error) ? error.code : "unexpected"
       );
-      // On a fixed clock: two calls past the bound of one in the same
-      // minute, audited once; one in the next minute, audited again.
-      const minute = Math.floor(Date.now() / 60_000) * 60_000;
-      vi.useFakeTimers({ toFake: ["Date"] });
-      try {
-        vi.setSystemTime(minute + 10_000);
-        results.limited = await readMany();
-        vi.setSystemTime(minute + 50_000);
-        results.limitedAgain = await readMany();
-        vi.setSystemTime(minute + 70_000);
-        results.nextMinute = await readMany();
-      } finally {
-        vi.useRealTimers();
-      }
+      // Two calls past the bound of one in the same minute, audited once;
+      // one in the next minute, audited again.
+      const minute = Math.floor(held / 60_000) * 60_000;
+      vi.setSystemTime(minute + 10_000);
+      results.limited = await readMany();
+      vi.setSystemTime(minute + 50_000);
+      results.limitedAgain = await readMany();
+      vi.setSystemTime(minute + 70_000);
+      results.nextMinute = await readMany();
     });
     expect({
       results,
