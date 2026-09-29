@@ -946,6 +946,7 @@ describe("reading notes", { timeout: 60_000 }, () => {
             "medium: interview",
             "date: 2026-09-22",
             "from: Anna",
+            `draft: ${draftId.draft}`,
           ],
           `${notes}\n`
         ),
