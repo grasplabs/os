@@ -82,7 +82,7 @@ export const workersPaidEvent = "workers-paid";
  * Whether staff confirmed Workers Paid for client `clientId`, in this run
  * or an earlier one (`client.workers_paid`).
  */
-const confirmedWorkersPaid = async (
+export const confirmedWorkersPaid = async (
   db: ConsoleDatabase,
   clientId: string
 ): Promise<boolean> => {

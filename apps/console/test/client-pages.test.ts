@@ -2,8 +2,8 @@ import { introspectWorkflow } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
-import { act, consoleDatabase } from "../src/db/act.ts";
-import { clients } from "../src/db/schema.ts";
+import { act, audit, consoleDatabase } from "../src/db/act.ts";
+import { clientDeploys, clients } from "../src/db/schema.ts";
 import { startProvisioning } from "../src/provision/control.ts";
 import { importReleases } from "../src/releases/import.ts";
 import { accessJwt, mockAccess } from "./access.ts";
@@ -31,8 +31,41 @@ const page = async (path: string) => {
   return { status: response.status, html: html.replaceAll(scripts, "") };
 };
 
-/** A client recorded as provisioning, waiting for Workers Paid, on a new account id. */
-const recordClient = async () => {
+/**
+ * A client whose real run waits for Workers Paid, its account step as it
+ * ends for a new account (the page's tests have no Cloudflare API to
+ * settle one against). The caller disposes of `runs`.
+ */
+const waitingClient = async () => {
+  const release = await publishRelease({ notes: "feat(core): waits" });
+  await importReleases(env.RELEASES, db);
+  const clientId = `client-${crypto.randomUUID().slice(0, 8)}`;
+  const accountId = crypto.randomUUID().replaceAll("-", "");
+  const runs = await introspectWorkflow(env.PROVISION_CLIENT);
+  await runs.modifyAll(async (modifier) => {
+    await modifier.mockStepResult(
+      { name: "account" },
+      { accountId, abandonedAccountId: null }
+    );
+  });
+  await startProvisioning(env, staff, {
+    clientId,
+    name: "Acme",
+    releaseId: release.id,
+    ring: 1,
+  });
+  const [run] = await runs.get();
+  if (run === undefined) {
+    throw new Error("No run was created");
+  }
+  await run.waitForStepResult({ name: "client" });
+  return { clientId, accountId, releaseId: release.id, runs };
+};
+
+/** A client recorded as `status`, without a run, on a new account id. */
+const recordClient = async (
+  status: "provisioning" | "active" = "provisioning"
+) => {
   const id = `client-${crypto.randomUUID().slice(0, 8)}`;
   const accountId = crypto.randomUUID().replaceAll("-", "");
   const now = new Date();
@@ -45,6 +78,7 @@ const recordClient = async () => {
         name: `Acme ${id}`,
         accountId,
         ring: 3,
+        status,
         createdBy: staff.email,
         createdAt: now,
         updatedAt: now,
@@ -54,6 +88,9 @@ const recordClient = async () => {
   );
   return { id, accountId };
 };
+
+/** What the not-found page says of client `id`, as React escapes it. */
+const noSuchClient = (id: string) => `There&#x27;s no client ${id}.`;
 
 describe("the client pages", () => {
   it("list every client, with a way to add one", async () => {
@@ -84,27 +121,8 @@ describe("the client pages", () => {
   });
 
   it("show a client waiting for Workers Paid the checklist, with its account's dashboard", async () => {
-    const release = await publishRelease({ notes: "feat(core): waits" });
-    await importReleases(env.RELEASES, db);
-    const clientId = `client-${crypto.randomUUID().slice(0, 8)}`;
-    const accountId = crypto.randomUUID().replaceAll("-", "");
-    await using runs = await introspectWorkflow(env.PROVISION_CLIENT);
-    // The account step as it ends for a new account; the page's test has
-    // no Cloudflare API to settle one against.
-    await runs.modifyAll(async (modifier) => {
-      await modifier.mockStepResult(
-        { name: "account" },
-        { accountId, abandonedAccountId: null }
-      );
-    });
-    await startProvisioning(env, staff, {
-      clientId,
-      name: "Acme",
-      releaseId: release.id,
-      ring: 1,
-    });
-    const [run] = await runs.get();
-    await run?.waitForStepResult({ name: "client" });
+    const { clientId, accountId, runs } = await waitingClient();
+    await using _runs = runs;
 
     const { status, html } = await page(`/clients/${clientId}`);
 
@@ -121,6 +139,60 @@ describe("the client pages", () => {
       confirm: true,
       hostname: true,
     });
+  });
+
+  it("say a Workers Paid confirmation is in, in place of the button, while the run gets to it", async () => {
+    const { clientId, runs } = await waitingClient();
+    await using _runs = runs;
+    // Once the run has checked for a confirmation and found none, it waits:
+    // recorded then, as confirming does first, before the run has the event.
+    const [run] = await runs.get();
+    await run?.waitForStepResult({ name: "workers paid confirmed" });
+    await audit(db, staff, { action: "client.workers_paid", clientId });
+
+    const { html } = await page(`/clients/${clientId}`);
+
+    expect({
+      confirmed: html.includes("Confirmed, waiting for the run."),
+      button: html.includes("Workers Paid is on"),
+    }).toStrictEqual({ confirmed: true, button: false });
+  });
+
+  it("show a deploy under way with its release and the last step it finished", async () => {
+    const { clientId, releaseId, runs } = await waitingClient();
+    await using _runs = runs;
+    const now = new Date();
+    await db.insert(clientDeploys).values({
+      id: crypto.randomUUID(),
+      clientId,
+      releaseId,
+      status: "running",
+      step: "migrations",
+      startedBy: staff.email,
+      createdAt: now,
+      updatedAt: now,
+    });
+
+    const { html } = await page(`/clients/${clientId}`);
+
+    expect({
+      deploying: html.includes(`Deploying ${releaseId}: migrations done.`),
+      release: html.includes(releaseId),
+    }).toStrictEqual({ deploying: true, release: true });
+  });
+
+  it("show an active client where it's live", async () => {
+    const client = await recordClient("active");
+
+    const { status, html } = await page(`/clients/${client.id}`);
+
+    expect({
+      status,
+      live: html.includes(
+        `Live at https://${client.id}.grasp.test, and passed its smoke check.`
+      ),
+      resume: html.includes("Resume"),
+    }).toStrictEqual({ status: 200, live: true, resume: false });
   });
 
   it("offer to resume a client whose run is gone", async () => {
@@ -168,14 +240,37 @@ describe("the client pages", () => {
     });
   });
 
-  it("answer 404 for a client that doesn't exist, or can't be one", async () => {
-    const statuses = await Promise.all(
-      ["/clients/nobody-here", "/clients/Not_A_Client"].map(async (path) => {
-        const { status } = await page(path);
-        return status;
-      })
+  it("answer 404 for a client that doesn't exist, or can't be one, and link back to the list", async () => {
+    const [missing, invalid] = await Promise.all(
+      ["/clients/nobody-here", "/clients/Not_A_Client"].map(
+        async (path) => await page(path)
+      )
     );
 
-    expect(statuses).toStrictEqual([404, 404]);
+    expect({
+      statuses: [missing?.status, invalid?.status],
+      missing: missing?.html.includes(noSuchClient("nobody-here")),
+      invalid: invalid?.html.includes(noSuchClient("Not_A_Client")),
+      back: [missing, invalid].every(
+        (answer) =>
+          answer?.html.includes("Back to clients") === true &&
+          answer.html.includes('href="/"')
+      ),
+    }).toStrictEqual({
+      statuses: [404, 404],
+      missing: true,
+      invalid: true,
+      back: true,
+    });
+  });
+
+  it("answer 404 for a page the console doesn't have, with a way back", async () => {
+    const { status, html } = await page("/no-such-page");
+
+    expect({
+      status,
+      says: html.includes("The console has no such page."),
+      back: html.includes("Back to clients"),
+    }).toStrictEqual({ status: 404, says: true, back: true });
   });
 });

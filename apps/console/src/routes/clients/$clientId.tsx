@@ -88,16 +88,21 @@ const WorkersPaid = ({ view }: { view: ProvisioningView }) => {
         <li>Turn on R2 in the same account: the deploy creates buckets.</li>
         <li>Confirm below; the deploy starts at once.</li>
       </ol>
-      <div className="flex items-center gap-4">
-        <Button disabled={busy} onClick={confirm}>
-          Workers Paid is on
-        </Button>
-        {failure === null ? null : (
-          <p role="alert" className="text-destructive text-sm">
-            {failure}
-          </p>
-        )}
-      </div>
+      {view.workersPaidConfirmed ? (
+        // Confirmed already: the run goes on by itself, and the page follows.
+        <p className="text-sm">Confirmed, waiting for the run.</p>
+      ) : (
+        <div className="flex items-center gap-4">
+          <Button disabled={busy} onClick={confirm}>
+            Workers Paid is on
+          </Button>
+          {failure === null ? null : (
+            <p role="alert" className="text-destructive text-sm">
+              {failure}
+            </p>
+          )}
+        </div>
+      )}
     </div>
   );
 };
@@ -243,6 +248,20 @@ const Client = () => {
   );
 };
 
+/** A client id that names no client, nor a run for one. */
+const NoSuchClient = () => {
+  const { clientId } = Route.useParams();
+  return (
+    <main className="flex flex-col gap-4 p-6">
+      <h1 className="text-2xl font-medium">No such client</h1>
+      <p className="text-sm">{`There's no client ${clientId}.`}</p>
+      <Link to="/" className="text-sm underline underline-offset-4">
+        Back to clients
+      </Link>
+    </main>
+  );
+};
+
 export const Route = createFileRoute("/clients/$clientId")({
   loader: async ({ params }) => {
     if (!newClientIdSchema.safeParse(params.clientId).success) {
@@ -257,4 +276,5 @@ export const Route = createFileRoute("/clients/$clientId")({
     return view;
   },
   component: Client,
+  notFoundComponent: NoSuchClient,
 });

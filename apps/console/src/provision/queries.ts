@@ -8,6 +8,7 @@ import { clientDomain } from "../deploy/context.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
 import { currentRun, isReplaceable } from "./runs.ts";
 import type { RunStatus } from "./runs.ts";
+import { confirmedWorkersPaid } from "./workflow.ts";
 
 /** A client as the list shows it. */
 export interface ClientSummary {
@@ -80,6 +81,8 @@ export interface ProvisioningView {
    * resumed since.
    */
   stopped: { step: string; error: string } | null;
+  /** Whether staff confirmed Workers Paid already (`client.workers_paid`). */
+  workersPaidConfirmed: boolean;
   phase: ProvisioningPhase;
 }
 
@@ -114,7 +117,7 @@ const stopOf = async (
 };
 
 const phaseOf = (
-  view: Omit<ProvisioningView, "phase" | "stopped">
+  view: Omit<ProvisioningView, "phase" | "stopped" | "workersPaidConfirmed">
 ): ProvisioningPhase => {
   if (view.client?.status === "active") {
     return "active";
@@ -175,6 +178,7 @@ export const getProvisioning = async (
   return {
     ...view,
     stopped: await stopOf(env, clientId),
+    workersPaidConfirmed: await confirmedWorkersPaid(db, clientId),
     phase: phaseOf(view),
   };
 };
