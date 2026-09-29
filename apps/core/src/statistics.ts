@@ -322,17 +322,23 @@ const signalsMeasure = async (
   { where, groupBy, offset }: Query,
   start: Date,
   now: Date
-) => {
+): Promise<{
+  rows: z.infer<typeof groupRowSchema>[];
+  computation: string | null;
+}> => {
   if (!featureEnabled(env, "improvement_signals")) {
-    return [];
+    return { rows: [], computation: null };
   }
+  const db = drizzle(env.DB);
+  // Its computation's start, within the window.
+  const inWindow = sql`${improvementSignalComputations.startedAt} >= ${start.getTime()} AND ${improvementSignalComputations.startedAt} <= ${now.getTime()}`;
   const columns: Columns = {
     app: improvementSignals.appId,
     workflow: improvementSignals.workflowId,
     kind: improvementSignals.kind,
   };
   const grouped = groupBy.flatMap((name) => columns[name] ?? []);
-  const rows = await drizzle(env.DB)
+  const read = db
     .select({
       groups: groupsOf(grouped),
       count: count(),
@@ -352,7 +358,7 @@ const signalsMeasure = async (
           ? undefined
           : sql`${improvementSignals.kind} = ${where.kind}`,
         // Its computation's start, within the window, by its primary key.
-        sql`EXISTS (SELECT 1 FROM ${improvementSignalComputations} WHERE ${improvementSignalComputations.id} = ${improvementSignals.computation} AND ${improvementSignalComputations.startedAt} >= ${start.getTime()} AND ${improvementSignalComputations.startedAt} <= ${now.getTime()})`
+        sql`EXISTS (SELECT 1 FROM ${improvementSignalComputations} WHERE ${improvementSignalComputations.id} = ${improvementSignals.computation} AND ${inWindow})`
       )
     )
     .groupBy(...grouped)
@@ -362,9 +368,20 @@ const signalsMeasure = async (
     .orderBy(...grouped.map((group) => asc(group)))
     .limit(statisticMaxGroups + 1)
     .offset(offset);
-  return rows.map((row) =>
-    groupRowSchema.parse({ ...row, groups: groupValues(row.groups) })
-  );
+  // The computation it reads, in the same batch as its signals.
+  const which = db
+    .select({ id: improvementSignalComputations.id })
+    .from(improvementSignalComputations)
+    .where(
+      and(eq(improvementSignalComputations.id, latestFinishedBy(now)), inWindow)
+    );
+  const [computations, rows] = await db.batch([which, read]);
+  return {
+    rows: rows.map((row) =>
+      groupRowSchema.parse({ ...row, groups: groupValues(row.groups) })
+    ),
+    computation: computations[0]?.id ?? null,
+  };
 };
 
 /** Refusals of `appFor` that make one App of many unavailable. */
@@ -571,11 +588,21 @@ const platformMeasure = async (
   if (apps.length === 0) {
     return answerOf(measure, dayOf(start), dayOf(end), query.groupBy, []);
   }
-  const rows =
-    measure === "platform.workflow_runs"
-      ? await workflowRunsMeasure(env, apps, query, start, end)
-      : await signalsMeasure(env, apps, query, start, end);
-  return answerOf(measure, dayOf(start), dayOf(end), query.groupBy, rows);
+  if (measure === "platform.workflow_runs") {
+    const rows = await workflowRunsMeasure(env, apps, query, start, end);
+    return answerOf(measure, dayOf(start), dayOf(end), query.groupBy, rows);
+  }
+  const { rows, computation } = await signalsMeasure(
+    env,
+    apps,
+    query,
+    start,
+    end
+  );
+  return {
+    ...answerOf(measure, dayOf(start), dayOf(end), query.groupBy, rows),
+    computation,
+  };
 };
 
 /** When a read's window ends: its `until`, but never after `now`. */

@@ -21,8 +21,8 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import {
+  beforePreviousFinished,
   claimComputation,
-  claimedBefore,
   finishComputation,
   isFinished,
   latestFinished,
@@ -56,10 +56,12 @@ import { auditableCode } from "./workflows/host.ts";
 //
 // A computation writes its signals under its own ID, in as many batches
 // as they take, and then finishes in one batch: it marks itself finished
-// and deletes every computation started before it, with their signals.
-// Readers take the finished computation started last, in the same batch
-// as its signals, so they see one computation whole or the one before
-// it. A computation that outlived its lease and was finished past has
+// and deletes every computation started before the finished one before it,
+// with their signals. It keeps that previous one, whose signals a reader
+// may still be reading (a board snapshot pages through the computation
+// finished by its time, statistics.ts). Readers take the finished
+// computation started last, in the same batch as its signals, so they see
+// one computation whole or the one before it. A computation that outlived its lease and was finished past has
 // lost its row: its next write of signals fails on the foreign key, and
 // its finishing batch changes nothing, as every statement in it goes by
 // its row (the update finds none, so no audit event, and the deletes run
@@ -777,8 +779,9 @@ export const claimImprovementSignals = async (
  * Computes the claimed day's signals from `totals` (what the audit log
  * holds of the window) and the databases, writes them, then finishes the
  * computation in one batch, with its audit event: marks it finished, and
- * deletes every computation started before it, with their signals, only if
- * it is still there to mark.
+ * deletes every computation started before the finished one before it,
+ * with their signals, only if it is still there to mark. That previous
+ * one stays, for whoever is still reading it.
  */
 export const storeImprovementSignals = async (
   env: Env,
@@ -800,7 +803,8 @@ export const storeImprovementSignals = async (
     }
   }
   const finished = isFinished(computations, computation);
-  const before = claimedBefore(computations, computation);
+  // The finished computation before this one stays, with its signals.
+  const before = beforePreviousFinished(computations, computation);
   await auditedBatch(env, db, [
     finishComputation(db, computations, computation),
     outboxedIfChanged(db, {

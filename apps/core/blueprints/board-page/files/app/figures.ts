@@ -92,6 +92,8 @@ export interface Statistics {
     truncated: boolean;
     /** Of `apps`, those the caller may not see, or that are gone. */
     unavailable?: string[];
+    /** For improvement signals: the computation it read, null for none. */
+    computation?: string | null;
   }>;
 }
 
@@ -312,20 +314,37 @@ const expectedRefusals: ReadonlySet<string> = new Set([
 const keyOf = (appId: string, workflowId: string): string =>
   JSON.stringify([appId, workflowId]);
 
+/** Every group of a read, page by page, as `allGroups` reads them. */
+interface Pages {
+  groups: StatisticGroup[];
+  /** Of its Apps, those the caller may not see, or that are gone. */
+  unavailable: string[];
+  /** The improvement-signal computations its pages read: one, or none. */
+  computations: Set<string | null>;
+}
+
+/** Refuses a snapshot whose figures would be incomplete, and why. */
+const incomplete = (why: string): Error =>
+  Object.assign(
+    new Error(`${why}, so the snapshot's figures would be incomplete.`),
+    { code: "board.figures_incomplete" }
+  );
+
 /**
- * Every group `query` has, page by page, and the Apps of it the caller
- * may not see (`unavailable`). Its `until` holds the window still, and
- * the platform orders groups by their values, so no page overlaps or
- * skips another as runs start meanwhile. Refused with
- * `board.figures_incomplete` past `maxPages`, so a snapshot never freezes
- * part of them.
+ * Every group `query` has, page by page, the Apps of it the caller may not
+ * see (`unavailable`), and the signal computations its pages read. Its
+ * `until` holds the window still, and the platform orders groups by their
+ * values, so no page overlaps or skips another as runs start meanwhile.
+ * Refused with `board.figures_incomplete` past `maxPages`, so a snapshot
+ * never freezes part of them.
  */
 const allGroups = async (
   statistics: Statistics,
   caller: Caller,
   query: StatisticQuery
-): Promise<{ groups: StatisticGroup[]; unavailable: string[] }> => {
+): Promise<Pages> => {
   const groups: StatisticGroup[] = [];
+  const computations = new Set<string | null>();
   for (let page = 0; page < maxPages; page += 1) {
     // oxlint-disable-next-line no-await-in-loop -- one page after another
     const answer = await statistics.read(caller, {
@@ -333,15 +352,15 @@ const allGroups = async (
       offset: page * groupsPerPage,
     });
     groups.push(...answer.groups);
+    if (answer.computation !== undefined) {
+      computations.add(answer.computation);
+    }
     if (!answer.truncated) {
-      return { groups, unavailable: answer.unavailable ?? [] };
+      return { groups, unavailable: answer.unavailable ?? [], computations };
     }
   }
-  throw Object.assign(
-    new Error(
-      `The platform counts more than ${maxPages * groupsPerPage} groups of ${query.measure} for the Apps this Playbook links to, so the snapshot's figures would be incomplete.`
-    ),
-    { code: "board.figures_incomplete" }
+  throw incomplete(
+    `The platform counts more than ${maxPages * groupsPerPage} groups of ${query.measure} for the Apps this Playbook links to`
   );
 };
 
@@ -352,6 +371,42 @@ const chunksOf = <T>(items: readonly T[], size: number): T[][] =>
   );
 
 /**
+ * `query` read for each of `chunks` of Apps (`allGroups`), each chunk's
+ * pages in turn. A chunk refused as expected (not the caller's to use, or
+ * statistics switched off) has all its Apps `unavailable`; any other
+ * failure fails the snapshot.
+ */
+const readChunks = async (
+  statistics: Statistics,
+  caller: Caller,
+  chunks: readonly string[][],
+  query: StatisticQuery
+): Promise<Pages> => {
+  const read: Pages = { groups: [], unavailable: [], computations: new Set() };
+  for (const chunk of chunks) {
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- a few chunks, one at a time
+      const pages = await allGroups(statistics, caller, {
+        ...query,
+        apps: chunk,
+      });
+      read.groups.push(...pages.groups);
+      read.unavailable.push(...pages.unavailable);
+      for (const computation of pages.computations) {
+        read.computations.add(computation);
+      }
+    } catch (error) {
+      const code = codeOf(error);
+      if (code === undefined || !expectedRefusals.has(code)) {
+        throw error;
+      }
+      read.unavailable.push(...chunk);
+    }
+  }
+  return read;
+};
+
+/**
  * The runs each workflow of the Apps `apps` started in the window ending
  * `until`, and their improvement signals' highest value of each kind, by
  * `keyOf` and kind, as the platform's statistics count them (`statistics`,
@@ -359,9 +414,12 @@ const chunksOf = <T>(items: readonly T[], size: number): T[][] =>
  * `appsPerRead` Apps, grouped by App. The Apps whose runs couldn't be read
  * are `unavailable`, never counted as none: each the caller may not see,
  * or that is gone, and every App without the permission, or of a read
- * refused as expected (statistics switched off, say). Any other failure
- * fails the snapshot, as more groups than it reads do
- * (`board.figures_incomplete`).
+ * refused as expected (statistics switched off, say). The signals of every
+ * page come from one computation, the latest finished by `until`: should
+ * pages differ (a new computation cleaned it up meanwhile), they are read
+ * again from the first page once, and then the snapshot is refused
+ * (`board.figures_incomplete`), as it is for more groups than it reads.
+ * Any other failure fails it too.
  */
 const observed = async (
   statistics: Statistics | undefined,
@@ -375,54 +433,46 @@ const observed = async (
 }> => {
   const runs = new Map<string, number>();
   const signals = new Map<string, Map<string, number>>();
-  const unavailable = new Set<string>();
   if (statistics === undefined) {
     return { runs, signals, unavailable: new Set(apps) };
   }
-  for (const chunk of chunksOf(apps, appsPerRead)) {
-    try {
-      // oxlint-disable-next-line no-await-in-loop -- a few chunks, one at a time
-      const [started, signalled] = await Promise.all([
-        allGroups(statistics, caller, {
-          measure: "platform.workflow_runs",
-          days: windowDays,
-          apps: chunk,
-          until,
-          groupBy: ["app", "workflow"],
-        }),
-        allGroups(statistics, caller, {
-          measure: "platform.improvement_signals",
-          days: windowDays,
-          apps: chunk,
-          until,
-          groupBy: ["app", "workflow", "kind"],
-        }),
-      ]);
-      for (const app of [...started.unavailable, ...signalled.unavailable]) {
-        unavailable.add(app);
-      }
-      for (const { dimensions, count } of started.groups) {
-        runs.set(keyOf(dimensions.app ?? "", dimensions.workflow ?? ""), count);
-      }
-      for (const { dimensions, max } of signalled.groups) {
-        const key = keyOf(dimensions.app ?? "", dimensions.workflow ?? "");
-        const kinds = signals.get(key) ?? new Map<string, number>();
-        kinds.set(dimensions.kind ?? "", max);
-        signals.set(key, kinds);
-      }
-    } catch (error) {
-      const code = codeOf(error);
-      if (code === undefined || !expectedRefusals.has(code)) {
-        throw error;
-      }
-      // Not the caller's to use, or switched off: the snapshot is taken
-      // with these Apps' runs unavailable.
-      for (const app of chunk) {
-        unavailable.add(app);
-      }
+  const chunks = chunksOf(apps, appsPerRead);
+  const started = await readChunks(statistics, caller, chunks, {
+    measure: "platform.workflow_runs",
+    days: windowDays,
+    until,
+    groupBy: ["app", "workflow"],
+  });
+  const readSignals = async () =>
+    await readChunks(statistics, caller, chunks, {
+      measure: "platform.improvement_signals",
+      days: windowDays,
+      until,
+      groupBy: ["app", "workflow", "kind"],
+    });
+  let signalled = await readSignals();
+  if (signalled.computations.size > 1) {
+    signalled = await readSignals();
+    if (signalled.computations.size > 1) {
+      throw incomplete(
+        "The improvement signals changed twice while they were read"
+      );
     }
   }
-  return { runs, signals, unavailable };
+  for (const { dimensions, count } of started.groups) {
+    runs.set(keyOf(dimensions.app ?? "", dimensions.workflow ?? ""), count);
+  }
+  for (const { dimensions, max } of signalled.groups) {
+    const key = keyOf(dimensions.app ?? "", dimensions.workflow ?? "");
+    const kinds = signals.get(key) ?? new Map<string, number>();
+    kinds.set(dimensions.kind ?? "", max);
+    signals.set(key, kinds);
+  }
+  return {
+    runs,
+    signals,
+    unavailable: new Set([...started.unavailable, ...signalled.unavailable]),
+  };
 };
 
 /**

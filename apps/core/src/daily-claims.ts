@@ -121,11 +121,25 @@ export const isFinished = (
   WHERE ${table.id} = ${computation.id} AND ${table.finishedAt} IS NOT NULL
 )`;
 
-/** The computations started before `computation`. */
-export const claimedBefore = (
+/**
+ * The computations started before the finished one before `computation`:
+ * what its clean-up deletes, keeping that previous one for whoever is
+ * still reading it.
+ */
+export const beforePreviousFinished = (
   table: Computations,
   computation: Computation
-): SQL | undefined => lt(table.startedAt, computation.startedAt);
+): SQL | undefined =>
+  lt(
+    table.startedAt,
+    sql`(
+      SELECT ${table.startedAt} FROM ${table}
+      WHERE ${table.finishedAt} IS NOT NULL
+        AND ${table.startedAt} < ${computation.startedAt.getTime()}
+      ORDER BY ${table.startedAt} DESC, ${table.id} DESC
+      LIMIT 1
+    )`
+  );
 
 /** The finished computation started last: whose results are current. */
 export const latestFinished = (table: Computations): SQL => sql`(

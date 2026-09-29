@@ -240,6 +240,11 @@ export interface StatisticAnswer {
    * acts for may not see, or that no longer exist, which it doesn't count.
    */
   unavailable?: string[];
+  /**
+   * For `platform.improvement_signals`: the computation it read (null for
+   * none), so a reader of several pages can tell they read the same one.
+   */
+  computation?: string | null;
 }
 
 /** Why recording or reading statistics was refused. */

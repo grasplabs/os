@@ -11,6 +11,7 @@ import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
+import { refreshDailySignals } from "../src/daily-signals.ts";
 import {
   readStatistics,
   recordStatistic,
@@ -824,6 +825,57 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
       ],
       reads: 2,
       scans: [],
+    });
+  });
+
+  it("read one signal computation on every page held at `until`, kept while a newer one finishes, and say which", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const reader = await statsApp(admin);
+    await grantPlatform(admin, reader);
+    const watched = await statsApp(admin);
+    const days = (count: number) => new Date(Date.now() + count * dayMs);
+    // The production computation: today's, finished before the snapshot.
+    await refreshDailySignals(env, days(0));
+    const until = new Date().toISOString();
+    // Past the snapshot's time before anything else finishes.
+    while (Date.now() <= Date.parse(until)) {
+      // oxlint-disable-next-line no-await-in-loop -- time moves on I/O
+      await env.DB.prepare("SELECT 1").run();
+    }
+    const computationRead = async () =>
+      z.object({ ok: z.object({ computation: z.string().nullable() }) }).parse(
+        await platformRead(reader, admin.userId, {
+          measure: "platform.improvement_signals",
+          days: 7,
+          apps: [watched],
+          groupBy: ["kind"],
+          until,
+        })
+      ).ok.computation;
+    const first = await computationRead();
+    // A newer computation finishes between two pages: the one the first
+    // page read is kept, and the next page reads it too.
+    await refreshDailySignals(env, days(1));
+    const second = await computationRead();
+    // Another one: now the first is older than the latest two finished,
+    // and goes. A page reading it now says so.
+    await refreshDailySignals(env, days(2));
+    const third = await computationRead();
+    const kept = await env.DB.prepare(
+      "SELECT count(*) AS kept FROM improvement_signal_computations WHERE id = ?"
+    )
+      .bind(first)
+      .first<{ kept: number }>();
+    expect({
+      read: typeof first,
+      second: second === first,
+      third: third === first,
+      kept: kept?.kept,
+    }).toStrictEqual({
+      read: "string",
+      second: true,
+      third: false,
+      kept: 0,
     });
   });
 
