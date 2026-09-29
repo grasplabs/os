@@ -66,6 +66,7 @@ export default defineConfig({
             app_blueprints: true,
             builtins: true,
             playbook: true,
+            record_types: true,
             screens: true,
             screen_workflows: true,
             members: true,

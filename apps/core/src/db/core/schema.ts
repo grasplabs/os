@@ -1,4 +1,8 @@
-import type { AgentProposer, AppExports } from "@grasp-os/shared/apps";
+import type {
+  AgentProposer,
+  AppExports,
+  AppRecordTypes,
+} from "@grasp-os/shared/apps";
 import { auditRejectReasons } from "@grasp-os/shared/audit";
 import type { Json } from "@grasp-os/shared/json";
 import { signalKinds } from "@grasp-os/shared/signals";
@@ -469,8 +473,36 @@ export const appVersions = sqliteTable(
      * previous release writes gets none.
      */
     proposedBy: text("proposed_by", { mode: "json" }).$type<AgentProposer>(),
+    /**
+     * The version's record types (JSON, `AppRecordTypes`), read from its
+     * `app/records.json` when it is committed (app-records.ts): so a save
+     * to Knowledge reads no files to find the types it is checked against.
+     */
+    records: text({ mode: "json" })
+      .$type<AppRecordTypes>()
+      .notNull()
+      .default(sql`'{}'`),
   },
   (table) => [primaryKey({ columns: [table.appId, table.version] })]
+);
+
+/**
+ * Which App a record type in a collection (a Knowledge collection, by ID)
+ * belongs to: the first whose declaration took effect there
+ * (knowledge/record-types.ts). Claimed when an App's write permission on
+ * the collection is granted or its version is made current, and kept
+ * while that App may write there with a version that declares the type;
+ * another App claims it only once it no longer does.
+ */
+export const recordTypeOwners = sqliteTable(
+  "record_type_owners",
+  {
+    collectionId: text("collection_id").notNull(),
+    type: text().notNull(),
+    appId: text("app_id").notNull(),
+    claimedAt: timestamp("claimed_at").notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.collectionId, table.type] })]
 );
 
 /**

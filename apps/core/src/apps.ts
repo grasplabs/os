@@ -33,6 +33,7 @@ import { z } from "zod";
 import { appsFoundBy, requireAppRole } from "./app-access.ts";
 import type { Person } from "./app-access.ts";
 import { exportsIn } from "./app-exports.ts";
+import { recordTypesIn } from "./app-records.ts";
 import {
   auditedBatch,
   outboxed,
@@ -46,6 +47,7 @@ import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
+import { requireOwnTypes } from "./knowledge/record-types.ts";
 import { madeCurrent } from "./permissions.ts";
 import { buildOnSave, notBuiltOnSave } from "./save-builds.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";
@@ -665,6 +667,9 @@ export const commitFiles = async (
     throw appErrors.create("app.nothing_to_commit");
   }
   const exported = exportsIn(files);
+  const records = recordTypesIn(files);
+  // None another App already has where this one may write.
+  await requireOwnTypes(env, appId, records);
   await storeTree(env, appId, { tree, json });
 
   const row: VersionRow = {
@@ -680,6 +685,7 @@ export const commitFiles = async (
     workflows: workflowsIn(files),
     exports: exported,
     proposedBy: null,
+    records,
   };
   // Only the rows this commit read: each write gives the rows it writes a
   // new revision, so a row written since has one this commit didn't read.
@@ -824,6 +830,9 @@ export const proposeDraft = async (
     throw appErrors.create("app.nothing_to_commit");
   }
   const exported = exportsIn(files);
+  const records = recordTypesIn(files);
+  // None another App already has where this one may write.
+  await requireOwnTypes(env, appId, records);
   await storeTree(env, appId, { tree, json });
   const row: VersionRow = {
     appId,
@@ -838,6 +847,7 @@ export const proposeDraft = async (
     workflows: workflowsIn(files),
     exports: exported,
     proposedBy: by.via ?? null,
+    records,
   };
   const db = drizzle(env.DB);
   try {

@@ -34,12 +34,7 @@ import { requireFeature } from "../features.ts";
 import { appOfEntry } from "./app-entries.ts";
 import { entryNow } from "./apps-collection.ts";
 import type { CollectionRow } from "./collections.ts";
-import {
-  checkedText,
-  keptFieldsOf,
-  personWriter,
-  writeVersion,
-} from "./documents.ts";
+import { checkedText, personWriter, writeVersion } from "./documents.ts";
 import type { DocumentRow } from "./documents.ts";
 import { frozenPathRanges } from "./frontmatter.ts";
 import { personalCollectionId } from "./memory-files.ts";
@@ -689,7 +684,16 @@ const requireSavable = async (
   }
   const text = rewritten(current, matcher)?.text ?? current.text;
   try {
-    await checkedText(env, collection, document.path, text);
+    await checkedText(
+      env,
+      collection,
+      document.path,
+      text,
+      null,
+      false,
+      undefined,
+      true
+    );
   } catch (error) {
     const code = knowledgeErrors.codeOf(error);
     if (code === undefined) {
@@ -957,9 +961,10 @@ const purgeDocument = async (
     ifVersion: at,
     message: "Personal data removed",
     restoredFrom: null,
-    // What a Playbook record keeps from version to version, such as a
-    // workflow's link, a term is removed from too.
-    sets: keptFieldsOf(document.path, text),
+    // What a record keeps from version to version, such as a workflow's
+    // link, a term is removed from too, and a record no App declares any
+    // more, or that no longer fits its type, is purged all the same.
+    purge: true,
     also: [
       ...(changed === undefined
         ? []

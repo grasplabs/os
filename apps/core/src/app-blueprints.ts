@@ -25,6 +25,7 @@ import type { BuiltinBlueprint } from "#blueprints";
 
 import { stillOpenTo } from "./app-access.ts";
 import { exportsIn } from "./app-exports.ts";
+import { recordTypesIn } from "./app-records.ts";
 import {
   appFor,
   appsListedFor,
@@ -439,6 +440,7 @@ export const createFromBlueprint = async (
     workflows: workflowsIn(files),
     exports: exportsIn(files),
     proposedBy: null,
+    records: recordTypesIn(files),
   };
   const requests = await blueprintRequests(
     env,
@@ -728,6 +730,7 @@ export const installBuiltinBlueprint = async (
           workflows: workflowsIn(files),
           exports: exportsIn(files),
           proposedBy: null,
+          records: recordTypesIn(files),
         }),
         outboxed(
           db,

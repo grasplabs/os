@@ -35,6 +35,7 @@ import type { Identity } from "@grasp-os/shared/rpc";
 import {
   and,
   asc,
+  desc,
   eq,
   inArray,
   isNull,
@@ -70,6 +71,7 @@ import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
 import { appHost } from "./durable-objects.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
+import { byCollection, typeClaims } from "./knowledge/record-types.ts";
 
 // Permission records and the one check every server path runs. A person
 // asks for a permission (it allows nothing yet), an admin grants it, their
@@ -1187,6 +1189,65 @@ export const revokePermission = async (
 };
 
 /**
+ * `row` as the API returns it, as `by` reads it, and, for an App's request
+ * to write a collection, the record types the version an admin reviews
+ * declares there: those it would claim, and those another App has already
+ * (`typeClaims`), named to admins only (who decide), for the rest by type
+ * alone.
+ */
+const withTypeClaims = async (
+  env: Env,
+  by: Pick<Identity, "role">,
+  row: Row
+): Promise<Permission> => {
+  const permission = toPermission(row);
+  if (
+    permission.status !== "requested" ||
+    permission.subject.type !== "app" ||
+    permission.object.type !== "collection" ||
+    !permission.actions.includes("write")
+  ) {
+    return permission;
+  }
+  const { appId } = permission.subject;
+  const { collectionId } = permission.object;
+  // The version an admin reviews as they grant: the current one, or the
+  // latest while none is (an App just created from a blueprint).
+  const reviewed = await drizzle(env.DB)
+    .select({ records: appVersions.records })
+    .from(appVersions)
+    .innerJoin(apps, eq(apps.id, appVersions.appId))
+    .where(
+      and(
+        eq(appVersions.appId, appId),
+        or(
+          eq(appVersions.version, apps.currentVersion),
+          isNull(apps.currentVersion)
+        )
+      )
+    )
+    .orderBy(desc(appVersions.version))
+    .limit(1)
+    .get();
+  const types = byCollection(reviewed?.records ?? {}).get(collectionId) ?? [];
+  if (types.length === 0) {
+    return permission;
+  }
+  const { claims, taken } = await typeClaims(env, appId, collectionId, types);
+  const admin = isAdmin(by.role);
+  return {
+    ...permission,
+    recordTypes: {
+      claims,
+      taken: taken.map(({ type, owner }) => ({
+        type,
+        owner: admin ? owner : null,
+      })),
+    },
+  };
+};
+
+/**
  * Every permission, or those of one App or agent, oldest first; only those
  * in `status` when given. With `openApps` (a condition on `apps`: the Apps
  * the person has a role in, as `appsListedFor` in apps.ts says), one that
@@ -1245,7 +1306,9 @@ export const listPermissions = async (
     .from(permissions)
     .where(and(ofOne, ofOpenApp, inStatus))
     .orderBy(asc(permissions.requestedAt), asc(permissions.id));
-  return rows.map(toPermission);
+  return await Promise.all(
+    rows.map(async (row) => await withTypeClaims(env, by, row))
+  );
 };
 
 /**

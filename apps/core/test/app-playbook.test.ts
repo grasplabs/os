@@ -541,13 +541,15 @@ describe("App server code writing the Playbook", { timeout: 60_000 }, () => {
         user: { ok: false },
         builder: { ok: false },
         readOnly: { ok: false },
-        otherCollection: { ok: false },
+        // Any collection it may write takes records: only not the
+        // Playbook's types.
+        otherCollection: { ok: true },
         admin: { ok: true },
       },
       user: { error: "knowledge.forbidden" },
       builder: { error: "knowledge.forbidden" },
       readOnly: { error: "permission.denied" },
-      otherCollection: { error: "permission.denied" },
+      otherCollection: { error: "knowledge.invalid" },
       admin: { ok: { path, currentVersion: 1 } },
     });
   });
