@@ -74,6 +74,13 @@ export class Previews {
    */
   readonly #running = new Map<string, Running>();
 
+  /**
+   * The server calls running now, by the caller token each hands the
+   * draft's code, with the preview it runs in (by facet name), and
+   * whether one of its stubs refused a call of it (`refused`).
+   */
+  readonly #calls = new Map<string, { name: string; refused: boolean }>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
     this.#env = env;
@@ -84,7 +91,8 @@ export class Previews {
    * `app` at its revision, with `args`, for `personId`, whom the chat is
    * theirs: answers as an App's call does (`App.call`), with `app.failed`
    * for an error of the draft's code, and `app.timed_out` for a call that
-   * isn't answered in time.
+   * isn't answered in time. `ran.refused` says, once it ended, whether a
+   * stub of the preview refused a call of it (`refused`).
    */
   async call(
     chatId: ChatId,
@@ -92,11 +100,15 @@ export class Previews {
     app: AppId,
     draft: Draft,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    ran: { refused: boolean }
   ): Promise<AppAnswer> {
     requireAppMethod(method);
     const name = facetName(chatId, app);
     const limit = deadline(callTimeoutMs(this.#env));
+    const token = crypto.randomUUID();
+    const call = { name, refused: false };
+    this.#calls.set(token, call);
     let running: Running | undefined;
     try {
       // Starting the code counts against the call's time, as for an App.
@@ -108,8 +120,9 @@ export class Previews {
       return await Promise.race([
         invokeServer(
           started.facet,
-          // The stubs of a preview act for no one: the token names nothing.
-          { userId: personId, mode: "interactive", token: crypto.randomUUID() },
+          // The stubs of a preview act for no one: the token names only
+          // this call, for what they refuse of it (`refused`).
+          { userId: personId, mode: "interactive", token },
           args,
           { app, version: null, method }
         ),
@@ -127,6 +140,20 @@ export class Previews {
       throw error;
     } finally {
       limit.clear();
+      this.#calls.delete(token);
+      ran.refused = call.refused;
+    }
+  }
+
+  /**
+   * Records that a stub of the chat's preview of `app` refused a call of
+   * the server call `token` names, while it runs: a caller token of any
+   * other preview, or of none, records nothing.
+   */
+  refused(chatId: ChatId, app: string, token: unknown): void {
+    const call = typeof token === "string" ? this.#calls.get(token) : undefined;
+    if (call?.name === facetName(chatId, app)) {
+      call.refused = true;
     }
   }
 
@@ -154,7 +181,6 @@ export class Previews {
             workspaceId: workspaceIdSchema.parse(this.#ctx.id.name),
             chatId,
             app,
-            revision: draft.revision,
           },
           draft
         ),

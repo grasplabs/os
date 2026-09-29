@@ -74,11 +74,7 @@ import { readAsDelegate } from "./knowledge/binding.ts";
 import { forContext } from "./knowledge/memory.ts";
 import { catalog, noteListedSkills } from "./knowledge/tools.ts";
 import { gatewaySettings, models } from "./models.ts";
-import {
-  PreviewReports,
-  previewRefusal,
-  serverProblem,
-} from "./preview-reports.ts";
+import { PreviewReports, serverProblem } from "./preview-reports.ts";
 import type { PreviewOutcome } from "./preview-reports.ts";
 import { Previews } from "./preview.ts";
 import type { WorkContext } from "./restricted.ts";
@@ -1359,17 +1355,13 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * Records that a stub of the preview of the chat's draft of App `appId`
-   * at `revision` refused a call, as `refusal`: for core's preview stubs
-   * alone (preview-bindings.ts), before the draft's code hears of it.
+   * Records that a stub of the chat's preview of App `appId` refused a
+   * call of the server call `token` names (`Previews.refused`): for
+   * core's preview stubs alone (preview-bindings.ts), before the draft's
+   * code hears of it.
    */
-  previewRefused(
-    chatId: ChatId,
-    appId: string,
-    revision: number,
-    refusal: string
-  ): void {
-    this.#previewReports.refused(chatId, appId, revision, refusal);
+  previewRefused(chatId: ChatId, appId: string, token: unknown): void {
+    this.#previews.refused(chatId, appId, token);
   }
 
   /**
@@ -1404,6 +1396,7 @@ export class Workspace extends DurableObject<Env> {
       throw appErrors.create("app.preview_outdated");
     }
     const id = chatIdSchema.parse(chatId);
+    const ran = { refused: false };
     try {
       return await this.#previews.call(
         id,
@@ -1411,24 +1404,25 @@ export class Workspace extends DurableObject<Env> {
         appIdSchema.parse(appId),
         draft,
         method,
-        args
+        args,
+        ran
       );
     } catch (error) {
-      // What the draft's code failed with is the agent's to fix too.
+      // What the draft's code failed with is the agent's to fix too, but
+      // for a call a preview stub refused a call of, as core saw it.
       const problem = serverProblem(method, error);
       if (problem === undefined) {
         throw error;
       }
-      this.#previewReports.report(id, appId, draft.revision, problem);
-      // Failed for a refusal of the preview's: the screen hears so, and
-      // what it reports of it quotes the refusal too.
-      const refusal = this.#previewReports.refusalIn(
+      this.#previewReports.report(
         id,
         appId,
         draft.revision,
-        problem.message
+        problem,
+        ran.refused
       );
-      throw refusal === undefined ? error : previewRefusal(refusal);
+      // The screen hears it was refused, as it would of a failed call.
+      throw ran.refused ? appErrors.create("app.preview_side_effect") : error;
     }
   }
 

@@ -13,14 +13,18 @@ import type { ChatId } from "@grasp-os/shared/ids";
 // draft's current revision's reports are kept, in memory: a restart loses
 // them, and the next check finds the preview unseen until the panel
 // reports again. Each problem the draft caused fails the check, kept or
-// not.
+// not, and a preview passes only once it has run a moment past rendering
+// with none, so an error that comes a little later still counts.
 //
-// A preview refuses some calls on purpose (preview-bindings.ts), and a
-// problem those cause may be no fault of the draft's: so each refusal is
-// recorded here, by an ID its message carries (`previewRefusal`), and
-// only a problem whose message quotes one that was recorded counts as
-// refused, which fails nothing. Text alone, the refusal's wording in a
-// message or a stack, proves nothing.
+// A preview refuses some calls on purpose (preview-bindings.ts, and the
+// page for a screen's calls on workflow runs, screen-host.ts). Whether a
+// problem came of one is never read from what the draft's code wrote,
+// which it could forge: only core marks a problem `refused`, for a server
+// call during which a preview stub refused a call (`Previews.call`
+// tracks them, by the call's own caller token), and such a problem fails
+// nothing. What a screen reports is always the draft's: a refused call
+// rejects with `app.preview_side_effect`, as a failed call does live, and
+// a screen must handle it as it would handle that.
 //
 // A report is text the draft's code wrote, or what the person typed into
 // the preview. It reaches the agent only as data in a check's result,
@@ -33,18 +37,22 @@ const maxProblems = 10;
 /** Most refused problems kept of one revision, apart from those. */
 const maxRefusedKept = 3;
 
-/** Most refusals recorded of one revision. */
-const maxRefusals = 100;
-
 /** How long an open preview counts as open without reporting again. */
 const openForMs = 10 * 60 * 1000;
+
+/**
+ * How long a preview runs past rendering, with no problem, before it
+ * passes: an error a moment later (a load after the first render) still
+ * fails it.
+ */
+export const settleMs = 1000;
 
 /** A problem as a check answers it: whether a preview refused what caused it. */
 export interface ReportedProblem extends PreviewProblem {
   /**
-   * It quotes a refusal a stub of the preview made (a connection, another
-   * App, a write to Knowledge): the draft may be right, so it doesn't fail
-   * the check.
+   * A server call that failed after a stub of the preview refused one of
+   * its calls (a connection, another App, a write to Knowledge), as core
+   * saw it: the draft may be right, so it doesn't fail the check.
    */
   refused: boolean;
 }
@@ -52,9 +60,9 @@ export interface ReportedProblem extends PreviewProblem {
 /** How the preview of a draft's revision ran, as a check reads it. */
 export interface PreviewOutcome {
   /**
-   * `failed`: it reported problems the draft caused; `passed`: it
-   * rendered and reported none; `unseen`: nobody had it open, or it
-   * didn't report in time.
+   * `failed`: it reported problems the draft caused; `passed`: it ran
+   * past rendering with none; `unseen`: nobody had it open, or it didn't
+   * report in time.
    */
   status: "passed" | "failed" | "unseen";
   problems: ReportedProblem[];
@@ -63,7 +71,8 @@ export interface PreviewOutcome {
 /** What one preview reported of one revision. */
 interface Reports {
   revision: number;
-  rendered: boolean;
+  /** When it said it rendered, in milliseconds since the epoch. */
+  renderedAt: number | undefined;
   /** The first problems of each kind, as a check answers them. */
   problems: ReportedProblem[];
   /**
@@ -71,17 +80,25 @@ interface Reports {
    * past {@link maxProblems} still fails it.
    */
   failed: number;
-  /** The refusals the preview's stubs made (`refused`), by ID. */
-  refusals: Set<string>;
   /** Resolved at the next report, then replaced. */
   next: PromiseWithResolvers<void>;
 }
 
-const outcomeOf = ({ rendered, problems, failed }: Reports): PreviewOutcome => {
+/** How `reports` stand `now`, and until when a pass must wait to settle. */
+const outcomeOf = (
+  { renderedAt, problems, failed }: Reports,
+  now: number
+): PreviewOutcome & { settlesAt?: number } => {
   if (failed > 0) {
     return { status: "failed", problems };
   }
-  return { status: rendered ? "passed" : "unseen", problems };
+  if (renderedAt === undefined) {
+    return { status: "unseen", problems };
+  }
+  const settlesAt = renderedAt + settleMs;
+  return settlesAt <= now
+    ? { status: "passed", problems }
+    : { status: "unseen", problems, settlesAt };
 };
 
 const keyOf = (chatId: ChatId, app: string): string => `${chatId}:${app}`;
@@ -131,34 +148,14 @@ export const serverProblem = (
 };
 
 /**
- * A refusal of a preview's stub (preview-bindings.ts), as the draft's
- * code gets it: `app.preview_side_effect`, its message naming `id`, the
- * refusal core recorded (`PreviewReports.refused`).
- */
-export const previewRefusal = (id: string): Error => {
-  const refusal = appErrors.create("app.preview_side_effect", {
-    refusal: id,
-  });
-  refusal.message = `${refusal.message} (refusal ${id})`;
-  return refusal;
-};
-
-/** The ID `previewRefusal` puts in a message, wherever it is quoted. */
-const refusalIds = /\(refusal (?<id>[\da-f-]{36})\)/gu;
-
-/** A refusal recorded in `reports` that `message` quotes, if any. */
-const refusalQuoted = (reports: Reports, message: string): string | undefined =>
-  [...message.matchAll(refusalIds)]
-    .map(({ groups }) => groups?.id)
-    .find((id) => id !== undefined && reports.refusals.has(id));
-
-/**
  * Counts `problem` in `reports`, and keeps it while there's room for its
- * kind: refused only when it quotes a refusal the preview's stubs made,
- * so neither the text of one nor refusals in numbers hide a real error.
+ * kind, so refused problems in numbers crowd out no real one.
  */
-const keepProblem = (reports: Reports, problem: PreviewProblem): void => {
-  const refused = refusalQuoted(reports, problem.message) !== undefined;
+const keepProblem = (
+  reports: Reports,
+  problem: PreviewProblem,
+  refused: boolean
+): void => {
   if (!refused) {
     reports.failed += 1;
   }
@@ -171,10 +168,9 @@ const keepProblem = (reports: Reports, problem: PreviewProblem): void => {
 /** A revision's reports before any came. */
 const emptyReports = (revision: number): Reports => ({
   revision,
-  rendered: false,
+  renderedAt: undefined,
   problems: [],
   failed: 0,
-  refusals: new Set(),
   next: Promise.withResolvers(),
 });
 
@@ -191,44 +187,18 @@ export class PreviewReports {
   }
 
   /**
-   * Records that a stub of the preview of the draft of `app` at `revision`
-   * refused a call (`previewRefusal`), as `id`: a problem that quotes it
-   * came from what the preview refuses on purpose.
-   */
-  refused(chatId: ChatId, app: string, revision: number, id: string): void {
-    const reports = this.#at(keyOf(chatId, app), revision);
-    if (reports !== undefined && reports.refusals.size < maxRefusals) {
-      reports.refusals.add(id);
-    }
-  }
-
-  /**
-   * The refusal of the preview of the draft of `app` at `revision` that
-   * `message` quotes, if its stubs made one: what a server call that
-   * failed with it failed for.
-   */
-  refusalIn(
-    chatId: ChatId,
-    app: string,
-    revision: number,
-    message: string
-  ): string | undefined {
-    const reports = this.#reports.get(keyOf(chatId, app));
-    return reports?.revision === revision
-      ? refusalQuoted(reports, message)
-      : undefined;
-  }
-
-  /**
    * Keeps `problem`, one the preview of the draft of `app` at `revision`
-   * ran into, or, without one, that it rendered. What an earlier revision
-   * reported goes once a later one reports.
+   * ran into, or, without one, that it rendered. `refused`, which only
+   * core sets (never from a report's text), for a server call a preview
+   * stub refused a call of. What an earlier revision reported goes once a
+   * later one reports.
    */
   report(
     chatId: ChatId,
     app: string,
     revision: number,
-    problem?: PreviewProblem
+    problem?: PreviewProblem,
+    refused = false
   ): void {
     const key = keyOf(chatId, app);
     this.#open.set(key, Date.now());
@@ -237,9 +207,9 @@ export class PreviewReports {
       return;
     }
     if (problem === undefined) {
-      reports.rendered = true;
+      reports.renderedAt ??= Date.now();
     } else {
-      keepProblem(reports, problem);
+      keepProblem(reports, problem, refused);
     }
     const { next } = reports;
     reports.next = Promise.withResolvers();
@@ -266,8 +236,9 @@ export class PreviewReports {
 
   /**
    * How the preview of the draft of `app` at `revision` ran: waiting up
-   * to `waitMs` for it to report, while the person has it open and it
-   * hasn't yet.
+   * to `waitMs`, while the person has it open, for it to report, and past
+   * rendering until it settles. Out of time, a preview that rendered with
+   * no problem yet passes.
    */
   async outcome(
     chatId: ChatId,
@@ -280,17 +251,25 @@ export class PreviewReports {
     try {
       for (;;) {
         const reports = this.#reports.get(key);
-        const now =
+        const { settlesAt, ...now } =
           reports?.revision === revision
-            ? outcomeOf(reports)
+            ? outcomeOf(reports, Date.now())
             : { status: "unseen" as const, problems: [] };
         const open = Date.now() - (this.#open.get(key) ?? 0) < openForMs;
-        if (now.status !== "unseen" || !open || limit.signal.aborted) {
+        if (now.status !== "unseen") {
           return now;
         }
-        // oxlint-disable-next-line no-await-in-loop -- until it reports, or the wait ends
+        if (limit.signal.aborted || (!open && settlesAt === undefined)) {
+          return settlesAt === undefined ? now : { ...now, status: "passed" };
+        }
+        const settled =
+          settlesAt === undefined
+            ? []
+            : [scheduler.wait(Math.max(0, settlesAt - Date.now()))];
+        // oxlint-disable-next-line no-await-in-loop -- until it reports or settles, or the wait ends
         await Promise.race([
           (reports ?? this.#waitFor(key)).next.promise,
+          ...settled,
           whenAborted(limit.signal),
         ]).catch(() => {
           // The wait ended: answered as it is now, above.

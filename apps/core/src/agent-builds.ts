@@ -869,8 +869,12 @@ const buildDeclaration = (previews: boolean): string => {
      * panel, where its server code runs with no side effects: connections,
      * other Apps and writes to Knowledge are refused there, and Knowledge
      * is empty. \`failed\` fails the check: fix what the problems say and
-     * check again. A problem \`refused\` came from what the preview refuses
-     * on purpose, and fails nothing. \`unseen\`: nobody had it open.
+     * check again. A problem \`refused\` is a server call that failed after
+     * the preview refused one of its calls on purpose: it fails nothing.
+     * A refused call (workflow runs on a screen too) rejects with
+     * \`app.preview_side_effect\`: handle it as a failed call, as a screen
+     * must live; one it leaves unhandled fails the check. \`unseen\`:
+     * nobody had it open.
      */
     preview: {
       status: "passed" | "failed" | "unseen";

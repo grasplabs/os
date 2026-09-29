@@ -285,7 +285,14 @@ const appTarget = (link: CoreLink, bundle: ScreenBundle): FrameTarget => {
   };
 };
 
-/** What a preview refuses: starting, reading or answering a workflow run. */
+/**
+ * What a preview refuses: starting, reading or answering a workflow run.
+ * The same refusal as core's for a call a preview stub refused
+ * (`app.preview_side_effect`), and handled alike: the refusal itself
+ * fails no check, and what the screen reports of it is the draft's, as
+ * of any failed call (core's preview-reports.ts), since nothing the frame
+ * sends can say it came of a refusal.
+ */
 const refusedInPreview = async (): Promise<never> => {
   await Promise.resolve();
   throw appErrors.create("app.preview_side_effect");

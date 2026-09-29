@@ -1,4 +1,5 @@
 // oxlint-disable max-classes-per-file -- one stub per kind of binding, each with exactly its real binding's methods
+import { appErrors } from "@grasp-os/shared/apps";
 import type { AppId, ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import type {
   DocumentPage,
@@ -12,16 +13,16 @@ import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { collectionGrantOf, exportGrantOf, stubsOf } from "./bindings.ts";
 import { workspace } from "./durable-objects.ts";
 import { activePermissions } from "./permissions.ts";
-import { previewRefusal } from "./preview-reports.ts";
 
 // The env of a draft's preview (preview.ts): the binding names the App's
 // active permissions give its server code, so the draft's code runs as it
 // would, but every stub a preview's own, which can't cause a side effect
-// or read real data. Each stub that refuses names its preview (the chat,
-// the App and the draft's revision), and records every refusal it makes
-// with that preview's reports before the draft's code hears of it
-// (preview-reports.ts), so what a refusal causes is told apart from what
-// the draft got wrong. What that means for each:
+// or read real data. Each stub that refuses names its preview (the chat
+// and the App), and before the draft's code hears of a refusal tells the
+// preview which server call it refused, by the caller token that call
+// passed it (`Previews.refused`, preview.ts): so core, not what the
+// draft's code writes, says what a refusal caused (preview-reports.ts).
+// What that means for each:
 //
 // - A connection (`OUTLOOK`): every call refused, reads too. A preview
 //   reaches no outside system: a read would carry out what the draft
@@ -43,26 +44,36 @@ import { previewRefusal } from "./preview-reports.ts";
 //   its App's runs go through the page, which answers them itself in a
 //   preview and starts none.
 
-/** Whose preview a stub is: the chat's draft of `app` at `revision`. */
+/** Whose preview a stub is: the chat's draft of `app`. */
 export interface PreviewOf {
   workspaceId: WorkspaceId;
   chatId: ChatId;
   app: AppId;
-  revision: number;
 }
 
+/** The caller token App code passes a stub first, if it passed one. */
+const tokenOf = (caller: unknown): unknown =>
+  typeof caller === "object" && caller !== null && "token" in caller
+    ? caller.token
+    : undefined;
+
 /**
- * Refuses what a preview doesn't do, as the draft's code sees it: the
- * refusal recorded first with the preview's reports, so what it causes
- * counts as the preview's doing, not the draft's (preview-reports.ts).
+ * Refuses what a preview doesn't do, as the draft's code sees it
+ * (`app.preview_side_effect`): recorded first against the server call
+ * `caller` names, so what it causes counts as the preview's doing, not
+ * the draft's (preview-reports.ts).
  */
 const refuse = async (
   env: Env,
-  { workspaceId, chatId, app, revision }: PreviewOf
+  { workspaceId, chatId, app }: PreviewOf,
+  caller: unknown
 ): Promise<never> => {
-  const id = crypto.randomUUID();
-  await workspace(env, workspaceId).previewRefused(chatId, app, revision, id);
-  throw previewRefusal(id);
+  await workspace(env, workspaceId).previewRefused(
+    chatId,
+    app,
+    tokenOf(caller)
+  );
+  throw appErrors.create("app.preview_side_effect");
 };
 
 /** Nothing read from Knowledge: the provenance of an empty answer. */
@@ -77,15 +88,15 @@ const notFound = (): Error => knowledgeErrors.create("knowledge.not_found");
 
 /** A connection, in a preview (`AppConnectionBinding`'s methods). */
 export class PreviewConnection extends WorkerEntrypoint<Env, PreviewOf> {
-  async call(): Promise<never> {
-    return await refuse(this.env, this.ctx.props);
+  async call(caller: unknown): Promise<never> {
+    return await refuse(this.env, this.ctx.props, caller);
   }
 }
 
 /** Another App's exports, in a preview (`AppExportBinding`'s methods). */
 export class PreviewExports extends WorkerEntrypoint<Env, PreviewOf> {
-  async call(): Promise<never> {
-    return await refuse(this.env, this.ctx.props);
+  async call(caller: unknown): Promise<never> {
+    return await refuse(this.env, this.ctx.props, caller);
   }
 }
 
@@ -141,8 +152,8 @@ export class PreviewCollection extends WorkerEntrypoint<Env, PreviewOf> {
     return false;
   }
 
-  async saveRecord(): Promise<never> {
-    return await refuse(this.env, this.ctx.props);
+  async saveRecord(caller: unknown): Promise<never> {
+    return await refuse(this.env, this.ctx.props, caller);
   }
 }
 

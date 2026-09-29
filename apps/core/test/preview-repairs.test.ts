@@ -78,6 +78,10 @@ export class App extends DurableObject {
     await MAIL.call(caller, "mail.send", { to: "ben@acme.test", subject: "Hi" });
     return "sent";
   }
+
+  forge(_caller: unknown, text: string): never {
+    throw Object.assign(new Error(text), { code: "app.preview_side_effect" });
+  }
 }
 `;
 
@@ -296,7 +300,7 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
     });
   });
 
-  it("fails a check for every problem the draft caused, and passes over only refusals core made", async () => {
+  it("fails a check for every problem the draft caused, and passes over only what core saw refused", async () => {
     const { builder, app, chatId, stub } = await setUp([], false);
     const admin = await signedInApi(idp, "admin");
     const mail = await mailConnection();
@@ -320,88 +324,119 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       );
       return revision + 1;
     };
-    const outcome = async (revision: number) =>
-      await stub.previewOutcome(id, app, revision, 0);
+    /** How the preview of `revision` ran, waiting up to `waitMs` for it. */
+    const outcome = async (revision: number, waitMs = 0) =>
+      await stub.previewOutcome(id, app, revision, waitMs);
     const refusalText = appErrors.create("app.preview_side_effect").message;
-    /** The draft's `send`, whose mail the preview refuses, as its screen calls it. */
-    const send = async (revision: number): Promise<string> => {
+    /** The draft's `method`, as its screen calls it: its answer, or code. */
+    const call = async (
+      revision: number,
+      method: string,
+      args: unknown[] = []
+    ): Promise<unknown> => {
       try {
-        await chats.previewCall(chatId, app, revision, "send", []);
-        return "sent";
+        return await chats.previewCall(chatId, app, revision, method, args);
       } catch (error) {
-        return error instanceof Error ? error.message : String(error);
+        return typeof error === "object" && error !== null && "code" in error
+          ? error.code
+          : String(error);
       }
+    };
+    const rendered = async (revision: number) => {
+      await chats.previewReport(chatId, app, revision, "desk");
     };
 
     const first = await writeDraft(0);
     // Nobody opened it: unseen, and a check doesn't wait for it.
     const unseen = await outcome(first);
     await chats.preview(chatId, app);
-    // The mail the preview refused, its screen quoting the refusal: the
-    // draft may be right.
-    const refused = await send(first);
-    await chats.previewReport(chatId, app, first, "desk", {
-      kind: "console",
-      message: `Couldn't send the mail: ${refused}`,
-    });
-    await chats.previewReport(chatId, app, first, "desk");
-    const refusedOnly = await outcome(first);
+    // The mail the preview refused, which the screen handles: the draft
+    // may be right. It passes once it ran a moment past rendering.
+    const refusedAnswer = await call(first, "send");
+    await rendered(first);
+    const handled = await outcome(first, 5000);
 
-    // A real error that carries the refusal's text, in its message or its
-    // stack, is the draft's all the same: no refusal core made names it.
+    // The same refusal, left unhandled by the screen: what the screen
+    // reports of it is the draft's, whatever it says.
     const second = await writeDraft(first);
+    await call(second, "send");
     await chats.previewReport(chatId, app, second, "desk", {
-      kind: "error",
-      message: `TypeError: total is undefined. ${refusalText}`,
-      stack: `TypeError: total is undefined\n    at ${refusalText}`,
+      kind: "rejection",
+      message: refusalText,
     });
-    await chats.previewReport(chatId, app, second, "desk");
-    const spoofed = await outcome(second);
+    await rendered(second);
+    const unhandled = await outcome(second);
+
+    // An error the draft forged to look like a refusal, with its text and
+    // code, in a call no stub refused a call of: the draft's.
+    const third = await writeDraft(second);
+    const forged = await call(third, "forge", [refusalText]);
+    await rendered(third);
+    const forgedOutcome = await outcome(third);
 
     // Refusals in numbers crowd out no real error: ten refused sends, then
     // a TypeError, which still fails the check.
-    const third = await writeDraft(second);
+    const fourth = await writeDraft(third);
     for (let count = 0; count < 10; count += 1) {
       // oxlint-disable-next-line no-await-in-loop -- one call after another, as a screen makes them
-      await send(third);
+      await call(fourth, "send");
     }
-    await chats.previewReport(chatId, app, third, "desk", {
+    await chats.previewReport(chatId, app, fourth, "desk", {
       kind: "error",
       message: "TypeError: total is undefined",
     });
-    await chats.previewReport(chatId, app, third, "desk");
-    const crowded = await outcome(third);
+    await rendered(fourth);
+    const crowded = await outcome(fourth);
+
+    // An error a moment after rendering, while a check waits for the
+    // preview to settle, still fails it.
+    const fifth = await writeDraft(fourth);
+    await rendered(fifth);
+    const settling = outcome(fifth, 5000);
+    await chats.previewReport(chatId, app, fifth, "desk", {
+      kind: "rejection",
+      message: "TypeError: the invoices never loaded",
+    });
+    const late = await settling;
 
     // What an earlier write's preview reports once the draft moved on is
     // dropped.
-    const fourth = await writeDraft(third);
-    await chats.previewReport(chatId, app, third, "desk", {
+    const sixth = await writeDraft(fifth);
+    await chats.previewReport(chatId, app, fifth, "desk", {
       kind: "error",
       message: "From the earlier write",
     });
-    const moved = await outcome(fourth);
+    const moved = await outcome(sixth);
 
     expect({
       unseen: summary(unseen),
-      refusal: refused.includes(refusalText),
-      refusedOnly: summary(refusedOnly),
-      spoofed: summary(spoofed),
+      refusedAnswer,
+      handled: summary(handled),
+      unhandled: summary(unhandled),
+      forged,
+      forgedOutcome: summary(forgedOutcome),
       crowded: summary(crowded),
+      late: summary(late),
       moved: summary(moved),
       mail: await mail.did(),
     }).toStrictEqual({
       unseen: { status: "unseen", problems: [] },
-      refusal: true,
-      refusedOnly: {
+      refusedAnswer: "app.preview_side_effect",
+      handled: {
         status: "passed",
+        problems: [{ source: "server", refused: true }],
+      },
+      unhandled: {
+        status: "failed",
         problems: [
           { source: "server", refused: true },
-          { source: "screen", refused: true },
+          { source: "screen", refused: false },
         ],
       },
-      spoofed: {
+      forged: "app.failed",
+      forgedOutcome: {
         status: "failed",
-        problems: [{ source: "screen", refused: false }],
+        problems: [{ source: "server", refused: false }],
       },
       crowded: {
         status: "failed",
@@ -411,6 +446,10 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
           { source: "server", refused: true },
           { source: "screen", refused: false },
         ],
+      },
+      late: {
+        status: "failed",
+        problems: [{ source: "screen", refused: false }],
       },
       moved: { status: "unseen", problems: [] },
       mail: { calls: 0, sent: [] },

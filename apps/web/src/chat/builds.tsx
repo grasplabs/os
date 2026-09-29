@@ -3,7 +3,6 @@ import { appErrors } from "@grasp-os/shared/apps";
 import type { ChatDraft } from "@grasp-os/shared/chat";
 import { featureErrors, messageOf } from "@grasp-os/shared/errors";
 import { roleErrors } from "@grasp-os/shared/roles";
-import { screenPath } from "@grasp-os/shared/screens";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -31,6 +30,8 @@ import {
   serverFileLabels,
   serverFileOf,
   versionKey,
+  changedScreens,
+  previewedScreen,
 } from "./builds-state.ts";
 import type { ServerFile } from "./builds-state.ts";
 
@@ -527,13 +528,6 @@ const PendingVersion = ({
   );
 };
 
-/** The screens a draft changes, by name (`screens/<name>.tsx`). */
-const changedScreens = ({ changed }: ChatDraft): string[] =>
-  changed.flatMap((path) => {
-    const name = screenPath.exec(path)?.groups?.name;
-    return name === undefined ? [] : [name];
-  });
-
 /**
  * The preview of a draft: its first screen, or one it changes the person
  * picks. Loaded afresh at each of the draft's writes, as its key says.
@@ -547,8 +541,9 @@ const DraftPreview = ({
   draft: ChatDraft;
   name: string;
 }) => {
-  const [screen, setScreen] = useState<string>();
-  const screens = changedScreens(draft);
+  const [picked, setPicked] = useState<string>();
+  const screens = changedScreens(draft.changed);
+  const screen = previewedScreen(screens, picked);
   return (
     <section
       aria-label={`Preview of ${name}`}
@@ -560,7 +555,7 @@ const DraftPreview = ({
             <Button
               key={one}
               onClick={() => {
-                setScreen(one);
+                setPicked(one);
               }}
               size="sm"
               variant={one === screen ? "secondary" : "ghost"}
