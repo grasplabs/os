@@ -30,6 +30,7 @@ import { personOf } from "./connections.ts";
 import {
   memberRemovals,
   members,
+  notifications,
   sessions,
   teamMembers,
   users,
@@ -155,7 +156,8 @@ const listMembers = async (env: Env, by: Identity): Promise<Member[]> => {
 
 /**
  * Records that `userId` is removed and deletes their membership, their team
- * memberships and every session they have, with the audit event, in one
+ * memberships, every session and notification they have, with the audit
+ * event, in one
  * batch. The marker goes in only while they are a member and the admin
  * still is one, checked in the same statement, so a removal racing any
  * other change of membership or role (see `setMemberRole`) never leaves
@@ -192,6 +194,9 @@ const recordRemoval = async (
         )
       ),
     db.delete(sessions).where(and(eq(sessions.userId, userId), removed)),
+    db
+      .delete(notifications)
+      .where(and(eq(notifications.personId, userId), removed)),
   ]);
   return inserted.length > 0;
 };

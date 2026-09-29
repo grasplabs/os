@@ -14,6 +14,7 @@ import { KnowledgeSignalsRpc } from "./knowledge/signals-rpc.ts";
 import { UploadsRpc } from "./knowledge/uploads-rpc.ts";
 import { MembersRpc } from "./members.ts";
 import { ModelsRpc } from "./models-rpc.ts";
+import { NotificationsRpc } from "./notifications.ts";
 import { PendingActionsRpc } from "./pending-actions.ts";
 import { PermissionsRpc } from "./permissions-rpc.ts";
 import { ScreensRpc } from "./screens-rpc.ts";
@@ -51,6 +52,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #pendingActions: PendingActionsRpc;
   readonly #signals: SignalsRpc;
   readonly #chats: ChatsRpc;
+  readonly #notifications: NotificationsRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -108,6 +110,15 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#signals = new SignalsRpc(env, checkWith("improvement_signals"));
     // Chats are how people ask the agent: its kill switch stops them too.
     this.#chats = new ChatsRpc(env, checkWith("agent", "chat"));
+    // They tell of failed runs: the workflows kill switch stops them too.
+    this.#notifications = new NotificationsRpc(
+      env,
+      checkWith("workflows", "run_notifications")
+    );
+  }
+
+  get notifications(): NotificationsRpc {
+    return this.#notifications;
   }
 
   get chats(): ChatsRpc {

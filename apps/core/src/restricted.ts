@@ -36,7 +36,9 @@ import { appHost, workspace } from "./durable-objects.ts";
 // by an App must start from (and restrict) that App's flag, and state
 // shared across a workspace's chats would need a flag on the workspace, not
 // on each chat. Whatever adds such a flow adds the flag with it: a call
-// from one App to another's export carries it both ways (app-calls.ts).
+// from one App to another's export carries it both ways (app-calls.ts),
+// and a chat started to fix a failed run starts restricted when the run's
+// App is, since the run's report may hold what it read (run-fixes.ts).
 //
 // Entering restricted mode is audited, with the collections whose read
 // entered it as provenance: before the flag is set, so it's never set

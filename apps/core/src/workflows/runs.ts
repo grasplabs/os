@@ -1,6 +1,6 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
-import { actorOf, runActorOf } from "@grasp-os/shared/audit";
+import { actorOf, createAuditEvent, runActorOf } from "@grasp-os/shared/audit";
 import {
   appIdSchema,
   runIdSchema,
@@ -32,15 +32,24 @@ import {
 } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { appFor, versionFiles } from "../apps.ts";
-import { auditedBatch, outboxed, outboxedIfChanged } from "../audit-outbox.ts";
+import {
+  auditedBatch,
+  outboxed,
+  outboxedEventWhere,
+  outboxedIfChanged,
+  storedEvent,
+} from "../audit-outbox.ts";
 import type { Member } from "../auth/identity.ts";
+import { builtinOwner } from "../builtin-app-id.ts";
 import { apps, workflowRuns } from "../db/core/schema.ts";
 import { appHost } from "../durable-objects.ts";
 import { featureEnabled, requireFeature } from "../features.ts";
 import type { Feature } from "../features.ts";
+import { failureNoticed } from "../notifications.ts";
 import { hasWorkflow } from "./code.ts";
 import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
@@ -186,6 +195,51 @@ export const runActor = (
 ): AuditActor =>
   runActorOf({ runId: row.id, app: row.appId, workflow: row.workflowId });
 
+/**
+ * The statements that record a run's failure, after the one that marks it
+ * failed in the same batch: its `workflow.run.failed` event, stored only
+ * if that statement changed the row, so a run that ended otherwise records
+ * nothing; and, while `run_notifications` is on, the notice to the person
+ * it acted for (notifications.ts), only if the event was stored. That
+ * person is who started it, or for a triggered run the App's owner, read
+ * now; none for a built-in's App, which nobody owns.
+ */
+const failureRecorded = async (
+  env: Env,
+  db: DrizzleD1Database,
+  row: Pick<RunRow, "id" | "appId" | "workflowId" | "version" | "startedBy">,
+  detail: Record<string, string | number | boolean | null>
+) => {
+  const failed = createAuditEvent(
+    runEntry(runActor(row), "workflow.run.failed", row, detail),
+    "core"
+  );
+  const stored = outboxedEventWhere(db, failed, sql`changes() > 0`);
+  if (!featureEnabled(env, "run_notifications")) {
+    return [stored] as const;
+  }
+  let personId = row.startedBy;
+  if (personId === null) {
+    const app = await appRecord(env, appIdSchema.parse(row.appId));
+    personId = app.ownerId;
+  }
+  // A built-in's App is owned by nobody: there is no one to tell.
+  if (personId === builtinOwner) {
+    return [stored] as const;
+  }
+  return [
+    stored,
+    ...failureNoticed(db, {
+      run: row,
+      personId,
+      entry: runEntry(runActor(row), "workflow.run.notified", row, {
+        person: personId,
+      }),
+      recorded: storedEvent(failed.id),
+    }),
+  ] as const;
+};
+
 /** What starts a run: which workflow, with what input, for whom. */
 export interface RunRequest {
   app: AppId;
@@ -293,16 +347,17 @@ const unstarted = {
 } as const;
 
 /**
- * Marks a run that didn't start as failed, for `reason`, audited as a
- * failed run, once. Only a starting run: one the dispatcher has run
- * meanwhile (`markRunning`), or that was cancelled, stays as it is. Its
+ * Marks a run that didn't start as failed, for `reason`, audited and
+ * notified as a failed run (`failureRecorded`), once. Only a starting
+ * run: one the dispatcher has run meanwhile (`markRunning`), or that was
+ * cancelled, stays as it is. Its
  * report, which its owner sees as they see any failed run's, says only
  * that it didn't start. It gives up its trigger key, so its trigger
  * delivered again starts a new run. Whether this marked it.
  */
 const failStart = async (
   env: Env,
-  row: Pick<RunRow, "id" | "appId" | "workflowId" | "version">,
+  row: Pick<RunRow, "id" | "appId" | "workflowId" | "version" | "startedBy">,
   reason: keyof typeof unstarted
 ): Promise<boolean> => {
   const db = drizzle(env.DB);
@@ -325,13 +380,10 @@ const failStart = async (
         and(eq(workflowRuns.id, row.id), eq(workflowRuns.status, "starting"))
       )
       .returning({ id: workflowRuns.id }),
-    outboxedIfChanged(
-      db,
-      runEntry(runActor(row), "workflow.run.failed", row, {
-        reason,
-        error: "workflow.run_failed",
-      })
-    ),
+    ...(await failureRecorded(env, db, row, {
+      reason,
+      error: "workflow.run_failed",
+    })),
   ]);
   if (!failed) {
     return false;
@@ -736,9 +788,10 @@ export type Stopped = Pick<RunFailure, "step" | "input" | "error">;
 
 /**
  * Marks a run as it ended, once, with its audit event; a failed run keeps
- * its report (`failed`), for its owner to see. The audit event names only
- * the error's code (one the audit log can take, or a fixed one), never
- * its message, which workflow code writes.
+ * its report (`failed`), for its owner to see, and notifies them
+ * (`failureRecorded`). The audit event names only the error's code (one
+ * the audit log can take, or a fixed one), never its message, which
+ * workflow code writes.
  */
 export const endRun = async (
   env: Env,
@@ -767,15 +820,14 @@ export const endRun = async (
         and(eq(workflowRuns.id, row.id), inArray(workflowRuns.status, unended))
       )
       .returning({ id: workflowRuns.id }),
-    outboxedIfChanged(
-      db,
-      runEntry(
-        runActor(row),
-        `workflow.run.${status}`,
-        row,
-        failed === undefined ? {} : { error: failed.error.code }
-      )
-    ),
+    ...(failed === undefined
+      ? [
+          outboxedIfChanged(
+            db,
+            runEntry(runActor(row), "workflow.run.completed", row)
+          ),
+        ]
+      : await failureRecorded(env, db, row, { error: failed.error.code })),
   ]);
   // Only when this ended it: not again for a run a cancel ended first.
   if (ended) {

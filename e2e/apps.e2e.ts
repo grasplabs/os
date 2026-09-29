@@ -184,18 +184,22 @@ test("the nav shows admins their own sections, and nobody else", async ({
     const links = page
       .getByRole("navigation", { name: "Main" })
       .getByRole("link");
-    // The nav shows once the person's identity is in.
+    // The nav shows once the person's identity is in, and Notifications
+    // once core has counted them.
     await expect(links.first()).toBeVisible();
-    return await links.allTextContents();
+    await expect(links.filter({ hasText: /^Notifications/u })).toBeVisible();
+    const texts = await links.allTextContents();
+    // Without how many are unread.
+    return texts.map((text) => text.replace(/\d+ unread$/u, ""));
   };
   expect({
     admin: await navOf(admin),
     builder: await navOf(builder),
     user: await navOf(user),
   }).toStrictEqual({
-    admin: [...everyone, ...adminOnly],
-    builder: everyone,
-    user: everyone,
+    admin: [...everyone, ...adminOnly, "Notifications"],
+    builder: [...everyone, "Notifications"],
+    user: [...everyone, "Notifications"],
   });
 });
 

@@ -59,10 +59,12 @@ export const chatMessages = sqliteTable(
 
 /**
  * What a chat's agent has read from, each source once: the collections and
- * connections its code read through the chat's APIs. Every model request
- * of the chat carries all of them as provenance, so the client's model
- * rules judge a later turn by what an earlier one read. Written only for a
- * code run that is still open (`recordSources` in workspace.ts).
+ * connections its code read through the chat's APIs, and, for a chat
+ * started to fix a failed run, the run and its App's sources. Every model
+ * request of the chat carries all of them as provenance, so the client's
+ * model rules judge a later turn by what an earlier one read. Written only
+ * for a code run that is still open (`recordSources` in workspace.ts), or
+ * with the chat that attaches a run's report (`createChat`).
  */
 export const chatSources = sqliteTable(
   "chat_sources",
@@ -124,7 +126,8 @@ export const chatDraftFiles = sqliteTable(
 );
 
 /**
- * Audit events of changes to this object's chats (made, renamed, deleted),
+ * Audit events of changes to this object's chats (made, renamed, deleted,
+ * started to fix a failed run, restricted from the start),
  * each stored in the same transaction as its change, until the object has
  * delivered it to the audit log (`drainObjectOutbox` in audit-outbox.ts).
  */
@@ -133,3 +136,24 @@ export const auditOutbox = sqliteTable("audit_outbox", {
   event: text().notNull(),
   createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
 });
+
+/**
+ * What a chat was started with, besides its question: for now, the
+ * failure report of the workflow run the person asked its agent to fix
+ * (`chats.fixRun` in chats-rpc.ts), as JSON. Its agent reads it through
+ * `env.chat.attachments()`, as data: the report's message is the
+ * workflow's own text, and never goes into the agent's instructions.
+ */
+export const chatAttachments = sqliteTable(
+  "chat_attachments",
+  {
+    chatId: text("chat_id")
+      .$type<ChatId>()
+      .notNull()
+      .references(() => chats.id),
+    runId: text("run_id").notNull(),
+    report: text().notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.chatId, table.runId] })]
+);

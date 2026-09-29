@@ -879,6 +879,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       failure: { step: null, code: "workflow.run_failed" },
       audited: [
         "workflow.run.failed  workflow.run_failed",
+        "workflow.run.notified",
         "workflow.step.completed $sneaky",
         "workflow.step.failed failing workflow.step_failed",
         "workflow.step.failed huge workflow.step_failed",
@@ -1320,6 +1321,7 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       },
       audited: [
         "workflow.run.failed start_failed workflow.run_failed",
+        "workflow.run.notified",
         "workflow.run.started",
       ],
     });

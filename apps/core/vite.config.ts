@@ -145,6 +145,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               agent: true,
               chat: true,
               app_builder: true,
+              run_notifications: true,
             },
             // Few enough statistics points to reach each bound in a test.
             STATISTICS_POINT_LIMITS: "10/25",

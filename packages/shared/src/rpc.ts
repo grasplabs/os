@@ -8,6 +8,7 @@ import type { KnowledgeApi } from "./knowledge.ts";
 import type { MembersApi } from "./members.ts";
 import type { MemoryApi } from "./memory.ts";
 import type { ModelsApi } from "./models.ts";
+import type { NotificationsApi } from "./notifications.ts";
 import type { PermissionsApi } from "./permissions.ts";
 import type { Role } from "./roles.ts";
 import type { ScreensApi } from "./screens.ts";
@@ -78,6 +79,11 @@ export interface SessionApi {
   readonly connections: ConnectionsApi;
   /** Runs of Apps' workflows, for those with a role in the App. */
   readonly workflows: WorkflowsApi;
+  /**
+   * What core tells the person: the workflows that failed while acting for
+   * them.
+   */
+  readonly notifications: NotificationsApi;
   /**
    * Decisions workflow runs wait for, answered by the people they are
    * from, whatever their role.

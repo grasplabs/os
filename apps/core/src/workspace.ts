@@ -5,7 +5,11 @@ import {
   createAuditEvent,
   delegateActorOf,
 } from "@grasp-os/shared/audit";
-import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
+import type {
+  AuditActor,
+  AuditDetailValue,
+  AuditEntry,
+} from "@grasp-os/shared/audit";
 import type {
   ChatDraft,
   ChatMessage,
@@ -25,9 +29,11 @@ import {
 } from "@grasp-os/shared/ids";
 import type { ChatId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
+import { modelErrors } from "@grasp-os/shared/models";
 import { permissionErrors } from "@grasp-os/shared/permissions";
+import type { RunFailure } from "@grasp-os/shared/workflows";
 import { DurableObject } from "cloudflare:workers";
-import { and, asc, count, desc, eq, gt } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
@@ -52,6 +58,7 @@ import { migrateOnWake } from "./db/migrate.ts";
 import migrations from "./db/workspace/migrations/migrations.js";
 import {
   auditOutbox,
+  chatAttachments,
   chatDraftFiles,
   chatDrafts,
   chatMessages,
@@ -62,7 +69,7 @@ import { featureEnabled, requireFeature } from "./features.ts";
 import { readAsDelegate } from "./knowledge/binding.ts";
 import { forContext } from "./knowledge/memory.ts";
 import { catalog, noteListedSkills } from "./knowledge/tools.ts";
-import { models } from "./models.ts";
+import { gatewaySettings, models } from "./models.ts";
 import type { WorkContext } from "./restricted.ts";
 
 export type Chat = typeof chats.$inferSelect;
@@ -94,6 +101,19 @@ interface TurnBuilds {
   >;
 }
 
+/**
+ * A failed run a new chat's agent is asked to fix (`fixRun` in
+ * chats-rpc.ts): its report, attached to the chat as data, and what the
+ * report may hold data from, which the chat carries from the start.
+ */
+export interface RunToFix {
+  report: RunFailure;
+  /** The run, and every source its App may have read (app-provenance.ts). */
+  sources: string[];
+  /** Whether the run's App is restricted: then the chat is, from the start. */
+  restricted: boolean;
+}
+
 /** A question for a chat's agent, and the model to answer it with. */
 export const questionSchema = z.strictObject({
   text: z.string().trim().min(1).max(100_000),
@@ -121,6 +141,14 @@ export type Answer = TurnResult & { provenance: AnswerProvenance };
  */
 const storedMessageSchema = z.custom<Message>(
   (value) => typeof value === "object" && value !== null && isMessage(value)
+);
+
+/**
+ * A failure report attached to a chat (`attachments`), as this object
+ * stored it: checked as far as being an object.
+ */
+const storedReportSchema = z.custom<RunFailure>(
+  (value) => typeof value === "object" && value !== null
 );
 
 /** The message a watcher saw last: none (`null`), or a stored one's ID. */
@@ -259,12 +287,19 @@ export class Workspace extends DurableObject<Env> {
    * acting for them. Refused past {@link maxChatsPerPerson}. Made `by`
    * someone (the person, through the chat API), it is audited with it, in
    * the same transaction; core's own chats (tests) pass nobody.
+   *
+   * Made to fix a failed run (`fix`), it starts with the run's report
+   * attached (`attachments`), audited as `workflow.run.fix_asked`, and
+   * with what the report may hold data from as its sources; restricted
+   * from the start, audited so, when the run's App is. All in the same
+   * transaction: no turn can read the report before the chat carries it.
    */
   createChat(
     title: string,
     personId: string,
     agentId: string,
-    by?: AuditActor
+    by?: AuditActor,
+    fix?: RunToFix
   ): Chat {
     const agent = workspaceAgentIdSchema.safeParse(agentId);
     if (!agent.success) {
@@ -284,7 +319,7 @@ export class Workspace extends DurableObject<Env> {
       if (by !== undefined) {
         this.#outboxed(by, "chat.created", id);
       }
-      return this.#db
+      const made = this.#db
         .insert(chats)
         .values({
           id,
@@ -292,12 +327,97 @@ export class Workspace extends DurableObject<Env> {
           createdAt: new Date(),
           personId,
           agentId: agent.data,
+          restricted: fix?.restricted === true,
         })
         .returning()
         .get();
+      if (fix !== undefined) {
+        this.#attachRun(made, fix, by);
+      }
+      return made;
     });
     this.#deliverAudit();
     return chat;
+  }
+
+  /**
+   * A new chat of `personId`'s to fix a failed run (`createChat` with
+   * `fix`), made only if the deployment allows `model`, which its question
+   * will name: a refused model leaves no chat without a question.
+   */
+  createFixChat(
+    title: string,
+    personId: string,
+    agentId: string,
+    by: AuditActor,
+    fix: RunToFix,
+    model: string
+  ): Chat {
+    if (!gatewaySettings(this.env).models.includes(model)) {
+      throw modelErrors.create("model.not_allowed");
+    }
+    return this.createChat(title, personId, agentId, by, fix);
+  }
+
+  /**
+   * Attaches the report of the run `fix` names to the new chat, with its
+   * sources, and audits it: in `createChat`'s transaction.
+   */
+  #attachRun(chat: Chat, fix: RunToFix, by: AuditActor | undefined): void {
+    const { report, sources, restricted } = fix;
+    const { id, createdAt, personId, agentId } = chat;
+    this.#db
+      .insert(chatAttachments)
+      .values({
+        chatId: id,
+        runId: report.run,
+        report: JSON.stringify(report),
+        createdAt,
+      })
+      .run();
+    const carried = [...new Set([report.run, ...sources])];
+    this.#keepSources(id, carried);
+    const workspace = this.ctx.id.name ?? null;
+    if (by !== undefined) {
+      this.#outboxEntry({
+        actor: by,
+        action: "workflow.run.fix_asked",
+        target: { type: "workflow_run", id: report.run },
+        detail: {
+          app: report.app,
+          workflow: report.workflow,
+          version: report.version,
+          chat: id,
+          workspace,
+        },
+      });
+    }
+    if (restricted && personId !== null && agentId !== null) {
+      // As restricted.ts records a chat entering restricted mode.
+      this.#outboxEntry({
+        actor: delegateActorOf(chatAuthority({ agentId, personId })),
+        action: "context.restricted",
+        target: { type: "chat", id },
+        provenance: carried.slice(0, auditProvenanceMaxItems),
+        detail: { workspace },
+      });
+    }
+  }
+
+  /**
+   * The reports of the failed runs the chat was started to fix, oldest
+   * first, as data for its agent (`env.chat.attachments()` in
+   * agent-apis.ts). Core's own read: the agent's code reaches only its
+   * own chat's.
+   */
+  attachments(chatId: ChatId): RunFailure[] {
+    return this.#db
+      .select({ report: chatAttachments.report })
+      .from(chatAttachments)
+      .where(eq(chatAttachments.chatId, chatId))
+      .orderBy(asc(chatAttachments.createdAt), asc(chatAttachments.runId))
+      .all()
+      .map(({ report }) => storedReportSchema.parse(JSON.parse(report)));
   }
 
   /**
@@ -312,15 +432,17 @@ export class Workspace extends DurableObject<Env> {
     chatId: ChatId,
     detail: Record<string, AuditDetailValue> = {}
   ): void {
-    const event = createAuditEvent(
-      {
-        actor: by,
-        action,
-        target: { type: "chat", id: chatId },
-        detail: { workspace: this.ctx.id.name ?? null, ...detail },
-      },
-      "core"
-    );
+    this.#outboxEntry({
+      actor: by,
+      action,
+      target: { type: "chat", id: chatId },
+      detail: { workspace: this.ctx.id.name ?? null, ...detail },
+    });
+  }
+
+  /** Stores `entry`'s event in the outbox, as `#outboxed` does. */
+  #outboxEntry(entry: AuditEntry): void {
+    const event = createAuditEvent(entry, "core");
     this.#db
       .insert(auditOutbox)
       .values({
@@ -740,15 +862,21 @@ export class Workspace extends DurableObject<Env> {
     return true;
   }
 
-  /** Keeps `sources` with the chat, each once, for good. */
+  /**
+   * Keeps `sources` with the chat, each once, for good: one statement
+   * whatever their number, the list bound as one JSON value, as the
+   * object's SQLite takes at most 100 bound values a statement.
+   */
   #keepSources(chatId: ChatId, sources: readonly string[]): void {
     if (sources.length === 0) {
       return;
     }
-    const createdAt = new Date();
+    // The WHERE keeps SQLite from reading ON CONFLICT as a join.
     this.#db
       .insert(chatSources)
-      .values(sources.map((sourceId) => ({ chatId, sourceId, createdAt })))
+      .select(
+        sql`SELECT ${chatId}, value, ${Date.now()} FROM json_each(${JSON.stringify(sources)}) WHERE true`
+      )
       .onConflictDoNothing()
       .run();
     this.#provenanceChanged(chatId);
@@ -837,6 +965,10 @@ export class Workspace extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         this.#db.delete(chatMessages).where(eq(chatMessages.chatId, id)).run();
         this.#db.delete(chatSources).where(eq(chatSources.chatId, id)).run();
+        this.#db
+          .delete(chatAttachments)
+          .where(eq(chatAttachments.chatId, id))
+          .run();
         this.#dropDrafts(
           eq(chatDraftFiles.chatId, id),
           eq(chatDrafts.chatId, id)
