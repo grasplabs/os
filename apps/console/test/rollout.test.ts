@@ -1,7 +1,7 @@
 import { platformChangeSchema } from "@grasp-os/shared/platform-change";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
@@ -45,6 +45,7 @@ import {
 import { checkRevocation } from "../src/rollout/shared-secrets.ts";
 import type { AccountState } from "./cloudflare-api-kit.ts";
 import { mockCloudflareApi } from "./cloudflare-api.ts";
+import { racingDb } from "./racing-db.ts";
 import { publishRelease } from "./releases.ts";
 import {
   emptyStoreSecret,
@@ -3292,7 +3293,54 @@ describe("applying a client's settings now", () => {
       releases: [release, release],
       pending: false,
       runner: null,
-      event: { actor: staff.email, target: release },
+      event: { actor: staff.email, target: null },
+    });
+  });
+
+  it("deploys the release a rollout just made live, not the one the client ran when staff asked, when the rollout ends before the apply claims the client", async () => {
+    const before = await importedRelease("feat(core): before the race");
+    const client = await activeClient(0, before);
+    const release = await importedRelease("feat(core): landed in the race");
+    await setFeature(env, staff, {
+      clientId: client.clientId,
+      feature: "memory",
+      on: true,
+    });
+    await using run = await followRollouts();
+    await using applies = await followApplies();
+    // The rollout runs to its end after the apply read what the client
+    // runs, right before its claim lands (its first batch).
+    let raced = false;
+    const racing = racingDb(async () => {
+      if (!raced) {
+        raced = true;
+        await rollOut(release, { scope: "ring", ring: 0 });
+        await run.waitForStatus("complete");
+      }
+    });
+
+    await applySettings({ ...env, DB: racing }, staff, client.clientId);
+    await applies.settledLatest();
+
+    const workers = await workersOf(client.clientId);
+    const [latest] = await db
+      .select({ releaseId: clientDeploys.releaseId, kind: clientDeploys.kind })
+      .from(clientDeploys)
+      .where(eq(clientDeploys.clientId, client.clientId))
+      .orderBy(desc(clientDeploys.createdAt))
+      .limit(1);
+    expect({
+      raced,
+      releases: workers.map(({ releaseId }) => releaseId),
+      applied: latest?.releaseId,
+      features: await liveFeaturesOf(client.clientId, client.account),
+      runner: await runnerOf(client.clientId),
+    }).toStrictEqual({
+      raced: true,
+      releases: [release, release],
+      applied: release,
+      features: { memory: true },
+      runner: null,
     });
   });
 

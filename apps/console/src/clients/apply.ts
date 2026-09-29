@@ -27,6 +27,7 @@ import {
   guarded,
   isEngineAbort,
   quickStep,
+  stop,
   stopReason,
 } from "../workflow-steps.ts";
 import { SettingsError } from "./settings.ts";
@@ -34,8 +35,6 @@ import { SettingsError } from "./settings.ts";
 /** What an apply's run is started with: identifiers only. */
 export interface ApplyParams {
   clientId: string;
-  /** The release its Workers run, which it deploys again. */
-  releaseId: string;
   /** The staff member who asked for it. */
   startedBy: Staff;
 }
@@ -80,6 +79,10 @@ const releaseQuietly = async (
  * (`unknown_client`), one that isn't active (`not_active`), one whose
  * Workers don't run one release (`nothing_deployed`), and while another
  * runner has it (`client_busy`).
+ *
+ * The release checked here only decides whether to start: the run reads
+ * the release it deploys again once it holds the client, so a rollout
+ * that lands before the claim is the release it deploys.
  */
 export const applySettings = async (
   env: Env,
@@ -117,7 +120,7 @@ export const applySettings = async (
     staff,
     clientId,
     run?.runId ?? null,
-    { action: "client.apply_settings", clientId, target: releaseId },
+    { action: "client.apply_settings", clientId },
     { kind: "apply", runId: newApplyId() }
   );
   if (runId === undefined) {
@@ -125,7 +128,6 @@ export const applySettings = async (
   }
   const params: ApplyParams = {
     clientId,
-    releaseId,
     startedBy: { email: staff.email, sub: staff.sub },
   };
   try {
@@ -141,22 +143,30 @@ export const applySettings = async (
 /**
  * Applies a client's settings: deploys the release it runs again, as the
  * client's runner, every Worker live at once (`runDeploy`), then releases
- * the client, whether the deploy worked or not.
+ * the client, whether the deploy worked or not. The release is read in the
+ * run, which holds the client: no other runner changes it after.
  */
 export class ApplyClient extends WorkflowEntrypoint<Env, ApplyParams> {
   override async run(
     event: WorkflowEvent<ApplyParams>,
     step: WorkflowStep
   ): Promise<void> {
-    const { clientId, releaseId, startedBy } = event.payload;
+    const { clientId, startedBy } = event.payload;
     const db = consoleDatabase(this.env.DB);
     try {
       const deployId = await step.do(
         "start",
         quickStep,
-        guarded(
-          async () => await startDeploy(db, startedBy, clientId, releaseId)
-        )
+        guarded(async () => {
+          const releaseId = await runningRelease(db, clientId);
+          if (releaseId === null) {
+            throw stop(
+              "nothing_deployed",
+              `${clientId}'s Workers don't run one release`
+            );
+          }
+          return await startDeploy(db, startedBy, clientId, releaseId);
+        })
       );
       await step.do(
         "deploy",
