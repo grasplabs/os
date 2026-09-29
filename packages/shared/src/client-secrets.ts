@@ -71,3 +71,37 @@ export const deriveClientSecret = async (
   );
   return encoding === "hex" ? toHex(mac) : toBase64(mac);
 };
+
+/**
+ * An HMAC-SHA256 key for one `purpose`, derived from `secret` with HKDF
+ * (SHA-256, no salt, the purpose as info): each purpose gets a key of its
+ * own, so a MAC made for one never passes for another. Core derives its
+ * own keys this way from its auth secret (core's src/derived-keys.ts);
+ * the console, which derives that secret, signs what it tells core with
+ * one (@grasp-os/shared/platform-change).
+ */
+export const hkdfHmacKey = async (
+  secret: string,
+  purpose: string,
+  usages: ("sign" | "verify")[]
+): Promise<CryptoKey> => {
+  const material = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    "HKDF",
+    false,
+    ["deriveKey"]
+  );
+  return await crypto.subtle.deriveKey(
+    {
+      name: "HKDF",
+      hash: "SHA-256",
+      salt: new Uint8Array(),
+      info: encoder.encode(purpose),
+    },
+    material,
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    usages
+  );
+};

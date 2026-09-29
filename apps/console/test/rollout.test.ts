@@ -4,6 +4,8 @@ import { and, asc, eq, inArray, sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { cloudflareApi } from "../src/cloudflare/api.ts";
+import { deployVersion, deployVersions } from "../src/cloudflare/workers.ts";
 import { act, consoleDatabase } from "../src/db/act.ts";
 import {
   auditEvents,
@@ -29,11 +31,12 @@ import {
   startRollout,
 } from "../src/rollout/control.ts";
 import type { StartRolloutInput } from "../src/rollout/control.ts";
+import { driftOf } from "../src/rollout/drift.ts";
 import { rollbackClient, rollbackRing } from "../src/rollout/rollback.ts";
 import type { AccountState } from "./cloudflare-api-kit.ts";
 import { mockCloudflareApi } from "./cloudflare-api.ts";
 import { publishRelease } from "./releases.ts";
-import { useStoreSecrets } from "./secrets-store.ts";
+import { emptyStoreSecret, useStoreSecrets } from "./secrets-store.ts";
 
 const token = "test-deployer-token-rollout-5d1e7a";
 const tenantToken = "test-tenant-admin-token-rollout-9c3f20";
@@ -342,6 +345,10 @@ const rolloutActions = async (rolloutId: string): Promise<string[]> => {
 /** A Workflow instance method a test's stand-in never expects called. */
 const unused = async (): Promise<never> =>
   await Promise.reject(new Error("Not expected to be called"));
+
+/** An audit event's detail, parsed. */
+const parsedDetail = (detail: string | null): unknown =>
+  JSON.parse(detail ?? "null");
 
 /** The code `promise` is refused with, or `resolved` if it isn't. */
 const codeOf = async (promise: Promise<unknown>): Promise<unknown> => {
@@ -966,7 +973,7 @@ describe("controlling a rollout", () => {
   useStoreSecrets({ deployer: token, tenant: tenantToken });
   beforeEach(setAsideEarlierTests);
 
-  it("rolls a client back to the versions it ran before at once, and stops its rollout", async () => {
+  it("rolls a client back to the versions it ran before at once, stops its rollout, and tells its core for its Activity", async () => {
     const before = await importedRelease("feat(core): the release before");
     const internal = await activeClient(0, before);
     await activeClient(1, before);
@@ -992,6 +999,8 @@ describe("controlling a rollout", () => {
       runner: await runnerOf(internal.clientId),
       actions: actions.slice(-2),
       approve: await codeOf(approveRollout(env, staff, rolloutId)),
+      // Signed with the key the rolled-back core's auth secret gives.
+      notices: internal.account.notices,
     }).toMatchObject({
       live: previous,
       recorded: previous,
@@ -1001,6 +1010,305 @@ describe("controlling a rollout", () => {
       runner: null,
       actions: ["rollout.rollback", "rollout.client_rolled_back"],
       approve: "not_waiting",
+      notices: [
+        {
+          versionId: previous.core,
+          change: { by: staff.email, what: "rollback", release: before },
+        },
+      ],
+    });
+  });
+
+  it("rolls a client back even when its core doesn't take the notice, and audits that it didn't", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const previous = await recordedVersionsOf(internal.clientId);
+    const release = await importedRelease("feat(core): an older core");
+    await using run = await followRollouts();
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    // As a core from before the endpoint answers.
+    internal.account.noticeStatus = 404;
+    const warn = vi.spyOn(console, "warn").mockReturnValue();
+    await using rollbacks = await followRollbacks();
+
+    try {
+      await rollbacks.rollBack(rolloutId, internal.clientId);
+    } finally {
+      warn.mockRestore();
+    }
+
+    const unrecorded = await db
+      .select({ target: auditEvents.target, detail: auditEvents.detail })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.clientId, internal.clientId),
+          eq(auditEvents.action, "rollout.activity_unrecorded")
+        )
+      );
+    expect({
+      live: await liveVersionsOf(internal.clientId, internal.account),
+      targets: await targetsOf(rolloutId),
+      unrecorded: unrecorded.map(({ target, detail }) => ({
+        target,
+        detail: parsedDetail(detail),
+      })),
+    }).toStrictEqual({
+      live: previous,
+      targets: {
+        [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
+      },
+      unrecorded: [
+        {
+          target: previous.core,
+          detail: { what: "rollback", error: "core_404" },
+        },
+      ],
+    });
+  });
+
+  it("rolls a client back even when the keys to tell its core are missing, auditing that it didn't", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const previous = await recordedVersionsOf(internal.clientId);
+    const release = await importedRelease("feat(core): no keys to tell");
+    await using run = await followRollouts();
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    await emptyStoreSecret(env.CLIENT_KEY, "CLIENT_KEY");
+    const warn = vi.spyOn(console, "warn").mockReturnValue();
+    await using rollbacks = await followRollbacks();
+
+    let runId = "";
+    try {
+      runId = await rollbacks.rollBack(rolloutId, internal.clientId);
+    } finally {
+      warn.mockRestore();
+    }
+
+    const instance = await env.ROLLBACK_CLIENT.get(runId);
+    const { status } = await instance.status();
+    const unrecorded = await db
+      .select({ detail: auditEvents.detail })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.clientId, internal.clientId),
+          eq(auditEvents.action, "rollout.activity_unrecorded")
+        )
+      );
+    expect({
+      status,
+      live: await liveVersionsOf(internal.clientId, internal.account),
+      targets: await targetsOf(rolloutId),
+      notices: internal.account.notices,
+      unrecorded: unrecorded.map(({ detail }) => parsedDetail(detail)),
+    }).toStrictEqual({
+      status: "complete",
+      live: previous,
+      targets: {
+        [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
+      },
+      notices: [],
+      unrecorded: [{ what: "rollback", error: "store_secret_missing" }],
+    });
+  });
+
+  it("tells a client's core the version the rollback confirmed live right before it released the client, not the one it planned", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const release = await importedRelease("feat(core): changed at the end");
+    await using run = await followRollouts();
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const [, core] = await workersOf(internal.clientId);
+    const script = core?.scriptName ?? "";
+    const released = core?.versionId ?? "";
+    // Core's release version goes live again as the rollback reads what
+    // core runs for the last time before it releases the client: after
+    // its two checks (when asked for, and as its run's plan), its restore,
+    // and its restore again.
+    const api = cloudflareApi({ token, retryDelayMs: 0 });
+    const lastRead = 5;
+    let reads = 0;
+    cloudflare.beforeAnswering(
+      (call) => {
+        if (
+          call.method !== "GET" ||
+          !call.path.endsWith(`/workers/scripts/${script}/deployments`)
+        ) {
+          return false;
+        }
+        reads += 1;
+        return reads === lastRead;
+      },
+      async () => {
+        await deployVersion(api, internal.account.id, script, released, {
+          message: "late",
+          force: true,
+        });
+      }
+    );
+    await using rollbacks = await followRollbacks();
+
+    await rollbacks.rollBack(rolloutId, internal.clientId);
+
+    const drift = await driftOf(api, db, internal.clientId);
+    expect({
+      notices: internal.account.notices,
+      core: drift?.workers.find(({ worker }) => worker === "core")?.state,
+    }).toMatchObject({
+      notices: [
+        {
+          versionId: released,
+          change: { what: "rollback", release: "unknown" },
+        },
+      ],
+      // Recorded as rolled back, and shown as the drift it is.
+      core: "drifted",
+    });
+  });
+
+  it("records a rollback whose last read of what core runs keeps failing, telling core nothing and auditing it as unconfirmed", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    const previous = await recordedVersionsOf(internal.clientId);
+    const release = await importedRelease("feat(core): unread at the end");
+    await using run = await followRollouts();
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const [, core] = await workersOf(internal.clientId);
+    const script = core?.scriptName ?? "";
+    // Every read of what core runs from the rollback's last one on, after
+    // its two checks, its restore and its restore again, is refused.
+    const seen = new Set<unknown>();
+    const lastRead = 5;
+    const isLateCoreRead = (call: {
+      method: string;
+      path: string;
+    }): boolean => {
+      if (
+        call.method !== "GET" ||
+        !call.path.startsWith(`/accounts/${internal.account.id}/`) ||
+        !call.path.endsWith(`/workers/scripts/${script}/deployments`)
+      ) {
+        return false;
+      }
+      seen.add(call);
+      return seen.size >= lastRead;
+    };
+    for (let refusal = 0; refusal < lastRead; refusal += 1) {
+      cloudflare.failNext(isLateCoreRead, 400);
+    }
+    const warn = vi.spyOn(console, "warn").mockReturnValue();
+    await using rollbacks = await followRollbacks();
+
+    let runId = "";
+    try {
+      runId = await rollbacks.rollBack(rolloutId, internal.clientId);
+    } finally {
+      warn.mockRestore();
+    }
+
+    const instance = await env.ROLLBACK_CLIENT.get(runId);
+    const { status } = await instance.status();
+    const audited = await db
+      .select({ action: auditEvents.action, detail: auditEvents.detail })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.clientId, internal.clientId),
+          inArray(auditEvents.action, [
+            "rollout.client_rolled_back",
+            "rollout.activity_unrecorded",
+          ])
+        )
+      )
+      .orderBy(asc(auditEvents.at), sql`rowid`);
+    expect({
+      status,
+      live: await liveVersionsOf(internal.clientId, internal.account),
+      targets: await targetsOf(rolloutId),
+      notices: internal.account.notices,
+      audited: audited.map(({ action, detail }) => ({
+        action,
+        detail: parsedDetail(detail),
+      })),
+    }).toMatchObject({
+      status: "complete",
+      live: previous,
+      targets: {
+        [internal.clientId]: { ring: 0, status: "rolled_back", error: null },
+      },
+      notices: [],
+      audited: [
+        {
+          action: "rollout.client_rolled_back",
+          detail: {
+            confirmed_connect: previous.connect,
+            confirmed_core: "unknown",
+          },
+        },
+        {
+          action: "rollout.activity_unrecorded",
+          detail: { what: "rollback", error: "core_unconfirmed" },
+        },
+      ],
+    });
+  });
+
+  it("tells core the version its record stored when the record step runs again after committing, though core changed since", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    await activeClient(1, before);
+    const previous = await recordedVersionsOf(internal.clientId);
+    const release = await importedRelease("feat(core): recorded, then changed");
+    await using run = await followRollouts();
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 1 });
+    await run.waitForStepResult({ name: "ring 1 approved" });
+    const [, core] = await workersOf(internal.clientId);
+    const script = core?.scriptName ?? "";
+    const released = core?.versionId ?? "";
+    const api = cloudflareApi({ token, retryDelayMs: 0 });
+    // The claim's batch goes through; the record's, the next, commits,
+    // then core's release version goes live again (another deploy, after
+    // the client was released), and the record's answer is lost, so the
+    // step runs again.
+    let batches = 0;
+    const batch = env.DB.batch.bind(env.DB);
+    const losing = vi
+      .spyOn(env.DB, "batch")
+      .mockImplementation(async (statements) => {
+        batches += 1;
+        const results = await batch(statements);
+        if (batches === 2) {
+          await deployVersion(api, internal.account.id, script, released, {
+            message: "after the release",
+            force: true,
+          });
+          throw new Error("The answer was lost");
+        }
+        return results;
+      });
+    await using rollbacks = await followRollbacks();
+    try {
+      await rollbacks.rollBack(rolloutId, internal.clientId);
+    } finally {
+      losing.mockRestore();
+    }
+
+    expect({
+      notices: internal.account.notices,
+      core: liveOf(internal.account, script),
+    }).toMatchObject({
+      notices: [
+        {
+          versionId: previous.core,
+          change: { what: "rollback", release: before },
+        },
+      ],
+      core: released,
     });
   });
 
@@ -1836,6 +2144,159 @@ describe("controlling a rollout", () => {
       approve: "not_waiting",
       cancelAgain: "not_waiting",
       actions: ["rollout.pause", "rollout.resume", "rollout.cancel"],
+    });
+  });
+});
+
+describe("drift", () => {
+  useStoreSecrets({ deployer: token, tenant: tenantToken });
+  beforeEach(setAsideEarlierTests);
+
+  const api = cloudflareApi({ token, retryDelayMs: 0 });
+
+  /** Client `clientId`'s drift, and each Worker's. */
+  const driftStates = async (clientId: string) => {
+    const drift = await driftOf(api, db, clientId);
+    return {
+      state: drift?.state,
+      workers: Object.fromEntries(
+        (drift?.workers ?? []).map(({ worker, state }) => [worker, state])
+      ),
+    };
+  };
+
+  it("shows when a client is changed outside the console, split, or can't be read", async () => {
+    const first = await importedRelease("feat(core): the first release");
+    const internal = await activeClient(0, first);
+    const [connect] = await workersOf(internal.clientId);
+    const script = connect?.scriptName ?? "";
+    const firstConnect = connect?.versionId ?? "";
+    const second = await importedRelease("feat(core): the second release");
+    await runDeploy(
+      await deployContext(env),
+      await startDeploy(db, staff, internal.clientId, second)
+    );
+    const [connectNow] = await workersOf(internal.clientId);
+    const secondConnect = connectNow?.versionId ?? "";
+    await pinClient(env, staff, {
+      clientId: internal.clientId,
+      releaseId: second,
+    });
+
+    const inSync = await driftStates(internal.clientId);
+    const pinned = await driftOf(api, db, internal.clientId);
+    // Pinned to a release it doesn't run.
+    await pinClient(env, staff, {
+      clientId: internal.clientId,
+      releaseId: first,
+    });
+    const offPin = await driftStates(internal.clientId);
+    await pinClient(env, staff, {
+      clientId: internal.clientId,
+      releaseId: second,
+    });
+    // A client the console has made nothing live on yet.
+    const fresh = `client-${crypto.randomUUID().slice(0, 8)}`;
+    await db.insert(clients).values({
+      id: fresh,
+      name: fresh,
+      accountId: crypto.randomUUID().replaceAll("-", ""),
+      status: "active",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const nothingYet = await driftStates(fresh);
+    // Rolled back in the dashboard, outside the console.
+    await deployVersion(api, internal.account.id, script, firstConnect, {
+      message: "by hand",
+      force: true,
+    });
+    const drifted = await driftStates(internal.clientId);
+    await deployVersions(
+      api,
+      internal.account.id,
+      script,
+      [
+        { version_id: secondConnect, percentage: 50 },
+        { version_id: firstConnect, percentage: 50 },
+      ],
+      { message: "by hand", force: true }
+    );
+    const split = await driftStates(internal.clientId);
+    // The deployer lost its membership.
+    internal.account.members.clear();
+    const warn = vi.spyOn(console, "warn").mockReturnValue();
+    let unknown: Awaited<ReturnType<typeof driftStates>> | null = null;
+    try {
+      unknown = await driftStates(internal.clientId);
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect({
+      inSync,
+      intended: pinned?.intendedRelease,
+      drifted,
+      split,
+      unknown,
+      nobody: await driftOf(api, db, "nobody"),
+      offPin,
+      nothingYet,
+    }).toStrictEqual({
+      inSync: {
+        state: "in_sync",
+        workers: { connect: "in_sync", core: "in_sync" },
+      },
+      offPin: {
+        state: "off_pin",
+        workers: { connect: "in_sync", core: "in_sync" },
+      },
+      nothingYet: { state: "unknown", workers: {} },
+      intended: second,
+      drifted: {
+        state: "drifted",
+        workers: { connect: "drifted", core: "in_sync" },
+      },
+      split: {
+        state: "split",
+        workers: { connect: "split", core: "in_sync" },
+      },
+      unknown: {
+        state: "unknown",
+        workers: { connect: "unknown", core: "unknown" },
+      },
+      nobody: null,
+    });
+  });
+
+  it("shows a Worker of the release the console has no record of as drifted, never in sync", async () => {
+    const release = await importedRelease("feat(core): recorded in part");
+    const internal = await activeClient(0, release);
+    // A deploy that stopped part way: core was never recorded.
+    await db
+      .delete(clientWorkers)
+      .where(
+        and(
+          eq(clientWorkers.clientId, internal.clientId),
+          eq(clientWorkers.worker, "core")
+        )
+      );
+
+    const drift = await driftOf(api, db, internal.clientId);
+
+    expect({
+      state: drift?.state,
+      workers: (drift?.workers ?? []).map(({ worker, recorded, state }) => ({
+        worker,
+        recorded: recorded === null ? null : "recorded",
+        state,
+      })),
+    }).toStrictEqual({
+      state: "drifted",
+      workers: [
+        { worker: "connect", recorded: "recorded", state: "in_sync" },
+        { worker: "core", recorded: null, state: "drifted" },
+      ],
     });
   });
 });

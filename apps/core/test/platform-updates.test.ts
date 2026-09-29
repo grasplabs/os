@@ -1,5 +1,14 @@
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { auditEventTypeOf } from "@grasp-os/shared/audit-log";
+import { hkdfHmacKey } from "@grasp-os/shared/client-secrets";
+import { toHex } from "@grasp-os/shared/encoding";
+import {
+  platformUpdateMaxBytes,
+  platformUpdateMaxSkewMs,
+  platformUpdatePath,
+  platformUpdatePurpose,
+  platformUpdateSignatureHeader,
+} from "@grasp-os/shared/platform-change";
 import type { PlatformChange } from "@grasp-os/shared/platform-change";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -8,6 +17,7 @@ import { z } from "zod";
 import { recordPlatformUpdate } from "../src/platform-updates.ts";
 import { allEvents } from "./audit-events.ts";
 import { runCron } from "./cron.ts";
+import { routed } from "./sign-in.ts";
 import { testBinding } from "./test-env.ts";
 
 // Platform updates: the every-minute cron records each version of core it
@@ -135,8 +145,8 @@ describe("platform updates", () => {
     await runCron({ CF_VERSION_METADATA: earlier });
 
     await expect(updatesOf(next)).resolves.toHaveLength(1);
-    // A rollback to a version already recorded isn't recorded again: the
-    // console's own audit log records rollbacks.
+    // A rollback to a version already recorded isn't recorded again here:
+    // the console tells core of it instead (a notice, below).
     await expect(updatesOf(earlier)).resolves.toHaveLength(1);
   });
 
@@ -271,5 +281,140 @@ describe("platform updates", () => {
     await runCron({ CF_VERSION_METADATA: version });
 
     await expect(updatesOf(version)).resolves.toHaveLength(1);
+  });
+});
+
+/** A rollback's change, as the console sends it. */
+const rollback: PlatformChange = {
+  by: "staff@grasp.test",
+  what: "rollback",
+  release: "r000122-fedcba0",
+  at: "2031-01-02T04:00:00.000Z",
+};
+
+/** A notice of `change` putting core on `versionId`, sent `sentAt`. */
+const noticeBody = (
+  versionId: string,
+  sentAt = new Date().toISOString()
+): string => JSON.stringify({ versionId, change: rollback, sentAt });
+
+/** `body`'s signature as the console makes it, with the key `secret` gives. */
+const signatureOf = async (
+  body: string,
+  secret = env.BETTER_AUTH_SECRET
+): Promise<string> => {
+  const key = await hkdfHmacKey(secret, platformUpdatePurpose, ["sign"]);
+  return toHex(
+    new Uint8Array(
+      await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(body))
+    )
+  );
+};
+
+/** Sends `body` to core's notice path through the router, signed with `signature`. */
+const sendNotice = async (
+  body: string,
+  signature: string | null,
+  method = "POST"
+): Promise<number> => {
+  const headers = new Headers({ "content-type": "application/json" });
+  if (signature !== null) {
+    headers.set(platformUpdateSignatureHeader, signature);
+  }
+  const response = await routed(platformUpdatePath, {
+    method,
+    headers,
+    ...(method === "POST" ? { body } : {}),
+  });
+  await response.body?.cancel();
+  return response.status;
+};
+
+describe("platform update notices", () => {
+  it("record a rollback the console signed as a platform update of the version it went back to", async () => {
+    const versionId = crypto.randomUUID();
+    const body = noticeBody(versionId);
+
+    const status = await sendNotice(body, await signatureOf(body));
+
+    const [update, ...others] = await updatesOf({
+      id: versionId,
+      tag: "",
+      timestamp: "",
+    });
+    expect({ status, others, update }).toMatchObject({
+      status: 204,
+      others: [],
+      update: {
+        actor: { type: "system" },
+        action: "platform.updated",
+        target: { type: "version", id: versionId },
+        detail: {
+          versionId,
+          versionCreatedAt: null,
+          by: rollback.by,
+          what: rollback.what,
+          release: rollback.release,
+          changedAt: rollback.at,
+        },
+      },
+    });
+  });
+
+  it("refuse, recording nothing, a notice unsigned, signed with another key, stale, too large, malformed or not posted", async () => {
+    const versionId = crypto.randomUUID();
+    const body = noticeBody(versionId);
+    const stale = noticeBody(
+      versionId,
+      new Date(Date.now() - platformUpdateMaxSkewMs - 60_000).toISOString()
+    );
+    const early = noticeBody(
+      versionId,
+      new Date(Date.now() + platformUpdateMaxSkewMs + 60_000).toISOString()
+    );
+    // Signed, but padded past the limit with what JSON allows.
+    const large = `${body}${" ".repeat(platformUpdateMaxBytes)}`;
+    // Signed, but not a notice.
+    const notJson = "not json";
+    const notNotice = JSON.stringify({ versionId, sentAt: rollback.at });
+    const info = vi.spyOn(console, "info").mockReturnValue();
+
+    let statuses: Record<string, number> = {};
+    try {
+      statuses = {
+        unsigned: await sendNotice(body, null),
+        otherKey: await sendNotice(
+          body,
+          await signatureOf(body, "another-auth-secret-of-32-chars-or-more")
+        ),
+        notHex: await sendNotice(body, "z".repeat(64)),
+        stale: await sendNotice(stale, await signatureOf(stale)),
+        early: await sendNotice(early, await signatureOf(early)),
+        large: await sendNotice(large, await signatureOf(large)),
+        notJson: await sendNotice(notJson, await signatureOf(notJson)),
+        notNotice: await sendNotice(notNotice, await signatureOf(notNotice)),
+        get: await sendNotice(body, await signatureOf(body), "GET"),
+      };
+    } finally {
+      info.mockRestore();
+    }
+
+    expect({
+      statuses,
+      updates: await updatesOf({ id: versionId, tag: "", timestamp: "" }),
+    }).toStrictEqual({
+      statuses: {
+        unsigned: 403,
+        otherKey: 403,
+        notHex: 403,
+        stale: 403,
+        early: 403,
+        large: 403,
+        notJson: 403,
+        notNotice: 403,
+        get: 404,
+      },
+      updates: [],
+    });
   });
 });

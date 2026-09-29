@@ -1,4 +1,5 @@
 import { sha256Hex, toHex } from "@grasp-os/shared/encoding";
+import { readAtMost } from "@grasp-os/shared/http";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import type { InboundEmail } from "@grasp-os/shared/workflows";
@@ -59,40 +60,6 @@ const maxSubjectLength = 1000;
 
 /** Longest name, address, file name or type a run's input keeps. */
 const maxFieldLength = 256;
-
-/**
- * `stream`'s bytes, read up to `max` of them: undefined for a stream
- * longer than that, counted on what it holds, whatever it says its size is.
- */
-const readAtMost = async (
-  stream: ReadableStream<Uint8Array>,
-  max: number
-): Promise<Uint8Array | undefined> => {
-  const reader = stream.getReader();
-  const chunks: Uint8Array[] = [];
-  let length = 0;
-  for (;;) {
-    // oxlint-disable-next-line no-await-in-loop -- a stream reads in order
-    const { done, value } = await reader.read();
-    if (done) {
-      break;
-    }
-    length += value.byteLength;
-    if (length > max) {
-      // oxlint-disable-next-line no-await-in-loop -- once, then out
-      await reader.cancel();
-      return undefined;
-    }
-    chunks.push(value);
-  }
-  const bytes = new Uint8Array(length);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return bytes;
-};
 
 const cut = (text: string, max = maxFieldLength): string => text.slice(0, max);
 

@@ -114,6 +114,18 @@ const deploySecrets = async (env: Env): Promise<DeploySecrets> => {
   };
 };
 
+/**
+ * The keys telling a client's core of a platform update needs, read from
+ * Secrets Store (src/rollout/activity.ts): only these, so nothing else
+ * missing stops it.
+ */
+export const activityKeys = async (
+  env: Env
+): Promise<Pick<DeploySecrets, "routerKey" | "clientKey">> => ({
+  routerKey: await storeSecret(env, "ROUTER_KEY"),
+  clientKey: await storeSecret(env, "CLIENT_KEY"),
+});
+
 /** Everything a deploy works with, from `env`. Throws while no domain is set. */
 export const deployContext = async (env: Env): Promise<DeployContext> => {
   const domain = clientDomain(env);

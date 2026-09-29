@@ -8,7 +8,10 @@ import { afterEach, beforeEach } from "vite-plus/test";
 /** What the local Secrets Store (Miniflare) offers tests to manage a secret. */
 export interface SecretsStoreAdmin {
   create: (value: string) => Promise<string>;
+  update: (value: string, id: string) => Promise<string>;
   delete: (id: string) => Promise<void>;
+  /** The store's secrets: each one's name, and its id as `metadata.uuid`. */
+  list: () => Promise<{ name: string; metadata?: { uuid?: string } }[]>;
 }
 
 /** The local Secrets Store's admin API for the secret `binding` names. */
@@ -16,13 +19,32 @@ export const adminOf = async (
   binding: SecretsStoreSecret
 ): Promise<SecretsStoreAdmin> => {
   // SAFETY: Miniflare's local Secrets Store binding answers this method with
-  // its admin API, whose `create` and `delete` have these signatures.
+  // its admin API, whose methods have these signatures.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
   const admin = Reflect.get(
     binding,
     "SecretsStoreSecret::admin_api"
   ) as () => Promise<SecretsStoreAdmin>;
   return await admin();
+};
+
+/**
+ * Empties the secret `binding` names, `name` in the store, as a store
+ * missing it reads: kept under its id, so it's taken out after the test
+ * as usual.
+ */
+export const emptyStoreSecret = async (
+  binding: SecretsStoreSecret,
+  name: string
+): Promise<void> => {
+  const admin = await adminOf(binding);
+  const secrets = await admin.list();
+  const id = secrets.find((secret) => secret.name.endsWith(name))?.metadata
+    ?.uuid;
+  if (id === undefined) {
+    throw new Error(`${name} isn't in the store`);
+  }
+  await admin.update("", id);
 };
 
 /**

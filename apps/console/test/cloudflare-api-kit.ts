@@ -72,6 +72,13 @@ export interface AccountState {
   unhealthy?: number;
   /** The version its Workers' health checks name, as an old version still answering would. */
   answeringVersion?: string;
+  /**
+   * The platform update notices its core took, signed with the key its
+   * live version's auth secret gives (@grasp-os/shared/platform-change).
+   */
+  notices: unknown[];
+  /** The status its core answers notices with instead, as an older core would. */
+  noticeStatus?: number;
 }
 
 /** A call the fake got. */
