@@ -177,7 +177,11 @@ const Intake = () => {
         return;
       }
       case "discarded": {
-        setNotice("Discarded.");
+        setNotice(
+          result.saving
+            ? "Discarded. Records its save already wrote stay in the Playbook."
+            : "Discarded."
+        );
         await showList();
         return;
       }

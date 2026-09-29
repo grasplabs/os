@@ -122,7 +122,8 @@ export type EditorResult =
   /** Kept, and opened again; `problem` when saving it then failed. */
   | { kind: "kept"; opened: OpenedDraft; problem?: string }
   | { kind: "saved"; saved: Saved }
-  | { kind: "discarded" };
+  /** Discarded; `saving` when its save had started, and wrote some. */
+  | { kind: "discarded"; saving: boolean };
 
 /**
  * A draft, reviewed and edited before it is saved: a new one (`opened`
@@ -239,12 +240,12 @@ export const DraftEditor = ({
     }
     await run(
       async () =>
-        await ask<null>("discard", {
+        await ask<{ saving: boolean }>("discard", {
           id: opened.id,
           ifVersion: opened.version,
         }),
-      () => {
-        onResult({ kind: "discarded" });
+      (answer) => {
+        onResult({ kind: "discarded", saving: answer.saving });
       }
     );
   };

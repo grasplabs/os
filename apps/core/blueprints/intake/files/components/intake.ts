@@ -194,6 +194,9 @@ export const refusal = (code: string): string => {
     case "knowledge.invalid": {
       return "That doesn't fit: check every statement has text and a tag, and the source a title and a date.";
     }
+    case "intake.discarded": {
+      return "This draft was discarded while it was being saved. Records already written stay in the Playbook.";
+    }
     case "intake.not_owner": {
       return "Another copy of the intake keeps the Playbook's sources and statements: an admin grants the Playbook to the one copy to use.";
     }

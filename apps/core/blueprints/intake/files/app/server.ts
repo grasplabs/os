@@ -311,13 +311,16 @@ export class App extends DurableObject<Env> {
 
   /**
    * Throws a draft away, at `ifVersion`: an open one, or one whose save
-   * stopped halfway (`saving`), which may never finish. What that save
-   * wrote stays in the Playbook, where Knowledge shows it.
+   * stopped halfway, or is still under way (`saving`), which then stops
+   * before its next write. Records it already wrote stay in the Playbook,
+   * where Knowledge shows them; one write on its way as it is discarded
+   * may still land. Answers whether a save had started (`saving`), so the
+   * screen can say so.
    */
   async discard(
     caller: Caller,
     input: { id: string; ifVersion: number }
-  ): Promise<Outcome<null>> {
+  ): Promise<Outcome<{ saving: boolean }>> {
     return await outcome(async () => {
       await this.#requireWriter(caller);
       const row = this.#row(input.id);
@@ -325,7 +328,7 @@ export class App extends DurableObject<Env> {
         refuse("intake.conflict", "The draft changed since it was opened.");
       }
       this.ctx.storage.sql.exec("DELETE FROM drafts WHERE id = ?", input.id);
-      return null;
+      return { saving: row.status === "saving" };
     });
   }
 
@@ -373,11 +376,24 @@ export class App extends DurableObject<Env> {
         saveKey = crypto.randomUUID();
         this.#next(input.id, input.ifVersion, "saving", draft, saveKey);
       }
-      const paths = pathsOf(
-        saveKey ?? refuse("intake.conflict", "The draft's save has no key."),
-        draft
-      );
+      const key =
+        saveKey ?? refuse("intake.conflict", "The draft's save has no key.");
+      const paths = pathsOf(key, draft);
+      // Before each write: the draft is still here, saving under this key.
+      // One discarded meanwhile (from another tab, say) stops the save.
+      const stillSaving = () => {
+        const [now] = this.ctx.storage.sql
+          .exec<Row>("SELECT * FROM drafts WHERE id = ?", input.id)
+          .toArray();
+        if (now?.status !== "saving" || now.save_key !== key) {
+          refuse(
+            "intake.discarded",
+            "The draft was discarded while it was saved: records already written stay in the Playbook."
+          );
+        }
+      };
       const { source, statements } = draft;
+      stillSaving();
       await saveNew(playbook, caller, input.id, {
         path: paths.source,
         record: {
@@ -390,6 +406,7 @@ export class App extends DurableObject<Env> {
         body: source.notes === "" ? "" : `${source.notes}\n`,
       });
       for (const [index, statement] of statements.entries()) {
+        stillSaving();
         // oxlint-disable-next-line no-await-in-loop -- each after its source, in order
         await saveNew(playbook, caller, input.id, {
           path: paths.statement(index + 1),

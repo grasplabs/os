@@ -154,16 +154,32 @@ const stemOf = (sourcePath: string): string =>
 const insertsVersion = /^insert into "versions"/iu;
 
 /**
- * Runs `run` with Knowledge failing the write of the record after the
- * first `written`: a save that stops there, as an outage would stop it.
+ * `promise`, or a failure naming `what` after 10 seconds: a held write
+ * the test never reaches fails it rather than holding it forever.
  */
-const failingAfter = async <T>(
-  written: number,
+const within = async <T>(promise: Promise<T>, what: string): Promise<T> => {
+  const late = Promise.withResolvers<never>();
+  const timer = setTimeout(() => {
+    late.reject(new Error(`${what} took too long`));
+  }, 10_000);
+  try {
+    return await Promise.race([promise, late.promise]);
+  } finally {
+    clearTimeout(timer);
+  }
+};
+
+/**
+ * Runs `run` with `before` run ahead of each Knowledge batch, given how
+ * many records' versions have been written by then, counting the one the
+ * batch writes: a write held, or failed, where a test says.
+ */
+const aroundWrites = async <T>(
+  before: (writes: number) => Promise<void>,
   run: () => Promise<T>
 ): Promise<T> => {
   const real = env.KNOWLEDGE;
   let writes = 0;
-  let failed = false;
   env.KNOWLEDGE = new Proxy(real, {
     get: (target, key) => {
       if (key === "prepare") {
@@ -176,10 +192,7 @@ const failingAfter = async <T>(
       }
       if (key === "batch") {
         return async (statements: D1PreparedStatement[]) => {
-          if (!failed && writes > written) {
-            failed = true;
-            throw new Error("Knowledge is down");
-          }
+          await before(writes);
           return await target.batch(statements);
         };
       }
@@ -196,6 +209,24 @@ const failingAfter = async <T>(
   } finally {
     env.KNOWLEDGE = real;
   }
+};
+
+/**
+ * Runs `run` with Knowledge failing the write of the record after the
+ * first `written`: a save that stops there, as an outage would stop it.
+ */
+const failingAfter = async <T>(
+  written: number,
+  run: () => Promise<T>
+): Promise<T> => {
+  let failed = false;
+  return await aroundWrites(async (writes) => {
+    await Promise.resolve();
+    if (!failed && writes > written) {
+      failed = true;
+      throw new Error("Knowledge is down");
+    }
+  }, run);
 };
 
 /** A document's text with frontmatter, as someone saves it in Knowledge. */
@@ -500,7 +531,7 @@ describe("the intake", { timeout: 60_000 }, () => {
       refused: { error: "intake.not_owner" },
       after: { version: 1, status: "open" },
       written: [],
-      discarded: { ok: null },
+      discarded: { ok: { saving: false } },
     });
   });
 
@@ -604,7 +635,66 @@ describe("the intake", { timeout: 60_000 }, () => {
     }).toStrictEqual({
       refused: { error: "intake.path_taken" },
       statements: [[`statements/${stem}-1.md`, "Mine.\n"]],
-      discarded: { ok: null },
+      discarded: { ok: { saving: true } },
+      gone: { error: "intake.not_found" },
+    });
+  });
+
+  it("stops a save whose draft is discarded meanwhile before its next write", async () => {
+    const { admin, app } = await setUp();
+    const draft = interview(`Discarded ${unique()}`);
+    const slug = draft.source.title.toLowerCase().replace(" ", "-");
+    const { id } = okOf(
+      await call(app, admin.userId, "create", draft),
+      createdSchema
+    );
+    // The first statement's write waits until the draft is discarded.
+    const held = Promise.withResolvers<null>();
+    const resume = Promise.withResolvers<null>();
+    let discarded: unknown;
+    const stopped = await aroundWrites(
+      async (writes) => {
+        if (writes === 2) {
+          held.resolve(null);
+          await resume.promise;
+        }
+      },
+      async () => {
+        const saving = call(app, admin.userId, "save", {
+          id,
+          ifVersion: 1,
+          draft,
+        });
+        try {
+          await within(held.promise, "held");
+          discarded = await within(
+            call(app, admin.userId, "discard", { id, ifVersion: 2 }),
+            "discard"
+          );
+        } finally {
+          resume.resolve(null);
+        }
+        return await saving;
+      }
+    );
+    // Signed in again: the held write ran the rest of the test in another
+    // request's context, whose sockets this one can't use.
+    const reader = await signedInApi(idp, "admin");
+    const [source] = await documentsAt(reader, `sources/2026-09-21-${slug}-`);
+    const statements = await documentsAt(
+      reader,
+      `statements/${stemOf(source?.path ?? "")}-`
+    );
+    expect({
+      discarded,
+      stopped,
+      // The write on its way landed; none after it.
+      statements: statements.map(({ path }) => path),
+      gone: await call(app, admin.userId, "draft", id),
+    }).toStrictEqual({
+      discarded: { ok: { saving: true } },
+      stopped: { error: "intake.discarded" },
+      statements: [`statements/${stemOf(source?.path ?? "")}-1.md`],
       gone: { error: "intake.not_found" },
     });
   });
