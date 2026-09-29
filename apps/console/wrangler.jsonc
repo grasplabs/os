@@ -64,6 +64,13 @@
       "binding": "ROLLOUT",
       "class_name": "Rollout",
     },
+    // Rolls a client back from a rollout (src/rollout/rollback.ts): an
+    // instance per rollback, a runner under the same claim as the others.
+    {
+      "name": "grasp-os-rollback-client",
+      "binding": "ROLLBACK_CLIENT",
+      "class_name": "RollbackClient",
+    },
   ],
   // The router's hostname map, which a deploy writes (src/deploy/router.ts).
   // The router's first deploy creates it as grasp-os-router-hosts; `deploy`

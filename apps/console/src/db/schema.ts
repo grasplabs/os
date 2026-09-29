@@ -89,24 +89,26 @@ export const clients = sqliteTable(
 /**
  * The runner that's a client's current one (src/runners.ts): the
  * only one that may change what its account runs. A provisioning run (a
- * Workflow instance per attempt), or a rollout while it deploys the client
- * (its Workflow instance). Each claims it with one conditional write
- * naming the runner it replaces, so however many act at once, one wins:
- * the single runner a client's deploy relies on. No foreign key: a
- * provisioning run is claimed before its account step records the client.
+ * Workflow instance per attempt), a rollout while it deploys the client
+ * (its Workflow instance), or a rollback of the client (its instance).
+ * Each claims it with one conditional write naming the runner it
+ * replaces, so however many act at once, one wins: the single runner a
+ * client's deploy relies on. No foreign key: a provisioning run is
+ * claimed before its account step records the client.
  */
 export const clientRuns = sqliteTable("client_runs", {
   /** The client's id, as it will be recorded. */
   clientId: text("client_id").primaryKey(),
   /**
-   * The runner's Workflow instance id: a provisioning run's
-   * (`<clientId>-<random>`) or a rollout's (the rollout's id).
+   * The runner's id: a provisioning run's Workflow instance
+   * (`<clientId>-<random>`), a rollout's (the rollout's id), or a
+   * rollback's (`rollback-<random>`).
    */
   runId: text("run_id").notNull(),
   /** When it was claimed: a run not created yet counts as starting for a while. */
   claimedAt: timestamp("claimed_at").notNull(),
   /** Which Workflow the runner is an instance of. */
-  kind: text({ enum: ["provision", "rollout"] })
+  kind: text({ enum: ["provision", "rollout", "rollback"] })
     .notNull()
     .default("provision"),
 });
@@ -204,7 +206,12 @@ export const rolloutTargets = sqliteTable(
       .notNull()
       .references(() => clients.id),
     ring: integer().notNull(),
-    /** `skipped`: on the release already, or pinned to another. */
+    /**
+     * `pending` until its first step starts, claimed or not; `skipped`: on
+     * the release already, pinned to another, or the rollout cancelled
+     * before anything of it started; `stopped`: the rollout cancelled
+     * after something had.
+     */
     status: text({
       enum: [
         "pending",
@@ -213,6 +220,7 @@ export const rolloutTargets = sqliteTable(
         "failed",
         "rolled_back",
         "skipped",
+        "stopped",
       ],
     })
       .notNull()
