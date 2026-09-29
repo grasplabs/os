@@ -8,7 +8,8 @@ import {
   fetchNewClientOptions,
   startClient,
 } from "../../provision/functions.ts";
-import { InvalidFieldError, useAction } from "../../provision/use-action.ts";
+import { useProvisionAction } from "../../provision/use-action.ts";
+import { InvalidFieldError } from "../../use-action.ts";
 
 /** A form field with its label and what it's for. */
 const Field = ({
@@ -36,7 +37,7 @@ const textOf = (form: FormData, name: string): string => {
 const NewClient = () => {
   const { releases } = Route.useLoaderData();
   const navigate = useNavigate();
-  const { busy, failure, run } = useAction();
+  const { busy, failure, run } = useProvisionAction();
   const start = (form: FormData) => {
     const accountId = textOf(form, "accountId");
     const clientId = textOf(form, "clientId");

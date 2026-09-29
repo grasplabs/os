@@ -63,6 +63,8 @@ export interface ProvisioningView {
     status: ClientSummary["status"];
     createdBy: string | null;
     createdAt: Date;
+    /** The release rollouts leave it on, if it's pinned (src/rollout/control.ts). */
+    pinnedReleaseId: string | null;
   } | null;
   /** Its latest deploy. */
   deploy: {
@@ -168,6 +170,7 @@ export const getProvisioning = async (
       status: clients.status,
       createdBy: clients.createdBy,
       createdAt: clients.createdAt,
+      pinnedReleaseId: clients.pinnedReleaseId,
     })
     .from(clients)
     .where(eq(clients.id, clientId));

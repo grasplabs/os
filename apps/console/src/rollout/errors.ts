@@ -6,6 +6,11 @@ export const rolloutErrorCodes = [
   "release_not_imported",
   /** No active client is in what the rollout was started for. */
   "no_targets",
+  /**
+   * The ring past 0, or the client, it was started for adds no one past
+   * ring 0: it would reach only Grasp's own deployments.
+   */
+  "ring_zero_only",
   /** It would take its run past the step budget: roll out to fewer clients at a time. */
   "too_large",
   /** Another rollout is running or waiting for approval. */
@@ -31,6 +36,8 @@ export const rolloutErrorCodes = [
   "rotated_since",
   /** Another runner (provisioning, another rollout, a rollback) has the client. */
   "client_busy",
+  /** The rollback's run failed or was ended before it finished. */
+  "rollback_failed",
 ] as const;
 export type RolloutErrorCode = (typeof rolloutErrorCodes)[number];
 

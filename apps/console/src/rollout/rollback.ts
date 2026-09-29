@@ -844,3 +844,74 @@ export const rollbackRing = async (
   }
   return results;
 };
+
+/** How long staff's rollback waits for its run, and how often it looks. */
+const rollbackWaitMs = 20_000;
+const rollbackPollMs = 500;
+
+/** A rollback run's statuses once it ended without finishing. */
+const failedRuns: ReadonlySet<string> = new Set(["errored", "terminated"]);
+
+/**
+ * Waits for rollback run `runId` to end, up to `rollbackWaitMs` (its run
+ * takes seconds), and returns whether it failed: errored, or ended
+ * before it finished. One still going after that isn't failed, and the
+ * page shows it as it is.
+ */
+const rollbackFailed = async (env: Env, runId: string): Promise<boolean> => {
+  const instance = await env.ROLLBACK_CLIENT.get(runId);
+  for (let waited = 0; waited < rollbackWaitMs; waited += rollbackPollMs) {
+    // oxlint-disable-next-line no-await-in-loop -- polled until it ends
+    const { status } = await instance.status();
+    if (hasEnded(status)) {
+      return failedRuns.has(status);
+    }
+    // oxlint-disable-next-line no-await-in-loop -- polled until it ends
+    await scheduler.wait(rollbackPollMs);
+  }
+  return false;
+};
+
+/**
+ * Rolls client `clientId` back from rollout `rolloutId`, as `staff`
+ * (`rollbackClient`), and waits for its run, so staff read what it did.
+ * Refused as `rollbackClient` refuses, and when its run failed
+ * (`rollback_failed`).
+ */
+export const rollbackClientAndWait = async (
+  env: Env,
+  staff: Staff,
+  rolloutId: string,
+  clientId: string
+): Promise<string> => {
+  const runId = await rollbackClient(env, staff, rolloutId, clientId);
+  if (await rollbackFailed(env, runId)) {
+    throw new RolloutError(
+      "rollback_failed",
+      `The rollback of ${clientId} didn't finish`
+    );
+  }
+  return runId;
+};
+
+/**
+ * Rolls ring `ring` of rollout `rolloutId` back, as `staff`
+ * (`rollbackRing`), and waits for each client's run: one whose run
+ * failed is listed as refused (`rollback_failed`), like one refused to
+ * begin with.
+ */
+export const rollbackRingAndWait = async (
+  env: Env,
+  staff: Staff,
+  rolloutId: string,
+  ring: number
+): Promise<RingRollback[]> => {
+  const results = await rollbackRing(env, staff, rolloutId, ring);
+  return await Promise.all(
+    results.map(async (result) =>
+      result.runId !== null && (await rollbackFailed(env, result.runId))
+        ? { ...result, refused: "rollback_failed" }
+        : result
+    )
+  );
+};

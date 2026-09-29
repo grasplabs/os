@@ -17,12 +17,14 @@ import { useEffect } from "react";
 
 import {
   confirmClientWorkersPaid,
+  fetchNewClientOptions,
   fetchProvisioning,
   retryClient,
 } from "../../provision/functions.ts";
 import type { ProvisioningView } from "../../provision/queries.ts";
-import { useAction } from "../../provision/use-action.ts";
+import { useProvisionAction } from "../../provision/use-action.ts";
 import { formatTime } from "../../releases/format.ts";
+import { ClientRelease } from "../../rollout/client-release.tsx";
 
 /** How often the page reads the run again while it's working on its own. */
 const refreshMs = 5000;
@@ -60,7 +62,7 @@ const Facts = ({ view }: { view: ProvisioningView }) => {
 /** What staff do while the run waits for Workers Paid. */
 const WorkersPaid = ({ view }: { view: ProvisioningView }) => {
   const router = useRouter();
-  const { busy, failure, run } = useAction();
+  const { busy, failure, run } = useProvisionAction();
   const accountId = view.client?.accountId ?? "";
   const confirm = () => {
     void run(async () => {
@@ -110,7 +112,7 @@ const WorkersPaid = ({ view }: { view: ProvisioningView }) => {
 /** Why the run stopped, and resuming it. */
 const Failed = ({ view }: { view: ProvisioningView }) => {
   const router = useRouter();
-  const { busy, failure, run } = useAction();
+  const { busy, failure, run } = useProvisionAction();
   const retry = () => {
     void run(async () => {
       const result = await retryClient({ data: { clientId: view.clientId } });
@@ -216,7 +218,7 @@ const working: ReadonlySet<ProvisioningView["phase"]> = new Set([
 ]);
 
 const Client = () => {
-  const view = Route.useLoaderData();
+  const { view, releases } = Route.useLoaderData();
   const router = useRouter();
   const following = working.has(view.phase);
   useEffect(() => {
@@ -248,6 +250,13 @@ const Client = () => {
           <Progress view={view} />
         </CardContent>
       </Card>
+      {view.client?.status === "active" ? (
+        <ClientRelease
+          clientId={view.clientId}
+          pinnedReleaseId={view.client.pinnedReleaseId}
+          releases={releases}
+        />
+      ) : null}
     </main>
   );
 };
@@ -271,13 +280,14 @@ export const Route = createFileRoute("/clients/$clientId")({
     if (!newClientIdSchema.safeParse(params.clientId).success) {
       throw notFound();
     }
-    const view = await fetchProvisioning({
-      data: { clientId: params.clientId },
-    });
+    const [view, { releases }] = await Promise.all([
+      fetchProvisioning({ data: { clientId: params.clientId } }),
+      fetchNewClientOptions(),
+    ]);
     if (view === null) {
       throw notFound();
     }
-    return view;
+    return { view, releases };
   },
   component: Client,
   notFoundComponent: NoSuchClient,

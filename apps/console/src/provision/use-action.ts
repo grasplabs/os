@@ -1,7 +1,5 @@
-import { useState } from "react";
-
+import { useAction } from "../use-action.ts";
 import type { ProvisionErrorCode } from "./control.ts";
-import type { ChangeResult } from "./functions.ts";
 
 /** What staff read when the console refuses a change, by its code. */
 const refusals: Readonly<Record<ProvisionErrorCode, string>> = {
@@ -18,43 +16,5 @@ const refusals: Readonly<Record<ProvisionErrorCode, string>> = {
   not_provisioning: "It isn't being provisioned, so there's nothing to do.",
 };
 
-/** A field the page checks itself, and what it says of it: shown as it is. */
-export class InvalidFieldError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "InvalidFieldError";
-  }
-}
-
-/** What staff read when a change fails for any other reason, such as a field the form let through. */
-const failed = "That didn't work. Check the fields and try again.";
-
-/** Runs `action`: null when it worked, else what went wrong, worded. Never throws. */
-const failureOf = async (
-  action: () => Promise<ChangeResult>
-): Promise<string | null> => {
-  try {
-    const { refused } = await action();
-    return refused === null ? null : refusals[refused];
-  } catch (error) {
-    return error instanceof InvalidFieldError ? error.message : failed;
-  }
-};
-
-/**
- * A staff action on a client page: `run` runs it, `busy` holds while it
- * does (cleared whether it worked or not), and `failure` says why the
- * last one failed, until the next.
- */
-export const useAction = () => {
-  const [busy, setBusy] = useState(false);
-  const [failure, setFailure] = useState<string | null>(null);
-  const run = async (action: () => Promise<ChangeResult>): Promise<void> => {
-    setBusy(true);
-    setFailure(null);
-    const outcome = await failureOf(action);
-    setBusy(false);
-    setFailure(outcome);
-  };
-  return { busy, failure, run };
-};
+/** A staff action on a client's provisioning (`useAction`), its refusals worded. */
+export const useProvisionAction = () => useAction(refusals);

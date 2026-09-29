@@ -1,0 +1,1 @@
+CREATE INDEX `rollouts_created_idx` ON `rollouts` (`created_at`);
