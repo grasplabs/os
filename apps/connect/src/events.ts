@@ -12,7 +12,16 @@ import type {
   OutboxedConnectorEvent,
 } from "@grasp-os/shared/connect";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { and, eq, inArray, isNull, lte, notExists, sql } from "drizzle-orm";
+import {
+  and,
+  eq,
+  inArray,
+  isNull,
+  lte,
+  not,
+  notExists,
+  sql,
+} from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
@@ -63,6 +72,17 @@ import { accessTokenFor } from "./tokens.ts";
 const kinds: Readonly<Record<string, EventKind>> = {
   ...microsoftEventKinds,
 };
+
+/** The types whose sources are primed before they're read. */
+const primedTypes = Object.entries(kinds).flatMap(([type, kind]) =>
+  kind.prime === undefined ? [] : [type]
+);
+
+/** An unprimed source of a type that is primed first, as SQL. */
+const unprimedSql = and(
+  isNull(eventSources.cursor),
+  inArray(eventSources.type, primedTypes)
+);
 
 /** The type `type` names, if connect reports it. */
 const kindOf = (type: string): EventKind | undefined =>
@@ -429,15 +449,15 @@ const readSource = async (
   const db = drizzle(env.DB);
   const now = Date.now();
   const kind = kindOf(source.type);
-  const unprimed = kind?.prime !== undefined && source.cursor === null;
-  if (kind === undefined || connection.status !== "active" || unprimed) {
-    // Nothing to read yet: an unprimed source is primed first
-    // (`primeSources`), however long that takes.
+  // An unprimed source is primed first (`primeSources`), and read once
+  // it has a position; `readDue` never picks one.
+  if (kind?.prime !== undefined && source.cursor === null) {
+    return 0;
+  }
+  if (kind === undefined || connection.status !== "active") {
     await db
       .update(eventSources)
-      .set({
-        pollAt: new Date(now + (unprimed ? pollIntervalMs : inactiveWaitMs)),
-      })
+      .set({ pollAt: new Date(now + inactiveWaitMs) })
       .where(eq(eventSources.id, source.id));
     return 0;
   }
@@ -474,20 +494,30 @@ const primesPerSync = 25;
  * Takes where each new source of a type that reads on from a position
  * (`EventKind.prime`) stands now, as its first cursor: a request each,
  * on top of the reads, and before them, so it marks when the source
- * started however late its first read comes. One that fails is tried
- * again by the next sync, and reads nothing meanwhile.
+ * started however late its first read comes. The longest due first; one
+ * that fails waits as a read that fails does, longer each time (and is
+ * recorded as refused after repeated refusals), so it never holds up the
+ * others. It reads nothing meanwhile.
  */
 const primeSources = async (env: Env): Promise<void> => {
+  if (primedTypes.length === 0) {
+    return;
+  }
   const db = drizzle(env.DB);
-  const unprimed = await db
+  const due = await db
     .select({ source: eventSources, connection: connections })
     .from(eventSources)
     .innerJoin(connections, eq(connections.id, eventSources.connectionId))
-    .where(and(isNull(eventSources.cursor), eq(connections.status, "active")));
-  const primeable = unprimed
-    .filter(({ source }) => kindOf(source.type)?.prime !== undefined)
-    .slice(0, primesPerSync);
-  for (const { source, connection } of primeable) {
+    .where(
+      and(
+        unprimedSql,
+        eq(connections.status, "active"),
+        lte(eventSources.pollAt, new Date())
+      )
+    )
+    .orderBy(eventSources.pollAt)
+    .limit(primesPerSync);
+  for (const { source, connection } of due) {
     const prime = kindOf(source.type)?.prime;
     if (prime === undefined) {
       continue;
@@ -505,15 +535,13 @@ const primeSources = async (env: Env): Promise<void> => {
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
       await db
         .update(eventSources)
-        .set({ cursor, updatedAt: new Date() })
+        .set({ cursor, failures: 0, updatedAt: new Date() })
         .where(
           and(eq(eventSources.id, source.id), isNull(eventSources.cursor))
         );
     } catch (error) {
-      log.warn("events.prime_failed", {
-        type: source.type,
-        ...errorFields(error),
-      });
+      // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
+      await failRead(env, source, error);
     }
   }
 };
@@ -546,7 +574,12 @@ const readDue = async (env: Env): Promise<void> => {
     .select({ source: eventSources, connection: connections })
     .from(eventSources)
     .innerJoin(connections, eq(connections.id, eventSources.connectionId))
-    .where(lte(eventSources.pollAt, new Date()))
+    .where(
+      and(
+        lte(eventSources.pollAt, new Date()),
+        primedTypes.length === 0 ? undefined : not(unprimedSql ?? sql`0`)
+      )
+    )
     .orderBy(eventSources.pollAt)
     .limit(readsPerSync);
   for (const { source, connection } of due) {

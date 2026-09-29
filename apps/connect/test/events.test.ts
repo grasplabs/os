@@ -50,11 +50,23 @@ const providers = fakeProviders();
 let graph: GraphEventsFake = graphEventsFake();
 /** Answers the next Graph request instead of the fake, when set. */
 let instead: (() => Response) | undefined;
+/** Drives Graph fails every request for. */
+const failingDrives = new Set<string>();
 const internet = fakeInternet((request, url) => {
   const answer = instead;
   if (answer !== undefined) {
     instead = undefined;
     return answer();
+  }
+  if (
+    [...failingDrives].some((drive) =>
+      decodeURIComponent(url.pathname).includes(`/drives/${drive}/`)
+    )
+  ) {
+    return Response.json(
+      { error: { code: "ServiceNotAvailable" } },
+      { status: 500 }
+    );
   }
   return url.hostname === "graph.microsoft.com"
     ? graph.answer(request, url)
@@ -170,6 +182,7 @@ describe("connector events", () => {
   beforeEach(async () => {
     graph = graphEventsFake();
     instead = undefined;
+    failingDrives.clear();
     vi.useFakeTimers({ toFake: ["Date"] });
     await env.DB.batch([
       env.DB.prepare("DELETE FROM event_sources"),
@@ -515,6 +528,35 @@ describe("connector events", () => {
       primed: [true],
       asked: [true, true, false],
     });
+  });
+
+  it("never let drives that keep failing to prime hold up another", async () => {
+    const outlook = await connected();
+    const failing = Array.from({ length: 25 }, (_, n) => `b!failing-${n}`);
+    for (const drive of failing) {
+      failingDrives.add(drive);
+    }
+    const listeners = [...failing, financeDrive].map((drive) =>
+      listener(outlook, { type: "m365.file.created", resource: drive })
+    );
+    await sync(listeners);
+    await sync(listeners);
+    const { results } = await env.DB.prepare(
+      "SELECT resource, failures FROM event_sources WHERE cursor IS NOT NULL"
+    ).all<{ resource: string; failures: number }>();
+    const failed = await sources();
+
+    // The failing ones wait longer each time, as failed reads do.
+    expect({
+      primed: results.map(({ resource }) => resource),
+      failures: [
+        ...new Set(
+          failed
+            .filter(({ cursor }) => cursor === null)
+            .map(({ failures }) => failures)
+        ),
+      ],
+    }).toStrictEqual({ primed: [financeDrive], failures: [1] });
   });
 
   it("never hand core an event of a connection disconnected since, and drop it", async () => {
