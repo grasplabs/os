@@ -378,34 +378,39 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
     });
     // Committed, not yet current: what runs is still version 1.
     const beforeCurrent = await apps.contents(app.id);
+    const exportsBefore = await apps.exports(app.id);
     await apps.versions.setCurrent(app.id, 2);
 
     expect({
       none,
       beforeCurrent,
       current: await apps.contents(app.id),
+      exportsBefore,
+      exports: await apps.exports(app.id),
     }).toStrictEqual({
-      none: { version: null, screens: [], workflows: [], exports: {} },
-      beforeCurrent: {
-        version: 1,
-        screens: ["inbox"],
-        workflows: [],
-        exports: {},
-      },
+      none: { version: null, screens: [], workflows: [] },
+      beforeCurrent: { version: 1, screens: ["inbox"], workflows: [] },
       current: {
         version: 2,
         screens: ["archive", "inbox"],
         workflows: ["report"],
-        // As declared, with the description a declaration leaves out.
+      },
+      exportsBefore: { version: 1, exports: {} },
+      // As declared, with the description a declaration leaves out.
+      exports: {
+        version: 2,
         exports: {
           findInvoices: { ...exported.findInvoices, description: "" },
           payInvoice: exported.payInvoice,
         },
       },
     });
-    await expect(outcome(apps.contents("no-such-app"))).resolves.toBe(
-      "app.not_found"
-    );
+    await expect(
+      Promise.all([
+        outcome(apps.contents("no-such-app")),
+        outcome(apps.exports("no-such-app")),
+      ])
+    ).resolves.toStrictEqual(["app.not_found", "app.not_found"]);
   });
 
   it("refuses to commit exports that aren't valid, saying why", async () => {
@@ -421,6 +426,55 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
       "not json",
       JSON.stringify({ find_invoices: valid }),
       JSON.stringify({ toString: valid }),
+      // What a permission's actions mean as all exports so marked.
+      JSON.stringify({ read: valid }),
+      JSON.stringify({ write: valid }),
+      JSON.stringify({ toJSON: valid }),
+      // A regular expression of the exporting App's, run by core on what
+      // another App sends: one written to backtrack takes seconds.
+      JSON.stringify({
+        findInvoices: {
+          ...valid,
+          input: { type: "string", pattern: "^(a+)+$" },
+        },
+      }),
+      JSON.stringify({
+        findInvoices: {
+          ...valid,
+          input: {
+            type: "object",
+            patternProperties: { "^(a+)+$": { type: "string" } },
+          },
+        },
+      }),
+      JSON.stringify({
+        findInvoices: { ...valid, input: { type: "string", format: "email" } },
+      }),
+      // Keywords core doesn't check: a bound nobody enforces.
+      JSON.stringify({
+        findInvoices: { ...valid, output: { type: "array", minItems: 1 } },
+      }),
+      JSON.stringify({
+        findInvoices: {
+          ...valid,
+          input: { type: "string", contentMediaType: "application/json" },
+        },
+      }),
+      JSON.stringify({
+        findInvoices: { ...valid, input: { allOf: [{ type: "string" }] } },
+      }),
+      JSON.stringify({
+        findInvoices: { ...valid, input: { minLength: 1 } },
+      }),
+      JSON.stringify({
+        findInvoices: {
+          ...valid,
+          input: {
+            type: "object",
+            properties: { customer: { type: "string", pattern: "^a" } },
+          },
+        },
+      }),
       JSON.stringify({ findInvoices: { ...valid, access: "admin" } }),
       JSON.stringify({ findInvoices: { ...valid, input: { type: 7 } } }),
       JSON.stringify({ findInvoices: { ...valid, extra: true } }),
@@ -439,9 +493,41 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
     }
     expect(refused).toStrictEqual(refused.map(() => "app.exports_invalid"));
     await expect(apps.versions.list(app.id)).resolves.toStrictEqual([]);
-    // And the same file, valid, commits.
+    // And valid exports commit, with every keyword core checks.
     await expect(
-      committing(JSON.stringify({ findInvoices: valid }))
+      committing(
+        JSON.stringify({
+          findInvoices: valid,
+          countInvoices: {
+            access: "read",
+            input: {
+              type: "object",
+              title: "Filter",
+              properties: {
+                status: { enum: ["open", "paid"] },
+                year: {
+                  type: "integer",
+                  minimum: 2000,
+                  exclusiveMaximum: 3000,
+                },
+                amount: { type: "number", multipleOf: 0.01, maximum: 1e9 },
+                note: { type: "string", minLength: 1, maxLength: 200 },
+                tags: {
+                  type: "array",
+                  items: { type: "string" },
+                  minItems: 1,
+                  maxItems: 5,
+                },
+                owner: { anyOf: [{ type: "string" }, { type: "null" }] },
+                kind: { const: "invoice" },
+              },
+              required: ["status"],
+              additionalProperties: false,
+            },
+            output: { oneOf: [{ type: "integer" }, { type: "boolean" }] },
+          },
+        })
+      )
     ).resolves.toBe("ok");
   });
 

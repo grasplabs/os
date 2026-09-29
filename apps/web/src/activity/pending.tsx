@@ -48,7 +48,8 @@ export interface PendingRequests {
   directory: Directory;
   /**
    * The exports of each App a request asks to call, as they are now: what
-   * granting it lets the asking App call.
+   * granting it lets the asking App call. Missing for one that couldn't
+   * be read.
    */
   exports: ReadonlyMap<string, AppExports>;
 }
@@ -83,16 +84,19 @@ export const readPendingRequests = async (
       )
     ),
   ];
-  const contents = await Promise.all(
-    called.map(async (app) => await session.apps.contents(app))
+  // Each App's exports on their own: one that can't be read is shown as
+  // such, and the requests are still there to decide.
+  const read = await Promise.allSettled(
+    called.map(async (app) => await session.apps.exports(app))
   );
-  return {
-    requests,
-    directory,
-    exports: new Map(
-      called.map((app, index) => [app, contents[index]?.exports ?? {}])
-    ),
-  };
+  const exports = new Map<string, AppExports>();
+  for (const [index, app] of called.entries()) {
+    const result = read[index];
+    if (result?.status === "fulfilled") {
+      exports.set(app, result.value.exports);
+    }
+  }
+  return { requests, directory, exports };
 };
 
 /** Who asks: the App or agent the permission is for. */
@@ -109,11 +113,13 @@ const coveredExports = (
   actions: readonly string[],
   exported: AppExports | undefined
 ): string => {
-  const covered = Object.entries(exported ?? {}).flatMap(
-    ([name, { access }]) =>
-      actions.includes(name) || actions.includes(access)
-        ? [`${name} (${access})`]
-        : []
+  if (exported === undefined) {
+    return "couldn't be read";
+  }
+  const covered = Object.entries(exported).flatMap(([name, { access }]) =>
+    actions.includes(name) || actions.includes(access)
+      ? [`${name} (${access})`]
+      : []
   );
   return covered.length === 0 ? "none now" : covered.join(", ");
 };

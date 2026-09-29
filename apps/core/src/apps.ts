@@ -10,7 +10,7 @@ import {
 import type {
   App,
   AppContents,
-  AppExports,
+  CurrentExports,
   AppFiles,
   AppRole,
   AppVersion,
@@ -492,16 +492,15 @@ export const appContents = async (
 ): Promise<AppContents> => {
   const { id, currentVersion } = await appFor(env, by, app, "user");
   if (currentVersion === null) {
-    return { version: null, screens: [], workflows: [], exports: {} };
+    return { version: null, screens: [], workflows: [] };
   }
-  const row = await findVersion(env, id, currentVersion);
-  const files = await readTree(env, id, row.tree);
-  const paths = [...files.keys()].toSorted();
+  const paths = Object.keys(
+    await versionFiles(env, id, currentVersion)
+  ).toSorted();
   return {
     version: currentVersion,
     screens: namesIn(paths, (path) => screenPath.exec(path)?.groups?.name),
     workflows: namesIn(paths, workflowIdOf),
-    exports: row.exports,
   };
 };
 
@@ -513,7 +512,7 @@ export const appExports = async (
   env: Env,
   by: Person,
   app: unknown
-): Promise<{ version: number | null; exports: AppExports }> => {
+): Promise<CurrentExports> => {
   const { id, currentVersion } = await appFor(env, by, app, "user");
   if (currentVersion === null) {
     return { version: null, exports: {} };

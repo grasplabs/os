@@ -654,7 +654,8 @@ export interface DroppedApp {
  * (`droppedApps`): one they have no role in, as `openTo` (the Apps of
  * those it names they may open; apps.ts, passed in as for
  * `requestPermission`) says, so a copy never names an App its creator
- * can't see.
+ * can't see; and, while calls between Apps are off (`app_calls`), any
+ * App's exports, which nobody could ask for then either.
  */
 export const blueprintRequests = async (
   env: Env,
@@ -710,8 +711,10 @@ export const blueprintRequests = async (
     ),
   ];
   const open = otherApps.length === 0 ? new Set() : await openTo(otherApps);
+  const callsOn = featureEnabled(env, "app_calls");
   const isHidden = (row: Row): boolean =>
-    namesOtherApp(row) && !open.has(row.objectId);
+    (row.objectType === "app" && !callsOn) ||
+    (namesOtherApp(row) && !open.has(row.objectId));
   const requestedAt = new Date();
   const rows = found
     .filter((row) => !isOthers(row) && !isHidden(row))

@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import { isAppMethodName } from "./apps.ts";
+import { isExportName } from "./apps.ts";
 import { defineErrorFamily } from "./errors.ts";
 import {
   agentIdSchema,
@@ -119,7 +119,7 @@ const isActionOf = (type: PermissionObjectType, action: string): boolean => {
   // Another App's exports: all those it marks `read`, all those it marks
   // `write`, or one by its name, whichever it is marked.
   if (type === "app") {
-    return action === "read" || action === "write" || isAppMethodName(action);
+    return action === "read" || action === "write" || isExportName(action);
   }
   const actions: readonly string[] = platformActions[type];
   return actions.includes(action);
