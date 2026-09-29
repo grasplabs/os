@@ -44,6 +44,20 @@ test("the side panel shows an App being built, and a builder makes its version c
     const chat = await api.chats.create(`Build ${tag}`);
 
     const page = await pageOf(browser, builder);
+    // The server code's first read goes to an API this stack has switched
+    // off (improvement signals), which core refuses: as a read that fails.
+    let failServerCode = true;
+    await page.routeWebSocket("**/rpc", (socket) => {
+      const toCore = socket.connectToServer();
+      socket.onMessage((message) => {
+        const text = String(message);
+        toCore.send(
+          failServerCode
+            ? text.replaceAll('["apps","files","read"]', '["signals","list"]')
+            : text
+        );
+      });
+    });
     await page.goto(`/?chat=${chat.id}`);
     await page.getByRole("button", { name: "Side panel" }).click();
     const built = page
@@ -66,17 +80,31 @@ test("the side panel shows an App being built, and a builder makes its version c
     await expect(built.getByRole("region", { name: "Tests" })).toContainText(
       "No workflows to test."
     );
-    // All of its server code is flagged, each file shown as it would run.
+    // All of its server code is flagged. Until it loads, nothing is made
+    // current; once its read failed, it can be read again.
     const serverCode = built.getByRole("region", { name: "Server code" });
     await expect(serverCode).toContainText(
       "Added: it acts for whoever uses the App"
     );
-    await serverCode.getByText("app/lib/format.ts").click();
-    await expect(serverCode).toContainText("export const format");
+    const makeCurrent = built.getByRole("button", {
+      name: `Make version ${version} current`,
+    });
+    const again = serverCode.getByRole("button", {
+      name: "Load the server code again",
+    });
+    await expect(again).toBeVisible();
+    await expect(makeCurrent).toBeDisabled();
+    failServerCode = false;
+    await again.click();
+    await serverCode.getByText("app/lib/format.ts, as it would run").click();
+    await expect(
+      serverCode
+        .getByRole("figure")
+        .filter({ hasText: "Would run after approval" })
+    ).toContainText("export const format");
+    await expect(makeCurrent).toBeEnabled();
 
-    await built
-      .getByRole("button", { name: `Make version ${version} current` })
-      .click();
+    await makeCurrent.click();
     await expect(built).toHaveCount(0);
     await expect
       .poll(async () => {

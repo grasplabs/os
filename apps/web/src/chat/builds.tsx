@@ -20,6 +20,14 @@ import { ErrorText } from "../error-text.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
+import {
+  pendingToShow,
+  readyToMakeCurrent,
+  serverFileLabels,
+  serverFileOf,
+  versionKey,
+} from "./builds-state.ts";
+import type { ServerFile } from "./builds-state.ts";
 
 // In the side panel, while the chat's agent builds Apps (`app_builder`):
 // the Apps it is still changing in the chat's own drafts, and the Apps the
@@ -99,13 +107,6 @@ const proposerText = ({ proposedBy }: VersionReview): string => {
     : `Proposed by the agent in chat "${proposedBy.chatTitle}".`;
 };
 
-/** One changed file of the server code: before, and as it would run. */
-interface ServerFile {
-  path: string;
-  before?: string;
-  after?: string;
-}
-
 /**
  * Each changed file of a version's server code (`app/**.ts`), before and
  * after: against the current version, or as a first version has it.
@@ -130,81 +131,77 @@ const serverCodeOf = async (
     return [...paths].map((path) => ({ path, after: files[path] }));
   }
   const diff = await session.apps.versions.diff(app, current, version);
-  return diff
-    .filter(({ path }) => paths.has(path))
-    .map((file) => ({
-      path: file.path,
-      ...(file.change === "added" ? {} : { before: file.before }),
-      ...(file.change === "deleted" ? {} : { after: file.after }),
-    }));
+  return diff.filter(({ path }) => paths.has(path)).map(serverFileOf);
 };
 
 /**
  * The server code a version runs, as it changes: it acts for whoever uses
- * the App, with everything the App holds, so it is shown in full.
+ * the App, with everything the App holds, so it is shown in full, what
+ * runs now and what would after approval, each labelled.
  */
 const ServerCode = ({
-  app,
-  review,
+  code,
+  onRetry,
 }: {
-  app: string;
-  review: VersionReview;
+  code: Loaded<ServerFile[]> | undefined;
+  onRetry: () => void;
 }) => {
-  const [code, setCode] = useState<Loaded<ServerFile[]>>();
-  const { current, serverFiles } = review;
-  const { version } = review.version;
-  useEffect(() => {
-    let open = true;
-    const read = async (): Promise<void> => {
-      const found = await loadFromCore(
-        async (session) =>
-          await serverCodeOf(session, { app, current, version, serverFiles })
-      );
-      if (open) {
-        setCode(found);
-      }
-    };
-    void read();
-    return () => {
-      open = false;
-    };
-  }, [app, current, version, serverFiles]);
   if (code === undefined) {
-    return null;
+    return (
+      <output className="text-muted-foreground">
+        Loading the server code…
+      </output>
+    );
   }
   if (code.state !== "ready") {
-    return <NotLoaded page={code} />;
+    return (
+      <div className="flex items-center gap-2">
+        <NotLoaded page={code} />
+        <Button onClick={onRetry} size="sm" variant="outline">
+          Load the server code again
+        </Button>
+      </div>
+    );
   }
   return (
     <>
-      {code.data.map(({ path, before, after }) => (
-        <details key={path}>
-          <summary>
-            <code className="font-mono">{path}</code>, as it would run
-          </summary>
-          {before === undefined ? null : (
-            <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
-              <code className="font-mono">{before}</code>
-            </pre>
-          )}
-          {after === undefined ? null : (
-            <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
-              <code className="font-mono">{after}</code>
-            </pre>
-          )}
-        </details>
-      ))}
+      {code.data.map((file) => {
+        const labels = serverFileLabels(file);
+        return (
+          <details key={file.path}>
+            <summary>{labels.summary}</summary>
+            {file.before === undefined ? null : (
+              <figure className="flex flex-col gap-1">
+                <figcaption className="text-xs">{labels.before}</figcaption>
+                <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
+                  <code className="font-mono">{file.before}</code>
+                </pre>
+              </figure>
+            )}
+            {file.after === undefined ? null : (
+              <figure className="flex flex-col gap-1">
+                <figcaption className="text-xs">{labels.after}</figcaption>
+                <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
+                  <code className="font-mono">{file.after}</code>
+                </pre>
+              </figure>
+            )}
+          </details>
+        );
+      })}
     </>
   );
 };
 
 /** What a version changes, as core worked it out. */
 const ReviewDetails = ({
-  app,
   review,
+  serverCode,
+  onRetryServerCode,
 }: {
-  app: string;
   review: VersionReview;
+  serverCode: Loaded<ServerFile[]> | undefined;
+  onRetryServerCode: () => void;
 }) => (
   <div className="flex flex-col gap-3 text-sm">
     <p>{proposerText(review)}</p>
@@ -240,7 +237,7 @@ const ReviewDetails = ({
           {changeWords[review.server]}: it acts for whoever uses the App, with
           everything the App holds
         </Badge>
-        <ServerCode app={app} review={review} />
+        <ServerCode code={serverCode} onRetry={onRetryServerCode} />
       </section>
     )}
     {review.workflows.length === 0 ? null : (
@@ -353,11 +350,15 @@ const PendingVersion = ({
 }: {
   app: App;
   version: number;
-  onDone: () => void;
+  onDone: (made: string) => void;
 }) => {
   const [review, setReview] = useState<
     Loaded<VersionReview> | { state: "hidden" }
   >();
+  const [serverCode, setServerCode] = useState<Loaded<ServerFile[]>>();
+  // Bumped to read what failed again.
+  const [reviewReads, setReviewReads] = useState(0);
+  const [codeReads, setCodeReads] = useState(0);
   const { busy, failure, run } = useCoreAction();
   useEffect(() => {
     let current = true;
@@ -371,18 +372,54 @@ const PendingVersion = ({
     return () => {
       current = false;
     };
-  }, [app.id, version]);
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- `reviewReads` says when to read again
+  }, [app.id, version, reviewReads]);
+  const loaded = review?.state === "ready" ? review.data : undefined;
+  useEffect(() => {
+    let current = true;
+    const read = async (): Promise<void> => {
+      if (loaded === undefined || loaded.server === null) {
+        return;
+      }
+      const found = await loadFromCore(
+        async (session) =>
+          await serverCodeOf(session, {
+            app: app.id,
+            current: loaded.current,
+            version,
+            serverFiles: loaded.serverFiles,
+          })
+      );
+      if (current) {
+        setServerCode(found);
+      }
+    };
+    void read();
+    return () => {
+      current = false;
+    };
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- `codeReads` says when to read again
+  }, [app.id, version, loaded, codeReads]);
   const makeCurrent = async (): Promise<void> => {
     const made = await run(
       async (session) => await session.apps.versions.setCurrent(app.id, version)
     );
     if (made !== undefined) {
-      onDone();
+      onDone(versionKey(app.id, version));
     }
   };
-  if (review === undefined || review.state === "hidden") {
+  if (review === undefined) {
     return null;
   }
+  if (review.state === "hidden") {
+    return null;
+  }
+  // Only once all of what the reviewer reads has loaded.
+  const ready = readyToMakeCurrent(
+    review,
+    loaded !== undefined && loaded.server !== null,
+    serverCode
+  );
   return (
     <Card size="sm">
       <CardHeader>
@@ -391,17 +428,34 @@ const PendingVersion = ({
         </CardTitle>
       </CardHeader>
       <CardContent>
-        {review.state === "ready" ? (
-          <ReviewDetails app={app.id} review={review.data} />
+        {loaded === undefined ? (
+          <div className="flex items-center gap-2">
+            <NotLoaded page={review} />
+            <Button
+              onClick={() => {
+                setReviewReads(reviewReads + 1);
+              }}
+              size="sm"
+              variant="outline"
+            >
+              Load the review again
+            </Button>
+          </div>
         ) : (
-          <NotLoaded page={review} />
+          <ReviewDetails
+            onRetryServerCode={() => {
+              setCodeReads(codeReads + 1);
+            }}
+            review={loaded}
+            serverCode={serverCode}
+          />
         )}
         <ErrorText>{failure}</ErrorText>
       </CardContent>
-      {review.state === "ready" ? (
+      {loaded === undefined ? null : (
         <CardFooter>
           <Button
-            disabled={busy}
+            disabled={busy || !ready}
             onClick={() => {
               void makeCurrent();
             }}
@@ -409,14 +463,15 @@ const PendingVersion = ({
             Make version {version} current
           </Button>
         </CardFooter>
-      ) : null}
+      )}
     </Card>
   );
 };
 
 /**
  * The Apps being built: the chat's drafts, and versions up for review.
- * Read again whenever the agent stops working (`running` turns false).
+ * Read again whenever the agent stops working (`running` turns false),
+ * and after a version is made current here, whatever the agent does.
  */
 export const ChatBuilds = ({
   chatId,
@@ -427,12 +482,20 @@ export const ChatBuilds = ({
 }) => {
   const [builds, setBuilds] = useState<Loaded<Builds> | { state: "off" }>();
   const [reads, setReads] = useState(0);
+  // Versions made current here: gone from the section at once.
+  const [madeCurrent, setMadeCurrent] = useState<ReadonlySet<string>>(
+    new Set()
+  );
   // Only the latest read shows, whichever ends last.
   const latest = useRef(0);
+  // The reads asked for (after making a version current) done so far:
+  // those go whether the agent works or not.
+  const handledReads = useRef(0);
   useEffect(() => {
-    if (running) {
+    if (running && reads === handledReads.current) {
       return;
     }
+    handledReads.current = reads;
     latest.current += 1;
     const read = latest.current;
     const load = async (): Promise<void> => {
@@ -442,7 +505,6 @@ export const ChatBuilds = ({
       }
     };
     void load();
-    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- `reads` says when to read again
   }, [chatId, running, reads]);
   if (builds === undefined || builds.state === "off") {
     return null;
@@ -453,9 +515,7 @@ export const ChatBuilds = ({
   const names = new Map<string, string>(
     builds.data.apps.map((app) => [app.id, app.name])
   );
-  const pending = builds.data.apps.filter(
-    ({ pendingVersion }) => pendingVersion !== null
-  );
+  const pending = pendingToShow(builds.data.apps, madeCurrent);
   if (builds.data.drafts.length === 0 && pending.length === 0) {
     return null;
   }
@@ -469,18 +529,17 @@ export const ChatBuilds = ({
           not proposed yet
         </p>
       ))}
-      {pending.map((app) =>
-        app.pendingVersion === null ? null : (
-          <PendingVersion
-            app={app}
-            key={`${app.id}:${app.pendingVersion}`}
-            onDone={() => {
-              setReads(reads + 1);
-            }}
-            version={app.pendingVersion}
-          />
-        )
-      )}
+      {pending.map((app) => (
+        <PendingVersion
+          app={app}
+          key={versionKey(app.id, app.pendingVersion)}
+          onDone={(made) => {
+            setMadeCurrent(new Set([...madeCurrent, made]));
+            setReads(reads + 1);
+          }}
+          version={app.pendingVersion}
+        />
+      ))}
     </section>
   );
 };
