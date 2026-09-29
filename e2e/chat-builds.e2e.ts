@@ -35,6 +35,15 @@ test("the side panel shows an App being built, and a builder makes its version c
       // Server code the server build reads, though not app/server.ts.
       "app/lib/format.ts":
         "export const format = (total: number) => String(total);\n",
+      // A method other Apps may call, which changes the App's data.
+      "app/exports.json": JSON.stringify({
+        book: {
+          access: "write",
+          description: "Book an invoice",
+          input: { type: "object" },
+          output: { type: "object" },
+        },
+      }),
     });
     const { version } = await api.apps.files.commit(
       app.id,
@@ -80,6 +89,12 @@ test("the side panel shows an App being built, and a builder makes its version c
     await expect(built.getByRole("region", { name: "Tests" })).toContainText(
       "No workflows to test."
     );
+    // What other Apps may now call, flagged when it changes the App's data.
+    const exported = built.getByRole("region", { name: "Exports" });
+    await expect(exported).toContainText(
+      "Other Apps may now call book, which changes the App's data"
+    );
+    await expect(exported).toContainText("Changes the App's data");
     // All of its server code is flagged. Until it loads, nothing is made
     // current; once its read failed, it can be read again.
     const serverCode = built.getByRole("region", { name: "Server code" });

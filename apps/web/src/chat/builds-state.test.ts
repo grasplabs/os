@@ -3,11 +3,13 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  exportChangeText,
   pendingToShow,
   readyToMakeCurrent,
   serverFileLabels,
   serverFileOf,
   stillMadeCurrent,
+  triggerChangeText,
   versionKey,
 } from "./builds-state.ts";
 
@@ -115,5 +117,99 @@ describe("the Being built section", () => {
         after: "Would run after approval",
       },
     });
+  });
+
+  it("says what makes a workflow run on its own now, and how many times", () => {
+    expect([
+      triggerChangeText({
+        trigger: { type: "schedule", param: "every" },
+        change: "added",
+        count: 1,
+      }),
+      triggerChangeText({
+        trigger: {
+          type: "schedule",
+          param: "every",
+          timeZone: "Europe/Amsterdam",
+        },
+        change: "added",
+        count: 2,
+      }),
+      triggerChangeText({
+        trigger: {
+          type: "event",
+          event: "mail.received",
+          filter: { from: "a" },
+        },
+        change: "removed",
+        count: 1,
+      }),
+      triggerChangeText({
+        trigger: { type: "email", address: "invoices" },
+        change: "added",
+        count: 1,
+      }),
+      triggerChangeText({
+        trigger: { type: "manual" },
+        change: "removed",
+        count: 3,
+      }),
+    ]).toStrictEqual([
+      "Now also runs on a schedule (its parameter every)",
+      "Now also runs on a schedule (its parameter every, Europe/Amsterdam) (2 more times)",
+      "No longer runs on the event mail.received, filtered",
+      "Now also runs on mail to invoices@",
+      "No longer runs when someone starts it (3 fewer times)",
+    ]);
+  });
+
+  it("says what other Apps may call, and highlights what now changes the App's data", () => {
+    expect([
+      exportChangeText({
+        name: "book",
+        change: "added",
+        access: "write",
+        accessBefore: null,
+      }),
+      exportChangeText({
+        name: "totals",
+        change: "added",
+        access: "read",
+        accessBefore: null,
+      }),
+      exportChangeText({
+        name: "purge",
+        change: "removed",
+        access: null,
+        accessBefore: "write",
+      }),
+      exportChangeText({
+        name: "totals",
+        change: "modified",
+        access: "write",
+        accessBefore: "read",
+      }),
+      exportChangeText({
+        name: "totals",
+        change: "modified",
+        access: "read",
+        accessBefore: "read",
+      }),
+    ]).toStrictEqual([
+      {
+        text: "Other Apps may now call book, which changes the App's data",
+        widens: true,
+      },
+      {
+        text: "Other Apps may now call totals, which reads the App's data",
+        widens: false,
+      },
+      { text: "Other Apps may no longer call purge", widens: false },
+      {
+        text: "totals now changes the App's data (read → write)",
+        widens: true,
+      },
+      { text: "totals changed: it reads the App's data", widens: false },
+    ]);
   });
 });

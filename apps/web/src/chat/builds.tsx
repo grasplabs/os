@@ -21,8 +21,10 @@ import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import {
+  exportChangeText,
   pendingToShow,
   readyToMakeCurrent,
+  triggerChangeText,
   stillMadeCurrent,
   serverFileLabels,
   serverFileOf,
@@ -247,10 +249,28 @@ const ReviewDetails = ({
         <ul className="flex flex-col gap-2">
           {review.workflows.map((workflow) => (
             <li className="flex flex-col gap-1" key={workflow.id}>
-              <span>
+              <span className="flex items-center gap-2">
                 {changeWords[workflow.change]} workflow{" "}
                 <code className="font-mono">{workflow.id}</code>
+                {workflow.sideEffect ? (
+                  <Badge variant="destructive">
+                    May change something outside Grasp
+                  </Badge>
+                ) : null}
               </span>
+              {workflow.triggers === null ? (
+                <span className="text-muted-foreground">
+                  What makes it run on its own can&apos;t be read from its code.
+                </span>
+              ) : (
+                workflow.triggers.map((change) => (
+                  <span
+                    key={`${change.change}:${JSON.stringify(change.trigger)}`}
+                  >
+                    {triggerChangeText(change)}
+                  </span>
+                ))
+              )}
               {workflow.shared.length === 0 ? null : (
                 <span className="text-muted-foreground">
                   Code it may use changed: {workflow.shared.join(", ")}
@@ -258,7 +278,8 @@ const ReviewDetails = ({
               )}
               {workflow.steps === null ? (
                 <span className="text-muted-foreground">
-                  Its steps can&apos;t be read from its code.
+                  Its steps can&apos;t be read from its code, so it may do
+                  anything its code does.
                 </span>
               ) : (
                 workflow.steps.map((step) => (
@@ -280,13 +301,39 @@ const ReviewDetails = ({
                   </span>
                 ))
               )}
-              {workflow.params?.map((param) => (
-                <span key={param.name}>
-                  {changeWords[param.change]} parameter {param.name}
+              {workflow.params === null ? (
+                <span className="text-muted-foreground">
+                  Its parameters can&apos;t be read from its code.
                 </span>
-              ))}
+              ) : (
+                workflow.params.map((param) => (
+                  <span key={param.name}>
+                    {changeWords[param.change]} parameter {param.name}
+                  </span>
+                ))
+              )}
             </li>
           ))}
+        </ul>
+      </section>
+    )}
+    {review.exports.length === 0 ? null : (
+      <section aria-label="Exports" className="flex flex-col gap-1">
+        <h4 className="font-medium">What other Apps may call</h4>
+        <ul className="flex flex-col gap-1">
+          {review.exports.map((change) => {
+            const { text, widens } = exportChangeText(change);
+            return (
+              <li className="flex items-center gap-2" key={change.name}>
+                {text}
+                {widens ? (
+                  <Badge variant="destructive">
+                    Changes the App&apos;s data
+                  </Badge>
+                ) : null}
+              </li>
+            );
+          })}
         </ul>
       </section>
     )}
