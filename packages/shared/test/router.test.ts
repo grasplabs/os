@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { deriveRouterSecret, routerHostKey } from "../src/router.ts";
+import {
+  deriveRouterSecret,
+  newClientIdSchema,
+  routerHostKey,
+} from "../src/router.ts";
 
 describe("router secret", () => {
   it("is HMAC-SHA256 of router:<clientId>:<generation> under the router key, in hex", async () => {
@@ -25,6 +29,22 @@ describe("router secret", () => {
         ).rejects.toThrow(TypeError);
       })
     );
+  });
+
+  it("takes a new client id that fits its hostname and workers.dev subdomain, up to 50 characters, and no reserved one", () => {
+    expect(
+      [
+        "acme",
+        "a".repeat(50),
+        "a".repeat(51),
+        "Acme",
+        "-acme",
+        "www",
+        "api",
+      ].map((id) => newClientIdSchema.safeParse(id).success)
+    ).toStrictEqual([true, true, false, false, false, false, false]);
+    // The longest fallback subdomain still fits a DNS label.
+    expect(`grasp-${"a".repeat(50)}-abcdef`).toHaveLength(63);
   });
 
   it("keys hostnames in lowercase, without a trailing dot", () => {

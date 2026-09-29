@@ -1,7 +1,7 @@
+import { deadline, whenAborted } from "@grasp-os/shared/deadline";
 import type { WorkerEntrypoint } from "cloudflare:workers";
 import { z } from "zod";
 
-import { deadline, whenAborted } from "./deadline.ts";
 import { sandbox } from "./sandbox.ts";
 
 // Code Mode: the agent acts by writing code against typed APIs, and the

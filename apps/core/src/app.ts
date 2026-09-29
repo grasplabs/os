@@ -4,6 +4,7 @@ import {
   reservedAppMethods,
 } from "@grasp-os/shared/apps";
 import type { AppCaller } from "@grasp-os/shared/apps";
+import { deadline, whenAborted } from "@grasp-os/shared/deadline";
 import {
   isExpectedError,
   messageOf,
@@ -19,7 +20,6 @@ import { DurableObject } from "cloudflare:workers";
 import { appBindings } from "./app-bindings.ts";
 import { addToErrorLog, readErrorLog } from "./app-error-log.ts";
 import { findApp, versionFiles } from "./apps.ts";
-import { deadline, whenAborted } from "./deadline.ts";
 import { appHost } from "./durable-objects.ts";
 import { requireFeature } from "./features.ts";
 import { sandbox } from "./sandbox.ts";

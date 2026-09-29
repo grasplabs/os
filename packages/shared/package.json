@@ -15,6 +15,7 @@
     "./client-secrets": "./src/client-secrets.ts",
     "./config": "./src/config.ts",
     "./connect": "./src/connect.ts",
+    "./deadline": "./src/deadline.ts",
     "./decisions": "./src/decisions.ts",
     "./deployment-config": "./src/deployment-config.ts",
     "./encoding": "./src/encoding.ts",

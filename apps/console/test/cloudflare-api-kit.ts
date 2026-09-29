@@ -66,6 +66,10 @@ export interface AccountState {
    * the account's scripts was live on at that moment.
    */
   scriptUploads: { script: string; live: Record<string, string | undefined> }[];
+  /** How many more health checks its Workers fail, as a Worker still starting. */
+  unhealthy?: number;
+  /** The version its Workers' health checks name, as an old version still answering would. */
+  answeringVersion?: string;
 }
 
 /** A call the fake got. */

@@ -32,7 +32,13 @@ const route = async (
 ): Promise<Response> => {
   const { pathname } = new URL(request.url);
   if (pathname === "/health") {
-    return Response.json({ ok: true });
+    // The version answering, where there is version metadata: the console's
+    // smoke check compares it with the version it just deployed. Behind the
+    // router-secret check, as every route is.
+    const version = env.CF_VERSION_METADATA?.id;
+    return Response.json(
+      version === undefined ? { ok: true } : { ok: true, version }
+    );
   }
   if (pathname === "/rpc") {
     return await rpcResponse(request, env, requestId);

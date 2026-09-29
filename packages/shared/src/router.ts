@@ -63,6 +63,27 @@ export const routerHostSchema = z.object({
 });
 export type RouterHost = z.infer<typeof routerHostSchema>;
 
+/** Hostnames no client gets: the platform's own, under `<domain>`. */
+export const reservedClientIds: ReadonlySet<string> = new Set([
+  "console",
+  "internal",
+  "staging",
+  "www",
+  "api",
+]);
+
+/**
+ * A new client's id, which is its hostname's label (`<id>.<domain>`): a
+ * lowercase DNS label of at most 50 characters, so the console's
+ * workers.dev subdomain for it, `grasp-<id>-<6 hex>` at its longest,
+ * still fits a 63-character label, and never a reserved one. So one
+ * hostname is one client's.
+ */
+export const newClientIdSchema = z
+  .string()
+  .regex(/^[a-z0-9](?:[a-z0-9-]{0,48}[a-z0-9])?$/u)
+  .refine((id) => !reservedClientIds.has(id), "a reserved name");
+
 /** A hostname as the map keys it: lowercase, without a trailing dot. */
 export const routerHostKey = (hostname: string): string =>
   hostname.toLowerCase().replace(/\.$/u, "");

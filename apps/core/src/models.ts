@@ -32,6 +32,8 @@ import {
 } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
 import { jsonVar } from "@grasp-os/shared/config";
+import { deadline } from "@grasp-os/shared/deadline";
+import type { Deadline, Stopped } from "@grasp-os/shared/deadline";
 import {
   modelGatewayConfigSchema as gatewayConfigSchema,
   modelRulesConfigSchema as rulesConfigSchema,
@@ -49,8 +51,6 @@ import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { keepAuditEvent } from "./audit-outbox.ts";
-import { deadline } from "./deadline.ts";
-import type { Deadline, Stopped } from "./deadline.ts";
 import { featureEnabled } from "./features.ts";
 import {
   budgetMonth,
