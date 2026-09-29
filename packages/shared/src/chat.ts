@@ -84,8 +84,9 @@ export interface ChatPartial {
 
 /**
  * What a chat's answers may hold: every source the chat has read from
- * (collections and connections, by ID), and whether it read restricted
- * data, which puts it in restricted mode for good.
+ * (collections and connections, by ID, and the failed run it was started
+ * to fix, with its App's sources), and whether it read restricted data,
+ * which puts it in restricted mode for good.
  */
 export interface ChatProvenance {
   sources: string[];
@@ -197,6 +198,16 @@ export interface ChatsApi {
    * watching.
    */
   send: (chatId: string, question: ChatQuestion) => Promise<void>;
+  /**
+   * Asks the agent, in a new chat, to fix the workflow of failed run
+   * `run`, with `model`: the run's failure report is attached to the chat
+   * as data (the agent reads it with `env.chat.attachments()`), never put
+   * into its instructions, and the question names only the run, its App
+   * and its workflow. For the person the run acted for, and admins: anyone
+   * else is refused as if there were no such run. Resolves with the chat
+   * once the agent has taken the question.
+   */
+  fixRun: (run: string, model: string) => Promise<ChatSummary>;
   /**
    * The Apps the chat's agent is changing in the chat's drafts, not yet
    * proposed, most recently written first.

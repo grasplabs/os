@@ -1,0 +1,242 @@
+import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
+import { env } from "cloudflare:workers";
+import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
+
+import { startRun } from "../src/workflows/runs.ts";
+import { allEvents } from "./audit-events.ts";
+import { mockIdp } from "./idp.ts";
+import { fullScan, planOf, recordedQueries } from "./query-plans.ts";
+import { finished } from "./runs.ts";
+import { refusal, signedInApi } from "./sign-in.ts";
+import { appWith, workflowFiles } from "./workflow-apps.ts";
+
+// A failed run tells the person it acted for, in the product. The ways it
+// can fail come first: someone else is told of it, or nobody is; a
+// workflow failing every minute buries the person in notifications; a
+// notification outlives the person's access to its App; it goes
+// unrecorded; the list reads the whole table.
+
+const idp = mockIdp();
+
+/** Signing people in and running workflows can be slow on CI. */
+const slow = { timeout: 60_000 };
+
+type Person = Awaited<ReturnType<typeof signedInApi>>;
+
+/** A workflow that fails in its one step, with the workflow's own words. */
+const failing = (id: string) =>
+  workflowFiles(
+    id,
+    `  await step.do("check", { description: "Check" }, async () => {
+    throw new Error("Customer c-1 is blocked");
+  });`,
+    { check: null }
+  );
+
+/** A run of `workflow` that `person` started, once it has ended. */
+const failedRun = async (person: Person, app: string, workflow: string) => {
+  const run = await person.api.workflows.start(app, workflow);
+  await finished(run.id);
+  return run.id;
+};
+
+/** The person's notifications, as the page lists them. */
+const listed = async (person: Person) => {
+  const { notifications, unread } = await person.api.notifications.list();
+  return {
+    unread,
+    notifications: notifications.map(({ workflow, run, failures, read }) => ({
+      workflow,
+      run,
+      failures,
+      read,
+    })),
+  };
+};
+
+describe("failed runs", slow, () => {
+  it("notify the person each acted for, once per workflow until they read it", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const user = await signedInApi(idp, "user");
+    const admin = await signedInApi(idp, "admin");
+    const app = await appWith(owner, failing("careless"));
+    await owner.api.apps.members.add(app, {
+      type: "person",
+      id: user.userId,
+      role: "user",
+    });
+
+    const first = await failedRun(owner, app, "careless");
+    const second = await failedRun(owner, app, "careless");
+    const counted = await listed(owner);
+    await owner.api.notifications.markRead();
+    const third = await failedRun(owner, app, "careless");
+    // A trigger's run acts for the App's owner; the user's for the user.
+    const byTrigger = await startRun(env, {
+      app: appIdSchema.parse(app),
+      workflow: workflowIdSchema.parse("careless"),
+      input: undefined,
+      startedBy: null,
+      actor: { type: "system" },
+    });
+    await finished(byTrigger.id);
+    const byUser = await failedRun(user, app, "careless");
+
+    const runs = new Set<string>([first, second, third, byTrigger.id, byUser]);
+    const events = await allEvents();
+    const notified = events
+      .filter(({ action }) => action === "workflow.run.notified")
+      .filter(({ target }) => runs.has(target?.id ?? ""))
+      .map(({ target, detail }) => [target?.id, detail.person]);
+    const adminListed = await listed(admin);
+    expect({
+      counted,
+      owner: await listed(owner),
+      user: await listed(user),
+      // Admins see every failure on the Workflows page, and aren't told.
+      admin: adminListed.notifications.filter(({ run }) => runs.has(run)),
+      notified,
+    }).toStrictEqual({
+      counted: {
+        unread: 1,
+        notifications: [
+          { workflow: "careless", run: second, failures: 2, read: false },
+        ],
+      },
+      owner: {
+        unread: 1,
+        notifications: [
+          {
+            workflow: "careless",
+            run: byTrigger.id,
+            failures: 2,
+            read: false,
+          },
+          { workflow: "careless", run: second, failures: 2, read: true },
+        ],
+      },
+      user: {
+        unread: 1,
+        notifications: [
+          { workflow: "careless", run: byUser, failures: 1, read: false },
+        ],
+      },
+      admin: [],
+      notified: [
+        [first, owner.userId],
+        [second, owner.userId],
+        [third, owner.userId],
+        [byTrigger.id, owner.userId],
+        [byUser, user.userId],
+      ],
+    });
+  });
+
+  it("notify a run that failed to start, as any failed run", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const app = await appWith(owner, failing("unstartable"));
+    // An ID core's record takes but Workflows refuses (over 100
+    // characters), so creating the run fails after its row is written.
+    const taken: ReturnType<typeof crypto.randomUUID> =
+      `run-${"x".repeat(100)}-${crypto.randomUUID()}`;
+    const uuid = vi.spyOn(crypto, "randomUUID").mockReturnValueOnce(taken);
+    try {
+      await refusal(
+        startRun(env, {
+          app: appIdSchema.parse(app),
+          workflow: workflowIdSchema.parse("unstartable"),
+          input: undefined,
+          startedBy: owner.userId,
+          actor: { type: "system" },
+        })
+      );
+    } finally {
+      uuid.mockRestore();
+    }
+
+    await expect(listed(owner)).resolves.toStrictEqual({
+      unread: 1,
+      notifications: [
+        { workflow: "unstartable", run: taken, failures: 1, read: false },
+      ],
+    });
+  });
+
+  it("stop telling a person of an App they can no longer open", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const user = await signedInApi(idp, "user");
+    const app = await appWith(owner, failing("careless"));
+    const member = { type: "person", id: user.userId } as const;
+    await owner.api.apps.members.add(app, { ...member, role: "user" });
+    await failedRun(user, app, "careless");
+    const before = await listed(user);
+    await owner.api.apps.members.remove(app, member);
+
+    expect({ before: before.unread, after: await listed(user) }).toStrictEqual({
+      before: 1,
+      after: { unread: 0, notifications: [] },
+    });
+  });
+
+  it("tell nobody while switched off", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const app = await appWith(owner, failing("careless"));
+    const { FEATURES } = env;
+    env.FEATURES = {
+      ...z.record(z.string(), z.boolean()).parse(FEATURES),
+      run_notifications: false,
+    };
+    let run: string;
+    try {
+      run = await failedRun(owner, app, "careless");
+    } finally {
+      env.FEATURES = FEATURES;
+    }
+    const events = await allEvents();
+
+    expect({
+      listed: await listed(owner),
+      failed: events.some(
+        ({ action, target }) =>
+          action === "workflow.run.failed" && target?.id === run
+      ),
+      notified: events.some(
+        ({ action, target }) =>
+          action === "workflow.run.notified" && target?.id === run
+      ),
+    }).toStrictEqual({
+      listed: { unread: 0, notifications: [] },
+      failed: true,
+      notified: false,
+    });
+  });
+
+  it("are listed and read by the person's own index, with no sort of their own", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const queries = await recordedQueries(async () => {
+      await owner.api.notifications.list();
+      await owner.api.notifications.markRead();
+    });
+    const plans = await Promise.all(
+      queries
+        .filter(({ query }) => query.includes('"notifications"'))
+        .map(async (recorded) => await planOf(recorded))
+    );
+
+    expect({
+      lists: plans.length,
+      byIndex: plans.map((plan) =>
+        plan.some((step) => /SEARCH notifications USING/u.test(step))
+      ),
+      scans: plans.flat().filter((step) => fullScan.test(step)),
+      sorts: plans.flat().filter((step) => step.includes("TEMP B-TREE")),
+    }).toStrictEqual({
+      // The list, its unread count, marking read and dropping old ones.
+      lists: 4,
+      byIndex: [true, true, true, true],
+      scans: [],
+      sorts: [],
+    });
+  });
+});

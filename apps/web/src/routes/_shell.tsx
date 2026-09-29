@@ -14,6 +14,7 @@ import type { ErrorComponentProps } from "@tanstack/react-router";
 
 import { loadCoreStatus, signOut } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
+import { NotificationsLink } from "../notifications/nav-link.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
 
 // The signed-in product: a nav of its sections beside the page. Everyone
@@ -81,6 +82,7 @@ const Shell = () => {
                 </Link>
               </li>
             ))}
+          <NotificationsLink />
         </ul>
         <div className="mt-auto flex flex-col gap-2">
           <p className="text-sm">

@@ -20,6 +20,7 @@ import { requireFeature } from "./features.ts";
 import { gatewaySettings } from "./models.ts";
 import { callbackFor, isStub, recheckedEvery } from "./page-callbacks.ts";
 import type { StillOpen } from "./page-callbacks.ts";
+import { fixQuestion, runToFix } from "./run-fixes.ts";
 import { RunSubscription } from "./run-subscription.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
@@ -31,7 +32,8 @@ import { questionSchema } from "./workspace.ts";
 // object checks every call against the chat's stored person too: nobody
 // else lists, renames, deletes, asks in, stops or follows a chat, and a
 // chat of someone else's is refused as if there were none. Making,
-// renaming and deleting one is audited.
+// renaming and deleting one is audited, and so is starting one to fix a
+// failed run (`fixRun`).
 
 /**
  * The agent every chat's agent is: the organization workspace's, so
@@ -183,6 +185,40 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
         throw agentErrors.create("agent.invalid_question");
       }
       await this.#chatsOf(userId).send(id, userId, parsed.data);
+    });
+  }
+
+  /**
+   * Starts a chat to fix a failed run (run-fixes.ts), and asks its agent
+   * with `model`; only while `workflows` and `run_notifications` are on.
+   * The chat is made, with the report attached, before the question is
+   * asked: a question refused (a model the deployment doesn't allow, say)
+   * leaves it in the person's list, to ask again.
+   */
+  async fixRun(run: string, model: string): Promise<ChatSummary> {
+    return await withPerson(this.#check, async (person) => {
+      requireFeature(this.#env, "workflows");
+      requireFeature(this.#env, "run_notifications");
+      const { userId } = person;
+      const fix = await runToFix(this.#env, person, run);
+      const chats = this.#chatsOf(userId);
+      const chat = await chats.createChat(
+        `Fix ${fix.report.workflow}`,
+        userId,
+        chatAgentId,
+        actorOf(person),
+        fix
+      );
+      await chats.send(chat.id, userId, {
+        text: fixQuestion(fix.report),
+        model,
+      });
+      return {
+        id: chat.id,
+        title: chat.title,
+        createdAt: chat.createdAt.toISOString(),
+        running: true,
+      };
     });
   }
 

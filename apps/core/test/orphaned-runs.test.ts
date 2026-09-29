@@ -212,7 +212,11 @@ describe("runs that never reached the engine", () => {
       outage: "failed",
       young: "starting",
       youngShown: "running",
-      audited: ["workflow.run.failed no_instance workflow.run_failed"],
+      // Its person is told, as of any failed run.
+      audited: [
+        "workflow.run.failed no_instance workflow.run_failed",
+        "workflow.run.notified",
+      ],
     });
   });
 
@@ -312,7 +316,7 @@ describe("runs that never reached the engine", () => {
       row: "failed",
       // The dispatcher refused it before its first step.
       engine: "errored",
-      actions: ["workflow.run.failed"],
+      actions: ["workflow.run.failed", "workflow.run.notified"],
     });
   });
 

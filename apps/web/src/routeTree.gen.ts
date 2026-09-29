@@ -17,6 +17,7 @@ import { Route as ShellActivityRouteImport } from './routes/_shell.activity'
 import { Route as ShellConnectionsRouteImport } from './routes/_shell.connections'
 import { Route as ShellMembersRouteImport } from './routes/_shell.members'
 import { Route as ShellModelsRouteImport } from './routes/_shell.models'
+import { Route as ShellNotificationsRouteImport } from './routes/_shell.notifications'
 import { Route as DecisionsDecisionRouteImport } from './routes/decisions.$decision'
 import { Route as ShellAppsIndexRouteImport } from './routes/_shell.apps.index'
 import { Route as ShellAppsAppRouteImport } from './routes/_shell.apps.$app'
@@ -63,6 +64,11 @@ const ShellMembersRoute = ShellMembersRouteImport.update({
 const ShellModelsRoute = ShellModelsRouteImport.update({
   id: '/models',
   path: '/models',
+  getParentRoute: () => ShellRoute,
+} as any)
+const ShellNotificationsRoute = ShellNotificationsRouteImport.update({
+  id: '/notifications',
+  path: '/notifications',
   getParentRoute: () => ShellRoute,
 } as any)
 const DecisionsDecisionRoute = DecisionsDecisionRouteImport.update({
@@ -116,6 +122,7 @@ export interface FileRoutesByFullPath {
   '/connections': typeof ShellConnectionsRoute
   '/members': typeof ShellMembersRoute
   '/models': typeof ShellModelsRoute
+  '/notifications': typeof ShellNotificationsRoute
   '/decisions/$decision': typeof DecisionsDecisionRoute
   '/apps/$app': typeof ShellAppsAppRoute
   '/knowledge/$collection': typeof ShellKnowledgeCollectionRoute
@@ -132,6 +139,7 @@ export interface FileRoutesByTo {
   '/connections': typeof ShellConnectionsRoute
   '/members': typeof ShellMembersRoute
   '/models': typeof ShellModelsRoute
+  '/notifications': typeof ShellNotificationsRoute
   '/decisions/$decision': typeof DecisionsDecisionRoute
   '/': typeof ShellIndexRoute
   '/apps/$app': typeof ShellAppsAppRoute
@@ -151,6 +159,7 @@ export interface FileRoutesById {
   '/_shell/connections': typeof ShellConnectionsRoute
   '/_shell/members': typeof ShellMembersRoute
   '/_shell/models': typeof ShellModelsRoute
+  '/_shell/notifications': typeof ShellNotificationsRoute
   '/decisions/$decision': typeof DecisionsDecisionRoute
   '/_shell/': typeof ShellIndexRoute
   '/_shell/apps/$app': typeof ShellAppsAppRoute
@@ -171,6 +180,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/members'
     | '/models'
+    | '/notifications'
     | '/decisions/$decision'
     | '/apps/$app'
     | '/knowledge/$collection'
@@ -187,6 +197,7 @@ export interface FileRouteTypes {
     | '/connections'
     | '/members'
     | '/models'
+    | '/notifications'
     | '/decisions/$decision'
     | '/'
     | '/apps/$app'
@@ -205,6 +216,7 @@ export interface FileRouteTypes {
     | '/_shell/connections'
     | '/_shell/members'
     | '/_shell/models'
+    | '/_shell/notifications'
     | '/decisions/$decision'
     | '/_shell/'
     | '/_shell/apps/$app'
@@ -282,6 +294,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ShellModelsRouteImport
       parentRoute: typeof ShellRoute
     }
+    '/_shell/notifications': {
+      id: '/_shell/notifications'
+      path: '/notifications'
+      fullPath: '/notifications'
+      preLoaderRoute: typeof ShellNotificationsRouteImport
+      parentRoute: typeof ShellRoute
+    }
     '/decisions/$decision': {
       id: '/decisions/$decision'
       path: '/decisions/$decision'
@@ -346,6 +365,7 @@ interface ShellRouteChildren {
   ShellConnectionsRoute: typeof ShellConnectionsRoute
   ShellMembersRoute: typeof ShellMembersRoute
   ShellModelsRoute: typeof ShellModelsRoute
+  ShellNotificationsRoute: typeof ShellNotificationsRoute
   ShellIndexRoute: typeof ShellIndexRoute
   ShellAppsAppRoute: typeof ShellAppsAppRoute
   ShellKnowledgeCollectionRoute: typeof ShellKnowledgeCollectionRoute
@@ -360,6 +380,7 @@ const ShellRouteChildren: ShellRouteChildren = {
   ShellConnectionsRoute: ShellConnectionsRoute,
   ShellMembersRoute: ShellMembersRoute,
   ShellModelsRoute: ShellModelsRoute,
+  ShellNotificationsRoute: ShellNotificationsRoute,
   ShellIndexRoute: ShellIndexRoute,
   ShellAppsAppRoute: ShellAppsAppRoute,
   ShellKnowledgeCollectionRoute: ShellKnowledgeCollectionRoute,

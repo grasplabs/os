@@ -25,7 +25,8 @@ import { featureErrors } from "@grasp-os/shared/errors";
 // (`apps`), the chat's agent building Apps (`app_builder`), starting
 // runs and every step of one (`workflows`), opening
 // or asking a decision (`decisions`), and screens' calls on their App's
-// runs (`screen_workflows`). `model_rules` stops the model
+// runs (`screen_workflows`), and telling people of failed runs and asking
+// the agent to fix them (`run_notifications`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist,
 // `model_settings` admins reading those rules and the month's spend, and
 // `improvement_signals` the daily signals and reading them, and
@@ -246,7 +247,16 @@ export type Feature =
    * none of that; drafts already written stay with their chats, and
    * versions it proposed stay up for review.
    */
-  | "app_builder";
+  | "app_builder"
+  /**
+   * Telling the person a failed run acted for (notifications.ts), and
+   * their asking the chat's agent, in a new chat, to fix its workflow
+   * (`fixRun` in chats-rpc.ts); needs `workflows` on too, and `agent` and
+   * `chat` to ask. While off, a failed run tells nobody, nobody lists
+   * notifications, and no chat starts from a failed run; chats started
+   * before keep their report attached.
+   */
+  | "run_notifications";
 
 /** Whether `feature` is switched on for this deployment. */
 export const featureEnabled = (

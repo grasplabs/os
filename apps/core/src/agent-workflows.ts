@@ -16,12 +16,15 @@ import { runStatus } from "./workflows/runs.ts";
 // Workflows for a chat's code: `await env.workflows.runs("app-1",
 // "report")`. What the chat's person sees of them themselves
 // (agent-person.ts), of the workflows the agent may read: a permission's
-// object of its own. The agent sees runs' state, never what a run returned
-// or its error's words: those hold what the run read through its App's
-// connections and collections, which the chat has no permission for, and
-// whose restricted mode it doesn't share; of a restricted App's run not
-// even where it failed, beyond a platform error code. Every call is
-// audited as the organization's agent acting for the chat's person.
+// object of its own. The agent sees runs' state here, never what a run
+// returned or its error's words: those hold what the run read through its
+// App's connections and collections, which the chat has no permission
+// for, and whose restricted mode it doesn't share; of a restricted App's
+// run not even where it failed, beyond a platform error code. Every call
+// is audited as the organization's agent acting for the chat's person.
+// Only a chat its person started to fix a failed run gets that run's
+// report, attached with the App's sources and restricted mode
+// (run-fixes.ts).
 
 /** Whether the agent may read workflow `workflow` of App `app`. */
 const readsWorkflow =
