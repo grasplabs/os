@@ -1,8 +1,8 @@
 /**
  * Onboarding a client, as a Cloudflare Workflow: its account (created, or
  * adopted by id), its client record, its AI Gateway (which core's model
- * gateway calls through, src/deploy/core-config.ts), a pause while staff upgrade the
- * account to Workers Paid, then a deploy of the chosen release (its EU
+ * gateway calls through, src/deploy/core-config.ts), a pause while staff
+ * upgrade the account to Workers Paid, then a deploy of the chosen release (its EU
  * resources, migrations, Workers with their secrets, smoke check and
  * hostname in the router's map, src/deploy/deploy.ts), and the client
  * marked active.
@@ -364,8 +364,8 @@ const deployToRun = async (
 
 /**
  * Ensures the client's AI Gateway in account `accountId`, as the deployer
- * (`ensureAiGateway`: made if it's missing, authenticated, logging
- * metadata only), audited. Found by its id first, so a step that runs
+ * (`ensureAiGateway`: made if it's missing, always authenticated, with
+ * no cache or rate limit), audited. Found by its id first, so a step that runs
  * again, or a resumed run, makes no second one; an adopted account's is
  * kept, with authentication switched on.
  */
