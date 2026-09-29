@@ -591,13 +591,41 @@ const recordedAlready = async (
 };
 
 /**
+ * Resumes cancelled rollout `rolloutId`'s run if staff paused it (or asked
+ * to), so it goes on to its next step, where it finds the rollout
+ * cancelled and ends the client it's on by the cancellation rule
+ * (src/rollout/workflow.ts): stopped or skipped, its deploy cancelled and
+ * the client released. Paused, it would never get there, and would hold
+ * the client and leave the rollout open. Whichever of a pause and a
+ * rollback's cancel lands second calls it, so the run can't stay paused.
+ */
+export const goOnToStop = async (
+  env: Env,
+  rolloutId: string,
+  createdAt: Date
+): Promise<void> => {
+  const { instance, status } = await instanceStatus(
+    env.ROLLOUT,
+    rolloutId,
+    createdAt
+  );
+  if (
+    instance !== null &&
+    (status === "paused" || status === "waitingForPause")
+  ) {
+    await instance.resume();
+  }
+};
+
+/**
  * Ends rollout `rolloutId`'s run if the rollout is cancelled, its run
  * hasn't ended, and it's working on none of its clients: none deploying,
  * and none claimed (it claims a client before it marks it deploying), as
  * while it waits for approval, when it would only idle until its wait
  * timed out. A run working on a client is left to stop by itself at its
  * next step (src/rollout/workflow.ts), releasing the client, so no client
- * is left claimed by an ended run or part way.
+ * is left claimed by an ended run or part way; one staff paused would
+ * never reach that step, so it's resumed to (`goOnToStop`).
  */
 const endIdleRollout = async (env: Env, rolloutId: string): Promise<void> => {
   const db = consoleDatabase(env.DB);
@@ -626,11 +654,11 @@ const endIdleRollout = async (env: Env, rolloutId: string): Promise<void> => {
       )
     )
     .limit(1);
-  if (
-    rollout?.status !== "cancelled" ||
-    deploying !== undefined ||
-    claimed !== undefined
-  ) {
+  if (rollout?.status !== "cancelled") {
+    return;
+  }
+  if (deploying !== undefined || claimed !== undefined) {
+    await goOnToStop(env, rolloutId, rollout.createdAt);
     return;
   }
   const { instance, status } = await instanceStatus(

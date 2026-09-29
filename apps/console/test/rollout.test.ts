@@ -969,6 +969,38 @@ const isD1Call =
     call.path.startsWith(`/accounts/${account.id}/d1/database`) &&
     call.path.endsWith(pathEnd);
 
+/**
+ * Where rollout `rolloutId` left two clients it deployed, the `first`
+ * rolled back while it worked on the `second`.
+ */
+const cancelOutcome = async (
+  rolloutId: string,
+  first: { clientId: string },
+  second: { clientId: string }
+) => ({
+  targets: await targetsOf(rolloutId),
+  rollout: await rolloutRow(rolloutId),
+  deploy: await targetDeployOf(rolloutId, second.clientId),
+  runner: await runnerOf(second.clientId),
+});
+
+/**
+ * `cancelOutcome` once the rollback of the `first` cancelled the rollout:
+ * the `second` stopped by the cancellation rule and released.
+ */
+const cancelled = (
+  first: { clientId: string },
+  second: { clientId: string }
+) => ({
+  targets: {
+    [first.clientId]: { ring: 0, status: "rolled_back", error: null },
+    [second.clientId]: { ring: 0, status: "stopped", error: "cancelled" },
+  },
+  rollout: { status: "cancelled", ring: 0 },
+  deploy: { status: "failed", error: "cancelled" },
+  runner: null,
+});
+
 describe("controlling a rollout", () => {
   useStoreSecrets({ deployer: token, tenant: tenantToken });
   beforeEach(setAsideEarlierTests);
@@ -2047,6 +2079,132 @@ describe("controlling a rollout", () => {
       },
       releases: [release, release],
     });
+  });
+
+  it("stops a paused rollout's client once a rollback of another cancels it, releasing the client", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const { first, second } = await twoClients(before);
+    const [connect] = await workersOf(second.clientId);
+    const script = connect?.scriptName ?? "";
+    const release = await importedRelease("feat(core): paused, then cancelled");
+    // Staff pause the rollout as the second client's connect goes to 10%.
+    cloudflare.beforeAnswering(
+      (call) =>
+        call.path.startsWith(`/accounts/${second.account.id}/`) &&
+        isDeploymentAt(script, 10)(call),
+      async () => {
+        await pauseRollout(env, staff, await openRollout());
+      }
+    );
+    await using run = await followRollouts();
+    await using rollbacks = await followRollbacks();
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("paused");
+
+    // The first client's rollback cancels the paused rollout.
+    await rollbacks.rollBack(rolloutId, first.clientId);
+    await run.waitForStatus("complete");
+
+    await expect(
+      cancelOutcome(rolloutId, first, second)
+    ).resolves.toStrictEqual(cancelled(first, second));
+  });
+
+  it("stops a rollout's client when a rollback cancels it while its pause is still landing", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const { first, second } = await twoClients(before);
+    const [connect] = await workersOf(second.clientId);
+    const script = connect?.scriptName ?? "";
+    const release = await importedRelease("feat(core): pausing, cancelled");
+    await using rollbacks = await followRollbacks();
+    // Staff pause the rollout as the second client's connect goes to 10%,
+    // and the first client's rollback cancels it while that step is still
+    // in flight: the run is waiting to pause, not paused.
+    cloudflare.beforeAnswering(
+      (call) =>
+        call.path.startsWith(`/accounts/${second.account.id}/`) &&
+        isDeploymentAt(script, 10)(call),
+      async () => {
+        const rolloutId = await openRollout();
+        await pauseRollout(env, staff, rolloutId);
+        await rollbacks.rollBack(rolloutId, first.clientId);
+      }
+    );
+    await using run = await followRollouts();
+
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    await expect(
+      cancelOutcome(rolloutId, first, second)
+    ).resolves.toStrictEqual(cancelled(first, second));
+  });
+
+  it("stops a rollout's client when a rollback cancels it between staff's check and their pause", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const { first, second } = await twoClients(before);
+    const [connect] = await workersOf(second.clientId);
+    const script = connect?.scriptName ?? "";
+    const release = await importedRelease("feat(core): cancelled, then paused");
+    await using rollbacks = await followRollbacks();
+    // The pause's own call to Workflows is held until the first client's
+    // rollback has cancelled the rollout and found its run not paused:
+    // only the pause's read of the rollout after it can see the cancel.
+    const get = env.ROLLOUT.get.bind(env.ROLLOUT);
+    let pausing = false;
+    const holding = vi
+      .spyOn(env.ROLLOUT, "get")
+      .mockImplementation(async (id): Promise<WorkflowInstance> => {
+        const instance = await get(id);
+        if (!pausing) {
+          return instance;
+        }
+        const held: WorkflowInstance = {
+          id: instance.id,
+          status: async () => await instance.status(),
+          resume: async () => {
+            await instance.resume();
+          },
+          terminate: async () => {
+            await instance.terminate();
+          },
+          restart: async () => {
+            await instance.restart();
+          },
+          sendEvent: async (event) => {
+            await instance.sendEvent(event);
+          },
+          delete: unused,
+          subscribe: unused,
+          pause: async () => {
+            pausing = false;
+            await rollbacks.rollBack(id, first.clientId);
+            await instance.pause();
+          },
+        };
+        return held;
+      });
+    cloudflare.beforeAnswering(
+      (call) =>
+        call.path.startsWith(`/accounts/${second.account.id}/`) &&
+        isDeploymentAt(script, 10)(call),
+      async () => {
+        pausing = true;
+        await pauseRollout(env, staff, await openRollout());
+      }
+    );
+    let rolloutId = "";
+    try {
+      await using run = await followRollouts();
+      rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+      await run.waitForStatus("complete");
+    } finally {
+      holding.mockRestore();
+    }
+
+    await expect(
+      cancelOutcome(rolloutId, first, second)
+    ).resolves.toStrictEqual(cancelled(first, second));
   });
 
   it("skips a client pinned to another release, and deploys one pinned to this one", async () => {
