@@ -200,6 +200,14 @@ export type Feature =
    */
   | "connector_events"
   /**
+   * Keeping messages email triggers receive, with their attachments, for
+   * 30 days, and runs reading those attachments
+   * (workflows/inbound-email.ts). While off, no message is kept (a run's
+   * input says `stored: null`) and no attachment is read; the messages
+   * kept before are still deleted once their 30 days pass.
+   */
+  | "email_attachments"
+  /**
    * Building an App's code as it is committed (save-builds.ts), and
    * answering the commit with how the builds went. While off, a commit
    * builds nothing and answers each build as `pending`: they build at

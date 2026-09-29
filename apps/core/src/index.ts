@@ -14,6 +14,7 @@ import { recordPlatformUpdate } from "./platform-updates.ts";
 import { sweepStatistics } from "./statistics.ts";
 import { pumpConnectorEvents } from "./workflows/connector-events.ts";
 import { receiveEmail } from "./workflows/inbound-email.ts";
+import { deleteExpiredEmail } from "./workflows/kept-email.ts";
 import { failOrphans } from "./workflows/runs.ts";
 import { startDueSchedules } from "./workflows/triggers.ts";
 
@@ -67,9 +68,11 @@ export default {
   // Knowledge usage signals, until they're computed, from one pass over the audit log (see
   // src/daily-signals.ts), and Apps whose entry in the Apps
   // collection isn't of their current version (see
-  // src/knowledge/apps-collection.ts), and statistics past their
-  // retention (see src/statistics.ts). And the audit log's retention
-  // alarm armed, if it isn't yet: retention itself runs on that alarm (see
+  // src/knowledge/apps-collection.ts), statistics past their retention
+  // (see src/statistics.ts), and messages email triggers kept, deleted
+  // once their days are over (see src/workflows/kept-email.ts). And the
+  // audit log's retention alarm armed, if it isn't yet: retention itself
+  // runs on that alarm (see
   // src/audit-log.ts), and a deployment that appends nothing after a
   // release still gets it.
   scheduled: async (controller, env) => {
@@ -79,6 +82,7 @@ export default {
             refreshDailySignals(env),
             indexApps(env),
             sweepStatistics(env),
+            deleteExpiredEmail(env, new Date(controller.scheduledTime)),
             auditLog(env).armRetention(),
           ]
         : [

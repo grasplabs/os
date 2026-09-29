@@ -1,4 +1,5 @@
 /* oxlint-disable require-await -- fakes of async interfaces answer right away */
+import { workflowErrors } from "@grasp-os/shared/workflows";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createTestState, testRun } from "../src/testing.ts";
@@ -1191,5 +1192,77 @@ describe(appExports, () => {
       status: "failed",
       error: { code: "workflow.invalid_step_call" },
     });
+  });
+});
+
+/** The message the platform refuses an attachment's read with `code`. */
+const refusal = (
+  code:
+    | "workflow.outside_step"
+    | "workflow.invalid"
+    | "workflow.attachment_not_found"
+): string => workflowErrors.create(code).message;
+
+describe("readAttachment", () => {
+  /**
+   * Reads attachment `index` of the message in a step, or first `outside`
+   * one; `message` stands in for anything workflow code may pass.
+   */
+  const reads = (index: unknown = 0, outside = false) =>
+    workflow(
+      "reader",
+      { params: noParams, input: z.unknown() },
+      async (step, { input, readAttachment }) => {
+        // SAFETY: the test passes what code without types could.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+        const message = input as { stored: string | null };
+        // SAFETY: as above, for the index.
+        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+        const at = index as number;
+        if (outside) {
+          await readAttachment(message, at);
+        }
+        return await step.do("read", { description: "Read" }, async () => {
+          // What a read gives is its own: changing it changes no other.
+          const first = await readAttachment(message, at);
+          first.fill(0);
+          return new TextDecoder().decode(await readAttachment(message, at));
+        });
+      }
+    );
+  const stored = `2026-09-29/${"a".repeat(64)}`;
+  const attachments = { [stored]: [new TextEncoder().encode("%PDF-")] };
+
+  it("reads a kept message's attachment inside a step, a copy each time", async () => {
+    await expect(
+      testRun(reads(), { input: { stored }, attachments })
+    ).resolves.toMatchObject({ status: "completed", output: "%PDF-" });
+  });
+
+  it("passes every read on, and the engine refuses as the platform does", async () => {
+    const runs = await Promise.all([
+      testRun(reads(0, true), { input: { stored }, attachments }),
+      testRun(reads(), { input: { stored: null }, attachments }),
+      testRun(reads(), { input: "not a message", attachments }),
+      testRun(reads("0"), { input: { stored }, attachments }),
+      testRun(reads(), { input: { stored: "2026-09-29/../x" }, attachments }),
+      testRun(reads(1), { input: { stored }, attachments }),
+      testRun(reads(), {
+        input: { stored: `2026-09-29/${"b".repeat(64)}` },
+        attachments,
+      }),
+    ]);
+
+    expect(
+      runs.map((run) => (run.status === "failed" ? run.error.message : run))
+    ).toStrictEqual([
+      refusal("workflow.outside_step"),
+      refusal("workflow.attachment_not_found"),
+      refusal("workflow.invalid"),
+      refusal("workflow.invalid"),
+      refusal("workflow.invalid"),
+      refusal("workflow.attachment_not_found"),
+      refusal("workflow.attachment_not_found"),
+    ]);
   });
 });

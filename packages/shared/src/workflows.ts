@@ -40,6 +40,10 @@ export const workflowErrors = defineErrorFamily({
     "The run this was delivered for is still starting. Try again shortly.",
   "workflow.email_taken":
     "Another App's workflow already receives mail at this address.",
+  "workflow.attachment_not_found":
+    "This App has no such attachment: the message isn't kept for it, or its 30 days have passed.",
+  "workflow.attachment_unreadable":
+    "The kept message can't be read any more, so none of its attachments can.",
   // What a step or run failed with when its error named no code of its
   // own: the audit log and failure reports carry these instead.
   "workflow.step_failed": "A step of the workflow failed.",
@@ -142,6 +146,30 @@ export const emailLocalPartSchema = z
   .regex(/^[a-z0-9_+-]+(?:\.[a-z0-9_+-]+)*$/u)
   .max(64);
 
+/**
+ * Where a message an email trigger received is kept while its attachments
+ * can be read: the UTC day it was stored and its ID, `2026-09-29/<id>`. It
+ * names no App: a run reads only what its own App received.
+ */
+export const storedEmailSchema = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}\/[0-9a-f]{64}$/u);
+
+/** The largest message an email trigger takes, in bytes; larger ones bounce. */
+export const inboundEmailMaxBytes = 10 * 1024 * 1024;
+
+/**
+ * The most of each of To and Cc, and of attachments, a message's run input
+ * lists; so the most attachments a run reads by index.
+ */
+export const inboundEmailMaxListed = 100;
+
+/** An attachment's index in a message's run input. */
+export const inboundEmailIndexSchema = z
+  .int()
+  .min(0)
+  .max(inboundEmailMaxListed - 1);
+
 /** A name and address, as a message's headers give them. */
 const mailboxSchema = z.object({ name: z.string(), address: z.string() });
 
@@ -150,13 +178,19 @@ const mailboxSchema = z.object({ name: z.string(), address: z.string() });
  * is the SHA-256 of its bytes. `from` is what the message's header says,
  * which its sender can write anything in: nothing vouches for it. Bounded
  * to fit a run's input (128 KiB of JSON): at most 100 each of `to`, `cc` and
- * `attachments` (listed, never included), names, addresses and file names
+ * `attachments` (listed, their content never included), names, addresses and file names
  * cut at 256 characters and the subject at 1,000, and as much of its
  * plain text as fits (for a message with only HTML, its text),
  * `truncated` when cut.
+ *
+ * `stored` is where the message is kept for 30 days, so the run can read
+ * its attachments (`readAttachment` in `@grasp-os/sdk/workflow`); null
+ * when it has none but inline ones, or while keeping messages is switched
+ * off.
  */
 export const inboundEmailSchema = z.object({
   id: z.string(),
+  stored: storedEmailSchema.nullable(),
   from: mailboxSchema,
   to: z.array(mailboxSchema),
   cc: z.array(mailboxSchema),

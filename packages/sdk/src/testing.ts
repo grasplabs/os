@@ -2,7 +2,12 @@ import { messageOf } from "@grasp-os/shared/errors";
 import { runIdSchema } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Json } from "@grasp-os/shared/json";
-import { isRetryable } from "@grasp-os/shared/workflows";
+import {
+  inboundEmailIndexSchema,
+  isRetryable,
+  storedEmailSchema,
+  workflowErrors,
+} from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import type {
@@ -133,6 +138,13 @@ export interface TestEngineOptions {
   decisions?: Readonly<Record<string, DecisionAnswer>>;
   /** Events sent to the run; each goes to the first wait for its type. */
   events?: readonly TestEvent[];
+  /**
+   * The content of kept messages' attachments, by the message's `stored`
+   * name, in the order its `attachments` lists them, for `readAttachment`.
+   * Reading any other fails with `workflow.attachment_not_found`, as a
+   * message another App received does.
+   */
+  attachments?: Readonly<Record<string, readonly Uint8Array[]>>;
   state?: TestState;
   /**
    * `record` (the default) records side-effect steps without running them;
@@ -259,6 +271,9 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
     }
   };
 
+  // How many steps' functions run now: `readAttachment` works only inside one.
+  let stepsRunning = 0;
+
   const receive = (type: string): EngineEvent => {
     const index = events.findIndex((event) => event.type === type);
     if (index !== -1) {
@@ -298,7 +313,12 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         } else if (sideEffect && !runSideEffects) {
           status = "recorded";
         } else {
-          output = await attempt(retries?.limit ?? 0, fn);
+          stepsRunning += 1;
+          try {
+            output = await attempt(retries?.limit ?? 0, fn);
+          } finally {
+            stepsRunning -= 1;
+          }
         }
         const stored = toStored(step.name, output);
         results.set(name, stored);
@@ -425,6 +445,33 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         state.values.set(key, value);
       }
       await Promise.resolve();
+    },
+    // Refuses as the platform does, but records nothing.
+    readAttachment: async (stored, index) => {
+      if (stepsRunning === 0) {
+        throw workflowErrors.create("workflow.outside_step");
+      }
+      if (stored === null) {
+        throw workflowErrors.create("workflow.attachment_not_found");
+      }
+      if (
+        !storedEmailSchema.safeParse(stored).success ||
+        !inboundEmailIndexSchema.safeParse(index).success
+      ) {
+        throw workflowErrors.create("workflow.invalid");
+      }
+      const content =
+        stored !== undefined &&
+        index !== undefined &&
+        options.attachments &&
+        Object.hasOwn(options.attachments, stored)
+          ? options.attachments[stored]?.[index]
+          : undefined;
+      if (content === undefined) {
+        throw workflowErrors.create("workflow.attachment_not_found");
+      }
+      // A copy of its own, as each read on the platform is.
+      return await Promise.resolve(new Uint8Array(content));
     },
   };
 

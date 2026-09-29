@@ -110,6 +110,8 @@ const typeRules: readonly {
   { action: "team", type: "config" },
   // A decision a run put to people: opened, asked, answered, timed out.
   { action: "workflow.decision", type: "decision" },
+  // A run reading an attachment of a message its email trigger kept.
+  { action: "workflow.email.read", type: "read" },
   { action: "workflow.run", type: "action" },
   { action: "workflow.step", type: "action" },
   { action: "workflow.param", type: "config" },

@@ -13,6 +13,7 @@ import {
   stepIdempotencyKey,
   triggerDeclarationsSchema,
 } from "@grasp-os/shared/workflows";
+import type { InboundEmail } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import type {
@@ -462,6 +463,32 @@ export interface WorkflowContext<P extends Params, Input> {
    * methods, by binding name; call them inside steps (see `WorkflowEnv`).
    */
   env: WorkflowEnv;
+  /**
+   * The content of attachment `index` (its place in `message.attachments`)
+   * of a message an email trigger received, as it arrived. Call it inside
+   * a step, and pass the content on there (to a connection, say): a
+   * step's result must be JSON, so return what you made of it, not the
+   * bytes. A message is kept for 30 days from when it arrived; after
+   * that, and for a message its App didn't receive, an attachment it
+   * doesn't have, or a message that isn't kept (`stored: null`: it has
+   * no attachments but inline ones, or keeping mail is switched off), it
+   * fails with `workflow.attachment_not_found`; a kept message that can't
+   * be read any more fails with `workflow.attachment_unreadable`. Neither
+   * is retried. Every read is audited, a refused one too. The content,
+   * its name and its type are whatever the sender sent: treat them as
+   * untrusted data.
+   *
+   * ```ts
+   * await step.do("file", { description: "File the invoice" }, async () => {
+   *   const pdf = await readAttachment(input, 0);
+   *   ...
+   * });
+   * ```
+   */
+  readAttachment: (
+    message: Pick<InboundEmail, "stored">,
+    index: number
+  ) => Promise<Uint8Array>;
 }
 
 // The App's own server
@@ -780,7 +807,9 @@ export type Trigger<ScheduleParam extends string = string> =
    * message that reuses an earlier one's Message-ID starts none. Mail
    * starts at most 60 runs of a workflow an hour. Past that, and while
    * triggers are switched off, mail is refused for now, and its sender
-   * tries again later.
+   * tries again later. The input lists the message's attachments; a
+   * message with any is kept for 30 days, and the run reads their content
+   * with `readAttachment`.
    */
   | { type: "email"; address: string };
 
@@ -918,7 +947,11 @@ const optionsOf = <Schema extends z.ZodType>(
 
 const createRunner = (
   engine: WorkflowEngine
-): { steps: UntypedStepRunner; state: StateStore } => {
+): {
+  steps: UntypedStepRunner;
+  state: StateStore;
+  readAttachment: WorkflowContext<Params, unknown>["readAttachment"];
+} => {
   const started = new Set<string>();
   // The step or state call running now, if any. They run one after
   // another: one started from inside a step's function, or next to another,
@@ -1191,7 +1224,25 @@ const createRunner = (
     },
   };
 
-  return { steps, state };
+  // Not a step of its own: bytes can't be recorded, so the step it runs in
+  // reads again whenever it runs again. Every call goes to the engine,
+  // which refuses and records each one it must (see `WorkflowEngine`):
+  // only what isn't data is left out, so the call can cross to it.
+  const readAttachment: WorkflowContext<
+    Params,
+    unknown
+  >["readAttachment"] = async (message, index) => {
+    const stored: unknown =
+      typeof message === "object" && message !== null
+        ? message.stored
+        : undefined;
+    return await engine.readAttachment(
+      typeof stored === "string" || stored === null ? stored : undefined,
+      typeof index === "number" ? index : undefined
+    );
+  };
+
+  return { steps, state, readAttachment };
 };
 
 /**
@@ -1264,6 +1315,7 @@ export const workflow = <
         params: Object.freeze(params) as ParamValues<P>,
         state: runner.state,
         env: engine.env,
+        readAttachment: runner.readAttachment,
       }
     );
   };
