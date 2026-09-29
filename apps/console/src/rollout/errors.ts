@@ -29,7 +29,7 @@ export const rolloutErrorCodes = [
   "superseded",
   /**
    * What the client ran before isn't the release right before the
-   * rollout's: its migrations only keep that one working.
+   * rollout's, or the same one: its migrations only keep those working.
    */
   "too_far_back",
   /** The client's secrets rotated since, which its previous versions don't have. */
@@ -38,6 +38,8 @@ export const rolloutErrorCodes = [
   "client_busy",
   /** The rollback's run failed or was ended before it finished. */
   "rollback_failed",
+  /** A secrets rollout can't start while Secrets Store is missing a shared secret. */
+  "secrets_store_incomplete",
 ] as const;
 export type RolloutErrorCode = (typeof rolloutErrorCodes)[number];
 

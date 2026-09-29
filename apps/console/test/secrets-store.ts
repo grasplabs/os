@@ -29,13 +29,14 @@ export const adminOf = async (
 };
 
 /**
- * Empties the secret `binding` names, `name` in the store, as a store
- * missing it reads: kept under its id, so it's taken out after the test
- * as usual.
+ * Sets the secret `binding` names, `name` in the store, to `value`, as
+ * deploy-ops does after a rotation in 1Password: kept under its id, so
+ * it's taken out after the test as usual.
  */
-export const emptyStoreSecret = async (
+export const setStoreSecret = async (
   binding: SecretsStoreSecret,
-  name: string
+  name: string,
+  value: string
 ): Promise<void> => {
   const admin = await adminOf(binding);
   const secrets = await admin.list();
@@ -44,7 +45,15 @@ export const emptyStoreSecret = async (
   if (id === undefined) {
     throw new Error(`${name} isn't in the store`);
   }
-  await admin.update("", id);
+  await admin.update(value, id);
+};
+
+/** Empties the secret `binding` names, `name` in the store, as a store missing it reads. */
+export const emptyStoreSecret = async (
+  binding: SecretsStoreSecret,
+  name: string
+): Promise<void> => {
+  await setStoreSecret(binding, name, "");
 };
 
 /**

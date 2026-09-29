@@ -73,10 +73,11 @@ import {
   workersSubdomain,
 } from "./router.ts";
 import type { RouterHosts, SmokeOptions } from "./router.ts";
-import { workerSecrets } from "./secrets.ts";
+import { sharedSecretPrints, workerSecrets } from "./secrets.ts";
 import type { DeploySecrets } from "./secrets.ts";
 import {
   checkBindingNames,
+  secretsFingerprint,
   uploadFingerprint,
   workerUpload,
 } from "./upload.ts";
@@ -144,17 +145,22 @@ export const errorCode = (error: unknown): string => {
 const actorName = (actor: Actor): string =>
   actor === "system" ? actor : actor.email;
 
+/** What a deploy deploys: a release, or only new secrets on the one the client runs. */
+export type DeployKind = (typeof clientDeploys.kind.enumValues)[number];
+
 /**
  * Starts deploying release `releaseId` to client `clientId`, and returns
  * the deploy's id for `runDeploy`. The client's older deploys that hadn't
  * finished are superseded in the same batch. A client whose id can't be
- * its hostname (`newClientIdSchema`) is refused.
+ * its hostname (`newClientIdSchema`) is refused. A `secrets` deploy runs
+ * the same steps; core records it as new secrets rather than a release.
  */
 export const startDeploy = async (
   db: ConsoleDatabase,
   actor: Actor,
   clientId: string,
-  releaseId: string
+  releaseId: string,
+  kind: DeployKind = "release"
 ): Promise<string> => {
   if (!newClientIdSchema.safeParse(clientId).success) {
     throw new DeployError(
@@ -181,6 +187,7 @@ export const startDeploy = async (
         id,
         clientId,
         releaseId,
+        kind,
         status: "running",
         startedBy: actorName(actor),
         createdAt: now,
@@ -191,7 +198,7 @@ export const startDeploy = async (
       action: "deploy.start",
       clientId,
       target: releaseId,
-      detail: { deploy: id },
+      detail: { deploy: id, kind },
     }
   );
   return id;
@@ -205,6 +212,7 @@ const deployOf = async (db: ConsoleDatabase, id: string) => {
     .select({
       clientId: clientDeploys.clientId,
       releaseId: clientDeploys.releaseId,
+      kind: clientDeploys.kind,
       status: clientDeploys.status,
       startedBy: clientDeploys.startedBy,
       createdAt: clientDeploys.createdAt,
@@ -301,12 +309,19 @@ const recordFailure = async (
 
 /**
  * The versions a deploy uploaded, by app, each with the fingerprint of
- * everything that went into it (`uploadFingerprint`).
+ * everything that went into it (`uploadFingerprint`), of its secrets
+ * alone (`secretsFingerprint`), and of the shared secrets among them
+ * (`sharedSecretPrints`, secret by secret).
  */
 const recordedSchema = z.object({
   byApp: z.record(
     z.string(),
-    z.object({ version: z.string(), fingerprint: z.string() })
+    z.object({
+      version: z.string(),
+      fingerprint: z.string(),
+      secrets: z.string(),
+      shared: z.record(z.string(), z.string()),
+    })
   ),
 });
 type Recorded = z.infer<typeof recordedSchema>["byApp"];
@@ -328,7 +343,8 @@ const configVarNames: ReadonlySet<string> = new Set(deploymentConfigVars);
  * client's setting of the same name, if it has one; its other settings,
  * each a JSON var named by its deployment config var (and nothing else:
  * `unknown_setting`); and `PLATFORM_CHANGE`, which core records as
- * `platform.updated`.
+ * `platform.updated`: a `release`, or new `secrets` on the release it
+ * runs.
  */
 const coreVars = async (
   context: DeployContext,
@@ -348,7 +364,7 @@ const coreVars = async (
   }
   const change: PlatformChange = {
     by: deploy.startedBy,
-    what: "release",
+    what: deploy.kind,
     release: deploy.releaseId,
     // When the deploy started: the same however often it's resumed.
     at: deploy.createdAt.toISOString(),
@@ -609,18 +625,18 @@ const recordedNow = async (
 
 /**
  * Uploads `app`'s Worker as a new version with its secrets, and returns
- * the version's id. A Worker whose version this deploy already uploaded
- * isn't uploaded again, but only if everything that went into that
- * version is the same now (its fingerprint): secrets, vars, bindings and
- * code. A script upload (a Worker's first, or one with Durable Object
- * migrations) is live at once.
+ * the version's id with its secrets' fingerprint. A Worker whose version
+ * this deploy already uploaded isn't uploaded again, but only if
+ * everything that went into that version is the same now (its
+ * fingerprint): secrets, vars, bindings and code. A script upload (a
+ * Worker's first, or one with Durable Object migrations) is live at once.
  */
 const uploadApp = async (
   context: DeployContext,
   loaded: LoadedDeploy,
   app: DeployApp,
   databases: ReadonlyMap<string, string>
-): Promise<string> => {
+): Promise<{ version: string; secrets: string }> => {
   const { api, db, store, secrets } = context;
   const { id, deploy, manifest } = loaded;
   const { accountId, clientId, releaseId } = deploy;
@@ -648,10 +664,15 @@ const uploadApp = async (
     vars: workerVars,
     secrets: workerSecretValues,
   });
+  const secretsPrint = await secretsFingerprint(
+    secrets.clientKey,
+    workerSecretValues
+  );
+  const sharedPrint = await sharedSecretPrints(secrets, app);
   const versions = await recordedNow(db, id);
   const recorded = versions[app];
   if (recorded?.fingerprint === fingerprint) {
-    return recorded.version;
+    return { version: recorded.version, secrets: secretsPrint };
   }
   const upload = await workerUpload(
     store,
@@ -669,7 +690,12 @@ const uploadApp = async (
     upload,
     workerSecretValues
   );
-  versions[app] = { version: versionId, fingerprint };
+  versions[app] = {
+    version: versionId,
+    fingerprint,
+    secrets: secretsPrint,
+    shared: sharedPrint,
+  };
   await act(
     db,
     "system",
@@ -689,7 +715,7 @@ const uploadApp = async (
       detail: { deploy: id, worker: app, version: versionId },
     }
   );
-  return versionId;
+  return { version: versionId, secrets: secretsPrint };
 };
 
 /**
@@ -893,9 +919,9 @@ export const runDeploy = async (
       const apps = appsOf(loaded.manifest);
       for (const app of apps) {
         // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-        const versionId = await uploadApp(context, loaded, app, databases);
+        const { version } = await uploadApp(context, loaded, app, databases);
         // oxlint-disable-next-line no-await-in-loop -- live before the next Worker
-        await goLive(context, loaded, app, versionId);
+        await goLive(context, loaded, app, version);
       }
       await recordStep(context.db, loaded, "workers", { workers: apps.length });
       await finish(context, loaded, current);
@@ -958,20 +984,61 @@ export interface UploadedWorker {
    * once, and so is one an earlier run of a later phase deployed.
    */
   live: boolean;
+  /**
+   * Whether it runs with the same secrets as the version it replaces, as
+   * the client's deploys recorded them: only then may the two share
+   * traffic. False when that version's secrets aren't on record.
+   */
+  sameSecrets: boolean;
 }
 
 /**
+ * The fingerprint `print` (of all its secrets, or of its shared ones) the
+ * latest of client `clientId`'s deploys to record `app`'s version
+ * `version` recorded for it (for `shared`, the JSON of its by-name map);
+ * null when none did (a version uploaded
+ * outside the console, or before deploys recorded one).
+ */
+export const recordedPrintOf = async (
+  db: ConsoleDatabase,
+  clientId: string,
+  app: string,
+  version: string,
+  print: "secrets" | "shared"
+): Promise<string | null> => {
+  const [row] = await db
+    .select({
+      secrets: sql<
+        string | null
+      >`json_extract(${clientDeploys.versions}, ${`$.byApp.${app}.${print}`})`,
+    })
+    .from(clientDeploys)
+    .where(
+      and(
+        eq(clientDeploys.clientId, clientId),
+        sql`json_extract(${clientDeploys.versions}, ${`$.byApp.${app}.version`}) = ${version}`
+      )
+    )
+    .orderBy(desc(clientDeploys.createdAt))
+    .limit(1);
+  return row?.secrets ?? null;
+};
+
+/**
  * Uploads `app`'s Worker with its secrets, unless the deploy uploaded it
- * already (`uploadApp`). Null when the deploy is done already.
+ * already (`uploadApp`), and says whether it has the same secrets as
+ * `previous`, the version it replaces. Null when the deploy is done
+ * already.
  */
 export const uploadDeployWorker = async (
   context: DeployContext,
   id: string,
   app: DeployApp,
-  databases: Record<string, string>
+  databases: Record<string, string>,
+  previous: string | undefined
 ): Promise<UploadedWorker | null> => {
   const ran = await runPhase(context, id, "workers", async (loaded) => {
-    const version = await uploadApp(
+    const { version, secrets } = await uploadApp(
       context,
       loaded,
       app,
@@ -982,7 +1049,21 @@ export const uploadDeployWorker = async (
       loaded.deploy.accountId,
       workerOf(loaded.manifest, app).name
     );
-    return { version, live: live === version };
+    const previousSecrets =
+      previous === undefined
+        ? null
+        : await recordedPrintOf(
+            context.db,
+            loaded.deploy.clientId,
+            app,
+            previous,
+            "secrets"
+          );
+    return {
+      version,
+      live: live === version,
+      sameSecrets: previousSecrets === secrets,
+    };
   });
   return ran?.result ?? null;
 };

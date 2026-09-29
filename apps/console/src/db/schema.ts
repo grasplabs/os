@@ -156,6 +156,13 @@ export const clientDeploys = sqliteTable(
     releaseId: text("release_id")
       .notNull()
       .references(() => releases.id),
+    /**
+     * What it deploys: a release, or only new secrets on the release the
+     * client runs (a secrets rollout). Core records it as what changed.
+     */
+    kind: text({ enum: ["release", "secrets"] })
+      .notNull()
+      .default("release"),
     /** `superseded`: a newer deploy of the client started, so this one no longer runs. */
     status: text({
       enum: ["running", "done", "failed", "superseded"],
@@ -165,10 +172,11 @@ export const clientDeploys = sqliteTable(
     /** Why it failed: an error code, never a token or a response body. */
     error: text(),
     /**
-     * The versions this deploy uploaded, and the secrets generation they
-     * carry: JSON, `{"generation": 1, "byApp": {"connect": "<version id>"}}`.
-     * A resumed deploy deploys these rather than upload again, unless the
-     * generation has changed since.
+     * The versions this deploy uploaded, each with fingerprints of what went
+     * into it and of its secrets alone: JSON, `{"byApp": {"connect":
+     * {"version": "<id>", "fingerprint": "<hex>", "secrets": "<hex>"}}}`
+     * (src/deploy/deploy.ts). A resumed deploy deploys these rather than
+     * upload again, unless what goes into one has changed since.
      */
     versions: text(),
     /** The staff member who started it, or `system`. */
@@ -189,6 +197,13 @@ export const rollouts = sqliteTable(
     /** A release's code, or only new secrets on what runs. */
     kind: text({ enum: ["release", "secrets"] }).notNull(),
     releaseId: text("release_id").references(() => releases.id),
+    /**
+     * For a secrets rollout, the fingerprint of the shared secrets Secrets
+     * Store held for each app when it started: JSON, `{"connect": "<hex>"}`
+     * (src/rollout/shared-secrets.ts). What proves a rotation reached its
+     * clients; null for a release rollout.
+     */
+    sharedSecrets: text("shared_secrets"),
     /** `waiting`: for a staff member's approval of the next ring. */
     status: text({
       enum: ["running", "waiting", "done", "failed", "cancelled"],

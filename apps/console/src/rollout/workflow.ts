@@ -11,8 +11,15 @@
  * a pause at each (`gradualStages`), then all of it; then the smoke check
  * and the router's map (src/deploy/deploy.ts). A Worker's first upload,
  * or one with Durable Object migrations, goes live at once, and so does
- * every Worker while a secrets rotation is still to go live: versions
- * with different secrets can't share traffic.
+ * every Worker whose new version has other secrets than the one before
+ * (a rotation still to go live, or shared secrets changed in Secrets
+ * Store): versions with different secrets can't share traffic.
+ *
+ * A secrets rollout (no release) takes the shared secrets in Secrets
+ * Store now to clients without a code release: it deploys each client's
+ * own release again, as a `secrets` deploy, every Worker live at once.
+ * Everything else is a release rollout's: claims, rings, approvals,
+ * cancelling, rollbacks and audit.
  *
  * One runner per client: the rollout claims each client in D1 before it
  * deploys it and releases it after (src/runners.ts), so it never
@@ -85,6 +92,7 @@ import {
   parsePrevious,
   previousRunOf,
   ringsOf,
+  runningRelease,
   skipReason,
   targetClient,
   TrafficSplitError,
@@ -94,7 +102,11 @@ import type { PreviousRun, TargetClient } from "./targets.ts";
 /** What a rollout's run is started with: identifiers only, since Workflows stores them. */
 export interface RolloutParams {
   rolloutId: string;
-  releaseId: string;
+  /**
+   * The release it rolls out; null for a secrets rollout, which deploys
+   * each client's own release again with the secrets in Secrets Store now.
+   */
+  releaseId: string | null;
   /** The staff member who started it. */
   startedBy: Staff;
 }
@@ -361,14 +373,64 @@ const readPrevious = async (
 };
 
 /**
+ * Why rollout `params` skips `client` before claiming it, or null: one no
+ * longer active (`not_active`); for a release rollout, what `skipReason`
+ * says. A secrets rollout skips no active client here: it deploys the
+ * release the client runs, whatever it's pinned to, read once it holds
+ * the client (`claimTarget`).
+ */
+const skipFor = async (
+  db: ConsoleDatabase,
+  params: RolloutParams,
+  client: TargetClient
+): Promise<string | null> => {
+  if (client.status !== "active") {
+    return "not_active";
+  }
+  if (params.releaseId === null) {
+    return null;
+  }
+  const [release] = await db
+    .select({ id: releases.id, builtAt: releases.builtAt })
+    .from(releases)
+    .where(eq(releases.id, params.releaseId));
+  if (release === undefined) {
+    throw stop(
+      "release_not_imported",
+      `Release ${params.releaseId} isn't imported`
+    );
+  }
+  return skipReason(client, release);
+};
+
+/**
+ * What a claimed target deploys: the deploy it started already, or else
+ * the release to start one of, the rollout's or, for a secrets rollout,
+ * the one `client` runs; null when it has neither.
+ */
+const deployPlan = (
+  deployId: string | null,
+  releaseId: string | null,
+  client: TargetClient
+): { deployId: string } | { releaseId: string } | null => {
+  if (deployId !== null) {
+    return { deployId };
+  }
+  const release = releaseId ?? runningRelease(client);
+  return release === null ? null : { releaseId: release };
+};
+
+/**
  * Claims client `clientId` for the rollout, unless it skips it, and
- * returns the deploy it runs and what the client ran before. A client
- * that's no longer active, pinned to another release, or on this one
- * already (with no rotation waiting) or a newer one (`skipReason`), is
- * skipped, audited, unless the rollout is deploying it already; a
- * rollout staff stopped goes no further. What it ran before is read
- * once, before anything of the release is live, and kept on its target,
- * which stays `pending` until its first step starts (`markStarted`).
+ * returns the deploy it runs and what the client ran before. A client it
+ * skips (`skipFor`) is skipped, audited, unless the rollout is deploying
+ * it already; a rollout staff stopped goes no further. A secrets rollout
+ * reads the release the client runs once it holds the client, so no
+ * other runner changes it after, and skips (`no_release`) a client whose
+ * Workers don't run one release, unless it started its deploy already.
+ * What it ran before is read once, before anything of the release is
+ * live, and kept on its target, which stays `pending` until its first
+ * step starts (`markStarted`).
  */
 const claimTarget = async (
   env: Env,
@@ -376,7 +438,7 @@ const claimTarget = async (
   params: RolloutParams,
   clientId: string
 ): Promise<Claimed> => {
-  const { rolloutId, releaseId } = params;
+  const { rolloutId } = params;
   if (await isCancelled(db, rolloutId)) {
     return { state: "cancelled" };
   }
@@ -392,25 +454,35 @@ const claimTarget = async (
     return { state: "skipped" };
   }
   const client = await targetClient(db, clientId);
-  const [release] = await db
-    .select({ id: releases.id, builtAt: releases.builtAt })
-    .from(releases)
-    .where(eq(releases.id, releaseId));
-  if (release === undefined) {
-    throw stop("release_not_imported", `Release ${releaseId} isn't imported`);
-  }
   const skip =
-    client?.status === "active" ? skipReason(client, release) : "not_active";
+    client === undefined ? "not_active" : await skipFor(db, params, client);
   if (client === undefined || (skip !== null && target.status === "pending")) {
     await skipTarget(db, rolloutId, clientId, skip ?? "not_active");
     return { state: "skipped" };
   }
   await claimClient(env, db, rolloutId, clientId);
+  // Read again now the rollout holds the client: no other runner changes
+  // what it runs from here.
+  const held = (await targetClient(db, clientId)) ?? client;
+  // The deploy it started already, or the release to start one of.
+  const plan = deployPlan(target.deployId, params.releaseId, held);
+  if (plan === null) {
+    await skipTarget(db, rolloutId, clientId, "no_release");
+    return { state: "skipped" };
+  }
+  // Read before a deploy starts: one that stops here leaves none behind.
   const previous =
-    parsePrevious(target.previous) ?? (await readPrevious(env, client));
+    parsePrevious(target.previous) ?? (await readPrevious(env, held));
   const deployId =
-    target.deployId ??
-    (await startDeploy(db, params.startedBy, clientId, releaseId));
+    "deployId" in plan
+      ? plan.deployId
+      : await startDeploy(
+          db,
+          params.startedBy,
+          clientId,
+          plan.releaseId,
+          params.releaseId === null ? "secrets" : "release"
+        );
   // Still pending: claimed, but nothing of it started yet.
   await db
     .update(rolloutTargets)
@@ -522,6 +594,7 @@ const deployClaimed = async (
     }
   );
   for (const app of prepared?.apps ?? []) {
+    const before = previous.versions[app];
     // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
     const uploaded = await clientStep(
       step,
@@ -534,7 +607,8 @@ const deployClaimed = async (
           await context(),
           deployId,
           app,
-          prepared?.databases ?? {}
+          prepared?.databases ?? {},
+          before
         )
     );
     if (uploaded === null) {
@@ -542,11 +616,15 @@ const deployClaimed = async (
       // successors got that far.
       break;
     }
-    const before = previous.versions[app];
-    // Versions with different secrets can't share traffic: a rotation
-    // still to go live (the new versions carry a generation the router
-    // doesn't send yet) goes live at once.
-    const sameSecrets = prepared?.generation === previous.generation;
+    // Versions with different secrets can't share traffic, so new ones go
+    // live at once: a rotation still to go live (the new versions carry a
+    // generation the router doesn't send yet), shared secrets changed in
+    // Secrets Store since the version before, or one whose secrets aren't
+    // on record. A secrets rollout exists to change them: always at once.
+    const sameSecrets =
+      params.releaseId !== null &&
+      uploaded.sameSecrets &&
+      prepared?.generation === previous.generation;
     if (
       !uploaded.live &&
       sameSecrets &&

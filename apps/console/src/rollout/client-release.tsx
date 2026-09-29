@@ -23,7 +23,8 @@ import { useRouter } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { thenRefresh } from "../use-action.ts";
-import type { ClientDrift, ClientDriftState } from "./drift.ts";
+import type { ClientDriftState } from "./drift.ts";
+import type { DriftCheck } from "./functions.ts";
 import { fetchDrift, pinClientFn } from "./functions.ts";
 import { useRolloutAction } from "./use-action.ts";
 
@@ -36,13 +37,23 @@ const driftWords: Readonly<Record<ClientDriftState, string>> = {
   unknown: "can't be told: nothing made live yet, or the account didn't answer",
 };
 
+/** Whether it runs the shared secrets in Secrets Store now, in words. */
+const sharedSecretsWords = (current: boolean | null): string => {
+  if (current === null) {
+    return "Whether it runs the shared secrets in Secrets Store now can't be told: the store can't be read.";
+  }
+  return current
+    ? "It runs the shared secrets in Secrets Store now."
+    : "It doesn't run the shared secrets in Secrets Store now: a secrets rollout brings it up to date.";
+};
+
 /** A version's id, short, as the table shows it. */
 const shortVersion = (id: string | null): string => id?.slice(0, 8) ?? "";
 
 /** Client `clientId`'s drift, or `failed` when it couldn't be read. Never throws. */
 const readDrift = async (
   clientId: string
-): Promise<ClientDrift | "failed" | null> => {
+): Promise<DriftCheck | "failed" | null> => {
   try {
     return await fetchDrift({ data: { clientId } });
   } catch {
@@ -52,7 +63,7 @@ const readDrift = async (
 
 /** The client's drift, read when staff ask, and what it says. */
 const Drift = ({ clientId }: { clientId: string }) => {
-  const [drift, setDrift] = useState<ClientDrift | null>(null);
+  const [drift, setDrift] = useState<DriftCheck | null>(null);
   const [reading, setReading] = useState(false);
   const [failed, setFailed] = useState(false);
   const check = async () => {
@@ -77,6 +88,11 @@ const Drift = ({ clientId }: { clientId: string }) => {
         </Button>
         {drift === null ? null : (
           <p className="text-sm">{`It ${driftWords[drift.state]}.`}</p>
+        )}
+        {drift === null ? null : (
+          <p className="text-sm">
+            {sharedSecretsWords(drift.sharedSecretsCurrent)}
+          </p>
         )}
         {failed ? (
           <p role="alert" className="text-destructive text-sm">

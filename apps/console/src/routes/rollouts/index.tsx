@@ -18,6 +18,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { formatTime } from "../../releases/format.ts";
+import type { StartRolloutInput } from "../../rollout/control.ts";
 import { fetchRollouts, startRolloutFn } from "../../rollout/functions.ts";
 import type { RolloutOptions } from "../../rollout/queries.ts";
 import type { RolloutScope } from "../../rollout/targets.ts";
@@ -31,6 +32,14 @@ const scopes: { value: ScopeKind; label: string }[] = [
   { value: "ring", label: "One ring" },
   { value: "client", label: "One client" },
   { value: "all", label: "Every client, ring by ring" },
+];
+
+/** What a rollout takes to clients, as the form offers it. */
+type RolloutKind = StartRolloutInput["kind"];
+
+const kinds: { value: RolloutKind; label: string }[] = [
+  { value: "release", label: "A release" },
+  { value: "secrets", label: "Secrets only" },
 ];
 
 /** The form's text field `name`, trimmed. */
@@ -62,13 +71,14 @@ const scopeOf = (
 const clientsOf = (count: number): string =>
   count === 1 ? "1 client" : `${count} clients`;
 
-/** Starting a rollout: a release, and whom it reaches after ring 0. */
+/** Starting a rollout: a release or the secrets alone, and whom it reaches after ring 0. */
 const StartRollout = ({ options }: { options: RolloutOptions }) => {
   const navigate = useNavigate();
   const { busy, failure, run } = useRolloutAction();
   // Only rings past the first can be chosen: every rollout reaches that
   // one first, whatever else it's for.
   const later = options.rings.filter(({ ring }) => ring !== options.firstRing);
+  const [what, setWhat] = useState<RolloutKind>("release");
   const [kind, setKind] = useState<ScopeKind>("ring");
   const [ring, setRing] = useState<number | null>(null);
   const chosenRing = ring ?? later[0]?.ring ?? options.firstRing;
@@ -82,15 +92,14 @@ const StartRollout = ({ options }: { options: RolloutOptions }) => {
   }
   const start = (form: FormData) => {
     void run(async () => {
+      // With no one past the first ring, every client is that ring.
+      const scope: RolloutScope =
+        later.length === 0 ? { scope: "all" } : scopeOf(kind, chosenRing, form);
       const result = await startRolloutFn({
-        data: {
-          releaseId: textOf(form, "releaseId"),
-          // With no one past the first ring, every client is that ring.
-          scope:
-            later.length === 0
-              ? { scope: "all" }
-              : scopeOf(kind, chosenRing, form),
-        },
+        data:
+          what === "secrets"
+            ? { kind: "secrets", scope }
+            : { kind: "release", releaseId: textOf(form, "releaseId"), scope },
       });
       if (result.done !== null) {
         await navigate({
@@ -109,23 +118,53 @@ const StartRollout = ({ options }: { options: RolloutOptions }) => {
       }}
       className="flex flex-col gap-4"
     >
-      <label htmlFor="rollout-release" className="flex flex-col gap-1 text-sm">
-        <span className="font-medium">Release</span>
-        <Input
-          id="rollout-release"
-          name="releaseId"
-          list="release-ids"
-          required
-          defaultValue={newest.id}
-        />
-        <datalist id="release-ids">
-          {options.releases.map((release) => (
-            <option key={release.id} value={release.id}>
-              {release.notes}
-            </option>
+      <fieldset className="flex flex-col gap-1 text-sm">
+        <legend className="font-medium">What</legend>
+        <div className="flex flex-wrap gap-2">
+          {kinds.map((each) => (
+            <Button
+              key={each.value}
+              type="button"
+              size="sm"
+              variant={what === each.value ? "default" : "outline"}
+              aria-pressed={what === each.value}
+              onClick={() => {
+                setWhat(each.value);
+              }}
+            >
+              {each.label}
+            </Button>
           ))}
-        </datalist>
-      </label>
+        </div>
+      </fieldset>
+      {what === "secrets" ? (
+        <p className="text-muted-foreground text-sm">
+          Each client gets the shared secrets in Secrets Store now, on the
+          release it runs, all traffic at once. Copy a rotated secret there
+          first with the Deploy grasp-os-ops workflow, secrets only.
+        </p>
+      ) : (
+        <label
+          htmlFor="rollout-release"
+          className="flex flex-col gap-1 text-sm"
+        >
+          <span className="font-medium">Release</span>
+          <Input
+            id="rollout-release"
+            name="releaseId"
+            list="release-ids"
+            required
+            defaultValue={newest.id}
+          />
+          <datalist id="release-ids">
+            {options.releases.map((release) => (
+              <option key={release.id} value={release.id}>
+                {release.notes}
+              </option>
+            ))}
+          </datalist>
+        </label>
+      )}
       {later.length === 0 ? (
         <p className="text-muted-foreground text-sm">
           {`Only ring ${options.firstRing} has active clients, so this reaches only our own deployments.`}
@@ -255,7 +294,11 @@ const Rollouts = () => {
                   </Link>
                 </TableCell>
                 <TableCell>
-                  <span className="font-mono">{rollout.releaseId ?? ""}</span>
+                  {rollout.kind === "secrets" ? (
+                    "Secrets only"
+                  ) : (
+                    <span className="font-mono">{rollout.releaseId ?? ""}</span>
+                  )}
                 </TableCell>
                 <TableCell>{rollout.status}</TableCell>
                 <TableCell>{rollout.ring}</TableCell>

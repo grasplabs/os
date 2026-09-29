@@ -1,3 +1,4 @@
+import { hkdfHmacKey } from "@grasp-os/shared/client-secrets";
 import { toHex } from "@grasp-os/shared/encoding";
 import { canonicalJson } from "@grasp-os/shared/json";
 /**
@@ -197,6 +198,35 @@ export interface UploadInputs {
   secrets: readonly Secret[];
 }
 
+/** HMAC-SHA256 of `inputs`, as canonical JSON, under `key`: hex. */
+const keyedHash = async (key: CryptoKey, inputs: unknown): Promise<string> => {
+  const mac = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    encoder.encode(canonicalJson(z.json().parse(inputs)))
+  );
+  return toHex(new Uint8Array(mac));
+};
+
+/** `key` as an HMAC-SHA256 key, as it is. */
+const rawHmacKey = async (key: string): Promise<CryptoKey> =>
+  await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(key),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"]
+  );
+
+/** What the key secrets fingerprints are made with is derived for. */
+const secretsFingerprintPurpose = "grasp-os console secrets fingerprint";
+
+/** Secrets as `[name, value]` pairs, by name. */
+const sortedSecrets = (secrets: readonly Secret[]): [string, string][] =>
+  secrets
+    .map(({ name, value }): [string, string] => [name, value])
+    .toSorted(([a], [b]) => (a < b ? -1 : 1));
+
 /**
  * A fingerprint of everything that goes into a Worker's upload: its
  * secrets' names and values (the previous keys included, when given), its
@@ -209,8 +239,8 @@ export interface UploadInputs {
 export const uploadFingerprint = async (
   key: string,
   { manifest, worker, databases, vars, secrets }: UploadInputs
-): Promise<string> => {
-  const inputs = z.json().parse({
+): Promise<string> =>
+  await keyedHash(await rawHmacKey(key), {
     compatibilityDate: manifest.compatibilityDate,
     compatibilityFlags: worker.compatibilityFlags,
     mainModule: worker.mainModule,
@@ -224,21 +254,21 @@ export const uploadFingerprint = async (
     durableObjectMigrations: worker.durableObjectMigrations,
     bindings: renderBindings(worker, databases),
     vars,
-    secrets: secrets
-      .map(({ name, value }) => [name, value])
-      .toSorted(([a = ""], [b = ""]) => (a < b ? -1 : 1)),
+    secrets: sortedSecrets(secrets),
   });
-  const hmacKey = await crypto.subtle.importKey(
-    "raw",
-    encoder.encode(key),
-    { name: "HMAC", hash: "SHA-256" },
-    false,
-    ["sign"]
-  );
-  const mac = await crypto.subtle.sign(
-    "HMAC",
-    hmacKey,
-    encoder.encode(canonicalJson(inputs))
-  );
-  return toHex(new Uint8Array(mac));
-};
+
+/**
+ * A fingerprint of `secrets` alone, names and values: HMAC-SHA256 under a
+ * key HKDF derives from `key` (`CLIENT_KEY`) for this purpose alone, so it
+ * tells nothing about the values and never passes for another MAC. Of a
+ * Worker's secrets: two versions with the same one may share traffic
+ * (src/rollout/workflow.ts). Of its shared secrets: whether a version
+ * runs the ones in Secrets Store now (src/rollout/shared-secrets.ts).
+ */
+export const secretsFingerprint = async (
+  key: string,
+  secrets: readonly Secret[]
+): Promise<string> =>
+  await keyedHash(await hkdfHmacKey(key, secretsFingerprintPurpose, ["sign"]), {
+    secrets: sortedSecrets(secrets),
+  });

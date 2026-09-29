@@ -14,7 +14,10 @@ import { identifierSchema } from "./ids.ts";
 export const platformChangeSchema = z.object({
   /** The staff member, or the rollout, that made the change. */
   by: identifierSchema,
-  /** What changed, e.g. `release`, `settings` or `rollback`. */
+  /**
+   * What changed, e.g. `release`, `secrets` (new shared secrets on the
+   * same release), `settings` or `rollback`.
+   */
   what: identifierSchema,
   /** The release the version runs, e.g. `r000123-abcdef0`. */
   release: identifierSchema,
