@@ -1,4 +1,5 @@
 import { compilerVersion } from "@grasp-os/compiler";
+import { agentErrors } from "@grasp-os/shared/agent";
 import { appErrors } from "@grasp-os/shared/apps";
 import { featureErrors } from "@grasp-os/shared/errors";
 import { chatIdSchema } from "@grasp-os/shared/ids";
@@ -311,6 +312,24 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       "notes.md": "the builder's",
       "builder.md": "mine",
     });
+    // The chat's page lists what the agent is changing, for its person only.
+    // In the object itself: a refusal over RPC is also reported as
+    // uncaught by the object, which fails the run.
+    const listed = await runInDurableObject(chat.stub, (instance) => {
+      const refused = (() => {
+        try {
+          instance.drafts(chat.chat.id, "someone-else");
+          return "listed";
+        } catch (error) {
+          return agentErrors.codeOf(error);
+        }
+      })();
+      return { own: instance.drafts(chat.chat.id, builder.userId), refused };
+    });
+    expect(listed).toMatchObject({
+      own: [{ app: existing, base: 1, changed: ["notes.md"] }],
+      refused: "agent.chat_not_found",
+    });
   });
 
   it("stops the repair loop after five failed checks in a row, until the next question", async () => {
@@ -448,6 +467,12 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
         instance.draft(chatIdSchema.parse(chat.chat.id), existing)
       )
     ).resolves.toMatchObject({ changes: {}, revision: 2 });
+    // Nor does the chat's page list it.
+    await expect(
+      runInDurableObject(chat.stub, (instance) =>
+        instance.drafts(chat.chat.id, chat.personId)
+      )
+    ).resolves.toStrictEqual([]);
   });
 
   it("refuses to build without the agent's own permission, or for someone who doesn't build", async () => {

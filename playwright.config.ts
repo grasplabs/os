@@ -77,6 +77,7 @@ export default defineConfig({
             confirmations: true,
             agent: true,
             chat: true,
+            app_builder: true,
           })
         ),
         // `--local` has no Workers AI: a deployment kept in the EU extracts

@@ -6,10 +6,12 @@ import { useEffect, useRef, useState } from "react";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { ScreenFrame } from "../screens/screen-frame.tsx";
+import { ChatBuilds } from "./builds.tsx";
 
-// Beside the chat: a slot for what the chat is about. For now, one of the
-// person's Apps, its screen running beside the conversation, and a way to
-// its workflows on the App's page.
+// Beside the chat: a slot for what the chat is about. The Apps its agent
+// is building (builds.tsx), and one of the person's Apps, its screen
+// running beside the conversation, and a way to its workflows on the
+// App's page.
 
 /** The App open in the panel, and what it has to show. */
 interface Opened {
@@ -50,8 +52,17 @@ const OpenedApp = ({
   );
 };
 
-/** The side panel: the person's Apps, one of them open. */
-export const SidePanel = () => {
+/**
+ * The side panel: what the chat's agent is building, and the person's
+ * Apps, one of them open.
+ */
+export const SidePanel = ({
+  chatId,
+  running,
+}: {
+  chatId: string;
+  running: boolean;
+}) => {
   const [apps, setApps] = useState<Loaded<App[]>>();
   const [opened, setOpened] = useState<Loaded<Opened>>();
   useEffect(() => {
@@ -99,28 +110,31 @@ export const SidePanel = () => {
     return <NotLoaded page={apps} />;
   }
   return (
-    <div className="flex flex-col gap-2">
-      <h2 className="text-sm font-medium">Apps</h2>
-      {opened === undefined ? null : <NotLoaded page={opened} />}
-      {apps.data.length === 0 ? (
-        <p className="text-muted-foreground text-sm">No Apps yet.</p>
-      ) : (
-        <ul className="flex flex-col gap-1">
-          {apps.data.map((app) => (
-            <li key={app.id}>
-              <Button
-                className="w-full justify-start"
-                onClick={() => {
-                  void open(app);
-                }}
-                variant="ghost"
-              >
-                {app.name}
-              </Button>
-            </li>
-          ))}
-        </ul>
-      )}
+    <div className="flex flex-col gap-4">
+      <ChatBuilds chatId={chatId} running={running} />
+      <div className="flex flex-col gap-2">
+        <h2 className="text-sm font-medium">Apps</h2>
+        {opened === undefined ? null : <NotLoaded page={opened} />}
+        {apps.data.length === 0 ? (
+          <p className="text-muted-foreground text-sm">No Apps yet.</p>
+        ) : (
+          <ul className="flex flex-col gap-1">
+            {apps.data.map((app) => (
+              <li key={app.id}>
+                <Button
+                  className="w-full justify-start"
+                  onClick={() => {
+                    void open(app);
+                  }}
+                  variant="ghost"
+                >
+                  {app.name}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
     </div>
   );
 };
