@@ -1,5 +1,4 @@
-import { actorOf, delegateActorOf } from "@grasp-os/shared/audit";
-import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
+import { actorOf } from "@grasp-os/shared/audit";
 import { isExpectedError } from "@grasp-os/shared/errors";
 import {
   appIdSchema,
@@ -10,56 +9,39 @@ import type { PermissionId } from "@grasp-os/shared/ids";
 import {
   documentPathSchema,
   knowledgeErrors,
-  listRecordsOptionsSchema,
   playbookCollectionId,
   playbookRecordTypes,
 } from "@grasp-os/shared/knowledge";
-import type {
-  DocumentSummary,
-  RecordPage,
-  RecordRead,
-  RecordSummary,
-} from "@grasp-os/shared/knowledge";
-import { permissionErrors } from "@grasp-os/shared/permissions";
+import type { DocumentSummary } from "@grasp-os/shared/knowledge";
 import type { Authority, WorkContext } from "@grasp-os/shared/permissions";
 import { isAdmin } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, eq, gt } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import { stringify } from "yaml";
 import { z } from "zod";
 
 import type { Person } from "../app-access.ts";
 import { appContents } from "../apps.ts";
 import { outboxed } from "../audit-outbox.ts";
-import { memberRole, teamsOf } from "../auth/identity.ts";
-import { collections, documents, versions } from "../db/knowledge/schema.ts";
+import { collections, documents } from "../db/knowledge/schema.ts";
 import { requireFeature } from "../features.ts";
-import { authorize } from "../permissions.ts";
-import { isRestricted } from "../restricted.ts";
-import { noteProvenance } from "./access.ts";
-import type { Reader } from "./access.ts";
-import { allowedFor } from "./app-entries.ts";
 import {
   ensureCollection,
   isWritable,
-  readableCollection,
   requireWritable,
 } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
+import { findByPath, keptFieldsOf, writeVersion } from "./documents.ts";
+import { parseFrontmatter, withFrontmatter } from "./frontmatter.ts";
+import { noDeclaredTypes } from "./record-types.ts";
 import {
-  findByPath,
-  getDocument,
-  keptFieldsOf,
-  toSummary,
-  writeVersion,
-} from "./documents.ts";
-import type { DocumentRow, Writer } from "./documents.ts";
-import {
-  FrontmatterError,
-  parseFrontmatter,
-  withFrontmatter,
-} from "./frontmatter.ts";
+  delegateWriter,
+  lastCheckOf,
+  recordText,
+  versionText,
+  versionWriter,
+} from "./records.ts";
+import type { RecordWriter } from "./records.ts";
 import { snapshotFigures } from "./snapshots.ts";
 
 // The Playbook: the company's records (its vision, teams, people, tools,
@@ -80,31 +62,6 @@ import { snapshotFigures } from "./snapshots.ts";
 // a permission to write the Playbook, only what that person may do
 // themselves (so only for an admin), and never from a context that read
 // restricted data, which the Playbook, read by everyone, would pass on.
-
-/**
- * Who saves a record: the person whose rights apply, the audit actor, and
- * for an App or agent, what its audit events add (`Writer`'s `detail`).
- */
-interface RecordWriter {
-  person: Person;
-  actor: AuditActor;
-  detail?: Record<string, AuditDetailValue>;
-  /** Checked again just before each write's batch (`Write`'s `lastCheck`). */
-  lastCheck?: () => Promise<void>;
-}
-
-/** What each write of `writer` checks last, just before its batch. */
-const lastCheckOf = ({
-  lastCheck,
-}: RecordWriter): { lastCheck?: () => Promise<void> } =>
-  lastCheck === undefined ? {} : { lastCheck };
-
-/** Who a writer's versions are by, and what their audit events say. */
-const versionWriter = ({ person, actor, detail }: RecordWriter): Writer => ({
-  actor,
-  userId: person.userId,
-  ...(detail === undefined ? {} : { detail }),
-});
 
 /** A person, saving a record themselves. */
 const personRecordWriter = (person: Identity): RecordWriter => ({
@@ -193,26 +150,6 @@ const recordInputSchema = z.strictObject({
   message: z.string().trim().max(500).optional(),
 });
 
-/** The text of `record`: its frontmatter, then its Markdown. */
-const recordText = (record: Record<string, unknown>, body: string): string =>
-  `---\n${stringify(record)}---\n${body}`;
-
-/** The text of version `number` of `documentId`, if it has one. */
-const versionText = async (
-  env: Env,
-  documentId: string,
-  number: number
-): Promise<string | undefined> => {
-  const row = await drizzle(env.KNOWLEDGE)
-    .select({ text: versions.text })
-    .from(versions)
-    .where(
-      and(eq(versions.documentId, documentId), eq(versions.number, number))
-    )
-    .get();
-  return row?.text;
-};
-
 /**
  * What a save of a `type` record keeps from the saved `text` at `path`
  * when that was a `type` record too, whatever the record it saves says:
@@ -288,7 +225,7 @@ const writeRecord = async (
     ifVersion,
     message: message === undefined || message === "" ? null : message,
     restoredFrom: null,
-    ...(setsKept ? { sets: keptFieldsOf(path, text) } : {}),
+    ...(setsKept ? { sets: keptFieldsOf(path, text, noDeclaredTypes) } : {}),
     ...lastCheckOf(writer),
   });
 };
@@ -437,57 +374,21 @@ export const linkWorkflow = async (
 ): Promise<DocumentSummary> =>
   await linkWorkflowAs(env, personRecordWriter(person), input);
 
-/**
- * The person an App or agent writes the Playbook for (`authority`), in
- * `context`: only while `permissionId` lets it write the Playbook, that
- * person is still a member, and the context hasn't read restricted data
- * (`permission.restricted`), which the Playbook, open to everyone, would
- * pass on. Their own rights apply on top: only an admin changes the
- * Playbook.
- */
-const delegateWriter = async (
+/** An App's or agent's writer of the Playbook (`delegateWriter`). */
+const playbookWriter = async (
   env: Env,
   authority: Authority,
   context: WorkContext,
   permissionId: PermissionId
 ): Promise<RecordWriter> => {
   requirePlaybook(env);
-  await authorize(
+  return await delegateWriter(
     env,
     authority,
-    { type: "collection", collectionId: playbookCollectionId },
-    "write",
-    permissionId
+    context,
+    permissionId,
+    playbookCollectionId
   );
-  const requireUnrestricted = async (): Promise<void> => {
-    if (await isRestricted(env, authority, context)) {
-      throw permissionErrors.create("permission.restricted");
-    }
-  };
-  await requireUnrestricted();
-  const userId = authority.onBehalfOf;
-  const role = await memberRole(env.DB, userId);
-  if (!role) {
-    throw permissionErrors.create("permission.person_inactive");
-  }
-  return {
-    person: { userId, role, teams: await teamsOf(env.DB, userId) },
-    actor: delegateActorOf(authority),
-    // Again just before the batch. The save's payload was fixed when App
-    // code called it, so a sensitive read finishing meanwhile can't be in
-    // it: this is defence in depth.
-    lastCheck: requireUnrestricted,
-    // The App actor doesn't name the person or the version; a workflow
-    // run's write (`mode: "workflow"`) acts for its starter, or for the
-    // App's owner when a trigger started it.
-    detail: {
-      onBehalfOf: userId,
-      mode: authority.mode,
-      ...(authority.appVersion === undefined
-        ? {}
-        : { appVersion: authority.appVersion }),
-    },
-  };
 };
 
 /**
@@ -504,7 +405,7 @@ export const saveRecordAsDelegate = async (
 ): Promise<DocumentSummary> =>
   await saveRecordAs(
     env,
-    await delegateWriter(env, authority, context, permissionId),
+    await playbookWriter(env, authority, context, permissionId),
     input
   );
 
@@ -522,7 +423,7 @@ export const linkWorkflowAsDelegate = async (
 ): Promise<DocumentSummary> =>
   await linkWorkflowAs(
     env,
-    await delegateWriter(env, authority, context, permissionId),
+    await playbookWriter(env, authority, context, permissionId),
     input
   );
 
@@ -603,7 +504,7 @@ export const takeSnapshotAsDelegate = async (
 ): Promise<DocumentSummary> =>
   await takeSnapshotAs(
     env,
-    await delegateWriter(env, authority, context, permissionId),
+    await playbookWriter(env, authority, context, permissionId),
     input
   );
 
@@ -623,7 +524,7 @@ export const canWriteAsDelegate = async (
 ): Promise<boolean> => {
   let person: Person;
   try {
-    ({ person } = await delegateWriter(env, authority, context, permissionId));
+    ({ person } = await playbookWriter(env, authority, context, permissionId));
   } catch (error) {
     if (isExpectedError(error)) {
       return false;
@@ -633,152 +534,4 @@ export const canWriteAsDelegate = async (
   const collection =
     (await storedPlaybook(env)) ?? playbookCollectionRow(person.userId);
   return isWritable(env, person, collection);
-};
-
-/**
- * A document as `reader` may read it (`getDocument`), with its frontmatter
- * as data (`record`: its type, and the fields its type's schema reads,
- * defaults filled in), and the Markdown after it (`body`): how code with
- * no YAML parser reads a record, and saves it back (`saveRecord`).
- */
-export const getRecord = async (
-  env: Env,
-  reader: Reader,
-  documentId: unknown,
-  version?: unknown
-): Promise<RecordRead> => {
-  const read = await getDocument(env, reader, documentId, version);
-  let parsed: ReturnType<typeof parseFrontmatter>;
-  try {
-    parsed = parseFrontmatter(read.path, read.version.text);
-  } catch (error) {
-    // Saved text fit its type when it was saved; under another release's
-    // schemas (after a rollback, say) it may not. Refused as a save of it
-    // would be, saying why.
-    if (error instanceof FrontmatterError) {
-      throw knowledgeErrors.create("knowledge.invalid", {
-        issues: error.issues,
-      });
-    }
-    throw error;
-  }
-  const { type, frontmatter, body } = parsed;
-  return { ...read, record: { type, ...frontmatter }, body };
-};
-
-/**
- * The record `text` holds, as `document`'s current version, or
- * `undefined` when there is none or it doesn't fit its type any more (see
- * `getRecord`).
- */
-const recordOf = (
-  document: DocumentRow,
-  text: string | null
-): RecordSummary | undefined => {
-  if (text === null) {
-    return undefined;
-  }
-  try {
-    const { type, frontmatter, body } = parseFrontmatter(document.path, text);
-    return { ...toSummary(document), record: { type, ...frontmatter }, body };
-  } catch (error) {
-    if (error instanceof FrontmatterError) {
-      return undefined;
-    }
-    throw error;
-  }
-};
-
-/**
- * A page of the collection `collectionId`'s documents (of `type`, if
- * given), in path order, each read as `getRecord` reads its current
- * version, in one read: one access check, and one read in the audit log
- * for the page, naming the documents it read. How code that needs many
- * records reads them without a read, and an audit event, for each.
- */
-export const listRecords = async (
-  env: Env,
-  reader: Reader,
-  collectionId: unknown,
-  options?: unknown
-): Promise<RecordPage> => {
-  const { after, limit, type } = knowledgeErrors.parse(
-    "knowledge.invalid",
-    listRecordsOptionsSchema,
-    options
-  );
-  const db = drizzle(env.KNOWLEDGE);
-  const allowed = await allowedFor(env, db, reader, collectionId);
-  const collection = await readableCollection(
-    db,
-    allowed.collections,
-    collectionId
-  );
-  // The documents of the page, or of the rest of the collection, after
-  // the path `from`.
-  const listed = (from: string | undefined) =>
-    and(
-      eq(documents.collectionId, collection.id),
-      allowed.documents(),
-      from === undefined ? undefined : gt(documents.path, from),
-      type === undefined ? undefined : eq(documents.type, type)
-    );
-  // The text is read in the same query as the access check, as
-  // `getDocument` reads it.
-  const rows = await db
-    .select({ document: documents, text: versions.text })
-    .from(documents)
-    .innerJoin(collections, eq(collections.id, documents.collectionId))
-    .leftJoin(
-      versions,
-      and(
-        eq(versions.documentId, documents.id),
-        eq(versions.number, documents.currentVersion)
-      )
-    )
-    .where(listed(after))
-    .orderBy(asc(documents.path))
-    .limit(limit);
-  const last = rows.at(-1);
-  // Whether another page follows, only after a full one: by ID alone, so
-  // nothing is read that this page's audit event doesn't name.
-  const more =
-    rows.length === limit && last !== undefined
-      ? await db
-          .select({ id: documents.id })
-          .from(documents)
-          .innerJoin(collections, eq(collections.id, documents.collectionId))
-          .where(listed(last.document.path))
-          .limit(1)
-          .get()
-      : undefined;
-  const provenance = await noteProvenance(
-    env,
-    reader,
-    {
-      action: "knowledge.read",
-      target: { type: "collection", id: collection.id },
-      // At most `recordPageMaxLimit` (20) and the collection: they fit the
-      // event's provenance.
-      documentIds: rows.map(({ document }) => document.id),
-      detail: { read: "records", count: rows.length },
-    },
-    collection
-  );
-  const records: RecordSummary[] = [];
-  const unreadable: DocumentSummary[] = [];
-  for (const { document, text } of rows) {
-    const record = recordOf(document, text);
-    if (record === undefined) {
-      unreadable.push(toSummary(document));
-    } else {
-      records.push(record);
-    }
-  }
-  return {
-    records,
-    unreadable,
-    next: more === undefined || last === undefined ? null : last.document.path,
-    provenance,
-  };
 };

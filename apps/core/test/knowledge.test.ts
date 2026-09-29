@@ -356,7 +356,7 @@ describe("saving a document", () => {
       frontmatter: {
         code: "knowledge.invalid",
         issues: [
-          "frontmatter.type: one of doc, skill, memory, decision, file, vision, team, person, tool, source, statement, workflow, snapshot, plan-item, rulebook-entry",
+          "frontmatter.type: one of doc, skill, memory, decision, file, vision, team, person, tool, source, statement, workflow, snapshot, plan-item, rulebook-entry, or a record type an App declares for this collection",
         ],
       },
       path: {
@@ -382,7 +382,7 @@ describe("saving a document", () => {
     });
   });
 
-  it("reads a type it doesn't know, as a later release saved it, as a plain doc", async () => {
+  it("lists a type by its name, and one that is no type's name, as a later release could save it, as a plain doc", async () => {
     const { api } = await knowledgeOf("user");
     const { id: collectionId } = await api.createCollection(personal());
     await api.saveDocument({
@@ -398,9 +398,19 @@ describe("saving a document", () => {
       text: "# Forms\n\nFill in quarantined forms.",
       ifVersion: 0,
     });
-    // As a rollback leaves it: a type this release has no schema for.
+    const declared = await api.saveDocument({
+      collectionId,
+      path: "pdf/tasks.md",
+      text: "# Tasks",
+      ifVersion: 0,
+    });
+    // As a rollback leaves it: a type this release can't even name.
     await env.KNOWLEDGE.prepare("UPDATE documents SET type = ? WHERE id = ?")
-      .bind("later-kind", later.id)
+      .bind("Later kind!", later.id)
+      .run();
+    // A record type an App declares, whether one does now or not.
+    await env.KNOWLEDGE.prepare("UPDATE documents SET type = ? WHERE id = ?")
+      .bind("task", declared.id)
       .run();
     const { documents } = await api.listDocuments(collectionId);
     const read = await api.getDocument(later.id);
@@ -415,10 +425,11 @@ describe("saving a document", () => {
       listed: [
         { path: "pdf/SKILL.md", type: "skill" },
         { path: "pdf/forms.md", type: "doc" },
+        { path: "pdf/tasks.md", type: "task" },
       ],
       read: "doc",
       searched: ["doc"],
-      followed: ["doc"],
+      followed: ["doc", "task"],
     });
   });
 

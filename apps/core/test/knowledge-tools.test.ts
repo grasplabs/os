@@ -215,7 +215,7 @@ describe("an agent's Knowledge tools", setUpTime, () => {
       await envOf(actingFor(agent, admin.userId)),
       "HANDBOOK"
     );
-    const found = async (type?: "skill" | "doc") => {
+    const found = async (type?: string) => {
       const { hits } = await knowledge.search(word, { type });
       return hits.map((hit) => `${hit.type} ${hit.documentId}`).toSorted();
     };
@@ -226,15 +226,18 @@ describe("an agent's Knowledge tools", setUpTime, () => {
       skills: await found("skill"),
       docs: await found("doc"),
       inCollection: inCollection?.hits.map(({ documentId }) => documentId),
+      // A type an App may declare finds what it holds; one no type could
+      // be named is refused.
+      recipes: await found("recipe"),
       unknownType: await outcome(
-        // @ts-expect-error -- not a type of document
-        knowledge.search(word, { type: "recipe" })
+        knowledge.search(word, { type: "Not a type" })
       ),
     }).toStrictEqual({
       any: [`doc ${notesId}`, `skill ${skillId}`],
       skills: [`skill ${skillId}`],
       docs: [`doc ${notesId}`],
       inCollection: [skillId],
+      recipes: [],
       unknownType: "knowledge.invalid",
     });
   });

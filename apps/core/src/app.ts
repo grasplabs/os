@@ -202,6 +202,8 @@ export interface CallPath {
 /** A call running now, as the host keeps it by its token. */
 interface RunningCall {
   caller: AppCallerInput;
+  /** The method of the App's server code it calls. */
+  method: string;
   /** The version its code runs on, once started. */
   version?: number;
   /** The Apps whose calls are under way above it, outermost first. */
@@ -330,6 +332,7 @@ export class App extends DurableObject<Env> {
     const token = crypto.randomUUID();
     const call: RunningCall = {
       caller,
+      method,
       above: via?.chain ?? [],
       deadline: Date.now() + ms,
       readOnly: via?.readOnly ?? false,
@@ -559,21 +562,23 @@ export class App extends DurableObject<Env> {
    * Who a stub call acts for: the caller of the running call `token`
    * names, with the version of the code the call runs, and, for a
    * workflow run's step, that step's idempotency key, and where the call
-   * is within calls between Apps (`path`). For the App's stubs
-   * (app-bindings.ts, app-calls.ts) only. A call whose code hasn't
-   * started has handed its token to no one, so no stub call can come
-   * with it.
+   * is within calls between Apps (`path`), and the method it calls,
+   * which a record's kept fields go by (knowledge/records.ts). For the
+   * App's stubs (app-bindings.ts, app-calls.ts) only. A call whose code
+   * hasn't started has handed its token to no one, so no stub call can
+   * come with it.
    */
   callerOf(token: string): {
     authority: Authority;
     idempotencyKey: string | undefined;
     path: CallPath;
+    method: string;
   } {
     const call = this.#calls.get(token);
     if (call?.version === undefined) {
       throw appErrors.create("app.caller_invalid");
     }
-    const { caller, version, above, deadline: ends, readOnly } = call;
+    const { caller, method, version, above, deadline: ends, readOnly } = call;
     return {
       authority: {
         subject: { type: "app", appId: this.#app },
@@ -583,6 +588,7 @@ export class App extends DurableObject<Env> {
       },
       idempotencyKey: caller.idempotencyKey,
       path: { chain: [...above, this.#app], deadline: ends, readOnly },
+      method,
     };
   }
 

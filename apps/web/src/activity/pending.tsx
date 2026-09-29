@@ -146,6 +146,41 @@ const objectOf = (
 };
 
 /**
+ * The record types a request to write a collection would claim there, and
+ * those another App keeps there already, which this App wouldn't get:
+ * named, for an admin to grant the one they want.
+ */
+const RecordTypeClaims = ({
+  request,
+  directory,
+}: {
+  request: Permission;
+  directory: Directory;
+}) => {
+  const { recordTypes } = request;
+  if (recordTypes === undefined) {
+    return null;
+  }
+  return (
+    <>
+      {recordTypes.claims.length === 0 ? null : (
+        <span className="text-muted-foreground block text-xs">
+          Would keep {recordTypes.claims.join(", ")} records here
+        </span>
+      )}
+      {recordTypes.taken.map(({ type, owner }) => (
+        <span key={type} className="text-destructive block text-xs">
+          {owner === null
+            ? `Another App already keeps ${type} records here`
+            : `${appName(directory, owner)} already keeps ${type} records here`}
+          : this App&apos;s won&apos;t apply.
+        </span>
+      ))}
+    </>
+  );
+};
+
+/**
  * The version of the App an admin reviews as they decide: the one current
  * as the list was read, whose code the grant trusts. Null for an agent's
  * permission, an App with none current, or one the list doesn't have:
@@ -374,6 +409,7 @@ export const PendingApprovals = ({
                     <span className="text-muted-foreground block text-xs">
                       as {request.binding}
                     </span>
+                    <RecordTypeClaims request={request} directory={directory} />
                   </TableCell>
                   <TableCell>{request.actions.join(", ")}</TableCell>
                   <TableCell>

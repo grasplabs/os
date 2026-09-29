@@ -119,6 +119,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               knowledge_purge: true,
               knowledge_uploads: true,
               playbook: true,
+              record_types: true,
               skills: true,
               apps_collection: true,
               connections: true,

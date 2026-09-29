@@ -25,8 +25,9 @@ const callerSchema = z.object({ token: z.string().min(1).max(100) });
 
 /**
  * Who `caller` is, as App `app`'s host knows them while their call runs,
- * that call's step key, for a workflow run's caller, and where the call
- * is within calls between Apps. App code can't name anyone: a caller that
+ * that call's step key, for a workflow run's caller, where the call is
+ * within calls between Apps, and the App method it calls. App code can't
+ * name anyone: a caller that
  * isn't one of a running call of this App (made up, ended, or another
  * App's) is `app.caller_invalid`.
  */
@@ -38,6 +39,7 @@ export const callerOf = async (
   authority: Authority;
   idempotencyKey: string | undefined;
   path: CallPath;
+  method: string;
 }> => {
   const parsed = callerSchema.safeParse(caller);
   if (!parsed.success) {

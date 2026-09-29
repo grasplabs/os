@@ -1,4 +1,5 @@
 import type { AppId } from "@grasp-os/shared/ids";
+import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import type {
   BacklinkPage,
   DocumentPage,
@@ -19,13 +20,18 @@ import { forSandbox } from "../bindings.ts";
 import { collectionReads, readAsDelegate } from "./binding.ts";
 import type { CollectionGrant } from "./binding.ts";
 import {
-  canWriteAsDelegate,
-  getRecord,
+  canWriteAsDelegate as canWritePlaybook,
   linkWorkflowAsDelegate,
-  listRecords,
-  saveRecordAsDelegate,
+  saveRecordAsDelegate as savePlaybookRecord,
   takeSnapshotAsDelegate,
 } from "./playbook.ts";
+import {
+  canWriteAsDelegate,
+  getRecord,
+  listRecords,
+  saveRecordAsDelegate,
+} from "./records.ts";
+import type { Setter } from "./records.ts";
 
 /**
  * A collection, as an App's server code holds it:
@@ -37,12 +43,14 @@ import {
  * read of restricted data puts the App in restricted mode first, for
  * everyone using it.
  *
- * The Playbook's stub also writes records (`saveRecord`, `linkWorkflow`,
- * `takeSnapshot`), under a permission with `write`, for the caller and
- * with their rights (playbook.ts), and says whether it would
- * (`canWrite`), so App screens offer only the changes core takes. Other
- * collections have no writes: a save through any other stub is refused by
- * the permission check, and `canWrite` is `false` there.
+ * Each stub also reads and writes the collection's records, typed by the
+ * record types Apps declare for it (records.ts, record-types.ts): a save
+ * (`saveRecord`) only under a permission with `write`, for the caller and
+ * with their rights, and says whether it would (`canWrite`), so App
+ * screens offer only the changes core takes. A save through a stub whose
+ * permission doesn't write is refused by the permission check, and
+ * `canWrite` is `false` there. The Playbook's stub also links a workflow
+ * and takes a snapshot (`linkWorkflow`, `takeSnapshot`, playbook.ts).
  */
 export class AppCollectionBinding extends WorkerEntrypoint<
   Env,
@@ -54,6 +62,18 @@ export class AppCollectionBinding extends WorkerEntrypoint<
     return async () => {
       const resolved = await callerOf(this.env, app, caller);
       return resolved.authority;
+    };
+  }
+
+  /** Who `caller` is, and the App method their call runs. */
+  async #callerOf(
+    caller: unknown
+  ): Promise<{ authority: Authority; setter: Setter }> {
+    const { app } = this.ctx.props;
+    const resolved = await callerOf(this.env, app, caller);
+    return {
+      authority: resolved.authority,
+      setter: { app, method: resolved.method },
     };
   }
 
@@ -116,7 +136,7 @@ export class AppCollectionBinding extends WorkerEntrypoint<
   /**
    * A document with its frontmatter as data (`record`) and its Markdown
    * (`body`), read as `getDocument` reads it: how App code, which has no
-   * YAML parser, reads a Playbook record.
+   * YAML parser, reads a record.
    */
   async getRecord(
     caller: unknown,
@@ -152,42 +172,61 @@ export class AppCollectionBinding extends WorkerEntrypoint<
   }
 
   /**
-   * Whether `saveRecord` and `linkWorkflow` would write for `caller` now,
-   * by the checks they make (`canWriteAsDelegate` in playbook.ts): a
-   * permission to write the Playbook, a caller who may change it
-   * themselves (an admin), and an App that hasn't read restricted data.
-   * A hint for showing only what core takes: each write is checked again.
+   * Whether `saveRecord` would write for `caller` now, by the checks it
+   * makes (`canWriteAsDelegate` in records.ts): a permission to write the
+   * collection, a caller who may change it themselves, and an App that
+   * hasn't read restricted data. A hint for showing only what core takes:
+   * each write is checked again.
    */
   async canWrite(caller: unknown): Promise<boolean> {
-    return await this.#write(
-      caller,
-      async (authority, grant) =>
-        await canWriteAsDelegate(
-          this.env,
-          authority,
-          grant.context,
-          grant.permissionId
-        )
+    const { collectionId } = this.ctx.props;
+    return await this.#write(caller, async ({ authority }, grant) =>
+      collectionId === playbookCollectionId
+        ? await canWritePlaybook(
+            this.env,
+            authority,
+            grant.context,
+            grant.permissionId
+          )
+        : await canWriteAsDelegate(
+            this.env,
+            authority,
+            grant.context,
+            grant.permissionId,
+            collectionId
+          )
     );
   }
 
   /**
-   * Saves a Playbook record for `caller` (`saveRecord` in playbook.ts:
-   * `{ path, ifVersion, record, body, message? }`), through the save
-   * pipeline, with versions: only under a permission that writes the
-   * Playbook, and only for someone who may change it themselves.
+   * Saves a record for `caller` (`{ path, ifVersion, record, body,
+   * message? }`, `recordSaveSchema`), through the save pipeline, with
+   * versions: only under a permission that writes the collection, and only
+   * for someone who may change it themselves. The record's type checks
+   * it; the kept fields its declaration gives to the method this call
+   * runs in are set as `record` has them, and every other one is kept
+   * (records.ts, `writeRecord`).
    */
   async saveRecord(caller: unknown, input: unknown): Promise<DocumentSummary> {
-    return await this.#write(
-      caller,
-      async (authority, grant) =>
-        await saveRecordAsDelegate(
-          this.env,
-          authority,
-          grant.context,
-          grant.permissionId,
-          input
-        )
+    const { collectionId } = this.ctx.props;
+    return await this.#write(caller, async ({ authority, setter }, grant) =>
+      collectionId === playbookCollectionId
+        ? await savePlaybookRecord(
+            this.env,
+            authority,
+            grant.context,
+            grant.permissionId,
+            input
+          )
+        : await saveRecordAsDelegate(
+            this.env,
+            authority,
+            grant.context,
+            grant.permissionId,
+            collectionId,
+            input,
+            setter
+          )
     );
   }
 
@@ -203,7 +242,7 @@ export class AppCollectionBinding extends WorkerEntrypoint<
   ): Promise<DocumentSummary> {
     return await this.#write(
       caller,
-      async (authority, grant) =>
+      async ({ authority }, grant) =>
         await linkWorkflowAsDelegate(
           this.env,
           authority,
@@ -227,7 +266,7 @@ export class AppCollectionBinding extends WorkerEntrypoint<
   ): Promise<DocumentSummary> {
     return await this.#write(
       caller,
-      async (authority, grant) =>
+      async ({ authority }, grant) =>
         await takeSnapshotAsDelegate(
           this.env,
           authority,
@@ -241,11 +280,14 @@ export class AppCollectionBinding extends WorkerEntrypoint<
   /** Runs a write for `caller`, with errors as the sandbox sees them. */
   async #write<T>(
     caller: unknown,
-    run: (authority: Authority, grant: CollectionGrant) => Promise<T>
+    run: (
+      resolved: { authority: Authority; setter: Setter },
+      grant: CollectionGrant
+    ) => Promise<T>
   ): Promise<T> {
     const { app: _app, ...grant } = this.ctx.props;
     try {
-      return await run(await this.#authorityOf(caller)(), grant);
+      return await run(await this.#callerOf(caller), grant);
     } catch (error) {
       throw forSandbox(error);
     }

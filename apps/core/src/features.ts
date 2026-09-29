@@ -93,6 +93,15 @@ export type Feature =
    */
   | "playbook"
   /**
+   * Record types Apps declare (app/records.json) for the collections they
+   * write, checked on every save of one of their records
+   * (knowledge/record-types.ts); needs `knowledge` on too. While off, no
+   * App's declaration counts: a save of a type the platform doesn't know
+   * is refused, as before record types, and such records read as
+   * unreadable, until it's back on.
+   */
+  | "record_types"
+  /**
    * Skills (knowledge/grasp-skills.ts): the release's Grasp skills synced
    * into their collection, the client's own skills collection, and
    * copying a Grasp skill into it; needs `knowledge` on too. While off,
