@@ -268,7 +268,7 @@ const ReviewDetails = ({
                     {changeWords[step.change]} step {step.name}
                     {step.sideEffect ? (
                       <Badge variant="destructive">
-                        Changes something outside Grasp
+                        May change something outside Grasp
                       </Badge>
                     ) : null}
                     {step.calls.length === 0 ? null : (
@@ -276,6 +276,9 @@ const ReviewDetails = ({
                         Calls {step.calls.join(", ")}: may change things
                       </Badge>
                     )}
+                    {step.sharedCode ? (
+                      <Badge variant="outline">Shared code changed</Badge>
+                    ) : null}
                   </span>
                 ))
               )}
