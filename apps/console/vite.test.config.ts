@@ -38,6 +38,11 @@ export default defineProject({
   test: {
     name: "console",
     include: ["test/**/*.test.ts"],
+    // The first page a test file renders loads the whole app through Vite's
+    // module runner, about 2 s on an idle machine and several times that on
+    // a loaded one (CI, or the whole repo's suites at once), past Vitest's
+    // 5 s default. A hang still fails, just later.
+    testTimeout: 30_000,
     // Brings the database up to the committed migrations.
     setupFiles: ["./test/apply-migrations.ts"],
   },
