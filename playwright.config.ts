@@ -6,7 +6,10 @@ import { origin, testAuthSecret } from "./e2e/people.ts";
 const port = 8787;
 const ci = process.env.CI === "true";
 
-/** The one model the stack's gateway allows; no test calls it. */
+/**
+ * The one model the stack's gateway allows. `--local` reaches no AI Gateway,
+ * so a call to it fails: the chat test (e2e/chat.e2e.ts) shows that failure.
+ */
 const e2eModel = "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
 /** A `--var` for wrangler dev, quoted once for the shell. */
@@ -70,11 +73,14 @@ export default defineConfig({
             model_rules: true,
             model_settings: true,
             build_on_save: true,
+            confirmations: true,
+            agent: true,
+            chat: true,
           })
         ),
         // `--local` has no Workers AI: a deployment kept in the EU extracts
-        // uploads' text in the Worker instead (knowledge/extract.ts). No
-        // test calls a model; the Models page shows the rules and budgets.
+        // uploads' text in the Worker instead (knowledge/extract.ts). The
+        // Models page shows the rules and budgets.
         devVar(
           "MODEL_GATEWAY",
           JSON.stringify({

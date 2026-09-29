@@ -45,7 +45,7 @@ const isBusy = (error: unknown): boolean =>
  * core's (apps/core/package.json), as one batch in one transaction, which
  * SQLite undoes whole when it can't finish: so a busy batch is tried again.
  */
-const execute = async (sql: string): Promise<void> => {
+export const execute = async (sql: string): Promise<void> => {
   for (let attempt = 1; ; attempt += 1) {
     try {
       execFileSync(

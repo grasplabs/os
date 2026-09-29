@@ -202,6 +202,12 @@ export class Workspace extends DurableObject<Env> {
   /** How long the alarm waits before delivering audit events again. */
   #auditRetryMs = auditRetryMs.first;
 
+  /**
+   * Bumped whenever a chat's agent has a write held (`heldChanged`), so its
+   * watchers read the held writes again. In memory only.
+   */
+  readonly #heldVersions = new Map<ChatId, number>();
+
   /** Who follows each chat (`watch`), by chat and watch ID. */
   readonly #watchers = new Map<ChatId, Map<string, ChatWatch>>();
 
@@ -797,6 +803,7 @@ export class Workspace extends DurableObject<Env> {
       this.#deliverAudit();
       this.#stopped.delete(id);
       this.#provenanceVersions.delete(id);
+      this.#heldVersions.delete(id);
       for (const watch of this.#watchers.get(id)?.values() ?? []) {
         watch[Symbol.dispose]();
       }
@@ -858,6 +865,16 @@ export class Workspace extends DurableObject<Env> {
     watch?.[Symbol.dispose]();
   }
 
+  /**
+   * Tells the chat's watchers its agent had a write held for the person
+   * (agent-connections.ts), so the page shows it to confirm at once, in
+   * the middle of a turn too. Nothing of the write itself.
+   */
+  heldChanged(chatId: ChatId): void {
+    this.#heldVersions.set(chatId, (this.#heldVersions.get(chatId) ?? 0) + 1);
+    this.#changed(chatId);
+  }
+
   /** Tells the chat's watchers it changed, with the messages just stored. */
   #changed(chatId: ChatId, messages: readonly ChatMessage[] = []): void {
     for (const watch of this.#watchers.get(chatId)?.values() ?? []) {
@@ -873,7 +890,8 @@ export class Workspace extends DurableObject<Env> {
       partial: partial === undefined ? null : partialOf(partial),
       running: this.#turns.has(chatId),
       provenanceVersion: this.#provenanceVersions.get(chatId) ?? 0,
-      ...(stopped === undefined ? {} : { stopped }),
+      stopped: stopped ?? null,
+      held: this.#heldVersions.get(chatId) ?? 0,
     };
   }
 

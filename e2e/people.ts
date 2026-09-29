@@ -129,6 +129,7 @@ const cast = {
   workflows: { builder: "builder", user: "user" },
   activity: { admin: "admin", builder: "builder" },
   activityAgain: { admin: "admin", builder: "builder" },
+  chat: { user: "user" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;
