@@ -6,7 +6,7 @@ import {
   statisticRowsPerDay,
 } from "@grasp-os/shared/statistics";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
@@ -696,9 +696,20 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
       ).catch((error: unknown) =>
         isExpectedError(error) ? error.code : "unexpected"
       );
-      // Two calls past the bound of one, in the same minute: audited once.
-      results.limited = await readMany();
-      results.limitedAgain = await readMany();
+      // On a fixed clock: two calls past the bound of one in the same
+      // minute, audited once; one in the next minute, audited again.
+      const minute = Math.floor(Date.now() / 60_000) * 60_000;
+      vi.useFakeTimers({ toFake: ["Date"] });
+      try {
+        vi.setSystemTime(minute + 10_000);
+        results.limited = await readMany();
+        vi.setSystemTime(minute + 50_000);
+        results.limitedAgain = await readMany();
+        vi.setSystemTime(minute + 70_000);
+        results.nextMinute = await readMany();
+      } finally {
+        vi.useRealTimers();
+      }
     });
     expect({
       results,
@@ -719,6 +730,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
         off: "feature.disabled",
         limited: { error: "statistics.rate_limited" },
         limitedAgain: { error: "statistics.rate_limited" },
+        nextMinute: { error: "statistics.rate_limited" },
       },
       refused: [
         {
@@ -735,6 +747,11 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
           app: watched,
           measure: "platform.workflow_runs",
           refused: "feature.disabled",
+        },
+        {
+          app: watched,
+          measure: "platform.workflow_runs",
+          refused: "statistics.rate_limited",
         },
         {
           app: watched,
