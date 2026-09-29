@@ -5,11 +5,16 @@ import { errorFields, log } from "@grasp-os/shared/log";
 import type { InboundEmail } from "@grasp-os/shared/workflows";
 import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
-import PostalMime from "postal-mime";
 import type { Address, Email } from "postal-mime";
 
 import { apps, workflowTriggers } from "../db/core/schema.ts";
 import { featureEnabled } from "../features.ts";
+import {
+  keepMessage,
+  maxListed,
+  maxMessageBytes,
+  parsedOf,
+} from "./kept-email.ts";
 import { atHourlyCap, maxInputLength, startRun } from "./runs.ts";
 
 // Mail to workflows' email triggers (trigger-registry.ts). Email Routing
@@ -26,8 +31,12 @@ import { atHourlyCap, maxInputLength, startRun } from "./runs.ts";
 // A run gets the message parsed (`InboundEmail`), bounded to fit a run's
 // input: at most 100 each of To and Cc, names, subject and file names
 // cut, attachments listed (never their content), and as much plain text
-// as fits (a message with only HTML, its text). Nothing of the message is
-// stored; attachments come later. Its `id` is the SHA-256 of its bytes.
+// as fits (a message with only HTML, its text). Its `id` is the SHA-256
+// of its bytes.
+//
+// A message with attachments is kept for its runs to read them, while
+// `email_attachments` is on (kept-email.ts); its input names it
+// (`stored`), or says `stored: null`.
 //
 // The same message delivered again starts no second run: its key, per
 // App and workflow, is the SHA-256 of its Message-ID, or of its bytes
@@ -48,12 +57,6 @@ import { atHourlyCap, maxInputLength, startRun } from "./runs.ts";
 // message is untrusted data for the run, its From address included. A
 // start that fails fails the delivery, so the sending server can try
 // again, starting only what didn't start.
-
-/** The largest message taken, in bytes; larger ones bounce. */
-const maxMessageBytes = 10 * 1024 * 1024;
-
-/** The most of each of To and Cc, and of attachments, a run's input lists. */
-const maxListed = 100;
 
 /** Longest subject a run's input keeps, in characters. */
 const maxSubjectLength = 1000;
@@ -222,6 +225,7 @@ const textOfHtml = (full: string): string => {
 /** A parsed message as its run's input. */
 const inputOf = (
   id: string,
+  stored: string | null,
   envelopeFrom: string,
   parsed: Email
 ): InboundEmail => {
@@ -229,6 +233,7 @@ const inputOf = (
   const date = parsed.date === undefined ? null : new Date(parsed.date);
   return fitted({
     id,
+    stored,
     from: from ?? { name: "", address: cut(envelopeFrom) },
     to: mailboxes(parsed.to),
     cc: mailboxes(parsed.cc),
@@ -274,15 +279,6 @@ const receiversAt = async (env: Env, address: string) =>
         eq(workflowTriggers.address, address)
       )
     );
-
-/** `raw` parsed, or undefined for a message that doesn't parse. */
-const parsedOf = async (raw: Uint8Array): Promise<Email | undefined> => {
-  try {
-    return await PostalMime.parse(raw);
-  } catch {
-    return undefined;
-  }
-};
 
 /**
  * Takes a message Email Routing delivers: starts a run of each workflow
@@ -347,7 +343,18 @@ export const receiveEmail = async (
     )
   );
   const withRoom = receivers.filter((_, index) => capped[index] !== true);
-  const input = inputOf(id, message.from, parsed);
+  // Kept before any run starts, so each finds it. Failing to keep it
+  // fails the delivery for now: its sender tries again.
+  const stored =
+    featureEnabled(env, "email_attachments") && parsed.attachments.length > 0
+      ? await keepMessage(
+          env,
+          withRoom.map(({ appId }) => appId),
+          id,
+          raw
+        )
+      : null;
+  const input = inputOf(id, stored, message.from, parsed);
   const started = await Promise.allSettled(
     withRoom.map(
       async (receiver) =>

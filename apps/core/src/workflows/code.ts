@@ -273,6 +273,7 @@ export class Run extends WorkerEntrypoint {
         waitForDecision: async (name, options) => unwrapped(await host.waitForDecision(name, options)),
         getState: async (key) => unwrapped(await host.getState(key)),
         setState: async (key, value, idempotencyKey) => unwrapped(await host.setState(key, value, idempotencyKey)),
+        readAttachment: async (stored, index) => unwrapped(await host.readAttachment(stored, index)),
       };
       return await definition.run(engine, input);
     });

@@ -12,6 +12,7 @@ import type { Authority } from "@grasp-os/shared/permissions";
 import {
   isRetryable,
   stepIdempotencyKey,
+  storedEmailSchema,
   workflowErrors,
 } from "@grasp-os/shared/workflows";
 import type { InputShape } from "@grasp-os/shared/workflows";
@@ -41,12 +42,13 @@ import type {
   DecisionRecipient,
 } from "../decisions/decisions.ts";
 import { appHost } from "../durable-objects.ts";
-import { featureEnabled } from "../features.ts";
+import { featureEnabled, requireFeature } from "../features.ts";
 import type { Feature } from "../features.ts";
 import { models } from "../models.ts";
 import { requireActivePerson, requireApprovedVersion } from "../permissions.ts";
 import type { Settled, StepError } from "./code.ts";
 import { sentEventSchema } from "./engine.ts";
+import { maxListed, readStoredAttachment } from "./kept-email.ts";
 
 // The engine a run's workflow code runs on, as core's side of it: the SDK's
 // `WorkflowEngine` (`@grasp-os/sdk/engine`) on Cloudflare's `step` API. The
@@ -1493,5 +1495,95 @@ export class RunHost extends RpcTarget {
       );
       return null;
     });
+  }
+
+  /**
+   * The content of attachment `index` of a message an email trigger kept
+   * for the run's App (`stored`, as the run's input names it), only inside
+   * a step, for a person who is still there (kept-email.ts). Checked
+   * against the run's own App, never one the isolate names: another App's
+   * message is found as none. Every read is audited as a read, one refused
+   * too (with its code); an attachment is handed on only once its read is
+   * recorded, and a read that can't be recorded fails, to be tried again.
+   */
+  async readAttachment(
+    stored: unknown,
+    index: unknown
+  ): Promise<Settled<Uint8Array>> {
+    return await settle(async () => {
+      const { step } = this.#requireStep();
+      requireFeature(this.#env, "email_attachments");
+      await this.#requirePerson();
+      const message = checked(storedEmailSchema, stored);
+      const at = checked(
+        z
+          .int()
+          .min(0)
+          .max(maxListed - 1),
+        index
+      );
+      let content: Uint8Array;
+      try {
+        content = await readStoredAttachment(
+          this.#env,
+          this.#run.app,
+          message,
+          at
+        );
+      } catch (error) {
+        const errorCode = isExpectedError(error)
+          ? error.code
+          : "internal.unexpected";
+        await this.#auditRead({ step, message, index: at, errorCode }).catch(
+          (auditError: unknown) => {
+            // The refusal's own error is the one the run gets.
+            log.error("workflow.email.audit_failed", {
+              runId: this.#run.runId,
+              step,
+              ...errorFields(auditError),
+            });
+          }
+        );
+        throw error;
+      }
+      await this.#auditRead({
+        step,
+        message,
+        index: at,
+        bytes: content.byteLength,
+      });
+      return content;
+    });
+  }
+
+  /** Records a read of a kept message's attachment, through the outbox. */
+  async #auditRead(read: {
+    step: string;
+    message: string;
+    index: number;
+    bytes?: number;
+    errorCode?: string;
+  }): Promise<void> {
+    const { app, workflow, version, runId } = this.#run;
+    const db = drizzle(this.#env.DB);
+    await auditedBatch(this.#env, db, [
+      outboxed(db, {
+        actor: this.#actor,
+        action: "workflow.email.read",
+        target: { type: "workflow_run", id: runId },
+        detail: {
+          app,
+          workflow,
+          version,
+          step: read.step,
+          message: read.message,
+          attachment: read.index,
+          ...(read.bytes === undefined ? {} : { bytes: read.bytes }),
+          ...(read.errorCode === undefined
+            ? {}
+            : { errorCode: read.errorCode }),
+        },
+      }),
+    ]);
   }
 }

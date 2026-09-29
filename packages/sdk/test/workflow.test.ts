@@ -1,4 +1,5 @@
 /* oxlint-disable require-await -- fakes of async interfaces answer right away */
+import { workflowErrors } from "@grasp-os/shared/workflows";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createTestState, testRun } from "../src/testing.ts";
@@ -17,6 +18,8 @@ import {
 } from "../src/workflow.ts";
 import type { DoOptions, Duration, StepRunner } from "../src/workflow.ts";
 import { createFakeEngine } from "./fakes.ts";
+
+const notFound = workflowErrors.create("workflow.attachment_not_found").message;
 
 const noParams = {};
 
@@ -1191,5 +1194,49 @@ describe(appExports, () => {
       status: "failed",
       error: { code: "workflow.invalid_step_call" },
     });
+  });
+});
+
+describe("readAttachment", () => {
+  /** Reads a message's first attachment in a step, or first `outside` it. */
+  const readsFirst = (outside = false) =>
+    workflow(
+      "reader",
+      { params: noParams, input: z.object({ stored: z.string().nullable() }) },
+      async (step, { input, readAttachment }) => {
+        if (outside) {
+          await readAttachment(input, 0);
+        }
+        return await step.do("read", { description: "Read" }, async () =>
+          new TextDecoder().decode(await readAttachment(input, 0))
+        );
+      }
+    );
+  const attachments = { "2026-09-29/m": [new TextEncoder().encode("%PDF-")] };
+
+  it("reads a kept message's attachment inside a step", async () => {
+    await expect(
+      testRun(readsFirst(), { input: { stored: "2026-09-29/m" }, attachments })
+    ).resolves.toMatchObject({ status: "completed", output: "%PDF-" });
+  });
+
+  it("refuses one outside a step, and one of a message that isn't kept or has no such attachment", async () => {
+    const runs = await Promise.all([
+      testRun(readsFirst(true), {
+        input: { stored: "2026-09-29/m" },
+        attachments,
+      }),
+      testRun(readsFirst(), { input: { stored: null }, attachments }),
+      testRun(readsFirst(), {
+        input: { stored: "2026-09-29/other" },
+        attachments,
+      }),
+    ]);
+
+    expect(runs).toMatchObject([
+      { status: "failed", error: { code: "workflow.invalid_step_call" } },
+      { status: "failed", error: { message: notFound } },
+      { status: "failed", error: { message: notFound } },
+    ]);
   });
 });

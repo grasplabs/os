@@ -23,15 +23,19 @@ export const runCron = async (
 
 /**
  * Runs core's cron trigger, as Cloudflare does every 15 minutes, on an env
- * with `changes`.
+ * with `changes`, for the time `at` (now by default).
  */
 export const runQuarterHourCron = async (
-  changes: Partial<Env> = {}
+  changes: Partial<Env> = {},
+  at = new Date()
 ): Promise<void> => {
-  await worker.scheduled(createScheduledController({ cron: "*/15 * * * *" }), {
-    ...env,
-    ...changes,
-  });
+  await worker.scheduled(
+    createScheduledController({
+      cron: "*/15 * * * *",
+      scheduledTime: at.getTime(),
+    }),
+    { ...env, ...changes }
+  );
 };
 
 /**

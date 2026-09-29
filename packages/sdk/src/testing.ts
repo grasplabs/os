@@ -2,7 +2,7 @@ import { messageOf } from "@grasp-os/shared/errors";
 import { runIdSchema } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import type { Json } from "@grasp-os/shared/json";
-import { isRetryable } from "@grasp-os/shared/workflows";
+import { isRetryable, workflowErrors } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import type {
@@ -133,6 +133,13 @@ export interface TestEngineOptions {
   decisions?: Readonly<Record<string, DecisionAnswer>>;
   /** Events sent to the run; each goes to the first wait for its type. */
   events?: readonly TestEvent[];
+  /**
+   * The content of kept messages' attachments, by the message's `stored`
+   * name, in the order its `attachments` lists them, for `readAttachment`.
+   * Reading any other fails with `workflow.attachment_not_found`, as a
+   * message another App received does.
+   */
+  attachments?: Readonly<Record<string, readonly Uint8Array[]>>;
   state?: TestState;
   /**
    * `record` (the default) records side-effect steps without running them;
@@ -425,6 +432,16 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         state.values.set(key, value);
       }
       await Promise.resolve();
+    },
+    readAttachment: async (stored, index) => {
+      const content =
+        options.attachments && Object.hasOwn(options.attachments, stored)
+          ? options.attachments[stored]?.[index]
+          : undefined;
+      if (content === undefined) {
+        throw workflowErrors.create("workflow.attachment_not_found");
+      }
+      return await Promise.resolve(content);
     },
   };
 

@@ -7,6 +7,7 @@ import { setCurrentVersion } from "../src/apps.ts";
 import worker from "../src/index.ts";
 import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
+import { runQuarterHourCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { racingDb } from "./racing-db.ts";
 import { endLiveRuns, finished } from "./runs.ts";
@@ -41,6 +42,7 @@ export default workflow(
   async (step, { input }) =>
     await step.do("read", { description: "Read the invoice mail" }, async () => ({
       id: input.id,
+      stored: input.stored,
       from: input.from.address,
       to: input.to.length,
       subject: input.subject,
@@ -56,7 +58,7 @@ export default workflow(
 
 import definition from "./${id}.ts";
 
-const input = { id: "m", from: { name: "", address: "a@b.test" }, to: [], cc: [], subject: "", date: null, text: "", truncated: false, attachments: [] };
+const input = { id: "m", stored: null, from: { name: "", address: "a@b.test" }, to: [], cc: [], subject: "", date: null, text: "", truncated: false, attachments: [] };
 
 export default workflowTests(definition, [{ name: "runs", input, mocks: { read: null }, expect: { output: null } }]);
 `,
@@ -184,6 +186,7 @@ const runsOf = async (builder: Person, app: string) =>
 
 const outputSchema = z.object({
   id: z.string(),
+  stored: z.string().nullable(),
   from: z.string(),
   to: z.number(),
   subject: z.string(),
@@ -229,16 +232,35 @@ const storedObjects = async (): Promise<string[]> => {
   );
 };
 
+/** The keys of the objects in R2 that `before` didn't list. */
+const addedSince = async (before: readonly string[]): Promise<string[]> => {
+  const now = await storedObjects();
+  return now
+    .filter((object) => !before.includes(object))
+    .map((object) => object.split("@")[0] ?? object);
+};
+
+/** The deployment's features, all on, with `changes`. */
+const featuresWith = (changes: Record<string, boolean>): Partial<Env> => ({
+  FEATURES: {
+    ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
+    ...changes,
+  },
+});
+
+/** A kept message's name: its day, and the SHA-256 of its bytes. */
+const storedName = /^(?<day>\d{4}-\d{2}-\d{2})\/[0-9a-f]{64}$/u;
+
 describe("email triggers", () => {
   afterEach(endLiveRuns);
 
-  it("start a run with the message as input, and store nothing of it", async () => {
+  it("start a run with the message as input, and keep it for the App's runs alone", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, intake());
     const before = await storedObjects();
 
     const delivery = await deliver("Invoices@grasp.test", invoiceMail());
-    const { id, ...read } = await readByRun(builder, app);
+    const { id, stored, ...read } = await readByRun(builder, app);
 
     expect(delivery.rejected).toBeUndefined();
     expect(id).toMatch(/^[0-9a-f]{64}$/u);
@@ -249,8 +271,40 @@ describe("email triggers", () => {
       truncated: false,
       attachments: ["inv-7.pdf:5"],
     });
-    // Nothing added to R2, nothing replaced: the message went nowhere.
-    await expect(storedObjects()).resolves.toStrictEqual(before);
+    // Named by its day and ID, never the App; kept under the App.
+    const day = storedName.exec(stored ?? "")?.groups?.day;
+    expect(stored).toBe(`${day}/${id}`);
+    await expect(addedSince(before)).resolves.toStrictEqual([
+      `inbound-email/${day}/${app}/${id}`,
+    ]);
+  });
+
+  it("keep nothing of a message without attachments, or while keeping mail is off", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, intake("unkept"));
+    const before = await storedObjects();
+
+    await deliver(
+      "unkept@grasp.test",
+      invoiceMail({ to: "unkept@grasp.test", subject: "Off" }),
+      { changes: featuresWith({ email_attachments: false }) }
+    );
+    await deliver("unkept@grasp.test", unclosed("Plain", "<p>No files.</p>"));
+
+    const read = await readByRuns(builder, app);
+    expect(
+      read.map(({ subject, stored, attachments }) => ({
+        subject,
+        stored,
+        attachments: attachments.length,
+      }))
+    ).toStrictEqual(
+      expect.arrayContaining([
+        { subject: "Off", stored: null, attachments: 1 },
+        { subject: "Plain", stored: null, attachments: 0 },
+      ])
+    );
+    await expect(addedSince(before)).resolves.toStrictEqual([]);
   });
 
   it("start the same message once across a new version of the workflow", async () => {
@@ -689,5 +743,176 @@ describe("email triggers", () => {
       refused: "app.conflict",
       receivers: [first],
     });
+  });
+});
+
+/**
+ * A workflow receiving mail at `address` that reads the message's first
+ * attachment in a step, and returns its name for the message and the
+ * attachment's content, as text.
+ */
+const reader = (address: string): Record<string, string> => ({
+  "workflows/reader.ts": `import { emailMessage, workflow } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "reader",
+  { params: {}, input: emailMessage, triggers: [{ type: "email", address: "${address}" }] },
+  async (step, { input, readAttachment }) =>
+    await step.do("read", { description: "Read the invoice" }, async () => {
+      const pdf = await readAttachment(input, 0);
+      return { stored: input.stored, content: String.fromCharCode(...pdf) };
+    })
+);
+`,
+  "workflows/reader.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./reader.ts";
+
+const stored = "2026-09-29/${"0".repeat(64)}";
+const input = { id: "m", stored, from: { name: "", address: "a@b.test" }, to: [], cc: [], subject: "", date: null, text: "", truncated: false, attachments: [{ filename: "inv.pdf", mimeType: "application/pdf", size: 5 }] };
+
+export default workflowTests(definition, [
+  { name: "reads", input, attachments: { [stored]: [new TextEncoder().encode("%PDF-")] }, expect: { output: { stored, content: "%PDF-" } } },
+]);
+`,
+});
+
+/**
+ * A workflow started by hand with a kept message's name, which reads its
+ * first attachment, as a run of another App would try to.
+ */
+const snoop: Record<string, string> = {
+  "workflows/snoop.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "snoop",
+  { params: {}, input: z.object({ stored: z.string() }) },
+  async (step, { input, readAttachment }) =>
+    await step.do("read", { description: "Read another App's mail" }, async () =>
+      (await readAttachment(input, 0)).byteLength
+    )
+);
+`,
+  "workflows/snoop.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./snoop.ts";
+
+export default workflowTests(definition, [
+  { name: "runs", input: { stored: "x" }, mocks: { read: 0 }, expect: { output: 0 } },
+]);
+`,
+};
+
+/** The audit log's reads of kept messages by run `run`. */
+const readsBy = async (run: string) => {
+  const events = await allEvents();
+  return events
+    .filter(
+      ({ action, target }) =>
+        action === "workflow.email.read" && target?.id === run
+    )
+    .map(({ actor, detail }) => ({ actor, detail }));
+};
+
+describe("attachments of mail", () => {
+  afterEach(endLiveRuns);
+
+  it("are read by the run the message started, and each read is audited", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, reader("scans"));
+
+    await deliver("scans@grasp.test", invoiceMail({ to: "scans@grasp.test" }));
+    const [run] = await runsOf(builder, app);
+    await finished(run?.id ?? "");
+    const { output } = await builder.api.workflows.status(run?.id ?? "");
+    const read = z
+      .object({ stored: z.string(), content: z.string() })
+      .parse(output);
+
+    // The PDF as it was sent: its bytes, not what the message said of them.
+    expect(read.content).toBe("%PDF-");
+    await expect(readsBy(run?.id ?? "")).resolves.toStrictEqual([
+      {
+        actor: {
+          type: "workflow",
+          runId: run?.id,
+          appId: app,
+          workflowId: "reader",
+        },
+        detail: {
+          app,
+          workflow: "reader",
+          version: 1,
+          step: "read",
+          message: read.stored,
+          attachment: 0,
+          bytes: 5,
+        },
+      },
+    ]);
+  });
+
+  it("can't be read by another App's run, which is refused and audited", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, reader("private"));
+    const other = await appWith(builder, snoop);
+    const before = await storedObjects();
+
+    await deliver(
+      "private@grasp.test",
+      invoiceMail({ to: "private@grasp.test" })
+    );
+    const [received] = await runsOf(builder, app);
+    await finished(received?.id ?? "");
+    const { output } = await builder.api.workflows.status(received?.id ?? "");
+    const { stored } = z.object({ stored: z.string() }).parse(output);
+    const { id: run } = await builder.api.workflows.start(other, "snoop", {
+      stored,
+    });
+    await finished(run);
+
+    await expect(builder.api.workflows.status(run)).resolves.toMatchObject({
+      status: "failed",
+      failure: {
+        step: "read",
+        error: { code: "workflow.attachment_not_found" },
+      },
+    });
+    await expect(readsBy(run)).resolves.toMatchObject([
+      {
+        detail: {
+          app: other,
+          message: stored,
+          attachment: 0,
+          errorCode: "workflow.attachment_not_found",
+        },
+      },
+    ]);
+    // It was kept for its own App only.
+    await expect(addedSince(before)).resolves.toStrictEqual([
+      `inbound-email/${stored.split("/")[0]}/${app}/${stored.split("/")[1]}`,
+    ]);
+  });
+
+  it("are deleted once 30 days have passed since the day they were kept", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, intake("kept"));
+    await deliver("kept@grasp.test", invoiceMail({ to: "kept@grasp.test" }));
+    const { id, stored } = await readByRun(builder, app);
+    const day = storedName.exec(stored ?? "")?.groups?.day ?? "";
+    const key = `inbound-email/${day}/${app}/${id}`;
+    const dayEnded = Date.parse(`${day}T00:00:00Z`) + 24 * 60 * 60 * 1000;
+    const kept = async (): Promise<boolean> =>
+      (await env.FILES.head(key)) !== null;
+
+    // Up to 30 days after its day ended, it stays.
+    await runQuarterHourCron(
+      {},
+      new Date(dayEnded + 30 * 24 * 60 * 60 * 1000 - 1)
+    );
+    await expect(kept()).resolves.toBeTruthy();
+    // Then the next run deletes it.
+    await runQuarterHourCron({}, new Date(dayEnded + 30 * 24 * 60 * 60 * 1000));
+    await expect(kept()).resolves.toBeFalsy();
   });
 });
