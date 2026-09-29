@@ -2,6 +2,7 @@ import { appErrors } from "@grasp-os/shared/apps";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { permissionErrors } from "@grasp-os/shared/permissions";
+import { workflowErrors } from "@grasp-os/shared/workflows";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
@@ -26,12 +27,22 @@ import { appWith, workflowFiles } from "./workflow-apps.ts";
 
 const idp = mockIdp();
 
-/** A workflow that returns what it read. */
-const reportFiles = workflowFiles(
-  "report",
-  `  return await step.do("total", { description: "Read the total" }, async () => "total-is-secret-42");`,
-  { total: "total" }
-);
+/**
+ * A workflow that returns what it read, and a second one of the same App
+ * that the agent is never granted.
+ */
+const reportFiles = {
+  ...workflowFiles(
+    "report",
+    `  return await step.do("total", { description: "Read the total" }, async () => "total-is-secret-42");`,
+    { total: "total" }
+  ),
+  ...workflowFiles(
+    "digest",
+    `  return await step.do("sum", { description: "Sum it up" }, async () => 1);`,
+    { sum: 1 }
+  ),
+};
 
 interface Made {
   app: string;
@@ -159,14 +170,19 @@ const everyCall = ({ app, run }: Made) =>
     apps: "(await env.apps.list()).map(({ id }) => id)",
     files: `Object.keys(await env.apps.files(${JSON.stringify(app)})).includes("workflows/report.ts")`,
     versions: `(await env.apps.versions(${JSON.stringify(app)})).map(({ version }) => version)`,
-    workflows: "(await env.workflows.list()).map(({ workflow }) => workflow)",
+    workflows:
+      "(await env.workflows.list()).map(({ workflow, lastRun }) => ({ workflow, lastRun: lastRun?.id ?? null }))",
     runs: `(await env.workflows.runs(${JSON.stringify(app)}, "report")).map(({ id, status }) => ({ id, status }))`,
     status: `await env.workflows.status(${JSON.stringify(run)})`,
+    // A run that doesn't exist: refused as a run the agent may not read is.
+    unknown: `await env.workflows.status("run-${"0".repeat(8)}")`,
   });
 
 const denied = permissionErrors.create("permission.denied", {
   action: "read",
 }).message;
+
+const noSuchRun = workflowErrors.create("workflow.run_not_found").message;
 
 describe("a chat's Apps and workflows", () => {
   it("show the agent its person's App and runs, never a run's output, and record every call", async () => {
@@ -187,7 +203,8 @@ describe("a chat's Apps and workflows", () => {
       apps: [app],
       files: true,
       versions: [1],
-      workflows: ["report"],
+      // Only the workflow the agent may read, summed up as ever.
+      workflows: [{ workflow: "report", lastRun: run }],
       runs: [{ id: run, status: "completed" }],
       status: {
         id: run,
@@ -196,8 +213,9 @@ describe("a chat's Apps and workflows", () => {
         status: "completed",
         failure: null,
       },
+      unknown: noSuchRun,
     });
-    const calls = await callsOf(chat.agent.agentId, 6);
+    const calls = await callsOf(chat.agent.agentId, 7);
     expect(
       calls.map(({ detail }) => String(detail.method)).toSorted()
     ).toStrictEqual([
@@ -206,6 +224,7 @@ describe("a chat's Apps and workflows", () => {
       "apps.versions",
       "workflows.list",
       "workflows.runs",
+      "workflows.status",
       "workflows.status",
     ]);
   });
@@ -226,11 +245,13 @@ describe("a chat's Apps and workflows", () => {
         versions: denied,
         workflows: [],
         runs: denied,
-        status: denied,
+        // An existing run it may not read and an unknown one: the same.
+        status: noSuchRun,
+        unknown: noSuchRun,
       })}`
     );
     // Every call recorded once: the refused ones with why.
-    const calls = await callsOf(chat.agent.agentId, 6);
+    const calls = await callsOf(chat.agent.agentId, 7);
     expect(
       calls
         .map(({ detail }) => ({
@@ -256,7 +277,12 @@ describe("a chat's Apps and workflows", () => {
       {
         method: "workflows.status",
         outcome: "refused",
-        reason: "permission.denied",
+        reason: "workflow.run_not_found",
+      },
+      {
+        method: "workflows.status",
+        outcome: "refused",
+        reason: "workflow.run_not_found",
       },
     ]);
   });
@@ -338,7 +364,8 @@ describe("a chat's Apps and workflows", () => {
         versions: notFound,
         workflows: [],
         runs: notFound,
-        status: notFound,
+        status: noSuchRun,
+        unknown: noSuchRun,
       })}`
     );
   });

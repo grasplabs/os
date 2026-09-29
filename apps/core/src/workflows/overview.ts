@@ -336,9 +336,16 @@ const summariesOf = async (
  */
 export const workflowOverview = async (
   env: Env,
-  by: Member
+  by: Member,
+  /** Only the workflows it keeps, left out before they are summed up. */
+  keep: (app: string, workflow: string) => boolean = () => true
 ): Promise<WorkflowSummary[]> =>
-  await summariesOf(env, workflowsOf(await visibleApps(env, by)));
+  await summariesOf(
+    env,
+    workflowsOf(await visibleApps(env, by)).filter(({ app, workflow }) =>
+      keep(app.id, workflow)
+    )
+  );
 
 const runFilterSchema = z
   .strictObject({

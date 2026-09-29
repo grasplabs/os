@@ -1,10 +1,13 @@
+import { appErrors } from "@grasp-os/shared/apps";
 import { isExpectedCode } from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { Permission } from "@grasp-os/shared/permissions";
+import { roleErrors } from "@grasp-os/shared/roles";
+import { workflowErrors } from "@grasp-os/shared/workflows";
 import type { WorkflowRun, WorkflowSummary } from "@grasp-os/shared/workflows";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
-import { asPerson, readDenied } from "./agent-person.ts";
+import { asPerson } from "./agent-person.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
 import { appHost } from "./durable-objects.ts";
 import { listAllRuns, workflowOverview } from "./workflows/overview.ts";
@@ -85,6 +88,19 @@ const agentRun = (run: WorkflowRun, restricted: boolean): AgentRun => ({
 const appRestricted = async (env: Env, app: string): Promise<boolean> =>
   await appHost(env, appIdSchema.parse(app)).isRestricted();
 
+const notFound = () => workflowErrors.create("workflow.run_not_found");
+
+/**
+ * A run the agent may not see, as one that doesn't exist: its App is one
+ * the person can't open, or its workflow one the agent may not read. The
+ * same refusal as an unknown run, so run IDs can't be probed.
+ */
+const hidden = (error: unknown): unknown =>
+  appErrors.codeOf(error) === "app.not_found" ||
+  roleErrors.codeOf(error) !== undefined
+    ? notFound()
+    : error;
+
 /** Workflows, as a chat's code reads them. */
 export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {
   /** The workflows the agent may read, of Apps the person sees. */
@@ -93,12 +109,11 @@ export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {
       feature: "workflows",
       allowed: () => true,
       method: "workflows.list",
-      read: async (person, permissions) => {
-        const summaries = await workflowOverview(this.env, person);
-        return summaries.filter(({ app, workflow }) =>
+      // Only the workflows the agent may read are summed up at all.
+      read: async (person, permissions) =>
+        await workflowOverview(this.env, person, (app, workflow) =>
           readsWorkflow(app, workflow)(permissions)
-        );
-      },
+        ),
       detail: (listed) => ({ workflows: listed.length }),
     });
   }
@@ -132,9 +147,13 @@ export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {
       allowed: () => true,
       method: "workflows.status",
       read: async (person, permissions) => {
-        const found = await runStatus(this.env, person, run);
+        const found = await runStatus(this.env, person, run).catch(
+          (error: unknown) => {
+            throw hidden(error);
+          }
+        );
         if (!readsWorkflow(found.app, found.workflow)(permissions)) {
-          throw readDenied();
+          throw notFound();
         }
         return agentRun(found, await appRestricted(this.env, found.app));
       },
