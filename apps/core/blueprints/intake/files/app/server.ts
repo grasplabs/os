@@ -30,8 +30,20 @@ interface Summary {
 /** The Playbook, as the App's permission gives it. */
 interface Playbook {
   canWrite: (caller: Caller) => Promise<boolean>;
+  ownedTypes: (caller: Caller) => Promise<string[]>;
+  listDocuments: (
+    caller: Caller,
+    options?: { after?: string; limit?: number }
+  ) => Promise<{ documents: { id: string; path: string }[] }>;
+  getRecord: (
+    caller: Caller,
+    documentId: string
+  ) => Promise<{ record: Record<string, unknown> }>;
   saveRecord: (caller: Caller, input: unknown) => Promise<Summary>;
 }
+
+/** The types a save writes: it must own both, to set their kept fields. */
+const savedTypes = ["source", "statement"] as const;
 
 interface Env {
   PLAYBOOK?: Playbook;
@@ -100,11 +112,12 @@ const slugOf = (name: string): string =>
     .slice(0, 60) || "untitled";
 
 /**
- * Where a draft's records go: its own paths, by its ID, so a save that
- * stopped halfway and runs again writes the same ones.
+ * Where a save's records go: paths of its own, by the random key the save
+ * took when it started (`save_key`), which nobody can know beforehand; a
+ * save that stopped halfway and runs again writes the same ones.
  */
-const pathsOf = (id: string, draft: Draft) => {
-  const stem = `${draft.source.date}-${slugOf(draft.source.title)}-${id.slice(0, 8)}`;
+const pathsOf = (saveKey: string, draft: Draft) => {
+  const stem = `${draft.source.date}-${slugOf(draft.source.title)}-${saveKey}`;
   return {
     source: `sources/${stem}.md`,
     statement: (position: number) => `statements/${stem}-${position}.md`,
@@ -112,19 +125,43 @@ const pathsOf = (id: string, draft: Draft) => {
 };
 
 /**
- * Saves a new record at `path`, or finds it saved by an earlier attempt:
- * only this draft writes its paths, so one there is its own.
+ * Saves a new record at `path` for draft `draft`, or finds it saved by an
+ * earlier attempt of the same save: a record there counts as written only
+ * when it names that draft (`draft`, a field only this App's `save`
+ * sets). Anything else there refuses the save (`intake.path_taken`),
+ * never taken as its own.
  */
 const saveNew = async (
   playbook: Playbook,
   caller: Caller,
+  draft: string,
   input: { path: string; record: Record<string, unknown>; body: string }
 ): Promise<void> => {
   try {
-    await playbook.saveRecord(caller, { ...input, ifVersion: 0 });
+    await playbook.saveRecord(caller, {
+      ...input,
+      record: { ...input.record, draft },
+      ifVersion: 0,
+    });
   } catch (error) {
     if (codeOf(error) !== "knowledge.conflict") {
       throw error;
+    }
+    // The document at the path: the first listed from just before it.
+    const { documents } = await playbook.listDocuments(caller, {
+      after: input.path.slice(0, -1),
+      limit: 1,
+    });
+    const [there] = documents;
+    const found =
+      there?.path === input.path
+        ? await playbook.getRecord(caller, there.id)
+        : undefined;
+    if (found?.record.draft !== draft) {
+      refuse(
+        "intake.path_taken",
+        `Something else is at ${input.path}: the draft wasn't saved over it.`
+      );
     }
   }
 };
@@ -138,6 +175,8 @@ interface Row {
   draft: string;
   created_by: string;
   created_at: number;
+  /** The key of the save under way, which names its paths; while open, none. */
+  save_key: string | null;
   [column: string]: SqlStorageValue;
 }
 
@@ -182,7 +221,8 @@ export class App extends DurableObject<Env> {
       version INTEGER NOT NULL,
       draft TEXT NOT NULL,
       created_by TEXT NOT NULL,
-      created_at INTEGER NOT NULL
+      created_at INTEGER NOT NULL,
+      save_key TEXT
     )`);
     ctx.storage.sql.exec(
       "CREATE INDEX IF NOT EXISTS drafts_by_created ON drafts (created_at)"
@@ -269,7 +309,11 @@ export class App extends DurableObject<Env> {
     });
   }
 
-  /** Throws a draft away, at `ifVersion`, unsaved. */
+  /**
+   * Throws a draft away, at `ifVersion`: an open one, or one whose save
+   * stopped halfway (`saving`), which may never finish. What that save
+   * wrote stays in the Playbook, where Knowledge shows it.
+   */
   async discard(
     caller: Caller,
     input: { id: string; ifVersion: number }
@@ -277,7 +321,7 @@ export class App extends DurableObject<Env> {
     return await outcome(async () => {
       await this.#requireWriter(caller);
       const row = this.#row(input.id);
-      if (row.status !== "open" || row.version !== input.ifVersion) {
+      if (row.version !== input.ifVersion) {
         refuse("intake.conflict", "The draft changed since it was opened.");
       }
       this.ctx.storage.sql.exec("DELETE FROM drafts WHERE id = ?", input.id);
@@ -288,10 +332,17 @@ export class App extends DurableObject<Env> {
   /**
    * Saves a draft to the Playbook, as it was edited (`draft`), at
    * `ifVersion`: its source, then each statement naming it, then drops
-   * the draft. A draft must have a statement. Once a save has started,
-   * the draft is `saving`: its edits are fixed, and saving it again
-   * finishes it with what the first save started (whatever `draft` says),
-   * writing only the records not in the Playbook yet.
+   * the draft. A draft must have a statement. Refused before anything is
+   * written (`intake.not_owner`) unless this App owns the Playbook's
+   * `source` and `statement` types, whose kept fields only their owner's
+   * `save` sets. Once a save has started, the draft is `saving`: its
+   * edits, and the paths it writes (by a random key), are fixed, and
+   * saving it again finishes it with what the first save started
+   * (whatever `draft` says), writing only the records not in the Playbook
+   * yet. A record already at one of its paths counts as written only when
+   * it names this draft; anything else refuses the save
+   * (`intake.path_taken`). A `saving` draft that can't finish can be
+   * discarded.
    */
   async save(
     caller: Caller,
@@ -299,20 +350,35 @@ export class App extends DurableObject<Env> {
   ): Promise<Outcome<{ source: string; statements: number }>> {
     return await outcome(async () => {
       const playbook = await this.#requireWriter(caller);
+      // Only the owner of both types sets their kept fields: another copy
+      // of the intake would write the source and then be refused at the
+      // first statement. Checked before anything is written.
+      const owned = await playbook.ownedTypes(caller);
+      if (!savedTypes.every((type) => owned.includes(type))) {
+        refuse(
+          "intake.not_owner",
+          "Another copy of the intake keeps the Playbook's sources and statements."
+        );
+      }
       const row = this.#row(input.id);
       let draft = storedDraft(row);
+      let saveKey = row.save_key;
       if (row.status === "open") {
         draft = draftOf(input.draft);
         if (draft.statements.length === 0) {
           refuse("intake.no_statements", "Add a statement to save.");
         }
         // Before the first write, and before anything else can run here:
-        // from now on, what this saves is fixed.
-        this.#next(input.id, input.ifVersion, "saving", draft);
+        // from now on, what this saves, and where, is fixed.
+        saveKey = crypto.randomUUID();
+        this.#next(input.id, input.ifVersion, "saving", draft, saveKey);
       }
-      const paths = pathsOf(input.id, draft);
+      const paths = pathsOf(
+        saveKey ?? refuse("intake.conflict", "The draft's save has no key."),
+        draft
+      );
       const { source, statements } = draft;
-      await saveNew(playbook, caller, {
+      await saveNew(playbook, caller, input.id, {
         path: paths.source,
         record: {
           type: "source",
@@ -325,7 +391,7 @@ export class App extends DurableObject<Env> {
       });
       for (const [index, statement] of statements.entries()) {
         // oxlint-disable-next-line no-await-in-loop -- each after its source, in order
-        await saveNew(playbook, caller, {
+        await saveNew(playbook, caller, input.id, {
           path: paths.statement(index + 1),
           record: {
             type: "statement",
@@ -366,16 +432,23 @@ export class App extends DurableObject<Env> {
    * Stores `draft` as the next version of an open draft at `ifVersion`,
    * now `status`; `intake.conflict` when it is at another, or saving.
    */
-  #next(id: string, ifVersion: number, status: Status, draft: Draft): number {
+  #next(
+    id: string,
+    ifVersion: number,
+    status: Status,
+    draft: Draft,
+    saveKey: string | null = null
+  ): number {
     const row = this.#row(id);
     if (row.status !== "open" || row.version !== ifVersion) {
       refuse("intake.conflict", "The draft changed since it was opened.");
     }
     this.ctx.storage.sql.exec(
-      "UPDATE drafts SET status = ?, version = ?, draft = ? WHERE id = ?",
+      "UPDATE drafts SET status = ?, version = ?, draft = ?, save_key = ? WHERE id = ?",
       status,
       ifVersion + 1,
       JSON.stringify(draft),
+      saveKey,
       id
     );
     return ifVersion + 1;

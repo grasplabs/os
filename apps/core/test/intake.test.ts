@@ -18,10 +18,13 @@ import { outcome, signedInApi, unique } from "./sign-in.ts";
 // to the Playbook as `source` and `statement` records, which its types
 // (app/records.json) check whoever saves. What can go wrong, tried below:
 // a draft reaching the Playbook without being saved, or saved twice; a
-// save that stops halfway finished with other records than it started;
-// someone who may not change the Playbook reading or writing drafts; edits
-// over someone else's; and a statement without a source, tags, or with
-// tags the intake doesn't know, saved by hand past the App.
+// copy that doesn't own the types writing half a draft; a save that stops
+// halfway finished with other records than it started, or stuck; someone
+// else's document at a save's path taken as written; someone who may not
+// change the Playbook reading or writing drafts; edits over someone
+// else's; and records saved or edited by hand past the App: without tags,
+// with tags or a date the intake doesn't take, or changing, or dropping
+// through another type, what only its save sets.
 
 const idp = mockIdp();
 
@@ -143,6 +146,58 @@ const documentsAt = async (
 /** A new path in the Playbook's `folder`, for a record saved by hand. */
 const byHand = (folder: string): string => `${folder}/by-hand-${unique()}.md`;
 
+/** The stem of a saved source's path, which its statements' paths share. */
+const stemOf = (sourcePath: string): string =>
+  sourcePath.replace(/^sources\//u, "").replace(/\.md$/u, "");
+
+/** Knowledge's writes of a new version: one per record saved. */
+const insertsVersion = /^insert into "versions"/iu;
+
+/**
+ * Runs `run` with Knowledge failing the write of the record after the
+ * first `written`: a save that stops there, as an outage would stop it.
+ */
+const failingAfter = async <T>(
+  written: number,
+  run: () => Promise<T>
+): Promise<T> => {
+  const real = env.KNOWLEDGE;
+  let writes = 0;
+  let failed = false;
+  env.KNOWLEDGE = new Proxy(real, {
+    get: (target, key) => {
+      if (key === "prepare") {
+        return (query: string) => {
+          if (insertsVersion.test(query)) {
+            writes += 1;
+          }
+          return target.prepare(query);
+        };
+      }
+      if (key === "batch") {
+        return async (statements: D1PreparedStatement[]) => {
+          if (!failed && writes > written) {
+            failed = true;
+            throw new Error("Knowledge is down");
+          }
+          return await target.batch(statements);
+        };
+      }
+      const value: unknown = Reflect.get(target, key);
+      if (typeof value !== "function") {
+        return value;
+      }
+      const bound: unknown = value.bind(target);
+      return bound;
+    },
+  });
+  try {
+    return await run();
+  } finally {
+    env.KNOWLEDGE = real;
+  }
+};
+
 /** A document's text with frontmatter, as someone saves it in Knowledge. */
 const recordText = (fields: string[], body = ""): string =>
   ["---", ...fields, "---", body].join("\n");
@@ -244,6 +299,7 @@ describe("the intake", { timeout: 60_000 }, () => {
               "medium: interview",
               "date: 2026-09-21",
               "from: Anna, controller",
+              `draft: ${created.id}`,
             ],
             "Talked about month-end close.\n"
           ),
@@ -261,6 +317,7 @@ describe("the intake", { timeout: 60_000 }, () => {
               "tags:",
               "  - time_sink",
               "  - handover",
+              `draft: ${created.id}`,
             ],
             `From [[${saved.source}]].\n\n> It's three days, every month.\n`
           ),
@@ -276,6 +333,7 @@ describe("the intake", { timeout: 60_000 }, () => {
               "tags:",
               "  - blocker",
               "  - rule",
+              `draft: ${created.id}`,
             ],
             `From [[${saved.source}]].\n`
           ),
@@ -290,6 +348,7 @@ describe("the intake", { timeout: 60_000 }, () => {
               "date: 2026-09-21",
               "tags:",
               "  - goal",
+              `draft: ${created.id}`,
             ],
             `From [[${saved.source}]].\n`
           ),
@@ -397,92 +456,107 @@ describe("the intake", { timeout: 60_000 }, () => {
     });
   });
 
-  it("finishes a save that stopped halfway with what it started, never with later edits", async () => {
+  it("refuses a copy that doesn't own the Playbook's intake types before it writes anything, leaving its draft open", async () => {
     const { admin, app: first } = await setUp();
-    // The first copy saves, and so claims the Playbook's intake types
-    // (knowledge/record-types.ts). A second copy's save then lands its
-    // source, and is refused at its first statement, whose source and
-    // date only the owner's save sets.
-    const { id: claiming } = okOf(
-      await call(first, admin.userId, "create", interview(`First ${unique()}`)),
+    // The first copy saves, and so claims the types (knowledge/record-types.ts).
+    const claiming = interview(`First ${unique()}`);
+    const { id: claimed } = okOf(
+      await call(first, admin.userId, "create", claiming),
       createdSchema
     );
     okOf(
       await call(first, admin.userId, "save", {
-        id: claiming,
+        id: claimed,
         ifVersion: 1,
-        draft: interview(`First ${unique()}`),
+        draft: claiming,
       }),
       savedSchema
     );
     const { app: second } = await copyOf(admin);
-    const draft = interview(`Halfway ${unique()}`);
+    const draft = interview(`Second ${unique()}`);
     const { id } = okOf(
       await call(second, admin.userId, "create", draft),
       createdSchema
     );
-    const stopped = await call(second, admin.userId, "save", {
+    const refused = await call(second, admin.userId, "save", {
       id,
       ifVersion: 1,
       draft,
     });
-    // Its paths (the server's `pathsOf`): by the date, title and draft.
-    const stem = `2026-09-21-${draft.source.title.toLowerCase().replace(" ", "-")}-${id.slice(0, 8)}`;
-    const [sourceLanded, statementsLanded] = await Promise.all([
-      documentsAt(admin, `sources/${stem}.md`),
-      documentsAt(admin, `statements/${stem}-`),
-    ]);
-    const whileSaving = okOf(
+    const after = okOf(
       await call(second, admin.userId, "draft", id),
       z.object({ version: z.number(), status: z.string() })
     );
-    const edits = await call(second, admin.userId, "keep", {
+    const slug = draft.source.title.toLowerCase().replace(" ", "-");
+    expect({
+      refused,
+      after,
+      written: await documentsAt(admin, `sources/2026-09-21-${slug}-`),
+      discarded: await call(second, admin.userId, "discard", {
+        id,
+        ifVersion: 1,
+      }),
+    }).toStrictEqual({
+      refused: { error: "intake.not_owner" },
+      after: { version: 1, status: "open" },
+      written: [],
+      discarded: { ok: null },
+    });
+  });
+
+  it("finishes a save that stopped halfway with what it started, never with later edits", async () => {
+    const { admin, app } = await setUp();
+    const draft = interview(`Halfway ${unique()}`);
+    const slug = draft.source.title.toLowerCase().replace(" ", "-");
+    const { id } = okOf(
+      await call(app, admin.userId, "create", draft),
+      createdSchema
+    );
+    // The source lands; the first statement's write fails.
+    const stopped = await failingAfter(
+      1,
+      async () =>
+        await call(app, admin.userId, "save", { id, ifVersion: 1, draft })
+    );
+    const [source] = await documentsAt(admin, `sources/2026-09-21-${slug}-`);
+    const stem = stemOf(source?.path ?? "");
+    const landed = await documentsAt(admin, `statements/${stem}-`);
+    const whileSaving = okOf(
+      await call(app, admin.userId, "draft", id),
+      z.object({ version: z.number(), status: z.string() })
+    );
+    const edits = await call(app, admin.userId, "keep", {
       id,
       ifVersion: whileSaving.version,
       draft: interview("Changed since"),
     });
-    const discarded = await call(second, admin.userId, "discard", {
-      id,
-      ifVersion: whileSaving.version,
-    });
-    // The first copy goes: the second now has the types.
-    await revokeOtherCopies(admin.api, intake, second);
     const finished = okOf(
-      await call(second, admin.userId, "save", {
+      await call(app, admin.userId, "save", {
         id,
         ifVersion: whileSaving.version,
         draft: interview("Changed since"),
       }),
       savedSchema
     );
-    const [source, statements] = await Promise.all([
-      documentsAt(admin, finished.source),
+    const [sources, statements] = await Promise.all([
+      documentsAt(admin, `sources/2026-09-21-${slug}-`),
       documentsAt(admin, `statements/${stem}-`),
     ]);
     expect({
       stopped,
-      landed: {
-        source: sourceLanded.length,
-        statements: statementsLanded.length,
-      },
+      landed: landed.length,
       whileSaving,
       edits,
-      discarded,
       finished,
-      source: source.map(({ text }) =>
-        text.includes(`title: ${draft.source.title}`)
-      ),
+      sources: sources.map(({ path }) => path),
       statements: statements.map(({ text }) => text.split("\n")[2]),
     }).toStrictEqual({
-      // The source landed; its statements, which only the types' owner
-      // saves, didn't.
-      stopped: { error: "knowledge.invalid" },
-      landed: { source: 1, statements: 0 },
+      stopped: { error: "internal.unexpected" },
+      landed: 0,
       whileSaving: { version: 2, status: "saving" },
       edits: { error: "intake.conflict" },
-      discarded: { error: "intake.conflict" },
-      finished: { source: `sources/${stem}.md`, statements: 2 },
-      source: [true],
+      finished: { source: source?.path, statements: 2 },
+      sources: [source?.path],
       statements: [
         "title: Closing the month takes three days.",
         "title: Invoices wait for a second signature over 5,000.",
@@ -490,7 +564,52 @@ describe("the intake", { timeout: 60_000 }, () => {
     });
   });
 
-  it("has the Playbook refuse a statement or source that doesn't fit its type, and a statement's source changed or made by hand", async () => {
+  it("never takes someone else's document at its path as its own, and discards a save that can't finish", async () => {
+    const { admin, app } = await setUp();
+    const draft = interview(`Taken ${unique()}`);
+    const slug = draft.source.title.toLowerCase().replace(" ", "-");
+    const { id } = okOf(
+      await call(app, admin.userId, "create", draft),
+      createdSchema
+    );
+    await failingAfter(
+      1,
+      async () =>
+        await call(app, admin.userId, "save", { id, ifVersion: 1, draft })
+    );
+    const [source] = await documentsAt(admin, `sources/2026-09-21-${slug}-`);
+    const stem = stemOf(source?.path ?? "");
+    // Someone else's document, where the first statement goes.
+    await admin.api.knowledge.saveDocument({
+      collectionId: playbook,
+      path: `statements/${stem}-1.md`,
+      text: "Mine.\n",
+      ifVersion: 0,
+    });
+    const refused = await call(app, admin.userId, "save", {
+      id,
+      ifVersion: 2,
+      draft,
+    });
+    const statements = await documentsAt(admin, `statements/${stem}-`);
+    const discarded = await call(app, admin.userId, "discard", {
+      id,
+      ifVersion: 2,
+    });
+    expect({
+      refused,
+      statements: statements.map(({ path, text }) => [path, text]),
+      discarded,
+      gone: await call(app, admin.userId, "draft", id),
+    }).toStrictEqual({
+      refused: { error: "intake.path_taken" },
+      statements: [[`statements/${stem}-1.md`, "Mine.\n"]],
+      discarded: { ok: null },
+      gone: { error: "intake.not_found" },
+    });
+  });
+
+  it("has the Playbook refuse records that don't fit their types, and any change to what only the intake's save sets", async () => {
     const { admin, app } = await setUp();
     const draft = interview(`By hand ${unique()}`);
     const { id } = okOf(
@@ -501,8 +620,7 @@ describe("the intake", { timeout: 60_000 }, () => {
       await call(app, admin.userId, "save", { id, ifVersion: 1, draft }),
       savedSchema
     );
-    const stem = saved.source.replace(/^sources\//u, "").replace(/\.md$/u, "");
-    const statementPath = `statements/${stem}-1.md`;
+    const statementPath = `statements/${stemOf(saved.source)}-1.md`;
     const save = async (path: string, fields: string[], ifVersion = 0) =>
       await outcome(
         admin.api.knowledge.saveDocument({
@@ -512,85 +630,88 @@ describe("the intake", { timeout: 60_000 }, () => {
           ifVersion,
         })
       );
-    const title = "title: Closing takes three days.";
-    const edits = {
-      noTags: await save(
-        statementPath,
-        ["type: statement", title, "tags: []"],
-        1
-      ),
-      unknownTag: await save(
-        statementPath,
-        ["type: statement", title, "tags: [gossip]"],
-        1
-      ),
+    const statement = (tags: string, extra: string[] = []) => [
+      "type: statement",
+      "title: Closing takes three days.",
+      `source: ${saved.source}`,
+      "date: 2026-09-21",
+      `tags: ${tags}`,
+      `draft: ${id}`,
+      ...extra,
+    ];
+    const source = (date: string) => [
+      "type: source",
+      "title: A retitled interview",
+      "medium: interview",
+      `date: ${date}`,
+      `draft: ${id}`,
+    ];
+    const statementEdits = {
+      noTags: await save(statementPath, statement("[]"), 1),
+      unknownTag: await save(statementPath, statement("[gossip]"), 1),
       otherSource: await save(
         statementPath,
-        [
-          "type: statement",
-          title,
-          "source: sources/elsewhere.md",
-          "tags: [goal]",
-        ],
+        statement("[goal]").map((line) =>
+          line.startsWith("source:") ? "source: sources/elsewhere.md" : line
+        ),
         1
       ),
-      retagged: await save(
+      // No type: a round trip through a plain document would drop them.
+      untyped: await save(
         statementPath,
-        [
-          "type: statement",
-          title,
-          `source: ${saved.source}`,
-          "date: 2026-09-21",
-          "tags: [blocker, time_sink]",
-        ],
+        ["title: Closing takes three days."],
         1
       ),
+      retagged: await save(statementPath, statement("[blocker, time_sink]"), 1),
     };
-    const [edited] = await documentsAt(admin, statementPath);
+    const sourceEdits = {
+      otherDate: await save(saved.source, source("2026-09-22"), 1),
+      untyped: await save(saved.source, ["title: A retitled interview"], 1),
+      retitled: await save(saved.source, source("2026-09-21"), 1),
+    };
     expect({
-      ...edits,
-      edited: edited?.text,
-      byHand: await save(byHand("statements"), [
+      ...statementEdits,
+      source: sourceEdits,
+      // Only the intake's save, once someone reviewed it, makes either.
+      statementByHand: await save(byHand("statements"), [
         "type: statement",
         "title: Approvals wait a week.",
         `source: ${saved.source}`,
         "date: 2026-09-21",
         "tags: [blocker]",
       ]),
-      source: await save(byHand("sources"), [
+      sourceByHand: await save(byHand("sources"), [
         "type: source",
         "title: A call with finance",
         "medium: chat",
         "date: 2026-09-21",
+      ]),
+      notADate: await save(byHand("sources"), [
+        "type: source",
+        "title: A call with finance",
+        "medium: chat",
+        "date: 2026-02-30",
       ]),
       badMedium: await save(byHand("sources"), [
         "type: source",
         "title: A call with finance",
         "medium: rumour",
-        "date: 2026-09-21",
-      ]),
-      noDate: await save(byHand("sources"), [
-        "type: source",
-        "title: A call with finance",
-        "medium: chat",
       ]),
     }).toStrictEqual({
       noTags: "knowledge.invalid",
       unknownTag: "knowledge.invalid",
       otherSource: "knowledge.invalid",
+      untyped: "knowledge.invalid",
       retagged: "ok",
-      edited: recordText([
-        "type: statement",
-        title,
-        `source: ${saved.source}`,
-        "date: 2026-09-21",
-        "tags: [blocker, time_sink]",
-      ]),
-      // Only the intake's save, once someone reviewed it, makes one.
-      byHand: "knowledge.invalid",
-      source: "ok",
+      source: {
+        otherDate: "knowledge.invalid",
+        untyped: "knowledge.invalid",
+        retitled: "ok",
+      },
+      statementByHand: "knowledge.invalid",
+      sourceByHand: "knowledge.invalid",
+      notADate: "knowledge.invalid",
       badMedium: "knowledge.invalid",
-      noDate: "knowledge.invalid",
     });
   });
 });

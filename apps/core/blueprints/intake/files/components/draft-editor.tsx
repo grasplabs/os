@@ -262,7 +262,8 @@ export const DraftEditor = ({
           {saving ? (
             <p className="text-sm">
               Saving this draft started and didn&apos;t finish. Finish saving it
-              as it was.
+              as it was, or discard it: what was saved already stays in the
+              Playbook.
             </p>
           ) : null}
           <SourceFields
@@ -311,17 +312,15 @@ export const DraftEditor = ({
                 Keep as a draft
               </Button>
             )}
-            {saving ? null : (
-              <Button
-                variant="outline"
-                disabled={busy}
-                onClick={() => {
-                  void discard();
-                }}
-              >
-                Discard
-              </Button>
-            )}
+            <Button
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                void discard();
+              }}
+            >
+              Discard
+            </Button>
             <Button variant="ghost" disabled={busy} onClick={onBack}>
               Back
             </Button>

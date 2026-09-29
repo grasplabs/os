@@ -393,7 +393,9 @@ interface KeptCheck {
  * version that no longer fits its type (after its schema changed) keeps
  * them all the same. The version it goes over is the one the write's
  * batch requires is still current, so nothing saved in between is
- * compared against.
+ * compared against. A version of another type than the one it goes over
+ * is refused too while that one has a kept field its write doesn't set:
+ * otherwise a round trip through another type would drop the field.
  */
 const requireFieldsKept = async (
   db: DrizzleD1Database,
@@ -435,8 +437,25 @@ const requireFieldsKept = async (
           ];
     }
   );
-  if (declaredProblems.length > 0) {
-    throw invalid(declaredProblems);
+  // And those of the type it goes over, when that is another: a version
+  // of another type (a `doc`, say) would drop them, and one of the type
+  // again after it would then set them afresh. So a record whose type
+  // keeps fields doesn't change type by hand while it has any of them.
+  const previous = savedRaw?.type;
+  const droppedProblems =
+    previous === undefined || sameType
+      ? []
+      : [...keptSetters(declared, previous).keys()].flatMap((field) =>
+          fieldOf(savedRaw?.fields, field) === undefined ||
+          Object.hasOwn(sets, field)
+            ? []
+            : [
+                `frontmatter.type: a ${previous} keeps its ${field}, which only the method its record type gives it to changes, so it stays a ${previous}`,
+              ]
+        );
+  const problems = [...declaredProblems, ...droppedProblems];
+  if (problems.length > 0) {
+    throw invalid(problems);
   }
 };
 

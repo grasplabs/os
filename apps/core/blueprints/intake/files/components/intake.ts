@@ -194,6 +194,12 @@ export const refusal = (code: string): string => {
     case "knowledge.invalid": {
       return "That doesn't fit: check every statement has text and a tag, and the source a title and a date.";
     }
+    case "intake.not_owner": {
+      return "Another copy of the intake keeps the Playbook's sources and statements: an admin grants the Playbook to the one copy to use.";
+    }
+    case "intake.path_taken": {
+      return "Something else is already where this draft would be saved, so it wasn't saved over it. Discard the draft and take it again.";
+    }
     case "intake.no_statements": {
       return "Add a statement to save.";
     }
