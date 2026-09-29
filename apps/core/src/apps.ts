@@ -38,6 +38,7 @@ import {
   outboxedIfChanged,
   storedEvent,
 } from "./audit-outbox.ts";
+import type { Member } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
@@ -434,7 +435,7 @@ export const createApp = async (
  * As with `appFor`, while `app_sharing` is off: every App for admins and
  * builders, and users are refused. Never a pending App (`findApp`).
  */
-export const appsListedFor = (env: Env, by: Identity): SQL => {
+export const appsListedFor = (env: Env, by: Member): SQL => {
   if (!featureEnabled(env, "app_sharing")) {
     requireBuilder(by);
   }
@@ -442,7 +443,7 @@ export const appsListedFor = (env: Env, by: Identity): SQL => {
 };
 
 /** The Apps `by` has a role in (app-access.ts), oldest first. */
-export const listApps = async (env: Env, by: Identity): Promise<App[]> => {
+export const listApps = async (env: Env, by: Member): Promise<App[]> => {
   const rows = await drizzle(env.DB)
     .select()
     .from(apps)
@@ -503,7 +504,7 @@ export const appContents = async (
 /** An App's files at `version`, or its working copy without one. */
 export const readFiles = async (
   env: Env,
-  by: Identity,
+  by: Member,
   app: unknown,
   version?: unknown
 ): Promise<AppFiles> => {
@@ -671,7 +672,7 @@ export const commitFiles = async (
 /** An App's versions, newest first, a page at a time. */
 export const listVersions = async (
   env: Env,
-  by: Identity,
+  by: Member,
   app: unknown,
   before?: unknown
 ): Promise<AppVersion[]> => {
