@@ -7,7 +7,6 @@ import { clients, rollouts, rolloutTargets } from "../db/schema.ts";
 import { listReleases } from "../releases/queries.ts";
 import { instanceStatus } from "../runners.ts";
 import type { RunStatus } from "../runners.ts";
-import { sharedSecretsCurrent } from "./shared-secrets.ts";
 import { firstRing } from "./targets.ts";
 
 /** How many rollouts the list shows: the latest. */
@@ -57,50 +56,7 @@ export interface RolloutView extends RolloutSummary {
   run: RunStatus;
   /** Its clients, ring by ring, then by id. */
   targets: TargetView[];
-  /**
-   * For a secrets rollout, whether the old shared secrets can be revoked:
-   * which active clients run the ones in Secrets Store now
-   * (src/rollout/shared-secrets.ts), and those it didn't target. Null for
-   * a release rollout, or while the store can't be read.
-   */
-  sharedSecrets: SharedSecretsView | null;
 }
-
-/** Where every active client is on the shared secrets in Secrets Store now. */
-export interface SharedSecretsView {
-  /** The active clients that run them now, by id. */
-  current: string[];
-  /** The active clients that don't, by id: until none is left, keep the old ones. */
-  behind: string[];
-  /** The active clients the rollout didn't target, by id. */
-  outOfScope: string[];
-}
-
-/**
- * Where every active client is on the shared secrets in Secrets Store
- * now, for rollout targets `targets`; null while the store can't be read.
- */
-const sharedSecretsView = async (
-  env: Env,
-  db: ConsoleDatabase,
-  targets: readonly { clientId: string }[]
-): Promise<SharedSecretsView | null> => {
-  const current = await sharedSecretsCurrent(env, db);
-  if (current === null) {
-    return null;
-  }
-  const active = await db
-    .select({ id: clients.id })
-    .from(clients)
-    .where(eq(clients.status, "active"));
-  const ids = active.map(({ id }) => id).toSorted((a, b) => a.localeCompare(b));
-  const targeted = new Set(targets.map(({ clientId }) => clientId));
-  return {
-    current: ids.filter((id) => current.get(id) === true),
-    behind: ids.filter((id) => current.get(id) !== true),
-    outOfScope: ids.filter((id) => !targeted.has(id)),
-  };
-};
 
 /** Rollout `id`, or null when there's none. */
 export const getRollout = async (
@@ -140,10 +96,6 @@ export const getRollout = async (
     targets: targets.toSorted(
       (a, b) => a.ring - b.ring || a.clientId.localeCompare(b.clientId)
     ),
-    sharedSecrets:
-      rollout.kind === "secrets"
-        ? await sharedSecretsView(env, db, targets)
-        : null,
   };
 };
 

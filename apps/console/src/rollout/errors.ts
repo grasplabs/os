@@ -38,6 +38,8 @@ export const rolloutErrorCodes = [
   "client_busy",
   /** The rollback's run failed or was ended before it finished. */
   "rollback_failed",
+  /** A secrets rollout can't start while Secrets Store is missing a shared secret. */
+  "secrets_store_incomplete",
 ] as const;
 export type RolloutErrorCode = (typeof rolloutErrorCodes)[number];
 

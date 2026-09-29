@@ -22,7 +22,6 @@ import { deployContext } from "../src/deploy/context.ts";
 import { runDeploy, startDeploy } from "../src/deploy/deploy.ts";
 import { rotateClientSecrets } from "../src/deploy/rotation.ts";
 import { startProvisioning } from "../src/provision/control.ts";
-import { getProvisioning } from "../src/provision/queries.ts";
 import { importReleases } from "../src/releases/import.ts";
 import {
   approveRollout,
@@ -34,13 +33,13 @@ import {
 } from "../src/rollout/control.ts";
 import type { StartRolloutInput } from "../src/rollout/control.ts";
 import { driftOf } from "../src/rollout/drift.ts";
-import { getRollout } from "../src/rollout/queries.ts";
 import {
   rollbackClient,
   rollbackClientAndWait,
   rollbackRing,
   rollbackRingAndWait,
 } from "../src/rollout/rollback.ts";
+import { checkRevocation } from "../src/rollout/shared-secrets.ts";
 import type { AccountState } from "./cloudflare-api-kit.ts";
 import { mockCloudflareApi } from "./cloudflare-api.ts";
 import { publishRelease } from "./releases.ts";
@@ -1271,13 +1270,15 @@ describe("rolling new secrets out", () => {
         "rollout.done",
       ],
     });
-    // Every active client runs the new secret: the old one can go.
-    const view = await getRollout(env, rolloutId);
-    expect(view?.sharedSecrets).toStrictEqual({
-      current: [internal.clientId, acme.clientId].toSorted((a, b) =>
-        a.localeCompare(b)
-      ),
+    // The rotation reached every active client, read live: the old one can go.
+    const view = await checkRevocation(env, rolloutId);
+    expect(view).toStrictEqual({
+      safe: true,
+      storeChanged: false,
+      unchanged: [],
+      unproven: [],
       behind: [],
+      skipped: [],
       outOfScope: [],
     });
     // The secret's value is in no log line, audit event, deploy record or
@@ -1306,40 +1307,150 @@ describe("rolling new secrets out", () => {
     ).not.toContain(rotatedMicrosoft);
   });
 
-  it("says which active clients don't run the shared secrets in Secrets Store now, such as after a rollout that started before deploy-ops wrote them", async () => {
+  it("never says the old secrets can go after a rollout that started before deploy-ops wrote a new value, nor once the store changes after it", async () => {
     const release = await importedRelease("feat(core): what they run");
     const internal = await activeClient(0, release);
     const acme = await activeClient(2, release);
     await using run = await followRollouts();
 
-    // Started before deploy-ops wrote the new value: it takes the old one.
+    // Started before deploy-ops wrote the new value: every client already
+    // ran what the store held, and it deploys that again.
     const rolloutId = await rollOutSecrets({ scope: "ring", ring: 0 });
     await run.waitForStatus("complete");
-    const before = await getRollout(env, rolloutId);
+    const unchanged = await checkRevocation(env, rolloutId);
+    // Deploy-ops writes it now: nobody runs it yet.
     await rotateMicrosoftSecret();
-    const after = await getRollout(env, rolloutId);
-    const clientPage = await getProvisioning(env, internal.clientId);
+    const changed = await checkRevocation(env, rolloutId);
 
-    expect({
-      before: before?.sharedSecrets,
-      after: after?.sharedSecrets,
-      clientPage: clientPage?.sharedSecretsCurrent,
-    }).toStrictEqual({
-      before: {
-        current: [internal.clientId, acme.clientId].toSorted((a, b) =>
-          a.localeCompare(b)
-        ),
+    expect({ unchanged, changed }).toStrictEqual({
+      unchanged: {
+        safe: false,
+        storeChanged: false,
+        unchanged: [internal.clientId],
+        unproven: [],
         behind: [],
+        skipped: [],
         outOfScope: [acme.clientId],
       },
-      after: {
-        current: [],
+      changed: {
+        safe: false,
+        storeChanged: true,
+        unchanged: [internal.clientId],
+        unproven: [],
         behind: [internal.clientId, acme.clientId].toSorted((a, b) =>
           a.localeCompare(b)
         ),
+        skipped: [],
         outOfScope: [acme.clientId],
       },
-      clientPage: false,
+    });
+  });
+
+  it("gives a rollout's go-ahead only for the value it rolled out: once the store moves on, the next rollout's check decides", async () => {
+    const release = await importedRelease("feat(core): rotated twice");
+    await twoClients(release);
+    await rotateMicrosoftSecret();
+    await using run = await followRollouts();
+    const first = await rollOutSecrets({ scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    // Rotated again, and rolled out again: every client runs the newest.
+    await setStoreSecret(
+      env.MICROSOFT_CLIENT_SECRET,
+      "MICROSOFT_CLIENT_SECRET",
+      "microsoft-secret-rotated-again-9d2f"
+    );
+    const second = await rollOutSecrets({ scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    const [firstCheck, secondCheck] = await Promise.all([
+      checkRevocation(env, first),
+      checkRevocation(env, second),
+    ]);
+    expect({
+      first: firstCheck,
+      second: secondCheck,
+    }).toMatchObject({
+      first: { safe: false, storeChanged: true, unchanged: [], behind: [] },
+      second: { safe: true, storeChanged: false, unchanged: [], behind: [] },
+    });
+  });
+
+  it("counts a client behind, read live, when a Worker was changed outside the console, split, or has no record", async () => {
+    const release = await importedRelease("feat(core): what they run");
+    const { first: outside, second: split } = await twoClients(release);
+    const unrecorded = await activeClient(0, release);
+    await rotateMicrosoftSecret();
+    await using run = await followRollouts();
+    const rolloutId = await rollOutSecrets({ scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const reached = await checkRevocation(env, rolloutId);
+    const connectOf = async (clientId: string) => {
+      const workers = await workersOf(clientId);
+      return workers.find(({ worker }) => worker === "connect");
+    };
+    // Connect redeployed outside the console: a version with no record.
+    const outsideConnect = await connectOf(outside.clientId);
+    const script = outside.account.scripts.get(
+      outsideConnect?.scriptName ?? ""
+    );
+    const last = script?.versions.at(-1);
+    if (script !== undefined && last !== undefined) {
+      const version = { ...last, id: crypto.randomUUID() };
+      script.versions.push(version);
+      script.deployments.unshift({
+        id: crypto.randomUUID(),
+        created_on: new Date().toISOString(),
+        versions: [{ version_id: version.id, percentage: 100 }],
+        annotations: {},
+      });
+    }
+    // Connect's traffic split between its version and the one before.
+    const splitConnect = await connectOf(split.clientId);
+    const splitVersions =
+      split.account.scripts.get(splitConnect?.scriptName ?? "")?.versions ?? [];
+    await deployVersions(
+      cloudflareApi({ token, retryDelayMs: 0 }),
+      split.account.id,
+      splitConnect?.scriptName ?? "",
+      [
+        { version_id: splitVersions.at(-1)?.id ?? "", percentage: 50 },
+        { version_id: splitVersions.at(-2)?.id ?? "", percentage: 50 },
+      ],
+      { message: "split by hand" }
+    );
+    // The console lost its record of core.
+    await db
+      .delete(clientWorkers)
+      .where(
+        and(
+          eq(clientWorkers.clientId, unrecorded.clientId),
+          eq(clientWorkers.worker, "core")
+        )
+      );
+
+    const after = await checkRevocation(env, rolloutId);
+
+    expect({
+      reached:
+        reached !== "not_secrets_rollout" &&
+        reached !== "store_unreadable" &&
+        reached.safe,
+      after,
+    }).toStrictEqual({
+      reached: true,
+      after: {
+        safe: false,
+        storeChanged: false,
+        unchanged: [],
+        unproven: [],
+        behind: [
+          outside.clientId,
+          split.clientId,
+          unrecorded.clientId,
+        ].toSorted((a, b) => a.localeCompare(b)),
+        skipped: [],
+        outOfScope: [],
+      },
     });
   });
 

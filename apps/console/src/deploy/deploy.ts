@@ -993,22 +993,23 @@ export interface UploadedWorker {
 }
 
 /**
- * The secrets fingerprint the latest of client `clientId`'s deploys to
- * record `app`'s version `version` recorded for it; null when none did
- * (a version uploaded outside the console, or before deploys recorded
- * one).
+ * The fingerprint `print` (of all its secrets, or of its shared ones) the
+ * latest of client `clientId`'s deploys to record `app`'s version
+ * `version` recorded for it; null when none did (a version uploaded
+ * outside the console, or before deploys recorded one).
  */
-const recordedSecretsOf = async (
+export const recordedPrintOf = async (
   db: ConsoleDatabase,
   clientId: string,
-  app: DeployApp,
-  version: string
+  app: string,
+  version: string,
+  print: "secrets" | "shared"
 ): Promise<string | null> => {
   const [row] = await db
     .select({
       secrets: sql<
         string | null
-      >`json_extract(${clientDeploys.versions}, ${`$.byApp.${app}.secrets`})`,
+      >`json_extract(${clientDeploys.versions}, ${`$.byApp.${app}.${print}`})`,
     })
     .from(clientDeploys)
     .where(
@@ -1050,11 +1051,12 @@ export const uploadDeployWorker = async (
     const previousSecrets =
       previous === undefined
         ? null
-        : await recordedSecretsOf(
+        : await recordedPrintOf(
             context.db,
             loaded.deploy.clientId,
             app,
-            previous
+            previous,
+            "secrets"
           );
     return {
       version,

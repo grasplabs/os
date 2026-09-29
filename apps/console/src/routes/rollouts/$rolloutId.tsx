@@ -20,6 +20,7 @@ import { z } from "zod";
 import { formatTime } from "../../releases/format.ts";
 import {
   approveRolloutFn,
+  checkRevocationFn,
   cancelRolloutFn,
   fetchRollout,
   pauseRolloutFn,
@@ -28,11 +29,11 @@ import {
   rollbackRingFn,
 } from "../../rollout/functions.ts";
 import type { RolloutChange } from "../../rollout/functions.ts";
+import type { RolloutView, TargetView } from "../../rollout/queries.ts";
 import type {
-  RolloutView,
-  SharedSecretsView,
-  TargetView,
-} from "../../rollout/queries.ts";
+  RevocationCheck,
+  RevocationRefusal,
+} from "../../rollout/shared-secrets.ts";
 import { useRolloutAction } from "../../rollout/use-action.ts";
 import { thenRefresh } from "../../use-action.ts";
 
@@ -147,50 +148,125 @@ const Controls = ({ rollout }: { rollout: RolloutView }) => {
   );
 };
 
-/**
- * Whether the old shared secrets can be revoked at their providers: only
- * once every active client runs the ones in Secrets Store now. Until
- * then, which clients don't, and why this rollout didn't reach them.
- */
-const SharedSecrets = ({
-  rollout,
-  shared,
-}: {
-  rollout: RolloutView;
-  shared: SharedSecretsView;
-}) => {
-  if (shared.behind.length === 0) {
-    return (
-      <p className="text-sm">
-        Every active client runs the shared secrets in Secrets Store now: the
-        old ones can be revoked at their providers.
-      </p>
-    );
+/** Why a revocation check says to keep the old shared secrets, in words. */
+const keepReasons = (check: RevocationCheck): string[] => [
+  ...(check.storeChanged
+    ? [
+        "Secrets Store changed since this rollout started: roll the new values out with another secrets rollout first.",
+      ]
+    : []),
+  ...(check.unchanged.length === 0
+    ? []
+    : [
+        `Secrets Store held what ${check.unchanged.join(", ")} already ran when this rollout started: it hasn't changed, so deploy-ops may not have run, and there's nothing to revoke yet.`,
+      ]),
+  ...(check.unproven.length === 0
+    ? []
+    : [
+        `What ${check.unproven.join(", ")} ran before isn't on record, so the rotation can't be proven for them.`,
+      ]),
+  ...(check.behind.length === 0
+    ? []
+    : [
+        `${check.behind.join(", ")} ${check.behind.length === 1 ? "doesn't" : "don't"} run the shared secrets in Secrets Store now, read live from ${check.behind.length === 1 ? "its account" : "their accounts"}.`,
+      ]),
+  ...(check.skipped.length === 0
+    ? []
+    : [
+        `This rollout skipped ${check.skipped.map(({ clientId, reason }) => `${clientId} (${reason})`).join(", ")}.`,
+      ]),
+  ...(check.outOfScope.length === 0
+    ? []
+    : [`Outside its scope: ${check.outOfScope.join(", ")}.`]),
+];
+
+/** Rollout `rolloutId`'s revocation check, or `failed` when it couldn't be read. Never throws. */
+const readRevocation = async (
+  rolloutId: string
+): Promise<RevocationCheck | RevocationRefusal | "failed"> => {
+  try {
+    return await checkRevocationFn({ data: { rolloutId } });
+  } catch {
+    return "failed";
   }
-  const skipped = rollout.targets
-    .filter(({ status }) => status === "skipped")
-    .map(({ clientId, error }) => `${clientId} (${error ?? "skipped"})`);
-  const lines = [
-    `Keep the old shared secrets: ${shared.behind.length} active ${shared.behind.length === 1 ? "client doesn't" : "clients don't"} run the ones in Secrets Store now: ${shared.behind.join(", ")}.`,
-    ...(skipped.length === 0
-      ? []
-      : [`This rollout skipped ${skipped.join(", ")}.`]),
-    ...(shared.outOfScope.length === 0
-      ? []
-      : [`Outside its scope: ${shared.outOfScope.join(", ")}.`]),
-  ];
+};
+
+/** A revocation check, or why none could be made, in words. */
+const verdictOf = (
+  result: RevocationCheck | RevocationRefusal | "failed"
+): { safe: boolean; lines: string[] } => {
+  if (result === "failed") {
+    return { safe: false, lines: ["That did not work. Try again."] };
+  }
+  if (result === "store_unreadable") {
+    return {
+      safe: false,
+      lines: [
+        "Secrets Store is missing a shared secret, so nothing can be told.",
+      ],
+    };
+  }
+  if (result === "not_secrets_rollout") {
+    return { safe: false, lines: ["This isn't a secrets rollout."] };
+  }
+  if (result.safe) {
+    return {
+      safe: true,
+      lines: [
+        "The rotation reached every active client: the old shared secrets can be revoked at their providers.",
+      ],
+    };
+  }
+  return {
+    safe: false,
+    lines: ["Keep the old shared secrets.", ...keepReasons(result)],
+  };
+};
+
+/**
+ * Whether a secrets rollout's old shared secrets can be revoked at their
+ * providers, read live from every active client when staff ask
+ * (src/rollout/shared-secrets.ts).
+ */
+const Revocation = ({ rolloutId }: { rolloutId: string }) => {
+  const [verdict, setVerdict] = useState<{
+    safe: boolean;
+    lines: string[];
+  } | null>(null);
+  const [reading, setReading] = useState(false);
+  const check = async () => {
+    setReading(true);
+    const result = await readRevocation(rolloutId);
+    setReading(false);
+    setVerdict(verdictOf(result));
+  };
   return (
-    <div
-      role={rollout.status === "done" ? "alert" : undefined}
-      className={
-        rollout.status === "done"
-          ? "text-destructive flex flex-col gap-1 text-sm"
-          : "text-muted-foreground flex flex-col gap-1 text-sm"
-      }
-    >
-      {lines.map((line) => (
-        <p key={line}>{line}</p>
-      ))}
+    <div className="flex flex-col gap-2">
+      <div>
+        <Button
+          variant="outline"
+          disabled={reading}
+          onClick={() => {
+            void check();
+          }}
+        >
+          Check whether the old secrets can be revoked
+        </Button>
+      </div>
+      {verdict === null ? null : (
+        <div
+          role={verdict.safe ? undefined : "alert"}
+          className={
+            verdict.safe
+              ? "flex flex-col gap-1 text-sm"
+              : "text-destructive flex flex-col gap-1 text-sm"
+          }
+        >
+          {verdict.lines.map((line) => (
+            <p key={line}>{line}</p>
+          ))}
+        </div>
+      )}
     </div>
   );
 };
@@ -206,12 +282,6 @@ const Targets = ({ rollout }: { rollout: RolloutView }) => {
   // The clients a ring's rollback left, and why: the rest were rolled back.
   const [left, setLeft] = useState<string | null>(null);
   const rings = [...new Set(rollout.targets.map(({ ring }) => ring))];
-  const shared = rollout.sharedSecrets;
-  const secretsOf =
-    shared === null
-      ? null
-      : (clientId: string): string =>
-          shared.current.includes(clientId) ? "current" : "behind";
   const rollBackRing = (ring: number) => {
     setLeft(null);
     act(async () => {
@@ -327,9 +397,6 @@ const Targets = ({ rollout }: { rollout: RolloutView }) => {
                   <TableHead>Client</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Why</TableHead>
-                  {secretsOf === null ? null : (
-                    <TableHead>Shared secrets</TableHead>
-                  )}
                   <TableHead>Updated (UTC)</TableHead>
                   <TableHead>
                     <span className="sr-only">Actions</span>
@@ -352,9 +419,6 @@ const Targets = ({ rollout }: { rollout: RolloutView }) => {
                     <TableCell>
                       <span className="font-mono">{target.error ?? ""}</span>
                     </TableCell>
-                    {secretsOf === null ? null : (
-                      <TableCell>{secretsOf(target.clientId)}</TableCell>
-                    )}
                     <TableCell>{formatTime(target.updatedAt)}</TableCell>
                     <TableCell>
                       {reached.has(target.status) ? (
@@ -424,9 +488,9 @@ const Rollout = () => {
         ))}
       </dl>
       <Controls rollout={rollout} />
-      {rollout.sharedSecrets === null ? null : (
-        <SharedSecrets rollout={rollout} shared={rollout.sharedSecrets} />
-      )}
+      {rollout.kind === "secrets" ? (
+        <Revocation rolloutId={rollout.id} />
+      ) : null}
       <Targets rollout={rollout} />
     </main>
   );

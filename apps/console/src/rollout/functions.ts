@@ -9,7 +9,11 @@ import { env } from "cloudflare:workers";
 import { z } from "zod";
 
 import { consoleDatabase } from "../db/act.ts";
-import { deployerApi } from "../deploy/context.ts";
+import {
+  deployerApi,
+  deploySecrets,
+  MissingStoreSecretError,
+} from "../deploy/context.ts";
 import {
   approveRollout,
   cancelRollout,
@@ -21,11 +25,18 @@ import {
   startRolloutSchema,
 } from "./control.ts";
 import { driftOf } from "./drift.ts";
+import type { ClientDrift } from "./drift.ts";
 import { RolloutError } from "./errors.ts";
 import type { RolloutErrorCode } from "./errors.ts";
 import { getRollout, listRollouts, rolloutOptions } from "./queries.ts";
 import { rollbackClientAndWait, rollbackRingAndWait } from "./rollback.ts";
 import type { RingRollback } from "./rollback.ts";
+import {
+  checkRevocation,
+  runsSharedSecrets,
+  storePrints,
+} from "./shared-secrets.ts";
+import type { SharedPrints } from "./shared-secrets.ts";
 
 const rolloutSchema = z.object({ rolloutId: z.uuid() });
 const clientSchema = z.object({ clientId: z.string().min(1) });
@@ -148,14 +159,41 @@ export const pinClientFn = createServerFn({ method: "POST" })
       })
   );
 
+/**
+ * A client's drift, read live from its account, with whether it runs the
+ * shared secrets in Secrets Store now (null while the store can't be
+ * read).
+ */
+export type DriftCheck = ClientDrift & { sharedSecretsCurrent: boolean | null };
+
 /** A client's drift, read live from its account when staff ask. */
 export const fetchDrift = createServerFn({ method: "GET" })
   .validator(clientSchema)
-  .handler(
-    async ({ data }) =>
-      await driftOf(
-        await deployerApi(env),
-        consoleDatabase(env.DB),
-        data.clientId
-      )
-  );
+  .handler(async ({ data }): Promise<DriftCheck | null> => {
+    const db = consoleDatabase(env.DB);
+    const drift = await driftOf(await deployerApi(env), db, data.clientId);
+    if (drift === null) {
+      return null;
+    }
+    let store: SharedPrints | null = null;
+    try {
+      store = await storePrints(await deploySecrets(env));
+    } catch (error) {
+      if (!(error instanceof MissingStoreSecretError)) {
+        throw error;
+      }
+    }
+    return {
+      ...drift,
+      sharedSecretsCurrent:
+        store === null ? null : await runsSharedSecrets(db, drift, store),
+    };
+  });
+
+/**
+ * Whether secrets rollout `rolloutId`'s old shared secrets can be
+ * revoked, read live from every active client's account when staff ask.
+ */
+export const checkRevocationFn = createServerFn({ method: "GET" })
+  .validator(rolloutSchema)
+  .handler(async ({ data }) => await checkRevocation(env, data.rolloutId));

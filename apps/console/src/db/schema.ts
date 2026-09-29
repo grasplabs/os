@@ -197,6 +197,13 @@ export const rollouts = sqliteTable(
     /** A release's code, or only new secrets on what runs. */
     kind: text({ enum: ["release", "secrets"] }).notNull(),
     releaseId: text("release_id").references(() => releases.id),
+    /**
+     * For a secrets rollout, the fingerprint of the shared secrets Secrets
+     * Store held for each app when it started: JSON, `{"connect": "<hex>"}`
+     * (src/rollout/shared-secrets.ts). What proves a rotation reached its
+     * clients; null for a release rollout.
+     */
+    sharedSecrets: text("shared_secrets"),
     /** `waiting`: for a staff member's approval of the next ring. */
     status: text({
       enum: ["running", "waiting", "done", "failed", "cancelled"],

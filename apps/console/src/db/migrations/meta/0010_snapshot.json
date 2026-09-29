@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "98ab306a-b596-4ce0-a603-a97905874403",
+  "id": "2ca4cfab-73d4-4607-a803-40bceb1f5f24",
   "prevId": "c3aac221-c69c-4786-96d9-a0889fa34ac2",
   "tables": {
     "audit_events": {
@@ -689,6 +689,13 @@
         },
         "release_id": {
           "name": "release_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "shared_secrets": {
+          "name": "shared_secrets",
           "type": "text",
           "primaryKey": false,
           "notNull": false,

@@ -35,12 +35,18 @@ import {
   rollouts,
   rolloutTargets,
 } from "../db/schema.ts";
-import { clientDomain } from "../deploy/context.ts";
+import {
+  clientDomain,
+  deploySecrets,
+  MissingStoreSecretError,
+} from "../deploy/context.ts";
 import { errorCode } from "../deploy/deploy.ts";
 import { importedManifest } from "../deploy/release.ts";
 import { hasEnded, instanceStatus } from "../runners.ts";
 import { RolloutError } from "./errors.ts";
 import { goOnToStop } from "./rollback.ts";
+import { storePrints } from "./shared-secrets.ts";
+import type { SharedPrints } from "./shared-secrets.ts";
 import { firstRing, rolloutScopeSchema, targetsOf } from "./targets.ts";
 import { approvalEvent, rolloutSteps, stepBudget } from "./workflow.ts";
 import type { RolloutParams } from "./workflow.ts";
@@ -117,6 +123,22 @@ const settleEnded = async (env: Env, db: ConsoleDatabase): Promise<void> => {
 };
 
 /**
+ * The fingerprints of the shared secrets in Secrets Store now, by app;
+ * refused (`secrets_store_incomplete`) while one is missing, as every
+ * deploy of the rollout would be.
+ */
+const startingPrints = async (env: Env): Promise<SharedPrints> => {
+  try {
+    return await storePrints(await deploySecrets(env));
+  } catch (error) {
+    if (error instanceof MissingStoreSecretError) {
+      throw new RolloutError("secrets_store_incomplete", error.message);
+    }
+    throw error;
+  }
+};
+
+/**
  * The most Workers a client runs: what a secrets rollout, which deploys
  * each client's own release, budgets steps for.
  */
@@ -189,6 +211,10 @@ export const startRollout = async (
       `${targets.length} clients would take about ${steps} steps, over ${stepBudget}: roll out one ring or client at a time`
     );
   }
+  // What Secrets Store holds as a secrets rollout starts: what proves a
+  // rotation reached its clients (src/rollout/shared-secrets.ts).
+  const sharedSecrets =
+    releaseId === null ? JSON.stringify(await startingPrints(env)) : null;
   const id = crypto.randomUUID();
   const now = Date.now();
   const active = sql.join(
@@ -201,7 +227,7 @@ export const startRollout = async (
     db
       .insert(rollouts)
       .select(
-        sql`SELECT ${id}, ${kind}, ${releaseId}, 'running', ${first.ring}, ${staff.email}, ${now}, ${now} WHERE NOT EXISTS (SELECT 1 FROM ${rollouts} WHERE ${rollouts.status} IN (${active}))`
+        sql`SELECT ${id}, ${kind}, ${releaseId}, ${sharedSecrets}, 'running', ${first.ring}, ${staff.email}, ${now}, ${now} WHERE NOT EXISTS (SELECT 1 FROM ${rollouts} WHERE ${rollouts.status} IN (${active}))`
       ),
     {
       action: "rollout.start",
