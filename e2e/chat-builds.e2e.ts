@@ -53,6 +53,11 @@ test("the side panel shows an App being built, and a builder makes its version c
     await expect(built).toContainText(
       "Nothing runs yet: this would be the App's first current version."
     );
+    // Who proposed it, and the proposer's own words, labelled as such.
+    await expect(built).toContainText("Committed by a person.");
+    await expect(built.getByRole("blockquote")).toHaveText(
+      "In the proposer's wordsAn invoice desk for invoices@"
+    );
     await expect(built.getByRole("region", { name: "Tests" })).toContainText(
       "No workflows to test."
     );

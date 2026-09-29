@@ -1,6 +1,8 @@
 import type { App, VersionReview } from "@grasp-os/shared/apps";
+import { appErrors } from "@grasp-os/shared/apps";
 import type { ChatDraft } from "@grasp-os/shared/chat";
 import { featureErrors, messageOf } from "@grasp-os/shared/errors";
+import { roleErrors } from "@grasp-os/shared/roles";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -18,11 +20,11 @@ import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 
-// In the side panel: the Apps the chat's agent is building. Those it is
-// still changing in the chat's own drafts, and the person's Apps with a
-// version up for review, which a builder reviews (what core says it
-// changes, never the agent's word) and makes current here. Functional
-// only.
+// In the side panel, while the chat's agent builds Apps (`app_builder`):
+// the Apps it is still changing in the chat's own drafts, and the Apps the
+// person builds with a version up for review, which they review (what
+// core says it changes, never the proposer's word) and make current here.
+// Functional only.
 
 /** What the panel read: the person's Apps, and the chat's drafts. */
 interface Builds {
@@ -31,25 +33,48 @@ interface Builds {
 }
 
 /**
- * The person's Apps and the chat's drafts. Outside the component, as the
- * React Compiler can't compile `try`. Drafts switched off (`app_builder`)
- * are none, rather than a refusal in every chat's panel.
+ * The person's Apps and the chat's drafts; `off` while the agent doesn't
+ * build Apps, when the panel shows none of this. Outside the component,
+ * as the React Compiler can't compile `try`.
  */
-const readBuilds = async (chatId: string): Promise<Loaded<Builds>> => {
-  const apps = await loadFromCore(async (session) => await session.apps.list());
-  if (apps.state !== "ready") {
-    return apps;
-  }
+const readBuilds = async (
+  chatId: string
+): Promise<Loaded<Builds> | { state: "off" }> => {
   try {
-    const drafts = await withSession(
-      async (session) => await session.chats.drafts(chatId)
+    const [apps, drafts] = await withSession(
+      async (session) =>
+        await Promise.all([session.apps.list(), session.chats.drafts(chatId)])
     );
-    return { state: "ready", data: { apps: apps.data, drafts } };
+    return { state: "ready", data: { apps, drafts } };
   } catch (error) {
     if (featureErrors.codeOf(error) === "feature.disabled") {
-      return { state: "ready", data: { apps: apps.data, drafts: [] } };
+      return { state: "off" };
     }
     return { state: "refused", message: messageOf(error) };
+  }
+};
+
+/**
+ * A version's review, or `hidden` for an App the person doesn't build:
+ * only builders review and make versions current, so they alone see it.
+ */
+const readReview = async (
+  app: string,
+  version: number
+): Promise<Loaded<VersionReview> | { state: "hidden" }> => {
+  try {
+    const review = await withSession(
+      async (session) => await session.apps.versions.review(app, version)
+    );
+    return { state: "ready", data: review };
+  } catch (error) {
+    const hidden =
+      roleErrors.codeOf(error) !== undefined ||
+      appErrors.codeOf(error) === "app.not_found" ||
+      featureErrors.codeOf(error) === "feature.disabled";
+    return hidden
+      ? { state: "hidden" }
+      : { state: "refused", message: messageOf(error) };
   }
 };
 
@@ -60,10 +85,100 @@ const changeWords = {
   removed: "Removed",
 } as const;
 
+/** Who proposed a version, as its reviewer reads it. */
+const proposerText = ({ proposedBy }: VersionReview): string => {
+  if (proposedBy === null) {
+    return "Committed by a person.";
+  }
+  return proposedBy.chatTitle === null
+    ? "Proposed by the agent, in another person's chat."
+    : `Proposed by the agent in chat "${proposedBy.chatTitle}".`;
+};
+
+/**
+ * The server code a version runs, as it changes: it acts for whoever uses
+ * the App, with everything the App holds, so it is shown in full.
+ */
+const ServerCode = ({
+  app,
+  review,
+}: {
+  app: string;
+  review: VersionReview;
+}) => {
+  const [code, setCode] =
+    useState<Loaded<{ before?: string; after?: string }>>();
+  const { current } = review;
+  const { version } = review.version;
+  useEffect(() => {
+    let open = true;
+    const read = async (): Promise<void> => {
+      const found = await loadFromCore(async (session) => {
+        if (current === null) {
+          const files = await session.apps.files.read(app, version);
+          return { after: files["app/server.ts"] };
+        }
+        const diff = await session.apps.versions.diff(app, current, version);
+        const server = diff.find(({ path }) => path === "app/server.ts");
+        return {
+          before:
+            server === undefined || server.change === "added"
+              ? undefined
+              : server.before,
+          after:
+            server === undefined || server.change === "deleted"
+              ? undefined
+              : server.after,
+        };
+      });
+      if (open) {
+        setCode(found);
+      }
+    };
+    void read();
+    return () => {
+      open = false;
+    };
+  }, [app, current, version]);
+  if (code === undefined) {
+    return null;
+  }
+  if (code.state !== "ready") {
+    return <NotLoaded page={code} />;
+  }
+  return (
+    <details>
+      <summary>The server code, as it would run</summary>
+      {code.data.before === undefined ? null : (
+        <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
+          <code className="font-mono">{code.data.before}</code>
+        </pre>
+      )}
+      {code.data.after === undefined ? null : (
+        <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
+          <code className="font-mono">{code.data.after}</code>
+        </pre>
+      )}
+    </details>
+  );
+};
+
 /** What a version changes, as core worked it out. */
-const ReviewDetails = ({ review }: { review: VersionReview }) => (
+const ReviewDetails = ({
+  app,
+  review,
+}: {
+  app: string;
+  review: VersionReview;
+}) => (
   <div className="flex flex-col gap-3 text-sm">
-    <p>{review.version.message}</p>
+    <p>{proposerText(review)}</p>
+    <blockquote className="border-l-2 pl-3">
+      <span className="text-muted-foreground block text-xs">
+        In the proposer&apos;s words
+      </span>
+      {review.version.message}
+    </blockquote>
     <p className="text-muted-foreground">
       {review.current === null
         ? "Nothing runs yet: this would be the App's first current version."
@@ -83,6 +198,16 @@ const ReviewDetails = ({ review }: { review: VersionReview }) => (
         </ul>
       )}
     </section>
+    {review.server === null ? null : (
+      <section aria-label="Server code" className="flex flex-col gap-1">
+        <h4 className="font-medium">Server code</h4>
+        <Badge variant="destructive">
+          {changeWords[review.server]}: it acts for whoever uses the App, with
+          everything the App holds
+        </Badge>
+        <ServerCode app={app} review={review} />
+      </section>
+    )}
     {review.workflows.length === 0 ? null : (
       <section aria-label="Workflows" className="flex flex-col gap-1">
         <h4 className="font-medium">Workflows</h4>
@@ -93,6 +218,11 @@ const ReviewDetails = ({ review }: { review: VersionReview }) => (
                 {changeWords[workflow.change]} workflow{" "}
                 <code className="font-mono">{workflow.id}</code>
               </span>
+              {workflow.shared.length === 0 ? null : (
+                <span className="text-muted-foreground">
+                  Code it may use changed: {workflow.shared.join(", ")}
+                </span>
+              )}
               {workflow.steps === null ? (
                 <span className="text-muted-foreground">
                   Its steps can&apos;t be read from its code.
@@ -106,6 +236,11 @@ const ReviewDetails = ({ review }: { review: VersionReview }) => (
                         Changes something outside Grasp
                       </Badge>
                     ) : null}
+                    {step.calls.length === 0 ? null : (
+                      <Badge variant="outline">
+                        Calls {step.calls.join(", ")}: may change things
+                      </Badge>
+                    )}
                   </span>
                 ))
               )}
@@ -119,6 +254,24 @@ const ReviewDetails = ({ review }: { review: VersionReview }) => (
         </ul>
       </section>
     )}
+    <section aria-label="What the App holds" className="flex flex-col gap-1">
+      <h4 className="font-medium">What the App holds</h4>
+      {review.grants.length === 0 ? (
+        <p className="text-muted-foreground">No permissions.</p>
+      ) : (
+        <ul className="flex flex-col gap-1">
+          {review.grants.map(({ permission, askedAgain }) => (
+            <li key={permission.id}>
+              {permission.binding}: {permission.actions.join(", ")} on{" "}
+              {permission.object.type}
+              {askedAgain
+                ? ", asked for again of an admin if you make this current"
+                : ""}
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
     <section aria-label="Permissions asked for" className="flex flex-col gap-1">
       <h4 className="font-medium">Permissions asked for</h4>
       {review.permissions.length === 0 ? (
@@ -129,6 +282,7 @@ const ReviewDetails = ({ review }: { review: VersionReview }) => (
             <li key={permission.id}>
               {permission.binding}: {permission.actions.join(", ")} on{" "}
               {permission.object.type}, waiting for an admin
+              {permission.requestedVia === null ? "" : " (asked by the agent)"}
             </li>
           ))}
         </ul>
@@ -151,8 +305,8 @@ const ReviewDetails = ({ review }: { review: VersionReview }) => (
 );
 
 /**
- * An App's version up for review: what it changes, and making it current,
- * for the App's builders (a person who isn't one reads why not).
+ * An App's version up for review: what it changes, and making it current;
+ * nothing for an App the person doesn't build.
  */
 const PendingVersion = ({
   app,
@@ -163,14 +317,14 @@ const PendingVersion = ({
   version: number;
   onDone: () => void;
 }) => {
-  const [review, setReview] = useState<Loaded<VersionReview>>();
+  const [review, setReview] = useState<
+    Loaded<VersionReview> | { state: "hidden" }
+  >();
   const { busy, failure, run } = useCoreAction();
   useEffect(() => {
     let current = true;
     const read = async (): Promise<void> => {
-      const found = await loadFromCore(
-        async (session) => await session.apps.versions.review(app.id, version)
-      );
+      const found = await readReview(app.id, version);
       if (current) {
         setReview(found);
       }
@@ -188,6 +342,9 @@ const PendingVersion = ({
       onDone();
     }
   };
+  if (review === undefined || review.state === "hidden") {
+    return null;
+  }
   return (
     <Card size="sm">
       <CardHeader>
@@ -196,13 +353,14 @@ const PendingVersion = ({
         </CardTitle>
       </CardHeader>
       <CardContent>
-        {review === undefined ? null : <NotLoaded page={review} />}
-        {review?.state === "ready" ? (
-          <ReviewDetails review={review.data} />
-        ) : null}
+        {review.state === "ready" ? (
+          <ReviewDetails app={app.id} review={review.data} />
+        ) : (
+          <NotLoaded page={review} />
+        )}
         <ErrorText>{failure}</ErrorText>
       </CardContent>
-      {review?.state === "ready" ? (
+      {review.state === "ready" ? (
         <CardFooter>
           <Button
             disabled={busy}
@@ -229,7 +387,7 @@ export const ChatBuilds = ({
   chatId: string;
   running: boolean;
 }) => {
-  const [builds, setBuilds] = useState<Loaded<Builds>>();
+  const [builds, setBuilds] = useState<Loaded<Builds> | { state: "off" }>();
   const [reads, setReads] = useState(0);
   // Only the latest read shows, whichever ends last.
   const latest = useRef(0);
@@ -248,7 +406,7 @@ export const ChatBuilds = ({
     void load();
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- `reads` says when to read again
   }, [chatId, running, reads]);
-  if (builds === undefined) {
+  if (builds === undefined || builds.state === "off") {
     return null;
   }
   if (builds.state !== "ready") {
@@ -265,7 +423,7 @@ export const ChatBuilds = ({
   }
   return (
     <section aria-label="Being built" className="flex flex-col gap-2">
-      <h2 className="text-sm font-medium">Being built</h2>
+      <h3 className="text-sm font-medium">Being built</h3>
       {builds.data.drafts.map((draft) => (
         <p className="text-sm" key={draft.app}>
           {names.get(draft.app) ?? draft.app}: {draft.changed.length}{" "}

@@ -381,6 +381,11 @@ export const PendingApprovals = ({
                   </TableCell>
                   <TableCell>
                     {personName(directory, request.requestedBy)}
+                    {request.requestedVia === null ? null : (
+                      <span className="text-muted-foreground block text-xs">
+                        asked for by the agent, in their chat
+                      </span>
+                    )}
                     {again === undefined ? null : (
                       <span className="text-muted-foreground block text-xs">
                         {again}
