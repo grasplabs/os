@@ -1,0 +1,73 @@
+{
+  "source": {
+    "collection": "playbook",
+    "description": "Where statements come from: an interview, a chat or a document, when it was, and who it came from. Its title names it; its body keeps the notes it was taken from.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "medium": {
+          "enum": ["interview", "chat", "document", "other"]
+        },
+        "date": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "description": "When it was, as YYYY-MM-DD"
+        },
+        "from": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "description": "Who it came from: a name or a role"
+        }
+      },
+      "required": ["title", "medium", "date"]
+    }
+  },
+  "statement": {
+    "collection": "playbook",
+    "description": "One claim from a source, as its title, tagged with what it is about: a goal, a blocker, a time sink, a handover, a tool or a rule. It names its source by path and carries the source's date, which only the intake's save sets, once someone reviewed it: an edit of its text keeps them, and a statement saved by hand, without them, is refused. Its body links the source and quotes it.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "The source's record, by its path"
+        },
+        "date": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10,
+          "description": "The source's date, as YYYY-MM-DD"
+        },
+        "tags": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 6,
+          "items": {
+            "enum": ["goal", "blocker", "time_sink", "handover", "tool", "rule"]
+          }
+        }
+      },
+      "required": ["title", "source", "date", "tags"]
+    },
+    "kept": [
+      {
+        "method": "save",
+        "fields": ["source", "date"]
+      }
+    ]
+  }
+}

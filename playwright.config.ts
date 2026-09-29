@@ -5,7 +5,7 @@ import { testAuthSecret } from "./e2e/people.ts";
 import { corePort, idpOrigin, idpPort, origin, stateDir } from "./e2e/stack.ts";
 
 /** The end-to-end tests of the Playbook's built-ins (their own project). */
-const playbookTests = /(?:board-page|workflow-map)\.e2e\.ts$/u;
+const playbookTests = /(?:board-page|intake|workflow-map)\.e2e\.ts$/u;
 const ci = process.env.CI === "true";
 
 /**
