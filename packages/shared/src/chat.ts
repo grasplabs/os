@@ -17,6 +17,20 @@ export interface ChatSummary {
   running: boolean;
 }
 
+/**
+ * An App the chat's agent is changing in the chat's own draft, not yet
+ * proposed (`ChatsApi.drafts`).
+ */
+export interface ChatDraft {
+  app: string;
+  /** The version the draft is over; null for an App with none yet. */
+  base: number | null;
+  /** The paths it changes, sorted. */
+  changed: string[];
+  /** When it was last written (ISO 8601). */
+  updatedAt: string;
+}
+
 /** Code the agent ran, or is writing, in a code step. */
 export interface ChatCode {
   /** Pairs the code with its result. */
@@ -183,6 +197,11 @@ export interface ChatsApi {
    * watching.
    */
   send: (chatId: string, question: ChatQuestion) => Promise<void>;
+  /**
+   * The Apps the chat's agent is changing in the chat's drafts, not yet
+   * proposed, most recently written first.
+   */
+  drafts: (chatId: string) => Promise<ChatDraft[]>;
   /** Stops the agent's work on the chat; `false` when there was none. */
   cancel: (chatId: string) => Promise<boolean>;
   /**

@@ -1,4 +1,5 @@
 import { compilerVersion } from "@grasp-os/compiler";
+import { agentErrors } from "@grasp-os/shared/agent";
 import { appErrors } from "@grasp-os/shared/apps";
 import { featureErrors } from "@grasp-os/shared/errors";
 import { chatIdSchema } from "@grasp-os/shared/ids";
@@ -311,6 +312,15 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       "notes.md": "the builder's",
       "builder.md": "mine",
     });
+    // The chat's page lists what the agent is changing, for its person only.
+    await expect(
+      chat.stub.drafts(chat.chat.id, builder.userId)
+    ).resolves.toMatchObject([
+      { app: existing, base: 1, changed: ["notes.md"] },
+    ]);
+    await expect(
+      chat.stub.drafts(chat.chat.id, "someone-else")
+    ).rejects.toThrow(agentErrors.create("agent.chat_not_found").message);
   });
 
   it("stops the repair loop after five failed checks in a row, until the next question", async () => {
