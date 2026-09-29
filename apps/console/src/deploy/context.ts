@@ -41,11 +41,19 @@ type StoreSecret = {
   [Name in keyof Env]-?: Env[Name] extends SecretsStoreSecret ? Name : never;
 }[keyof Env];
 
+/** A Secrets Store secret the console needs isn't there. */
+export class MissingStoreSecretError extends Error {
+  constructor(name: StoreSecret) {
+    super(`${name} is missing from Secrets Store`);
+    this.name = "MissingStoreSecretError";
+  }
+}
+
 /**
  * The value of the Secrets Store secret `name`. One that's missing or
- * empty stops the caller, naming the secret and nothing of its value:
- * deploy-ops writes every one of them, so a gap is a store to fix, not a
- * secret to leave off.
+ * empty stops the caller (`MissingStoreSecretError`), naming the secret
+ * and nothing of its value: deploy-ops writes every one of them, so a gap
+ * is a store to fix, not a secret to leave off.
  */
 const storeSecret = async (env: Env, name: StoreSecret): Promise<string> => {
   let value = "";
@@ -56,12 +64,22 @@ const storeSecret = async (env: Env, name: StoreSecret): Promise<string> => {
     // below, by name.
   }
   if (value === "") {
-    throw new Error(`${name} is missing from Secrets Store`);
+    throw new MissingStoreSecretError(name);
   }
   return value;
 };
 
-/** The Cloudflare API as the deployer, a member of every client account. */
+/**
+ * The Cloudflare API as a tenant admin: it only creates client accounts
+ * and makes the deployer a member of them (src/provision/workflow.ts).
+ */
+export const tenantAdminApi = async (env: Env): Promise<CloudflareApi> =>
+  cloudflareApi({ token: await storeSecret(env, "TENANT_ADMIN_TOKEN") });
+
+/**
+ * The Cloudflare API as the deployer: a member of every client account,
+ * its token scoped to what a deploy does.
+ */
 export const deployerApi = async (env: Env): Promise<CloudflareApi> =>
   cloudflareApi({ token: await storeSecret(env, "DEPLOYER_API_TOKEN") });
 

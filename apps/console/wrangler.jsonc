@@ -62,14 +62,21 @@
   "kv_namespaces": [
     { "binding": "ROUTER_HOSTS", "id": "router-hosts-namespace" },
   ],
-  // What a deploy needs from the account's Secrets Store: the deployer's
-  // API token (a member of every client account), the keys each client's
-  // own secrets are derived from, and the secrets every client shares,
-  // which deploy-ops copies in from 1Password (src/provision/secrets.ts).
-  // The store id is the account's own: `deploy` fills it in
+  // What provisioning and deploys need from the account's Secrets Store
+  // (src/deploy/context.ts): the tenant admin's token, which only creates
+  // accounts and makes the deployer a member (src/provision/workflow.ts);
+  // the deployer's token, with deploy permissions only, on every client
+  // account; the keys each client's own secrets are derived from; and the
+  // secrets every client shares, which deploy-ops copies in from
+  // 1Password. The store id is the account's own: `deploy` fills it in
   // (scripts/wrangler-deploy.ts), so this placeholder only reaches local
   // runs and tests.
   "secrets_store_secrets": [
+    {
+      "binding": "TENANT_ADMIN_TOKEN",
+      "store_id": "account-secrets-store",
+      "secret_name": "TENANT_ADMIN_TOKEN",
+    },
     {
       "binding": "DEPLOYER_API_TOKEN",
       "store_id": "account-secrets-store",

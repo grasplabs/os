@@ -33,18 +33,13 @@ export const listAccounts = async (api: CloudflareApi): Promise<Account[]> =>
   await listAll(api, "/accounts", accountSchema);
 
 /**
- * The account named `name`, created if the token sees none by that name.
- * Only a tenant admin's token (Cloudflare's partner programme) may create
- * accounts: any other is refused, and the account is adopted by id
- * (`getAccount`) instead. A create is a POST, so it isn't retried after a
- * server error or a lost answer; running this again finds the account it
- * made by its name, so it makes one account however often it runs. Two
- * accounts of that name stop it rather than pick one.
+ * The account named exactly `name` the token sees, or undefined. Two of
+ * that name stop it rather than pick one.
  */
-export const ensureAccount = async (
+export const findAccount = async (
   api: CloudflareApi,
   name: string
-): Promise<Account> => {
+): Promise<Account | undefined> => {
   // The API matches `name` loosely: pick the exact one.
   const listed = await listAll(api, "/accounts", accountSchema, { name });
   const matches = listed.filter((account) => account.name === name);
@@ -52,16 +47,83 @@ export const ensureAccount = async (
   if (others.length > 0) {
     throw new Error(`${matches.length} accounts are named ${name}`);
   }
-  return (
-    found ??
-    (await api.call(
-      {
-        method: "POST",
-        path: "/accounts",
-        json: { name, type: "standard" },
-      },
-      accountSchema
-    ))
+  return found;
+};
+
+/**
+ * The account named `name`, created if the token sees none by that name.
+ * Only a tenant admin's token (Cloudflare's partner programme) may create
+ * accounts. A create is a POST, so it isn't retried after a server error
+ * or a lost answer; running this again finds the account it made by its
+ * name, so it makes one account however often it runs.
+ */
+export const ensureAccount = async (
+  api: CloudflareApi,
+  name: string
+): Promise<Account> =>
+  (await findAccount(api, name)) ??
+  (await api.call(
+    { method: "POST", path: "/accounts", json: { name, type: "standard" } },
+    accountSchema
+  ));
+
+const userSchema = z.object({ email: z.string() });
+
+/** The email of the user whose token `api` holds. */
+export const tokenUserEmail = async (api: CloudflareApi): Promise<string> => {
+  const { email } = await api.call(
+    { method: "GET", path: "/user" },
+    userSchema
+  );
+  return email;
+};
+
+const memberSchema = z.object({
+  id: z.string(),
+  status: z.string(),
+  user: z.object({ email: z.string() }),
+});
+const roleSchema = z.object({ id: z.string(), name: z.string() });
+
+/**
+ * Makes the Cloudflare user `email` a member of account `accountId` with
+ * the role named `roleName`, accepted at once (it's an existing user, as
+ * the tenant admin adds it), unless it's a member already. Running it
+ * again after a lost answer finds the member it added. A membership still
+ * pending (an invitation nobody accepted) stops it: staff accept or remove
+ * it by hand.
+ */
+export const ensureMember = async (
+  api: CloudflareApi,
+  accountId: string,
+  email: string,
+  roleName: string
+): Promise<void> => {
+  const path = `/accounts/${accountId}/members`;
+  const members = await listAll(api, path, memberSchema);
+  const existing = members.find(
+    (member) => member.user.email.toLowerCase() === email.toLowerCase()
+  );
+  if (existing?.status === "accepted") {
+    return;
+  }
+  if (existing !== undefined) {
+    throw new Error(
+      `${email}'s membership of ${accountId} is ${existing.status}`
+    );
+  }
+  const roles = await listAll(api, `/accounts/${accountId}/roles`, roleSchema);
+  const role = roles.find(({ name }) => name === roleName);
+  if (role === undefined) {
+    throw new Error(`Account ${accountId} has no role named ${roleName}`);
+  }
+  await api.call(
+    {
+      method: "POST",
+      path,
+      json: { email, roles: [role.id], status: "accepted" },
+    },
+    memberSchema
   );
 };
 

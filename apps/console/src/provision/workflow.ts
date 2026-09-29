@@ -1,3 +1,4 @@
+import { log } from "@grasp-os/shared/log";
 /**
  * Onboarding a client, as a Cloudflare Workflow: its account (created, or
  * adopted by id), its client record, a pause while staff upgrade the
@@ -12,26 +13,50 @@
  *
  * Every step can run again: the account is found by name before it's
  * created, the record is inserted once, and a deploy finds what it made
- * before (src/deploy/deploy.ts). A step that fails is retried, and a run
- * that failed is resumed from its deploy (`retryProvisioning`), so a
- * failure part way creates nothing twice.
+ * before (src/deploy/deploy.ts). A step that fails for a reason a retry
+ * can fix is retried; any other failure stops the run at once
+ * (`NonRetryableError`, carrying its code), for staff to fix and resume
+ * (`retryProvisioning`). Either way nothing is made twice.
  *
- * The deployer's token and the secrets are read from Secrets Store inside
- * each step and never returned from one: a step's result and the run's
- * params are stored by Workflows (threat model R17, CO3).
+ * Two tokens, by privilege, both from Secrets Store: the tenant admin's,
+ * read only in the account step, creates the account and makes the
+ * deployer a member; the deployer's, scoped to what a deploy does, does
+ * everything else. Neither is ever returned from a step: a step's result
+ * and the run's params are stored by Workflows (threat model R17, CO3).
  */
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
-import { and, desc, eq, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import type { Staff } from "../access.ts";
-import { ensureAccount, getAccount } from "../cloudflare/accounts.ts";
-import { actIfChanged, consoleDatabase } from "../db/act.ts";
+import {
+  ensureAccount,
+  ensureMember,
+  findAccount,
+  getAccount,
+  tokenUserEmail,
+} from "../cloudflare/accounts.ts";
+import { CloudflareApiError } from "../cloudflare/api.ts";
+import type { CloudflareApi } from "../cloudflare/api.ts";
+import { listScripts } from "../cloudflare/workers.ts";
+import { actIfChanged, audit, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import { clientDeploys, clients } from "../db/schema.ts";
-import { deployContext, deployerApi } from "../deploy/context.ts";
-import { runDeploy, startDeploy } from "../deploy/deploy.ts";
+import { clients } from "../db/schema.ts";
+import {
+  deployContext,
+  deployerApi,
+  MissingStoreSecretError,
+  tenantAdminApi,
+} from "../deploy/context.ts";
+import {
+  errorCode,
+  latestDeployOf,
+  runDeploy,
+  startDeploy,
+} from "../deploy/deploy.ts";
+import { DeployError } from "../deploy/errors.ts";
+import type { DeployErrorCode } from "../deploy/errors.ts";
 
 /** What a run is started with: identifiers only, since Workflows stores them. */
 export interface ProvisionParams {
@@ -45,6 +70,11 @@ export interface ProvisionParams {
   ring: number;
   /** The staff member who started it. */
   startedBy: Staff;
+  /**
+   * Staff confirmed Workers Paid for an earlier run of this client, which
+   * got as far as deploying: this run doesn't ask again.
+   */
+  workersPaid?: boolean;
 }
 
 /** The event staff send once the account is on Workers Paid. */
@@ -58,6 +88,16 @@ export const deployStep = "deploy";
 
 /** The name of the account a run creates for a client. */
 export const accountName = (clientId: string): string => `grasp-os-${clientId}`;
+
+/**
+ * The role the tenant admin gives the deployer in a new account. What the
+ * deployer can do there is what its token's permissions allow within this
+ * role, so the token, scoped to deploying, is what limits it.
+ */
+const deployerRole = "Administrator";
+
+/** Grasp's Worker scripts, as every release names them. */
+const graspScriptPrefix = "grasp-os-";
 
 /** Quick steps: a few API calls or a row. */
 const quickStep = {
@@ -76,21 +116,228 @@ const deployStepConfig = {
 
 /**
  * How long a run waits for Workers Paid before it fails; a failed run is
- * started again from the page.
+ * resumed from the page.
  */
 const workersPaidTimeout = "30 days";
 
+/** Deploy failures a retry can fix: a new version still starting, a name race, a flaky query. */
+const retryableDeployCodes: ReadonlySet<DeployErrorCode> = new Set([
+  "smoke_check_failed",
+  "subdomain_unavailable",
+  "d1_migration_failed",
+]);
+
+/** A failure no retry fixes, as the run stops with it: its code, then what we say of it. */
+const stop = (code: string, detail?: string): NonRetryableError =>
+  new NonRetryableError(detail === undefined ? code : `${code}: ${detail}`);
+
+/**
+ * `error` as a step fails with it: one a retry can't fix becomes a
+ * `NonRetryableError` that carries its code and our own words, never a
+ * response body. That's every deploy failure but the few a retry can fix,
+ * a secret missing from Secrets Store, and any API refusal but a rate
+ * limit or a timeout (the API client retries those already).
+ */
+const asStepError = (error: unknown): unknown => {
+  if (error instanceof DeployError) {
+    return retryableDeployCodes.has(error.code)
+      ? error
+      : stop(error.code, error.message);
+  }
+  if (error instanceof MissingStoreSecretError) {
+    return stop("store_secret_missing", error.message);
+  }
+  if (
+    error instanceof CloudflareApiError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    error.status !== 408 &&
+    error.status !== 429
+  ) {
+    return stop(errorCode(error));
+  }
+  return error;
+};
+
+/**
+ * Records that client `clientId`'s run stopped at `step` with `error` (its
+ * code and our words), audited as `client.provision_stop`: Workflows
+ * reports a stopped run only as stopped, so the page reads why from here.
+ * A failure to record it is logged, not thrown, so the step fails with
+ * its own error.
+ */
+const recordStop = async (
+  db: ConsoleDatabase,
+  clientId: string,
+  step: string,
+  error: string
+): Promise<void> => {
+  try {
+    await audit(db, "system", {
+      action: "client.provision_stop",
+      clientId,
+      detail: { step, error },
+    });
+  } catch (recordError) {
+    log.error("provision.stop_unrecorded", {
+      clientId,
+      step,
+      error: errorCode(recordError),
+    });
+  }
+};
+
+/**
+ * `task` as step `step` of client `clientId`'s run runs it, its failures
+ * as `asStepError` makes them, and one that stops the run recorded.
+ */
+const guarded =
+  <T>(
+    db: ConsoleDatabase,
+    clientId: string,
+    step: string,
+    task: () => Promise<T>
+  ) =>
+  async (): Promise<T> => {
+    try {
+      return await task();
+    } catch (error) {
+      const failure = asStepError(error);
+      if (failure instanceof NonRetryableError) {
+        await recordStop(db, clientId, step, failure.message);
+      }
+      throw failure;
+    }
+  };
+
+/**
+ * The Grasp Worker script in account `accountId` that makes it someone
+ * else's, or undefined when it's free for client `clientId`: its own
+ * recorded account, or one that runs no Grasp Worker. So another client's
+ * account, staging's or the console's own can't be adopted and deployed
+ * over, whether the console knows it or not.
+ */
+export const scriptInTheWay = async (
+  api: CloudflareApi,
+  db: ConsoleDatabase,
+  accountId: string,
+  clientId: string
+): Promise<string | undefined> => {
+  const [own] = await db
+    .select({ id: clients.id })
+    .from(clients)
+    .where(and(eq(clients.id, clientId), eq(clients.accountId, accountId)));
+  if (own !== undefined) {
+    return undefined;
+  }
+  const scripts = await listScripts(api, accountId);
+  return scripts.find((script) => script.startsWith(graspScriptPrefix));
+};
+
+/** The account a run works in, and one an earlier run made for it but left. */
+interface RunAccount {
+  accountId: string;
+  /** `grasp-os-<clientId>`, made by an earlier run, when this one adopts another. */
+  abandonedAccountId: string | null;
+}
+
+/**
+ * The id of `grasp-os-<clientId>`, an account an earlier run made before
+ * staff chose to adopt another, so the run records it for staff to close;
+ * undefined when there's none, or no tenant admin token to look with.
+ */
+const madeEarlier = async (
+  env: Env,
+  clientId: string
+): Promise<string | undefined> => {
+  let tenant: CloudflareApi;
+  try {
+    tenant = await tenantAdminApi(env);
+  } catch (error) {
+    if (error instanceof MissingStoreSecretError) {
+      return undefined;
+    }
+    throw error;
+  }
+  const made = await findAccount(tenant, accountName(clientId));
+  return made?.id;
+};
+
+/**
+ * The account step: creates `grasp-os-<clientId>` as the tenant admin
+ * (found by name if it exists) and makes the deployer a member, or adopts
+ * the account staff named, which the deployer must be a member of
+ * already. Either way the deployer must reach it, and it must be free for
+ * this client (`scriptInTheWay`).
+ */
+const settleAccount = async (
+  env: Env,
+  db: ConsoleDatabase,
+  params: ProvisionParams
+): Promise<RunAccount> => {
+  const deployer = await deployerApi(env);
+  let { accountId } = params;
+  let abandonedAccountId: string | null = null;
+  if (accountId === undefined) {
+    const tenant = await tenantAdminApi(env);
+    const account = await ensureAccount(tenant, accountName(params.clientId));
+    await ensureMember(
+      tenant,
+      account.id,
+      await tokenUserEmail(deployer),
+      deployerRole
+    );
+    accountId = account.id;
+  } else {
+    const made = await madeEarlier(env, params.clientId);
+    if (made !== undefined && made !== accountId) {
+      abandonedAccountId = made;
+    }
+  }
+  try {
+    await getAccount(deployer, accountId);
+  } catch (error) {
+    if (
+      error instanceof CloudflareApiError &&
+      error.status >= 400 &&
+      error.status < 500 &&
+      error.status !== 429
+    ) {
+      throw stop(
+        "account_unreachable",
+        `The deployer isn't a member of account ${accountId}`
+      );
+    }
+    throw error;
+  }
+  const inTheWay = await scriptInTheWay(
+    deployer,
+    db,
+    accountId,
+    params.clientId
+  );
+  if (inTheWay !== undefined) {
+    throw stop(
+      "account_in_use",
+      `Account ${accountId} already runs ${inTheWay}`
+    );
+  }
+  return { accountId, abandonedAccountId };
+};
+
 /**
  * Records the client, audited as `client.create` by whoever started the
- * run. A client already recorded on this account is left as it is (a step
- * that runs again); one on another account, or an account another client
- * has, stops the run: that's for staff to sort out, not for a retry.
+ * run, with an account an earlier run made and this one left. A client
+ * already recorded on this account is left as it is (a step that runs
+ * again); one on another account, or an account another client has, stops
+ * the run.
  */
 const recordClient = async (
   db: ConsoleDatabase,
   params: ProvisionParams,
-  accountId: string
+  account: RunAccount
 ): Promise<void> => {
+  const { accountId, abandonedAccountId } = account;
   const now = new Date();
   await actIfChanged(
     db,
@@ -111,7 +358,10 @@ const recordClient = async (
       action: "client.create",
       clientId: params.clientId,
       target: accountId,
-      detail: { ring: params.ring },
+      detail: {
+        ring: params.ring,
+        ...(abandonedAccountId === null ? {} : { abandonedAccountId }),
+      },
     }
   );
   const [row] = await db
@@ -119,7 +369,8 @@ const recordClient = async (
     .from(clients)
     .where(eq(clients.id, params.clientId));
   if (row?.accountId !== accountId) {
-    throw new NonRetryableError(
+    throw stop(
+      row === undefined ? "account_taken" : "client_on_another_account",
       row === undefined
         ? `Account ${accountId} is another client's`
         : `Client ${params.clientId} is on another account`
@@ -139,16 +390,7 @@ const deployToRun = async (
   db: ConsoleDatabase,
   params: ProvisionParams
 ): Promise<string> => {
-  const [latest] = await db
-    .select({
-      id: clientDeploys.id,
-      releaseId: clientDeploys.releaseId,
-      status: clientDeploys.status,
-    })
-    .from(clientDeploys)
-    .where(eq(clientDeploys.clientId, params.clientId))
-    .orderBy(desc(clientDeploys.createdAt), desc(sql`rowid`))
-    .limit(1);
+  const latest = await latestDeployOf(db, params.clientId);
   if (
     latest?.releaseId === params.releaseId &&
     (latest.status === "failed" || latest.status === "done")
@@ -193,37 +435,53 @@ export class ProvisionClient extends WorkflowEntrypoint<Env, ProvisionParams> {
     const { payload: params } = event;
     const db = consoleDatabase(this.env.DB);
 
-    const accountId = await step.do("account", quickStep, async () => {
-      const api = await deployerApi(this.env);
-      const account =
-        params.accountId === undefined
-          ? await ensureAccount(api, accountName(params.clientId))
-          : await getAccount(api, params.accountId);
-      return account.id;
-    });
+    const account = await step.do(
+      "account",
+      quickStep,
+      guarded(
+        db,
+        params.clientId,
+        "account",
+        async () => await settleAccount(this.env, db, params)
+      )
+    );
 
-    await step.do("client", quickStep, async () => {
-      await recordClient(db, params, accountId);
-    });
+    await step.do(
+      "client",
+      quickStep,
+      guarded(db, params.clientId, "client", async () => {
+        await recordClient(db, params, account);
+      })
+    );
 
     // Workers Paid can't be bought through the API yet: staff upgrade the
     // account in the dashboard and confirm on the client's page.
-    await step.waitForEvent("workers paid", {
-      type: workersPaidEvent,
-      timeout: workersPaidTimeout,
-    });
+    if (params.workersPaid !== true) {
+      await step.waitForEvent("workers paid", {
+        type: workersPaidEvent,
+        timeout: workersPaidTimeout,
+      });
+    }
 
-    const deployId = await step.do(deployStep, deployStepConfig, async () => {
-      const context = await deployContext(this.env);
-      const id = await deployToRun(context.db, params);
-      await runDeploy(context, id);
-      return id;
-    });
+    const deployId = await step.do(
+      deployStep,
+      deployStepConfig,
+      guarded(db, params.clientId, deployStep, async () => {
+        const context = await deployContext(this.env);
+        const id = await deployToRun(context.db, params);
+        await runDeploy(context, id);
+        return id;
+      })
+    );
 
-    await step.do("activate", quickStep, async () => {
-      await activate(db, params.clientId);
-    });
+    await step.do(
+      "activate",
+      quickStep,
+      guarded(db, params.clientId, "activate", async () => {
+        await activate(db, params.clientId);
+      })
+    );
 
-    return { accountId, deployId };
+    return { accountId: account.accountId, deployId };
   }
 }

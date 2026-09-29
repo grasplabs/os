@@ -4,18 +4,28 @@ import {
   ensureAccount,
   ensureAiGateway,
   ensureD1Database,
+  ensureMember,
   ensureR2Bucket,
   ensureWorkersSubdomain,
   getAccount,
   listAccounts,
 } from "../src/cloudflare/accounts.ts";
 import { CloudflareApiError, cloudflareApi } from "../src/cloudflare/api.ts";
-import { mockCloudflareApi } from "./cloudflare-api.ts";
+import {
+  deployerEmail,
+  mockCloudflareApi,
+  tenantEmail,
+} from "./cloudflare-api.ts";
 
 const token = "test-deployer-token-0123456789";
 const cloudflare = mockCloudflareApi(token);
 /** No waiting between retries: the fake answers at once. */
 const api = cloudflareApi({ token, retryDelayMs: 0 });
+/** A tenant admin's: it alone creates accounts. */
+const tenant = cloudflareApi({
+  token: `${token}-tenant-admin`,
+  retryDelayMs: 0,
+});
 
 /** What `promise` fails with, or undefined if it doesn't. */
 const errorOf = async (promise: Promise<unknown>): Promise<unknown> => {
@@ -58,20 +68,56 @@ describe("accounts", () => {
     );
   });
 
-  it("creates an account by name once, matching the name exactly", async () => {
-    cloudflare.addAccount("grasp-os-acme-old");
-    const created = await ensureAccount(api, "grasp-os-acme");
-    const again = await ensureAccount(api, "grasp-os-acme");
-    expect(again).toStrictEqual(created);
-    expect(cloudflare.accountsNamed("grasp-os-acme")).toHaveLength(1);
+  it("creates an account by name once, as a tenant admin, matching the name exactly", async () => {
+    cloudflare.addAccount("grasp-os-acme-old", tenantEmail);
+    const created = await ensureAccount(tenant, "grasp-os-acme");
+    const again = await ensureAccount(tenant, "grasp-os-acme");
+    expect({
+      again,
+      named: cloudflare.accountsNamed("grasp-os-acme").length,
+      asDeployer: await errorOf(ensureAccount(api, "grasp-os-other")),
+    }).toMatchObject({ again: created, named: 1, asDeployer: { status: 403 } });
   });
 
   it("refuses to pick between two accounts of one name", async () => {
-    cloudflare.addAccount("grasp-os-twin");
-    cloudflare.addAccount("grasp-os-twin");
-    await expect(ensureAccount(api, "grasp-os-twin")).rejects.toThrow(
+    cloudflare.addAccount("grasp-os-twin", tenantEmail);
+    cloudflare.addAccount("grasp-os-twin", tenantEmail);
+    await expect(ensureAccount(tenant, "grasp-os-twin")).rejects.toThrow(
       "2 accounts are named grasp-os-twin"
     );
+  });
+
+  it("makes the deployer a member as an Administrator once, at once, and refuses a pending one or a role the account lacks", async () => {
+    const account = cloudflare.addAccount("grasp-os-member", tenantEmail);
+    await ensureMember(tenant, account.id, deployerEmail, "Administrator");
+    await ensureMember(tenant, account.id, deployerEmail, "Administrator");
+    const posts = cloudflare.calls.filter(
+      ({ method, path }) => method === "POST" && path.endsWith("/members")
+    );
+    const pending = cloudflare.addAccount("grasp-os-pending", tenantEmail);
+    pending.members.set(deployerEmail, "pending");
+
+    const messageOf = async (promise: Promise<unknown>) => {
+      const error = await errorOf(promise);
+      return error instanceof Error ? error.message : error;
+    };
+    expect({
+      member: account.members.get(deployerEmail),
+      posts: posts.map(({ body }) => body),
+      pending: await messageOf(
+        ensureMember(tenant, pending.id, deployerEmail, "Administrator")
+      ),
+      role: await messageOf(
+        ensureMember(tenant, pending.id, "someone@grasp.test", "No such role")
+      ),
+    }).toStrictEqual({
+      member: "accepted",
+      posts: [
+        { email: deployerEmail, roles: ["role-admin"], status: "accepted" },
+      ],
+      pending: `${deployerEmail}'s membership of ${pending.id} is pending`,
+      role: `Account ${pending.id} has no role named No such role`,
+    });
   });
 
   it("refuses an account the token isn't a member of", async () => {

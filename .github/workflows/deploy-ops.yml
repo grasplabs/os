@@ -138,7 +138,11 @@ jobs:
         run: vp run --filter @grasp-os/console db:migrate
       # Router first: the console binds its hostname map, which the router's
       # first deploy creates, and both need the account's Secrets Store
-      # (scripts/wrangler-deploy.ts fills in both ids).
+      # (scripts/wrangler-deploy.ts fills in both ids). So a router deploy
+      # that fails stops the console's too. Besides Workers Scripts, D1 and
+      # Secrets Store, the job's token needs Workers KV Storage (read, to
+      # find the map) and Workflows (edit: the console's deploy registers
+      # its provisioning Workflow).
       - if: ${{ !inputs.secrets-only }}
         run: vp run --filter @grasp-os/router deploy
       # The console verifies every request's Access JWT against its Access

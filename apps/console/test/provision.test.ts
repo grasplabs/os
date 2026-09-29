@@ -1,6 +1,6 @@
 import { introspectWorkflowInstance } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { asc, eq, sql } from "drizzle-orm";
+import { and, asc, eq, sql } from "drizzle-orm";
 import {
   afterEach,
   beforeEach,
@@ -20,11 +20,16 @@ import {
 import type { ProvisionInput } from "../src/provision/control.ts";
 import { accountName } from "../src/provision/workflow.ts";
 import { importReleases } from "../src/releases/import.ts";
-import { mockCloudflareApi } from "./cloudflare-api.ts";
+import {
+  deployerEmail,
+  mockCloudflareApi,
+  tenantEmail,
+} from "./cloudflare-api.ts";
 import { publishRelease } from "./releases.ts";
 
 const token = "test-deployer-token-provision-7f3a9c";
-const cloudflare = mockCloudflareApi(token);
+const tenantToken = "test-tenant-admin-token-provision-2b8e41";
+const cloudflare = mockCloudflareApi(token, tenantToken);
 const db = consoleDatabase(env.DB);
 const staff = { email: "staff@grasp.test", sub: "sub-staff" };
 /** The console's CLIENT_DOMAIN in the test pool (vite.test.config.ts). */
@@ -52,6 +57,7 @@ const adminOf = async (
 
 /** Every secret the console reads, as deploy-ops puts them in the store. */
 const storeSecrets: [SecretsStoreSecret, string][] = [
+  [env.TENANT_ADMIN_TOKEN, tenantToken],
   [env.DEPLOYER_API_TOKEN, token],
   [env.ROUTER_KEY, "test-router-key"],
   [env.CLIENT_KEY, "test-client-key"],
@@ -168,6 +174,35 @@ const codeOf = async (promise: Promise<unknown>): Promise<unknown> => {
 const sortedNames = (items: readonly { name: string }[] = []): string[] =>
   items.map(({ name }) => name).toSorted((a, b) => a.localeCompare(b));
 
+/** The detail of each of the client's audit events of `action`, oldest first. */
+const detailsOf = async (
+  clientId: string,
+  action: string
+): Promise<unknown[]> => {
+  const rows = await db
+    .select({ detail: auditEvents.detail })
+    .from(auditEvents)
+    .where(
+      and(eq(auditEvents.clientId, clientId), eq(auditEvents.action, action))
+    )
+    .orderBy(asc(auditEvents.at), sql`rowid`);
+  return rows.map(({ detail }): unknown => JSON.parse(detail ?? "null"));
+};
+
+/** Another client's entry for `clientId`'s hostname, which holds it until cleared. */
+const holdHostname = async (clientId: string): Promise<string> => {
+  const hostname = `${clientId}.${domain}`;
+  await env.ROUTER_HOSTS.put(
+    hostname,
+    JSON.stringify({
+      clientId: "someone-else",
+      coreUrl: "https://grasp-os-core.elsewhere.workers.dev",
+      generation: 1,
+    })
+  );
+  return hostname;
+};
+
 describe("provisioning a new client", () => {
   const stored: { admin: SecretsStoreAdmin; id: string }[] = [];
 
@@ -186,7 +221,7 @@ describe("provisioning a new client", () => {
     }
   });
 
-  it("creates its account, waits for Workers Paid, then deploys the release and activates it, audited", async () => {
+  it("creates its account as the tenant admin, makes the deployer a member, waits for Workers Paid, then deploys the release and activates it, audited", async () => {
     const { clientId, input } = await setUp();
     await using run = await follow(clientId);
 
@@ -197,9 +232,15 @@ describe("provisioning a new client", () => {
     const [account] = accounts;
     expect({
       accounts: accounts.length,
+      members: Object.fromEntries(account?.members ?? []),
       databases: account?.d1.length,
       deploys: await deploysOf(clientId),
-    }).toStrictEqual({ accounts: 1, databases: 0, deploys: [] });
+    }).toStrictEqual({
+      accounts: 1,
+      members: { [tenantEmail]: "accepted", [deployerEmail]: "accepted" },
+      databases: 0,
+      deploys: [],
+    });
 
     await confirmWorkersPaid(env, staff, clientId);
     await run.waitForStatus("complete");
@@ -265,7 +306,7 @@ describe("provisioning a new client", () => {
     });
   });
 
-  it("adopts an account by its id, creating none", async () => {
+  it("adopts an account the deployer is a member of by its id, creating none", async () => {
     const account = cloudflare.addAccount("Acme's own");
     const { clientId, input } = await setUp({ accountId: account.id });
     await using run = await follow(clientId);
@@ -284,12 +325,73 @@ describe("provisioning a new client", () => {
     });
   });
 
-  it("resumes steps whose creates went through with their answers lost, making each thing once, and keeps the token out of the database and logs", async () => {
+  it("refuses to adopt an account that runs a Grasp Worker, or that the deployer can't reach, before a run starts", async () => {
+    const staging = cloudflare.addAccount("Grasp staging");
+    staging.scripts.set("grasp-os-core", {
+      versions: [],
+      deployments: [],
+      schedules: [],
+    });
+    const stranger = cloudflare.addAccount("Not ours", "someone@else.test");
+    const { clientId, input } = await setUp();
+
+    const inUse = await codeOf(
+      startProvisioning(env, staff, { ...input, accountId: staging.id })
+    );
+    const unreachable = await codeOf(
+      startProvisioning(env, staff, { ...input, accountId: stranger.id })
+    );
+    const trail = await actions(clientId);
+    expect({ inUse, unreachable, started: trail.length }).toStrictEqual({
+      inUse: "account_in_use",
+      unreachable: "account_unreachable",
+      started: 0,
+    });
+  });
+
+  it("stops at once, without a retry, when the account it would create runs a Grasp Worker already", async () => {
+    const { clientId, input } = await setUp();
+    // An account of the client's name that already runs Grasp: not one an
+    // earlier run of this client made, since no client is recorded on it.
+    const taken = cloudflare.addAccount(accountName(clientId), tenantEmail);
+    taken.members.set(deployerEmail, "accepted");
+    taken.scripts.set("grasp-os-connect", {
+      versions: [],
+      deployments: [],
+      schedules: [],
+    });
+    await using run = await follow(clientId);
+
+    await startProvisioning(env, staff, input);
+    await run.waitForStatus("errored");
+
+    expect({
+      stops: await detailsOf(clientId, "client.provision_stop"),
+      scriptLists: cloudflare.calls.filter(
+        ({ method, path }) =>
+          method === "GET" && path === `/accounts/${taken.id}/workers/scripts`
+      ).length,
+      client: await clientRow(clientId),
+    }).toStrictEqual({
+      stops: [
+        {
+          step: "account",
+          error: `account_in_use: Account ${taken.id} already runs grasp-os-connect`,
+        },
+      ],
+      scriptLists: 1,
+      client: undefined,
+    });
+  });
+
+  it("resumes steps whose creates went through with their answers lost, making each thing once, and keeps both tokens out of the database, logs, step results and status", async () => {
     const { clientId, input } = await setUp();
     await using run = await follow(clientId);
-    // The account's create and a database's go through, and their answers
-    // never arrive: each step fails and runs again.
+    // The account's create, the deployer's membership and a database's go
+    // through, and their answers never arrive: each step fails and runs
+    // again.
     cloudflare.failNext(isCreate("/accounts"), "lost");
+    cloudflare.failNext(isCreate("/members"), "lost");
     cloudflare.failNext(isCreate("/d1/database"), "lost");
 
     const logs = await logsOf(async () => {
@@ -302,35 +404,34 @@ describe("provisioning a new client", () => {
     const accounts = cloudflare.accountsNamed(accountName(clientId));
     expect({
       accounts: accounts.length,
+      member: accounts[0]?.members.get(deployerEmail),
       databases: sortedNames(accounts[0]?.d1),
       // The deploy step failed once and ran again: its failure was logged.
       failureLogged: logs.includes("deploy.failed"),
     }).toStrictEqual({
       accounts: 1,
+      member: "accepted",
       databases: ["grasp-os-connect", "grasp-os-core", "grasp-os-knowledge"],
       failureLogged: true,
     });
-    const rows = await everyRow();
-    expect({
-      logs: logs.includes(token),
-      rows: rows.includes(token),
-      output: JSON.stringify(await run.getOutput()).includes(token),
-    }).toStrictEqual({ logs: false, rows: false, output: false });
+    const instance = await env.PROVISION_CLIENT.get(clientId);
+    const texts = [
+      logs,
+      await everyRow(),
+      JSON.stringify(await run.getOutput()),
+      JSON.stringify(await run.waitForStepResult({ name: "account" })),
+      JSON.stringify(await run.waitForStepResult({ name: "deploy" })),
+      JSON.stringify(await instance.status()),
+    ];
+    expect(
+      texts.map((text) => text.includes(token) || text.includes(tenantToken))
+    ).toStrictEqual([false, false, false, false, false, false]);
   });
 
-  it("resumes a run that failed at its last step from its deploy: nothing made twice, Workers Paid not asked again", async () => {
+  it("stops a run at once on a failure no retry fixes, and resumes it from its deploy: nothing made twice, Workers Paid not asked again", async () => {
     const { clientId, input } = await setUp();
     await using run = await follow(clientId);
-    // Another client's entry holds the hostname until staff clear it.
-    const hostname = `${clientId}.${domain}`;
-    await env.ROUTER_HOSTS.put(
-      hostname,
-      JSON.stringify({
-        clientId: "someone-else",
-        coreUrl: "https://grasp-os-core.elsewhere.workers.dev",
-        generation: 1,
-      })
-    );
+    const hostname = await holdHostname(clientId);
 
     await logsOf(async () => {
       await startProvisioning(env, staff, input);
@@ -338,11 +439,22 @@ describe("provisioning a new client", () => {
       await confirmWorkersPaid(env, staff, clientId);
       await run.waitForStatus("errored");
     });
+    // One attempt: a retry would have recorded the failure again.
+    const failures = await detailsOf(clientId, "deploy.fail");
     expect({
       deploys: await deploysOf(clientId),
+      failures: failures.length,
+      stops: await detailsOf(clientId, "client.provision_stop"),
       client: await clientRow(clientId),
     }).toMatchObject({
       deploys: [{ status: "failed", error: "hostname_taken" }],
+      failures: 1,
+      stops: [
+        {
+          step: "deploy",
+          error: `hostname_taken: ${hostname} routes to another client`,
+        },
+      ],
       client: { status: "provisioning" },
     });
 
@@ -362,7 +474,7 @@ describe("provisioning a new client", () => {
       deploys: await deploysOf(clientId),
       confirmations: trail.filter((action) => action === "client.workers_paid")
         .length,
-      retried: trail.includes("client.provision_retry"),
+      retries: await detailsOf(clientId, "client.provision_retry"),
       client: await clientRow(clientId),
     }).toMatchObject({
       databases: 3,
@@ -370,16 +482,67 @@ describe("provisioning a new client", () => {
       versions: [1, 1],
       deploys: [{ status: "done", error: null }],
       confirmations: 1,
-      retried: true,
+      retries: [{ from: "deploy" }],
       client: { status: "active" },
     });
   });
 
-  it("lets staff start again with another account when the run couldn't read the first", async () => {
-    const { clientId, input } = await setUp({
-      // An account the deployer isn't a member of.
-      accountId: "0".repeat(32),
+  it("gives a client whose run is gone a new run, which doesn't ask for Workers Paid again once it got to a deploy", async () => {
+    const { clientId, input } = await setUp();
+    const hostname = await holdHostname(clientId);
+    await using run = await follow(clientId);
+    await logsOf(async () => {
+      await startProvisioning(env, staff, input);
+      await run.waitForStepResult({ name: "client" });
+      await confirmWorkersPaid(env, staff, clientId);
+      await run.waitForStatus("errored");
     });
+    // As Workflows drops a run after its retention.
+    const gone = await env.PROVISION_CLIENT.get(clientId);
+    await gone.delete();
+    await env.ROUTER_HOSTS.delete(hostname);
+
+    // The new run stops before its own deploy: the deployer lost its
+    // membership meanwhile.
+    const [account] = cloudflare.accountsNamed(accountName(clientId));
+    account?.members.delete(deployerEmail);
+    await using again = await follow(clientId);
+    await retryProvisioning(env, staff, clientId);
+    await again.waitForStatus("errored");
+    const stops = await detailsOf(clientId, "client.provision_stop");
+    // Resumed once it's back: from the start, since the new run never got
+    // to its deploy step, and still without asking for Workers Paid.
+    account?.members.set(deployerEmail, "accepted");
+    await retryProvisioning(env, staff, clientId);
+    await again.waitForStatus("complete");
+
+    expect(stops.at(-1)).toStrictEqual({
+      step: "account",
+      error: `account_unreachable: The deployer isn't a member of account ${account?.id}`,
+    });
+    const trail = await actions(clientId);
+    expect({
+      client: await clientRow(clientId),
+      accounts: cloudflare.accountsNamed(accountName(clientId)).length,
+      confirmations: trail.filter((action) => action === "client.workers_paid")
+        .length,
+      retries: await detailsOf(clientId, "client.provision_retry"),
+      deploys: await deploysOf(clientId),
+    }).toMatchObject({
+      client: { status: "active" },
+      accounts: 1,
+      confirmations: 1,
+      retries: [{ from: "new_run" }, { from: "deploy" }],
+      deploys: [{ status: "done" }],
+    });
+  });
+
+  it("lets staff start again with another account when the run couldn't settle the first, and records the account it left", async () => {
+    const { clientId, input } = await setUp();
+    // The client's account exists with the deployer's membership pending:
+    // the account step can't finish.
+    const stuck = cloudflare.addAccount(accountName(clientId), tenantEmail);
+    stuck.members.set(deployerEmail, "pending");
     await using run = await follow(clientId);
 
     await startProvisioning(env, staff, input);
@@ -391,9 +554,14 @@ describe("provisioning a new client", () => {
     await startProvisioning(env, staff, { ...input, accountId: account.id });
     await again.waitForStepResult({ name: "client" });
 
-    expect({ before, after: await clientRow(clientId) }).toMatchObject({
+    expect({
+      before,
+      after: await clientRow(clientId),
+      created: await detailsOf(clientId, "client.create"),
+    }).toMatchObject({
       before: undefined,
       after: { accountId: account.id },
+      created: [{ ring: 2, abandonedAccountId: stuck.id }],
     });
   });
 
@@ -445,18 +613,21 @@ describe("provisioning a new client", () => {
       domain: await codeOf(
         startProvisioning({ ...env, CLIENT_DOMAIN: "" }, staff, other.input)
       ),
+      // Active now: nothing to resume.
+      resume: await codeOf(retryProvisioning(env, staff, clientId)),
     }).toStrictEqual({
       exists: "client_exists",
       account: "account_taken",
       release: "release_not_imported",
       domain: "domain_not_set",
+      resume: "not_provisioning",
     });
     await expect(
       startProvisioning(env, staff, { ...other.input, clientId: "www" })
     ).rejects.toThrow("a reserved name");
   });
 
-  it("refuses to confirm or resume what isn't being provisioned", async () => {
+  it("refuses to confirm or resume what isn't being provisioned, or a run still going", async () => {
     const { clientId, input } = await setUp();
     await using run = await follow(clientId);
     await startProvisioning(env, staff, input);
@@ -470,7 +641,7 @@ describe("provisioning a new client", () => {
     }).toStrictEqual({
       confirm: "not_provisioning",
       retry: "not_provisioning",
-      retryWaiting: "not_provisioning",
+      retryWaiting: "already_running",
     });
   });
 });
