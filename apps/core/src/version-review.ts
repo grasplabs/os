@@ -277,7 +277,12 @@ const stepChanges = (
     return {
       name,
       change,
-      sideEffect: (found?.sideEffect ?? false) || (shared && usesBindings),
+      // A step that calls the App's bindings may change things, whether it
+      // says so (`sideEffect`) or not.
+      sideEffect:
+        (found?.sideEffect ?? false) ||
+        (found?.env ?? []).length > 0 ||
+        (shared && usesBindings),
       calls: found?.env ?? [],
       sharedCode: shared,
     };

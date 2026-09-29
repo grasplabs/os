@@ -216,9 +216,9 @@ export interface VersionReview {
     shared: string[];
     /**
      * Its steps that differ, by name, each compared as its code is
-     * written: whether each may change something outside Grasp, and the
-     * App's bindings its code calls (`APP`, a connection, another App's
-     * exports). While `shared` code changed, every step is listed
+     * written: whether each may change something outside Grasp (it says
+     * so, or it calls any of the App's bindings), and the App's bindings
+     * its code calls (`APP`, a connection, another App's exports). While `shared` code changed, every step is listed
      * (`sharedCode`), as any may now behave differently through it, and
      * may change things if the workflow calls bindings at all. Null when
      * the code can't be read as steps.
