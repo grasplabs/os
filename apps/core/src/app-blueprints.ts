@@ -11,6 +11,7 @@ import type {
   FromBlueprint,
 } from "@grasp-os/shared/apps";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { isExpectedError } from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -339,6 +340,32 @@ const approvedSource = async (
 };
 
 /**
+ * Of the Apps `named`, those `by` may open, as `appFor` decides for each
+ * (a role in it, and able to read what it read): the Apps whose workflows
+ * and exports they could ask for themselves.
+ */
+const openedBy = async (
+  env: Env,
+  by: Identity,
+  named: readonly AppId[]
+): Promise<Set<string>> => {
+  const opened = await Promise.all(
+    named.map(async (app) => {
+      try {
+        await appFor(env, by, app, "user");
+        return [app];
+      } catch (error) {
+        if (isExpectedError(error)) {
+          return [];
+        }
+        throw error;
+      }
+    })
+  );
+  return new Set(opened.flat());
+};
+
+/**
  * Creates an App of `by`'s own from the blueprint of App `app` at
  * `version`: the code at that version as its first version (its AGENTS.md
  * a stub), and requests for what that App was given or asked for. All of
@@ -407,7 +434,13 @@ export const createFromBlueprint = async (
     workflows: workflowsIn(files),
     exports: exportsIn(files),
   };
-  const requests = await blueprintRequests(env, by, source.id, id);
+  const requests = await blueprintRequests(
+    env,
+    by,
+    source.id,
+    id,
+    async (named) => await openedBy(env, by, named)
+  );
   const db = drizzle(env.DB);
   // The App, pending, only while the blueprint is still marked and `by`
   // still has a role in its App (`stillOpenTo`), selected from its row:
@@ -476,6 +509,16 @@ export const createFromBlueprint = async (
         })
       )
     ),
+    ...requests.droppedApps.map(({ type, binding }) =>
+      outboxed(
+        db,
+        changeEntry(by, "app.blueprint.app_dropped", id, {
+          objectType: type,
+          binding,
+          fromApp: source.id,
+        })
+      )
+    ),
   ] as const;
   try {
     await auditedBatch(env, db, statements);
@@ -493,6 +536,7 @@ export const createFromBlueprint = async (
     version: toVersion(versionRow),
     permissions: requests.rows.map(toPermission),
     dropped: requests.dropped,
+    droppedApps: requests.droppedApps,
   };
 };
 

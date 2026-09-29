@@ -133,6 +133,7 @@ export const changeEntry = (
     | "app.blueprint.marked"
     | "app.blueprint.unmarked"
     | "app.blueprint.connection_dropped"
+    | "app.blueprint.app_dropped"
     | "app.blueprint.revoked",
   app: AppId,
   detail: Record<string, AuditDetailValue>

@@ -88,6 +88,10 @@ const share = async (
 
 const named = { name: "My notes", description: "Mine" };
 
+/** Rows ordered by their binding. */
+const byBinding = (one: { binding: string }, other: { binding: string }) =>
+  one.binding.localeCompare(other.binding);
+
 /** A personal connection of `owner`'s, such as their mailbox. */
 const mailboxOf = async (owner: Person): Promise<string> => {
   const id = `connection-mailbox-${unique()}`;
@@ -111,6 +115,90 @@ const mailboxOf = async (owner: Person): Promise<string> => {
 // which end a call that hangs. Sixty seconds is room for a slow runner,
 // as the other tests that release Apps give theirs.
 describe("blueprints", { timeout: 60_000 }, () => {
+  it("ask only for the workflows and exports of Apps their creator has a role in, and never name the others", async () => {
+    const [owner, maker] = await Promise.all([
+      personApi("builder"),
+      personApi("builder"),
+    ]);
+    const source = await notesApp(owner);
+    const [visible, hidden] = await Promise.all([
+      notesApp(owner),
+      notesApp(owner),
+    ]);
+    await share(owner, visible, maker, "user");
+    const asks = async (
+      binding: string,
+      object:
+        | { type: "workflow"; appId: string; workflowId: string }
+        | { type: "app"; appId: string }
+    ) =>
+      await owner.api.permissions.request({
+        subject: { type: "app", appId: source },
+        object,
+        actions: object.type === "app" ? ["read"] : ["start"],
+        binding,
+      });
+    for (const [binding, object] of [
+      ["VISIBLE_CRM", { type: "app", appId: visible }],
+      [
+        "VISIBLE_FLOW",
+        { type: "workflow", appId: visible, workflowId: "report" },
+      ],
+      ["HIDDEN_CRM", { type: "app", appId: hidden }],
+      [
+        "HIDDEN_FLOW",
+        { type: "workflow", appId: hidden, workflowId: "report" },
+      ],
+    ] as const) {
+      // oxlint-disable-next-line no-await-in-loop -- one request at a time
+      await asks(binding, object);
+    }
+    await share(owner, source, maker, "user");
+    await owner.api.apps.blueprints.mark(source, 1);
+
+    const made: CreatedFromBlueprint[] = [];
+    const events = await auditedDuring(async () => {
+      made.push(await maker.api.apps.blueprints.create(source, 1, named));
+    });
+    const [created] = made;
+
+    expect({
+      asked: created?.permissions
+        .map(({ object, binding }) => ({ object, binding }))
+        .toSorted(byBinding),
+      droppedApps: created?.droppedApps.toSorted(byBinding),
+      recorded: events
+        .filter(({ action }) => action === "app.blueprint.app_dropped")
+        .map(({ detail }) => ({
+          type: detail.objectType,
+          binding: String(detail.binding),
+          fromApp: detail.fromApp,
+        }))
+        .toSorted(byBinding),
+      // Nothing it answers or lists names the App they can't see.
+      namesHidden:
+        JSON.stringify(created).includes(hidden) ||
+        JSON.stringify(await maker.api.permissions.list()).includes(hidden),
+    }).toStrictEqual({
+      asked: [
+        { object: { type: "app", appId: visible }, binding: "VISIBLE_CRM" },
+        {
+          object: { type: "workflow", appId: visible, workflowId: "report" },
+          binding: "VISIBLE_FLOW",
+        },
+      ],
+      droppedApps: [
+        { type: "app", binding: "HIDDEN_CRM" },
+        { type: "workflow", binding: "HIDDEN_FLOW" },
+      ],
+      recorded: [
+        { type: "app", binding: "HIDDEN_CRM", fromApp: source },
+        { type: "workflow", binding: "HIDDEN_FLOW", fromApp: source },
+      ],
+      namesHidden: false,
+    });
+  });
+
   it("create an App with the same code, none of the data, and requests for what it was given", async () => {
     const [owner, maker, admin] = await Promise.all([
       personApi("builder"),

@@ -6,7 +6,7 @@ import type {
   AuditEntry,
 } from "@grasp-os/shared/audit";
 import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
-import { permissionIdSchema } from "@grasp-os/shared/ids";
+import { appIdSchema, permissionIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
 import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -632,6 +632,16 @@ export interface DroppedConnection {
 }
 
 /**
+ * A workflow or the exports of another App a blueprint's App was given,
+ * that a copy doesn't ask for: by its type and binding only, never the
+ * App, which its creator can't see.
+ */
+export interface DroppedApp {
+  type: "workflow" | "app";
+  binding: string;
+}
+
+/**
  * Requests for `app` of what `from` was given or asked for (its
  * permissions that aren't revoked), made by `by` as `app` is created from
  * a blueprint of `from` (app-blueprints.ts): the rows and their audit
@@ -639,17 +649,24 @@ export interface DroppedConnection {
  * nothing until an admin grants it. A workflow of `from` itself becomes
  * the same workflow of `app`. Someone else's personal connection is left
  * out (`dropped`), as only its owner's calls could use it and a copy is
- * `by`'s own App, and so is one connect doesn't know.
+ * `by`'s own App, and so is one connect doesn't know. So is a workflow or
+ * the exports of another App `by` couldn't ask for themselves
+ * (`droppedApps`): one they have no role in, as `openTo` (the Apps of
+ * those it names they may open; apps.ts, passed in as for
+ * `requestPermission`) says, so a copy never names an App its creator
+ * can't see.
  */
 export const blueprintRequests = async (
   env: Env,
   by: Identity,
   from: AppId,
-  app: AppId
+  app: AppId,
+  openTo: (apps: AppId[]) => Promise<ReadonlySet<string>>
 ): Promise<{
   rows: Row[];
   entries: AuditEntry[];
   dropped: DroppedConnection[];
+  droppedApps: DroppedApp[];
 }> => {
   const found = await drizzle(env.DB)
     .select()
@@ -681,9 +698,23 @@ export const blueprintRequests = async (
   );
   const isOthers = (row: Row): boolean =>
     row.objectType === "connection" && !kept.has(row.objectId);
+  // Another App's workflow or exports: kept only if `by` may open it.
+  const namesOtherApp = (row: Row): boolean =>
+    (row.objectType === "workflow" || row.objectType === "app") &&
+    row.objectId !== from;
+  const otherApps = [
+    ...new Set(
+      found
+        .filter(namesOtherApp)
+        .map(({ objectId }) => appIdSchema.parse(objectId))
+    ),
+  ];
+  const open = otherApps.length === 0 ? new Set() : await openTo(otherApps);
+  const isHidden = (row: Row): boolean =>
+    namesOtherApp(row) && !open.has(row.objectId);
   const requestedAt = new Date();
   const rows = found
-    .filter((row) => !isOthers(row))
+    .filter((row) => !isOthers(row) && !isHidden(row))
     .map((row): Row => ({
       ...row,
       id: crypto.randomUUID(),
@@ -710,6 +741,10 @@ export const blueprintRequests = async (
     dropped: found
       .filter(isOthers)
       .map(({ objectId, binding }) => ({ connectionId: objectId, binding })),
+    droppedApps: found.filter(isHidden).map(({ objectType, binding }) => ({
+      type: objectType === "app" ? "app" : "workflow",
+      binding,
+    })),
   };
 };
 

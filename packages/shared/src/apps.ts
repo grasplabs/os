@@ -325,11 +325,14 @@ export type FromBlueprint = z.input<typeof fromBlueprintSchema>;
  * the blueprint's version, but for its AGENTS.md, a stub naming the
  * blueprint (the blueprint's was written from what its App read, which
  * the copy may not have read), and `permissions` are requests, waiting for an
- * admin, for the connections, collections and workflows the blueprint's
- * App was given or asked for, but for someone else's personal
- * connections, which only their owner's calls could use, and connections
- * connect doesn't know (`dropped`).
- * Nothing else comes with it: no data, no settings, no runs, no members.
+ * admin, for the connections, collections, workflows and other Apps'
+ * exports the blueprint's App was given or asked for, but for someone
+ * else's personal connections, which only their owner's calls could use,
+ * and connections connect doesn't know (`dropped`), and the workflows and
+ * exports of Apps its creator has no role in, which they couldn't ask for
+ * themselves (`droppedApps`): a copy never names an App its creator can't
+ * see. Nothing else comes with it: no data, no settings, no runs, no
+ * members.
  */
 export interface CreatedFromBlueprint {
   app: App;
@@ -337,6 +340,11 @@ export interface CreatedFromBlueprint {
   permissions: Permission[];
   /** The connections, by binding, it doesn't ask for. */
   dropped: { connectionId: string; binding: string }[];
+  /**
+   * The workflows and exports of other Apps, by binding, it doesn't ask
+   * for; never naming the App.
+   */
+  droppedApps: { type: "workflow" | "app"; binding: string }[];
 }
 
 /** Blueprints: App versions to create Apps from. */
