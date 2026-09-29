@@ -350,9 +350,11 @@ const checkFiles = async (
     tests.status === "failed";
   const built = !failed && all.every(buildPassed);
   const preview = await previewOf(env, scope, app, revision, built);
+  // A preview that failed fails the check, even with a build still going.
+  const previewFailed = preview.status === "failed";
   return {
-    passed: built && preview.status !== "failed",
-    pending: !failed && all.some(buildUnknown),
+    passed: built && !previewFailed,
+    pending: !failed && !previewFailed && all.some(buildUnknown),
     screens: reported(builds.screens),
     server: reported(builds.server),
     workflows: reported(builds.workflows),
