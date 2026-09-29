@@ -272,6 +272,11 @@ export interface Turn {
   /** Keeps a finished message: called in order, as each one finishes. */
   keep: (message: Message) => void;
   /**
+   * Shows a response as it streams in, before `keep` gets it whole: called
+   * with the response so far on each change.
+   */
+  write?: (partial: AssistantMessage) => void;
+  /**
    * Why the turn may not go on, if it may not: asked before every model
    * request, so a person who left, or the agent switched off, stops a turn
    * under way.
@@ -483,6 +488,7 @@ export const runTurn = async ({
   loader,
   signal: cancelled,
   keep,
+  write,
   whyStop,
 }: Turn): Promise<TurnResult> => {
   // Cancelled by the caller, or stopped here (see `whyStop`).
@@ -532,6 +538,13 @@ export const runTurn = async ({
     (event) => {
       if (event.type === "message_end" && isMessage(event.message)) {
         keep(event.message);
+      }
+      if (
+        event.type === "message_update" &&
+        isMessage(event.message) &&
+        event.message.role === "assistant"
+      ) {
+        write?.(event.message);
       }
     },
     signal,

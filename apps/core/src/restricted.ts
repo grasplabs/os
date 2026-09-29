@@ -122,19 +122,19 @@ const restrictedState = async (
     const restricted = await appHost(env, context.appId).isRestricted();
     return { restricted, workflow };
   }
-  // A chat is its workspace's agent's to work in, and no one else's.
+  // A chat is its workspace agent's to work in, as the chat stored it, and
+  // no one else's, whichever object holds it (a person's own, say).
   const { subject } = authority;
-  const workspaceId: string = context.workspaceId;
-  if (subject.type !== "agent" || subject.agentId !== workspaceId) {
+  if (subject.type !== "agent") {
     throw contextInvalid();
   }
-  const restricted = await workspace(env, context.workspaceId).isChatRestricted(
+  const chat = await workspace(env, context.workspaceId).chatState(
     context.chatId
   );
-  if (restricted === undefined) {
+  if (chat === undefined || chat.agentId !== subject.agentId) {
     throw contextInvalid();
   }
-  return { restricted };
+  return { restricted: chat.restricted };
 };
 
 /**

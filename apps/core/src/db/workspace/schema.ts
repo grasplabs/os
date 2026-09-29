@@ -11,18 +11,30 @@ import {
   text,
 } from "drizzle-orm/sqlite-core";
 
-export const chats = sqliteTable("chats", {
-  id: text().$type<ChatId>().primaryKey(),
-  title: text().notNull(),
-  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
-  /** It read restricted data, and is in restricted mode for good. */
-  restricted: integer({ mode: "boolean" }).notNull().default(false),
-  /**
-   * The person the chat belongs to, whom its agent acts for. Chats made
-   * before agents have none, and their agent can't act.
-   */
-  personId: text("person_id"),
-});
+export const chats = sqliteTable(
+  "chats",
+  {
+    id: text().$type<ChatId>().primaryKey(),
+    title: text().notNull(),
+    createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+    /** It read restricted data, and is in restricted mode for good. */
+    restricted: integer({ mode: "boolean" }).notNull().default(false),
+    /**
+     * The person the chat belongs to, whom its agent acts for, and the
+     * only one who reaches it. Chats made before agents have none: nobody
+     * lists them, and their agent can't act.
+     */
+    personId: text("person_id"),
+    /**
+     * The agent that answers in the chat, acting for its person: the
+     * workspace agent admins grant to, whichever object holds the chat.
+     * Chats made before have none, and their agent can't act.
+     */
+    agentId: text("agent_id"),
+  },
+  // A person's list, newest first.
+  (table) => [index("chats_person").on(table.personId, table.createdAt)]
+);
 
 /**
  * A chat's transcript, in order: the agent's messages as pi shapes them
@@ -62,3 +74,14 @@ export const chatSources = sqliteTable(
   },
   (table) => [primaryKey({ columns: [table.chatId, table.sourceId] })]
 );
+
+/**
+ * Audit events of changes to this object's chats (made, renamed, deleted),
+ * each stored in the same transaction as its change, until the object has
+ * delivered it to the audit log (`drainObjectOutbox` in audit-outbox.ts).
+ */
+export const auditOutbox = sqliteTable("audit_outbox", {
+  id: text().primaryKey(),
+  event: text().notNull(),
+  createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
+});

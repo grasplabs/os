@@ -57,6 +57,7 @@ import {
   callOf,
   dropForEndedRun,
   heldFor,
+  declineChatActions,
   listPendingActions,
   pendingActionFor,
   refuseConfirmation,
@@ -270,6 +271,10 @@ export default class Connect
 
   async anyPending(request: unknown): Promise<boolean> {
     return await anyPending(this.env, request);
+  }
+
+  async declineChatActions(request: unknown): Promise<number> {
+    return await declineChatActions(this.env, request);
   }
 
   async declineAction(request: unknown): Promise<void> {

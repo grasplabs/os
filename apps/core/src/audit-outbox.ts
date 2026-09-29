@@ -46,7 +46,7 @@ const drainMaxBatches = 50;
 /** One outbox, as a drain reads it: its oldest events, and settling them. */
 interface Outbox {
   /** Named in logs. */
-  name: "core" | "knowledge" | "connect";
+  name: "core" | "knowledge" | "connect" | "workspace";
   /** Its oldest events, at most {@link auditOutboxTakeMax}, in order. */
   take: () => Promise<readonly OutboxedAuditEvent[]>;
   /**
@@ -95,6 +95,32 @@ const databaseOutbox = (
         )
         .bind(...ids),
     ]);
+  },
+});
+
+/**
+ * A Durable Object's own outbox, an `audit_outbox` table in its SQLite
+ * (the Workspace object's: chats made, renamed and deleted), written in
+ * the same transaction as the change. Its rows go in rowid order. A row
+ * the log can't take is recorded with an `audit.gap`, as any outbox's, and
+ * removed: the object keeps no rejected table.
+ */
+const objectOutbox = (storage: SqlStorage): Outbox => ({
+  name: "workspace",
+  take: async () =>
+    await Promise.resolve(
+      storage
+        .exec<{ id: string; event: string; createdAt: number }>(
+          "SELECT id, event, created_at AS createdAt FROM audit_outbox ORDER BY rowid LIMIT ?",
+          auditOutboxTakeMax
+        )
+        .toArray()
+    ),
+  settle: async (appended, rejected) => {
+    for (const id of [...appended, ...rejected.map((row) => row.id)]) {
+      storage.exec("DELETE FROM audit_outbox WHERE id = ?", id);
+    }
+    await Promise.resolve();
   },
 });
 
@@ -304,6 +330,22 @@ const drainLogged = async (
     });
     return 0;
   }
+};
+
+/**
+ * Drains a Durable Object's outbox (`objectOutbox`) as far as it goes,
+ * logging a drain that fails: how many events are left in it, so the
+ * object can try again later (its alarm) while any are.
+ */
+export const drainObjectOutbox = async (
+  env: AuditLogEnv,
+  storage: SqlStorage
+): Promise<number> => {
+  await drainLogged(env, objectOutbox(storage), drainMaxBatches);
+  const [left] = storage
+    .exec<{ count: number }>("SELECT count(*) AS count FROM audit_outbox")
+    .toArray();
+  return left?.count ?? 0;
 };
 
 /**

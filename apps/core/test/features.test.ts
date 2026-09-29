@@ -31,6 +31,7 @@ const callsWith = async (features?: unknown) => {
     outcome(session.models.settings()),
     outcome(session.pendingActions.list()),
     outcome(session.signals.list()),
+    outcome(session.chats.list()),
     outcome(session.whoami()),
   ]);
 };
@@ -38,6 +39,7 @@ const callsWith = async (features?: unknown) => {
 describe("feature flags", () => {
   it("refuse every flagged API while no flag is set", async () => {
     await expect(callsWith()).resolves.toStrictEqual([
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -61,6 +63,7 @@ describe("feature flags", () => {
       callsWith({ apps: true, permissions: false, unknown: true })
     ).resolves.toStrictEqual([
       "ok",
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -210,9 +213,35 @@ describe("feature flags", () => {
         "feature.disabled",
         "feature.disabled",
         "feature.disabled",
+        "feature.disabled",
         "ok",
       ]);
     }
+  });
+
+  it("stop chats with their own flag, and with the agent kill switch", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const chatsWith = async (features: Record<string, boolean>) => {
+      const coreEnv: Env = { ...env, FEATURES: features };
+      const { core } = await openRpc(admin.session, { coreEnv });
+      const { chats } = core.authenticate();
+      return await Promise.all([
+        outcome(chats.list()),
+        outcome(chats.send("chat", { text: "Hi.", model: "any" })),
+      ]);
+    };
+    await expect(
+      Promise.all([
+        chatsWith({ agent: true }),
+        chatsWith({ chat: true }),
+        chatsWith({ agent: true, chat: true }),
+      ])
+    ).resolves.toStrictEqual([
+      ["feature.disabled", "feature.disabled"],
+      ["feature.disabled", "feature.disabled"],
+      // Past the flags: this chat doesn't exist.
+      ["ok", "agent.chat_not_found"],
+    ]);
   });
 
   it("stop workflow parameter values with the workflows flag", async () => {

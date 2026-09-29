@@ -1,5 +1,6 @@
 import type { AppsApi } from "./apps.ts";
 import type { AuditApi } from "./audit-log.ts";
+import type { ChatsApi } from "./chat.ts";
 import type { ConnectionsApi, PendingActionsApi } from "./connect.ts";
 import type { DecisionsApi } from "./decisions.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
@@ -43,6 +44,11 @@ export interface Identity {
 export interface SessionApi {
   /** The person behind the session, with their current role and teams. */
   whoami: () => Promise<Identity>;
+  /**
+   * The person's chats with the workspace's agent: their list, questions,
+   * and each chat's messages as they stream in.
+   */
+  readonly chats: ChatsApi;
   /** Permissions of Apps and agents. */
   readonly permissions: PermissionsApi;
   /**

@@ -3,6 +3,7 @@ import { RpcTarget } from "capnweb";
 
 import { AppsRpc } from "./apps-rpc.ts";
 import { AuditRpc } from "./audit-rpc.ts";
+import { ChatsRpc } from "./chats-rpc.ts";
 import { ConnectionsRpc } from "./connections.ts";
 import { DecisionsRpc } from "./decisions/rpc.ts";
 import { requireFeature, uploadFeatures } from "./features.ts";
@@ -47,6 +48,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #models: ModelsRpc;
   readonly #pendingActions: PendingActionsRpc;
   readonly #signals: SignalsRpc;
+  readonly #chats: ChatsRpc;
 
   constructor(env: Env, check: SessionCheck) {
     super();
@@ -97,6 +99,12 @@ export class SessionRpc extends RpcTarget implements SessionApi {
       checkWith("connections", "confirmations")
     );
     this.#signals = new SignalsRpc(env, checkWith("improvement_signals"));
+    // Chats are how people ask the agent: its kill switch stops them too.
+    this.#chats = new ChatsRpc(env, checkWith("agent", "chat"));
+  }
+
+  get chats(): ChatsRpc {
+    return this.#chats;
   }
 
   get apps(): AppsRpc {

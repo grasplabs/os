@@ -23,13 +23,15 @@ import type {
   ScreensApi,
 } from "@grasp-os/shared/screens";
 import type { WorkflowRun } from "@grasp-os/shared/workflows";
-import { RpcStub, RpcTarget } from "capnweb";
+import { RpcTarget } from "capnweb";
 import { z } from "zod";
 
 import { callApp, isPlainData } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
 import { appFor, findVersion, getApp, versionFiles } from "./apps.ts";
 import { appHost } from "./durable-objects.ts";
+import { callbackFor, isStub } from "./page-callbacks.ts";
+import type { StillOpen } from "./page-callbacks.ts";
 import { RunSubscription } from "./run-subscription.ts";
 import { buildFailed, buildScreens } from "./screens.ts";
 import { withPerson } from "./session-check.ts";
@@ -74,9 +76,6 @@ const recheckMs = 5000;
  * App's host.
  */
 const maxRunSubscriptions = 20;
-
-/** Whether the person may still use the App, as a push through a callback asks. */
-type StillOpen = () => Promise<boolean>;
 
 /** A running App's screen, built from its current version. */
 const openScreen = async (
@@ -125,50 +124,10 @@ const openScreen = async (
 /** A function the App gets for a callback the screen passed. */
 type Callback = (value: AppAnswer) => Promise<void>;
 
-/**
- * A stub of the frame's: a function (or object) of the screen's, which the
- * App may only call.
- */
-const isStub = (value: unknown): value is RpcStub<Callback> =>
-  value instanceof RpcStub;
-
-/**
- * The screen's callback `stub` as a function the App can keep and call
- * later: it passes on plain data only, never a way into the App (a stub or
- * a function of its own), and gives the App nothing back from the screen.
- * It's released by the runtime when the App lets it go (right after a
- * call that didn't keep it, or when the App drops it later), or by
- * `callServer` after a failure; releasing a stub twice does nothing.
- * Releasing it releases the screen's callback too, which tells the screen
- * to subscribe again. Before each push, `stillOpen` checks the person may
- * still use the App; once they may not, it releases itself and refuses
- * the push, and every one after. `released`, if given, is called once it's
- * released, however that happened.
- */
-const callbackFor = (
-  stub: RpcStub<Callback>,
-  stillOpen: StillOpen,
-  released?: () => void
-): Callback & Disposable => {
-  const toScreen = stub.dup();
-  return Object.assign(
-    async (value: AppAnswer): Promise<void> => {
-      if (!isPlainData(value)) {
-        throw appErrors.create("app.answer_invalid");
-      }
-      if (!(await stillOpen())) {
-        toScreen[Symbol.dispose]();
-        throw appErrors.create("app.not_found");
-      }
-      await toScreen(value);
-    },
-    {
-      [Symbol.dispose]: () => {
-        toScreen[Symbol.dispose]();
-        released?.();
-      },
-    }
-  );
+/** How the App's pushes through a screen's callback are refused. */
+const refusals = {
+  invalid: () => appErrors.create("app.answer_invalid"),
+  closed: () => appErrors.create("app.not_found"),
 };
 
 /**
@@ -188,7 +147,7 @@ const argumentsFor = (
     if (!isStub(arg)) {
       return arg;
     }
-    const callback = callbackFor(arg, stillOpen);
+    const callback = callbackFor(arg, stillOpen, refusals);
     callbacks.push(callback);
     return callback;
   });
@@ -259,6 +218,7 @@ const watchRuns = async (
   const callback: Callback & Disposable = callbackFor(
     onChange,
     stillOpenFor(id),
+    refusals,
     () => {
       subscriptions.delete(callback);
     }

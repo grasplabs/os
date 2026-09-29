@@ -1,7 +1,7 @@
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
-import { evictDurableObject, runInDurableObject } from "cloudflare:test";
+import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -352,7 +352,7 @@ describe("a chat's Knowledge", setUpTime, () => {
       read,
       says("Note here too.")
     );
-    const other = await stub.createChat("Other", person.userId);
+    const other = await stub.createChat("Other", person.userId, agent.agentId);
     // Granted once, to the workspace's agent.
     await grantRead(admin, agent, collectionId);
 
@@ -395,23 +395,14 @@ describe("a chat's Knowledge", setUpTime, () => {
     ]);
   });
 
-  it("acts for no workspace whose ID isn't a plain identifier", async () => {
+  it("makes no chat for an agent whose ID isn't a plain identifier", async () => {
     const person = await newPerson();
-    // What no workspace core names looks like: it would reach into
-    // another agent's memory path.
-    const stub = workspace(env, workspaceIdSchema.parse("../other"));
-    const chat = await stub.createChat("Questions", person.userId);
-    // A model that would answer, were the question let through.
-    const gateway = fakeGateway(says("Hi."));
-    await pointAtGateway(stub, gateway);
-
+    const stub = workspace(env, workspaceIdSchema.parse(crypto.randomUUID()));
+    // What no agent core names looks like: it would reach into another
+    // agent's memory path.
     await expect(
-      outcome(stub.ask(chat.id, { text: "Hi.", model }))
+      outcome(stub.createChat("Questions", person.userId, "../other"))
     ).resolves.toBe("permission.context_invalid");
-    expect(gateway.requests).toStrictEqual([]);
-    await expect(
-      runInDurableObject(stub, (instance) => instance.messages(chat.id))
-    ).resolves.toStrictEqual([]);
   });
 
   it("records nothing for a code run that isn't open", async () => {

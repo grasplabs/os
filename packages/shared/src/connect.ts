@@ -2,7 +2,12 @@ import { z } from "zod";
 
 import type { OutboxedAuditEvent, OutboxRejected } from "./audit.ts";
 import { defineErrorFamily } from "./errors.ts";
-import { connectionIdSchema, identifierSchema } from "./ids.ts";
+import {
+  chatIdSchema,
+  connectionIdSchema,
+  identifierSchema,
+  workspaceIdSchema,
+} from "./ids.ts";
 import { permissionActionSchema } from "./permissions.ts";
 import type { PermissionSubject, WorkContext } from "./permissions.ts";
 import { roleSchema } from "./roles.ts";
@@ -476,6 +481,15 @@ export const declineActionSchema = z.strictObject({
 });
 export type DeclineAction = z.input<typeof declineActionSchema>;
 
+/** Every held action of one chat, for the person it waits for. */
+export const declineChatActionsSchema = z.strictObject({
+  person: connectionPersonSchema,
+  /** The Workspace object that holds the chat, as its context names it. */
+  workspaceId: workspaceIdSchema,
+  chatId: chatIdSchema,
+});
+export type DeclineChatActions = z.input<typeof declineChatActionsSchema>;
+
 /** One held action, for the person it waits for. */
 export const heldRequestSchema = z.strictObject({
   person: connectionPersonSchema,
@@ -598,6 +612,12 @@ export interface ConnectApi {
   confirmAction: (request: ConfirmAction) => Promise<ConnectResult>;
   /** Drops a held action its person declined. */
   declineAction: (request: DeclineAction) => Promise<void>;
+  /**
+   * Declines every held action of one chat waiting for the person, each
+   * recorded as `declineAction` records it, however many there are (a
+   * chat being deleted): how many it declined.
+   */
+  declineChatActions: (request: DeclineChatActions) => Promise<number>;
   /**
    * Whether any side effect with idempotency key `idempotencyKey`, acting
    * for `onBehalfOf`, still waits for that person: a workflow run waits

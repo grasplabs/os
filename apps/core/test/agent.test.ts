@@ -372,7 +372,7 @@ describe("chat agent sandbox", () => {
     const warned = vi.spyOn(console, "warn");
     // Long enough that the cancel always comes first, however slow the
     // runner: the cancel ends the run, not the wait.
-    const { stub, chat, ask } = await newChat(
+    const { stub, chat, personId, ask } = await newChat(
       codeStep(
         "export default async (env) => { await scheduler.wait(5_000); await env.chat.info(); await env.chat.info(); };"
       )
@@ -382,7 +382,7 @@ describe("chat agent sandbox", () => {
     await vi.waitFor(async () => {
       await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
     });
-    await stub.cancel(chat.id);
+    await stub.cancel(chat.id, personId);
     await expect(reply).resolves.toMatchObject({ outcome: "cancelled" });
 
     // The code goes on after its run was cancelled; its API refuses it,
@@ -528,7 +528,7 @@ describe("chat agent sandbox", () => {
 
 describe("chat agent turns", () => {
   it("can be cancelled while its code runs", async () => {
-    const { stub, chat, gateway, ask } = await newChat(
+    const { stub, chat, personId, gateway, ask } = await newChat(
       codeStep(
         "export default async () => { await scheduler.wait(10_000); return 'late'; };"
       )
@@ -540,7 +540,7 @@ describe("chat agent turns", () => {
       // The step has started once its call is kept.
       await expect(transcript(stub, chat.id)).resolves.toHaveLength(3);
     });
-    await stub.cancel(chat.id);
+    await stub.cancel(chat.id, personId);
 
     await expect(reply).resolves.toMatchObject({ outcome: "cancelled" });
     await expect(codeResults(stub, chat.id)).resolves.toStrictEqual([
@@ -559,7 +559,7 @@ describe("chat agent turns", () => {
     await vi.waitFor(() => {
       expect(gateway.requests).toHaveLength(1);
     });
-    await expect(stub.cancel(chat.id)).resolves.toBeTruthy();
+    await expect(stub.cancel(chat.id, personId)).resolves.toBeTruthy();
 
     await expect(reply).resolves.toMatchObject({ outcome: "cancelled" });
     const [event] = await modelCallsBy(personId, 1);
@@ -567,7 +567,9 @@ describe("chat agent turns", () => {
   });
 
   it("takes one question at a time per chat", async () => {
-    const { stub, chat, gateway, ask } = await newChat({ hang: true });
+    const { stub, chat, personId, gateway, ask } = await newChat({
+      hang: true,
+    });
 
     const first = ask("First.");
     await vi.waitFor(() => {
@@ -575,7 +577,7 @@ describe("chat agent turns", () => {
     });
 
     await expect(codeOf(ask("Second."))).resolves.toBe("agent.busy");
-    await stub.cancel(chat.id);
+    await stub.cancel(chat.id, personId);
     await expect(first).resolves.toMatchObject({ outcome: "cancelled" });
   });
 

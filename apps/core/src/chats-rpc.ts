@@ -1,0 +1,236 @@
+import { agentErrors } from "@grasp-os/shared/agent";
+import { actorOf } from "@grasp-os/shared/audit";
+import { chatTitleSchema } from "@grasp-os/shared/chat";
+import type {
+  ChatQuestion,
+  ChatsApi,
+  ChatSummary,
+  ChatUpdate,
+} from "@grasp-os/shared/chat";
+import { chatIdSchema, workspaceIdSchema } from "@grasp-os/shared/ids";
+import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
+import { errorFields, log } from "@grasp-os/shared/log";
+import { RpcTarget } from "capnweb";
+
+import { organizationId } from "./auth/auth.ts";
+import { personOf } from "./connections.ts";
+import { workspace } from "./durable-objects.ts";
+import { gatewaySettings } from "./models.ts";
+import { callbackFor, isStub, recheckedEvery } from "./page-callbacks.ts";
+import type { StillOpen } from "./page-callbacks.ts";
+import { RunSubscription } from "./run-subscription.ts";
+import { withPerson } from "./session-check.ts";
+import type { SessionCheck } from "./session-check.ts";
+import { questionSchema } from "./workspace.ts";
+
+// A signed-in person's chats (workspace.ts), over `/rpc`. Each person's
+// chats are in a Workspace object of their own, reached only with the
+// signed-in person as the session check hands them over here, and that
+// object checks every call against the chat's stored person too: nobody
+// else lists, renames, deletes, asks in, stops or follows a chat, and a
+// chat of someone else's is refused as if there were none. Making,
+// renaming and deleting one is audited.
+
+/**
+ * The agent every chat's agent is: the organization workspace's, so
+ * admins grant to it once, whoever's chat it answers in. Named as agents
+ * must be (`workspaceAgentIdSchema` in agent-scope.ts).
+ */
+export const chatAgentId = organizationId;
+
+/**
+ * The Workspace object that holds `userId`'s chats: each person's own, so
+ * one person's chats, watches and turns never load, cap or restart
+ * another's. A chat's context names it (`workspaceId`), and its agent is
+ * still {@link chatAgentId}.
+ */
+export const personalWorkspaceId = (userId: string): WorkspaceId =>
+  workspaceIdSchema.parse(`person:${userId}`);
+
+/** How long one answer to whether the person may still follow chats holds. */
+const recheckMs = 5000;
+
+/**
+ * Most chats one connection follows at once: a page shows one, and a page
+ * that watches over and over holds no more than this in the object.
+ */
+const maxWatches = 10;
+
+/** A chat's ID from the page: a string, or no chat at all. */
+const chatIdOf = (chatId: unknown): ChatId => {
+  const parsed = chatIdSchema.safeParse(chatId);
+  if (!parsed.success) {
+    throw agentErrors.create("agent.chat_not_found");
+  }
+  return parsed.data;
+};
+
+/** How a push to a chat page is refused. */
+const refusals = {
+  invalid: () => agentErrors.create("agent.invalid_request"),
+  closed: () => agentErrors.create("agent.chat_not_found"),
+};
+
+/** The signed-in person's chats with the workspace's agent. */
+export class ChatsRpc extends RpcTarget implements ChatsApi {
+  readonly #env: Env;
+  readonly #check: SessionCheck;
+  /** This connection's watches, each until it's released. */
+  readonly #watches = new Set<Disposable>();
+  /**
+   * Whether this connection may still follow chats: its session holds and
+   * chats (and the agent) are switched on, as every call checks, read
+   * again at most every {@link recheckMs} as updates are pushed.
+   */
+  readonly #stillOpen: StillOpen;
+
+  constructor(env: Env, check: SessionCheck) {
+    super();
+    this.#env = env;
+    this.#check = check;
+    this.#stillOpen = recheckedEvery(recheckMs, async () => {
+      try {
+        await check();
+        return true;
+      } catch {
+        return false;
+      }
+    });
+  }
+
+  /** The object that holds `userId`'s chats. */
+  #chatsOf(userId: string) {
+    return workspace(this.#env, personalWorkspaceId(userId));
+  }
+
+  async models(): Promise<string[]> {
+    return await withPerson(
+      this.#check,
+      () => gatewaySettings(this.#env).models
+    );
+  }
+
+  async list(): Promise<ChatSummary[]> {
+    return await withPerson(
+      this.#check,
+      async ({ userId }) => await this.#chatsOf(userId).chats(userId)
+    );
+  }
+
+  async create(title: string): Promise<ChatSummary> {
+    return await withPerson(this.#check, async (person) => {
+      const { userId } = person;
+      const parsed = chatTitleSchema.safeParse(title);
+      if (!parsed.success) {
+        throw agentErrors.create("agent.invalid_title");
+      }
+      const chat = await this.#chatsOf(userId).createChat(
+        parsed.data,
+        userId,
+        chatAgentId,
+        actorOf(person)
+      );
+      return {
+        id: chat.id,
+        title: chat.title,
+        createdAt: chat.createdAt.toISOString(),
+        running: false,
+      };
+    });
+  }
+
+  async rename(chatId: string, title: string): Promise<void> {
+    await withPerson(this.#check, async (person) => {
+      const id = chatIdOf(chatId);
+      const parsed = chatTitleSchema.safeParse(title);
+      if (!parsed.success) {
+        throw agentErrors.create("agent.invalid_title");
+      }
+      await this.#chatsOf(person.userId).renameChat(
+        id,
+        person.userId,
+        parsed.data,
+        actorOf(person)
+      );
+    });
+  }
+
+  /**
+   * Deletes the chat once its agent isn't working on it, rejecting first
+   * every write it holds, so none is left that nobody can decide: a
+   * failure there leaves the chat as it was, to delete again. The object
+   * does it all (`deleteChat`), taking no question meanwhile.
+   */
+  async remove(chatId: string): Promise<void> {
+    await withPerson(this.#check, async (person) => {
+      await this.#chatsOf(person.userId).deleteChat(
+        chatIdOf(chatId),
+        person.userId,
+        await personOf(this.#env, person),
+        actorOf(person)
+      );
+    });
+  }
+
+  async send(chatId: string, question: ChatQuestion): Promise<void> {
+    await withPerson(this.#check, async ({ userId }) => {
+      const id = chatIdOf(chatId);
+      // Two strings only: whatever else the page passed goes no further.
+      const parsed = questionSchema.safeParse(question);
+      if (!parsed.success) {
+        throw agentErrors.create("agent.invalid_question");
+      }
+      await this.#chatsOf(userId).send(id, userId, parsed.data);
+    });
+  }
+
+  async cancel(chatId: string): Promise<boolean> {
+    return await withPerson(
+      this.#check,
+      async ({ userId }) =>
+        await this.#chatsOf(userId).cancel(chatIdOf(chatId), userId)
+    );
+  }
+
+  async watch(
+    chatId: string,
+    after: number | null,
+    onUpdate: (update: ChatUpdate) => void
+  ): Promise<RunSubscription> {
+    return await withPerson(this.#check, async ({ userId }) => {
+      const id = chatIdOf(chatId);
+      if (!isStub(onUpdate)) {
+        throw agentErrors.create("agent.invalid_request");
+      }
+      if (this.#watches.size >= maxWatches) {
+        throw agentErrors.create("agent.too_many_watches");
+      }
+      const listener = callbackFor(onUpdate, this.#stillOpen, refusals, () => {
+        this.#watches.delete(listener);
+      });
+      this.#watches.add(listener);
+      const chats = this.#chatsOf(userId);
+      let watchId: string;
+      try {
+        watchId = await chats.watch(id, userId, after, listener);
+      } catch (error) {
+        listener[Symbol.dispose]();
+        throw error;
+      }
+      return new RunSubscription(async () => {
+        // The slot is free at once, and the listener forwards nothing
+        // more; the object drops it now, or at its next update if it
+        // can't be reached.
+        listener[Symbol.dispose]();
+        try {
+          await chats.unwatch(id, watchId);
+        } catch (error) {
+          log.warn("chat.unwatch_failed", {
+            chatId: id,
+            ...errorFields(error),
+          });
+        }
+      });
+    });
+  }
+}

@@ -178,7 +178,13 @@ export type Feature =
    * isolates Code Mode runs the agent's code in (code-mode.ts), and has no
    * AI binding for its model calls either.
    */
-  | "agent";
+  | "agent"
+  /**
+   * People's chats with the agent over `/rpc` (chats-rpc.ts): their list,
+   * asking, and following a chat as it streams; needs `agent` on too.
+   * While off, nobody reaches a chat; turns under way go on to their end.
+   */
+  | "chat";
 
 /** Whether `feature` is switched on for this deployment. */
 export const featureEnabled = (
