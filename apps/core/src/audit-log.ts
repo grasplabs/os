@@ -54,6 +54,8 @@ import { archives, events } from "./db/audit-log/schema.ts";
 import { migrateOnWake } from "./db/migrate.ts";
 import { inJurisdiction } from "./durable-objects.ts";
 import { featureEnabled } from "./features.ts";
+import { KnowledgeTallier } from "./knowledge/usage-tally.ts";
+import type { KnowledgeTally } from "./knowledge/usage-tally.ts";
 import { SignalTallier } from "./signal-tally.ts";
 import type { SignalTally } from "./signal-tally.ts";
 
@@ -262,6 +264,22 @@ export interface ArchivedStretch {
 export interface SearchRange {
   low: number;
   high: number;
+}
+
+/** What the daily signals want tallied of a stretch (`tallyStretch`). */
+export interface TallyWanted {
+  /** The improvement signals': of the entries received from `from` on. */
+  signals?: { from: string };
+  /** Knowledge's usage signals': reads and questions, each from its time. */
+  knowledge?: { readsFrom: string; questionsFrom: string };
+}
+
+/** A stretch's partial totals, for those that wanted them. */
+export interface StretchTally {
+  signals?: SignalTally;
+  knowledge?: KnowledgeTally;
+  /** Where to carry on, or `null` once the range is read. */
+  next: number | null;
 }
 
 /** A search: which events, in which order, from which position on. */
@@ -603,23 +621,42 @@ export class AuditLog extends DurableObject<Env> {
   }
 
   /**
-   * What the improvement signals need of the entries in `range` after
-   * position `after`: model calls' cost per workflow run and Knowledge
-   * searches that found nothing, tallied in one pass over at most
-   * {@link searchScanMax} entries (src/signal-tally.ts), so only partial
-   * totals leave the object. `next` says where to carry on, or is `null`
-   * once the range is read. `null` instead when retention has archived
-   * where it would read.
+   * What the daily signals (src/daily-signals.ts) need of the entries in
+   * `range` after position `after`, tallied in one pass over at most
+   * {@link searchScanMax} entries, so only partial totals leave the
+   * object: for the improvement signals, model calls' cost per workflow
+   * run and searches that found nothing (src/signal-tally.ts); for
+   * Knowledge's usage signals, the documents read and the searches that
+   * found nothing by collection (src/knowledge/usage-tally.ts). Each only
+   * while `wanted` asks for it. `next` says where to carry on, or is
+   * `null` once the range is read. `null` instead when retention has
+   * archived where it would read.
    */
-  tallySignals(
+  tallyStretch(
     range: SearchRange,
+    wanted: TallyWanted,
     after?: number
-  ): { tally: SignalTally; next: number | null } | null {
+  ): StretchTally | null {
     const low =
       after === undefined ? range.low : Math.max(range.low, after + 1);
-    const tallier = new SignalTallier();
+    const signals =
+      wanted.signals === undefined
+        ? undefined
+        : new SignalTallier(wanted.signals.from);
+    const knowledge =
+      wanted.knowledge === undefined
+        ? undefined
+        : new KnowledgeTallier(
+            wanted.knowledge.readsFrom,
+            wanted.knowledge.questionsFrom
+          );
+    const totals = (next: number | null): StretchTally => ({
+      signals: signals?.totals(),
+      knowledge: knowledge?.totals(),
+      next,
+    });
     if (low > range.high) {
-      return { tally: tallier.totals(), next: null };
+      return totals(null);
     }
     const [oldest] = this.#page(0, 1);
     if (oldest === undefined || low < oldest.seq) {
@@ -640,13 +677,25 @@ export class AuditLog extends DurableObject<Env> {
       last = entry.seq;
       const event = parseStored(entry.event);
       if (event !== null) {
-        tallier.add(event, entry.receivedAt);
+        signals?.add(event, entry.receivedAt);
+        knowledge?.add(event, entry.receivedAt);
       }
     }
-    return {
-      tally: tallier.totals(),
-      next: last === undefined || last >= range.high ? null : last,
-    };
+    return totals(last === undefined || last >= range.high ? null : last);
+  }
+
+  /**
+   * Whether the log still holds every entry it received from `from` (ISO
+   * 8601) on: retention has archived none of them.
+   */
+  holdsSince(from: string): boolean {
+    const [archived] = this.#db
+      .select({ lastReceivedAt: archives.lastReceivedAt })
+      .from(archives)
+      .orderBy(desc(archives.lastSeq))
+      .limit(1)
+      .all();
+    return archived === undefined || archived.lastReceivedAt < from;
   }
 
   /**

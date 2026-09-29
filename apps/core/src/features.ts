@@ -27,7 +27,8 @@ import { featureErrors } from "@grasp-os/shared/errors";
 // runs (`screen_workflows`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist,
 // `model_settings` admins reading those rules and the month's spend, and
-// `improvement_signals` the daily signals and reading them. `builtins`
+// `improvement_signals` the daily signals and reading them, and
+// `knowledge_signals` Knowledge's usage signals and reading them. `builtins`
 // moves installing what ships with the release (builtins.ts) from the
 // cron trigger to the first request.
 //
@@ -147,6 +148,13 @@ export type Feature =
    * them. While off, nothing is computed and nobody reads what was.
    */
   | "improvement_signals"
+  /**
+   * Knowledge usage signals (knowledge/signals.ts): computing them daily,
+   * their owners listing and dismissing them, and a chat's agent reading
+   * its person's; needs `knowledge` on too. While off, nothing is computed
+   * and nobody reads what was.
+   */
+  | "knowledge_signals"
   /**
    * What ships with the release, installed once per release on the first
    * request (builtins.ts): the built-in blueprints, while `apps` and

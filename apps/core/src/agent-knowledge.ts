@@ -6,6 +6,11 @@ import type {
   Provenance,
   SearchResults,
 } from "@grasp-os/shared/knowledge";
+import {
+  questionWindowDays,
+  unreadDays,
+} from "@grasp-os/shared/knowledge-signals";
+import type { KnowledgeSignals } from "@grasp-os/shared/knowledge-signals";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import {
@@ -19,6 +24,7 @@ import type { AgentApi, AgentScope } from "./agent-scope.ts";
 import type { Reader } from "./knowledge/access.ts";
 import { readAsDelegate } from "./knowledge/binding.ts";
 import { search } from "./knowledge/search.ts";
+import { agentKnowledgeSignals } from "./knowledge/signals.ts";
 import { catalog, follow, read } from "./knowledge/tools.ts";
 
 // Knowledge for a chat's code: `await env.knowledge.search("leave policy")`.
@@ -28,7 +34,9 @@ import { catalog, follow, read } from "./knowledge/tools.ts";
 // (knowledge/access.ts). Every read but the catalog is recorded in the
 // audit log there, and puts the chat in restricted mode when it read a
 // sensitive collection. Here it is also recorded with the chat, which
-// every later model request carries as provenance.
+// every later model request carries as provenance. The catalog and the
+// usage signals of the person's own collections hold nothing of a
+// sensitive collection, and are recorded as the chat's calls.
 
 /** Knowledge, as a chat's code calls it. */
 export class KnowledgeApi
@@ -116,6 +124,36 @@ export class KnowledgeApi
       )
     );
   }
+
+  /**
+   * The usage signals of the collections the chat's person owns, for the
+   * agent to bring up with them: only of collections it may read, none of
+   * a sensitive one (knowledge/signals.ts), so there's no source to record
+   * with the chat. Recorded as the chat's call, as the catalog is.
+   */
+  async signals(): Promise<KnowledgeSignals> {
+    const scope = this.ctx.props;
+    await requireOpenRun(this.env, scope, "knowledge.signals");
+    return await auditedCall(
+      this.env,
+      scope,
+      {
+        method: "knowledge.signals",
+        detailOf: (found: KnowledgeSignals) => ({
+          signals: found.signals.length,
+        }),
+      },
+      async () =>
+        await readAsDelegate(
+          this.env,
+          chatAuthority(scope),
+          chatContext(scope),
+          undefined,
+          async (reader) =>
+            await agentKnowledgeSignals(this.env, reader, scope.personId)
+        )
+    );
+  }
 }
 
 /** The types `env.knowledge` returns, as the model reads them. */
@@ -158,7 +196,32 @@ interface KnowledgeHit {
   section: number;
   headings: string[];
   snippet: string;
-}`;
+}
+
+/**
+ * What the person should look at in a collection they own, computed daily.
+ * A question's words are never kept: only a key that the same words share.
+ */
+type KnowledgeSignal = { id: string; collection: { id: string; name: string } } & (
+  | {
+      kind: "unanswered_question";
+      /** Searches by others in the last ${questionWindowDays} days that found nothing, in the collection or closest to it. */
+      value: number;
+      evidence: { queryKey: string; searches: number; askers: number; terms: number; lastAt: string };
+    }
+  | {
+      kind: "unread_document";
+      /** Days since it changed; nobody read it for \`evidence.days\` days (${unreadDays}, or fewer where the audit log keeps less) either. */
+      value: number;
+      evidence: { document: { id: string; path: string; title: string }; updatedAt: string; days: number };
+    }
+  | {
+      kind: "overdue_review";
+      /** Days past its review date. */
+      value: number;
+      evidence: { document: { id: string; path: string; title: string }; reviewDate: string };
+    }
+);`;
 
 /** What the model reads of `env.knowledge`. */
 const knowledgeDeclaration = `/**
@@ -173,7 +236,7 @@ knowledge: {
     skills: { documentId: string; collectionId: string; name: string; description: string }[];
     truncated: boolean;
   }>;
-  /** Sections that match \`query\`, best first: 20, or \`limit\` up to 50. */
+  /** Sections that match \`query\`, best first: 20, or \`limit\` up to 50. Pass \`collectionId\` when you know which collection should hold the answer. */
   search(
     query: string,
     options?: { collectionId?: string; type?: string; limit?: number }
@@ -196,6 +259,8 @@ knowledge: {
     truncated: boolean;
     provenance: Provenance;
   }>;
+  /** For your person: questions nothing answered, unread and overdue documents in collections they own that you may read. Bring them up when it helps. */
+  signals(): Promise<{ computedAt: string | null; signals: KnowledgeSignal[] }>;
 };`;
 
 /** `env.knowledge`. */

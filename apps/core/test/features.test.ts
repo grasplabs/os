@@ -21,6 +21,7 @@ const callsWith = async (features?: unknown) => {
     outcome(session.permissions.list()),
     outcome(session.knowledge.listCollections()),
     outcome(session.memory.collections()),
+    outcome(session.knowledgeSignals.list()),
     outcome(session.uploads.get(crypto.randomUUID())),
     outcome(session.connections.list()),
     outcome(session.workflows.list(crypto.randomUUID())),
@@ -54,6 +55,7 @@ describe("feature flags", () => {
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
+      "feature.disabled",
       "ok",
     ]);
   });
@@ -63,6 +65,7 @@ describe("feature flags", () => {
       callsWith({ apps: true, permissions: false, unknown: true })
     ).resolves.toStrictEqual([
       "ok",
+      "feature.disabled",
       "feature.disabled",
       "feature.disabled",
       "feature.disabled",
@@ -115,6 +118,31 @@ describe("feature flags", () => {
       ["feature.disabled", "feature.disabled", 404],
       ["feature.disabled", "feature.disabled", 404],
       ["upload.not_found", "upload.unsupported", 401],
+    ]);
+  });
+
+  it("stop Knowledge usage signals with their own flag, and with the Knowledge kill switch", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const signalsWith = async (features: Record<string, boolean>) => {
+      const coreEnv: Env = { ...env, FEATURES: features };
+      const { core } = await openRpc(admin.session, { coreEnv });
+      const { knowledgeSignals } = core.authenticate();
+      return await Promise.all([
+        outcome(knowledgeSignals.list()),
+        outcome(knowledgeSignals.dismiss(crypto.randomUUID())),
+      ]);
+    };
+    await expect(
+      Promise.all([
+        signalsWith({ knowledge: true }),
+        signalsWith({ knowledge_signals: true }),
+        signalsWith({ knowledge: true, knowledge_signals: true }),
+      ])
+    ).resolves.toStrictEqual([
+      ["feature.disabled", "feature.disabled"],
+      ["feature.disabled", "feature.disabled"],
+      // Past the flags: there's no such signal.
+      ["ok", "knowledge_signal.not_found"],
     ]);
   });
 
@@ -199,6 +227,7 @@ describe("feature flags", () => {
     for (const features of ["{not json", '{"apps": "yes"}', "[true]"]) {
       // oxlint-disable-next-line no-await-in-loop -- one config at a time
       await expect(callsWith(features)).resolves.toStrictEqual([
+        "feature.disabled",
         "feature.disabled",
         "feature.disabled",
         "feature.disabled",

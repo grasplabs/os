@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 
-// What core's database is asked, and how SQLite plans it: tests that
+// What core's databases are asked, and how SQLite plans it: tests that
 // check a query reads an index, not a whole table, on a database without
 // statistics, as a fresh D1 is.
 
@@ -20,22 +20,27 @@ const through = (target: object, key: PropertyKey): unknown => {
  */
 export const fullScan = /^SCAN (?!\(|.* (?:USING|VIRTUAL TABLE))/u;
 
-/** A statement sent to core's database, and the values bound to it. */
+/** A database of core's: its own, or Knowledge's. */
+type Database = "DB" | "KNOWLEDGE";
+
+/** A statement sent to a database, and the values bound to it. */
 export interface Recorded {
   query: string;
   values: unknown[];
+  database: Database;
 }
 
 /**
- * The statements sent to core's database (`env.DB`) while `run` runs, as
- * drizzle binds them; every one goes through as ever.
+ * The statements sent to `database` (core's own, `env.DB`, by default)
+ * while `run` runs, as drizzle binds them; every one goes through as ever.
  */
 export const recordedQueries = async (
-  run: () => Promise<unknown>
+  run: () => Promise<unknown>,
+  database: Database = "DB"
 ): Promise<Recorded[]> => {
-  const db = env.DB;
+  const db = env[database];
   const recorded: Recorded[] = [];
-  env.DB = new Proxy(db, {
+  env[database] = new Proxy(db, {
     get: (target, key) => {
       if (key !== "prepare") {
         return through(target, key);
@@ -46,7 +51,7 @@ export const recordedQueries = async (
           get: (inner, innerKey) => {
             if (innerKey === "bind") {
               return (...values: unknown[]) => {
-                recorded.push({ query, values });
+                recorded.push({ query, values, database });
                 return inner.bind(...values);
               };
             }
@@ -59,7 +64,7 @@ export const recordedQueries = async (
   try {
     await run();
   } finally {
-    env.DB = db;
+    env[database] = db;
   }
   return recorded;
 };
@@ -68,8 +73,10 @@ export const recordedQueries = async (
 export const planOf = async ({
   query,
   values,
+  database,
 }: Recorded): Promise<string[]> => {
-  const { results } = await env.DB.prepare(`EXPLAIN QUERY PLAN ${query}`)
+  const { results } = await env[database]
+    .prepare(`EXPLAIN QUERY PLAN ${query}`)
     .bind(...values)
     .all<{ detail: string }>();
   return results.map(({ detail }) => detail);

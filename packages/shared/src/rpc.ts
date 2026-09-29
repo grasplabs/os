@@ -3,6 +3,7 @@ import type { AuditApi } from "./audit-log.ts";
 import type { ChatsApi } from "./chat.ts";
 import type { ConnectionsApi, PendingActionsApi } from "./connect.ts";
 import type { DecisionsApi } from "./decisions.ts";
+import type { KnowledgeSignalsApi } from "./knowledge-signals.ts";
 import type { KnowledgeApi } from "./knowledge.ts";
 import type { MembersApi } from "./members.ts";
 import type { MemoryApi } from "./memory.ts";
@@ -58,6 +59,11 @@ export interface SessionApi {
   readonly apps: AppsApi;
   /** Knowledge: collections, documents and their versions. */
   readonly knowledge: KnowledgeApi;
+  /**
+   * Knowledge usage signals, computed daily: what's missing or stale in the
+   * collections the person owns.
+   */
+  readonly knowledgeSignals: KnowledgeSignalsApi;
   /** Memory files: the collections that hold them. */
   readonly memory: MemoryApi;
   /**

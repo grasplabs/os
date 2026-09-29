@@ -12,6 +12,9 @@
  * the triggers that keep them) is FTS5, which Drizzle can't describe: it
  * lives in its own migration, `0001_search.sql`.
  */
+import type { Json } from "@grasp-os/shared/json";
+import { knowledgeSignalKinds } from "@grasp-os/shared/knowledge-signals";
+import { sql } from "drizzle-orm";
 import {
   foreignKey,
   index,
@@ -89,6 +92,12 @@ export const documents = sqliteTable(
       table.collectionId,
       table.path
     ),
+    // The daily usage signals (knowledge/signals.ts) page through the
+    // documents unchanged for long, and those past their review date.
+    index("documents_updated_at_idx").on(table.updatedAt, table.id),
+    index("documents_review_date_idx")
+      .on(table.reviewDate, table.id)
+      .where(sql`${table.reviewDate} IS NOT NULL`),
   ]
 );
 
@@ -272,3 +281,101 @@ export const uploadCleanups = sqliteTable("upload_cleanups", {
    */
   createdAt: timestamp("created_at").notNull(),
 });
+
+/**
+ * The daily computations of the usage signals (knowledge/signals.ts), one
+ * row per attempt, as core's `improvement_signal_computations` has them
+ * (src/daily-claims.ts).
+ */
+export const knowledgeSignalComputations = sqliteTable(
+  "knowledge_signal_computations",
+  {
+    id: text().primaryKey(),
+    /** The UTC day it is the computation of, such as `2026-09-29`. */
+    day: text().notNull(),
+    startedAt: timestamp("started_at").notNull(),
+    finishedAt: timestamp("finished_at"),
+  },
+  (table) => [
+    index("knowledge_signal_computations_day_idx").on(table.day),
+    index("knowledge_signal_computations_started_idx").on(
+      table.startedAt,
+      table.id
+    ),
+  ]
+);
+
+/**
+ * The usage signals of a computation: one per kind, collection and subject
+ * (a search's key, or a document's ID), for the collection's owner, with
+ * an ID derived from those three, the same in every computation. Readers
+ * take only the finished computation started last, so a computation's
+ * signals show all at once when it finishes, and never those of one that
+ * doesn't. Written under the computation's ID: one that outlived its lease
+ * and lost its row fails on the foreign key. `evidence` is JSON, IDs and
+ * counts only; `evidence_at` is when its latest evidence was seen (a
+ * question's latest search), null for a document's.
+ *
+ * No foreign keys to collections or documents: a purge that deletes one
+ * meanwhile must not fail a computation's writes. Reads join the
+ * collection (and the document) and so never show a signal about one
+ * that's gone.
+ */
+export const knowledgeSignals = sqliteTable(
+  "knowledge_signals",
+  {
+    computation: text()
+      .notNull()
+      .references(() => knowledgeSignalComputations.id),
+    id: text().notNull(),
+    kind: text({ enum: knowledgeSignalKinds }).notNull(),
+    collectionId: text("collection_id").notNull(),
+    subject: text().notNull(),
+    /** User ID: the collection's owner when it was computed. */
+    owner: text().notNull(),
+    /**
+     * Ranks it within its kind: a question's searches, the days since an
+     * unread document changed. Null for an overdue document, ranked by its
+     * review date as it is when listed.
+     */
+    value: integer(),
+    evidence: text({ mode: "json" }).$type<Json>().notNull(),
+    evidenceAt: timestamp("evidence_at"),
+  },
+  (table) => [
+    primaryKey({ columns: [table.computation, table.id] }),
+    uniqueIndex("knowledge_signals_subject_idx").on(
+      table.computation,
+      table.collectionId,
+      table.kind,
+      table.subject
+    ),
+    index("knowledge_signals_owner_idx").on(
+      table.computation,
+      table.owner,
+      table.kind,
+      table.value,
+      table.id
+    ),
+  ]
+);
+
+/**
+ * Signals an owner dismissed, by kind, collection and subject, so they
+ * outlast the computations: a signal is hidden while it has no evidence
+ * newer than its dismissal. A computation's finish removes those whose
+ * signal it no longer has, or has with newer evidence, so a signal that
+ * went away and came back shows again.
+ */
+export const knowledgeSignalDismissals = sqliteTable(
+  "knowledge_signal_dismissals",
+  {
+    kind: text({ enum: knowledgeSignalKinds }).notNull(),
+    collectionId: text("collection_id").notNull(),
+    subject: text().notNull(),
+    dismissedAt: timestamp("dismissed_at").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.kind, table.collectionId, table.subject] }),
+  ]
+);
