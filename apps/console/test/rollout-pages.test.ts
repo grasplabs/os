@@ -1,34 +1,18 @@
-import { env, exports } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vite-plus/test";
 
 import { act, consoleDatabase } from "../src/db/act.ts";
 import { clients, rollouts, rolloutTargets } from "../src/db/schema.ts";
 import { importReleases } from "../src/releases/import.ts";
-import { accessJwt, mockAccess } from "./access.ts";
+import { mockAccess } from "./access.ts";
+import { page } from "./pages.ts";
 import { publishRelease } from "./releases.ts";
 
 mockAccess();
 
-const origin = "https://console.grasp.test";
 const db = consoleDatabase(env.DB);
 const staff = { email: "staff@grasp.test", sub: "sub-staff" };
-
-const scripts = /<script\b[^>]*>[\s\S]*?<\/script>/gu;
-
-/**
- * The page at `path`, as a staff member sees it: its markup without its
- * scripts, so the data sent along for hydration doesn't count as shown.
- */
-const page = async (path: string) => {
-  const response = await exports.default.fetch(`${origin}${path}`, {
-    headers: {
-      "cf-access-jwt-assertion": await accessJwt(staff.email),
-    },
-  });
-  const html = await response.text();
-  return { status: response.status, html: html.replaceAll(scripts, "") };
-};
 
 /** A release, published and imported. */
 const importedRelease = async (): Promise<string> => {
@@ -132,7 +116,7 @@ describe("the rollout pages", () => {
     });
   });
 
-  it("offer only rings past ring 0, with how many clients each has, and say when ring 0 is all there is", async () => {
+  it("offer only rings past ring 0 in Selects, with how many clients each has, and say when ring 0 is all there is", async () => {
     await importedRelease();
     // Only this test's clients are active.
     await db
@@ -149,19 +133,23 @@ describe("the rollout pages", () => {
       ringZeroOnly: {
         says: ringZeroOnly.html.includes("reaches only our own deployments"),
         choice: ringZeroOnly.html.includes("One ring"),
+        selects: count(ringZeroOnly.html, 'data-slot="select-trigger"'),
       },
       withRingTwo: {
         says: withRingTwo.html.includes("reaches only our own deployments"),
         choice: withRingTwo.html.includes("One ring"),
+        // The scope and the ring, each server-rendered with its choice.
+        selects: count(withRingTwo.html, 'data-slot="select-trigger"'),
         ringTwo: withRingTwo.html.includes("Ring 2 (1 client)"),
         // Ring 0 comes first whatever's chosen, so it isn't offered.
         ringZero: withRingTwo.html.includes("Ring 0 ("),
       },
     }).toStrictEqual({
-      ringZeroOnly: { says: true, choice: false },
+      ringZeroOnly: { says: true, choice: false, selects: 0 },
       withRingTwo: {
         says: false,
         choice: true,
+        selects: 2,
         ringTwo: true,
         ringZero: false,
       },

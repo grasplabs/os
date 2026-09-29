@@ -1,5 +1,5 @@
 import { introspectWorkflow } from "cloudflare:test";
-import { env, exports } from "cloudflare:workers";
+import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -7,30 +7,14 @@ import { act, audit, consoleDatabase } from "../src/db/act.ts";
 import { clientDeploys, clientRuns, clients } from "../src/db/schema.ts";
 import { startProvisioning } from "../src/provision/control.ts";
 import { importReleases } from "../src/releases/import.ts";
-import { accessJwt, mockAccess } from "./access.ts";
+import { mockAccess } from "./access.ts";
+import { page } from "./pages.ts";
 import { publishRelease } from "./releases.ts";
 
 mockAccess();
 
-const origin = "https://console.grasp.test";
 const db = consoleDatabase(env.DB);
 const staff = { email: "staff@grasp.test", sub: "sub-staff" };
-
-const scripts = /<script\b[^>]*>[\s\S]*?<\/script>/gu;
-
-/**
- * The page at `path`, as a staff member sees it: its markup without its
- * scripts, so the data sent along for hydration doesn't count as shown.
- */
-const page = async (path: string) => {
-  const response = await exports.default.fetch(`${origin}${path}`, {
-    headers: {
-      "cf-access-jwt-assertion": await accessJwt(staff.email),
-    },
-  });
-  const html = await response.text();
-  return { status: response.status, html: html.replaceAll(scripts, "") };
-};
 
 /**
  * A client whose real run waits for Workers Paid, its account step as it
