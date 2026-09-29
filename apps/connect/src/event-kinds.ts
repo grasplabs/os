@@ -14,6 +14,8 @@ export type EventSource = typeof eventSources.$inferSelect;
 export interface SourceRead {
   source: EventSource;
   connection: Connection;
+  /** The connection's access token, for the provider's own hosts only. */
+  token: string;
   /**
    * Goes through a provider's pages from `start`, each fetched with the
    * connection's token by `page`, until the provider says it's at the end
@@ -51,6 +53,15 @@ export interface EventKind {
   server: string;
   /** Whether a permission's resource is one of this type's sources. */
   isResource: (resource: string) => boolean;
+  /**
+   * For a provider that can only read on from a position, not from a
+   * time: where it stands now, as the source's first cursor, taken as
+   * soon as the source starts (events.ts), so a first read that comes
+   * late still reads everything since. Until it has one, the source reads
+   * nothing. Without `prime`, a source's first read starts from when it
+   * started.
+   */
+  prime?: (read: SourceRead) => Promise<string>;
   read: (read: SourceRead) => Promise<ReadEvents>;
 }
 

@@ -12,7 +12,7 @@ import type {
   OutboxedConnectorEvent,
 } from "@grasp-os/shared/connect";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { and, eq, inArray, lte, notExists, sql } from "drizzle-orm";
+import { and, eq, inArray, isNull, lte, notExists, sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
@@ -53,8 +53,11 @@ import { accessTokenFor } from "./tokens.ts";
 // result can't be kept, waits longer after each failure, up to an hour, or
 // as long as the provider asks; one refused access (401, 403, 404)
 // `refusedLimit` times in a row is recorded in the audit log and read only
-// daily from then on. While the outbox holds `outboxMax` events, nothing
-// is read: the sources' cursors keep their place, and nothing is lost.
+// daily from then on. A source is read only while the outbox has room for
+// all a read can find, so it never holds more than `outboxMax` events: the
+// sources' cursors keep their place meanwhile, and nothing is lost. Events
+// of a connection disconnected before core took them are never delivered,
+// and are dropped.
 
 /** Every event type connect reports, by type. */
 const kinds: Readonly<Record<string, EventKind>> = {
@@ -230,17 +233,6 @@ const reconcile = async (
   }
 };
 
-/** Whether the outbox holds `outboxMax` events. */
-const outboxFull = async (db: D1Database): Promise<boolean> => {
-  const row = await db
-    .prepare(
-      "SELECT count(*) AS held FROM (SELECT 1 FROM connector_events LIMIT ?)"
-    )
-    .bind(outboxMax)
-    .first<{ held: number }>();
-  return (row?.held ?? 0) >= outboxMax;
-};
-
 /**
  * Takes the source for one read: moves its next read past the lease, only
  * if no one else did first. Whether it was taken.
@@ -301,7 +293,7 @@ const keepRead = async (
   connection: Connection,
   found: ReadEvents,
   readAt: Date
-): Promise<void> => {
+): Promise<number> => {
   const db = drizzle(env.DB);
   const action = actionOf(source.type) ?? "";
   const events = found.events.filter(({ id }) => {
@@ -328,6 +320,7 @@ const keepRead = async (
       .values({
         id: crypto.randomUUID(),
         key: JSON.stringify([source.id, event.id]),
+        connectionId: connection.id,
         event: JSON.stringify({
           id: event.id,
           connection: connection.id,
@@ -360,9 +353,10 @@ const keepRead = async (
   const [first, ...rest] = entries;
   if (first === undefined) {
     await update;
-    return;
+    return 0;
   }
   await recordEvents(env, [first, ...rest], [...inserts, update]);
+  return events.length;
 };
 
 /**
@@ -421,43 +415,133 @@ const failRead = async (
   await update;
 };
 
-/** Reads one source that is due, and keeps what it found. */
+/**
+ * Reads one source that is due, and keeps what it found, if the outbox
+ * has `room` for it: how many events it kept, or `null` when it had no
+ * room (the source is left as it was, due, for a later sync).
+ */
 const readSource = async (
   env: Env,
   source: EventSource,
-  connection: Connection
-): Promise<void> => {
+  connection: Connection,
+  room: number
+): Promise<number | null> => {
+  const db = drizzle(env.DB);
   const now = Date.now();
   const kind = kindOf(source.type);
-  if (kind === undefined || connection.status !== "active") {
-    await drizzle(env.DB)
+  const unprimed = kind?.prime !== undefined && source.cursor === null;
+  if (kind === undefined || connection.status !== "active" || unprimed) {
+    // Nothing to read yet: an unprimed source is primed first
+    // (`primeSources`), however long that takes.
+    await db
       .update(eventSources)
-      .set({ pollAt: new Date(now + inactiveWaitMs) })
+      .set({
+        pollAt: new Date(now + (unprimed ? pollIntervalMs : inactiveWaitMs)),
+      })
       .where(eq(eventSources.id, source.id));
-    return;
+    return 0;
   }
   if (!(await takeSource(env.DB, source, now))) {
-    return;
+    return 0;
   }
   try {
     const token = await accessTokenFor(env, connection.id);
     const found = await kind.read({
       source,
       connection,
+      token,
       pages: pagesWith(token),
     });
-    await keepRead(env, source, connection, found, new Date(now));
+    if (found.events.length > room) {
+      // Kept nothing, nor moved on: read again once there's room.
+      await db
+        .update(eventSources)
+        .set({ pollAt: source.pollAt })
+        .where(eq(eventSources.id, source.id));
+      return null;
+    }
+    return await keepRead(env, source, connection, found, new Date(now));
   } catch (error) {
     await failRead(env, source, error);
+    return 0;
   }
 };
 
-/** Reads the sources that are due, the longest due first. */
-const readDue = async (env: Env): Promise<void> => {
-  if (await outboxFull(env.DB)) {
-    log.warn("events.outbox_full", {});
-    return;
+/** Most sources one sync primes. */
+const primesPerSync = 25;
+
+/**
+ * Takes where each new source of a type that reads on from a position
+ * (`EventKind.prime`) stands now, as its first cursor: a request each,
+ * on top of the reads, and before them, so it marks when the source
+ * started however late its first read comes. One that fails is tried
+ * again by the next sync, and reads nothing meanwhile.
+ */
+const primeSources = async (env: Env): Promise<void> => {
+  const db = drizzle(env.DB);
+  const unprimed = await db
+    .select({ source: eventSources, connection: connections })
+    .from(eventSources)
+    .innerJoin(connections, eq(connections.id, eventSources.connectionId))
+    .where(and(isNull(eventSources.cursor), eq(connections.status, "active")));
+  const primeable = unprimed
+    .filter(({ source }) => kindOf(source.type)?.prime !== undefined)
+    .slice(0, primesPerSync);
+  for (const { source, connection } of primeable) {
+    const prime = kindOf(source.type)?.prime;
+    if (prime === undefined) {
+      continue;
+    }
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
+      const token = await accessTokenFor(env, connection.id);
+      // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
+      const cursor = await prime({
+        source,
+        connection,
+        token,
+        pages: pagesWith(token),
+      });
+      // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
+      await db
+        .update(eventSources)
+        .set({ cursor, updatedAt: new Date() })
+        .where(
+          and(eq(eventSources.id, source.id), isNull(eventSources.cursor))
+        );
+    } catch (error) {
+      log.warn("events.prime_failed", {
+        type: source.type,
+        ...errorFields(error),
+      });
+    }
   }
+};
+
+/**
+ * A read's events at most: `readMaxItems` items and a page past them, of
+ * no more than 50 (the page size connect asks providers for).
+ */
+const eventsPerRead = readMaxItems + 50;
+
+/** The events the outbox holds, up to `outboxMax`. */
+const outboxHeld = async (db: D1Database): Promise<number> => {
+  const row = await db
+    .prepare(
+      "SELECT count(*) AS held FROM (SELECT 1 FROM connector_events LIMIT ?)"
+    )
+    .bind(outboxMax)
+    .first<{ held: number }>();
+  return row?.held ?? 0;
+};
+
+/**
+ * Reads the sources that are due, the longest due first, each only while
+ * the outbox has room for all a read can find, so it never holds more
+ * than `outboxMax`.
+ */
+const readDue = async (env: Env): Promise<void> => {
+  let room = outboxMax - (await outboxHeld(env.DB));
   const due = await drizzle(env.DB)
     .select({ source: eventSources, connection: connections })
     .from(eventSources)
@@ -466,15 +550,63 @@ const readDue = async (env: Env): Promise<void> => {
     .orderBy(eventSources.pollAt)
     .limit(readsPerSync);
   for (const { source, connection } of due) {
+    if (room < eventsPerRead) {
+      log.warn("events.outbox_full", { room });
+      return;
+    }
     try {
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
-      await readSource(env, source, connection);
+      const kept = await readSource(env, source, connection, room);
+      if (kept === null) {
+        log.warn("events.outbox_full", { room });
+        return;
+      }
+      room -= kept;
     } catch (error) {
       log.error("events.source_failed", {
         type: source.type,
         ...errorFields(error),
       });
     }
+  }
+};
+
+/**
+ * Drops the events of connections that were disconnected (or no longer
+ * exist) before core took them, recorded in the audit log, one event per
+ * connection. Core never gets them meanwhile (`takeConnectorEvents`).
+ */
+const dropDisconnected = async (env: Env): Promise<void> => {
+  const db = drizzle(env.DB);
+  const gone = await db
+    .select({
+      connectionId: connectorEvents.connectionId,
+      count: sql<number>`count(*)`,
+    })
+    .from(connectorEvents)
+    .leftJoin(connections, eq(connections.id, connectorEvents.connectionId))
+    .where(
+      sql`${connections.id} IS NULL OR ${connections.status} = 'disconnected'`
+    )
+    .groupBy(connectorEvents.connectionId);
+  for (const { connectionId, count } of gone) {
+    // oxlint-disable-next-line no-await-in-loop -- one connection at a time, each audited
+    await recordEvents(
+      env,
+      [
+        {
+          actor: { type: "system" },
+          action: "connection.events.dropped",
+          target: { type: "connection", id: connectionId },
+          detail: { reason: "disconnected", count },
+        },
+      ],
+      [
+        db
+          .delete(connectorEvents)
+          .where(eq(connectorEvents.connectionId, connectionId)),
+      ]
+    );
   }
 };
 
@@ -489,17 +621,28 @@ export const syncEventSources = async (
     request
   );
   await reconcile(env, listeners);
+  await dropDisconnected(env);
+  await primeSources(env);
   await readDue(env);
 };
 
-/** `ConnectApi.takeConnectorEvents`: the oldest due, in order. */
+/**
+ * `ConnectApi.takeConnectorEvents`: the oldest due, in order, of active
+ * connections only: a disconnected connection's events never start a run.
+ */
 export const takeConnectorEvents = async (
   env: Env
 ): Promise<OutboxedConnectorEvent[]> =>
   await drizzle(env.DB)
     .select({ id: connectorEvents.id, event: connectorEvents.event })
     .from(connectorEvents)
-    .where(lte(connectorEvents.retryAt, new Date()))
+    .innerJoin(connections, eq(connections.id, connectorEvents.connectionId))
+    .where(
+      and(
+        lte(connectorEvents.retryAt, new Date()),
+        eq(connections.status, "active")
+      )
+    )
     .orderBy(connectorEvents.retryAt)
     .limit(connectorEventsTakeMax);
 

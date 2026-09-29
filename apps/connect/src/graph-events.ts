@@ -212,28 +212,43 @@ const driveItemFields = [
 
 /**
  * `m365.file.created`: files created in the drive after the source
- * started, in any folder of it. Graph's first read of a drive starts from
- * now (`token=latest`), so what the drive already holds is never read.
- * A drive's delta can't start from a time: when its cursor is gone, it
- * starts from now again, and files created in between aren't reported.
+ * started, in any folder of it. A drive's delta can't start from a time,
+ * only from now (`token=latest`): the source takes that position as soon
+ * as it starts (`prime`), so what the drive already holds is never read,
+ * and a first read that comes late misses nothing. When its cursor is
+ * gone, it takes the position again, and files created in between aren't
+ * reported.
  */
 const fileCreated: EventKind = {
   provider: "microsoft",
   server: "microsoft-365",
   isResource: isDrive,
-  read: async (read): Promise<ReadEvents> => {
+  prime: async (read): Promise<string> => {
     const { source } = read;
     const drive =
       source.resource === ""
         ? `users/${ownUser(read)}/drive`
         : `drives/${encodeURIComponent(source.resource)}`;
-    const start = `${v1}/${drive}/root/delta?${queryOf({
-      token: "latest",
-      $select: driveItemFields,
-    })}`;
+    const now = await graphPage(driveItem)(
+      read.token,
+      `${v1}/${drive}/root/delta?${queryOf({
+        token: "latest",
+        $select: driveItemFields,
+      })}`
+    );
+    if (now.end === undefined) {
+      throw new SourceError("Graph handed back no delta link for now");
+    }
+    return now.end;
+  },
+  read: async (read): Promise<ReadEvents> => {
+    const { source } = read;
+    if (source.cursor === null) {
+      throw new SourceError("The drive's position isn't taken yet");
+    }
     const { items, cursor, more } = await read.pages(
       graphPage(driveItem),
-      source.cursor ?? start
+      source.cursor
     );
     const since = newSince(source);
     const events = items.flatMap((item) =>

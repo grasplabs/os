@@ -378,13 +378,16 @@ export const eventSources = sqliteTable(
  * due (`retry_at`), delivers them to workflows, and settles them. One per
  * source and the provider's ID of the item (`key`), so an item read twice
  * waits once. A failed delivery is tried again later, `attempts` making
- * each wait longer. `event` is the event as JSON.
+ * each wait longer. `event` is the event as JSON, read from connection
+ * `connection_id`: only an active connection's are delivered, and a
+ * disconnected one's are dropped.
  */
 export const connectorEvents = sqliteTable(
   "connector_events",
   {
     id: text().primaryKey(),
     key: text().notNull(),
+    connectionId: text("connection_id").notNull(),
     event: text().notNull(),
     attempts: integer().notNull().default(0),
     retryAt: timestamp("retry_at").notNull(),
@@ -393,5 +396,6 @@ export const connectorEvents = sqliteTable(
   (table) => [
     uniqueIndex("connector_events_key_idx").on(table.key),
     index("connector_events_retry_idx").on(table.retryAt),
+    index("connector_events_connection_idx").on(table.connectionId),
   ]
 );

@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "a2d5fc75-0f0d-4708-8233-a9c1dce7736b",
+  "id": "9a979c40-e249-4a06-b589-205baf86626e",
   "prevId": "dd669e06-06eb-41bc-bcf9-bcdec1e10f0d",
   "tables": {
     "audit_outbox": {
@@ -485,6 +485,13 @@
           "notNull": true,
           "autoincrement": false
         },
+        "connection_id": {
+          "name": "connection_id",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false
+        },
         "event": {
           "name": "event",
           "type": "text",
@@ -527,6 +534,13 @@
           "name": "connector_events_retry_idx",
           "columns": [
             "retry_at"
+          ],
+          "isUnique": false
+        },
+        "connector_events_connection_idx": {
+          "name": "connector_events_connection_idx",
+          "columns": [
+            "connection_id"
           ],
           "isUnique": false
         }

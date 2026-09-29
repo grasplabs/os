@@ -145,6 +145,22 @@ const listening = async () => {
     }));
 };
 
+/** `count` events of `connection` in the outbox, waiting for core. */
+const fillOutbox = async (connection: string, count: number) => {
+  await env.DB.prepare(
+    "INSERT INTO connector_events (id, key, connection_id, event, retry_at, created_at) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) SELECT 'filler-' || i, 'filler-' || i, ?, '{}', 0, 0 FROM n"
+  )
+    .bind(count, connection)
+    .run();
+};
+
+const heldCount = async (): Promise<number> => {
+  const row = await env.DB.prepare(
+    "SELECT count(*) AS held FROM connector_events"
+  ).first<{ held: number }>();
+  return row?.held ?? 0;
+};
+
 const eventIdsOf = (taken: { event: string }[]): string[] =>
   taken.map(
     ({ event }) => z.object({ id: z.string() }).parse(JSON.parse(event)).id
@@ -407,11 +423,7 @@ describe("connector events", () => {
   it("read nothing while the outbox is full, and keep their place", async () => {
     const outlook = await connected();
     await sync([listener(outlook)]);
-    await env.DB.prepare(
-      "INSERT INTO connector_events (id, key, event, retry_at, created_at) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) SELECT 'filler-' || i, 'filler-' || i, '{}', 0, 0 FROM n"
-    )
-      .bind(outboxMax)
-      .run();
+    await fillOutbox(outlook.id, outboxMax);
     const mail = invoiceMail(outlook.oid, 1, now());
     graph.receive(outlook.oid, mail);
     later();
@@ -425,6 +437,113 @@ describe("connector events", () => {
     const events = await outboxed();
 
     expect(events.map(({ id }) => id)).toStrictEqual([mail.id]);
+  });
+
+  it("read a source only while the outbox has room for all it can find, so it never overflows", async () => {
+    const outlook = await connected();
+    const own = listener(outlook);
+    const shared = listener(outlook, { resource: invoices });
+    await sync([own, shared]);
+    // Room for one read of up to 150 events, not two.
+    await fillOutbox(outlook.id, outboxMax - 150);
+    for (let n = 1; n <= 100; n += 1) {
+      graph.receive(outlook.oid, invoiceMail(outlook.oid, n, now()));
+      graph.receive(invoices, invoiceMail(invoices, n, now()));
+    }
+    later();
+    await sync([own, shared]);
+    const held = await heldCount();
+    const left = await sources();
+
+    expect({
+      held,
+      stillDue: left.filter(({ poll_at: pollAt }) => pollAt <= Date.now())
+        .length,
+    }).toStrictEqual({ held: outboxMax - 50, stillDue: 1 });
+  });
+
+  it("take a drive's position as soon as it starts, so a first read that comes late misses nothing", async () => {
+    const outlook = await connected();
+    const files = listener(outlook, {
+      type: "m365.file.created",
+      resource: financeDrive,
+    });
+    // No room to read: the first read has to wait.
+    await fillOutbox(outlook.id, outboxMax);
+    await sync([files]);
+    const primed = await sources();
+    const file = createdFile(financeDrive, 1, now());
+    graph.change(financeDrive, file);
+    await env.DB.prepare(
+      "DELETE FROM connector_events WHERE id LIKE 'filler-%'"
+    ).run();
+    later();
+    await sync([files]);
+    const events = await outboxed();
+
+    expect({
+      primed: primed.map(({ cursor }) => cursor?.includes("token=0")),
+      events: events.map(({ id }) => id),
+    }).toStrictEqual({ primed: [true], events: [file.id] });
+  });
+
+  it("read nothing of a drive until its position is taken", async () => {
+    const outlook = await connected();
+    const files = listener(outlook, {
+      type: "m365.file.created",
+      resource: financeDrive,
+    });
+    instead = () =>
+      Response.json(
+        { error: { code: "ServiceNotAvailable" } },
+        { status: 500 }
+      );
+    await sync([files]);
+    const unprimed = await sources();
+    later();
+    await sync([files]);
+    const primed = await sources();
+
+    // Asked where the drive stands, and read nothing while it had no
+    // position; once it had one, read on from there.
+    expect({
+      unprimed: unprimed.map(({ cursor }) => cursor),
+      primed: primed.map(({ cursor }) => cursor?.includes("token=0")),
+      asked: graphPaths().map((path) => path.includes("token=latest")),
+    }).toStrictEqual({
+      unprimed: [null],
+      primed: [true],
+      asked: [true, true, false],
+    });
+  });
+
+  it("never hand core an event of a connection disconnected since, and drop it", async () => {
+    const outlook = await connected();
+    await sync([listener(outlook)]);
+    graph.receive(outlook.oid, invoiceMail(outlook.oid, 1, now()));
+    later();
+    await sync([listener(outlook)]);
+    await exports.default.disconnect({
+      person: outlook.person,
+      connectionId: outlook.id,
+    });
+    const taken = await exports.default.takeConnectorEvents();
+    await sync([]);
+    const held = await heldCount();
+    const events = await listening();
+
+    expect({ taken, held }).toStrictEqual({ taken: [], held: 0 });
+    expect(
+      events.filter(({ action }) => action === "connection.events.dropped")
+    ).toStrictEqual([
+      {
+        action: "connection.events.dropped",
+        actor: "system",
+        target: outlook.id,
+        detail: { reason: "disconnected", count: 1 },
+        provenance: [],
+      },
+    ]);
   });
 
   it("wait as long as Graph asks when it throttles, and longer after each failure", async () => {
