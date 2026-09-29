@@ -2,6 +2,7 @@ import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { and, asc, eq, sql } from "drizzle-orm";
 import { describe, expect, it, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import { consoleDatabase } from "../src/db/act.ts";
 import {
@@ -19,6 +20,7 @@ import type { ProvisionInput } from "../src/provision/control.ts";
 import { accountName } from "../src/provision/workflow.ts";
 import { importReleases } from "../src/releases/import.ts";
 import { startingMs } from "../src/runners.ts";
+import type { AccountState } from "./cloudflare-api-kit.ts";
 import {
   deployerEmail,
   mockCloudflareApi,
@@ -35,6 +37,14 @@ const staff = { email: "staff@grasp.test", sub: "sub-staff" };
 /** The console's CLIENT_DOMAIN in the test pool (vite.test.config.ts). */
 const domain = "grasp.test";
 
+/** How a new client's people sign in: both IdPs, as a client may have. */
+const signIn = {
+  domains: ["acme.test"],
+  admins: ["ada@acme.test"],
+  entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
+  googleHostedDomain: "acme.test",
+};
+
 /** A release imported to provision with, and a new client's input. */
 const setUp = async (input: Partial<ProvisionInput> = {}) => {
   const release = await publishRelease({ notes: "feat(core): onboard me" });
@@ -47,6 +57,7 @@ const setUp = async (input: Partial<ProvisionInput> = {}) => {
       name: "Acme",
       releaseId: release.id,
       ring: 2,
+      signIn,
       ...input,
     },
   };
@@ -157,6 +168,26 @@ const logsOf = async (task: () => Promise<void>): Promise<string> => {
   }
   return JSON.stringify(lines, (_key, value: unknown) =>
     value instanceof Error ? `${value.name}: ${value.message}` : value
+  );
+};
+
+/** Grasp's OAuth apps' client ids, as the test pool sets them (vite.test.config.ts). */
+const entraClientId = "test-entra-app";
+const googleClientId = "test-google-app.apps.googleusercontent.com";
+
+const bindingsSchema = z.array(
+  z.object({ name: z.string(), json: z.unknown().optional() })
+);
+
+/** The JSON vars of the version all of core's traffic goes to in `account`, by name. */
+const coreVarsOf = (account: AccountState | undefined) => {
+  const core = account?.scripts.get("grasp-os-core");
+  const live = core?.deployments[0]?.versions[0]?.version_id;
+  const version = core?.versions.find(({ id }) => id === live);
+  return Object.fromEntries(
+    bindingsSchema
+      .parse(version?.metadata.bindings ?? [])
+      .map(({ name, json }): [string, unknown] => [name, json])
   );
 };
 
@@ -278,6 +309,7 @@ describe("provisioning a new client", () => {
       clientEvents: [
         "client.provision_start",
         "client.create",
+        "client.ai_gateway",
         "client.workers_paid",
         "client.workers_subdomain",
         "client.activate",
@@ -309,6 +341,38 @@ describe("provisioning a new client", () => {
         "TOKEN_ENCRYPTION_KEY",
       ],
     });
+    // Its AI Gateway, authenticated and keeping no payloads, and core's
+    // model gateway and sign-in pointing at it and at its IdPs.
+    const vars = coreVarsOf(account);
+    expect({
+      gateways: account?.gateways,
+      modelGateway: vars.MODEL_GATEWAY,
+      signIn: vars.SIGN_IN,
+    }).toStrictEqual({
+      gateways: [
+        {
+          id: "grasp-os",
+          authentication: true,
+          cache_ttl: 0,
+          cache_invalidate_on_update: false,
+          collect_logs: true,
+          rate_limiting_interval: 0,
+          rate_limiting_limit: 0,
+          rate_limiting_technique: "fixed",
+        },
+      ],
+      modelGateway: {
+        gateway: "grasp-os",
+        models: ["workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
+      },
+      signIn: {
+        origin: `https://${clientId}.${domain}`,
+        domains: ["acme.test"],
+        admins: ["ada@acme.test"],
+        entra: { tenantId: signIn.entraTenantId, clientId: entraClientId },
+        google: { hostedDomain: "acme.test", clientId: googleClientId },
+      },
+    });
   });
 
   it("adopts an account the deployer is a member of by its id, creating none", async () => {
@@ -324,10 +388,33 @@ describe("provisioning a new client", () => {
     expect({
       client: await clientRow(clientId),
       creates: cloudflare.calls.filter(isCreate("/accounts")).length,
+      gateways: account.gateways.map(({ id }) => id),
+      modelGateway: coreVarsOf(account).MODEL_GATEWAY,
     }).toMatchObject({
       client: { accountId: account.id, status: "active" },
       creates: 0,
+      gateways: ["grasp-os"],
+      modelGateway: { gateway: "grasp-os" },
     });
+  });
+
+  it("keeps the AI Gateway an adopted account has, its settings too, with authentication switched on", async () => {
+    const account = cloudflare.addAccount("Acme's own");
+    // Made in the dashboard before, with the client's own provider keys.
+    const own = {
+      id: "grasp-os",
+      authentication: false,
+      collect_logs: true,
+      store_id: "acme-keys",
+    };
+    account.gateways.push(own);
+    const { input } = await setUp({ accountId: account.id });
+    await using run = await followRuns();
+
+    await startProvisioning(env, staff, input);
+    await run.waitForStepResult({ name: "ai gateway" });
+
+    expect(account.gateways).toStrictEqual([{ ...own, authentication: true }]);
   });
 
   it("refuses to adopt an account that runs a Grasp Worker, or that the deployer can't reach, before a run starts", async () => {
@@ -398,6 +485,7 @@ describe("provisioning a new client", () => {
     cloudflare.failNext(isCreate("/accounts"), "lost");
     cloudflare.failNext(isCreate("/members"), "lost");
     cloudflare.failNext(isCreate("/d1/database"), "lost");
+    cloudflare.failNext(isCreate("/ai-gateway/gateways"), "lost");
 
     const logs = await logsOf(async () => {
       await startProvisioning(env, staff, input);
@@ -411,12 +499,14 @@ describe("provisioning a new client", () => {
       accounts: accounts.length,
       member: accounts[0]?.members.get(deployerEmail),
       databases: sortedNames(accounts[0]?.d1),
+      gateways: accounts[0]?.gateways.map(({ id }) => id),
       // The deploy step failed once and ran again: its failure was logged.
       failureLogged: logs.includes("deploy.failed"),
     }).toStrictEqual({
       accounts: 1,
       member: "accepted",
       databases: ["grasp-os-connect", "grasp-os-core", "grasp-os-knowledge"],
+      gateways: ["grasp-os"],
       failureLogged: true,
     });
     const instance = await instanceOf(clientId);
@@ -472,6 +562,10 @@ describe("provisioning a new client", () => {
     expect({
       databases: account?.d1.length,
       buckets: account?.buckets.length,
+      // The resumed run ensured the gateway again, and found it.
+      gateways: account?.gateways.length,
+      // Its sign-in, from the record the first run made.
+      signIn: coreVarsOf(account).SIGN_IN,
       // The resumed deploy deployed the versions it had uploaded.
       versions: [...(account?.scripts.values() ?? [])].map(
         ({ versions }) => versions.length
@@ -484,6 +578,8 @@ describe("provisioning a new client", () => {
     }).toMatchObject({
       databases: 3,
       buckets: 2,
+      gateways: 1,
+      signIn: { origin: `https://${clientId}.${domain}` },
       versions: [1, 1],
       deploys: [{ status: "done", error: null }],
       confirmations: 1,

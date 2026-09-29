@@ -77,6 +77,11 @@ const activeClient = async (
         accountId: account.id,
         ring,
         status: "active",
+        signIn: JSON.stringify({
+          domains: ["acme.test"],
+          admins: [],
+          googleHostedDomain: "acme.test",
+        }),
         createdAt: now,
         updatedAt: now,
       }),
@@ -477,6 +482,26 @@ describe("rolling a release out", () => {
       ],
       again: "not_waiting",
     });
+    // The rollout keeps core's model gateway and sign-in.
+    const acmeCore = acmeWorkers.find(({ worker }) => worker === "core");
+    const vars = Object.fromEntries(
+      z
+        .array(z.object({ name: z.string(), json: z.unknown().optional() }))
+        .parse(
+          acme.account.scripts
+            .get(acmeCore?.scriptName ?? "")
+            ?.versions.find(({ id }) => id === acmeCore?.versionId)?.metadata
+            .bindings ?? []
+        )
+        .map(({ name, json }): [string, unknown] => [name, json])
+    );
+    expect({
+      gateway: vars.MODEL_GATEWAY,
+      origin: z.object({ origin: z.string() }).parse(vars.SIGN_IN).origin,
+    }).toMatchObject({
+      gateway: { gateway: "grasp-os" },
+      origin: `https://${acme.clientId}.grasp.test`,
+    });
   });
 
   it("lets a new rollout start once the waiting one's run was ended outside the console, marking that one failed", async () => {
@@ -764,6 +789,11 @@ describe("rolling a release out", () => {
       name: "Held",
       releaseId: release,
       ring: 1,
+      signIn: {
+        domains: ["acme.test"],
+        admins: [],
+        googleHostedDomain: "acme.test",
+      },
     });
     const [heldRun] = await provisioning.get();
     await heldRun?.waitForStepResult({ name: "client" });

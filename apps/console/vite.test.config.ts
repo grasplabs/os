@@ -63,6 +63,9 @@ export default defineProject({
           DEV_ACCESS_EMAIL: "",
           // Where provisioned clients are served (src/deploy/context.ts).
           CLIENT_DOMAIN: "grasp.test",
+          // Grasp's OAuth apps, which clients' sign-in names (src/deploy/core-config.ts).
+          ENTRA_CLIENT_ID: "test-entra-app",
+          GOOGLE_CLIENT_ID: "test-google-app.apps.googleusercontent.com",
           CONSOLE_MIGRATIONS: migrations,
           KNOWLEDGE_MIGRATION_FILES: knowledgeMigrationFiles,
         },

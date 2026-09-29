@@ -64,6 +64,13 @@
       "when": 1790659194559,
       "tag": "0008_rollouts_created",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "6",
+      "when": 1790694442195,
+      "tag": "0009_client_sign_in",
+      "breakpoints": true
     }
   ]
 }

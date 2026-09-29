@@ -76,6 +76,14 @@ export const clients = sqliteTable(
       .default("provisioning"),
     /** The staff member who started provisioning it (src/provision/). */
     createdBy: text("created_by"),
+    /**
+     * How its people sign in, as staff gave it when provisioning: JSON
+     * (`clientSignInSchema`, src/deploy/core-config.ts), the client's own
+     * Entra tenant and/or Google Workspace, its email domains and first
+     * admins. Every deploy makes core's `SIGN_IN` from it; null for a
+     * client without one, whose core gets no `SIGN_IN`.
+     */
+    signIn: text("sign_in"),
     /** The release it stays on while pinned, whatever the rollouts. */
     pinnedReleaseId: text("pinned_release_id").references(() => releases.id),
     createdAt: timestamp("created_at").notNull(),

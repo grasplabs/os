@@ -11,6 +11,7 @@
 import { cloudflareApi } from "../cloudflare/api.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
 import { consoleDatabase } from "../db/act.ts";
+import type { SignInApps } from "./core-config.ts";
 import type { DeployContext } from "./deploy.ts";
 import type { DeploySecrets } from "./secrets.ts";
 
@@ -126,6 +127,25 @@ export const activityKeys = async (
   clientKey: await storeSecret(env, "CLIENT_KEY"),
 });
 
+/** The console var `value`, trimmed; undefined while it's unset or empty. */
+const varOf = (value: string | undefined): string | undefined => {
+  const trimmed = value?.trim() ?? "";
+  return trimmed === "" ? undefined : trimmed;
+};
+
+/**
+ * Grasp's OAuth apps' client ids, from the console's vars (deploy-ops sets
+ * them): not secrets, their secrets are shared secrets above.
+ */
+const signInApps = (env: Env): SignInApps => {
+  const entraClientId = varOf(env.ENTRA_CLIENT_ID);
+  const googleClientId = varOf(env.GOOGLE_CLIENT_ID);
+  return {
+    ...(entraClientId === undefined ? {} : { entraClientId }),
+    ...(googleClientId === undefined ? {} : { googleClientId }),
+  };
+};
+
 /** Everything a deploy works with, from `env`. Throws while no domain is set. */
 export const deployContext = async (env: Env): Promise<DeployContext> => {
   const domain = clientDomain(env);
@@ -137,6 +157,7 @@ export const deployContext = async (env: Env): Promise<DeployContext> => {
     db: consoleDatabase(env.DB),
     store: env.RELEASES,
     secrets: await deploySecrets(env),
+    signInApps: signInApps(env),
     router: { hosts: env.ROUTER_HOSTS, domain },
   };
 };

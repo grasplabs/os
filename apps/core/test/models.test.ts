@@ -2,6 +2,7 @@ import { Type } from "@earendil-works/pi-ai";
 import { OPENAI_MODELS } from "@earendil-works/pi-ai/providers/openai.models";
 import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import type { AuditEvent } from "@grasp-os/shared/audit";
+import { defaultGatewayModels } from "@grasp-os/shared/deployment-config";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -145,6 +146,29 @@ describe("model gateway", { timeout: 30_000 }, () => {
       }
     }
   );
+
+  it("answers a call with the config the console gives a new deployment", async () => {
+    const [model] = defaultGatewayModels;
+    const { gateway, gatewayEnv } = withGateway([answer("Hello.")], {
+      gateway: "grasp-os",
+      models: defaultGatewayModels,
+    });
+
+    const result = await models(gatewayEnv).call({
+      model,
+      messages: [{ role: "user", content: "Say hello." }],
+      purpose: "chat.turn",
+      trigger: newPerson(),
+      work,
+    });
+
+    expect({
+      text: result.text,
+      gateways: gateway.requests.map(
+        ({ url }) => new URL(url).pathname.split("/")[3]
+      ),
+    }).toStrictEqual({ text: "Hello.", gateways: ["grasp-os"] });
+  });
 
   it("sends no provider key, so the gateway uses the keys it stores", async () => {
     const { gateway, gatewayEnv } = withGateway([

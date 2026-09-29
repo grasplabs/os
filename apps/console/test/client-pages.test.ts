@@ -33,9 +33,9 @@ const page = async (path: string) => {
 };
 
 /**
- * A client whose real run waits for Workers Paid, its account step as it
- * ends for a new account (the page's tests have no Cloudflare API to
- * settle one against). The caller disposes of `runs`.
+ * A client whose real run waits for Workers Paid, its account and AI
+ * Gateway steps as they end for a new account (the page's tests have no
+ * Cloudflare API to settle them against). The caller disposes of `runs`.
  */
 const waitingClient = async () => {
   const release = await publishRelease({ notes: "feat(core): waits" });
@@ -48,12 +48,18 @@ const waitingClient = async () => {
       { name: "account" },
       { accountId, abandonedAccountId: null }
     );
+    await modifier.mockStepResult({ name: "ai gateway" }, true);
   });
   await startProvisioning(env, staff, {
     clientId,
     name: "Acme",
     releaseId: release.id,
     ring: 1,
+    signIn: {
+      domains: ["acme.test"],
+      admins: [],
+      googleHostedDomain: "acme.test",
+    },
   });
   const [run] = await runs.get();
   if (run === undefined) {
@@ -117,8 +123,14 @@ describe("the client pages", () => {
       status,
       form:
         html.includes('name="clientId"') && html.includes('name="accountId"'),
+      signIn: [
+        'name="entraTenantId"',
+        'name="googleHostedDomain"',
+        'name="domains"',
+        'name="admins"',
+      ].every((field) => html.includes(field)),
       newest: html.includes(`value="${release.id}"`),
-    }).toStrictEqual({ status: 200, form: true, newest: true });
+    }).toStrictEqual({ status: 200, form: true, signIn: true, newest: true });
   });
 
   it("show a client waiting for Workers Paid the checklist, with its account's dashboard", async () => {
@@ -256,6 +268,11 @@ describe("the client pages", () => {
       name: "Acme",
       releaseId: release.id,
       ring: 1,
+      signIn: {
+        domains: ["acme.test"],
+        admins: [],
+        googleHostedDomain: "acme.test",
+      },
     });
     const [run] = await runs.get();
     await run?.waitForStatus("errored");

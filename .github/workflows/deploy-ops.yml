@@ -153,13 +153,17 @@ jobs:
       # grant nothing. So is CLIENT_DOMAIN, the domain clients are served
       # under: without it the console provisions and deploys no client, but
       # works otherwise, so it's passed only when set (keep_vars keeps the
-      # last one).
+      # last one). So are ENTRA_CLIENT_ID and GOOGLE_CLIENT_ID, Grasp's
+      # OAuth apps' client ids, which each client's core signs people in
+      # with: a client whose sign-in names an IdP without one isn't deployed.
       - name: Deploy the console with its Access settings
         if: ${{ !inputs.secrets-only }}
         env:
           CF_ACCESS_AUD: ${{ vars.CF_ACCESS_AUD }}
           CF_ACCESS_ISS: ${{ vars.CF_ACCESS_ISS }}
           CLIENT_DOMAIN: ${{ vars.CLIENT_DOMAIN }}
+          ENTRA_CLIENT_ID: ${{ vars.ENTRA_CLIENT_ID }}
+          GOOGLE_CLIENT_ID: ${{ vars.GOOGLE_CLIENT_ID }}
         run: |
           set -euo pipefail
           if [ -z "$CF_ACCESS_AUD" ] || [ -z "$CF_ACCESS_ISS" ]; then
@@ -167,9 +171,11 @@ jobs:
             exit 1
           fi
           vars=(--var "CF_ACCESS_AUD:$CF_ACCESS_AUD" --var "CF_ACCESS_ISS:$CF_ACCESS_ISS")
-          if [ -n "$CLIENT_DOMAIN" ]; then
-            vars+=(--var "CLIENT_DOMAIN:$CLIENT_DOMAIN")
-          fi
+          for name in CLIENT_DOMAIN ENTRA_CLIENT_ID GOOGLE_CLIENT_ID; do
+            if [ -n "${!name}" ]; then
+              vars+=(--var "$name:${!name}")
+            fi
+          done
           vp run --filter @grasp-os/console build
           cd apps/console
           vp exec node ../../scripts/wrangler-deploy.ts "${vars[@]}"

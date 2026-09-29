@@ -724,6 +724,77 @@ describe("deploying safely", () => {
     });
   });
 
+  it("gives core its model gateway and its sign-in from the client's record, a setting of the same name replacing it, and refuses sign-in through an IdP the console has no app for", async () => {
+    const { account, clientId, deployId } = await setUp();
+    await db
+      .update(clients)
+      .set({
+        signIn: JSON.stringify({
+          domains: ["acme.test"],
+          admins: ["ada@acme.test"],
+          entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
+        }),
+      })
+      .where(eq(clients.id, clientId));
+    const apps = { entraClientId: "entra-app" };
+    await runDeploy({ ...context, signInApps: apps }, deployId);
+    const first = bindingsOf(liveVersionOf(account, "grasp-os-core"));
+    const chosen = {
+      gateway: "grasp-os",
+      models: ["anthropic/claude-sonnet-4-5"],
+    };
+    await db.insert(settings).values({
+      clientId,
+      key: "MODEL_GATEWAY",
+      value: JSON.stringify(chosen),
+      updatedBy: staff.email,
+      updatedAt: new Date(),
+    });
+    await runDeploy(
+      { ...context, signInApps: apps },
+      await nextDeploy(clientId, { notes: "feat(core): next" })
+    );
+    const second = bindingsOf(liveVersionOf(account, "grasp-os-core"));
+    // A console without the Entra app's id can't sign anyone in.
+    const refused = await nextDeploy(clientId, { notes: "fix(core): after" });
+    await failingDeploy(refused);
+    const refusedRow = await deployRow(refused);
+
+    expect({
+      modelGateway: first.get("MODEL_GATEWAY"),
+      signIn: first.get("SIGN_IN"),
+      chosen: second.get("MODEL_GATEWAY"),
+      // Every deploy makes it again: the next one keeps it.
+      signInKept: second.get("SIGN_IN"),
+      refused: refusedRow?.error,
+    }).toStrictEqual({
+      modelGateway: {
+        type: "json",
+        name: "MODEL_GATEWAY",
+        json: {
+          gateway: "grasp-os",
+          models: ["workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
+        },
+      },
+      signIn: {
+        type: "json",
+        name: "SIGN_IN",
+        json: {
+          origin: `https://${clientId}.${domain}`,
+          domains: ["acme.test"],
+          admins: ["ada@acme.test"],
+          entra: {
+            tenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
+            clientId: "entra-app",
+          },
+        },
+      },
+      chosen: { type: "json", name: "MODEL_GATEWAY", json: chosen },
+      signInKept: first.get("SIGN_IN"),
+      refused: "sign_in_incomplete",
+    });
+  });
+
   it("refuses a shared secret named like a binding", async () => {
     const { deployId } = await setUp();
 

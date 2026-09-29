@@ -83,7 +83,8 @@
   // (src/deploy/context.ts): the tenant admin's token, which only creates
   // accounts and makes the deployer a member (src/provision/workflow.ts);
   // the deployer's token, with deploy permissions only, on every client
-  // account; the keys each client's own secrets are derived from; and the
+  // account (AI Gateway edit among them: provisioning makes each client's
+  // gateway); the keys each client's own secrets are derived from; and the
   // secrets every client shares, which deploy-ops copies in from
   // 1Password. The store id is the account's own: `deploy` fills it in
   // (scripts/wrangler-deploy.ts), so this placeholder only reaches local

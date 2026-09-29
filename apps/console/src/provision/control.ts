@@ -19,6 +19,7 @@ import { audit, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
 import { auditEvents, clients, releases } from "../db/schema.ts";
 import { clientDomain, deployerApi } from "../deploy/context.ts";
+import { clientSignInSchema } from "../deploy/core-config.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
 import { claimRun, currentRun, isReplaceable } from "../runners.ts";
 import { scriptInTheWay, workersPaidEvent } from "./workflow.ts";
@@ -66,6 +67,8 @@ export const provisionInputSchema = z.object({
   accountId: accountIdSchema.optional(),
   releaseId: releaseIdSchema,
   ring: z.int().nonnegative(),
+  /** How its people sign in: every deploy makes core's `SIGN_IN` from it. */
+  signIn: clientSignInSchema,
 });
 export type ProvisionInput = z.infer<typeof provisionInputSchema>;
 
