@@ -56,7 +56,7 @@ const waitingClient = async () => {
     ring: 1,
     signIn: {
       domains: ["acme.test"],
-      admins: [],
+      admins: ["ada@acme.test"],
       googleHostedDomain: "acme.test",
     },
   });
@@ -269,7 +269,7 @@ describe("the client pages", () => {
       ring: 1,
       signIn: {
         domains: ["acme.test"],
-        admins: [],
+        admins: ["ada@acme.test"],
         googleHostedDomain: "acme.test",
       },
     });

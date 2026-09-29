@@ -3,6 +3,7 @@ import { Input } from "@grasp-os/ui/components/input";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
+import { signInProblem } from "../../deploy/core-config.ts";
 import { clientIdProblem } from "../../provision/client-id.ts";
 import {
   fetchNewClientOptions,
@@ -51,12 +52,19 @@ const signInOf = (form: FormData) => {
       "Give the client's Entra tenant id, its Google Workspace domain, or both."
     );
   }
-  return {
+  const signIn = {
     domains: listOf(form, "domains"),
     admins: listOf(form, "admins"),
     ...(entraTenantId === "" ? {} : { entraTenantId }),
     ...(googleHostedDomain === "" ? {} : { googleHostedDomain }),
   };
+  // The server's own check (a first admin who can sign in, among others),
+  // said before anything is sent.
+  const problem = signInProblem(signIn);
+  if (problem !== null) {
+    throw new InvalidFieldError(problem);
+  }
+  return signIn;
 };
 
 const NewClient = () => {
@@ -166,9 +174,9 @@ const NewClient = () => {
           </Field>
           <Field
             label="Admins"
-            hint="Emails that get the admin role when they first sign in, separated by commas."
+            hint="Emails that get the admin role when they first sign in, separated by commas: at least one, each in the email domains."
           >
-            <Input name="admins" />
+            <Input name="admins" required />
           </Field>
           <div className="flex items-center gap-4">
             <Button type="submit" disabled={busy}>

@@ -60,7 +60,7 @@ import {
 import type { ReleaseStore } from "../releases/import.ts";
 import { holdsClient, stillHolds } from "../runners.ts";
 import type { HeldClient } from "../runners.ts";
-import { derivedCoreConfig } from "./core-config.ts";
+import { checkDeployedSignIn, derivedCoreConfig } from "./core-config.ts";
 import type { SignInApps } from "./core-config.ts";
 import { DeployError } from "./errors.ts";
 import { migrateDatabases } from "./migrations.ts";
@@ -353,7 +353,7 @@ const coreVars = async (
     // When the deploy started: the same however often it's resumed.
     at: deploy.createdAt.toISOString(),
   };
-  return {
+  const vars = {
     ...derivedCoreConfig({
       clientId: deploy.clientId,
       signIn: deploy.signIn,
@@ -365,6 +365,10 @@ const coreVars = async (
     ),
     PLATFORM_CHANGE: change,
   };
+  // The SIGN_IN that goes out, a setting's included: never one no admin
+  // can sign in with.
+  checkDeployedSignIn(deploy.clientId, vars);
+  return vars;
 };
 
 /** The deploy's runner lost the client: it stops. */

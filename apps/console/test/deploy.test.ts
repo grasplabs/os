@@ -806,6 +806,107 @@ describe("deploying safely", () => {
     });
   });
 
+  it("refuses to deploy a sign-in no first admin could sign in with, naming no email where it's recorded", async () => {
+    const { account, clientId, deployId } = await setUp();
+    await db
+      .update(clients)
+      .set({
+        signIn: JSON.stringify({
+          domains: ["acme.test"],
+          admins: ["ada@elsewhere.test"],
+          entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
+        }),
+      })
+      .where(eq(clients.id, clientId));
+    const counts = account.scripts.size;
+
+    const logged = await failingDeploy(deployId);
+
+    const row = await deployRow(deployId);
+    const events = await deployEvents(clientId);
+    expect({
+      error: row?.error,
+      uploaded: account.scripts.size - counts,
+      named: JSON.stringify({ logged, row, events }).includes(
+        "ada@elsewhere.test"
+      ),
+    }).toStrictEqual({
+      error: "sign_in_incomplete",
+      uploaded: 0,
+      named: false,
+    });
+  });
+
+  it("deploys a SIGN_IN setting in place of the record's only while an admin of it can sign in", async () => {
+    const { account, clientId, deployId } = await setUp();
+    const record = {
+      domains: ["acme.test"],
+      admins: ["ada@acme.test"],
+      entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
+    };
+    await db
+      .update(clients)
+      .set({ signIn: JSON.stringify(record) })
+      .where(eq(clients.id, clientId));
+    const override = {
+      origin: `https://${clientId}.${domain}`,
+      domains: ["acme.test", "acme-group.test"],
+      admins: ["bo@acme-group.test"],
+      entra: {
+        tenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
+        clientId: "entra-app",
+      },
+    };
+    await db.insert(settings).values({
+      clientId,
+      key: "SIGN_IN",
+      value: JSON.stringify(override),
+      updatedBy: staff.email,
+      updatedAt: new Date(),
+    });
+    const withApps = { ...context, signInApps: { entraClientId: "entra-app" } };
+    await runDeploy(withApps, deployId);
+    const deployed = bindingsOf(liveVersionOf(account, "grasp-os-core")).get(
+      "SIGN_IN"
+    );
+    // The override's only admin is outside its domains.
+    await db
+      .update(settings)
+      .set({
+        value: JSON.stringify({ ...override, admins: ["bo@elsewhere.test"] }),
+      })
+      .where(and(eq(settings.clientId, clientId), eq(settings.key, "SIGN_IN")));
+    const refused = await nextDeploy(clientId, {
+      notes: "fix(core): override",
+    });
+    const logged: unknown[] = [];
+    const errors = vi.spyOn(console, "error").mockImplementation((line) => {
+      logged.push(line);
+    });
+    try {
+      await expect(runDeploy(withApps, refused)).rejects.toMatchObject({
+        code: "sign_in_incomplete",
+      });
+    } finally {
+      errors.mockRestore();
+    }
+    const row = await deployRow(refused);
+
+    expect({
+      deployed,
+      refused: row?.error,
+      named: JSON.stringify({
+        logged,
+        row,
+        events: await deployEvents(clientId),
+      }).includes("bo@elsewhere.test"),
+    }).toStrictEqual({
+      deployed: { type: "json", name: "SIGN_IN", json: override },
+      refused: "sign_in_incomplete",
+      named: false,
+    });
+  });
+
   it("refuses a shared secret named like a binding", async () => {
     const { deployId } = await setUp();
 

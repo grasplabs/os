@@ -81,6 +81,31 @@ export const signInConfigSchema = z.object({
 });
 export type SignInConfig = z.infer<typeof signInConfigSchema>;
 
+/**
+ * The domain of `email`, as core's sign-in reads it (core's
+ * src/auth/claims.ts): after the last `@`, lowercase.
+ */
+const emailDomainOf = (email: string): string | undefined => {
+  const at = email.lastIndexOf("@");
+  return at > 0 ? email.slice(at + 1).toLowerCase() : undefined;
+};
+
+/**
+ * The admins of `config` who can never sign in: core signs in only people
+ * whose email is in one of its `domains`, whichever IdP they come from.
+ */
+export const unreachableAdmins = ({
+  domains,
+  admins,
+}: {
+  domains: readonly string[];
+  admins: readonly string[];
+}): string[] =>
+  admins.filter((email) => {
+    const domain = emailDomainOf(email);
+    return domain === undefined || !domains.includes(domain);
+  });
+
 /** The longest a staff window may be. */
 export const staffWindowMaxMs = 7 * 24 * 60 * 60 * 1000;
 
