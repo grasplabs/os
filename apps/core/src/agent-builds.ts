@@ -24,10 +24,10 @@ import {
   appFor,
   applyChanges,
   createApp,
+  draftFiles,
   draftOverLatest,
   latestVersion,
   proposeDraft,
-  versionFiles,
 } from "./apps.ts";
 import type { Acting, Member } from "./auth/identity.ts";
 import { workspace } from "./durable-objects.ts";
@@ -191,25 +191,6 @@ const draftOf = async (
   return Object.keys(draft.changes).length === 0
     ? { ...draft, base: await latestVersion(env, app) }
     : draft;
-};
-
-/** A draft's files: its base version's, with its changes over them. */
-const filesOf = async (
-  env: Env,
-  app: AppId,
-  { base, changes }: Pick<Draft, "base" | "changes">
-): Promise<Map<string, string>> => {
-  const files = new Map(
-    base === null ? [] : Object.entries(await versionFiles(env, app, base))
-  );
-  for (const [path, content] of Object.entries(changes)) {
-    if (content === null) {
-      files.delete(path);
-    } else {
-      files.set(path, content);
-    }
-  }
-  return files;
 };
 
 /** Whether a build lets a draft through: it built, or had nothing to. */
@@ -512,7 +493,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
         return {
           base: draft.base,
           changed: Object.keys(draft.changes).toSorted(),
-          files: Object.fromEntries(await filesOf(this.env, id, draft)),
+          files: Object.fromEntries(await draftFiles(this.env, id, draft)),
         };
       },
       (found) => ({
@@ -536,13 +517,13 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
       async (by) => {
         const id = await this.#buildable(by, app);
         const draft = await draftOf(this.env, this.ctx.props, id);
-        const base = await filesOf(this.env, id, {
+        const base = await draftFiles(this.env, id, {
           base: draft.base,
           changes: {},
         });
         const written = applyChanges(
           this.env,
-          await filesOf(this.env, id, draft),
+          await draftFiles(this.env, id, draft),
           changes
         );
         // Only what differs from the base is kept: a path written back as
@@ -610,7 +591,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
       async (by) => {
         const id = await this.#buildable(by, app);
         const draft = await draftOf(this.env, this.ctx.props, id);
-        const files = Object.fromEntries(await filesOf(this.env, id, draft));
+        const files = Object.fromEntries(await draftFiles(this.env, id, draft));
         const { result, failedInARow } = await this.#counted(
           id,
           async () => await checkFiles(this.env, id, draft.base, files)
@@ -752,7 +733,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
           params
         );
         const draft = await draftOf(this.env, this.ctx.props, id);
-        const files = Object.fromEntries(await filesOf(this.env, id, draft));
+        const files = Object.fromEntries(await draftFiles(this.env, id, draft));
         const workflowId = workflowIdSchema.safeParse(workflow);
         if (!workflowId.success || !hasWorkflow(files, workflowId.data)) {
           throw appErrors.create("app.invalid", {

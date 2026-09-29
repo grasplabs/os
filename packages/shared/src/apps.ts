@@ -580,6 +580,11 @@ export const appErrors = defineErrorFamily({
     "This draft has had as many dry runs as one question may. Tell the person what you found.",
   "app.creates_exhausted":
     "This chat created as many Apps as one question may. Tell the person what you made.",
+  "app.no_draft": "This chat has no draft of that App to preview.",
+  "app.preview_outdated":
+    "The draft changed since this preview loaded it. Load the preview again.",
+  "app.preview_side_effect":
+    "A preview changes nothing and reaches nothing outside it: no connections, no other Apps, no workflows and no writes to Knowledge.",
 });
 
 /**

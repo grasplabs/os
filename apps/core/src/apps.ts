@@ -25,6 +25,7 @@ import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { requireBuilder, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
+import { screenPath } from "@grasp-os/shared/screens";
 import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -479,12 +480,6 @@ export const getApp = async (
   app: unknown
 ): Promise<App> => await appFor(env, by, app, "user");
 
-/**
- * A screen's name, from its file's path (as `openScreen` finds it, in
- * screens-rpc.ts); undefined for any other file.
- */
-const screenPath = /^screens\/(?<name>[\w-]{1,64})\.tsx$/u;
-
 /** The names `nameOf` finds in `paths`, in their order. */
 const namesIn = (
   paths: string[],
@@ -502,6 +497,13 @@ const namesIn = (
 export const workflowsIn = (files: ReadonlyMap<string, string>): string[] =>
   namesIn([...files.keys()].toSorted(), workflowIdOf);
 
+/** The names of the screens in an App's files (`screens/<name>.tsx`), sorted. */
+export const screensIn = (files: ReadonlyMap<string, string>): string[] =>
+  namesIn(
+    [...files.keys()].toSorted(),
+    (path) => screenPath.exec(path)?.groups?.name
+  );
+
 /** The screens and workflows of an App's current version. */
 export const appContents = async (
   env: Env,
@@ -512,13 +514,13 @@ export const appContents = async (
   if (currentVersion === null) {
     return { version: null, screens: [], workflows: [] };
   }
-  const paths = Object.keys(
-    await versionFiles(env, id, currentVersion)
-  ).toSorted();
+  const files = new Map(
+    Object.entries(await versionFiles(env, id, currentVersion))
+  );
   return {
     version: currentVersion,
-    screens: namesIn(paths, (path) => screenPath.exec(path)?.groups?.name),
-    workflows: namesIn(paths, workflowIdOf),
+    screens: screensIn(files),
+    workflows: workflowsIn(files),
   };
 };
 
@@ -740,6 +742,25 @@ export interface DraftChanges {
   /** New content by path, or null to delete a file. */
   changes: Record<string, string | null>;
 }
+
+/** A draft's files: its base version's, with its changes over them. */
+export const draftFiles = async (
+  env: Env,
+  app: AppId,
+  { base, changes }: DraftChanges
+): Promise<Map<string, string>> => {
+  const files = new Map(
+    base === null ? [] : Object.entries(await versionFiles(env, app, base))
+  );
+  for (const [path, content] of Object.entries(changes)) {
+    if (content === null) {
+      files.delete(path);
+    } else {
+      files.set(path, content);
+    }
+  }
+  return files;
+};
 
 /** The files a draft commits, and the version they follow. */
 export interface DraftOverLatest {

@@ -250,7 +250,14 @@ export type Feature =
    * notifications, and no chat starts from a failed run; chats started
    * before keep their report attached.
    */
-  | "run_notifications";
+  | "run_notifications"
+  /**
+   * Previewing a chat's draft of an App (preview.ts): its screens in the
+   * chat's side panel, calling its server code in a preview with no side
+   * effects; needs `app_builder` on too. While off, no draft is previewed,
+   * and a preview open in a page stops at its next call.
+   */
+  | "app_preview";
 
 /** Whether `feature` is switched on for this deployment. */
 export const featureEnabled = (

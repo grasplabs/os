@@ -32,6 +32,9 @@ export const screenNameSchema = z
   .string()
   .regex(/^[\w-]{1,64}$/u, "a screen's file name, without .tsx");
 
+/** A screen's file, `screens/<name>.tsx`: its name is the `name` group. */
+export const screenPath = /^screens\/(?<name>[\w-]{1,64})\.tsx$/u;
+
 /** One of an App's screens at its current version, ready for a frame. */
 export interface ScreenBundle {
   app: AppId;

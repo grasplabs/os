@@ -1,5 +1,6 @@
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { agentErrors } from "@grasp-os/shared/agent";
+import { appErrors } from "@grasp-os/shared/apps";
 import {
   auditProvenanceMaxItems,
   createAuditEvent,
@@ -23,6 +24,7 @@ import {
   isExpectedError,
 } from "@grasp-os/shared/errors";
 import {
+  appIdSchema,
   chatIdSchema,
   identifierSchema,
   workspaceIdSchema,
@@ -48,6 +50,7 @@ import {
 import type { CodeRunCall } from "./agent-scope.ts";
 import { isMessage, runTurn } from "./agent.ts";
 import type { TurnContext, TurnResult } from "./agent.ts";
+import type { AppAnswer } from "./app.ts";
 import { drainObjectOutbox } from "./audit-outbox.ts";
 import { memberRole } from "./auth/identity.ts";
 import { chatMessageOf, partialOf } from "./chat-messages.ts";
@@ -70,6 +73,7 @@ import { readAsDelegate } from "./knowledge/binding.ts";
 import { forContext } from "./knowledge/memory.ts";
 import { catalog, noteListedSkills } from "./knowledge/tools.ts";
 import { gatewaySettings, models } from "./models.ts";
+import { Previews } from "./preview.ts";
 import type { WorkContext } from "./restricted.ts";
 
 export type Chat = typeof chats.$inferSelect;
@@ -276,6 +280,9 @@ export class Workspace extends DurableObject<Env> {
 
   /** Who follows each chat (`watch`), by chat and watch ID. */
   readonly #watchers = new Map<ChatId, Map<string, ChatWatch>>();
+
+  /** The chats' previews of their drafts (preview.ts). */
+  readonly #previews = new Previews(this.ctx, this.env);
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -962,6 +969,13 @@ export class Workspace extends DurableObject<Env> {
         workspaceId: workspaceIdSchema.parse(this.ctx.id.name),
         chatId: id,
       });
+      // Every App it has a draft of, even one with no changes left: its
+      // preview may still run.
+      const drafted = this.#db
+        .select({ appId: chatDrafts.appId })
+        .from(chatDrafts)
+        .where(eq(chatDrafts.chatId, id))
+        .all();
       this.ctx.storage.transactionSync(() => {
         this.#db.delete(chatMessages).where(eq(chatMessages.chatId, id)).run();
         this.#db.delete(chatSources).where(eq(chatSources.chatId, id)).run();
@@ -977,6 +991,9 @@ export class Workspace extends DurableObject<Env> {
         this.#outboxed(by, "chat.deleted", id, { declined });
       });
       this.#deliverAudit();
+      for (const { appId } of drafted) {
+        this.#previews.drop(id, appId);
+      }
       this.#stopped.delete(id);
       this.#provenanceVersions.delete(id);
       this.#heldVersions.delete(id);
@@ -1150,7 +1167,7 @@ export class Workspace extends DurableObject<Env> {
     unchanged: readonly string[],
     revision: number
   ): boolean {
-    return this.ctx.storage.transactionSync(() => {
+    const saved = this.ctx.storage.transactionSync(() => {
       const [row] = this.#db
         .select({ revision: chatDrafts.revision })
         .from(chatDrafts)
@@ -1199,6 +1216,11 @@ export class Workspace extends DurableObject<Env> {
       }
       return true;
     });
+    if (saved) {
+      // The preview of the revision before is over: its database goes now.
+      this.#previews.drop(chatId, appId);
+    }
+    return saved;
   }
 
   /**
@@ -1207,7 +1229,7 @@ export class Workspace extends DurableObject<Env> {
    * changed since, or the chat is gone.
    */
   dropDraft(chatId: ChatId, appId: string, revision?: number): boolean {
-    return this.ctx.storage.transactionSync(() => {
+    const dropped = this.ctx.storage.transactionSync(() => {
       const now = this.draft(chatId, appId);
       if (revision !== undefined && now.revision !== revision) {
         return false;
@@ -1244,6 +1266,53 @@ export class Workspace extends DurableObject<Env> {
         .run();
       return true;
     });
+    if (dropped) {
+      this.#previews.drop(chatId, appId);
+    }
+    return dropped;
+  }
+
+  // A chat's preview of its draft of an App (preview.ts), for the chat's
+  // own person: core checks their role in the App first (chats-rpc.ts).
+
+  /**
+   * `personId`'s own chat's draft of App `appId`, to preview:
+   * `app.no_draft` while it changes nothing.
+   */
+  previewDraft(chatId: unknown, personId: string, appId: string): Draft {
+    const { id } = this.#ownChat(chatId, personId);
+    const draft = this.draft(id, appId);
+    if (Object.keys(draft.changes).length === 0) {
+      throw appErrors.create("app.no_draft");
+    }
+    return draft;
+  }
+
+  /**
+   * Calls `method` of the server code of `personId`'s own chat's draft of
+   * App `appId` with `args`, in its preview, as the draft is at
+   * `revision`: `app.preview_outdated` once it is at another.
+   */
+  async previewCall(
+    chatId: unknown,
+    personId: string,
+    appId: string,
+    revision: unknown,
+    method: string,
+    args: unknown[]
+  ): Promise<AppAnswer> {
+    const draft = this.previewDraft(chatId, personId, appId);
+    if (draft.revision !== revision) {
+      throw appErrors.create("app.preview_outdated");
+    }
+    return await this.#previews.call(
+      chatIdSchema.parse(chatId),
+      personId,
+      appIdSchema.parse(appId),
+      draft,
+      method,
+      args
+    );
   }
 
   /** Deletes the draft files and drafts the conditions name, in that order. */

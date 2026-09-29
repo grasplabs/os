@@ -30,6 +30,8 @@ import { callApp, isPlainData } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
 import { appFor, findVersion, getApp, versionFiles } from "./apps.ts";
 import { appHost } from "./durable-objects.ts";
+import { requireFeature } from "./features.ts";
+import type { Feature } from "./features.ts";
 import { callbackFor, isStub } from "./page-callbacks.ts";
 import type { StillOpen } from "./page-callbacks.ts";
 import { RunSubscription } from "./run-subscription.ts";
@@ -77,23 +79,20 @@ const recheckMs = 5000;
  */
 const maxRunSubscriptions = 20;
 
-/** A running App's screen, built from its current version. */
-const openScreen = async (
+/** What a frame runs of a screen: its code, the kit's it needs, its CSS. */
+type ScreenCode = Omit<ScreenBundle, "app" | "name" | "version">;
+
+/**
+ * Screen `screen` of an App's `files` (at `version`; null for a chat's
+ * draft), built, with the kit modules it needs.
+ */
+export const screenCode = async (
   env: Env,
-  by: Identity,
-  app: unknown,
-  screen: unknown
-): Promise<ScreenBundle> => {
-  const {
-    id,
-    name: appName,
-    currentVersion: version,
-  } = await getApp(env, by, app);
+  files: Record<string, string>,
+  screen: unknown,
+  version: number | null
+): Promise<ScreenCode> => {
   const name = screenErrors.parse("screen.invalid", screenNameSchema, screen);
-  if (version === null) {
-    throw appErrors.create("app.not_running");
-  }
-  const files = await versionFiles(env, id, version);
   const path = `screens/${name}.tsx`;
   if (!Object.hasOwn(files, path)) {
     throw screenErrors.create("screen.not_found");
@@ -107,9 +106,6 @@ const openScreen = async (
   }
   const { modules } = await kitModules(env.ASSETS);
   return {
-    app: id,
-    name: appName,
-    version,
     screen: name,
     entry: appModuleName(path),
     runtime: kitModuleName(screenRuntime),
@@ -118,6 +114,32 @@ const openScreen = async (
       build.kitModules.map((module) => [module, modules[module] ?? ""])
     ),
     css: build.css,
+  };
+};
+
+/** A running App's screen, built from its current version. */
+const openScreen = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  screen: unknown
+): Promise<ScreenBundle> => {
+  const {
+    id,
+    name: appName,
+    currentVersion: version,
+  } = await getApp(env, by, app);
+  // A name that can't be a screen's is refused before `app.not_running`.
+  screenErrors.parse("screen.invalid", screenNameSchema, screen);
+  if (version === null) {
+    throw appErrors.create("app.not_running");
+  }
+  const files = await versionFiles(env, id, version);
+  return {
+    app: id,
+    name: appName,
+    version,
+    ...(await screenCode(env, files, screen, version)),
   };
 };
 
@@ -135,7 +157,7 @@ const refusals = {
  * (how `live` in @grasp-os/sdk/screen subscribes), each as a function the
  * App can only call.
  */
-const argumentsFor = (
+export const argumentsFor = (
   args: unknown[],
   stillOpen: StillOpen
 ): { passed: unknown[]; callbacks: Disposable[] } => {
@@ -244,21 +266,28 @@ const watchRuns = async (
 };
 
 /**
- * Whether the person behind the connection still has a role in `app`,
- * read now: the connection's own session check (`check`), which reads
- * their session, role and teams as every call does, Grasp staff's
- * window included, then the App's rules (`appFor`). Anything that goes
- * wrong on the way is a no: a callback must not outlive access because a
- * check failed. A session that ended also closes the connection, as on
- * any call.
+ * Whether the person behind the connection still has `role` in `app`
+ * (any role: `user`), with `features` on, read now: the connection's own
+ * session check (`check`), which reads their session, role and teams as
+ * every call does, Grasp staff's window included, then the flags, then
+ * the App's rules (`appFor`). Anything that goes wrong on the way is a
+ * no: a callback must not outlive access because a check failed. A
+ * session that ended also closes the connection, as on any call. For the
+ * callbacks of an App's screens, and of a draft's preview (chats-rpc.ts).
  */
-const hasRole = async (
+export const stillHasRole = async (
   env: Env,
   check: SessionCheck,
-  app: AppId
+  app: AppId,
+  role: "user" | "builder" = "user",
+  features: readonly Feature[] = []
 ): Promise<boolean> => {
   try {
-    await appFor(env, await check(), app, "user");
+    const person = await check();
+    for (const feature of features) {
+      requireFeature(env, feature);
+    }
+    await appFor(env, person, app, role);
     return true;
   } catch (error) {
     if (!isExpectedError(error)) {
@@ -342,7 +371,7 @@ export class ScreensRpc extends RpcTarget implements ScreensApi {
       if (cached !== undefined && cached.until > now) {
         return await cached.open;
       }
-      const open = hasRole(this.#env, this.#check, app);
+      const open = stillHasRole(this.#env, this.#check, app);
       this.#access.set(app, { open, until: now + recheckMs });
       return await open;
     };

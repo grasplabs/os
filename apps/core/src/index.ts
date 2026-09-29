@@ -40,6 +40,12 @@ export { CollectionBinding } from "./knowledge/binding.ts";
 export { KnowledgeBinding } from "./knowledge/tools-binding.ts";
 export { WorkflowDispatcher } from "./workflows/dispatcher.ts";
 export { DynamicWorkflowBinding } from "./workflows/engine.ts";
+export {
+  PreviewCollection,
+  PreviewConnection,
+  PreviewExports,
+  PreviewStatistics,
+} from "./preview-bindings.ts";
 export { Workspace } from "./workspace.ts";
 
 export default {
