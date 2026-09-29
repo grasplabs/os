@@ -26,7 +26,9 @@
  * collections, and its permissions as any request's are checked, each
  * for a collection it declares), and its
  * files as any App's write checks them (paths, no hidden files, each
- * file's size and their number), and their total size as any version's.
+ * file's size and their number), their total size as any version's, and
+ * its record types (`app/records.json`) as any version's commit reads
+ * them.
  */
 import {
   existsSync,
@@ -39,13 +41,19 @@ import {
 import path from "node:path";
 
 import { appLimits } from "@grasp-os/shared/app-limits";
-import { fileChangesSchema, fromBlueprintSchema } from "@grasp-os/shared/apps";
+import {
+  appErrors,
+  appRecordTypesPath,
+  fileChangesSchema,
+  fromBlueprintSchema,
+} from "@grasp-os/shared/apps";
 import { declaredCollectionSchema } from "@grasp-os/shared/knowledge";
 import { declaredPermissionSchema } from "@grasp-os/shared/permissions";
 import { z } from "zod";
 
 import type { BuiltinBlueprint } from "#blueprints";
 
+import { recordTypesIn } from "./src/app-records.ts";
 import { builtinAppId } from "./src/builtin-app-id.ts";
 
 /** Where the built-ins that ship with each release are. */
@@ -124,6 +132,37 @@ const filesIn = (dir: string): Record<string, string> => {
   );
 };
 
+/** The issues a refusal names (`details.issues`), if it names any. */
+const issuesOf = (error: unknown): string[] => {
+  const details =
+    error instanceof Error && "details" in error ? error.details : undefined;
+  if (typeof details !== "object" || details === null) {
+    return [];
+  }
+  const issues = "issues" in details ? details.issues : undefined;
+  return Array.isArray(issues)
+    ? issues.filter((issue): issue is string => typeof issue === "string")
+    : [];
+};
+
+/**
+ * Throws, naming each issue, for `files` whose record types the commit
+ * would refuse: it reads them as the commit does.
+ */
+const checkRecordTypes = (where: string, files: Record<string, string>) => {
+  try {
+    recordTypesIn(new Map(Object.entries(files)));
+  } catch (error) {
+    if (appErrors.codeOf(error) !== "app.records_invalid") {
+      throw error;
+    }
+    throw new Error(
+      `${where}: files/${appRecordTypesPath} ${issuesOf(error).join("; ")}`,
+      { cause: error }
+    );
+  }
+};
+
 /** The built-ins in `dir`, one per folder, checked. */
 const blueprintsIn = (dir: string): BuiltinBlueprint[] =>
   readdirSync(dir, { withFileTypes: true })
@@ -163,6 +202,7 @@ const blueprintsIn = (dir: string): BuiltinBlueprint[] =>
           `${where}: files/ holds ${length} characters, over an App's ${appLimits.totalLength}`
         );
       }
+      checkRecordTypes(where, files);
       return { id: name, ...manifest.data, files };
     });
 
