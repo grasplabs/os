@@ -48,7 +48,8 @@ export default defineConfig({
     // the fake IdP below (e2e/people.ts), and the flagged features are on.
     {
       command: [
-        `rm -rf ${JSON.stringify(stateDir)} &&`,
+        // The dir comes from `env` below, so no path is ever shell syntax.
+        'rm -rf "$DEV_PERSIST_TO" &&',
         `vp run --filter @grasp-os/core dev --local --port ${corePort}`,
         devVar("BETTER_AUTH_SECRET", testAuthSecret),
         ...Object.entries(localSignIn(origin, idpOrigin)).map(([name, value]) =>
