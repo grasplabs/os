@@ -1,3 +1,5 @@
+import { setFlagsFromString } from "node:v8";
+
 import ultracite from "ultracite/oxfmt";
 import antiSlop from "ultracite/oxlint/anti-slop";
 import core from "ultracite/oxlint/core";
@@ -6,6 +8,15 @@ import shadcn from "ultracite/oxlint/shadcn";
 import tanstack from "ultracite/oxlint/tanstack";
 import vitest from "ultracite/oxlint/vitest";
 import { defineConfig } from "vite-plus";
+
+// Node 24's V8 has a Sparkplug bug that segfaults the Vitest process
+// mid-run (exit 139) in GC: BaselineOutOfLinePrologue pushes a stale
+// register that the GC reads as a pointer
+// (https://github.com/nodejs/node/issues/62393). `vp test` starts Vitest
+// itself and NODE_OPTIONS rejects V8 flags, so switch the baseline tier off
+// here, where Vitest loads its config. Drop this once the Node release in
+// devEngines carries the backport (https://github.com/nodejs/node/pull/65753).
+setFlagsFromString("--no-sparkplug");
 
 const generated = [
   "**/routeTree.gen.ts",
