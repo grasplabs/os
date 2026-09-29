@@ -73,6 +73,14 @@ import type { CheckOutcome, Draft } from "./workspace.ts";
  */
 export const maxFailedChecks = 5;
 
+/**
+ * Most checks of one draft in one turn whose builds didn't finish in time
+ * or couldn't run (`pending`): they don't count as failed, but each still
+ * asks the compiler for work, so a build that never finishes can't be
+ * checked without end.
+ */
+export const maxUnsettledChecks = 10;
+
 /** Most dry runs of one draft in one turn, apart from its checks. */
 export const maxDryRunsPerTurn = 10;
 
@@ -348,8 +356,15 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   ): Promise<{ result: T; failedInARow: number }> {
     const { workspaceId, chatId } = this.ctx.props;
     const chats = workspace(this.env, workspaceId);
-    if (!(await chats.takeCheck(chatId, app, maxFailedChecks))) {
+    const taken = await chats.takeCheck(chatId, app, {
+      failed: maxFailedChecks,
+      unsettled: maxUnsettledChecks,
+    });
+    if (taken === "failed") {
       throw appErrors.create("app.checks_exhausted");
+    }
+    if (taken === "unsettled") {
+      throw appErrors.create("app.builds_unfinished");
     }
     let result: T;
     try {
@@ -604,6 +619,7 @@ build: {
     /**
      * A build is still going (or couldn't run now) and nothing failed: not
      * a failed check. Check again: the next one reads the build's result.
+     * After ${maxUnsettledChecks} such checks in a question, checking refuses.
      */
     pending: boolean;
     screens: Build;

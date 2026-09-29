@@ -545,13 +545,17 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     ]);
   });
 
-  it("counts no check whose builds are still going, and says to check again", async () => {
+  it("counts no check whose builds are still going as failed, up to ten a turn", async () => {
     const checks = `export default async (env) => {
       ${findApp}
       const checks = [];
-      for (let count = 0; count < 7; count += 1) {
-        const check = await env.build.check(app.id);
-        checks.push({ passed: check.passed, pending: check.pending, failedInARow: check.failedInARow });
+      for (let count = 0; count < 12; count += 1) {
+        try {
+          const check = await env.build.check(app.id);
+          checks.push({ passed: check.passed, pending: check.pending, failedInARow: check.failedInARow });
+        } catch (error) {
+          checks.push(error.message);
+        }
       }
       return checks;
     };`;
@@ -601,10 +605,14 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
 
     const results = await codeResults(chat.stub, chat.chat.id);
     const pending = { passed: false, pending: true, failedInARow: 0 };
-    // More than the repair loop allows to fail, none refused or counted.
-    expect(returned(results[1]?.text)).toStrictEqual(
-      Array.from({ length: 7 }, () => pending)
-    );
+    // More than the repair loop allows to fail, none counted as failed;
+    // past ten a turn, refused: each asks the compiler for work.
+    const unfinished = appErrors.create("app.builds_unfinished").message;
+    expect(returned(results[1]?.text)).toStrictEqual([
+      ...Array.from({ length: 10 }, () => pending),
+      unfinished,
+      unfinished,
+    ]);
     expect(returned(results[2]?.text)).toStrictEqual({
       passed: true,
       pending: false,
