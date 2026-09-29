@@ -10,12 +10,45 @@ import type { eventSources } from "./db/schema.ts";
 /** A source's row. */
 export type EventSource = typeof eventSources.$inferSelect;
 
+/**
+ * The requests one sync may still send to providers, shared by every
+ * source it reads, whichever the provider: a Worker invocation may only
+ * send so many subrequests.
+ */
+export interface RequestBudget {
+  /** The requests left. */
+  readonly left: number;
+  /** Counts one request. */
+  spend: () => void;
+}
+
+/** A budget of `requests` requests. */
+export const requestBudget = (requests: number): RequestBudget => {
+  let left = requests;
+  return {
+    get left() {
+      return left;
+    },
+    spend: () => {
+      left -= 1;
+    },
+  };
+};
+
+/**
+ * What a read reaches a provider with: the connection's access token,
+ * for the provider's own hosts only, and the sync's request budget.
+ */
+export interface ProviderAccess {
+  token: string;
+  budget: RequestBudget;
+}
+
 /** What one read of a source has to go on. */
 export interface SourceRead {
   source: EventSource;
   connection: Connection;
-  /** The connection's access token, for the provider's own hosts only. */
-  token: string;
+  access: ProviderAccess;
   /**
    * Goes through a provider's pages from `start`, each fetched with the
    * connection's token by `page`, until the provider says it's at the end
@@ -25,7 +58,7 @@ export interface SourceRead {
    */
   pages: <Item>(
     page: (
-      token: string,
+      access: ProviderAccess,
       url: string
     ) => Promise<{ items: Item[]; next?: string; end?: string }>,
     start: string
@@ -174,8 +207,9 @@ export const providerLink = (
 /**
  * Fetches JSON from a provider with the connection's token: only on
  * `hosts`, over HTTPS, never following a redirect (it would take the
- * token along). A throttled answer says how long to wait; a gone cursor
- * (410, or a status of `resyncStatuses`) starts the source over.
+ * token along). Each request counts against the sync's budget. A
+ * throttled answer says how long to wait; a gone cursor (410, or a
+ * status of `resyncStatuses`) starts the source over.
  */
 export const readFromProvider =
   ({
@@ -189,12 +223,13 @@ export const readFromProvider =
     headers?: Record<string, string>;
     resyncStatuses?: readonly number[];
   }) =>
-  async (token: string, url: string): Promise<unknown> => {
+  async ({ token, budget }: ProviderAccess, url: string): Promise<unknown> => {
     if (!isProviderUrl(url, hosts)) {
       throw new SourceError(`${name} handed back a link to another host`, {
         resync: true,
       });
     }
+    budget.spend();
     const response = await fetch(url, {
       headers: { ...headers, authorization: `Bearer ${token}` },
       redirect: "manual",

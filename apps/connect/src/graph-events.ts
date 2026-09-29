@@ -8,7 +8,12 @@ import {
   providerLink,
   readFromProvider,
 } from "./event-kinds.ts";
-import type { EventKind, ReadEvents, SourceRead } from "./event-kinds.ts";
+import type {
+  EventKind,
+  ProviderAccess,
+  ReadEvents,
+  SourceRead,
+} from "./event-kinds.ts";
 
 // Microsoft 365's events, read from Microsoft Graph with the connection's
 // token, which stays in connect: Graph's delta queries say what changed in
@@ -77,8 +82,8 @@ const graph = readFromProvider({
 /** Graph's page, as one read of a delta query goes through them. */
 const graphPage =
   <Item extends z.ZodType>(item: Item) =>
-  async (token: string, url: string) => {
-    const page = pageOf(item).parse(await graph(token, url));
+  async (access: ProviderAccess, url: string) => {
+    const page = pageOf(item).parse(await graph(access, url));
     return {
       items: page.value,
       next: providerLink(page["@odata.nextLink"], hosts),
@@ -233,7 +238,7 @@ const fileCreated: EventKind = {
         ? `users/${ownUser(read)}/drive`
         : `drives/${encodeURIComponent(source.resource)}`;
     const now = await graphPage(driveItem)(
-      read.token,
+      read.access,
       `${v1}/${drive}/root/delta?${queryOf({
         token: "latest",
         $select: driveItemFields,

@@ -8,6 +8,7 @@ import {
 } from "./event-kinds.ts";
 import type {
   EventKind,
+  ProviderAccess,
   ReadEvent,
   ReadEvents,
   SourceRead,
@@ -16,15 +17,17 @@ import type {
 // Google Workspace's events, read with the connection's token, which stays
 // in connect: Gmail's history says which messages reached a mailbox's
 // inbox since a history ID, and Drive's changes what changed in a shared
-// drive since a page token. The first read of a source only asks for
-// where Gmail's history or Drive's changes stand now, so nothing from
-// before it started is read. Nothing but Google's API hosts is ever sent
-// the token. Gmail's message and Drive's file IDs don't change as a
+// drive since a page token. Nothing from before a source started is read.
+// Nothing but Google's API hosts is ever sent the token. Gmail's message and Drive's file IDs don't change as a
 // message is labelled or a file edited, and Gmail's history only reports
 // a message once as added, so nothing is reported twice for a change.
-// Neither can replay what it no longer keeps: a source whose history ID
-// or page token has gone starts over from now, and what came in between
-// isn't reported.
+// Neither reads on from a time, only from a position: a source takes
+// where the mailbox's history or the drive's changes stand as soon as it
+// starts (`prime`), so a first read that comes late misses nothing. Nor
+// can either replay what came before a position: while a source has none
+// (its prime failing, or its history ID or page token gone), what comes
+// isn't reported. Priming is tried again within five minutes, and a late
+// one is recorded (`connection.events.primed_late`, events.ts).
 //
 // A mailbox is its address, as the connector's Gmail tools take it: the
 // one a permission names, or, for a permission on the whole connection,
@@ -137,14 +140,14 @@ const receivedAtOf = (internalDate: string | null | undefined) => {
 
 /** A message's event, or none if it's gone since it arrived. */
 const mailEventOf = async (
-  token: string,
+  access: ProviderAccess,
   mailbox: string,
   id: string
 ): Promise<ReadEvent[]> => {
   let body: unknown;
   try {
     body = await google(
-      token,
+      access,
       `${gmail(mailbox, `/messages/${encodeURIComponent(id)}`)}?${queryOf({
         format: "metadata",
       })}&metadataHeaders=Subject&metadataHeaders=From`
@@ -177,33 +180,41 @@ const mailEventOf = async (
   ];
 };
 
+/** Gmail's history of messages added to `mailbox`'s inbox from `historyId`. */
+const historyFrom = (mailbox: string, historyId: string): string =>
+  `${gmail(mailbox, "/history")}?${queryOf({
+    startHistoryId: historyId,
+    historyTypes: "messageAdded",
+    labelId: "INBOX",
+    maxResults: "20",
+  })}`;
+
 /**
  * `google.mail.received`: mail that reached the mailbox's inbox after the
  * source started, by Gmail's history of messages added with the INBOX
- * label. Each message's subject and sender are read from its metadata.
+ * label, from where the mailbox's history stood as the source started
+ * (`prime`). Each message's subject and sender are read from its
+ * metadata.
  */
 const mailReceived: EventKind = {
   provider: "google",
   server: "google-workspace",
   isResource: isMailbox,
   wholeConnection: true,
+  prime: async (read): Promise<string> => {
+    const mailbox = mailboxOf(read);
+    const { historyId } = profileSchema.parse(
+      await google(read.access, gmail(mailbox, "/profile"))
+    );
+    return historyFrom(mailbox, historyId);
+  },
   read: async (read): Promise<ReadEvents> => {
     const mailbox = mailboxOf(read);
-    const historyFrom = (historyId: string): string =>
-      `${gmail(mailbox, "/history")}?${queryOf({
-        startHistoryId: historyId,
-        historyTypes: "messageAdded",
-        labelId: "INBOX",
-        maxResults: "50",
-      })}`;
     if (read.source.cursor === null) {
-      const { historyId } = profileSchema.parse(
-        await google(read.token, gmail(mailbox, "/profile"))
-      );
-      return { events: [], cursor: historyFrom(historyId), more: false };
+      throw new SourceError("The mailbox's history position isn't taken yet");
     }
-    const { items, cursor, more } = await read.pages(async (token, url) => {
-      const page = historySchema.parse(await google(token, url));
+    const { items, cursor, more } = await read.pages(async (access, url) => {
+      const page = historySchema.parse(await google(access, url));
       const next = new URL(url);
       if (page.nextPageToken !== null && page.nextPageToken !== undefined) {
         next.searchParams.set("pageToken", page.nextPageToken);
@@ -217,7 +228,7 @@ const mailReceived: EventKind = {
             .map(({ message }) => message.id)
         ),
         ...(page.nextPageToken === null || page.nextPageToken === undefined
-          ? { end: historyFrom(page.historyId) }
+          ? { end: historyFrom(mailbox, page.historyId) }
           : { next: next.href }),
       };
     }, read.source.cursor);
@@ -228,7 +239,7 @@ const mailReceived: EventKind = {
       const found = await Promise.all(
         ids
           .slice(at, at + concurrentReads)
-          .map(async (id) => await mailEventOf(read.token, mailbox, id))
+          .map(async (id) => await mailEventOf(read.access, mailbox, id))
       );
       events.push(...found.flat());
     }
@@ -263,52 +274,61 @@ const changesSchema = z.object({
 
 const folderMimeType = "application/vnd.google-apps.folder";
 
+/** The query that holds a Drive request to shared drive `drive`. */
+const sharedDrive = (drive: string) => ({
+  driveId: drive,
+  supportsAllDrives: "true",
+});
+
+/** Drive's changes of shared drive `drive` from `pageToken`. */
+const changesFrom = (drive: string, pageToken: string): string =>
+  `https://${apisHost}/drive/v3/changes?${queryOf({
+    ...sharedDrive(drive),
+    pageToken,
+    includeItemsFromAllDrives: "true",
+    pageSize: "50",
+    fields:
+      "nextPageToken,newStartPageToken,changes(removed,file(id,name,mimeType,size,createdTime,parents,driveId,trashed,webViewLink))",
+  })}`;
+
 /**
  * `google.file.created`: files created in the shared drive after the
- * source started, in any folder of it, by Drive's changes of that drive.
+ * source started, in any folder of it, by Drive's changes of that drive,
+ * from where they stood as the source started (`prime`).
  */
 const fileCreated: EventKind = {
   provider: "google",
   server: "google-workspace",
   isResource: isDrive,
   wholeConnection: false,
+  prime: async (read): Promise<string> => {
+    const drive = read.source.resource;
+    const { startPageToken } = z
+      .object({ startPageToken: z.string().min(1) })
+      .parse(
+        await google(
+          read.access,
+          `https://${apisHost}/drive/v3/changes/startPageToken?${queryOf(sharedDrive(drive))}`
+        )
+      );
+    return changesFrom(drive, startPageToken);
+  },
   read: async (read): Promise<ReadEvents> => {
     const { source } = read;
     const drive = source.resource;
-    const shared = {
-      driveId: drive,
-      supportsAllDrives: "true",
-    };
-    const changesFrom = (pageToken: string): string =>
-      `https://${apisHost}/drive/v3/changes?${queryOf({
-        ...shared,
-        pageToken,
-        includeItemsFromAllDrives: "true",
-        pageSize: "50",
-        fields:
-          "nextPageToken,newStartPageToken,changes(removed,file(id,name,mimeType,size,createdTime,parents,driveId,trashed,webViewLink))",
-      })}`;
     if (source.cursor === null) {
-      const { startPageToken } = z
-        .object({ startPageToken: z.string().min(1) })
-        .parse(
-          await google(
-            read.token,
-            `https://${apisHost}/drive/v3/changes/startPageToken?${queryOf(shared)}`
-          )
-        );
-      return { events: [], cursor: changesFrom(startPageToken), more: false };
+      throw new SourceError("The drive's position isn't taken yet");
     }
-    const { items, cursor, more } = await read.pages(async (token, url) => {
-      const page = changesSchema.parse(await google(token, url));
+    const { items, cursor, more } = await read.pages(async (access, url) => {
+      const page = changesSchema.parse(await google(access, url));
       const { nextPageToken, newStartPageToken } = page;
       return {
         items: page.changes ?? [],
         ...(nextPageToken !== null && nextPageToken !== undefined
-          ? { next: changesFrom(nextPageToken) }
+          ? { next: changesFrom(drive, nextPageToken) }
           : {}),
         ...(newStartPageToken !== null && newStartPageToken !== undefined
-          ? { end: changesFrom(newStartPageToken) }
+          ? { end: changesFrom(drive, newStartPageToken) }
           : {}),
       };
     }, source.cursor);
