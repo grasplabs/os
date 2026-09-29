@@ -193,9 +193,10 @@ export interface DraftCheck {
   };
   /**
    * How the preview of the draft in the person's side panel ran
-   * (preview-reports.ts): `failed` fails the check.
+   * (preview-reports.ts): `failed` fails the check. None while previews
+   * are off.
    */
-  preview: PreviewOutcome & { note: string };
+  preview?: PreviewOutcome & { note: string };
   /** Checks of this draft that failed in a row this turn. */
   failedInARow: number;
   /** How many may fail in a row before checking refuses. */
@@ -300,7 +301,8 @@ const logCountFailure = (failure: unknown): void => {
  * check answers it (preview-reports.ts): waiting a little for it to
  * report, when the builds it needs passed, and each problem's stack cut
  * short. It is what the draft's code wrote, so it goes to the model with
- * a note saying so, as data.
+ * a note saying so, as data. Nothing while previews are off: no preview
+ * runs, so none is waited for.
  */
 const previewOf = async (
   env: Env,
@@ -309,6 +311,9 @@ const previewOf = async (
   revision: number,
   built: boolean
 ): Promise<DraftCheck["preview"]> => {
+  if (!featureEnabled(env, "app_preview")) {
+    return undefined;
+  }
   const outcome = await workspace(env, workspaceId).previewOutcome(
     chatId,
     app,
@@ -351,7 +356,7 @@ const checkFiles = async (
   const built = !failed && all.every(buildPassed);
   const preview = await previewOf(env, scope, app, revision, built);
   // A preview that failed fails the check, even with a build still going.
-  const previewFailed = preview.status === "failed";
+  const previewFailed = preview?.status === "failed";
   return {
     passed: built && !previewFailed,
     pending: !failed && !previewFailed && all.some(buildUnknown),
@@ -359,7 +364,7 @@ const checkFiles = async (
     server: reported(builds.server),
     workflows: reported(builds.workflows),
     tests,
-    preview,
+    ...(preview === undefined ? {} : { preview }),
   };
 };
 
@@ -854,7 +859,30 @@ interface Build {
 }`;
 
 /** What the model reads of `env.build`. */
-const buildDeclaration = `/**
+const buildDeclaration = (previews: boolean): string => {
+  const previewCheck = previews
+    ? ", and reads how its\n   * screens ran in the person's preview (runtime errors)"
+    : "";
+  const previewField = previews
+    ? `    /**
+     * How the draft's screens ran in the preview in the person's side
+     * panel, where its server code runs with no side effects: connections,
+     * other Apps and writes to Knowledge are refused there, and Knowledge
+     * is empty. \`failed\` fails the check: fix what the problems say and
+     * check again. A problem \`refused\` came from what the preview refuses
+     * on purpose, and fails nothing. \`unseen\`: nobody had it open.
+     */
+    preview: {
+      status: "passed" | "failed" | "unseen";
+      problems: { source: "screen" | "server"; at: string; kind: string; message: string; stack?: string; refused: boolean }[];
+      note: string;
+    };
+`
+    : "";
+  const previewProposed = previews
+    ? "; preview: { status: string; problems: { at: string; message: string; refused: boolean }[]; note: string }"
+    : "";
+  return `/**
  * Building Apps for the person: create one, or change one they build, in
  * this chat's own draft of it (builders' working copy never sees it). Write
  * files, check them, fix what fails and check again. Nothing here makes a
@@ -898,8 +926,7 @@ build: {
   discard(app: string): Promise<void>;
   /**
    * Builds the draft's screens, server code and workflows (type errors,
-   * lint and build errors), runs its workflows' tests, and reads how its
-   * screens ran in the person's preview (runtime errors). Fix what fails
+   * lint and build errors) and runs its workflows' tests${previewCheck}. Fix what fails
    * and check again; after ${maxFailedChecks} checks in a row that didn't pass, checking
    * refuses: stop and tell the person what still fails.
    */
@@ -915,20 +942,7 @@ build: {
     server: Build;
     workflows: Build;
     tests: { status: "passed" | "failed" | "none" | "not_run"; failures: string[] };
-    /**
-     * How the draft's screens ran in the preview in the person's side
-     * panel, where its server code runs with no side effects: connections,
-     * other Apps and writes to Knowledge are refused there, and Knowledge
-     * is empty. \`failed\` fails the check: fix what the problems say and
-     * check again. A problem \`refused\` came from what the preview refuses
-     * on purpose, and fails nothing. \`unseen\`: nobody had it open.
-     */
-    preview: {
-      status: "passed" | "failed" | "unseen";
-      problems: { source: "screen" | "server"; at: string; kind: string; message: string; stack?: string; refused: boolean }[];
-      note: string;
-    };
-    failedInARow: number;
+${previewField}    failedInARow: number;
     maxFailedChecks: number;
   }>;
   /**
@@ -954,7 +968,7 @@ build: {
   propose(app: string, message: string): Promise<{
     version: number | null;
     /** \`pending\`: a build is still going; propose again shortly. */
-    check: { passed: boolean; pending: boolean; screens: Build; server: Build; workflows: Build; tests: { status: string; failures: string[] }; preview: { status: string; problems: { at: string; message: string; refused: boolean }[]; note: string } };
+    check: { passed: boolean; pending: boolean; screens: Build; server: Build; workflows: Build; tests: { status: string; failures: string[] }${previewProposed} };
     /** What the version changes, as its reviewer reads it; null when not proposed. */
     review: {
       current: number | null;
@@ -999,11 +1013,15 @@ build: {
     binding: string;
   }): Promise<{ id: string; status: string }>;
 };`;
+};
 
-/** `env.build`. */
-export const buildApi: AgentApi = {
+/**
+ * `env.build`: what its checks say of the draft's preview only while
+ * previews are on (`app_preview`).
+ */
+export const buildApi = (env: Env): AgentApi => ({
   name: "build",
   types: buildTypes,
-  declaration: buildDeclaration,
+  declaration: buildDeclaration(featureEnabled(env, "app_preview")),
   stub: (scope) => exports.BuildApi({ props: scope }),
-};
+});

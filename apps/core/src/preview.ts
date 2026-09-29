@@ -1,11 +1,13 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import { deadline, whenAborted } from "@grasp-os/shared/deadline";
+import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, ChatId } from "@grasp-os/shared/ids";
 
 import { callTimeoutMs, invokeServer, requireAppMethod } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
 import { draftFiles } from "./apps.ts";
 import { previewBindings } from "./preview-bindings.ts";
+import type { PreviewOf } from "./preview-bindings.ts";
 import { sandbox } from "./sandbox.ts";
 import { buildFailed, buildServer } from "./screens.ts";
 import type { Draft } from "./workspace.ts";
@@ -32,19 +34,20 @@ const facetName = (chatId: ChatId, app: string): string =>
 /**
  * The draft's server code, as `draft` has it at its revision, as the
  * class its facet runs: loaded unnamed, never kept, as a draft's code
- * changes with each write.
+ * changes with each write. Its stubs name the preview (`of`), whose
+ * reports their refusals go to.
  */
 const loadPreview = async (
   env: Env,
-  app: AppId,
+  of: PreviewOf,
   draft: Draft
 ): Promise<DurableObjectClass> => {
-  const files = Object.fromEntries(await draftFiles(env, app, draft));
+  const files = Object.fromEntries(await draftFiles(env, of.app, draft));
   const build = await buildServer(env, files);
   if (!build.ok) {
     throw appErrors.create("app.build_failed", buildFailed(null, build));
   }
-  const bindings = await previewBindings(env, app);
+  const bindings = await previewBindings(env, of);
   return env.LOADER.get(null, () => ({
     ...sandbox,
     mainModule: build.mainModule,
@@ -145,7 +148,16 @@ export class Previews {
       this.drop(chatId, app);
       running = {
         revision: draft.revision,
-        loaded: loadPreview(this.#env, app, draft),
+        loaded: loadPreview(
+          this.#env,
+          {
+            workspaceId: workspaceIdSchema.parse(this.#ctx.id.name),
+            chatId,
+            app,
+            revision: draft.revision,
+          },
+          draft
+        ),
       };
       this.#running.set(name, running);
     }

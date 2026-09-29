@@ -1,11 +1,12 @@
 import { appErrors } from "@grasp-os/shared/apps";
-import { chatIdSchema } from "@grasp-os/shared/ids";
+import { appIdSchema, chatIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { chatAgentId, personalWorkspaceId } from "../src/chats-rpc.ts";
 import { workspace } from "../src/durable-objects.ts";
+import type { PreviewOutcome } from "../src/preview-reports.ts";
 import { buildServer } from "../src/screens.ts";
 import {
   codeResults,
@@ -19,6 +20,7 @@ import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { release, requestGranted } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
+import { mailConnection } from "./mail-connection.ts";
 import { signedInApi } from "./sign-in.ts";
 
 // The repair loop, fed by the preview: the chat's agent writes a draft
@@ -54,6 +56,27 @@ const server = (
 export class App extends DurableObject {
   total(): number {
     ${fixed ? "return 7;" : `throw new Error(atob(${JSON.stringify(btoa(`Invoice 7 has no total. ${attack}`))}));`}
+  }
+}
+`;
+
+/** A preview's outcome, by each problem's source and whether it was refused. */
+const summary = (reported: PreviewOutcome) => ({
+  status: reported.status,
+  problems: reported.problems.map(({ source, refused }) => ({
+    source,
+    refused,
+  })),
+});
+
+/** Server code whose `send` mails through `MAIL`, as a screen's button would. */
+const mailing = `import { DurableObject } from "cloudflare:workers";
+
+export class App extends DurableObject {
+  async send(caller: unknown): Promise<string> {
+    const { MAIL } = (this as unknown as { env: Record<string, any> }).env;
+    await MAIL.call(caller, "mail.send", { to: "ben@acme.test", subject: "Hi" });
+    return "sent";
   }
 }
 `;
@@ -145,7 +168,14 @@ const setUp = async (replies: GatewayReply[], agentBuilds = true) => {
   const builder = await signedInApi(idp, "builder");
   const { id: app } = await builder.api.apps.create({ name: "Invoice desk" });
   await release(builder, app, { "AGENTS.md": "# Invoice desk\n" });
-  if (agentBuilds) {
+  const granted = await admin.api.permissions.list();
+  const agentHasIt = granted.some(
+    ({ subject, binding, status }) =>
+      subject.type === "agent" &&
+      binding === "APP_LIBRARY" &&
+      status === "active"
+  );
+  if (agentBuilds && !agentHasIt) {
     await requestGranted(idp, admin, {
       subject: { type: "agent", agentId: chatAgentId },
       object: { type: "collection", collectionId: "apps" },
@@ -229,6 +259,10 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       passedCheck,
       outsideResults,
       inResult: JSON.stringify(gateway.requests.at(-2)?.body).includes(attack),
+      // The agent reads of the preview while previews are on.
+      declared: JSON.stringify(gateway.requests[0]?.body).includes(
+        "preview (runtime errors)"
+      ),
     }).toStrictEqual({
       outcome: "answered",
       broken: "app.failed",
@@ -258,11 +292,21 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       },
       outsideResults: gateway.requests.map(() => false),
       inResult: true,
+      declared: true,
     });
   });
 
-  it("fails a check only for what the draft caused, of its current write", async () => {
+  it("fails a check for every problem the draft caused, and passes over only refusals core made", async () => {
     const { builder, app, chatId, stub } = await setUp([], false);
+    const admin = await signedInApi(idp, "admin");
+    const mail = await mailConnection();
+    await requestGranted(idp, admin, {
+      subject: { type: "app", appId: appIdSchema.parse(app) },
+      object: { type: "connection", connectionId: mail.id },
+      actions: ["mail.send"],
+      binding: "MAIL",
+    });
+    await buildServer(env, { "app/server.ts": mailing });
     const id = chatIdSchema.parse(chatId);
     const { chats } = builder.api;
     const writeDraft = async (revision: number) => {
@@ -270,7 +314,7 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
         id,
         app,
         1,
-        { "screens/desk.tsx": screen, "app/server.ts": server(true) },
+        { "screens/desk.tsx": screen, "app/server.ts": mailing },
         [],
         revision
       );
@@ -278,42 +322,140 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
     };
     const outcome = async (revision: number) =>
       await stub.previewOutcome(id, app, revision, 0);
+    const refusalText = appErrors.create("app.preview_side_effect").message;
+    /** The draft's `send`, whose mail the preview refuses, as its screen calls it. */
+    const send = async (revision: number): Promise<string> => {
+      try {
+        await chats.previewCall(chatId, app, revision, "send", []);
+        return "sent";
+      } catch (error) {
+        return error instanceof Error ? error.message : String(error);
+      }
+    };
 
     const first = await writeDraft(0);
     // Nobody opened it: unseen, and a check doesn't wait for it.
     const unseen = await outcome(first);
     await chats.preview(chatId, app);
-    // A connection the preview refused: the draft may be right.
+    // The mail the preview refused, its screen quoting the refusal: the
+    // draft may be right.
+    const refused = await send(first);
     await chats.previewReport(chatId, app, first, "desk", {
       kind: "console",
-      message: `Couldn't read the mail: ${appErrors.create("app.preview_side_effect").message}`,
+      message: `Couldn't send the mail: ${refused}`,
     });
     await chats.previewReport(chatId, app, first, "desk");
-    const refused = await outcome(first);
-    // What an earlier write's preview reports once the draft moved on is
-    // dropped; the new write starts with nothing reported.
+    const refusedOnly = await outcome(first);
+
+    // A real error that carries the refusal's text, in its message or its
+    // stack, is the draft's all the same: no refusal core made names it.
     const second = await writeDraft(first);
-    await chats.previewReport(chatId, app, first, "desk", {
+    await chats.previewReport(chatId, app, second, "desk", {
+      kind: "error",
+      message: `TypeError: total is undefined. ${refusalText}`,
+      stack: `TypeError: total is undefined\n    at ${refusalText}`,
+    });
+    await chats.previewReport(chatId, app, second, "desk");
+    const spoofed = await outcome(second);
+
+    // Refusals in numbers crowd out no real error: ten refused sends, then
+    // a TypeError, which still fails the check.
+    const third = await writeDraft(second);
+    for (let count = 0; count < 10; count += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one call after another, as a screen makes them
+      await send(third);
+    }
+    await chats.previewReport(chatId, app, third, "desk", {
+      kind: "error",
+      message: "TypeError: total is undefined",
+    });
+    await chats.previewReport(chatId, app, third, "desk");
+    const crowded = await outcome(third);
+
+    // What an earlier write's preview reports once the draft moved on is
+    // dropped.
+    const fourth = await writeDraft(third);
+    await chats.previewReport(chatId, app, third, "desk", {
       kind: "error",
       message: "From the earlier write",
     });
-    const moved = await outcome(second);
+    const moved = await outcome(fourth);
 
-    expect({ unseen, refused, moved }).toStrictEqual({
+    expect({
+      unseen: summary(unseen),
+      refusal: refused.includes(refusalText),
+      refusedOnly: summary(refusedOnly),
+      spoofed: summary(spoofed),
+      crowded: summary(crowded),
+      moved: summary(moved),
+      mail: await mail.did(),
+    }).toStrictEqual({
       unseen: { status: "unseen", problems: [] },
-      refused: {
+      refusal: true,
+      refusedOnly: {
         status: "passed",
         problems: [
-          {
-            source: "screen",
-            at: "desk",
-            kind: "console",
-            message: `Couldn't read the mail: ${appErrors.create("app.preview_side_effect").message}`,
-            refused: true,
-          },
+          { source: "server", refused: true },
+          { source: "screen", refused: true },
+        ],
+      },
+      spoofed: {
+        status: "failed",
+        problems: [{ source: "screen", refused: false }],
+      },
+      crowded: {
+        status: "failed",
+        problems: [
+          { source: "server", refused: true },
+          { source: "server", refused: true },
+          { source: "server", refused: true },
+          { source: "screen", refused: false },
         ],
       },
       moved: { status: "unseen", problems: [] },
+      mail: { calls: 0, sent: [] },
+    });
+  });
+
+  it("says nothing of a preview, and waits for none, while previews are off", async () => {
+    const { builder, chatId, stub, gateway } = await setUp([
+      codeStep(
+        write({ "screens/desk.tsx": screen, "app/server.ts": server(true) })
+      ),
+      codeStep(`export default async (env) => {
+        const [app] = (await env.apps.list()).filter(({ name }) => name === "Invoice desk");
+        const checked = await env.build.check(app.id);
+        return { passed: checked.passed, preview: "preview" in checked };
+      };`),
+      says("Checked."),
+    ]);
+    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
+    const { FEATURES: features } = env;
+    try {
+      env.FEATURES = { ...on, app_preview: false };
+      await pointAtGateway(stub, gateway);
+      await stub.ask(chatIdSchema.parse(chatId), {
+        text: "Build an invoice desk",
+        model,
+      });
+    } finally {
+      env.FEATURES = features;
+    }
+
+    const results = await codeResults(stub, chatId);
+    const declared = JSON.stringify(gateway.requests[0]?.body);
+    const drafts = await builder.api.chats.drafts(chatId);
+    expect({
+      checked: returned(results[1]?.text),
+      declared: [
+        declared.includes("preview (runtime errors)"),
+        declared.includes("refused: boolean"),
+      ],
+      drafts: drafts.length,
+    }).toStrictEqual({
+      checked: { passed: true, preview: false },
+      declared: [false, false],
+      drafts: 1,
     });
   });
 });

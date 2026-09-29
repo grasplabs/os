@@ -3,6 +3,7 @@ import { appErrors } from "@grasp-os/shared/apps";
 import type { ChatDraft } from "@grasp-os/shared/chat";
 import { featureErrors, messageOf } from "@grasp-os/shared/errors";
 import { roleErrors } from "@grasp-os/shared/roles";
+import { screenPath } from "@grasp-os/shared/screens";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -41,9 +42,6 @@ import type { ServerFile } from "./builds-state.ts";
 // (`app_preview`), whose server code changes nothing and reads no real
 // data; what goes wrong in it goes to the agent's next check of the draft.
 // Functional only.
-
-/** A screen's file, `screens/<name>.tsx`, as its name. */
-const screenPath = /^screens\/(?<name>[\w-]{1,64})\.tsx$/u;
 
 /** What the panel read: the person's Apps, and the chat's drafts. */
 interface Builds {

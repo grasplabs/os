@@ -74,7 +74,11 @@ import { readAsDelegate } from "./knowledge/binding.ts";
 import { forContext } from "./knowledge/memory.ts";
 import { catalog, noteListedSkills } from "./knowledge/tools.ts";
 import { gatewaySettings, models } from "./models.ts";
-import { PreviewReports, serverProblem } from "./preview-reports.ts";
+import {
+  PreviewReports,
+  previewRefusal,
+  serverProblem,
+} from "./preview-reports.ts";
 import type { PreviewOutcome } from "./preview-reports.ts";
 import { Previews } from "./preview.ts";
 import type { WorkContext } from "./restricted.ts";
@@ -627,7 +631,7 @@ export class Workspace extends DurableObject<Env> {
         history: this.#transcript(chat.id),
         question: parsed.data.text,
         model,
-        apis: agentApis(),
+        apis: agentApis(this.env),
         context,
         scope,
         whyStop: async () => {
@@ -1355,6 +1359,20 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
+   * Records that a stub of the preview of the chat's draft of App `appId`
+   * at `revision` refused a call, as `refusal`: for core's preview stubs
+   * alone (preview-bindings.ts), before the draft's code hears of it.
+   */
+  previewRefused(
+    chatId: ChatId,
+    appId: string,
+    revision: number,
+    refusal: string
+  ): void {
+    this.#previewReports.refused(chatId, appId, revision, refusal);
+  }
+
+  /**
    * How the preview of the chat's draft of App `appId` at `revision` ran,
    * waiting up to `waitMs` for it to report while the person has it open:
    * for the agent's checks of the draft (agent-builds.ts).
@@ -1398,10 +1416,19 @@ export class Workspace extends DurableObject<Env> {
     } catch (error) {
       // What the draft's code failed with is the agent's to fix too.
       const problem = serverProblem(method, error);
-      if (problem !== undefined) {
-        this.#previewReports.report(id, appId, draft.revision, problem);
+      if (problem === undefined) {
+        throw error;
       }
-      throw error;
+      this.#previewReports.report(id, appId, draft.revision, problem);
+      // Failed for a refusal of the preview's: the screen hears so, and
+      // what it reports of it quotes the refusal too.
+      const refusal = this.#previewReports.refusalIn(
+        id,
+        appId,
+        draft.revision,
+        problem.message
+      );
+      throw refusal === undefined ? error : previewRefusal(refusal);
     }
   }
 
