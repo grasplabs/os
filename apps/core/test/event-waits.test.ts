@@ -125,6 +125,7 @@ const execution = (step: RunStep): RunHost => {
         appVersion: 1,
       }),
       connections: {},
+      apps: {},
     },
     hooks
   );

@@ -35,7 +35,8 @@ import { buildFailed, buildServer } from "./screens.ts";
 //
 // One App serves everyone who uses it, at the same time. So its stubs act
 // for no one on their own: every call into the App gets a caller from core
-// (from the session, or the workflow run), with a token only this object
+// (from the session, the workflow run, or another App's call of one of its
+// exports, app-calls.ts), with a token only this object
 // knows, for as long as the call runs. The App passes the caller on to its
 // stubs, which ask this object who the token belongs to. App code has no
 // way to name a person itself, and a token it keeps stops working once its
@@ -159,6 +160,56 @@ export type RunWatcher = Rpc.Stub<(change: RunChange) => Promise<void>>;
 /** Who calls the App, as core knows it; the token is the host's. */
 export type AppCallerInput = Omit<AppCaller, "token">;
 
+/**
+ * What a call from another App's code through an export carries besides
+ * its caller (app-calls.ts), for the host to keep with the call: never
+ * shown to the App's code.
+ */
+export interface ExportCall {
+  /**
+   * The version whose exports core checked the call against: it runs only
+   * on that version, and is refused with `app.conflict` once another is
+   * current.
+   */
+  version: number;
+  /** The Apps whose calls are under way above this one, outermost first. */
+  chain: readonly AppId[];
+  /** When the call it comes from must end, in milliseconds since the epoch. */
+  deadline: number;
+  /** Whether the call may only call other Apps' exports marked `read`. */
+  readOnly: boolean;
+  /**
+   * Called once the call is pinned to `version`, just before the method
+   * runs: where the caller records the call (app-calls.ts). If it
+   * throws, the method doesn't run.
+   */
+  onPinned: () => Promise<void>;
+}
+
+/**
+ * Where a running call is within calls between Apps, as its stubs call
+ * other Apps' exports from it (app-calls.ts).
+ */
+export interface CallPath {
+  /** The Apps whose calls are under way, outermost first, this one last. */
+  chain: AppId[];
+  /** When the call must end, in milliseconds since the epoch. */
+  deadline: number;
+  /** Whether it may only call other Apps' exports marked `read`. */
+  readOnly: boolean;
+}
+
+/** A call running now, as the host keeps it by its token. */
+interface RunningCall {
+  caller: AppCallerInput;
+  /** The version its code runs on, once started. */
+  version?: number;
+  /** The Apps whose calls are under way above it, outermost first. */
+  above: readonly AppId[];
+  deadline: number;
+  readOnly: boolean;
+}
+
 /** The App's current version: the one that runs. */
 const currentVersion = async (env: Env, app: AppId): Promise<number> => {
   const { currentVersion: version } = await findApp(env, app);
@@ -237,9 +288,9 @@ export class App extends DurableObject<Env> {
 
   /**
    * The calls running now, by token, with the version their code runs on
-   * once it started.
+   * once it started, and where each runs within calls between Apps.
    */
-  readonly #calls = new Map<string, AppCallerInput & { version?: number }>();
+  readonly #calls = new Map<string, RunningCall>();
 
   get #app(): AppId {
     return appIdSchema.parse(this.ctx.id.name);
@@ -254,32 +305,56 @@ export class App extends DurableObject<Env> {
    * A call that isn't answered in time gets `app.timed_out`, and its
    * caller stops working at once. The App's code keeps running for the
    * other calls: it is one facet, shared by them all.
+   *
+   * A call from another App's code through an export (`via`, from
+   * app-calls.ts) runs only on the version core checked it against, ends
+   * by the time the call it came from must, and is kept with the Apps
+   * above it, for the calls its code makes on (`callerOf`).
    */
   async call(
     caller: AppCallerInput,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    via?: ExportCall
   ): Promise<AppAnswer> {
     if (!appMethodPattern.test(method) || reservedMethods.has(method)) {
       throw appErrors.create("app.method_invalid", { method });
     }
+    const ms = Math.min(
+      callTimeoutMs(this.env),
+      (via?.deadline ?? Number.POSITIVE_INFINITY) - Date.now()
+    );
+    if (ms <= 0) {
+      throw appErrors.create("app.timed_out", { version: null, method });
+    }
     const token = crypto.randomUUID();
-    this.#calls.set(token, caller);
+    const call: RunningCall = {
+      caller,
+      above: via?.chain ?? [],
+      deadline: Date.now() + ms,
+      readOnly: via?.readOnly ?? false,
+    };
+    this.#calls.set(token, call);
     let version: number | undefined;
     const run = async (): Promise<AppAnswer> => {
       const read = this.#nextRead();
-      const running = await this.#facet(
-        await currentVersion(this.env, this.#app),
-        read
-      );
+      const current = await currentVersion(this.env, this.#app);
+      // The exports checked were another version's: it isn't called.
+      if (via !== undefined && current !== via.version) {
+        throw appErrors.create("app.conflict");
+      }
+      const running = await this.#facet(current, read);
       ({ version } = running);
+      if (via !== undefined) {
+        await this.#pinned(running.version, via);
+      }
       // Timed out while the code started: its caller already has the
       // answer, so the method mustn't run (and write) after all.
       if (!this.#calls.has(token)) {
         throw appErrors.create("app.timed_out", { version, method });
       }
       // What the App's stub calls in this call are audited with.
-      this.#calls.set(token, { ...caller, version });
+      this.#calls.set(token, { ...call, version });
       // Only the App's own methods: not what every stub has.
       if (method in Object.getPrototypeOf(running.facet)) {
         throw appErrors.create("app.method_invalid", { method });
@@ -301,7 +376,7 @@ export class App extends DurableObject<Env> {
       return plainAnswer(answer, running.version, method);
     };
 
-    const limit = deadline(callTimeoutMs(this.env));
+    const limit = deadline(ms);
     // Never rejects: when the deadline wins, the call goes on without a
     // caller, and how it ends is nobody's business any more.
     const settled = async (): Promise<
@@ -329,6 +404,26 @@ export class App extends DurableObject<Env> {
       throw forCaller(outcome.error, this.#app, version, method);
     }
     return outcome.answer;
+  }
+
+  /**
+   * Pins a call from another App's export to the version core checked it
+   * against (`via.version`): the facet `#facet` handed back must run it,
+   * then the caller hears it is about to run (`via.onPinned`, which
+   * records the call), and the facet must still be that version's after:
+   * a call that made another version current meanwhile, and started it,
+   * would otherwise have this call run code nobody checked it against.
+   * Nothing awaits between this and invoking the method, so no other call
+   * can replace the facet in between. `app.conflict` otherwise.
+   */
+  async #pinned(running: number, via: ExportCall): Promise<void> {
+    if (running !== via.version) {
+      throw appErrors.create("app.conflict");
+    }
+    await via.onPinned();
+    if (this.#server?.version !== via.version) {
+      throw appErrors.create("app.conflict");
+    }
   }
 
   /** Whether the App has read restricted data. */
@@ -463,26 +558,31 @@ export class App extends DurableObject<Env> {
   /**
    * Who a stub call acts for: the caller of the running call `token`
    * names, with the version of the code the call runs, and, for a
-   * workflow run's step, that step's idempotency key. For the App's stubs
-   * (app-bindings.ts) only. A call whose code hasn't started has handed
-   * its token to no one, so no stub call can come with it.
+   * workflow run's step, that step's idempotency key, and where the call
+   * is within calls between Apps (`path`). For the App's stubs
+   * (app-bindings.ts, app-calls.ts) only. A call whose code hasn't
+   * started has handed its token to no one, so no stub call can come
+   * with it.
    */
   callerOf(token: string): {
     authority: Authority;
     idempotencyKey: string | undefined;
+    path: CallPath;
   } {
-    const caller = this.#calls.get(token);
-    if (caller?.version === undefined) {
+    const call = this.#calls.get(token);
+    if (call?.version === undefined) {
       throw appErrors.create("app.caller_invalid");
     }
+    const { caller, version, above, deadline: ends, readOnly } = call;
     return {
       authority: {
         subject: { type: "app", appId: this.#app },
         onBehalfOf: caller.userId,
         mode: caller.mode,
-        appVersion: caller.version,
+        appVersion: version,
       },
       idempotencyKey: caller.idempotencyKey,
+      path: { chain: [...above, this.#app], deadline: ends, readOnly },
     };
   }
 

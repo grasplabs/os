@@ -2,7 +2,7 @@ import { signCapability } from "@grasp-os/shared/capability";
 import { connectCallSchema, connectErrors } from "@grasp-os/shared/connect";
 import type { ConnectCall, ConnectResult } from "@grasp-os/shared/connect";
 import { isExpectedError, toOpaqueError } from "@grasp-os/shared/errors";
-import type { PermissionId } from "@grasp-os/shared/ids";
+import type { AppId, PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
   bindingNameSchema,
@@ -294,6 +294,25 @@ export const connectionGrantOf =
       ? { context, permissionId: id, connection: object }
       : undefined;
 
+/**
+ * A permission on another App's exports, as a stub holds it (app-calls.ts).
+ * An App's calls of another App keep the calling App's restricted mode,
+ * so it needs no context of its own.
+ */
+export interface ExportGrant {
+  /** The permission the stub was built from: only it counts on each call. */
+  permissionId: PermissionId;
+  /** The App whose exports it calls. */
+  app: AppId;
+}
+
+/** A permission on another App's exports as its grant; nothing for any other. */
+export const exportGrantOf = ({
+  id,
+  object,
+}: Permission): ExportGrant | undefined =>
+  object.type === "app" ? { permissionId: id, app: object.appId } : undefined;
+
 /** A collection permission as its grant in `context`; nothing for any other. */
 export const collectionGrantOf =
   (context: WorkContext) =>
@@ -368,11 +387,11 @@ export const bindingsFor = async (
 
 /**
  * A workflow run's permissions as they are now, as `bindingsFor` builds
- * them, but for its connections: those aren't stubs in its env but grants,
- * by binding name, which the run's host calls for it (workflows/host.ts),
- * so each call is checked against the step running then and its key. The
- * workflow dispatcher builds them on every start and resume, so a revoked
- * permission is gone from the next one.
+ * them, but for its connections and other Apps' exports: those aren't
+ * stubs in its env but grants, by binding name, which the run's host calls
+ * for it (workflows/host.ts), so each call is checked against the step
+ * running then and its key. The workflow dispatcher builds them on every
+ * start and resume, so a revoked permission is gone from the next one.
  */
 export const runBindingsFor = async (
   env: Env,
@@ -381,10 +400,12 @@ export const runBindingsFor = async (
 ): Promise<{
   bindings: Record<string, Fetcher<CollectionBinding>>;
   connections: Record<string, ConnectionGrant>;
+  apps: Record<string, ExportGrant>;
 }> => {
   const permissions = await grantedPermissions(env, authority);
   return {
     bindings: stubsOf(permissions, collectionStubOf(authority, context)),
     connections: stubsOf(permissions, connectionGrantOf(context)),
+    apps: stubsOf(permissions, exportGrantOf),
   };
 };

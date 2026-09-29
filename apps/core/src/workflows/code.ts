@@ -62,14 +62,15 @@ export type Settled<T> =
 
 /**
  * What the run's main module takes from core: the run, the parameter
- * values people set, its input, and the binding names of its connections,
- * which it calls through the host (host.ts).
+ * values people set, its input, and the binding names of its connections
+ * and of other Apps' exports, which it calls through the host (host.ts).
  */
 export interface RunStart {
   runId: RunId;
   params: Record<string, string | number>;
   input: unknown;
   connections: string[];
+  apps: string[];
 }
 
 /** The run's main module, as core calls it. */
@@ -228,7 +229,7 @@ const bindings = (env) =>
     },
   });
 
-const withConnections = (env, host, connections) => ({
+const withConnections = (env, host, connections, apps) => ({
   ...env,
   APP: {
     call: async (method, ...args) => unwrapped(await host.callApp(method, args)),
@@ -242,10 +243,19 @@ const withConnections = (env, host, connections) => ({
       },
     ])
   ),
+  ...Object.fromEntries(
+    apps.map((name) => [
+      name,
+      {
+        call: async (method, input) =>
+          unwrapped(await host.callExport(name, method, input)),
+      },
+    ])
+  ),
 });
 
 export class Run extends WorkerEntrypoint {
-  async run(host, { runId, params, input, connections }) {
+  async run(host, { runId, params, input, connections, apps }) {
     return await settled(async () => {
       if (definition?.metadata?.id !== ${JSON.stringify(id)} || typeof definition.run !== "function") {
         throw new Error(${JSON.stringify(`workflows/${id}.ts must export the workflow "${id}" as its default export.`)});
@@ -253,7 +263,7 @@ export class Run extends WorkerEntrypoint {
       const engine = {
         runId,
         params,
-        env: bindings(withConnections(this.env, host, connections)),
+        env: bindings(withConnections(this.env, host, connections, apps)),
         do: async (name, options, fn) => unwrapped(await host.do(name, options, async () => await settled(fn))),
         sleep: async (name, milliseconds) => unwrapped(await host.sleep(name, milliseconds)),
         waitForEvent: async (name, options) => unwrapped(await host.waitForEvent(name, options)),

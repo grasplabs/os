@@ -183,6 +183,13 @@
       "when": 1790651111050,
       "tag": "0025_app_exports",
       "breakpoints": true
+    },
+    {
+      "idx": 26,
+      "version": "6",
+      "when": 1790652713849,
+      "tag": "0026_app_calls",
+      "breakpoints": true
     }
   ]
 }

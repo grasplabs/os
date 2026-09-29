@@ -24,10 +24,11 @@ import { NonRetryableError } from "cloudflare:workflows";
 import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
+import { callExport } from "../app-calls.ts";
 import type { AppAnswer, AppCallerInput } from "../app.ts";
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
 import { forSandbox, requireStepKey, runStubCall } from "../bindings.ts";
-import type { ConnectionGrant } from "../bindings.ts";
+import type { ConnectionGrant, ExportGrant } from "../bindings.ts";
 import {
   decisionDeadline,
   decisionEventType,
@@ -71,6 +72,8 @@ export interface HostedRun {
   authority: Authority;
   /** Its connection permissions, by binding name (`runBindingsFor`). */
   connections: Record<string, ConnectionGrant>;
+  /** Its permissions on other Apps' exports, by binding name. */
+  apps: Record<string, ExportGrant>;
 }
 
 /**
@@ -1311,6 +1314,53 @@ export class RunHost extends RpcTarget {
             { userId: authority.onBehalfOf, mode: "workflow", idempotencyKey },
             String(method),
             checked(z.array(z.unknown()), args)
+          )
+      );
+    });
+  }
+
+  /**
+   * Calls export `method` of another App, by the run's permission on its
+   * exports (`binding`), with `input` (`env.CRM.call(method, input)`),
+   * only inside a step, for the person the run acts for (app-calls.ts).
+   * The called App's method gets the step's key on its caller, the only
+   * one its connection calls take, so a side effect it holds holds the
+   * step as the run's own would.
+   */
+  async callExport(
+    binding: unknown,
+    method: unknown,
+    input: unknown
+  ): Promise<Settled<unknown>> {
+    return await settle(async () => {
+      const attempt = this.#requireStep();
+      const idempotencyKey = this.#stepKey();
+      const { apps, authority, app } = this.#run;
+      const name = checked(z.string(), binding);
+      const grant = Object.hasOwn(apps, name) ? apps[name] : undefined;
+      if (grant === undefined) {
+        throw workflowErrors.create("workflow.invalid");
+      }
+      attempt.calledApp = true;
+      return await heldNoted(
+        attempt,
+        async () =>
+          await callExport(
+            this.#env,
+            {
+              authority,
+              idempotencyKey,
+              // A run's call ends by the called App's own limit.
+              path: {
+                chain: [app],
+                deadline: Number.POSITIVE_INFINITY,
+                readOnly: false,
+              },
+              actor: this.#actor,
+            },
+            grant,
+            method,
+            input
           )
       );
     });

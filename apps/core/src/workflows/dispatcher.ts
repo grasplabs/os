@@ -181,12 +181,18 @@ const runWorkflow = async (
   };
   const result = await settledRun(async () => {
     const authority = await authorityOf(env, row);
-    const { bindings, connections } = await runBindingsFor(
+    const { bindings, connections, apps } = await runBindingsFor(
       env,
       authority,
       contextOf(pinned.data.app, runId)
     );
-    const run: HostedRun = { ...pinned.data, runId, authority, connections };
+    const run: HostedRun = {
+      ...pinned.data,
+      runId,
+      authority,
+      connections,
+      apps,
+    };
     const files = await versionFiles(env, run.app, run.version);
     // Read on every load, though only the run's first uses them: after
     // that the SDK replays the values its `$params` step recorded.
@@ -229,6 +235,7 @@ const runWorkflow = async (
       params: Object.fromEntries(params),
       input: event.payload,
       connections: Object.keys(connections),
+      apps: Object.keys(apps),
     });
   });
   const failed = result.ok ? undefined : result.error;

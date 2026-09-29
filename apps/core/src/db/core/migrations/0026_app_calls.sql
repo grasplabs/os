@@ -1,0 +1,1 @@
+CREATE INDEX `permissions_object_idx` ON `permissions` (`object_type`,`object_id`);

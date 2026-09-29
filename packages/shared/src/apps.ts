@@ -412,6 +412,15 @@ export const appErrors = defineErrorFamily({
   "app.nothing_to_commit": "Nothing was written since the latest version.",
   "app.exports_invalid":
     "The App's exports (app/exports.json) aren't valid, so it can't be committed.",
+  "app.export_not_found":
+    "The App doesn't export that method: it never did, or its current version no longer does.",
+  "app.call_invalid":
+    "That input doesn't match what the App's export takes, or isn't JSON.",
+  "app.call_too_large":
+    "The input or the answer of a call to another App is too large.",
+  "app.call_cycle":
+    "An App can't call an App whose call is already under way in this one.",
+  "app.call_too_deep": "Too many Apps call one another in this one call.",
   "app.conflict": "Someone else changed this App at the same time. Try again.",
   "app.not_running": "The App has no current version to run yet.",
   "app.build_failed": "The App's server code doesn't build.",
@@ -484,6 +493,13 @@ export interface AppCaller {
    * and run however often the step is retried.
    */
   idempotencyKey?: string;
+  /**
+   * For a call from another App, through one of its exports: that App,
+   * and the version of its code that called. The call works for anyone
+   * using that App, under its permission on this App's exports; whether
+   * `userId` has a role in this App isn't checked.
+   */
+  app?: { id: string; version: number };
 }
 
 // Exports: the methods of an App's server code that other Apps may call,
@@ -501,6 +517,20 @@ export const appMaxExports = 64;
 
 /** Most characters of an App's exports file. */
 export const appExportsMaxLength = 64_000;
+
+/**
+ * The limits of a call to another App's export. The input and the answer
+ * are JSON, measured in bytes of UTF-8 as sent: an answer fits a workflow
+ * step's result. One call may lead to more (the called App calling
+ * another), at most `depth` calls deep, so 3 hops, 4 Apps: A calls B, B
+ * calls C, C calls D, and D calls no further. Never back into an App
+ * already in it; all of them end by the time the first one must.
+ */
+export const appCallLimits = {
+  inputBytes: 256 * 1024,
+  answerBytes: 1024 * 1024,
+  depth: 3,
+} as const;
 
 /**
  * Names no export has: those core refuses as an App's method, `read` and

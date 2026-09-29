@@ -1,4 +1,8 @@
-import { appMethodPattern, reservedAppMethods } from "@grasp-os/shared/apps";
+import {
+  appMethodPattern,
+  isExportName,
+  reservedAppMethods,
+} from "@grasp-os/shared/apps";
 import type { ReservedAppMethod } from "@grasp-os/shared/apps";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
 import type { RunId, WorkflowId } from "@grasp-os/shared/ids";
@@ -558,6 +562,24 @@ export type AppServer<Server> = {
 };
 
 /**
+ * A typed stub whose every name `isName` accepts is `method(name)`, and
+ * any other name, a symbol too, is `undefined`: nothing for `then` (so a
+ * stub can be awaited as a value), `toJSON` (so serializing it calls
+ * nothing), or any name core refuses. For `appServer` and `appExports`.
+ */
+const methodsOf = (
+  isName: (name: string) => boolean,
+  method: (name: string) => BindingMethod
+): Readonly<Record<string, BindingMethod | undefined>> =>
+  new Proxy(
+    {},
+    {
+      get: (_target, name): BindingMethod | undefined =>
+        typeof name === "string" && isName(name) ? method(name) : undefined,
+    }
+  );
+
+/**
  * A typed stub of the run's own App's server methods (`app/server.ts`):
  * `appServer<App>(env).setStatus("INV-7", "booked")` is
  * `env.APP.call("setStatus", "INV-7", "booked")`, typed by the App's
@@ -588,25 +610,84 @@ export const appServer = <Server = Record<string, BindingMethod>>(
       }
       return await app.call(name, ...args);
     };
-  // SAFETY: every name `AppServer` has is a method that calls the App's
-  // method of that name; core checks the name again, and refuses one the
-  // App doesn't have.
+  // SAFETY: every name `AppServer` has is one this accepts (the type keeps
+  // only those), a method that calls the App's method of that name; core
+  // checks the name again, and refuses one the App doesn't have.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-  return new Proxy(
-    {},
-    {
-      // Only names core calls, as `AppServer` has them: nothing for a
-      // symbol, `then` (so a stub can be awaited as a value), `toJSON` (so
-      // serializing it calls nothing) or any other name core refuses.
-      get: (_target, name): BindingMethod | undefined =>
-        typeof name === "string" &&
-        appMethodPattern.test(name) &&
-        !reserved.has(name) &&
-        name !== "toJSON"
-          ? method(name)
-          : undefined,
-    }
+  return methodsOf(
+    (name) =>
+      appMethodPattern.test(name) && !reserved.has(name) && name !== "toJSON",
+    method
   ) as AppServer<Server>;
+};
+
+/**
+ * The exports of another App as a workflow calls them, typed by
+ * `Exports`, which the workflow writes from what that App's
+ * `app/exports.json` declares: each export's one input, answering what it
+ * answers. Only names core calls (`IsAppMethod`) and only functions.
+ */
+export type AppExportsStub<Exports> = {
+  readonly [
+    Name in keyof Exports as Name extends "read" | "write"
+      ? never
+      : IsAppMethod<Name> extends true
+        ? Exports[Name] extends (input: never) => unknown
+          ? Name
+          : never
+        : never
+  ]: Exports[Name] extends (input: infer Input) => infer Answer
+    ? (input: Input) => Promise<Awaited<Answer>>
+    : never;
+};
+
+/**
+ * A typed stub of another App's exports, by the run's permission on them
+ * (its binding): `appExports<Crm>(env.CRM).findCustomers({ query: "Acme" })`
+ * is `env.CRM.call("findCustomers", { query: "Acme" })`:
+ *
+ * ```ts
+ * type Crm = {
+ *   findCustomers: (input: { query: string }) => { id: string; name: string }[];
+ * };
+ *
+ * const found = await step.do("find", { description: "Find the customer" }, async () =>
+ *   await appExports<Crm>(env.CRM).findCustomers({ query: input.customer })
+ * );
+ * ```
+ *
+ * Like any binding, it works only inside a step, and acts for the person
+ * the run acts for, under the run's App's permission; the called App's
+ * method runs in its own sandbox. Core checks each call: the export must
+ * be in that App's current version (`app.export_not_found` otherwise),
+ * allowed by the permission (one marked `write` only from a version of
+ * this App an admin approved), and its input and answer JSON within
+ * `appCallLimits` and its schemas (`app.call_invalid`, `app.call_too_large`,
+ * `app.answer_invalid`). If either App has read restricted data, both are
+ * restricted from then on.
+ *
+ * Make one call of an export that writes per step, as with `appServer`:
+ * the called App's own connection calls take the step's idempotency key,
+ * so a second such call in the same step repeats the first one's side
+ * effects' answers instead of making its own. A `sideEffect: true` step
+ * gets the key.
+ */
+export const appExports = <Exports = Record<string, (input: Json) => unknown>>(
+  binding: Readonly<Record<string, BindingMethod>> | undefined
+): AppExportsStub<Exports> => {
+  const method =
+    (name: string): BindingMethod =>
+    async (input) => {
+      if (binding?.call === undefined) {
+        throw invalidCall("The run has no permission to call that App");
+      }
+      return await binding.call(name, input ?? null);
+    };
+  // SAFETY: every name `AppExportsStub` has is an export's name (the type
+  // keeps only those), a method that calls the export of that name; core
+  // checks the name again, and refuses one the App doesn't export.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+  return methodsOf(isExportName, method) as AppExportsStub<Exports>;
 };
 
 // Definition

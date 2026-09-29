@@ -29,6 +29,7 @@ export { MemoryApi } from "./agent-memory.ts";
 export { WorkflowsApi } from "./agent-workflows.ts";
 export { Builtins } from "./builtins.ts";
 export { AppConnectionBinding } from "./app-bindings.ts";
+export { AppExportBinding } from "./app-calls.ts";
 export { ConnectionBinding } from "./bindings.ts";
 export { AppCollectionBinding } from "./knowledge/app-binding.ts";
 export { CollectionBinding } from "./knowledge/binding.ts";
