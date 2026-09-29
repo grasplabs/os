@@ -1,5 +1,11 @@
 import { appErrors } from "@grasp-os/shared/apps";
-import type { App, SavedBuild, VersionReview } from "@grasp-os/shared/apps";
+import type {
+  App,
+  Blueprint,
+  CreatedFromBlueprint,
+  SavedBuild,
+  VersionReview,
+} from "@grasp-os/shared/apps";
 import { delegateActorOf } from "@grasp-os/shared/audit";
 import type { AuditDetailValue } from "@grasp-os/shared/audit";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
@@ -13,6 +19,7 @@ import { z } from "zod";
 import { asPerson } from "./agent-person.ts";
 import { chatAuthority, chatContext } from "./agent-scope.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
+import { createFromBlueprint, listBlueprints } from "./app-blueprints.ts";
 import {
   appFor,
   applyChanges,
@@ -40,9 +47,11 @@ import type { DryRuns } from "./workflows/code.ts";
 import type { CheckOutcome, Draft } from "./workspace.ts";
 
 // Building Apps from a chat: `await env.build.write(app, { ... })`. The
-// chat's agent creates Apps, and changes one in a draft of its own: one
-// per chat and App, kept with the chat in its Workspace object
-// (workspace.ts), over the App's latest version when it began. Builders'
+// chat's agent creates Apps (new, or from a blueprint the person may
+// create from, by the rules people follow: app-blueprints.ts), and
+// changes one in a draft of its own: one per chat and App, kept with the
+// chat in its Workspace object (workspace.ts), over the App's latest
+// version when it began. Builders'
 // working copy never sees a draft, so the agent's edits and a builder's
 // can't overwrite each other. It checks a draft as a save does (screens,
 // server code and workflows: type errors, @shadcn/lint and build errors)
@@ -64,7 +73,8 @@ import type { CheckOutcome, Draft } from "./workspace.ts";
 // most `maxCreatesPerTurn` Apps.
 //
 // The person's rights bound every call, read again each time: creating an
-// App needs a role that builds, and changing one a builder's role in it.
+// App needs a role that builds (and, from a blueprint, a role in its
+// App), and changing one a builder's role in it.
 // The agent needs a permission of its own too: `write` on the Apps
 // collection, the company's catalog of Apps, which no one writes as
 // Knowledge (it is read only), so granting it means only this. A chat
@@ -116,6 +126,15 @@ const buildsApps =
         object.collectionId === appsCollectionId &&
         actions.includes("write")
     );
+
+/**
+ * Refuses blueprints while they are off: as for people, whose blueprints
+ * need App sharing on too, whose roles decide who creates from one.
+ */
+const requireBlueprints = (env: Env): void => {
+  requireFeature(env, "app_sharing");
+  requireFeature(env, "app_blueprints");
+};
 
 /** The values a dry run sets, by parameter name, over each test's own. */
 const dryRunParamsSchema = z
@@ -369,27 +388,79 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   async create(input: unknown): Promise<App> {
     return await this.#build(
       "build.create",
-      async (by) => {
-        const { workspaceId, chatId } = this.ctx.props;
-        const taken = await workspace(this.env, workspaceId).takeCreate(
-          chatId,
-          maxCreatesPerTurn
-        );
-        if (!taken) {
-          throw appErrors.create("app.creates_exhausted");
-        }
-        try {
-          return await createApp(this.env, by, input);
-        } catch (error) {
-          // Refused (the person's role, say): it created nothing.
-          await workspace(this.env, workspaceId)
-            .releaseCreate(chatId)
-            .catch(logCountFailure);
-          throw error;
-        }
-      },
+      async (by) =>
+        await this.#creating(async () => await createApp(this.env, by, input)),
       (created) => ({ app: created.id })
     );
+  }
+
+  /**
+   * The blueprints the person may create an App from: of the Apps they
+   * have a role in, newest first, as people's own list has them.
+   */
+  async blueprints(): Promise<Blueprint[]> {
+    return await this.#build(
+      "build.blueprints",
+      async (by) => {
+        requireBlueprints(this.env);
+        return await listBlueprints(this.env, by);
+      },
+      (listed) => ({ blueprints: listed.length })
+    );
+  }
+
+  /**
+   * A new App owned by the person, from the blueprint of App `app` at
+   * `version`, by the same rules as a person creating one
+   * (app-blueprints.ts): only someone who builds, from a blueprint of an
+   * App they have a role in. Its requests wait for an admin, recorded as
+   * the agent's. Counted with `create`: at most {@link maxCreatesPerTurn}
+   * a turn.
+   */
+  async createFromBlueprint(
+    app: unknown,
+    version: unknown,
+    input: unknown
+  ): Promise<CreatedFromBlueprint> {
+    return await this.#build(
+      "build.createFromBlueprint",
+      async (by) => {
+        requireBlueprints(this.env);
+        return await this.#creating(
+          async () =>
+            await createFromBlueprint(this.env, by, app, version, input)
+        );
+      },
+      (created) => ({
+        app: created.app.id,
+        blueprint: created.app.blueprint,
+      })
+    );
+  }
+
+  /**
+   * Runs `create`, which creates an App, once it takes one of the Apps
+   * the chat's agent may create this turn: given back when it creates
+   * nothing.
+   */
+  async #creating<T>(create: () => Promise<T>): Promise<T> {
+    const { workspaceId, chatId } = this.ctx.props;
+    const taken = await workspace(this.env, workspaceId).takeCreate(
+      chatId,
+      maxCreatesPerTurn
+    );
+    if (!taken) {
+      throw appErrors.create("app.creates_exhausted");
+    }
+    try {
+      return await create();
+    } catch (error) {
+      // Refused (the person's role, say): it created nothing.
+      await workspace(this.env, workspaceId)
+        .releaseCreate(chatId)
+        .catch(logCountFailure);
+      throw error;
+    }
   }
 
   /**
@@ -752,6 +823,23 @@ const buildDeclaration = `/**
 build: {
   /** Creates an App owned by the person, with no files yet: at most ${maxCreatesPerTurn} a question. */
   create(app: { name: string; description?: string }): Promise<{ id: string; name: string }>;
+  /** The blueprints the person may create an App from, newest first: \`app\` and \`version\` name each. */
+  blueprints(): Promise<{ app: string; name: string; description: string; version: number }[]>;
+  /**
+   * Creates an App owned by the person from the blueprint of App \`app\` at
+   * \`version\`: the blueprint's code as its first version, and a request
+   * for each permission the blueprint's App has, which an admin grants or
+   * not. Counts with \`create\`: at most ${maxCreatesPerTurn} a question. Change it
+   * afterwards in a draft, as any App.
+   */
+  createFromBlueprint(app: string, version: number, created: { name: string; description?: string }): Promise<{
+    app: { id: string; name: string };
+    version: { version: number };
+    permissions: { id: string; binding: string; status: string }[];
+    /** Connections and other Apps' workflows or exports it doesn't ask for, by binding. */
+    dropped: { binding: string }[];
+    droppedApps: { binding: string }[];
+  }>;
   /**
    * This chat's draft of an App: every file as the draft has them, the
    * version it is over (the App's latest when the draft began), and the
