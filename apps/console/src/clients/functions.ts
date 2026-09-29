@@ -11,6 +11,7 @@ import { z } from "zod";
 
 import { consoleDatabase } from "../db/act.ts";
 import { applySettings } from "./apply.ts";
+import { clientGrid } from "./grid.ts";
 import { clientHistory, clientSettings } from "./queries.ts";
 import {
   featureInputSchema,
@@ -43,6 +44,11 @@ const change = async (
     throw error;
   }
 };
+
+/** Every client, as the grid shows it, read live from each active client's account. */
+export const fetchClientGrid = createServerFn({ method: "GET" }).handler(
+  async () => await clientGrid(env, new Date())
+);
 
 /** A client's settings and its latest console actions; null settings for no such client. */
 export const fetchClientSettings = createServerFn({ method: "GET" })

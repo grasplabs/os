@@ -132,11 +132,12 @@ const defaultAttemptTimeoutMs = 10_000;
 const healthSchema = z.object({ ok: z.literal(true), version: z.string() });
 
 /**
- * The version core's `/health` at `origin` names, or undefined when it
- * doesn't answer, answers otherwise, or takes longer than `timeoutMs`
- * (its body included): a stalled connection ends this try, not the check.
+ * The version core's `/health` at `origin` names, to a request carrying
+ * `routerSecret` as the router sends it; undefined when it doesn't
+ * answer, answers otherwise, or takes longer than `timeoutMs` (its body
+ * included): a stalled connection ends this try, not the check.
  */
-const answeringVersion = async (
+export const answeringVersion = async (
   fetchCore: typeof fetch,
   origin: string,
   routerSecret: string,
@@ -224,6 +225,17 @@ const storedEntry = async (
   }
   return parsed.data;
 };
+
+/**
+ * The entry the router's map has for `hostname`: the client and core it
+ * routes to, and the generation it derives the router secret from; null
+ * when it has none.
+ */
+export const mappedRoute = async (
+  hosts: RouterHosts,
+  hostname: string
+): Promise<RouterHost | null> =>
+  await storedEntry(hosts, routerHostKey(hostname));
 
 /**
  * The secrets generation the router's map has for `hostname`, which the

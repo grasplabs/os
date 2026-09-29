@@ -19,6 +19,7 @@ import {
   platformUpdateSignatureHeader,
 } from "@grasp-os/shared/platform-change";
 import { afterEach, beforeEach, vi } from "vite-plus/test";
+import { z } from "zod";
 
 import {
   base,
@@ -419,13 +420,74 @@ export const mockCloudflareApi = (
     [`Bearer ${tenantToken}`, tenantEmail],
   ]);
   /**
-   * Answers a call that names no account (`/user`, `/accounts`), or
-   * undefined for any other.
+   * What the analytics API answers the console's usage query with: for each
+   * account the query names (variables `a0`, `a1`, ...), what the account
+   * reports, as GraphQL groups; an error for one the caller isn't a member
+   * of, as the API answers it, with the rest of the data.
+   */
+  const answerAnalytics = (body: unknown, caller: string): Response => {
+    const parsed = z
+      .object({ variables: z.record(z.string(), z.unknown()) })
+      .safeParse(body);
+    const variables = parsed.success ? parsed.data.variables : {};
+    const errors: { message: string }[] = [];
+    const viewer = Object.fromEntries(
+      Object.entries(variables)
+        .filter(([name]) => /^a\d+$/u.test(name))
+        .map(([name, tag]) => {
+          const account = accounts.get(typeof tag === "string" ? tag : "");
+          if (account === undefined || !isMember(account, caller)) {
+            errors.push({ message: `not authorized for ${String(tag)}` });
+            return [name, null];
+          }
+          const { usage } = account;
+          return [
+            name,
+            usage === undefined
+              ? []
+              : [
+                  {
+                    month: [
+                      {
+                        sum: {
+                          requests: usage.monthRequests,
+                          cpuTimeUs: usage.monthCpuTimeUs,
+                        },
+                      },
+                    ],
+                    day: [
+                      {
+                        sum: {
+                          requests: usage.dayRequests,
+                          errors: usage.dayErrors,
+                        },
+                      },
+                    ],
+                    ai: [{ sum: { cost: usage.monthAiCost } }],
+                  },
+                ],
+          ];
+        })
+    );
+    return Response.json({
+      data: { viewer },
+      errors: errors.length === 0 ? null : errors,
+    });
+  };
+
+  /**
+   * Answers a call that names no account (`/user`, `/accounts`,
+   * `/graphql`), or undefined for any other.
    */
   const answerUnscoped = (
     call: ApiCall,
     caller: string | undefined
   ): Response | undefined => {
+    if (call.path === "/graphql" && call.method === "POST") {
+      return caller === undefined
+        ? refusal(403, 10_000, "Authentication error")
+        : answerAnalytics(call.body, caller);
+    }
     if (call.path !== "/user" && call.path !== "/accounts") {
       return undefined;
     }

@@ -84,17 +84,39 @@ const recordClient = async (
 const noSuchClient = (id: string) => `There&#x27;s no client ${id}.`;
 
 describe("the client pages", () => {
-  it("list every client, with a way to add one", async () => {
+  it("list every client in a grid with links to its deployment, account and Activity, a way to add one, and live columns it can't read as unknown", async () => {
     const client = await recordClient();
+    const live = await recordClient("active");
 
+    // The tests' Secrets Store holds no deployer token: nothing live is read.
     const { status, html } = await page("/");
 
     expect({
       status,
-      listed:
-        html.includes(`Acme ${client.id}`) && html.includes(client.accountId),
+      listed: html.includes(`href="/clients/${client.id}"`),
+      columns: [
+        "Release",
+        "Last deploy (UTC)",
+        "Drift",
+        "Shared secrets",
+        "Health",
+        "Cost this month",
+      ].every((column) => html.includes(column)),
+      links: [
+        `href="https://${live.id}.grasp.test"`,
+        `href="https://${live.id}.grasp.test/activity"`,
+        `href="https://dash.cloudflare.com/${live.accountId}"`,
+      ].every((link) => html.includes(link)),
+      unknown: html.includes(">unknown<"),
       add: html.includes('href="/clients/new"'),
-    }).toStrictEqual({ status: 200, listed: true, add: true });
+    }).toStrictEqual({
+      status: 200,
+      listed: true,
+      columns: true,
+      links: true,
+      unknown: true,
+      add: true,
+    });
   });
 
   it("offer the imported releases on the new-client form, newest first by default", async () => {
