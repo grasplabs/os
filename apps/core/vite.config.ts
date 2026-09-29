@@ -45,6 +45,7 @@ export const screenTests = [
   "test/screen*.test.ts",
   "test/app-sandbox.test.ts",
   "test/agent-apps.test.ts",
+  "test/agent-builds.test.ts",
   "test/workflows.test.ts",
   "test/workflow-chaos.test.ts",
   "test/held-runs.test.ts",
@@ -140,6 +141,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               app_calls: true,
               agent: true,
               chat: true,
+              app_builder: true,
             },
             // One memory limit set, the others at their defaults.
             MEMORY_LIMITS: { "USER.md": 500 },

@@ -49,6 +49,8 @@ interface __BaseEnv_Env {
   CONNECTOR_EVENTS_PER_RUN?: string;
   /** Tests only: a shorter limit for one call into an App (src/app.ts). */
   APP_CALL_TIMEOUT_MS?: string;
+  /** Tests only: a shorter wait for a check's builds (src/agent-builds.ts). */
+  CHECK_BUILD_WAIT_MS?: string;
   /** The router secret before the current one, while rotating (src/router-secret.ts). */
   ROUTER_SECRET_PREVIOUS?: string;
   /** Local dev only (src/router-secret.ts). */

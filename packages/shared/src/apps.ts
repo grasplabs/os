@@ -7,8 +7,9 @@ import type { AppId } from "./ids.ts";
 import type { Permission } from "./permissions.ts";
 
 // An App's code is a tree of text files, versioned as a whole: builders
-// (and the agent, for a builder) write files into the App's working copy
-// and commit it as the next version. Versions never change once committed.
+// write files into the App's working copy and commit it as the next
+// version; the chat's agent, for a builder, writes into a draft of its
+// chat's own instead. Versions never change once committed.
 // One version is current, the one that runs; another can be pending, put
 // up for review before a builder makes it current.
 
@@ -432,6 +433,14 @@ export const appErrors = defineErrorFamily({
   "app.timed_out": "The App's server code took too long to answer.",
   "app.caller_invalid":
     "Pass the caller of the App method this runs in, while that call runs.",
+  "app.checks_exhausted":
+    "This draft failed its checks too many times in a row this turn. Stop, and tell the person what still fails.",
+  "app.builds_unfinished":
+    "This draft's builds didn't finish in time too many times this turn. Tell the person it couldn't be checked now.",
+  "app.dry_runs_exhausted":
+    "This draft has had as many dry runs as one question may. Tell the person what you found.",
+  "app.creates_exhausted":
+    "This chat created as many Apps as one question may. Tell the person what you made.",
 });
 
 /**

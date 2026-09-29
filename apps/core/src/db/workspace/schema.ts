@@ -4,6 +4,7 @@
  */
 import type { ChatId } from "@grasp-os/shared/ids";
 import {
+  foreignKey,
   index,
   integer,
   primaryKey,
@@ -74,6 +75,52 @@ export const chatSources = sqliteTable(
     createdAt: integer("created_at", { mode: "timestamp_ms" }).notNull(),
   },
   (table) => [primaryKey({ columns: [table.chatId, table.sourceId] })]
+);
+
+/**
+ * A chat's drafts: one per App its agent writes to, over the version it
+ * started from (`base`, null for an App with none). A draft is the chat's
+ * own: builders' working copy never sees it, and it reaches the App only
+ * when the agent proposes it as a version (agent-builds.ts). Each write is
+ * a new `revision`, and lands only over the revision it read. A draft
+ * whose changes are all gone (proposed, discarded, or written back as the
+ * base has them) keeps its row, and its revision: it has no changes, and
+ * its next write starts over the App's latest version.
+ */
+export const chatDrafts = sqliteTable(
+  "chat_drafts",
+  {
+    chatId: text("chat_id")
+      .$type<ChatId>()
+      .notNull()
+      .references(() => chats.id),
+    appId: text("app_id").notNull(),
+    base: integer(),
+    revision: integer().notNull(),
+    updatedAt: integer("updated_at", { mode: "timestamp_ms" }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.chatId, table.appId] })]
+);
+
+/**
+ * A draft's changes (`chatDrafts`): a file's new content by path, or null
+ * to delete it, a row each, so no row holds more than one file.
+ */
+export const chatDraftFiles = sqliteTable(
+  "chat_draft_files",
+  {
+    chatId: text("chat_id").$type<ChatId>().notNull(),
+    appId: text("app_id").notNull(),
+    path: text().notNull(),
+    content: text(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.chatId, table.appId, table.path] }),
+    foreignKey({
+      columns: [table.chatId, table.appId],
+      foreignColumns: [chatDrafts.chatId, chatDrafts.appId],
+    }),
+  ]
 );
 
 /**

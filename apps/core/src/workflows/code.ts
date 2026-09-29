@@ -583,10 +583,17 @@ export const dryRunTests = async (
   version: number,
   id: WorkflowId,
   files: AppFiles,
-  params: Record<string, string | number>
+  params: Record<string, string | number>,
+  /**
+   * For a chat's draft over `version` (agent-builds.ts): its isolate is
+   * loaded unnamed, never kept, as a draft's code changes with each write.
+   */
+  { draft = false }: { draft?: boolean } = {}
 ): Promise<DryRuns> => {
   const code = env.LOADER.get(
-    `workflow-dry-run:${app}:${version}:${id}:${compilerVersion}`,
+    draft
+      ? null
+      : `workflow-dry-run:${app}:${version}:${id}:${compilerVersion}`,
     async () => ({
       ...workflowSandbox,
       mainModule: dryRunModule,
@@ -616,18 +623,19 @@ export const dryRunTests = async (
 };
 
 /**
- * Refuses a version (with its `files`) whose workflows don't build, or
- * whose workflows' tests fail or are missing (`workflow.tests_failed`), so
- * no such version is made current. A version without workflows passes.
+ * Runs the tests of the workflows in an App's `files` (its `version`, or
+ * the version a chat's draft is over, for errors), and says what fails:
+ * nothing when all pass, or there are no workflows. Refuses workflows that
+ * don't build (`workflow.build_failed`).
  */
-export const requireWorkflowTestsPass = async (
+export const workflowTestFailures = async (
   env: Env,
   version: number,
   files: AppFiles
-): Promise<void> => {
+): Promise<string[]> => {
   const ids = workflowIdsIn(files);
   if (ids.length === 0) {
-    return;
+    return [];
   }
   const modules = await modulesOf(env, version, files);
   const failures: string[] = [];
@@ -642,6 +650,20 @@ export const requireWorkflowTestsPass = async (
       );
     }
   }
+  return failures;
+};
+
+/**
+ * Refuses a version (with its `files`) whose workflows don't build, or
+ * whose workflows' tests fail or are missing (`workflow.tests_failed`), so
+ * no such version is made current. A version without workflows passes.
+ */
+export const requireWorkflowTestsPass = async (
+  env: Env,
+  version: number,
+  files: AppFiles
+): Promise<void> => {
+  const failures = await workflowTestFailures(env, version, files);
   if (failures.length > 0) {
     throw workflowErrors.create("workflow.tests_failed", {
       version,
