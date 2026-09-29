@@ -128,9 +128,9 @@ export const buildWorkflows = async (
     async (compiler, files) => await compiler.buildWorkflows(files)
   );
 
-/** The details of a `*.build_failed` error: the version, and why. */
+/** The details of a `*.build_failed` error: the version (null for a draft), and why. */
 export const buildFailed = (
-  version: number,
+  version: number | null,
   { diagnostics }: FailedBuild
 ): NonNullable<ErrorPayload["details"]> => ({
   version,

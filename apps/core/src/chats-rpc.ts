@@ -8,13 +8,16 @@ import type {
   ChatSummary,
   ChatUpdate,
   FixRunResult,
+  PreviewBundle,
 } from "@grasp-os/shared/chat";
 import { internalErrors, isExpectedError } from "@grasp-os/shared/errors";
 import { chatIdSchema, workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
+import { screenErrors } from "@grasp-os/shared/screens";
 import { RpcTarget } from "capnweb";
 
+import { appFor, draftFiles, screensIn } from "./apps.ts";
 import { organizationId } from "./auth/auth.ts";
 import { personOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
@@ -24,6 +27,7 @@ import { callbackFor, isStub, recheckedEvery } from "./page-callbacks.ts";
 import type { StillOpen } from "./page-callbacks.ts";
 import { fixQuestion, runToFix } from "./run-fixes.ts";
 import { RunSubscription } from "./run-subscription.ts";
+import { argumentsFor, screenCode } from "./screens-rpc.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 import { questionSchema } from "./workspace.ts";
@@ -252,6 +256,84 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
     return await withPerson(this.#check, async ({ userId }) => {
       requireFeature(this.#env, "app_builder");
       return await this.#chatsOf(userId).drafts(chatIdOf(chatId), userId);
+    });
+  }
+
+  /**
+   * A screen of the chat's draft of `app`, to preview (preview.ts): only
+   * while the person builds the App, as the agent must to write it.
+   */
+  async preview(
+    chatId: string,
+    app: string,
+    screen?: string
+  ): Promise<PreviewBundle> {
+    return await withPerson(this.#check, async (by) => {
+      requireFeature(this.#env, "app_builder");
+      requireFeature(this.#env, "app_preview");
+      const { id, name } = await appFor(this.#env, by, app, "builder");
+      const draft = await this.#chatsOf(by.userId).previewDraft(
+        chatIdOf(chatId),
+        by.userId,
+        id
+      );
+      const files = await draftFiles(this.#env, id, draft);
+      const screens = screensIn(files);
+      if (screens.length === 0) {
+        throw screenErrors.create("screen.not_found");
+      }
+      return {
+        app: id,
+        name,
+        revision: draft.revision,
+        screens,
+        ...(await screenCode(
+          this.#env,
+          Object.fromEntries(files),
+          screen ?? screens[0],
+          null
+        )),
+      };
+    });
+  }
+
+  /**
+   * Calls a method of the draft's server code in its preview, with plain
+   * data and the screen's callbacks, as a screen's call does
+   * (screens-rpc.ts); each push through a callback checks again that the
+   * connection may still follow chats.
+   */
+  async previewCall(
+    chatId: string,
+    app: string,
+    revision: number,
+    method: string,
+    args: unknown[]
+  ): Promise<unknown> {
+    return await withPerson(this.#check, async (by) => {
+      requireFeature(this.#env, "app_builder");
+      requireFeature(this.#env, "app_preview");
+      const { id } = await appFor(this.#env, by, app, "builder");
+      if (typeof method !== "string" || !Array.isArray(args)) {
+        throw screenErrors.create("screen.invalid");
+      }
+      const { passed, callbacks } = argumentsFor(args, this.#stillOpen);
+      try {
+        return await this.#chatsOf(by.userId).previewCall(
+          chatIdOf(chatId),
+          by.userId,
+          id,
+          revision,
+          method,
+          passed
+        );
+      } catch (error) {
+        // A failed call keeps no callback.
+        for (const callback of callbacks) {
+          callback[Symbol.dispose]();
+        }
+        throw error;
+      }
     });
   }
 

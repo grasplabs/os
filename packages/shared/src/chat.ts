@@ -1,5 +1,7 @@
 import { z } from "zod";
 
+import type { ScreenBundle } from "./screens.ts";
+
 // A person's chats with the organization's agent, as the frontend sees them
 // (core's chats-rpc.ts). Each chat belongs to the person who made it: only
 // they list, rename, delete, ask in or follow it.
@@ -29,6 +31,18 @@ export interface ChatDraft {
   changed: string[];
   /** When it was last written (ISO 8601). */
   updatedAt: string;
+}
+
+/**
+ * A screen of the chat's draft of an App, ready for a frame, as
+ * `ScreenBundle` is for a running App (`ChatsApi.preview`): at the draft's
+ * revision instead of a version, with the names of the draft's screens.
+ */
+export interface PreviewBundle extends Omit<ScreenBundle, "version"> {
+  /** Which write of the draft it was built from: its calls name it. */
+  revision: number;
+  /** The draft's screens, sorted. */
+  screens: string[];
 }
 
 /** Code the agent ran, or is writing, in a code step. */
@@ -222,6 +236,29 @@ export interface ChatsApi {
    * proposed, most recently written first.
    */
   drafts: (chatId: string) => Promise<ChatDraft[]>;
+  /**
+   * Screen `screen` of the chat's draft of `app` (its first screen when
+   * none is named), built, to preview: for the person while they build
+   * the App. Behind `app_preview`, as is `previewCall`.
+   */
+  preview: (
+    chatId: string,
+    app: string,
+    screen?: string
+  ) => Promise<PreviewBundle>;
+  /**
+   * Calls `method` of the draft's server code with `args`, as a screen's
+   * `call` does, in the draft's preview: nothing it does leaves the
+   * preview, and it reads no real data. `revision` is the preview's:
+   * `app.preview_outdated` once the draft changed.
+   */
+  previewCall: (
+    chatId: string,
+    app: string,
+    revision: number,
+    method: string,
+    args: unknown[]
+  ) => Promise<unknown>;
   /** Stops the agent's work on the chat; `false` when there was none. */
   cancel: (chatId: string) => Promise<boolean>;
   /**

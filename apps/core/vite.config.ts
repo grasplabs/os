@@ -46,6 +46,7 @@ export const screenTests = [
   "test/app-sandbox.test.ts",
   "test/agent-apps.test.ts",
   "test/agent-builds.test.ts",
+  "test/app-preview.test.ts",
   "test/workflows.test.ts",
   "test/workflow-chaos.test.ts",
   "test/held-runs.test.ts",
@@ -145,6 +146,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               chat: true,
               app_builder: true,
               run_notifications: true,
+              app_preview: true,
             },
             // Few enough statistics points to reach each bound in a test.
             STATISTICS_POINT_LIMITS: "10/25",

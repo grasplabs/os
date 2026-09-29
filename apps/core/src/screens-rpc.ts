@@ -77,23 +77,20 @@ const recheckMs = 5000;
  */
 const maxRunSubscriptions = 20;
 
-/** A running App's screen, built from its current version. */
-const openScreen = async (
+/** What a frame runs of a screen: its code, the kit's it needs, its CSS. */
+type ScreenCode = Omit<ScreenBundle, "app" | "name" | "version">;
+
+/**
+ * Screen `screen` of an App's `files` (at `version`; null for a chat's
+ * draft), built, with the kit modules it needs.
+ */
+export const screenCode = async (
   env: Env,
-  by: Identity,
-  app: unknown,
-  screen: unknown
-): Promise<ScreenBundle> => {
-  const {
-    id,
-    name: appName,
-    currentVersion: version,
-  } = await getApp(env, by, app);
+  files: Record<string, string>,
+  screen: unknown,
+  version: number | null
+): Promise<ScreenCode> => {
   const name = screenErrors.parse("screen.invalid", screenNameSchema, screen);
-  if (version === null) {
-    throw appErrors.create("app.not_running");
-  }
-  const files = await versionFiles(env, id, version);
   const path = `screens/${name}.tsx`;
   if (!Object.hasOwn(files, path)) {
     throw screenErrors.create("screen.not_found");
@@ -107,9 +104,6 @@ const openScreen = async (
   }
   const { modules } = await kitModules(env.ASSETS);
   return {
-    app: id,
-    name: appName,
-    version,
     screen: name,
     entry: appModuleName(path),
     runtime: kitModuleName(screenRuntime),
@@ -118,6 +112,32 @@ const openScreen = async (
       build.kitModules.map((module) => [module, modules[module] ?? ""])
     ),
     css: build.css,
+  };
+};
+
+/** A running App's screen, built from its current version. */
+const openScreen = async (
+  env: Env,
+  by: Identity,
+  app: unknown,
+  screen: unknown
+): Promise<ScreenBundle> => {
+  const {
+    id,
+    name: appName,
+    currentVersion: version,
+  } = await getApp(env, by, app);
+  // A name that can't be a screen's is refused before `app.not_running`.
+  screenErrors.parse("screen.invalid", screenNameSchema, screen);
+  if (version === null) {
+    throw appErrors.create("app.not_running");
+  }
+  const files = await versionFiles(env, id, version);
+  return {
+    app: id,
+    name: appName,
+    version,
+    ...(await screenCode(env, files, screen, version)),
   };
 };
 
@@ -135,7 +155,7 @@ const refusals = {
  * (how `live` in @grasp-os/sdk/screen subscribes), each as a function the
  * App can only call.
  */
-const argumentsFor = (
+export const argumentsFor = (
   args: unknown[],
   stillOpen: StillOpen
 ): { passed: unknown[]; callbacks: Disposable[] } => {

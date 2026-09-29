@@ -59,7 +59,7 @@ const facetName = "server";
  */
 const defaultCallTimeoutMs = 60_000;
 
-const callTimeoutMs = (env: Env): number => {
+export const callTimeoutMs = (env: Env): number => {
   const set = Number(env.APP_CALL_TIMEOUT_MS);
   return Number.isInteger(set) && set > 0 && set < defaultCallTimeoutMs
     ? set
@@ -136,7 +136,7 @@ export const isPlainData = (value: unknown): boolean => {
 /** `answer`, if it is plain data; `app.answer_invalid` if not. */
 const plainAnswer = (
   answer: AppAnswer,
-  version: number,
+  version: number | null,
   method: string
 ): AppAnswer => {
   if (!isPlainData(answer)) {
@@ -154,6 +154,75 @@ const isMethod = (
   value: unknown
 ): value is (...args: unknown[]) => Promise<AppAnswer> =>
   typeof value === "function";
+
+/**
+ * Refuses a method name core never calls on App code: not an identifier,
+ * or one the runtime gives a meaning of its own (`reservedMethods`).
+ */
+export const requireAppMethod = (method: string): void => {
+  if (!appMethodPattern.test(method) || reservedMethods.has(method)) {
+    throw appErrors.create("app.method_invalid", { method });
+  }
+};
+
+/** Which App's code a call ran: its version (null for a draft's), and method. */
+interface RanAt {
+  app: AppId;
+  version: number | null;
+  method: string;
+}
+
+/**
+ * An error of an App's code as its caller gets it: `app.failed`, with the
+ * version that ran and the App's own message, never a stack or a code the
+ * App made up. The log gets no App-written text: only which App, version
+ * and method, and the error's name.
+ */
+const appFailure = (error: unknown, { app, version, method }: RanAt): Error => {
+  log.warn("app.call_failed", {
+    appId: app,
+    version: version ?? undefined,
+    method,
+    errorName: errorNameOf(error),
+  });
+  const reported = appErrors.create("app.failed", {
+    version,
+    method,
+    message: messageOf(error),
+  });
+  reported.stack = undefined;
+  return reported;
+};
+
+/**
+ * Calls `method` of the App's server code running in `facet`, with
+ * `caller` first in its arguments: only the App's own methods, never what
+ * every stub has, and only plain data back. An error of the App's code
+ * comes back as `app.failed`.
+ */
+export const invokeServer = async (
+  facet: Fetcher,
+  caller: AppCaller,
+  args: unknown[],
+  at: RanAt
+): Promise<AppAnswer> => {
+  const { method, version } = at;
+  if (method in Object.getPrototypeOf(facet)) {
+    throw appErrors.create("app.method_invalid", { method });
+  }
+  const invoke: unknown = Reflect.get(facet, method);
+  if (!isMethod(invoke)) {
+    throw appErrors.create("app.method_invalid", { method });
+  }
+  let answer: AppAnswer;
+  try {
+    // Not `invoke.apply(...)`: on a stub, that calls a method "apply".
+    answer = await Reflect.apply(invoke, facet, [caller, ...args]);
+  } catch (error) {
+    throw appFailure(error, at);
+  }
+  return plainAnswer(answer, version, method);
+};
 
 /**
  * A screen's callback for its App's run changes, as the host keeps it:
@@ -332,9 +401,7 @@ export class App extends DurableObject<Env> {
     args: unknown[],
     via?: ExportCall
   ): Promise<AppAnswer> {
-    if (!appMethodPattern.test(method) || reservedMethods.has(method)) {
-      throw appErrors.create("app.method_invalid", { method });
-    }
+    requireAppMethod(method);
     const ms = Math.min(
       callTimeoutMs(this.env),
       (via?.deadline ?? Number.POSITIVE_INFINITY) - Date.now()
@@ -371,25 +438,12 @@ export class App extends DurableObject<Env> {
       }
       // What the App's stub calls in this call are audited with.
       this.#calls.set(token, { ...call, version });
-      // Only the App's own methods: not what every stub has.
-      if (method in Object.getPrototypeOf(running.facet)) {
-        throw appErrors.create("app.method_invalid", { method });
-      }
-      const invoke: unknown = Reflect.get(running.facet, method);
-      if (!isMethod(invoke)) {
-        throw appErrors.create("app.method_invalid", { method });
-      }
-      let answer: AppAnswer;
-      try {
-        // Not `invoke.apply(...)`: on a stub, that calls a method "apply".
-        answer = await Reflect.apply(invoke, running.facet, [
-          { ...caller, token } satisfies AppCaller,
-          ...args,
-        ]);
-      } catch (error) {
-        throw this.#reported(error, running.version, method);
-      }
-      return plainAnswer(answer, running.version, method);
+      return await invokeServer(
+        running.facet,
+        { ...caller, token } satisfies AppCaller,
+        args,
+        { app: this.#app, version: running.version, method }
+      );
     };
 
     const limit = deadline(ms);
@@ -745,28 +799,6 @@ export class App extends DurableObject<Env> {
       id: facetName,
     }));
     return { facet, version: server.version };
-  }
-
-  /**
-   * An error of the App's code as its caller gets it: `app.failed`, with
-   * the version that ran and the App's own message, never a stack or a
-   * code the App made up. The log gets no App-written text: only which
-   * App, version and method, and the error's name.
-   */
-  #reported(error: unknown, version: number, method: string): Error {
-    log.warn("app.call_failed", {
-      appId: this.#app,
-      version,
-      method,
-      errorName: errorNameOf(error),
-    });
-    const reported = appErrors.create("app.failed", {
-      version,
-      method,
-      message: messageOf(error),
-    });
-    reported.stack = undefined;
-    return reported;
   }
 }
 
