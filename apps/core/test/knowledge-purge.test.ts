@@ -167,7 +167,7 @@ describe("a personal purge", setUpTime, () => {
     const stays = await personOf("user");
     const agent = newAgent();
     const secret = `vanderzwaluw${unique()}`;
-    const work = await newChat();
+    const work = await newChat(agent);
     const asLeaver = actingFor(agent, leaver.userId);
     const asStays = actingFor(agent, stays.userId);
     const own = { type: "own" } as const;
@@ -317,13 +317,14 @@ describe("a personal purge", setUpTime, () => {
   });
 
   it("leaves nothing of a person whose text was only theirs, and can run again", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const leaver = await personOf("user");
     const secret = `oudejans${unique()}`;
-    const work = await newChat();
+    const work = await newChat(agent);
     await saveUserMemory(
       env,
-      actingFor(newAgent(), leaver.userId),
+      actingFor(agent, leaver.userId),
       work,
       { type: "own" },
       { text: `# ${secret}\nCall me ${secret}.`, ifVersion: 0 }
@@ -396,7 +397,7 @@ describe("a purge of content", setUpTime, () => {
       `# Company\n${name} runs payroll.`
     );
     const agent = newAgent();
-    const work = await newChat();
+    const work = await newChat(agent);
     const asAgent = actingFor(agent, admin.userId);
     const proposal = await proposeMemory(env, asAgent, work, {
       file: "MEMORY.md",
@@ -1088,7 +1089,7 @@ describe("a purge of content", setUpTime, () => {
     const admin = await personOf("admin");
     const agent = newAgent();
     const asAgent = actingFor(agent, admin.userId);
-    const work = await newChat();
+    const work = await newChat(agent);
     const name = `Jonker${unique()}`;
     const { memory } = await admin.api.memory.collections();
     const path = `agents/${agent.agentId}/AGENTS.md`;
@@ -1259,13 +1260,14 @@ describe("a purge whose index cleanup fails", setUpTime, () => {
   });
 
   it("says the data is gone and a run again cleans up, for a person", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const leaver = await personOf("user");
     const secret = `brouwer${unique()}`;
     await saveUserMemory(
       env,
-      actingFor(newAgent(), leaver.userId),
-      await newChat(),
+      actingFor(agent, leaver.userId),
+      await newChat(agent),
       { type: "own" },
       { text: `# About me\nCall me ${secret}.`, ifVersion: 0 }
     );
@@ -1296,6 +1298,7 @@ describe("a purge whose index cleanup fails", setUpTime, () => {
 
 describe("purging", setUpTime, () => {
   it("is only for the client's admins, and never without the token prepared for it", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const otherAdmin = await personOf("admin");
     const builder = await personOf("builder");
@@ -1305,8 +1308,8 @@ describe("purging", setUpTime, () => {
     const staff = staffRpc.core.authenticate();
     await saveUserMemory(
       env,
-      actingFor(newAgent(), user.userId),
-      await newChat(),
+      actingFor(agent, user.userId),
+      await newChat(agent),
       { type: "own" },
       { text: "# About me", ifVersion: 0 }
     );
@@ -1477,7 +1480,7 @@ describe("purging", setUpTime, () => {
   it("refuses to run a purge that a new version made impossible, before changing anything", async () => {
     const admin = await personOf("admin");
     const agent = actingFor(newAgent(), admin.userId);
-    const work = await newChat();
+    const work = await newChat(agent);
     const own = { type: "own" } as const;
     const handbook = await admin.api.knowledge.createCollection({
       name: "Handbook",
@@ -1523,7 +1526,7 @@ describe("purging", setUpTime, () => {
   it("refuses to run a purge of a memory file now over its limit, even when only earlier versions hold a term", async () => {
     const admin = await personOf("admin");
     const agent = actingFor(newAgent(), admin.userId);
-    const work = await newChat();
+    const work = await newChat(agent);
     const own = { type: "own" } as const;
     const name = `Mulder${unique()}`;
     const first = await saveUserMemory(env, agent, work, own, {
@@ -1564,6 +1567,7 @@ describe("purging", setUpTime, () => {
   });
 
   it("refuses documents that don't exist, naming them, when prepared and when run", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const leaver = await personOf("user");
     const handbook = await admin.api.knowledge.createCollection({
@@ -1589,8 +1593,8 @@ describe("purging", setUpTime, () => {
     // owner's Personal collection.
     const user = await saveUserMemory(
       env,
-      actingFor(newAgent(), leaver.userId),
-      await newChat(),
+      actingFor(agent, leaver.userId),
+      await newChat(agent),
       { type: "own" },
       { text: "# About me\nCall me Roos.", ifVersion: 0 }
     );

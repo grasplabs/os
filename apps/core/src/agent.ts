@@ -7,7 +7,7 @@ import type {
   SystemMessage,
 } from "@earendil-works/pi-ai";
 
-import type { AgentApi, AgentScope } from "./agent-apis.ts";
+import type { AgentApi, AgentScope } from "./agent-scope.ts";
 import { describeRun, runCode } from "./code-mode.ts";
 import type { CodeRun } from "./code-mode.ts";
 import type { AgentModel } from "./models.ts";
@@ -50,6 +50,7 @@ What it returns comes back to you as JSON, with what it logs and anything it thr
 const apisSection = (apis: readonly AgentApi[]): string =>
   [
     "<apis>",
+    ...apis.flatMap(({ types }) => (types === undefined ? [] : [types, ""])),
     "interface Env {",
     ...apis.flatMap(({ declaration }) =>
       declaration.split("\n").map((line) => `  ${line}`)

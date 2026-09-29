@@ -1,8 +1,6 @@
-import type { Message } from "@earendil-works/pi-ai";
 import { agentErrors } from "@grasp-os/shared/agent";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { featureErrors } from "@grasp-os/shared/errors";
-import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import { modelErrors } from "@grasp-os/shared/models";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { evictDurableObject, runInDurableObject } from "cloudflare:test";
@@ -17,7 +15,16 @@ import {
   maxSteps,
 } from "../src/agent.ts";
 import { codeLimits } from "../src/code-mode.ts";
-import { workspace } from "../src/durable-objects.ts";
+import {
+  chatOf,
+  codeResults,
+  codeStep,
+  gatewayConfig,
+  model,
+  pointAtGateway,
+  says,
+  transcript,
+} from "./agent-chat.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { allEvents } from "./audit-events.ts";
@@ -25,105 +32,15 @@ import { mockIdp } from "./idp.ts";
 import { signedInWithRole } from "./sign-in.ts";
 
 // A chat's agent, through the Workspace object: the loop, the code it runs
-// in isolates of their own, and the model gateway, all real. The outside
-// system is the model provider behind AI Gateway: a fake behind the
-// object's AI binding answers with scripted replies, in the provider's own
-// wire format.
-
-const model = "anthropic/claude-sonnet-4-5";
-
-/** The model calls `executeCode` with `code`, `times` times at once. */
-const codeStep = (code: string, times = 1): GatewayReply => ({
-  text: "",
-  toolCalls: Array.from({ length: times }, () => ({
-    id: `call_${crypto.randomUUID()}`,
-    name: "executeCode",
-    arguments: { code },
-  })),
-  inputTokens: 200,
-  outputTokens: 40,
-});
-
-/** The model answers. */
-const says = (text: string): GatewayReply => ({
-  text,
-  inputTokens: 200,
-  outputTokens: 20,
-});
-
-type WorkspaceStub = ReturnType<typeof workspace>;
-
-/** The deployment's model config: the model the tests use, and no other. */
-const gatewayConfig = { gateway: "grasp-os-test", models: [model] };
-
-/**
- * Points the object's model gateway at a fake AI Gateway, with `config`,
- * and switches the agent on or off, the other flags as the tests' env
- * sets them (the client's model rules on). Objects may share their env,
- * so every test sets both; a restarted object may get a new one, so it is
- * pointed again.
- */
-const pointAtGateway = async (
-  stub: WorkspaceStub,
-  gateway: ReturnType<typeof fakeGateway>,
-  {
-    agentOn = true,
-    config = gatewayConfig,
-  }: { agentOn?: boolean; config?: object } = {}
-) => {
-  await runInDurableObject(stub, (instance) => {
-    const objectEnv: unknown = Reflect.get(instance, "env");
-    if (typeof objectEnv !== "object" || objectEnv === null) {
-      throw new TypeError("The Workspace object has no env");
-    }
-    Object.assign(objectEnv, {
-      AI: gateway.binding,
-      MODEL_GATEWAY: config,
-      FEATURES: {
-        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-        agent: agentOn,
-      },
-    });
-  });
-};
+// in isolates of their own, and the model gateway, all real (agent-chat.ts).
 
 const idp = mockIdp();
 
 /** A new chat for a person no other test uses, answered by `replies`. */
 const newChat = async (...replies: GatewayReply[]) => {
-  const id = workspaceIdSchema.parse(crypto.randomUUID());
-  const stub = workspace(env, id);
   // A member of the organization, whom no other test uses.
-  const { userId: personId } = await signedInWithRole(idp, "user");
-  const chat = await stub.createChat("Questions", personId);
-  const gateway = fakeGateway(...replies);
-  await pointAtGateway(stub, gateway);
-  const ask = async (text: string) => await stub.ask(chat.id, { text, model });
-  return { id, stub, chat, personId, gateway, ask };
-};
-
-/** The chat's transcript, as the object keeps it. */
-const transcript = async (
-  stub: WorkspaceStub,
-  chatId: string
-): Promise<Message[]> =>
-  await runInDurableObject(stub, (instance) => instance.messages(chatId));
-
-/** What the code steps of the chat returned, or threw, as the model read it. */
-const codeResults = async (stub: WorkspaceStub, chatId: string) => {
-  const messages = await transcript(stub, chatId);
-  return messages.flatMap((message) =>
-    message.role === "toolResult"
-      ? [
-          {
-            isError: message.isError,
-            text: message.content
-              .flatMap((part) => (part.type === "text" ? [part.text] : []))
-              .join(""),
-          },
-        ]
-      : []
-  );
+  const { userId } = await signedInWithRole(idp, "user");
+  return await chatOf(userId, ...replies);
 };
 
 /** Runs `code` as the chat's only code step, and returns what it gave. */
@@ -215,7 +132,7 @@ describe("chat agent", () => {
     ]);
   });
 
-  it("audits every model request as the chat's agent, acting for the chat's person", async () => {
+  it("audits every model request as the workspace's agent, acting for the chat's person, in the chat", async () => {
     const { id, chat, personId, ask } = await newChat(
       codeStep("export default async () => 1 + 1;"),
       says("Two.")
@@ -225,12 +142,20 @@ describe("chat agent", () => {
 
     const events = await modelCallsBy(personId, 2);
     expect(events.map(({ actor }) => actor)).toStrictEqual([
-      { type: "agent", agentId: `${id}/${chat.id}`, onBehalfOf: personId },
-      { type: "agent", agentId: `${id}/${chat.id}`, onBehalfOf: personId },
+      { type: "agent", agentId: id, onBehalfOf: personId },
+      { type: "agent", agentId: id, onBehalfOf: personId },
     ]);
     expect(events.map(({ detail }) => detail)).toStrictEqual([
-      expect.objectContaining({ purpose: "chat.turn", outcome: "answered" }),
-      expect.objectContaining({ purpose: "chat.turn", outcome: "answered" }),
+      expect.objectContaining({
+        purpose: "chat.turn",
+        outcome: "answered",
+        chat: chat.id,
+      }),
+      expect.objectContaining({
+        purpose: "chat.turn",
+        outcome: "answered",
+        chat: chat.id,
+      }),
     ]);
     // Metadata only: never the question or the code.
     expect(JSON.stringify(events)).not.toContain("1 + 1");
@@ -377,18 +302,18 @@ describe("chat agent sandbox", () => {
 
     expect(result).toStrictEqual({
       isError: false,
-      text: `Returned:\n${JSON.stringify({ given: ["chat"], imported: [], exports: [] })}`,
+      text: `Returned:\n${JSON.stringify({ given: ["chat", "knowledge"], imported: [], exports: [] })}`,
     });
   });
 
   it("names the API it doesn't have, and the ones it does", async () => {
     const result = await runStep(
-      "export default async (env) => await env.knowledge.search('policy');"
+      "export default async (env) => await env.mailbox.send('hi');"
     );
 
     expect(result?.isError).toBeTruthy();
     expect(result?.text).toContain(
-      "This chat has no API named env.knowledge. It has: env.chat."
+      "This chat has no API named env.mailbox. It has: env.chat, env.knowledge."
     );
   });
 

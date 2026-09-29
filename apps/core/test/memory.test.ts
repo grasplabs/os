@@ -174,7 +174,7 @@ describe("memory for a context", setUpTime, () => {
     );
     const { id: appId } = await builder.api.apps.create({ name: "Desk" });
     await release(builder, appId, { "AGENTS.md": markers.app });
-    const work = await newChat();
+    const work = await newChat(agent);
     const asAgent = actingFor(agent, builder.userId);
     await userMemory(asAgent, work, markers.user);
     await userMemory(actingFor(agent, other.userId), work, markers.otherUser);
@@ -235,7 +235,7 @@ describe("memory for a context", setUpTime, () => {
     const u = unique();
     await saveOver(admin, memory, "AGENTS.md", `Be brief. ${u}`);
     await saveOver(admin, memory, "MEMORY.md", `We are Acme. ${u}`);
-    const work = await newChat();
+    const work = await newChat(agent);
     const asAgent = actingFor(agent, admin.userId);
     await userMemory(asAgent, work, `Call me Sam. ${u}`);
     const found = await forContext(env, asAgent, work, { type: "own" });
@@ -252,7 +252,7 @@ describe("memory for a context", setUpTime, () => {
     const user = await personOf("user");
     const agent = newAgent();
     const app = { type: "app" as const, appId: `app-${unique()}` };
-    const work = await newChat();
+    const work = await newChat(agent);
     const asAgent = actingFor(agent, user.userId);
     const asApp = actingFor(app, user.userId);
     await expect(
@@ -288,6 +288,7 @@ describe("memory for a context", setUpTime, () => {
   });
 
   it("gives an App's AGENTS.md only to agents of people who build that App", async () => {
+    const agent = newAgent();
     const [owner, member, builder, outsider] = await Promise.all([
       personOf("builder"),
       personOf("builder"),
@@ -306,8 +307,7 @@ describe("memory for a context", setUpTime, () => {
       id: builder.userId,
       role: "builder",
     });
-    const work = await newChat();
-    const agent = newAgent();
+    const work = await newChat(agent);
     /** "ok" when the agent gets the App's AGENTS.md, or why it doesn't. */
     const onApp = async (person: Person) => {
       const read = async () => {
@@ -336,7 +336,7 @@ describe("memory for a context", setUpTime, () => {
     const memory = await memoryOf(admin);
     await saveOver(admin, memory, "AGENTS.md", `Agents ${unique()}`);
     await saveOver(admin, memory, "MEMORY.md", `Before ${unique()}`);
-    const work = await newChat();
+    const work = await newChat(agent);
     const asFirst = actingFor(agent, first.userId);
     const own = { type: "own" } as const;
     const read = async (authority: Authority) =>
@@ -400,7 +400,7 @@ describe("memory for a context", setUpTime, () => {
     const admin = await personOf("admin");
     const agent = newAgent();
     const memory = await memoryOf(admin);
-    const work = await newChat();
+    const work = await newChat(agent);
     const asAgent = actingFor(agent, admin.userId);
     await saveOver(admin, memory, "AGENTS.md", `Agents ${unique()}`);
     const saved = await userMemory(asAgent, work, "Prefers Dutch.");
@@ -430,6 +430,8 @@ describe("memory for a context", setUpTime, () => {
         appId,
         appVersion,
         sensitive: false,
+        // Which chat of its workspace read it.
+        chat: work.type === "chat" ? work.chatId : null,
       },
     };
     expect({
@@ -457,7 +459,7 @@ describe("memory for a context", setUpTime, () => {
     const admin = await personOf("admin");
     const agent = newAgent();
     const memory = await memoryOf(admin);
-    const work = await newChat();
+    const work = await newChat(agent);
     const asAgent = actingFor(agent, admin.userId);
     await saveOver(admin, memory, "AGENTS.md", `Agents ${unique()}`);
     const { id: appId } = await admin.api.apps.create({ name: "Bare" });
@@ -482,11 +484,12 @@ describe("memory for a context", setUpTime, () => {
   });
 
   it("gives each caller its own copy of cached memory", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const memory = await memoryOf(admin);
     await saveOver(admin, memory, "AGENTS.md", `Agents ${unique()}`);
-    const work = await newChat();
-    const asAgent = actingFor(newAgent(), admin.userId);
+    const work = await newChat(agent);
+    const asAgent = actingFor(agent, admin.userId);
     const first = await forContext(env, asAgent, work, { type: "own" });
     const asReturned = structuredClone(first.files);
     // One caller changes what it got.
@@ -502,13 +505,14 @@ describe("memory for a context", setUpTime, () => {
   });
 
   it("is empty while memory is switched off", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const memory = await memoryOf(admin);
     await saveOver(admin, memory, "AGENTS.md", `On ${unique()}`);
     const found = await forContext(
       { ...env, FEATURES: { knowledge: true } },
-      actingFor(newAgent(), admin.userId),
-      await newChat(),
+      actingFor(agent, admin.userId),
+      await newChat(agent),
       { type: "own" }
     );
     expect({ files: found.files, text: found.text }).toStrictEqual({
@@ -602,9 +606,10 @@ describe("memory limits", setUpTime, () => {
   });
 
   it("refuse an agent's USER.md over its limit", async () => {
+    const agent = newAgent();
     const user = await personOf("user");
-    const asAgent = actingFor(newAgent(), user.userId);
-    const work = await newChat();
+    const asAgent = actingFor(agent, user.userId);
+    const work = await newChat(agent);
     await expect(
       Promise.all([
         outcome(userMemory(asAgent, work, sized(2001))),
@@ -620,7 +625,7 @@ describe("an agent's USER.md", setUpTime, () => {
     const other = await personOf("user");
     const agent = newAgent();
     const asAgent = actingFor(agent, user.userId);
-    const work = await newChat();
+    const work = await newChat(agent);
     let first: Awaited<ReturnType<typeof userMemory>> | undefined;
     const events = await auditedDuring(async () => {
       first = await userMemory(asAgent, work, "Works in Utrecht.");
@@ -687,8 +692,8 @@ describe("an agent's USER.md", setUpTime, () => {
       { type: "app", appId: `app-${unique()}` },
       user.userId
     );
-    const work = await newChat();
-    const restricted = await newChat();
+    const work = await newChat(agent);
+    const restricted = await newChat(agent);
     await restrict(env, asAgent, restricted, []);
     await expect(
       Promise.all([

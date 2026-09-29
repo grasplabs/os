@@ -1,4 +1,4 @@
-import { workspaceIdSchema } from "@grasp-os/shared/ids";
+import { appIdSchema, workspaceIdSchema } from "@grasp-os/shared/ids";
 import type {
   CollectionReader,
   KnowledgeTools,
@@ -15,11 +15,18 @@ import type { ConnectionBinding } from "../src/bindings.ts";
 import { workspace } from "../src/durable-objects.ts";
 import type { WorkContext } from "../src/restricted.ts";
 
-/** A new chat in a new workspace, where an agent works. */
-export const newChat = async (): Promise<
-  Extract<WorkContext, { type: "chat" }>
-> => {
-  const workspaceId = workspaceIdSchema.parse(crypto.randomUUID());
+/**
+ * A new chat in the workspace of `agent`, where it works: an agent works
+ * only in its own workspace's chats, so the workspace is named after it.
+ */
+export const newChat = async (
+  of: PermissionSubjectInput | Authority
+): Promise<Extract<WorkContext, { type: "chat" }>> => {
+  const subject = "subject" in of ? of.subject : of;
+  // Anyone else's chat is in a workspace of its own, which no agent's is.
+  const workspaceId = workspaceIdSchema.parse(
+    subject.type === "agent" ? subject.agentId : crypto.randomUUID()
+  );
   const { id } = await workspace(env, workspaceId).createChat(
     "Chat",
     "person-1"
@@ -42,12 +49,22 @@ export const actingFor = (
 
 type Bindings = Awaited<ReturnType<typeof bindingsFor>>;
 
-/** The env an agent or App gets for `authority` in `context`, or a chat of its own. */
+/**
+ * The env an agent or App gets for `authority` in `context`, or where it
+ * works without one: an agent in a chat of its workspace, an App as itself.
+ */
 export const envOf = async (
   authority: Authority,
   context?: WorkContext
 ): Promise<Bindings> =>
-  await bindingsFor(env, authority, context ?? (await newChat()));
+  await bindingsFor(
+    env,
+    authority,
+    context ??
+      (authority.subject.type === "app"
+        ? { type: "app", appId: appIdSchema.parse(authority.subject.appId) }
+        : await newChat(authority))
+  );
 
 /**
  * Tests register no connection in connect, so a call that ends in this

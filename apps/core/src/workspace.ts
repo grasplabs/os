@@ -1,28 +1,33 @@
 import type { Message } from "@earendil-works/pi-ai";
 import { agentErrors } from "@grasp-os/shared/agent";
-import { delegateActorOf } from "@grasp-os/shared/audit";
+import {
+  auditProvenanceMaxItems,
+  delegateActorOf,
+} from "@grasp-os/shared/audit";
 import { featureErrors } from "@grasp-os/shared/errors";
-import { chatIdSchema, workspaceIdSchema } from "@grasp-os/shared/ids";
+import {
+  chatIdSchema,
+  identifierSchema,
+  workspaceIdSchema,
+} from "@grasp-os/shared/ids";
 import type { ChatId } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
-import {
-  authoritySchema,
-  permissionErrors,
-} from "@grasp-os/shared/permissions";
+import { permissionErrors } from "@grasp-os/shared/permissions";
 import { DurableObject } from "cloudflare:workers";
 import { asc, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
 
 import { agentApis } from "./agent-apis.ts";
-import type { CodeRunCall } from "./agent-apis.ts";
+import { chatAuthority } from "./agent-scope.ts";
+import type { CodeRunCall } from "./agent-scope.ts";
 import { isMessage, runTurn } from "./agent.ts";
 import type { TurnResult } from "./agent.ts";
 import { memberRole } from "./auth/identity.ts";
 import { codeLimits } from "./code-mode.ts";
 import { migrateOnWake } from "./db/migrate.ts";
 import migrations from "./db/workspace/migrations/migrations.js";
-import { chatMessages, chats } from "./db/workspace/schema.ts";
+import { chatMessages, chatSources, chats } from "./db/workspace/schema.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
 import { models } from "./models.ts";
 
@@ -56,6 +61,12 @@ export const maxChatChars = 4_000_000;
  * one: a few turns' worth (at most 30 runs each).
  */
 const endedRunsKept = 1000;
+
+/**
+ * The sources one API call of a code run read from, as it records them:
+ * a few collections or a connection, each an identifier.
+ */
+const sourcesSchema = z.array(identifierSchema).max(auditProvenanceMaxItems);
 
 /** A person's or team's workspace: chats and the Code Mode agent on Pi. */
 export class Workspace extends DurableObject<Env> {
@@ -154,35 +165,34 @@ export class Workspace extends DurableObject<Env> {
       // The object is named after its workspace (`workspace` in
       // durable-objects.ts).
       const workspaceId = workspaceIdSchema.parse(this.ctx.id.name);
-      // The chat's agent, acting for the chat's person, in this chat: the
-      // audit log's actor, and the rules' context (its restricted mode).
-      const authority = authoritySchema.parse({
-        subject: { type: "agent", agentId: `${workspaceId}/${chat.id}` },
-        onBehalfOf: personId,
-        mode: "interactive",
-      });
+      const scope = { workspaceId, chatId: chat.id, personId };
+      // The workspace's agent, acting for the chat's person, in this chat:
+      // the audit log's actor, and the rules' context (its restricted mode).
+      const authority = chatAuthority(scope);
       // Refuses a model the deployment or its rules don't allow before
-      // anything is kept. Nothing the chat's APIs read feeds a request yet
-      // (the sample API reads nothing). The first API that reads data must
-      // record its sources per chat, persisted and only from open runs, and
-      // pass the chat's whole set as every later request's provenance, so a
-      // later turn can't send what an earlier one read to a model the rules
-      // forbid.
-      const model = await models(this.env).agent({
-        model: parsed.data.model,
-        purpose: "chat.turn",
-        trigger: delegateActorOf(authority),
-        work: {
-          authority,
-          context: { type: "chat", workspaceId, chatId: chat.id },
+      // anything is kept. Every request carries everything the chat has
+      // read from, in this turn and every one before it, read again for
+      // each request: the rules judge it by all of it, so a later turn
+      // can't send what an earlier one read to a model they forbid.
+      const model = await models(this.env).agent(
+        {
+          model: parsed.data.model,
+          purpose: "chat.turn",
+          trigger: delegateActorOf(authority),
+          provenance: this.#sources(chat.id),
+          work: {
+            authority,
+            context: { type: "chat", workspaceId, chatId: chat.id },
+          },
         },
-      });
+        () => this.#sources(chat.id)
+      );
       return await runTurn({
         history: this.#transcript(chat.id),
         question: parsed.data.text,
         model,
         apis: agentApis(),
-        scope: { workspaceId, chatId: chat.id, personId },
+        scope,
         whyStop: async () => {
           if (!featureEnabled(this.env, "agent")) {
             return featureErrors.create("feature.disabled", {
@@ -269,6 +279,43 @@ export class Workspace extends DurableObject<Env> {
       this.#codeRuns.set(key, "reported");
     }
     return "ended";
+  }
+
+  /**
+   * Records what an API call of a code run of the chat read from (see
+   * agent-apis.ts), before the call hands over what it read: `false`, and
+   * nothing recorded, once the run has ended, so the call must not hand it
+   * over. Each source is kept once, for good; every later model request of
+   * the chat carries them all.
+   */
+  recordSources(
+    chatId: ChatId,
+    runId: string,
+    ids: readonly string[]
+  ): boolean {
+    if (typeof this.#codeRuns.get(`${chatId}/${runId}`) !== "number") {
+      return false;
+    }
+    const sources = sourcesSchema.parse(ids);
+    if (sources.length > 0) {
+      const createdAt = new Date();
+      this.#db
+        .insert(chatSources)
+        .values(sources.map((sourceId) => ({ chatId, sourceId, createdAt })))
+        .onConflictDoNothing()
+        .run();
+    }
+    return true;
+  }
+
+  /** Everything the chat has read from, as `recordSources` kept it. */
+  #sources(chatId: ChatId): string[] {
+    return this.#db
+      .select({ sourceId: chatSources.sourceId })
+      .from(chatSources)
+      .where(eq(chatSources.chatId, chatId))
+      .all()
+      .map(({ sourceId }) => sourceId);
   }
 
   /** The chat's transcript, oldest first. */

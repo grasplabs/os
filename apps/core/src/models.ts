@@ -28,6 +28,7 @@ import {
   auditActorSchema,
   auditEventSchema,
   auditIdentifierMaxLength,
+  auditProvenanceMaxItems,
   createAuditEvent,
 } from "@grasp-os/shared/audit";
 import type { AuditEntry } from "@grasp-os/shared/audit";
@@ -39,7 +40,7 @@ import {
   modelRulesConfigSchema as rulesConfigSchema,
 } from "@grasp-os/shared/deployment-config";
 import type { ModelRules } from "@grasp-os/shared/deployment-config";
-import { connectionIdSchema } from "@grasp-os/shared/ids";
+import { connectionIdSchema, identifierSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
 import {
@@ -272,8 +273,12 @@ const sessionShape = {
   purpose: z.string().max(64).regex(purposePattern),
   /** Who or what asked: a person, an agent, an App or a workflow run. */
   trigger: auditActorSchema,
-  /** IDs of the resources that fed the prompt. */
-  provenance: auditEventSchema.shape.provenance,
+  /**
+   * IDs of the resources that fed the prompt: all of them, however many,
+   * as the rules judge by every one. The audit log records as many as its
+   * event holds (`keepingProvenance`).
+   */
+  provenance: z.array(identifierSchema).default([]),
   /**
    * Connections whose data may have fed the prompt, such as a run's: for
    * the deployment's rules only, never recorded.
@@ -632,13 +637,55 @@ interface Recorded {
   errorType: string | undefined;
 }
 
-const auditEntry = ({ call, ref, judged }: Admitted, recorded: Recorded) => {
+/**
+ * The chat a call works in, if it works in one: its actor is the
+ * workspace's agent, for every chat of the workspace.
+ */
+const chatOf = ({ work }: Session): string | null =>
+  work?.context.type === "chat" ? work.context.chatId : null;
+
+/** Whether `entry` makes an event the audit log takes. */
+const fitsAuditLog = (entry: AuditEntry): boolean => {
+  try {
+    createAuditEvent(entry, "core");
+    return true;
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * A call's audit entry with as much of its provenance as the audit log
+ * holds, each ID once: at most {@link auditProvenanceMaxItems}, halved
+ * until the event fits (the rest of it is identifiers and small values,
+ * well within the limit), and how many it left out. The rules judged the
+ * call by all of it; the log names what fits, so a call that read a lot is
+ * still recorded, never refused for it.
+ */
+const keepingProvenance = (
+  provenance: readonly string[],
+  entryWith: (kept: string[], dropped: number) => AuditEntry
+): AuditEntry => {
+  const unique = [...new Set(provenance)];
+  const entryKeeping = (kept: number): AuditEntry =>
+    entryWith(unique.slice(0, kept), unique.length - kept);
+  let kept = Math.min(unique.length, auditProvenanceMaxItems);
+  while (kept > 0 && !fitsAuditLog(entryKeeping(kept))) {
+    kept = Math.floor(kept / 2);
+  }
+  return entryKeeping(kept);
+};
+
+const auditEntry = (
+  { call, ref, judged }: Admitted,
+  recorded: Recorded
+): AuditEntry => {
   const { logId } = recorded;
-  return {
+  return keepingProvenance(call.provenance, (provenance, dropped) => ({
     actor: call.trigger,
     action: "model.call",
     requestId: call.requestId,
-    provenance: call.provenance,
+    provenance,
     model: {
       provider: ref.provider,
       model: ref.id,
@@ -661,8 +708,10 @@ const auditEntry = ({ call, ref, judged }: Admitted, recorded: Recorded) => {
       euOnly: judged.euOnly ?? null,
       // Why it carried sensitive data, if a data rule asked and it did.
       sensitive: judged.sensitive ?? null,
+      provenanceDropped: dropped,
+      chat: chatOf(call),
     },
-  } satisfies AuditEntry;
+  }));
 };
 
 /**
@@ -724,21 +773,10 @@ const record = async (
   );
 };
 
-/** Whether `entry` makes an event the audit log takes. */
-const fitsAuditLog = (entry: AuditEntry): boolean => {
-  try {
-    createAuditEvent(entry, "core");
-    return true;
-  } catch {
-    return false;
-  }
-};
-
 /**
  * The audit entry of a refused call, with as much of its provenance as
  * fits the audit log (`provenanceDropped` says how much didn't), so a
- * refusal is always recorded: a refused call, unlike a sent one, never
- * had its event's size checked.
+ * refusal is always recorded.
  */
 const refusedEntry = (
   call: Session,
@@ -747,26 +785,20 @@ const refusedEntry = (
   // Never a model name so long that the event would be refused.
   const model =
     call.model.length <= auditIdentifierMaxLength ? call.model : null;
-  const entryKeeping = (kept: number): AuditEntry => ({
+  return keepingProvenance(call.provenance, (provenance, dropped) => ({
     actor: call.trigger,
     action: "model.refused",
     requestId: call.requestId,
-    provenance: call.provenance.slice(0, kept),
+    provenance,
     detail: {
       purpose: call.purpose,
       reason: code,
       because: because ?? null,
       model,
-      provenanceDropped: call.provenance.length - kept,
+      provenanceDropped: dropped,
+      chat: chatOf(call),
     },
-  });
-  // Halved until it fits: the rest of the event is identifiers and small
-  // values, well within the limit.
-  let kept = call.provenance.length;
-  while (kept > 0 && !fitsAuditLog(entryKeeping(kept))) {
-    kept = Math.floor(kept / 2);
-  }
-  return entryKeeping(kept);
+  }));
 };
 
 /** Records a call the deployment's rules refused, with the reason, and refuses it. */
@@ -836,7 +868,8 @@ const admit = async (
       "core"
     );
   } catch {
-    // Its provenance, say, is too long to record.
+    // Never expected: its provenance is kept to what fits, and every other
+    // field is bounded. Refused, so no request goes unrecorded.
     throw modelErrors.create("model.invalid_call");
   }
   const verdict = await judgeCall(env, rules, call);
