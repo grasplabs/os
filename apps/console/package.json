@@ -8,7 +8,7 @@
     "dev": "vp dev",
     "build": "vp build",
     "preview": "vp preview",
-    "deploy": "vp build && wrangler deploy",
+    "deploy": "vp build && node ../../scripts/wrangler-deploy.ts",
     "typegen": "wrangler types --include-runtime=false",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "wrangler d1 migrations apply DB --remote"

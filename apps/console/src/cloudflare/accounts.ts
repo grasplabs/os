@@ -32,6 +32,39 @@ export const getAccount = async (
 export const listAccounts = async (api: CloudflareApi): Promise<Account[]> =>
   await listAll(api, "/accounts", accountSchema);
 
+/**
+ * The account named `name`, created if the token sees none by that name.
+ * Only a tenant admin's token (Cloudflare's partner programme) may create
+ * accounts: any other is refused, and the account is adopted by id
+ * (`getAccount`) instead. A create is a POST, so it isn't retried after a
+ * server error or a lost answer; running this again finds the account it
+ * made by its name, so it makes one account however often it runs. Two
+ * accounts of that name stop it rather than pick one.
+ */
+export const ensureAccount = async (
+  api: CloudflareApi,
+  name: string
+): Promise<Account> => {
+  // The API matches `name` loosely: pick the exact one.
+  const listed = await listAll(api, "/accounts", accountSchema, { name });
+  const matches = listed.filter((account) => account.name === name);
+  const [found, ...others] = matches;
+  if (others.length > 0) {
+    throw new Error(`${matches.length} accounts are named ${name}`);
+  }
+  return (
+    found ??
+    (await api.call(
+      {
+        method: "POST",
+        path: "/accounts",
+        json: { name, type: "standard" },
+      },
+      accountSchema
+    ))
+  );
+};
+
 const subdomainSchema = z.object({ subdomain: z.string() });
 
 /**

@@ -36,16 +36,8 @@ const secrets: DeploySecrets = {
     connect: { COMPOSIO_API_KEY: "composio" },
   },
 };
-const isKv = (value: unknown): value is KVNamespace =>
-  typeof value === "object" &&
-  value !== null &&
-  "get" in value &&
-  "put" in value;
-/** The router's hostname map in the test pool (vite.test.config.ts). */
-const hosts: unknown = Reflect.get(env, "ROUTER_HOSTS");
-if (!isKv(hosts)) {
-  throw new TypeError("Expected the router's hostname map as ROUTER_HOSTS");
-}
+/** The router's hostname map, as the console binds it (wrangler.jsonc). */
+const hosts = env.ROUTER_HOSTS;
 const domain = "grasp.test";
 const context = {
   api,

@@ -256,6 +256,25 @@ export const mockCloudflareApi = (token: string) => {
   const matched: { matches: (call: ApiCall) => boolean; failure: Failure }[] =
     [];
 
+  /** Adds an account the token is a member of, and returns what it holds. */
+  const addAccount = (name = "Client"): AccountState => {
+    const account: AccountState = {
+      id: crypto.randomUUID().replaceAll("-", ""),
+      name,
+      d1: [],
+      buckets: [],
+      gateways: [],
+      scripts: new Map(),
+      workflows: new Map(),
+      assets: new Set(),
+      sessions: new Map(),
+      completions: new Set(),
+      scriptUploads: [],
+    };
+    accounts.set(account.id, account);
+    return account;
+  };
+
   /** Calls being answered now, and the most at once. */
   const load = { now: 0, peak: 0 };
 
@@ -266,12 +285,25 @@ export const mockCloudflareApi = (token: string) => {
   ): Promise<Response> => {
     const authorized =
       request.headers.get("authorization") === `Bearer ${token}`;
-    if (call.path === "/accounts" && call.method === "GET") {
+    if (call.path === "/accounts") {
       if (!authorized) {
         return refusal(403, 10_000, "Authentication error");
       }
+      if (call.method === "POST") {
+        // As a tenant admin's token creates one: it's a member at once.
+        const body: Json =
+          typeof call.body === "object" && call.body !== null
+            ? { ...call.body }
+            : {};
+        const created = addAccount(text(body, "name"));
+        return envelope({ id: created.id, name: created.name });
+      }
+      // The API matches `name` loosely; the fake as a substring.
+      const name = call.query.get("name") ?? "";
       return paged(
-        [...accounts.values()].map(({ id, name }) => ({ id, name })),
+        [...accounts.values()]
+          .filter((account) => account.name.includes(name))
+          .map(({ id, name: accountName }) => ({ id, name: accountName })),
         call.query
       );
     }
@@ -406,23 +438,10 @@ export const mockCloudflareApi = (token: string) => {
     /** The most calls it was answering at once in this test. */
     peakConcurrency: () => load.peak,
     /** Adds an account the token is a member of, and returns what it holds. */
-    addAccount: (name = "Client"): AccountState => {
-      const account: AccountState = {
-        id: crypto.randomUUID().replaceAll("-", ""),
-        name,
-        d1: [],
-        buckets: [],
-        gateways: [],
-        scripts: new Map(),
-        workflows: new Map(),
-        assets: new Set(),
-        sessions: new Map(),
-        completions: new Set(),
-        scriptUploads: [],
-      };
-      accounts.set(account.id, account);
-      return account;
-    },
+    addAccount,
+    /** The accounts named `name`, as the fake holds them. */
+    accountsNamed: (name: string): AccountState[] =>
+      [...accounts.values()].filter((account) => account.name === name),
     /** Fails the `n`th call from now as `failure` says, whatever it asks. */
     failCall: (n: number, failure: Failure) => {
       planned.set(calls.length + n, failure);

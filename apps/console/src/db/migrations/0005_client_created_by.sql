@@ -1,0 +1,1 @@
+ALTER TABLE `clients` ADD `created_by` text;

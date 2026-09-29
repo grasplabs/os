@@ -1,7 +1,8 @@
 /**
  * Console D1 schema: intent and history only. What runs in a client's
- * account (live Worker versions, secrets) is read from that account; client
- * account tokens live in Secrets Store, never here (threat model R17).
+ * account (live Worker versions, secrets) is read from that account; the
+ * token that reaches client accounts lives in Secrets Store, never here
+ * (threat model R17).
  */
 import {
   index,
@@ -71,6 +72,8 @@ export const clients = sqliteTable("clients", {
   status: text({ enum: ["provisioning", "active", "offboarded"] })
     .notNull()
     .default("provisioning"),
+  /** The staff member who started provisioning it (src/provision/). */
+  createdBy: text("created_by"),
   /** The release it stays on while pinned, whatever the rollouts. */
   pinnedReleaseId: text("pinned_release_id").references(() => releases.id),
   createdAt: timestamp("created_at").notNull(),

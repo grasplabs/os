@@ -7,6 +7,8 @@
  * nothing but the open-source app's code.
  *
  * The cron imports newly published releases (src/releases/import.ts).
+ * `ProvisionClient` is the Workflow that onboards a client
+ * (src/provision/workflow.ts).
  */
 import handler from "@tanstack/react-start/server-entry";
 
@@ -14,6 +16,8 @@ import { withAccess } from "./access.ts";
 import type { Staff } from "./access.ts";
 import { consoleDatabase } from "./db/act.ts";
 import { importReleases } from "./releases/import.ts";
+
+export { ProvisionClient } from "./provision/workflow.ts";
 
 declare module "@tanstack/react-start" {
   interface Register {

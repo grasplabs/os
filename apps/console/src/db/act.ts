@@ -1,6 +1,8 @@
 /**
  * How the console changes anything: the change and its audit event in one
- * D1 batch, so neither lands without the other (threat model R19, CO6).
+ * D1 batch, so neither lands without the other (threat model R19, CO6). A
+ * change outside the database (a Workflow started) is recorded first, on
+ * its own (`audit`).
  */
 import { sql } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
@@ -66,6 +68,19 @@ export const act = async (
   // matter. (`actIfChanged` is different: its event must follow the
   // statement whose changes it reads.)
   await db.batch([record, ...statements]);
+};
+
+/**
+ * Records `event` by `actor` on its own: for an action whose change isn't
+ * in the console's database, such as starting a Workflow. Recorded before
+ * the action, so an action that then fails is still an audited attempt.
+ */
+export const audit = async (
+  db: ConsoleDatabase,
+  actor: Actor,
+  event: ConsoleEvent
+): Promise<void> => {
+  await db.insert(auditEvents).values(rowOf(actor, event));
 };
 
 /**

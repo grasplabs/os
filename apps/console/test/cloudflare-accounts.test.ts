@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  ensureAccount,
   ensureAiGateway,
   ensureD1Database,
   ensureR2Bucket,
@@ -54,6 +55,22 @@ describe("accounts", () => {
     }
     await expect(listAccounts(api)).rejects.toThrow(
       "Listing /accounts passed 20 pages"
+    );
+  });
+
+  it("creates an account by name once, matching the name exactly", async () => {
+    cloudflare.addAccount("grasp-os-acme-old");
+    const created = await ensureAccount(api, "grasp-os-acme");
+    const again = await ensureAccount(api, "grasp-os-acme");
+    expect(again).toStrictEqual(created);
+    expect(cloudflare.accountsNamed("grasp-os-acme")).toHaveLength(1);
+  });
+
+  it("refuses to pick between two accounts of one name", async () => {
+    cloudflare.addAccount("grasp-os-twin");
+    cloudflare.addAccount("grasp-os-twin");
+    await expect(ensureAccount(api, "grasp-os-twin")).rejects.toThrow(
+      "2 accounts are named grasp-os-twin"
     );
   });
 
