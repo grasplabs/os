@@ -11,29 +11,20 @@ import type { eventSources } from "./db/schema.ts";
 export type EventSource = typeof eventSources.$inferSelect;
 
 /**
- * The requests one sync may still send to providers, shared by every
- * source it reads, whichever the provider: a Worker invocation may only
- * send so many subrequests.
+ * The requests one sync may still send out, shared by every source it
+ * reads, whichever the provider: a Worker invocation may only send so
+ * many subrequests.
  */
 export interface RequestBudget {
   /** The requests left. */
   readonly left: number;
-  /** Counts one request. */
+  /**
+   * Counts one request, or throws a `spent` SourceError when none is
+   * left: the read stops there, keeps its cursor, and is read again by
+   * the next sync. So the budget is a hard bound.
+   */
   spend: () => void;
 }
-
-/** A budget of `requests` requests. */
-export const requestBudget = (requests: number): RequestBudget => {
-  let left = requests;
-  return {
-    get left() {
-      return left;
-    },
-    spend: () => {
-      left -= 1;
-    },
-  };
-};
 
 /**
  * What a read reaches a provider with: the connection's access token,
@@ -112,18 +103,47 @@ export class SourceError extends Error {
   readonly resync: boolean;
   /** The provider's HTTP status, when it answered with an error. */
   readonly status: number | undefined;
+  /**
+   * The sync's request budget ran out: not a failure of the source, which
+   * keeps its cursor and is read by the next sync.
+   */
+  readonly spent: boolean;
 
   constructor(
     message: string,
-    options: { retryAfterMs?: number; resync?: boolean; status?: number } = {}
+    options: {
+      retryAfterMs?: number;
+      resync?: boolean;
+      status?: number;
+      spent?: boolean;
+    } = {}
   ) {
     super(message);
     this.name = "SourceError";
     this.retryAfterMs = options.retryAfterMs;
     this.resync = options.resync ?? false;
     this.status = options.status;
+    this.spent = options.spent ?? false;
   }
 }
+
+/** A budget of `requests` requests. */
+export const requestBudget = (requests: number): RequestBudget => {
+  let left = requests;
+  return {
+    get left() {
+      return left;
+    },
+    spend: () => {
+      if (left <= 0) {
+        throw new SourceError("The sync's request budget is spent", {
+          spent: true,
+        });
+      }
+      left -= 1;
+    },
+  };
+};
 
 /**
  * Items after which one read of a source stops, which bounds its events
@@ -204,61 +224,99 @@ export const providerLink = (
   return url;
 };
 
+/** What a provider is to connect's requests. */
+interface ProviderSpec {
+  name: string;
+  hosts: readonly string[];
+  headers?: Record<string, string>;
+  resyncStatuses?: readonly number[];
+}
+
 /**
- * Fetches JSON from a provider with the connection's token: only on
- * `hosts`, over HTTPS, never following a redirect (it would take the
- * token along). Each request counts against the sync's budget. A
- * throttled answer says how long to wait; a gone cursor (410, or a
- * status of `resyncStatuses`) starts the source over.
+ * Sends one request to a provider with the connection's token: only to
+ * its `hosts`, over HTTPS, never following a redirect (it would take the
+ * token along), counted against the sync's budget. Its answer's bytes,
+ * at most `answerMaxBytes`, and content type. A throttled answer says
+ * how long to wait; a gone cursor (410, or a status of `resyncStatuses`)
+ * starts the source over.
  */
-export const readFromProvider =
-  ({
-    name,
-    hosts,
-    headers = {},
-    resyncStatuses = [],
-  }: {
-    name: string;
-    hosts: readonly string[];
-    headers?: Record<string, string>;
-    resyncStatuses?: readonly number[];
-  }) =>
-  async ({ token, budget }: ProviderAccess, url: string): Promise<unknown> => {
-    if (!isProviderUrl(url, hosts)) {
-      throw new SourceError(`${name} handed back a link to another host`, {
-        resync: true,
-      });
-    }
-    budget.spend();
-    const response = await fetch(url, {
-      headers: { ...headers, authorization: `Bearer ${token}` },
-      redirect: "manual",
-      signal: AbortSignal.timeout(requestTimeoutMs),
+const requestProvider = async (
+  { name, hosts, headers = {}, resyncStatuses = [] }: ProviderSpec,
+  { token, budget }: ProviderAccess,
+  url: string,
+  post?: { body: string; contentType: string }
+): Promise<{ text: string; contentType: string }> => {
+  if (!isProviderUrl(url, hosts)) {
+    throw new SourceError(`${name} handed back a link to another host`, {
+      resync: true,
     });
-    const { status } = response;
-    if (status === 429 || status === 503) {
-      throw new SourceError(`${name} is throttling reads`, {
-        retryAfterMs: retryAfterMs(response.headers.get("retry-after")),
-        status,
-      });
-    }
-    if (status === 410 || resyncStatuses.includes(status)) {
-      throw new SourceError(`${name} no longer has the cursor`, {
-        resync: true,
-        status,
-      });
-    }
-    if (!response.ok) {
-      throw new SourceError(`${name} answered ${status}`, { status });
-    }
-    const bytes = await response.arrayBuffer();
-    if (bytes.byteLength > answerMaxBytes) {
-      throw new SourceError(`${name}'s answer is too large`);
-    }
-    try {
-      return JSON.parse(new TextDecoder().decode(bytes));
-    } catch {
-      // Not the parser's message: it quotes the answer.
-      throw new SourceError(`${name}'s answer isn't JSON`);
-    }
+  }
+  budget.spend();
+  const response = await fetch(url, {
+    method: post === undefined ? "GET" : "POST",
+    headers: {
+      ...headers,
+      ...(post === undefined ? {} : { "content-type": post.contentType }),
+      authorization: `Bearer ${token}`,
+    },
+    ...(post === undefined ? {} : { body: post.body }),
+    redirect: "manual",
+    signal: AbortSignal.timeout(requestTimeoutMs),
+  });
+  const { status } = response;
+  if (status === 429 || status === 503) {
+    throw new SourceError(`${name} is throttling reads`, {
+      retryAfterMs: retryAfterMs(response.headers.get("retry-after")),
+      status,
+    });
+  }
+  if (status === 410 || resyncStatuses.includes(status)) {
+    throw new SourceError(`${name} no longer has the cursor`, {
+      resync: true,
+      status,
+    });
+  }
+  if (!response.ok) {
+    throw new SourceError(`${name} answered ${status}`, { status });
+  }
+  const bytes = await response.arrayBuffer();
+  if (bytes.byteLength > answerMaxBytes) {
+    throw new SourceError(`${name}'s answer is too large`);
+  }
+  return {
+    text: new TextDecoder().decode(bytes),
+    contentType: response.headers.get("content-type") ?? "",
   };
+};
+
+/** Parses a provider's JSON, never quoting it in an error. */
+export const providerJson = (name: string, text: string): unknown => {
+  try {
+    return JSON.parse(text);
+  } catch {
+    // Not the parser's message: it quotes the answer.
+    throw new SourceError(`${name}'s answer isn't JSON`);
+  }
+};
+
+/** Fetches JSON from a provider, as `requestProvider` sends it. */
+export const readFromProvider =
+  (spec: ProviderSpec) =>
+  async (access: ProviderAccess, url: string): Promise<unknown> => {
+    const { text } = await requestProvider(spec, access, url);
+    return providerJson(spec.name, text);
+  };
+
+/**
+ * Posts `body` to a provider, as `requestProvider` sends it: its answer's
+ * text and content type (a batch endpoint's multipart answer).
+ */
+export const postToProvider =
+  (spec: ProviderSpec) =>
+  async (
+    access: ProviderAccess,
+    url: string,
+    body: string,
+    contentType: string
+  ): Promise<{ text: string; contentType: string }> =>
+    await requestProvider(spec, access, url, { body, contentType });

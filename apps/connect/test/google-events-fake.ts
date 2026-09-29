@@ -115,9 +115,44 @@ export const googleEventsFake = () => {
         : { newStartPageToken: String(to) }),
     });
   };
+  /**
+   * Gmail's batch endpoint: each part a request of its own, answered as
+   * Gmail answers it, in one multipart answer.
+   */
+  const batch = async (request: Request): Promise<Response> => {
+    const type = request.headers.get("content-type") ?? "";
+    const boundary = type.split("boundary=")[1]?.trim() ?? "";
+    const text = await request.text();
+    const parts = text
+      .split(`--${boundary}`)
+      .slice(1)
+      .filter((part) => !part.startsWith("--"));
+    const answers = await Promise.all(
+      parts.map(async (part, index) => {
+        const line = part.split("\r\n").find((each) => each.startsWith("GET "));
+        const target = new URL(
+          `https://gmail.googleapis.com${line?.split(" ")[1] ?? "/"}`
+        );
+        const answer = gmail(decodeURIComponent(target.pathname), target);
+        const status =
+          answer.status === 200 ? "200 OK" : `${answer.status} Not Found`;
+        return `--batch_answer\r\nContent-Type: application/http\r\nContent-ID: <response-m${index}>\r\n\r\nHTTP/1.1 ${status}\r\nContent-Type: application/json; charset=UTF-8\r\n\r\n${await answer.text()}\r\n`;
+      })
+    );
+    return new Response(`${answers.join("")}--batch_answer--`, {
+      headers: { "content-type": "multipart/mixed; boundary=batch_answer" },
+    });
+  };
   return {
     /** Google's answer; 404 for anything else. */
-    answer: (request: Request, url: URL): Response => {
+    answer: async (request: Request, url: URL): Promise<Response> => {
+      if (
+        request.method === "POST" &&
+        url.hostname === "gmail.googleapis.com" &&
+        url.pathname === "/batch/gmail/v1"
+      ) {
+        return await batch(request);
+      }
       if (request.method !== "GET") {
         return notFound();
       }

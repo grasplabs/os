@@ -744,9 +744,11 @@ export type Trigger<ScheduleParam extends string = string> =
    *   `mimeType`, `size`, `folderId`, `createdAt`, `webUrl`.
    *
    * Google Workspace connections report, within about a minute:
-   * - `google.mail.received` (read action `mail.list`): mail reaching a
+   * - `google.mail.received` (read action `mail.list`): mail arriving in a
    *   mailbox's inbox. Its payload: `mailbox`, `id`, `threadId`, `folder`
    *   (`"inbox"`), `subject`, `from` (`{ name, address }`), `receivedAt`.
+   *   Only mail as it arrives: unlike `m365.mail.received`, a message
+   *   moved into the inbox later isn't reported.
    * - `google.file.created` (read action `files.list`): a file created in
    *   a shared drive, in any folder. Its payload as `m365.file.created`'s.
    *

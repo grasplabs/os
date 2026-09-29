@@ -11,6 +11,7 @@ import {
 } from "vite-plus/test";
 import { z } from "zod";
 
+import { SourceError, requestBudget } from "../src/event-kinds.ts";
 import { outboxMax, pollIntervalMs, requestsPerSync } from "../src/events.ts";
 import { accessTokenFor } from "../src/tokens.ts";
 import { auditEvents, connectAccount, ownAccount, someone } from "./connect.ts";
@@ -18,6 +19,7 @@ import {
   driveFile,
   driveFileId,
   driveFolder,
+  driveShortcut,
   driveTrashed,
   gmailId,
   gmailInvoice,
@@ -38,12 +40,12 @@ const providers = fakeProviders();
 let google: GoogleEventsFake = googleEventsFake();
 /** Whether Google fails every request for where a mailbox or drive stands. */
 let positionsFail = false;
-const internet = fakeInternet((request, url) =>
+const internet = fakeInternet(async (request, url) =>
   positionsFail &&
   (url.pathname.endsWith("/profile") ||
     url.pathname.endsWith("/changes/startPageToken"))
     ? Response.json({ error: { code: 503 } }, { status: 500 })
-    : google.answer(request, url)
+    : await google.answer(request, url)
 );
 const audit = auditEvents();
 
@@ -105,9 +107,20 @@ const sources = async () => {
     .parse(results);
 };
 
-/** The paths Google was asked for, without their queries. */
-const paths = (): string[] =>
-  internet.sent.map(({ host, path }) => `${host}${path.split("?")[0]}`);
+/** `count` events of `connection` in the outbox, waiting for core. */
+const fillOutbox = async (connection: string, count: number) => {
+  await env.DB.prepare(
+    "INSERT INTO connector_events (id, key, connection_id, event, retry_at, created_at) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) SELECT 'filler-' || i, 'filler-' || i, ?, '{}', 0, 0 FROM n"
+  )
+    .bind(count, connection)
+    .run();
+};
+
+const emptyOutbox = async () => {
+  await env.DB.prepare(
+    "DELETE FROM connector_events WHERE id LIKE 'filler-%'"
+  ).run();
+};
 
 describe("Google Workspace connector events", () => {
   beforeEach(async () => {
@@ -137,22 +150,26 @@ describe("Google Workspace connector events", () => {
     await sync([listener(gmail)]);
     later();
     await sync([listener(gmail)]);
-    const address = encodeURIComponent(gmail.address);
+    const token = `Bearer ${await accessTokenFor(env, gmail.id)}`;
 
-    // The own mailbox by its address, never `me`: where history stood as
-    // the source started, then what came since (nothing yet, then the new
-    // mail), with each new message's metadata.
-    expect(paths()).toStrictEqual([
-      `gmail.googleapis.com/gmail/v1/users/${address}/profile`,
-      `gmail.googleapis.com/gmail/v1/users/${address}/history`,
-      `gmail.googleapis.com/gmail/v1/users/${address}/history`,
-      `gmail.googleapis.com/gmail/v1/users/${address}/messages/${gmailId(3)}`,
-      `gmail.googleapis.com/gmail/v1/users/${address}/messages/${gmailId(4)}`,
-      `gmail.googleapis.com/gmail/v1/users/${address}/history`,
-    ]);
-    expect(internet.sent[0]?.headers.authorization).toBe(
-      `Bearer ${await accessTokenFor(env, gmail.id)}`
-    );
+    // Only Gmail, with the connection's token, and the own mailbox by its
+    // address, never `me`: in the paths and in each batched request.
+    expect({
+      hosts: [...new Set(internet.sent.map(({ host }) => host))],
+      tokens: [
+        ...new Set(internet.sent.map(({ headers }) => headers.authorization)),
+      ],
+      mailbox: internet.sent.every(
+        ({ path, body }) =>
+          !`${path}${body}`.includes("/users/me/") &&
+          (path.startsWith("/batch/") ||
+            path.includes(`/users/${encodeURIComponent(gmail.address)}/`))
+      ),
+    }).toStrictEqual({
+      hosts: ["gmail.googleapis.com"],
+      tokens: [token],
+      mailbox: true,
+    });
     await expect(outboxed()).resolves.toStrictEqual([
       {
         id: gmailId(4),
@@ -186,11 +203,10 @@ describe("Google Workspace connector events", () => {
     ]);
   });
 
-  it("name every message a large read found in the audit log, a hundred to an event", async () => {
+  it("stop a read at the history record that brings it to a hundred messages, and read on from there", async () => {
     const gmail = await connected();
     await sync([listener(gmail)]);
-    // Forty history records of three messages each, twenty to a page: the
-    // read stops after the page that passes a hundred, with 120 events.
+    // Forty history records of three messages each.
     for (let record = 0; record < 40; record += 1) {
       google.receive(
         gmail.address,
@@ -199,71 +215,80 @@ describe("Google Workspace connector events", () => {
     }
     later();
     await sync([listener(gmail)]);
-    const events = await audit.events();
-    const reads = events.filter(
-      ({ action }) => action === "connection.events.read"
-    );
-
-    expect(
-      reads.map(({ provenance, detail }) => [provenance.length, detail.count])
-    ).toStrictEqual([
-      [100, 100],
-      [20, 20],
-    ]);
-    await expect(outboxed()).resolves.toHaveLength(120);
-  });
-
-  it("stop a sync once its request budget can't take another read, and read the rest next time", async () => {
-    const mailboxes = await Promise.all(
-      Array.from({ length: 4 }, async () => await connected())
-    );
-    const listeners = mailboxes.map((gmail) => listener(gmail));
-    await sync(listeners);
-    // A flood in each: 100 messages, a request each for their metadata,
-    // and five pages of history.
-    for (const { address } of mailboxes) {
-      for (let n = 1; n <= 100; n += 1) {
-        google.receive(address, gmailInvoice(n, Date.now()));
-      }
-    }
-    later();
-    await sync(listeners);
     const first = await outboxed();
-    const asked = internet.sent.length;
-    await sync(listeners);
-    const second = await outboxed();
+    const events = await audit.events();
+    await sync([listener(gmail)]);
+    const all = await outboxed();
 
-    // Where each mailbox stood and a first read of it, then three floods
-    // of 105 requests: a fourth wouldn't fit in the 400, so it waits,
-    // where it was, for the next.
+    // The 34th record passes a hundred: 102 messages, all in the audit
+    // log, a hundred to an event; the other 18 read next.
     expect({
       first: first.length,
-      askedFirst: asked,
-      second: second.length,
-      askedAll: internet.sent.length,
-      budget: requestsPerSync,
-    }).toStrictEqual({
-      first: 300,
-      askedFirst: 8 + 3 * 105,
-      second: 400,
-      askedAll: 8 + 4 * 105,
-      budget: 400,
-    });
+      reads: events
+        .filter(({ action }) => action === "connection.events.read")
+        .map(({ provenance }) => provenance.length),
+      all: all.length,
+    }).toStrictEqual({ first: 102, reads: [100, 2], all: 120 });
+  });
+
+  it("keep every sync within its request budget through a flood of many-message records, and move on", async () => {
+    const [big, busy] = await Promise.all([connected(), connected()]);
+    const listeners = [listener(big), listener(busy)];
+    await sync(listeners);
+    // One record of 600 messages, and sixty of five.
+    google.receive(
+      big.address,
+      ...Array.from({ length: 600 }, (_, n) => gmailInvoice(n + 1, Date.now()))
+    );
+    for (let record = 0; record < 60; record += 1) {
+      google.receive(
+        busy.address,
+        ...Array.from({ length: 5 }, (_, n) =>
+          gmailInvoice(1000 + record * 5 + n, Date.now())
+        )
+      );
+    }
+    later();
+    const perSync: number[] = [];
+    for (let run = 0; run < 4; run += 1) {
+      const before = internet.sent.length;
+      // oxlint-disable-next-line no-await-in-loop -- one sync after another
+      await sync(listeners);
+      perSync.push(internet.sent.length - before);
+    }
+    const events = await outboxed();
+
+    expect({
+      withinBudget: perSync.every((requests) => requests <= requestsPerSync),
+      events: events.length,
+    }).toStrictEqual({ withinBudget: true, events: 900 });
+  });
+
+  it("hold a sync to its request budget: a request past it stops the read, as spent, not failed", () => {
+    const budget = requestBudget(2);
+    budget.spend();
+    budget.spend();
+    let thrown: unknown;
+    try {
+      budget.spend();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect({
+      left: budget.left,
+      spent: thrown instanceof SourceError && thrown.spent,
+      resync: thrown instanceof SourceError && thrown.resync,
+    }).toStrictEqual({ left: 0, spent: true, resync: false });
   });
 
   it("take where a mailbox's history stands as soon as they start, so a first read that comes late misses nothing", async () => {
     const gmail = await connected();
     // No room to read: the first read has to wait.
-    await env.DB.prepare(
-      "INSERT INTO connector_events (id, key, connection_id, event, retry_at, created_at) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) SELECT 'filler-' || i, 'filler-' || i, ?, '{}', 0, 0 FROM n"
-    )
-      .bind(outboxMax, gmail.id)
-      .run();
+    await fillOutbox(gmail.id, outboxMax);
     await sync([listener(gmail)]);
     google.receive(gmail.address, gmailInvoice(1, Date.now()));
-    await env.DB.prepare(
-      "DELETE FROM connector_events WHERE id LIKE 'filler-%'"
-    ).run();
+    await emptyOutbox();
     later();
     await sync([listener(gmail)]);
     const events = await outboxed();
@@ -271,15 +296,11 @@ describe("Google Workspace connector events", () => {
     expect(events.map(({ id }) => id)).toStrictEqual([gmailId(1)]);
   });
 
-  it("keep nothing of a read that finds more than the outbox has room for, and read it again once there's room", async () => {
+  it("read near a full outbox only as far as fits, and the rest once there's room", async () => {
     const gmail = await connected();
     await sync([listener(gmail)]);
-    // Room for 150 events; forty records of four messages: 160.
-    await env.DB.prepare(
-      "INSERT INTO connector_events (id, key, connection_id, event, retry_at, created_at) WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?) SELECT 'filler-' || i, 'filler-' || i, ?, '{}', 0, 0 FROM n"
-    )
-      .bind(outboxMax - 150, gmail.id)
-      .run();
+    // Room for one read of up to 150 events; forty records of four.
+    await fillOutbox(gmail.id, outboxMax - 150);
     for (let record = 0; record < 40; record += 1) {
       google.receive(
         gmail.address,
@@ -288,18 +309,70 @@ describe("Google Workspace connector events", () => {
     }
     later();
     await sync([listener(gmail)]);
-    const whileFull = await outboxed();
-    await env.DB.prepare(
-      "DELETE FROM connector_events WHERE id LIKE 'filler-%'"
-    ).run();
+    const nearFull = await outboxed();
+    // No room for another read.
+    await sync([listener(gmail)]);
+    const stillNearFull = await outboxed();
+    await emptyOutbox();
     await sync([listener(gmail)]);
     const afterwards = await outboxed();
 
     expect({
-      whileFull: whileFull.length,
-      afterwards: afterwards.length,
-    }).toStrictEqual({ whileFull: outboxMax - 150, afterwards: 160 });
+      read: nearFull.length - (outboxMax - 150),
+      waited: stillNearFull.length === nearFull.length,
+      all: afterwards.length,
+    }).toStrictEqual({ read: 100, waited: true, all: 160 });
   });
+
+  it("read a sender's From header in time however it's padded, and unescape its name", async () => {
+    const gmail = await connected();
+    await sync([listener(gmail)]);
+    const padded = gmailInvoice(1, Date.now());
+    const escaped = gmailInvoice(2, Date.now());
+    google.receive(gmail.address, {
+      ...padded,
+      payload: {
+        ...padded.payload,
+        headers: [
+          { name: "From", value: `${"\u00A0".repeat(50_000)}"x" <` },
+          { name: "Subject", value: "S".repeat(20_000) },
+        ],
+      },
+    });
+    google.receive(gmail.address, {
+      ...escaped,
+      payload: {
+        ...escaped.payload,
+        headers: [
+          {
+            name: "From",
+            value: String.raw`"Billing \"Dept\"" <billing@northwind.example.com>`,
+          },
+        ],
+      },
+    });
+    later();
+    await sync([listener(gmail)]);
+    const events = await outboxed();
+    const payloads = events.map(({ payload }) =>
+      z
+        .object({
+          subject: z.string().nullable(),
+          from: z.object({ name: z.string().nullable() }).nullable(),
+        })
+        .parse(payload)
+    );
+
+    expect(
+      payloads.map(({ subject, from }) => [
+        subject?.length ?? 0,
+        from?.name ?? null,
+      ])
+    ).toStrictEqual([
+      [1000, null],
+      [0, 'Billing "Dept"'],
+    ]);
+  }, 10_000);
 
   it("back off taking a position that keeps failing, as a failed read does", async () => {
     const gmail = await connected();
@@ -375,6 +448,7 @@ describe("Google Workspace connector events", () => {
     const created = new Date().toISOString();
     google.change(financeDrive, driveFolder(financeDrive, 1, created));
     google.change(financeDrive, driveTrashed(financeDrive, 2, created));
+    google.change(financeDrive, driveShortcut(financeDrive, 6, created));
     google.change(financeDrive, driveFile("0AOtherDrive", 3, created));
     google.change(
       financeDrive,
@@ -388,11 +462,16 @@ describe("Google Workspace connector events", () => {
     await expect(sources()).resolves.toMatchObject([
       { resource: financeDrive },
     ]);
-    expect(paths()).toStrictEqual([
-      "www.googleapis.com/drive/v3/changes/startPageToken",
-      "www.googleapis.com/drive/v3/changes",
-      "www.googleapis.com/drive/v3/changes",
-    ]);
+    // Drive only, each request held to the shared drive.
+    expect(
+      internet.sent.every(
+        ({ host, path }) =>
+          host === "www.googleapis.com" &&
+          path.startsWith("/drive/v3/changes") &&
+          new URL(`https://${host}${path}`).searchParams.get("driveId") ===
+            financeDrive
+      )
+    ).toBeTruthy();
     await expect(outboxed()).resolves.toStrictEqual([
       {
         id: driveFileId(5),

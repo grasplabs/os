@@ -260,20 +260,58 @@ const splitAddresses = (value: string): string[] => {
   return found.map((each) => each.trim()).filter((each) => each !== "");
 };
 
-const namedAddress = /^(?<name>.*?)\s*<(?<address>[^<>]*)>$/su;
+/** Longest address header read, in characters: anything past it is cut. */
+export const addressHeaderMaxLength = 4096;
 
-/** The addresses of an address header (`From`, `To`), in order. */
+/**
+ * `Name <address>` split at its last `<`, with no regex: a sender writes
+ * the header, and a pattern that backtracks would let one header stall
+ * whatever reads it. `null` for a bare address.
+ */
+const namedAddress = (
+  value: string
+): { name: string; address: string } | null => {
+  const open = value.lastIndexOf("<");
+  if (open === -1 || !value.endsWith(">")) {
+    return null;
+  }
+  const address = value.slice(open + 1, -1);
+  return address.includes(">")
+    ? null
+    : { name: value.slice(0, open).trimEnd(), address };
+};
+
+/** A display name, unquoted, with its escapes (`\"`) undone. */
+const unquoted = (name: string): string => {
+  const inner =
+    name.length >= 2 && name.startsWith('"') && name.endsWith('"')
+      ? name.slice(1, -1)
+      : name;
+  let plain = "";
+  let escaped = false;
+  for (const character of inner) {
+    if (!escaped && character === "\\") {
+      escaped = true;
+      continue;
+    }
+    escaped = false;
+    plain += character;
+  }
+  return plain.trim();
+};
+
+/**
+ * The addresses of an address header (`From`, `To`), in order, from at
+ * most `addressHeaderMaxLength` characters of it.
+ */
 export const addressesOf = (value: string | undefined): Address[] =>
-  splitAddresses(value ?? "").map((each) => {
-    const named = namedAddress.exec(each);
+  splitAddresses((value ?? "").slice(0, addressHeaderMaxLength)).map((each) => {
+    const named = namedAddress(each);
     if (named === null) {
       return { name: null, address: each };
     }
-    const name = (named.groups?.name ?? "")
-      .replace(/^"(?<inner>.*)"$/su, "$<inner>")
-      .replaceAll(/\\(?<escaped>.)/gu, "$<escaped>")
-      .trim();
-    const address = named.groups?.address?.trim() ?? "";
+    const name = unquoted(named.name);
+    const address = named.address.trim();
     return {
       name: name === "" ? null : name,
       address: address === "" ? null : address,

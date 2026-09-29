@@ -2,7 +2,8 @@
  * What Gmail's and Drive's APIs answer about new mail and files, as
  * recorded from them with the names, addresses and IDs made up: a
  * message's metadata (the headers connect asks for), and a shared drive's
- * changes: a new file, a new folder, a trashed file, one of another drive.
+ * changes: a new file, a new folder, a shortcut, a trashed file, one of
+ * another drive.
  */
 
 /** A Gmail message ID, as Gmail shapes them. */
@@ -76,4 +77,15 @@ export const driveFolder = (drive: string, n: number, createdAt: string) => ({
 export const driveTrashed = (drive: string, n: number, createdAt: string) => ({
   ...driveFile(drive, n, createdAt),
   file: { ...driveFile(drive, n, createdAt).file, trashed: true },
+});
+
+/** A shortcut created in `drive`: it points at a file, it isn't one. */
+export const driveShortcut = (drive: string, n: number, createdAt: string) => ({
+  ...driveFile(drive, n, createdAt),
+  file: {
+    ...driveFile(drive, n, createdAt).file,
+    name: "Shortcut to Invoice",
+    mimeType: "application/vnd.google-apps.shortcut",
+    size: undefined,
+  },
 });

@@ -6,7 +6,8 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./google": "./src/google.ts"
+    "./google": "./src/google.ts",
+    "./mime": "./src/mime.ts"
   },
   "dependencies": {
     "@grasp-os/connector-kit": "workspace:*",

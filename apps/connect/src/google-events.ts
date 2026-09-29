@@ -1,10 +1,14 @@
+import { addressesOf } from "@grasp-os/connector-google-workspace/mime";
 import { z } from "zod";
 
 import {
   SourceError,
   isSince,
   newSince,
+  postToProvider,
+  providerJson,
   readFromProvider,
+  readMaxItems,
 } from "./event-kinds.ts";
 import type {
   EventKind,
@@ -39,12 +43,14 @@ const gmailHost = "gmail.googleapis.com";
 const apisHost = "www.googleapis.com";
 
 /** Google, sent the token: only on its API hosts, over HTTPS. */
-const google = readFromProvider({
+const googleSpec = {
   name: "Google",
   hosts: [gmailHost, apisHost],
   // Gmail answers a history ID it no longer keeps with a 404.
   resyncStatuses: [404],
-});
+};
+const google = readFromProvider(googleSpec);
+const googlePost = postToProvider(googleSpec);
 
 /** A query string, each value percent-encoded. */
 const queryOf = (query: Readonly<Record<string, string>>): string =>
@@ -82,6 +88,7 @@ const historySchema = z.object({
   history: z
     .array(
       z.object({
+        id: z.string().min(1),
         messagesAdded: z
           .array(
             z.object({
@@ -112,25 +119,11 @@ const messageSchema = z.object({
     .nullish(),
 });
 
-/** Messages whose metadata is read at once. */
-const concurrentReads = 5;
+/** Messages whose metadata one batch request reads. */
+const messagesPerBatch = 50;
 
-/** `Name <address>`, `<address>` or `address`, as a From header has it. */
-const addressOf = (
-  header: string | undefined
-): { name: string | null; address: string | null } | null => {
-  if (header === undefined) {
-    return null;
-  }
-  const found = /^\s*(?:"?(?<name>[^"<]*?)"?\s*)?<(?<address>[^>]+)>\s*$/u.exec(
-    header
-  )?.groups;
-  if (found?.address === undefined) {
-    return { name: null, address: header.trim() };
-  }
-  const name = found.name?.trim() ?? "";
-  return { name: name === "" ? null : name, address: found.address.trim() };
-};
+/** Longest subject an event carries, in characters. */
+const subjectMaxLength = 1000;
 
 /** When Gmail received a message, from its `internalDate` (ms), in ISO. */
 const receivedAtOf = (internalDate: string | null | undefined) => {
@@ -138,46 +131,113 @@ const receivedAtOf = (internalDate: string | null | undefined) => {
   return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
 };
 
-/** A message's event, or none if it's gone since it arrived. */
-const mailEventOf = async (
-  access: ProviderAccess,
-  mailbox: string,
-  id: string
-): Promise<ReadEvent[]> => {
-  let body: unknown;
-  try {
-    body = await google(
-      access,
-      `${gmail(mailbox, `/messages/${encodeURIComponent(id)}`)}?${queryOf({
-        format: "metadata",
-      })}&metadataHeaders=Subject&metadataHeaders=From`
-    );
-  } catch (error) {
-    // Deleted since: nothing to report.
-    if (error instanceof SourceError && error.resync) {
-      return [];
-    }
-    throw error;
-  }
+/** A message's event, from its metadata. */
+const mailEventOf = (mailbox: string, body: unknown): ReadEvent => {
   const message = messageSchema.parse(body);
   const header = (name: string) =>
     message.payload?.headers?.find(
       (each) => each.name.toLowerCase() === name.toLowerCase()
     )?.value;
-  return [
-    {
+  const [from] = addressesOf(header("From"));
+  return {
+    id: message.id,
+    payload: {
+      mailbox,
       id: message.id,
-      payload: {
-        mailbox,
-        id: message.id,
-        threadId: message.threadId ?? null,
-        folder: "inbox",
-        subject: header("Subject") ?? null,
-        from: addressOf(header("From")),
-        receivedAt: receivedAtOf(message.internalDate),
-      },
+      threadId: message.threadId ?? null,
+      folder: "inbox",
+      subject: header("Subject")?.slice(0, subjectMaxLength) ?? null,
+      from:
+        from === undefined ? null : { name: from.name, address: from.address },
+      receivedAt: receivedAtOf(message.internalDate),
     },
-  ];
+  };
+};
+
+/** Gmail's batch endpoint, on its own host. */
+const gmailBatchUrl = `https://${gmailHost}/batch/gmail/v1`;
+
+/** The `boundary` a multipart answer's content type names. */
+const boundaryOf = (contentType: string): string | undefined => {
+  const at = contentType.toLowerCase().indexOf("boundary=");
+  if (at === -1) {
+    return undefined;
+  }
+  const [value = ""] = contentType.slice(at + "boundary=".length).split(";");
+  const boundary = value.trim().replaceAll('"', "");
+  return boundary === "" ? undefined : boundary;
+};
+
+/**
+ * The parts of Gmail's batch answer: each one's HTTP status and body. No
+ * regex: the answer is split at its boundary and each part's status line
+ * and body found by position.
+ */
+const batchParts = (
+  text: string,
+  contentType: string
+): { status: number; body: string }[] => {
+  const boundary = boundaryOf(contentType);
+  if (boundary === undefined) {
+    throw new SourceError("Gmail's batch answer names no boundary");
+  }
+  return text
+    .replaceAll("\r\n", "\n")
+    .split(`--${boundary}`)
+    .slice(1)
+    .filter((part) => !part.startsWith("--"))
+    .map((part) => {
+      const line = part.indexOf("HTTP/1.1 ");
+      const status = Number(part.slice(line + 9, line + 12));
+      const bodyAt = part.indexOf("\n\n", line);
+      if (line === -1 || !Number.isInteger(status) || bodyAt === -1) {
+        throw new SourceError("Gmail's batch answer has a part it can't read");
+      }
+      return { status, body: part.slice(bodyAt + 2).trim() };
+    });
+};
+
+/**
+ * The events of messages `ids`, their metadata read through Gmail's batch
+ * endpoint, a request per `messagesPerBatch` messages. A message deleted
+ * since it arrived is left out; any other failure fails the read.
+ */
+const mailEventsOf = async (
+  access: ProviderAccess,
+  mailbox: string,
+  ids: readonly string[]
+): Promise<ReadEvent[]> => {
+  const events: ReadEvent[] = [];
+  for (let at = 0; at < ids.length; at += messagesPerBatch) {
+    const boundary = `batch_${crypto.randomUUID()}`;
+    const body = `${ids
+      .slice(at, at + messagesPerBatch)
+      .map(
+        (id, index) =>
+          `--${boundary}\r\nContent-Type: application/http\r\nContent-ID: <m${index}>\r\n\r\nGET /gmail/v1/users/${encodeURIComponent(mailbox)}/messages/${encodeURIComponent(id)}?format=metadata&metadataHeaders=Subject&metadataHeaders=From\r\n\r\n`
+      )
+      .join("")}--${boundary}--`;
+    // oxlint-disable-next-line no-await-in-loop -- a batch at a time, each counted
+    const answer = await googlePost(
+      access,
+      gmailBatchUrl,
+      body,
+      `multipart/mixed; boundary=${boundary}`
+    );
+    for (const part of batchParts(answer.text, answer.contentType)) {
+      if (part.status === 404) {
+        continue;
+      }
+      if (part.status !== 200) {
+        throw new SourceError(`Gmail answered ${part.status} in a batch`, {
+          status: part.status,
+          ...(part.status === 429 ? { retryAfterMs: 60_000 } : {}),
+        });
+      }
+      events.push(mailEventOf(mailbox, providerJson("Gmail", part.body)));
+    }
+  }
+  return events;
 };
 
 /** Gmail's history of messages added to `mailbox`'s inbox from `historyId`. */
@@ -189,12 +249,25 @@ const historyFrom = (mailbox: string, historyId: string): string =>
     maxResults: "20",
   })}`;
 
+/** One history record: its ID, and the messages it added to the inbox. */
+interface HistoryRecord {
+  id: string;
+  messages: string[];
+}
+
 /**
  * `google.mail.received`: mail that reached the mailbox's inbox after the
  * source started, by Gmail's history of messages added with the INBOX
  * label, from where the mailbox's history stood as the source started
- * (`prime`). Each message's subject and sender are read from its
- * metadata.
+ * (`prime`). Gmail's history reports a message as added once, when it
+ * arrives: a message moved into the inbox later isn't reported.
+ *
+ * A read stops at the history record that brings its messages to
+ * `readMaxItems`, and reads on from that record next time, so its
+ * requests (pages, and a batch request per 50 messages' metadata) and its
+ * events stay bounded: 100 messages and the rest of one record. A record
+ * is never split, so one whose batches alone passed a sync's request
+ * budget (some 20,000 messages in one record) would never move on.
  */
 const mailReceived: EventKind = {
   provider: "google",
@@ -213,36 +286,42 @@ const mailReceived: EventKind = {
     if (read.source.cursor === null) {
       throw new SourceError("The mailbox's history position isn't taken yet");
     }
-    const { items, cursor, more } = await read.pages(async (access, url) => {
+    const walked = await read.pages(async (access, url) => {
       const page = historySchema.parse(await google(access, url));
       const next = new URL(url);
       if (page.nextPageToken !== null && page.nextPageToken !== undefined) {
         next.searchParams.set("pageToken", page.nextPageToken);
       }
       return {
-        items: (page.history ?? []).flatMap(({ messagesAdded }) =>
-          (messagesAdded ?? [])
-            .filter(
-              ({ message }) => message.labelIds?.includes("INBOX") === true
-            )
-            .map(({ message }) => message.id)
+        items: (page.history ?? []).map(
+          ({ id, messagesAdded }): HistoryRecord => ({
+            id,
+            messages: (messagesAdded ?? [])
+              .filter(
+                ({ message }) => message.labelIds?.includes("INBOX") === true
+              )
+              .map(({ message }) => message.id),
+          })
         ),
         ...(page.nextPageToken === null || page.nextPageToken === undefined
           ? { end: historyFrom(mailbox, page.historyId) }
           : { next: next.href }),
       };
     }, read.source.cursor);
-    const ids = [...new Set(items)];
-    const events: ReadEvent[] = [];
-    for (let at = 0; at < ids.length; at += concurrentReads) {
-      // oxlint-disable-next-line no-await-in-loop -- a few at a time
-      const found = await Promise.all(
-        ids
-          .slice(at, at + concurrentReads)
-          .map(async (id) => await mailEventOf(read.access, mailbox, id))
-      );
-      events.push(...found.flat());
+    let { cursor, more } = walked;
+    const ids = new Set<string>();
+    for (const [index, record] of walked.items.entries()) {
+      for (const id of record.messages) {
+        ids.add(id);
+      }
+      if (ids.size >= readMaxItems && index < walked.items.length - 1) {
+        // The rest from after this record, next time.
+        cursor = historyFrom(mailbox, record.id);
+        more = true;
+        break;
+      }
     }
+    const events = await mailEventsOf(read.access, mailbox, [...ids]);
     return { events, cursor, more };
   },
 };
@@ -272,7 +351,11 @@ const changesSchema = z.object({
   newStartPageToken: z.string().nullish(),
 });
 
-const folderMimeType = "application/vnd.google-apps.folder";
+/** Drive items that aren't files of their own: folders and shortcuts. */
+const notFiles = new Set([
+  "application/vnd.google-apps.folder",
+  "application/vnd.google-apps.shortcut",
+]);
 
 /** The query that holds a Drive request to shared drive `drive`. */
 const sharedDrive = (drive: string) => ({
@@ -337,7 +420,7 @@ const fileCreated: EventKind = {
       file !== null &&
       file !== undefined &&
       file.trashed !== true &&
-      file.mimeType !== folderMimeType &&
+      !notFiles.has(file.mimeType ?? "") &&
       file.driveId === drive &&
       isSince(file.createdTime, newSince(source))
         ? [

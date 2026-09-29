@@ -114,19 +114,21 @@ const inactiveWaitMs = 15 * 60_000;
 /** Most sources one sync reads. */
 const readsPerSync = 25;
 /**
- * Requests to providers one sync sends, at most, priming and reading
- * together, whichever the provider: well inside a Worker invocation's
- * 1,000 subrequests, with room for the rest of the sync.
+ * Requests one sync sends out, at most, priming and reading together,
+ * whichever the provider, each access token too (it may be refreshed):
+ * well inside a Worker invocation's 1,000 subrequests, with room for the
+ * rest of the sync. A hard bound: a read that would pass it stops there
+ * and keeps its cursor (`RequestBudget.spend`).
  */
 export const requestsPerSync = 400;
 /**
- * Requests a read may take, at most: a few pages, and a request for each
- * of its items where the provider needs one (Gmail's messages). A source
- * is read only while this much of the sync's budget is left, so a read is
- * never cut off: the sync stops before it, and the sources left are read
- * by the next one, from where they are.
+ * Requests a read takes, as a rule: its token, a few pages, and a batch
+ * request per 50 of Gmail's messages. A source is read only while this
+ * much of the sync's budget is left, so a read is rarely cut off; one
+ * that is keeps its cursor, and the sources left are read by the next
+ * sync, from where they are.
  */
-const requestsPerRead = 150;
+const requestsPerRead = 20;
 /** Events the outbox holds before sources stop being read. */
 export const outboxMax = 10_000;
 /** Refusals in a row after which a source is read only daily. */
@@ -512,6 +514,8 @@ const readSource = async (
     return 0;
   }
   try {
+    // The token may be refreshed: a request of its own.
+    budget.spend();
     const access = { token: await accessTokenFor(env, connection.id), budget };
     const found = await kind.read({
       source,
@@ -529,6 +533,14 @@ const readSource = async (
     }
     return await keepRead(env, source, connection, found, new Date(now));
   } catch (error) {
+    if (error instanceof SourceError && error.spent) {
+      // Not the source's failure: read again by the next sync.
+      await db
+        .update(eventSources)
+        .set({ pollAt: source.pollAt })
+        .where(eq(eventSources.id, source.id));
+      return null;
+    }
     await failRead(env, source, error);
     return 0;
   }
@@ -589,6 +601,7 @@ const primeSources = async (env: Env, budget: RequestBudget): Promise<void> => {
       continue;
     }
     try {
+      budget.spend();
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
       const token = await accessTokenFor(env, connection.id);
       const access = { token, budget };
@@ -627,6 +640,14 @@ const primeSources = async (env: Env, budget: RequestBudget): Promise<void> => {
         [primed]
       );
     } catch (error) {
+      if (error instanceof SourceError && error.spent) {
+        // oxlint-disable-next-line no-await-in-loop -- once, then stop
+        await db
+          .update(eventSources)
+          .set({ pollAt: source.pollAt })
+          .where(eq(eventSources.id, source.id));
+        return;
+      }
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
       await failRead(env, source, error, primeMaxWaitMs);
     }
@@ -634,8 +655,10 @@ const primeSources = async (env: Env, budget: RequestBudget): Promise<void> => {
 };
 
 /**
- * A read's events at most: `readMaxItems` items and a page past them, of
- * no more than 50 (the page size connect asks providers for).
+ * A read's events, as a rule: `readMaxItems` items and a page past them,
+ * of no more than 50 (the page size connect asks providers for), or a
+ * Gmail history record past them. A read that still finds more than the
+ * room left keeps nothing (`readSource`).
  */
 const eventsPerRead = readMaxItems + 50;
 
@@ -682,7 +705,7 @@ const readDue = async (env: Env, budget: RequestBudget): Promise<void> => {
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
       const kept = await readSource(env, source, connection, room, budget);
       if (kept === null) {
-        log.warn("events.outbox_full", { room });
+        log.warn("events.read_stopped", { room, left: budget.left });
         return;
       }
       room -= kept;
