@@ -66,6 +66,11 @@ const Headline = ({ workflows }: { workflows: WorkflowFigures[] }) => {
         <dd className="text-2xl font-semibold">
           {headline.running} of {headline.workflows}
         </dd>
+        {headline.unavailable === 0 ? null : (
+          <dd className="text-muted-foreground text-xs">
+            Runs of {headline.unavailable} unavailable
+          </dd>
+        )}
       </div>
     </dl>
   );
@@ -133,7 +138,7 @@ const BeforeAndAfter = ({ workflows }: { workflows: WorkflowFigures[] }) => {
             </TableCell>
             <TableCell>
               <Badge variant={row.from === "observed" ? "default" : "outline"}>
-                {row.from}
+                {row.from === "unavailable" ? "runs unavailable" : row.from}
               </Badge>
             </TableCell>
           </TableRow>

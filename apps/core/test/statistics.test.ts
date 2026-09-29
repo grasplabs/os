@@ -540,93 +540,144 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     });
   });
 
-  it("count many Apps' runs in one read, grouped by App, a page at a time, audited once with the Apps it counted", async () => {
+  it("count many Apps' runs in one read, grouped by App, the ones it can't read listed unavailable, audited once with every App asked for", async () => {
     const admin = await signedInApi(idp, "admin");
     const builder = await signedInApi(idp, "builder");
     const reader = await statsApp(builder);
     await grantPlatform(builder, reader);
-    // The builder builds `theirs`, not `watched`.
+    // The builder builds `theirs`, not `watched`; `gone` is no App at all.
     const watched = await statsApp(admin);
     const theirs = await statsApp(builder);
+    const gone = crypto.randomUUID();
     await seedRun(watched, "pay");
     await seedRun(watched, "pay");
     await seedRun(theirs, "remind");
-    const both = {
+    const all = {
       measure: "platform.workflow_runs",
       days: 7,
-      apps: [watched, theirs],
+      apps: [watched, gone, theirs],
       groupBy: ["app", "workflow"],
     };
-    let counted: unknown;
-    const events = await auditedDuring(async () => {
-      counted = await platformRead(reader, admin.userId, both);
-    });
-    // 101 more workflows of `theirs`: more groups than one page holds.
-    await env.DB.prepare(
-      "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 101) INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at) SELECT ?1 || i, ?2, 'w' || i, 1, NULL, 'completed', ?3, ?3 FROM n"
-    )
-      .bind(`bulk-${unique()}-`, theirs, Date.now())
-      .run();
-    const page = async (offset: number) =>
-      answerSchema.parse(
-        await platformRead(reader, builder.userId, {
-          measure: "platform.workflow_runs",
-          days: 7,
-          apps: [theirs],
-          groupBy: ["workflow"],
-          offset,
+    const answerOf = (answer: unknown) => {
+      const parsed = z
+        .object({
+          ok: answerSchema.shape.ok.extend({
+            unavailable: z.array(z.string()),
+          }),
         })
-      ).ok;
-    const [first, second] = [await page(0), await page(100)];
-    const workflows = [...first.groups, ...second.groups].map(
-      ({ dimensions }) => dimensions.workflow
-    );
+        .parse(answer).ok;
+      return {
+        groups: parsed.groups.map(({ dimensions, count }) => ({
+          ...dimensions,
+          count,
+        })),
+        unavailable: parsed.unavailable,
+      };
+    };
+    let byAdmin: unknown;
+    const events = await auditedDuring(async () => {
+      byAdmin = await platformRead(reader, admin.userId, all);
+    });
+    // Ordered by the groups' values: by App ID, then workflow.
+    const expected = [
+      { app: watched, workflow: "pay", count: 2 },
+      { app: theirs, workflow: "remind", count: 1 },
+    ].toSorted((one, other) => one.app.localeCompare(other.app));
     expect({
-      counted: answerSchema.parse(counted).ok.groups,
+      byAdmin: answerOf(byAdmin),
+      // An App the builder may not see is unavailable too, and the rest
+      // still counted.
+      byBuilder: answerOf(await platformRead(reader, builder.userId, all)),
       audited: events
         .filter(({ action }) => action === "statistics.read")
         .map(({ target, provenance, detail }) => ({
           target,
           provenance,
           apps: detail.apps,
+          unavailable: detail.unavailable,
         })),
-      // One App of the read the builder may not see refuses it whole.
-      notTheirs: await platformRead(reader, builder.userId, both),
-      pages: [first.truncated, second.groups.length, second.truncated],
-      distinct: new Set(workflows).size,
       ownWithApps: await read(reader, admin.userId, {
         measure: "ticks",
         days: 1,
         apps: [watched],
       }),
       oneAndApps: await platformRead(reader, admin.userId, {
-        ...both,
+        ...all,
         where: { app: watched },
       }),
+      // One App, as `where.app`, is still refused when it can't be read.
+      oneGone: await platformRead(reader, admin.userId, {
+        measure: "platform.workflow_runs",
+        days: 7,
+        where: { app: gone },
+      }),
     }).toStrictEqual({
-      counted: [
+      byAdmin: { groups: expected, unavailable: [gone] },
+      byBuilder: {
+        groups: [{ app: theirs, workflow: "remind", count: 1 }],
+        unavailable: [watched, gone],
+      },
+      // Every App asked for: those it counted, then the unavailable one.
+      audited: [
         {
-          dimensions: { app: watched, workflow: "pay" },
-          count: 2,
-          sum: 2,
-          min: 1,
-          max: 1,
-        },
-        {
-          dimensions: { app: theirs, workflow: "remind" },
-          count: 1,
-          sum: 1,
-          min: 1,
-          max: 1,
+          target: undefined,
+          provenance: [watched, theirs, gone],
+          apps: 3,
+          unavailable: 1,
         },
       ],
-      audited: [{ target: undefined, provenance: [watched, theirs], apps: 2 }],
-      notTheirs: { error: "app.not_found" },
-      // 102 workflows: a page of 100, then the other 2.
-      pages: [true, 2, false],
-      distinct: 102,
       ownWithApps: { error: "statistics.invalid" },
       oneAndApps: { error: "statistics.invalid" },
+      oneGone: { error: "app.not_found" },
+    });
+  });
+
+  it("page by the groups' values over a window held at `until`, so runs starting between pages neither repeat nor skip a group", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const reader = await statsApp(admin);
+    await grantPlatform(admin, reader);
+    const watched = await statsApp(admin);
+    // 101 workflows ran a minute ago: two pages of groups.
+    await env.DB.prepare(
+      "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 101) INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at) SELECT ?1 || i, ?2, 'w' || i, 1, NULL, 'completed', ?3, ?3 FROM n"
+    )
+      .bind(`bulk-${unique()}-`, watched, Date.now() - 60_000)
+      .run();
+    const until = new Date(Date.now() - 1000).toISOString();
+    const page = async (offset: number, held = true) =>
+      answerSchema.parse(
+        await platformRead(reader, admin.userId, {
+          measure: "platform.workflow_runs",
+          days: 7,
+          apps: [watched],
+          groupBy: ["workflow"],
+          offset,
+          ...(held ? { until } : {}),
+        })
+      ).ok;
+    const first = await page(0);
+    // Between the pages: a workflow that sorts first starts, and another
+    // run of one on the first page.
+    await seedRun(watched, "a-first");
+    await seedRun(watched, "w1");
+    const second = await page(100);
+    const groups = [...first.groups, ...second.groups];
+    const workflows = groups.map(({ dimensions }) => dimensions.workflow);
+    // Without `until`, the new workflow moves every group a place.
+    const unheld = await page(100, false);
+    expect({
+      pages: [first.truncated, second.truncated],
+      read: workflows.length,
+      distinct: new Set(workflows).size,
+      w1: groups.find(({ dimensions }) => dimensions.workflow === "w1")?.count,
+      unheldFirst: unheld.groups[0]?.dimensions.workflow,
+    }).toStrictEqual({
+      pages: [true, false],
+      read: 101,
+      distinct: 101,
+      w1: 1,
+      // What the first page ended with, read again.
+      unheldFirst: first.groups.at(-1)?.dimensions.workflow,
     });
   });
 
@@ -718,20 +769,21 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
             step !== "SCAN improvement_signal_computations"
         ),
     }).toStrictEqual({
+      // By kind: the groups' values.
       groups: [
-        {
-          dimensions: { kind: "failing_step" },
-          count: 2,
-          sum: 6,
-          min: 2,
-          max: 4,
-        },
         {
           dimensions: { kind: "cost_per_run" },
           count: 1,
           sum: 0.5,
           min: 0.5,
           max: 0.5,
+        },
+        {
+          dimensions: { kind: "failing_step" },
+          count: 2,
+          sum: 6,
+          min: 2,
+          max: 4,
         },
       ],
       later: [],

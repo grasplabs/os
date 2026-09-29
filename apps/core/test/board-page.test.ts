@@ -676,6 +676,68 @@ describe("the board page", { timeout: 60_000 }, () => {
     });
   });
 
+  it("freezes the figures of the Apps it can read, and marks a workflow of an App that's gone unavailable, never as not running", async () => {
+    const { admin, app, map } = await setUp();
+    const { folder, pay, payables } = await seedPlaybook(admin, map);
+    await seedRuns(payables, 30, dayMs);
+    // A designed workflow linked to an App that no longer exists: read in
+    // the same chunk as `payables`.
+    const drawn = await saveWorkflow(map, admin, {
+      path: `${folder}/gone.md`,
+      ifVersion: 0,
+      record: { type: "workflow", title: "Gone", state: "drawn" },
+    });
+    const designed = await saveWorkflow(map, admin, {
+      documentId: drawn.id,
+      path: drawn.path,
+      ifVersion: 1,
+      record: {
+        type: "workflow",
+        title: "Gone",
+        state: "designed",
+        steps: [
+          {
+            name: "Do it",
+            numbers: { frequency: estimated(10), minutes: estimated(6) },
+          },
+        ],
+      },
+    });
+    okOf(
+      await call(map, admin.userId, "link", {
+        documentId: designed.id,
+        ifVersion: 2,
+        appId: crypto.randomUUID(),
+        workflowId: "pay",
+      }),
+      savedSchema
+    );
+    const taken = okOf(
+      await call(app, admin.userId, "take", { maturity: 1 }),
+      savedSchema
+    );
+    const { record } = okOf(
+      await call(app, admin.userId, "open", taken.id),
+      snapshotSchema
+    );
+    expect({
+      pay: z
+        .object({ running: z.object({ runs: z.number() }) })
+        .parse(figuresOf(record, pay.path)).running.runs,
+      gone: figuresOf(record, designed.path),
+    }).toStrictEqual({
+      pay: 30,
+      gone: {
+        path: designed.path,
+        title: "Gone",
+        state: "designed",
+        drawn: { version: 1, hoursPerWeek: 0, basis: "estimated" },
+        designed: { version: 3, hoursPerWeek: 1, basis: "estimated" },
+        unavailable: true,
+      },
+    });
+  });
+
   it("refuses to freeze figures it can't read whole, and saves nothing", async () => {
     const { admin, app, map } = await setUp();
     const { payables } = await seedPlaybook(admin, map);

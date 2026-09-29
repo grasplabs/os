@@ -146,14 +146,15 @@ export const isPlatformMeasure = (
 ): measure is PlatformMeasure => Object.hasOwn(platformMeasures, measure);
 
 /**
- * What to read: a measure, over the last `days` UTC days (today
- * included; a platform measure over exactly the last `days` × 24 hours),
- * only points whose dimensions are `where`, added up by the dimensions in
- * `groupBy` (all together without), the page of groups from `offset` on
- * (largest count first, then by their values, so pages don't overlap). A
- * platform measure is read for one App (`where.app`), or for up to
- * `statisticMaxApps` in one read (`apps`, grouped by `app` to tell them
- * apart).
+ * What to read: a measure, over the last `days` UTC days up to `until`
+ * (now when not given, and never later; that day included; a platform
+ * measure over exactly the last `days` × 24 hours before it), only points
+ * whose dimensions are `where`, added up by the dimensions in `groupBy`
+ * (all together without), the page of groups from `offset` on. Groups are
+ * ordered by their values, never by count, so with a fixed `until` pages
+ * neither overlap nor skip one as points arrive. A platform measure is
+ * read for one App (`where.app`), or for up to `statisticMaxApps` in one
+ * read (`apps`, grouped by `app` to tell them apart).
  */
 export const statisticQuerySchema = z
   .strictObject({
@@ -172,6 +173,7 @@ export const statisticQuerySchema = z
       })
       .optional(),
     offset: z.int().min(0).max(statisticMaxOffset).default(0),
+    until: z.iso.datetime().optional(),
     groupBy: z
       .array(dimensionNameSchema)
       .max(statisticMaxDimensions)
@@ -229,10 +231,15 @@ export interface StatisticAnswer {
   /** The first and last UTC day it covers, `YYYY-MM-DD`. */
   from: string;
   to: string;
-  /** The groups, largest count first, at most `statisticMaxGroups`. */
+  /** The groups, by their values, at most `statisticMaxGroups`. */
   groups: StatisticGroup[];
   /** Whether more groups had points than it answers. */
   truncated: boolean;
+  /**
+   * For a platform read of `apps`: those whose runs the person the read
+   * acts for may not see, or that no longer exist, which it doesn't count.
+   */
+  unavailable?: string[];
 }
 
 /** Why recording or reading statistics was refused. */

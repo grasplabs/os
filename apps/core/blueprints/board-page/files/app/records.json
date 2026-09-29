@@ -132,6 +132,9 @@
                     },
                     "required": ["appId", "workflowId", "runs", "hoursPerWeek"],
                     "additionalProperties": false
+                  },
+                  "unavailable": {
+                    "type": "boolean"
                   }
                 },
                 "required": ["path", "title", "state"],

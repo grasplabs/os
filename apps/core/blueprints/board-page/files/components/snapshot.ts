@@ -69,6 +69,9 @@ export const refusal = (code: string): string => {
     case "board.not_snapshot": {
       return "That document isn't a snapshot.";
     }
+    case "board.figures_incomplete": {
+      return "The Apps linked here ran more workflows than one snapshot reads, so it wasn't taken: its figures would be incomplete.";
+    }
     case "board.too_many_workflows": {
       return "The Playbook has more workflows than one snapshot holds (250).";
     }

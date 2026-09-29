@@ -1,3 +1,4 @@
+import { appErrors } from "@grasp-os/shared/apps";
 import { delegateActorOf } from "@grasp-os/shared/audit";
 import { isExpectedError } from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
@@ -23,10 +24,10 @@ import {
   and,
   asc,
   count,
-  desc,
   eq,
   gte,
   inArray,
+  isNull,
   lte,
   max,
   min,
@@ -42,6 +43,7 @@ import { appFor } from "./apps.ts";
 import { keepAuditEvent } from "./audit-outbox.ts";
 import { memberRole, teamsOf } from "./auth/identity.ts";
 import {
+  apps as appsTable,
   appStatistics,
   improvementSignalComputations,
   improvementSignals,
@@ -232,10 +234,8 @@ const ownMeasure = async (
     .groupBy(...grouped)
     // Without a group, no points still makes one row: none, then.
     .having(sql`count(*) > 0`)
-    .orderBy(
-      desc(sql`sum(${appStatistics.count})`),
-      ...grouped.map((group) => asc(group))
-    )
+    // By the groups' values, never their counts: pages stay put.
+    .orderBy(...grouped.map((group) => asc(group)))
     .limit(statisticMaxGroups + 1)
     .offset(query.offset);
   return answerOf(
@@ -284,7 +284,8 @@ const workflowRunsMeasure = async (
     .groupBy(...grouped)
     // Without a group, no points still makes one row: none, then.
     .having(sql`count(*) > 0`)
-    .orderBy(desc(count()), ...grouped.map((group) => asc(group)))
+    // By the groups' values, never their counts: pages stay put.
+    .orderBy(...grouped.map((group) => asc(group)))
     .limit(statisticMaxGroups + 1)
     .offset(offset);
   // Each run is a point of value 1.
@@ -344,7 +345,8 @@ const signalsMeasure = async (
     .groupBy(...grouped)
     // Without a group, no points still makes one row: none, then.
     .having(sql`count(*) > 0`)
-    .orderBy(desc(count()), ...grouped.map((group) => asc(group)))
+    // By the groups' values, never their counts: pages stay put.
+    .orderBy(...grouped.map((group) => asc(group)))
     .limit(statisticMaxGroups + 1)
     .offset(offset);
   return rows.map((row) =>
@@ -352,35 +354,74 @@ const signalsMeasure = async (
   );
 };
 
+/** Refusals of `appFor` that make one App of many unavailable. */
+const unavailableCodes: ReadonlySet<string> = new Set([
+  "app.not_found",
+  "role.forbidden",
+]);
+
 /**
- * Refuses a read of the Apps `apps`' platform measures for the person
- * `authority` acts for unless they may see each one's runs added up: an
- * admin, or a builder of each (`appFor`). One they may not see refuses the
- * whole read, as `appFor` does, without saying which.
+ * Of the Apps `apps`, those whose runs the person `authority` acts for
+ * may see added up (an admin, or a builder of it, `appFor`), and the rest,
+ * which they may not see or which no longer exist. `permission.person_inactive`
+ * for someone no longer a member.
  */
-const requireRunsVisible = async (
+const runsVisible = async (
   env: Env,
   authority: Authority,
   apps: readonly string[]
-): Promise<void> => {
+): Promise<{ visible: string[]; unavailable: string[] }> => {
   const userId = authority.onBehalfOf;
   const role = await memberRole(env.DB, userId);
   if (!role) {
     throw permissionErrors.create("permission.person_inactive");
   }
   if (role === "admin") {
-    return;
+    const rows = await drizzle(env.DB)
+      .select({ id: appsTable.id })
+      .from(appsTable)
+      .where(
+        and(inArray(appsTable.id, [...apps]), isNull(appsTable.pendingSince))
+      );
+    const existing = new Set(rows.map(({ id }) => id));
+    return {
+      visible: apps.filter((app) => existing.has(app)),
+      unavailable: apps.filter((app) => !existing.has(app)),
+    };
   }
   const member = { userId, role, teams: await teamsOf(env.DB, userId) };
+  const visible: string[] = [];
+  const unavailable: string[] = [];
   for (const app of apps) {
-    // oxlint-disable-next-line no-await-in-loop -- refused at the first
-    await appFor(env, member, app, "builder");
+    try {
+      // oxlint-disable-next-line no-await-in-loop -- a few Apps, one at a time
+      await appFor(env, member, app, "builder");
+      visible.push(app);
+    } catch (error) {
+      if (!isExpectedError(error) || !unavailableCodes.has(error.code)) {
+        throw error;
+      }
+      unavailable.push(app);
+    }
   }
+  return { visible, unavailable };
 };
 
-/** The Apps a platform read counts: `apps`, or the one `where.app`. */
-const appsOf = (query: Query): string[] =>
-  query.apps ?? (query.where.app === undefined ? [] : [query.where.app]);
+/**
+ * Refuses a read of App `app`'s platform measures for the person
+ * `authority` acts for unless they may see its runs added up, as `appFor`
+ * does, without saying whether it exists.
+ */
+const requireRunsVisible = async (
+  env: Env,
+  authority: Authority,
+  app: string
+): Promise<void> => {
+  const { unavailable } = await runsVisible(env, authority, [app]);
+  if (unavailable.length > 0) {
+    throw appErrors.create("app.not_found");
+  }
+};
 
 /** A platform read as its audit event names it. */
 interface PlatformRead {
@@ -389,6 +430,8 @@ interface PlatformRead {
   app?: string;
   /** The Apps it reads for in one read (`apps`), as far as they are IDs. */
   apps?: string[];
+  /** Of `apps`, those it didn't count (`unavailable`). */
+  unavailable?: string[];
   days?: number;
 }
 
@@ -438,14 +481,27 @@ export const auditPlatformRead = async (
   await keepAuditEvent(env, drizzle(env.DB), {
     actor: delegateActorOf(authority),
     action: "statistics.read",
-    // The Apps one read counts, by ID: at most as many as provenance holds.
-    ...(read.apps === undefined ? {} : { provenance: read.apps }),
+    // Every App one read asks for, by ID (at most as many as provenance
+    // holds): those it counted, then the `unavailable` ones it didn't.
+    ...(read.apps === undefined
+      ? {}
+      : {
+          provenance: [
+            ...read.apps.filter(
+              (app) => !(read.unavailable ?? []).includes(app)
+            ),
+            ...(read.unavailable ?? []),
+          ],
+        }),
     ...(read.app === undefined
       ? {}
       : { target: { type: "app", id: read.app } }),
     detail: {
       measure: read.measure,
       ...(read.apps === undefined ? {} : { apps: read.apps.length }),
+      ...(read.unavailable === undefined
+        ? {}
+        : { unavailable: read.unavailable.length }),
       ...(read.days === undefined ? {} : { days: read.days }),
       onBehalfOf: authority.onBehalfOf,
       ...(refused === undefined ? {} : { refused }),
@@ -454,16 +510,18 @@ export const auditPlatformRead = async (
 };
 
 /**
- * Refuses a platform read of the Apps `apps`' measures by App code acting
- * as `authority` unless under the permission `permissionId` (`{ type:
- * "platform" }`, `statistics`), for a person who may see each one's runs.
+ * Refuses a platform read by App code acting as `authority` unless under
+ * the permission `permissionId` (`{ type: "platform" }`, `statistics`),
+ * for a person who may see the runs of the one App it reads (`where.app`).
+ * Of many (`apps`), the Apps the person may see: the rest are unavailable,
+ * and don't refuse it.
  */
 const requirePlatformRead = async (
   env: Env,
   authority: Authority,
   permissionId: PermissionId | undefined,
-  apps: readonly string[]
-): Promise<void> => {
+  query: Query
+): Promise<{ visible: string[]; unavailable?: string[] }> => {
   if (permissionId === undefined) {
     throw permissionErrors.create("permission.denied", {
       action: "statistics",
@@ -476,28 +534,42 @@ const requirePlatformRead = async (
     "statistics",
     permissionId
   );
-  await requireRunsVisible(env, authority, apps);
+  if (query.apps === undefined) {
+    const app = query.where.app ?? "";
+    await requireRunsVisible(env, authority, app);
+    return { visible: [app] };
+  }
+  return await runsVisible(env, authority, query.apps);
 };
 
 /**
- * A platform measure, as `query` asks, for the App `query.where.app` or
- * the Apps `query.apps`, over exactly the last `query.days` × 24 hours
- * before `now`.
+ * A platform measure, as `query` asks, for the Apps `apps` (those of the
+ * read the person may see), over exactly the last `query.days` × 24 hours
+ * before `end`.
  */
 const platformMeasure = async (
   env: Env,
   measure: PlatformMeasure,
   query: Query,
-  now: Date
+  apps: readonly string[],
+  end: Date
 ): Promise<StatisticAnswer> => {
-  const apps = appsOf(query);
-  const start = new Date(now.getTime() - query.days * dayMs);
+  const start = new Date(end.getTime() - query.days * dayMs);
+  if (apps.length === 0) {
+    return answerOf(measure, dayOf(start), dayOf(end), query.groupBy, []);
+  }
   const rows =
     measure === "platform.workflow_runs"
-      ? await workflowRunsMeasure(env, apps, query, start, now)
-      : await signalsMeasure(env, apps, query, start, now);
-  return answerOf(measure, dayOf(start), dayOf(now), query.groupBy, rows);
+      ? await workflowRunsMeasure(env, apps, query, start, end)
+      : await signalsMeasure(env, apps, query, start, end);
+  return answerOf(measure, dayOf(start), dayOf(end), query.groupBy, rows);
 };
+
+/** When a read's window ends: its `until`, but never after `now`. */
+const endOf = (query: Query, now: Date): Date =>
+  query.until === undefined
+    ? now
+    : new Date(Math.min(Date.parse(query.until), now.getTime()));
 
 /**
  * Reads statistics (`statisticQuerySchema`) for the App whose code acts as
@@ -525,11 +597,12 @@ export const readStatistics = async (
     if (authority.subject.type !== "app") {
       throw permissionErrors.create("permission.denied");
     }
-    const { from, to } = windowOf(now, query.days);
+    const { from, to } = windowOf(endOf(query, now), query.days);
     return await ownMeasure(env, authority.subject.appId, query, from, to);
   }
   let query: Query;
   let measure: PlatformMeasure;
+  let counted: { visible: string[]; unavailable?: string[] };
   try {
     requireFeature(env, "statistics");
     query = statisticErrors.parse(
@@ -541,7 +614,7 @@ export const readStatistics = async (
       throw permissionErrors.create("permission.denied");
     }
     ({ measure } = query);
-    await requirePlatformRead(env, authority, platform, appsOf(query));
+    counted = await requirePlatformRead(env, authority, platform, query);
   } catch (error) {
     await auditPlatformRead(
       env,
@@ -551,8 +624,20 @@ export const readStatistics = async (
     );
     throw error;
   }
-  await auditPlatformRead(env, authority, { ...read, days: query.days });
-  return await platformMeasure(env, measure, query, now);
+  const { visible, unavailable } = counted;
+  await auditPlatformRead(env, authority, {
+    ...read,
+    days: query.days,
+    ...(unavailable === undefined ? {} : { unavailable }),
+  });
+  const answer = await platformMeasure(
+    env,
+    measure,
+    query,
+    visible,
+    endOf(query, now)
+  );
+  return unavailable === undefined ? answer : { ...answer, unavailable };
 };
 
 /**

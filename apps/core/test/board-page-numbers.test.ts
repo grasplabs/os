@@ -85,7 +85,33 @@ describe("the board page's numbers", () => {
       hoursNow: 10.6,
       savedRunning: 9.4,
       running: 1,
+      unavailable: 0,
       workflows: 3,
+    });
+  });
+
+  it("show a workflow whose runs couldn't be read as unavailable, never as saving nothing", () => {
+    const unread: WorkflowFigures = { ...hire, unavailable: true };
+    expect({
+      beforeAfter: beforeAndAfter([unread]),
+      headline: headlineOf([book, pay, unread]),
+    }).toStrictEqual({
+      beforeAfter: [
+        {
+          path: hire.path,
+          title: "Hire",
+          before: 6,
+          after: 1,
+          from: "unavailable",
+        },
+      ],
+      headline: {
+        hoursNow: 10.6,
+        savedRunning: 9.4,
+        running: 1,
+        unavailable: 1,
+        workflows: 3,
+      },
     });
   });
 

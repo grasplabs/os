@@ -77,6 +77,8 @@ interface StatisticQuery {
   apps?: string[];
   /** Where in the groups the page starts. */
   offset?: number;
+  /** When the window ends: the snapshot's time, the same for every page. */
+  until?: string;
   groupBy?: string[];
 }
 
@@ -85,7 +87,12 @@ export interface Statistics {
   read: (
     caller: Caller,
     query: StatisticQuery
-  ) => Promise<{ groups: StatisticGroup[]; truncated: boolean }>;
+  ) => Promise<{
+    groups: StatisticGroup[];
+    truncated: boolean;
+    /** Of `apps`, those the caller may not see, or that are gone. */
+    unavailable?: string[];
+  }>;
 }
 
 /** Most Apps one platform read counts (the platform's bound). */
@@ -306,7 +313,10 @@ const keyOf = (appId: string, workflowId: string): string =>
   JSON.stringify([appId, workflowId]);
 
 /**
- * Every group `query` has, page by page: refused with
+ * Every group `query` has, page by page, and the Apps of it the caller
+ * may not see (`unavailable`). Its `until` holds the window still, and
+ * the platform orders groups by their values, so no page overlaps or
+ * skips another as runs start meanwhile. Refused with
  * `board.figures_incomplete` past `maxPages`, so a snapshot never freezes
  * part of them.
  */
@@ -314,7 +324,7 @@ const allGroups = async (
   statistics: Statistics,
   caller: Caller,
   query: StatisticQuery
-): Promise<StatisticGroup[]> => {
+): Promise<{ groups: StatisticGroup[]; unavailable: string[] }> => {
   const groups: StatisticGroup[] = [];
   for (let page = 0; page < maxPages; page += 1) {
     // oxlint-disable-next-line no-await-in-loop -- one page after another
@@ -324,7 +334,7 @@ const allGroups = async (
     });
     groups.push(...answer.groups);
     if (!answer.truncated) {
-      return groups;
+      return { groups, unavailable: answer.unavailable ?? [] };
     }
   }
   throw Object.assign(
@@ -342,27 +352,32 @@ const chunksOf = <T>(items: readonly T[], size: number): T[][] =>
   );
 
 /**
- * The runs each workflow of the Apps `apps` started in the window, and
- * their improvement signals' highest value of each kind, by `keyOf` and
- * kind, as the platform's statistics count them (`statistics`, the stub of
- * the page's permission on them): a few reads, each for up to
- * `appsPerRead` Apps, grouped by App. None without it, for Apps one of
- * which the caller may not see, or while statistics are switched off.
- * Any other failure fails the snapshot, as more groups than it reads do
+ * The runs each workflow of the Apps `apps` started in the window ending
+ * `until`, and their improvement signals' highest value of each kind, by
+ * `keyOf` and kind, as the platform's statistics count them (`statistics`,
+ * the stub of the page's permission on them): a few reads, each for up to
+ * `appsPerRead` Apps, grouped by App. The Apps whose runs couldn't be read
+ * are `unavailable`, never counted as none: each the caller may not see,
+ * or that is gone, and every App without the permission, or of a read
+ * refused as expected (statistics switched off, say). Any other failure
+ * fails the snapshot, as more groups than it reads do
  * (`board.figures_incomplete`).
  */
 const observed = async (
   statistics: Statistics | undefined,
   caller: Caller,
-  apps: readonly string[]
+  apps: readonly string[],
+  until: string
 ): Promise<{
   runs: Map<string, number>;
   signals: Map<string, Map<string, number>>;
+  unavailable: Set<string>;
 }> => {
   const runs = new Map<string, number>();
   const signals = new Map<string, Map<string, number>>();
+  const unavailable = new Set<string>();
   if (statistics === undefined) {
-    return { runs, signals };
+    return { runs, signals, unavailable: new Set(apps) };
   }
   for (const chunk of chunksOf(apps, appsPerRead)) {
     try {
@@ -372,19 +387,24 @@ const observed = async (
           measure: "platform.workflow_runs",
           days: windowDays,
           apps: chunk,
+          until,
           groupBy: ["app", "workflow"],
         }),
         allGroups(statistics, caller, {
           measure: "platform.improvement_signals",
           days: windowDays,
           apps: chunk,
+          until,
           groupBy: ["app", "workflow", "kind"],
         }),
       ]);
-      for (const { dimensions, count } of started) {
+      for (const app of [...started.unavailable, ...signalled.unavailable]) {
+        unavailable.add(app);
+      }
+      for (const { dimensions, count } of started.groups) {
         runs.set(keyOf(dimensions.app ?? "", dimensions.workflow ?? ""), count);
       }
-      for (const { dimensions, max } of signalled) {
+      for (const { dimensions, max } of signalled.groups) {
         const key = keyOf(dimensions.app ?? "", dimensions.workflow ?? "");
         const kinds = signals.get(key) ?? new Map<string, number>();
         kinds.set(dimensions.kind ?? "", max);
@@ -395,23 +415,29 @@ const observed = async (
       if (code === undefined || !expectedRefusals.has(code)) {
         throw error;
       }
-      // Not the caller's to see, or switched off: the snapshot is taken
-      // without what runs.
+      // Not the caller's to use, or switched off: the snapshot is taken
+      // with these Apps' runs unavailable.
+      for (const app of chunk) {
+        unavailable.add(app);
+      }
     }
   }
-  return { runs, signals };
+  return { runs, signals, unavailable };
 };
 
 /**
  * What a snapshot freezes of `record`: its title, its team's title (by
  * `teams`), its hours drawn (`drawn`), designed, and as it runs, by the
- * runs its App workflow started in the window (`runs`).
+ * runs its App workflow started in the window (`runs`); or, when that
+ * App's runs couldn't be read (`unavailable`), that they are unavailable,
+ * never none.
  */
 const figuresOf = (
   record: Current,
   drawn: Version | undefined,
   teams: ReadonlyMap<string, string>,
-  runs: ReadonlyMap<string, number>
+  runs: ReadonlyMap<string, number>,
+  unavailable: ReadonlySet<string>
 ): Record<string, unknown> => {
   const { workflow, version } = record;
   const teamTitle =
@@ -433,7 +459,10 @@ const figuresOf = (
     ...(workflow.state === "designed"
       ? { designed: { version, ...hoursOf(workflow.steps) } }
       : {}),
-    ...(app === undefined || started === 0
+    ...(app !== undefined && unavailable.has(app.appId)
+      ? { unavailable: true }
+      : {}),
+    ...(app === undefined || started === 0 || unavailable.has(app.appId)
       ? {}
       : {
           running: {
@@ -512,7 +541,14 @@ export const freeze = async (
       )
     ),
   ];
-  const { runs, signals } = await observed(statistics, caller, apps);
+  // The window ends as the snapshot is taken, for every read of it.
+  const until = new Date().toISOString();
+  const { runs, signals, unavailable } = await observed(
+    statistics,
+    caller,
+    apps,
+    until
+  );
   const frozen: Frozen["workflows"] = [];
   const workflows: Record<string, unknown>[] = [];
   for (const record of current) {
@@ -527,7 +563,7 @@ export const freeze = async (
     if (record.workflow.state === "designed") {
       frozen.push({ path: record.path, version: record.version });
     }
-    workflows.push(figuresOf(record, drawn, teams, runs));
+    workflows.push(figuresOf(record, drawn, teams, runs, unavailable));
   }
   const rank = (kind: string): number => {
     const at = kindOrder.indexOf(kind);
