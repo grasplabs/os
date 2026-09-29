@@ -63,6 +63,10 @@ export default defineProject({
           DEV_ACCESS_EMAIL: "",
           // Where provisioned clients are served (src/deploy/context.ts).
           CLIENT_DOMAIN: "grasp.test",
+          // Where TanStack Start answers server functions: the build sets
+          // it; here the Worker reads it from process.env, which workerd
+          // fills from its vars, so tests can call them through the entry.
+          TSS_SERVER_FN_BASE: "/_serverFn/",
           // Grasp's OAuth apps, which clients' sign-in names (src/deploy/core-config.ts).
           ENTRA_CLIENT_ID: "test-entra-app",
           GOOGLE_CLIENT_ID: "test-google-app.apps.googleusercontent.com",

@@ -7,6 +7,13 @@ import {
 } from "@grasp-os/ui/components/card";
 import { Input } from "@grasp-os/ui/components/input";
 import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@grasp-os/ui/components/select";
+import {
   Table,
   TableBody,
   TableCell,
@@ -18,16 +25,13 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { formatTime } from "../../releases/format.ts";
-import type { StartRolloutInput } from "../../rollout/control.ts";
 import { fetchRollouts, startRolloutFn } from "../../rollout/functions.ts";
 import type { RolloutOptions } from "../../rollout/queries.ts";
-import type { RolloutScope } from "../../rollout/targets.ts";
+import { startRequestOf } from "../../rollout/start-request.ts";
+import type { RolloutKind, ScopeKind } from "../../rollout/start-request.ts";
 import { useRolloutAction } from "../../rollout/use-action.ts";
-import { InvalidFieldError } from "../../use-action.ts";
 
-/** What a rollout reaches after ring 0, as the form offers it. */
-type ScopeKind = RolloutScope["scope"];
-
+/** Whom a rollout reaches after ring 0, as the form offers it. */
 const scopes: { value: ScopeKind; label: string }[] = [
   { value: "ring", label: "One ring" },
   { value: "client", label: "One client" },
@@ -35,8 +39,6 @@ const scopes: { value: ScopeKind; label: string }[] = [
 ];
 
 /** What a rollout takes to clients, as the form offers it. */
-type RolloutKind = StartRolloutInput["kind"];
-
 const kinds: { value: RolloutKind; label: string }[] = [
   { value: "release", label: "A release" },
   { value: "secrets", label: "Secrets only" },
@@ -46,25 +48,6 @@ const kinds: { value: RolloutKind; label: string }[] = [
 const textOf = (form: FormData, name: string): string => {
   const value = form.get(name);
   return typeof value === "string" ? value.trim() : "";
-};
-
-/** The scope the form says, or why it can't be one. */
-const scopeOf = (
-  kind: ScopeKind,
-  ring: number,
-  form: FormData
-): RolloutScope => {
-  if (kind === "all") {
-    return { scope: "all" };
-  }
-  if (kind === "client") {
-    const clientId = textOf(form, "clientId");
-    if (clientId === "") {
-      throw new InvalidFieldError("Name the client to roll out to.");
-    }
-    return { scope: "client", clientId };
-  }
-  return { scope: "ring", ring };
 };
 
 /** `count` clients, in words. */
@@ -82,6 +65,10 @@ const StartRollout = ({ options }: { options: RolloutOptions }) => {
   const [kind, setKind] = useState<ScopeKind>("ring");
   const [ring, setRing] = useState<number | null>(null);
   const chosenRing = ring ?? later[0]?.ring ?? options.firstRing;
+  const ringItems = later.map((each) => ({
+    value: each.ring,
+    label: `Ring ${each.ring} (${clientsOf(each.clients)})`,
+  }));
   const [newest] = options.releases;
   if (newest === undefined) {
     return (
@@ -92,14 +79,15 @@ const StartRollout = ({ options }: { options: RolloutOptions }) => {
   }
   const start = (form: FormData) => {
     void run(async () => {
-      // With no one past the first ring, every client is that ring.
-      const scope: RolloutScope =
-        later.length === 0 ? { scope: "all" } : scopeOf(kind, chosenRing, form);
       const result = await startRolloutFn({
-        data:
-          what === "secrets"
-            ? { kind: "secrets", scope }
-            : { kind: "release", releaseId: textOf(form, "releaseId"), scope },
+        data: startRequestOf({
+          what,
+          releaseId: textOf(form, "releaseId"),
+          scope: kind,
+          ring: chosenRing,
+          clientId: textOf(form, "clientId"),
+          pastFirstRing: later.length > 0,
+        }),
       });
       if (result.done !== null) {
         await navigate({
@@ -170,28 +158,34 @@ const StartRollout = ({ options }: { options: RolloutOptions }) => {
           {`Only ring ${options.firstRing} has active clients, so this reaches only our own deployments.`}
         </p>
       ) : (
-        <fieldset className="flex flex-col gap-1 text-sm">
-          <legend className="font-medium">Then</legend>
-          <div className="flex flex-wrap gap-2">
-            {scopes.map((scope) => (
-              <Button
-                key={scope.value}
-                type="button"
-                size="sm"
-                variant={kind === scope.value ? "default" : "outline"}
-                aria-pressed={kind === scope.value}
-                onClick={() => {
-                  setKind(scope.value);
-                }}
-              >
-                {scope.label}
-              </Button>
-            ))}
-          </div>
+        <div className="flex flex-col gap-1 text-sm">
+          <span id="rollout-scope" className="font-medium">
+            Then
+          </span>
+          <Select
+            items={scopes}
+            value={kind}
+            onValueChange={(value: ScopeKind | null) => {
+              if (value !== null) {
+                setKind(value);
+              }
+            }}
+          >
+            <SelectTrigger aria-labelledby="rollout-scope">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {scopes.map((scope) => (
+                <SelectItem key={scope.value} value={scope.value}>
+                  {scope.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
           <span className="text-muted-foreground">
             Ring {options.firstRing} comes first, then this once you approve it.
           </span>
-        </fieldset>
+        </div>
       )}
       {later.length > 0 && kind === "all" ? (
         <ul className="text-muted-foreground flex flex-col gap-1 text-sm">
@@ -203,25 +197,31 @@ const StartRollout = ({ options }: { options: RolloutOptions }) => {
         </ul>
       ) : null}
       {later.length > 0 && kind === "ring" ? (
-        <fieldset className="flex flex-col gap-1 text-sm">
-          <legend className="font-medium">Ring</legend>
-          <div className="flex flex-wrap gap-2">
-            {later.map((each) => (
-              <Button
-                key={each.ring}
-                type="button"
-                size="sm"
-                variant={chosenRing === each.ring ? "default" : "outline"}
-                aria-pressed={chosenRing === each.ring}
-                onClick={() => {
-                  setRing(each.ring);
-                }}
-              >
-                {`Ring ${each.ring} (${clientsOf(each.clients)})`}
-              </Button>
-            ))}
-          </div>
-        </fieldset>
+        <div className="flex flex-col gap-1 text-sm">
+          <span id="rollout-ring" className="font-medium">
+            Ring
+          </span>
+          <Select
+            items={ringItems}
+            value={chosenRing}
+            onValueChange={(value: number | null) => {
+              if (value !== null) {
+                setRing(value);
+              }
+            }}
+          >
+            <SelectTrigger aria-labelledby="rollout-ring">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              {ringItems.map((item) => (
+                <SelectItem key={item.value} value={item.value}>
+                  {item.label}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
       ) : null}
       {later.length > 0 && kind === "client" ? (
         <label htmlFor="rollout-client" className="flex flex-col gap-1 text-sm">

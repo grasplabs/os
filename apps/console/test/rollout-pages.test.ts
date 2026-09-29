@@ -1,34 +1,28 @@
-import { env, exports } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { introspectWorkflow } from "cloudflare:test";
+import { env } from "cloudflare:workers";
+import { and, eq, inArray } from "drizzle-orm";
 import { describe, expect, it } from "vite-plus/test";
+import { z } from "zod";
 
 import { act, consoleDatabase } from "../src/db/act.ts";
-import { clients, rollouts, rolloutTargets } from "../src/db/schema.ts";
+import {
+  auditEvents,
+  clients,
+  rollouts,
+  rolloutTargets,
+} from "../src/db/schema.ts";
 import { importReleases } from "../src/releases/import.ts";
-import { accessJwt, mockAccess } from "./access.ts";
+import { startRolloutFn } from "../src/rollout/functions.ts";
+import { startRequestOf } from "../src/rollout/start-request.ts";
+import type { StartChoices } from "../src/rollout/start-request.ts";
+import { mockAccess } from "./access.ts";
+import { callServerFn, page } from "./pages.ts";
 import { publishRelease } from "./releases.ts";
 
 mockAccess();
 
-const origin = "https://console.grasp.test";
 const db = consoleDatabase(env.DB);
 const staff = { email: "staff@grasp.test", sub: "sub-staff" };
-
-const scripts = /<script\b[^>]*>[\s\S]*?<\/script>/gu;
-
-/**
- * The page at `path`, as a staff member sees it: its markup without its
- * scripts, so the data sent along for hydration doesn't count as shown.
- */
-const page = async (path: string) => {
-  const response = await exports.default.fetch(`${origin}${path}`, {
-    headers: {
-      "cf-access-jwt-assertion": await accessJwt(staff.email),
-    },
-  });
-  const html = await response.text();
-  return { status: response.status, html: html.replaceAll(scripts, "") };
-};
 
 /** A release, published and imported. */
 const importedRelease = async (): Promise<string> => {
@@ -132,7 +126,7 @@ describe("the rollout pages", () => {
     });
   });
 
-  it("offer only rings past ring 0, with how many clients each has, and say when ring 0 is all there is", async () => {
+  it("offer only rings past ring 0 in Selects, with how many clients each has, and say when ring 0 is all there is", async () => {
     await importedRelease();
     // Only this test's clients are active.
     await db
@@ -149,22 +143,93 @@ describe("the rollout pages", () => {
       ringZeroOnly: {
         says: ringZeroOnly.html.includes("reaches only our own deployments"),
         choice: ringZeroOnly.html.includes("One ring"),
+        selects: count(ringZeroOnly.html, 'data-slot="select-trigger"'),
       },
       withRingTwo: {
         says: withRingTwo.html.includes("reaches only our own deployments"),
         choice: withRingTwo.html.includes("One ring"),
+        // The scope and the ring, each server-rendered with its choice.
+        selects: count(withRingTwo.html, 'data-slot="select-trigger"'),
         ringTwo: withRingTwo.html.includes("Ring 2 (1 client)"),
         // Ring 0 comes first whatever's chosen, so it isn't offered.
         ringZero: withRingTwo.html.includes("Ring 0 ("),
       },
     }).toStrictEqual({
-      ringZeroOnly: { says: true, choice: false },
+      ringZeroOnly: { says: true, choice: false, selects: 0 },
       withRingTwo: {
         says: false,
         choice: true,
+        selects: 2,
         ringTwo: true,
         ringZero: false,
       },
+    });
+  });
+
+  it("start the rollout the form's choices send, through the console's entry, recorded as sent", async () => {
+    const release = await importedRelease();
+    // No earlier test's rollout stands in the way.
+    await db
+      .update(rollouts)
+      .set({ status: "cancelled" })
+      .where(inArray(rollouts.status, ["running", "waiting"]));
+    const target = await recordClient(2);
+    // The runs it starts go nowhere: the test reads what was started.
+    await using runs = await introspectWorkflow(env.ROLLOUT);
+    const choices: StartChoices = {
+      what: "release",
+      releaseId: release,
+      scope: "client",
+      ring: 3,
+      clientId: target,
+      pastFirstRing: true,
+    };
+
+    const result = await callServerFn(startRolloutFn, startRequestOf(choices));
+
+    const rolloutId = result.done ?? "";
+    const [started] = await db
+      .select({ releaseId: rollouts.releaseId, kind: rollouts.kind })
+      .from(rollouts)
+      .where(eq(rollouts.id, rolloutId));
+    const [event] = await db
+      .select({ actor: auditEvents.actor, detail: auditEvents.detail })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.action, "rollout.start"),
+          eq(auditEvents.target, rolloutId)
+        )
+      );
+    const startedRuns = await runs.get();
+    const targets = await db
+      .select({ clientId: rolloutTargets.clientId, ring: rolloutTargets.ring })
+      .from(rolloutTargets)
+      .where(eq(rolloutTargets.rolloutId, rolloutId));
+    expect({
+      refused: result.refused,
+      started,
+      event: {
+        actor: event?.actor,
+        detail: z.unknown().parse(JSON.parse(event?.detail ?? "null")),
+      },
+      // Past ring 0, only the client named.
+      pastRingZero: targets.filter(({ ring }) => ring !== 0),
+      runs: startedRuns.length,
+    }).toMatchObject({
+      refused: null,
+      started: { releaseId: release, kind: "release" },
+      event: {
+        actor: staff.email,
+        detail: {
+          kind: "release",
+          release,
+          scope: "client",
+          client: target,
+        },
+      },
+      pastRingZero: [{ clientId: target, ring: 2 }],
+      runs: 1,
     });
   });
 

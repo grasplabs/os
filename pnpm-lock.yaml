@@ -150,6 +150,9 @@ catalogs:
     secretlint:
       specifier: 13.0.5
       version: 13.0.5
+    seroval:
+      specifier: 1.6.7
+      version: 1.6.7
     shadcn:
       specifier: 4.21.0
       version: 4.21.0
@@ -352,6 +355,9 @@ importers:
       drizzle-kit:
         specifier: 'catalog:'
         version: 0.31.11
+      seroval:
+        specifier: 'catalog:'
+        version: 1.6.7
       tailwindcss:
         specifier: 'catalog:'
         version: 4.3.3
