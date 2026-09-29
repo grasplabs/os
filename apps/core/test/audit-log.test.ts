@@ -621,18 +621,30 @@ describe("AuditLog retention", () => {
 
   it("archives a long backlog a stretch at a time, and keeps one chain", async () => {
     const log = newLog();
-    await appendMany(log, 700);
-    const cutoff = await cutoffNow();
+    // The log's clock is set here, not read: it receives the backlog a
+    // minute before the cutoff and records each archive a minute after it,
+    // rather than this test's reading of the real clock having to fall
+    // strictly between the log's own readings.
+    const cutoffMs = Date.now();
+    const cutoff = new Date(cutoffMs).toISOString();
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(cutoffMs - 60_000);
+      await appendMany(log, 700);
+      vi.setSystemTime(cutoffMs + 60_000);
 
-    await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
-      from: 1,
-      through: 500,
-    });
-    await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
-      from: 501,
-      through: 700,
-    });
-    await expect(log.archive(cutoff, 180)).resolves.toBeNull();
+      await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
+        from: 1,
+        through: 500,
+      });
+      await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
+        from: 501,
+        through: 700,
+      });
+      await expect(log.archive(cutoff, 180)).resolves.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
     await expect(verifyAll(log)).resolves.toMatchObject({
       result: { ok: true, through: 702, done: true },
     });
