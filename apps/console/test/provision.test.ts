@@ -235,10 +235,7 @@ const detailsOf = async (
   return rows.map(({ detail }): unknown => JSON.parse(detail ?? "null"));
 };
 
-/**
- * The client's resumes, oldest first: whether each replaced a run, and
- * whether it skipped the Workers Paid pause.
- */
+/** The client's resumes, oldest first: whether each replaced a run. */
 const retriesOf = async (clientId: string) => {
   const details = await detailsOf(clientId, "client.provision_retry");
   return details.map((detail) => {
@@ -246,10 +243,7 @@ const retriesOf = async (clientId: string) => {
       typeof detail === "object" && detail !== null
         ? Reflect.get(detail, key)
         : undefined;
-    return {
-      replaced: typeof field("replaces") === "string",
-      workersPaid: field("workersPaid"),
-    };
+    return { replaced: typeof field("replaces") === "string" };
   });
 };
 
@@ -547,7 +541,7 @@ describe("provisioning a new client", () => {
       deploys: [{ status: "done", error: null }],
       confirmations: 1,
       // A new run in place of the stopped one, without the pause.
-      retries: [{ replaced: true, workersPaid: true }],
+      retries: [{ replaced: true }],
       client: { status: "active" },
     });
   });
@@ -603,8 +597,8 @@ describe("provisioning a new client", () => {
       retries: [
         // The first replaced the run that was gone, the second its
         // successor that stopped.
-        { replaced: true, workersPaid: true },
-        { replaced: true, workersPaid: true },
+        { replaced: true },
+        { replaced: true },
       ],
       deploys: [{ status: "done" }],
     });
@@ -663,6 +657,62 @@ describe("provisioning a new client", () => {
       accounts: 1,
       claims: 1,
       again: "already_running",
+    });
+  });
+
+  it("lets a new run go on when a Workers Paid confirmation races the resume that replaces a stopped run, whichever lands first", async () => {
+    const { clientId, input } = await setUp();
+    await using run = await followRuns();
+    await startProvisioning(env, staff, input);
+    await run.waitForStepResult({ name: "client" });
+    // The run waiting for Workers Paid ends before staff confirm (its wait
+    // timed out, say).
+    const waiting = await instanceOf(clientId);
+    await waiting.terminate();
+    await run.waitForStatus("terminated");
+
+    // A confirmation and a resume at once: the confirmation may reach the
+    // old run, the new one before it waits, or the new one waiting.
+    await Promise.all([
+      confirmWorkersPaid(env, staff, clientId),
+      retryProvisioning(env, staff, clientId),
+    ]);
+    await run.waitForStatus("complete");
+
+    const trail = await actions(clientId);
+    expect({
+      runs: await run.count(),
+      confirmations: trail.filter((action) => action === "client.workers_paid")
+        .length,
+      client: await clientRow(clientId),
+    }).toMatchObject({
+      runs: 2,
+      confirmations: 1,
+      client: { status: "active" },
+    });
+  });
+
+  it("lets a new run go on without asking again when staff confirmed Workers Paid on the run it replaced", async () => {
+    const { clientId, input } = await setUp();
+    await using run = await followRuns();
+    await startProvisioning(env, staff, input);
+    await run.waitForStepResult({ name: "client" });
+    const waiting = await instanceOf(clientId);
+    await waiting.terminate();
+    await run.waitForStatus("terminated");
+
+    // The confirmation lands first, on the run that stopped: it takes no
+    // event, and the resume's new run finds the confirmation.
+    await confirmWorkersPaid(env, staff, clientId);
+    await retryProvisioning(env, staff, clientId);
+    await run.waitForStatus("complete");
+
+    const confirmed = await run.waitForStepResult({
+      name: "workers paid confirmed",
+    });
+    expect({ confirmed, client: await clientRow(clientId) }).toMatchObject({
+      confirmed: true,
+      client: { status: "active" },
     });
   });
 

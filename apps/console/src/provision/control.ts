@@ -199,10 +199,14 @@ export const startProvisioning = async (
 };
 
 /**
- * Tells client `clientId`'s current run that its account is on Workers
- * Paid, as `staff`. Refused unless the client is being provisioned by a
- * run Workflows has. Sending it again, or before the run waits for it, is
- * harmless: the run takes the first when it gets there.
+ * Records, as `staff`, that client `clientId`'s account is on Workers
+ * Paid, then tells the client's current run, as `client_runs` names it
+ * once the confirmation is recorded. Every run checks for the
+ * confirmation before it waits for it, so whichever run is current when
+ * a resume races this one, it goes on: the one told, or a new one that
+ * finds the confirmation. Refused unless the client is being provisioned
+ * and has had a run. Confirming again, or before the run waits, is
+ * harmless.
  */
 export const confirmWorkersPaid = async (
   env: Env,
@@ -210,11 +214,9 @@ export const confirmWorkersPaid = async (
   clientId: string
 ): Promise<void> => {
   const client = await clientOf(env, clientId);
-  const run = await currentRun(env, clientId);
   if (
     client?.status !== "provisioning" ||
-    run === null ||
-    run.instance === null
+    (await currentRun(env, clientId)) === null
   ) {
     throw new ProvisionError(
       "not_provisioning",
@@ -225,7 +227,14 @@ export const confirmWorkersPaid = async (
     action: "client.workers_paid",
     clientId,
   });
-  await run.instance.sendEvent({ type: workersPaidEvent, payload: {} });
+  // Read after the confirmation is recorded: a run claimed since finds it.
+  const run = await currentRun(env, clientId);
+  // A run that stopped takes no event; the one that replaces it finds the
+  // confirmation instead.
+  const instance = run?.instance ?? null;
+  if (run !== null && instance !== null && !isReplaceable(run.status)) {
+    await instance.sendEvent({ type: workersPaidEvent, payload: {} });
+  }
 };
 
 /**
@@ -263,29 +272,11 @@ const releaseToResume = async (
   return started.releaseId;
 };
 
-/** Whether staff confirmed Workers Paid for client `clientId`, in any run. */
-const confirmedWorkersPaid = async (
-  db: ConsoleDatabase,
-  clientId: string
-): Promise<boolean> => {
-  const [confirmed] = await db
-    .select({ id: auditEvents.id })
-    .from(auditEvents)
-    .where(
-      and(
-        eq(auditEvents.clientId, clientId),
-        eq(auditEvents.action, "client.workers_paid")
-      )
-    )
-    .limit(1);
-  return confirmed !== undefined;
-};
-
 /**
  * Resumes provisioning client `clientId`, as `staff`, with a new run made
- * from the client's record: the release its latest deploy was of (or the
- * one it was started with), and no Workers Paid pause once staff
- * confirmed it. One path whichever step the old run stopped at, and
+ * from the client's record, with the release its latest deploy was of (or
+ * the one it was started with); it waits for Workers Paid only if staff
+ * never confirmed it. One path whichever step the old run stopped at, and
  * whether it stopped or is gone: every step finds what an earlier run
  * made, and the deploy resumes the client's failed deploy, so nothing is
  * made twice.
@@ -313,15 +304,11 @@ export const retryProvisioning = async (
     throw alreadyRunning(clientId);
   }
   const releaseId = await releaseToResume(db, clientId);
-  const workersPaid = await confirmedWorkersPaid(db, clientId);
   const runId = await claimRun(db, staff, clientId, run?.runId ?? null, {
     action: "client.provision_retry",
     clientId,
     target: releaseId,
-    detail: {
-      workersPaid,
-      ...(run === null ? {} : { replaces: run.runId }),
-    },
+    detail: run === null ? {} : { replaces: run.runId },
   });
   if (runId === undefined) {
     throw alreadyRunning(clientId);
@@ -335,7 +322,6 @@ export const retryProvisioning = async (
       releaseId,
       ring: client.ring,
       startedBy: { email: staff.email, sub: staff.sub },
-      workersPaid,
     } satisfies ProvisionParams,
   });
 };

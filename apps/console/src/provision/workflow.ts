@@ -45,7 +45,7 @@ import type { CloudflareApi } from "../cloudflare/api.ts";
 import { listScripts } from "../cloudflare/workers.ts";
 import { actIfChanged, audit, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import { clients } from "../db/schema.ts";
+import { auditEvents, clients } from "../db/schema.ts";
 import {
   deployContext,
   deployerApi,
@@ -73,15 +73,31 @@ export interface ProvisionParams {
   ring: number;
   /** The staff member who started it. */
   startedBy: Staff;
-  /**
-   * Staff confirmed Workers Paid for an earlier run of this client: this
-   * run, which resumes it, doesn't ask again.
-   */
-  workersPaid?: boolean;
 }
 
 /** The event staff send once the account is on Workers Paid. */
 export const workersPaidEvent = "workers-paid";
+
+/**
+ * Whether staff confirmed Workers Paid for client `clientId`, in this run
+ * or an earlier one (`client.workers_paid`).
+ */
+const confirmedWorkersPaid = async (
+  db: ConsoleDatabase,
+  clientId: string
+): Promise<boolean> => {
+  const [confirmed] = await db
+    .select({ id: auditEvents.id })
+    .from(auditEvents)
+    .where(
+      and(
+        eq(auditEvents.clientId, clientId),
+        eq(auditEvents.action, "client.workers_paid")
+      )
+    )
+    .limit(1);
+  return confirmed !== undefined;
+};
 
 /** The deploy step, as a stopped run's audit event names it. */
 const deployStep = "deploy";
@@ -454,8 +470,16 @@ export class ProvisionClient extends WorkflowEntrypoint<Env, ProvisionParams> {
 
       // Workers Paid can't be bought through the API yet: staff upgrade the
       // account in the dashboard and confirm on the client's page.
+      // Checked first: a confirmation recorded for an earlier run, or while
+      // a resume replaced it, stands, and one recorded after this check
+      // reaches this run as its event (src/provision/control.ts).
       current = "workers paid";
-      if (params.workersPaid !== true) {
+      const confirmed = await step.do(
+        "workers paid confirmed",
+        quickStep,
+        guarded(async () => await confirmedWorkersPaid(db, params.clientId))
+      );
+      if (!confirmed) {
         await step.waitForEvent("workers paid", {
           type: workersPaidEvent,
           timeout: workersPaidTimeout,
