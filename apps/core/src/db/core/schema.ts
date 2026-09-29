@@ -1,3 +1,4 @@
+import type { AppExports } from "@grasp-os/shared/apps";
 import { auditRejectReasons } from "@grasp-os/shared/audit";
 import type { Json } from "@grasp-os/shared/json";
 import { signalKinds } from "@grasp-os/shared/signals";
@@ -291,7 +292,8 @@ export const auditOutboxRejected = sqliteTable(
  * The object is stored by type: a connection is `object_id`, with
  * `resource` naming one resource in it or null for all of it; a collection
  * is `object_id`; a workflow is its App's ID in `object_id` and the
- * workflow's in `resource`. `actions` is a JSON array of action names.
+ * workflow's in `resource`; another App's exports are that App's ID in
+ * `object_id`. `actions` is a JSON array of action names.
  */
 export const permissions = sqliteTable(
   "permissions",
@@ -300,7 +302,7 @@ export const permissions = sqliteTable(
     subjectType: text("subject_type", { enum: ["app", "agent"] }).notNull(),
     subjectId: text("subject_id").notNull(),
     objectType: text("object_type", {
-      enum: ["connection", "collection", "workflow"],
+      enum: ["connection", "collection", "workflow", "app"],
     }).notNull(),
     objectId: text("object_id").notNull(),
     resource: text(),
@@ -441,6 +443,15 @@ export const appVersions = sqliteTable(
       .$type<string[]>()
       .notNull()
       .default(sql`'[]'`),
+    /**
+     * The version's exports (JSON, `AppExports`), read from its
+     * `app/exports.json` when it is committed (app-exports.ts): so a call
+     * from another App reads no files to find what it may call.
+     */
+    exports: text({ mode: "json" })
+      .$type<AppExports>()
+      .notNull()
+      .default(sql`'{}'`),
   },
   (table) => [primaryKey({ columns: [table.appId, table.version] })]
 );

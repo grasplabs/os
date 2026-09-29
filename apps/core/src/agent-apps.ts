@@ -1,10 +1,15 @@
-import type { App, AppFiles, AppVersion } from "@grasp-os/shared/apps";
+import type {
+  App,
+  AppExports,
+  AppFiles,
+  AppVersion,
+} from "@grasp-os/shared/apps";
 import type { Permission } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import { asPerson } from "./agent-person.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
-import { listApps, listVersions, readFiles } from "./apps.ts";
+import { appExports, listApps, listVersions, readFiles } from "./apps.ts";
 import { appsCollectionEnabled } from "./knowledge/access.ts";
 import { appsCollectionId } from "./knowledge/app-entries.ts";
 
@@ -56,6 +61,27 @@ export class AppsApi extends WorkerEntrypoint<Env, AgentScope> {
     });
   }
 
+  /**
+   * What an App's current version exports to other Apps (the methods they
+   * may call under a permission an admin grants): for anyone with a role
+   * in it. Read only: nothing here asks for or calls one.
+   */
+  async exports(
+    app: unknown
+  ): Promise<{ version: number | null; exports: AppExports }> {
+    return await asPerson(this.env, this.ctx.props, {
+      feature: "apps",
+      allowed: readsApps(this.env),
+      method: "apps.exports",
+      read: async (person) => await appExports(this.env, person, app),
+      detail: (found) => ({
+        app: typeof app === "string" ? app : null,
+        version: found.version,
+        exports: Object.keys(found.exports).length,
+      }),
+    });
+  }
+
   /** An App's versions, newest first: for its builders. */
   async versions(app: unknown, before?: unknown): Promise<AppVersion[]> {
     return await asPerson(this.env, this.ctx.props, {
@@ -91,6 +117,23 @@ apps: {
   }[]>;
   /** An App's files by path, at \`version\`, or its working copy without one. Only for Apps the person builds. */
   files(app: string, version?: number): Promise<Record<string, string>>;
+  /**
+   * The methods an App's current version lets other Apps call, by name, as
+   * its \`app/exports.json\` declares them: whether each only reads or also
+   * writes the App's data, and the JSON Schemas of its input and answer.
+   * Another App calls one only once an admin grants it a permission on
+   * this App's exports. Any App the person has a role in.
+   */
+  exports(app: string): Promise<{
+    /** The current version; null (and no exports) while it has none. */
+    version: number | null;
+    exports: Record<string, {
+      access: "read" | "write";
+      description: string;
+      input: Record<string, unknown>;
+      output: Record<string, unknown>;
+    }>;
+  }>;
   /** An App's versions, newest first, at most 100 before \`before\`. Only for Apps the person builds. */
   versions(app: string, before?: number): Promise<{
     version: number;

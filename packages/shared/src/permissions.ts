@@ -1,5 +1,6 @@
 import { z } from "zod";
 
+import { isExportName } from "./apps.ts";
 import { defineErrorFamily } from "./errors.ts";
 import {
   agentIdSchema,
@@ -64,8 +65,9 @@ const collectionObjectSchema = z.strictObject({
 
 /**
  * What a permission gives access to: a connection (all of it, or one
- * resource in it, such as one mailbox), a Knowledge collection, or one
- * workflow of an App.
+ * resource in it, such as one mailbox), a Knowledge collection, one
+ * workflow of an App, or another App's exports: the methods of its server
+ * code it lets other Apps call (`appExportsPath`).
  */
 export const permissionObjectSchema = z.discriminatedUnion("type", [
   z.strictObject({
@@ -85,6 +87,10 @@ export const permissionObjectSchema = z.discriminatedUnion("type", [
     appId: appIdSchema,
     workflowId: workflowIdSchema,
   }),
+  z.strictObject({
+    type: z.literal("app"),
+    appId: appIdSchema,
+  }),
 ]);
 export type PermissionObject = z.infer<typeof permissionObjectSchema>;
 export type PermissionObjectType = PermissionObject["type"];
@@ -96,7 +102,7 @@ export type PermissionObjectType = PermissionObject["type"];
  */
 const connectionActionPattern = /^[A-Za-z][\w.-]{0,63}$/u;
 
-/** The actions of the other objects, fixed by the platform. */
+/** The actions of collections and workflows, fixed by the platform. */
 const platformActions = {
   collection: ["read", "write"],
   workflow: ["read", "start"],
@@ -109,6 +115,11 @@ export const permissionActionSchema = z.string().regex(connectionActionPattern);
 const isActionOf = (type: PermissionObjectType, action: string): boolean => {
   if (type === "connection") {
     return connectionActionPattern.test(action);
+  }
+  // Another App's exports: all those it marks `read`, all those it marks
+  // `write`, or one by its name, whichever it is marked.
+  if (type === "app") {
+    return action === "read" || action === "write" || isExportName(action);
   }
   const actions: readonly string[] = platformActions[type];
   return actions.includes(action);
@@ -254,8 +265,9 @@ export type DeclaredPermission = z.infer<typeof declaredPermissionSchema>;
 /**
  * Requested: asked for, allows nothing yet. Active: granted, allows its
  * actions. Revoked: allows nothing, for good (ask again for a new one).
- * An App's active permission on a connection, to write a collection or to
- * start a workflow goes back to requested when someone who couldn't grant
+ * An App's active permission on a connection, to write a collection, to
+ * start a workflow, or to call another App's exports other than all those
+ * marked `read`, goes back to requested when someone who couldn't grant
  * it (Grasp staff included) makes another version of the App current
  * (`AppVersionsApi.setCurrent`), until an admin grants it again.
  */

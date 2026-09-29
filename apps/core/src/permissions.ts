@@ -6,7 +6,7 @@ import type {
   AuditEntry,
 } from "@grasp-os/shared/audit";
 import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
-import { permissionIdSchema } from "@grasp-os/shared/ids";
+import { appIdSchema, permissionIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
 import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -32,7 +32,17 @@ import {
   roleErrors,
 } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, eq, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import {
+  and,
+  asc,
+  eq,
+  inArray,
+  isNull,
+  ne,
+  notInArray,
+  or,
+  sql,
+} from "drizzle-orm";
 import type { SQL, SQLWrapper } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
@@ -58,7 +68,7 @@ import {
 import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
 import { appHost } from "./durable-objects.ts";
-import { featureEnabled } from "./features.ts";
+import { featureEnabled, requireFeature } from "./features.ts";
 
 // Permission records and the one check every server path runs. A person
 // asks for a permission (it allows nothing yet), an admin grants it, their
@@ -112,6 +122,14 @@ const objectColumns = (object: PermissionObject) => {
         mask: null,
       };
     }
+    case "app": {
+      return {
+        objectType: object.type,
+        objectId: object.appId,
+        resource: null,
+        mask: null,
+      };
+    }
     default: {
       return object satisfies never;
     }
@@ -142,6 +160,12 @@ const objectOf = (row: Row): PermissionObject => {
         type: row.objectType,
         appId: row.objectId,
         workflowId: resource,
+      });
+    }
+    case "app": {
+      return permissionObjectSchema.parse({
+        type: row.objectType,
+        appId: row.objectId,
       });
     }
     default: {
@@ -188,8 +212,8 @@ const auditDetail = ({
   actions,
   binding,
 }: Permission): Record<string, AuditDetailValue> => {
-  // The object's IDs by name: connectionId and resource, collectionId, or
-  // appId and workflowId; a connection's masked fields as one
+  // The object's IDs by name: connectionId and resource, collectionId,
+  // appId and workflowId, or appId; a connection's masked fields as one
   // identifier-sized value, as the actions are.
   const { type: objectType, ...objectIds } = object;
   const { subjectType, subjectId } = subjectColumns(subject);
@@ -302,9 +326,12 @@ const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
     .get();
 
 /**
- * The Apps a permission names, its subject and a workflow's App, must be in
- * the registry: one query for both. Apps are never deleted, so one that
- * exists now still does when the permission is stored.
+ * The Apps a permission names, its subject and a workflow's or another
+ * App's exports' App, must be in the registry: one query for both. Apps
+ * are never deleted, so one that exists now still does when the permission
+ * is stored. Another App's exports are never a built-in blueprint's, which
+ * never runs, and never the subject's own: an App calls its own methods
+ * without a permission.
  */
 const requireApps = async (
   env: Env,
@@ -315,14 +342,23 @@ const requireApps = async (
   if (subject.type === "app") {
     named.set("subject.appId", subject.appId);
   }
-  if (object.type === "workflow") {
+  if (object.type === "workflow" || object.type === "app") {
     named.set("object.appId", object.appId);
   }
   if (named.size === 0) {
     return;
   }
+  if (
+    object.type === "app" &&
+    subject.type === "app" &&
+    object.appId === subject.appId
+  ) {
+    throw permissionErrors.create("permission.invalid", {
+      issues: ["object.appId: An App calls its own methods without one."],
+    });
+  }
   const found = await drizzle(env.DB)
-    .select({ id: apps.id })
+    .select({ id: apps.id, ownerId: apps.ownerId })
     .from(apps)
     .where(inArray(apps.id, [...new Set(named.values())]));
   const existing = new Set(found.map(({ id }) => id));
@@ -330,6 +366,16 @@ const requireApps = async (
   if (missing.length > 0) {
     throw permissionErrors.create("permission.invalid", {
       issues: missing.map(([path]) => `${path}: There's no such App.`),
+    });
+  }
+  const builtinExports =
+    object.type === "app" &&
+    found.some(
+      ({ id, ownerId }) => id === object.appId && ownerId === builtinOwner
+    );
+  if (builtinExports) {
+    throw permissionErrors.create("permission.invalid", {
+      issues: ["object.appId: A built-in blueprint never runs."],
     });
   }
 };
@@ -396,9 +442,10 @@ const requireCollection = async (
 
 /**
  * Asks for a permission for an App or agent. It allows nothing until an
- * admin grants it. For an App, only its builders ask, and a workflow of
- * another App only someone with a role in that App: `requireAppRole`
- * refuses anyone else, before anything says whether the App exists
+ * admin grants it. For an App, only its builders ask, and a workflow or
+ * the exports of another App only someone with a role in that App:
+ * `requireAppRole` refuses anyone else, before anything says whether the
+ * App exists
  * (`appFor` in apps.ts, passed in because apps.ts depends on this module,
  * through workflow code and its bindings).
  */
@@ -426,6 +473,16 @@ export const requestPermission = async (
     object.type === "workflow" &&
     object.appId === subject.appId;
   if (object.type === "workflow" && !ownWorkflow) {
+    await requireAppRole(object.appId, "user");
+  }
+  if (object.type === "app") {
+    // Only an App calls another's exports, and only while they are on.
+    requireFeature(env, "app_calls");
+    if (subject.type !== "app") {
+      throw permissionErrors.create("permission.invalid", {
+        issues: ["subject: Only an App calls another App's exports."],
+      });
+    }
     await requireAppRole(object.appId, "user");
   }
   await requireApps(env, subject, object);
@@ -575,6 +632,16 @@ export interface DroppedConnection {
 }
 
 /**
+ * A workflow or the exports of another App a blueprint's App was given,
+ * that a copy doesn't ask for: by its type and binding only, never the
+ * App, which its creator can't see.
+ */
+export interface DroppedApp {
+  type: "workflow" | "app";
+  binding: string;
+}
+
+/**
  * Requests for `app` of what `from` was given or asked for (its
  * permissions that aren't revoked), made by `by` as `app` is created from
  * a blueprint of `from` (app-blueprints.ts): the rows and their audit
@@ -582,17 +649,25 @@ export interface DroppedConnection {
  * nothing until an admin grants it. A workflow of `from` itself becomes
  * the same workflow of `app`. Someone else's personal connection is left
  * out (`dropped`), as only its owner's calls could use it and a copy is
- * `by`'s own App, and so is one connect doesn't know.
+ * `by`'s own App, and so is one connect doesn't know. So is a workflow or
+ * the exports of another App `by` couldn't ask for themselves
+ * (`droppedApps`): one they have no role in, as `openTo` (the Apps of
+ * those it names they may open; apps.ts, passed in as for
+ * `requestPermission`) says, so a copy never names an App its creator
+ * can't see; and, while calls between Apps are off (`app_calls`), any
+ * App's exports, which nobody could ask for then either.
  */
 export const blueprintRequests = async (
   env: Env,
   by: Identity,
   from: AppId,
-  app: AppId
+  app: AppId,
+  openTo: (apps: AppId[]) => Promise<ReadonlySet<string>>
 ): Promise<{
   rows: Row[];
   entries: AuditEntry[];
   dropped: DroppedConnection[];
+  droppedApps: DroppedApp[];
 }> => {
   const found = await drizzle(env.DB)
     .select()
@@ -624,9 +699,25 @@ export const blueprintRequests = async (
   );
   const isOthers = (row: Row): boolean =>
     row.objectType === "connection" && !kept.has(row.objectId);
+  // Another App's workflow or exports: kept only if `by` may open it.
+  const namesOtherApp = (row: Row): boolean =>
+    (row.objectType === "workflow" || row.objectType === "app") &&
+    row.objectId !== from;
+  const otherApps = [
+    ...new Set(
+      found
+        .filter(namesOtherApp)
+        .map(({ objectId }) => appIdSchema.parse(objectId))
+    ),
+  ];
+  const open = otherApps.length === 0 ? new Set() : await openTo(otherApps);
+  const callsOn = featureEnabled(env, "app_calls");
+  const isHidden = (row: Row): boolean =>
+    (row.objectType === "app" && !callsOn) ||
+    (namesOtherApp(row) && !open.has(row.objectId));
   const requestedAt = new Date();
   const rows = found
-    .filter((row) => !isOthers(row))
+    .filter((row) => !isOthers(row) && !isHidden(row))
     .map((row): Row => ({
       ...row,
       id: crypto.randomUUID(),
@@ -653,6 +744,10 @@ export const blueprintRequests = async (
     dropped: found
       .filter(isOthers)
       .map(({ objectId, binding }) => ({ connectionId: objectId, binding })),
+    droppedApps: found.filter(isHidden).map(({ objectType, binding }) => ({
+      type: objectType === "app" ? "app" : "workflow",
+      binding,
+    })),
   };
 };
 
@@ -785,7 +880,8 @@ const eventIdSql = (fresh: string): SQL =>
 
 /**
  * What `auditDetail` records of a permission row, as SQL: its IDs by name
- * (connectionId, resource and mask; collectionId; appId and workflowId),
+ * (connectionId, resource and mask; collectionId; appId and workflowId;
+ * appId),
  * its actions and its binding.
  */
 const auditDetailSql = sql`json_patch(
@@ -799,6 +895,7 @@ const auditDetailSql = sql`json_patch(
       )
     )
     WHEN 'collection' THEN json_object('collectionId', ${permissions.objectId})
+    WHEN 'app' THEN json_object('appId', ${permissions.objectId})
     ELSE json_object('appId', ${permissions.objectId}, 'workflowId', ${permissions.resource})
   END
 )`;
@@ -814,7 +911,9 @@ const canGrantSql = (by: Identity): SQL =>
  * That a permission lets an App change things for the person using it,
  * as SQL on its row: any on a connection (core can't tell a connector's
  * writes from its reads; connect knows), or with an action other than
- * `read`, such as writing a collection or starting a workflow.
+ * `read`, such as writing a collection, starting a workflow, or calling
+ * another App's exports marked `write` (or one by name, whichever it is
+ * marked: its App's next version may mark it `write`).
  */
 const changesThingsSql = or(
   eq(permissions.objectType, "connection"),
@@ -1077,9 +1176,9 @@ export const listPermissions = async (
         );
   const db = drizzle(env.DB);
   const open = db.select({ id: apps.id }).from(apps).where(openApps);
-  // Both Apps a permission names, its subject and a workflow's, must be
-  // open to the person: an agent's permission for a hidden App's workflow
-  // would name that App otherwise.
+  // Both Apps a permission names, its subject and a workflow's or
+  // exports' App, must be open to the person: an agent's permission for a
+  // hidden App's workflow would name that App otherwise.
   const ofOpenApp =
     openApps === undefined
       ? undefined
@@ -1089,7 +1188,7 @@ export const listPermissions = async (
             inArray(permissions.subjectId, open)
           ),
           or(
-            ne(permissions.objectType, "workflow"),
+            notInArray(permissions.objectType, ["workflow", "app"]),
             inArray(permissions.objectId, open)
           )
         );

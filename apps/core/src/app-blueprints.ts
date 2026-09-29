@@ -11,6 +11,7 @@ import type {
   FromBlueprint,
 } from "@grasp-os/shared/apps";
 import type { AuditEntry } from "@grasp-os/shared/audit";
+import { isExpectedError } from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -23,6 +24,7 @@ import { drizzle } from "drizzle-orm/d1";
 import type { BuiltinBlueprint } from "#blueprints";
 
 import { stillOpenTo } from "./app-access.ts";
+import { exportsIn } from "./app-exports.ts";
 import {
   appFor,
   appsListedFor,
@@ -36,7 +38,12 @@ import {
   workflowsIn,
 } from "./apps.ts";
 import type { AppRow, VersionRow } from "./apps.ts";
-import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
+import {
+  auditedBatch,
+  outboxed,
+  outboxedIfChanged,
+  outboxedWhere,
+} from "./audit-outbox.ts";
 import { builtinAppId, builtinOwner } from "./builtin-app-id.ts";
 import {
   appBlueprints,
@@ -338,6 +345,32 @@ const approvedSource = async (
 };
 
 /**
+ * Of the Apps `named`, those `by` may open, as `appFor` decides for each
+ * (a role in it, and able to read what it read): the Apps whose workflows
+ * and exports they could ask for themselves.
+ */
+const openedBy = async (
+  env: Env,
+  by: Identity,
+  named: readonly AppId[]
+): Promise<Set<string>> => {
+  const opened = await Promise.all(
+    named.map(async (app) => {
+      try {
+        await appFor(env, by, app, "user");
+        return [app];
+      } catch (error) {
+        if (isExpectedError(error)) {
+          return [];
+        }
+        throw error;
+      }
+    })
+  );
+  return new Set(opened.flat());
+};
+
+/**
  * Creates an App of `by`'s own from the blueprint of App `app` at
  * `version`: the code at that version as its first version (its AGENTS.md
  * a stub), and requests for what that App was given or asked for. All of
@@ -404,9 +437,20 @@ export const createFromBlueprint = async (
     // builder commits; otherwise approved as any version is.
     approved: (await approvedSource(env, source, number)) ? 1 : null,
     workflows: workflowsIn(files),
+    exports: exportsIn(files),
   };
-  const requests = await blueprintRequests(env, by, source.id, id);
+  const requests = await blueprintRequests(
+    env,
+    by,
+    source.id,
+    id,
+    async (named) => await openedBy(env, by, named)
+  );
   const db = drizzle(env.DB);
+  /** Whether a request names another App: a workflow or exports of it. */
+  const namesOtherApp = (row: typeof permissions.$inferSelect): boolean =>
+    (row.objectType === "workflow" || row.objectType === "app") &&
+    row.objectId !== id;
   // The App, pending, only while the blueprint is still marked and `by`
   // still has a role in its App (`stillOpenTo`), selected from its row:
   // unmarked or unshared since they were read above, nothing is inserted,
@@ -463,12 +507,60 @@ export const createFromBlueprint = async (
     ),
     // One statement each: D1 binds at most 100 values to one.
     ...requests.rows.map((row) => db.insert(permissions).values(row)),
-    ...requests.entries.map((entry) => outboxed(db, entry)),
+    // A request naming another App only while `by` still has a role in
+    // it as the batch runs: one they lost since `openedBy` read it is
+    // taken out again, in the same batch, so the copy never names it.
+    ...requests.rows
+      .filter(namesOtherApp)
+      .map((row) =>
+        db
+          .delete(permissions)
+          .where(
+            and(
+              eq(permissions.id, row.id),
+              sql`NOT ${stillOpenTo(by, appIdSchema.parse(row.objectId))}`
+            )
+          )
+      ),
+    // Each request's audit entry (`entries` are the rows', in order) if
+    // its row stayed; one taken out is recorded as dropped instead.
+    ...requests.rows.flatMap((row, index) => {
+      const entry = requests.entries[index];
+      if (entry === undefined) {
+        return [];
+      }
+      if (!namesOtherApp(row)) {
+        return [outboxed(db, entry)];
+      }
+      const kept = sql`EXISTS (SELECT 1 FROM ${permissions} WHERE ${permissions.id} = ${row.id})`;
+      return [
+        outboxedWhere(db, entry, kept),
+        outboxedWhere(
+          db,
+          changeEntry(by, "app.blueprint.app_dropped", id, {
+            objectType: row.objectType,
+            binding: row.binding,
+            fromApp: source.id,
+          }),
+          sql`NOT ${kept}`
+        ),
+      ];
+    }),
     ...requests.dropped.map(({ connectionId, binding }) =>
       outboxed(
         db,
         changeEntry(by, "app.blueprint.connection_dropped", id, {
           connectionId,
+          binding,
+          fromApp: source.id,
+        })
+      )
+    ),
+    ...requests.droppedApps.map(({ type, binding }) =>
+      outboxed(
+        db,
+        changeEntry(by, "app.blueprint.app_dropped", id, {
+          objectType: type,
           binding,
           fromApp: source.id,
         })
@@ -485,12 +577,32 @@ export const createFromBlueprint = async (
     await appFor(env, by, source.id, "user");
     throw error;
   }
+  // The requests that stayed: those naming another App `by` lost their
+  // role in as the batch ran were taken out, and are dropped too.
+  const stayedRows = await db
+    .select({ id: permissions.id })
+    .from(permissions)
+    .where(
+      and(eq(permissions.subjectType, "app"), eq(permissions.subjectId, id))
+    );
+  const stayed = new Set(stayedRows.map((row) => row.id));
   await activateCopy(env, by, source.id, id);
   return {
     app: toApp(appRow),
     version: toVersion(versionRow),
-    permissions: requests.rows.map(toPermission),
+    permissions: requests.rows
+      .filter((row) => stayed.has(row.id))
+      .map(toPermission),
     dropped: requests.dropped,
+    droppedApps: [
+      ...requests.droppedApps,
+      ...requests.rows
+        .filter((row) => !stayed.has(row.id))
+        .map(({ objectType, binding }) => ({
+          type: objectType === "app" ? ("app" as const) : ("workflow" as const),
+          binding,
+        })),
+    ],
   };
 };
 
@@ -613,6 +725,7 @@ export const installBuiltinBlueprint = async (
           createdAt: now,
           approved: 1,
           workflows: workflowsIn(files),
+          exports: exportsIn(files),
         }),
         outboxed(
           db,

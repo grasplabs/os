@@ -10,6 +10,7 @@ import {
 import type {
   App,
   AppContents,
+  CurrentExports,
   AppFiles,
   AppRole,
   AppVersion,
@@ -31,6 +32,7 @@ import { z } from "zod";
 
 import { appsFoundBy, requireAppRole } from "./app-access.ts";
 import type { Person } from "./app-access.ts";
+import { exportsIn } from "./app-exports.ts";
 import {
   auditedBatch,
   outboxed,
@@ -131,6 +133,7 @@ export const changeEntry = (
     | "app.blueprint.marked"
     | "app.blueprint.unmarked"
     | "app.blueprint.connection_dropped"
+    | "app.blueprint.app_dropped"
     | "app.blueprint.revoked",
   app: AppId,
   detail: Record<string, AuditDetailValue>
@@ -501,6 +504,23 @@ export const appContents = async (
   };
 };
 
+/**
+ * What an App's current version exports to other Apps, for anyone with a
+ * role in it: read from its row alone, no files.
+ */
+export const appExports = async (
+  env: Env,
+  by: Person,
+  app: unknown
+): Promise<CurrentExports> => {
+  const { id, currentVersion } = await appFor(env, by, app, "user");
+  if (currentVersion === null) {
+    return { version: null, exports: {} };
+  }
+  const row = await findVersion(env, id, currentVersion);
+  return { version: currentVersion, exports: row.exports };
+};
+
 /** An App's files at `version`, or its working copy without one. */
 export const readFiles = async (
   env: Env,
@@ -609,6 +629,7 @@ export const commitFiles = async (
   if (tree === latest?.tree) {
     throw appErrors.create("app.nothing_to_commit");
   }
+  const exported = exportsIn(files);
   await storeTree(env, appId, { tree, json });
 
   const row: VersionRow = {
@@ -622,6 +643,7 @@ export const commitFiles = async (
     createdAt: new Date(),
     approved: null,
     workflows: workflowsIn(files),
+    exports: exported,
   };
   // Only the rows this commit read: each write gives the rows it writes a
   // new revision, so a row written since has one this commit didn't read.

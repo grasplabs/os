@@ -255,6 +255,19 @@ describe("the built-in blueprints", () => {
       listed: listedOff.some(({ id }) => id === helloApp),
     }).toStrictEqual({ refused: refused.slice(0, 3), listed: true });
     await expect(helloState()).resolves.toStrictEqual(before);
+
+    // Nor does another App get to call its exports: a built-in never runs.
+    const caller = await admin.api.apps.create({ name: `Caller ${unique()}` });
+    await expect(
+      outcome(
+        admin.api.permissions.request({
+          subject: { type: "app", appId: caller.id },
+          object: { type: "app", appId: helloApp },
+          actions: ["read"],
+          binding: "HELLO",
+        })
+      )
+    ).resolves.toBe("permission.invalid");
   });
 
   it("each create an App that builds", async () => {

@@ -27,11 +27,20 @@ import { appWith, workflowFiles } from "./workflow-apps.ts";
 
 const idp = mockIdp();
 
+/** What the App lets other Apps call. */
+const totalsExport = {
+  access: "read",
+  description: "The latest total",
+  input: { type: "object" },
+  output: { type: "number" },
+};
+
 /**
  * A workflow that returns what it read, and a second one of the same App
- * that the agent is never granted.
+ * that the agent is never granted; and an export.
  */
 const reportFiles = {
+  "app/exports.json": JSON.stringify({ totals: totalsExport }),
   ...workflowFiles(
     "report",
     `  return await step.do("total", { description: "Read the total" }, async () => "total-is-secret-42");`,
@@ -172,6 +181,7 @@ const everyCall = ({ app, run }: Made) =>
     apps: "(await env.apps.list()).map(({ id }) => id)",
     files: `Object.keys(await env.apps.files(${JSON.stringify(app)})).includes("workflows/report.ts")`,
     versions: `(await env.apps.versions(${JSON.stringify(app)})).map(({ version }) => version)`,
+    exports: `await env.apps.exports(${JSON.stringify(app)})`,
     workflows:
       "(await env.workflows.list()).map(({ workflow, lastRun }) => ({ workflow, lastRun: lastRun?.id ?? null }))",
     runs: `(await env.workflows.runs(${JSON.stringify(app)}, "report")).map(({ id, status }) => ({ id, status }))`,
@@ -205,6 +215,7 @@ describe("a chat's Apps and workflows", () => {
       apps: [app],
       files: true,
       versions: [1],
+      exports: { version: 1, exports: { totals: totalsExport } },
       // Only the workflow the agent may read, summed up as ever.
       workflows: [{ workflow: "report", lastRun: run }],
       runs: [{ id: run, status: "completed" }],
@@ -217,10 +228,11 @@ describe("a chat's Apps and workflows", () => {
       },
       unknown: noSuchRun,
     });
-    const calls = await callsOf(chat.agent.agentId, 7);
+    const calls = await callsOf(chat.agent.agentId, 8);
     expect(
       calls.map(({ detail }) => String(detail.method)).toSorted()
     ).toStrictEqual([
+      "apps.exports",
       "apps.files",
       "apps.list",
       "apps.versions",
@@ -245,6 +257,7 @@ describe("a chat's Apps and workflows", () => {
         apps: denied,
         files: denied,
         versions: denied,
+        exports: denied,
         workflows: [],
         runs: denied,
         // An existing run it may not read and an unknown one: the same.
@@ -253,7 +266,7 @@ describe("a chat's Apps and workflows", () => {
       })}`
     );
     // Every call recorded once: the refused ones with why.
-    const calls = await callsOf(chat.agent.agentId, 7);
+    const calls = await callsOf(chat.agent.agentId, 8);
     expect(
       calls
         .map(({ detail }) => ({
@@ -263,6 +276,11 @@ describe("a chat's Apps and workflows", () => {
         }))
         .toSorted((one, other) => one.method.localeCompare(other.method))
     ).toStrictEqual([
+      {
+        method: "apps.exports",
+        outcome: "refused",
+        reason: "permission.denied",
+      },
       { method: "apps.files", outcome: "refused", reason: "permission.denied" },
       { method: "apps.list", outcome: "refused", reason: "permission.denied" },
       {
@@ -364,6 +382,7 @@ describe("a chat's Apps and workflows", () => {
         apps: [],
         files: notFound,
         versions: notFound,
+        exports: notFound,
         workflows: [],
         runs: notFound,
         status: noSuchRun,

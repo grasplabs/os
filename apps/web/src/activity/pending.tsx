@@ -1,4 +1,5 @@
 import { appErrors, builtinOwner } from "@grasp-os/shared/apps";
+import type { AppExports } from "@grasp-os/shared/apps";
 import type { Permission } from "@grasp-os/shared/permissions";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -45,6 +46,12 @@ import { useCoreAction } from "../use-core-action.ts";
 export interface PendingRequests {
   requests: Permission[];
   directory: Directory;
+  /**
+   * The exports of each App a request asks to call, as they are now: what
+   * granting it lets the asking App call. Missing for one that couldn't
+   * be read.
+   */
+  exports: ReadonlyMap<string, AppExports>;
 }
 
 /** Whether a request is a built-in blueprint's own, decided on its copies. */
@@ -70,7 +77,26 @@ export const readPendingRequests = async (
   const requests = requested.filter(
     (permission) => !isBuiltins(permission, directory)
   );
-  return { requests, directory };
+  const called = [
+    ...new Set(
+      requests.flatMap(({ object }) =>
+        object.type === "app" ? [object.appId] : []
+      )
+    ),
+  ];
+  // Each App's exports on their own: one that can't be read is shown as
+  // such, and the requests are still there to decide.
+  const read = await Promise.allSettled(
+    called.map(async (app) => await session.apps.exports(app))
+  );
+  const exports = new Map<string, AppExports>();
+  for (const [index, app] of called.entries()) {
+    const result = read[index];
+    if (result?.status === "fulfilled") {
+      exports.set(app, result.value.exports);
+    }
+  }
+  return { requests, directory, exports };
 };
 
 /** Who asks: the App or agent the permission is for. */
@@ -79,8 +105,31 @@ const subjectOf = ({ subject }: Permission, directory: Directory): string =>
     ? appName(directory, subject.appId)
     : `Agent ${subject.agentId}`;
 
+/**
+ * The exports of another App a request's actions cover, as they are now:
+ * all those marked `read` or `write`, and each named.
+ */
+const coveredExports = (
+  actions: readonly string[],
+  exported: AppExports | undefined
+): string => {
+  if (exported === undefined) {
+    return "couldn't be read";
+  }
+  const covered = Object.entries(exported).flatMap(([name, { access }]) =>
+    actions.includes(name) || actions.includes(access)
+      ? [`${name} (${access})`]
+      : []
+  );
+  return covered.length === 0 ? "none now" : covered.join(", ");
+};
+
 /** What it asks for, by ID: connections and collections have no names here. */
-const objectOf = ({ object }: Permission, directory: Directory): string => {
+const objectOf = (
+  { object, actions }: Permission,
+  directory: Directory,
+  exports: PendingRequests["exports"]
+): string => {
   if (object.type === "connection") {
     const within = object.resource === undefined ? "" : `, ${object.resource}`;
     const masked =
@@ -89,6 +138,9 @@ const objectOf = ({ object }: Permission, directory: Directory): string => {
   }
   if (object.type === "collection") {
     return `Collection ${object.collectionId}`;
+  }
+  if (object.type === "app") {
+    return `Exports of ${appName(directory, object.appId)}: ${coveredExports(actions, exports.get(object.appId))}`;
   }
   return `Workflow ${object.workflowId} of ${appName(directory, object.appId)}`;
 };
@@ -265,7 +317,7 @@ const RequestActions = ({
 
 /** The requests waiting for an admin, with the decision where it's theirs. */
 export const PendingApprovals = ({
-  pending: { requests, directory },
+  pending: { requests, directory, exports },
   decides,
 }: {
   pending: PendingRequests;
@@ -312,7 +364,7 @@ export const PendingApprovals = ({
           <TableBody>
             {requests.map((request) => {
               const subject = subjectOf(request, directory);
-              const object = objectOf(request, directory);
+              const object = objectOf(request, directory, exports);
               const again = askedAgain(request, directory);
               return (
                 <TableRow key={request.id}>

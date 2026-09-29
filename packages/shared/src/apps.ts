@@ -135,6 +135,16 @@ export interface AppContents {
   workflows: string[];
 }
 
+/**
+ * What an App's current version offers other Apps: its exports
+ * (`appExportsPath`). None while it has no current version.
+ */
+export interface CurrentExports {
+  /** The current version; null while it has none. */
+  version: number | null;
+  exports: AppExports;
+}
+
 /** An App's files by path. */
 export type AppFiles = Record<string, string>;
 
@@ -209,7 +219,9 @@ export interface AppFilesApi {
    * without building. Answers with how they went (`builds`) once they are
    * done, or after a few seconds with those still building as `pending`
    * (all three `pending` while `build_on_save` is off).
-   * A build never fails or holds up the commit.
+   * A build never fails or holds up the commit. Exports that aren't
+   * valid (`appExportsPath`) do: the commit is refused with
+   * `app.exports_invalid`, naming the issues.
    */
   commit: (app: string, message: string) => Promise<CommittedVersion>;
 }
@@ -227,7 +239,8 @@ export interface AppVersionsApi {
    * Makes a version the one that runs, after review or to roll back. By
    * anyone but one of the organization's admins (Grasp staff too, and a
    * rollback too), it asks again for the App's permissions on a
-   * connection, to write a collection or to start a workflow: they allow
+   * connection, to write a collection, to start a workflow or to call
+   * another App's exports other than all those marked `read`: they allow
    * nothing until an admin grants them again, which approves the version
    * they reviewed (`PermissionsApi.grant`). Code of a version no admin approved changes
    * nothing, in a run that started on it too. Not for the first version
@@ -321,11 +334,15 @@ export type FromBlueprint = z.input<typeof fromBlueprintSchema>;
  * the blueprint's version, but for its AGENTS.md, a stub naming the
  * blueprint (the blueprint's was written from what its App read, which
  * the copy may not have read), and `permissions` are requests, waiting for an
- * admin, for the connections, collections and workflows the blueprint's
- * App was given or asked for, but for someone else's personal
- * connections, which only their owner's calls could use, and connections
- * connect doesn't know (`dropped`).
- * Nothing else comes with it: no data, no settings, no runs, no members.
+ * admin, for the connections, collections, workflows and other Apps'
+ * exports the blueprint's App was given or asked for, but for someone
+ * else's personal connections, which only their owner's calls could use,
+ * and connections connect doesn't know (`dropped`), and the workflows and
+ * exports of Apps its creator has no role in, which they couldn't ask for
+ * themselves (`droppedApps`): a copy never names an App its creator can't
+ * see. While calls between Apps are switched off, any App's exports are
+ * dropped too. Nothing else comes with it: no data, no settings, no runs,
+ * no members.
  */
 export interface CreatedFromBlueprint {
   app: App;
@@ -333,6 +350,11 @@ export interface CreatedFromBlueprint {
   permissions: Permission[];
   /** The connections, by binding, it doesn't ask for. */
   dropped: { connectionId: string; binding: string }[];
+  /**
+   * The workflows and exports of other Apps, by binding, it doesn't ask
+   * for; never naming the App.
+   */
+  droppedApps: { type: "workflow" | "app"; binding: string }[];
 }
 
 /** Blueprints: App versions to create Apps from. */
@@ -364,6 +386,11 @@ export interface AppsApi {
   get: (app: string) => Promise<App>;
   /** The screens and workflows of the App's current version. */
   contents: (app: string) => Promise<AppContents>;
+  /**
+   * What the App's current version exports to other Apps: read from its
+   * version alone, for anyone with a role in the App.
+   */
+  exports: (app: string) => Promise<CurrentExports>;
   readonly files: AppFilesApi;
   readonly versions: AppVersionsApi;
   readonly members: AppMembersApi;
@@ -383,6 +410,8 @@ export const appErrors = defineErrorFamily({
   "app.version_not_found": "The App has no such version.",
   "app.too_large": "The App's files would be over its limits.",
   "app.nothing_to_commit": "Nothing was written since the latest version.",
+  "app.exports_invalid":
+    "The App's exports (app/exports.json) aren't valid, so it can't be committed.",
   "app.conflict": "Someone else changed this App at the same time. Try again.",
   "app.not_running": "The App has no current version to run yet.",
   "app.build_failed": "The App's server code doesn't build.",
@@ -456,3 +485,255 @@ export interface AppCaller {
    */
   idempotencyKey?: string;
 }
+
+// Exports: the methods of an App's server code that other Apps may call,
+// under a permission an admin grants (an `app` object, permissions.ts). An
+// App declares them in one file of its code, so they are versioned with
+// it: what a version exports never changes, and removing or changing an
+// export takes a new version. Core reads them as the version is committed,
+// never by running the code.
+
+/** Where an App declares its exports. */
+export const appExportsPath = "app/exports.json";
+
+/** Most exports one App declares. */
+export const appMaxExports = 64;
+
+/** Most characters of an App's exports file. */
+export const appExportsMaxLength = 64_000;
+
+/**
+ * Names no export has: those core refuses as an App's method, `read` and
+ * `write`, which a permission's actions mean as all exports so marked (so
+ * a grant of `read` never names an export marked `write`), and `toJSON`,
+ * which the workflow SDK's typed stub leaves out (`appExports`).
+ */
+const reservedExportNames: ReadonlySet<string> = new Set([
+  ...reservedAppMethods,
+  "read",
+  "write",
+  "toJSON",
+]);
+
+/**
+ * Whether `name` may be an export's (a method core calls, by
+ * `appMethodPattern`, and none of `reservedExportNames`): what an export,
+ * and a permission's action naming one, may be called.
+ */
+export const isExportName = (name: string): boolean =>
+  appMethodPattern.test(name) && !reservedExportNames.has(name);
+
+// The JSON Schema an export's input and answer may be written in: the
+// keywords Zod enforces (`z.fromJSONSchema`), and only those, so the App
+// that exports never believes a bound holds that core doesn't check (a
+// `minItems` without `items`, say, or `allOf`, which Zod reads and
+// ignores). No `pattern`, `patternProperties` or `format`: each would be
+// a regular expression the exporting App's builders wrote, run by core on
+// the input another App sends, where one written to backtrack takes
+// seconds for a few dozen characters. No `$ref` either: a schema is a
+// tree, of at most `jsonSchemaMaxDepth` levels.
+
+/** Keywords any schema may have: what it says of itself, and choices. */
+const commonKeywords = [
+  "type",
+  "title",
+  "description",
+  "default",
+  "examples",
+  "enum",
+  "const",
+  "anyOf",
+  "oneOf",
+] as const;
+
+/** Keywords Zod enforces for each type, besides the common ones. */
+const keywordsByType: Readonly<Record<string, readonly string[]>> = {
+  string: ["minLength", "maxLength"],
+  number: [
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+  ],
+  integer: [
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "multipleOf",
+  ],
+  boolean: [],
+  null: [],
+  object: ["properties", "required", "additionalProperties"],
+  // `items` is required of an array: without it, Zod checks no bound.
+  array: ["items", "minItems", "maxItems"],
+};
+
+/** Most levels one schema nests. */
+const jsonSchemaMaxDepth = 16;
+
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** The schemas `schema` holds, each by its path. */
+const nestedSchemas = (
+  schema: Record<string, unknown>,
+  path: string
+): Map<string, unknown> => {
+  const { properties, items, additionalProperties, anyOf, oneOf } = schema;
+  const nested = new Map<string, unknown>();
+  if (isRecord(properties)) {
+    for (const [name, of] of Object.entries(properties)) {
+      nested.set(`${path}.properties.${name}`, of);
+    }
+  }
+  if (items !== undefined) {
+    nested.set(`${path}.items`, items);
+  }
+  if (isRecord(additionalProperties)) {
+    nested.set(`${path}.additionalProperties`, additionalProperties);
+  }
+  for (const [keyword, choices] of [
+    ["anyOf", anyOf],
+    ["oneOf", oneOf],
+  ] as const) {
+    if (Array.isArray(choices)) {
+      for (const [at, of] of choices.entries()) {
+        nested.set(`${path}.${keyword}.${at}`, of);
+      }
+    }
+  }
+  return nested;
+};
+
+/** What's wrong with an object's `properties` and `required`. */
+const propertyIssues = (
+  { properties, required }: Record<string, unknown>,
+  path: string
+): string[] => {
+  const issues: string[] = [];
+  if (properties !== undefined && !isRecord(properties)) {
+    issues.push(`${path}.properties: An object of schemas`);
+  }
+  const named = isRecord(properties) ? Object.keys(properties) : [];
+  const namesProperties =
+    Array.isArray(required) &&
+    required.every((name) => typeof name === "string" && named.includes(name));
+  if (required !== undefined && !namesProperties) {
+    issues.push(`${path}.required: Names of its properties`);
+  }
+  return issues;
+};
+
+/**
+ * What's wrong with `schema` as an export's JSON Schema, at `path`: each
+ * keyword Zod wouldn't enforce, and each nested schema's too. None when
+ * it may be used.
+ */
+const jsonSchemaIssues = (
+  schema: unknown,
+  path: string,
+  depth = 0
+): string[] => {
+  if (!isRecord(schema)) {
+    return [`${path}: A schema is an object`];
+  }
+  if (depth > jsonSchemaMaxDepth) {
+    return [`${path}: At most ${jsonSchemaMaxDepth} levels deep`];
+  }
+  const { type } = schema;
+  if (
+    type !== undefined &&
+    !(typeof type === "string" && Object.hasOwn(keywordsByType, type))
+  ) {
+    return [`${path}.type: One of ${Object.keys(keywordsByType).join(", ")}`];
+  }
+  const allowed = new Set<string>([
+    ...commonKeywords,
+    ...(type === undefined ? [] : (keywordsByType[type] ?? [])),
+  ]);
+  const forType = type === undefined ? " without a type" : ` for a ${type}`;
+  const issues = Object.keys(schema).flatMap((keyword) =>
+    allowed.has(keyword)
+      ? []
+      : [`${path}.${keyword}: Not a keyword core checks${forType}`]
+  );
+  if (type === "array" && schema.items === undefined) {
+    issues.push(`${path}.items: An array says what its items are`);
+  }
+  return [
+    ...issues,
+    ...propertyIssues(schema, path),
+    ...[...nestedSchemas(schema, path)].flatMap(([at, of]) =>
+      jsonSchemaIssues(of, at, depth + 1)
+    ),
+  ];
+};
+
+/**
+ * A JSON Schema, as an export's input or answer: only keywords Zod
+ * enforces (see above), read as a schema by `z.fromJSONSchema`, which
+ * core checks each call's input and answer against.
+ */
+const jsonSchemaSchema = z
+  .record(z.string(), z.unknown())
+  .superRefine((schema, context) => {
+    const issues = jsonSchemaIssues(schema, "schema");
+    for (const message of issues) {
+      context.addIssue({ code: "custom", message });
+    }
+    if (issues.length > 0) {
+      return;
+    }
+    try {
+      z.fromJSONSchema(schema);
+    } catch {
+      context.addIssue({
+        code: "custom",
+        message: "A JSON Schema Zod can read (z.fromJSONSchema)",
+      });
+    }
+  });
+
+/**
+ * One export: whether it only reads the App's data or also changes it,
+ * what it does, and the JSON Schemas of its one argument and its answer.
+ * A permission that allows `read` allows only the exports marked `read`.
+ */
+export const appExportSchema = z.strictObject({
+  access: z.enum(["read", "write"]),
+  description: z.string().max(appLimits.descriptionLength).default(""),
+  input: jsonSchemaSchema,
+  output: jsonSchemaSchema,
+});
+export type AppExport = z.infer<typeof appExportSchema>;
+
+/**
+ * An App's exports file (`appExportsPath`): each export by the name of the
+ * server method it calls, which gets the caller first and the input
+ * second, as every method does.
+ *
+ * ```json
+ * {
+ *   "findCustomers": {
+ *     "access": "read",
+ *     "description": "Customers whose name starts with the query",
+ *     "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] },
+ *     "output": { "type": "array", "items": { "type": "object" } }
+ *   }
+ * }
+ * ```
+ */
+export const appExportsSchema = z
+  .record(
+    z.string().refine(isExportName, {
+      message:
+        "A method's name: a lowercase letter, then up to 63 letters and digits, and not a reserved name",
+    }),
+    appExportSchema
+  )
+  .refine((exported) => Object.keys(exported).length <= appMaxExports, {
+    message: `At most ${appMaxExports} exports`,
+  });
+export type AppExports = z.infer<typeof appExportsSchema>;
