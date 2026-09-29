@@ -375,10 +375,14 @@ describe("a chat's Knowledge", setUpTime, () => {
     // another agent's memory path.
     const stub = workspace(env, workspaceIdSchema.parse("../other"));
     const chat = await stub.createChat("Questions", person.userId);
+    // A model that would answer, were the question let through.
+    const gateway = fakeGateway(says("Hi."));
+    await pointAtGateway(stub, gateway);
 
     await expect(
       outcome(stub.ask(chat.id, { text: "Hi.", model }))
-    ).resolves.not.toBe("ok");
+    ).resolves.toBe("permission.context_invalid");
+    expect(gateway.requests).toStrictEqual([]);
     await expect(
       runInDurableObject(stub, (instance) => instance.messages(chat.id))
     ).resolves.toStrictEqual([]);

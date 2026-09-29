@@ -1,6 +1,9 @@
 import { agentErrors } from "@grasp-os/shared/agent";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
-import { authoritySchema } from "@grasp-os/shared/permissions";
+import {
+  authoritySchema,
+  permissionErrors,
+} from "@grasp-os/shared/permissions";
 import type { Authority } from "@grasp-os/shared/permissions";
 import { z } from "zod";
 
@@ -60,15 +63,18 @@ const workspaceAgentIdSchema = z.string().regex(/^[A-Za-z0-9-]{1,64}$/u);
 export const chatAuthority = ({
   workspaceId,
   personId,
-}: Omit<AgentScope, "runId" | "chatId">): Authority =>
-  authoritySchema.parse({
-    subject: {
-      type: "agent",
-      agentId: workspaceAgentIdSchema.parse(workspaceId),
-    },
+}: Omit<AgentScope, "runId" | "chatId">): Authority => {
+  const agentId = workspaceAgentIdSchema.safeParse(workspaceId);
+  if (!agentId.success) {
+    // No workspace core names: nowhere an agent can work.
+    throw permissionErrors.create("permission.context_invalid");
+  }
+  return authoritySchema.parse({
+    subject: { type: "agent", agentId: agentId.data },
     onBehalfOf: personId,
     mode: "interactive",
   });
+};
 
 /** The chat, as the context an agent works in and keeps restricted mode. */
 export const chatContext = ({

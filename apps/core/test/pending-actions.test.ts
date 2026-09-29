@@ -53,7 +53,7 @@ const setUp = async () => {
     actions: ["mail.send"],
     binding: "MAIL",
   });
-  const chat = await newChat();
+  const chat = await newChat(agent);
   const key = `chat:${unique()}`;
   /** The agent asks to send the mail, with the same key each time. */
   const send = async (): Promise<ConnectResult> => {

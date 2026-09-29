@@ -18,6 +18,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { appHost, workspace } from "../src/durable-objects.ts";
+import { isRestricted, restrict } from "../src/restricted.ts";
 import type { WorkContext } from "../src/restricted.ts";
 import { grantReviewed, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
@@ -159,7 +160,7 @@ describe("Apps and agents reading Knowledge", setUpTime, () => {
   it("read no collection without a granted permission to read it", async () => {
     const admin = await personOf("admin");
     const agent = newAgent();
-    const context = await newChat();
+    const context = await newChat(agent);
     const handbook = await collectionWithNote(admin, {
       name: "Handbook",
       access: "everyone",
@@ -244,7 +245,7 @@ describe("Apps and agents reading Knowledge", setUpTime, () => {
     await requestGranted(idp, admin, outlook(agent));
     const bindings = await envOf(
       actingFor(agent, admin.userId),
-      await newChat()
+      await newChat(agent)
     );
     const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
     const { FEATURES: features } = env;
@@ -560,10 +561,37 @@ describe("restricted mode", setUpTime, () => {
     return { admin, subject, sensitive, ordinary, mail };
   };
 
+  it("is kept only by the agent of the chat's own workspace", async () => {
+    const admin = await personOf("admin");
+    const agent = newAgent();
+    const chat = await newChat(agent);
+    const app = await admin.api.apps.create({ name: `App ${unique()}` });
+    const strangers = [
+      actingFor(newAgent(), admin.userId),
+      actingFor({ type: "app", appId: app.id }, admin.userId),
+    ];
+
+    const tried = await Promise.all(
+      strangers.flatMap((stranger) => [
+        outcome(isRestricted(env, stranger, chat)),
+        outcome(restrict(env, stranger, chat, ["collection-1"])),
+      ])
+    );
+
+    expect({
+      tried,
+      own: await isRestricted(env, actingFor(agent, admin.userId), chat),
+    }).toStrictEqual({
+      tried: Array.from({ length: 4 }, () => "permission.context_invalid"),
+      // Nobody else put it in restricted mode.
+      own: false,
+    });
+  });
+
   it("holds a chat's actions with a restricted-data warning for good once it read restricted data", async () => {
     const { admin, subject, sensitive, ordinary, mail } = await setUp();
-    const chat = await newChat();
-    const otherChat = await newChat();
+    const chat = await newChat(subject);
+    const otherChat = await newChat(subject);
     const bindings = await envOf(actingFor(subject, admin.userId), chat);
 
     // Reading ordinary Knowledge changes nothing.
@@ -635,7 +663,7 @@ describe("restricted mode", setUpTime, () => {
     ];
     const results = await Promise.all(
       reads.map(async (read) => {
-        const chat = await newChat();
+        const chat = await newChat(subject);
         const bindings = await envOf(actingFor(subject, admin.userId), chat);
         await outcome(read(readerIn(bindings)));
         await sendMail(bindings);
@@ -728,7 +756,7 @@ describe("restricted mode", setUpTime, () => {
       admin,
       readCollection(app, ordinary.collectionId, "OTHER")
     );
-    const chat = await newChat();
+    const chat = await newChat(agent);
     const inChat = await envOf(actingFor(agent, admin.userId), chat);
     const inApp = await envOf(actingFor(app, admin.userId), app);
     // An ordinary read restricts nothing; the first restricted one does, and

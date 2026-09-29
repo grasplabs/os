@@ -175,7 +175,7 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
       "MEMORY.md",
       before
     );
-    const work = await newChat();
+    const work = await newChat(agent);
     const asAgent = actingFor(agent, user.userId);
     let proposalId = "";
     const proposed = await auditedDuring(async () => {
@@ -268,12 +268,13 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
   });
 
   it("is declined without changing the file, once", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const memory = await memoryOf(admin);
     const text = `Unchanged ${unique()}`;
     await saveOver(admin, memory, "MEMORY.md", text);
-    const work = await newChat();
-    const proposal = await propose(actingFor(newAgent(), admin.userId), work, {
+    const work = await newChat(agent);
+    const proposal = await propose(actingFor(agent, admin.userId), work, {
       file: "MEMORY.md",
       text: "Changed",
     });
@@ -302,11 +303,12 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
   });
 
   it("never saves over a change made since it was proposed", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const memory = await memoryOf(admin);
     await saveOver(admin, memory, "MEMORY.md", `Base ${unique()}`);
-    const work = await newChat();
-    const asAgent = actingFor(newAgent(), admin.userId);
+    const work = await newChat(agent);
+    const asAgent = actingFor(agent, admin.userId);
     const first = await propose(asAgent, work, {
       file: "MEMORY.md",
       text: "First",
@@ -328,14 +330,15 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
   });
 
   it("saves nothing when a decline lands while it is being approved", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const other = await personOf("admin");
     const memory = await memoryOf(admin);
-    const work = await newChat();
+    const work = await newChat(agent);
     const base = `Base ${unique()}`;
     const proposed = `Proposed ${unique()}`;
     await saveOver(admin, memory, "MEMORY.md", base);
-    const { id } = await propose(actingFor(newAgent(), admin.userId), work, {
+    const { id } = await propose(actingFor(agent, admin.userId), work, {
       file: "MEMORY.md",
       text: proposed,
     });
@@ -362,11 +365,12 @@ describe("a proposal to change the company MEMORY.md", setUpTime, () => {
   });
 
   it("is checked against the file's limit again when approved", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const memory = await memoryOf(admin);
     await saveOver(admin, memory, "MEMORY.md", `Base ${unique()}`);
-    const work = await newChat();
-    const { id } = await propose(actingFor(newAgent(), admin.userId), work, {
+    const work = await newChat(agent);
+    const { id } = await propose(actingFor(agent, admin.userId), work, {
       file: "MEMORY.md",
       text: "Longer than four characters",
     });
@@ -390,7 +394,7 @@ describe("proposals", setUpTime, () => {
     const admin = await personOf("admin");
     const agent = newAgent();
     await memoryOf(admin);
-    const work = await newChat();
+    const work = await newChat(agent);
     const asAgent = actingFor(agent, admin.userId);
     const text = `Answer in Dutch. ${unique()}`;
     const proposal = await propose(asAgent, work, { file: "agent", text });
@@ -410,11 +414,12 @@ describe("proposals", setUpTime, () => {
   });
 
   it("are checked as a save is, and only an agent makes one", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     await memoryOf(admin);
-    const asAgent = actingFor(newAgent(), admin.userId);
-    const work = await newChat();
-    const restricted = await newChat();
+    const asAgent = actingFor(agent, admin.userId);
+    const work = await newChat(agent);
+    const restricted = await newChat(agent);
     await restrict(env, asAgent, restricted, []);
     const outcomeOf = async (authority: Authority, input: unknown) =>
       await outcome(proposeMemory(env, authority, work, input));
@@ -428,7 +433,7 @@ describe("proposals", setUpTime, () => {
           actingFor({ type: "app", appId: `app-${unique()}` }, admin.userId),
           { file: "MEMORY.md", text: "From an App" }
         ),
-        outcomeOf(actingFor(newAgent(), `gone-${unique()}`), {
+        outcomeOf(actingFor(agent, `gone-${unique()}`), {
           file: "MEMORY.md",
           text: "Gone",
         }),
@@ -460,10 +465,10 @@ describe("proposals", setUpTime, () => {
   });
 
   it("keep to the cap when another proposal lands while one is being made", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     await memoryOf(admin);
-    const work = await newChat();
-    const agent = newAgent();
+    const work = await newChat(agent);
     const asAgent = actingFor(agent, admin.userId);
     for (let index = 0; index < 19; index += 1) {
       // oxlint-disable-next-line no-await-in-loop -- one proposal at a time
@@ -491,11 +496,12 @@ describe("proposals", setUpTime, () => {
   });
 
   it("wait at most 20 at a time from one agent for one person", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const other = await personOf("user");
     await memoryOf(admin);
-    const work = await newChat();
-    const asAgent = actingFor(newAgent(), admin.userId);
+    const work = await newChat(agent);
+    const asAgent = actingFor(agent, admin.userId);
     const ids: string[] = [];
     for (let index = 0; index < 20; index += 1) {
       // oxlint-disable-next-line no-await-in-loop -- one proposal at a time
@@ -509,8 +515,9 @@ describe("proposals", setUpTime, () => {
     const overCap = await outcome(propose(asAgent, work, next));
     // Another agent has a count of its own, and so does the same agent
     // acting for someone else.
+    const another = newAgent();
     const otherAgent = await outcome(
-      propose(actingFor(newAgent(), admin.userId), work, next)
+      propose(actingFor(another, admin.userId), await newChat(another), next)
     );
     const otherPerson = await outcome(
       propose(actingFor(asAgent.subject, other.userId), work, next)
@@ -536,12 +543,13 @@ describe("proposals", setUpTime, () => {
 
 describe("the proposals listing", setUpTime, () => {
   it("pages past its first 200, reaching every pending proposal once", async () => {
+    const agent = newAgent();
     const admin = await personOf("admin");
     const memory = await memoryOf(admin);
     const agentId = `agent-${unique()}`;
     const source = JSON.stringify({
       actor: { type: "agent", agentId, onBehalfOf: admin.userId },
-      context: await newChat(),
+      context: await newChat(agent),
     });
     // Stored as they are, past the cap, and after every other proposal:
     // 201 of them, two made in the same millisecond.

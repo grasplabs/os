@@ -436,7 +436,9 @@ describe("the skill catalog", setUpTime, () => {
     // The agent's Knowledge tools, which it has only once it may read a
     // collection.
     const toolsNow = async () =>
-      knowledgeIn(await envOf(actingFor(agent, admin.userId), await newChat()));
+      knowledgeIn(
+        await envOf(actingFor(agent, admin.userId), await newChat(agent))
+      );
     const ungranted = await toolsNow();
 
     await requestGranted(

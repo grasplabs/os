@@ -473,7 +473,7 @@ describe("an agent's Knowledge tools", setUpTime, () => {
       admin,
       readCollection(agent, payroll.id, "PAYROLL")
     );
-    const chat = await newChat();
+    const chat = await newChat(agent);
     const knowledge = await toolsOf(agent, admin, chat);
 
     const catalog = await knowledge.catalog();
@@ -661,7 +661,7 @@ describe("an agent's Knowledge tools", setUpTime, () => {
     ];
     const results = await Promise.all(
       reads.map(async (read) => {
-        const chat = await newChat();
+        const chat = await newChat(agent);
         const { provenance } = await read(await toolsOf(agent, admin, chat));
         const restricted = await workspace(
           env,
@@ -734,7 +734,7 @@ describe("Knowledge reads in the audit log", setUpTime, () => {
     await requestGranted(idp, admin, readCollection(agent, collectionId));
     await requestGranted(idp, admin, readCollection(app, collectionId));
     // The chat the agent reads in, which each of its reads names.
-    const chat = await newChat();
+    const chat = await newChat(agent);
     const knowledge = await toolsOf(agent, admin, chat);
     const appReader = collectionIn(
       await envOf(actingFor(app, admin.userId), app),
