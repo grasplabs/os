@@ -324,6 +324,9 @@ export const permissions = sqliteTable(
       table.subjectId,
       table.status
     ),
+    // The Apps granted to call an App's exports, found from that App
+    // (app-provenance.ts): by object, not subject.
+    index("permissions_object_idx").on(table.objectType, table.objectId),
     // A binding name is one stub in the subject's env, so it is unique
     // among the permissions that aren't revoked.
     uniqueIndex("permissions_live_binding_idx")

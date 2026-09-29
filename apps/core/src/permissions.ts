@@ -947,17 +947,20 @@ const unapprovedSql = (
  * version it started on, which may be one made current since without,
  * its permissions granted again for another. Without a version, which the
  * host always sets for an App, nothing is approved: it fails closed. The
- * App and its version may be columns of the query it runs in.
+ * App and its version may be columns of the query it runs in. `changes`
+ * says whether the action changes things when the action alone doesn't:
+ * an export named in a permission changes things if it is marked `write`.
  */
 export const allowingPermissionSql = (
   subject: PermissionSubject | { type: "app"; appId: SQLWrapper },
   appVersion: number | SQLWrapper | undefined,
   object: PermissionObject,
-  action: string
+  action: string,
+  changes = changesThings(object, action)
 ): SQL => {
   const { objectType, objectId, resource } = objectColumns(object);
   let unapproved: SQL | undefined;
-  if (subject.type === "app" && changesThings(object, action)) {
+  if (subject.type === "app" && changes) {
     unapproved =
       appVersion === undefined
         ? sql`0`
@@ -1294,4 +1297,53 @@ export const authorize = async (
     throw permissionErrors.create("permission.denied", { action });
   }
   return { mask: maskOf(allowing) };
+};
+
+/**
+ * The permission check for a call of another App's export, as `authorize`
+ * is for the other objects: the person is still a member, and
+ * `permissionId` is active, of that exact subject, on `app`'s exports, and
+ * allows `method`: by its name, or by `access`, how the export is marked
+ * (`read` or `write`). A call of an export marked `write` also needs the
+ * calling code's version to be one an admin approved, whichever allows it.
+ * Throws `permission.denied` or `permission.person_inactive` otherwise.
+ */
+export const authorizeExport = async (
+  env: Env,
+  authority: Authority,
+  app: AppId,
+  { method, access }: { method: string; access: "read" | "write" },
+  permissionId: PermissionId
+): Promise<void> => {
+  await requireActivePerson(env, authority);
+  const object: PermissionObject = { type: "app", appId: app };
+  const changes = access === "write";
+  const allowing = await drizzle(env.DB)
+    .select({ id: permissions.id })
+    .from(permissions)
+    .where(
+      and(
+        eq(permissions.id, permissionId),
+        or(
+          allowingPermissionSql(
+            authority.subject,
+            authority.appVersion,
+            object,
+            access,
+            changes
+          ),
+          allowingPermissionSql(
+            authority.subject,
+            authority.appVersion,
+            object,
+            method,
+            changes
+          )
+        )
+      )
+    )
+    .get();
+  if (!allowing) {
+    throw permissionErrors.create("permission.denied", { action: method });
+  }
 };

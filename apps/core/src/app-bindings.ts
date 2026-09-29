@@ -5,9 +5,12 @@ import type { Authority } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
+import type { AppExportBinding } from "./app-calls.ts";
+import type { CallPath } from "./app.ts";
 import {
   collectionGrantOf,
   connectionGrantOf,
+  exportGrantOf,
   requireStepKey,
   runStubCall,
   stubsOf,
@@ -22,15 +25,20 @@ const callerSchema = z.object({ token: z.string().min(1).max(100) });
 
 /**
  * Who `caller` is, as App `app`'s host knows them while their call runs,
- * and that call's step key, for a workflow run's caller. App code can't
- * name anyone: a caller that isn't one of a running call of this App (made
- * up, ended, or another App's) is `app.caller_invalid`.
+ * that call's step key, for a workflow run's caller, and where the call
+ * is within calls between Apps. App code can't name anyone: a caller that
+ * isn't one of a running call of this App (made up, ended, or another
+ * App's) is `app.caller_invalid`.
  */
 export const callerOf = async (
   env: Env,
   app: AppId,
   caller: unknown
-): Promise<{ authority: Authority; idempotencyKey: string | undefined }> => {
+): Promise<{
+  authority: Authority;
+  idempotencyKey: string | undefined;
+  path: CallPath;
+}> => {
   const parsed = callerSchema.safeParse(caller);
   if (!parsed.success) {
     throw appErrors.create("app.caller_invalid");
@@ -79,26 +87,37 @@ export class AppConnectionBinding extends WorkerEntrypoint<
   }
 }
 
+/** A stub an App's server code holds. */
+type AppStub =
+  | Fetcher<AppConnectionBinding>
+  | Fetcher<AppCollectionBinding>
+  | Fetcher<AppExportBinding>;
+
 /**
  * The env of an App's server code, built from the App's permission
- * records as they are now: its connections and the collections it may
- * read. Its stubs act for no one person: each call passes its caller.
+ * records as they are now: its connections, the collections it may read,
+ * and the other Apps whose exports it may call. Its stubs act for no one
+ * person: each call passes its caller.
  */
 export const appBindings = async (
   env: Env,
   app: AppId
-): Promise<
-  Record<string, Fetcher<AppConnectionBinding> | Fetcher<AppCollectionBinding>>
-> => {
+): Promise<Record<string, AppStub>> => {
   const context = { type: "app", appId: app } as const;
   const connectionOf = connectionGrantOf(context);
   const collectionOf = collectionGrantOf(context);
-  return stubsOf<Fetcher<AppConnectionBinding> | Fetcher<AppCollectionBinding>>(
+  return stubsOf<AppStub>(
     await activePermissions(env, { type: "app", appId: app }),
     (permission) => {
       const connection = connectionOf(permission);
       if (connection !== undefined) {
         return exports.AppConnectionBinding({ props: { ...connection, app } });
+      }
+      const exported = exportGrantOf(permission);
+      if (exported !== undefined) {
+        return exports.AppExportBinding({
+          props: { ...exported, caller: app },
+        });
       }
       const collection = collectionOf(permission);
       return collection === undefined

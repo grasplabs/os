@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { createTestState, testRun } from "../src/testing.ts";
 import {
+  appExports,
   appServer,
   model,
   money,
@@ -1104,6 +1105,85 @@ describe(appServer, () => {
 
   it("fails the step with a workflow error when the run has no App to call", async () => {
     const run = await testRun(booking, { input: "INV-7" });
+
+    expect(run).toMatchObject({
+      status: "failed",
+      error: { code: "workflow.invalid_step_call" },
+    });
+  });
+});
+
+describe(appExports, () => {
+  /** Another App's exports, as a workflow types them. */
+  interface Crm {
+    findCustomers: (input: { query: string }) => { name: string }[];
+  }
+
+  /** A workflow that finds a customer through the CRM's typed stub. */
+  const lookup = workflow(
+    "lookup",
+    { params: noParams, input: z.string() },
+    async (step, { env, input }) =>
+      await step.do("find", { description: "Find it" }, async () => {
+        const crm = await Promise.resolve(appExports<Crm>(env.CRM));
+        return await crm.findCustomers({ query: input });
+      })
+  );
+
+  it("calls the export of that name with its input, by the binding", async () => {
+    const calls: unknown[][] = [];
+    const run = await testRun(lookup, {
+      input: "Acme",
+      env: {
+        CRM: {
+          call: async (...args) => {
+            calls.push(args);
+            return [{ name: "Acme BV" }];
+          },
+        },
+      },
+    });
+
+    expect({ run: run.status, calls }).toStrictEqual({
+      run: "completed",
+      calls: [["findCustomers", { query: "Acme" }]],
+    });
+    expect(run).toMatchObject({ output: [{ name: "Acme BV" }] });
+  });
+
+  it("calls nothing when it's serialized, awaited or asked for a name core refuses", async () => {
+    const calls: unknown[][] = [];
+    const stub = appExports({
+      call: async (...args) => {
+        calls.push(args);
+        return null;
+      },
+    });
+    const methods = [
+      "then",
+      "toJSON",
+      "toString",
+      "find_customers",
+      "Upper",
+    ].filter((name) => Reflect.get(stub, name) !== undefined);
+
+    expect({
+      json: JSON.stringify(stub),
+      awaited: (await Promise.resolve(stub)) === stub,
+      methods,
+      symbol: typeof Reflect.get(stub, Symbol.toPrimitive),
+      calls,
+    }).toStrictEqual({
+      json: "{}",
+      awaited: true,
+      methods: [],
+      symbol: "undefined",
+      calls: [],
+    });
+  });
+
+  it("fails the step with a workflow error when the run has no such binding", async () => {
+    const run = await testRun(lookup, { input: "Acme" });
 
     expect(run).toMatchObject({
       status: "failed",

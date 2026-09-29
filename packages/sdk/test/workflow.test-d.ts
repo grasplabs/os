@@ -6,6 +6,7 @@ import { expectTypeOf } from "vite-plus/test";
 
 import type { stepOptionSchemas } from "../src/steps.ts";
 import {
+  appExports,
   appServer,
   model,
   money,
@@ -16,6 +17,7 @@ import {
   z,
 } from "../src/workflow.ts";
 import type {
+  AppExportsStub,
   AppServer,
   DecisionOptions,
   DoOptions,
@@ -258,3 +260,25 @@ expectTypeOf(invoices).not.toHaveProperty("mark-paid");
 expectTypeOf(invoices).not.toHaveProperty("toJSON");
 // @ts-expect-error -- a status the method doesn't take
 void invoices.setStatus("INV-7", "paid");
+
+// Another App's exports, typed by what the workflow writes of them: each
+// takes its one input and answers a promise; names core refuses aren't
+// there.
+interface CrmExports {
+  findCustomers: (input: { query: string }) => { name: string }[];
+  count: (input: null) => Promise<number>;
+  find_customers: (input: null) => void;
+  toJSON: (input: null) => string;
+}
+declare const crm: AppExportsStub<CrmExports>;
+expectTypeOf(crm.findCustomers).toEqualTypeOf<
+  (input: { query: string }) => Promise<{ name: string }[]>
+>();
+expectTypeOf(crm.count).toEqualTypeOf<(input: null) => Promise<number>>();
+expectTypeOf(appExports<CrmExports>(context.env.CRM)).toEqualTypeOf<
+  AppExportsStub<CrmExports>
+>();
+expectTypeOf(crm).not.toHaveProperty("find_customers");
+expectTypeOf(crm).not.toHaveProperty("toJSON");
+// @ts-expect-error -- an input the export doesn't take
+void crm.findCustomers({ query: 7 });

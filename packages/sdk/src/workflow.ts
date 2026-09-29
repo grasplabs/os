@@ -609,6 +609,82 @@ export const appServer = <Server = Record<string, BindingMethod>>(
   ) as AppServer<Server>;
 };
 
+/**
+ * The exports of another App as a workflow calls them, typed by
+ * `Exports`, which the workflow writes from what that App's
+ * `app/exports.json` declares: each export's one input, answering what it
+ * answers. Only names core calls (`IsAppMethod`) and only functions.
+ */
+export type AppExportsStub<Exports> = {
+  readonly [
+    Name in keyof Exports as IsAppMethod<Name> extends true
+      ? Exports[Name] extends (input: never) => unknown
+        ? Name
+        : never
+      : never
+  ]: Exports[Name] extends (input: infer Input) => infer Answer
+    ? (input: Input) => Promise<Awaited<Answer>>
+    : never;
+};
+
+/**
+ * A typed stub of another App's exports, by the run's permission on them
+ * (its binding): `appExports<Crm>(env.CRM).findCustomers({ query: "Acme" })`
+ * is `env.CRM.call("findCustomers", { query: "Acme" })`:
+ *
+ * ```ts
+ * type Crm = {
+ *   findCustomers: (input: { query: string }) => { id: string; name: string }[];
+ * };
+ *
+ * const found = await step.do("find", { description: "Find the customer" }, async () =>
+ *   await appExports<Crm>(env.CRM).findCustomers({ query: input.customer })
+ * );
+ * ```
+ *
+ * Like any binding, it works only inside a step, and acts for the person
+ * the run acts for, under the run's App's permission; the called App's
+ * method runs in its own sandbox. Core checks each call: the export must
+ * be in that App's current version (`app.export_not_found` otherwise),
+ * allowed by the permission (one marked `write` only from a version of
+ * this App an admin approved), and its input and answer JSON within
+ * `appCallLimits` and its schemas (`app.call_invalid`, `app.call_too_large`,
+ * `app.answer_invalid`). If either App has read restricted data, both are
+ * restricted from then on. A step that calls an export with a side effect
+ * should be a `sideEffect: true` step: the called App's own connection
+ * calls take its key.
+ */
+export const appExports = <Exports = Record<string, (input: Json) => unknown>>(
+  binding: Readonly<Record<string, BindingMethod>> | undefined
+): AppExportsStub<Exports> => {
+  const method =
+    (name: string): BindingMethod =>
+    async (input) => {
+      if (binding?.call === undefined) {
+        throw invalidCall("The run has no permission to call that App");
+      }
+      return await binding.call(name, input ?? null);
+    };
+  // SAFETY: every name `AppExportsStub` has is a method that calls the
+  // export of that name; core checks the name again, and refuses one the
+  // App doesn't export.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+  return new Proxy(
+    {},
+    {
+      // As `appServer`: nothing for a symbol, `then`, `toJSON` or any
+      // other name core refuses.
+      get: (_target, name): BindingMethod | undefined =>
+        typeof name === "string" &&
+        appMethodPattern.test(name) &&
+        !reserved.has(name) &&
+        name !== "toJSON"
+          ? method(name)
+          : undefined,
+    }
+  ) as AppExportsStub<Exports>;
+};
+
 // Definition
 
 /**

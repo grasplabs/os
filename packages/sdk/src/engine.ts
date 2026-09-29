@@ -53,14 +53,17 @@ export type BindingMethod = (...args: Json[]) => Promise<unknown>;
 /**
  * What a run reaches outside its own code, by binding name: one binding per
  * permission of its App (a connection, say: `env.OUTLOOK.call(action,
- * input, { idempotencyKey })`), and its App's own server methods
- * (`env.APP.call(method, ...args)`, or typed by the App's class with
- * `appServer<App>(env)` from `@grasp-os/sdk/workflow`). Each call is checked against the
+ * input, { idempotencyKey })`, or another App's exports:
+ * `env.CRM.call(method, input)`, typed with `appExports<Crm>(env.CRM)`),
+ * and its App's own server methods (`env.APP.call(method, ...args)`, or
+ * typed by the App's class with `appServer<App>(env)` from
+ * `@grasp-os/sdk/workflow`). Each call is checked against the
  * permissions as they are then, and acts for the person the run acts for.
  * They work only inside a step (a replay doesn't call them again), and a
  * connection call takes that step's `idempotencyKey` or none. An App
- * method a step calls gets the same key on its caller
- * (`caller.idempotencyKey`), the only one its own connection calls take.
+ * method a step calls, its own App's or another's export, gets the same
+ * key on its caller (`caller.idempotencyKey`), the only one its own
+ * connection calls take.
  *
  * Once the run's App has read restricted data, each side effect waits for
  * the person the run acts for to confirm it (where the deployment has held
