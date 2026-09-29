@@ -215,10 +215,13 @@ export interface VersionReview {
     /** The changed files outside screens and its own that it may use. */
     shared: string[];
     /**
-     * Its steps that differ, by name: whether each says it changes
-     * something outside Grasp, and the App's bindings its code calls
-     * (`APP`, a connection, another App's exports), which may too; null
-     * when the code can't be read as steps.
+     * Its steps that differ, by name, each compared as its code is
+     * written: whether each may change something outside Grasp, and the
+     * App's bindings its code calls (`APP`, a connection, another App's
+     * exports). While `shared` code changed, every step is listed
+     * (`sharedCode`), as any may now behave differently through it, and
+     * may change things if the workflow calls bindings at all. Null when
+     * the code can't be read as steps.
      */
     steps:
       | {
@@ -226,6 +229,7 @@ export interface VersionReview {
           change: ReviewChange;
           sideEffect: boolean;
           calls: string[];
+          sharedCode: boolean;
         }[]
       | null;
     /** Its parameters that differ, by name; null when they can't be read. */

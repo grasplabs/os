@@ -452,8 +452,9 @@ export interface StepOutline {
    */
   env?: string[];
   /**
-   * A hash of the step's call as written, its function included: changes
-   * whenever its code does (the review of a version compares it).
+   * The step's call as written, its function included, which the review
+   * of a version compares whole: any change to its code shows. Only for
+   * the App's builders; empty for anyone else.
    */
   code: string;
   line: number;

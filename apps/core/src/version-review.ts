@@ -15,17 +15,12 @@ import { workflowErrors } from "@grasp-os/shared/workflows";
 import type { OutlineNode, StepOutline } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
-import {
-  appFor,
-  appsListedFor,
-  findVersion,
-  toVersion,
-  versionFiles,
-} from "./apps.ts";
+import { appFor, findVersion, toVersion, versionFiles } from "./apps.ts";
 import type { VersionRow } from "./apps.ts";
 import type { Member } from "./auth/identity.ts";
 import { workspace } from "./durable-objects.ts";
-import { activeGrants, listPermissions } from "./permissions.ts";
+import { permissionsOpenTo } from "./permissions-open.ts";
+import { askedAgainBy } from "./permissions.ts";
 import {
   declaredParams,
   workflowIdsIn,
@@ -39,8 +34,9 @@ import {
 // version: who proposed it, its files and server code, its workflows with
 // the steps and parameters that differ (a workflow counts as changed when
 // code outside screens changed, which it may import; a step that calls
-// the App's bindings may change things whether it says so or not, and a
-// step counts as changed when its code does, by its hash), what
+// the App's bindings may change things whether it says so or not, a step
+// counts as changed when its code as written does, and every step when
+// shared code changed), what
 // the App asks for that no admin granted yet, what it holds and which of
 // that making it current would ask an admin for again, and its workflows'
 // tests, kept per version's files so they run once.
@@ -255,6 +251,39 @@ const proposerOf = async (
   return { ...proposedBy, ownChat, chatTitle };
 };
 
+/**
+ * How a workflow's steps differ, by name, each compared as its code is
+ * written. When code outside screens it may import changed (`shared`),
+ * any step may do something else through it, whether its own code
+ * changed or not, and whether or not it reads the App's bindings itself
+ * (a helper may): every step is then listed, `sharedCode`, and said to
+ * possibly change things outside Grasp if the workflow calls bindings at
+ * all.
+ */
+const stepChanges = (
+  before: ReadonlyMap<string, StepOutline>,
+  now: ReadonlyMap<string, StepOutline>,
+  shared: boolean
+): NonNullable<VersionReview["workflows"][number]["steps"]> => {
+  const usesBindings = [...now.values()].some(
+    ({ env }) => (env ?? []).length > 0
+  );
+  return differences(
+    before,
+    now,
+    (one, other) => !shared && sameJson(withoutLine(one), withoutLine(other))
+  ).map(({ name, change, now: step, before: was }) => {
+    const found = step ?? was;
+    return {
+      name,
+      change,
+      sideEffect: (found?.sideEffect ?? false) || (shared && usesBindings),
+      calls: found?.env ?? [],
+      sharedCode: shared,
+    };
+  });
+};
+
 /** A version's files, and its number. */
 interface VersionAt {
   version: number;
@@ -315,20 +344,7 @@ const workflowsOf = async (
       steps:
         stepsBefore === null || stepsNow === null
           ? null
-          : differences(
-              stepsBefore,
-              stepsNow,
-              // A step that calls the App's bindings may do something else
-              // once code it calls changed, its own unchanged.
-              (one, other) =>
-                sameJson(withoutLine(one), withoutLine(other)) &&
-                (shared.length === 0 || (other.env ?? []).length === 0)
-            ).map(({ name, change: stepChange, now, before: was }) => ({
-              name,
-              change: stepChange,
-              sideEffect: (now ?? was)?.sideEffect ?? false,
-              calls: (now ?? was)?.env ?? [],
-            })),
+          : stepChanges(stepsBefore, stepsNow, shared.length > 0),
       params:
         paramsBefore === null || paramsNow === null
           ? null
@@ -375,6 +391,13 @@ export const reviewVersion = async (
   // Asked for again only if not kept, as `madeCurrent` says: an App's
   // first version copied from a blueprint, made current for the first time.
   const keep = current === null && row.approved === 1;
+  // What the App holds, as the permissions API shows it to this reviewer.
+  const held = await permissionsOpenTo(
+    env,
+    by,
+    { type: "app", appId: found.id },
+    "active"
+  );
   return {
     version: toVersion(row),
     proposedBy: await proposerOf(env, by, row),
@@ -390,18 +413,17 @@ export const reviewVersion = async (
       change,
     })),
     workflows,
-    permissions: await listPermissions(
+    // As the permissions API shows them to this reviewer, no more.
+    permissions: await permissionsOpenTo(
       env,
       by,
       { type: "app", appId: found.id },
-      appsListedFor(env, by),
       "requested"
     ),
-    grants: await activeGrants(env, by, {
-      app: found.id,
-      openApps: appsListedFor(env, by),
-      keep,
-    }),
+    grants: held.map((permission) => ({
+      permission,
+      askedAgain: askedAgainBy(by, permission, keep),
+    })),
     tests: await testsOf(env, found.id, row, files),
   };
 };

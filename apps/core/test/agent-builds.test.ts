@@ -15,6 +15,7 @@ import { outlook, release, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { signedInApi } from "./sign-in.ts";
+import { connectDb } from "./test-env.ts";
 import { server } from "./workflow-apps.ts";
 
 // `env.build` in a chat's code: the chat's agent building Apps for its
@@ -178,6 +179,27 @@ return limit;
 import definition from "./invoices.ts";
 
 export default workflowTests(definition, [{ name: "runs", mocks: { limit: 1, book: 1 }, expect: { output: 1 } }]);
+`,
+});
+
+/** A workflow whose first step calls a helper, the second a connection. */
+const digest = (to: string) => ({
+  "workflows/lib/total.ts": "export const total = (n: number) => n + 1;\n",
+  "workflows/digest.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
+
+import { total } from "./lib/total.ts";
+
+export default workflow("digest", { params: {}, input: z.unknown() }, async (step, { env }) => {
+  const sum = await step.do("sum", { description: "Sum" }, async () => total(1));
+  await step.do("mail", { description: "Mail" }, async () => await env.MAIL.call("mail.send", ${JSON.stringify(to)}));
+  return sum;
+});
+`,
+  "workflows/digest.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./digest.ts";
+
+export default workflowTests(definition, [{ name: "runs", mocks: { sum: 2, mail: 1 }, expect: { output: 2 } }]);
 `,
 });
 
@@ -962,12 +984,14 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
           id: "notify",
           change: "modified",
           shared: ["app/lib/books.ts"],
+          // Code it may use changed: it may change things through it.
           steps: [
             {
               name: "save",
               change: "modified",
-              sideEffect: false,
+              sideEffect: true,
               calls: ["APP"],
+              sharedCode: true,
             },
           ],
           params: [],
@@ -1006,6 +1030,133 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
         },
       ],
     });
+  });
+
+  it("lists every step of a workflow whose shared code changed, and a step changed only in its code", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const { id: app } = await builder.api.apps.create({ name: "Digest" });
+    await release(builder, app, digest("hwczrv0to6"));
+    // Only the mail's address: two calls a 32-bit hash couldn't tell apart.
+    await builder.api.apps.files.write(app, digest("flfoi83s5j"));
+    const { version: address } = await builder.api.apps.files.commit(
+      app,
+      "Address"
+    );
+    const addressReview = await builder.api.apps.versions.review(app, address);
+    // Then only the helper the first step calls, without reading env.
+    await builder.api.apps.files.write(app, {
+      ...digest("hwczrv0to6"),
+      "workflows/lib/total.ts": "export const total = (n: number) => n + 2;\n",
+    });
+    const { version: helper } = await builder.api.apps.files.commit(
+      app,
+      "Helper"
+    );
+    const helperReview = await builder.api.apps.versions.review(app, helper);
+
+    expect({
+      address: addressReview.workflows,
+      helper: helperReview.workflows,
+    }).toStrictEqual({
+      address: [
+        {
+          id: "digest",
+          change: "modified",
+          shared: [],
+          steps: [
+            {
+              name: "mail",
+              change: "modified",
+              sideEffect: false,
+              calls: ["MAIL"],
+              sharedCode: false,
+            },
+          ],
+          params: [],
+        },
+      ],
+      helper: [
+        {
+          id: "digest",
+          change: "modified",
+          shared: ["workflows/lib/total.ts"],
+          // Every step, and each may change things: the workflow calls
+          // bindings, and the helper may too.
+          steps: [
+            {
+              name: "mail",
+              change: "modified",
+              sideEffect: true,
+              calls: ["MAIL"],
+              sharedCode: true,
+            },
+            {
+              name: "sum",
+              change: "modified",
+              sideEffect: true,
+              calls: [],
+              sharedCode: true,
+            },
+          ],
+          params: [],
+        },
+      ],
+    });
+  });
+
+  it("lists nothing naming an App its reviewer may not open, role or not", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const reviewer = await signedInApi(idp, "builder");
+    const { id: app } = await owner.api.apps.create({ name: "Invoicing" });
+    const { id: unreadable } = await owner.api.apps.create({ name: "Inbox" });
+    await owner.api.apps.members.add(app, {
+      type: "person",
+      id: reviewer.userId,
+      role: "builder",
+    });
+    await owner.api.apps.members.add(unreadable, {
+      type: "person",
+      id: reviewer.userId,
+      role: "user",
+    });
+    // The Inbox then reads the owner's own mailbox, which the reviewer
+    // can't read: they keep their role in it, but may no longer open it.
+    const mailbox = `connection-mailbox-${crypto.randomUUID()}`;
+    const now = Date.now();
+    await connectDb()
+      .prepare(
+        "INSERT INTO connections (id, provider, scope, owner_user_id, status, server_kind, server, created_at, updated_at) VALUES (?, 'microsoft', 'personal', ?, 'active', 'native', 'microsoft-365', ?, ?)"
+      )
+      .bind(mailbox, owner.userId, now, now)
+      .run();
+    await requestGranted(idp, owner, {
+      ...outlook(unreadable, "MAILBOX"),
+      object: { type: "connection", connectionId: mailbox },
+    });
+    // Invoicing asks to call it: waiting for an admin, so Invoicing reads
+    // nothing of it, and stays open to the reviewer.
+    await owner.api.permissions.request({
+      subject: { type: "app", appId: app },
+      object: { type: "app", appId: unreadable },
+      actions: ["read"],
+      binding: "INBOX",
+    });
+    await owner.api.apps.files.write(app, { "notes.md": "new" });
+    const { version } = await owner.api.apps.files.commit(app, "Notes");
+
+    const [ownReview, theirs, listed] = await Promise.all([
+      owner.api.apps.versions.review(app, version),
+      reviewer.api.apps.versions.review(app, version),
+      reviewer.api.permissions.list({ type: "app", appId: app }),
+    ]);
+
+    // As the permissions API shows them to the reviewer, no more.
+    expect({
+      owner: ownReview.permissions.map(({ binding }) => binding),
+      reviewer: theirs.permissions.map(({ binding }) => binding),
+      api: listed.map(({ binding }) => binding),
+      named: JSON.stringify(theirs).includes(unreadable),
+    }).toStrictEqual({ owner: ["INBOX"], reviewer: [], api: [], named: false });
   });
 
   it("lists no grant naming an App its reviewer can't see", async () => {

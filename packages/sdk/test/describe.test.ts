@@ -20,8 +20,10 @@ ${body}
 });
 `;
 
-/** A step's code hash: 8 hex digits. */
-const hashPattern = /^[0-9a-f]{8}$/u;
+// Two calls whose 32-bit FNV-1a hashes were the same: compared as
+// written, they differ.
+const mail = (to: string): string =>
+  `await step.do("mail", { description: "Mail" }, async () => await env.MAIL.call("mail.send", ${JSON.stringify(to)}));`;
 
 describe(describeWorkflow, () => {
   it("shows a step in a loop once, nested under the loop", () => {
@@ -81,10 +83,10 @@ describe(describeWorkflow, () => {
     timeout: params.signTimeout,
   });`);
 
-    // Each step's code hash, as whether it is one.
+    // Each step's code, as whether it is its call as written.
     const steps = describeWorkflow(source).steps.map((node) =>
       node.type === "step"
-        ? { ...node, code: hashPattern.test(node.code) }
+        ? { ...node, code: node.code.startsWith(`step.`) }
         : node
     );
 
@@ -295,22 +297,18 @@ describe(describeWorkflow, () => {
     ).toStrictEqual([["env"], ["env"]]);
   });
 
-  it("changes a step's code hash when only its function changes", () => {
+  it("keeps each step's call as written, so any change to its code shows", () => {
     const codeOf = (body: string): string | undefined => {
-      const [first] = describeWorkflow(workflowSource(body)).steps;
+      const [first] = describeWorkflow(
+        workflowSource(body, "step, { env }")
+      ).steps;
       return first?.type === "step" ? first.code : undefined;
     };
-    const one = codeOf(
-      `await step.do("x", { description: "X" }, async () => 1);`
-    );
 
-    expect(one).toMatch(hashPattern);
-    expect(
-      codeOf(`await step.do("x", { description: "X" }, async () => 2);`)
-    ).not.toBe(one);
-    expect(
-      codeOf(`await step.do("x", { description: "X" }, async () => 1);`)
-    ).toBe(one);
+    expect(codeOf(mail("hwczrv0to6"))).toBe(
+      mail("hwczrv0to6").replace("await ", "").replace(/;$/u, "")
+    );
+    expect(codeOf(mail("hwczrv0to6"))).not.toBe(codeOf(mail("flfoi83s5j")));
   });
 
   it("rejects a source without exactly one workflow, or that doesn't parse", () => {

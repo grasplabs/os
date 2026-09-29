@@ -232,21 +232,6 @@ const paramsIn = (bindings: Bindings, nodes: Node[]): string[] => {
   return names;
 };
 
-/**
- * A short hash of a step's call as written (FNV-1a, 32 bits): changes
- * whenever its code does, so a change to its function alone shows.
- */
-const sourceHash = (text: string): string => {
-  let hash = 0x81_1c_9d_c5;
-  for (let index = 0; index < text.length; index += 1) {
-    // oxlint-disable-next-line no-bitwise -- FNV-1a works on the bits
-    hash ^= text.codePointAt(index) ?? 0;
-    hash = Math.imul(hash, 0x01_00_01_93);
-  }
-  // oxlint-disable-next-line no-bitwise -- as an unsigned 32-bit number
-  return (hash >>> 0).toString(16).padStart(8, "0");
-};
-
 const isStepCall = (bindings: Bindings, node: Node): node is CallExpression =>
   node.type === "CallExpression" &&
   node.callee.type === "MemberExpression" &&
@@ -693,7 +678,7 @@ const describeCall = (
     params: paramsIn(reader.bindings, call.arguments),
     options: literalOptions(options),
     ...(env.length === 0 ? {} : { env }),
-    code: sourceHash(textOf(reader, call)),
+    code: textOf(reader, call),
     line: lineOf(call),
   };
 };

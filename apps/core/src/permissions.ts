@@ -1249,37 +1249,20 @@ export const listPermissions = async (
 };
 
 /**
- * App `app`'s active permissions, oldest first, as `listPermissions` lists
- * them for `by` with `openApps` (only those naming Apps `by` has a role
- * in), each with whether `by` making one of its versions current would
- * ask an admin for it again, as `madeCurrent` does: one that changes
+ * Whether `by` making a version of the App that holds `permission` current
+ * would ask an admin for it again, as `madeCurrent` does: one that changes
  * things, unless `by` could grant it (one of the organization's own
  * admins) or the permissions are kept (`keep`, an App's first version
  * copied from a blueprint, made current for the first time).
  */
-export const activeGrants = async (
-  env: Env,
+export const askedAgainBy = (
   by: Pick<Identity, "role" | "staff">,
-  { app, openApps, keep }: { app: AppId; openApps: SQL; keep: boolean }
-): Promise<{ permission: Permission; askedAgain: boolean }[]> => {
-  const listed = await listPermissions(
-    env,
-    by,
-    { type: "app", appId: app },
-    openApps,
-    "active"
-  );
-  const canGrant = isAdmin(by.role) && !by.staff;
-  return listed.map((permission) => ({
-    permission,
-    askedAgain:
-      !keep &&
-      !canGrant &&
-      permission.actions.some((action) =>
-        changesThings(permission.object, action)
-      ),
-  }));
-};
+  permission: Permission,
+  keep: boolean
+): boolean =>
+  !keep &&
+  !(isAdmin(by.role) && !by.staff) &&
+  permission.actions.some((action) => changesThings(permission.object, action));
 
 /**
  * The person an App or agent acts for must still be in the organization:

@@ -781,7 +781,8 @@ build: {
         change: "added" | "modified" | "removed";
         /** Changed code outside screens it may use. */
         shared: string[];
-        steps: { name: string; change: string; sideEffect: boolean; calls: string[] }[] | null;
+        /** \`sharedCode\`: listed because code it may use changed. */
+        steps: { name: string; change: string; sideEffect: boolean; calls: string[]; sharedCode: boolean }[] | null;
         params: { name: string; change: string }[] | null;
       }[];
       permissions: { id: string; object: Record<string, unknown>; actions: string[]; binding: string }[];
