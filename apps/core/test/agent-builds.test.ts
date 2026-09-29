@@ -391,7 +391,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       runInDurableObject(chat.stub, (instance) =>
         instance.draft(chatIdSchema.parse(chat.chat.id), existing)
       )
-    ).resolves.toStrictEqual({ base: null, changes: {}, revision: 0 });
+    ).resolves.toMatchObject({ changes: {}, revision: 2 });
   });
 
   it("refuses to build without the agent's own permission, or for someone who doesn't build", async () => {
@@ -510,5 +510,105 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
         revision: 2,
       },
     ]);
+  });
+
+  it("keeps a draft's revisions going when its changes are all gone", async () => {
+    const { chat } = await setUp([]);
+    const chatId = chatIdSchema.parse(chat.chat.id);
+
+    const saved = await runInDurableObject(chat.stub, (instance) => [
+      // A write reads revision 0; meanwhile another creates the draft and
+      // writes its only change back as the base has it.
+      instance.saveDraft(chatId, "app-1", null, { "a.md": "a" }, [], 0),
+      instance.saveDraft(chatId, "app-1", null, {}, ["a.md"], 1),
+      instance.draft(chatId, "app-1"),
+      // The write that read revision 0 lands on nothing.
+      instance.saveDraft(chatId, "app-1", null, { "b.md": "b" }, [], 0),
+      // Nor once the draft is dropped, as a proposal drops it.
+      instance.saveDraft(chatId, "app-1", null, { "c.md": "c" }, [], 2),
+      instance.dropDraft(chatId, "app-1", 3),
+      instance.saveDraft(chatId, "app-1", null, { "d.md": "d" }, [], 0),
+      instance.saveDraft(chatId, "app-1", null, { "d.md": "d" }, [], 3),
+      instance.draft(chatId, "app-1"),
+    ]);
+
+    expect(saved).toStrictEqual([
+      true,
+      true,
+      { base: null, changes: {}, revision: 2 },
+      false,
+      true,
+      true,
+      false,
+      false,
+      { base: null, changes: {}, revision: 4 },
+    ]);
+  });
+
+  it("counts no check whose builds are still going, and says to check again", async () => {
+    const checks = `export default async (env) => {
+      ${findApp}
+      const checks = [];
+      for (let count = 0; count < 7; count += 1) {
+        const check = await env.build.check(app.id);
+        checks.push({ passed: check.passed, pending: check.pending, failedInARow: check.failedInARow });
+      }
+      return checks;
+    };`;
+    const { chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        const app = await env.build.create({ name: ${JSON.stringify(appName)} });
+        await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": fixed })});
+      };`),
+      codeStep(checks),
+      says("Still building."),
+      codeStep(`export default async (env) => {
+        ${findApp}
+        const check = await env.build.check(app.id);
+        return { passed: check.passed, pending: check.pending, failedInARow: check.failedInARow };
+      };`),
+      says("Built."),
+    ]);
+    await grant();
+    // The build cache answers only once the test lets it: every build waits
+    // on it past a check's wait.
+    const held = Promise.withResolvers<boolean>();
+    const { FILES: files, CHECK_BUILD_WAIT_MS: wait } = env;
+    const holding = new Proxy(files, {
+      get: (target, property) => {
+        const value: unknown = Reflect.get(target, property);
+        if (property === "get" && typeof value === "function") {
+          return async (...args: unknown[]): Promise<unknown> => {
+            await held.promise;
+            return Reflect.apply(value, target, args);
+          };
+        }
+        return typeof value === "function"
+          ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
+          : value;
+      },
+    });
+    try {
+      env.FILES = holding;
+      env.CHECK_BUILD_WAIT_MS = "50";
+      await chat.ask("Build an invoice desk");
+    } finally {
+      env.FILES = files;
+      env.CHECK_BUILD_WAIT_MS = wait;
+      held.resolve(true);
+    }
+    await chat.ask("Check it again");
+
+    const results = await codeResults(chat.stub, chat.chat.id);
+    const pending = { passed: false, pending: true, failedInARow: 0 };
+    // More than the repair loop allows to fail, none refused or counted.
+    expect(returned(results[1]?.text)).toStrictEqual(
+      Array.from({ length: 7 }, () => pending)
+    );
+    expect(returned(results[2]?.text)).toStrictEqual({
+      passed: true,
+      pending: false,
+      failedInARow: 0,
+    });
   });
 });

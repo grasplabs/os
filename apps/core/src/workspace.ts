@@ -77,6 +77,9 @@ export interface Draft {
   revision: number;
 }
 
+/** How a check of a draft ended, as the repair loop counts it. */
+export type CheckOutcome = "passed" | "failed" | "pending";
+
 /**
  * What a chat's agent spent building Apps this turn (agent-builds.ts):
  * the Apps it created, and for each App's draft the checks that failed in
@@ -1005,27 +1008,6 @@ export class Workspace extends DurableObject<Env> {
           )
           .run();
       }
-      // A draft left with no change is no draft: the next write starts
-      // again over the App's latest version.
-      const [left] = this.#db
-        .select({ path: chatDraftFiles.path })
-        .from(chatDraftFiles)
-        .where(
-          and(
-            eq(chatDraftFiles.chatId, chatId),
-            eq(chatDraftFiles.appId, appId)
-          )
-        )
-        .limit(1)
-        .all();
-      if (left === undefined) {
-        this.#db
-          .delete(chatDrafts)
-          .where(
-            and(eq(chatDrafts.chatId, chatId), eq(chatDrafts.appId, appId))
-          )
-          .run();
-      }
       return true;
     });
   }
@@ -1037,16 +1019,26 @@ export class Workspace extends DurableObject<Env> {
    */
   dropDraft(chatId: ChatId, appId: string, revision?: number): boolean {
     return this.ctx.storage.transactionSync(() => {
-      if (
-        revision !== undefined &&
-        this.draft(chatId, appId).revision !== revision
-      ) {
+      const now = this.draft(chatId, appId);
+      if (revision !== undefined && now.revision !== revision) {
         return false;
       }
-      this.#dropDrafts(
-        and(eq(chatDraftFiles.chatId, chatId), eq(chatDraftFiles.appId, appId)),
-        and(eq(chatDrafts.chatId, chatId), eq(chatDrafts.appId, appId))
-      );
+      // Its changes go; its revision stays, one on, so a write that read
+      // an earlier one still lands on nothing (`saveDraft`).
+      this.#db
+        .delete(chatDraftFiles)
+        .where(
+          and(
+            eq(chatDraftFiles.chatId, chatId),
+            eq(chatDraftFiles.appId, appId)
+          )
+        )
+        .run();
+      this.#db
+        .update(chatDrafts)
+        .set({ revision: now.revision + 1, updatedAt: new Date() })
+        .where(and(eq(chatDrafts.chatId, chatId), eq(chatDrafts.appId, appId)))
+        .run();
       return true;
     });
   }
@@ -1112,12 +1104,15 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * Settles a check taken with `takeCheck`: a failed one adds to the
-   * checks that failed in a row, a passing one starts them again. How
-   * many failed in a row now.
+   * checks that failed in a row, a passing one starts them again, and one
+   * whose builds are still going counts as neither. How many failed in a
+   * row now.
    */
-  settleCheck(chatId: ChatId, appId: string, passed: boolean): number {
+  settleCheck(chatId: ChatId, appId: string, outcome: CheckOutcome): number {
     const draft = this.#draftBuilds(chatId, appId);
-    draft.failed = passed ? 0 : draft.failed + 1;
+    if (outcome !== "pending") {
+      draft.failed = outcome === "passed" ? 0 : draft.failed + 1;
+    }
     draft.running = Math.max(0, draft.running - 1);
     return draft.failed;
   }

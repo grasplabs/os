@@ -34,7 +34,7 @@ import {
   workflowTestFailures,
 } from "./workflows/code.ts";
 import type { DryRuns } from "./workflows/code.ts";
-import type { Draft } from "./workspace.ts";
+import type { CheckOutcome, Draft } from "./workspace.ts";
 
 // Building Apps from a chat: `await env.build.write(app, { ... })`. The
 // chat's agent creates Apps, and changes one in a draft of its own: one
@@ -124,6 +124,12 @@ export interface DraftFiles {
 export interface DraftCheck {
   /** It all builds and every workflow test passes: what proposing needs. */
   passed: boolean;
+  /**
+   * A build didn't finish in time, or couldn't run now, and nothing
+   * failed: not counted as a failed check. The build goes on, and the
+   * next check reads it from the cache.
+   */
+  pending: boolean;
   screens: SavedBuild;
   server: SavedBuild;
   workflows: SavedBuild;
@@ -145,7 +151,8 @@ const draftOf = async (
   app: AppId
 ): Promise<Draft> => {
   const draft = await workspace(env, workspaceId).draft(chatId, app);
-  return draft.revision === 0
+  // No changes (none yet, or all gone): over the App's latest version.
+  return Object.keys(draft.changes).length === 0
     ? { ...draft, base: await latestVersion(env, app) }
     : draft;
 };
@@ -173,6 +180,24 @@ const filesOf = async (
 const buildPassed = ({ status }: SavedBuild): boolean =>
   status === "ok" || status === "none";
 
+/**
+ * Whether a build says nothing of the draft yet: still going past the
+ * check's wait, or it couldn't run now. Nothing the agent could fix.
+ */
+const buildUnknown = ({ status }: SavedBuild): boolean =>
+  status === "pending" || status === "error";
+
+/**
+ * How long a check waits for its builds: {@link checkWaitMs}, or less
+ * where tests set `CHECK_BUILD_WAIT_MS`.
+ */
+const buildWaitMs = (env: Env): number => {
+  const set = Number(env.CHECK_BUILD_WAIT_MS);
+  return Number.isInteger(set) && set > 0 && set < checkWaitMs
+    ? set
+    : checkWaitMs;
+};
+
 /** A build as a check answers it: its first diagnostics only. */
 const reported = (build: SavedBuild): SavedBuild => ({
   ...build,
@@ -199,6 +224,17 @@ const testsOf = async (
   };
 };
 
+/** How a check counts: passed, failed, or neither while a build is pending. */
+const outcomeOf = ({
+  passed,
+  pending,
+}: Pick<DraftCheck, "passed" | "pending">): CheckOutcome => {
+  if (passed) {
+    return "passed";
+  }
+  return pending ? "pending" : "failed";
+};
+
 /** Logs a turn's count that couldn't be settled; the call's own error goes on. */
 const logCountFailure = (failure: unknown): void => {
   log.warn("agent.check_settle_failed", errorFields(failure));
@@ -214,15 +250,16 @@ const checkFiles = async (
   const builds = await buildOnSave(
     env,
     { app, version: base ?? 0, files },
-    checkWaitMs
+    buildWaitMs(env)
   );
   const tests = await testsOf(env, base, files, builds.workflows);
+  const all = [builds.screens, builds.server, builds.workflows];
+  const failed =
+    all.some((build) => !buildPassed(build) && !buildUnknown(build)) ||
+    tests.status === "failed";
   return {
-    passed:
-      buildPassed(builds.screens) &&
-      buildPassed(builds.server) &&
-      buildPassed(builds.workflows) &&
-      tests.status !== "failed",
+    passed: !failed && all.every(buildPassed),
+    pending: !failed && all.some(buildUnknown),
     screens: reported(builds.screens),
     server: reported(builds.server),
     workflows: reported(builds.workflows),
@@ -305,10 +342,9 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
    * anything runs, so checks started at once can't pass the limit), and
    * settles it however it ends: passed only when `run` says so.
    */
-  async #counted<T>(
+  async #counted<T extends Pick<DraftCheck, "passed" | "pending">>(
     app: AppId,
-    run: () => Promise<T>,
-    passed: (result: T) => boolean
+    run: () => Promise<T>
   ): Promise<{ result: T; failedInARow: number }> {
     const { workspaceId, chatId } = this.ctx.props;
     const chats = workspace(this.env, workspaceId);
@@ -321,10 +357,14 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
     } catch (error) {
       // Settled as failed; a failure to settle is logged, never in the way
       // of why the check failed.
-      await chats.settleCheck(chatId, app, false).catch(logCountFailure);
+      await chats.settleCheck(chatId, app, "failed").catch(logCountFailure);
       throw error;
     }
-    const failedInARow = await chats.settleCheck(chatId, app, passed(result));
+    const failedInARow = await chats.settleCheck(
+      chatId,
+      app,
+      outcomeOf(result)
+    );
     return { result, failedInARow };
   }
 
@@ -439,8 +479,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
         const files = Object.fromEntries(await filesOf(this.env, id, draft));
         const { result, failedInARow } = await this.#counted(
           id,
-          async () => await checkFiles(this.env, id, draft.base, files),
-          ({ passed }) => passed
+          async () => await checkFiles(this.env, id, draft.base, files)
         );
         return { ...result, failedInARow, maxFailedChecks };
       },
@@ -562,6 +601,11 @@ build: {
    */
   check(app: string): Promise<{
     passed: boolean;
+    /**
+     * A build is still going (or couldn't run now) and nothing failed: not
+     * a failed check. Check again: the next one reads the build's result.
+     */
+    pending: boolean;
     screens: Build;
     server: Build;
     workflows: Build;
