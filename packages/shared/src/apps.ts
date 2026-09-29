@@ -5,6 +5,7 @@ import { defineErrorFamily } from "./errors.ts";
 import { identifierSchema } from "./ids.ts";
 import type { AppId } from "./ids.ts";
 import type { Permission } from "./permissions.ts";
+import type { TriggerDeclaration } from "./workflows.ts";
 
 // An App's code is a tree of text files, versioned as a whole: builders
 // write files into the App's working copy and commit it as the next
@@ -234,6 +235,30 @@ export interface VersionReview {
       | null;
     /** Its parameters that differ, by name; null when they can't be read. */
     params: { name: string; change: ReviewChange }[] | null;
+    /**
+     * Its triggers added or removed: what makes it run on its own, such
+     * as a schedule, an event or mail to an address; null when they can't
+     * be read.
+     */
+    triggers:
+      | { trigger: TriggerDeclaration; change: "added" | "removed" }[]
+      | null;
+    /**
+     * It may change something outside Grasp: a listed step may, or its
+     * steps can't be read at all.
+     */
+    sideEffect: boolean;
+  }[];
+  /**
+   * Its exports (`app/exports.json`: the methods other Apps may call) that
+   * differ, by name, with their access (`read`, or `write`: changes the
+   * App's data) now and before; null where there is none.
+   */
+  exports: {
+    name: string;
+    change: ReviewChange;
+    access: "read" | "write" | null;
+    accessBefore: "read" | "write" | null;
   }[];
   /**
    * What the App asks for that no admin has granted yet: each waits for

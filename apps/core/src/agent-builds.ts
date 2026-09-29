@@ -822,7 +822,13 @@ build: {
         /** \`sharedCode\`: listed because code it may use changed. */
         steps: { name: string; change: string; sideEffect: boolean; calls: string[]; sharedCode: boolean }[] | null;
         params: { name: string; change: string }[] | null;
+        /** What makes it run on its own, added or removed. */
+        triggers: { trigger: Record<string, unknown>; change: "added" | "removed" }[] | null;
+        /** It may change something outside Grasp (or its steps can't be read). */
+        sideEffect: boolean;
       }[];
+      /** What other Apps may call (app/exports.json), with read/write access. */
+      exports: { name: string; change: string; access: "read" | "write" | null; accessBefore: "read" | "write" | null }[];
       permissions: { id: string; object: Record<string, unknown>; actions: string[]; binding: string }[];
       /** What the App holds, and which making it current asks an admin for again. */
       grants: { permission: { id: string; binding: string; actions: string[] }; askedAgain: boolean }[];

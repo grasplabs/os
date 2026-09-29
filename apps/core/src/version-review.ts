@@ -5,14 +5,20 @@ import {
 } from "@grasp-os/compiler";
 import { describeWorkflow } from "@grasp-os/sdk/describe";
 import type {
+  AppExports,
   AppFiles,
   ReviewChange,
   VersionReview,
 } from "@grasp-os/shared/apps";
 import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, WorkflowId } from "@grasp-os/shared/ids";
+import { canonicalJson } from "@grasp-os/shared/json";
 import { workflowErrors } from "@grasp-os/shared/workflows";
-import type { OutlineNode, StepOutline } from "@grasp-os/shared/workflows";
+import type {
+  OutlineNode,
+  StepOutline,
+  TriggerDeclaration,
+} from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import { appFor, findVersion, toVersion, versionFiles } from "./apps.ts";
@@ -23,6 +29,7 @@ import { permissionsOpenTo } from "./permissions-open.ts";
 import { askedAgainBy } from "./permissions.ts";
 import {
   declaredParams,
+  declaredTriggers,
   workflowIdsIn,
   workflowTestFailures,
 } from "./workflows/code.ts";
@@ -158,6 +165,66 @@ const paramsOf = async (
     throw error;
   }
 };
+
+/**
+ * A workflow's triggers at a version, each as canonical JSON: none where
+ * it has no such workflow; null when they can't be read (code that doesn't
+ * build or declare).
+ */
+const triggersOf = async (
+  env: Env,
+  app: AppId,
+  at: { version: number; files: AppFiles } | undefined,
+  id: WorkflowId
+): Promise<Map<string, TriggerDeclaration> | null> => {
+  if (at === undefined || !workflowIdsIn(at.files).includes(id)) {
+    return new Map();
+  }
+  try {
+    const triggers = await declaredTriggers(env, app, at.version, id, at.files);
+    return new Map(
+      triggers.map((trigger) => [canonicalJson(trigger), trigger])
+    );
+  } catch (error) {
+    if (workflowErrors.codeOf(error) !== undefined) {
+      return null;
+    }
+    throw error;
+  }
+};
+
+/** A workflow's triggers added and removed: what makes it run on its own. */
+const triggerChanges = (
+  before: ReadonlyMap<string, TriggerDeclaration>,
+  now: ReadonlyMap<string, TriggerDeclaration>
+): NonNullable<VersionReview["workflows"][number]["triggers"]> => [
+  ...[...now]
+    .filter(([key]) => !before.has(key))
+    .map(([, trigger]) => ({ trigger, change: "added" as const })),
+  ...[...before]
+    .filter(([key]) => !now.has(key))
+    .map(([, trigger]) => ({ trigger, change: "removed" as const })),
+];
+
+/**
+ * How a version's exports (what other Apps may call, `app/exports.json`)
+ * differ from the current version's: each by name, with its access now
+ * and before.
+ */
+const exportChanges = (
+  before: AppExports,
+  now: AppExports
+): VersionReview["exports"] =>
+  differences(
+    new Map(Object.entries(before)),
+    new Map(Object.entries(now)),
+    sameJson
+  ).map(({ name, change, now: after, before: was }) => ({
+    name,
+    change,
+    access: after?.access ?? null,
+    accessBefore: was?.access ?? null,
+  }));
 
 /** Where a version's tests are kept, by its files' hash and the compiler. */
 const testsKey = (app: AppId, tree: string): string =>
@@ -342,14 +409,25 @@ const workflowsOf = async (
     const paramsBefore = await paramsOf(env, app, before, id);
     // oxlint-disable-next-line no-await-in-loop -- one isolate at a time
     const paramsNow = await paramsOf(env, app, proposed, id);
+    // oxlint-disable-next-line no-await-in-loop -- one isolate at a time
+    const triggersBefore = await triggersOf(env, app, before, id);
+    // oxlint-disable-next-line no-await-in-loop -- one isolate at a time
+    const triggersNow = await triggersOf(env, app, proposed, id);
+    const steps =
+      stepsBefore === null || stepsNow === null
+        ? null
+        : stepChanges(stepsBefore, stepsNow, shared.length > 0);
     workflows.push({
       id,
       change,
       shared,
-      steps:
-        stepsBefore === null || stepsNow === null
+      // Steps that can't be read may do anything.
+      sideEffect: steps === null || steps.some(({ sideEffect }) => sideEffect),
+      steps,
+      triggers:
+        triggersBefore === null || triggersNow === null
           ? null
-          : stepChanges(stepsBefore, stepsNow, shared.length > 0),
+          : triggerChanges(triggersBefore, triggersNow),
       params:
         paramsBefore === null || paramsNow === null
           ? null
@@ -396,6 +474,12 @@ export const reviewVersion = async (
   // Asked for again only if not kept, as `madeCurrent` says: an App's
   // first version copied from a blueprint, made current for the first time.
   const keep = current === null && row.approved === 1;
+  // What other Apps may call of the current version, from its row.
+  const currentRow =
+    before === undefined
+      ? undefined
+      : await findVersion(env, found.id, before.version);
+  const exportsBefore = currentRow?.exports ?? {};
   // What the App holds, as the permissions API shows it to this reviewer.
   const held = await permissionsOpenTo(
     env,
@@ -413,6 +497,7 @@ export const reviewVersion = async (
       Object.keys(serverFiles(before?.files ?? {})).length,
       Object.keys(serverFiles(files)).length
     ),
+    exports: exportChanges(exportsBefore, row.exports),
     serverFiles: serverChanges.map(({ name, change }) => ({
       path: name,
       change,

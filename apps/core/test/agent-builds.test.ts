@@ -204,6 +204,37 @@ export default workflowTests(definition, [{ name: "runs", mocks: { sum: 2, mail:
 `,
 });
 
+/**
+ * The weekly workflow, run by `triggers`; with `nested`, its step called
+ * from a function of its own, which the step list can't read.
+ */
+const weekly = (triggers: string, nested = false): Record<string, string> => ({
+  "workflows/weekly.ts": `import { schedule, workflow } from "@grasp-os/sdk/workflow";
+
+export default workflow(
+  "weekly",
+  { params: { every: schedule({ label: "Runs", default: "0 8 * * 1" }) }, triggers: ${triggers} },
+  async (step) => {
+    ${nested ? 'const run = async () => await step.do("report", { description: "Write the report" }, async () => "sent");\n    return await run();' : 'return await step.do("report", { description: "Write the report" }, async () => "sent");'}
+  }
+);
+`,
+  "workflows/weekly.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
+
+import definition from "./weekly.ts";
+
+export default workflowTests(definition, [{ name: "runs", mocks: { report: "sent" }, expect: { output: "sent" } }]);
+`,
+});
+
+/** An export of the App's, with its access. */
+const exported = (access: "read" | "write", description = "") => ({
+  access,
+  description,
+  input: { type: "object" },
+  output: { type: "object" },
+});
+
 describe("building Apps from a chat", { timeout: 120_000 }, () => {
   it("repairs a restyled button without the person, in a draft nobody else sees, and puts nothing live", async () => {
     const { builder, person, chat, grant } = await setUp([
@@ -1149,6 +1180,8 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
           id: "digest",
           change: "modified",
           shared: [],
+          sideEffect: true,
+          triggers: [],
           steps: [
             // Calls MAIL: may change things, though it doesn't say so.
             {
@@ -1167,6 +1200,8 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
           id: "digest",
           change: "modified",
           shared: ["workflows/lib/total.ts"],
+          sideEffect: true,
+          triggers: [],
           // Every step, and each may change things: the workflow calls
           // bindings, and the helper may too.
           steps: [
@@ -1186,6 +1221,65 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
             },
           ],
           params: [],
+        },
+      ],
+    });
+  });
+
+  it("calls out new triggers, changed exports, and steps it can't read as possibly acting", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const { id: app } = await builder.api.apps.create({ name: "Weekly" });
+    await release(builder, app, {
+      ...weekly(`[{ type: "manual" }]`),
+      "app/exports.json": JSON.stringify({
+        totals: exported("read"),
+        purge: exported("write"),
+      }),
+    });
+    await builder.api.apps.files.write(app, {
+      // Now on a schedule, and its step inside a function of its own.
+      ...weekly(`[{ type: "schedule", param: "every" }]`, true),
+      "app/exports.json": JSON.stringify({
+        totals: exported("write"),
+        book: exported("write"),
+      }),
+    });
+    const { version } = await builder.api.apps.files.commit(app, "Weekly");
+
+    const review = await builder.api.apps.versions.review(app, version);
+
+    expect({
+      workflows: review.workflows,
+      exports: review.exports,
+    }).toStrictEqual({
+      workflows: [
+        {
+          id: "weekly",
+          change: "modified",
+          // Code it may import: JSON too.
+          shared: ["app/exports.json"],
+          sideEffect: true,
+          steps: null,
+          params: [],
+          triggers: [
+            { trigger: { type: "schedule", param: "every" }, change: "added" },
+            { trigger: { type: "manual" }, change: "removed" },
+          ],
+        },
+      ],
+      exports: [
+        { name: "book", change: "added", access: "write", accessBefore: null },
+        {
+          name: "purge",
+          change: "removed",
+          access: null,
+          accessBefore: "write",
+        },
+        {
+          name: "totals",
+          change: "modified",
+          access: "write",
+          accessBefore: "read",
         },
       ],
     });
