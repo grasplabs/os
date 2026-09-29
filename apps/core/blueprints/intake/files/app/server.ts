@@ -11,11 +11,17 @@ import type { Draft } from "./draft.ts";
 // Playbook is written through the App's permission (`PLAYBOOK`, which an
 // admin approves) and only for someone who may change it: only admins.
 // Intake is theirs, so every method but `overview` refuses anyone else
-// (`knowledge.forbidden`), and `overview` shows them nothing.
+// (`knowledge.forbidden`), and `overview` shows them nothing. Drafts are
+// typed in by hand, or proposed by a run of the `extract` workflow, which
+// takes the statements out of someone's notes.
 
-/** Whoever the method runs for, as the platform passes it. */
+/**
+ * Whoever the method runs for, as the platform passes it: with its step's
+ * idempotency key when a workflow run's side-effect step calls.
+ */
 interface Caller {
   userId: string;
+  idempotencyKey?: string;
 }
 
 /** A document, without its text. */
@@ -53,10 +59,10 @@ interface Env {
 type Outcome<T> = { ok: T } | { error: string };
 
 /**
- * Where a draft came from: typed in by hand. Kept with it, so the review
- * says what it reviews.
+ * Where a draft came from: typed in by hand, or taken out of notes by a
+ * model (`extract`). Kept with it, so the review says what it reviews.
  */
-type Origin = "manual";
+type Origin = "manual" | "notes";
 
 /**
  * A draft being reviewed (`open`), or being saved (`saving`): once a save
@@ -227,6 +233,12 @@ export class App extends DurableObject<Env> {
     ctx.storage.sql.exec(
       "CREATE INDEX IF NOT EXISTS drafts_by_created ON drafts (created_at)"
     );
+    // The draft each run's step proposed, by the step's idempotency key: a
+    // step that runs again proposes nothing new.
+    ctx.storage.sql.exec(`CREATE TABLE IF NOT EXISTS proposals (
+      key TEXT PRIMARY KEY,
+      draft_id TEXT NOT NULL
+    )`);
   }
 
   /**
@@ -279,16 +291,45 @@ export class App extends DurableObject<Env> {
   ): Promise<Outcome<{ id: string; version: number }>> {
     return await outcome(async () => {
       await this.#requireWriter(caller);
-      const draft = draftOf(input);
       const id = crypto.randomUUID();
-      this.ctx.storage.sql.exec(
-        "INSERT INTO drafts (id, origin, status, version, draft, created_by, created_at) VALUES (?, 'manual', 'open', 1, ?, ?, ?)",
-        id,
-        JSON.stringify(draft),
-        caller.userId,
-        Date.now()
-      );
+      this.#insert(id, "manual", draftOf(input), caller);
       return { id, version: 1 };
+    });
+  }
+
+  /**
+   * Keeps a draft a run of `extract` proposes, for its starter to review:
+   * only from a workflow run's side-effect step, by its idempotency key,
+   * once, so a step that runs again answers the draft it kept the first
+   * time. Refused (`intake.invalid`) from anywhere else, such as a screen.
+   */
+  async propose(
+    caller: Caller,
+    input: unknown
+  ): Promise<Outcome<{ id: string }>> {
+    return await outcome(async () => {
+      await this.#requireWriter(caller);
+      const key =
+        caller.idempotencyKey ??
+        refuse("intake.invalid", "Only a workflow run proposes a draft.");
+      const draft = draftOf(input);
+      const [known] = this.ctx.storage.sql
+        .exec<{ draft_id: string }>(
+          "SELECT draft_id FROM proposals WHERE key = ?",
+          key
+        )
+        .toArray();
+      if (known !== undefined) {
+        return { id: known.draft_id };
+      }
+      const id = crypto.randomUUID();
+      this.#insert(id, "notes", draft, caller);
+      this.ctx.storage.sql.exec(
+        "INSERT INTO proposals (key, draft_id) VALUES (?, ?)",
+        key,
+        id
+      );
+      return { id };
     });
   }
 
@@ -435,6 +476,18 @@ export class App extends DurableObject<Env> {
       refuse("knowledge.forbidden", "Only admins take intake.");
     }
     return playbook;
+  }
+
+  /** Stores a new draft, open for review at version 1. */
+  #insert(id: string, origin: Origin, draft: Draft, caller: Caller): void {
+    this.ctx.storage.sql.exec(
+      "INSERT INTO drafts (id, origin, status, version, draft, created_by, created_at) VALUES (?, ?, 'open', 1, ?, ?, ?)",
+      id,
+      origin,
+      JSON.stringify(draft),
+      caller.userId,
+      Date.now()
+    );
   }
 
   /** The draft `id`; `intake.not_found` when there is none. */

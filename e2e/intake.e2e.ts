@@ -10,7 +10,8 @@ import { revokeOtherCopies } from "./playbook.ts";
 // it, approves the Playbook permission it asks for, takes an interview as
 // a draft with its statements and tags, keeps it, reviews it again from
 // the list, retags a statement, and saves it: the source and its
-// statements are then in the Playbook, and the draft is gone.
+// statements are then in the Playbook, and the draft is gone. And sends
+// notes to be read by a model, following the reading on the screen.
 
 const intake = "builtin-intake";
 
@@ -118,6 +119,7 @@ test("an admin takes an interview as a draft, reviews it again, and saves its ta
   const row = drafts.getByRole("row").filter({ hasText: title });
   await expect(row.getByRole("cell")).toHaveText([
     title,
+    "Typed in",
     "2026-09-21",
     "2",
     "Review",
@@ -147,4 +149,34 @@ test("an admin takes an interview as a draft, reviews it again, and saves its ta
     `${statementsStem}1.md`,
     `${statementsStem}2.md`,
   ]);
+});
+
+test("an admin sends notes to be read, and follows the reading to its end", async ({
+  browser,
+}) => {
+  const { admin } = peopleIn("intake");
+  const title = `Notes ${crypto.randomUUID().slice(0, 8)}`;
+  const app = await intakeFor(admin);
+  const page = await pageOf(browser, admin);
+  const screen = await openIntake(page, app);
+
+  await screen.getByRole("button", { name: "Read notes" }).click();
+  const start = screen.getByRole("button", { name: "Take out statements" });
+  await expect(start).toBeDisabled();
+  await screen.getByLabel("Source title").fill(title);
+  await screen
+    .getByLabel("Notes", { exact: true })
+    .fill("Closing the month takes three days.");
+  await start.click();
+
+  // Followed live. The local stack reaches no model, and doesn't allow
+  // the workflow's model, so the reading fails, saying so, and keeps no
+  // draft; core's tests read notes with a scripted model
+  // (apps/core/test/intake.test.ts).
+  const reading = screen.getByRole("region", { name: "Notes being read" });
+  const item = reading.getByRole("listitem").filter({ hasText: title });
+  await expect(item).toContainText("Failed:", { timeout: 30_000 });
+  await item.getByRole("button", { name: "Dismiss" }).click();
+  await expect(reading).toHaveCount(0);
+  await expect(screen.getByText(title)).toHaveCount(0);
 });

@@ -10,7 +10,7 @@ import {
 } from "vite-plus/test";
 
 import { connectBridge } from "../src/screen-runtime.ts";
-import { callServer, followRuns, live } from "../src/screen.ts";
+import { callServer, followRun, followRuns, live } from "../src/screen.ts";
 
 // `live` from the side of the page: the screen's runtime connects to a fake
 // page over a real `MessagePort`, as in the frame, and the page plays core
@@ -73,6 +73,21 @@ class FakePage extends RpcTarget {
     const read = Promise.withResolvers<unknown>();
     this.reads.push(read);
     return await read.promise;
+  }
+
+  // Runs by ID, as core keeps them, whatever the list holds; each read
+  // of one is counted.
+  readonly known = new Map<string, unknown>();
+  readonly runReads: string[] = [];
+
+  run(id: string): unknown {
+    this.runReads.push(id);
+    if (!this.known.has(id)) {
+      throw Object.assign(new Error("There's no such workflow run."), {
+        code: "workflow.run_not_found",
+      });
+    }
+    return this.known.get(id);
   }
 
   /** Core's limit too: at most 20 subscriptions not released. */
@@ -403,5 +418,61 @@ describe(followRuns, () => {
       held: page.followers.filter(({ released }) => !released).length,
       shown: shown.at(-1),
     }).toStrictEqual({ held: 0, shown: ["pushed"] });
+  });
+});
+
+describe(followRun, () => {
+  let page: FakePage;
+  let sessions: Disposable[] = [];
+
+  beforeEach(() => {
+    const { port1, port2 } = new MessageChannel();
+    page = new FakePage();
+    sessions = [newMessagePortRpcSession(port2, page), connectBridge(port1)];
+  });
+
+  afterEach(() => {
+    for (const session of sessions) {
+      session[Symbol.dispose]();
+    }
+  });
+
+  const settle = async (): Promise<void> => {
+    for (let round = 0; round < 3; round += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one round trip after another
+      await roundTrip();
+    }
+  };
+
+  it("reads a run by its ID, however old, again when its workflow's runs change, and null for one core has none of", async () => {
+    const name = workflow();
+    // Not among the newest 100 the list shows: never listed at all here.
+    page.known.set("run-old", { id: "run-old", status: "running" });
+    const shown: unknown[] = [];
+    const missing: unknown[] = [];
+    const stop = followRun(name, "run-old", (run) => {
+      shown.push(run);
+    });
+    const stopMissing = followRun(name, "run-gone", (run) => {
+      missing.push(run);
+    });
+    await settle();
+    page.known.set("run-old", { id: "run-old", status: "completed" });
+    const follower = page.followers.findLast((each) => each.workflow === name);
+    await follower?.callback({ run: "run-old" });
+    await settle();
+    stop();
+    stopMissing();
+    await settle();
+
+    expect({
+      last: shown.at(-1),
+      missing: [...new Set(missing)],
+      listed: page.reads.length,
+    }).toStrictEqual({
+      last: { id: "run-old", status: "completed" },
+      missing: [null],
+      listed: 0,
+    });
   });
 });

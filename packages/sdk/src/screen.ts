@@ -56,7 +56,8 @@
  *
  * Workflows: `useWorkflow("invoice-intake")` starts runs of the App's
  * workflow, shows them as they change (started, waiting for a decision,
- * ended) and answers their decisions, for the person using the screen. A
+ * ended) and answers their decisions, for the person using the screen;
+ * `useRun("invoice-intake", id)` follows one run by its ID, however old. A
  * workflow saves what it finds by calling the App's server
  * (`appServer<App>(env)` in `@grasp-os/sdk/workflow`), which tells the
  * screens that have it open, as above.
@@ -412,6 +413,99 @@ export const followRuns = (
     clearTimeout(retry);
     stop();
   };
+};
+
+/** What core answers for a run it has no record of. */
+const runNotFound = "workflow.run_not_found";
+
+const isRunNotFound = (error: unknown): boolean =>
+  typeof error === "object" &&
+  error !== null &&
+  "code" in error &&
+  error.code === runNotFound;
+
+/**
+ * Follows one run of `workflow` by its ID: calls `onRun` with it once it
+ * has read it and each time core says one of the workflow's runs changed,
+ * however old the run is (`followRuns` lists the newest 100 only). With
+ * `null` when core has no such run, or none the person may see. A read
+ * that fails otherwise leaves it as it was and is tried again, backing off
+ * to every 30 s, as `followRuns` does; a newer read always wins over an
+ * older one. Returns a function that stops it.
+ */
+export const followRun = (
+  workflow: string,
+  run: string,
+  onRun: (run: ScreenRun | null) => void
+): (() => void) => {
+  let stopped = false;
+  let started = 0;
+  let shown = 0;
+  let retry: ReturnType<typeof setTimeout> | undefined;
+  const show = (mine: number, found: ScreenRun | null): void => {
+    if (!stopped && mine > shown) {
+      shown = mine;
+      onRun(found);
+    }
+  };
+  const read = async (delay: number): Promise<void> => {
+    clearTimeout(retry);
+    retry = undefined;
+    started += 1;
+    const mine = started;
+    try {
+      const found: unknown = await bridge().run(run);
+      // SAFETY: core's `screens.run` answers a `ScreenRun`.
+      // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+      show(mine, found as ScreenRun);
+    } catch (error) {
+      if (isRunNotFound(error)) {
+        show(mine, null);
+        return;
+      }
+      console.error(`Reading run ${run} of ${workflow} failed`, error);
+      if (!stopped && mine === started) {
+        retry = setTimeout(() => {
+          void read(Math.min(delay * 2, retryMs.most));
+        }, delay);
+      }
+    }
+  };
+  const readNow = (): void => {
+    void read(retryMs.first);
+  };
+  const stop = onRunChange(workflow, readNow);
+  readNow();
+  return () => {
+    stopped = true;
+    clearTimeout(retry);
+    stop();
+  };
+};
+
+/**
+ * One run of the App's workflow `workflow`, in a component, by its ID,
+ * live (`followRun`): `undefined` until it is read, `null` when core has
+ * no such run, or none the person may see.
+ */
+export const useRun = (
+  workflow: string,
+  run: string
+): ScreenRun | null | undefined => {
+  // Kept with the run it is of, so switching to another shows nothing of
+  // the last one meanwhile.
+  const [followed, setFollowed] = useState<{
+    key: string;
+    run: ScreenRun | null | undefined;
+  }>({ key: `${workflow}/${run}`, run: undefined });
+  useEffect(
+    () =>
+      followRun(workflow, run, (found) => {
+        setFollowed({ key: `${workflow}/${run}`, run: found });
+      }),
+    [workflow, run]
+  );
+  return followed.key === `${workflow}/${run}` ? followed.run : undefined;
 };
 
 /**
