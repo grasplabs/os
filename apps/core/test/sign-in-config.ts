@@ -55,10 +55,11 @@ export const localAdmin = "admin@acme.test";
 
 /**
  * Core's sign-in vars for a local stack at `origin`: the client's Entra
- * tenant, answered by the fake IdP (test/idp-worker.ts), so people sign in
- * through the product as they do in production. Only test values.
+ * tenant, answered by the fake IdP (test/idp-worker.ts) at `idpOrigin`, so
+ * people sign in through the product as they do in production. Only test
+ * values.
  */
-export const localSignIn = (origin: string) => ({
+export const localSignIn = (origin: string, idpOrigin = localIdpOrigin) => ({
   SIGN_IN: {
     origin,
     domains: ["acme.test"],
@@ -66,5 +67,5 @@ export const localSignIn = (origin: string) => ({
     entra: { tenantId: acmeTenant, clientId: entraClient.id },
   },
   ENTRA_CLIENT_SECRET: entraClient.secret,
-  DEV_IDP_ORIGIN: localIdpOrigin,
+  DEV_IDP_ORIGIN: idpOrigin,
 });

@@ -13,9 +13,7 @@ import { newWebSocketRpcSession } from "capnweb";
  * front, before any test runs; tests only look theirs up.
  */
 import { localAdmin } from "../apps/core/test/sign-in-config.ts";
-
-/** The local stack's address (playwright.config.ts). */
-export const origin = "http://localhost:8787";
+import { origin } from "./stack.ts";
 
 /** Signs session cookies on the test stack only; never a real secret. */
 export const testAuthSecret = "e2e-only-better-auth-secret-of-32-chars-or-more";

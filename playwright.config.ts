@@ -1,9 +1,9 @@
 import { defineConfig, devices } from "@playwright/test";
 
-import { localIdpPort, localSignIn } from "./apps/core/test/sign-in-config.ts";
-import { origin, testAuthSecret } from "./e2e/people.ts";
+import { localSignIn } from "./apps/core/test/sign-in-config.ts";
+import { testAuthSecret } from "./e2e/people.ts";
+import { corePort, idpOrigin, idpPort, origin, stateDir } from "./e2e/stack.ts";
 
-const port = 8787;
 const ci = process.env.CI === "true";
 
 /**
@@ -32,20 +32,26 @@ export default defineConfig({
   globalSetup: "./e2e/setup.ts",
   reporter: ci ? "github" : "list",
   use: {
-    baseURL: `http://localhost:${port}`,
+    baseURL: origin,
     trace: "on-first-retry",
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  // Never a server already running: on this checkout's ports (e2e/stack.ts)
+  // that is a stale run or another checkout's stack, with state the tests
+  // don't expect. Playwright then fails, naming the port.
   webServer: [
     // The full local stack: core serves the built frontend, as in
     // production. `--local` keeps remote bindings off, so it runs without
-    // Cloudflare credentials. People sign in through the fake IdP below
-    // (e2e/people.ts), and the flagged features are on.
+    // Cloudflare credentials. It starts from empty state, as in CI, kept
+    // apart from `vp run dev`'s. This can't wait for the global setup,
+    // which Playwright runs once the servers are up. People sign in through
+    // the fake IdP below (e2e/people.ts), and the flagged features are on.
     {
       command: [
-        `vp run --filter @grasp-os/core dev --local --port ${port}`,
+        `rm -rf '${stateDir}' &&`,
+        `vp run --filter @grasp-os/core dev --local --port ${corePort}`,
         devVar("BETTER_AUTH_SECRET", testAuthSecret),
-        ...Object.entries(localSignIn(origin)).map(([name, value]) =>
+        ...Object.entries(localSignIn(origin, idpOrigin)).map(([name, value]) =>
           devVar(
             name,
             typeof value === "string" ? value : JSON.stringify(value)
@@ -93,15 +99,16 @@ export default defineConfig({
           })
         ),
       ].join(" "),
-      port,
-      reuseExistingServer: !ci,
+      env: { DEV_PERSIST_TO: stateDir },
+      port: corePort,
+      reuseExistingServer: false,
       timeout: 120_000,
     },
     // Stands in for the client's Entra tenant.
     {
-      command: `node_modules/.bin/wrangler dev -c apps/core/test/idp.wrangler.jsonc --port ${localIdpPort}`,
-      port: localIdpPort,
-      reuseExistingServer: !ci,
+      command: `node_modules/.bin/wrangler dev -c apps/core/test/idp.wrangler.jsonc --port ${idpPort}`,
+      port: idpPort,
+      reuseExistingServer: false,
       timeout: 60_000,
     },
   ],

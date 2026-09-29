@@ -12,7 +12,7 @@
   },
   "scripts": {
     "build": "node build-blueprints.ts && node ../../packages/compiler/build.ts ../web/dist && node build-extractor.ts ../web/dist",
-    "dev": "vp -C ../web build --mode development && vp run build && node ../connect/build.ts && wrangler d1 migrations apply DB --local && wrangler d1 migrations apply KNOWLEDGE --local && wrangler d1 migrations apply DB --local -c ../connect/wrangler.jsonc --persist-to .wrangler/state && wrangler dev -c wrangler.jsonc -c ../connect/wrangler.jsonc --var DEV_SKIP_ROUTER_SECRET:true --var DURABLE_OBJECT_JURISDICTION:none",
+    "dev": "vp -C ../web build --mode development && vp run build && node ../connect/build.ts && wrangler d1 migrations apply DB --local --persist-to \"${DEV_PERSIST_TO:-.wrangler/state}\" && wrangler d1 migrations apply KNOWLEDGE --local --persist-to \"${DEV_PERSIST_TO:-.wrangler/state}\" && wrangler d1 migrations apply DB --local -c ../connect/wrangler.jsonc --persist-to \"${DEV_PERSIST_TO:-.wrangler/state}\" && wrangler dev -c wrangler.jsonc -c ../connect/wrangler.jsonc --persist-to \"${DEV_PERSIST_TO:-.wrangler/state}\" --var DEV_SKIP_ROUTER_SECRET:true --var DURABLE_OBJECT_JURISDICTION:none",
     "deploy": "vp run build && wrangler deploy",
     "typegen": "wrangler types --include-runtime=false -c wrangler.jsonc -c ../connect/wrangler.jsonc",
     "db:migrate": "wrangler d1 migrations apply DB --remote && wrangler d1 migrations apply KNOWLEDGE --remote",
