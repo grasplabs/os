@@ -25,6 +25,7 @@ import type { AppId } from "@grasp-os/shared/ids";
 import { canonicalJson } from "@grasp-os/shared/json";
 import { requireBuilder, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
+import { screenPath } from "@grasp-os/shared/screens";
 import { and, asc, desc, eq, isNull, lt, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -478,12 +479,6 @@ export const getApp = async (
   by: Identity,
   app: unknown
 ): Promise<App> => await appFor(env, by, app, "user");
-
-/**
- * A screen's name, from its file's path (as `openScreen` finds it, in
- * screens-rpc.ts); undefined for any other file.
- */
-const screenPath = /^screens\/(?<name>[\w-]{1,64})\.tsx$/u;
 
 /** The names `nameOf` finds in `paths`, in their order. */
 const namesIn = (

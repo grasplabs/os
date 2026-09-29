@@ -256,8 +256,8 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
     });
     const restarted = await call(revision, "notes");
     await call(revision, "remember", ["again"]);
-    // A preview of an earlier write is refused once the draft changed,
-    // and the new one starts empty.
+    // A write drops the preview of the revision before: a call for it is
+    // refused, and the new revision starts with an empty database.
     const next = await write({ "screens/list.tsx": screen }, revision);
     const changed = {
       earlier: await call(revision, "notes"),

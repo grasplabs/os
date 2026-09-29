@@ -1167,7 +1167,7 @@ export class Workspace extends DurableObject<Env> {
     unchanged: readonly string[],
     revision: number
   ): boolean {
-    return this.ctx.storage.transactionSync(() => {
+    const saved = this.ctx.storage.transactionSync(() => {
       const [row] = this.#db
         .select({ revision: chatDrafts.revision })
         .from(chatDrafts)
@@ -1216,6 +1216,11 @@ export class Workspace extends DurableObject<Env> {
       }
       return true;
     });
+    if (saved) {
+      // The preview of the revision before is over: its database goes now.
+      this.#previews.drop(chatId, appId);
+    }
+    return saved;
   }
 
   /**
