@@ -15,6 +15,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 
 import { withSession } from "../core.ts";
+import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
@@ -90,9 +91,52 @@ const proposerText = ({ proposedBy }: VersionReview): string => {
   if (proposedBy === null) {
     return "Committed by a person.";
   }
+  if (!proposedBy.ownChat) {
+    return "Proposed by the agent, in another person's chat.";
+  }
   return proposedBy.chatTitle === null
-    ? "Proposed by the agent, in another person's chat."
+    ? "Proposed by the agent, in a chat of yours that was deleted."
     : `Proposed by the agent in chat "${proposedBy.chatTitle}".`;
+};
+
+/** One changed file of the server code: before, and as it would run. */
+interface ServerFile {
+  path: string;
+  before?: string;
+  after?: string;
+}
+
+/**
+ * Each changed file of a version's server code (`app/**.ts`), before and
+ * after: against the current version, or as a first version has it.
+ */
+const serverCodeOf = async (
+  session: Session,
+  {
+    app,
+    current,
+    version,
+    serverFiles,
+  }: {
+    app: string;
+    current: number | null;
+    version: number;
+    serverFiles: VersionReview["serverFiles"];
+  }
+): Promise<ServerFile[]> => {
+  const paths = new Set(serverFiles.map(({ path }) => path));
+  if (current === null) {
+    const files = await session.apps.files.read(app, version);
+    return [...paths].map((path) => ({ path, after: files[path] }));
+  }
+  const diff = await session.apps.versions.diff(app, current, version);
+  return diff
+    .filter(({ path }) => paths.has(path))
+    .map((file) => ({
+      path: file.path,
+      ...(file.change === "added" ? {} : { before: file.before }),
+      ...(file.change === "deleted" ? {} : { after: file.after }),
+    }));
 };
 
 /**
@@ -106,31 +150,16 @@ const ServerCode = ({
   app: string;
   review: VersionReview;
 }) => {
-  const [code, setCode] =
-    useState<Loaded<{ before?: string; after?: string }>>();
-  const { current } = review;
+  const [code, setCode] = useState<Loaded<ServerFile[]>>();
+  const { current, serverFiles } = review;
   const { version } = review.version;
   useEffect(() => {
     let open = true;
     const read = async (): Promise<void> => {
-      const found = await loadFromCore(async (session) => {
-        if (current === null) {
-          const files = await session.apps.files.read(app, version);
-          return { after: files["app/server.ts"] };
-        }
-        const diff = await session.apps.versions.diff(app, current, version);
-        const server = diff.find(({ path }) => path === "app/server.ts");
-        return {
-          before:
-            server === undefined || server.change === "added"
-              ? undefined
-              : server.before,
-          after:
-            server === undefined || server.change === "deleted"
-              ? undefined
-              : server.after,
-        };
-      });
+      const found = await loadFromCore(
+        async (session) =>
+          await serverCodeOf(session, { app, current, version, serverFiles })
+      );
       if (open) {
         setCode(found);
       }
@@ -139,7 +168,7 @@ const ServerCode = ({
     return () => {
       open = false;
     };
-  }, [app, current, version]);
+  }, [app, current, version, serverFiles]);
   if (code === undefined) {
     return null;
   }
@@ -147,19 +176,25 @@ const ServerCode = ({
     return <NotLoaded page={code} />;
   }
   return (
-    <details>
-      <summary>The server code, as it would run</summary>
-      {code.data.before === undefined ? null : (
-        <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
-          <code className="font-mono">{code.data.before}</code>
-        </pre>
-      )}
-      {code.data.after === undefined ? null : (
-        <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
-          <code className="font-mono">{code.data.after}</code>
-        </pre>
-      )}
-    </details>
+    <>
+      {code.data.map(({ path, before, after }) => (
+        <details key={path}>
+          <summary>
+            <code className="font-mono">{path}</code>, as it would run
+          </summary>
+          {before === undefined ? null : (
+            <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
+              <code className="font-mono">{before}</code>
+            </pre>
+          )}
+          {after === undefined ? null : (
+            <pre className="bg-muted overflow-x-auto rounded-md p-3 text-xs">
+              <code className="font-mono">{after}</code>
+            </pre>
+          )}
+        </details>
+      ))}
+    </>
   );
 };
 

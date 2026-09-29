@@ -30,7 +30,12 @@ test("the side panel shows an App being built, and a builder makes its version c
   const name = `Invoice desk ${tag}`;
   try {
     const app = await api.apps.create({ name });
-    await api.apps.files.write(app.id, { "screens/desk.tsx": screen });
+    await api.apps.files.write(app.id, {
+      "screens/desk.tsx": screen,
+      // Server code the server build reads, though not app/server.ts.
+      "app/lib/format.ts":
+        "export const format = (total: number) => String(total);\n",
+    });
     const { version } = await api.apps.files.commit(
       app.id,
       "An invoice desk for invoices@"
@@ -61,6 +66,13 @@ test("the side panel shows an App being built, and a builder makes its version c
     await expect(built.getByRole("region", { name: "Tests" })).toContainText(
       "No workflows to test."
     );
+    // All of its server code is flagged, each file shown as it would run.
+    const serverCode = built.getByRole("region", { name: "Server code" });
+    await expect(serverCode).toContainText(
+      "Added: it acts for whoever uses the App"
+    );
+    await serverCode.getByText("app/lib/format.ts").click();
+    await expect(serverCode).toContainText("export const format");
 
     await built
       .getByRole("button", { name: `Make version ${version} current` })

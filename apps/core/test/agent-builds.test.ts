@@ -313,14 +313,23 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       "builder.md": "mine",
     });
     // The chat's page lists what the agent is changing, for its person only.
-    await expect(
-      chat.stub.drafts(chat.chat.id, builder.userId)
-    ).resolves.toMatchObject([
-      { app: existing, base: 1, changed: ["notes.md"] },
-    ]);
-    await expect(
-      chat.stub.drafts(chat.chat.id, "someone-else")
-    ).rejects.toThrow(agentErrors.create("agent.chat_not_found").message);
+    // In the object itself: a refusal over RPC is also reported as
+    // uncaught by the object, which fails the run.
+    const listed = await runInDurableObject(chat.stub, (instance) => {
+      const refused = (() => {
+        try {
+          instance.drafts(chat.chat.id, "someone-else");
+          return "listed";
+        } catch (error) {
+          return agentErrors.codeOf(error);
+        }
+      })();
+      return { own: instance.drafts(chat.chat.id, builder.userId), refused };
+    });
+    expect(listed).toMatchObject({
+      own: [{ app: existing, base: 1, changed: ["notes.md"] }],
+      refused: "agent.chat_not_found",
+    });
   });
 
   it("stops the repair loop after five failed checks in a row, until the next question", async () => {
