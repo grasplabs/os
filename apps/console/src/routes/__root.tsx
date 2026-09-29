@@ -32,6 +32,17 @@ const RootDocument = ({ children }: { children: ReactNode }) => (
   </html>
 );
 
+/** A page the console doesn't have. */
+const NotFound = () => (
+  <main className="flex flex-col gap-4 p-6">
+    <h1 className="text-2xl font-medium">Not found</h1>
+    <p className="text-sm">The console has no such page.</p>
+    <Link to="/" className="text-sm underline underline-offset-4">
+      Back to clients
+    </Link>
+  </main>
+);
+
 export const Route = createRootRoute({
   head: () => ({
     meta: [
@@ -42,4 +53,5 @@ export const Route = createRootRoute({
     links: [{ rel: "stylesheet", href: styles }],
   }),
   shellComponent: RootDocument,
+  notFoundComponent: NotFound,
 });

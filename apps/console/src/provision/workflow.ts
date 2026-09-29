@@ -30,7 +30,7 @@ import { log } from "@grasp-os/shared/log";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
 import { NonRetryableError } from "cloudflare:workflows";
-import { and, eq } from "drizzle-orm";
+import { and, asc, eq } from "drizzle-orm";
 
 import type { Staff } from "../access.ts";
 import {
@@ -79,15 +79,15 @@ export interface ProvisionParams {
 export const workersPaidEvent = "workers-paid";
 
 /**
- * Whether staff confirmed Workers Paid for client `clientId`, in this run
- * or an earlier one (`client.workers_paid`).
+ * When staff first confirmed Workers Paid for client `clientId`, in this
+ * run or an earlier one (`client.workers_paid`); null when they haven't.
  */
-const confirmedWorkersPaid = async (
+export const workersPaidConfirmedAt = async (
   db: ConsoleDatabase,
   clientId: string
-): Promise<boolean> => {
+): Promise<Date | null> => {
   const [confirmed] = await db
-    .select({ id: auditEvents.id })
+    .select({ at: auditEvents.at })
     .from(auditEvents)
     .where(
       and(
@@ -95,9 +95,16 @@ const confirmedWorkersPaid = async (
         eq(auditEvents.action, "client.workers_paid")
       )
     )
+    .orderBy(asc(auditEvents.at))
     .limit(1);
-  return confirmed !== undefined;
+  return confirmed?.at ?? null;
 };
+
+/** Whether staff confirmed Workers Paid for client `clientId`, in this run or an earlier one. */
+const confirmedWorkersPaid = async (
+  db: ConsoleDatabase,
+  clientId: string
+): Promise<boolean> => (await workersPaidConfirmedAt(db, clientId)) !== null;
 
 /** The deploy step, as a stopped run's audit event names it. */
 const deployStep = "deploy";

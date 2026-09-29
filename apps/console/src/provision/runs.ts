@@ -27,6 +27,8 @@ export type RunStatus = InstanceStatus["status"] | "starting" | "gone";
 /** A client's current run. */
 export interface CurrentRun {
   runId: string;
+  /** When it was claimed: what's newer belongs to it. */
+  claimedAt: Date;
   status: RunStatus;
   /** The instance, when Workflows has it. */
   instance: WorkflowInstance | null;
@@ -79,12 +81,13 @@ export const currentRun = async (
     const starting = Date.now() - claim.claimedAt.getTime() < startingMs;
     return {
       runId: claim.runId,
+      claimedAt: claim.claimedAt,
       status: starting ? "starting" : "gone",
       instance: null,
     };
   }
   const { status } = await instance.status();
-  return { runId: claim.runId, status, instance };
+  return { runId: claim.runId, claimedAt: claim.claimedAt, status, instance };
 };
 
 /** A new run's instance id: the client's, and a random part of its own. */
