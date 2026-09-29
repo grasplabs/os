@@ -22,7 +22,10 @@ const tags = [
 const sourceSchema = z.object({
   title: z.string().trim().min(1).max(200),
   medium: z.enum(["interview", "chat", "document", "other"]),
-  date: z.string().length(10),
+  // A calendar date that exists (`2026-02-30` doesn't), as the draft
+  // takes it (app/draft.ts `isDate`, which checks it again on
+  // `propose`): refused at the run's input, before any model reads.
+  date: z.iso.date(),
   from: z.string().trim().max(200),
 });
 

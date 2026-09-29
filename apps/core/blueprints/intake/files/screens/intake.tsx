@@ -309,7 +309,9 @@ const Intake = () => {
       {view.kind === "list" && writable ? (
         <Extractions
           started={reading}
-          runs={extract.runs}
+          onReady={() => {
+            void list();
+          }}
           onReview={(run) => {
             void review(run);
           }}

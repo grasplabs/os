@@ -959,6 +959,43 @@ describe("reading notes", { timeout: 60_000 }, () => {
     });
   });
 
+  it("refuses notes of a date that doesn't exist at the run's input, before any model reads them", async () => {
+    const { admin, app } = await setUp();
+    await admin.api.workflows.params.set(app, "extract", "model", testModel);
+    const gateway = fakeGateway();
+    const ai: AiBinding = env.AI;
+    const answering = vi
+      .spyOn(ai, "fetch")
+      .mockImplementation(gateway.binding.fetch);
+    let run: { id: string };
+    try {
+      run = await admin.api.screens.startRun(app, "extract", {
+        source: {
+          title: `Leap ${unique()}`,
+          medium: "interview",
+          date: "2026-02-30",
+          from: "Anna",
+        },
+        notes,
+      });
+      await runEnded(run.id);
+    } finally {
+      answering.mockRestore();
+    }
+    const ran = await admin.api.screens.run(app, run.id);
+    expect({
+      status: ran.status,
+      code: ran.failure?.error.code,
+      step: ran.failure?.step ?? null,
+      modelCalls: gateway.requests.length,
+    }).toStrictEqual({
+      status: "failed",
+      code: "workflow.invalid_input",
+      step: null,
+      modelCalls: 0,
+    });
+  });
+
   it("keeps one draft for a run's step however often it proposes, and none from a screen", async () => {
     const { admin, app } = await setUp();
     const draft = interview(`Proposed ${unique()}`);

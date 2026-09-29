@@ -75,11 +75,13 @@ export const NotesForm = ({
       return;
     }
     setProblem("");
-    setSource({
-      ...source,
+    // On the source as it is once the file is read, whatever was typed
+    // meanwhile.
+    setSource((latest) => ({
+      ...latest,
       notes: text,
-      title: source.title === "" ? file.name.slice(0, 200) : source.title,
-    });
+      title: latest.title === "" ? file.name.slice(0, 200) : latest.title,
+    }));
   };
 
   const start = async (): Promise<void> => {
