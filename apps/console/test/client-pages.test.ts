@@ -33,9 +33,9 @@ const page = async (path: string) => {
 };
 
 /**
- * A client whose real run waits for Workers Paid, its account and AI
- * Gateway steps as they end for a new account (the page's tests have no
- * Cloudflare API to settle them against). The caller disposes of `runs`.
+ * A client whose real run waits for Workers Paid, its account step as it
+ * ends for a new account (the page's tests have no Cloudflare API to
+ * settle one against). The caller disposes of `runs`.
  */
 const waitingClient = async () => {
   const release = await publishRelease({ notes: "feat(core): waits" });
@@ -48,7 +48,6 @@ const waitingClient = async () => {
       { name: "account" },
       { accountId, abandonedAccountId: null }
     );
-    await modifier.mockStepResult({ name: "ai gateway" }, true);
   });
   await startProvisioning(env, staff, {
     clientId,

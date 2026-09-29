@@ -1,9 +1,8 @@
 /**
  * Onboarding a client, as a Cloudflare Workflow: its account (created, or
- * adopted by id), its client record, its AI Gateway (which core's model
- * gateway calls through, src/deploy/core-config.ts), a pause while staff
- * upgrade the account to Workers Paid, then a deploy of the chosen release (its EU
- * resources, migrations, Workers with their secrets, smoke check and
+ * adopted by id), its client record, a pause while staff upgrade the
+ * account to Workers Paid, then a deploy of the chosen release (its EU
+ * resources and AI Gateway, migrations, Workers with their secrets, smoke check and
  * hostname in the router's map, src/deploy/deploy.ts), and the client
  * marked active.
  *
@@ -35,7 +34,6 @@ import { and, asc, eq } from "drizzle-orm";
 import type { Staff } from "../access.ts";
 import {
   ensureAccount,
-  ensureAiGateway,
   ensureMember,
   findAccount,
   getAccount,
@@ -53,7 +51,6 @@ import {
   MissingStoreSecretError,
   tenantAdminApi,
 } from "../deploy/context.ts";
-import { clientGatewayId } from "../deploy/core-config.ts";
 import type { ClientSignIn } from "../deploy/core-config.ts";
 import {
   errorCode,
@@ -362,31 +359,6 @@ const deployToRun = async (
   );
 };
 
-/**
- * Ensures the client's AI Gateway in account `accountId`, as the deployer
- * (`ensureAiGateway`: made if it's missing, always authenticated, with
- * no cache or rate limit), audited. Found by its id first, so a step that runs
- * again, or a resumed run, makes no second one; an adopted account's is
- * kept, with authentication switched on.
- */
-const settleAiGateway = async (
-  env: Env,
-  db: ConsoleDatabase,
-  clientId: string,
-  accountId: string
-): Promise<void> => {
-  const gateway = await ensureAiGateway(
-    await deployerApi(env),
-    accountId,
-    clientGatewayId
-  );
-  await audit(db, "system", {
-    action: "client.ai_gateway",
-    clientId,
-    target: gateway.id,
-  });
-};
-
 /** Marks the client active once its first deploy is live, audited once. */
 const activate = async (
   db: ConsoleDatabase,
@@ -434,21 +406,6 @@ export class ProvisionClient extends WorkflowEntrypoint<Env, ProvisionParams> {
         quickStep,
         guarded(async () => {
           await recordClient(db, params, account);
-        })
-      );
-
-      // AI Gateway doesn't need Workers Paid: made before the pause.
-      current = "ai gateway";
-      await step.do(
-        "ai gateway",
-        quickStep,
-        guarded(async () => {
-          await settleAiGateway(
-            this.env,
-            db,
-            params.clientId,
-            account.accountId
-          );
         })
       );
 

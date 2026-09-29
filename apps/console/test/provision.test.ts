@@ -309,7 +309,6 @@ describe("provisioning a new client", () => {
       clientEvents: [
         "client.provision_start",
         "client.create",
-        "client.ai_gateway",
         "client.workers_paid",
         "client.workers_subdomain",
         "client.activate",
@@ -408,11 +407,13 @@ describe("provisioning a new client", () => {
       store_id: "acme-keys",
     };
     account.gateways.push(own);
-    const { input } = await setUp({ accountId: account.id });
+    const { clientId, input } = await setUp({ accountId: account.id });
     await using run = await followRuns();
 
     await startProvisioning(env, staff, input);
-    await run.waitForStepResult({ name: "ai gateway" });
+    await run.waitForStepResult({ name: "client" });
+    await confirmWorkersPaid(env, staff, clientId);
+    await run.waitForStatus("complete");
 
     expect(account.gateways).toStrictEqual([{ ...own, authentication: true }]);
   });

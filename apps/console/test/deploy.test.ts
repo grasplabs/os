@@ -234,13 +234,14 @@ describe("deploying a release to a client's account", () => {
 
   it("resumes after a migration failed, applying only what's left", async () => {
     const { account, deployId } = await setUp();
-    // Ten calls make the three databases and two buckets; then connect's
-    // database is read (11) and its migration applied (12), which fails.
-    cloudflare.failCall(12, "statement-failed");
+    // Twelve calls make the three databases, two buckets and the AI
+    // Gateway; then connect's database is read (13) and its migration
+    // applied (14), which fails.
+    cloudflare.failCall(14, "statement-failed");
 
     await failingDeploy(deployId);
 
-    expect(cloudflare.calls[11]?.path).toMatch(/\/query$/u);
+    expect(cloudflare.calls[13]?.path).toMatch(/\/query$/u);
     await expect(deployRow(deployId)).resolves.toMatchObject({
       status: "failed",
       step: "resources",
@@ -724,7 +725,7 @@ describe("deploying safely", () => {
     });
   });
 
-  it("gives core its model gateway and its sign-in from the client's record, a setting of the same name replacing it, and refuses sign-in through an IdP the console has no app for", async () => {
+  it("gives core its model gateway and its sign-in from the client's record, a setting of the same name replacing it, and refuses sign-in through an IdP the console has no app for, or a record that isn't JSON", async () => {
     const { account, clientId, deployId } = await setUp();
     await db
       .update(clients)
@@ -759,6 +760,14 @@ describe("deploying safely", () => {
     const refused = await nextDeploy(clientId, { notes: "fix(core): after" });
     await failingDeploy(refused);
     const refusedRow = await deployRow(refused);
+    // A record that isn't JSON is refused as such, not as unexpected.
+    await db
+      .update(clients)
+      .set({ signIn: "{not json" })
+      .where(eq(clients.id, clientId));
+    const garbled = await nextDeploy(clientId, { notes: "fix(core): garbled" });
+    await failingDeploy(garbled);
+    const garbledRow = await deployRow(garbled);
 
     expect({
       modelGateway: first.get("MODEL_GATEWAY"),
@@ -767,6 +776,7 @@ describe("deploying safely", () => {
       // Every deploy makes it again: the next one keeps it.
       signInKept: second.get("SIGN_IN"),
       refused: refusedRow?.error,
+      garbled: garbledRow?.error,
     }).toStrictEqual({
       modelGateway: {
         type: "json",
@@ -792,6 +802,7 @@ describe("deploying safely", () => {
       chosen: { type: "json", name: "MODEL_GATEWAY", json: chosen },
       signInKept: first.get("SIGN_IN"),
       refused: "sign_in_incomplete",
+      garbled: "sign_in_incomplete",
     });
   });
 

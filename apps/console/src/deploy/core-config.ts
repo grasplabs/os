@@ -1,9 +1,10 @@
 /**
  * The deployment config every deploy derives for a client's core, before
  * its settings (src/deploy/deploy.ts, where a setting of the same name
- * replaces it): `MODEL_GATEWAY`, naming the AI Gateway provisioning made
- * in the client's account (src/provision/workflow.ts) with the models a
- * new deployment allows, and `SIGN_IN`, from the client's record. Derived
+ * replaces it): `MODEL_GATEWAY`, naming the AI Gateway the deploy's
+ * resources step ensures in the client's account (src/deploy/resources.ts)
+ * with the models a new deployment allows, and `SIGN_IN`, from the
+ * client's record. Derived
  * on every deploy, so rollouts keep them.
  */
 import {
@@ -74,7 +75,13 @@ const signInOf = (
   }
   const incomplete = (why: string): DeployError =>
     new DeployError("sign_in_incomplete", `${clientId}'s sign-in: ${why}`);
-  const record = clientSignInSchema.safeParse(JSON.parse(signIn));
+  let parsed: unknown = undefined;
+  try {
+    parsed = JSON.parse(signIn);
+  } catch {
+    // Not JSON: refused below, as a record that doesn't parse.
+  }
+  const record = clientSignInSchema.safeParse(parsed);
   if (!record.success) {
     throw incomplete("its record doesn't parse");
   }
