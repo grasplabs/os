@@ -969,8 +969,9 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * `personId`'s own chat's drafts, the most recently written first:
-   * which Apps, over which version, and the paths each changes.
+   * `personId`'s own chat's drafts with changes, the most recently
+   * written first: which Apps, over which version, and the paths each
+   * changes.
    */
   drafts(chatId: unknown, personId: string): ChatDraft[] {
     const { id } = this.#ownChat(chatId, personId);
@@ -990,14 +991,16 @@ export class Workspace extends DurableObject<Env> {
       .where(eq(chatDraftFiles.chatId, id))
       .orderBy(asc(chatDraftFiles.appId), asc(chatDraftFiles.path))
       .all();
-    return rows.map(({ appId, base, updatedAt }) => ({
-      app: appId,
-      base,
-      changed: paths
+    // A draft whose changes are all gone keeps its row (its revision
+    // goes on), and isn't one to show.
+    return rows.flatMap(({ appId, base, updatedAt }) => {
+      const changed = paths
         .filter((row) => row.appId === appId)
-        .map(({ path }) => path),
-      updatedAt: updatedAt.toISOString(),
-    }));
+        .map(({ path }) => path);
+      return changed.length === 0
+        ? []
+        : [{ app: appId, base, changed, updatedAt: updatedAt.toISOString() }];
+    });
   }
 
   /**

@@ -467,6 +467,12 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
         instance.draft(chatIdSchema.parse(chat.chat.id), existing)
       )
     ).resolves.toMatchObject({ changes: {}, revision: 2 });
+    // Nor does the chat's page list it.
+    await expect(
+      runInDurableObject(chat.stub, (instance) =>
+        instance.drafts(chat.chat.id, chat.personId)
+      )
+    ).resolves.toStrictEqual([]);
   });
 
   it("refuses to build without the agent's own permission, or for someone who doesn't build", async () => {
