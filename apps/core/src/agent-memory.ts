@@ -18,7 +18,7 @@ export class MemoryApi extends WorkerEntrypoint<Env, AgentScope> {
   /** Saves the person's USER.md from version `ifVersion` (0 for their first). */
   async saveUser(input: unknown): Promise<{ version: number }> {
     const scope = this.ctx.props;
-    await requireOpenRun(this.env, scope);
+    await requireOpenRun(this.env, scope, "memory.saveUser");
     try {
       const saved = await saveUserMemory(
         this.env,
