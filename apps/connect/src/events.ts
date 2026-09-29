@@ -29,14 +29,22 @@ import { z } from "zod";
 import { recordEventIf, recordEvents } from "./audit.ts";
 import type { Connection } from "./connections.ts";
 import { connections, connectorEvents, eventSources } from "./db/schema.ts";
-import { SourceError, maxWaitMs, readMaxItems } from "./event-kinds.ts";
+import {
+  SourceError,
+  maxWaitMs,
+  readMaxItems,
+  requestBudget,
+} from "./event-kinds.ts";
 import type {
   EventKind,
+  ProviderAccess,
+  RequestBudget,
   EventSource,
   ReadEvent,
   ReadEvents,
   SourceRead,
 } from "./event-kinds.ts";
+import { googleEventKinds } from "./google-events.ts";
 import { microsoftEventKinds } from "./graph-events.ts";
 import { accessTokenFor } from "./tokens.ts";
 
@@ -66,11 +74,14 @@ import { accessTokenFor } from "./tokens.ts";
 // all a read can find, so it never holds more than `outboxMax` events: the
 // sources' cursors keep their place meanwhile, and nothing is lost. Events
 // of a connection disconnected before core took them are never delivered,
-// and are dropped.
+// and are dropped. One sync sends at most `requestsPerSync` requests to
+// providers, of every source together: once too few are left for another
+// read, it stops, and the sources still due are read by the next.
 
 /** Every event type connect reports, by type. */
 const kinds: Readonly<Record<string, EventKind>> = {
   ...microsoftEventKinds,
+  ...googleEventKinds,
 };
 
 /** The types whose sources are primed before they're read. */
@@ -102,6 +113,22 @@ const readLeaseMs = 2 * 60_000;
 const inactiveWaitMs = 15 * 60_000;
 /** Most sources one sync reads. */
 const readsPerSync = 25;
+/**
+ * Requests one sync sends out, at most, priming and reading together,
+ * whichever the provider, each access token too (it may be refreshed):
+ * well inside a Worker invocation's 1,000 subrequests, with room for the
+ * rest of the sync. A hard bound: a read that would pass it stops there
+ * and keeps its cursor (`RequestBudget.spend`).
+ */
+export const requestsPerSync = 400;
+/**
+ * Requests a read takes, as a rule: its token, a few pages, and a batch
+ * request per 50 of Gmail's messages. A source is read only while this
+ * much of the sync's budget is left, so a read is rarely cut off; one
+ * that is keeps its cursor, and the sources left are read by the next
+ * sync, from where they are.
+ */
+const requestsPerRead = 20;
 /** Events the outbox holds before sources stop being read. */
 export const outboxMax = 10_000;
 /** Refusals in a row after which a source is read only daily. */
@@ -145,7 +172,9 @@ const mayListen = (
   connection.server === kind.server &&
   (connection.scope === "shared" ||
     connection.ownerUserId === listener.owner) &&
-  (listener.resource === null || kind.isResource(listener.resource));
+  (listener.resource === null
+    ? kind.wholeConnection
+    : kind.isResource(listener.resource));
 
 /** D1 binds at most 100 values a statement. */
 const idsPerQuery = 90;
@@ -291,13 +320,13 @@ const takeSource = async (
 
 /** Goes through a provider's pages, as `SourceRead.pages` says. */
 const pagesWith =
-  (token: string): SourceRead["pages"] =>
+  (access: ProviderAccess): SourceRead["pages"] =>
   async (page, start) => {
     const items: Awaited<ReturnType<typeof page>>["items"] = [];
     let url = start;
     for (let read = 0; read < readMaxPages; read += 1) {
       // oxlint-disable-next-line no-await-in-loop -- each page names the next
-      const { items: found, next, end } = await page(token, url);
+      const { items: found, next, end } = await page(access, url);
       items.push(...found);
       if (end !== undefined) {
         return { items, cursor: end, more: false };
@@ -463,7 +492,8 @@ const readSource = async (
   env: Env,
   source: EventSource,
   connection: Connection,
-  room: number
+  room: number,
+  budget: RequestBudget
 ): Promise<number | null> => {
   const db = drizzle(env.DB);
   const now = Date.now();
@@ -484,12 +514,14 @@ const readSource = async (
     return 0;
   }
   try {
-    const token = await accessTokenFor(env, connection.id);
+    // The token may be refreshed: a request of its own.
+    budget.spend();
+    const access = { token: await accessTokenFor(env, connection.id), budget };
     const found = await kind.read({
       source,
       connection,
-      token,
-      pages: pagesWith(token),
+      access,
+      pages: pagesWith(access),
     });
     if (found.events.length > room) {
       // Kept nothing, nor moved on: read again once there's room.
@@ -501,6 +533,14 @@ const readSource = async (
     }
     return await keepRead(env, source, connection, found, new Date(now));
   } catch (error) {
+    if (error instanceof SourceError && error.spent) {
+      // Not the source's failure: read again by the next sync.
+      await db
+        .update(eventSources)
+        .set({ pollAt: source.pollAt })
+        .where(eq(eventSources.id, source.id));
+      return null;
+    }
     await failRead(env, source, error);
     return 0;
   }
@@ -531,7 +571,7 @@ export const primeMaxWaitMs = 5 * 60_000;
  * without a position, as `connection.events.primed_late`. A failing
  * source never holds up the others, and reads nothing meanwhile.
  */
-const primeSources = async (env: Env): Promise<void> => {
+const primeSources = async (env: Env, budget: RequestBudget): Promise<void> => {
   if (primedTypes.length === 0) {
     return;
   }
@@ -552,19 +592,25 @@ const primeSources = async (env: Env): Promise<void> => {
   for (const { source, connection } of due) {
     const prime = kindOf(source.type)?.prime;
     const now = Date.now();
-    // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
-    if (prime === undefined || !(await takeSource(env.DB, source, now))) {
+    if (
+      prime === undefined ||
+      budget.left < 1 ||
+      // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
+      !(await takeSource(env.DB, source, now))
+    ) {
       continue;
     }
     try {
+      budget.spend();
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
       const token = await accessTokenFor(env, connection.id);
+      const access = { token, budget };
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
       const cursor = await prime({
         source,
         connection,
-        token,
-        pages: pagesWith(token),
+        access,
+        pages: pagesWith(access),
       });
       const primed = db
         .update(eventSources)
@@ -594,6 +640,14 @@ const primeSources = async (env: Env): Promise<void> => {
         [primed]
       );
     } catch (error) {
+      if (error instanceof SourceError && error.spent) {
+        // oxlint-disable-next-line no-await-in-loop -- once, then stop
+        await db
+          .update(eventSources)
+          .set({ pollAt: source.pollAt })
+          .where(eq(eventSources.id, source.id));
+        return;
+      }
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
       await failRead(env, source, error, primeMaxWaitMs);
     }
@@ -602,7 +656,9 @@ const primeSources = async (env: Env): Promise<void> => {
 
 /**
  * A read's events at most: `readMaxItems` items and a page past them, of
- * no more than 50 (the page size connect asks providers for).
+ * no more than 50 (the page size connect asks providers for); a Gmail
+ * read takes exactly `readMaxItems` at most. A read that still found
+ * more than the room left would keep nothing (`readSource`).
  */
 const eventsPerRead = readMaxItems + 50;
 
@@ -620,9 +676,9 @@ const outboxHeld = async (db: D1Database): Promise<number> => {
 /**
  * Reads the sources that are due, the longest due first, each only while
  * the outbox has room for all a read can find, so it never holds more
- * than `outboxMax`.
+ * than `outboxMax`, and while the sync's request budget lasts.
  */
-const readDue = async (env: Env): Promise<void> => {
+const readDue = async (env: Env, budget: RequestBudget): Promise<void> => {
   let room = outboxMax - (await outboxHeld(env.DB));
   const due = await drizzle(env.DB)
     .select({ source: eventSources, connection: connections })
@@ -641,11 +697,15 @@ const readDue = async (env: Env): Promise<void> => {
       log.warn("events.outbox_full", { room });
       return;
     }
+    if (budget.left < requestsPerRead) {
+      log.info("events.budget_spent", { left: budget.left });
+      return;
+    }
     try {
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
-      const kept = await readSource(env, source, connection, room);
+      const kept = await readSource(env, source, connection, room, budget);
       if (kept === null) {
-        log.warn("events.outbox_full", { room });
+        log.warn("events.read_stopped", { room, left: budget.left });
         return;
       }
       room -= kept;
@@ -709,8 +769,9 @@ export const syncEventSources = async (
   );
   await reconcile(env, listeners);
   await dropDisconnected(env);
-  await primeSources(env);
-  await readDue(env);
+  const budget = requestBudget(requestsPerSync);
+  await primeSources(env, budget);
+  await readDue(env, budget);
 };
 
 /**

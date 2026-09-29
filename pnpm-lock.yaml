@@ -251,6 +251,9 @@ importers:
 
   apps/connect:
     dependencies:
+      '@grasp-os/connector-google-workspace':
+        specifier: workspace:*
+        version: link:../../packages/connectors/google-workspace
       '@grasp-os/connector-kit':
         specifier: workspace:*
         version: link:../../packages/connector-kit
@@ -270,9 +273,6 @@ importers:
       '@cloudflare/workers-types':
         specifier: 'catalog:'
         version: 5.20260921.1
-      '@grasp-os/connector-google-workspace':
-        specifier: workspace:*
-        version: link:../../packages/connectors/google-workspace
       '@grasp-os/connector-microsoft-365':
         specifier: workspace:*
         version: link:../../packages/connectors/microsoft-365
