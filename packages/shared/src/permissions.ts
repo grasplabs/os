@@ -268,8 +268,9 @@ export type PermissionRequest = z.input<typeof permissionRequestSchema>;
 /**
  * A permission a built-in blueprint declares (its `blueprint.json`): a
  * request without its subject, which is every App created from it. Only
- * a collection, or the platform's statistics: the things a built-in can
- * name the same way in every deployment (the Playbook, say), where
+ * a collection one of its blueprints declares (`declaredCollectionSchema`
+ * in `@grasp-os/shared/knowledge`), or the platform's statistics: the
+ * things a built-in can name the same way in every deployment, where
  * connections have IDs of their own in each.
  */
 export const declaredPermissionSchema = z

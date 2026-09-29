@@ -4,12 +4,11 @@ import { defineErrorFamily } from "./errors.ts";
 import {
   appIdSchema,
   collectionIdSchema,
-  documentIdSchema,
   runIdSchema,
   workflowIdSchema,
 } from "./ids.ts";
 
-// Improvement signals: where the Playbook's Evaluate step should look,
+// Improvement signals: where to look to improve the Apps' workflows,
 // read from runs, decisions and the audit log, and computed once a day
 // (core's src/signals.ts). Each signal names where it was seen (an App's
 // workflow, or the deployment), what it is about, a value to rank it by,
@@ -104,17 +103,6 @@ const costSchema = z.object({
     runs: z.int(),
     /** US dollars those runs' model calls cost in the window. */
     cost: z.number(),
-    /**
-     * Minutes each run saves, by the Playbook workflow record linked to
-     * it: from its automated steps' numbers (`steps`), or else its
-     * expected gain spread over the runs (`gain`); null without either.
-     */
-    minutesSavedPerRun: z.number().nullable(),
-    savedFrom: z.enum(["steps", "gain"]).nullable(),
-    /** The Playbook workflow record linked to the workflow. */
-    record: documentIdSchema.nullable(),
-    /** US dollars per hour saved; null while nothing is known saved. */
-    costPerHourSaved: z.number().nullable(),
     /** The runs that cost most, most first; admins only. */
     costliest: z
       .array(z.object({ run: runIdSchema, cost: z.number() }))

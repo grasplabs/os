@@ -86,9 +86,7 @@ describe("frontmatter", () => {
       tags: refusal("a.md", "---\ntags: [ok, '']\n---"),
       title: refusal("a.md", `---\ntitle: ${"x".repeat(201)}\n---`),
     }).toStrictEqual({
-      type: [
-        "frontmatter.type: one of doc, skill, memory, decision, file, vision, team, person, tool, source, statement, workflow, snapshot, plan-item, rulebook-entry",
-      ],
+      type: ["frontmatter.type: one of doc, skill, memory, decision, file"],
       review: ["frontmatter.review: Invalid ISO date"],
       tags: [
         "frontmatter.tags.1: Too small: expected string to have >=1 characters",

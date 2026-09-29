@@ -17,8 +17,8 @@ import { featureErrors } from "@grasp-os/shared/errors";
 // stubs (`knowledge`), an agent's memory and its saves of it (`memory`,
 // which gives every context no memory while off), purging Knowledge
 // (`knowledge_purge`), uploading files and extracting their text
-// (`knowledge_uploads`), the Playbook's collection and record saves
-// (`playbook`), syncing and copying skills (`skills`), indexing Apps
+// (`knowledge_uploads`), record types Apps declare (`record_types`),
+// syncing and copying skills (`skills`), indexing Apps
 // into the Apps collection (`apps_collection`), connection calls
 // (`connections`), Composio's toolkits in the catalog and connecting them
 // (`composio`), App methods
@@ -86,13 +86,6 @@ export type Feature =
    * plain workerd lacks: on-prem it stays off.
    */
   | "knowledge_uploads"
-  /**
-   * The Playbook collection and saving its records (knowledge/playbook.ts);
-   * needs `knowledge` on too. While off, nothing is saved to the Playbook,
-   * by these helpers or any other save; what it holds is still read,
-   * searched and purged like any document.
-   */
-  | "playbook"
   /**
    * Record types Apps declare (app/records.json) for the collections they
    * write, checked on every save of one of their records

@@ -7,7 +7,6 @@ import {
   readOnlySources,
 } from "@grasp-os/shared/knowledge";
 import type { Collection, CollectionSource } from "@grasp-os/shared/knowledge";
-import { isAdmin } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, eq } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
@@ -19,7 +18,7 @@ import { organizationId } from "../auth/auth.ts";
 import { teams } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
-import { featureEnabled, requireFeature, uploadFeatures } from "../features.ts";
+import { featureEnabled, uploadFeatures } from "../features.ts";
 import { allowedCollections, canCreate, canWrite } from "./access.ts";
 import type { Reader } from "./access.ts";
 
@@ -55,22 +54,13 @@ const toCollection = (
 
 /**
  * Refuses a change to `collection` that `person` may not make: one to a
- * collection only the platform writes, one their access doesn't allow, or
- * one to the Playbook while its flag is off or by anyone but an admin
- * (its owner too, once no longer one). A purge, which doesn't come through
- * here, still reaches the Playbook.
+ * collection only the platform writes, or one their access doesn't allow.
  */
 export const requireWritable = (
   env: Env,
   person: Pick<Identity, "userId" | "role">,
   collection: CollectionRow
 ): void => {
-  if (collection.source === "playbook") {
-    requireFeature(env, "playbook");
-    if (!isAdmin(person.role)) {
-      throw knowledgeErrors.create("knowledge.forbidden");
-    }
-  }
   if (readOnlySources.has(collection.source)) {
     throw knowledgeErrors.create("knowledge.read_only");
   }
@@ -168,7 +158,7 @@ const unknownTeams = async (env: Env, teamIds: string[]): Promise<string[]> => {
 /**
  * Creates a collection `person` owns. People create collections written
  * here; the platform passes the `source` of the collections it fills
- * (uploads, the Playbook, Grasp's own, Apps').
+ * (uploads, Grasp's own, Apps').
  */
 export const createCollection = async (
   env: Env,

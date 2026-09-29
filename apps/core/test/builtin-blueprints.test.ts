@@ -1,8 +1,10 @@
+import { collectionIdSchema } from "@grasp-os/shared/ids";
 import type { CollectionId } from "@grasp-os/shared/ids";
 import type { DeclaredPermission } from "@grasp-os/shared/permissions";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
+import { z } from "zod";
 
 import type { BuiltinBlueprint } from "#blueprints";
 
@@ -350,6 +352,70 @@ describe("the built-in blueprints", () => {
     }).toStrictEqual({
       listed: [["Hi", "Says hi."]],
       audited: ["app.described"],
+    });
+
+    await reinstall();
+  });
+
+  it("create the collections they declare once, open to everyone and changed by admins only", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const builder = await signedInApi(idp, "builder");
+    const id = collectionIdSchema.parse(`greetings-${unique()}`);
+    const declared = releaseWith({
+      collections: [{ id, name: "Greetings", description: "Said hello." }],
+    });
+    // Not while record types are off: nothing would keep records there.
+    const off: Env = {
+      ...env,
+      FEATURES: {
+        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
+        record_types: false,
+      },
+    };
+    await expect(install(declared, off)).resolves.toBeTruthy();
+    const whileOff = await env.KNOWLEDGE.prepare(
+      "SELECT count(*) AS count FROM collections WHERE id = ?"
+    )
+      .bind(id)
+      .first<{ count: number }>();
+    const events = await auditedDuring(async () => {
+      await expect(install(declared)).resolves.toBeTruthy();
+      await expect(install(declared)).resolves.toBeTruthy();
+    });
+    const collection = await env.KNOWLEDGE.prepare(
+      "SELECT name, owner, access, source FROM collections WHERE id = ?"
+    )
+      .bind(id)
+      .first();
+    const save = async (person: typeof admin) =>
+      await outcome(
+        person.api.knowledge.saveDocument({
+          collectionId: id,
+          path: `hello-${unique()}.md`,
+          text: "# Hello",
+          ifVersion: 0,
+        })
+      );
+    expect({
+      whileOff: whileOff?.count,
+      collection,
+      created: events.filter(
+        ({ action, target }) =>
+          action === "knowledge.collection.created" && target?.id === id
+      ).length,
+      admin: await save(admin),
+      builder: await save(builder),
+    }).toStrictEqual({
+      whileOff: 0,
+      collection: {
+        name: "Greetings",
+        owner: "grasp",
+        access: "everyone",
+        source: "here",
+      },
+      created: 1,
+      admin: "ok",
+      builder: "knowledge.forbidden",
     });
 
     await reinstall();

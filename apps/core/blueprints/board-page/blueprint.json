@@ -1,11 +1,28 @@
 {
   "name": "Board page",
   "description": "Takes dated snapshots of the Playbook and shows one on a page for the board: maturity, where the hours go, before and after, improvement signals and the decision needed. Prints on one page.",
+  "collections": [
+    {
+      "id": "playbook",
+      "name": "Playbook",
+      "description": "The company's Playbook: its teams, its workflows drawn and designed, and the snapshots it shows the board."
+    }
+  ],
   "permissions": [
     {
-      "object": { "type": "collection", "collectionId": "playbook" },
+      "object": {
+        "type": "collection",
+        "collectionId": "playbook"
+      },
       "actions": ["read", "write"],
       "binding": "PLAYBOOK"
+    },
+    {
+      "object": {
+        "type": "platform"
+      },
+      "actions": ["statistics"],
+      "binding": "PLATFORM"
     }
   ]
 }

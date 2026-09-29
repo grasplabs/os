@@ -8,7 +8,6 @@ import type {
 import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
 import { appIdSchema, permissionIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
-import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
   grantReviewSchema,
@@ -401,8 +400,8 @@ const requireApps = async (
 };
 
 /**
- * A collection a permission names must exist (but for the Playbook, see
- * below), and not be someone's personal collection: Apps and agents never read those (see
+ * A collection a permission names must exist, and not be someone's
+ * personal collection: Apps and agents never read those (see
  * knowledge/access.ts), so nobody can be asked to grant one.
  *
  * Nor is an App given the Apps collection (knowledge/apps-collection.ts).
@@ -427,18 +426,6 @@ const requireCollection = async (
     .from(collections)
     .where(eq(collections.id, object.collectionId))
     .get();
-  // The Playbook is set up by the first admin who saves a record into it
-  // (knowledge/playbook.ts), so while its flag is on it can be asked for
-  // and granted before then: an App's first save is what sets it up. It
-  // is open to everyone and not an App's collection, as the checks below
-  // require.
-  const playbookNotYet =
-    !found &&
-    object.collectionId === playbookCollectionId &&
-    featureEnabled(env, "playbook");
-  if (playbookNotYet) {
-    return;
-  }
   if (!found) {
     throw permissionErrors.create("permission.invalid", {
       issues: ["object.collectionId: There's no such collection."],
@@ -1090,7 +1077,7 @@ export interface MadeCurrent {
  * only if the batch did make it current (`changed`). An admin grants a
  * permission trusting the code that will use it, and an App's code runs
  * as whoever uses it, so a builder's next version could otherwise write
- * the Playbook, say, as the next admin who opens it.
+ * a shared collection, say, as the next admin who opens it.
  *
  * The version is approved (`app_versions.approved`, which `authorize`
  * reads) if `by` could grant the permissions themselves (`canGrantSql`),

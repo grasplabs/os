@@ -32,7 +32,7 @@ const levels = Array.from({ length: maturityLevels + 1 }, (_, level) => ({
 }));
 
 /**
- * Takes a snapshot of the Playbook now: the platform freezes each
+ * Takes a snapshot of the Playbook now: the page's server freezes each
  * workflow's hours and signals; the person says the maturity.
  */
 export const TakeSnapshot = ({

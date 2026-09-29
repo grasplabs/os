@@ -1,10 +1,5 @@
-import {
-  collectionIdSchema,
-  documentIdSchema,
-  runIdSchema,
-} from "@grasp-os/shared/ids";
+import { collectionIdSchema, runIdSchema } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
-import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import { log } from "@grasp-os/shared/log";
 import { signalWindowDays } from "@grasp-os/shared/signals";
 import type { ImprovementSignal, SignalKind } from "@grasp-os/shared/signals";
@@ -26,8 +21,8 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
 import {
+  beforePreviousFinished,
   claimComputation,
-  claimedBefore,
   finishComputation,
   isFinished,
   latestFinished,
@@ -42,18 +37,16 @@ import {
   workflowRuns,
 } from "./db/core/schema.ts";
 import { chunks, inList } from "./db/d1.ts";
-import { documents, versions } from "./db/knowledge/schema.ts";
 import { featureEnabled } from "./features.ts";
-import { parseFrontmatter } from "./knowledge/frontmatter.ts";
 import { collectionsPerQuestion } from "./signal-tally.ts";
 import type { SignalTally } from "./signal-tally.ts";
 import { auditableCode } from "./workflows/host.ts";
 
-// Improvement signals, level 1: where the Playbook's Evaluate step should
-// look (@grasp-os/shared/signals has what each one means). Each is a query
-// over runs and decisions (the core database), the audit log (model calls'
-// cost, Knowledge searches that found nothing) and the Playbook's workflow
-// records, over the last `signalWindowDays` days.
+// Improvement signals, level 1: where to look to improve the Apps'
+// workflows (@grasp-os/shared/signals has what each one means). Each is a
+// query over runs and decisions (the core database) and the audit log
+// (model calls' cost, Knowledge searches that found nothing), over the
+// last `signalWindowDays` days.
 //
 // They're computed once a UTC day and kept in `improvement_signals`, so
 // reading them is a few indexed queries. The first run of the 15-minute
@@ -63,10 +56,12 @@ import { auditableCode } from "./workflows/host.ts";
 //
 // A computation writes its signals under its own ID, in as many batches
 // as they take, and then finishes in one batch: it marks itself finished
-// and deletes every computation started before it, with their signals.
-// Readers take the finished computation started last, in the same batch
-// as its signals, so they see one computation whole or the one before
-// it. A computation that outlived its lease and was finished past has
+// and deletes every computation started before the finished one before it,
+// with their signals. It keeps that previous one, whose signals a reader
+// may still be reading (a board snapshot pages through the computation
+// finished by its time, statistics.ts). Readers take the finished
+// computation started last, in the same batch as its signals, so they see
+// one computation whole or the one before it. A computation that outlived its lease and was finished past has
 // lost its row: its next write of signals fails on the foreign key, and
 // its finishing batch changes nothing, as every statement in it goes by
 // its row (the update finds none, so no audit event, and the deletes run
@@ -109,9 +104,6 @@ const rowsPerInsert = 14;
 
 /** Inserts one batch writes. */
 const insertsPerBatch = 50;
-
-/** Playbook records read at a time, with their text (up to 1 MB each). */
-const recordsPerPage = 10;
 
 /** Statuses of a run that hasn't ended. */
 const unended: (typeof workflowRuns.$inferSelect)["status"][] = [
@@ -639,131 +631,9 @@ export const addSignalTally = (
   }
 };
 
-/** What a Playbook workflow record says its App workflow saves. */
-interface Saving {
-  record: string;
-  /** Minutes a run saves, by the record's automated steps. */
-  stepMinutes: number | null;
-  gainHoursPerWeek: number | null;
-}
-
-/** Steps whose work Grasp does, and so no longer a person. */
-const automatedKinds: ReadonlySet<string> = new Set([
-  "automated",
-  "ai_checked",
-]);
-
-/** The App workflow a record links to, and what it saves; none unlinked. */
-const savingOf = (
-  record: string,
-  path: string,
-  text: string
-): { key: string; saving: Saving } | undefined => {
-  let parsed: ReturnType<typeof parseFrontmatter>;
-  try {
-    parsed = parseFrontmatter(path, text);
-  } catch {
-    return undefined;
-  }
-  const { frontmatter } = parsed;
-  if (!("steps" in frontmatter && "app" in frontmatter) || !frontmatter.app) {
-    return undefined;
-  }
-  const timed = frontmatter.steps.filter(
-    ({ kind, numbers }) =>
-      kind !== undefined &&
-      automatedKinds.has(kind) &&
-      numbers?.minutes !== undefined
-  );
-  const stepMinutes = timed.reduce(
-    (sum, { numbers }) =>
-      sum + (numbers?.minutes?.value ?? 0) * (numbers?.people?.value ?? 1),
-    0
-  );
-  return {
-    key: workflowKey(frontmatter.app.appId, frontmatter.app.workflowId),
-    saving: {
-      record,
-      stepMinutes: timed.length === 0 ? null : stepMinutes,
-      gainHoursPerWeek: frontmatter.gain?.hoursPerWeek ?? null,
-    },
-  };
-};
-
 /**
- * What each App workflow saves, by the Playbook workflow record linked to
- * it (the first by ID where several are): a record that no longer reads
- * as a workflow is left out.
- */
-const savings = async (env: Env): Promise<Map<string, Saving>> => {
-  const db = drizzle(env.KNOWLEDGE);
-  const found = new Map<string, Saving>();
-  let after = "";
-  for (;;) {
-    // One page after another: each starts where the last ended.
-    // oxlint-disable-next-line no-await-in-loop
-    const records = await db
-      .select({ id: documents.id, path: documents.path, text: versions.text })
-      .from(documents)
-      .innerJoin(
-        versions,
-        and(
-          eq(versions.documentId, documents.id),
-          eq(versions.number, documents.currentVersion)
-        )
-      )
-      .where(
-        and(
-          eq(documents.collectionId, playbookCollectionId),
-          eq(documents.type, "workflow"),
-          gt(documents.id, after)
-        )
-      )
-      .orderBy(asc(documents.id))
-      .limit(recordsPerPage);
-    for (const { id, path, text } of records) {
-      const saving = savingOf(id, path, text);
-      if (saving !== undefined && !found.has(saving.key)) {
-        found.set(saving.key, saving.saving);
-      }
-    }
-    if (records.length < recordsPerPage) {
-      return found;
-    }
-    after = records.at(-1)?.id ?? after;
-  }
-};
-
-/**
- * The minutes each of `runs` runs in the window saves, by `saving`: its
- * automated steps' minutes, or else its weekly gain over the runs a week.
- */
-const minutesSaved = (
-  saving: Saving | undefined,
-  runs: number
-): Pick<EvidenceOf<"cost_per_run">, "minutesSavedPerRun" | "savedFrom"> => {
-  if (saving?.stepMinutes !== undefined && saving.stepMinutes !== null) {
-    return { minutesSavedPerRun: saving.stepMinutes, savedFrom: "steps" };
-  }
-  if (
-    saving?.gainHoursPerWeek !== undefined &&
-    saving.gainHoursPerWeek !== null
-  ) {
-    const runsPerWeek = runs / (signalWindowDays / 7);
-    return {
-      minutesSavedPerRun: (saving.gainHoursPerWeek * 60) / runsPerWeek,
-      savedFrom: "gain",
-    };
-  }
-  return { minutesSavedPerRun: null, savedFrom: null };
-};
-
-/**
- * Cost per run against minutes saved, for each App workflow with runs
- * started in the window: the cost of those runs' model calls in the
- * window, over them, and the minutes a run saves by its Playbook record,
- * from its automated steps' minutes (times the people each took), or else
- * its weekly gain over the runs a week it had.
+ * Cost per run, for each App workflow with runs started in the window:
+ * the cost of those runs' model calls in the window, over them.
  *
  * A run started before the window counts neither as a run nor for what it
  * spent, so the cost and `costliest` name the same runs. The window rolls
@@ -772,7 +642,6 @@ const minutesSaved = (
  */
 const costSignals = (
   { costs }: SignalTotals,
-  saved: ReadonlyMap<string, Saving>,
   runs: ReadonlyMap<string, Started>,
   before: ReadonlySet<string>
 ): SignalRow[] =>
@@ -782,8 +651,6 @@ const costSignals = (
     );
     const cost = [...perRun.values()].reduce((sum, amount) => sum + amount, 0);
     const costPerRun = cost / started;
-    const saving = saved.get(key);
-    const { minutesSavedPerRun, savedFrom } = minutesSaved(saving, started);
     return signalRow(
       "cost_per_run",
       { appId, workflowId, subject: "" },
@@ -791,14 +658,6 @@ const costSignals = (
       {
         runs: started,
         cost: dollars(cost),
-        minutesSavedPerRun,
-        savedFrom,
-        record:
-          saving === undefined ? null : documentIdSchema.parse(saving.record),
-        costPerHourSaved:
-          minutesSavedPerRun === null || minutesSavedPerRun <= 0
-            ? null
-            : dollars(costPerRun / (minutesSavedPerRun / 60)),
         costliest: mostFirst(perRun)
           .slice(0, samples)
           .map(([run, amount]) => ({
@@ -862,11 +721,10 @@ const computeSignals = async (
   const db = drizzle(env.DB);
   const from = signalsFrom(now);
   const runs = await runsSince(db, from);
-  const [waiting, failing, corrections, saved] = await Promise.all([
+  const [waiting, failing, corrections] = await Promise.all([
     waitingSignals(db, now),
     failingSignals(db, from, runs),
     correctionSignals(db, from),
-    savings(env),
   ]);
   const before = await startedBefore(
     db,
@@ -877,7 +735,7 @@ const computeSignals = async (
     ...waiting,
     ...failing,
     ...corrections,
-    ...costSignals(totals, saved, runs, before),
+    ...costSignals(totals, runs, before),
     ...unansweredSignals(totals),
   ];
 };
@@ -921,8 +779,9 @@ export const claimImprovementSignals = async (
  * Computes the claimed day's signals from `totals` (what the audit log
  * holds of the window) and the databases, writes them, then finishes the
  * computation in one batch, with its audit event: marks it finished, and
- * deletes every computation started before it, with their signals, only if
- * it is still there to mark.
+ * deletes every computation started before the finished one before it,
+ * with their signals, only if it is still there to mark. That previous
+ * one stays, for whoever is still reading it.
  */
 export const storeImprovementSignals = async (
   env: Env,
@@ -944,7 +803,8 @@ export const storeImprovementSignals = async (
     }
   }
   const finished = isFinished(computations, computation);
-  const before = claimedBefore(computations, computation);
+  // The finished computation before this one stays, with its signals.
+  const before = beforePreviousFinished(computations, computation);
   await auditedBatch(env, db, [
     finishComputation(db, computations, computation),
     outboxedIfChanged(db, {

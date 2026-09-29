@@ -1,8 +1,6 @@
 import { issuesOf } from "@grasp-os/shared/errors";
-import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import {
   builtinDocumentTypeSchema,
-  documentPathSchema,
   documentTypeSchema,
   isBuiltinDocumentType,
   splitFrontmatterBlock,
@@ -11,7 +9,7 @@ import type {
   BuiltinDocumentType,
   DocumentType,
 } from "@grasp-os/shared/knowledge";
-import { isMap, isScalar, isSeq, parse, parseDocument } from "yaml";
+import { parse } from "yaml";
 import { z } from "zod";
 
 import type { DeclaredTypes } from "./record-types.ts";
@@ -57,223 +55,6 @@ const fileSchema = baseSchema.extend({
   mediaType: z.string().trim().min(1).max(128).optional(),
 });
 
-// The Playbook's records. The structure is here; what a person reads is
-// the Markdown after it: the title names the record, the body says the
-// rest. A record names others by their path in the Playbook, as `[[links]]`
-// do. Wherever a name can be, a value is plain text, so a purge that
-// replaces a name with its marker leaves a record that still fits its
-// type. A path that holds a name is purged like any text, and the path
-// then names no document, but for a snapshot's frozen workflow paths,
-// which a purge leaves (`frozenPathRanges`): the snapshot must name
-// versions the Playbook has.
-
-/** Longest short value a person writes. */
-export const shortTextMax = 200;
-
-/** A short value a person writes: a name, a role, a tool. */
-const shortText = z.string().trim().min(1).max(shortTextMax);
-
-/** Another record, by its path in the Playbook: `people/anna.md`. */
-const recordPath = documentPathSchema;
-
-/** A person, with their role and team. Their name is the title. */
-const personSchema = baseSchema.extend({
-  role: shortText.optional(),
-  team: recordPath.optional(),
-});
-
-/** A tool the company uses, and who makes it. */
-const toolSchema = baseSchema.extend({
-  vendor: shortText.optional(),
-});
-
-/** Where statements come from: an interview, a chat, a document. */
-const sourceSchema = baseSchema.extend({
-  medium: z.enum(["interview", "chat", "document", "other"]).optional(),
-  date: z.iso.date().optional(),
-  /** Who it is from. */
-  person: recordPath.optional(),
-});
-
-/** A claim from a source, and what it is about. */
-const statementSchema = baseSchema.extend({
-  source: recordPath,
-  topic: z.enum(["goal", "blocker", "time_sink", "handover", "tool", "rule"]),
-});
-
-/** Largest number a workflow step has: frequency, minutes or people. */
-const stepNumberMax = 10_000;
-
-/** A number, and whether it was estimated or observed (in runs). */
-const stepNumber = z.strictObject({
-  value: z.number().min(0).max(stepNumberMax),
-  basis: z.enum(["estimated", "observed"]),
-});
-
-/** One step of a workflow: who does it, with what, and how often. */
-const stepSchema = z.strictObject({
-  name: shortText,
-  who: shortText.optional(),
-  tool: shortText.optional(),
-  /** Whether the work passes to someone else after this step. */
-  handover: z.boolean().default(false),
-  /** How a designed step is done. */
-  kind: z.enum(["automated", "ai_checked", "tool", "instruction"]).optional(),
-  numbers: z
-    .strictObject({
-      /** Times a week. */
-      frequency: stepNumber.optional(),
-      /** Minutes each time. */
-      minutes: stepNumber.optional(),
-      /** People each time. */
-      people: stepNumber.optional(),
-    })
-    .optional(),
-});
-
-/** Most steps one workflow has. */
-const workflowMaxSteps = 100;
-
-/** Most parameters one workflow has. */
-const workflowMaxParameters = 50;
-
-/** Most hours a week a workflow is expected to save. */
-const gainMaxHoursPerWeek = 100_000;
-
-/**
- * A workflow as it runs now (`drawn`) or as it should (`designed`). Once
- * built, a designed one names the App workflow that runs it, by IDs only
- * (playbook.ts links it).
- */
-const workflowSchema = baseSchema
-  .extend({
-    state: z.enum(["drawn", "designed"]),
-    team: recordPath.optional(),
-    steps: z.array(stepSchema).max(workflowMaxSteps).default([]),
-    /** What can be set for it, such as a threshold. */
-    parameters: z
-      .array(
-        z.strictObject({
-          name: shortText,
-          value: z.string().trim().max(1000).optional(),
-        })
-      )
-      .max(workflowMaxParameters)
-      .default([]),
-    /** What it is expected to save. */
-    gain: z
-      .strictObject({
-        hoursPerWeek: z.number().min(0).max(gainMaxHoursPerWeek),
-      })
-      .optional(),
-    app: z
-      .strictObject({ appId: appIdSchema, workflowId: workflowIdSchema })
-      .optional(),
-  })
-  .refine(({ state, app }) => app === undefined || state === "designed", {
-    path: ["app"],
-    message: "Only a designed workflow links to an App workflow",
-  });
-
-/** Most workflows one snapshot holds. */
-const snapshotMaxWorkflows = 500;
-
-/**
- * Most workflows one snapshot's figures hold: each freezes up to two
- * versions of its record (drawn and designed), within `workflows`.
- */
-export const snapshotMaxFigures = snapshotMaxWorkflows / 2;
-
-/** Most improvement signals one snapshot's figures hold. */
-export const snapshotMaxSignals = 50;
-
-/** Most hours a week a snapshot holds for one workflow. */
-export const snapshotMaxHoursPerWeek = gainMaxHoursPerWeek;
-
-/** Hours a week, as a snapshot freezes them. */
-const hoursPerWeek = z.number().min(0).max(snapshotMaxHoursPerWeek);
-
-/** A version of a workflow record, and the hours a week its steps take. */
-const versionHours = z.strictObject({
-  version: z.int().min(1),
-  hoursPerWeek,
-  /** Observed only when every number of its steps was. */
-  basis: z.enum(["estimated", "observed"]),
-});
-
-/**
- * What a snapshot froze of one workflow record (knowledge/snapshots.ts):
- * its hours as drawn (its latest drawn version), as designed (a designed
- * one's current version), and as it runs: its designed steps at the runs
- * a week its App workflow was observed to start.
- */
-const workflowFiguresSchema = z.strictObject({
-  path: recordPath,
-  title: shortText,
-  /** Its team's title, then. */
-  team: shortText.optional(),
-  state: z.enum(["drawn", "designed"]),
-  drawn: versionHours.optional(),
-  designed: versionHours.optional(),
-  running: z
-    .strictObject({
-      appId: appIdSchema,
-      workflowId: workflowIdSchema,
-      /** Runs started in the `windowDays` before the snapshot. */
-      runs: z.int().min(1),
-      hoursPerWeek,
-    })
-    .optional(),
-});
-
-/**
- * The numbers a snapshot froze when it was taken (`takeSnapshot`), which
- * nothing later changes: each workflow's hours, and the improvement
- * signals of the App workflows the Playbook links to, by the record
- * linked (its kind and value only). Only the platform writes them.
- */
-const figuresSchema = z.strictObject({
-  /** Days of runs the observed numbers are from. */
-  windowDays: z.int().min(1).max(366),
-  workflows: z.array(workflowFiguresSchema).max(snapshotMaxFigures),
-  signals: z
-    .array(
-      z.strictObject({
-        path: recordPath,
-        // Any kind's name, so a kind a later release adds still reads
-        // after a rollback.
-        kind: z.string().regex(/^[a-z_]{1,64}$/u),
-        value: z.number().min(0),
-      })
-    )
-    .max(snapshotMaxSignals),
-});
-
-/**
- * A dated freeze of the Playbook: the workflow records at the versions it
- * was taken from, which later saves don't change, and the maturity then.
- * One taken by the platform also holds its `figures`, and the decision it
- * puts to the board.
- */
-const snapshotSchema = baseSchema.extend({
-  date: z.iso.date(),
-  maturity: z.int().min(0).max(5).optional(),
-  workflows: z
-    .array(z.strictObject({ path: recordPath, version: z.int().min(1) }))
-    .max(snapshotMaxWorkflows)
-    .default([]),
-  figures: figuresSchema.optional(),
-  /** The one decision it asks for, in plain words. */
-  decisionNeeded: z.string().trim().max(1000).optional(),
-});
-
-/** A step of the plan, and where it stands. */
-const planItemSchema = baseSchema.extend({
-  status: z.enum(["planned", "doing", "done", "dropped"]).default("planned"),
-  due: z.iso.date().optional(),
-  workflow: recordPath.optional(),
-});
-
 /** The frontmatter schema of each type. */
 const frontmatterSchemas = {
   doc: baseSchema,
@@ -281,16 +62,6 @@ const frontmatterSchemas = {
   memory: baseSchema,
   decision: decisionSchema,
   file: fileSchema,
-  vision: baseSchema,
-  team: baseSchema,
-  person: personSchema,
-  tool: toolSchema,
-  source: sourceSchema,
-  statement: statementSchema,
-  workflow: workflowSchema,
-  snapshot: snapshotSchema,
-  "plan-item": planItemSchema,
-  "rulebook-entry": baseSchema,
 } as const satisfies Record<BuiltinDocumentType, z.ZodType>;
 
 type Frontmatter = z.infer<(typeof frontmatterSchemas)[BuiltinDocumentType]>;
@@ -515,55 +286,4 @@ export const parseBaseFields = (path: string, text: string): ParsedRecord => {
     frontmatter: { ...rest, ...base.data },
     body,
   };
-};
-
-/**
- * `text` with `fields` set in its frontmatter, and everything else as it
- * was: its other keys and comments, and the Markdown after it. Only for
- * text `parseFrontmatter` read.
- */
-export const withFrontmatter = (
-  text: string,
-  fields: Record<string, unknown>
-): string => {
-  const { yaml, body } = splitFrontmatter(text);
-  const document = parseDocument(yaml ?? "", { logLevel: "error" });
-  for (const [key, value] of Object.entries(fields)) {
-    document.set(key, value);
-  }
-  return `---\n${document.toString()}---\n${body}`;
-};
-
-const openingFence = /^\uFEFF?---[ \t]*\r?\n/u;
-const closingFence = /^---[ \t]*\r?$/mu;
-
-/**
- * Where a snapshot in `text` names the workflow versions it froze by
- * their path (`workflows[].path`), as [start, end) offsets in `text`, a
- * value's quotes included. None when `text` has no frontmatter or isn't
- * a snapshot; frontmatter that doesn't read gives what it can.
- */
-export const frozenPathRanges = (text: string): [number, number][] => {
-  const opening = openingFence.exec(text);
-  if (!opening) {
-    return [];
-  }
-  const start = opening[0].length;
-  const rest = text.slice(start);
-  const closing = closingFence.exec(rest);
-  if (!closing) {
-    return [];
-  }
-  const document = parseDocument(rest.slice(0, closing.index), {
-    logLevel: "error",
-  });
-  const workflows = document.get("workflows", true);
-  if (document.get("type") !== "snapshot" || !isSeq(workflows)) {
-    return [];
-  }
-  return workflows.items.flatMap((entry): [number, number][] => {
-    const path = isMap(entry) ? entry.get("path", true) : undefined;
-    const range = isScalar(path) ? path.range : undefined;
-    return range ? [[start + range[0], start + range[1]]] : [];
-  });
 };

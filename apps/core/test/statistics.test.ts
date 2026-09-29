@@ -6,11 +6,12 @@ import {
   statisticRowsPerDay,
 } from "@grasp-os/shared/statistics";
 import { env } from "cloudflare:workers";
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
+import { refreshDailySignals } from "../src/daily-signals.ts";
 import {
   readStatistics,
   recordStatistic,
@@ -154,11 +155,31 @@ const seedRun = async (app: string, workflow: string, ago = 0) => {
     .run();
 };
 
+/**
+ * Holds the clock from here to the end of the test, as it reads now: core
+ * and the App's host read the same `Date`, so the test's points, reads,
+ * runs and windows never cross a minute (the rate bounds' counters) or a
+ * UTC day, however slow the machine. A test moves it on only on purpose.
+ * Held once a test's setup is done: signing in and building an App wait
+ * on time passing.
+ */
+const holdClock = (): number => {
+  const at = Date.now();
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(at);
+  return at;
+};
+
 describe("an App's own statistics", { timeout: 60_000 }, () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("are recorded as they come and read back added up, by the dimensions asked, over the days asked", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
     const other = await statsApp(admin);
+    holdClock();
     const recorded = await callApp(env, app, as(admin.userId), "record", [
       [
         { measure: "invoices", value: 120, dimensions: { supplier: "acme" } },
@@ -248,6 +269,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("stay within their bounds, and are recorded only from a call of the App that's running", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     const record = async (point: unknown) =>
       await callApp(env, app, as(admin.userId), "record", [[point]]);
     const query = async (input: unknown) =>
@@ -303,6 +325,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("are recorded no faster than a call or a minute allows", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     // Lowered for tests (vite.config.ts).
     const {
       perCall: statisticPointsPerCall,
@@ -345,6 +368,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("are read no more often than a call or a minute allows", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     // Lowered for tests (vite.config.ts).
     const { perCall, perMinute } = statisticLimitsOf(
       "read",
@@ -373,6 +397,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("are swept past their retention, however many rows, in one run", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     const old = new Date(Date.now() - 500 * dayMs).toISOString().slice(0, 10);
     await env.DB.prepare(
       `WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 2500)
@@ -393,6 +418,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
   it("are read, bounded and swept by their indexes, never a table whole", async () => {
     const admin = await signedInApi(idp, "admin");
     const app = await statsApp(admin);
+    holdClock();
     // Past the retention: swept.
     await recordStatistic(
       env,
@@ -433,6 +459,10 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
 });
 
 describe("the platform's statistics", { timeout: 60_000 }, () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
   it("count an App's runs and signals for whoever may see its runs, audited, and nobody else", async () => {
     const admin = await signedInApi(idp, "admin");
     const builder = await signedInApi(idp, "builder");
@@ -460,6 +490,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
       })
     );
     await grantPlatform(builder, reader);
+    holdClock();
     await seedRun(watched, "pay");
     await seedRun(watched, "pay");
     await seedRun(watched, "remind");
@@ -540,36 +571,198 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     });
   });
 
+  it("count many Apps' runs in one read, grouped by App, the ones it can't read listed unavailable, audited once with every App asked for", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const builder = await signedInApi(idp, "builder");
+    const reader = await statsApp(builder);
+    await grantPlatform(builder, reader);
+    // The builder builds `theirs`, not `watched`; `gone` is no App at all.
+    const watched = await statsApp(admin);
+    const theirs = await statsApp(builder);
+    holdClock();
+    const gone = crypto.randomUUID();
+    await seedRun(watched, "pay");
+    await seedRun(watched, "pay");
+    await seedRun(theirs, "remind");
+    const all = {
+      measure: "platform.workflow_runs",
+      days: 7,
+      apps: [watched, gone, theirs],
+      groupBy: ["app", "workflow"],
+    };
+    const answerOf = (answer: unknown) => {
+      const parsed = z
+        .object({
+          ok: answerSchema.shape.ok.extend({
+            unavailable: z.array(z.string()),
+          }),
+        })
+        .parse(answer).ok;
+      return {
+        groups: parsed.groups.map(({ dimensions, count }) => ({
+          ...dimensions,
+          count,
+        })),
+        unavailable: parsed.unavailable,
+      };
+    };
+    let byAdmin: unknown;
+    const events = await auditedDuring(async () => {
+      byAdmin = await platformRead(reader, admin.userId, all);
+    });
+    // Ordered by the groups' values: by App ID, then workflow.
+    const expected = [
+      { app: watched, workflow: "pay", count: 2 },
+      { app: theirs, workflow: "remind", count: 1 },
+    ].toSorted((one, other) => one.app.localeCompare(other.app));
+    expect({
+      byAdmin: answerOf(byAdmin),
+      // An App the builder may not see is unavailable too, and the rest
+      // still counted.
+      byBuilder: answerOf(await platformRead(reader, builder.userId, all)),
+      audited: events
+        .filter(({ action }) => action === "statistics.read")
+        .map(({ target, provenance, detail }) => ({
+          target,
+          provenance,
+          apps: detail.apps,
+          unavailable: detail.unavailable,
+        })),
+      ownWithApps: await read(reader, admin.userId, {
+        measure: "ticks",
+        days: 1,
+        apps: [watched],
+      }),
+      oneAndApps: await platformRead(reader, admin.userId, {
+        ...all,
+        where: { app: watched },
+      }),
+      // One App, as `where.app`, is still refused when it can't be read.
+      oneGone: await platformRead(reader, admin.userId, {
+        measure: "platform.workflow_runs",
+        days: 7,
+        where: { app: gone },
+      }),
+    }).toStrictEqual({
+      byAdmin: { groups: expected, unavailable: [gone] },
+      byBuilder: {
+        groups: [{ app: theirs, workflow: "remind", count: 1 }],
+        unavailable: [watched, gone],
+      },
+      // Every App asked for: those it counted, then the unavailable one.
+      audited: [
+        {
+          target: undefined,
+          provenance: [watched, theirs, gone],
+          apps: 3,
+          unavailable: 1,
+        },
+      ],
+      ownWithApps: { error: "statistics.invalid" },
+      oneAndApps: { error: "statistics.invalid" },
+      oneGone: { error: "app.not_found" },
+    });
+  });
+
+  it("page by the groups' values over a window held at `until`, so runs starting between pages neither repeat nor skip a group", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const reader = await statsApp(admin);
+    await grantPlatform(admin, reader);
+    const watched = await statsApp(admin);
+    holdClock();
+    // 101 workflows ran a minute ago: two pages of groups.
+    await env.DB.prepare(
+      "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 101) INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at) SELECT ?1 || i, ?2, 'w' || i, 1, NULL, 'completed', ?3, ?3 FROM n"
+    )
+      .bind(`bulk-${unique()}-`, watched, Date.now() - 60_000)
+      .run();
+    const until = new Date(Date.now() - 1000).toISOString();
+    const page = async (offset: number, held = true) =>
+      answerSchema.parse(
+        await platformRead(reader, admin.userId, {
+          measure: "platform.workflow_runs",
+          days: 7,
+          apps: [watched],
+          groupBy: ["workflow"],
+          offset,
+          ...(held ? { until } : {}),
+        })
+      ).ok;
+    const first = await page(0);
+    // Between the pages: a workflow that sorts first starts, and another
+    // run of one on the first page.
+    await seedRun(watched, "a-first");
+    await seedRun(watched, "w1");
+    const second = await page(100);
+    const groups = [...first.groups, ...second.groups];
+    const workflows = groups.map(({ dimensions }) => dimensions.workflow);
+    // Without `until`, the new workflow moves every group a place.
+    const unheld = await page(100, false);
+    expect({
+      pages: [first.truncated, second.truncated],
+      read: workflows.length,
+      distinct: new Set(workflows).size,
+      w1: groups.find(({ dimensions }) => dimensions.workflow === "w1")?.count,
+      unheldFirst: unheld.groups[0]?.dimensions.workflow,
+    }).toStrictEqual({
+      pages: [true, false],
+      read: 101,
+      distinct: 101,
+      w1: 1,
+      // What the first page ended with, read again.
+      unheldFirst: first.groups.at(-1)?.dimensions.workflow,
+    });
+  });
+
   it("give the latest improvement signals of an App's workflows by kind, and plan their reads by index", async () => {
     const admin = await signedInApi(idp, "admin");
     const reader = await statsApp(admin);
     await grantPlatform(admin, reader);
     const watched = await statsApp(admin);
-    const id = `computation-${unique()}`;
-    // The latest computation, within the day read.
-    const startedAt = Date.now() - 60_000;
-    await env.DB.batch([
-      env.DB.prepare(
-        "INSERT INTO improvement_signal_computations (id, day, started_at, finished_at) VALUES (?, ?, ?, ?)"
-      ).bind(
-        id,
-        new Date(startedAt).toISOString().slice(0, 10),
-        startedAt,
-        startedAt
-      ),
-      ...(
-        [
-          ["pay", "failing_step", "match", 4],
-          ["pay", "failing_step", "book", 2],
-          ["pay", "cost_per_run", "", 0.5],
-          ["remind", "failing_step", "send", 1],
-        ] as const
-      ).map(([workflow, kind, subject, value]) =>
+    holdClock();
+    /** A finished computation, started `ago` and finished `took` later, with `signals`. */
+    const seedComputation = async (
+      ago: number,
+      took: number,
+      signals: readonly (readonly [string, string, string, number])[]
+    ) => {
+      const id = `computation-${unique()}`;
+      const startedAt = Date.now() - ago;
+      await env.DB.batch([
         env.DB.prepare(
-          "INSERT INTO improvement_signals (computation, app_id, workflow_id, kind, subject, value, evidence) VALUES (?, ?, ?, ?, ?, ?, '{}')"
-        ).bind(id, watched, workflow, kind, subject, value)
-      ),
+          "INSERT INTO improvement_signal_computations (id, day, started_at, finished_at) VALUES (?, ?, ?, ?)"
+        ).bind(
+          id,
+          new Date(startedAt).toISOString().slice(0, 10),
+          startedAt,
+          startedAt + took
+        ),
+        ...signals.map(([workflow, kind, subject, value]) =>
+          env.DB.prepare(
+            "INSERT INTO improvement_signals (computation, app_id, workflow_id, kind, subject, value, evidence) VALUES (?, ?, ?, ?, ?, ?, '{}')"
+          ).bind(id, watched, workflow, kind, subject, value)
+        ),
+      ]);
+    };
+    // The latest computation, within the day read: two minutes ago.
+    await seedComputation(120_000, 10_000, [
+      ["pay", "failing_step", "match", 4],
+      ["pay", "failing_step", "book", 2],
+      ["pay", "cost_per_run", "", 0.5],
+      ["remind", "failing_step", "send", 1],
     ]);
+    // A snapshot's time, after it finished.
+    const until = new Date(Date.now() - 60_000).toISOString();
+    const signalsRead = async (held: boolean) =>
+      answerSchema.parse(
+        await platformRead(reader, admin.userId, {
+          measure: "platform.improvement_signals",
+          days: 1,
+          where: { app: watched, workflow: "pay" },
+          groupBy: ["kind"],
+          ...(held ? { until } : {}),
+        })
+      ).ok.groups;
     let answer: unknown;
     const recorded = await recordedQueries(async () => {
       answer = await platformRead(reader, admin.userId, {
@@ -585,37 +778,29 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
         groupBy: ["workflow"],
       });
     });
-    // A computation dated past the read's now is the latest: it answers
-    // nothing, and the one before isn't the latest any more.
-    const future = Date.now() + 1000 * dayMs;
-    await env.DB.prepare(
-      "INSERT INTO improvement_signal_computations (id, day, started_at, finished_at) VALUES (?, ?, ?, ?)"
-    )
-      .bind(
-        `computation-${unique()}`,
-        new Date(future).toISOString().slice(0, 10),
-        future,
-        future
-      )
-      .run();
-    await env.DB.prepare(
-      "INSERT INTO improvement_signals (computation, app_id, workflow_id, kind, subject, value, evidence) SELECT id, ?, 'pay', 'failing_step', 'later', 9, '{}' FROM improvement_signal_computations WHERE started_at = ?"
-    )
-      .bind(watched, future)
-      .run();
-    const later = await platformRead(reader, admin.userId, {
-      measure: "platform.improvement_signals",
-      days: 1,
-      where: { app: watched, workflow: "pay" },
-      groupBy: ["kind"],
-    });
+    const heldBefore = await signalsRead(true);
+    // Then one finishes after the snapshot's time, as between its pages,
+    // and another is dated after now.
+    await seedComputation(30_000, 10_000, [
+      ["pay", "failing_step", "later", 9],
+    ]);
+    await seedComputation(-1000 * dayMs, 0, [
+      ["pay", "failing_step", "future", 99],
+    ]);
+    const heldAfter = await signalsRead(true);
+    const current = await signalsRead(false);
     const measured = recorded.filter(({ query }) =>
       /from "(?:improvement_signals|workflow_runs)"/u.test(query)
     );
     const plans = await Promise.all(measured.map(planOf));
     expect({
       groups: answerSchema.parse(answer).ok.groups,
-      later: answerSchema.parse(later).ok.groups,
+      // Held at the snapshot's time: the same computation before and after
+      // another finished.
+      held: heldAfter,
+      same: JSON.stringify(heldAfter) === JSON.stringify(heldBefore),
+      // Not held: the latest finished by now, never one dated later.
+      current,
       reads: measured.length,
       // Which computation is the latest reads the computations, as every
       // read of the signals does: a finished one deletes those before it,
@@ -628,14 +813,8 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
             step !== "SCAN improvement_signal_computations"
         ),
     }).toStrictEqual({
+      // By kind: the groups' values.
       groups: [
-        {
-          dimensions: { kind: "failing_step" },
-          count: 2,
-          sum: 6,
-          min: 2,
-          max: 4,
-        },
         {
           dimensions: { kind: "cost_per_run" },
           count: 1,
@@ -643,10 +822,91 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
           min: 0.5,
           max: 0.5,
         },
+        {
+          dimensions: { kind: "failing_step" },
+          count: 2,
+          sum: 6,
+          min: 2,
+          max: 4,
+        },
       ],
-      later: [],
+      held: [
+        {
+          dimensions: { kind: "cost_per_run" },
+          count: 1,
+          sum: 0.5,
+          min: 0.5,
+          max: 0.5,
+        },
+        {
+          dimensions: { kind: "failing_step" },
+          count: 2,
+          sum: 6,
+          min: 2,
+          max: 4,
+        },
+      ],
+      same: true,
+      current: [
+        {
+          dimensions: { kind: "failing_step" },
+          count: 1,
+          sum: 9,
+          min: 9,
+          max: 9,
+        },
+      ],
       reads: 2,
       scans: [],
+    });
+  });
+
+  it("read one signal computation on every page held at `until`, kept while a newer one finishes, and say which", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const reader = await statsApp(admin);
+    await grantPlatform(admin, reader);
+    const watched = await statsApp(admin);
+    const held = holdClock();
+    const days = (count: number) => new Date(Date.now() + count * dayMs);
+    // The production computation: today's, finished before the snapshot.
+    await refreshDailySignals(env, days(0));
+    const until = new Date(held).toISOString();
+    // Past the snapshot's time before anything else finishes.
+    vi.setSystemTime(held + 1000);
+    const computationRead = async () =>
+      z.object({ ok: z.object({ computation: z.string().nullable() }) }).parse(
+        await platformRead(reader, admin.userId, {
+          measure: "platform.improvement_signals",
+          days: 7,
+          apps: [watched],
+          groupBy: ["kind"],
+          until,
+        })
+      ).ok.computation;
+    const first = await computationRead();
+    // A newer computation finishes between two pages: the one the first
+    // page read is kept, and the next page reads it too.
+    await refreshDailySignals(env, days(1));
+    const second = await computationRead();
+    // Another one: now the first is older than the latest two finished,
+    // and goes. A page reading it now says so.
+    await refreshDailySignals(env, days(2));
+    const third = await computationRead();
+    const kept = await env.DB.prepare(
+      "SELECT count(*) AS kept FROM improvement_signal_computations WHERE id = ?"
+    )
+      .bind(first)
+      .first<{ kept: number }>();
+    expect({
+      read: typeof first,
+      second: second === first,
+      third: third === first,
+      kept: kept?.kept,
+    }).toStrictEqual({
+      read: "string",
+      second: true,
+      third: false,
+      kept: 0,
     });
   });
 
@@ -655,6 +915,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     const reader = await statsApp(admin);
     await grantPlatform(admin, reader);
     const watched = await statsApp(admin);
+    const held = holdClock();
     const query = {
       measure: "platform.workflow_runs",
       days: 7,
@@ -696,9 +957,15 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
       ).catch((error: unknown) =>
         isExpectedError(error) ? error.code : "unexpected"
       );
-      // Two calls past the bound of one, in the same minute: audited once.
+      // Two calls past the bound of one in the same minute, audited once;
+      // one in the next minute, audited again.
+      const minute = Math.floor(held / 60_000) * 60_000;
+      vi.setSystemTime(minute + 10_000);
       results.limited = await readMany();
+      vi.setSystemTime(minute + 50_000);
       results.limitedAgain = await readMany();
+      vi.setSystemTime(minute + 70_000);
+      results.nextMinute = await readMany();
     });
     expect({
       results,
@@ -719,6 +986,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
         off: "feature.disabled",
         limited: { error: "statistics.rate_limited" },
         limitedAgain: { error: "statistics.rate_limited" },
+        nextMinute: { error: "statistics.rate_limited" },
       },
       refused: [
         {
@@ -735,6 +1003,11 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
           app: watched,
           measure: "platform.workflow_runs",
           refused: "feature.disabled",
+        },
+        {
+          app: watched,
+          measure: "platform.workflow_runs",
+          refused: "statistics.rate_limited",
         },
         {
           app: watched,

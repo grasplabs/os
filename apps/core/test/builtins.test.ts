@@ -43,6 +43,8 @@ const features = {
   apps: true,
   app_sharing: true,
   app_blueprints: true,
+  // The collections built-in blueprints declare are installed with it.
+  record_types: true,
 };
 
 /** Core's env with `builtins` on, and the flags the built-ins need. */

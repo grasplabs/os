@@ -356,7 +356,7 @@ describe("saving a document", () => {
       frontmatter: {
         code: "knowledge.invalid",
         issues: [
-          "frontmatter.type: one of doc, skill, memory, decision, file, vision, team, person, tool, source, statement, workflow, snapshot, plan-item, rulebook-entry, or a record type an App declares for this collection",
+          "frontmatter.type: one of doc, skill, memory, decision, file, or a record type an App declares for this collection",
         ],
       },
       path: {

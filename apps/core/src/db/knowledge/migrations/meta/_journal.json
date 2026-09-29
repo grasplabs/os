@@ -50,6 +50,13 @@
       "when": 1790659260124,
       "tag": "0006_usage_signals",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "6",
+      "when": 1790669298306,
+      "tag": "0007_drop_playbook",
+      "breakpoints": true
     }
   ]
 }

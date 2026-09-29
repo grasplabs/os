@@ -1,0 +1,187 @@
+{
+  "snapshot": {
+    "collection": "playbook",
+    "description": "A dated freeze of the Playbook for the board: the workflow records at the versions it froze, their hours drawn, designed and as they run, the improvement signals of the App workflows they link to, the maturity then, and the one decision it asks for. Only the board page's take sets what it froze.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "date": {
+          "type": "string",
+          "minLength": 10,
+          "maxLength": 10
+        },
+        "maturity": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "workflows": {
+          "type": "array",
+          "maxItems": 500,
+          "default": [],
+          "description": "The workflow records it froze, by path and version",
+          "items": {
+            "type": "object",
+            "properties": {
+              "path": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 512
+              },
+              "version": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "required": ["path", "version"],
+            "additionalProperties": false
+          }
+        },
+        "figures": {
+          "type": "object",
+          "properties": {
+            "windowDays": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 366
+            },
+            "workflows": {
+              "type": "array",
+              "maxItems": 250,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "title": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "team": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 200
+                  },
+                  "state": {
+                    "enum": ["drawn", "designed"]
+                  },
+                  "drawn": {
+                    "type": "object",
+                    "properties": {
+                      "version": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "hoursPerWeek": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100000
+                      },
+                      "basis": {
+                        "enum": ["estimated", "observed"]
+                      }
+                    },
+                    "required": ["version", "hoursPerWeek", "basis"],
+                    "additionalProperties": false
+                  },
+                  "designed": {
+                    "type": "object",
+                    "properties": {
+                      "version": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "hoursPerWeek": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100000
+                      },
+                      "basis": {
+                        "enum": ["estimated", "observed"]
+                      }
+                    },
+                    "required": ["version", "hoursPerWeek", "basis"],
+                    "additionalProperties": false
+                  },
+                  "running": {
+                    "type": "object",
+                    "properties": {
+                      "appId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "workflowId": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 256
+                      },
+                      "runs": {
+                        "type": "integer",
+                        "minimum": 1
+                      },
+                      "hoursPerWeek": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 100000
+                      }
+                    },
+                    "required": ["appId", "workflowId", "runs", "hoursPerWeek"],
+                    "additionalProperties": false
+                  },
+                  "unavailable": {
+                    "type": "boolean"
+                  }
+                },
+                "required": ["path", "title", "state"],
+                "additionalProperties": false
+              }
+            },
+            "signals": {
+              "type": "array",
+              "maxItems": 50,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 512
+                  },
+                  "kind": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 64
+                  },
+                  "value": {
+                    "type": "number",
+                    "minimum": 0
+                  }
+                },
+                "required": ["path", "kind", "value"],
+                "additionalProperties": false
+              }
+            }
+          },
+          "required": ["windowDays", "workflows", "signals"],
+          "additionalProperties": false
+        },
+        "decisionNeeded": {
+          "type": "string",
+          "maxLength": 1000
+        }
+      },
+      "required": ["date"]
+    },
+    "kept": [
+      {
+        "method": "take",
+        "fields": ["figures", "date", "maturity", "workflows"]
+      }
+    ]
+  }
+}

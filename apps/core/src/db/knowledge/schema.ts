@@ -42,7 +42,7 @@ export const collections = sqliteTable("collections", {
   access: text({ enum: ["everyone", "teams", "me"] }).notNull(),
   sensitive: integer({ mode: "boolean" }).notNull().default(false),
   source: text({
-    enum: ["here", "upload", "playbook", "grasp", "apps"],
+    enum: ["here", "upload", "grasp", "apps"],
   }).notNull(),
   createdAt: timestamp("created_at").notNull(),
 });

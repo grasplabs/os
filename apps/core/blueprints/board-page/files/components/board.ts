@@ -21,6 +21,11 @@ export interface WorkflowFigures {
   state: "drawn" | "designed";
   drawn?: VersionHours;
   designed?: VersionHours;
+  /**
+   * Whether the runs of the App workflow it links to couldn't be read as
+   * the snapshot was taken: unknown, not none.
+   */
+  unavailable?: boolean;
   /** Its designed steps at the runs a week observed. */
   running?: {
     appId: string;
@@ -58,8 +63,8 @@ export const maturityLevels = 5;
 
 /**
  * A snapshot record's fields: the server reads only documents of type
- * `snapshot`, which the Playbook checked against its snapshot schema on
- * save, and reads back with that schema.
+ * `snapshot`, which the Playbook checked against the page's snapshot
+ * type (app/records.json) on save, and reads back with it.
  */
 export const snapshotRecordOf = (
   record: Record<string, unknown>
@@ -109,9 +114,23 @@ export interface BeforeAfterRow {
   title: string;
   before: number;
   after: number;
-  /** Observed in runs, or expected from the design. */
-  from: "observed" | "expected";
+  /**
+   * Observed in runs, expected from the design, or expected because its
+   * runs couldn't be read.
+   */
+  from: "observed" | "expected" | "unavailable";
 }
+
+/** Where a before-and-after row's after comes from. */
+const fromOf = (
+  running: boolean,
+  unavailable: boolean
+): BeforeAfterRow["from"] => {
+  if (running) {
+    return "observed";
+  }
+  return unavailable ? "unavailable" : "expected";
+};
 
 /**
  * Before and after for each designed workflow with a drawn version,
@@ -121,7 +140,7 @@ export const beforeAndAfter = (
   workflows: readonly WorkflowFigures[]
 ): BeforeAfterRow[] =>
   workflows
-    .flatMap(({ path, title, drawn, designed, running }) => {
+    .flatMap(({ path, title, drawn, designed, running, unavailable }) => {
       if (drawn === undefined || designed === undefined) {
         return [];
       }
@@ -131,10 +150,7 @@ export const beforeAndAfter = (
           title,
           before: drawn.hoursPerWeek,
           after: running?.hoursPerWeek ?? designed.hoursPerWeek,
-          from:
-            running === undefined
-              ? ("expected" as const)
-              : ("observed" as const),
+          from: fromOf(running !== undefined, unavailable === true),
         },
       ];
     })
@@ -152,6 +168,8 @@ export interface Headline {
   /** Hours a week the running workflows save against their drawn versions. */
   savedRunning: number;
   running: number;
+  /** Workflows whose runs couldn't be read: unknown, not counted as none. */
+  unavailable: number;
   workflows: number;
 }
 
@@ -160,7 +178,11 @@ export const headlineOf = (workflows: readonly WorkflowFigures[]): Headline => {
   let now = 0;
   let saved = 0;
   let running = 0;
+  let unavailable = 0;
   for (const workflow of workflows) {
+    if (workflow.unavailable === true) {
+      unavailable += 1;
+    }
     now += hoursNow(workflow);
     if (workflow.running !== undefined) {
       running += 1;
@@ -174,6 +196,7 @@ export const headlineOf = (workflows: readonly WorkflowFigures[]): Headline => {
     hoursNow: Math.round(now * 10) / 10,
     savedRunning: Math.round(saved * 10) / 10,
     running,
+    unavailable,
     workflows: workflows.length,
   };
 };

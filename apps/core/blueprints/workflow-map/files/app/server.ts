@@ -6,6 +6,10 @@ import { DurableObject } from "cloudflare:workers";
 // change the Playbook; everyone else who can open the map reads it, and
 // the Playbook says which the caller is (`canWrite`). It keeps nothing of
 // its own: the Playbook is where the records live, with their versions.
+// Their types are the map's own (`app/records.json`), which the Playbook
+// checks every save against, whoever saves; a workflow's link to the App
+// workflow that runs it is set only by `link`, and kept by every other
+// save.
 
 /** Whoever the method runs for, as the platform passes it. */
 interface Caller {
@@ -54,7 +58,6 @@ interface Playbook {
     options?: { before?: number; limit?: number }
   ) => Promise<{ versions: { number: number }[] }>;
   saveRecord: (caller: Caller, input: unknown) => Promise<Summary>;
-  linkWorkflow: (caller: Caller, input: unknown) => Promise<Summary>;
 }
 
 interface Env {
@@ -81,9 +84,6 @@ type Outcome<T> = { ok: T } | { error: string };
 
 /** The most records one page of the Playbook lists. */
 const pageSize = 20;
-
-/** The most versions of a workflow the map looks back for its drawn one. */
-const historyDepth = 50;
 
 const codeOf = (error: unknown): string =>
   typeof error === "object" &&
@@ -171,6 +171,66 @@ const recordsOf = async (
   }
 };
 
+/**
+ * The version of a workflow last drawn, as a save of it designed keeps
+ * it: the version `stored` is, when that one is drawn; otherwise the one
+ * it keeps already; none for a new one.
+ */
+const drawnVersionOf = (stored: RecordRead | undefined): number | undefined => {
+  if (stored === undefined) {
+    return undefined;
+  }
+  if (stored.record.state === "drawn") {
+    return stored.version.number;
+  }
+  const kept = stored.record.drawnVersion;
+  return typeof kept === "number" ? kept : undefined;
+};
+
+/** `value` trimmed, if it is text. */
+const trim = (value: unknown): unknown =>
+  typeof value === "string" ? value.trim() : value;
+
+/** Each of `fields` of `entry` trimmed, where it is text. */
+const trimFields = (entry: unknown, fields: readonly string[]): unknown => {
+  if (typeof entry !== "object" || entry === null || Array.isArray(entry)) {
+    return entry;
+  }
+  const fieldsOf: Record<string, unknown> = Object.fromEntries(
+    Object.entries(entry)
+  );
+  for (const field of fields) {
+    if (field in fieldsOf) {
+      fieldsOf[field] = trim(fieldsOf[field]);
+    }
+  }
+  return fieldsOf;
+};
+
+/**
+ * A workflow record with its names trimmed, as the Playbook's schema of
+ * it, which can't trim, holds them: its title, and its steps' and
+ * parameters' texts.
+ */
+const trimmed = (record: Record<string, unknown>): Record<string, unknown> => ({
+  ...record,
+  ...(record.title === undefined ? {} : { title: trim(record.title) }),
+  ...(Array.isArray(record.steps)
+    ? {
+        steps: record.steps.map((step) =>
+          trimFields(step, ["name", "who", "tool"])
+        ),
+      }
+    : {}),
+  ...(Array.isArray(record.parameters)
+    ? {
+        parameters: record.parameters.map((parameter) =>
+          trimFields(parameter, ["name", "value"])
+        ),
+      }
+    : {}),
+});
+
 /** A path segment from a name: `Pay invoices` is `pay-invoices`. */
 const slugOf = (name: string): string =>
   name
@@ -238,8 +298,10 @@ export class App extends DurableObject<Env> {
 
   /**
    * A workflow, and for a designed one, the last version of it that was
-   * drawn, to set beside it. Any other document is refused
-   * (`map.not_workflow`): the map never shows one as a workflow.
+   * drawn (its `drawnVersion`, which `save` keeps), to set beside it; none
+   * when that version no longer reads as a workflow. Any other document
+   * is refused (`map.not_workflow`): the map never shows one as a
+   * workflow.
    */
   async open(
     caller: Caller,
@@ -253,18 +315,22 @@ export class App extends DurableObject<Env> {
       if (current.record.state !== "designed") {
         return { current, drawn: null };
       }
-      const { versions } = await playbook.history(caller, id, {
-        before: current.version,
-        limit: historyDepth,
-      });
-      for (const { number } of versions) {
-        // oxlint-disable-next-line no-await-in-loop -- newest first, until the drawn one
-        const earlier = await playbook.getRecord(caller, id, number);
-        if (earlier.record.state === "drawn") {
-          return { current, drawn: workflowOf(earlier) };
-        }
+      const { drawnVersion } = current.record;
+      if (typeof drawnVersion !== "number") {
+        return { current, drawn: null };
       }
-      return { current, drawn: null };
+      try {
+        const earlier = await playbook.getRecord(caller, id, drawnVersion);
+        return {
+          current,
+          drawn: earlier.record.state === "drawn" ? workflowOf(earlier) : null,
+        };
+      } catch (error) {
+        if (codeOf(error) === "knowledge.invalid") {
+          return { current, drawn: null };
+        }
+        throw error;
+      }
     });
   }
 
@@ -275,7 +341,10 @@ export class App extends DurableObject<Env> {
    * another type, or a version of a document that isn't a workflow (named
    * by `documentId`, which a save from `ifVersion` 1 on needs, at `path`),
    * is refused with `map.not_workflow`, so the map never turns a team or
-   * any other record into a workflow.
+   * any other record into a workflow. A designed workflow keeps the
+   * version of it last drawn (`drawnVersion`, which only this method
+   * sets); a linked one stays designed (`map.linked_drawn`). Names are
+   * saved trimmed.
    */
   async save(
     caller: Caller,
@@ -294,8 +363,9 @@ export class App extends DurableObject<Env> {
       if (save.record.type !== "workflow") {
         refuse("map.not_workflow", "The map saves only workflows.");
       }
+      let stored: RecordRead | undefined;
       if (save.ifVersion > 0) {
-        const stored =
+        stored =
           documentId === undefined
             ? refuse("map.not_workflow", "Name the workflow to save.")
             : await playbook.getRecord(caller, documentId);
@@ -304,12 +374,29 @@ export class App extends DurableObject<Env> {
           refuse("map.not_workflow", `${stored.path} isn't at ${save.path}.`);
         }
       }
-      const title =
-        typeof save.record.title === "string" ? save.record.title : "";
+      const { drawnVersion: _drawn, ...record } = trimmed(save.record);
+      const linked =
+        record.app !== undefined || stored?.record.app !== undefined;
+      if (record.state === "drawn" && linked) {
+        refuse(
+          "map.linked_drawn",
+          "A workflow linked to an App workflow stays designed."
+        );
+      }
+      const drawnVersion =
+        record.state === "designed" ? drawnVersionOf(stored) : undefined;
+      const title = typeof record.title === "string" ? record.title : "";
       const path =
         save.path ??
         `workflows/${slugOf(title)}-${crypto.randomUUID().slice(0, 8)}.md`;
-      return await playbook.saveRecord(caller, { ...save, path });
+      return await playbook.saveRecord(caller, {
+        ...save,
+        record: {
+          ...record,
+          ...(drawnVersion === undefined ? {} : { drawnVersion }),
+        },
+        path,
+      });
     });
   }
 
@@ -326,7 +413,13 @@ export class App extends DurableObject<Env> {
     });
   }
 
-  /** Links a designed workflow to the App workflow built from it. */
+  /**
+   * Links a designed workflow, at `ifVersion`, to the App workflow built
+   * from it, by the App's and the workflow's IDs, as its next version: the
+   * one method that sets a workflow's `app` (`app/records.json`). Refused
+   * with `map.not_workflow` for another document, `map.not_designed` for a
+   * drawn workflow, and `knowledge.conflict` when someone saved it since.
+   */
   async link(
     caller: Caller,
     input: {
@@ -336,9 +429,27 @@ export class App extends DurableObject<Env> {
       workflowId: string;
     }
   ): Promise<Outcome<Summary>> {
-    return await outcome(
-      async () => await this.#playbook().linkWorkflow(caller, input)
-    );
+    return await outcome(async () => {
+      const playbook = this.#playbook();
+      const read = await playbook.getRecord(caller, input.documentId);
+      requireWorkflow(read);
+      if (read.record.state !== "designed") {
+        refuse(
+          "map.not_designed",
+          "Only a designed workflow links to an App workflow."
+        );
+      }
+      return await playbook.saveRecord(caller, {
+        path: read.path,
+        ifVersion: input.ifVersion,
+        record: {
+          ...read.record,
+          app: { appId: input.appId, workflowId: input.workflowId },
+        },
+        body: read.body,
+        message: "Linked to its App workflow",
+      });
+    });
   }
 
   #playbook(): Playbook {

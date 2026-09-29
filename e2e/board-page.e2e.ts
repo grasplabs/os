@@ -2,13 +2,17 @@ import { expect } from "@playwright/test";
 
 import { test } from "./csp.ts";
 import { apiOf, pageOf, peopleIn } from "./people.ts";
+import { revokeOtherCopies } from "./playbook.ts";
 
 // The board page, the built-in App, end to end: an admin creates an App
 // from it, approves the Playbook permission it asks for, takes a snapshot
 // of a Playbook full of workflows, writes its narrative and decision, and
-// prints it: the page alone, on one sheet of A4.
+// prints it: the page alone, on one sheet of A4. The workflows are the
+// workflow map's records, whose type it declares: the admin creates one
+// from it too.
 
 const boardPage = "builtin-board-page";
+const workflowMap = "builtin-workflow-map";
 
 /**
  * How long the release's install may take to list the built-in: it runs
@@ -41,26 +45,32 @@ test("an admin takes a snapshot on the board page, writes its narrative and prin
       .poll(
         async () => {
           const listed = await api.apps.blueprints.list();
-          return listed.some((blueprint) => blueprint.app === boardPage);
+          return [boardPage, workflowMap].every((builtin) =>
+            listed.some((blueprint) => blueprint.app === builtin)
+          );
         },
         { timeout: installedMs }
       )
       .toBeTruthy();
     const listed = await api.apps.blueprints.list();
-    const version =
-      listed.find((blueprint) => blueprint.app === boardPage)?.version ?? 1;
-    const created = await api.apps.blueprints.create(boardPage, version, {
-      name: `Board page ${run}`,
-    });
-    for (const { id } of created.permissions) {
-      // Reviewed before a version of the copy is current.
-      // oxlint-disable-next-line no-await-in-loop -- one grant at a time
-      await api.permissions.grant(id, { version: null });
-    }
-    await api.apps.versions.setCurrent(created.app.id, 1);
-    app = created.app.id;
-    // A first snapshot sets the Playbook up, if no test has yet.
-    await api.screens.call(app, "take", [{ maturity: 0 }]);
+    /** An App of the admin's from the built-in `builtin`, approved and current. */
+    const copy = async (builtin: string, name: string): Promise<string> => {
+      const version =
+        listed.find((blueprint) => blueprint.app === builtin)?.version ?? 1;
+      const created = await api.apps.blueprints.create(builtin, version, {
+        name,
+      });
+      await revokeOtherCopies(api, builtin, created.app.id);
+      for (const { id } of created.permissions) {
+        // Reviewed before a version of the copy is current.
+        // oxlint-disable-next-line no-await-in-loop -- one grant at a time
+        await api.permissions.grant(id, { version: null });
+      }
+      await api.apps.versions.setCurrent(created.app.id, 1);
+      return created.app.id;
+    };
+    app = await copy(boardPage, `Board page ${run}`);
+    await copy(workflowMap, `Workflow map ${run}`);
     // The Playbook is the deployment's: other runs' workflows are in it
     // too, and the page shows the top ones of all of them.
     for (let index = 1; index <= seeded; index += 1) {

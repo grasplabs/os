@@ -105,10 +105,15 @@ export const fingerprintOf = async (env: Env, of: Release): Promise<string> => {
     canonicalJson({
       blueprints: blueprintsEnabled(env)
         ? of.blueprints.map(
-            ({ id, name, description, permissions, files }) => ({
+            ({ id, name, description, collections, permissions, files }) => ({
               id,
               name,
               description,
+              // Created only while record types are on: switching them on
+              // installs again, and creates them.
+              collections: featureEnabled(env, "record_types")
+                ? [...collections]
+                : [],
               permissions: [...permissions],
               files: { ...files },
             })

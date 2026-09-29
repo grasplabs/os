@@ -1,5 +1,4 @@
 import type { AppId } from "@grasp-os/shared/ids";
-import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import type {
   BacklinkPage,
   DocumentPage,
@@ -19,12 +18,6 @@ import { callerOf } from "../app-bindings.ts";
 import { forSandbox } from "../bindings.ts";
 import { collectionReads, readAsDelegate } from "./binding.ts";
 import type { CollectionGrant } from "./binding.ts";
-import {
-  canWriteAsDelegate as canWritePlaybook,
-  linkWorkflowAsDelegate,
-  saveRecordAsDelegate as savePlaybookRecord,
-  takeSnapshotAsDelegate,
-} from "./playbook.ts";
 import {
   canWriteAsDelegate,
   getRecord,
@@ -49,8 +42,7 @@ import type { Setter } from "./records.ts";
  * with their rights, and says whether it would (`canWrite`), so App
  * screens offer only the changes core takes. A save through a stub whose
  * permission doesn't write is refused by the permission check, and
- * `canWrite` is `false` there. The Playbook's stub also links a workflow
- * and takes a snapshot (`linkWorkflow`, `takeSnapshot`, playbook.ts).
+ * `canWrite` is `false` there.
  */
 export class AppCollectionBinding extends WorkerEntrypoint<
   Env,
@@ -180,21 +172,16 @@ export class AppCollectionBinding extends WorkerEntrypoint<
    */
   async canWrite(caller: unknown): Promise<boolean> {
     const { collectionId } = this.ctx.props;
-    return await this.#write(caller, async ({ authority }, grant) =>
-      collectionId === playbookCollectionId
-        ? await canWritePlaybook(
-            this.env,
-            authority,
-            grant.context,
-            grant.permissionId
-          )
-        : await canWriteAsDelegate(
-            this.env,
-            authority,
-            grant.context,
-            grant.permissionId,
-            collectionId
-          )
+    return await this.#write(
+      caller,
+      async ({ authority }, grant) =>
+        await canWriteAsDelegate(
+          this.env,
+          authority,
+          grant.context,
+          grant.permissionId,
+          collectionId
+        )
     );
   }
 
@@ -209,70 +196,17 @@ export class AppCollectionBinding extends WorkerEntrypoint<
    */
   async saveRecord(caller: unknown, input: unknown): Promise<DocumentSummary> {
     const { collectionId } = this.ctx.props;
-    return await this.#write(caller, async ({ authority, setter }, grant) =>
-      collectionId === playbookCollectionId
-        ? await savePlaybookRecord(
-            this.env,
-            authority,
-            grant.context,
-            grant.permissionId,
-            input
-          )
-        : await saveRecordAsDelegate(
-            this.env,
-            authority,
-            grant.context,
-            grant.permissionId,
-            collectionId,
-            input,
-            setter
-          )
-    );
-  }
-
-  /**
-   * Links a designed workflow record to the workflow of an App, for
-   * `caller` (`linkWorkflow` in playbook.ts: `{ documentId, ifVersion,
-   * appId, workflowId }`): as `saveRecord`, and only to an App `caller`
-   * may use.
-   */
-  async linkWorkflow(
-    caller: unknown,
-    input: unknown
-  ): Promise<DocumentSummary> {
     return await this.#write(
       caller,
-      async ({ authority }, grant) =>
-        await linkWorkflowAsDelegate(
+      async ({ authority, setter }, grant) =>
+        await saveRecordAsDelegate(
           this.env,
           authority,
           grant.context,
           grant.permissionId,
-          input
-        )
-    );
-  }
-
-  /**
-   * Takes a dated snapshot of the Playbook for `caller`
-   * (`takeSnapshotAsDelegate` in playbook.ts: `{ maturity, title?,
-   * decisionNeeded?, body? }`), freezing its workflows' hours, as drawn,
-   * designed and observed in runs, and their improvement signals: as
-   * `saveRecord`.
-   */
-  async takeSnapshot(
-    caller: unknown,
-    input: unknown
-  ): Promise<DocumentSummary> {
-    return await this.#write(
-      caller,
-      async ({ authority }, grant) =>
-        await takeSnapshotAsDelegate(
-          this.env,
-          authority,
-          grant.context,
-          grant.permissionId,
-          input
+          collectionId,
+          input,
+          setter
         )
     );
   }

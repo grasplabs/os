@@ -59,9 +59,12 @@ const build = (dir: string): string => {
 
 const server = { "app/server.ts": "export class App {}\n" };
 
-/** A permission to read and write the Playbook, under `binding`. */
-const playbook = (binding = "PLAYBOOK", actions = ["read", "write"]) => ({
-  object: { type: "collection", collectionId: "playbook" },
+/** A collection a built-in declares. */
+const tasks = { id: "tasks", name: "Tasks", description: "Things to do." };
+
+/** A permission to read and write `tasks`, under `binding`. */
+const onTasks = (binding = "TASKS", actions = ["read", "write"]) => ({
+  object: { type: "collection", collectionId: "tasks" },
   actions,
   binding,
 });
@@ -97,21 +100,29 @@ describe("the built-in blueprints' build", () => {
         id: "fine",
         name: "Fixture",
         description: "A test's built-in.",
+        collections: [],
         permissions: [],
         files: server,
       },
     ]);
   });
 
-  it("embeds the permissions a built-in declares", () => {
-    const out = build(fixture("asks", server, { permissions: [playbook()] }));
-    expect(embedded(out)).toMatchObject([{ permissions: [playbook()] }]);
+  it("embeds the collections and permissions a built-in declares", () => {
+    const out = build(
+      fixture("asks", server, {
+        collections: [tasks],
+        permissions: [onTasks()],
+      })
+    );
+    expect(embedded(out)).toMatchObject([
+      { collections: [tasks], permissions: [onTasks()] },
+    ]);
   });
 
   it.each([
-    ["an action a collection doesn't have", [playbook("PLAYBOOK", ["delete"])]],
-    ["a binding name twice", [playbook(), playbook("PLAYBOOK", ["read"])]],
-    ["a platform binding name", [playbook("KNOWLEDGE")]],
+    ["an action a collection doesn't have", [onTasks("TASKS", ["delete"])]],
+    ["a binding name twice", [onTasks(), onTasks("TASKS", ["read"])]],
+    ["a platform binding name", [onTasks("KNOWLEDGE")]],
     [
       "a connection, whose ID differs in each deployment",
       [
@@ -123,7 +134,21 @@ describe("the built-in blueprints' build", () => {
       ],
     ],
   ])("fails for a declared permission with %s", (_case, permissions) => {
-    const dir = fixture("asks", server, { permissions });
+    const dir = fixture("asks", server, { collections: [tasks], permissions });
+    expect(() => build(dir)).toThrow("blueprint.json");
+    expect(existsSync(path.join(dir, "blueprints.js"))).toBeFalsy();
+  });
+
+  it.each([
+    ["a permission on a collection it doesn't declare", [], [onTasks()]],
+    [
+      "a collection named as a person's would be",
+      [{ ...tasks, id: "3f0c2a44-8f39-4c55-9d6e-2b1a0c6e4d11" }],
+      [],
+    ],
+    ["a collection twice", [tasks, tasks], []],
+  ])("fails for %s", (_case, collections, permissions) => {
+    const dir = fixture("asks", server, { collections, permissions });
     expect(() => build(dir)).toThrow("blueprint.json");
     expect(existsSync(path.join(dir, "blueprints.js"))).toBeFalsy();
   });

@@ -1,0 +1,2 @@
+-- The Playbook collection core used to create and write itself, and what it held: dropped. The Playbook is now an ordinary collection that its built-in blueprints declare and the install creates again, with record types those blueprints declare. Its documents, versions, sections, links, proposals and uploads go with it (their foreign keys cascade), and the search index with its sections (its triggers).
+DELETE FROM `collections` WHERE `source` = 'playbook';
