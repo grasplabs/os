@@ -59,9 +59,11 @@ const OpenedApp = ({
 export const SidePanel = ({
   chatId,
   running,
+  drafts,
 }: {
   chatId: string;
   running: boolean;
+  drafts: number;
 }) => {
   const [apps, setApps] = useState<Loaded<App[]>>();
   const [opened, setOpened] = useState<Loaded<Opened>>();
@@ -111,7 +113,7 @@ export const SidePanel = ({
   }
   return (
     <div className="flex flex-col gap-4">
-      <ChatBuilds chatId={chatId} running={running} />
+      <ChatBuilds chatId={chatId} drafts={drafts} running={running} />
       <div className="flex flex-col gap-2">
         <h2 className="text-sm font-medium">Apps</h2>
         {opened === undefined ? null : <NotLoaded page={opened} />}

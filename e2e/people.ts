@@ -131,6 +131,7 @@ const cast = {
   chat: { user: "user" },
   chatBuilds: { builder: "builder" },
   notifications: { builder: "builder" },
+  chatPreview: { builder: "builder" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;

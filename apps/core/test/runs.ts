@@ -278,7 +278,16 @@ export const endLiveRuns = async (): Promise<void> => {
         if (instance) {
           const { status } = await instance.status();
           if (!endedStatuses.has(status)) {
-            await instance.terminate();
+            await instance.terminate().catch(async (error: unknown) => {
+              // It ended on its own between the two calls (a run that just
+              // failed, say, whose row the test already saw): the engine
+              // refuses to terminate an ended instance. Anything else, or
+              // an instance still live, is the test's to see.
+              const now = await instance.status();
+              if (!endedStatuses.has(now.status)) {
+                throw error;
+              }
+            });
           }
         }
         seenEnded.add(id);

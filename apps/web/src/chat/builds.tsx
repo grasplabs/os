@@ -19,6 +19,7 @@ import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
+import { PreviewFrame } from "../screens/screen-frame.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import {
   exportChangeText,
@@ -29,6 +30,8 @@ import {
   serverFileLabels,
   serverFileOf,
   versionKey,
+  changedScreens,
+  previewedScreen,
 } from "./builds-state.ts";
 import type { ServerFile } from "./builds-state.ts";
 
@@ -36,6 +39,9 @@ import type { ServerFile } from "./builds-state.ts";
 // the Apps it is still changing in the chat's own drafts, and the Apps the
 // person builds with a version up for review, which they review (what
 // core says it changes, never the proposer's word) and make current here.
+// The draft written last (or the one the person picks) runs as a preview
+// (`app_preview`), whose server code changes nothing and reads no real
+// data; what goes wrong in it goes to the agent's next check of the draft.
 // Functional only.
 
 /** What the panel read: the person's Apps, and the chat's drafts. */
@@ -523,17 +529,70 @@ const PendingVersion = ({
 };
 
 /**
+ * The preview of a draft: its first screen, or one it changes the person
+ * picks. Loaded afresh at each of the draft's writes, as its key says.
+ */
+const DraftPreview = ({
+  chatId,
+  draft,
+  name,
+}: {
+  chatId: string;
+  draft: ChatDraft;
+  name: string;
+}) => {
+  const [picked, setPicked] = useState<string>();
+  const screens = changedScreens(draft.changed);
+  const screen = previewedScreen(screens, picked);
+  return (
+    <section
+      aria-label={`Preview of ${name}`}
+      className="flex h-96 flex-col gap-2"
+    >
+      {screens.length > 1 ? (
+        <div className="flex flex-wrap gap-1">
+          {screens.map((one) => (
+            <Button
+              key={one}
+              onClick={() => {
+                setPicked(one);
+              }}
+              size="sm"
+              variant={one === screen ? "secondary" : "ghost"}
+            >
+              {one}
+            </Button>
+          ))}
+        </div>
+      ) : null}
+      <PreviewFrame
+        app={draft.app}
+        chatId={chatId}
+        key={`${draft.app}:${draft.revision}:${screen ?? ""}`}
+        {...(screen === undefined ? {} : { screen })}
+      />
+    </section>
+  );
+};
+
+/**
  * The Apps being built: the chat's drafts, and versions up for review.
- * Read again whenever the agent stops working (`running` turns false),
- * and after a version is made current here, whatever the agent does.
+ * Read again whenever the agent stops working (`running` turns false) or
+ * writes or drops a draft (`drafts` changes), and after a version is made
+ * current here, whatever the agent does. The draft written last, or the
+ * one the person picks, shows its preview.
  */
 export const ChatBuilds = ({
   chatId,
   running,
+  drafts,
 }: {
   chatId: string;
   running: boolean;
+  drafts: number;
 }) => {
+  // The draft whose preview shows, by App; the latest when none is picked.
+  const [previewing, setPreviewing] = useState<string>();
   const [builds, setBuilds] = useState<Loaded<Builds> | { state: "off" }>();
   const [reads, setReads] = useState(0);
   // Versions made current here: gone from the section at once.
@@ -545,11 +604,19 @@ export const ChatBuilds = ({
   // The reads asked for (after making a version current) done so far:
   // those go whether the agent works or not.
   const handledReads = useRef(0);
+  // The drafts' changes read so far: those go whether the agent works or
+  // not, so a preview follows each write.
+  const handledDrafts = useRef(-1);
   useEffect(() => {
-    if (running && reads === handledReads.current) {
+    if (
+      running &&
+      reads === handledReads.current &&
+      drafts === handledDrafts.current
+    ) {
       return;
     }
     handledReads.current = reads;
+    handledDrafts.current = drafts;
     latest.current += 1;
     const read = latest.current;
     const load = async (): Promise<void> => {
@@ -562,7 +629,7 @@ export const ChatBuilds = ({
       }
     };
     void load();
-  }, [chatId, running, reads]);
+  }, [chatId, running, reads, drafts]);
   if (builds === undefined || builds.state === "off") {
     return null;
   }
@@ -576,16 +643,43 @@ export const ChatBuilds = ({
   if (builds.data.drafts.length === 0 && pending.length === 0) {
     return null;
   }
+  const previewed =
+    builds.data.drafts.find(({ app }) => app === previewing) ??
+    builds.data.drafts[0];
   return (
     <section aria-label="Being built" className="flex flex-col gap-2">
       <h3 className="text-sm font-medium">Being built</h3>
       {builds.data.drafts.map((draft) => (
-        <p className="text-sm" key={draft.app}>
-          {names.get(draft.app) ?? draft.app}: {draft.changed.length}{" "}
-          {draft.changed.length === 1 ? "file" : "files"} changed in this chat,
-          not proposed yet
-        </p>
+        <div
+          className="flex items-center justify-between gap-2"
+          key={draft.app}
+        >
+          <p className="text-sm">
+            {names.get(draft.app) ?? draft.app}: {draft.changed.length}{" "}
+            {draft.changed.length === 1 ? "file" : "files"} changed in this
+            chat, not proposed yet
+          </p>
+          {draft === previewed ? null : (
+            <Button
+              onClick={() => {
+                setPreviewing(draft.app);
+              }}
+              size="sm"
+              variant="outline"
+            >
+              Preview
+            </Button>
+          )}
+        </div>
       ))}
+      {previewed === undefined ? null : (
+        <DraftPreview
+          chatId={chatId}
+          draft={previewed}
+          key={previewed.app}
+          name={names.get(previewed.app) ?? previewed.app}
+        />
+      )}
       {pending.map((app) => (
         <PendingVersion
           app={app}

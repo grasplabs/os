@@ -3,8 +3,10 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  changedScreens,
   exportChangeText,
   pendingToShow,
+  previewedScreen,
   readyToMakeCurrent,
   serverFileLabels,
   serverFileOf,
@@ -229,5 +231,31 @@ describe("the Being built section", () => {
         widens: false,
       },
     ]);
+  });
+});
+
+describe("the screen a draft's preview shows", () => {
+  it("is the one picked while the draft still changes it, otherwise the first it changes", () => {
+    const changed = changedScreens([
+      "app/server.ts",
+      "screens/zeta.tsx",
+      "screens/alpha.tsx",
+      "screens/lib/format.ts",
+    ]);
+
+    expect({
+      changed,
+      unpicked: previewedScreen(changed),
+      picked: previewedScreen(changed, "alpha"),
+      // A later write no longer changes the picked screen.
+      gone: previewedScreen(["zeta"], "alpha"),
+      none: previewedScreen([], "alpha"),
+    }).toStrictEqual({
+      changed: ["zeta", "alpha"],
+      unpicked: "zeta",
+      picked: "alpha",
+      gone: "zeta",
+      none: undefined,
+    });
   });
 });
