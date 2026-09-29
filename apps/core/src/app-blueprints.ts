@@ -38,7 +38,12 @@ import {
   workflowsIn,
 } from "./apps.ts";
 import type { AppRow, VersionRow } from "./apps.ts";
-import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
+import {
+  auditedBatch,
+  outboxed,
+  outboxedIfChanged,
+  outboxedWhere,
+} from "./audit-outbox.ts";
 import { builtinAppId, builtinOwner } from "./builtin-app-id.ts";
 import {
   appBlueprints,
@@ -442,6 +447,10 @@ export const createFromBlueprint = async (
     async (named) => await openedBy(env, by, named)
   );
   const db = drizzle(env.DB);
+  /** Whether a request names another App: a workflow or exports of it. */
+  const namesOtherApp = (row: typeof permissions.$inferSelect): boolean =>
+    (row.objectType === "workflow" || row.objectType === "app") &&
+    row.objectId !== id;
   // The App, pending, only while the blueprint is still marked and `by`
   // still has a role in its App (`stillOpenTo`), selected from its row:
   // unmarked or unshared since they were read above, nothing is inserted,
@@ -498,7 +507,45 @@ export const createFromBlueprint = async (
     ),
     // One statement each: D1 binds at most 100 values to one.
     ...requests.rows.map((row) => db.insert(permissions).values(row)),
-    ...requests.entries.map((entry) => outboxed(db, entry)),
+    // A request naming another App only while `by` still has a role in
+    // it as the batch runs: one they lost since `openedBy` read it is
+    // taken out again, in the same batch, so the copy never names it.
+    ...requests.rows
+      .filter(namesOtherApp)
+      .map((row) =>
+        db
+          .delete(permissions)
+          .where(
+            and(
+              eq(permissions.id, row.id),
+              sql`NOT ${stillOpenTo(by, appIdSchema.parse(row.objectId))}`
+            )
+          )
+      ),
+    // Each request's audit entry (`entries` are the rows', in order) if
+    // its row stayed; one taken out is recorded as dropped instead.
+    ...requests.rows.flatMap((row, index) => {
+      const entry = requests.entries[index];
+      if (entry === undefined) {
+        return [];
+      }
+      if (!namesOtherApp(row)) {
+        return [outboxed(db, entry)];
+      }
+      const kept = sql`EXISTS (SELECT 1 FROM ${permissions} WHERE ${permissions.id} = ${row.id})`;
+      return [
+        outboxedWhere(db, entry, kept),
+        outboxedWhere(
+          db,
+          changeEntry(by, "app.blueprint.app_dropped", id, {
+            objectType: row.objectType,
+            binding: row.binding,
+            fromApp: source.id,
+          }),
+          sql`NOT ${kept}`
+        ),
+      ];
+    }),
     ...requests.dropped.map(({ connectionId, binding }) =>
       outboxed(
         db,
@@ -530,13 +577,32 @@ export const createFromBlueprint = async (
     await appFor(env, by, source.id, "user");
     throw error;
   }
+  // The requests that stayed: those naming another App `by` lost their
+  // role in as the batch ran were taken out, and are dropped too.
+  const stayedRows = await db
+    .select({ id: permissions.id })
+    .from(permissions)
+    .where(
+      and(eq(permissions.subjectType, "app"), eq(permissions.subjectId, id))
+    );
+  const stayed = new Set(stayedRows.map((row) => row.id));
   await activateCopy(env, by, source.id, id);
   return {
     app: toApp(appRow),
     version: toVersion(versionRow),
-    permissions: requests.rows.map(toPermission),
+    permissions: requests.rows
+      .filter((row) => stayed.has(row.id))
+      .map(toPermission),
     dropped: requests.dropped,
-    droppedApps: requests.droppedApps,
+    droppedApps: [
+      ...requests.droppedApps,
+      ...requests.rows
+        .filter((row) => !stayed.has(row.id))
+        .map(({ objectType, binding }) => ({
+          type: objectType === "app" ? ("app" as const) : ("workflow" as const),
+          binding,
+        })),
+    ],
   };
 };
 

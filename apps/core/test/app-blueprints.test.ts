@@ -226,6 +226,85 @@ describe("blueprints", { timeout: 60_000 }, () => {
     });
   });
 
+  it("drop a request on an App its creator loses their role in while the copy is made", async () => {
+    const [owner, maker] = await Promise.all([
+      personApi("builder"),
+      personApi("builder"),
+    ]);
+    const source = await notesApp(owner);
+    const crm = await notesApp(owner);
+    await share(owner, crm, maker, "user");
+    await owner.api.permissions.request({
+      subject: { type: "app", appId: source },
+      object: { type: "app", appId: crm },
+      actions: ["read"],
+      binding: "CRM",
+    });
+    await owner.api.permissions.request({
+      subject: { type: "app", appId: source },
+      object: { type: "workflow", appId: crm, workflowId: "report" },
+      actions: ["start"],
+      binding: "CRM_FLOW",
+    });
+    await share(owner, source, maker, "user");
+    await owner.api.apps.blueprints.mark(source, 1);
+    // The CRM stops being shared with them after the copy checked it,
+    // just before the batch that creates the copy lands.
+    let unshared = false;
+    const racing = racingDb(async (db) => {
+      if (!unshared) {
+        unshared = true;
+        await db
+          .prepare("DELETE FROM app_members WHERE app_id = ? AND member_id = ?")
+          .bind(crm, maker.userId)
+          .run();
+      }
+    });
+
+    let created: CreatedFromBlueprint | undefined;
+    const events = await auditedDuring(async () => {
+      created = await createFromBlueprint(
+        { ...env, DB: racing },
+        await maker.api.whoami(),
+        source,
+        1,
+        { name: `Raced ${unique()}` }
+      );
+    });
+    const stored = await env.DB.prepare(
+      "SELECT count(*) AS count FROM permissions WHERE subject_id = ? AND object_id = ?"
+    )
+      .bind(created?.app.id ?? "", crm)
+      .first<{ count: number }>();
+
+    expect({
+      raced: unshared,
+      permissions: created?.permissions,
+      droppedApps: created?.droppedApps.toSorted(byBinding),
+      stored: stored?.count,
+      requested: events.filter(
+        ({ action }) => action === "permission.requested"
+      ).length,
+      dropped: events
+        .filter(({ action }) => action === "app.blueprint.app_dropped")
+        .map(({ detail }) => String(detail.binding))
+        .toSorted((one, other) => one.localeCompare(other)),
+      namesCrm: JSON.stringify(created).includes(crm),
+    }).toStrictEqual({
+      raced: true,
+      permissions: [],
+      droppedApps: [
+        { type: "app", binding: "CRM" },
+        { type: "workflow", binding: "CRM_FLOW" },
+      ],
+      stored: 0,
+      // No request was recorded for what the copy doesn't ask for.
+      requested: 0,
+      dropped: ["CRM", "CRM_FLOW"],
+      namesCrm: false,
+    });
+  });
+
   it("create an App with the same code, none of the data, and requests for what it was given", async () => {
     const [owner, maker, admin] = await Promise.all([
       personApi("builder"),

@@ -463,6 +463,13 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
       JSON.stringify({
         findInvoices: { ...valid, input: { allOf: [{ type: "string" }] } },
       }),
+      // Types every object has by inheritance are no types either.
+      JSON.stringify({
+        findInvoices: { ...valid, input: { type: "constructor" } },
+      }),
+      JSON.stringify({
+        findInvoices: { ...valid, output: { type: "__proto__" } },
+      }),
       JSON.stringify({
         findInvoices: { ...valid, input: { minLength: 1 } },
       }),
@@ -493,6 +500,18 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
     }
     expect(refused).toStrictEqual(refused.map(() => "app.exports_invalid"));
     await expect(apps.versions.list(app.id)).resolves.toStrictEqual([]);
+    // Refused with what's wrong, never failing on the way.
+    await apps.files.write(app.id, {
+      "app/exports.json": JSON.stringify({
+        findInvoices: { ...valid, input: { type: "constructor" } },
+      }),
+    });
+    await expect(apps.files.commit(app.id, "Exports")).rejects.toMatchObject({
+      code: "app.exports_invalid",
+      details: {
+        issues: [expect.stringContaining("findInvoices.input")],
+      },
+    });
     // And valid exports commit, with every keyword core checks.
     await expect(
       committing(

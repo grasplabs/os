@@ -645,7 +645,7 @@ const jsonSchemaIssues = (
   const { type } = schema;
   if (
     type !== undefined &&
-    !(typeof type === "string" && type in keywordsByType)
+    !(typeof type === "string" && Object.hasOwn(keywordsByType, type))
   ) {
     return [`${path}.type: One of ${Object.keys(keywordsByType).join(", ")}`];
   }
