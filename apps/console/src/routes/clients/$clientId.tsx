@@ -168,7 +168,9 @@ const Progress = ({ view }: { view: ProvisioningView }) => {
   switch (view.phase) {
     case "account": {
       return (
-        <p className="text-sm">Creating or reading the Cloudflare account.</p>
+        <p className="text-sm">
+          Setting up: the Cloudflare account, then the client record.
+        </p>
       );
     }
     case "workers_paid": {

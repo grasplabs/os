@@ -1,9 +1,10 @@
 import { introspectWorkflow } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
+import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vite-plus/test";
 
 import { act, audit, consoleDatabase } from "../src/db/act.ts";
-import { clientDeploys, clients } from "../src/db/schema.ts";
+import { clientDeploys, clientRuns, clients } from "../src/db/schema.ts";
 import { startProvisioning } from "../src/provision/control.ts";
 import { importReleases } from "../src/releases/import.ts";
 import { accessJwt, mockAccess } from "./access.ts";
@@ -179,6 +180,42 @@ describe("the client pages", () => {
       deploying: html.includes(`Deploying ${releaseId}: migrations done.`),
       release: html.includes(releaseId),
     }).toStrictEqual({ deploying: true, release: true });
+  });
+
+  it("show a resumed run in its first steps, not the deploy an earlier run left", async () => {
+    const { clientId, releaseId, runs } = await waitingClient();
+    await using _runs = runs;
+    const [run] = await runs.get();
+    await run?.waitForStepResult({ name: "workers paid confirmed" });
+    // Staff confirmed Workers Paid, an earlier run's deploy failed, and the
+    // current run was claimed after both: it won't wait, and hasn't started
+    // its own deploy yet.
+    await audit(db, staff, { action: "client.workers_paid", clientId });
+    const earlier = new Date(Date.now() - 60 * 60 * 1000);
+    await db.insert(clientDeploys).values({
+      id: crypto.randomUUID(),
+      clientId,
+      releaseId,
+      status: "failed",
+      step: "workers",
+      error: "hostname_taken",
+      startedBy: staff.email,
+      createdAt: earlier,
+      updatedAt: earlier,
+    });
+    await db
+      .update(clientRuns)
+      .set({ claimedAt: new Date(Date.now() + 1000) })
+      .where(eq(clientRuns.clientId, clientId));
+
+    const { html } = await page(`/clients/${clientId}`);
+
+    expect({
+      settingUp: html.includes(
+        "Setting up: the Cloudflare account, then the client record."
+      ),
+      deploying: html.includes("Deploying"),
+    }).toStrictEqual({ settingUp: true, deploying: false });
   });
 
   it("show an active client where it's live", async () => {

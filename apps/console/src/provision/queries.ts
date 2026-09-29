@@ -8,7 +8,7 @@ import { clientDomain } from "../deploy/context.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
 import { currentRun, isReplaceable } from "./runs.ts";
 import type { RunStatus } from "./runs.ts";
-import { confirmedWorkersPaid } from "./workflow.ts";
+import { workersPaidConfirmedAt } from "./workflow.ts";
 
 /** A client as the list shows it. */
 export interface ClientSummary {
@@ -34,7 +34,9 @@ export const listClients = async (env: Env): Promise<ClientSummary[]> =>
 
 /**
  * Where a client's provisioning is, as its page tells staff what to do:
- * - `account`: the run is creating or reading the account;
+ * - `account`: the run is in its first steps: creating or reading the
+ *   account and recording the client (a resumed run whose Workers Paid was
+ *   confirmed before it goes straight on from there);
  * - `workers_paid`: waiting for staff to upgrade the account;
  * - `deploying`: deploying the release;
  * - `active`: done;
@@ -116,8 +118,20 @@ const stopOf = async (
   return parsed.success ? parsed.data : null;
 };
 
+/** What the phase is worked out from, besides the view. */
+interface PhaseFacts {
+  /** Whether the latest deploy started in the current run (after its claim), so it's its progress. */
+  deployInRun: boolean;
+  /**
+   * Whether staff confirmed Workers Paid before the current run was
+   * claimed: a resumed run then doesn't wait, and is in its first steps.
+   */
+  confirmedBeforeRun: boolean;
+}
+
 const phaseOf = (
-  view: Omit<ProvisioningView, "phase" | "stopped" | "workersPaidConfirmed">
+  view: Omit<ProvisioningView, "phase" | "stopped" | "workersPaidConfirmed">,
+  { deployInRun, confirmedBeforeRun }: PhaseFacts
 ): ProvisioningPhase => {
   if (view.client?.status === "active") {
     return "active";
@@ -127,10 +141,14 @@ const phaseOf = (
   if (runless || (view.run !== null && isReplaceable(view.run))) {
     return "failed";
   }
-  if (view.deploy !== null) {
+  // A deploy from before the current run (the one a resume picks up) isn't
+  // this run's progress until the run starts it again.
+  if (deployInRun) {
     return "deploying";
   }
-  return view.client === null ? "account" : "workers_paid";
+  return view.client === null || confirmedBeforeRun
+    ? "account"
+    : "workers_paid";
 };
 
 /**
@@ -159,6 +177,8 @@ export const getProvisioning = async (
   if (client === undefined && run === null) {
     return null;
   }
+  const confirmedAt = await workersPaidConfirmedAt(db, clientId);
+  const claimedAt = current?.claimedAt.getTime();
   const domain = clientDomain(env);
   const view = {
     clientId,
@@ -178,7 +198,16 @@ export const getProvisioning = async (
   return {
     ...view,
     stopped: await stopOf(env, clientId),
-    workersPaidConfirmed: await confirmedWorkersPaid(db, clientId),
-    phase: phaseOf(view),
+    workersPaidConfirmed: confirmedAt !== null,
+    phase: phaseOf(view, {
+      deployInRun:
+        latest !== undefined &&
+        claimedAt !== undefined &&
+        latest.createdAt.getTime() >= claimedAt,
+      confirmedBeforeRun:
+        confirmedAt !== null &&
+        claimedAt !== undefined &&
+        confirmedAt.getTime() < claimedAt,
+    }),
   };
 };

@@ -3,11 +3,12 @@ import { Input } from "@grasp-os/ui/components/input";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import type { ReactNode } from "react";
 
+import { clientIdProblem } from "../../provision/client-id.ts";
 import {
   fetchNewClientOptions,
   startClient,
 } from "../../provision/functions.ts";
-import { useAction } from "../../provision/use-action.ts";
+import { InvalidFieldError, useAction } from "../../provision/use-action.ts";
 
 /** A form field with its label and what it's for. */
 const Field = ({
@@ -38,10 +39,16 @@ const NewClient = () => {
   const { busy, failure, run } = useAction();
   const start = (form: FormData) => {
     const accountId = textOf(form, "accountId");
+    const clientId = textOf(form, "clientId");
     void run(async () => {
+      // The server's own rule, said before anything is sent.
+      const problem = clientIdProblem(clientId);
+      if (problem !== null) {
+        throw new InvalidFieldError(problem);
+      }
       const result = await startClient({
         data: {
-          clientId: textOf(form, "clientId"),
+          clientId,
           name: textOf(form, "name"),
           releaseId: textOf(form, "releaseId"),
           ring: Number(textOf(form, "ring")),

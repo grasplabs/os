@@ -204,6 +204,7 @@ export const latestDeployOf = async (db: ConsoleDatabase, clientId: string) => {
       status: clientDeploys.status,
       step: clientDeploys.step,
       error: clientDeploys.error,
+      createdAt: clientDeploys.createdAt,
     })
     .from(clientDeploys)
     .where(eq(clientDeploys.clientId, clientId))

@@ -18,6 +18,14 @@ const refusals: Readonly<Record<ProvisionErrorCode, string>> = {
   not_provisioning: "It isn't being provisioned, so there's nothing to do.",
 };
 
+/** A field the page checks itself, and what it says of it: shown as it is. */
+export class InvalidFieldError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "InvalidFieldError";
+  }
+}
+
 /** What staff read when a change fails for any other reason, such as a field the form let through. */
 const failed = "That didn't work. Check the fields and try again.";
 
@@ -28,8 +36,8 @@ const failureOf = async (
   try {
     const { refused } = await action();
     return refused === null ? null : refusals[refused];
-  } catch {
-    return failed;
+  } catch (error) {
+    return error instanceof InvalidFieldError ? error.message : failed;
   }
 };
 
