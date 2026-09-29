@@ -639,7 +639,7 @@ interface Recorded {
 
 /**
  * The chat a call works in, if it works in one: its actor is the
- * workspace's agent, for every chat of the workspace.
+ * organization's agent, in everyone's chats.
  */
 const chatOf = ({ work }: Session): string | null =>
   work?.context.type === "chat" ? work.context.chatId : null;

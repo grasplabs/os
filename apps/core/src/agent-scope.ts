@@ -25,8 +25,8 @@ export interface AgentScope {
   /** The Workspace object that holds the chat. */
   workspaceId: WorkspaceId;
   /**
-   * The agent that acts, as the chat stored it: the workspace agent admins
-   * grant to, whichever object holds the chat (a person's own, say).
+   * The agent that acts, as the chat stored it: the organization's agent
+   * admins grant to, whichever object holds the chat (a person's own, say).
    */
   agentId: string;
   chatId: ChatId;
@@ -55,17 +55,19 @@ export interface AgentApi {
 }
 
 /**
- * A workspace agent's ID: letters, digits and `-` only (as core names
- * workspaces), so it reads the same in a permission, an audit event and a
- * memory path (`agents/<id>/AGENTS.md`), and never reaches into another's.
+ * An agent's ID: letters, digits and `-` only (as the organization's ID,
+ * every chat's agent, is), so it reads the same in a permission, an audit
+ * event and a memory path (`agents/<id>/AGENTS.md`), and never reaches
+ * into another's.
  */
 export const workspaceAgentIdSchema = z.string().regex(/^[A-Za-z0-9-]{1,64}$/u);
 
 /**
  * The chat's agent, acting for the chat's person: the one acting on every
  * call its code makes, in the audit log and in every permission check. One
- * agent per workspace, so what an admin grants it holds in all the
- * workspace's chats, whichever object holds them; each chat still keeps
+ * agent for the whole organization (`chatAgentId` in chats-rpc.ts), so
+ * what an admin grants it holds in everyone's chats, whichever person's
+ * Workspace object holds them; each chat still keeps
  * its own sources, restricted mode and code runs (the chat is the context,
  * `chatContext`). Its permissions are the agent's own, and every one
  * reaches only as far as the person may go themselves.
@@ -157,7 +159,8 @@ export const auditAgentCall = async (
     actor: delegateActorOf(chatAuthority(scope)),
     action: "agent.call",
     target,
-    // The actor is the workspace's agent, in every chat: which chat called.
+    // The actor is the organization's agent, in everyone's chats: which chat
+    // called.
     detail: {
       ...detail,
       method,

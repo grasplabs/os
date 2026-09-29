@@ -27,7 +27,8 @@ export const chats = sqliteTable(
     personId: text("person_id"),
     /**
      * The agent that answers in the chat, acting for its person: the
-     * workspace agent admins grant to, whichever object holds the chat.
+     * organization's agent admins grant to, whichever object holds the
+     * chat.
      * Chats made before have none, and their agent can't act.
      */
     agentId: text("agent_id"),

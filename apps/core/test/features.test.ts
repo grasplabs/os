@@ -193,6 +193,27 @@ describe("feature flags", () => {
     ]);
   });
 
+  it("stop reading Apps' exports with calls between Apps, and with the Apps kill switch", async () => {
+    const admin = await signedInWithRole(idp, "admin");
+    const exportsWith = async (features: Record<string, boolean>) => {
+      const coreEnv: Env = { ...env, FEATURES: features };
+      const { core } = await openRpc(admin.session, { coreEnv });
+      return await outcome(core.authenticate().apps.exports("app"));
+    };
+    await expect(
+      Promise.all([
+        exportsWith({ apps: true }),
+        exportsWith({ app_calls: true }),
+        exportsWith({ apps: true, app_calls: true }),
+      ])
+    ).resolves.toStrictEqual([
+      "feature.disabled",
+      "feature.disabled",
+      // Past the flags: this App doesn't exist.
+      "app.not_found",
+    ]);
+  });
+
   it("stop blueprints with their own flag, the Apps kill switch, and sharing's", async () => {
     const admin = await signedInWithRole(idp, "admin");
     const blueprintsWith = async (features: Record<string, boolean>) => {

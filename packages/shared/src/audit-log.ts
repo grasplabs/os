@@ -73,6 +73,11 @@ const typeRules: readonly {
   { action: "knowledge", type: "action" },
   // A person making, renaming or deleting one of their chats.
   { action: "chat", type: "action" },
+  // A call of the chat agent's code that nothing else records: a listing,
+  // a catalog or a run's status, or a call refused before it did anything.
+  // Its calls that can change something (a connector call, an App's
+  // export) record themselves under their own actions.
+  { action: "agent.call", type: "read" },
   // A spending budget crossing its alert threshold or running out: filed
   // with the budgets it belongs to, not as a model call.
   { action: "model.budget", type: "config" },

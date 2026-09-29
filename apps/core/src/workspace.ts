@@ -418,7 +418,7 @@ export class Workspace extends DurableObject<Env> {
       // the chat stored it.
       const workspaceId = workspaceIdSchema.parse(this.ctx.id.name);
       const scope = { workspaceId, agentId, chatId: chat.id, personId };
-      // The workspace's agent, acting for the chat's person, in this chat:
+      // The organization's agent, acting for the chat's person, in this chat:
       // the audit log's actor, and the rules' context (its restricted mode).
       const authority = chatAuthority(scope);
       const work = chatContext(scope);

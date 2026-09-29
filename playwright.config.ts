@@ -73,6 +73,7 @@ export default defineConfig({
             model_rules: true,
             model_settings: true,
             build_on_save: true,
+            app_calls: true,
             confirmations: true,
             agent: true,
             chat: true,

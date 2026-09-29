@@ -71,7 +71,7 @@ const refusals = {
   closed: () => agentErrors.create("agent.chat_not_found"),
 };
 
-/** The signed-in person's chats with the workspace's agent. */
+/** The signed-in person's chats with the organization's agent. */
 export class ChatsRpc extends RpcTarget implements ChatsApi {
   readonly #env: Env;
   readonly #check: SessionCheck;

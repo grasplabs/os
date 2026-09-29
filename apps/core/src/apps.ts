@@ -44,7 +44,7 @@ import type { Member } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { apps, appVersions, appWorkingFiles } from "./db/core/schema.ts";
 import { inList, isUniqueViolation } from "./db/d1.ts";
-import { featureEnabled } from "./features.ts";
+import { featureEnabled, requireFeature } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
 import { madeCurrent } from "./permissions.ts";
 import { buildOnSave, notBuiltOnSave } from "./save-builds.ts";
@@ -506,13 +506,16 @@ export const appContents = async (
 
 /**
  * What an App's current version exports to other Apps, for anyone with a
- * role in it: read from its row alone, no files.
+ * role in it: read from its row alone, no files. Off with calls between
+ * Apps (`app_calls`), as everything about them is, for people and the
+ * agent alike.
  */
 export const appExports = async (
   env: Env,
   by: Person,
   app: unknown
 ): Promise<CurrentExports> => {
+  requireFeature(env, "app_calls");
   const { id, currentVersion } = await appFor(env, by, app, "user");
   if (currentVersion === null) {
     return { version: null, exports: {} };

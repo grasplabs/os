@@ -38,6 +38,16 @@ describe("audit event types", () => {
     ).toStrictEqual(["read", "read", "read", "action", "config"]);
   });
 
+  it("files the chat agent's own calls as reads, refused ones too", () => {
+    expect([
+      typeOf("agent.call", { method: "apps.list", outcome: "ok" }),
+      typeOf("agent.call", {
+        method: "connections.call",
+        outcome: "refused",
+      }),
+    ]).toStrictEqual(["read", "read"]);
+  });
+
   it("files computing improvement signals as an action, and reading them as a read", () => {
     expect(
       ["improvement.signals.computed", "improvement.signals.read"].map(

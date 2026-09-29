@@ -326,7 +326,7 @@ export const noteProvenance = async (
     provenance: [
       ...new Set([...provenance.collectionIds, ...documentIds]),
     ].slice(0, auditProvenanceMaxItems),
-    // A chat's agent is its workspace's, in every chat: which chat read.
+    // Every chat's agent is the organization's: which chat read.
     detail:
       reader.type === "delegate" && reader.context.type === "chat"
         ? { ...detail, sensitive, chat: reader.context.chatId }

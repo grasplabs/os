@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-// A person's chats with the workspace's agent, as the frontend sees them
+// A person's chats with the organization's agent, as the frontend sees them
 // (core's chats-rpc.ts). Each chat belongs to the person who made it: only
 // they list, rename, delete, ask in or follow it.
 
@@ -164,7 +164,7 @@ export interface ChatSubscriptionApi {
   release: () => Promise<void>;
 }
 
-/** The signed-in person's chats with the workspace's agent. */
+/** The signed-in person's chats with the organization's agent. */
 export interface ChatsApi {
   /** The models a question may name, the default first. */
   models: () => Promise<string[]>;

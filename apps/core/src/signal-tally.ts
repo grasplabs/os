@@ -41,7 +41,10 @@ export interface SignalTally {
 
 /**
  * Who asked, for counting how many different askers a question had: the
- * person or agent, the App's part, or the run.
+ * person, the App's part, or the run. An agent asks for a person, and
+ * every chat's is the same agent, so its asker is that person: people
+ * asking through it are each an asker of their own, and an owner asking
+ * through it is still the owner.
  */
 export const askerOf = (actor: AuditActor): string => {
   switch (actor.type) {
@@ -50,7 +53,7 @@ export const askerOf = (actor: AuditActor): string => {
       return `person:${actor.userId}`;
     }
     case "agent": {
-      return `agent:${actor.agentId}`;
+      return `person:${actor.onBehalfOf}`;
     }
     case "app": {
       return `app:${actor.appId}:${actor.part}`;
