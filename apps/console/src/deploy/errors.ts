@@ -17,6 +17,8 @@ export const deployErrorCodes = [
   "d1_migration_failed",
   /** A newer deploy of the same client started: this one no longer runs. */
   "deploy_superseded",
+  /** Another runner took the client over while the deploy ran: a rollback. */
+  "runner_replaced",
   /** The account's script ran a Durable Object migration the release doesn't have. */
   "unknown_migration_tag",
   /** A binding in the manifest names a placeholder the console doesn't fill. */

@@ -64,7 +64,7 @@ export default defineProject({
         // Where the fake Cloudflare API runs client D1 queries, one for
         // each database it holds at once (test/cloudflare-api-workers.ts).
         d1Databases: Object.fromEntries(
-          Array.from({ length: 4 }, (_, slot) => [
+          Array.from({ length: 8 }, (_, slot) => [
             `CLIENT_D1_${slot}`,
             `client-d1-${slot}`,
           ])

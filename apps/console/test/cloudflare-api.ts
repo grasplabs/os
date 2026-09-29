@@ -326,6 +326,14 @@ export const mockCloudflareApi = (
   /** Failures planned for the next call a test picks out, each once. */
   const matched: { matches: (call: ApiCall) => boolean; failure: Failure }[] =
     [];
+  /**
+   * What runs before the fake answers the next call a test picks out, each
+   * once: something else landing while that call is in flight.
+   */
+  const interleaved: {
+    matches: (call: ApiCall) => boolean;
+    meanwhile: () => Promise<void>;
+  }[] = [];
 
   /** Adds an account `member` is a member of, and returns what it holds. */
   const addAccount = (
@@ -457,6 +465,9 @@ export const mockCloudflareApi = (
     if (failure !== undefined) {
       return failed(failure);
     }
+    const between = interleaved.findIndex(({ matches }) => matches(call));
+    const [meanwhile] = between === -1 ? [] : interleaved.splice(between, 1);
+    await meanwhile?.meanwhile();
     return await respond(request, call);
   };
 
@@ -532,6 +543,7 @@ export const mockCloudflareApi = (
     planned.clear();
     takenSubdomains.clear();
     matched.length = 0;
+    interleaved.length = 0;
     load.peak = 0;
   });
 
@@ -556,6 +568,17 @@ export const mockCloudflareApi = (
     /** Fails the next call `matches` picks out as `failure` says, once. */
     failNext: (matches: (call: ApiCall) => boolean, failure: Failure) => {
       matched.push({ matches, failure });
+    },
+    /**
+     * Runs `meanwhile` once the next call `matches` picks out has arrived
+     * and before it's answered, once: so what `meanwhile` does lands
+     * first, whatever the call then does.
+     */
+    beforeAnswering: (
+      matches: (call: ApiCall) => boolean,
+      meanwhile: () => Promise<void>
+    ) => {
+      interleaved.push({ matches, meanwhile });
     },
   };
 };

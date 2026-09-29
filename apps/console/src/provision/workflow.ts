@@ -7,7 +7,7 @@
  * marked active.
  *
  * One run per client at a time: each is an instance of its own, and
- * starting or resuming claims it in D1 first (src/provision/runs.ts), so
+ * starting or resuming claims it in D1 first (src/runners.ts), so
  * a second start or resume for the same client can't run beside the
  * first: the single runner that a deploy's D1 migrations and router map
  * write rely on.
@@ -29,7 +29,6 @@
 import { log } from "@grasp-os/shared/log";
 import { WorkflowEntrypoint } from "cloudflare:workers";
 import type { WorkflowEvent, WorkflowStep } from "cloudflare:workers";
-import { NonRetryableError } from "cloudflare:workflows";
 import { and, asc, eq } from "drizzle-orm";
 
 import type { Staff } from "../access.ts";
@@ -40,7 +39,7 @@ import {
   getAccount,
   tokenUserEmail,
 } from "../cloudflare/accounts.ts";
-import { CloudflareApiError, isRefused } from "../cloudflare/api.ts";
+import { isRefused } from "../cloudflare/api.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
 import { listScripts } from "../cloudflare/workers.ts";
 import { actIfChanged, audit, consoleDatabase } from "../db/act.ts";
@@ -58,8 +57,14 @@ import {
   runDeploy,
   startDeploy,
 } from "../deploy/deploy.ts";
-import { DeployError } from "../deploy/errors.ts";
-import type { DeployErrorCode } from "../deploy/errors.ts";
+import {
+  deployStepConfig,
+  guarded,
+  isEngineAbort,
+  quickStep,
+  stop,
+  stopReason,
+} from "../workflow-steps.ts";
 
 /** What a run is started with: identifiers only, since Workflows stores them. */
 export interface ProvisionParams {
@@ -122,73 +127,11 @@ const deployerRole = "Administrator";
 /** Grasp's Worker scripts, as every release names them. */
 const graspScriptPrefix = "grasp-os-";
 
-/** Quick steps: a few API calls or a row. */
-const quickStep = {
-  retries: { limit: 3, delay: "10 seconds", backoff: "exponential" },
-  timeout: "2 minutes",
-} as const;
-
-/**
- * The deploy: uploads, migrations and a smoke check of up to about 80 s.
- * A retry resumes the same deploy, so it's retried less often, and later.
- */
-const deployStepConfig = {
-  retries: { limit: 2, delay: "1 minute", backoff: "exponential" },
-  timeout: "30 minutes",
-} as const;
-
 /**
  * How long a run waits for Workers Paid before it fails; a failed run is
  * resumed from the page.
  */
 const workersPaidTimeout = "30 days";
-
-/** Deploy failures a retry can fix: a new version still starting, a name race, a flaky query. */
-const retryableDeployCodes: ReadonlySet<DeployErrorCode> = new Set([
-  "smoke_check_failed",
-  "subdomain_unavailable",
-  "d1_migration_failed",
-]);
-
-/** A failure no retry fixes, as the run stops with it: its code, then what we say of it. */
-const stop = (code: string, detail?: string): NonRetryableError =>
-  new NonRetryableError(detail === undefined ? code : `${code}: ${detail}`);
-
-/**
- * `error` as a step fails with it, carrying its code and our own words,
- * never a response body. One a retry can't fix is a `NonRetryableError`:
- * every deploy failure but the few a retry can fix, a secret missing from
- * Secrets Store, and any API refusal but a timeout or a rate limit
- * (`isRefused`). Anything else is retried, as an `Error` saying what it
- * was: a deploy code, `cloudflare_<status>_<codes>`, our own message, or
- * only the name of an error we didn't throw (a parse error can quote what
- * it parsed).
- */
-const asStepError = (error: unknown): Error => {
-  if (error instanceof NonRetryableError) {
-    return error;
-  }
-  if (error instanceof DeployError) {
-    return retryableDeployCodes.has(error.code)
-      ? new Error(`${error.code}: ${error.message}`)
-      : stop(error.code, error.message);
-  }
-  if (error instanceof MissingStoreSecretError) {
-    return stop("store_secret_missing", error.message);
-  }
-  if (isRefused(error)) {
-    return stop(errorCode(error));
-  }
-  if (error instanceof CloudflareApiError) {
-    return new Error(errorCode(error));
-  }
-  if (error instanceof Error && error.name === "Error") {
-    return new Error(error.message);
-  }
-  return new Error(
-    `unexpected: ${error instanceof Error ? error.name : typeof error}`
-  );
-};
 
 /**
  * Records that client `clientId`'s run stopped at `step` with `error` (its
@@ -217,23 +160,6 @@ const recordStop = async (
     });
   }
 };
-
-/**
- * The error's class a step failure's message comes back to the run with
- * (`NonRetryableError: <code>: ...`), left off what's recorded.
- */
-const errorNamePrefix = /^\w*Error: /u;
-
-/** `task` as a step runs it, its failures as `asStepError` makes them. */
-const guarded =
-  <T>(task: () => Promise<T>) =>
-  async (): Promise<T> => {
-    try {
-      return await task();
-    } catch (error) {
-      throw asStepError(error);
-    }
-  };
 
 /**
  * The Grasp Worker script in account `accountId` that makes it someone
@@ -455,9 +381,9 @@ export class ProvisionClient extends WorkflowEntrypoint<Env, ProvisionParams> {
     const { payload: params } = event;
     const db = consoleDatabase(this.env.DB);
 
-    // The step running now, so a run that stops, whatever stops it (a
+    // The step running now, so a run that fails, whatever fails it (a
     // failure no retry fixes, retries used up, the pause timing out),
-    // records where.
+    // records where. The engine pausing or ending it isn't a failure.
     let current = "account";
     try {
       const account = await step.do(
@@ -498,7 +424,11 @@ export class ProvisionClient extends WorkflowEntrypoint<Env, ProvisionParams> {
         deployStep,
         deployStepConfig,
         guarded(async () => {
-          const context = await deployContext(this.env);
+          // As the client's runner: it stops if another takes the client.
+          const context = {
+            ...(await deployContext(this.env)),
+            runner: { clientId: params.clientId, runId: event.instanceId },
+          };
           const id = await deployToRun(context.db, params);
           await runDeploy(context, id);
           return id;
@@ -515,16 +445,14 @@ export class ProvisionClient extends WorkflowEntrypoint<Env, ProvisionParams> {
       );
       return { accountId: account.accountId, deployId };
     } catch (error) {
+      // Paused, the run carries on where it was once resumed; terminated,
+      // it's gone, and the page says so (src/provision/queries.ts).
+      if (isEngineAbort(error)) {
+        throw error;
+      }
       const failed = current;
       await step.do("record stop", quickStep, async () => {
-        await recordStop(
-          db,
-          params.clientId,
-          failed,
-          error instanceof Error
-            ? error.message.replace(errorNamePrefix, "")
-            : "unexpected"
-        );
+        await recordStop(db, params.clientId, failed, stopReason(error));
       });
       throw error;
     }

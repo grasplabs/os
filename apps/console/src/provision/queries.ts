@@ -6,8 +6,8 @@ import { consoleDatabase } from "../db/act.ts";
 import { auditEvents, clients } from "../db/schema.ts";
 import { clientDomain } from "../deploy/context.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
-import { currentRun, isReplaceable } from "./runs.ts";
-import type { RunStatus } from "./runs.ts";
+import { currentRun, isReplaceable } from "../runners.ts";
+import type { RunStatus } from "../runners.ts";
 import { workersPaidConfirmedAt } from "./workflow.ts";
 
 /** A client as the list shows it. */
@@ -73,7 +73,7 @@ export interface ProvisioningView {
     error: string | null;
   } | null;
   /**
-   * Its current run's status (src/provision/runs.ts): Workflows', or
+   * Its current run's status (src/runners.ts): Workflows', or
    * `starting`, or `gone`; null when it has none.
    */
   run: RunStatus | null;

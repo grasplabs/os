@@ -157,7 +157,7 @@ const isDatabase = (value: unknown): value is D1Database =>
   "batch" in value;
 
 /** The real D1 databases the fake keeps its databases in (vite.test.config.ts). */
-const clientD1Count = 4;
+const clientD1Count = 8;
 
 /** The real D1 database number `slot`. */
 const clientD1 = (slot: number): D1Database => {

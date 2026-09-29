@@ -19,11 +19,19 @@
  * refused (`deploy_superseded`), so a stale deploy can't put an older
  * release or older secrets back live.
  *
- * A deploy expects to be its client's only runner: provisioning claims
- * one run per client in D1 (src/provision/runs.ts). Databases and buckets are unique
- * by name, so two runs at once couldn't make one twice, but a D1
- * migration could be applied twice, since reading what a database has
- * applied and applying the rest aren't one step.
+ * `runDeploy` runs every step at once. A rollout runs the same steps in
+ * phases instead (`prepareDeploy` to `finishDeploy`), each a Workflow
+ * step of its own, so it can hold a Worker's traffic split between its
+ * previous version and the new one for a while (src/rollout/workflow.ts).
+ *
+ * A deploy expects to be its client's only runner: provisioning and
+ * rollouts claim the client in D1 first (src/runners.ts), and each
+ * checks it still holds it before and after each change it makes
+ * live, and makes every write to the client's record conditional on it
+ * (`DeployContext.runner`). Databases and buckets are unique by name,
+ * so two runs at once couldn't make one twice, but a D1 migration could
+ * be applied twice, since reading what a database has applied and
+ * applying the rest aren't one step.
  *
  * The Cloudflare API token is in `api` alone: never in a row, an audit
  * event or a log line (threat model R17, CO3). A failure is recorded as a
@@ -32,14 +40,16 @@
 import { deploymentConfigVars } from "@grasp-os/shared/deployment-config";
 import { log } from "@grasp-os/shared/log";
 import type { PlatformChange } from "@grasp-os/shared/platform-change";
-import type { ReleaseManifest } from "@grasp-os/shared/release";
+import type { ReleaseManifest, WorkerEntry } from "@grasp-os/shared/release";
 import { deriveRouterSecret, newClientIdSchema } from "@grasp-os/shared/router";
 import { and, desc, eq, gt, inArray, isNull, ne, or, sql } from "drizzle-orm";
+import type { SQL } from "drizzle-orm";
 import { z } from "zod";
 
 import { CloudflareApiError } from "../cloudflare/api.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
-import { act, actIfChanged } from "../db/act.ts";
+import { deployVersions, liveVersion } from "../cloudflare/workers.ts";
+import { act, actIfChanged, audit } from "../db/act.ts";
 import type { Actor, ConsoleDatabase } from "../db/act.ts";
 import {
   clientDeploys,
@@ -48,6 +58,8 @@ import {
   settings,
 } from "../db/schema.ts";
 import type { ReleaseStore } from "../releases/import.ts";
+import { holdsClient, stillHolds } from "../runners.ts";
+import type { HeldClient } from "../runners.ts";
 import { DeployError } from "./errors.ts";
 import { migrateDatabases } from "./migrations.ts";
 import { importedManifest } from "./release.ts";
@@ -79,6 +91,14 @@ export interface DeployContext {
   secrets: DeploySecrets;
   /** The time now: `new Date()` unless a test sets it. */
   now?: () => Date;
+  /**
+   * The runner the deploy runs as (src/runners.ts): checked to still hold
+   * the client right before and after each change that goes live
+   * (`assertLatest`, `runner_replaced` otherwise), and every write to the
+   * client's record is conditional on it in the same statement. Without
+   * one (tests of the deploy alone), neither is checked.
+   */
+  runner?: HeldClient;
   router: {
     /** The router's hostname map. */
     hosts: RouterHosts;
@@ -179,7 +199,6 @@ const deployOf = async (db: ConsoleDatabase, id: string) => {
       clientId: clientDeploys.clientId,
       releaseId: clientDeploys.releaseId,
       status: clientDeploys.status,
-      versions: clientDeploys.versions,
       startedBy: clientDeploys.startedBy,
       createdAt: clientDeploys.createdAt,
       accountId: clients.accountId,
@@ -330,26 +349,24 @@ const coreVars = async (
   };
 };
 
-/** The versions `deploy` uploaded before, with their fingerprints. */
-const recordedVersions = (deploy: Deploy): Recorded => {
-  const recorded = recordedSchema.safeParse(
-    JSON.parse(deploy.versions ?? "null")
-  );
-  return recorded.success ? recorded.data.byApp : {};
-};
+/** The deploy's runner lost the client: it stops. */
+const runnerReplaced = ({ clientId, runId }: HeldClient): DeployError =>
+  new DeployError("runner_replaced", `${runId} no longer holds ${clientId}`);
 
 /**
  * Throws `deploy_superseded` unless deploy `id` is still its client's
- * latest and not superseded: checked right before each thing that goes
- * live, so a deploy superseded while it runs makes nothing more live. (A
- * deploy's single runner is still the precondition: this closes the
- * window, not the race.)
+ * latest and not superseded, and `runner_replaced` unless its runner
+ * still holds the client: checked right before and after each thing
+ * that goes live, so a deploy superseded or taken over while it runs
+ * makes nothing more live. (A deploy's single runner is still the
+ * precondition: this closes the window, not the race.)
  */
 const assertLatest = async (
-  db: ConsoleDatabase,
+  context: DeployContext,
   id: string,
   clientId: string
 ): Promise<void> => {
+  const { db, runner } = context;
   const [row] = await db
     .select({ status: clientDeploys.status })
     .from(clientDeploys)
@@ -361,308 +378,43 @@ const assertLatest = async (
   ) {
     throw superseded(id);
   }
+  if (
+    runner !== undefined &&
+    !(await holdsClient(db, runner.clientId, runner.runId))
+  ) {
+    throw runnerReplaced(runner);
+  }
 };
 
 /**
- * Uploads and deploys each of the release's Workers in turn, each live
- * before the next is uploaded. A Worker whose version this deploy already
- * uploaded is deployed, not uploaded again, but only if everything that
- * went into that version is the same now (its fingerprint): secrets,
- * vars, bindings and code.
+ * The condition every write to the client's record carries: that the
+ * deploy's runner still holds it (`stillHolds`); none without a runner.
  */
-const deployWorkers = async (
-  context: DeployContext,
-  id: string,
-  deploy: Deploy,
-  manifest: ReleaseManifest,
-  databases: ReadonlyMap<string, string>
-): Promise<Record<string, string>> => {
-  const { api, db, store, secrets } = context;
-  const { accountId, clientId, releaseId } = deploy;
-  const now = context.now?.() ?? new Date();
-  // Refused before anything is uploaded: a release with another Worker
-  // needs the console to know it first.
-  const order = deployOrder(manifest.workers).map((app) => {
-    const parsed = appSchema.safeParse(app);
-    if (!parsed.success) {
-      throw new DeployError(
-        "unknown_worker",
-        `The console doesn't deploy the Worker ${app}`
-      );
-    }
-    return parsed.data;
-  });
-  const versions = recordedVersions(deploy);
-  const vars = await coreVars(db, deploy);
-  for (const app of order) {
-    const worker = manifest.workers[app];
-    if (worker === undefined) {
-      continue;
-    }
-    // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-    const workerSecretValues = await workerSecrets(
-      app,
-      worker,
-      secrets,
-      {
-        id: clientId,
-        generation: deploy.generation,
-        rotationLiveAt: deploy.rotationLiveAt,
-      },
-      now
-    );
-    const workerVars = app === coreApp ? vars : {};
-    checkBindingNames(worker, workerVars, workerSecretValues);
-    // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-    const fingerprint = await uploadFingerprint(secrets.clientKey, {
-      manifest,
-      worker,
-      databases,
-      vars: workerVars,
-      secrets: workerSecretValues,
-    });
-    const recorded = versions[app];
-    let versionId =
-      recorded?.fingerprint === fingerprint ? recorded.version : undefined;
-    if (versionId === undefined) {
-      // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-      const upload = await workerUpload(
-        store,
-        manifest,
-        worker,
-        databases,
-        workerVars
-      );
-      // A script upload goes live at once.
-      // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-      await assertLatest(db, id, clientId);
-      // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-      versionId = await uploadWorker(
-        api,
-        accountId,
-        worker,
-        upload,
-        workerSecretValues
-      );
-      versions[app] = { version: versionId, fingerprint };
-      // oxlint-disable-next-line no-await-in-loop -- recorded before it's deployed
-      await act(
-        db,
-        "system",
-        [
-          db
-            .update(clientDeploys)
-            .set({
-              versions: JSON.stringify({ byApp: versions }),
-              updatedAt: new Date(),
-            })
-            .where(eq(clientDeploys.id, id)),
-        ],
-        {
-          action: "deploy.version",
-          clientId,
-          target: releaseId,
-          detail: { deploy: id, worker: app, version: versionId },
-        }
-      );
-    }
-    // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-    await assertLatest(db, id, clientId);
-    // oxlint-disable-next-line no-await-in-loop -- live before the next Worker
-    await deployWorker(
-      api,
-      accountId,
-      worker,
-      versionId,
-      `Release ${releaseId} (deploy ${id})`
-    );
-    const liveAt = new Date();
-    // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-    await assertLatest(db, id, clientId);
-    // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
-    await act(
-      db,
-      "system",
-      [
-        db
-          .insert(clientWorkers)
-          .values({
-            clientId,
-            worker: app,
-            scriptName: worker.name,
-            releaseId,
-            versionId,
-            deployedAt: liveAt,
-          })
-          .onConflictDoUpdate({
-            target: [clientWorkers.clientId, clientWorkers.worker],
-            set: {
-              scriptName: worker.name,
-              releaseId,
-              versionId,
-              deployedAt: liveAt,
-            },
-          }),
-      ],
-      {
-        action: "deploy.worker_live",
-        clientId,
-        target: releaseId,
-        detail: { deploy: id, worker: app, version: versionId },
-      }
-    );
-  }
-  return Object.fromEntries(
-    Object.entries(versions).map(([app, { version }]) => [app, version])
-  );
-};
+const whileHolding = (context: DeployContext): SQL | undefined =>
+  context.runner === undefined ? undefined : stillHolds(context.runner);
 
-/** Records the account's workers.dev subdomain on the client, audited when it changes. */
-const recordSubdomain = async (
+/** A Worker the console deploys. */
+export type DeployApp = z.infer<typeof appSchema>;
+
+/** A deploy loaded to run: what it deploys where, and the release's manifest. */
+interface LoadedDeploy {
+  id: string;
+  deploy: Deploy;
+  manifest: ReleaseManifest;
+}
+
+/**
+ * Deploy `id`, loaded to run, or null when it's done already. One that
+ * isn't its client's latest is refused (`deploy_superseded`), and so is
+ * one superseded before, and one whose release isn't imported.
+ */
+const loadDeploy = async (
   db: ConsoleDatabase,
-  clientId: string,
-  subdomain: string
-): Promise<void> => {
-  await actIfChanged(
-    db,
-    "system",
-    db
-      .update(clients)
-      .set({ workersSubdomain: subdomain, updatedAt: new Date() })
-      .where(
-        and(
-          eq(clients.id, clientId),
-          or(
-            isNull(clients.workersSubdomain),
-            ne(clients.workersSubdomain, subdomain)
-          )
-        )
-      ),
-    { action: "client.workers_subdomain", clientId, target: subdomain }
-  );
-};
-
-/**
- * Runs the steps of `deploy` of `manifest`, calling `finished` after each,
- * and `current` as each starts: so a failure is recorded at the step it
- * happened in.
- */
-const runSteps = async (
-  context: DeployContext,
-  id: string,
-  deploy: Deploy,
-  manifest: ReleaseManifest,
-  hooks: {
-    current: (step: DeployStep) => void;
-    finished: (
-      step: DeployStep,
-      detail: Record<string, number>
-    ) => Promise<void>;
-  }
-): Promise<void> => {
-  const { api, db, store, secrets, router } = context;
-  const { accountId, clientId } = deploy;
-  hooks.current("resources");
-  const resources = await ensureResources(api, accountId, manifest);
-  await hooks.finished("resources", {
-    databases: resources.databases.size,
-    buckets: resources.buckets.length,
-  });
-
-  hooks.current("migrations");
-  const applied = await migrateDatabases(
-    api,
-    accountId,
-    resources.databases,
-    manifest,
-    store
-  );
-  await hooks.finished("migrations", {
-    applied: [...applied.values()].reduce((sum, count) => sum + count, 0),
-  });
-
-  hooks.current("workers");
-  const versions = await deployWorkers(
-    context,
-    id,
-    deploy,
-    manifest,
-    resources.databases
-  );
-  await hooks.finished("workers", { workers: Object.keys(versions).length });
-
-  hooks.current("smoke");
-  const core = manifest.workers[coreApp];
-  const coreVersion = versions[coreApp];
-  if (core === undefined || coreVersion === undefined) {
-    throw new DeployError(
-      "unknown_worker",
-      `Release ${deploy.releaseId} has no core Worker`
-    );
-  }
-  const subdomain = await workersSubdomain(api, accountId, clientId);
-  await recordSubdomain(db, clientId, subdomain);
-  const origin = coreOrigin(core.name, subdomain);
-  const attempts = await smokeCheck(
-    origin,
-    await deriveRouterSecret(secrets.routerKey, clientId, deploy.generation),
-    coreVersion,
-    router.smoke
-  );
-  await hooks.finished("smoke", { attempts });
-
-  hooks.current("router");
-  await registerHostname(
-    router.hosts,
-    `${clientId}.${router.domain}`,
-    { clientId, coreUrl: origin, generation: deploy.generation },
-    // The last thing before the write: KV can't make it conditional.
-    async () => {
-      await assertLatest(db, id, clientId);
-    }
-  );
-  // The map now has the new generation, so the router sends the new
-  // secret: a raised generation is live from here, and its previous keys
-  // are kept for a window from now (src/deploy/secrets.ts).
-  const liveAt = context.now?.() ?? new Date();
-  await actIfChanged(
-    db,
-    "system",
-    db
-      .update(clients)
-      .set({ rotationLiveAt: liveAt, updatedAt: liveAt })
-      .where(
-        and(
-          eq(clients.id, clientId),
-          eq(clients.generation, deploy.generation),
-          gt(clients.generation, 1),
-          isNull(clients.rotationLiveAt)
-        )
-      ),
-    {
-      action: "client.rotation_live",
-      clientId,
-      detail: { generation: deploy.generation },
-    }
-  );
-  await hooks.finished("router", { generation: deploy.generation });
-};
-
-/**
- * Runs deploy `id`'s steps, from the first, and marks it done; a deploy
- * already done is left as it is. Run it again to resume one that failed.
- * A deploy that isn't its client's latest is refused
- * (`deploy_superseded`), and so is one superseded before. On a failure it
- * records the step and the error's code, audited, and throws the error.
- */
-export const runDeploy = async (
-  context: DeployContext,
   id: string
-): Promise<void> => {
-  const { db } = context;
+): Promise<LoadedDeploy | null> => {
   const deploy = await deployOf(db, id);
   if (deploy.status === "done") {
-    return;
+    return null;
   }
   const { clientId, releaseId } = deploy;
   if (
@@ -681,39 +433,91 @@ export const runDeploy = async (
       `Release ${releaseId} isn't imported`
     );
   }
+  return { id, deploy, manifest };
+};
 
-  /** Records that `step` finished, with what it did. */
-  const finished = async (
-    step: DeployStep,
-    detail: Record<string, number>
-  ): Promise<void> => {
-    const recorded = await actIfChanged(
-      db,
-      "system",
-      db
-        .update(clientDeploys)
-        .set({ step, status: "running", error: null, updatedAt: new Date() })
-        .where(and(eq(clientDeploys.id, id), notSuperseded)),
-      {
-        action: `deploy.${step}`,
-        clientId,
-        target: releaseId,
-        detail: { deploy: id, ...detail },
-      }
-    );
-    if (!recorded) {
-      throw superseded(id);
+/**
+ * The release's Workers in the order they go live (`deployOrder`),
+ * refused (`unknown_worker`) when it has one the console doesn't know,
+ * before anything is uploaded.
+ */
+const appsOf = (manifest: ReleaseManifest): DeployApp[] =>
+  deployOrder(manifest.workers).map((app) => {
+    const parsed = appSchema.safeParse(app);
+    if (!parsed.success) {
+      throw new DeployError(
+        "unknown_worker",
+        `The console doesn't deploy the Worker ${app}`
+      );
     }
-  };
+    return parsed.data;
+  });
 
-  let step: DeployStep = "resources";
+/** The release's Worker `app`, which `appsOf` listed. */
+const workerOf = (manifest: ReleaseManifest, app: DeployApp): WorkerEntry => {
+  const worker = manifest.workers[app];
+  if (worker === undefined) {
+    throw new DeployError("unknown_worker", `The release has no ${app} Worker`);
+  }
+  return worker;
+};
+
+/**
+ * Records that `step` of `loaded` finished, with what it did, audited;
+ * throws `deploy_superseded` when the deploy was superseded meanwhile.
+ */
+const recordStep = async (
+  db: ConsoleDatabase,
+  { id, deploy }: LoadedDeploy,
+  step: DeployStep,
+  detail: Record<string, number>
+): Promise<void> => {
+  const recorded = await actIfChanged(
+    db,
+    "system",
+    db
+      .update(clientDeploys)
+      .set({ step, status: "running", error: null, updatedAt: new Date() })
+      .where(and(eq(clientDeploys.id, id), notSuperseded)),
+    {
+      action: `deploy.${step}`,
+      clientId: deploy.clientId,
+      target: deploy.releaseId,
+      detail: { deploy: id, ...detail },
+    }
+  );
+  if (!recorded) {
+    throw superseded(id);
+  }
+};
+
+/**
+ * Runs `task` on deploy `id`, from `first`, and returns what it returns
+ * with the deploy it loaded; null when the deploy is done already. `task`
+ * says which step it's in as it goes (`current`), so a failure is
+ * recorded, audited, at the step it happened in, and thrown.
+ */
+const runPhase = async <T>(
+  context: DeployContext,
+  id: string,
+  first: DeployStep,
+  task: (
+    loaded: LoadedDeploy,
+    current: (step: DeployStep) => void
+  ) => Promise<T>
+): Promise<{ loaded: LoadedDeploy; result: T } | null> => {
+  const { db } = context;
+  const loaded = await loadDeploy(db, id);
+  if (loaded === null) {
+    return null;
+  }
+  const { clientId, releaseId } = loaded.deploy;
+  let step = first;
   try {
-    await runSteps(context, id, deploy, manifest, {
-      current: (next) => {
-        step = next;
-      },
-      finished,
+    const result = await task(loaded, (next) => {
+      step = next;
     });
+    return { loaded, result };
   } catch (error) {
     const code = errorCode(error);
     log.error("deploy.failed", {
@@ -726,7 +530,306 @@ export const runDeploy = async (
     await recordFailure(db, { id, clientId, releaseId, step, code });
     throw error;
   }
+};
 
+/**
+ * The first two steps: the account's resources, then the release's
+ * database migrations. Returns its databases' ids, by name.
+ */
+const prepare = async (
+  context: DeployContext,
+  loaded: LoadedDeploy,
+  current: (step: DeployStep) => void
+): Promise<ReadonlyMap<string, string>> => {
+  const { api, db, store } = context;
+  const { deploy, manifest } = loaded;
+  current("resources");
+  const resources = await ensureResources(api, deploy.accountId, manifest);
+  await recordStep(db, loaded, "resources", {
+    databases: resources.databases.size,
+    buckets: resources.buckets.length,
+  });
+
+  current("migrations");
+  // Migrations change the client's databases: only while this deploy is
+  // its latest and its runner holds it.
+  await assertLatest(context, loaded.id, deploy.clientId);
+  const applied = await migrateDatabases(
+    api,
+    deploy.accountId,
+    resources.databases,
+    manifest,
+    store
+  );
+  await recordStep(db, loaded, "migrations", {
+    applied: [...applied.values()].reduce((sum, count) => sum + count, 0),
+  });
+  return resources.databases;
+};
+
+/**
+ * The versions deploy `id` recorded, read afresh: an upload records each
+ * as it's made, so a later Worker's upload keeps an earlier one's.
+ */
+const recordedNow = async (
+  db: ConsoleDatabase,
+  id: string
+): Promise<Recorded> => {
+  const [row] = await db
+    .select({ versions: clientDeploys.versions })
+    .from(clientDeploys)
+    .where(eq(clientDeploys.id, id));
+  const recorded = recordedSchema.safeParse(
+    JSON.parse(row?.versions ?? "null")
+  );
+  return recorded.success ? recorded.data.byApp : {};
+};
+
+/**
+ * Uploads `app`'s Worker as a new version with its secrets, and returns
+ * the version's id. A Worker whose version this deploy already uploaded
+ * isn't uploaded again, but only if everything that went into that
+ * version is the same now (its fingerprint): secrets, vars, bindings and
+ * code. A script upload (a Worker's first, or one with Durable Object
+ * migrations) is live at once.
+ */
+const uploadApp = async (
+  context: DeployContext,
+  loaded: LoadedDeploy,
+  app: DeployApp,
+  databases: ReadonlyMap<string, string>
+): Promise<string> => {
+  const { api, db, store, secrets } = context;
+  const { id, deploy, manifest } = loaded;
+  const { accountId, clientId, releaseId } = deploy;
+  const worker = workerOf(manifest, app);
+  // Read for every Worker, so a bad setting stops the deploy before the
+  // first one is uploaded (`unknown_setting`).
+  const vars = await coreVars(db, deploy);
+  const workerSecretValues = await workerSecrets(
+    app,
+    worker,
+    secrets,
+    {
+      id: clientId,
+      generation: deploy.generation,
+      rotationLiveAt: deploy.rotationLiveAt,
+    },
+    context.now?.() ?? new Date()
+  );
+  const workerVars = app === coreApp ? vars : {};
+  checkBindingNames(worker, workerVars, workerSecretValues);
+  const fingerprint = await uploadFingerprint(secrets.clientKey, {
+    manifest,
+    worker,
+    databases,
+    vars: workerVars,
+    secrets: workerSecretValues,
+  });
+  const versions = await recordedNow(db, id);
+  const recorded = versions[app];
+  if (recorded?.fingerprint === fingerprint) {
+    return recorded.version;
+  }
+  const upload = await workerUpload(
+    store,
+    manifest,
+    worker,
+    databases,
+    workerVars
+  );
+  // A script upload goes live at once.
+  await assertLatest(context, id, clientId);
+  const versionId = await uploadWorker(
+    api,
+    accountId,
+    worker,
+    upload,
+    workerSecretValues
+  );
+  versions[app] = { version: versionId, fingerprint };
+  await act(
+    db,
+    "system",
+    [
+      db
+        .update(clientDeploys)
+        .set({
+          versions: JSON.stringify({ byApp: versions }),
+          updatedAt: new Date(),
+        })
+        .where(eq(clientDeploys.id, id)),
+    ],
+    {
+      action: "deploy.version",
+      clientId,
+      target: releaseId,
+      detail: { deploy: id, worker: app, version: versionId },
+    }
+  );
+  return versionId;
+};
+
+/**
+ * Sends all of `app`'s traffic to `versionId`, with what goes with it
+ * (`deployWorker`), and records it as what the client runs.
+ */
+const goLive = async (
+  context: DeployContext,
+  loaded: LoadedDeploy,
+  app: DeployApp,
+  versionId: string
+): Promise<void> => {
+  const { api, db } = context;
+  const { id, deploy, manifest } = loaded;
+  const { accountId, clientId, releaseId } = deploy;
+  const worker = workerOf(manifest, app);
+  await assertLatest(context, id, clientId);
+  await deployWorker(
+    api,
+    accountId,
+    worker,
+    versionId,
+    `Release ${releaseId} (deploy ${id})`
+  );
+  const liveAt = new Date();
+  await assertLatest(context, id, clientId);
+  // Only while the runner holds the client, in the same statement: a
+  // rollback that took it over keeps its own record.
+  const recorded = await actIfChanged(
+    db,
+    "system",
+    db
+      .insert(clientWorkers)
+      .select(
+        sql`SELECT ${clientId}, ${app}, ${worker.name}, ${releaseId}, ${versionId}, ${liveAt.getTime()} WHERE ${whileHolding(context) ?? sql`1 = 1`}`
+      )
+      .onConflictDoUpdate({
+        target: [clientWorkers.clientId, clientWorkers.worker],
+        set: {
+          scriptName: worker.name,
+          releaseId,
+          versionId,
+          deployedAt: liveAt,
+        },
+      }),
+    {
+      action: "deploy.worker_live",
+      clientId,
+      target: releaseId,
+      detail: { deploy: id, worker: app, version: versionId },
+    }
+  );
+  if (!recorded && context.runner !== undefined) {
+    throw runnerReplaced(context.runner);
+  }
+};
+
+/** Records the account's workers.dev subdomain on the client, audited when it changes. */
+const recordSubdomain = async (
+  context: DeployContext,
+  clientId: string,
+  subdomain: string
+): Promise<void> => {
+  const { db } = context;
+  await actIfChanged(
+    db,
+    "system",
+    db
+      .update(clients)
+      .set({ workersSubdomain: subdomain, updatedAt: new Date() })
+      .where(
+        and(
+          eq(clients.id, clientId),
+          or(
+            isNull(clients.workersSubdomain),
+            ne(clients.workersSubdomain, subdomain)
+          ),
+          whileHolding(context)
+        )
+      ),
+    { action: "client.workers_subdomain", clientId, target: subdomain }
+  );
+};
+
+/**
+ * The last steps, once every Worker is live: the smoke check that core
+ * answers as the version this deploy uploaded, then the client's hostname
+ * in the router's map.
+ */
+const finish = async (
+  context: DeployContext,
+  loaded: LoadedDeploy,
+  current: (step: DeployStep) => void
+): Promise<void> => {
+  const { api, db, secrets, router } = context;
+  const { id, deploy, manifest } = loaded;
+  const { accountId, clientId } = deploy;
+  current("smoke");
+  await assertLatest(context, id, clientId);
+  const core = manifest.workers[coreApp];
+  const recorded = await recordedNow(db, id);
+  const coreVersion = recorded[coreApp]?.version;
+  if (core === undefined || coreVersion === undefined) {
+    throw new DeployError(
+      "unknown_worker",
+      `Release ${deploy.releaseId} has no core Worker`
+    );
+  }
+  const subdomain = await workersSubdomain(api, accountId, clientId);
+  await recordSubdomain(context, clientId, subdomain);
+  const origin = coreOrigin(core.name, subdomain);
+  const attempts = await smokeCheck(
+    origin,
+    await deriveRouterSecret(secrets.routerKey, clientId, deploy.generation),
+    coreVersion,
+    router.smoke
+  );
+  await recordStep(db, loaded, "smoke", { attempts });
+
+  current("router");
+  await registerHostname(
+    router.hosts,
+    `${clientId}.${router.domain}`,
+    { clientId, coreUrl: origin, generation: deploy.generation },
+    // The last thing before the write: KV can't make it conditional.
+    async () => {
+      await assertLatest(context, id, clientId);
+    }
+  );
+  // The map now has the new generation, so the router sends the new
+  // secret: a raised generation is live from here, and its previous keys
+  // are kept for a window from now (src/deploy/secrets.ts).
+  const liveAt = context.now?.() ?? new Date();
+  await actIfChanged(
+    db,
+    "system",
+    db
+      .update(clients)
+      .set({ rotationLiveAt: liveAt, updatedAt: liveAt })
+      .where(
+        and(
+          eq(clients.id, clientId),
+          eq(clients.generation, deploy.generation),
+          gt(clients.generation, 1),
+          isNull(clients.rotationLiveAt),
+          whileHolding(context)
+        )
+      ),
+    {
+      action: "client.rotation_live",
+      clientId,
+      detail: { generation: deploy.generation },
+    }
+  );
+  await recordStep(db, loaded, "router", { generation: deploy.generation });
+};
+
+/** Marks `loaded` done, audited; throws `deploy_superseded` if it was superseded meanwhile. */
+const markDone = async (
+  db: ConsoleDatabase,
+  { id, deploy }: LoadedDeploy
+): Promise<void> => {
   const done = await actIfChanged(
     db,
     "system",
@@ -736,12 +839,204 @@ export const runDeploy = async (
       .where(and(eq(clientDeploys.id, id), notSuperseded)),
     {
       action: "deploy.done",
-      clientId,
-      target: releaseId,
+      clientId: deploy.clientId,
+      target: deploy.releaseId,
       detail: { deploy: id },
     }
   );
   if (!done) {
     throw superseded(id);
+  }
+};
+
+/**
+ * Runs deploy `id`'s steps, from the first, and marks it done; a deploy
+ * already done is left as it is. Run it again to resume one that failed.
+ * Each Worker is uploaded and sent all traffic before the next is
+ * uploaded. A deploy that isn't its client's latest is refused
+ * (`deploy_superseded`), and so is one superseded before. On a failure it
+ * records the step and the error's code, audited, and throws the error.
+ */
+export const runDeploy = async (
+  context: DeployContext,
+  id: string
+): Promise<void> => {
+  const ran = await runPhase(
+    context,
+    id,
+    "resources",
+    async (loaded, current) => {
+      const databases = await prepare(context, loaded, current);
+      current("workers");
+      const apps = appsOf(loaded.manifest);
+      for (const app of apps) {
+        // oxlint-disable-next-line no-await-in-loop -- one Worker at a time
+        const versionId = await uploadApp(context, loaded, app, databases);
+        // oxlint-disable-next-line no-await-in-loop -- live before the next Worker
+        await goLive(context, loaded, app, versionId);
+      }
+      await recordStep(context.db, loaded, "workers", { workers: apps.length });
+      await finish(context, loaded, current);
+    }
+  );
+  if (ran !== null) {
+    await markDone(context.db, ran.loaded);
+  }
+};
+
+/*
+ * A gradual deploy, as a rollout runs it (src/rollout/workflow.ts): the
+ * steps of `runDeploy` in phases a Workflow runs as steps of its own, so
+ * it can hold a Worker's traffic split between versions for a while in
+ * between. Each phase finds what an earlier run of it made, as
+ * `runDeploy` does, and records a failure at its step.
+ */
+
+/** What `prepareDeploy` leaves for the next phases: identifiers only. */
+export interface PreparedDeploy {
+  /** The account's databases' ids, by name. */
+  databases: Record<string, string>;
+  /** The release's Workers, in the order they go live. */
+  apps: DeployApp[];
+  /** The secrets generation the new versions carry. */
+  generation: number;
+}
+
+/**
+ * The first phase of a gradual deploy: the account's resources and the
+ * release's migrations. Null when the deploy is done already.
+ */
+export const prepareDeploy = async (
+  context: DeployContext,
+  id: string
+): Promise<PreparedDeploy | null> => {
+  const ran = await runPhase(
+    context,
+    id,
+    "resources",
+    async (loaded, current) => {
+      const databases = await prepare(context, loaded, current);
+      current("workers");
+      return {
+        databases: Object.fromEntries(databases),
+        apps: appsOf(loaded.manifest),
+        generation: loaded.deploy.generation,
+      };
+    }
+  );
+  return ran?.result ?? null;
+};
+
+/** A Worker's version, as `uploadDeployWorker` made or found it. */
+export interface UploadedWorker {
+  version: string;
+  /**
+   * Whether all its traffic goes to it already: a script upload (a
+   * Worker's first, or one with Durable Object migrations) is live at
+   * once, and so is one an earlier run of a later phase deployed.
+   */
+  live: boolean;
+}
+
+/**
+ * Uploads `app`'s Worker with its secrets, unless the deploy uploaded it
+ * already (`uploadApp`). Null when the deploy is done already.
+ */
+export const uploadDeployWorker = async (
+  context: DeployContext,
+  id: string,
+  app: DeployApp,
+  databases: Record<string, string>
+): Promise<UploadedWorker | null> => {
+  const ran = await runPhase(context, id, "workers", async (loaded) => {
+    const version = await uploadApp(
+      context,
+      loaded,
+      app,
+      new Map(Object.entries(databases))
+    );
+    const live = await liveVersion(
+      context.api,
+      loaded.deploy.accountId,
+      workerOf(loaded.manifest, app).name
+    );
+    return { version, live: live === version };
+  });
+  return ran?.result ?? null;
+};
+
+/**
+ * Sends `percent` of `app`'s traffic to `version` and the rest to
+ * `previous`, the version it ran before: a gradual deployment's step,
+ * audited as `deploy.traffic`. The versions go as uploaded, with their
+ * own secrets.
+ */
+export const shiftDeployTraffic = async (
+  context: DeployContext,
+  id: string,
+  app: DeployApp,
+  traffic: { version: string; previous: string; percent: number }
+): Promise<void> => {
+  await runPhase(context, id, "workers", async (loaded) => {
+    const { api, db } = context;
+    const { accountId, clientId, releaseId } = loaded.deploy;
+    const { version, previous, percent } = traffic;
+    await assertLatest(context, id, clientId);
+    await deployVersions(
+      api,
+      accountId,
+      workerOf(loaded.manifest, app).name,
+      [
+        { version_id: version, percentage: percent },
+        { version_id: previous, percentage: 100 - percent },
+      ],
+      { message: `Release ${releaseId} (deploy ${id}) at ${percent}%` }
+    );
+    await assertLatest(context, id, clientId);
+    await audit(db, "system", {
+      action: "deploy.traffic",
+      clientId,
+      target: releaseId,
+      detail: { deploy: id, worker: app, version, percent },
+    });
+  });
+};
+
+/**
+ * Sends all of `app`'s traffic to `version`, with what goes with it, and
+ * records it as what the client runs (`goLive`).
+ */
+export const makeDeployWorkerLive = async (
+  context: DeployContext,
+  id: string,
+  app: DeployApp,
+  version: string
+): Promise<void> => {
+  await runPhase(context, id, "workers", async (loaded) => {
+    await goLive(context, loaded, app, version);
+  });
+};
+
+/**
+ * The last phase, once every Worker is live: the smoke check and the
+ * router (`finish`), then the deploy marked done.
+ */
+export const finishDeploy = async (
+  context: DeployContext,
+  id: string
+): Promise<void> => {
+  const ran = await runPhase(
+    context,
+    id,
+    "workers",
+    async (loaded, current) => {
+      await recordStep(context.db, loaded, "workers", {
+        workers: appsOf(loaded.manifest).length,
+      });
+      await finish(context, loaded, current);
+    }
+  );
+  if (ran !== null) {
+    await markDone(context.db, ran.loaded);
   }
 };

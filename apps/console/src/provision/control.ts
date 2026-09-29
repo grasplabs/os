@@ -4,7 +4,7 @@
  * stopped or is gone.
  *
  * Starting and resuming claim the client's next run in D1, audited in the
- * same batch (src/provision/runs.ts): of two staff members acting at once,
+ * same batch (src/runners.ts): of two staff members acting at once,
  * one wins and creates a run, the other is refused (`already_running`).
  */
 import { releaseIdSchema } from "@grasp-os/shared/release";
@@ -20,7 +20,7 @@ import type { ConsoleDatabase } from "../db/act.ts";
 import { auditEvents, clients, releases } from "../db/schema.ts";
 import { clientDomain, deployerApi } from "../deploy/context.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
-import { claimRun, currentRun, isReplaceable } from "./runs.ts";
+import { claimRun, currentRun, isReplaceable } from "../runners.ts";
 import { scriptInTheWay, workersPaidEvent } from "./workflow.ts";
 import type { ProvisionParams } from "./workflow.ts";
 
