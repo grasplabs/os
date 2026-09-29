@@ -60,6 +60,8 @@ import {
 import type { ReleaseStore } from "../releases/import.ts";
 import { holdsClient, stillHolds } from "../runners.ts";
 import type { HeldClient } from "../runners.ts";
+import { derivedCoreConfig } from "./core-config.ts";
+import type { SignInApps } from "./core-config.ts";
 import { DeployError } from "./errors.ts";
 import { migrateDatabases } from "./migrations.ts";
 import { importedManifest } from "./release.ts";
@@ -89,6 +91,11 @@ export interface DeployContext {
   store: ReleaseStore;
   /** The secrets to give the Workers, from Secrets Store. */
   secrets: DeploySecrets;
+  /**
+   * Grasp's OAuth apps' client ids, for core's `SIGN_IN`
+   * (src/deploy/core-config.ts); none unless given.
+   */
+  signInApps?: SignInApps;
   /** The time now: `new Date()` unless a test sets it. */
   now?: () => Date;
   /**
@@ -204,6 +211,7 @@ const deployOf = async (db: ConsoleDatabase, id: string) => {
       accountId: clients.accountId,
       generation: clients.generation,
       rotationLiveAt: clients.rotationLiveAt,
+      signIn: clients.signIn,
     })
     .from(clientDeploys)
     .innerJoin(clients, eq(clients.id, clientDeploys.clientId))
@@ -315,14 +323,18 @@ const coreApp = "core";
 const configVarNames: ReadonlySet<string> = new Set(deploymentConfigVars);
 
 /**
- * Core's vars: the client's settings, each a JSON var named by its
- * deployment config var (and nothing else: `unknown_setting`), and
- * `PLATFORM_CHANGE`, which core records as `platform.updated`.
+ * Core's vars: what every deploy derives for the client, its model
+ * gateway and sign-in (`derivedCoreConfig`), each replaced by the
+ * client's setting of the same name, if it has one; its other settings,
+ * each a JSON var named by its deployment config var (and nothing else:
+ * `unknown_setting`); and `PLATFORM_CHANGE`, which core records as
+ * `platform.updated`.
  */
 const coreVars = async (
-  db: ConsoleDatabase,
+  context: DeployContext,
   deploy: Deploy
 ): Promise<Record<string, unknown>> => {
+  const { db } = context;
   const rows = await db
     .select({ key: settings.key, value: settings.value })
     .from(settings)
@@ -342,6 +354,12 @@ const coreVars = async (
     at: deploy.createdAt.toISOString(),
   };
   return {
+    ...derivedCoreConfig({
+      clientId: deploy.clientId,
+      signIn: deploy.signIn,
+      domain: context.router.domain,
+      apps: context.signInApps ?? {},
+    }),
     ...Object.fromEntries(
       rows.map(({ key, value }): [string, unknown] => [key, JSON.parse(value)])
     ),
@@ -605,7 +623,7 @@ const uploadApp = async (
   const worker = workerOf(manifest, app);
   // Read for every Worker, so a bad setting stops the deploy before the
   // first one is uploaded (`unknown_setting`).
-  const vars = await coreVars(db, deploy);
+  const vars = await coreVars(context, deploy);
   const workerSecretValues = await workerSecrets(
     app,
     worker,

@@ -14,6 +14,14 @@ interface __BaseEnv_Env {
    * (src/deploy/context.ts). No client is provisioned or deployed without it.
    */
   CLIENT_DOMAIN?: string;
+  /**
+   * Grasp's multi-tenant Entra and Google OAuth apps' client ids, which
+   * every client's core signs people in with (src/deploy/core-config.ts):
+   * not secrets. A client whose sign-in names an IdP without one isn't
+   * deployed.
+   */
+  ENTRA_CLIENT_ID?: string;
+  GOOGLE_CLIENT_ID?: string;
   /** Local dev only, from .dev.vars: who requests to this machine come from (src/access.ts). */
   DEV_ACCESS_EMAIL?: string;
 }

@@ -34,6 +34,31 @@ const textOf = (form: FormData, name: string): string => {
   return typeof value === "string" ? value.trim() : "";
 };
 
+const listSeparator = /[\s,]+/u;
+
+/** The form's list field `name`: its entries, split on commas and spaces. */
+const listOf = (form: FormData, name: string): string[] =>
+  textOf(form, name)
+    .split(listSeparator)
+    .filter((entry) => entry !== "");
+
+/** The client's sign-in, as the form says it, or why it can't be one. */
+const signInOf = (form: FormData) => {
+  const entraTenantId = textOf(form, "entraTenantId");
+  const googleHostedDomain = textOf(form, "googleHostedDomain");
+  if (entraTenantId === "" && googleHostedDomain === "") {
+    throw new InvalidFieldError(
+      "Give the client's Entra tenant id, its Google Workspace domain, or both."
+    );
+  }
+  return {
+    domains: listOf(form, "domains"),
+    admins: listOf(form, "admins"),
+    ...(entraTenantId === "" ? {} : { entraTenantId }),
+    ...(googleHostedDomain === "" ? {} : { googleHostedDomain }),
+  };
+};
+
 const NewClient = () => {
   const { releases } = Route.useLoaderData();
   const navigate = useNavigate();
@@ -53,6 +78,7 @@ const NewClient = () => {
           name: textOf(form, "name"),
           releaseId: textOf(form, "releaseId"),
           ring: Number(textOf(form, "ring")),
+          signIn: signInOf(form),
           ...(accountId === "" ? {} : { accountId }),
         },
       });
@@ -119,6 +145,30 @@ const NewClient = () => {
               required
               defaultValue={1}
             />
+          </Field>
+          <Field
+            label="Entra tenant id"
+            hint="The client's Microsoft Entra tenant, if its people sign in with Microsoft."
+          >
+            <Input name="entraTenantId" />
+          </Field>
+          <Field
+            label="Google Workspace domain"
+            hint="The client's Workspace primary domain, if its people sign in with Google."
+          >
+            <Input name="googleHostedDomain" />
+          </Field>
+          <Field
+            label="Email domains"
+            hint="The domains its people sign in with, exactly, separated by commas."
+          >
+            <Input name="domains" required />
+          </Field>
+          <Field
+            label="Admins"
+            hint="Emails that get the admin role when they first sign in, separated by commas."
+          >
+            <Input name="admins" />
           </Field>
           <div className="flex items-center gap-4">
             <Button type="submit" disabled={busy}>

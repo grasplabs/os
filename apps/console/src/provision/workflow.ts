@@ -2,7 +2,7 @@
  * Onboarding a client, as a Cloudflare Workflow: its account (created, or
  * adopted by id), its client record, a pause while staff upgrade the
  * account to Workers Paid, then a deploy of the chosen release (its EU
- * resources, migrations, Workers with their secrets, smoke check and
+ * resources and AI Gateway, migrations, Workers with their secrets, smoke check and
  * hostname in the router's map, src/deploy/deploy.ts), and the client
  * marked active.
  *
@@ -51,6 +51,7 @@ import {
   MissingStoreSecretError,
   tenantAdminApi,
 } from "../deploy/context.ts";
+import type { ClientSignIn } from "../deploy/core-config.ts";
 import {
   errorCode,
   latestDeployOf,
@@ -76,6 +77,11 @@ export interface ProvisionParams {
   /** The release to deploy first. */
   releaseId: string;
   ring: number;
+  /**
+   * How its people sign in, recorded on the client; left out when resuming
+   * a client already recorded.
+   */
+  signIn?: ClientSignIn;
   /** The staff member who started it. */
   startedBy: Staff;
 }
@@ -295,6 +301,8 @@ const recordClient = async (
         name: params.name,
         accountId,
         ring: params.ring,
+        signIn:
+          params.signIn === undefined ? null : JSON.stringify(params.signIn),
         createdBy: params.startedBy.email,
         createdAt: now,
         updatedAt: now,

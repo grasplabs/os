@@ -7,11 +7,13 @@
 import type { ReleaseManifest } from "@grasp-os/shared/release";
 
 import {
+  ensureAiGateway,
   ensureD1Database,
   ensureR2Bucket,
   OutsideEuError,
 } from "../cloudflare/accounts.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
+import { clientGatewayId } from "./core-config.ts";
 import { DeployError } from "./errors.ts";
 import type { DeployErrorCode } from "./errors.ts";
 
@@ -74,7 +76,10 @@ const inEu = async <T>(
 
 /**
  * Ensures every D1 database and R2 bucket the release binds exists in the
- * account, in the EU, one at a time. Throws a `DeployError` for one that
+ * account, in the EU, one at a time, and the client's AI Gateway, which
+ * core's `MODEL_GATEWAY` names (src/deploy/core-config.ts): so no deploy
+ * points core at a gateway the account doesn't have, however the client
+ * came to be. Throws a `DeployError` for a database or bucket that
  * exists, or was made, elsewhere.
  */
 export const ensureResources = async (
@@ -99,5 +104,6 @@ export const ensureResources = async (
       async () => await ensureR2Bucket(api, accountId, name)
     );
   }
+  await ensureAiGateway(api, accountId, clientGatewayId);
   return { databases, buckets };
 };

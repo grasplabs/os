@@ -77,6 +77,11 @@ const activeClient = async (
         accountId: account.id,
         ring,
         status: "active",
+        signIn: JSON.stringify({
+          domains: ["acme.test"],
+          admins: [],
+          googleHostedDomain: "acme.test",
+        }),
         createdAt: now,
         updatedAt: now,
       }),
@@ -477,6 +482,26 @@ describe("rolling a release out", () => {
       ],
       again: "not_waiting",
     });
+    // The rollout keeps core's model gateway and sign-in.
+    const acmeCore = acmeWorkers.find(({ worker }) => worker === "core");
+    const vars = Object.fromEntries(
+      z
+        .array(z.object({ name: z.string(), json: z.unknown().optional() }))
+        .parse(
+          acme.account.scripts
+            .get(acmeCore?.scriptName ?? "")
+            ?.versions.find(({ id }) => id === acmeCore?.versionId)?.metadata
+            .bindings ?? []
+        )
+        .map(({ name, json }): [string, unknown] => [name, json])
+    );
+    expect({
+      gateway: vars.MODEL_GATEWAY,
+      origin: z.object({ origin: z.string() }).parse(vars.SIGN_IN).origin,
+    }).toMatchObject({
+      gateway: { gateway: "grasp-os" },
+      origin: `https://${acme.clientId}.grasp.test`,
+    });
   });
 
   it("lets a new rollout start once the waiting one's run was ended outside the console, marking that one failed", async () => {
@@ -553,6 +578,30 @@ describe("rolling a release out", () => {
       acme: [release, release],
       approvals: ["rollout.approve", "rollout.approve_resend"],
     });
+  });
+
+  it("makes the AI Gateway core's config names in a client's account that has none, once", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const internal = await activeClient(0, before);
+    // Deployed some other way than the console's deploys: no gateway.
+    internal.account.gateways.splice(0);
+    const release = await importedRelease("feat(core): needs its gateway");
+    const creates = () =>
+      cloudflare.calls.filter(
+        ({ method, path }) =>
+          method === "POST" &&
+          path === `/accounts/${internal.account.id}/ai-gateway/gateways`
+      ).length;
+    const createdBefore = creates();
+    await using run = await followRollouts();
+
+    await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    expect({
+      gateways: internal.account.gateways.map(({ id }) => id),
+      created: creates() - createdBefore,
+    }).toStrictEqual({ gateways: ["grasp-os"], created: 1 });
   });
 
   it("sends each Worker all its traffic at once, never split, while a secrets rotation is still to go live", async () => {
@@ -764,6 +813,11 @@ describe("rolling a release out", () => {
       name: "Held",
       releaseId: release,
       ring: 1,
+      signIn: {
+        domains: ["acme.test"],
+        admins: [],
+        googleHostedDomain: "acme.test",
+      },
     });
     const [heldRun] = await provisioning.get();
     await heldRun?.waitForStepResult({ name: "client" });

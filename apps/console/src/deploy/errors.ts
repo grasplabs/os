@@ -25,6 +25,11 @@ export const deployErrorCodes = [
   "unknown_placeholder",
   /** A client setting isn't a deployment config var core reads. */
   "unknown_setting",
+  /**
+   * The client's sign-in can't be made: its record doesn't parse, or it
+   * names an IdP the console has no app id for.
+   */
+  "sign_in_incomplete",
   /** A setting, shared secret or var takes a name something else has. */
   "binding_name_taken",
   /** A shared secret takes a name reserved for a derived one. */

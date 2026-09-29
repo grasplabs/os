@@ -134,6 +134,15 @@ export const modelGatewayConfigSchema = (modelRef: z.ZodType<string>) =>
     models: z.array(modelRef).min(1),
   });
 
+/**
+ * The models a new deployment allows until staff set its `MODEL_GATEWAY`:
+ * Workers AI's, which AI Gateway runs on the client's own account with no
+ * provider key, so a client can call a model on day one.
+ */
+export const defaultGatewayModels = [
+  "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast",
+] as const;
+
 const budgetSchema = z.strictObject({
   /** US dollars a month: a cent at least, and well within an integer. */
   limit: z.number().min(0.01).max(1_000_000_000),
