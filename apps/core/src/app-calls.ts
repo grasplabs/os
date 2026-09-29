@@ -59,7 +59,11 @@ import { isRestricted, restrict } from "./restricted.ts";
 //   caller before its answer does.
 // - Every call is recorded before it runs, on both sides: `app.call` by
 //   the calling App (or run) and `app.called` by the called App, in one
-//   batch; if they can't be stored, nothing is called. A refusal is
+//   batch, once the called App's host has pinned the call to the version
+//   checked and just before the method runs (`ExportCall.onPinned`); if
+//   they can't be stored, nothing is called. One the host refuses before
+//   its method runs (another version current, say) is recorded as
+//   refused instead. A refusal is
 //   recorded as `app.call` with why, a caller the calling App isn't
 //   running a call of too.
 //
@@ -336,13 +340,24 @@ export const callExport = async (
   if (await isRestricted(env, caller.authority, callingContext)) {
     await restrict(env, calledAuthority, calledContext, [`app:${calling}`]);
   }
-  await auditedBatch(env, db, [
-    outboxed(
-      db,
-      callEntry(record, { access, calledVersion: version, outcome: "called" })
-    ),
-    outboxed(db, calledEntry(record, { version, access })),
-  ]);
+  // Both sides' records, once the called App's host has pinned the call
+  // to `version` and before its method runs (`ExportCall.onPinned`): a
+  // call that never gets that far is recorded as refused instead.
+  let recorded = false;
+  const recordCalled = async (): Promise<void> => {
+    await auditedBatch(env, db, [
+      outboxed(
+        db,
+        callEntry(record, {
+          access,
+          calledVersion: version,
+          outcome: "called",
+        })
+      ),
+      outboxed(db, calledEntry(record, { version, access })),
+    ]);
+    recorded = true;
+  };
   // The answer, and an error of the called App's own (its message), may
   // carry what it read restricted: the caller is restricted before either
   // reaches it. Should that fail, so does the call, whatever the called
@@ -372,9 +387,25 @@ export const callExport = async (
         chain: caller.path.chain,
         deadline: caller.path.deadline,
         readOnly: caller.path.readOnly || access === "read",
+        onPinned: recordCalled,
       }
     );
   } catch (error) {
+    // Refused before its method ran: never recorded as called, or found
+    // another version running once it was (`app.conflict`).
+    const code = isExpectedError(error) ? error.code : "internal.unexpected";
+    if (!recorded || code === "app.conflict") {
+      await keepAuditEvent(
+        env,
+        db,
+        callEntry(record, {
+          access,
+          calledVersion: version,
+          outcome: "refused",
+          reason: code,
+        })
+      );
+    }
     await carryRestricted();
     throw error;
   }

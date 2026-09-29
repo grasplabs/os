@@ -178,6 +178,12 @@ export interface ExportCall {
   deadline: number;
   /** Whether the call may only call other Apps' exports marked `read`. */
   readOnly: boolean;
+  /**
+   * Called once the call is pinned to `version`, just before the method
+   * runs: where the caller records the call (app-calls.ts). If it
+   * throws, the method doesn't run.
+   */
+  onPinned: () => Promise<void>;
 }
 
 /**
@@ -339,6 +345,9 @@ export class App extends DurableObject<Env> {
       }
       const running = await this.#facet(current, read);
       ({ version } = running);
+      if (via !== undefined) {
+        await this.#pinned(running.version, via);
+      }
       // Timed out while the code started: its caller already has the
       // answer, so the method mustn't run (and write) after all.
       if (!this.#calls.has(token)) {
@@ -395,6 +404,26 @@ export class App extends DurableObject<Env> {
       throw forCaller(outcome.error, this.#app, version, method);
     }
     return outcome.answer;
+  }
+
+  /**
+   * Pins a call from another App's export to the version core checked it
+   * against (`via.version`): the facet `#facet` handed back must run it,
+   * then the caller hears it is about to run (`via.onPinned`, which
+   * records the call), and the facet must still be that version's after:
+   * a call that made another version current meanwhile, and started it,
+   * would otherwise have this call run code nobody checked it against.
+   * Nothing awaits between this and invoking the method, so no other call
+   * can replace the facet in between. `app.conflict` otherwise.
+   */
+  async #pinned(running: number, via: ExportCall): Promise<void> {
+    if (running !== via.version) {
+      throw appErrors.create("app.conflict");
+    }
+    await via.onPinned();
+    if (this.#server?.version !== via.version) {
+      throw appErrors.create("app.conflict");
+    }
   }
 
   /** Whether the App has read restricted data. */

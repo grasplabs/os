@@ -1,13 +1,14 @@
 import { appCallLimits } from "@grasp-os/shared/apps";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import type { AppId } from "@grasp-os/shared/ids";
-import { appIdSchema } from "@grasp-os/shared/ids";
+import { appIdSchema, permissionIdSchema } from "@grasp-os/shared/ids";
 import type { KnowledgeApi } from "@grasp-os/shared/knowledge";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
+import { callExport } from "../src/app-calls.ts";
 import { callApp } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
 import { release, requestGranted, serverBuilt } from "./apps.ts";
@@ -98,6 +99,12 @@ export class App extends DurableObject {
 
   async remembered(): Promise<unknown> {
     return (await this.ctx.storage.get("remembered")) ?? null;
+  }
+
+  customerCount(): number {
+    this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS customers (name TEXT)");
+    const [row] = this.ctx.storage.sql.exec("SELECT count(*) AS count FROM customers").toArray();
+    return Number(row?.count ?? 0);
   }
 
   async failAfterPayroll(caller: Caller, input: { documentId: string }): Promise<never> {
@@ -213,6 +220,65 @@ const relayed = (
   hops === 0
     ? last
     : { binding: "NEXT", method: "relay", input: relayed(hops - 1, last) };
+
+/** The query that reads an App's current exports (app-calls.ts). */
+const exportsRead = /"app_versions"\."exports"/u;
+
+/**
+ * Core's database, with `then` run once, just after the first read of an
+ * App's exports answered: another change landing between a call's check
+ * and its call.
+ */
+const afterExportsRead = (then: () => Promise<unknown>): D1Database => {
+  let ran = false;
+  const once = async (): Promise<void> => {
+    if (!ran) {
+      ran = true;
+      await then();
+    }
+  };
+  /** A bound statement whose answers run `once` after they come. */
+  const answering = (bound: D1PreparedStatement): D1PreparedStatement =>
+    new Proxy(bound, {
+      get: (target, key): unknown => {
+        const value: unknown = Reflect.get(target, key);
+        if (typeof value !== "function") {
+          return value;
+        }
+        const answers = key === "raw" || key === "all" || key === "first";
+        return async (...args: unknown[]): Promise<unknown> => {
+          const answer: unknown = await Reflect.apply(value, target, args);
+          if (answers) {
+            await once();
+          }
+          return answer;
+        };
+      },
+    });
+  return new Proxy(env.DB, {
+    get: (target, key): unknown => {
+      if (key !== "prepare") {
+        const value: unknown = Reflect.get(target, key);
+        return typeof value === "function" ? value.bind(target) : value;
+      }
+      return (query: string): D1PreparedStatement => {
+        const statement = target.prepare(query);
+        if (!exportsRead.test(query)) {
+          return statement;
+        }
+        return new Proxy(statement, {
+          get: (inner, innerKey): unknown => {
+            if (innerKey === "bind") {
+              return (...values: unknown[]) => answering(inner.bind(...values));
+            }
+            const value: unknown = Reflect.get(inner, innerKey);
+            return typeof value === "function" ? value.bind(inner) : value;
+          },
+        });
+      };
+    },
+  });
+};
 
 /** Whether `app` has read restricted data, or been sent it. */
 const restricted = async (app: AppId): Promise<boolean> =>
@@ -543,7 +609,13 @@ describe("calls between Apps", { timeout: 60_000 }, () => {
     const { admin, crm } = await setUp();
     const caller = { userId: admin.userId, mode: "interactive" as const };
     const args = [{ query: "BV" }];
-    const path = { chain: [], readOnly: false };
+    const path = {
+      chain: [],
+      readOnly: false,
+      onPinned: async () => {
+        await Promise.resolve();
+      },
+    };
     await expect(
       Promise.all([
         outcome(
@@ -562,6 +634,105 @@ describe("calls between Apps", { timeout: 60_000 }, () => {
         ),
       ])
     ).resolves.toStrictEqual(["app.timed_out", "app.conflict"]);
+  });
+
+  it("never run a version made current and started while a call is pinned to the one it was checked against", async () => {
+    const { admin, crm } = await setUp();
+    const caller = { userId: admin.userId, mode: "interactive" as const };
+    const withoutWrongAnswer = Object.fromEntries(
+      Object.entries(exported).filter(([name]) => name !== "wrongAnswer")
+    );
+    let raced = false;
+    const outcomeOfCall = await outcome(
+      appHost(env, crm).call(caller, "addCustomer", [{ name: "Globex" }], {
+        chain: [],
+        readOnly: false,
+        version: 1,
+        deadline: Date.now() + 60_000,
+        // Pinned to version 1: version 2 is made current, and another
+        // call starts it in the host, before this one's method runs.
+        onPinned: async () => {
+          await serverBuilt(
+            crm,
+            await release(admin, crm, appFiles(withoutWrongAnswer))
+          );
+          await callApp(env, crm, caller, "customerCount");
+          raced = true;
+        },
+      })
+    );
+    expect({
+      raced,
+      outcome: outcomeOfCall,
+      // Neither version's method ran.
+      customers: await callApp(env, crm, caller, "customerCount"),
+    }).toStrictEqual({ raced: true, outcome: "app.conflict", customers: 0 });
+  });
+
+  it("record a call the host refuses before its method runs as refused, never called", async () => {
+    const { admin, invoicing, crm } = await setUp();
+    const permissionId = await grantCalls(
+      admin,
+      invoicing,
+      crm,
+      ["read", "write"],
+      "CRM"
+    );
+    const withoutWrongAnswer = Object.fromEntries(
+      Object.entries(exported).filter(([name]) => name !== "wrongAnswer")
+    );
+    // Version 2 made current just after the call read version 1's exports.
+    const racing = afterExportsRead(async () => {
+      await serverBuilt(
+        crm,
+        await release(admin, crm, appFiles(withoutWrongAnswer))
+      );
+    });
+    const authority = {
+      subject: { type: "app" as const, appId: invoicing },
+      onBehalfOf: admin.userId,
+      mode: "interactive" as const,
+      appVersion: 1,
+    };
+    let refused = "";
+    const events = await auditedDuring(async () => {
+      refused = await outcome(
+        callExport(
+          { ...env, DB: racing },
+          {
+            authority,
+            idempotencyKey: undefined,
+            path: {
+              chain: [invoicing],
+              deadline: Date.now() + 60_000,
+              readOnly: false,
+            },
+            actor: { type: "app", appId: invoicing, part: "server" },
+          },
+          { permissionId: permissionIdSchema.parse(permissionId), app: crm },
+          "addCustomer",
+          { name: "Globex" }
+        )
+      );
+    });
+    expect({
+      refused,
+      recorded: callsIn(events).map(({ action, detail }) => [
+        action,
+        detail.outcome ?? null,
+        detail.reason ?? null,
+      ]),
+      customers: await callApp(
+        env,
+        crm,
+        { userId: admin.userId, mode: "interactive" },
+        "customerCount"
+      ),
+    }).toStrictEqual({
+      refused: "app.conflict",
+      recorded: [["app.call", "refused", "app.conflict"]],
+      customers: 0,
+    });
   });
 
   it("carry restricted mode from the App that read restricted data to the other, both ways", async () => {
