@@ -2,6 +2,7 @@ import { appErrors } from "@grasp-os/shared/apps";
 import type { ConnectResult } from "@grasp-os/shared/connect";
 import type { AppId } from "@grasp-os/shared/ids";
 import type { Authority } from "@grasp-os/shared/permissions";
+import type { StatisticUse } from "@grasp-os/shared/statistics";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
@@ -19,6 +20,7 @@ import type { ConnectionGrant } from "./bindings.ts";
 import { appHost } from "./durable-objects.ts";
 import type { AppCollectionBinding } from "./knowledge/app-binding.ts";
 import { activePermissions } from "./permissions.ts";
+import type { AppStatisticsBinding } from "./statistics-binding.ts";
 
 /** What App code passes as the caller: the one its method was called with. */
 const callerSchema = z.object({ token: z.string().min(1).max(100) });
@@ -46,6 +48,41 @@ export const callerOf = async (
     throw appErrors.create("app.caller_invalid");
   }
   return await appHost(env, app).callerOf(parsed.data.token);
+};
+
+/**
+ * Who `caller` is, as `callerOf` says, counting one statistics `use` (a
+ * point or a read) of their call against its bounds
+ * (`App.claimStatistic`): `statistics.rate_limited` past a bound.
+ */
+export const statisticCallerOf = async (
+  env: Env,
+  app: AppId,
+  caller: unknown,
+  use: StatisticUse
+): Promise<{ authority: Authority }> => {
+  const parsed = callerSchema.safeParse(caller);
+  if (!parsed.success) {
+    throw appErrors.create("app.caller_invalid");
+  }
+  return await appHost(env, app).claimStatistic(parsed.data.token, use);
+};
+
+/**
+ * Who `caller` is, as `callerOf` says, to audit a statistics read of
+ * theirs refused past its bounds: undefined once one was audited in the
+ * App's minute (`App.limitedReadAudit`).
+ */
+export const limitedReadCallerOf = async (
+  env: Env,
+  app: AppId,
+  caller: unknown
+): Promise<{ authority: Authority } | undefined> => {
+  const parsed = callerSchema.safeParse(caller);
+  if (!parsed.success) {
+    return undefined;
+  }
+  return await appHost(env, app).limitedReadAudit(parsed.data.token);
 };
 
 /**
@@ -93,13 +130,16 @@ export class AppConnectionBinding extends WorkerEntrypoint<
 type AppStub =
   | Fetcher<AppConnectionBinding>
   | Fetcher<AppCollectionBinding>
-  | Fetcher<AppExportBinding>;
+  | Fetcher<AppExportBinding>
+  | Fetcher<AppStatisticsBinding>;
 
 /**
  * The env of an App's server code, built from the App's permission
  * records as they are now: its connections, the collections it may read,
- * and the other Apps whose exports it may call. Its stubs act for no one
- * person: each call passes its caller.
+ * the other Apps whose exports it may call, and the platform's statistics
+ * if it may read them; and its own statistics (`STATISTICS`), which every
+ * App has. Its stubs act for no one person:
+ * each call passes its caller.
  */
 export const appBindings = async (
   env: Env,
@@ -108,7 +148,7 @@ export const appBindings = async (
   const context = { type: "app", appId: app } as const;
   const connectionOf = connectionGrantOf(context);
   const collectionOf = collectionGrantOf(context);
-  return stubsOf<AppStub>(
+  const granted = stubsOf<AppStub>(
     await activePermissions(env, { type: "app", appId: app }),
     (permission) => {
       const connection = connectionOf(permission);
@@ -121,10 +161,20 @@ export const appBindings = async (
           props: { ...exported, caller: app },
         });
       }
+      if (permission.object.type === "platform") {
+        return exports.AppStatisticsBinding({
+          props: { app, permissionId: permission.id },
+        });
+      }
       const collection = collectionOf(permission);
       return collection === undefined
         ? undefined
         : exports.AppCollectionBinding({ props: { ...collection, app } });
     }
   );
+  // A platform binding name: no permission's stub has it.
+  return {
+    ...granted,
+    STATISTICS: exports.AppStatisticsBinding({ props: { app } }),
+  };
 };

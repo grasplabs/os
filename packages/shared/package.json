@@ -40,6 +40,7 @@
     "./screens": "./src/screens.ts",
     "./sign-in": "./src/sign-in.ts",
     "./signals": "./src/signals.ts",
+    "./statistics": "./src/statistics.ts",
     "./uploads": "./src/uploads.ts",
     "./workflows": "./src/workflows.ts"
   },

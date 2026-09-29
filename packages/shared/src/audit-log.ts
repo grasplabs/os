@@ -117,6 +117,9 @@ const typeRules: readonly {
   // Improvement signals: the daily computation, and reading them.
   { action: "improvement.signals.computed", type: "action" },
   { action: "improvement.signals.read", type: "read" },
+  // An App reading a measure the platform publishes of an App's runs
+  // (src/statistics.ts): counts and sums only.
+  { action: "statistics.read", type: "read" },
   // The log's own events, each named, so an `audit` action added later has
   // no type until it gets a rule: retention moving events out and purging
   // them, gaps (outbox rows the log can't take, moved aside, and events

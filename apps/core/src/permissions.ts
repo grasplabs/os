@@ -133,6 +133,15 @@ const objectColumns = (object: PermissionObject) => {
         mask: null,
       };
     }
+    case "platform": {
+      // One platform: the ID only fills the column.
+      return {
+        objectType: object.type,
+        objectId: "platform",
+        resource: null,
+        mask: null,
+      };
+    }
     default: {
       return object satisfies never;
     }
@@ -170,6 +179,9 @@ const objectOf = (row: Row): PermissionObject => {
         type: row.objectType,
         appId: row.objectId,
       });
+    }
+    case "platform": {
+      return permissionObjectSchema.parse({ type: row.objectType });
     }
     default: {
       throw new Error(`Unknown permission object ${String(row.objectType)}`);
@@ -492,6 +504,16 @@ export const requestPermission = async (
       });
     }
     await requireAppRole(object.appId, "user");
+  }
+  if (object.type === "platform") {
+    // Only an App's code reads the platform's statistics, and only while
+    // they are on.
+    requireFeature(env, "statistics");
+    if (subject.type !== "app") {
+      throw permissionErrors.create("permission.invalid", {
+        issues: ["subject: Only an App reads the platform's statistics."],
+      });
+    }
   }
   await requireApps(env, subject, object);
   await requireCollection(env, subject, object);
@@ -928,12 +950,16 @@ const canGrantSql = (by: Identity): SQL =>
  */
 const changesThingsSql = or(
   eq(permissions.objectType, "connection"),
-  sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value <> 'read')`
+  sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value NOT IN ('read', 'statistics'))`
 );
 
-/** `changesThingsSql` for one action of a permission on `object`. */
+/**
+ * `changesThingsSql` for one action of a permission on `object`: reading
+ * the platform's statistics (`statistics`) changes nothing either.
+ */
 const changesThings = (object: PermissionObject, action: string): boolean =>
-  object.type === "connection" || action !== "read";
+  object.type === "connection" ||
+  (action !== "read" && action !== "statistics");
 
 /**
  * That `version` of `app` is one no admin approved (`madeCurrent`), as

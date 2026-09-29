@@ -204,6 +204,13 @@
       "when": 1790680906993,
       "tag": "0028_app_record_types",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "6",
+      "when": 1790680994851,
+      "tag": "0029_app_statistics",
+      "breakpoints": true
     }
   ]
 }

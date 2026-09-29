@@ -142,6 +142,11 @@ const objectOf = (
   if (object.type === "app") {
     return `Exports of ${appName(directory, object.appId)}: ${coveredExports(actions, exports.get(object.appId))}`;
   }
+  if (object.type === "platform") {
+    // Consent in plain words: what the App reads is published company-wide
+    // on purpose (counts only, never a run), and it may show it to anyone.
+    return "Platform statistics. This App can read run and signal counts for every App, and may show them to anyone who uses it";
+  }
   return `Workflow ${object.workflowId} of ${appName(directory, object.appId)}`;
 };
 

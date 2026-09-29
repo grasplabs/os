@@ -51,6 +51,16 @@ interface __BaseEnv_Env {
   APP_CALL_TIMEOUT_MS?: string;
   /** Tests only: a shorter wait for a check's builds (src/agent-builds.ts). */
   CHECK_BUILD_WAIT_MS?: string;
+  /**
+   * Tests only: lower bounds on an App's statistics points, `perCall/
+   * perMinute` (src/app.ts, `claimStatistic`).
+   */
+  STATISTICS_POINT_LIMITS?: string;
+  /**
+   * Tests only: lower bounds on an App's statistics reads, `perCall/
+   * perMinute` (src/app.ts, `claimStatistic`).
+   */
+  STATISTICS_READ_LIMITS?: string;
   /** The router secret before the current one, while rotating (src/router-secret.ts). */
   ROUTER_SECRET_PREVIOUS?: string;
   /** Local dev only (src/router-secret.ts). */

@@ -15,6 +15,11 @@ import type { AppId } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
 import type { AppErrorEntry, RunChange } from "@grasp-os/shared/screens";
+import {
+  statisticErrors,
+  statisticLimitsOf,
+} from "@grasp-os/shared/statistics";
+import type { StatisticUse } from "@grasp-os/shared/statistics";
 import { DurableObject } from "cloudflare:workers";
 
 import { appBindings } from "./app-bindings.ts";
@@ -204,6 +209,8 @@ interface RunningCall {
   caller: AppCallerInput;
   /** The method of the App's server code it calls. */
   method: string;
+  /** Statistics points it recorded and reads it made (`claimStatistic`). */
+  statistics?: { point: number; read: number };
   /** The version its code runs on, once started. */
   version?: number;
   /** The Apps whose calls are under way above it, outermost first. */
@@ -293,6 +300,12 @@ export class App extends DurableObject<Env> {
    * once it started, and where each runs within calls between Apps.
    */
   readonly #calls = new Map<string, RunningCall>();
+
+  /** Statistics points the App recorded, and reads, in the current minute. */
+  #statisticsMinute = { minute: 0, point: 0, read: 0 };
+
+  /** The minute a read refused past its bounds was last audited. */
+  #limitedAuditMinute = -1;
 
   get #app(): AppId {
     return appIdSchema.parse(this.ctx.id.name);
@@ -590,6 +603,64 @@ export class App extends DurableObject<Env> {
       path: { chain: [...above, this.#app], deadline: ends, readOnly },
       method,
     };
+  }
+
+  /**
+   * Counts one statistics `use` (a point recorded, or a read) of the
+   * running call `token` names, for the App's stubs
+   * (statistics-binding.ts), and answers who the call acts for as
+   * `callerOf` does: at most the use's bounds (`statisticLimitsOf`) in one
+   * call, and for the App in one minute, all its calls together, kept in
+   * memory (a restart of this object starts the minute again).
+   * `statistics.rate_limited` past either, and `app.caller_invalid` for a
+   * token of no running call.
+   */
+  claimStatistic(
+    token: string,
+    use: StatisticUse
+  ): ReturnType<App["callerOf"]> {
+    const resolved = this.callerOf(token);
+    const call = this.#calls.get(token);
+    if (call === undefined) {
+      throw appErrors.create("app.caller_invalid");
+    }
+    const minute = Math.floor(Date.now() / 60_000);
+    if (this.#statisticsMinute.minute !== minute) {
+      this.#statisticsMinute = { minute, point: 0, read: 0 };
+    }
+    const { perCall, perMinute } = statisticLimitsOf(
+      use,
+      use === "point"
+        ? this.env.STATISTICS_POINT_LIMITS
+        : this.env.STATISTICS_READ_LIMITS
+    );
+    const counts = call.statistics ?? { point: 0, read: 0 };
+    if (counts[use] >= perCall || this.#statisticsMinute[use] >= perMinute) {
+      throw statisticErrors.create("statistics.rate_limited", {
+        use,
+        perCall,
+        perMinute,
+      });
+    }
+    call.statistics = { ...counts, [use]: counts[use] + 1 };
+    this.#statisticsMinute[use] += 1;
+    return resolved;
+  }
+
+  /**
+   * Who the running call `token` names acts for, as `callerOf` says, for
+   * the audit of a read refused past its bounds: the first one in a
+   * minute, for the App; undefined for the rest of that minute, so a loop
+   * can't flood the audit log.
+   */
+  limitedReadAudit(token: string): ReturnType<App["callerOf"]> | undefined {
+    const minute = Math.floor(Date.now() / 60_000);
+    if (this.#limitedAuditMinute === minute) {
+      return undefined;
+    }
+    const resolved = this.callerOf(token);
+    this.#limitedAuditMinute = minute;
+    return resolved;
   }
 
   /**

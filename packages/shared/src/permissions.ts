@@ -65,10 +65,21 @@ const collectionObjectSchema = z.strictObject({
 });
 
 /**
+ * The platform's own statistics, as a permission's object: the measures
+ * the platform publishes of Apps' runs (`platformMeasures` in
+ * `@grasp-os/shared/statistics`), which an App reads only once an admin
+ * grants it this, and then only of Apps whose runs the person it acts for
+ * may see. Its one action is `statistics`. An App's own statistics need
+ * no permission.
+ */
+const platformObjectSchema = z.strictObject({ type: z.literal("platform") });
+
+/**
  * What a permission gives access to: a connection (all of it, or one
  * resource in it, such as one mailbox), a Knowledge collection, one
- * workflow of an App, or another App's exports: the methods of its server
- * code it lets other Apps call (`appExportsPath`).
+ * workflow of an App, another App's exports: the methods of its server
+ * code it lets other Apps call (`appExportsPath`), or the platform's own
+ * statistics.
  */
 export const permissionObjectSchema = z.discriminatedUnion("type", [
   z.strictObject({
@@ -92,6 +103,7 @@ export const permissionObjectSchema = z.discriminatedUnion("type", [
     type: z.literal("app"),
     appId: appIdSchema,
   }),
+  platformObjectSchema,
 ]);
 export type PermissionObject = z.infer<typeof permissionObjectSchema>;
 export type PermissionObjectType = PermissionObject["type"];
@@ -107,6 +119,7 @@ const connectionActionPattern = /^[A-Za-z][\w.-]{0,63}$/u;
 const platformActions = {
   collection: ["read", "write"],
   workflow: ["read", "start"],
+  platform: ["statistics"],
 } as const;
 
 /** One action a permission allows. */
@@ -173,6 +186,10 @@ const platformBindingNames: ReadonlySet<string> = new Set([
   "ROUTER_SECRET",
   "ROUTER_SECRET_PREVIOUS",
   "SIGN_IN",
+  // An App's statistics (core's src/statistics.ts), next to its permissions.
+  "STATISTICS",
+  "STATISTICS_POINT_LIMITS",
+  "STATISTICS_READ_LIMITS",
   "TOKEN_ENCRYPTION_KEY",
   "TOKEN_ENCRYPTION_KEY_PREVIOUS",
   "WORKFLOW_OFF_WAIT_MS",
@@ -252,14 +269,17 @@ export type PermissionRequest = z.input<typeof permissionRequestSchema>;
 /**
  * A permission a built-in blueprint declares (its `blueprint.json`): a
  * request without its subject, which is every App created from it. Only
- * a collection: the one thing a built-in can name the same way in every
- * deployment (the Playbook, say), where connections have IDs of their
- * own in each.
+ * a collection, or the platform's statistics: the things a built-in can
+ * name the same way in every deployment (the Playbook, say), where
+ * connections have IDs of their own in each.
  */
 export const declaredPermissionSchema = z
   .strictObject({
     ...grantShape,
-    object: collectionObjectSchema,
+    object: z.discriminatedUnion("type", [
+      collectionObjectSchema,
+      platformObjectSchema,
+    ]),
   })
   .superRefine(checkGrant);
 export type DeclaredPermission = z.infer<typeof declaredPermissionSchema>;
