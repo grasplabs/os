@@ -208,14 +208,18 @@ export default workflowTests(definition, [{ name: "runs", mocks: { sum: 2, mail:
  * The weekly workflow, run by `triggers`; with `nested`, its step called
  * from a function of its own, which the step list can't read.
  */
-const weekly = (triggers: string, nested = false): Record<string, string> => ({
+const weekly = (
+  triggers: string,
+  nested = false,
+  acting = false
+): Record<string, string> => ({
   "workflows/weekly.ts": `import { schedule, workflow } from "@grasp-os/sdk/workflow";
 
 export default workflow(
   "weekly",
   { params: { every: schedule({ label: "Runs", default: "0 8 * * 1" }) }, triggers: ${triggers} },
   async (step) => {
-    ${nested ? 'const run = async () => await step.do("report", { description: "Write the report" }, async () => "sent");\n    return await run();' : 'return await step.do("report", { description: "Write the report" }, async () => "sent");'}
+    ${nested ? 'const run = async () => await step.do("report", { description: "Write the report" }, async () => "sent");\n    return await run();' : `return await step.do("report", { description: "Write the report"${acting ? ', sideEffect: true, input: "report"' : ""} }, async () => "sent");`}
   }
 );
 `,
@@ -1262,8 +1266,12 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
           steps: null,
           params: [],
           triggers: [
-            { trigger: { type: "schedule", param: "every" }, change: "added" },
-            { trigger: { type: "manual" }, change: "removed" },
+            {
+              trigger: { type: "schedule", param: "every" },
+              change: "added",
+              count: 1,
+            },
+            { trigger: { type: "manual" }, change: "removed", count: 1 },
           ],
         },
       ],
@@ -1283,6 +1291,44 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
         },
       ],
     });
+  });
+
+  it("counts a second identical trigger as added, and a workflow with an unchanged acting step as acting", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const { id: app } = await builder.api.apps.create({ name: "Weekly" });
+    const once = `[{ type: "schedule", param: "every" }]`;
+    await release(builder, app, weekly(once, false, true));
+    // Only a second schedule, the same as the first: both run it.
+    await builder.api.apps.files.write(
+      app,
+      weekly(
+        `[{ type: "schedule", param: "every" }, { type: "schedule", param: "every" }]`,
+        false,
+        true
+      )
+    );
+    const { version } = await builder.api.apps.files.commit(app, "Twice");
+
+    const review = await builder.api.apps.versions.review(app, version);
+
+    expect(review.workflows).toStrictEqual([
+      {
+        id: "weekly",
+        change: "modified",
+        shared: [],
+        // Its step, unchanged, says it changes things: so the workflow can.
+        sideEffect: true,
+        steps: [],
+        params: [],
+        triggers: [
+          {
+            trigger: { type: "schedule", param: "every" },
+            change: "added",
+            count: 1,
+          },
+        ],
+      },
+    ]);
   });
 
   it("lists nothing naming an App its reviewer may not open, role or not", async () => {

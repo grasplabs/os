@@ -166,25 +166,35 @@ const paramsOf = async (
   }
 };
 
+/** A workflow's triggers, by canonical JSON: each, and how many of it. */
+type Triggers = Map<string, { trigger: TriggerDeclaration; count: number }>;
+
 /**
- * A workflow's triggers at a version, each as canonical JSON: none where
- * it has no such workflow; null when they can't be read (code that doesn't
- * build or declare).
+ * A workflow's triggers at a version, counted by canonical JSON (two
+ * identical ones both register, so both count): none where it has no such
+ * workflow; null when they can't be read (code that doesn't build or
+ * declare).
  */
 const triggersOf = async (
   env: Env,
   app: AppId,
   at: { version: number; files: AppFiles } | undefined,
   id: WorkflowId
-): Promise<Map<string, TriggerDeclaration> | null> => {
+): Promise<Triggers | null> => {
   if (at === undefined || !workflowIdsIn(at.files).includes(id)) {
     return new Map();
   }
   try {
     const triggers = await declaredTriggers(env, app, at.version, id, at.files);
-    return new Map(
-      triggers.map((trigger) => [canonicalJson(trigger), trigger])
-    );
+    const counted: Triggers = new Map();
+    for (const trigger of triggers) {
+      const key = canonicalJson(trigger);
+      counted.set(key, {
+        trigger,
+        count: (counted.get(key)?.count ?? 0) + 1,
+      });
+    }
+    return counted;
   } catch (error) {
     if (workflowErrors.codeOf(error) !== undefined) {
       return null;
@@ -193,18 +203,31 @@ const triggersOf = async (
   }
 };
 
-/** A workflow's triggers added and removed: what makes it run on its own. */
+/**
+ * A workflow's triggers added and removed, with how many of each: what
+ * makes it run on its own, counted as a multiset, so a second identical
+ * trigger shows as one added.
+ */
 const triggerChanges = (
-  before: ReadonlyMap<string, TriggerDeclaration>,
-  now: ReadonlyMap<string, TriggerDeclaration>
-): NonNullable<VersionReview["workflows"][number]["triggers"]> => [
-  ...[...now]
-    .filter(([key]) => !before.has(key))
-    .map(([, trigger]) => ({ trigger, change: "added" as const })),
-  ...[...before]
-    .filter(([key]) => !now.has(key))
-    .map(([, trigger]) => ({ trigger, change: "removed" as const })),
-];
+  before: Triggers,
+  now: Triggers
+): NonNullable<VersionReview["workflows"][number]["triggers"]> => {
+  const keys = [...new Set([...now.keys(), ...before.keys()])];
+  return keys.flatMap((key) => {
+    const was = before.get(key);
+    const is = now.get(key);
+    const trigger = is?.trigger ?? was?.trigger;
+    const difference = (is?.count ?? 0) - (was?.count ?? 0);
+    if (trigger === undefined || difference === 0) {
+      return [];
+    }
+    return [
+      difference > 0
+        ? { trigger, change: "added" as const, count: difference }
+        : { trigger, change: "removed" as const, count: -difference },
+    ];
+  });
+};
 
 /**
  * How a version's exports (what other Apps may call, `app/exports.json`)
@@ -421,8 +444,15 @@ const workflowsOf = async (
       id,
       change,
       shared,
-      // Steps that can't be read may do anything.
-      sideEffect: steps === null || steps.some(({ sideEffect }) => sideEffect),
+      // This workflow can change things: steps that can't be read may do
+      // anything, and any step, changed or not, that says so or calls
+      // the App's bindings may (a new trigger runs them all).
+      sideEffect:
+        steps === null ||
+        steps.some(({ sideEffect }) => sideEffect) ||
+        [...(stepsNow?.values() ?? [])].some(
+          ({ sideEffect, env: calls }) => sideEffect || (calls ?? []).length > 0
+        ),
       steps,
       triggers:
         triggersBefore === null || triggersNow === null

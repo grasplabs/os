@@ -236,16 +236,21 @@ export interface VersionReview {
     /** Its parameters that differ, by name; null when they can't be read. */
     params: { name: string; change: ReviewChange }[] | null;
     /**
-     * Its triggers added or removed: what makes it run on its own, such
-     * as a schedule, an event or mail to an address; null when they can't
-     * be read.
+     * Its triggers added or removed, with how many of each (identical
+     * triggers each register): what makes it run on its own, such as a
+     * schedule, an event or mail to an address; null when they can't be
+     * read.
      */
     triggers:
-      | { trigger: TriggerDeclaration; change: "added" | "removed" }[]
+      | {
+          trigger: TriggerDeclaration;
+          change: "added" | "removed";
+          count: number;
+        }[]
       | null;
     /**
-     * It may change something outside Grasp: a listed step may, or its
-     * steps can't be read at all.
+     * The workflow can change something outside Grasp: any of its steps,
+     * changed or not, may, or its steps can't be read at all.
      */
     sideEffect: boolean;
   }[];

@@ -823,8 +823,8 @@ build: {
         steps: { name: string; change: string; sideEffect: boolean; calls: string[]; sharedCode: boolean }[] | null;
         params: { name: string; change: string }[] | null;
         /** What makes it run on its own, added or removed. */
-        triggers: { trigger: Record<string, unknown>; change: "added" | "removed" }[] | null;
-        /** It may change something outside Grasp (or its steps can't be read). */
+        triggers: { trigger: Record<string, unknown>; change: "added" | "removed"; count: number }[] | null;
+        /** It can change something outside Grasp (any step may, or its steps can't be read). */
         sideEffect: boolean;
       }[];
       /** What other Apps may call (app/exports.json), with read/write access. */
