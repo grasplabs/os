@@ -1,8 +1,4 @@
-import {
-  appCallLimits,
-  appErrors,
-  isExportName,
-} from "@grasp-os/shared/apps";
+import { appCallLimits, appErrors, isExportName } from "@grasp-os/shared/apps";
 import type { AppExport } from "@grasp-os/shared/apps";
 import { delegateActorOf } from "@grasp-os/shared/audit";
 import type { AuditActor, AuditEntry } from "@grasp-os/shared/audit";
@@ -64,15 +60,27 @@ import { isRestricted, restrict } from "./restricted.ts";
 // - Every call is recorded before it runs, on both sides: `app.call` by
 //   the calling App (or run) and `app.called` by the called App, in one
 //   batch; if they can't be stored, nothing is called. A refusal is
-//   recorded as `app.call` with why.
+//   recorded as `app.call` with why, a caller the calling App isn't
+//   running a call of too.
 //
 // What the called App's method then does with its own permissions is its
 // own: its connections and collections are checked as for any of its
 // calls, for the same person. Whether an export reads or writes is the
-// called App's own declaration.
+// called App's own declaration. The chain and read-only hold per call,
+// by its token: the called App's code could make a call on with the token
+// of another call of its own running at the same time, which is within
+// that declaration's trust.
 
 /** What a call records for a name that isn't a method's: none can be it. */
 const notAMethod = "(not a method)";
+
+/**
+ * The export's name as the audit log keeps it: an export's name, or
+ * `notAMethod`, so calling code can't write text of its choosing into the
+ * log for good.
+ */
+const recordedName = (method: unknown): string =>
+  typeof method === "string" && isExportName(method) ? method : notAMethod;
 
 /** Who calls an export, as core knows them. */
 export interface ExportCaller {
@@ -113,13 +121,43 @@ const currentExports = async (
 };
 
 /**
+ * Most export schemas this isolate keeps compiled: past it, it starts
+ * again, so memory stays bounded however many Apps call.
+ */
+const compiledSchemasMax = 512;
+
+/**
+ * Each export schema compiled once, by App, version, export and which
+ * side (`input` or `output`): a version's exports never change, so the
+ * key names one schema for good.
+ */
+const compiledSchemas = new Map<string, z.ZodType>();
+
+/** `schema`, the export schema `key` names, compiled (`compiledSchemas`). */
+const compiledSchema = (
+  key: string,
+  schema: Record<string, unknown>
+): z.ZodType => {
+  const kept = compiledSchemas.get(key);
+  if (kept !== undefined) {
+    return kept;
+  }
+  if (compiledSchemas.size >= compiledSchemasMax) {
+    compiledSchemas.clear();
+  }
+  const compiled = z.fromJSONSchema(schema);
+  compiledSchemas.set(key, compiled);
+  return compiled;
+};
+
+/**
  * `value` as JSON within `maxBytes` (its UTF-8 as sent), checked against
  * `schema`, and read back from that JSON: nothing but JSON goes on.
  */
 const checkedJson = (
   value: unknown,
   maxBytes: number,
-  schema: Record<string, unknown>,
+  schema: z.ZodType,
   invalid: () => Error
 ): Json => {
   let text: string | undefined;
@@ -135,7 +173,7 @@ const checkedJson = (
     throw appErrors.create("app.call_too_large", { maxBytes });
   }
   const json = z.json().parse(JSON.parse(text));
-  if (!z.fromJSONSchema(schema).safeParse(json).success) {
+  if (!schema.safeParse(json).success) {
     throw invalid();
   }
   return json;
@@ -231,10 +269,7 @@ export const callExport = async (
   method: unknown,
   input: unknown
 ): Promise<Json> => {
-  // The name as the audit log keeps it: a method's name, or `notAMethod`,
-  // so calling code can't write text of its choosing into it for good.
-  const name =
-    typeof method === "string" && isExportName(method) ? method : notAMethod;
+  const name = recordedName(method);
   const record: CallRecord = { caller, called: grant.app, method: name };
   const { app: calling, version: callingVersion } = callingApp(
     caller.authority
@@ -266,8 +301,11 @@ export const callExport = async (
     checked = {
       version,
       exported,
-      input: checkedJson(input, appCallLimits.inputBytes, exported.input, () =>
-        appErrors.create("app.call_invalid", { method: name })
+      input: checkedJson(
+        input,
+        appCallLimits.inputBytes,
+        compiledSchema(`${grant.app}:${version}:${name}:input`, exported.input),
+        () => appErrors.create("app.call_invalid", { method: name })
       ),
     };
   } catch (error) {
@@ -342,8 +380,11 @@ export const callExport = async (
   }
   await carryRestricted();
   // The host ran exactly `version` (or refused), so its schema holds.
-  return checkedJson(answer, appCallLimits.answerBytes, output, () =>
-    appErrors.create("app.answer_invalid", { version, method: name })
+  return checkedJson(
+    answer,
+    appCallLimits.answerBytes,
+    compiledSchema(`${grant.app}:${version}:${name}:output`, output),
+    () => appErrors.create("app.answer_invalid", { version, method: name })
   );
 };
 
@@ -369,11 +410,29 @@ export class AppExportBinding extends WorkerEntrypoint<
   ): Promise<AppAnswer> {
     const { caller: app, ...grant } = this.ctx.props;
     try {
-      const { authority, idempotencyKey, path } = await callerOf(
-        this.env,
-        app,
-        caller
-      );
+      let known: Awaited<ReturnType<typeof callerOf>>;
+      try {
+        known = await callerOf(this.env, app, caller);
+      } catch (error) {
+        // A caller this App isn't running a call of: made up, ended, or
+        // another App's. Recorded by the App the stub is its, as nobody
+        // else is known: no person, no version.
+        await keepAuditEvent(this.env, drizzle(this.env.DB), {
+          actor: { type: "app", appId: app, part: "server" },
+          action: "app.call",
+          target: { type: "app", id: grant.app },
+          detail: {
+            method: recordedName(method),
+            version: null,
+            person: null,
+            depth: null,
+            outcome: "refused",
+            reason: isExpectedError(error) ? error.code : "internal.unexpected",
+          },
+        });
+        throw error;
+      }
+      const { authority, idempotencyKey, path } = known;
       return await callExport(
         this.env,
         {

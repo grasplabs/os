@@ -1164,6 +1164,8 @@ describe(appExports, () => {
       "toJSON",
       "toString",
       "find_customers",
+      "read",
+      "write",
       "Upper",
     ].filter((name) => Reflect.get(stub, name) !== undefined);
 

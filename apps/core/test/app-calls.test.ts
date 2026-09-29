@@ -132,7 +132,7 @@ const exported = {
       properties: { query: { type: "string" } },
       required: ["query"],
     },
-    output: { type: "array" },
+    output: { type: "array", items: {} },
   },
   addCustomer: {
     access: "write",
@@ -143,8 +143,16 @@ const exported = {
     },
     output: { type: "boolean" },
   },
-  wrongAnswer: { access: "read", input: anyObject, output: { type: "array" } },
-  hugeAnswer: { access: "read", input: anyObject, output: { type: "array" } },
+  wrongAnswer: {
+    access: "read",
+    input: anyObject,
+    output: { type: "array", items: {} },
+  },
+  hugeAnswer: {
+    access: "read",
+    input: anyObject,
+    output: { type: "array", items: {} },
+  },
   relay: { access: "read", input: relayInput, output: {} },
   relayWrite: { access: "write", input: relayInput, output: {} },
   readPayroll: { access: "read", input: anyObject, output: {} },
@@ -362,9 +370,10 @@ describe("calls between Apps", { timeout: 60_000 }, () => {
     ]);
 
     // The calling App names nobody: a caller not of a call it runs now is
-    // refused, as for its connections.
-    await expect(
-      callApp(
+    // refused, as for its connections, and recorded by the App.
+    let forged: unknown;
+    const forgedEvents = await auditedDuring(async () => {
+      forged = await callApp(
         env,
         invoicing,
         { userId: clerk.userId, mode: "interactive" },
@@ -375,8 +384,26 @@ describe("calls between Apps", { timeout: 60_000 }, () => {
           { query: "BV" },
           { userId: clerk.userId, token: crypto.randomUUID() },
         ]
-      )
-    ).resolves.toStrictEqual({ refused: "app.caller_invalid" });
+      );
+    });
+    expect({ forged, recorded: callsIn(forgedEvents) }).toStrictEqual({
+      forged: { refused: "app.caller_invalid" },
+      recorded: [
+        {
+          actor: { type: "app", appId: invoicing, part: "server" },
+          action: "app.call",
+          target: { type: "app", id: crm },
+          detail: {
+            method: "findCustomers",
+            version: null,
+            person: null,
+            depth: null,
+            outcome: "refused",
+            reason: "app.caller_invalid",
+          },
+        },
+      ],
+    });
 
     await admin.api.permissions.revoke(permission);
     await expect(call("findCustomers", { query: "BV" })).resolves.toBe(

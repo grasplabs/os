@@ -269,6 +269,7 @@ interface CrmExports {
   count: (input: null) => Promise<number>;
   find_customers: (input: null) => void;
   toJSON: (input: null) => string;
+  read: (input: null) => string;
 }
 declare const crm: AppExportsStub<CrmExports>;
 expectTypeOf(crm.findCustomers).toEqualTypeOf<
@@ -280,5 +281,6 @@ expectTypeOf(appExports<CrmExports>(context.env.CRM)).toEqualTypeOf<
 >();
 expectTypeOf(crm).not.toHaveProperty("find_customers");
 expectTypeOf(crm).not.toHaveProperty("toJSON");
+expectTypeOf(crm).not.toHaveProperty("read");
 // @ts-expect-error -- an input the export doesn't take
 void crm.findCustomers({ query: 7 });
