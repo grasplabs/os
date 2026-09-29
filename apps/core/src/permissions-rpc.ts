@@ -87,7 +87,9 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
       // permissions either. Each App named is checked once.
       const named = listed.flatMap(({ subject: of, object }) => [
         ...(of.type === "app" ? [of.appId] : []),
-        ...(object.type === "workflow" ? [object.appId] : []),
+        ...(object.type === "workflow" || object.type === "app"
+          ? [object.appId]
+          : []),
       ]);
       const readable = await appsReadableBy(this.#env, person, [
         ...new Set(named),
@@ -95,7 +97,8 @@ export class PermissionsRpc extends RpcTarget implements PermissionsApi {
       return listed.filter(
         ({ subject: of, object }) =>
           (of.type !== "app" || readable.has(of.appId)) &&
-          (object.type !== "workflow" || readable.has(object.appId))
+          ((object.type !== "workflow" && object.type !== "app") ||
+            readable.has(object.appId))
       );
     });
   }

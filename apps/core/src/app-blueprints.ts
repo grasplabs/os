@@ -23,6 +23,7 @@ import { drizzle } from "drizzle-orm/d1";
 import type { BuiltinBlueprint } from "#blueprints";
 
 import { stillOpenTo } from "./app-access.ts";
+import { exportsIn } from "./app-exports.ts";
 import {
   appFor,
   appsListedFor,
@@ -404,6 +405,7 @@ export const createFromBlueprint = async (
     // builder commits; otherwise approved as any version is.
     approved: (await approvedSource(env, source, number)) ? 1 : null,
     workflows: workflowsIn(files),
+    exports: exportsIn(files),
   };
   const requests = await blueprintRequests(env, by, source.id, id);
   const db = drizzle(env.DB);
@@ -613,6 +615,7 @@ export const installBuiltinBlueprint = async (
           createdAt: now,
           approved: 1,
           workflows: workflowsIn(files),
+          exports: exportsIn(files),
         }),
         outboxed(
           db,

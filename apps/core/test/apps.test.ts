@@ -60,6 +60,25 @@ const first = {
   "AGENTS.md": "# Invoice desk — facturen, 請求書 🧾\n",
 };
 
+/** Exports, as an App declares them in `app/exports.json`. */
+const exported = {
+  findInvoices: {
+    access: "read",
+    input: {
+      type: "object",
+      properties: { customer: { type: "string" } },
+      required: ["customer"],
+    },
+    output: { type: "array", items: { type: "string" } },
+  },
+  payInvoice: {
+    access: "write",
+    description: "Marks an invoice paid",
+    input: { type: "string" },
+    output: { type: "boolean" },
+  },
+} as const;
+
 // Making a version with workflows current compiles them and runs their
 // tests, as "names the screens and workflows" does. That takes half a
 // second locally, and several times that on a loaded runner, closer to
@@ -330,7 +349,7 @@ describe("App code", { timeout: 60_000 }, () => {
     ]);
   });
 
-  it("names the screens and workflows of the version that runs, and only those", async () => {
+  it("names the screens, workflows and exports of the version that runs, and only those", async () => {
     const { apps } = await appsApi("builder");
     const app = await newApp(apps);
     await commit(apps, app.id, first);
@@ -338,6 +357,7 @@ describe("App code", { timeout: 60_000 }, () => {
     await apps.versions.setCurrent(app.id, 1);
     await commit(apps, app.id, {
       "screens/archive.tsx": "export default () => null;\n",
+      "app/exports.json": JSON.stringify(exported),
       // Neither is a screen or a workflow: code they share.
       "screens/parts/row.tsx": "export const Row = () => null;\n",
       "workflows/lib/dates.ts": "export const today = () => 0;\n",
@@ -365,17 +385,64 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
       beforeCurrent,
       current: await apps.contents(app.id),
     }).toStrictEqual({
-      none: { version: null, screens: [], workflows: [] },
-      beforeCurrent: { version: 1, screens: ["inbox"], workflows: [] },
+      none: { version: null, screens: [], workflows: [], exports: {} },
+      beforeCurrent: {
+        version: 1,
+        screens: ["inbox"],
+        workflows: [],
+        exports: {},
+      },
       current: {
         version: 2,
         screens: ["archive", "inbox"],
         workflows: ["report"],
+        // As declared, with the description a declaration leaves out.
+        exports: {
+          findInvoices: { ...exported.findInvoices, description: "" },
+          payInvoice: exported.payInvoice,
+        },
       },
     });
     await expect(outcome(apps.contents("no-such-app"))).resolves.toBe(
       "app.not_found"
     );
+  });
+
+  it("refuses to commit exports that aren't valid, saying why", async () => {
+    const { apps } = await appsApi("builder");
+    const app = await newApp(apps);
+    const committing = async (text: string): Promise<string> => {
+      await apps.files.write(app.id, { "app/exports.json": text });
+      return await outcome(apps.files.commit(app.id, "Exports"));
+    };
+    const valid = exported.findInvoices;
+    const refused: string[] = [];
+    for (const text of [
+      "not json",
+      JSON.stringify({ find_invoices: valid }),
+      JSON.stringify({ toString: valid }),
+      JSON.stringify({ findInvoices: { ...valid, access: "admin" } }),
+      JSON.stringify({ findInvoices: { ...valid, input: { type: 7 } } }),
+      JSON.stringify({ findInvoices: { ...valid, extra: true } }),
+      JSON.stringify(
+        Object.fromEntries(
+          Array.from({ length: 65 }, (_, index) => [`find${index}`, valid])
+        )
+      ),
+      JSON.stringify({
+        findInvoices: { ...valid, description: "x".repeat(64_000) },
+      }),
+    ]) {
+      // One at a time: each writes the same working copy.
+      // oxlint-disable-next-line no-await-in-loop -- see above
+      refused.push(await committing(text));
+    }
+    expect(refused).toStrictEqual(refused.map(() => "app.exports_invalid"));
+    await expect(apps.versions.list(app.id)).resolves.toStrictEqual([]);
+    // And the same file, valid, commits.
+    await expect(
+      committing(JSON.stringify({ findInvoices: valid }))
+    ).resolves.toBe("ok");
   });
 
   it("audits every commit and version change, by identifiers only", async () => {

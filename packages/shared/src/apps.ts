@@ -125,14 +125,15 @@ export interface AppVersion {
 /**
  * What an App's current version offers people: its screens by name (`inbox`
  * for `screens/inbox.tsx`) and its workflows by ID (`report` for
- * `workflows/report.ts`), each sorted. Empty while it has no current
- * version.
+ * `workflows/report.ts`), each sorted, and what it offers other Apps: its
+ * exports (`appExportsPath`). Empty while it has no current version.
  */
 export interface AppContents {
   /** The current version; null while it has none. */
   version: number | null;
   screens: string[];
   workflows: string[];
+  exports: AppExports;
 }
 
 /** An App's files by path. */
@@ -209,7 +210,9 @@ export interface AppFilesApi {
    * without building. Answers with how they went (`builds`) once they are
    * done, or after a few seconds with those still building as `pending`
    * (all three `pending` while `build_on_save` is off).
-   * A build never fails or holds up the commit.
+   * A build never fails or holds up the commit. Exports that aren't
+   * valid (`appExportsPath`) do: the commit is refused with
+   * `app.exports_invalid`, naming the issues.
    */
   commit: (app: string, message: string) => Promise<CommittedVersion>;
 }
@@ -227,7 +230,8 @@ export interface AppVersionsApi {
    * Makes a version the one that runs, after review or to roll back. By
    * anyone but one of the organization's admins (Grasp staff too, and a
    * rollback too), it asks again for the App's permissions on a
-   * connection, to write a collection or to start a workflow: they allow
+   * connection, to write a collection, to start a workflow or to call
+   * another App's exports other than all those marked `read`: they allow
    * nothing until an admin grants them again, which approves the version
    * they reviewed (`PermissionsApi.grant`). Code of a version no admin approved changes
    * nothing, in a run that started on it too. Not for the first version
@@ -383,6 +387,8 @@ export const appErrors = defineErrorFamily({
   "app.version_not_found": "The App has no such version.",
   "app.too_large": "The App's files would be over its limits.",
   "app.nothing_to_commit": "Nothing was written since the latest version.",
+  "app.exports_invalid":
+    "The App's exports (app/exports.json) aren't valid, so it can't be committed.",
   "app.conflict": "Someone else changed this App at the same time. Try again.",
   "app.not_running": "The App has no current version to run yet.",
   "app.build_failed": "The App's server code doesn't build.",
@@ -456,3 +462,88 @@ export interface AppCaller {
    */
   idempotencyKey?: string;
 }
+
+// Exports: the methods of an App's server code that other Apps may call,
+// under a permission an admin grants (an `app` object, permissions.ts). An
+// App declares them in one file of its code, so they are versioned with
+// it: what a version exports never changes, and removing or changing an
+// export takes a new version. Core reads them as the version is committed,
+// never by running the code.
+
+/** Where an App declares its exports. */
+export const appExportsPath = "app/exports.json";
+
+/** Most exports one App declares. */
+export const appMaxExports = 64;
+
+/** Most characters of an App's exports file. */
+export const appExportsMaxLength = 64_000;
+
+const reservedNames: ReadonlySet<string> = new Set(reservedAppMethods);
+
+/**
+ * Whether core calls `name` as an App's method (`appMethodPattern`, and
+ * not one of `reservedAppMethods`): what an export, and a permission's
+ * action naming one, may be called.
+ */
+export const isAppMethodName = (name: string): boolean =>
+  appMethodPattern.test(name) && !reservedNames.has(name);
+
+/**
+ * A JSON Schema, as an export's input or answer: an object Zod reads as a
+ * schema (`z.fromJSONSchema`), which core checks each call's input and
+ * answer against.
+ */
+const jsonSchemaSchema = z.record(z.string(), z.unknown()).refine(
+  (schema) => {
+    try {
+      z.fromJSONSchema(schema);
+      return true;
+    } catch {
+      return false;
+    }
+  },
+  { message: "A JSON Schema Zod can read (z.fromJSONSchema)" }
+);
+
+/**
+ * One export: whether it only reads the App's data or also changes it,
+ * what it does, and the JSON Schemas of its one argument and its answer.
+ * A permission that allows `read` allows only the exports marked `read`.
+ */
+export const appExportSchema = z.strictObject({
+  access: z.enum(["read", "write"]),
+  description: z.string().max(appLimits.descriptionLength).default(""),
+  input: jsonSchemaSchema,
+  output: jsonSchemaSchema,
+});
+export type AppExport = z.infer<typeof appExportSchema>;
+
+/**
+ * An App's exports file (`appExportsPath`): each export by the name of the
+ * server method it calls, which gets the caller first and the input
+ * second, as every method does.
+ *
+ * ```json
+ * {
+ *   "findCustomers": {
+ *     "access": "read",
+ *     "description": "Customers whose name starts with the query",
+ *     "input": { "type": "object", "properties": { "query": { "type": "string" } }, "required": ["query"] },
+ *     "output": { "type": "array", "items": { "type": "object" } }
+ *   }
+ * }
+ * ```
+ */
+export const appExportsSchema = z
+  .record(
+    z.string().refine(isAppMethodName, {
+      message:
+        "A method's name: a lowercase letter, then up to 63 letters and digits, and not a reserved name",
+    }),
+    appExportSchema
+  )
+  .refine((exported) => Object.keys(exported).length <= appMaxExports, {
+    message: `At most ${appMaxExports} exports`,
+  });
+export type AppExports = z.infer<typeof appExportsSchema>;

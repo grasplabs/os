@@ -173,6 +173,14 @@ export type Feature =
    */
   | "build_on_save"
   /**
+   * Apps calling each other's exports (app-exports.ts): asking for a
+   * permission on another App's exports, and every call through one;
+   * needs `apps` on too. While off, no such permission can be asked for
+   * and every call is refused; granted ones stay, and work again once it's
+   * back on.
+   */
+  | "app_calls"
+  /**
    * The chat agent (workspace.ts, agent.ts): asking a chat's agent. It
    * stays off on-prem: plain workerd doesn't enforce the CPU limit of the
    * isolates Code Mode runs the agent's code in (code-mode.ts), and has no
