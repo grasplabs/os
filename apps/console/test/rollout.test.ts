@@ -22,6 +22,7 @@ import { deployContext } from "../src/deploy/context.ts";
 import { runDeploy, startDeploy } from "../src/deploy/deploy.ts";
 import { rotateClientSecrets } from "../src/deploy/rotation.ts";
 import { startProvisioning } from "../src/provision/control.ts";
+import { getProvisioning } from "../src/provision/queries.ts";
 import { importReleases } from "../src/releases/import.ts";
 import {
   approveRollout,
@@ -33,6 +34,7 @@ import {
 } from "../src/rollout/control.ts";
 import type { StartRolloutInput } from "../src/rollout/control.ts";
 import { driftOf } from "../src/rollout/drift.ts";
+import { getRollout } from "../src/rollout/queries.ts";
 import {
   rollbackClient,
   rollbackClientAndWait,
@@ -1269,16 +1271,76 @@ describe("rolling new secrets out", () => {
         "rollout.done",
       ],
     });
-    // The secret's value is in no log line, audit event or deploy record.
+    // Every active client runs the new secret: the old one can go.
+    const view = await getRollout(env, rolloutId);
+    expect(view?.sharedSecrets).toStrictEqual({
+      current: [internal.clientId, acme.clientId].toSorted((a, b) =>
+        a.localeCompare(b)
+      ),
+      behind: [],
+      outOfScope: [],
+    });
+    // The secret's value is in no log line, audit event, deploy record or
+    // Workflow step result.
     const events = await db.select().from(auditEvents);
     const deploys = await db.select().from(clientDeploys);
+    const stepNames = [
+      "targets",
+      "ring 2 approved",
+      ...[internal.clientId, acme.clientId].flatMap((clientId) => [
+        `${clientId} claim`,
+        `${clientId} prepare`,
+        `${clientId} connect upload`,
+        `${clientId} connect live`,
+        `${clientId} core upload`,
+        `${clientId} core live`,
+        `${clientId} finish`,
+        `${clientId} done`,
+      ]),
+    ];
+    const steps = await Promise.all(
+      stepNames.map(async (name) => await run.waitForStepResult({ name }))
+    );
     expect(
-      JSON.stringify({
-        logged,
-        events,
-        deploys,
-      })
+      JSON.stringify({ logged, events, deploys, steps, view })
     ).not.toContain(rotatedMicrosoft);
+  });
+
+  it("says which active clients don't run the shared secrets in Secrets Store now, such as after a rollout that started before deploy-ops wrote them", async () => {
+    const release = await importedRelease("feat(core): what they run");
+    const internal = await activeClient(0, release);
+    const acme = await activeClient(2, release);
+    await using run = await followRollouts();
+
+    // Started before deploy-ops wrote the new value: it takes the old one.
+    const rolloutId = await rollOutSecrets({ scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const before = await getRollout(env, rolloutId);
+    await rotateMicrosoftSecret();
+    const after = await getRollout(env, rolloutId);
+    const clientPage = await getProvisioning(env, internal.clientId);
+
+    expect({
+      before: before?.sharedSecrets,
+      after: after?.sharedSecrets,
+      clientPage: clientPage?.sharedSecretsCurrent,
+    }).toStrictEqual({
+      before: {
+        current: [internal.clientId, acme.clientId].toSorted((a, b) =>
+          a.localeCompare(b)
+        ),
+        behind: [],
+        outOfScope: [acme.clientId],
+      },
+      after: {
+        current: [],
+        behind: [internal.clientId, acme.clientId].toSorted((a, b) =>
+          a.localeCompare(b)
+        ),
+        outOfScope: [acme.clientId],
+      },
+      clientPage: false,
+    });
   });
 
   it("skips a client whose Workers don't run one release, deploying nothing to it", async () => {
@@ -1315,6 +1377,57 @@ describe("rolling new secrets out", () => {
       },
       deployments: counts,
     });
+  });
+
+  it("sends each Worker all its traffic at once when the version it replaces has no secrets on record, or is one the console never made", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const { first: unrecorded, second: outside } = await twoClients(before);
+    // Its deploys' records carry no fingerprints.
+    await db
+      .update(clientDeploys)
+      .set({ versions: null })
+      .where(eq(clientDeploys.clientId, unrecorded.clientId));
+    // Each of its Workers runs a version uploaded outside the console.
+    for (const script of outside.account.scripts.values()) {
+      const [last] = script.versions.toReversed();
+      if (last !== undefined) {
+        const version = {
+          ...last,
+          id: crypto.randomUUID(),
+          number: last.number + 1,
+        };
+        script.versions.push(version);
+        script.deployments.unshift({
+          id: crypto.randomUUID(),
+          created_on: new Date().toISOString(),
+          versions: [{ version_id: version.id, percentage: 100 }],
+          annotations: {},
+        });
+      }
+    }
+    const skip = {
+      unrecorded: deploymentCounts(unrecorded.account),
+      outside: deploymentCounts(outside.account),
+    };
+    const release = await importedRelease("feat(core): no record to go by");
+    await using run = await followRollouts();
+
+    await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    const atOnce = { connect: [[100]], core: [[100]] };
+    expect({
+      unrecorded: await liveSharesOf(
+        unrecorded.clientId,
+        unrecorded.account,
+        skip.unrecorded
+      ),
+      outside: await liveSharesOf(
+        outside.clientId,
+        outside.account,
+        skip.outside
+      ),
+    }).toStrictEqual({ unrecorded: atOnce, outside: atOnce });
   });
 
   it("sends a Worker all its traffic at once in a release rollout when a shared secret it has changed since, and the others by stages", async () => {

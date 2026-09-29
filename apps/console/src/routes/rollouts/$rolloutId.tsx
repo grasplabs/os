@@ -28,7 +28,11 @@ import {
   rollbackRingFn,
 } from "../../rollout/functions.ts";
 import type { RolloutChange } from "../../rollout/functions.ts";
-import type { RolloutView, TargetView } from "../../rollout/queries.ts";
+import type {
+  RolloutView,
+  SharedSecretsView,
+  TargetView,
+} from "../../rollout/queries.ts";
 import { useRolloutAction } from "../../rollout/use-action.ts";
 import { thenRefresh } from "../../use-action.ts";
 
@@ -143,12 +147,71 @@ const Controls = ({ rollout }: { rollout: RolloutView }) => {
   );
 };
 
+/**
+ * Whether the old shared secrets can be revoked at their providers: only
+ * once every active client runs the ones in Secrets Store now. Until
+ * then, which clients don't, and why this rollout didn't reach them.
+ */
+const SharedSecrets = ({
+  rollout,
+  shared,
+}: {
+  rollout: RolloutView;
+  shared: SharedSecretsView;
+}) => {
+  if (shared.behind.length === 0) {
+    return (
+      <p className="text-sm">
+        Every active client runs the shared secrets in Secrets Store now: the
+        old ones can be revoked at their providers.
+      </p>
+    );
+  }
+  const skipped = rollout.targets
+    .filter(({ status }) => status === "skipped")
+    .map(({ clientId, error }) => `${clientId} (${error ?? "skipped"})`);
+  const lines = [
+    `Keep the old shared secrets: ${shared.behind.length} active ${shared.behind.length === 1 ? "client doesn't" : "clients don't"} run the ones in Secrets Store now: ${shared.behind.join(", ")}.`,
+    ...(skipped.length === 0
+      ? []
+      : [`This rollout skipped ${skipped.join(", ")}.`]),
+    ...(shared.outOfScope.length === 0
+      ? []
+      : [`Outside its scope: ${shared.outOfScope.join(", ")}.`]),
+  ];
+  return (
+    <div
+      role={rollout.status === "done" ? "alert" : undefined}
+      className={
+        rollout.status === "done"
+          ? "text-destructive flex flex-col gap-1 text-sm"
+          : "text-muted-foreground flex flex-col gap-1 text-sm"
+      }
+    >
+      {lines.map((line) => (
+        <p key={line}>{line}</p>
+      ))}
+    </div>
+  );
+};
+
+/** A rollback staff asked for: of one client, or of a ring. */
+type PendingRollback =
+  | { clientId: string; ring?: never }
+  | { ring: number; clientId?: never };
+
 /** The rollout's clients, ring by ring, each rolled back on its own or with its ring. */
 const Targets = ({ rollout }: { rollout: RolloutView }) => {
   const { busy, failure, act } = useControl();
   // The clients a ring's rollback left, and why: the rest were rolled back.
   const [left, setLeft] = useState<string | null>(null);
   const rings = [...new Set(rollout.targets.map(({ ring }) => ring))];
+  const shared = rollout.sharedSecrets;
+  const secretsOf =
+    shared === null
+      ? null
+      : (clientId: string): string =>
+          shared.current.includes(clientId) ? "current" : "behind";
   const rollBackRing = (ring: number) => {
     setLeft(null);
     act(async () => {
@@ -168,8 +231,65 @@ const Targets = ({ rollout }: { rollout: RolloutView }) => {
       return result;
     });
   };
+  const rollBackClient = (clientId: string) => {
+    act(
+      async () =>
+        await rollbackClientFn({
+          data: { rolloutId: rollout.id, clientId },
+        })
+    );
+  };
+  // A secrets rollout's rollback puts the old shared secrets back, which
+  // may be revoked at their providers already: asked first.
+  const [confirming, setConfirming] = useState<PendingRollback | null>(null);
+  const runRollback = (pending: PendingRollback) => {
+    setConfirming(null);
+    if (pending.ring === undefined) {
+      rollBackClient(pending.clientId);
+    } else {
+      rollBackRing(pending.ring);
+    }
+  };
+  const rollBack = (pending: PendingRollback) => {
+    if (rollout.kind === "secrets") {
+      setConfirming(pending);
+    } else {
+      runRollback(pending);
+    }
+  };
   return (
     <div className="flex flex-col gap-4">
+      {confirming === null ? null : (
+        <div
+          role="alert"
+          className="border-destructive flex flex-col gap-2 rounded-md border p-4 text-sm"
+        >
+          <p>
+            {`Rolling ${confirming.ring === undefined ? confirming.clientId : `ring ${confirming.ring}`} back puts the shared secrets it ran before back. If you revoked them at their providers, its people can't sign in or reach their connections until the next secrets rollout.`}
+          </p>
+          <div className="flex gap-2">
+            <Button
+              variant="destructive"
+              size="sm"
+              disabled={busy}
+              onClick={() => {
+                runRollback(confirming);
+              }}
+            >
+              Roll back anyway
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => {
+                setConfirming(null);
+              }}
+            >
+              Keep the new secrets
+            </Button>
+          </div>
+        </div>
+      )}
       {failure === null ? null : (
         <p role="alert" className="text-destructive text-sm">
           {failure}
@@ -194,7 +314,7 @@ const Targets = ({ rollout }: { rollout: RolloutView }) => {
                   size="sm"
                   disabled={busy}
                   onClick={() => {
-                    rollBackRing(ring);
+                    rollBack({ ring });
                   }}
                 >
                   {`Roll back ring ${ring}`}
@@ -207,6 +327,9 @@ const Targets = ({ rollout }: { rollout: RolloutView }) => {
                   <TableHead>Client</TableHead>
                   <TableHead>Status</TableHead>
                   <TableHead>Why</TableHead>
+                  {secretsOf === null ? null : (
+                    <TableHead>Shared secrets</TableHead>
+                  )}
                   <TableHead>Updated (UTC)</TableHead>
                   <TableHead>
                     <span className="sr-only">Actions</span>
@@ -229,6 +352,9 @@ const Targets = ({ rollout }: { rollout: RolloutView }) => {
                     <TableCell>
                       <span className="font-mono">{target.error ?? ""}</span>
                     </TableCell>
+                    {secretsOf === null ? null : (
+                      <TableCell>{secretsOf(target.clientId)}</TableCell>
+                    )}
                     <TableCell>{formatTime(target.updatedAt)}</TableCell>
                     <TableCell>
                       {reached.has(target.status) ? (
@@ -237,15 +363,7 @@ const Targets = ({ rollout }: { rollout: RolloutView }) => {
                           size="sm"
                           disabled={busy}
                           onClick={() => {
-                            act(
-                              async () =>
-                                await rollbackClientFn({
-                                  data: {
-                                    rolloutId: rollout.id,
-                                    clientId: target.clientId,
-                                  },
-                                })
-                            );
+                            rollBack({ clientId: target.clientId });
                           }}
                         >
                           Roll back
@@ -306,6 +424,9 @@ const Rollout = () => {
         ))}
       </dl>
       <Controls rollout={rollout} />
+      {rollout.sharedSecrets === null ? null : (
+        <SharedSecrets rollout={rollout} shared={rollout.sharedSecrets} />
+      )}
       <Targets rollout={rollout} />
     </main>
   );

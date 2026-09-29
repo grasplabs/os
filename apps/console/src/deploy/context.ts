@@ -91,7 +91,7 @@ export const clientDomain = (env: Env): string | null => {
 };
 
 /** Every secret a deploy gives the Workers, read from Secrets Store. */
-const deploySecrets = async (env: Env): Promise<DeploySecrets> => {
+export const deploySecrets = async (env: Env): Promise<DeploySecrets> => {
   const names = [...new Set(Object.values(sharedSecrets).flat())];
   const values = new Map(
     await Promise.all(

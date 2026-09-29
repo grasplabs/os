@@ -32,12 +32,23 @@ const refreshMs = 5000;
 const dashboard = (accountId: string): string =>
   `https://dash.cloudflare.com/${accountId}`;
 
+/** Whether the client runs the shared secrets in Secrets Store now, in words; "" when unknown. */
+const sharedSecretsOf = (current: boolean | null): string => {
+  if (current === null) {
+    return "";
+  }
+  return current
+    ? "current with Secrets Store"
+    : "behind Secrets Store: a secrets rollout would bring it up to date";
+};
+
 const Facts = ({ view }: { view: ProvisioningView }) => {
   const facts: [string, string][] = [
     ["Hostname", view.hostname ?? "no CLIENT_DOMAIN set"],
     ["Cloudflare account", view.client?.accountId ?? "not yet"],
     ["Ring", view.client === null ? "" : String(view.client.ring)],
     ["Release", view.deploy?.releaseId ?? "not deployed yet"],
+    ["Shared secrets", sharedSecretsOf(view.sharedSecretsCurrent)],
     ["Created by", view.client?.createdBy ?? ""],
     [
       "Created (UTC)",

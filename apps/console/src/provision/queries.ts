@@ -6,6 +6,7 @@ import { consoleDatabase } from "../db/act.ts";
 import { auditEvents, clients } from "../db/schema.ts";
 import { clientDomain } from "../deploy/context.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
+import { sharedSecretsCurrent } from "../rollout/shared-secrets.ts";
 import { currentRun, isReplaceable } from "../runners.ts";
 import type { RunStatus } from "../runners.ts";
 import { workersPaidConfirmedAt } from "./workflow.ts";
@@ -87,6 +88,12 @@ export interface ProvisioningView {
   stopped: { step: string; error: string } | null;
   /** Whether staff confirmed Workers Paid already (`client.workers_paid`). */
   workersPaidConfirmed: boolean;
+  /**
+   * For an active client, whether it runs the shared secrets in Secrets
+   * Store now (src/rollout/shared-secrets.ts); null otherwise, or while the
+   * store can't be read.
+   */
+  sharedSecretsCurrent: boolean | null;
   phase: ProvisioningPhase;
 }
 
@@ -132,7 +139,10 @@ interface PhaseFacts {
 }
 
 const phaseOf = (
-  view: Omit<ProvisioningView, "phase" | "stopped" | "workersPaidConfirmed">,
+  view: Omit<
+    ProvisioningView,
+    "phase" | "stopped" | "workersPaidConfirmed" | "sharedSecretsCurrent"
+  >,
   { deployInRun, confirmedBeforeRun }: PhaseFacts
 ): ProvisioningPhase => {
   if (view.client?.status === "active") {
@@ -198,8 +208,14 @@ export const getProvisioning = async (
           },
     run,
   };
+  const shared =
+    client?.status === "active"
+      ? await sharedSecretsCurrent(env, db, clientId)
+      : null;
   return {
     ...view,
+    sharedSecretsCurrent:
+      shared === null ? null : shared.get(clientId) === true,
     stopped: await stopOf(env, clientId),
     workersPaidConfirmed: confirmedAt !== null,
     phase: phaseOf(view, {

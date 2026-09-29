@@ -73,7 +73,7 @@ import {
   workersSubdomain,
 } from "./router.ts";
 import type { RouterHosts, SmokeOptions } from "./router.ts";
-import { workerSecrets } from "./secrets.ts";
+import { sharedSecretsFingerprint, workerSecrets } from "./secrets.ts";
 import type { DeploySecrets } from "./secrets.ts";
 import {
   checkBindingNames,
@@ -309,8 +309,9 @@ const recordFailure = async (
 
 /**
  * The versions a deploy uploaded, by app, each with the fingerprint of
- * everything that went into it (`uploadFingerprint`) and of its secrets
- * alone (`secretsFingerprint`).
+ * everything that went into it (`uploadFingerprint`), of its secrets
+ * alone (`secretsFingerprint`), and of the shared secrets among them
+ * (`sharedSecretsFingerprint`).
  */
 const recordedSchema = z.object({
   byApp: z.record(
@@ -319,6 +320,7 @@ const recordedSchema = z.object({
       version: z.string(),
       fingerprint: z.string(),
       secrets: z.string(),
+      shared: z.string(),
     })
   ),
 });
@@ -666,6 +668,7 @@ const uploadApp = async (
     secrets.clientKey,
     workerSecretValues
   );
+  const sharedPrint = await sharedSecretsFingerprint(secrets, app);
   const versions = await recordedNow(db, id);
   const recorded = versions[app];
   if (recorded?.fingerprint === fingerprint) {
@@ -687,7 +690,12 @@ const uploadApp = async (
     upload,
     workerSecretValues
   );
-  versions[app] = { version: versionId, fingerprint, secrets: secretsPrint };
+  versions[app] = {
+    version: versionId,
+    fingerprint,
+    secrets: secretsPrint,
+    shared: sharedPrint,
+  };
   await act(
     db,
     "system",

@@ -24,6 +24,7 @@ import type { WorkerEntry } from "@grasp-os/shared/release";
 
 import type { Secret } from "../cloudflare/workers.ts";
 import { DeployError } from "./errors.ts";
+import { secretsFingerprint } from "./upload.ts";
 
 /**
  * How long after a rotation went live a Worker still gets the previous
@@ -133,6 +134,25 @@ export const reservedSecretNames: ReadonlySet<string> = new Set(
     )
   )
 );
+
+/**
+ * The fingerprint of the shared secrets `secrets` gives the Worker `app`
+ * (`secretsFingerprint`): the same for every client, and for a version
+ * that runs them and for Secrets Store as it is now, so comparing the two
+ * says whether a client runs the shared secrets in the store
+ * (src/rollout/shared-secrets.ts).
+ */
+export const sharedSecretsFingerprint = async (
+  secrets: Pick<DeploySecrets, "clientKey" | "shared">,
+  app: string
+): Promise<string> =>
+  await secretsFingerprint(
+    secrets.clientKey,
+    Object.entries(secrets.shared[app] ?? {}).map(([name, value]) => ({
+      name,
+      value,
+    }))
+  );
 
 /** The client whose secrets are derived, and its rotation. */
 export interface ClientGeneration {

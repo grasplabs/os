@@ -373,25 +373,22 @@ const readPrevious = async (
 };
 
 /**
- * The release rollout `params` deploys to `client`, and why it skips the
- * client instead, if it does: one no longer active (`not_active`); for a
- * release rollout, its release, skipped as `skipReason` says; for a
- * secrets rollout, the release the client runs (`runningRelease`),
- * whatever it's pinned to, skipped (`no_release`) while its Workers don't
- * run one release.
+ * Why rollout `params` skips `client` before claiming it, or null: one no
+ * longer active (`not_active`); for a release rollout, what `skipReason`
+ * says. A secrets rollout skips no active client here: it deploys the
+ * release the client runs, whatever it's pinned to, read once it holds
+ * the client (`claimTarget`).
  */
-const releaseFor = async (
+const skipFor = async (
   db: ConsoleDatabase,
   params: RolloutParams,
   client: TargetClient
-): Promise<{ releaseId: string | null; skip: string | null }> => {
-  const active = client.status === "active";
+): Promise<string | null> => {
+  if (client.status !== "active") {
+    return "not_active";
+  }
   if (params.releaseId === null) {
-    const running = runningRelease(client);
-    if (!active) {
-      return { releaseId: running, skip: "not_active" };
-    }
-    return { releaseId: running, skip: running === null ? "no_release" : null };
+    return null;
   }
   const [release] = await db
     .select({ id: releases.id, builtAt: releases.builtAt })
@@ -403,20 +400,37 @@ const releaseFor = async (
       `Release ${params.releaseId} isn't imported`
     );
   }
-  return {
-    releaseId: release.id,
-    skip: active ? skipReason(client, release) : "not_active",
-  };
+  return skipReason(client, release);
+};
+
+/**
+ * What a claimed target deploys: the deploy it started already, or else
+ * the release to start one of, the rollout's or, for a secrets rollout,
+ * the one `client` runs; null when it has neither.
+ */
+const deployPlan = (
+  deployId: string | null,
+  releaseId: string | null,
+  client: TargetClient
+): { deployId: string } | { releaseId: string } | null => {
+  if (deployId !== null) {
+    return { deployId };
+  }
+  const release = releaseId ?? runningRelease(client);
+  return release === null ? null : { releaseId: release };
 };
 
 /**
  * Claims client `clientId` for the rollout, unless it skips it, and
- * returns the deploy it runs and what the client ran before. A client
- * the rollout has no release for, or skips (`releaseFor`), is skipped,
- * audited, unless the rollout is deploying it already; a rollout staff
- * stopped goes no further. What it ran before is read once, before
- * anything of the release is live, and kept on its target, which stays
- * `pending` until its first step starts (`markStarted`).
+ * returns the deploy it runs and what the client ran before. A client it
+ * skips (`skipFor`) is skipped, audited, unless the rollout is deploying
+ * it already; a rollout staff stopped goes no further. A secrets rollout
+ * reads the release the client runs once it holds the client, so no
+ * other runner changes it after, and skips (`no_release`) a client whose
+ * Workers don't run one release, unless it started its deploy already.
+ * What it ran before is read once, before anything of the release is
+ * live, and kept on its target, which stays `pending` until its first
+ * step starts (`markStarted`).
  */
 const claimTarget = async (
   env: Env,
@@ -440,30 +454,35 @@ const claimTarget = async (
     return { state: "skipped" };
   }
   const client = await targetClient(db, clientId);
-  const { releaseId, skip } =
-    client === undefined
-      ? { releaseId: null, skip: "not_active" }
-      : await releaseFor(db, params, client);
-  if (
-    client === undefined ||
-    releaseId === null ||
-    (skip !== null && target.status === "pending")
-  ) {
-    await skipTarget(db, rolloutId, clientId, skip ?? "no_release");
+  const skip =
+    client === undefined ? "not_active" : await skipFor(db, params, client);
+  if (client === undefined || (skip !== null && target.status === "pending")) {
+    await skipTarget(db, rolloutId, clientId, skip ?? "not_active");
     return { state: "skipped" };
   }
   await claimClient(env, db, rolloutId, clientId);
+  // Read again now the rollout holds the client: no other runner changes
+  // what it runs from here.
+  const held = (await targetClient(db, clientId)) ?? client;
+  // The deploy it started already, or the release to start one of.
+  const plan = deployPlan(target.deployId, params.releaseId, held);
+  if (plan === null) {
+    await skipTarget(db, rolloutId, clientId, "no_release");
+    return { state: "skipped" };
+  }
+  // Read before a deploy starts: one that stops here leaves none behind.
   const previous =
-    parsePrevious(target.previous) ?? (await readPrevious(env, client));
+    parsePrevious(target.previous) ?? (await readPrevious(env, held));
   const deployId =
-    target.deployId ??
-    (await startDeploy(
-      db,
-      params.startedBy,
-      clientId,
-      releaseId,
-      params.releaseId === null ? "secrets" : "release"
-    ));
+    "deployId" in plan
+      ? plan.deployId
+      : await startDeploy(
+          db,
+          params.startedBy,
+          clientId,
+          plan.releaseId,
+          params.releaseId === null ? "secrets" : "release"
+        );
   // Still pending: claimed, but nothing of it started yet.
   await db
     .update(rolloutTargets)
