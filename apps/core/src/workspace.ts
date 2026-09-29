@@ -7,6 +7,7 @@ import {
 } from "@grasp-os/shared/audit";
 import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
 import type {
+  ChatDraft,
   ChatMessage,
   ChatProvenance,
   ChatSummary,
@@ -947,6 +948,59 @@ export class Workspace extends DurableObject<Env> {
       ),
       revision: row.revision,
     };
+  }
+
+  /**
+   * The title of `personId`'s own chat `chatId`; `null` when it is gone,
+   * or not theirs. For a review of what the chat's agent proposed, read by
+   * the person it acted for alone: a title may quote their question.
+   */
+  chatTitle(chatId: unknown, personId: string): string | null {
+    const id = chatIdSchema.safeParse(chatId);
+    if (!id.success) {
+      return null;
+    }
+    const row = this.#db
+      .select({ title: chats.title, personId: chats.personId })
+      .from(chats)
+      .where(eq(chats.id, id.data))
+      .get();
+    return row?.personId === personId ? row.title : null;
+  }
+
+  /**
+   * `personId`'s own chat's drafts with changes, the most recently
+   * written first: which Apps, over which version, and the paths each
+   * changes.
+   */
+  drafts(chatId: unknown, personId: string): ChatDraft[] {
+    const { id } = this.#ownChat(chatId, personId);
+    // A chat's few drafts, read by their key and sorted here.
+    const rows = this.#db
+      .select()
+      .from(chatDrafts)
+      .where(eq(chatDrafts.chatId, id))
+      .all()
+      .toSorted(
+        (one, other) => other.updatedAt.getTime() - one.updatedAt.getTime()
+      );
+    // In key order: by App, then path.
+    const paths = this.#db
+      .select({ appId: chatDraftFiles.appId, path: chatDraftFiles.path })
+      .from(chatDraftFiles)
+      .where(eq(chatDraftFiles.chatId, id))
+      .orderBy(asc(chatDraftFiles.appId), asc(chatDraftFiles.path))
+      .all();
+    // A draft whose changes are all gone keeps its row (its revision
+    // goes on), and isn't one to show.
+    return rows.flatMap(({ appId, base, updatedAt }) => {
+      const changed = paths
+        .filter((row) => row.appId === appId)
+        .map(({ path }) => path);
+      return changed.length === 0
+        ? []
+        : [{ app: appId, base, changed, updatedAt: updatedAt.toISOString() }];
+    });
   }
 
   /**

@@ -1,5 +1,5 @@
 import { appErrors } from "@grasp-os/shared/apps";
-import type { App, SavedBuild } from "@grasp-os/shared/apps";
+import type { App, SavedBuild, VersionReview } from "@grasp-os/shared/apps";
 import { delegateActorOf } from "@grasp-os/shared/audit";
 import type { AuditDetailValue } from "@grasp-os/shared/audit";
 import { workflowIdSchema } from "@grasp-os/shared/ids";
@@ -17,17 +17,20 @@ import {
   appFor,
   applyChanges,
   createApp,
+  draftOverLatest,
   latestVersion,
+  proposeDraft,
   versionFiles,
 } from "./apps.ts";
-import type { AppChanger } from "./apps.ts";
-import type { Member } from "./auth/identity.ts";
+import type { Acting, Member } from "./auth/identity.ts";
 import { workspace } from "./durable-objects.ts";
-import { requireFeature } from "./features.ts";
+import { featureEnabled, requireFeature } from "./features.ts";
 import { appsCollectionEnabled } from "./knowledge/access.ts";
 import { appsCollectionId } from "./knowledge/app-entries.ts";
+import { requestPermission } from "./permissions.ts";
 import { isRestricted } from "./restricted.ts";
 import { buildOnSave } from "./save-builds.ts";
+import { keepTests, reviewVersion } from "./version-review.ts";
 import {
   dryRunTests,
   hasWorkflow,
@@ -45,7 +48,11 @@ import type { CheckOutcome, Draft } from "./workspace.ts";
 // server code and workflows: type errors, @shadcn/lint and build errors)
 // and runs its workflows' tests, and dry-runs them with the values it
 // gives. Tests and dry runs run in isolates with an empty env: nothing
-// they do leaves them. Nothing here makes a version current.
+// they do leaves them. Once a draft passes, the agent proposes it: it
+// becomes the App's next version, pending review, with a review of what
+// it changes worked out by core (version-review.ts). Nothing here makes a
+// version current, or can: a builder of the App does, in Grasp, and what
+// the App asks for waits for an admin to grant it.
 //
 // The repair loop is the agent loop itself: a check answers with what
 // fails, the agent writes a fix and checks again, until it passes or
@@ -63,7 +70,9 @@ import type { CheckOutcome, Draft } from "./workspace.ts";
 // Knowledge (it is read only), so granting it means only this. A chat
 // that read restricted data writes no App code: what it read would reach
 // everyone who builds the App. Every call is audited as `agent.call`, and
-// what changes an App (`app.created`) as the agent acting for the person.
+// what changes an App (`app.created`, `app.committed`,
+// `app.version.proposed`, `permission.requested`) as the agent acting for
+// the person.
 
 /**
  * Most checks of one draft that may fail in a row in one turn: the repair
@@ -275,6 +284,15 @@ const checkFiles = async (
   };
 };
 
+/** What proposing a draft did. */
+export interface Proposal {
+  /** The version it is now, pending review; null when it wasn't proposed. */
+  version: number | null;
+  check: DraftCheck;
+  /** What the version changes, as its reviewer reads it. */
+  review: VersionReview | null;
+}
+
 /** Building Apps, as a chat's code does it. */
 export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   /**
@@ -284,7 +302,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
    */
   async #build<T>(
     method: string,
-    run: (by: AppChanger) => Promise<T>,
+    run: (by: Acting) => Promise<T>,
     detail?: (result: T) => Record<string, AuditDetailValue>
   ): Promise<T> {
     const { env } = this;
@@ -299,9 +317,17 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
         if (await isRestricted(env, chatAuthority(scope), chatContext(scope))) {
           throw permissionErrors.create("permission.restricted");
         }
+        const authority = chatAuthority(scope);
         return await run({
           ...person,
-          actor: delegateActorOf(chatAuthority(scope)),
+          actor: delegateActorOf(authority),
+          via: {
+            type: "agent",
+            agentId: scope.agentId,
+            onBehalfOf: scope.personId,
+            workspaceId: scope.workspaceId,
+            chatId: scope.chatId,
+          },
         });
       },
       ...(detail === undefined ? {} : { detail }),
@@ -309,7 +335,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   }
 
   /** The App `app` names, which the person builds. */
-  async #buildable(by: AppChanger, app: unknown): Promise<AppId> {
+  async #buildable(by: Acting, app: unknown): Promise<AppId> {
     const { id } = await appFor(this.env, by, app, "builder");
     return id;
   }
@@ -498,10 +524,103 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
         );
         return { ...result, failedInARow, maxFailedChecks };
       },
-      (checked) => ({
+      (result) => ({
         app: typeof app === "string" ? app : null,
-        passed: checked.passed,
-        failedInARow: checked.failedInARow,
+        passed: result.passed,
+        failedInARow: result.failedInARow,
+      })
+    );
+  }
+
+  /**
+   * Proposes the chat's draft of `app` for review: checks it over the
+   * App's latest version (as `check` does, and counted with its checks),
+   * and once it passes commits it as the App's next version, pending, with
+   * `message`, and drops the draft. A builder makes it current, in Grasp.
+   * A draft that fails isn't proposed: what fails comes back instead.
+   */
+  async propose(app: unknown, message: unknown): Promise<Proposal> {
+    return await this.#build(
+      "build.propose",
+      async (by) => {
+        const id = await this.#buildable(by, app);
+        const { workspaceId, chatId } = this.ctx.props;
+        const draft = await draftOf(this.env, this.ctx.props, id);
+        if (Object.keys(draft.changes).length === 0) {
+          throw appErrors.create("app.nothing_to_commit");
+        }
+        const over = await draftOverLatest(this.env, id, draft);
+        const counted = await this.#counted(
+          id,
+          async () =>
+            await checkFiles(
+              this.env,
+              id,
+              draft.base,
+              Object.fromEntries(over.files)
+            )
+        );
+        const check = {
+          ...counted.result,
+          failedInARow: counted.failedInARow,
+          maxFailedChecks,
+        };
+        if (!check.passed) {
+          return { version: null, check, review: null };
+        }
+        const proposed = await proposeDraft(this.env, by, id, over, message);
+        // The check ran the tests of exactly these files: the review takes
+        // its result rather than running them again.
+        if (check.tests.status !== "not_run") {
+          await keepTests(this.env, id, proposed.tree, check.tests);
+        }
+        // Only the revision committed: a write since stays a draft.
+        await workspace(this.env, workspaceId).dropDraft(
+          chatId,
+          id,
+          draft.revision
+        );
+        return {
+          version: proposed.version,
+          check,
+          review: await reviewVersion(this.env, by, id, proposed.version),
+        };
+      },
+      (proposal) => ({
+        app: typeof app === "string" ? app : null,
+        version: proposal.version,
+        passed: proposal.check.passed,
+      })
+    );
+  }
+
+  /**
+   * Asks for a permission for `app` (a connection, a collection, a
+   * workflow or another App's exports), as its builders do: it allows
+   * nothing until an admin grants it.
+   */
+  async requestPermission(app: unknown, request: unknown): Promise<Permission> {
+    return await this.#build(
+      "build.requestPermission",
+      async (by) => {
+        const id = await this.#buildable(by, app);
+        const subject = { type: "app", appId: id };
+        return await requestPermission(
+          this.env,
+          by,
+          typeof request === "object" && request !== null
+            ? { ...request, subject }
+            : request,
+          async (named, role) => {
+            if (featureEnabled(this.env, "app_sharing")) {
+              await appFor(this.env, by, named, role);
+            }
+          }
+        );
+      },
+      (requested) => ({
+        app: typeof app === "string" ? app : null,
+        permission: requested.id,
       })
     );
   }
@@ -639,6 +758,53 @@ build: {
     status: "completed" | "failed";
     report: string;
   }[]>;
+  /**
+   * Proposes the draft for review: checks it over the App's latest version
+   * and, once it passes, makes it the App's next version, pending, with
+   * \`message\` (what changed and why, for the reviewer). A builder of the App
+   * reviews what it changes and makes it current in Grasp: tell the person
+   * so. One that fails isn't proposed: \`version\` is null, and \`check\` says why.
+   */
+  propose(app: string, message: string): Promise<{
+    version: number | null;
+    /** \`pending\`: a build is still going; propose again shortly. */
+    check: { passed: boolean; pending: boolean; screens: Build; server: Build; workflows: Build; tests: { status: string; failures: string[] } };
+    /** What the version changes, as its reviewer reads it; null when not proposed. */
+    review: {
+      current: number | null;
+      files: { path: string; change: "added" | "modified" | "removed" }[];
+      /** How the server code (app/**.ts) changed: it acts for whoever uses the App. */
+      server: "added" | "modified" | "removed" | null;
+      serverFiles: { path: string; change: "added" | "modified" | "removed" }[];
+      workflows: {
+        id: string;
+        change: "added" | "modified" | "removed";
+        /** Changed code outside screens it may use. */
+        shared: string[];
+        /** \`sharedCode\`: listed because code it may use changed. */
+        steps: { name: string; change: string; sideEffect: boolean; calls: string[]; sharedCode: boolean }[] | null;
+        params: { name: string; change: string }[] | null;
+      }[];
+      permissions: { id: string; object: Record<string, unknown>; actions: string[]; binding: string }[];
+      /** What the App holds, and which making it current asks an admin for again. */
+      grants: { permission: { id: string; binding: string; actions: string[] }; askedAgain: boolean }[];
+      tests: { status: "passed" | "failed" | "none"; failures: string[] };
+    } | null;
+  }>;
+  /**
+   * Asks for a permission the App needs, as its builders do: an admin
+   * grants it or not, and it allows nothing until then. \`binding\` is the
+   * name the App's code reaches it by, such as \`MAIL\`.
+   */
+  requestPermission(app: string, request: {
+    object:
+      | { type: "connection"; connectionId: string; resource?: string }
+      | { type: "collection"; collectionId: string }
+      | { type: "workflow"; appId: string; workflowId: string }
+      | { type: "app"; appId: string };
+    actions: string[];
+    binding: string;
+  }): Promise<{ id: string; status: string }>;
 };`;
 
 /** `env.build`. */

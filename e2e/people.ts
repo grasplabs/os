@@ -130,6 +130,7 @@ const cast = {
   activity: { admin: "admin", builder: "builder" },
   activityAgain: { admin: "admin", builder: "builder" },
   chat: { user: "user" },
+  chatBuilds: { builder: "builder" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;

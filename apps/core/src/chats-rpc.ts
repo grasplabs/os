@@ -2,6 +2,7 @@ import { agentErrors } from "@grasp-os/shared/agent";
 import { actorOf } from "@grasp-os/shared/audit";
 import { chatTitleSchema } from "@grasp-os/shared/chat";
 import type {
+  ChatDraft,
   ChatQuestion,
   ChatsApi,
   ChatSummary,
@@ -15,6 +16,7 @@ import { RpcTarget } from "capnweb";
 import { organizationId } from "./auth/auth.ts";
 import { personOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
+import { requireFeature } from "./features.ts";
 import { gatewaySettings } from "./models.ts";
 import { callbackFor, isStub, recheckedEvery } from "./page-callbacks.ts";
 import type { StillOpen } from "./page-callbacks.ts";
@@ -181,6 +183,14 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
         throw agentErrors.create("agent.invalid_question");
       }
       await this.#chatsOf(userId).send(id, userId, parsed.data);
+    });
+  }
+
+  /** Only while the agent builds Apps (`app_builder`). */
+  async drafts(chatId: string): Promise<ChatDraft[]> {
+    return await withPerson(this.#check, async ({ userId }) => {
+      requireFeature(this.#env, "app_builder");
+      return await this.#chatsOf(userId).drafts(chatIdOf(chatId), userId);
     });
   }
 

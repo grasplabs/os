@@ -245,6 +245,8 @@ const routeOf = (
  * (`statement-failed`).
  */
 export type Failure =
+  /** A refusal: the console retries none. */
+  | 400
   | 408
   | 429
   | 500
@@ -277,6 +279,9 @@ const failed = (failure: Exclude<Failure, "lost">): Response => {
     );
     response.headers.set("retry-after", failure.retryAfter);
     return response;
+  }
+  if (failure === 400) {
+    return refusal(400, 10_000, "Bad request");
   }
   if (failure === 408) {
     return refusal(408, 10_000, "Request timeout");

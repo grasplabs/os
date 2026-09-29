@@ -1,6 +1,8 @@
 /**
- * What staff do with rollouts (src/rollout/workflow.ts): start one, and
- * approve its next ring.
+ * What staff do with rollouts (src/rollout/workflow.ts): start one,
+ * approve its next ring, pause and resume its run, cancel it between
+ * rings, and pin a client to a release. Rolling a client back is
+ * src/rollout/rollback.ts.
  *
  * One rollout runs at a time: a rollout waiting for approval still owns
  * the rings after, which a second rollout would deploy something else
@@ -9,13 +11,24 @@
  */
 import { log } from "@grasp-os/shared/log";
 import { releaseIdSchema } from "@grasp-os/shared/release";
-import { and, eq, gt, inArray, min, sql } from "drizzle-orm";
+import {
+  and,
+  eq,
+  gt,
+  inArray,
+  isNotNull,
+  isNull,
+  min,
+  ne,
+  or,
+  sql,
+} from "drizzle-orm";
 import { z } from "zod";
 
 import type { Staff } from "../access.ts";
 import { actIfChanged, audit, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import { releases, rollouts, rolloutTargets } from "../db/schema.ts";
+import { clients, releases, rollouts, rolloutTargets } from "../db/schema.ts";
 import { clientDomain } from "../deploy/context.ts";
 import { errorCode } from "../deploy/deploy.ts";
 import { importedManifest } from "../deploy/release.ts";
@@ -300,4 +313,176 @@ export const approveRollout = async (
   }
   const instance = await env.ROLLOUT.get(rolloutId);
   await instance.sendEvent({ type: approvalEvent(next), payload: {} });
+};
+
+/** Rollout `rolloutId`'s row and where its run is; null when there's no such rollout. */
+const runOf = async (env: Env, db: ConsoleDatabase, rolloutId: string) => {
+  const [row] = await db
+    .select({ status: rollouts.status, createdAt: rollouts.createdAt })
+    .from(rollouts)
+    .where(eq(rollouts.id, rolloutId));
+  if (row === undefined) {
+    return null;
+  }
+  return {
+    row,
+    ...(await instanceStatus(env.ROLLOUT, rolloutId, row.createdAt)),
+  };
+};
+
+/** The statuses of a run that's going, and so can be paused. */
+const pausable: ReadonlySet<string> = new Set(["queued", "running", "waiting"]);
+
+/** Whether a rollout in `status` still has rings to deploy. */
+const isActive = (status: string): boolean =>
+  activeStatuses.some((each) => each === status);
+
+/**
+ * Pauses rollout `rolloutId`'s run, as `staff`, audited first: it stops
+ * after the step it's in, holding a client's traffic where it is if it's
+ * part way through one. Refused unless the rollout is running or waiting
+ * and its run is going (`not_running`).
+ */
+export const pauseRollout = async (
+  env: Env,
+  staff: Staff,
+  rolloutId: string
+): Promise<void> => {
+  const db = consoleDatabase(env.DB);
+  const run = await runOf(env, db, rolloutId);
+  const instance = run?.instance ?? null;
+  if (
+    run === null ||
+    instance === null ||
+    !isActive(run.row.status) ||
+    !pausable.has(run.status)
+  ) {
+    throw new RolloutError(
+      "not_running",
+      `Rollout ${rolloutId}'s run isn't going`
+    );
+  }
+  await audit(db, staff, { action: "rollout.pause", target: rolloutId });
+  await instance.pause();
+};
+
+/**
+ * Resumes rollout `rolloutId`'s paused run, as `staff`, audited first.
+ * Refused unless it's paused and the rollout still running or waiting
+ * (`not_paused`): a cancelled one stays stopped.
+ */
+export const resumeRollout = async (
+  env: Env,
+  staff: Staff,
+  rolloutId: string
+): Promise<void> => {
+  const db = consoleDatabase(env.DB);
+  const run = await runOf(env, db, rolloutId);
+  const instance = run?.instance ?? null;
+  if (
+    run?.status !== "paused" ||
+    instance === null ||
+    !isActive(run.row.status)
+  ) {
+    throw new RolloutError(
+      "not_paused",
+      `Rollout ${rolloutId}'s run isn't paused`
+    );
+  }
+  await audit(db, staff, { action: "rollout.resume", target: rolloutId });
+  await instance.resume();
+};
+
+/**
+ * Cancels rollout `rolloutId`, as `staff`, while it waits for approval:
+ * it deploys no further ring, and no longer holds the console's one
+ * rollout. Only then: between rings it holds no client, whereas part way
+ * through one a client is rolled back instead (src/rollout/rollback.ts).
+ * Refused otherwise (`not_waiting`).
+ */
+export const cancelRollout = async (
+  env: Env,
+  staff: Staff,
+  rolloutId: string
+): Promise<void> => {
+  const db = consoleDatabase(env.DB);
+  const cancelled = await actIfChanged(
+    db,
+    staff,
+    db
+      .update(rollouts)
+      .set({ status: "cancelled", updatedAt: new Date() })
+      .where(and(eq(rollouts.id, rolloutId), eq(rollouts.status, "waiting"))),
+    { action: "rollout.cancel", target: rolloutId }
+  );
+  if (!cancelled) {
+    throw new RolloutError(
+      "not_waiting",
+      `Rollout ${rolloutId} isn't waiting for approval`
+    );
+  }
+  // A run asked to go on finds the rollout cancelled; ended here, it
+  // doesn't wait out its approval either.
+  const run = await runOf(env, db, rolloutId);
+  await run?.instance?.terminate();
+};
+
+/** Pinning a client: to a release, or to none (unpinned). */
+export const pinSchema = z.object({
+  clientId: z.string().min(1),
+  releaseId: releaseIdSchema.nullable(),
+});
+export type PinInput = z.infer<typeof pinSchema>;
+
+/**
+ * Pins client `input.clientId` to release `input.releaseId`, as `staff`,
+ * or unpins it (`null`), audited when it changes: rollouts of any other
+ * release skip a pinned client (src/rollout/targets.ts). Refused for a
+ * client or a release the console doesn't have.
+ */
+export const pinClient = async (
+  env: Env,
+  staff: Staff,
+  input: PinInput
+): Promise<void> => {
+  const db = consoleDatabase(env.DB);
+  const { clientId, releaseId } = pinSchema.parse(input);
+  const [client] = await db
+    .select({ id: clients.id })
+    .from(clients)
+    .where(eq(clients.id, clientId));
+  if (client === undefined) {
+    throw new RolloutError("unknown_client", `No client ${clientId}`);
+  }
+  if (releaseId !== null) {
+    const [release] = await db
+      .select({ id: releases.id })
+      .from(releases)
+      .where(eq(releases.id, releaseId));
+    if (release === undefined) {
+      throw new RolloutError(
+        "release_not_imported",
+        `Release ${releaseId} isn't imported`
+      );
+    }
+  }
+  const pinned = clients.pinnedReleaseId;
+  await actIfChanged(
+    db,
+    staff,
+    db
+      .update(clients)
+      .set({ pinnedReleaseId: releaseId, updatedAt: new Date() })
+      .where(
+        and(
+          eq(clients.id, clientId),
+          releaseId === null
+            ? isNotNull(pinned)
+            : or(isNull(pinned), ne(pinned, releaseId))
+        )
+      ),
+    releaseId === null
+      ? { action: "client.unpin", clientId }
+      : { action: "client.pin", clientId, target: releaseId }
+  );
 };

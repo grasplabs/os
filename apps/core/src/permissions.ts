@@ -57,6 +57,7 @@ import {
 } from "./audit-outbox.ts";
 import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
+import type { Acting } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
 import { connectionOwnersOf } from "./connections.ts";
 import {
@@ -194,6 +195,7 @@ export const toPermission = (row: Row): Permission => ({
   grantedAt: row.grantedAt?.toISOString() ?? null,
   revokedBy: row.revokedBy,
   revokedAt: row.revokedAt?.toISOString() ?? null,
+  requestedVia: row.requestedVia ?? null,
 });
 
 /** Rows of `subject`, as a condition. */
@@ -247,13 +249,17 @@ const permissionEntry = (
   detail: { ...auditDetail(permission), ...extra },
 });
 
-/** The audit entry of a change to `permission` by the person `by`. */
+/**
+ * The audit entry of a change to `permission` by `by`: a person, or the
+ * chat's agent acting for them.
+ */
 const changeEntry = (
-  by: Identity,
+  by: Pick<Acting, "userId" | "staff" | "actor">,
   action: PermissionAction,
   permission: Permission,
   extra: Record<string, AuditDetailValue> = {}
-): AuditEntry => permissionEntry(actorOf(by), action, permission, extra);
+): AuditEntry =>
+  permissionEntry(by.actor ?? actorOf(by), action, permission, extra);
 
 /**
  * Refuses anyone but one of the organization's own admins: who may grant
@@ -451,7 +457,7 @@ const requireCollection = async (
  */
 export const requestPermission = async (
   env: Env,
-  by: Identity,
+  by: Acting,
   input: unknown,
   requireAppRole: (app: AppId, role: AppRole) => Promise<unknown>
 ): Promise<Permission> => {
@@ -500,6 +506,7 @@ export const requestPermission = async (
     grantedAt: null,
     revokedBy: null,
     revokedAt: null,
+    requestedVia: by.via ?? null,
   };
   const permission = toPermission(row);
   const db = drizzle(env.DB);
@@ -584,6 +591,7 @@ export const declaredRequests = async (
     grantedAt: null,
     revokedBy: null,
     revokedAt: null,
+    requestedVia: null,
   }));
   const liveKeys = new Set(live.map(grantKey));
   const wantedKeys = new Set(wanted.map(grantKey));
@@ -733,6 +741,7 @@ export const blueprintRequests = async (
       grantedAt: null,
       revokedBy: null,
       revokedAt: null,
+      requestedVia: null,
     }));
   return {
     rows,
@@ -1123,7 +1132,13 @@ export const madeCurrent = (
       .update(permissions)
       // Who granted it, and when, stay: a request with them is one asked
       // for again (`Permission.grantedBy`). Only the status allows.
-      .set({ status: "requested", requestedBy: by.userId, requestedAt: now })
+      // Asked for by `by` now, a person: not the agent that once may have.
+      .set({
+        status: "requested",
+        requestedBy: by.userId,
+        requestedAt: now,
+        requestedVia: null,
+      })
       .where(requestedAgain),
   ];
 };
@@ -1180,7 +1195,7 @@ export const revokePermission = async (
  */
 export const listPermissions = async (
   env: Env,
-  by: Identity,
+  by: Pick<Identity, "role">,
   subject?: unknown,
   openApps?: SQL,
   status?: unknown
@@ -1232,6 +1247,22 @@ export const listPermissions = async (
     .orderBy(asc(permissions.requestedAt), asc(permissions.id));
   return rows.map(toPermission);
 };
+
+/**
+ * Whether `by` making a version of the App that holds `permission` current
+ * would ask an admin for it again, as `madeCurrent` does: one that changes
+ * things, unless `by` could grant it (one of the organization's own
+ * admins) or the permissions are kept (`keep`, an App's first version
+ * copied from a blueprint, made current for the first time).
+ */
+export const askedAgainBy = (
+  by: Pick<Identity, "role" | "staff">,
+  permission: Permission,
+  keep: boolean
+): boolean =>
+  !keep &&
+  !(isAdmin(by.role) && !by.staff) &&
+  permission.actions.some((action) => changesThings(permission.object, action));
 
 /**
  * The person an App or agent acts for must still be in the organization:
