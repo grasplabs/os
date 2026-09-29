@@ -3,8 +3,9 @@ import type { Page } from "@playwright/test";
 
 import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
-import { apiOf, origin, pageOf, peopleIn, release } from "./people.ts";
+import { apiOf, pageOf, peopleIn, release } from "./people.ts";
 import type { Person } from "./people.ts";
+import { origin } from "./stack.ts";
 
 // Reaching Apps from the product: sign in, find an App in the Apps list,
 // open it, and use its screen with live data from its server; its

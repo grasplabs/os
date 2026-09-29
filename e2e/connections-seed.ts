@@ -16,6 +16,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { test } from "@playwright/test";
 
 import type { Cast } from "./people.ts";
+import { stateDir } from "./stack.ts";
 
 const quoted = (text: string): string => `'${text.replaceAll("'", "''")}'`;
 
@@ -41,8 +42,8 @@ const isBusy = (error: unknown): boolean =>
   busyErrors.some((text) => String(error.stderr).includes(text));
 
 /**
- * Runs SQL on connect's local database, which the dev server keeps next to
- * core's (apps/core/package.json), as one batch in one transaction, which
+ * Runs SQL on connect's local database, which the e2e stack keeps next to
+ * core's (e2e/stack.ts), as one batch in one transaction, which
  * SQLite undoes whole when it can't finish: so a busy batch is tried again.
  */
 export const execute = async (sql: string): Promise<void> => {
@@ -58,7 +59,7 @@ export const execute = async (sql: string): Promise<void> => {
           "-c",
           "../connect/wrangler.jsonc",
           "--persist-to",
-          ".wrangler/state",
+          stateDir,
           "--command",
           sql,
         ],

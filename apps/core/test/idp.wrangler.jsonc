@@ -1,6 +1,6 @@
 // The fake IdP (idp-worker.ts), for local development and the e2e tests
-// only: never deployed. Started beside core by `vp run dev` and Playwright,
-// on the port in sign-in-config.ts (`localIdpPort`).
+// only: never deployed. Started beside core by `vp run dev`, on the port in
+// sign-in-config.ts (`localIdpPort`), and by Playwright, on e2e/stack.ts's.
 {
   "$schema": "../../../node_modules/wrangler/config-schema.json",
   "name": "grasp-os-dev-idp",
