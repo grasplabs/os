@@ -6,7 +6,8 @@ import { consoleDatabase } from "../db/act.ts";
 import { auditEvents, clients } from "../db/schema.ts";
 import { clientDomain } from "../deploy/context.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
-import { endedStatuses, runOf } from "./control.ts";
+import { currentRun, isReplaceable } from "./runs.ts";
+import type { RunStatus } from "./runs.ts";
 
 /** A client as the list shows it. */
 export interface ClientSummary {
@@ -68,8 +69,11 @@ export interface ProvisioningView {
     step: string | null;
     error: string | null;
   } | null;
-  /** Its run's status, as Workflows reports it; null when it has none. */
-  run: InstanceStatus["status"] | null;
+  /**
+   * Its current run's status (src/provision/runs.ts): Workflows', or
+   * `starting`, or `gone`; null when it has none.
+   */
+  run: RunStatus | null;
   /**
    * Why its run last stopped (`client.provision_stop`): the step and the
    * error's code with our words. Null when it hasn't, or was started or
@@ -109,27 +113,15 @@ const stopOf = async (
   return parsed.success ? parsed.data : null;
 };
 
-/** Client `clientId`'s run's status, or null when it has none. */
-const runStatus = async (
-  env: Env,
-  clientId: string
-): Promise<ProvisioningView["run"]> => {
-  const run = await runOf(env, clientId);
-  if (run === null) {
-    return null;
-  }
-  const { status } = await run.status();
-  return status;
-};
-
 const phaseOf = (
   view: Omit<ProvisioningView, "phase" | "stopped">
 ): ProvisioningPhase => {
   if (view.client?.status === "active") {
     return "active";
   }
-  const gone = view.run === null && view.client !== null;
-  if (gone || (view.run !== null && endedStatuses.has(view.run))) {
+  // A client with no run at all can only be resumed.
+  const runless = view.run === null && view.client !== null;
+  if (runless || (view.run !== null && isReplaceable(view.run))) {
     return "failed";
   }
   if (view.deploy !== null) {
@@ -159,7 +151,8 @@ export const getProvisioning = async (
     .from(clients)
     .where(eq(clients.id, clientId));
   const latest = await latestDeployOf(db, clientId);
-  const run = await runStatus(env, clientId);
+  const current = await currentRun(env, clientId);
+  const run = current?.status ?? null;
   if (client === undefined && run === null) {
     return null;
   }

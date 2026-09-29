@@ -1,4 +1,4 @@
-import { introspectWorkflowInstance } from "cloudflare:test";
+import { introspectWorkflow } from "cloudflare:test";
 import { env, exports } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -88,13 +88,10 @@ describe("the client pages", () => {
     await importReleases(env.RELEASES, db);
     const clientId = `client-${crypto.randomUUID().slice(0, 8)}`;
     const accountId = crypto.randomUUID().replaceAll("-", "");
-    await using run = await introspectWorkflowInstance(
-      env.PROVISION_CLIENT,
-      clientId
-    );
+    await using runs = await introspectWorkflow(env.PROVISION_CLIENT);
     // The account step as it ends for a new account; the page's test has
     // no Cloudflare API to settle one against.
-    await run.modify(async (modifier) => {
+    await runs.modifyAll(async (modifier) => {
       await modifier.mockStepResult(
         { name: "account" },
         { accountId, abandonedAccountId: null }
@@ -106,7 +103,8 @@ describe("the client pages", () => {
       releaseId: release.id,
       ring: 1,
     });
-    await run.waitForStepResult({ name: "client" });
+    const [run] = await runs.get();
+    await run?.waitForStepResult({ name: "client" });
 
     const { status, html } = await page(`/clients/${clientId}`);
 
@@ -142,10 +140,7 @@ describe("the client pages", () => {
     const release = await publishRelease({ notes: "feat(core): stops" });
     await importReleases(env.RELEASES, db);
     const clientId = `client-${crypto.randomUUID().slice(0, 8)}`;
-    await using run = await introspectWorkflowInstance(
-      env.PROVISION_CLIENT,
-      clientId
-    );
+    await using runs = await introspectWorkflow(env.PROVISION_CLIENT);
     // The test's store holds no deployer token: the run's first step stops.
     await startProvisioning(env, staff, {
       clientId,
@@ -153,7 +148,8 @@ describe("the client pages", () => {
       releaseId: release.id,
       ring: 1,
     });
-    await run.waitForStatus("errored");
+    const [run] = await runs.get();
+    await run?.waitForStatus("errored");
 
     const { status, html } = await page(`/clients/${clientId}`);
 
