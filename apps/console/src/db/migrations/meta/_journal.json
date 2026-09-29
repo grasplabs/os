@@ -36,6 +36,20 @@
       "when": 1790632813374,
       "tag": "0004_client_workers_subdomain",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1790641144238,
+      "tag": "0005_client_created_by",
+      "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "6",
+      "when": 1790647123196,
+      "tag": "0006_client_runs",
+      "breakpoints": true
     }
   ]
 }

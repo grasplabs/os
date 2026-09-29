@@ -19,8 +19,8 @@
  * refused (`deploy_superseded`), so a stale deploy can't put an older
  * release or older secrets back live.
  *
- * A deploy expects to be its client's only runner: the provisioning
- * Workflow runs one instance per client. Databases and buckets are unique
+ * A deploy expects to be its client's only runner: provisioning claims
+ * one run per client in D1 (src/provision/runs.ts). Databases and buckets are unique
  * by name, so two runs at once couldn't make one twice, but a D1
  * migration could be applied twice, since reading what a database has
  * applied and applying the rest aren't one step.
@@ -104,7 +104,7 @@ export type DeployStep = (typeof deploySteps)[number];
  * failure has its `DeployError` code; the API's is `cloudflare_<status>`
  * and its error codes; anything else is `unexpected`.
  */
-const errorCode = (error: unknown): string => {
+export const errorCode = (error: unknown): string => {
   if (error instanceof DeployError) {
     return error.code;
   }
@@ -195,18 +195,30 @@ const deployOf = async (db: ConsoleDatabase, id: string) => {
   return row;
 };
 
-/** The id of client `clientId`'s latest deploy. */
-const latestDeployOf = async (
-  db: ConsoleDatabase,
-  clientId: string
-): Promise<string | undefined> => {
+/** Client `clientId`'s latest deploy: what it deploys, and how far it got. */
+export const latestDeployOf = async (db: ConsoleDatabase, clientId: string) => {
   const [latest] = await db
-    .select({ id: clientDeploys.id })
+    .select({
+      id: clientDeploys.id,
+      releaseId: clientDeploys.releaseId,
+      status: clientDeploys.status,
+      step: clientDeploys.step,
+      error: clientDeploys.error,
+    })
     .from(clientDeploys)
     .where(eq(clientDeploys.clientId, clientId))
     // Two deploys of one millisecond in the order they started.
     .orderBy(desc(clientDeploys.createdAt), desc(sql`rowid`))
     .limit(1);
+  return latest;
+};
+
+/** The id of client `clientId`'s latest deploy. */
+const latestDeployId = async (
+  db: ConsoleDatabase,
+  clientId: string
+): Promise<string | undefined> => {
+  const latest = await latestDeployOf(db, clientId);
   return latest?.id;
 };
 
@@ -344,7 +356,7 @@ const assertLatest = async (
   if (
     row === undefined ||
     row.status === "superseded" ||
-    (await latestDeployOf(db, clientId)) !== id
+    (await latestDeployId(db, clientId)) !== id
   ) {
     throw superseded(id);
   }
@@ -654,7 +666,7 @@ export const runDeploy = async (
   const { clientId, releaseId } = deploy;
   if (
     deploy.status === "superseded" ||
-    (await latestDeployOf(db, clientId)) !== id
+    (await latestDeployId(db, clientId)) !== id
   ) {
     throw new DeployError(
       "deploy_superseded",

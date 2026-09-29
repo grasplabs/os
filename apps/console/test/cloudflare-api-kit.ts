@@ -41,6 +41,8 @@ export interface ScriptState {
 export interface AccountState {
   id: string;
   name: string;
+  /** Its members, by email: `accepted`, or `pending` for an invitation. */
+  members: Map<string, string>;
   subdomain?: string;
   d1: { uuid: string; name: string; jurisdiction?: string }[];
   /** Buckets by jurisdiction: a name is unique only within one. */

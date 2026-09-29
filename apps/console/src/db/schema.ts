@@ -1,7 +1,8 @@
 /**
  * Console D1 schema: intent and history only. What runs in a client's
- * account (live Worker versions, secrets) is read from that account; client
- * account tokens live in Secrets Store, never here (threat model R17).
+ * account (live Worker versions, secrets) is read from that account; the
+ * token that reaches client accounts lives in Secrets Store, never here
+ * (threat model R17).
  */
 import {
   index,
@@ -71,10 +72,29 @@ export const clients = sqliteTable("clients", {
   status: text({ enum: ["provisioning", "active", "offboarded"] })
     .notNull()
     .default("provisioning"),
+  /** The staff member who started provisioning it (src/provision/). */
+  createdBy: text("created_by"),
   /** The release it stays on while pinned, whatever the rollouts. */
   pinnedReleaseId: text("pinned_release_id").references(() => releases.id),
   createdAt: timestamp("created_at").notNull(),
   updatedAt: timestamp("updated_at").notNull(),
+});
+
+/**
+ * The provisioning run that's a client's current one (src/provision/): its
+ * Workflow instance id, one per attempt. Starting or resuming claims the
+ * next with one conditional write naming the run it replaces, so however
+ * many staff act at once, one wins and only it creates a run: the single
+ * runner a client's deploy relies on. No foreign key: the run is claimed
+ * before its account step records the client.
+ */
+export const clientRuns = sqliteTable("client_runs", {
+  /** The client's id, as it will be recorded. */
+  clientId: text("client_id").primaryKey(),
+  /** The Workflow instance id: `<clientId>-<random>`. */
+  runId: text("run_id").notNull(),
+  /** When it was claimed: a run not created yet counts as starting for a while. */
+  claimedAt: timestamp("claimed_at").notNull(),
 });
 
 /**

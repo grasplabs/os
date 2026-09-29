@@ -158,7 +158,69 @@ const accountRoutes: Route[] = [
   },
 ];
 
-const routes = [...accountRoutes, ...workerRoutes];
+/** The roles every account has, as the API lists them. */
+const accountRoles = [
+  { id: "role-admin", name: "Administrator" },
+  { id: "role-read", name: "Administrator Read Only" },
+];
+
+/** An account's members and roles, as a tenant admin manages them, and its scripts. */
+const memberRoutes: Route[] = [
+  {
+    method: "GET",
+    path: /^\/members$/u,
+    answer: ({ account, call }) =>
+      paged(
+        [...account.members].map(([email, status]) => ({
+          id: `member-${email}`,
+          status,
+          user: { email },
+        })),
+        call.query
+      ),
+  },
+  {
+    method: "POST",
+    path: /^\/members$/u,
+    answer: ({ account, json }) => {
+      const email = text(json, "email");
+      const { roles } = json;
+      if (
+        !Array.isArray(roles) ||
+        !roles.every((role) => accountRoles.some(({ id }) => id === role))
+      ) {
+        return refusal(400, 1003, "Invalid roles");
+      }
+      // An existing user added as accepted is a member at once; otherwise
+      // it's an invitation.
+      const status =
+        text(json, "status") === "accepted" ? "accepted" : "pending";
+      account.members.set(email, status);
+      return envelope({ id: `member-${email}`, status, user: { email } });
+    },
+  },
+  {
+    method: "GET",
+    path: /^\/roles$/u,
+    answer: ({ call }) => paged(accountRoles, call.query),
+  },
+  {
+    method: "GET",
+    path: /^\/workers\/scripts$/u,
+    answer: ({ account }) =>
+      envelope([...account.scripts.keys()].map((id) => ({ id }))),
+  },
+];
+
+const routes = [...accountRoutes, ...memberRoutes, ...workerRoutes];
+
+/** Whether `caller` is an accepted member of `account`. */
+const isMember = (account: AccountState, caller: string | undefined) =>
+  caller !== undefined && account.members.get(caller) === "accepted";
+
+/** Who the deployer's token and the tenant admin's belong to. */
+export const deployerEmail = "deployer@grasp.test";
+export const tenantEmail = "tenant@grasp.test";
 
 /** The route that serves `call`, with its path's named parts. */
 const routeOf = (
@@ -175,14 +237,15 @@ const routeOf = (
 };
 
 /**
- * How a planned call fails: rate-limited (429, optionally with a
- * `Retry-After`), a server error in the envelope (500, 503), the edge's
+ * How a planned call fails: timed out at the edge (408), rate-limited
+ * (429, optionally with a `Retry-After`), a server error in the envelope (500, 503), the edge's
  * HTML error page (502), no answer before it ran (`network`), or no answer
  * after it ran (`lost`: the change is made, its response never arrives),
  * or, for a D1 query, an answer that succeeds with a statement that didn't
  * (`statement-failed`).
  */
 export type Failure =
+  | 408
   | 429
   | 500
   | 502
@@ -215,6 +278,9 @@ const failed = (failure: Exclude<Failure, "lost">): Response => {
     response.headers.set("retry-after", failure.retryAfter);
     return response;
   }
+  if (failure === 408) {
+    return refusal(408, 10_000, "Request timeout");
+  }
   if (failure === 502) {
     return new Response("<html>Bad gateway</html>", {
       status: 502,
@@ -245,10 +311,15 @@ const readBody = async (request: Request): Promise<unknown> => {
 };
 
 /**
- * A fake Cloudflare API that lets `token` in, for each test in the file.
- * Add accounts with `addAccount`; plan failures with `failCall`.
+ * A fake Cloudflare API that lets `token` (the deployer's) and
+ * `tenantToken` (a tenant admin's, which alone creates accounts) in, each
+ * to the accounts its user is an accepted member of, for each test in the
+ * file. Add accounts with `addAccount`; plan failures with `failCall`.
  */
-export const mockCloudflareApi = (token: string) => {
+export const mockCloudflareApi = (
+  token: string,
+  tenantToken = `${token}-tenant-admin`
+) => {
   const accounts = new Map<string, AccountState>();
   const calls: ApiCall[] = [];
   const planned = new Map<number, Failure>();
@@ -256,34 +327,98 @@ export const mockCloudflareApi = (token: string) => {
   const matched: { matches: (call: ApiCall) => boolean; failure: Failure }[] =
     [];
 
+  /** Adds an account `member` is a member of, and returns what it holds. */
+  const addAccount = (
+    name = "Client",
+    member = deployerEmail
+  ): AccountState => {
+    const account: AccountState = {
+      id: crypto.randomUUID().replaceAll("-", ""),
+      name,
+      members: new Map([[member, "accepted"]]),
+      d1: [],
+      buckets: [],
+      gateways: [],
+      scripts: new Map(),
+      workflows: new Map(),
+      assets: new Set(),
+      sessions: new Map(),
+      completions: new Set(),
+      scriptUploads: [],
+    };
+    accounts.set(account.id, account);
+    return account;
+  };
+
   /** Calls being answered now, and the most at once. */
   const load = { now: 0, peak: 0 };
+
+  /** Whose token a call carries: the deployer's or the tenant admin's. */
+  const callers = new Map([
+    [`Bearer ${token}`, deployerEmail],
+    [`Bearer ${tenantToken}`, tenantEmail],
+  ]);
+  /**
+   * Answers a call that names no account (`/user`, `/accounts`), or
+   * undefined for any other.
+   */
+  const answerUnscoped = (
+    call: ApiCall,
+    caller: string | undefined
+  ): Response | undefined => {
+    if (call.path !== "/user" && call.path !== "/accounts") {
+      return undefined;
+    }
+    if (caller === undefined) {
+      return refusal(403, 10_000, "Authentication error");
+    }
+    if (call.path === "/user") {
+      return envelope({ email: caller });
+    }
+    if (call.method === "POST") {
+      if (caller !== tenantEmail) {
+        return refusal(403, 10_000, "Only a tenant admin creates accounts");
+      }
+      // The tenant admin who creates one is its only member.
+      const body: Json =
+        typeof call.body === "object" && call.body !== null
+          ? { ...call.body }
+          : {};
+      const created = addAccount(text(body, "name"), tenantEmail);
+      return envelope({ id: created.id, name: created.name });
+    }
+    // The API matches `name` loosely; the fake as a substring.
+    const name = call.query.get("name") ?? "";
+    return paged(
+      [...accounts.values()]
+        .filter(
+          (account) => isMember(account, caller) && account.name.includes(name)
+        )
+        .map(({ id, name: accountName }) => ({ id, name: accountName })),
+      call.query
+    );
+  };
 
   /** Answers `call` as the API would. */
   const respond = async (
     request: Request,
     call: ApiCall
   ): Promise<Response> => {
-    const authorized =
-      request.headers.get("authorization") === `Bearer ${token}`;
-    if (call.path === "/accounts" && call.method === "GET") {
-      if (!authorized) {
-        return refusal(403, 10_000, "Authentication error");
-      }
-      return paged(
-        [...accounts.values()].map(({ id, name }) => ({ id, name })),
-        call.query
-      );
+    const caller = callers.get(request.headers.get("authorization") ?? "");
+    const unscoped = answerUnscoped(call, caller);
+    if (unscoped !== undefined) {
+      return unscoped;
     }
     const match = accountRoute.exec(call.path)?.groups;
     const found = routeOf(call, match?.rest ?? "");
+    const session = found?.route.session === true;
     // An upload session's token opens its upload, and nothing else; the
     // account's token doesn't open the upload.
-    if (found?.route.session === true ? authorized : !authorized) {
+    if (session ? caller !== undefined : caller === undefined) {
       return refusal(403, 10_000, "Authentication error");
     }
     const account = accounts.get(match?.id ?? "");
-    if (account === undefined) {
+    if (account === undefined || (!session && !isMember(account, caller))) {
       return refusal(403, 9109, "Unauthorized to access requested resource");
     }
     if (found === null) {
@@ -406,23 +541,10 @@ export const mockCloudflareApi = (token: string) => {
     /** The most calls it was answering at once in this test. */
     peakConcurrency: () => load.peak,
     /** Adds an account the token is a member of, and returns what it holds. */
-    addAccount: (name = "Client"): AccountState => {
-      const account: AccountState = {
-        id: crypto.randomUUID().replaceAll("-", ""),
-        name,
-        d1: [],
-        buckets: [],
-        gateways: [],
-        scripts: new Map(),
-        workflows: new Map(),
-        assets: new Set(),
-        sessions: new Map(),
-        completions: new Set(),
-        scriptUploads: [],
-      };
-      accounts.set(account.id, account);
-      return account;
-    },
+    addAccount,
+    /** The accounts named `name`, as the fake holds them. */
+    accountsNamed: (name: string): AccountState[] =>
+      [...accounts.values()].filter((account) => account.name === name),
     /** Fails the `n`th call from now as `failure` says, whatever it asks. */
     failCall: (n: number, failure: Failure) => {
       planned.set(calls.length + n, failure);

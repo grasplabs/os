@@ -219,6 +219,19 @@ export const cloudflareApi = ({
   };
 };
 
+/** Refusals a later attempt may get past: a timeout, a rate limit. */
+const transientStatuses: ReadonlySet<number> = new Set([408, 429]);
+
+/**
+ * Whether `error` is Cloudflare refusing the call for good: a 4xx other
+ * than a timeout or a rate limit, which trying again won't change.
+ */
+export const isRefused = (error: unknown): error is CloudflareApiError =>
+  error instanceof CloudflareApiError &&
+  error.status >= 400 &&
+  error.status < 500 &&
+  !transientStatuses.has(error.status);
+
 /** Whether `error` is Cloudflare saying the thing doesn't exist. */
 export const isNotFound = (error: unknown): boolean =>
   error instanceof CloudflareApiError && error.status === 404;

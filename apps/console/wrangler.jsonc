@@ -4,7 +4,8 @@
 // against the CF_ACCESS_AUD and CF_ACCESS_ISS vars; without them it refuses
 // everything. Deploy-ops passes them from the grasp-os-ops environment's
 // variables with `--var`, and stops if either is missing.
-// Client account tokens live in Secrets Store, never in the database.
+// The token it reaches client accounts with lives in Secrets Store, never in
+// the database.
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "grasp-os-console",
@@ -45,4 +46,72 @@
   ],
   // Imports newly published releases (src/releases/import.ts).
   "triggers": { "crons": ["*/5 * * * *"] },
+  // Onboards a client (src/provision/workflow.ts): an instance per attempt,
+  // each claimed in D1 first (src/provision/runs.ts), so two runs for one
+  // client can't overlap.
+  "workflows": [
+    {
+      "name": "grasp-os-provision-client",
+      "binding": "PROVISION_CLIENT",
+      "class_name": "ProvisionClient",
+    },
+  ],
+  // The router's hostname map, which a deploy writes (src/deploy/router.ts).
+  // The router's first deploy creates it as grasp-os-router-hosts; `deploy`
+  // fills in its id (scripts/wrangler-deploy.ts), so this placeholder only
+  // reaches local runs and tests.
+  "kv_namespaces": [
+    { "binding": "ROUTER_HOSTS", "id": "router-hosts-namespace" },
+  ],
+  // What provisioning and deploys need from the account's Secrets Store
+  // (src/deploy/context.ts): the tenant admin's token, which only creates
+  // accounts and makes the deployer a member (src/provision/workflow.ts);
+  // the deployer's token, with deploy permissions only, on every client
+  // account; the keys each client's own secrets are derived from; and the
+  // secrets every client shares, which deploy-ops copies in from
+  // 1Password. The store id is the account's own: `deploy` fills it in
+  // (scripts/wrangler-deploy.ts), so this placeholder only reaches local
+  // runs and tests.
+  "secrets_store_secrets": [
+    {
+      "binding": "TENANT_ADMIN_TOKEN",
+      "store_id": "account-secrets-store",
+      "secret_name": "TENANT_ADMIN_TOKEN",
+    },
+    {
+      "binding": "DEPLOYER_API_TOKEN",
+      "store_id": "account-secrets-store",
+      "secret_name": "DEPLOYER_API_TOKEN",
+    },
+    {
+      "binding": "ROUTER_KEY",
+      "store_id": "account-secrets-store",
+      "secret_name": "ROUTER_KEY",
+    },
+    {
+      "binding": "CLIENT_KEY",
+      "store_id": "account-secrets-store",
+      "secret_name": "CLIENT_KEY",
+    },
+    {
+      "binding": "ENTRA_CLIENT_SECRET",
+      "store_id": "account-secrets-store",
+      "secret_name": "ENTRA_CLIENT_SECRET",
+    },
+    {
+      "binding": "MICROSOFT_CLIENT_SECRET",
+      "store_id": "account-secrets-store",
+      "secret_name": "MICROSOFT_CLIENT_SECRET",
+    },
+    {
+      "binding": "GOOGLE_CLIENT_SECRET",
+      "store_id": "account-secrets-store",
+      "secret_name": "GOOGLE_CLIENT_SECRET",
+    },
+    {
+      "binding": "COMPOSIO_API_KEY",
+      "store_id": "account-secrets-store",
+      "secret_name": "COMPOSIO_API_KEY",
+    },
+  ],
 }

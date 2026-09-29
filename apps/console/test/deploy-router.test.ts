@@ -79,16 +79,8 @@ describe("the smoke check", () => {
   });
 });
 
-const isKv = (value: unknown): value is KVNamespace =>
-  typeof value === "object" &&
-  value !== null &&
-  "get" in value &&
-  "put" in value;
-/** The test pool's KV namespace for the router's map (vite.test.config.ts). */
-const kv: unknown = Reflect.get(env, "ROUTER_HOSTS");
-if (!isKv(kv)) {
-  throw new TypeError("Expected the router's hostname map as ROUTER_HOSTS");
-}
+/** The router's map, as the console binds it (wrangler.jsonc). */
+const kv = env.ROUTER_HOSTS;
 
 /**
  * The hostname map in the test pool's KV, whose reads after a write can be

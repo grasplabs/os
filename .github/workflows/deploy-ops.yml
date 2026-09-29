@@ -70,9 +70,10 @@ jobs:
       # on stdin, never as an argument or in a log line, and are written
       # every run: Secrets Store never reads a value back to compare.
       # The API token reaches curl through its config on stdin, not argv.
-      # The store holds only fixed secrets (these, the deployer token and the
-      # router key), never one per client, so one page normally covers it;
-      # the list is still read page by page up to `total_pages`.
+      # The store holds only fixed secrets (these, the deployer token, the
+      # router key and the client key), never one per client, so one page
+      # normally covers it; the list is still read page by page up to
+      # `total_pages`.
       - name: Copy the shared secrets to Secrets Store
         env:
           ENTRA_CLIENT_SECRET: ${{ steps.shared.outputs.ENTRA_CLIENT_SECRET }}
@@ -135,28 +136,40 @@ jobs:
       # the new schema until the deploy after them replaces it.
       - if: ${{ !inputs.secrets-only }}
         run: vp run --filter @grasp-os/console db:migrate
-      # Console first, each on its own: the router's deploy needs the
-      # account's Secrets Store (scripts/wrangler-deploy.ts), and an account
-      # not set up for it yet mustn't hold back the console.
+      # Router first: the console binds its hostname map, which the router's
+      # first deploy creates, and both need the account's Secrets Store
+      # (scripts/wrangler-deploy.ts fills in both ids). So a router deploy
+      # that fails stops the console's too. Besides Workers Scripts, D1 and
+      # Secrets Store, the job's token needs Workers KV Storage (read, to
+      # find the map) and Workflows (edit: the console's deploy registers
+      # its provisioning Workflow).
+      - if: ${{ !inputs.secrets-only }}
+        run: vp run --filter @grasp-os/router deploy
       # The console verifies every request's Access JWT against its Access
       # application (apps/console/src/access.ts) and refuses everyone
       # without these, so a deploy without them would lock staff out: stop
       # before deploying. They're the `grasp-os-ops` environment's variables,
       # not secrets: the AUD tag and the team URL identify the app, they
-      # grant nothing.
+      # grant nothing. So is CLIENT_DOMAIN, the domain clients are served
+      # under: without it the console provisions and deploys no client, but
+      # works otherwise, so it's passed only when set (keep_vars keeps the
+      # last one).
       - name: Deploy the console with its Access settings
         if: ${{ !inputs.secrets-only }}
         env:
           CF_ACCESS_AUD: ${{ vars.CF_ACCESS_AUD }}
           CF_ACCESS_ISS: ${{ vars.CF_ACCESS_ISS }}
+          CLIENT_DOMAIN: ${{ vars.CLIENT_DOMAIN }}
         run: |
           set -euo pipefail
           if [ -z "$CF_ACCESS_AUD" ] || [ -z "$CF_ACCESS_ISS" ]; then
             echo "::error::Set CF_ACCESS_AUD and CF_ACCESS_ISS as variables of the grasp-os-ops environment; nothing deployed"
             exit 1
           fi
+          vars=(--var "CF_ACCESS_AUD:$CF_ACCESS_AUD" --var "CF_ACCESS_ISS:$CF_ACCESS_ISS")
+          if [ -n "$CLIENT_DOMAIN" ]; then
+            vars+=(--var "CLIENT_DOMAIN:$CLIENT_DOMAIN")
+          fi
           vp run --filter @grasp-os/console build
           cd apps/console
-          vp exec wrangler deploy --var "CF_ACCESS_AUD:$CF_ACCESS_AUD" --var "CF_ACCESS_ISS:$CF_ACCESS_ISS"
-      - if: ${{ !inputs.secrets-only }}
-        run: vp run --filter @grasp-os/router deploy
+          vp exec node ../../scripts/wrangler-deploy.ts "${vars[@]}"

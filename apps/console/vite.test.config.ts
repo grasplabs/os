@@ -56,6 +56,8 @@ export default defineProject({
           // Off whatever a developer's .dev.vars sets: the tests of the
           // bypass set it themselves.
           DEV_ACCESS_EMAIL: "",
+          // Where provisioned clients are served (src/deploy/context.ts).
+          CLIENT_DOMAIN: "grasp.test",
           CONSOLE_MIGRATIONS: migrations,
           KNOWLEDGE_MIGRATION_FILES: knowledgeMigrationFiles,
         },
@@ -67,8 +69,6 @@ export default defineProject({
             `client-d1-${slot}`,
           ])
         ),
-        // The router's hostname map, as a deploy writes it (src/deploy/router.ts).
-        kvNamespaces: ["ROUTER_HOSTS"],
       },
     }),
   ],

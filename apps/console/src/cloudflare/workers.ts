@@ -56,6 +56,18 @@ export interface WorkerUpload {
 const scriptPath = (accountId: string, scriptName: string) =>
   `/accounts/${accountId}/workers/scripts/${scriptName}`;
 
+/** The names of every Worker script in the account. */
+export const listScripts = async (
+  api: CloudflareApi,
+  accountId: string
+): Promise<string[]> => {
+  const scripts = await api.call(
+    { method: "GET", path: `/accounts/${accountId}/workers/scripts` },
+    z.array(z.object({ id: z.string() }))
+  );
+  return scripts.map(({ id }) => id);
+};
+
 const uploadSessionSchema = z.object({
   jwt: z.string(),
   /** The hashes it lacks, in groups to upload together. */
