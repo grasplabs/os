@@ -7,6 +7,7 @@
  * `Authorization` header: never into a log, an error or a returned value
  * (threat model R17, CO3).
  */
+import { whenAborted } from "@grasp-os/shared/deadline";
 import { z } from "zod";
 
 export const cloudflareApiBase = "https://api.cloudflare.com/client/v4";
@@ -143,6 +144,12 @@ export interface CloudflareApiOptions {
    * last attempt did. Unset, a call makes all its attempts.
    */
   waitBudgetMs?: number;
+  /**
+   * Stops every call made through the client: requests under way are
+   * aborted, and none is retried or waited for after. Unset, calls run to
+   * their end.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -181,7 +188,20 @@ export const cloudflareApi = ({
   token,
   retryDelayMs = defaultRetryDelayMs,
   waitBudgetMs = Number.POSITIVE_INFINITY,
+  signal,
 }: CloudflareApiOptions): CloudflareApi => {
+  /** Throws the client's abort reason once its signal has aborted. */
+  const stopIfAborted = (): void => {
+    signal?.throwIfAborted();
+  };
+
+  /** Waits `ms` between attempts, or less, throwing, if the client is stopped. */
+  const pause = async (ms: number): Promise<void> => {
+    await (signal === undefined
+      ? scheduler.wait(ms)
+      : Promise.race([scheduler.wait(ms), whenAborted(signal)]));
+  };
+
   const send = async (call: ApiCall): Promise<Response | null> => {
     const url = new URL(`${cloudflareApiBase}${call.path}`);
     for (const [name, value] of Object.entries(call.query ?? {})) {
@@ -195,8 +215,10 @@ export const cloudflareApi = ({
       body = JSON.stringify(call.json);
     }
     try {
-      return await fetch(url, { method: call.method, headers, body });
+      return await fetch(url, { method: call.method, headers, body, signal });
     } catch {
+      // Stopped by the client's signal: not a lost answer to retry.
+      stopIfAborted();
       // A network error: no answer, and nothing of it is kept, since its
       // message could echo the request.
       return null;
@@ -258,7 +280,7 @@ export const cloudflareApi = ({
         envelope?.errors ?? []
       );
     }
-    await scheduler.wait(wait);
+    await pause(wait);
     return await page(call, schema, attempt + 1, waited + wait);
   };
 
@@ -297,7 +319,7 @@ export const cloudflareApi = ({
     if (wait === undefined) {
       throw new CloudflareApiError(call.method, call.path, status, []);
     }
-    await scheduler.wait(wait);
+    await pause(wait);
     return await graphql(query, variables, schema, attempt + 1, waited + wait);
   };
 

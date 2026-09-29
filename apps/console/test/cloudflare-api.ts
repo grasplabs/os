@@ -11,6 +11,7 @@
  * vite.test.config.ts).
  */
 import { hkdfHmacKey } from "@grasp-os/shared/client-secrets";
+import { whenAborted } from "@grasp-os/shared/deadline";
 import { toHex } from "@grasp-os/shared/encoding";
 import {
   platformUpdateNoticeSchema,
@@ -457,6 +458,8 @@ export const mockCloudflareApi = (
   const load = { now: 0, peak: 0, peakAccounts: 0 };
   /** Calls being answered now, by account. */
   const busyAccounts = new Map<string, number>();
+  /** Calls whose caller aborted them before they were answered. */
+  const aborted = { count: 0 };
 
   /** Whose token a call carries: the deployer's or the tenant admin's. */
   const callers = new Map([
@@ -720,7 +723,26 @@ export const mockCloudflareApi = (
         load.peakAccounts = Math.max(load.peakAccounts, busyAccounts.size);
       }
       try {
-        return await answer(request);
+        // As fetch does: a request whose signal aborts before it's answered
+        // rejects at once, whatever the fake was doing with it.
+        let answered = false;
+        return await Promise.race([
+          (async () => {
+            const response = await answer(request);
+            answered = true;
+            return response;
+          })(),
+          (async () => {
+            try {
+              return await whenAborted(request.signal);
+            } catch (error) {
+              if (!answered) {
+                aborted.count += 1;
+              }
+              throw error;
+            }
+          })(),
+        ]);
       } finally {
         load.now -= 1;
         if (accountId !== undefined) {
@@ -746,6 +768,7 @@ export const mockCloudflareApi = (
     load.peak = 0;
     load.peakAccounts = 0;
     busyAccounts.clear();
+    aborted.count = 0;
   });
 
   return {
@@ -755,6 +778,8 @@ export const mockCloudflareApi = (
     peakConcurrency: () => load.peak,
     /** The most accounts it was answering calls for at once in this test. */
     peakAccounts: () => load.peakAccounts,
+    /** How many calls their caller aborted before they were answered, in this test. */
+    abortedCalls: () => aborted.count,
     /** Adds an account the token is a member of, and returns what it holds. */
     addAccount,
     /** The accounts named `name`, as the fake holds them. */

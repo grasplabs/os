@@ -1,6 +1,6 @@
 import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
-import { beforeEach, describe, expect, it } from "vite-plus/test";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   clientGrid,
@@ -206,7 +206,7 @@ describe("the client grid", () => {
     });
   });
 
-  it("reads a few clients at a time, gives up on one that takes too long, and keeps each answer a minute", async () => {
+  it("reads a few clients at a time, stops one that takes too long, aborting its requests, and keeps each answer a minute", async () => {
     const release = await importedRelease("feat(core): many live");
     const all = [];
     for (let index = 0; index < 4; index += 1) {
@@ -232,6 +232,7 @@ describe("the client grid", () => {
 
     const first = await gridLive(env, new Date(), options);
     const peak = cloudflare.peakAccounts();
+    const aborted = cloudflare.abortedCalls();
     const callsBefore = all.map(({ account }) => callsFor(account));
     const again = await gridLive(env, new Date(), options);
     const callsAfter = all.map(({ account }) => callsFor(account));
@@ -239,6 +240,8 @@ describe("the client grid", () => {
 
     expect({
       peak,
+      // Its stalled request was aborted, not left running past the deadline.
+      aborted: aborted > 0,
       slow: first[slow?.clientId ?? ""],
       others: all.slice(1).map(({ clientId }) => first[clientId]?.reach),
       // Kept: the second read asked no account anything.
@@ -248,6 +251,7 @@ describe("the client grid", () => {
       ),
     }).toStrictEqual({
       peak: 2,
+      aborted: true,
       slow: {
         drift: "unknown",
         sharedSecretsCurrent: null,
@@ -258,6 +262,68 @@ describe("the client grid", () => {
       others: all.slice(1).map(() => "reachable"),
       again: "reachable",
       calls: all.map(() => 0),
+    });
+  });
+
+  it("keeps the usage of analytics requests that answered when another stalls past the deadline, aborting only that one", async () => {
+    // Recorded as active, never deployed: analytics read accounts, not deploys.
+    const recorded = [];
+    for (let index = 0; index < 11; index += 1) {
+      // oxlint-disable-next-line no-await-in-loop -- one after another
+      recorded.push(await recordClient("active"));
+    }
+    for (const { account } of recorded) {
+      account.usage = someUsage;
+    }
+    // By id, 10 accounts to the first request and the last one alone to
+    // the second, which never answers.
+    const byId = recorded.toSorted((a, b) =>
+      a.clientId.localeCompare(b.clientId)
+    );
+    const alone = byId.at(-1);
+    const held = Promise.withResolvers<boolean>();
+    cloudflare.beforeAnswering(
+      ({ path, body }) =>
+        path === "/graphql" &&
+        JSON.stringify(body).includes(alone?.account.id ?? "none"),
+      async () => {
+        await held.promise;
+      }
+    );
+
+    const live = await gridLive(env, new Date(), {
+      ...uncached,
+      rowDeadlineMs: 200,
+    });
+    const aborted = cloudflare.abortedCalls();
+    held.resolve(true);
+
+    expect({
+      answered: byId
+        .slice(0, -1)
+        .map(({ clientId }) => live[clientId]?.costUsd),
+      stalled: live[alone?.clientId ?? ""]?.costUsd,
+      aborted,
+    }).toStrictEqual({
+      answered: byId.slice(0, -1).map(() => ({ workers: 5, ai: 0 })),
+      stalled: null,
+      aborted: 1,
+    });
+  });
+
+  it("still answers when the cache can't keep what it read, or read it back", async () => {
+    const release = await importedRelease("feat(core): no cache");
+    const acme = await liveClient(release);
+    const broken = await caches.open("broken-in-this-test");
+    vi.spyOn(broken, "match").mockRejectedValue(new Error("cache down"));
+    vi.spyOn(broken, "put").mockRejectedValue(new Error("cache down"));
+    vi.spyOn(caches, "open").mockResolvedValue(broken);
+
+    const live = await gridLive(env, new Date(), defaultLiveOptions);
+
+    expect(live[acme.clientId]).toMatchObject({
+      drift: "in_sync",
+      reach: "reachable",
     });
   });
 

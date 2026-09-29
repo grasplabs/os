@@ -101,8 +101,9 @@ const usageOf = (answer: unknown): AccountUsage | undefined => {
 /**
  * Each of `accountIds`' usage, by account id, as of `now`. Never throws:
  * an account the API doesn't answer for (the token isn't a member, its
- * answer doesn't parse), or one in a request that failed, is left out,
- * for the grid to show as unknown, and the other accounts stand.
+ * answer doesn't parse), or one in a request that failed or was stopped
+ * (the API client's signal aborting it), is left out, for the grid to
+ * show as unknown, and the other requests' accounts stand.
  */
 export const accountUsage = async (
   api: CloudflareApi,

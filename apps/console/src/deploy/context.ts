@@ -83,7 +83,7 @@ export const tenantAdminApi = async (env: Env): Promise<CloudflareApi> =>
  */
 export const deployerApi = async (
   env: Env,
-  options: Pick<CloudflareApiOptions, "waitBudgetMs"> = {}
+  options: Pick<CloudflareApiOptions, "waitBudgetMs" | "signal"> = {}
 ): Promise<CloudflareApi> =>
   cloudflareApi({
     ...options,

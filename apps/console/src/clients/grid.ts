@@ -159,12 +159,14 @@ const recordedClients = async (db: ConsoleDatabase) => {
       releaseId: clientWorkers.releaseId,
     })
     .from(clientWorkers);
+  const releasesOf = new Map<string, Set<string | null>>();
+  for (const { clientId, releaseId } of workers) {
+    const releases = releasesOf.get(clientId) ?? new Set();
+    releases.add(releaseId);
+    releasesOf.set(clientId, releases);
+  }
   return rows.map((row) => {
-    const releases = new Set(
-      workers
-        .filter(({ clientId }) => clientId === row.id)
-        .map(({ releaseId }) => releaseId)
-    );
+    const releases = releasesOf.get(row.id) ?? new Set();
     const [only = null] = releases.size === 1 ? releases : [];
     return { ...row, release: only };
   });
@@ -179,7 +181,8 @@ const reachOf = async (
   hosts: RouterHosts,
   routerKey: string | null,
   clientId: string,
-  hostname: string | null
+  hostname: string | null,
+  signal: AbortSignal
 ): Promise<Reach> => {
   if (hostname === null || routerKey === null) {
     return "unknown";
@@ -193,8 +196,17 @@ const reachOf = async (
     clientId,
     route.generation
   );
+  // Its own deadline starts as it's sent; the row's stops it too.
+  const fetchCore: typeof fetch = async (input, init) =>
+    await fetch(input, {
+      ...init,
+      signal:
+        init?.signal === undefined || init.signal === null
+          ? signal
+          : AbortSignal.any([init.signal, signal]),
+    });
   const version = await answeringVersion(
-    fetch,
+    fetchCore,
     route.coreUrl,
     secret,
     healthTimeoutMs
@@ -206,8 +218,11 @@ const reachOf = async (
 interface LiveSources {
   env: Env;
   db: ConsoleDatabase;
-  /** The deployer's API; null when its token can't be read. */
-  api: CloudflareApi | null;
+  /**
+   * The deployer's API, its calls stopped by `signal`; null when its token
+   * can't be read.
+   */
+  apiFor: ((signal: AbortSignal) => Promise<CloudflareApi>) | null;
   /** The router key; null when Secrets Store doesn't have it. */
   routerKey: string | null;
   /** What Secrets Store holds, to check clients against; null when it can't be read. */
@@ -233,16 +248,21 @@ const orElse = async <T>(
   }
 };
 
-/** A client's live status, never throwing: what can't be read is unknown. */
+/**
+ * A client's live status, never throwing: what can't be read is unknown.
+ * Its requests stop when `signal` aborts.
+ */
 const liveOf = async (
-  { env, db, api, routerKey, store, usage, manifestOf }: LiveSources,
-  row: { id: string; accountId: string; hostname: string | null }
+  { env, db, apiFor, routerKey, store, usage, manifestOf }: LiveSources,
+  row: { id: string; accountId: string; hostname: string | null },
+  signal: AbortSignal
 ): Promise<LiveStatus> => {
   const drift =
-    api === null
+    apiFor === null
       ? null
       : await orElse(
-          async () => await driftOf(api, db, row.id, manifestOf),
+          async () =>
+            await driftOf(await apiFor(signal), db, row.id, manifestOf),
           null,
           "grid.drift_unread",
           row.id
@@ -258,7 +278,13 @@ const liveOf = async (
         ),
     orElse(
       async () =>
-        await reachOf(env.ROUTER_HOSTS, routerKey, row.id, row.hostname),
+        await reachOf(
+          env.ROUTER_HOSTS,
+          routerKey,
+          row.id,
+          row.hostname,
+          signal
+        ),
       "unknown" as const,
       "grid.health_unread",
       row.id
@@ -290,19 +316,39 @@ const ifStored = async <T>(read: () => Promise<T>): Promise<T | null> => {
 };
 
 /**
- * What `task` answers within `ms`, or `fallback` once that's up. The task
- * isn't stopped: what it still does lands nowhere.
+ * What `task` answers within `ms`, or `fallback` once that's up. The
+ * signal it's given aborts then, stopping the requests it has under way,
+ * so none outlives the deadline.
  */
 const within = async <T>(
   ms: number,
-  task: () => Promise<T>,
+  task: (signal: AbortSignal) => Promise<T>,
   fallback: T
 ): Promise<T> => {
   const limit = deadline(ms);
   try {
-    return await Promise.race([task(), whenAborted(limit.signal)]);
+    return await Promise.race([task(limit.signal), whenAborted(limit.signal)]);
   } catch {
     return fallback;
+  } finally {
+    limit.clear();
+  }
+};
+
+/**
+ * `accountIds`' usage, its requests stopped after `ms`: each request's
+ * answer stands as it comes, and one still going then is aborted, so only
+ * its own accounts are unknown (`accountUsage` never throws).
+ */
+const usageWithin = async (
+  ms: number,
+  apiFor: (signal: AbortSignal) => Promise<CloudflareApi>,
+  accountIds: readonly string[],
+  now: Date
+): Promise<Map<string, AccountUsage>> => {
+  const limit = deadline(ms);
+  try {
+    return await accountUsage(await apiFor(limit.signal), accountIds, now);
   } finally {
     limit.clear();
   }
@@ -333,26 +379,41 @@ const eachLimited = async <T, R>(
   return results;
 };
 
-/** Client `clientId`'s live answer kept within the last minute, if any. */
+/**
+ * Client `clientId`'s live answer kept within the last minute, if any. A
+ * cache that fails to answer is a miss: the answer is read again.
+ */
 const cached = async (clientId: string): Promise<LiveStatus | undefined> => {
-  const cache = await caches.open(cacheName);
-  const hit = await cache.match(cacheKey(clientId));
-  if (hit === undefined) {
+  try {
+    const cache = await caches.open(cacheName);
+    const hit = await cache.match(cacheKey(clientId));
+    if (hit === undefined) {
+      return undefined;
+    }
+    const parsed = liveStatusSchema.safeParse(await hit.json());
+    return parsed.success ? parsed.data : undefined;
+  } catch (error) {
+    log.warn("grid.cache_unread", { clientId, error: errorCode(error) });
     return undefined;
   }
-  const parsed = liveStatusSchema.safeParse(await hit.json());
-  return parsed.success ? parsed.data : undefined;
 };
 
-/** Keeps client `clientId`'s live answer for a minute. */
+/**
+ * Keeps client `clientId`'s live answer for a minute. A cache that fails
+ * to keep it is logged, and the answer stands.
+ */
 const keep = async (clientId: string, live: LiveStatus): Promise<void> => {
-  const cache = await caches.open(cacheName);
-  await cache.put(
-    cacheKey(clientId),
-    Response.json(live, {
-      headers: { "cache-control": `max-age=${cacheSeconds}` },
-    })
-  );
+  try {
+    const cache = await caches.open(cacheName);
+    await cache.put(
+      cacheKey(clientId),
+      Response.json(live, {
+        headers: { "cache-control": `max-age=${cacheSeconds}` },
+      })
+    );
+  } catch (error) {
+    log.warn("grid.cache_unkept", { clientId, error: errorCode(error) });
+  }
 };
 
 /** Every client, as the console recorded it, for the grid to show at once. */
@@ -391,9 +452,18 @@ export const gridLive = async (
   }
   const toRead = active.filter(({ id }) => !answers.has(id));
   if (toRead.length > 0) {
+    // Read once: whether the deployer's token is there at all.
     const api = await ifStored(
       async () => await deployerApi(env, { waitBudgetMs: options.waitBudgetMs })
     );
+    const apiFor =
+      api === null
+        ? null
+        : async (signal: AbortSignal) =>
+            await deployerApi(env, {
+              waitBudgetMs: options.waitBudgetMs,
+              signal,
+            });
     const secrets = await ifStored(
       async (): Promise<DeploySecrets> => await deploySecrets(env)
     );
@@ -401,21 +471,17 @@ export const gridLive = async (
     const sources: LiveSources = {
       env,
       db,
-      api,
+      apiFor,
       routerKey: secrets?.routerKey ?? null,
       store: secrets === null ? null : await storeCheck(secrets),
       usage:
-        api === null
+        apiFor === null
           ? null
-          : await within(
+          : await usageWithin(
               options.rowDeadlineMs,
-              async () =>
-                await accountUsage(
-                  api,
-                  toRead.map(({ accountId }) => accountId),
-                  now
-                ),
-              null
+              apiFor,
+              toRead.map(({ accountId }) => accountId),
+              now
             ),
       manifestOf: async (id) => {
         const known = manifests.get(id) ?? importedManifest(db, id);
@@ -431,17 +497,20 @@ export const gridLive = async (
           row.id,
           await within(
             options.rowDeadlineMs,
-            async () => await liveOf(sources, row),
+            async (signal) => await liveOf(sources, row, signal),
             unknownStatus
           ),
         ] as const
     );
     for (const [id, live] of read) {
       answers.set(id, live);
-      if (options.cache) {
-        // oxlint-disable-next-line no-await-in-loop -- a put each, after all were read
-        await keep(id, live);
-      }
+    }
+    if (options.cache) {
+      await Promise.all(
+        read.map(async ([id, live]) => {
+          await keep(id, live);
+        })
+      );
     }
   }
   return Object.fromEntries(answers);
