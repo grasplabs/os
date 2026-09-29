@@ -406,20 +406,25 @@ ${mailStep("after")}`,
       personApi("admin"),
       personApi("builder"),
     ]);
-    // Server code that saves a Playbook record for its caller.
-    const playbookServer = `import { DurableObject } from "cloudflare:workers";
+    // Server code that saves a record for its caller, into a collection
+    // everyone reads, which only admins change.
+    const savingServer = `import { DurableObject } from "cloudflare:workers";
 
 export class App extends DurableObject {
   async save(caller: unknown, path: string): Promise<unknown> {
-    const record = { type: "team", title: "Finance" };
-    const saved = await (this.env as any).PLAYBOOK.saveRecord(caller, { path, ifVersion: 0, record, body: "" });
+    const record = { type: "doc", title: "Finance" };
+    const saved = await (this.env as any).NOTES.saveRecord(caller, { path, ifVersion: 0, record, body: "" });
     return saved.currentVersion;
   }
 }
 `;
+    const { id: collectionId } = await admin.api.knowledge.createCollection({
+      name: `Notes ${crypto.randomUUID().slice(0, 8)}`,
+      access: "everyone",
+    });
     const path = `teams/finance-${crypto.randomUUID().slice(0, 8)}.md`;
     const version = (mark: string) => ({
-      "app/server.ts": playbookServer,
+      "app/server.ts": savingServer,
       ...workflowFiles(
         "saver",
         `  // ${mark}
@@ -432,9 +437,9 @@ export class App extends DurableObject {
     await release(builder, app, version("First."));
     const permission = await requestGranted(idp, builder, {
       subject: { type: "app", appId: app },
-      object: { type: "collection", collectionId: "playbook" },
+      object: { type: "collection", collectionId },
       actions: ["read", "write"],
-      binding: "PLAYBOOK",
+      binding: "NOTES",
     });
     // The run on the builder's own version waits; then harmless code is
     // made current, and an admin grants again for it.

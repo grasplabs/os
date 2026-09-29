@@ -69,6 +69,9 @@ export const refusal = (code: string): string => {
     case "board.not_snapshot": {
       return "That document isn't a snapshot.";
     }
+    case "board.too_many_workflows": {
+      return "The Playbook has more workflows than one snapshot holds (250).";
+    }
     case "permission.denied": {
       return "The page can't use the Playbook: an admin approves its permission first.";
     }

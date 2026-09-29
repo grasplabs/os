@@ -4,6 +4,7 @@ import type { Page } from "@playwright/test";
 import { test } from "./csp.ts";
 import { apiOf, pageOf, peopleIn } from "./people.ts";
 import type { Person } from "./people.ts";
+import { revokeOtherCopies } from "./playbook.ts";
 
 // The workflow map, the built-in App, end to end: an admin creates an App
 // from it, approves the Playbook permission it asks for, draws a workflow
@@ -56,6 +57,7 @@ const mapFor = async (admin: Person): Promise<string> => {
         binding: "PLAYBOOK",
       },
     ]);
+    await revokeOtherCopies(api, workflowMap, created.app.id);
     for (const { id } of created.permissions) {
       // Reviewed before a version of the copy is current.
       // oxlint-disable-next-line no-await-in-loop -- one grant at a time

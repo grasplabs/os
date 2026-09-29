@@ -58,8 +58,8 @@ export const maturityLevels = 5;
 
 /**
  * A snapshot record's fields: the server reads only documents of type
- * `snapshot`, which the Playbook checked against its snapshot schema on
- * save, and reads back with that schema.
+ * `snapshot`, which the Playbook checked against the page's snapshot
+ * type (app/records.json) on save, and reads back with it.
  */
 export const snapshotRecordOf = (
   record: Record<string, unknown>

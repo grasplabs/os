@@ -4,7 +4,6 @@ import type { ImprovementSignal } from "@grasp-os/shared/signals";
 import { createScheduledController } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { stringify } from "yaml";
 import type { z } from "zod";
 
 import { auditLog } from "../src/audit-log.ts";
@@ -317,38 +316,6 @@ const emptySearch = (
     : { target: { type: "collection", id: collection } }),
   detail: { terms: 3, queryKey, sensitive: false },
 });
-
-/**
- * A Playbook workflow record, linked to `app`'s `workflow`, as the save
- * pipeline stores it; returns its document ID.
- */
-const seedRecord = async (
-  app: string,
-  workflow: string,
-  fields: Record<string, unknown>
-): Promise<string> => {
-  const id = `record-${unique()}`;
-  const now = Date.now();
-  const text = `---\n${stringify({
-    type: "workflow",
-    title: `Workflow ${workflow}`,
-    state: "designed",
-    app: { appId: app, workflowId: workflow },
-    ...fields,
-  })}---\nHow it goes.\n`;
-  await env.KNOWLEDGE.batch([
-    env.KNOWLEDGE.prepare(
-      "INSERT OR IGNORE INTO collections (id, name, description, owner, access, sensitive, source, created_at) VALUES ('playbook', 'Playbook', 'The Playbook', 'admin', 'everyone', 0, 'playbook', ?)"
-    ).bind(now),
-    env.KNOWLEDGE.prepare(
-      "INSERT INTO documents (id, collection_id, path, title, type, description, owner, tags, current_version, created_at, updated_at) VALUES (?, 'playbook', ?, ?, 'workflow', '', 'admin', '[]', 1, ?, ?)"
-    ).bind(id, `workflows/${id}.md`, `Workflow ${workflow}`, now, now),
-    env.KNOWLEDGE.prepare(
-      "INSERT INTO versions (document_id, number, text, author, created_at) VALUES (?, 1, ?, 'admin', ?)"
-    ).bind(id, text, now),
-  ]);
-  return id;
-};
 
 /** The signals of `kind` in `list`, without the App (the tests' own). */
 const ofKind = <Kind extends ImprovementSignal["kind"]>(
@@ -677,7 +644,7 @@ describe("improvement signals", () => {
     ]);
   });
 
-  it("weigh each workflow's model cost per run against the minutes its Playbook record says it saves", async () => {
+  it("weigh each workflow's model cost per run, of runs started in the window only", async () => {
     const { app } = await builderWithApp();
     const api = await adminApi();
     const now = nextDay();
@@ -725,34 +692,6 @@ describe("improvement signals", () => {
         cost: { amount: 9, currency: "USD" },
       }
     );
-    const invoices = await seedRecord(app, "invoices", {
-      steps: [
-        {
-          name: "Enter",
-          kind: "automated",
-          numbers: {
-            minutes: { value: 6, basis: "estimated" },
-            people: { value: 2, basis: "estimated" },
-          },
-        },
-        {
-          name: "Check",
-          kind: "ai_checked",
-          numbers: { minutes: { value: 3, basis: "observed" } },
-        },
-        // A person still does this one.
-        {
-          name: "Pay",
-          kind: "instruction",
-          numbers: { minutes: { value: 20, basis: "estimated" } },
-        },
-      ],
-      gain: { hoursPerWeek: 1 },
-    });
-    const filing = await seedRecord(app, "filing", {
-      gain: { hoursPerWeek: 7 },
-    });
-
     await refreshDailySignals(env, now);
     const { signals } = await api.signals.list({ app });
 
@@ -765,10 +704,6 @@ describe("improvement signals", () => {
         evidence: {
           runs: 1,
           cost: 0.25,
-          minutesSavedPerRun: null,
-          savedFrom: null,
-          record: null,
-          costPerHourSaved: null,
           costliest: [{ run: unlinked, cost: 0.25 }],
         },
       },
@@ -780,10 +715,6 @@ describe("improvement signals", () => {
         evidence: {
           runs: 4,
           cost: 0.75,
-          minutesSavedPerRun: 15,
-          savedFrom: "steps",
-          record: invoices,
-          costPerHourSaved: 0.75,
           costliest: [
             { run: first, cost: 0.5 },
             { run: second, cost: 0.25 },
@@ -798,10 +729,6 @@ describe("improvement signals", () => {
         evidence: {
           runs: 30,
           cost: 0,
-          minutesSavedPerRun: 60,
-          savedFrom: "gain",
-          record: filing,
-          costPerHourSaved: 0,
           costliest: [],
         },
       },
@@ -1280,10 +1207,6 @@ describe("improvement signals", () => {
           evidence: {
             runs: 2,
             cost: 0.5,
-            minutesSavedPerRun: null,
-            savedFrom: null,
-            record: null,
-            costPerHourSaved: null,
           },
         },
       ],

@@ -47,8 +47,8 @@ type Stored = Omit<WorkflowRecord, "steps" | "parameters"> &
 /** A workflow's fields, with the lists it may leave out filled in. */
 export const recordOf = (workflow: Workflow): WorkflowRecord => {
   // SAFETY: the server lists only documents of type `workflow`, whose
-  // frontmatter the Playbook checked against its workflow schema on save,
-  // and reads them back with that schema.
+  // frontmatter the Playbook checked against the map's workflow type
+  // (app/records.json) on save, and reads them back with it.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
   const record = workflow.record as Stored;
   return {
@@ -109,8 +109,11 @@ export const refusal = (code: string): string => {
     case "map.not_workflow": {
       return "That document isn't a workflow.";
     }
-    case "app.not_found": {
-      return "There's no such App, or you can't open it.";
+    case "map.not_designed": {
+      return "Only a designed workflow links to an App workflow.";
+    }
+    case "map.linked_drawn": {
+      return "This workflow is linked to an App workflow, so it stays designed.";
     }
     default: {
       return `That didn't work (${code}).`;

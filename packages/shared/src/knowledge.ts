@@ -23,8 +23,8 @@ export const collectionAccessSchema = z.enum(["everyone", "teams", "me"]);
 export type CollectionAccess = z.infer<typeof collectionAccessSchema>;
 
 /**
- * Where a collection's documents come from: written here, uploaded, the
- * Playbook, shipped by Grasp, or derived from Apps. The last two are
+ * Where a collection's documents come from: written here, uploaded,
+ * shipped by Grasp, or derived from Apps. The last two are
  * read-only for people and agents: only the platform writes them. The
  * Apps collection holds each App's AGENTS.md, and each of its documents
  * is found only by those who may open that App: a listing, read or search
@@ -33,7 +33,6 @@ export type CollectionAccess = z.infer<typeof collectionAccessSchema>;
 export const collectionSourceSchema = z.enum([
   "here",
   "upload",
-  "playbook",
   "grasp",
   "apps",
 ]);
@@ -88,6 +87,23 @@ export const collectionInputSchema = z
     }
   });
 export type CollectionInput = z.input<typeof collectionInputSchema>;
+
+/**
+ * A collection a built-in blueprint asks for (its `blueprint.json`), by an
+ * ID of its own, the same in every deployment, which no collection a
+ * person creates has (theirs are UUIDs): the install creates it, open to
+ * everyone and changed by admins, if it isn't there yet, and every App
+ * created from a blueprint that names it shares it, such as the Playbook.
+ */
+export const declaredCollectionSchema = z.strictObject({
+  id: collectionIdSchema.refine(
+    (id) => /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/u.test(id) && id.length <= 64,
+    "Lowercase letters, digits and single hyphens, starting with a letter"
+  ),
+  name: z.string().trim().min(1).max(100),
+  description: z.string().trim().max(1024).default(""),
+});
+export type DeclaredCollection = z.infer<typeof declaredCollectionSchema>;
 
 /** A collection, as the API returns it. */
 export interface Collection {
@@ -283,33 +299,6 @@ export const historyOptionsSchema = z
   .default({ limit: pageMaxLimit });
 export type HistoryOptions = z.input<typeof historyOptionsSchema>;
 
-/**
- * The Playbook collection: one per deployment, under this ID, which no
- * other collection can have (every other one's is a random UUID). So an
- * App's blueprint can name it, and ask for it, in every deployment.
- */
-export const playbookCollectionId: CollectionId =
-  collectionIdSchema.parse("playbook");
-
-/**
- * The Playbook's records: typed documents that only a Playbook collection
- * holds (the one per deployment the platform creates), with the Playbook's
- * `decision`s, which any collection can hold.
- */
-export const playbookRecordTypes = [
-  "vision",
-  "team",
-  "person",
-  "tool",
-  "source",
-  "statement",
-  "workflow",
-  "snapshot",
-  "plan-item",
-  "rulebook-entry",
-] as const;
-export type PlaybookRecordType = (typeof playbookRecordTypes)[number];
-
 /** The kinds of document the platform knows, each with its own frontmatter. */
 export const builtinDocumentTypeSchema = z.enum([
   "doc",
@@ -317,7 +306,6 @@ export const builtinDocumentTypeSchema = z.enum([
   "memory",
   "decision",
   "file",
-  ...playbookRecordTypes,
 ]);
 export type BuiltinDocumentType = z.infer<typeof builtinDocumentTypeSchema>;
 
@@ -774,8 +762,8 @@ const purgeTermSchema = z
  *   counts where a term still starts a longer word (`inLongerWords`).
  *   In scripts written without spaces (Chinese, Japanese, Thai, Lao,
  *   Khmer, Burmese) a term is found inside running text. A document's
- *   own path stays, and so do a snapshot's frozen workflow paths; links
- *   and other fields naming a document are rewritten like any text.
+ *   own path stays; links and other fields naming a document are
+ *   rewritten like any text, kept fields of records too.
  */
 export const purgeInputSchema = z.discriminatedUnion("type", [
   z.strictObject({
@@ -809,9 +797,8 @@ export interface PurgePlan {
    * leaves of the documents named: every version, the one it saves too,
    * and every memory proposal ("Toms", "Tomin", "tomVisser" or
    * "tom.visser@acme.test.evil" for "Tom" or the address; not "automated"
-   * or "custom", where it is inside or ends one), outside a snapshot's
-   * frozen workflow paths. List the forms to remove as terms of their
-   * own. Always 0 for `personal`.
+   * or "custom", where it is inside or ends one). List the forms to remove
+   * as terms of their own. Always 0 for `personal`.
    */
   inLongerWords: number;
   /**

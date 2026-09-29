@@ -1,6 +1,5 @@
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
-import { playbookCollectionId } from "@grasp-os/shared/knowledge";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
@@ -9,7 +8,12 @@ import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
 import { builtinAppId } from "../src/builtin-app-id.ts";
 import { builtins, fingerprintOf, release } from "../src/builtins.ts";
-import { grantReviewed, release as releaseFiles, serverBuilt } from "./apps.ts";
+import {
+  grantReviewed,
+  release as releaseFiles,
+  revokeOtherCopies,
+  serverBuilt,
+} from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { auditedDuring, signedInApi, unique } from "./sign-in.ts";
 
@@ -22,6 +26,9 @@ import { auditedDuring, signedInApi, unique } from "./sign-in.ts";
 const idp = mockIdp();
 
 const workflowMap = builtinAppId("workflow-map");
+
+/** The collection the workflow map declares, and keeps its records in. */
+const playbookCollectionId = "playbook";
 
 const as = (userId: string): AppCallerInput => ({
   userId,
@@ -105,6 +112,7 @@ const setUp = async () => {
       status,
     })
   );
+  await revokeOtherCopies(admin.api, workflowMap, created.app.id);
   for (const { id } of created.permissions) {
     // oxlint-disable-next-line no-await-in-loop -- one grant at a time
     await grantReviewed(admin.api, id);
@@ -310,12 +318,21 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
         body: "",
       }),
       team: await call(app, user.userId, "addTeam", "Finance"),
+      // Linked, it stays designed.
+      redrawn: await call(app, admin.userId, "save", {
+        documentId: designed.id,
+        path: designed.path,
+        ifVersion: 2,
+        record: drawn,
+        body: "",
+      }),
     }).toStrictEqual({
       linked: 2,
       app: { appId: payables, workflowId: "pay" },
       writable: { admin: true, user: false },
       user: { error: "knowledge.forbidden" },
       team: { error: "knowledge.forbidden" },
+      redrawn: { error: "map.linked_drawn" },
     });
   });
 
@@ -460,6 +477,64 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
       .bind(teamId)
       .all();
     expect(results).toStrictEqual([{ type: "team", version: 1 }]);
+  });
+
+  it("keeps the Playbook's workflows the first copy's: a second copy is shown as another App's to the admin, and links nothing", async () => {
+    const { admin, app } = await setUp();
+    const designed = okOf(
+      await call(app, admin.userId, "save", {
+        ifVersion: 0,
+        record: { ...drawn, state: "designed" },
+        body: "",
+      }),
+      savedSchema
+    );
+    // A second copy, granted without taking the first one's away.
+    const second = await admin.api.apps.blueprints.create(workflowMap, 1, {
+      name: `Another map ${unique()}`,
+    });
+    const listed = await admin.api.permissions.list({
+      type: "app",
+      appId: second.app.id,
+    });
+    for (const { id } of second.permissions) {
+      // oxlint-disable-next-line no-await-in-loop -- one grant at a time
+      await grantReviewed(admin.api, id);
+    }
+    await admin.api.apps.versions.setCurrent(second.app.id, 1);
+    await serverBuilt(second.app.id, 1);
+    const copy = appIdSchema.parse(second.app.id);
+    expect({
+      shown: listed.map(({ recordTypes }) => recordTypes),
+      link: await call(copy, admin.userId, "link", {
+        documentId: designed.id,
+        ifVersion: 1,
+        appId: app,
+        workflowId: "pay",
+      }),
+      // The first copy still links it.
+      owner: okOf(
+        await call(app, admin.userId, "link", {
+          documentId: designed.id,
+          ifVersion: 1,
+          appId: copy,
+          workflowId: "pay",
+        }),
+        savedSchema
+      ).currentVersion,
+    }).toStrictEqual({
+      shown: [
+        {
+          claims: [],
+          taken: [
+            { type: "workflow", owner: app },
+            { type: "team", owner: app },
+          ],
+        },
+      ],
+      link: { error: "knowledge.invalid" },
+      owner: 2,
+    });
   });
 
   it("says it has no Playbook until an admin grants it", async () => {

@@ -116,8 +116,8 @@ export const expectedGain = (
   return Math.max(0, Math.round(saved * 10) / 10);
 };
 
-// The Playbook's workflow schema's limits (the platform checks them again
-// on save). Each input is bounded; the gain is worked out from them, and a
+// The workflow record type's limits (app/records.json, which the Playbook
+// checks again on every save). Each input is bounded; the gain is worked out from them, and a
 // product of in-range numbers can still pass its limit, so the map checks
 // it before saving (record.ts `draftProblem`).
 

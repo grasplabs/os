@@ -53,6 +53,8 @@ import {
   permissions,
 } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
+import { featureEnabled } from "./features.ts";
+import { ensureCollection } from "./knowledge/collections.ts";
 import { appMemoryPath } from "./knowledge/memory-files.ts";
 import {
   blueprintRequests,
@@ -631,7 +633,9 @@ const installEntry = (
  * name and description, if they changed; and its requests, as the release
  * declares them (`declaredRequests`). Each is audited, in the one batch
  * that writes it all, and only what differs from what's stored is
- * written, so installing it again writes nothing. The App never runs (it
+ * written, so installing it again writes nothing. The collections it
+ * declares are created first, in Knowledge's database, each only if it
+ * isn't there yet, and audited only then. The App never runs (it
  * has no current version, and nobody may make one current), so its
  * requests allow nothing: they are what an App created from it asks for,
  * each waiting for an admin there. Apps created from it earlier keep
@@ -781,6 +785,32 @@ export const installBuiltinBlueprint = async (
           ),
         ]
   );
+  // The collections its copies ask for, before anything asks for them:
+  // each is created once, by the first install that declares it, and
+  // shared by every App created from a blueprint that names it. Only while
+  // record types are on, as nothing keeps records there without them (the
+  // install's fingerprint says so, so switching them on installs again).
+  // Nothing deletes such a collection once created.
+  const declared = featureEnabled(env, "record_types")
+    ? blueprint.collections
+    : [];
+  for (const collection of declared) {
+    // oxlint-disable-next-line no-await-in-loop -- a few, one at a time
+    await ensureCollection(
+      env,
+      {
+        ...collection,
+        // Nobody's: open to everyone, only admins change it (`canWrite`).
+        owner: builtinOwner,
+        access: "everyone",
+        sensitive: false,
+        source: "here",
+        createdAt: now,
+      },
+      { type: "system" },
+      { builtin: blueprint.id }
+    );
+  }
   const requested = await declaredRequests(
     env,
     builtinOwner,

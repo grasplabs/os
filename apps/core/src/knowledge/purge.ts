@@ -36,7 +36,6 @@ import { entryNow } from "./apps-collection.ts";
 import type { CollectionRow } from "./collections.ts";
 import { checkedText, personWriter, writeVersion } from "./documents.ts";
 import type { DocumentRow } from "./documents.ts";
-import { frozenPathRanges } from "./frontmatter.ts";
 import { personalCollectionId } from "./memory-files.ts";
 import { failBatchIfProposals } from "./memory-proposals.ts";
 import { cleanUpOriginals, forgetUploads } from "./uploads.ts";
@@ -86,9 +85,7 @@ import { cleanUpOriginals, forgetUploads } from "./uploads.ts";
 //
 // What a purge doesn't reach: paths (a document named after someone keeps
 // its name; a `[[link]]` or a record field naming it is rewritten like
-// any text, and then names no document), a snapshot's frozen workflow
-// paths (left as they are, and not counted: the snapshot must name
-// versions the Playbook has), the Grasp skills (the release's text,
+// any text, and then names no document), the Grasp skills (the release's text,
 // which the next sync puts back: a purge naming one is refused), the App
 // itself (its name, description and versions' AGENTS.md: a purge naming
 // the App's entry in the Apps collection is refused while what indexing
@@ -469,31 +466,12 @@ const matcherOf = (
 };
 
 /**
- * The matches of `pattern` (global) in `text` that aren't inside a
- * snapshot's frozen workflow path (`frozenPathRanges`). A purge leaves
- * those: rewritten, one would name a workflow version the Playbook
- * doesn't have, and the snapshot couldn't be saved, which fails the
- * purge. Every other path in a text is purged like any text: one that
- * names a document by a person's name would otherwise keep it. A match
- * reaching past a frozen path is not inside it.
- */
-const outsidePaths = (text: string, pattern: RegExp): RegExpExecArray[] => {
-  const paths = frozenPathRanges(text);
-  return [...text.matchAll(pattern)].filter(
-    ({ index, 0: found }) =>
-      !paths.some(([from, to]) => index >= from && index + found.length <= to)
-  );
-};
-
-/**
  * `text` with every term replaced by the marker, until none is left: a
  * term that ends or starts with a dot or an at sign, once replaced, can
  * leave a term next to it no longer joined ("Tom." and "Ann" in
  * "Tom.Ann"), which one pass would leave to a purge run again. It ends:
  * a term can't overlap the marker (`purgeTermSchema`), so each pass
  * replaces text outside the markers, or markers with fewer of them.
- * Terms inside frozen paths are left (`outsidePaths`), so a pass that
- * finds only those changes nothing, and the loop ends.
  */
 const without = (text: string, matcher: Matcher): string => {
   if (!matcher.anywhere.test(text)) {
@@ -503,7 +481,7 @@ const without = (text: string, matcher: Matcher): string => {
   for (;;) {
     let next = "";
     let end = 0;
-    for (const { index, 0: found } of outsidePaths(current, matcher.remove)) {
+    for (const { index, 0: found } of current.matchAll(matcher.remove)) {
       next += `${current.slice(end, index)}${purgedMarker}`;
       end = index + found.length;
     }
@@ -527,7 +505,7 @@ const joinedIn = (texts: (string | null)[], matcher: Matcher): number => {
   let total = 0;
   for (const text of texts) {
     if (text !== null && anywhere.test(text)) {
-      total += outsidePaths(text, joined).length;
+      total += [...text.matchAll(joined)].length;
     }
   }
   return total;
@@ -689,7 +667,6 @@ const requireSavable = async (
       collection,
       document.path,
       text,
-      null,
       false,
       undefined,
       true

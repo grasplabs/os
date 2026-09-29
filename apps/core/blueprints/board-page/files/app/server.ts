@@ -1,50 +1,27 @@
 import { DurableObject } from "cloudflare:workers";
 
+import { freeze } from "./figures.ts";
+import type {
+  Caller,
+  Playbook,
+  RecordRead,
+  Statistics,
+  Summary,
+} from "./figures.ts";
+
 // The board page's server: it lists the Playbook's snapshots, reads one,
 // takes a new one and saves its narrative and the decision it asks for,
 // for the person using the page, through the App's Playbook permission
-// (`PLAYBOOK`, which an admin approves). The platform takes a snapshot
-// and freezes its numbers; saving it again keeps them. Only admins change
-// the Playbook; everyone else who can open the page reads it.
-
-/** Whoever the method runs for, as the platform passes it. */
-interface Caller {
-  userId: string;
-}
-
-/** A document, without its text. */
-interface Summary {
-  id: string;
-  path: string;
-  title: string;
-  type: string;
-  currentVersion: number;
-}
-
-/** A document read as a record: its frontmatter as data, and its Markdown. */
-interface RecordRead extends Summary {
-  record: Record<string, unknown>;
-  body: string;
-  version: { number: number };
-}
-
-/** The Playbook, as the App's permission gives it. */
-interface Playbook {
-  listDocuments: (
-    caller: Caller,
-    options?: { after?: string; limit?: number }
-  ) => Promise<{ documents: Summary[] }>;
-  getRecord: (
-    caller: Caller,
-    documentId: string,
-    version?: number
-  ) => Promise<RecordRead>;
-  saveRecord: (caller: Caller, input: unknown) => Promise<Summary>;
-  takeSnapshot: (caller: Caller, input: unknown) => Promise<Summary>;
-}
+// (`PLAYBOOK`, which an admin approves). `take` works out what a snapshot
+// freezes (figures.ts) and is the one method that sets it
+// (`app/records.json`): saving it again, by this page, a person or the
+// agent, keeps it. Only admins change the Playbook; everyone else who can
+// open the page reads it.
 
 interface Env {
   PLAYBOOK?: Playbook;
+  /** The page's permission on the platform's statistics, once granted. */
+  PLATFORM?: Statistics;
 }
 
 /** A snapshot as the page lists it. */
@@ -136,8 +113,8 @@ const snapshotOf = (read: RecordRead): Snapshot => ({
 
 export class App extends DurableObject<Env> {
   /**
-   * The Playbook's snapshots, by path, last first: the platform puts each
-   * under `snapshots/`, by its date, so the newest it took comes first.
+   * The Playbook's snapshots, by path, last first: `take` puts each under
+   * `snapshots/`, by its date, so the newest it took comes first.
    * `access: "none"` until an admin approves the App's Playbook
    * permission.
    */
@@ -170,15 +147,45 @@ export class App extends DurableObject<Env> {
 
   /**
    * Takes a snapshot of the Playbook now, with the maturity it records
-   * (0 to 5), and the decision it asks for.
+   * (0 to 5, which the snapshot's type checks), and the decision it asks
+   * for: a new record, under `snapshots/` by the time it was taken, so
+   * paths sort as snapshots were taken, that freezes every workflow
+   * record's hours and the signals of the App workflows they link to.
    */
   async take(
     caller: Caller,
     input: { maturity: number; decisionNeeded?: string }
   ): Promise<Outcome<Summary>> {
-    return await outcome(
-      async () => await this.#playbook().takeSnapshot(caller, input)
-    );
+    return await outcome(async () => {
+      const playbook = this.#playbook();
+      // Whoever may not change the Playbook is refused by the save.
+      const { workflows, figures } = await freeze(
+        playbook,
+        this.env.PLATFORM,
+        caller
+      );
+      const now = new Date();
+      const date = now.toISOString().slice(0, 10);
+      // Its own path each time (`2026-09-28T101530123Z`, after an older
+      // path of that day); two taken at once are two snapshots.
+      const taken = `${date}T${now.toISOString().slice(11, 23).replaceAll(/[:.]/gu, "")}Z`;
+      const decisionNeeded = input.decisionNeeded?.trim() ?? "";
+      return await playbook.saveRecord(caller, {
+        path: `snapshots/${taken}-${crypto.randomUUID().slice(0, 8)}.md`,
+        ifVersion: 0,
+        record: {
+          type: "snapshot",
+          title: `Snapshot ${date}`,
+          date,
+          maturity: input.maturity,
+          workflows,
+          figures,
+          ...(decisionNeeded === "" ? {} : { decisionNeeded }),
+        },
+        body: "",
+        message: "Taken",
+      });
+    });
   }
 
   /**
@@ -200,7 +207,7 @@ export class App extends DurableObject<Env> {
       const playbook = this.#playbook();
       // Only a snapshot's narrative: never another record it was handed.
       const current = await this.#snapshot(caller, input.id);
-      // The platform keeps what it froze, and refuses figures sent back.
+      // The Playbook keeps what it froze, which only `take` sets.
       const {
         figures: _figures,
         decisionNeeded: _decision,

@@ -12,7 +12,6 @@ import {
   isBuiltinDocumentType,
   knowledgeErrors,
   listDocumentsOptionsSchema,
-  playbookRecordTypes,
   restoreInputSchema,
   saveInputSchema,
   versionInputSchema,
@@ -29,7 +28,7 @@ import type {
   VersionSummary,
 } from "@grasp-os/shared/knowledge";
 import type { Identity } from "@grasp-os/shared/rpc";
-import { and, asc, desc, eq, gt, inArray, lt, ne, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, lt, ne } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
@@ -37,7 +36,7 @@ import { alias } from "drizzle-orm/sqlite-core";
 import { z } from "zod";
 
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
-import { inList, isUniqueViolation } from "../db/d1.ts";
+import { isUniqueViolation } from "../db/d1.ts";
 import {
   collections,
   documents,
@@ -55,7 +54,6 @@ import {
   FrontmatterError,
   frontmatterType,
   parseBaseFields,
-  parseFrontmatter,
   parseRecord,
   savedFields,
 } from "./frontmatter.ts";
@@ -100,20 +98,9 @@ interface Prepared {
   reviewDate: string | null;
   sections: Section[];
   links: Link[];
-  /** A snapshot's workflow records, at the versions it freezes. */
-  frozen: { path: string; version: number }[];
   /** The record types declared for the collection, as it was checked. */
   declared: DeclaredTypes;
 }
-
-const recordTypes: ReadonlySet<string> = new Set(playbookRecordTypes);
-
-const isPlaybookRecord = (type: DocumentType): boolean => recordTypes.has(type);
-
-/** A snapshot's frozen workflow versions, as its type's schema read them. */
-const frozenSchema = z
-  .array(z.object({ path: z.string(), version: z.int() }))
-  .default([]);
 
 /**
  * The record types declared for `collectionId` (record-types.ts), read
@@ -198,10 +185,6 @@ const prepare = (
     reviewDate: frontmatter.review ?? null,
     sections: found,
     links: linked,
-    frozen:
-      type === "snapshot"
-        ? (frozenSchema.safeParse(frontmatter.workflows).data ?? [])
-        : [],
     declared,
   };
 };
@@ -218,162 +201,6 @@ export const findByPath = async (
       and(eq(documents.collectionId, collectionId), eq(documents.path, path))
     )
     .get();
-
-/** Versions read at once to type-check a snapshot's new entries: up to 1 MB each. */
-const frozenPerQuery = 5;
-
-type Frozen = Prepared["frozen"];
-
-/** One version of the document at `path`, as a key. */
-const keyOf = ({ path, version }: { path: string; version: number }): string =>
-  JSON.stringify([path, version]);
-
-/** The frontmatter of a saved version's `text`, if it still reads as one. */
-const savedFrontmatter = (
-  path: string,
-  text: string
-): ReturnType<typeof parseFrontmatter> | undefined => {
-  try {
-    return parseFrontmatter(path, text);
-  } catch (error) {
-    if (error instanceof FrontmatterError) {
-      return undefined;
-    }
-    throw error;
-  }
-};
-
-/**
- * The entries of the snapshot at `path` in `collection` that were already
- * checked: those of its current version, the one a save goes over, and of
- * the version a restore restores (`restoredFrom`). Each was checked when
- * it was saved, and versions are never deleted.
- */
-const checkedBefore = async (
-  db: DrizzleD1Database,
-  collection: CollectionRow,
-  path: string,
-  restoredFrom: number | null
-): Promise<Set<string>> => {
-  const existing = await findByPath(db, collection.id, path);
-  if (!existing) {
-    return new Set();
-  }
-  const numbers = [existing.currentVersion];
-  if (restoredFrom !== null) {
-    numbers.push(restoredFrom);
-  }
-  const rows = await db
-    .select({ text: versions.text })
-    .from(versions)
-    .where(
-      and(
-        eq(versions.documentId, existing.id),
-        inArray(versions.number, numbers)
-      )
-    );
-  return new Set(
-    rows.flatMap(({ text }) => {
-      const frontmatter = savedFrontmatter(path, text)?.frontmatter;
-      return frontmatter && "workflows" in frontmatter
-        ? frontmatter.workflows.map(keyOf)
-        : [];
-    })
-  );
-};
-
-/** The types of the versions `entries` names, each by its own text. */
-const typesOf = async (
-  db: DrizzleD1Database,
-  collection: CollectionRow,
-  entries: Frozen
-): Promise<Map<string, DocumentType | undefined>> => {
-  const types = new Map<string, DocumentType | undefined>();
-  for (let start = 0; start < entries.length; start += frozenPerQuery) {
-    const page = entries.slice(start, start + frozenPerQuery);
-    // oxlint-disable-next-line no-await-in-loop -- a few versions at a time
-    const rows = await db
-      .select({
-        path: documents.path,
-        version: versions.number,
-        text: versions.text,
-      })
-      .from(versions)
-      .innerJoin(documents, eq(documents.id, versions.documentId))
-      .where(
-        and(
-          eq(documents.collectionId, collection.id),
-          sql`(${documents.path}, ${versions.number}) IN (SELECT json_extract(value, '$.path'), json_extract(value, '$.version') FROM json_each(${JSON.stringify(page)}))`
-        )
-      );
-    for (const row of rows) {
-      types.set(keyOf(row), savedFrontmatter(row.path, row.text)?.type);
-    }
-  }
-  return types;
-};
-
-/**
- * Refuses with `knowledge.invalid` a snapshot, saved at `path` in
- * `collection`, that freezes a version the collection doesn't have (one
- * query, on every save), or adds one that wasn't a workflow record, each
- * judged by its own text. Only entries new since the version it goes over
- * (and the one it restores) are read: a snapshot saved again, restored or
- * purged reads no text, and a purge that rewrote a frozen version since
- * doesn't make it invalid.
- */
-const requireFrozenVersions = async (
-  env: Env,
-  collection: CollectionRow,
-  path: string,
-  frozen: Frozen,
-  restoredFrom: number | null
-): Promise<void> => {
-  if (frozen.length === 0) {
-    return;
-  }
-  const db = drizzle(env.KNOWLEDGE);
-  const found = await db
-    .select({ path: documents.path, currentVersion: documents.currentVersion })
-    .from(documents)
-    .where(
-      and(
-        eq(documents.collectionId, collection.id),
-        inList(documents.path, [...new Set(frozen.map((entry) => entry.path))])
-      )
-    );
-  // A document's versions run from 1 to its current one.
-  const latest = new Map(found.map((row) => [row.path, row.currentVersion]));
-  const exists = (entry: Frozen[number]) =>
-    entry.version <= (latest.get(entry.path) ?? 0);
-  const checked = await checkedBefore(db, collection, path, restoredFrom);
-  const unchecked = [
-    ...new Map(
-      frozen
-        .filter((entry) => exists(entry) && !checked.has(keyOf(entry)))
-        .map((entry) => [keyOf(entry), entry])
-    ).values(),
-  ];
-  const types = await typesOf(db, collection, unchecked);
-  const problems = frozen.flatMap((entry, index) => {
-    const at = `frontmatter.workflows.${index}`;
-    if (!exists(entry)) {
-      return [
-        `${at}: the Playbook has no version ${entry.version} of ${entry.path}`,
-      ];
-    }
-    const key = keyOf(entry);
-    if (!checked.has(key) && types.get(key) !== "workflow") {
-      return [
-        `${at}: version ${entry.version} of ${entry.path} isn't a workflow record`,
-      ];
-    }
-    return [];
-  });
-  if (problems.length > 0) {
-    throw invalid(problems);
-  }
-};
 
 /** Splits rows so no insert binds more parameters than D1 allows. */
 const inChunks = <Row extends object>(rows: Row[]): Row[][] => {
@@ -438,10 +265,8 @@ const conflict = (existing: DocumentRow | undefined) =>
  * save would refuse it: one to the Grasp skills by anything but their
  * sync (`graspSync`), over a document's limits, frontmatter that doesn't
  * fit its type (a record type as the Apps that declare it for the
- * collection have it, record-types.ts), a Playbook record outside a
- * Playbook collection, a snapshot that freezes what it may not
- * (`requireFrozenVersions`; a restore passes the version it restores,
- * `restoredFrom`), or, for a memory file, over that file's size limit.
+ * collection have it, record-types.ts), or, for a memory file, over that
+ * file's size limit.
  * `declared` is the collection's record types when the caller read them
  * already; read here otherwise, if the text needs them. A purge's text
  * (`purge`) is checked for the fields every type has only
@@ -452,7 +277,6 @@ export const checkedText = async (
   collection: CollectionRow,
   path: string,
   text: string,
-  restoredFrom: number | null = null,
   graspSync = false,
   declared?: DeclaredTypes,
   purge = false
@@ -469,22 +293,6 @@ export const checkedText = async (
     declared ??
       (await declaredFor(env, collection.id, [frontmatterType(path, text)])),
     purge
-  );
-  // Records live in the Playbook collection, which only exists once the
-  // `playbook` flag is on (playbook.ts): until then no text of a record
-  // type is saved anywhere, and code from before record types, which
-  // can't read them, still reads everything that is.
-  if (isPlaybookRecord(prepared.type) && collection.source !== "playbook") {
-    throw invalid([
-      `frontmatter.type: a ${prepared.type} record belongs in the Playbook collection`,
-    ]);
-  }
-  await requireFrozenVersions(
-    env,
-    collection,
-    path,
-    prepared.frozen,
-    restoredFrom
   );
   const memoryFile = await memoryFileOf(collection, path);
   if (memoryFile !== undefined) {
@@ -531,8 +339,7 @@ export interface Write {
   /**
    * Kept fields this version sets instead of keeping them, by name: only
    * the method a record type's declaration names for them (knowledge/
-   * records.ts), the Playbook's own function for its built-in ones, and a
-   * purge (`keptFieldsOf`).
+   * records.ts).
    */
   sets?: Record<string, unknown>;
   /**
@@ -549,31 +356,6 @@ export interface Write {
   purge?: true;
 }
 
-/**
- * Frontmatter fields of a Playbook record type that one function of its
- * own (`owner`) sets, having checked or computed them. The first field
- * says whether they are set: only `owner` sets it, and once it is, every
- * other save or restore, of raw text too, keeps them all as the version
- * it goes over has them (`requireFieldsKept`).
- */
-interface KeptFields {
-  owner: string;
-  fields: readonly [string, ...string[]];
-}
-
-/** The `KeptFields` of each Playbook record type that has them. */
-const keptFields: Partial<Record<DocumentType, KeptFields>> = {
-  // A workflow's link to an App workflow (playbook.ts): it checks that the
-  // person may use the App and that the App runs the workflow.
-  workflow: { owner: "linkWorkflow", fields: ["app"] },
-  // What a snapshot the platform took froze (snapshots.ts). One made by
-  // hand, without figures, is saved as any record.
-  snapshot: {
-    owner: "takeSnapshot",
-    fields: ["figures", "date", "maturity", "workflows"],
-  },
-};
-
 /** A frontmatter field's value, if it has one. */
 const fieldOf = (frontmatter: object | undefined, field: string): unknown =>
   frontmatter === undefined
@@ -584,55 +366,10 @@ const fieldOf = (frontmatter: object | undefined, field: string): unknown =>
 const comparable = (value: unknown): string | undefined =>
   value === undefined ? undefined : canonicalJson(z.json().parse(value));
 
-/** The frontmatter of `text` at `path`, if it reads as its type. */
-const recordFrontmatter = (
-  path: string,
-  text: string,
-  declared: DeclaredTypes
-): ParsedRecord | undefined => {
-  try {
-    return parseRecord(path, text, declared);
-  } catch (error) {
-    if (error instanceof FrontmatterError) {
-      return undefined;
-    }
-    throw error;
-  }
-};
-
-/**
- * The fields a record of `type` keeps: the Playbook's built-in ones, and
- * those each declaration of the type keeps (record-types.ts).
- */
+/** The fields a record of `type` keeps, by its declarations (record-types.ts). */
 export const keptNames = (type: string, declared: DeclaredTypes): string[] => [
-  ...new Set([
-    ...(isBuiltinDocumentType(type) ? (keptFields[type]?.fields ?? []) : []),
-    ...keptSetters(declared, type).keys(),
-  ]),
+  ...new Set(keptSetters(declared, type).keys()),
 ];
-
-/**
- * The kept fields of the record `text` at `path`, as it has them, in a
- * collection whose record types are `declared`: for a write that sets
- * them to what its text says. Only a purge does: removing personal data
- * comes before keeping a link, and it rewrites whatever text holds a term.
- */
-export const keptFieldsOf = (
-  path: string,
-  text: string,
-  declared: DeclaredTypes
-): Record<string, unknown> => {
-  const parsed = recordFrontmatter(path, text, declared);
-  if (parsed === undefined) {
-    return {};
-  }
-  return Object.fromEntries(
-    keptNames(parsed.type, declared).map((field) => [
-      field,
-      fieldOf(parsed.frontmatter, field),
-    ])
-  );
-};
 
 /** What `requireFieldsKept` compares: a version, and the one it goes over. */
 interface KeptCheck {
@@ -648,59 +385,15 @@ interface KeptCheck {
 }
 
 /**
- * The problems with the Playbook's built-in kept fields: its record types
- * in its own collection only.
- */
-const builtinKeptProblems = (
-  { type, collection }: KeptCheck,
-  saved: ParsedRecord | undefined,
-  now: ParsedRecord | undefined,
-  sets: Record<string, unknown>
-): string[] => {
-  if (collection.source !== "playbook") {
-    return [];
-  }
-  const was = saved?.frontmatter;
-  const groups = new Set(
-    [type, saved?.type].flatMap((of) => {
-      const group =
-        of === undefined || !isBuiltinDocumentType(of)
-          ? undefined
-          : keptFields[of];
-      return group === undefined ? [] : [group];
-    })
-  );
-  return [...groups].flatMap(({ owner, fields }) => {
-    const [first] = fields;
-    const setting = Object.hasOwn(sets, first);
-    const keeping = setting || fieldOf(was, first) !== undefined;
-    const kept = setting ? sets : was;
-    const changed = keeping
-      ? fields.filter(
-          (field) =>
-            comparable(fieldOf(now?.frontmatter, field)) !==
-            comparable(fieldOf(kept, field))
-        )
-      : fields.filter(
-          (field) =>
-            field === first && fieldOf(now?.frontmatter, field) !== undefined
-        );
-    return changed.map(
-      (field) =>
-        `frontmatter.${field}: only ${owner} changes it; a save keeps the version before's`
-    );
-  });
-};
-
-/**
  * Refuses with `knowledge.invalid` a version that changes a kept field
- * of its type (the Playbook's built-in ones, of its type and of the
- * version's it goes over), unless the write `sets` it. A declared type's
- * kept field (record-types.ts) each on its own: a version that doesn't set
- * it has it as the version it goes over has it, when that version is of
- * the same type, and doesn't have it otherwise. The version it goes over
- * is the one the write's batch requires is still current, so nothing
- * saved in between is compared against.
+ * (record-types.ts) of its type, unless the write `sets` it: a version
+ * that doesn't set one has it as the version it goes over has it, when
+ * that version is of the same type, and doesn't have it otherwise. Both
+ * are read as their texts have them, checked against nothing, so a
+ * version that no longer fits its type (after its schema changed) keeps
+ * them all the same. The version it goes over is the one the write's
+ * batch requires is still current, so nothing saved in between is
+ * compared against.
  */
 const requireFieldsKept = async (
   db: DrizzleD1Database,
@@ -723,14 +416,6 @@ const requireFieldsKept = async (
         )
         .get()
     : undefined;
-  const saved =
-    before === undefined
-      ? undefined
-      : recordFrontmatter(path, before.text, declared);
-  const now = recordFrontmatter(path, text, declared);
-  // A declared type's kept fields as the texts have them, checked against
-  // nothing: a version that no longer fits its type (after its schema
-  // changed) keeps them all the same.
   const savedRaw =
     before === undefined ? undefined : savedFields(path, before.text);
   const nowRaw = savedFields(path, text);
@@ -750,12 +435,8 @@ const requireFieldsKept = async (
           ];
     }
   );
-  const problems = [
-    ...builtinKeptProblems(check, saved, now, sets),
-    ...declaredProblems,
-  ];
-  if (problems.length > 0) {
-    throw invalid(problems);
+  if (declaredProblems.length > 0) {
+    throw invalid(declaredProblems);
   }
 };
 
@@ -784,7 +465,6 @@ export const writeVersion = async (
     collection,
     path,
     text,
-    restoredFrom,
     graspSync,
     declared,
     write.purge === true

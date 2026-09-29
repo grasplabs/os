@@ -1,0 +1,185 @@
+{
+  "workflow": {
+    "collection": "playbook",
+    "description": "A workflow as it runs now (drawn) or as it should (designed): its steps with their numbers, what can be set, and what it is expected to save. A designed one names the version of it last drawn, which only the map's save sets, and, once built, the App workflow that runs it, which only the map's link sets.",
+    "schema": {
+      "type": "object",
+      "properties": {
+        "state": {
+          "enum": ["drawn", "designed"]
+        },
+        "team": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "description": "The team's record, by its path"
+        },
+        "steps": {
+          "type": "array",
+          "maxItems": 100,
+          "default": [],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "who": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "tool": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "handover": {
+                "type": "boolean",
+                "default": false,
+                "description": "Whether the work passes to someone else after this step"
+              },
+              "kind": {
+                "enum": ["automated", "ai_checked", "tool", "instruction"],
+                "description": "How a designed step is done"
+              },
+              "numbers": {
+                "type": "object",
+                "properties": {
+                  "frequency": {
+                    "type": "object",
+                    "description": "Times a week",
+                    "properties": {
+                      "value": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "basis": {
+                        "enum": ["estimated", "observed"]
+                      }
+                    },
+                    "required": ["value", "basis"],
+                    "additionalProperties": false
+                  },
+                  "minutes": {
+                    "type": "object",
+                    "description": "Minutes each time",
+                    "properties": {
+                      "value": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "basis": {
+                        "enum": ["estimated", "observed"]
+                      }
+                    },
+                    "required": ["value", "basis"],
+                    "additionalProperties": false
+                  },
+                  "people": {
+                    "type": "object",
+                    "description": "People each time",
+                    "properties": {
+                      "value": {
+                        "type": "number",
+                        "minimum": 0,
+                        "maximum": 10000
+                      },
+                      "basis": {
+                        "enum": ["estimated", "observed"]
+                      }
+                    },
+                    "required": ["value", "basis"],
+                    "additionalProperties": false
+                  }
+                },
+                "additionalProperties": false
+              }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+          }
+        },
+        "parameters": {
+          "type": "array",
+          "maxItems": 50,
+          "default": [],
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 200
+              },
+              "value": {
+                "type": "string",
+                "maxLength": 1000
+              }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+          }
+        },
+        "gain": {
+          "type": "object",
+          "description": "What it is expected to save",
+          "properties": {
+            "hoursPerWeek": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 100000
+            }
+          },
+          "required": ["hoursPerWeek"],
+          "additionalProperties": false
+        },
+        "app": {
+          "type": "object",
+          "description": "The App workflow that runs a designed one, by IDs",
+          "properties": {
+            "appId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            },
+            "workflowId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256
+            }
+          },
+          "required": ["appId", "workflowId"],
+          "additionalProperties": false
+        },
+        "drawnVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "For a designed workflow, the version of it last drawn, which the map's save keeps"
+        }
+      },
+      "required": ["state"]
+    },
+    "kept": [
+      {
+        "method": "link",
+        "fields": ["app"]
+      },
+      {
+        "method": "save",
+        "fields": ["drawnVersion"]
+      }
+    ]
+  },
+  "team": {
+    "collection": "playbook",
+    "description": "A team the company's workflows belong to. Its name is the title.",
+    "schema": {
+      "type": "object"
+    }
+  }
+}

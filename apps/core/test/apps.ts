@@ -102,6 +102,41 @@ export const reviewedOf = async (
   return { version: app?.currentVersion ?? null };
 };
 
+/**
+ * Revokes, as `api`'s admin, the collection permissions of every other App
+ * created from the built-in `blueprint` but `keep`: a collection's record
+ * types are one App's (knowledge/record-types.ts), so a test that creates
+ * a new copy of a built-in hands them to it, as an admin would, choosing
+ * the one copy they want.
+ */
+export const revokeOtherCopies = async (
+  api: Api,
+  blueprint: string,
+  keep: string
+): Promise<void> => {
+  const listed = await api.apps.list();
+  const others = new Set(
+    listed
+      .filter(
+        ({ id, blueprint: from }) =>
+          id !== keep && from?.startsWith(`${blueprint}@`) === true
+      )
+      .map(({ id }) => id)
+  );
+  const permissions = await api.permissions.list();
+  for (const { id, subject, object, status } of permissions) {
+    if (
+      subject.type === "app" &&
+      others.has(subject.appId) &&
+      object.type === "collection" &&
+      status !== "revoked"
+    ) {
+      // oxlint-disable-next-line no-await-in-loop -- one revoke at a time
+      await api.permissions.revoke(id);
+    }
+  }
+};
+
 /** Grants the permission `id` as `api`'s admin, having reviewed it now. */
 export const grantReviewed = async (
   api: Api,

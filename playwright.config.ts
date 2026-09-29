@@ -4,6 +4,8 @@ import { localSignIn } from "./apps/core/test/sign-in-config.ts";
 import { testAuthSecret } from "./e2e/people.ts";
 import { corePort, idpOrigin, idpPort, origin, stateDir } from "./e2e/stack.ts";
 
+/** The end-to-end tests of the Playbook's built-ins (their own project). */
+const playbookTests = /(?:board-page|workflow-map)\.e2e\.ts$/u;
 const ci = process.env.CI === "true";
 
 /**
@@ -35,7 +37,22 @@ export default defineConfig({
     baseURL: origin,
     trace: "on-first-retry",
   },
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      use: { ...devices["Desktop Chrome"] },
+      testIgnore: playbookTests,
+    },
+    // The Playbook's built-ins: one copy of each has the Playbook's record
+    // types (core's knowledge/record-types.ts), so their tests hand it from
+    // copy to copy (e2e/playbook.ts), one test at a time.
+    {
+      name: "playbook",
+      use: { ...devices["Desktop Chrome"] },
+      testMatch: playbookTests,
+      workers: 1,
+    },
+  ],
   // Never a server already running: on this checkout's ports (e2e/stack.ts)
   // that is a stale run or another checkout's stack, with state the tests
   // don't expect. Playwright then fails, naming the port.
@@ -65,7 +82,6 @@ export default defineConfig({
             app_sharing: true,
             app_blueprints: true,
             builtins: true,
-            playbook: true,
             record_types: true,
             statistics: true,
             screens: true,
