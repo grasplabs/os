@@ -20,13 +20,14 @@ import { z } from "zod";
 
 import { accountUsage, monthCostUsd } from "../cloudflare/analytics.ts";
 import type { AccountUsage } from "../cloudflare/analytics.ts";
+import { cloudflareApi } from "../cloudflare/api.ts";
 import type { CloudflareApi } from "../cloudflare/api.ts";
 import { consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
 import { clientDeploys, clients, clientWorkers } from "../db/schema.ts";
 import {
   clientDomain,
-  deployerApi,
+  deployerToken,
   deploySecrets,
   MissingStoreSecretError,
 } from "../deploy/context.ts";
@@ -222,7 +223,7 @@ interface LiveSources {
    * The deployer's API, its calls stopped by `signal`; null when its token
    * can't be read.
    */
-  apiFor: ((signal: AbortSignal) => Promise<CloudflareApi>) | null;
+  apiFor: ((signal: AbortSignal) => CloudflareApi) | null;
   /** The router key; null when Secrets Store doesn't have it. */
   routerKey: string | null;
   /** What Secrets Store holds, to check clients against; null when it can't be read. */
@@ -261,8 +262,7 @@ const liveOf = async (
     apiFor === null
       ? null
       : await orElse(
-          async () =>
-            await driftOf(await apiFor(signal), db, row.id, manifestOf),
+          async () => await driftOf(apiFor(signal), db, row.id, manifestOf),
           null,
           "grid.drift_unread",
           row.id
@@ -342,13 +342,13 @@ const within = async <T>(
  */
 const usageWithin = async (
   ms: number,
-  apiFor: (signal: AbortSignal) => Promise<CloudflareApi>,
+  apiFor: (signal: AbortSignal) => CloudflareApi,
   accountIds: readonly string[],
   now: Date
 ): Promise<Map<string, AccountUsage>> => {
   const limit = deadline(ms);
   try {
-    return await accountUsage(await apiFor(limit.signal), accountIds, now);
+    return await accountUsage(apiFor(limit.signal), accountIds, now);
   } finally {
     limit.clear();
   }
@@ -452,15 +452,15 @@ export const gridLive = async (
   }
   const toRead = active.filter(({ id }) => !answers.has(id));
   if (toRead.length > 0) {
-    // Read once: whether the deployer's token is there at all.
-    const api = await ifStored(
-      async () => await deployerApi(env, { waitBudgetMs: options.waitBudgetMs })
-    );
+    // The token is read once, here: every client's reads, and the
+    // analytics', make their API from it, each stopped by its own deadline.
+    const token = await ifStored(async () => await deployerToken(env));
     const apiFor =
-      api === null
+      token === null
         ? null
-        : async (signal: AbortSignal) =>
-            await deployerApi(env, {
+        : (signal: AbortSignal): CloudflareApi =>
+            cloudflareApi({
+              token,
               waitBudgetMs: options.waitBudgetMs,
               signal,
             });

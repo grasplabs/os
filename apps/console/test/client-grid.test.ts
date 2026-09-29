@@ -311,6 +311,35 @@ describe("the client grid", () => {
     });
   });
 
+  it("reads the deployer's token once, so Secrets Store failing after that still leaves every client's live answers", async () => {
+    const release = await importedRelease("feat(core): one token read");
+    const acme = await liveClient(release);
+    const globex = await liveClient(release);
+    acme.account.usage = someUsage;
+    globex.account.usage = someUsage;
+    let reads = 0;
+    // The first read answers as the store does; any after it fails, as a
+    // store gone bad would.
+    vi.spyOn(env.DEPLOYER_API_TOKEN, "get").mockImplementation(async () => {
+      reads += 1;
+      return reads === 1
+        ? await Promise.resolve(token)
+        : await Promise.reject(new Error("store unavailable"));
+    });
+
+    const live = await gridLive(env, new Date(), uncached);
+
+    expect({
+      reads,
+      acme: live[acme.clientId],
+      globex: live[globex.clientId],
+    }).toMatchObject({
+      reads: 1,
+      acme: { drift: "in_sync", costUsd: { workers: 5, ai: 0 } },
+      globex: { drift: "in_sync", costUsd: { workers: 5, ai: 0 } },
+    });
+  });
+
   it("still answers when the cache can't keep what it read, or read it back", async () => {
     const release = await importedRelease("feat(core): no cache");
     const acme = await liveClient(release);

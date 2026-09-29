@@ -77,6 +77,10 @@ const storeSecret = async (env: Env, name: StoreSecret): Promise<string> => {
 export const tenantAdminApi = async (env: Env): Promise<CloudflareApi> =>
   cloudflareApi({ token: await storeSecret(env, "TENANT_ADMIN_TOKEN") });
 
+/** The deployer's API token, from Secrets Store. */
+export const deployerToken = async (env: Env): Promise<string> =>
+  await storeSecret(env, "DEPLOYER_API_TOKEN");
+
 /**
  * The Cloudflare API as the deployer: a member of every client account,
  * its token scoped to what a deploy does.
