@@ -986,6 +986,26 @@ export const allowingPermissionSql = (
 };
 
 /**
+ * The permissions on connections through which App `appId`, running
+ * `appVersion` (columns of the query it runs in), could hear events, as
+ * SQL for a WHERE on `permissions`: `allowingPermissionSql`'s rule for an
+ * action on a connection, for any connection, resource and action. Where
+ * connect listens for events (workflows/connector-events.ts); each event
+ * is checked by `allowingPermissionSql` itself as it is delivered.
+ */
+export const listeningPermissionSql = (
+  appId: SQLWrapper,
+  appVersion: SQLWrapper
+): SQL =>
+  and(
+    eq(permissions.subjectType, "app"),
+    eq(permissions.subjectId, appId),
+    eq(permissions.status, "active"),
+    eq(permissions.objectType, "connection"),
+    sql`NOT ${unapprovedSql(appId, appVersion)}`
+  ) ?? sql`0`;
+
+/**
  * Refuses with `permission.denied` code of `version` of `app` that no admin
  * approved, while the App holds a permission that changes things, as
  * `authorize` does: for a run on it calling its App's server methods

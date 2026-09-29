@@ -56,6 +56,7 @@ export const screenTests = [
   "test/triggers.test.ts",
   "test/email-triggers.test.ts",
   "test/event-triggers.test.ts",
+  "test/event-sources.test.ts",
   "test/orphaned-runs.test.ts",
 ];
 
@@ -134,6 +135,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               improvement_signals: true,
               knowledge_signals: true,
               triggers: true,
+              connector_events: true,
               build_on_save: true,
               app_calls: true,
               agent: true,

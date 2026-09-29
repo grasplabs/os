@@ -820,6 +820,22 @@ describe("the Microsoft 365 connector's answers", () => {
     expect(graph.writesDone()).toBe(1);
   });
 
+  it("refuse a mailbox that is a dot segment before anything goes out", async () => {
+    const connection = await connected();
+    const outcomes = await Promise.all(
+      [".", ".."].map(
+        async (mailbox) =>
+          await toolError(call(connection, "mail.list", { mailbox }))
+      )
+    );
+
+    // Refused as input, naming the mailbox.
+    expect(
+      outcomes.map((refusal) => JSON.stringify(refusal).includes("mailbox"))
+    ).toStrictEqual([true, true]);
+    expect(graph.sent).toStrictEqual([]);
+  });
+
   it("tell a request connect's egress refused from one Graph refused", async () => {
     const connection = await connected();
     // `..` is a Graph ID's alphabet, but a dot segment in a path: the

@@ -22,6 +22,7 @@ import type {
   Disconnect,
   DisconnectPersonal,
   FinishConnection,
+  OutboxedConnectorEvent,
   PendingAction,
   StartConnection,
   StartToolkitConnection,
@@ -41,6 +42,11 @@ import {
   startToolkitConnection,
 } from "./composio-connections.ts";
 import { connectionOwners } from "./connections.ts";
+import {
+  ackConnectorEvents,
+  syncEventSources,
+  takeConnectorEvents,
+} from "./events.ts";
 import {
   abandonFlow,
   disconnect,
@@ -186,6 +192,22 @@ export default class Connect
 
   async ackAuditEvents(appended: unknown, rejected?: unknown): Promise<void> {
     await ackAuditEvents(this.env, appended, rejected);
+  }
+
+  // Connector events (src/events.ts). Core's cron trigger sends who
+  // listens where, then takes the events read, delivers them to workflows,
+  // and settles them.
+
+  async syncEventSources(listeners: unknown): Promise<void> {
+    await syncEventSources(this.env, listeners);
+  }
+
+  async takeConnectorEvents(): Promise<OutboxedConnectorEvent[]> {
+    return await takeConnectorEvents(this.env);
+  }
+
+  async ackConnectorEvents(ack: unknown): Promise<void> {
+    await ackConnectorEvents(this.env, ack);
   }
 
   // Connecting accounts (src/oauth.ts). Core calls these for a signed-in

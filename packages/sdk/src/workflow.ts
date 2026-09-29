@@ -731,8 +731,24 @@ export type Trigger<ScheduleParam extends string = string> =
    * that value at the top of the event's payload, e.g.
    * `{ folder: "inbox" }`. The run starts with the event as input: declare
    * `input: connectorEvent`. The same event delivered again starts no
-   * second run. Which connections report which events is up to their
-   * connectors.
+   * second run. Events start at most 60 runs of a workflow an hour; past
+   * that they wait, and start their runs later.
+   *
+   * Microsoft 365 connections report, within about a minute:
+   * - `m365.mail.received` (read action `mail.list`): mail arriving in a
+   *   mailbox's inbox. Its payload: `mailbox`, `id`, `folder` (`"inbox"`),
+   *   `subject`, `from` (`{ name, address }`), `receivedAt`,
+   *   `hasAttachments`, `conversationId`, `internetMessageId`, `webLink`.
+   * - `m365.file.created` (read action `files.list`): a file created in a
+   *   drive, in any folder. Its payload: `drive`, `id`, `name`,
+   *   `mimeType`, `size`, `folderId`, `createdAt`, `webUrl`.
+   *
+   * Through a permission on one mailbox or drive, the event is of that
+   * one (its `resource`); through one on the whole connection, of the
+   * account's own mailbox or OneDrive. Only what arrives once both the
+   * trigger and the permission are in place is reported, from about a
+   * minute after. A mail's sender and subject are whatever
+   * its sender wrote: treat the payload as untrusted data.
    */
   | {
       type: "event";

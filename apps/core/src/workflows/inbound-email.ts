@@ -2,14 +2,14 @@ import { sha256Hex, toHex } from "@grasp-os/shared/encoding";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import type { InboundEmail } from "@grasp-os/shared/workflows";
-import { and, eq, gte, like, or, sql } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import PostalMime from "postal-mime";
 import type { Address, Email } from "postal-mime";
 
-import { apps, workflowRuns, workflowTriggers } from "../db/core/schema.ts";
+import { apps, workflowTriggers } from "../db/core/schema.ts";
 import { featureEnabled } from "../features.ts";
-import { maxInputLength, startRun } from "./runs.ts";
+import { atHourlyCap, maxInputLength, startRun } from "./runs.ts";
 
 // Mail to workflows' email triggers (trigger-registry.ts). Email Routing
 // sends every message for the deployment's mail domain to core's email
@@ -36,7 +36,8 @@ import { maxInputLength, startRun } from "./runs.ts";
 // writes the Message-ID, though: a message that reuses another's, sent
 // first, keeps that one from starting a run.
 //
-// Mail starts at most `emailRunsPerHour` runs of a workflow an hour. A
+// Mail starts at most `triggeredRunsPerHour` runs of a workflow an hour
+// (runs.ts). A
 // message goes to each receiving workflow with room; if one is at its
 // limit, the delivery fails for now once the others started, so its
 // sender tries again later, and only the workflows that didn't start it
@@ -307,49 +308,6 @@ const receiversAt = async (env: Env, address: string) =>
       )
     );
 
-/** The most runs mail starts of one workflow in an hour. */
-const emailRunsPerHour = 60;
-
-const hourMs = 60 * 60 * 1000;
-
-/**
- * Whether App `app`'s workflow `workflow` is at its hourly limit for the
- * message whose run has trigger key `key`: mail started `emailRunsPerHour`
- * of its runs in the past hour (counted on its index by App, workflow and
- * time), and none of them is this message's. A workflow that has this
- * message's run already is never capped for it, so a delivery tried again
- * because another workflow was capped isn't refused by the run it started
- * itself. Checked before the starts, not with them, so mail delivered at
- * the same moment can go a few over.
- */
-const atHourlyCap = async (
-  env: Env,
-  app: string,
-  workflow: string,
-  key: string
-): Promise<boolean> => {
-  const recent = and(
-    gte(workflowRuns.createdAt, new Date(Date.now() - hourMs)),
-    like(workflowRuns.triggerKey, "email:%")
-  );
-  const mine = eq(workflowRuns.triggerKey, key);
-  const counted = await drizzle(env.DB)
-    .select({
-      runs: sql<number | null>`sum(case when ${recent} then 1 else 0 end)`,
-      delivered: sql<number | null>`max(case when ${mine} then 1 else 0 end)`,
-    })
-    .from(workflowRuns)
-    .where(
-      and(
-        eq(workflowRuns.appId, app),
-        eq(workflowRuns.workflowId, workflow),
-        or(recent, mine)
-      )
-    )
-    .get();
-  return counted?.delivered !== 1 && (counted?.runs ?? 0) >= emailRunsPerHour;
-};
-
 /** `raw` parsed, or undefined for a message that doesn't parse. */
 const parsedOf = async (raw: Uint8Array): Promise<Email | undefined> => {
   try {
@@ -416,7 +374,8 @@ export const receiveEmail = async (
           env,
           receiver.appId,
           receiver.workflowId,
-          keyOf(receiver)
+          keyOf(receiver),
+          "email"
         )
     )
   );
