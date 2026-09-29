@@ -3,7 +3,8 @@ import type { PendingReference } from "@grasp-os/shared/connect";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import {
-  auditAgentCall,
+  auditRefusal,
+  auditedCall,
   chatAuthority,
   chatContext,
   recordSources,
@@ -61,8 +62,32 @@ const connectionGrants = async (
   });
 };
 
+/** `options` with its idempotency key, if it has one, made the chat's own. */
+const chatKeyed = (scope: AgentScope, options: unknown): unknown => {
+  if (typeof options !== "object" || options === null) {
+    return options;
+  }
+  const key: unknown = Reflect.get(options, "idempotencyKey");
+  return typeof key === "string"
+    ? { ...options, idempotencyKey: `${scope.chatId}:${key}` }
+    : options;
+};
+
 /** Connections, as a chat's code calls them. */
 export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
+  /** The agent's grant under `name`, read now, or why there is none. */
+  async #grantNamed(
+    name: unknown
+  ): Promise<Awaited<ReturnType<typeof connectionGrants>>[number]> {
+    requireFeature(this.env, "connections");
+    const grants = await connectionGrants(this.env, this.ctx.props);
+    const grant = grants.find((held) => held.name === name);
+    if (grant === undefined) {
+      throw connectErrors.create("connect.connection_not_found");
+    }
+    return grant;
+  }
+
   /**
    * The connections the agent may use for its person: those it has a
    * permission for that the person may use themselves (a shared one, or
@@ -72,29 +97,36 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
     const scope = this.ctx.props;
     await requireOpenRun(this.env, scope);
     try {
-      requireFeature(this.env, "connections");
-      const grants = await connectionGrants(this.env, scope);
-      const owners = await connectionOwnersOf(this.env, [
-        ...new Set(grants.map(({ connection }) => connection.connectionId)),
-      ]);
-      const usable = new Set(
-        owners.flatMap(({ id, ownerUserId }) =>
-          ownerUserId === null || ownerUserId === scope.personId ? [id] : []
-        )
+      return await auditedCall(
+        this.env,
+        scope,
+        {
+          method: "connections.list",
+          detailOf: (listed: AgentConnection[]) => ({
+            connections: listed.length,
+          }),
+        },
+        async () => {
+          requireFeature(this.env, "connections");
+          const grants = await connectionGrants(this.env, scope);
+          const owners = await connectionOwnersOf(this.env, [
+            ...new Set(grants.map(({ connection }) => connection.connectionId)),
+          ]);
+          const usable = new Set(
+            owners.flatMap(({ id, ownerUserId }) =>
+              ownerUserId === null || ownerUserId === scope.personId ? [id] : []
+            )
+          );
+          return grants
+            .filter(({ connection }) => usable.has(connection.connectionId))
+            .map(({ name, connection, actions }) => ({
+              name,
+              connectionId: connection.connectionId,
+              resource: connection.resource ?? null,
+              actions,
+            }));
+        }
       );
-      const listed = grants
-        .filter(({ connection }) => usable.has(connection.connectionId))
-        .map(({ name, connection, actions }) => ({
-          name,
-          connectionId: connection.connectionId,
-          resource: connection.resource ?? null,
-          actions,
-        }));
-      await auditAgentCall(this.env, scope, {
-        method: "connections.list",
-        detail: { connections: listed.length },
-      });
-      return listed;
     } catch (error) {
       throw forSandbox(error);
     }
@@ -113,21 +145,27 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
   ): Promise<AgentCallResult> {
     const scope = this.ctx.props;
     await requireOpenRun(this.env, scope);
-    requireFeature(this.env, "connections");
-    let grants: Awaited<ReturnType<typeof connectionGrants>> = [];
-    try {
-      grants = await connectionGrants(this.env, scope);
-    } catch (error) {
-      throw forSandbox(error);
-    }
-    const grant = grants.find(({ name }) => name === connection);
-    if (grant === undefined) {
-      throw connectErrors.create("connect.connection_not_found");
-    }
+    const grant = await this.#grantNamed(connection).catch(
+      async (error: unknown) =>
+        await auditRefusal(
+          this.env,
+          scope,
+          {
+            method: "connections.call",
+            detail: {
+              connection: typeof connection === "string" ? connection : null,
+            },
+          },
+          forSandbox(error)
+        )
+    );
+    // Connect keeps a side effect's answer, and its held action, under the
+    // agent and the key: the agent is the workspace's, so each chat's keys
+    // are its own, and one chat never gets another's answer or held action.
     const result = await runStubCall(this.env, chatAuthority(scope), grant, [
       action,
       input,
-      options,
+      chatKeyed(scope, options),
     ]);
     if (result.pending !== undefined) {
       return { output: null, pending: result.pending };

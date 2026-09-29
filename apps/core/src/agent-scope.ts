@@ -1,6 +1,7 @@
 import { agentErrors } from "@grasp-os/shared/agent";
 import { delegateActorOf } from "@grasp-os/shared/audit";
 import type { AuditDetailValue, AuditEntry } from "@grasp-os/shared/audit";
+import { isExpectedError } from "@grasp-os/shared/errors";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import {
   authoritySchema,
@@ -146,23 +147,83 @@ export interface AgentCall {
   detail?: Record<string, AuditDetailValue>;
 }
 
+/** How a call ended: done, refused (an expected error), or failed. */
+type CallOutcome = "ok" | "refused" | "failed";
+
 /**
- * Records a call of the chat's code as `agent.call`, by the chat's agent
- * acting for its person: for the calls nothing below records (a Knowledge
- * read, a connection call and a model request record themselves). After
- * the call and before it hands anything over, through core's outbox, which
- * never fails the call (`keepAuditEvent`).
+ * Records a call of the chat's code as `agent.call`, by the workspace's
+ * agent acting for the chat's person, in the chat: for the calls nothing
+ * below records (a Knowledge read, a connection call and a model request
+ * record themselves). Through core's outbox, which never fails the call
+ * (`keepAuditEvent`).
  */
 export const auditAgentCall = async (
   env: Env,
-  scope: AgentScope,
-  { method, target, detail = {} }: AgentCall
+  scope: Omit<AgentScope, "runId">,
+  { method, target, detail = {} }: AgentCall,
+  ended?: { outcome: CallOutcome; reason: string | null }
 ): Promise<void> => {
   await keepAuditEvent(env, drizzle(env.DB), {
     actor: delegateActorOf(chatAuthority(scope)),
     action: "agent.call",
     target,
     // The actor is the workspace's agent, in every chat: which chat called.
-    detail: { ...detail, method, chat: scope.chatId },
+    detail: {
+      ...detail,
+      method,
+      chat: scope.chatId,
+      outcome: ended?.outcome ?? "ok",
+      reason: ended?.reason ?? null,
+    },
   });
+};
+
+/** How a call that threw ended, and why, as the audit log names it. */
+const endedBy = (
+  error: unknown
+): { outcome: CallOutcome; reason: string | null } =>
+  isExpectedError(error)
+    ? { outcome: "refused", reason: error.code }
+    : { outcome: "failed", reason: "internal.unexpected" };
+
+/**
+ * Runs one call of the chat's code and records it as `agent.call` once,
+ * however it ends: with what `detailOf` says of its result when it is
+ * done, and why when it is refused or fails. The error goes on as it was.
+ */
+export const auditedCall = async <T>(
+  env: Env,
+  scope: AgentScope,
+  call: AgentCall & {
+    detailOf?: (result: T) => Record<string, AuditDetailValue>;
+  },
+  run: () => Promise<T>
+): Promise<T> => {
+  const { detailOf, ...recorded } = call;
+  let result: T;
+  try {
+    result = await run();
+  } catch (error) {
+    await auditAgentCall(env, scope, recorded, endedBy(error));
+    throw error;
+  }
+  await auditAgentCall(env, scope, {
+    ...recorded,
+    detail: { ...recorded.detail, ...detailOf?.(result) },
+  });
+  return result;
+};
+
+/**
+ * Records a call refused before it reached what records it itself (a
+ * connection call before connect), and throws the refusal on.
+ */
+export const auditRefusal = async (
+  env: Env,
+  scope: AgentScope,
+  call: AgentCall,
+  error: unknown
+): Promise<never> => {
+  await auditAgentCall(env, scope, call, endedBy(error));
+  throw error;
 };

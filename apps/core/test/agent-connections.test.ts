@@ -144,24 +144,121 @@ describe("a chat's connections", setUpTime, () => {
         ungranted: connectErrors.create("connect.connection_not_found").message,
       })}`
     );
-    // The listing is audited as the agent's; the calls by connect.
-    const events = await eventsOf(chat.agent.agentId, (all) =>
-      all.some(({ action }) => action === "agent.call")
+    // Each call recorded once, naming the chat: the listing and the call
+    // refused before connect as the agent's, the calls connect took by
+    // connect.
+    const events = await eventsOf(
+      chat.agent.agentId,
+      (all) =>
+        all.filter(
+          ({ action }) =>
+            action === "agent.call" || action === "connection.call"
+        ).length === 4
     );
+    const actor = { ...chat.agent, onBehalfOf: person.userId };
     expect(
       events
-        .filter(({ action }) => action === "agent.call")
-        .map(({ actor, detail }) => ({ actor, detail }))
-    ).toStrictEqual([
-      {
-        actor: { ...chat.agent, onBehalfOf: person.userId },
-        detail: {
-          method: "connections.list",
-          connections: 1,
+        .filter(
+          ({ action }) =>
+            action === "agent.call" || action === "connection.call"
+        )
+        .map(({ action, actor: by, target, detail }) => ({
+          action,
+          by,
+          target: target?.id ?? null,
+          method: detail.method ?? null,
+          outcome: detail.outcome,
+          reason: detail.reason ?? null,
+          chat: detail.chat,
+        }))
+        .toSorted(
+          (one, other) =>
+            one.action.localeCompare(other.action) ||
+            String(one.method).localeCompare(String(other.method)) ||
+            String(one.target).localeCompare(String(other.target))
+        )
+    ).toStrictEqual(
+      [
+        {
+          action: "agent.call",
+          by: actor,
+          target: null,
+          method: "connections.call",
+          outcome: "refused",
+          reason: "connect.connection_not_found",
           chat: chat.chat.id,
         },
-      },
-    ]);
+        {
+          action: "agent.call",
+          by: actor,
+          target: null,
+          method: "connections.list",
+          outcome: "ok",
+          reason: null,
+          chat: chat.chat.id,
+        },
+        {
+          action: "connection.call",
+          by: actor,
+          target: mail.id,
+          method: null,
+          outcome: "ok",
+          reason: null,
+          chat: chat.chat.id,
+        },
+        {
+          action: "connection.call",
+          by: actor,
+          target: theirs.id,
+          method: null,
+          outcome: "refused",
+          reason: "connect.not_owner",
+          chat: chat.chat.id,
+        },
+      ].toSorted(
+        (one, other) =>
+          one.action.localeCompare(other.action) ||
+          String(one.method).localeCompare(String(other.method)) ||
+          String(one.target).localeCompare(String(other.target))
+      )
+    );
+  });
+
+  it("keep each chat's idempotency keys its own, in one workspace", async () => {
+    const send = codeStep(
+      `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: "invoice-7" });`
+    );
+    const { person, mail, chat, grant } = await setUp(
+      send,
+      says("It waits for you."),
+      send,
+      says("This one too.")
+    );
+    const other = await chat.stub.createChat("Other", person.userId);
+    await grant(mail.id, "MAIL");
+
+    await chat.ask("Send Ben the invoice.");
+    await chat.stub.ask(other.id, { text: "Send it from here.", model });
+
+    // Two held actions, one per chat, though both chats chose one key.
+    const held = await person.api.pendingActions.list();
+    const [first] = await codeResults(chat.stub, chat.chat.id);
+    const [second] = await codeResults(chat.stub, other.id);
+    expect({
+      held: held.length,
+      distinct: new Set(held.map(({ id }) => id)).size,
+      pending: [first?.text, second?.text].map((text) =>
+        held.some(({ id }) => text?.includes(id) === true)
+      ),
+      sameAnswer: first?.text === second?.text,
+      sent: await mail.did(),
+    }).toStrictEqual({
+      held: 2,
+      distinct: 2,
+      pending: [true, true],
+      sameAnswer: false,
+      sent: { calls: 0, sent: [] },
+    });
   });
 
   it("keep a chat that read an EU-only connection to EU models, in every later turn", async () => {

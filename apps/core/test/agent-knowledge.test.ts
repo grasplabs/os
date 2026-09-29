@@ -228,7 +228,14 @@ describe("a chat's Knowledge", setUpTime, () => {
         .filter(({ action }) => action === "agent.call")
         .map(({ detail }) => detail)
     ).toStrictEqual([
-      { method: "knowledge.catalog", collections: 1, skills: 0, chat: chat.id },
+      {
+        method: "knowledge.catalog",
+        collections: 1,
+        skills: 0,
+        chat: chat.id,
+        outcome: "ok",
+        reason: null,
+      },
     ]);
   });
 

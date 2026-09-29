@@ -88,6 +88,12 @@ export const capabilityClaimsSchema = z.strictObject({
    */
   origin: originSchema.optional(),
   /**
+   * Where the call is made: the chat, App or run, for the audit log. A
+   * chat's agent is its workspace's, in every chat, so only this says
+   * which chat called.
+   */
+  context: workContextSchema.optional(),
+  /**
    * Only on the capability core signs once the person confirmed a held
    * action, from their own session: that action's ID. Connect runs a held
    * action only with it, and takes it nowhere else.
@@ -108,6 +114,8 @@ export interface CapabilityScope {
   restricted?: boolean | undefined;
   /** What core checks again when a held call is confirmed: signed. */
   origin?: z.input<typeof originSchema> | undefined;
+  /** Where the call is made, for the audit log: signed, not compared. */
+  context?: z.input<typeof workContextSchema> | undefined;
   /** The held action the person confirmed: signed, not compared. */
   confirms?: string | undefined;
 }
@@ -170,6 +178,7 @@ export const signCapability = async (
     // capability that says it, which fails closed.
     ...(scope.restricted === true ? { restricted: true } : {}),
     ...(scope.origin === undefined ? {} : { origin: scope.origin }),
+    ...(scope.context === undefined ? {} : { context: scope.context }),
     ...(scope.confirms === undefined ? {} : { confirms: scope.confirms }),
   };
   capabilityClaimsSchema.parse(claims);

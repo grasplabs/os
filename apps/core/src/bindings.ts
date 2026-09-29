@@ -92,6 +92,7 @@ export const signedCall = async (
       mask,
       restricted,
       origin: holds ? { permissionId, context } : undefined,
+      context,
       confirms,
     }
   );

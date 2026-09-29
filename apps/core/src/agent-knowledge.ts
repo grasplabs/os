@@ -9,7 +9,7 @@ import type {
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import {
-  auditAgentCall,
+  auditedCall,
   chatAuthority,
   chatContext,
   recordSources,
@@ -64,17 +64,27 @@ export class KnowledgeApi
    * Knowledge doesn't record it; the call is, as every call of the chat's.
    */
   async catalog(): Promise<KnowledgeCatalog> {
-    const listed = await this.#asAgent(
-      async (reader) => await catalog(this.env, reader)
-    );
-    await auditAgentCall(this.env, this.ctx.props, {
-      method: "knowledge.catalog",
-      detail: {
-        collections: listed.collections.length,
-        skills: listed.skills.length,
+    const scope = this.ctx.props;
+    await requireOpenRun(this.env, scope);
+    return await auditedCall(
+      this.env,
+      scope,
+      {
+        method: "knowledge.catalog",
+        detailOf: (listed: KnowledgeCatalog) => ({
+          collections: listed.collections.length,
+          skills: listed.skills.length,
+        }),
       },
-    });
-    return listed;
+      async () =>
+        await readAsDelegate(
+          this.env,
+          chatAuthority(scope),
+          chatContext(scope),
+          undefined,
+          async (reader) => await catalog(this.env, reader)
+        )
+    );
   }
 
   async search(query: unknown, options?: unknown): Promise<SearchResults> {
