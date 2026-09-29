@@ -15,6 +15,8 @@ import {
 } from "@tanstack/react-router";
 import { useEffect } from "react";
 
+import { ClientSettings } from "../../clients/client-settings.tsx";
+import { fetchClientSettings } from "../../clients/functions.ts";
 import {
   confirmClientWorkersPaid,
   fetchNewClientOptions,
@@ -218,7 +220,7 @@ const working: ReadonlySet<ProvisioningView["phase"]> = new Set([
 ]);
 
 const Client = () => {
-  const { view, releases } = Route.useLoaderData();
+  const { view, releases, settings, history } = Route.useLoaderData();
   const router = useRouter();
   const following = working.has(view.phase);
   useEffect(() => {
@@ -257,6 +259,13 @@ const Client = () => {
           releases={releases}
         />
       ) : null}
+      {settings === null ? null : (
+        <ClientSettings
+          clientId={view.clientId}
+          settings={settings}
+          history={history}
+        />
+      )}
     </main>
   );
 };
@@ -280,14 +289,15 @@ export const Route = createFileRoute("/clients/$clientId")({
     if (!newClientIdSchema.safeParse(params.clientId).success) {
       throw notFound();
     }
-    const [view, { releases }] = await Promise.all([
+    const [view, { releases }, { settings, history }] = await Promise.all([
       fetchProvisioning({ data: { clientId: params.clientId } }),
       fetchNewClientOptions(),
+      fetchClientSettings({ data: { clientId: params.clientId } }),
     ]);
     if (view === null) {
       throw notFound();
     }
-    return { view, releases };
+    return { view, releases, settings, history };
   },
   component: Client,
   notFoundComponent: NoSuchClient,

@@ -486,9 +486,11 @@ export const rollbackClient = async (
  * Records rollback `held` of client `held.clientId` from rollout
  * `rolloutId`, audited: its target `rolled_back`, the console's record of
  * its Workers back on the previous versions, the rollout stopped
- * (`cancelled`), and the client released. All of it only while the
- * rollback still holds the client, in the same batch: one that lost it
- * changes nothing (`runner_replaced`).
+ * (`cancelled`), its config marked changed (the previous versions carry
+ * the flags and sign-in of their own deploy, not staff's latest, so the
+ * next rollout or apply deploys them again), and the client released.
+ * All of it only while the rollback still holds the client, in the same
+ * batch: one that lost it changes nothing (`runner_replaced`).
  */
 const recordRollback = async (
   db: ConsoleDatabase,
@@ -551,6 +553,10 @@ const recordRollback = async (
             )
           )
       ),
+      db
+        .update(clients)
+        .set({ configChangedAt: now, updatedAt: now })
+        .where(and(eq(clients.id, clientId), holding)),
       db
         .update(rollouts)
         .set({ status: "cancelled", updatedAt: now })

@@ -6,6 +6,8 @@ const refusals: Readonly<Record<ProvisionErrorCode, string>> = {
   domain_not_set:
     "The console has no CLIENT_DOMAIN yet, so no client can get a hostname.",
   release_not_imported: "That release isn't imported.",
+  sign_in_app_missing:
+    "The console has no OAuth app for that IdP yet: set ENTRA_CLIENT_ID or GOOGLE_CLIENT_ID on it first.",
   client_exists: "A client with that id exists already: open its page.",
   account_taken: "Another client is on that Cloudflare account.",
   account_in_use:

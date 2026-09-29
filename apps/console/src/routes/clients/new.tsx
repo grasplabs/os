@@ -1,9 +1,13 @@
 import { Button } from "@grasp-os/ui/components/button";
 import { Input } from "@grasp-os/ui/components/input";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
-import type { ReactNode } from "react";
 
-import { signInProblem } from "../../deploy/core-config.ts";
+import {
+  Field,
+  SignInFields,
+  signInOf,
+  textOf,
+} from "../../clients/sign-in-fields.tsx";
 import { clientIdProblem } from "../../provision/client-id.ts";
 import {
   fetchNewClientOptions,
@@ -11,61 +15,6 @@ import {
 } from "../../provision/functions.ts";
 import { useProvisionAction } from "../../provision/use-action.ts";
 import { InvalidFieldError } from "../../use-action.ts";
-
-/** A form field with its label and what it's for. */
-const Field = ({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint: string;
-  children: ReactNode;
-}) => (
-  <label className="flex flex-col gap-1 text-sm">
-    <span className="font-medium">{label}</span>
-    {children}
-    <span className="text-muted-foreground">{hint}</span>
-  </label>
-);
-
-/** The form's text field `name`, trimmed. */
-const textOf = (form: FormData, name: string): string => {
-  const value = form.get(name);
-  return typeof value === "string" ? value.trim() : "";
-};
-
-const listSeparator = /[\s,]+/u;
-
-/** The form's list field `name`: its entries, split on commas and spaces. */
-const listOf = (form: FormData, name: string): string[] =>
-  textOf(form, name)
-    .split(listSeparator)
-    .filter((entry) => entry !== "");
-
-/** The client's sign-in, as the form says it, or why it can't be one. */
-const signInOf = (form: FormData) => {
-  const entraTenantId = textOf(form, "entraTenantId");
-  const googleHostedDomain = textOf(form, "googleHostedDomain");
-  if (entraTenantId === "" && googleHostedDomain === "") {
-    throw new InvalidFieldError(
-      "Give the client's Entra tenant id, its Google Workspace domain, or both."
-    );
-  }
-  const signIn = {
-    domains: listOf(form, "domains"),
-    admins: listOf(form, "admins"),
-    ...(entraTenantId === "" ? {} : { entraTenantId }),
-    ...(googleHostedDomain === "" ? {} : { googleHostedDomain }),
-  };
-  // The server's own check (a first admin who can sign in, among others),
-  // said before anything is sent.
-  const problem = signInProblem(signIn);
-  if (problem !== null) {
-    throw new InvalidFieldError(problem);
-  }
-  return signIn;
-};
 
 const NewClient = () => {
   const { releases } = Route.useLoaderData();
@@ -154,30 +103,7 @@ const NewClient = () => {
               defaultValue={1}
             />
           </Field>
-          <Field
-            label="Entra tenant id"
-            hint="The client's Microsoft Entra tenant, if its people sign in with Microsoft."
-          >
-            <Input name="entraTenantId" />
-          </Field>
-          <Field
-            label="Google Workspace domain"
-            hint="The client's Workspace primary domain, if its people sign in with Google."
-          >
-            <Input name="googleHostedDomain" />
-          </Field>
-          <Field
-            label="Email domains"
-            hint="The domains its people sign in with, exactly, separated by commas."
-          >
-            <Input name="domains" required />
-          </Field>
-          <Field
-            label="Admins"
-            hint="Emails that get the admin role when they first sign in, separated by commas: at least one, each in the email domains."
-          >
-            <Input name="admins" required />
-          </Field>
+          <SignInFields current={null} />
           <div className="flex items-center gap-4">
             <Button type="submit" disabled={busy}>
               Start provisioning
