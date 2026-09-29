@@ -18,6 +18,7 @@ import { and, eq } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import drawAWorkflow from "../../skills/draw-a-workflow/SKILL.md";
+import interviewAStakeholder from "../../skills/interview-a-stakeholder/SKILL.md";
 import runABaseline from "../../skills/run-a-baseline/SKILL.md";
 import writeBoardPage from "../../skills/write-board-page/SKILL.md";
 import { outboxed } from "../audit-outbox.ts";
@@ -33,8 +34,9 @@ import type { Writer } from "./documents.ts";
 // agent's once it is granted read of each, as for any collection (agents
 // start with access to nothing):
 //
-// - the Grasp skills: how Grasp works (a baseline, a workflow, the board
-//   page), in apps/core/skills/, bundled with each release as text, and
+// - the Grasp skills: how Grasp works (a baseline, a workflow, a
+//   stakeholder interview, the board page), in apps/core/skills/, bundled
+//   with each release as text, and
 //   synced into their collection (source `grasp`) once per release, on
 //   the first request (builtins.ts), or, while the `builtins` flag is off,
 //   by the cron trigger every minute. Nobody else writes them, admins
@@ -79,6 +81,7 @@ export interface GraspSkill {
  */
 export const graspSkills: readonly GraspSkill[] = [
   { path: "draw-a-workflow/SKILL.md", text: drawAWorkflow },
+  { path: "interview-a-stakeholder/SKILL.md", text: interviewAStakeholder },
   { path: "run-a-baseline/SKILL.md", text: runABaseline },
   { path: "write-board-page/SKILL.md", text: writeBoardPage },
 ];

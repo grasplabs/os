@@ -225,6 +225,13 @@
       "when": 1790699956717,
       "tag": "0031_run_notifications",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "6",
+      "when": 1790709505603,
+      "tag": "0032_guest_chats",
+      "breakpoints": true
     }
   ]
 }

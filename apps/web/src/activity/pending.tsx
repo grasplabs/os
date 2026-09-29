@@ -142,6 +142,10 @@ const objectOf = (
   if (object.type === "app") {
     return `Exports of ${appName(directory, object.appId)}: ${coveredExports(actions, exports.get(object.appId))}`;
   }
+  if (object.type === "platform" && actions.includes("guests")) {
+    // Consent in plain words: who reaches what, and at whose cost.
+    return "Guest chats. This App can invite people who aren't members to a short chat with a model through a link, and read back what they write. Guests reach nothing else; their chats spend the model budget of whoever invites them";
+  }
   if (object.type === "platform") {
     // Consent in plain words: what the App reads is published company-wide
     // on purpose (counts only, never a run), and it may show it to anyone.

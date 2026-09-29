@@ -6,6 +6,7 @@ import { drainAuditOutboxes } from "./audit-outbox.ts";
 import { refreshDailySignals } from "./daily-signals.ts";
 import { handleRequest } from "./entry.ts";
 import { featureEnabled } from "./features.ts";
+import { sweepGuestChats } from "./guests.ts";
 import { indexApps } from "./knowledge/apps-collection.ts";
 import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import { sweepUploads } from "./knowledge/uploads.ts";
@@ -34,6 +35,7 @@ export { Builtins } from "./builtins.ts";
 export { AppConnectionBinding } from "./app-bindings.ts";
 export { AppExportBinding } from "./app-calls.ts";
 export { AppStatisticsBinding } from "./statistics-binding.ts";
+export { AppGuestsBinding } from "./guests-binding.ts";
 export { ConnectionBinding } from "./bindings.ts";
 export { AppCollectionBinding } from "./knowledge/app-binding.ts";
 export { CollectionBinding } from "./knowledge/binding.ts";
@@ -76,7 +78,8 @@ export default {
   // collection isn't of their current version (see
   // src/knowledge/apps-collection.ts), statistics past their retention
   // (see src/statistics.ts), and messages email triggers kept, deleted
-  // once their days are over (see src/workflows/kept-email.ts). And the
+  // once their days are over (see src/workflows/kept-email.ts), and guest
+  // chats 30 days after they ended (see src/guests.ts). And the
   // audit log's retention alarm armed, if it isn't yet: retention itself
   // runs on that alarm (see
   // src/audit-log.ts), and a deployment that appends nothing after a
@@ -89,6 +92,7 @@ export default {
             indexApps(env),
             sweepStatistics(env),
             deleteExpiredEmail(env, new Date(controller.scheduledTime)),
+            sweepGuestChats(env, new Date(controller.scheduledTime)),
             auditLog(env).armRetention(),
           ]
         : [
