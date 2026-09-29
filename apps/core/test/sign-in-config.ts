@@ -46,7 +46,7 @@ export const testSignIn = {
   GOOGLE_CLIENT_SECRET: googleClient.secret,
 };
 
-/** Where the fake IdP runs for local development and the e2e tests. */
+/** Where the fake IdP runs for `vp run dev`; e2e/stack.ts picks the e2e one. */
 export const localIdpPort = 8788;
 export const localIdpOrigin = `http://localhost:${localIdpPort}`;
 

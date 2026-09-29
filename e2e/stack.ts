@@ -15,12 +15,25 @@ const root = path.join(import.meta.dirname, "..");
  * reuses a server (playwright.config.ts); `E2E_PORT` then moves one.
  */
 const firstPort = 20_000;
-const checkouts = 5000;
+const portPairs = 5000;
 const hashed =
   firstPort +
-  2 * (createHash("sha256").update(root).digest().readUInt32BE(0) % checkouts);
+  2 * (createHash("sha256").update(root).digest().readUInt32BE(0) % portPairs);
 
-export const corePort = Number(process.env.E2E_PORT ?? hashed);
+const portOf = (value: string | undefined): number => {
+  if (value === undefined) {
+    return hashed;
+  }
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1024 || port > 65_534) {
+    throw new Error(
+      `E2E_PORT must be a port from 1024 to 65534, not "${value}"`
+    );
+  }
+  return port;
+};
+
+export const corePort = portOf(process.env.E2E_PORT);
 export const idpPort = corePort + 1;
 
 export const origin = `http://localhost:${corePort}`;
