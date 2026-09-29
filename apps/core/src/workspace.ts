@@ -33,6 +33,7 @@ import type { ChatId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
 import { permissionErrors } from "@grasp-os/shared/permissions";
+import type { ScreenProblem } from "@grasp-os/shared/screens";
 import type { RunFailure } from "@grasp-os/shared/workflows";
 import { DurableObject } from "cloudflare:workers";
 import { and, asc, count, desc, eq, gt, sql } from "drizzle-orm";
@@ -73,6 +74,8 @@ import { readAsDelegate } from "./knowledge/binding.ts";
 import { forContext } from "./knowledge/memory.ts";
 import { catalog, noteListedSkills } from "./knowledge/tools.ts";
 import { gatewaySettings, models } from "./models.ts";
+import { PreviewReports, serverProblem } from "./preview-reports.ts";
+import type { PreviewOutcome } from "./preview-reports.ts";
 import { Previews } from "./preview.ts";
 import type { WorkContext } from "./restricted.ts";
 
@@ -283,6 +286,15 @@ export class Workspace extends DurableObject<Env> {
 
   /** The chats' previews of their drafts (preview.ts). */
   readonly #previews = new Previews(this.ctx, this.env);
+
+  /** What those previews reported (preview-reports.ts). */
+  readonly #previewReports = new PreviewReports();
+
+  /**
+   * Bumped whenever a chat's agent writes or drops a draft, so its
+   * watchers read the drafts again, and preview the latest. In memory only.
+   */
+  readonly #draftVersions = new Map<ChatId, number>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -992,11 +1004,12 @@ export class Workspace extends DurableObject<Env> {
       });
       this.#deliverAudit();
       for (const { appId } of drafted) {
-        this.#previews.drop(id, appId);
+        this.#dropPreview(id, appId);
       }
       this.#stopped.delete(id);
       this.#provenanceVersions.delete(id);
       this.#heldVersions.delete(id);
+      this.#draftVersions.delete(id);
       this.#builds.delete(id);
       for (const watch of this.#watchers.get(id)?.values() ?? []) {
         watch[Symbol.dispose]();
@@ -1142,13 +1155,21 @@ export class Workspace extends DurableObject<Env> {
       .all();
     // A draft whose changes are all gone keeps its row (its revision
     // goes on), and isn't one to show.
-    return rows.flatMap(({ appId, base, updatedAt }) => {
+    return rows.flatMap(({ appId, base, revision, updatedAt }) => {
       const changed = paths
         .filter((row) => row.appId === appId)
         .map(({ path }) => path);
       return changed.length === 0
         ? []
-        : [{ app: appId, base, changed, updatedAt: updatedAt.toISOString() }];
+        : [
+            {
+              app: appId,
+              base,
+              changed,
+              revision,
+              updatedAt: updatedAt.toISOString(),
+            },
+          ];
     });
   }
 
@@ -1217,10 +1238,18 @@ export class Workspace extends DurableObject<Env> {
       return true;
     });
     if (saved) {
-      // The preview of the revision before is over: its database goes now.
+      // The preview of the revision before is over: its database goes now;
+      // what it reported goes once the new revision reports.
       this.#previews.drop(chatId, appId);
+      this.#draftsChanged(chatId);
     }
     return saved;
+  }
+
+  /** Tells the chat's watchers its drafts changed. */
+  #draftsChanged(chatId: ChatId): void {
+    this.#draftVersions.set(chatId, (this.#draftVersions.get(chatId) ?? 0) + 1);
+    this.#changed(chatId);
   }
 
   /**
@@ -1267,17 +1296,24 @@ export class Workspace extends DurableObject<Env> {
       return true;
     });
     if (dropped) {
-      this.#previews.drop(chatId, appId);
+      this.#dropPreview(chatId, appId);
+      this.#draftsChanged(chatId);
     }
     return dropped;
+  }
+
+  /** Stops the chat's preview of App `appId`, and forgets its reports. */
+  #dropPreview(chatId: ChatId, appId: string): void {
+    this.#previews.drop(chatId, appId);
+    this.#previewReports.drop(chatId, appId);
   }
 
   // A chat's preview of its draft of an App (preview.ts), for the chat's
   // own person: core checks their role in the App first (chats-rpc.ts).
 
   /**
-   * `personId`'s own chat's draft of App `appId`, to preview:
-   * `app.no_draft` while it changes nothing.
+   * `personId`'s own chat's draft of App `appId`, to preview, which they
+   * have open now: `app.no_draft` while it changes nothing.
    */
   previewDraft(chatId: unknown, personId: string, appId: string): Draft {
     const { id } = this.#ownChat(chatId, personId);
@@ -1285,7 +1321,51 @@ export class Workspace extends DurableObject<Env> {
     if (Object.keys(draft.changes).length === 0) {
       throw appErrors.create("app.no_draft");
     }
+    this.#previewReports.opened(id, appId);
     return draft;
+  }
+
+  /**
+   * Keeps what the preview of `personId`'s own chat's draft of App
+   * `appId` at `revision` reported on `screen`: `problem`, or, without
+   * one, that it rendered (preview-reports.ts). Dropped once the draft
+   * is at another revision.
+   */
+  previewReport(
+    chatId: unknown,
+    personId: string,
+    appId: string,
+    revision: unknown,
+    screen: string,
+    problem?: ScreenProblem
+  ): void {
+    const { id } = this.#ownChat(chatId, personId);
+    const { revision: now } = this.draft(id, appId);
+    if (revision !== now) {
+      return;
+    }
+    this.#previewReports.report(
+      id,
+      appId,
+      now,
+      problem === undefined
+        ? undefined
+        : { source: "screen", at: screen, ...problem }
+    );
+  }
+
+  /**
+   * How the preview of the chat's draft of App `appId` at `revision` ran,
+   * waiting up to `waitMs` for it to report while the person has it open:
+   * for the agent's checks of the draft (agent-builds.ts).
+   */
+  async previewOutcome(
+    chatId: ChatId,
+    appId: string,
+    revision: number,
+    waitMs: number
+  ): Promise<PreviewOutcome> {
+    return await this.#previewReports.outcome(chatId, appId, revision, waitMs);
   }
 
   /**
@@ -1305,14 +1385,24 @@ export class Workspace extends DurableObject<Env> {
     if (draft.revision !== revision) {
       throw appErrors.create("app.preview_outdated");
     }
-    return await this.#previews.call(
-      chatIdSchema.parse(chatId),
-      personId,
-      appIdSchema.parse(appId),
-      draft,
-      method,
-      args
-    );
+    const id = chatIdSchema.parse(chatId);
+    try {
+      return await this.#previews.call(
+        id,
+        personId,
+        appIdSchema.parse(appId),
+        draft,
+        method,
+        args
+      );
+    } catch (error) {
+      // What the draft's code failed with is the agent's to fix too.
+      const problem = serverProblem(method, error);
+      if (problem !== undefined) {
+        this.#previewReports.report(id, appId, draft.revision, problem);
+      }
+      throw error;
+    }
   }
 
   /** Deletes the draft files and drafts the conditions name, in that order. */
@@ -1437,6 +1527,7 @@ export class Workspace extends DurableObject<Env> {
       provenanceVersion: this.#provenanceVersions.get(chatId) ?? 0,
       stopped: stopped ?? null,
       held: this.#heldVersions.get(chatId) ?? 0,
+      drafts: this.#draftVersions.get(chatId) ?? 0,
     };
   }
 

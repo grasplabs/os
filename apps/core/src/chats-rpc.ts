@@ -14,7 +14,12 @@ import { internalErrors, isExpectedError } from "@grasp-os/shared/errors";
 import { chatIdSchema, workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
-import { screenErrors } from "@grasp-os/shared/screens";
+import {
+  screenErrors,
+  screenNameSchema,
+  screenProblemSchema,
+} from "@grasp-os/shared/screens";
+import type { ScreenProblem } from "@grasp-os/shared/screens";
 import { RpcTarget } from "capnweb";
 
 import { appFor, draftFiles, screensIn } from "./apps.ts";
@@ -344,6 +349,37 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
         }
         throw error;
       }
+    });
+  }
+
+  /**
+   * Keeps what the preview's screen reported, for the agent's next check
+   * of the draft: text its code wrote, held to size (`screenProblemSchema`).
+   */
+  async previewReport(
+    chatId: string,
+    app: string,
+    revision: number,
+    screen: string,
+    problem?: ScreenProblem
+  ): Promise<void> {
+    await withPerson(this.#check, async (by) => {
+      requireFeature(this.#env, "app_builder");
+      requireFeature(this.#env, "app_preview");
+      const { id } = await appFor(this.#env, by, app, "builder");
+      const at = screenErrors.parse("screen.invalid", screenNameSchema, screen);
+      const reported =
+        problem === undefined
+          ? undefined
+          : screenErrors.parse("screen.invalid", screenProblemSchema, problem);
+      await this.#chatsOf(by.userId).previewReport(
+        chatIdOf(chatId),
+        by.userId,
+        id,
+        revision,
+        at,
+        reported
+      );
     });
   }
 

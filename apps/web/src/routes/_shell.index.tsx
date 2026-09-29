@@ -404,7 +404,11 @@ const OpenChat = ({
           >
             Close
           </Button>
-          <SidePanel chatId={chat.id} running={view.running} />
+          <SidePanel
+            chatId={chat.id}
+            drafts={view.drafts}
+            running={view.running}
+          />
         </aside>
       ) : null}
     </div>
