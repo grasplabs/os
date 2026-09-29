@@ -203,7 +203,7 @@ describe("Google Workspace connector events", () => {
     ]);
   });
 
-  it("stop a read at the history record that brings it to a hundred messages, and read on from there", async () => {
+  it("take a hundred messages a read, going on inside a history record where it stopped", async () => {
     const gmail = await connected();
     await sync([listener(gmail)]);
     // Forty history records of three messages each.
@@ -216,19 +216,82 @@ describe("Google Workspace connector events", () => {
     later();
     await sync([listener(gmail)]);
     const first = await outboxed();
-    const events = await audit.events();
     await sync([listener(gmail)]);
     const all = await outboxed();
+    const events = await audit.events();
 
-    // The 34th record passes a hundred: 102 messages, all in the audit
-    // log, a hundred to an event; the other 18 read next.
+    // The 34th record's first message is the hundredth: its other two come
+    // with the rest, each message once.
     expect({
       first: first.length,
       reads: events
         .filter(({ action }) => action === "connection.events.read")
         .map(({ provenance }) => provenance.length),
       all: all.length,
-    }).toStrictEqual({ first: 102, reads: [100, 2], all: 120 });
+      once: new Set(all.map(({ id }) => id)).size,
+    }).toStrictEqual({ first: 100, reads: [100, 20], all: 120, once: 120 });
+  });
+
+  it("read a record of 600 messages a hundred at a time near a full outbox, never twice, and the others in between", async () => {
+    const [big, small] = await Promise.all([connected(), connected()]);
+    const listeners = [listener(big), listener(small)];
+    await sync(listeners);
+    // Room for one read at a time, as core takes what's read.
+    await fillOutbox(big.id, outboxMax - 150);
+    google.receive(
+      big.address,
+      ...Array.from({ length: 600 }, (_, n) => gmailInvoice(n + 1, Date.now()))
+    );
+    google.receive(small.address, gmailInvoice(1000, Date.now()));
+    later();
+    const delivered: string[] = [];
+    for (let run = 0; run < 8; run += 1) {
+      // A moment between syncs: a source due longer is read first.
+      later(1000);
+      // oxlint-disable-next-line no-await-in-loop -- one sync after another
+      await sync(listeners);
+      // oxlint-disable-next-line no-await-in-loop -- core takes what's read
+      const read = await env.DB.prepare(
+        "DELETE FROM connector_events WHERE id NOT LIKE 'filler-%' RETURNING event"
+      ).all<{ event: string }>();
+      delivered.push(
+        ...read.results.map(
+          ({ event }) =>
+            z.object({ id: z.string() }).parse(JSON.parse(event)).id
+        )
+      );
+    }
+    const bigBatches = internet.sent.filter(
+      ({ path, body }) =>
+        path.startsWith("/batch/") &&
+        body.includes(`/users/${encodeURIComponent(big.address)}/`)
+    );
+
+    expect({
+      delivered: delivered.length,
+      once: new Set(delivered).size,
+      // Each of the big record's messages' metadata read once: 600 / 50.
+      bigBatches: bigBatches.length,
+      smallBeforeBigDone: delivered.indexOf(gmailId(1000)) < 600,
+    }).toStrictEqual({
+      delivered: 601,
+      once: 601,
+      bigBatches: 12,
+      smallBeforeBigDone: true,
+    });
+  });
+
+  it("report a message a history entry names without its labels, as it asked for the inbox's", async () => {
+    const gmail = await connected();
+    await sync([listener(gmail)]);
+    const { labelIds: _labels, ...unlabelled } = gmailInvoice(1, Date.now());
+    google.receive(gmail.address, unlabelled);
+    google.receive(gmail.address, gmailSent(2, Date.now()));
+    later();
+    await sync([listener(gmail)]);
+    const events = await outboxed();
+
+    expect(events.map(({ id }) => id)).toStrictEqual([gmailId(1)]);
   });
 
   it("keep every sync within its request budget through a flood of many-message records, and move on", async () => {
@@ -250,7 +313,7 @@ describe("Google Workspace connector events", () => {
     }
     later();
     const perSync: number[] = [];
-    for (let run = 0; run < 4; run += 1) {
+    for (let run = 0; run < 8; run += 1) {
       const before = internet.sent.length;
       // oxlint-disable-next-line no-await-in-loop -- one sync after another
       await sync(listeners);

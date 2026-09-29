@@ -655,10 +655,10 @@ const primeSources = async (env: Env, budget: RequestBudget): Promise<void> => {
 };
 
 /**
- * A read's events, as a rule: `readMaxItems` items and a page past them,
- * of no more than 50 (the page size connect asks providers for), or a
- * Gmail history record past them. A read that still finds more than the
- * room left keeps nothing (`readSource`).
+ * A read's events at most: `readMaxItems` items and a page past them, of
+ * no more than 50 (the page size connect asks providers for); a Gmail
+ * read takes exactly `readMaxItems` at most. A read that still found
+ * more than the room left would keep nothing (`readSource`).
  */
 const eventsPerRead = readMaxItems + 50;
 

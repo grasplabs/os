@@ -125,6 +125,9 @@ const messagesPerBatch = 50;
 /** Longest subject an event carries, in characters. */
 const subjectMaxLength = 1000;
 
+/** Most of a From header an event reads, in characters. */
+const fromMaxLength = 4096;
+
 /** When Gmail received a message, from its `internalDate` (ms), in ISO. */
 const receivedAtOf = (internalDate: string | null | undefined) => {
   const ms = Number(internalDate ?? Number.NaN);
@@ -138,7 +141,7 @@ const mailEventOf = (mailbox: string, body: unknown): ReadEvent => {
     message.payload?.headers?.find(
       (each) => each.name.toLowerCase() === name.toLowerCase()
     )?.value;
-  const [from] = addressesOf(header("From"));
+  const [from] = addressesOf(header("From")?.slice(0, fromMaxLength));
   return {
     id: message.id,
     payload: {
@@ -255,6 +258,48 @@ interface HistoryRecord {
   messages: string[];
 }
 
+/** The part of a cursor that says how many of a record's messages were read. */
+const skipMark = "#skip=";
+
+/**
+ * Where a read inside record `record` goes on from: the history from just
+ * before it (Gmail's history IDs grow, and a history read starts after
+ * the ID it names), skipping the `skip` of its messages already read.
+ */
+const insideRecord = (
+  mailbox: string,
+  record: HistoryRecord,
+  skip: number
+): string =>
+  `${historyFrom(mailbox, (BigInt(record.id) - 1n).toString())}${skipMark}${skip}`;
+
+/**
+ * The messages of `records` a read takes, skipping the first `skip` of
+ * the first record's (read before), at most `readMaxItems`: and, when
+ * records are left, where it stopped: inside a record (`offset`, its
+ * messages read so far), or after one it read in full.
+ */
+const takeMessages = (
+  records: readonly HistoryRecord[],
+  skip: number
+): { ids: string[]; stop?: { record: HistoryRecord; offset?: number } } => {
+  const ids: string[] = [];
+  for (const [index, record] of records.entries()) {
+    const from = index === 0 ? skip : 0;
+    const room = readMaxItems - ids.length;
+    const messages = record.messages.slice(from);
+    if (messages.length > room) {
+      ids.push(...messages.slice(0, room));
+      return { ids, stop: { record, offset: from + room } };
+    }
+    ids.push(...messages);
+    if (ids.length === readMaxItems && index < records.length - 1) {
+      return { ids, stop: { record } };
+    }
+  }
+  return { ids };
+};
+
 /**
  * `google.mail.received`: mail that reached the mailbox's inbox after the
  * source started, by Gmail's history of messages added with the INBOX
@@ -262,12 +307,12 @@ interface HistoryRecord {
  * (`prime`). Gmail's history reports a message as added once, when it
  * arrives: a message moved into the inbox later isn't reported.
  *
- * A read stops at the history record that brings its messages to
- * `readMaxItems`, and reads on from that record next time, so its
- * requests (pages, and a batch request per 50 messages' metadata) and its
- * events stay bounded: 100 messages and the rest of one record. A record
- * is never split, so one whose batches alone passed a sync's request
- * budget (some 20,000 messages in one record) would never move on.
+ * A read takes at most `readMaxItems` messages, and goes on next time
+ * from where it stopped, inside a history record if it stopped there
+ * (its cursor then says how many of that record's messages it read). So
+ * a read's requests (a few pages, and a batch request per 50 messages'
+ * metadata) and its events stay bounded however many messages a record
+ * holds, and a read always fits the room the outbox has for one.
  */
 const mailReceived: EventKind = {
   provider: "google",
@@ -286,6 +331,18 @@ const mailReceived: EventKind = {
     if (read.source.cursor === null) {
       throw new SourceError("The mailbox's history position isn't taken yet");
     }
+    const marked = read.source.cursor.indexOf(skipMark);
+    const start =
+      marked === -1 ? read.source.cursor : read.source.cursor.slice(0, marked);
+    const skip =
+      marked === -1
+        ? 0
+        : Number(read.source.cursor.slice(marked + skipMark.length));
+    if (!Number.isSafeInteger(skip) || skip < 0) {
+      throw new SourceError("The cursor's record position isn't one", {
+        resync: true,
+      });
+    }
     const walked = await read.pages(async (access, url) => {
       const page = historySchema.parse(await google(access, url));
       const next = new URL(url);
@@ -297,8 +354,13 @@ const mailReceived: EventKind = {
           ({ id, messagesAdded }): HistoryRecord => ({
             id,
             messages: (messagesAdded ?? [])
+              // Asked for with the INBOX label already: an entry naming
+              // no labels is one; only one whose labels lack it isn't.
               .filter(
-                ({ message }) => message.labelIds?.includes("INBOX") === true
+                ({ message }) =>
+                  message.labelIds === null ||
+                  message.labelIds === undefined ||
+                  message.labelIds.includes("INBOX")
               )
               .map(({ message }) => message.id),
           })
@@ -307,21 +369,20 @@ const mailReceived: EventKind = {
           ? { end: historyFrom(mailbox, page.historyId) }
           : { next: next.href }),
       };
-    }, read.source.cursor);
+    }, start);
+    const taken = takeMessages(walked.items, skip);
     let { cursor, more } = walked;
-    const ids = new Set<string>();
-    for (const [index, record] of walked.items.entries()) {
-      for (const id of record.messages) {
-        ids.add(id);
-      }
-      if (ids.size >= readMaxItems && index < walked.items.length - 1) {
-        // The rest from after this record, next time.
-        cursor = historyFrom(mailbox, record.id);
-        more = true;
-        break;
-      }
+    if (taken.stop !== undefined) {
+      const { record, offset } = taken.stop;
+      more = true;
+      // Inside the record, or after it when it's all read.
+      cursor =
+        offset === undefined
+          ? historyFrom(mailbox, record.id)
+          : insideRecord(mailbox, record, offset);
     }
-    const events = await mailEventsOf(read.access, mailbox, [...ids]);
+    const { ids } = taken;
+    const events = await mailEventsOf(read.access, mailbox, [...new Set(ids)]);
     return { events, cursor, more };
   },
 };

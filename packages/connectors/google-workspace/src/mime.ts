@@ -260,9 +260,6 @@ const splitAddresses = (value: string): string[] => {
   return found.map((each) => each.trim()).filter((each) => each !== "");
 };
 
-/** Longest address header read, in characters: anything past it is cut. */
-export const addressHeaderMaxLength = 4096;
-
 /**
  * `Name <address>` split at its last `<`, with no regex: a sender writes
  * the header, and a pattern that backtracks would let one header stall
@@ -301,11 +298,11 @@ const unquoted = (name: string): string => {
 };
 
 /**
- * The addresses of an address header (`From`, `To`), in order, from at
- * most `addressHeaderMaxLength` characters of it.
+ * The addresses of an address header (`From`, `To`), in order. Linear in
+ * the header's length, however a sender writes it.
  */
 export const addressesOf = (value: string | undefined): Address[] =>
-  splitAddresses((value ?? "").slice(0, addressHeaderMaxLength)).map((each) => {
+  splitAddresses(value ?? "").map((each) => {
     const named = namedAddress(each);
     if (named === null) {
       return { name: null, address: each };
