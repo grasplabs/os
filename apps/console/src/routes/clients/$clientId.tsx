@@ -44,12 +44,15 @@ const Facts = ({ view }: { view: ProvisioningView }) => {
   ];
   return (
     <dl className="flex flex-col gap-1 text-sm">
-      {facts.map(([term, value]) => (
-        <div key={term} className="flex flex-wrap gap-x-4">
-          <dt className="text-muted-foreground w-48">{term}</dt>
-          <dd className="font-mono break-all">{value}</dd>
-        </div>
-      ))}
+      {/* Facts the client has none of yet (before it's recorded) are left out. */}
+      {facts
+        .filter(([, value]) => value !== "")
+        .map(([term, value]) => (
+          <div key={term} className="flex flex-wrap gap-x-4">
+            <dt className="text-muted-foreground w-48">{term}</dt>
+            <dd className="font-mono break-all">{value}</dd>
+          </div>
+        ))}
     </dl>
   );
 };
