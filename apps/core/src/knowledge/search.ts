@@ -11,13 +11,16 @@ import type { SearchHit, SearchResults } from "@grasp-os/shared/knowledge";
 import { sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
+import type { DrizzleD1Database } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { derivedHmacKey } from "../derived-keys.ts";
 import { noteProvenance } from "./access.ts";
 import type { Reader, ReadRecord } from "./access.ts";
 import { allowedFor } from "./app-entries.ts";
+import type { Allowed } from "./app-entries.ts";
 import { readableCollection } from "./collections.ts";
+import { nearestCollectionsMax, nearestDetail } from "./usage-tally.ts";
 
 // Full-text search over sections, in two FTS5 indexes kept by triggers on
 // the sections table (see the migration `0001_search.sql`): whole words,
@@ -248,18 +251,74 @@ const queryKey = async (env: Env, terms: string[]): Promise<string> => {
 };
 
 /**
+ * The collections a search of every collection that found nothing came
+ * closest in, best first, at most `nearestCollectionsMax`: a pass looser
+ * than the search's own, with any of its words (OR) rather than all, and a
+ * long word allowing a typo, over only the documents the reader may read.
+ * Just their IDs go on, into the search's audit event, for the usage
+ * signals to tell those collections' owners; the reader gets nothing of
+ * it.
+ */
+const nearestCollections = async (
+  db: DrizzleD1Database,
+  allowed: Allowed,
+  terms: string[]
+): Promise<string[]> => {
+  const long = terms.flatMap((term) => {
+    // Code points, as in `passesOf`.
+    // oxlint-disable-next-line typescript/no-misused-spread -- see above
+    const chars = [...term];
+    if (chars.length < trigramLength) {
+      return [];
+    }
+    return [
+      chars.length < typoLength ? quoted(term) : `(${allowingTypo(chars)})`,
+    ];
+  });
+  const passes: Pass[] = [
+    {
+      table: "search_words",
+      pass: 0,
+      match: terms.map((term) => `${quoted(term)}*`).join(" OR "),
+    },
+    ...(long.length === 0
+      ? []
+      : [{ table: "search_trigrams", pass: 1, match: long.join(" OR ") }]),
+  ];
+  const rows = await db.all(sql`
+    WITH matches AS (${sql.join(passes.map(matchesSql), sql` UNION ALL `)})
+    SELECT collections.id AS collectionId, min(matches.score) AS score
+    FROM matches
+    JOIN search_rows ON search_rows.id = matches.row_id
+    JOIN documents ON documents.id = search_rows.document_id
+    JOIN collections ON collections.id = documents.collection_id
+    WHERE ${allowed.documents()}
+    GROUP BY collections.id
+    ORDER BY score, collections.id
+    LIMIT ${nearestCollectionsMax}
+  `);
+  return z
+    .array(z.object({ collectionId: z.string() }))
+    .parse(rows)
+    .map(({ collectionId }) => collectionId);
+};
+
+/**
  * A search, as the audit log records it (`noteProvenance`): who searched,
  * where, and the documents it returned. One that found nothing the reader
  * may read feeds the usage signals that tell owners what's missing, so it
- * has how many words and a key to group the same question by. Never the
- * words themselves: people search for people, and the audit log keeps
+ * has how many words and a key to group the same question by, and, when
+ * it searched every collection, the few collections it came closest in
+ * (`nearestCollections`). Never the words themselves, nor the documents it
+ * came close to: people search for people, and the audit log keeps
  * everything for good.
  */
 const searchRecord = async (
   env: Env,
   terms: string[],
   collectionId: string | undefined,
-  hits: { documentId: string }[]
+  hits: { documentId: string }[],
+  nearest: readonly string[] = []
 ): Promise<ReadRecord> => {
   const target =
     collectionId === undefined
@@ -269,7 +328,11 @@ const searchRecord = async (
     return {
       action: "knowledge.search.empty",
       target,
-      detail: { terms: terms.length, queryKey: await queryKey(env, terms) },
+      detail: {
+        terms: terms.length,
+        queryKey: await queryKey(env, terms),
+        ...(nearest.length === 0 ? {} : { nearest: nearestDetail(nearest) }),
+      },
     };
   }
   return {
@@ -395,10 +458,16 @@ export const search = async (
       ranked.in_document
   `);
   const found = z.array(hitRowSchema).parse(rows);
+  // A search of every collection that found nothing notes where it came
+  // closest, for the usage signals. Nothing of it reaches the reader.
+  const nearest =
+    scope === undefined && found.length === 0
+      ? await nearestCollections(db, allowed, terms)
+      : [];
   const provenance = await noteProvenance(
     env,
     reader,
-    await searchRecord(env, terms, scope, found),
+    await searchRecord(env, terms, scope, found, nearest),
     ...scoped,
     ...found.map((row) => ({
       id: row.collectionId,

@@ -1,4 +1,3 @@
-import { auditFilterSchema } from "@grasp-os/shared/audit-log";
 import {
   collectionIdSchema,
   documentIdSchema,
@@ -18,7 +17,6 @@ import {
   gt,
   gte,
   inArray,
-  isNull,
   lt,
   sql,
 } from "drizzle-orm";
@@ -26,15 +24,24 @@ import type { SQL, SQLWrapper } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 import type { DrizzleD1Database } from "drizzle-orm/d1";
 
-import { auditLog } from "./audit-log.ts";
 import { auditedBatch, outboxedIfChanged } from "./audit-outbox.ts";
+import {
+  claimComputation,
+  claimedBefore,
+  finishComputation,
+  isFinished,
+  latestFinished,
+  newComputation,
+  unfinishedBefore,
+} from "./daily-claims.ts";
+import type { Computation } from "./daily-claims.ts";
 import {
   improvementSignalComputations as computations,
   improvementSignals,
   workflowDecisions,
   workflowRuns,
 } from "./db/core/schema.ts";
-import { inList } from "./db/d1.ts";
+import { chunks, inList } from "./db/d1.ts";
 import { documents, versions } from "./db/knowledge/schema.ts";
 import { featureEnabled } from "./features.ts";
 import { parseFrontmatter } from "./knowledge/frontmatter.ts";
@@ -49,14 +56,10 @@ import { auditableCode } from "./workflows/host.ts";
 // records, over the last `signalWindowDays` days.
 //
 // They're computed once a UTC day and kept in `improvement_signals`, so
-// reading them is a few indexed queries. A cron trigger runs every 15
-// minutes (src/index.ts), never in the same invocation as the every-minute
-// jobs, and the first run of a day that claims it computes
-// them: a claim is a row in `improvement_signal_computations`, inserted
-// only while the day has no finished computation, no claim younger than
-// `leaseMs` and fewer than `attemptsPerDay` claims, in one statement, so
-// two cron runs never both claim, and a computation that failed is claimed
-// again once its lease is up, a few times a day at most.
+// reading them is a few indexed queries. The first run of the 15-minute
+// cron trigger of a day that claims it (src/daily-claims.ts) computes
+// them, reading the audit log in the same pass as Knowledge's usage
+// signals (src/daily-signals.ts).
 //
 // A computation writes its signals under its own ID, in as many batches
 // as they take, and then finishes in one batch: it marks itself finished
@@ -79,14 +82,6 @@ import { auditableCode } from "./workflows/host.ts";
 
 const dayMs = 24 * 60 * 60 * 1000;
 
-/** How long a claimed computation has before another may claim its day. */
-// Longer than the 15 minutes between cron runs, so a run that starts a
-// little early never finds a claim lapsed that is still running.
-const leaseMs = 20 * 60 * 1000;
-
-/** The most computations one day claims: one that keeps failing stops. */
-const attemptsPerDay = 3;
-
 /**
  * The subject of a workflow's waits for single people, added up; no
  * decision's deciders are ever just `person`.
@@ -98,12 +93,7 @@ export const peopleSubject = "person";
  * ones: read in the same batch as them, so one finishing meanwhile can't
  * empty them.
  */
-export const latestComputation = sql`(
-  SELECT ${computations.id} FROM ${computations}
-  WHERE ${computations.finishedAt} IS NOT NULL
-  ORDER BY ${computations.startedAt} DESC, ${computations.id} DESC
-  LIMIT 1
-)`;
+export const latestComputation = latestFinished(computations);
 
 /** Rows one read of runs or decisions returns. */
 const pageRows = 500;
@@ -582,7 +572,7 @@ const correctionSignals = async (
 };
 
 /** What the audit log holds of the window, added up across its stretches. */
-interface AuditTotals {
+export interface SignalTotals {
   /** Each App workflow's model cost, in total and per run. */
   costs: Map<string, { cost: number; perRun: Map<string, number> }>;
   /** Each unanswered question, by App workflow (or none) and key. */
@@ -601,8 +591,17 @@ interface AuditTotals {
   >;
 }
 
-/** Adds a stretch's partial totals (`AuditLog.tallySignals`) to `totals`. */
-const addTally = (totals: AuditTotals, tally: SignalTally): void => {
+/** Totals of nothing yet, to add stretches to. */
+export const noSignalTotals = (): SignalTotals => ({
+  costs: new Map(),
+  questions: new Map(),
+});
+
+/** Adds a stretch's partial totals (`AuditLog.tallyStretch`) to `totals`. */
+export const addSignalTally = (
+  totals: SignalTotals,
+  tally: SignalTally
+): void => {
   for (const { appId, workflowId, runId, cost } of tally.costs) {
     const key = workflowKey(appId, workflowId);
     const found = totals.costs.get(key) ?? { cost: 0, perRun: new Map() };
@@ -637,37 +636,6 @@ const addTally = (totals: AuditTotals, tally: SignalTally): void => {
     found.lastAt =
       question.lastAt > found.lastAt ? question.lastAt : found.lastAt;
     totals.questions.set(key, found);
-  }
-};
-
-/**
- * Model calls' cost and unanswered questions in the window, from the audit
- * log: the object tallies one stretch at a time, a few thousand entries
- * each, and only partial totals cross over (src/signal-tally.ts). Stops
- * early where retention archived what it would read next: only what the
- * log holds counts.
- */
-const auditTotals = async (
-  env: Env,
-  window: { from: string; to: string }
-): Promise<AuditTotals> => {
-  const audit = auditLog(env);
-  const totals: AuditTotals = { costs: new Map(), questions: new Map() };
-  // Worked out once, so events appended meanwhile don't stretch it.
-  const range = await audit.range(auditFilterSchema.parse(window));
-  let after: number | undefined;
-  for (;;) {
-    // One stretch after another: each starts where the last ended.
-    // oxlint-disable-next-line no-await-in-loop
-    const stretch = await audit.tallySignals(range, after);
-    if (stretch === null) {
-      return totals;
-    }
-    addTally(totals, stretch.tally);
-    if (stretch.next === null) {
-      return totals;
-    }
-    after = stretch.next;
   }
 };
 
@@ -803,7 +771,7 @@ const minutesSaved = (
  * (model-budgets.ts) count a UTC calendar month: the two don't match.
  */
 const costSignals = (
-  { costs }: AuditTotals,
+  { costs }: SignalTotals,
   saved: ReadonlyMap<string, Saving>,
   runs: ReadonlyMap<string, Started>,
   before: ReadonlySet<string>
@@ -847,7 +815,7 @@ const costSignals = (
  * or App whose code asked, or the deployment for people and agents. The
  * most asked of each, at most `questionsPerScope`.
  */
-const unansweredSignals = ({ questions }: AuditTotals): SignalRow[] => {
+const unansweredSignals = ({ questions }: SignalTotals): SignalRow[] => {
   const scopes = Map.groupBy(questions.values(), ({ appId, workflowId }) =>
     workflowKey(appId, workflowId)
   );
@@ -881,17 +849,23 @@ const unansweredSignals = ({ questions }: AuditTotals): SignalRow[] => {
   );
 };
 
+/** The days before `now` whose audit events the signals read. */
+export const signalsFrom = (now: Date): Date =>
+  new Date(now.getTime() - signalWindowDays * dayMs);
+
 /** Every signal, as of `now`, over the window before it. */
-const computeSignals = async (env: Env, now: Date): Promise<SignalRow[]> => {
+const computeSignals = async (
+  env: Env,
+  now: Date,
+  totals: SignalTotals
+): Promise<SignalRow[]> => {
   const db = drizzle(env.DB);
-  const from = new Date(now.getTime() - signalWindowDays * dayMs);
-  const window = { from: from.toISOString(), to: now.toISOString() };
+  const from = signalsFrom(now);
   const runs = await runsSince(db, from);
-  const [waiting, failing, corrections, totals, saved] = await Promise.all([
+  const [waiting, failing, corrections, saved] = await Promise.all([
     waitingSignals(db, now),
     failingSignals(db, from, runs),
     correctionSignals(db, from),
-    auditTotals(env, window),
     savings(env),
   ]);
   const before = await startedBefore(
@@ -908,32 +882,23 @@ const computeSignals = async (env: Env, now: Date): Promise<SignalRow[]> => {
   ];
 };
 
-/** A claimed computation. */
-interface Computation {
-  id: string;
-  day: string;
-  startedAt: Date;
-}
-
 /**
- * Claims the computation of `now`'s UTC day, unless it has a finished one,
- * one claimed less than `leaseMs` before, or `attemptsPerDay` claims
- * already: in one statement, so of two claims at once only one lands. In
- * the same batch, the unfinished claims of earlier days go, with anything
- * they wrote: a computation still running on one then stops at its next
- * write, or finishes nothing (see `store`).
+ * Claims the improvement signals of `now`'s UTC day (src/daily-claims.ts),
+ * unless `improvement_signals` is off. In the same batch, the unfinished
+ * claims of earlier days go, with anything they wrote: a computation still
+ * running on one then stops at its next write, or finishes nothing (see
+ * `storeImprovementSignals`).
  */
-const claim = async (env: Env, now: Date): Promise<Computation | undefined> => {
+export const claimImprovementSignals = async (
+  env: Env,
+  now: Date
+): Promise<Computation | undefined> => {
+  if (!featureEnabled(env, "improvement_signals")) {
+    return undefined;
+  }
   const db = drizzle(env.DB);
-  const computation: Computation = {
-    id: crypto.randomUUID(),
-    day: now.toISOString().slice(0, 10),
-    startedAt: now,
-  };
-  const stale = and(
-    lt(computations.day, computation.day),
-    isNull(computations.finishedAt)
-  );
+  const computation = newComputation(now);
+  const stale = unfinishedBefore(computations, computation);
   const [, removed, claimed] = await db.batch([
     db
       .delete(improvementSignals)
@@ -944,22 +909,7 @@ const claim = async (env: Env, now: Date): Promise<Computation | undefined> => {
         )
       ),
     db.delete(computations).where(stale),
-    db
-      .insert(computations)
-      .select(
-        sql`SELECT ${computation.id}, ${computation.day}, ${now.getTime()}, NULL
-            WHERE NOT EXISTS (
-              SELECT 1 FROM ${computations}
-              WHERE ${computations.day} = ${computation.day}
-                AND (${computations.finishedAt} IS NOT NULL
-                  OR ${computations.startedAt} > ${now.getTime() - leaseMs})
-            )
-            AND (
-              SELECT count(*) FROM ${computations}
-              WHERE ${computations.day} = ${computation.day}
-            ) < ${attemptsPerDay}`
-      )
-      .returning({ id: computations.id }),
+    claimComputation(db, computations, computation),
   ]);
   if (removed.meta.changes > 0) {
     log.warn("signals.claims_dropped", { claims: removed.meta.changes });
@@ -967,23 +917,19 @@ const claim = async (env: Env, now: Date): Promise<Computation | undefined> => {
   return claimed.length === 0 ? undefined : computation;
 };
 
-/** Splits `items` into runs of `size`. */
-const chunks = <T>(items: readonly T[], size: number): T[][] =>
-  Array.from({ length: Math.ceil(items.length / size) }, (_, index) =>
-    items.slice(index * size, (index + 1) * size)
-  );
-
 /**
- * Writes the computation's signals, then finishes it in one batch, with
- * its audit event: marks it finished, and deletes every computation
- * started before it, with their signals, only if it is still there to
- * mark.
+ * Computes the claimed day's signals from `totals` (what the audit log
+ * holds of the window) and the databases, writes them, then finishes the
+ * computation in one batch, with its audit event: marks it finished, and
+ * deletes every computation started before it, with their signals, only if
+ * it is still there to mark.
  */
-const store = async (
+export const storeImprovementSignals = async (
   env: Env,
   computation: Computation,
-  rows: readonly SignalRow[]
+  totals: SignalTotals
 ): Promise<void> => {
+  const rows = await computeSignals(env, computation.startedAt, totals);
   const db = drizzle(env.DB);
   const inserts = chunks(rows, rowsPerInsert).map((chunk) =>
     db
@@ -997,17 +943,10 @@ const store = async (
       await db.batch([first, ...rest]);
     }
   }
-  const finished = sql`EXISTS (
-    SELECT 1 FROM ${computations}
-    WHERE ${computations.id} = ${computation.id}
-      AND ${computations.finishedAt} IS NOT NULL
-  )`;
-  const before = lt(computations.startedAt, computation.startedAt);
+  const finished = isFinished(computations, computation);
+  const before = claimedBefore(computations, computation);
   await auditedBatch(env, db, [
-    db
-      .update(computations)
-      .set({ finishedAt: new Date() })
-      .where(eq(computations.id, computation.id)),
+    finishComputation(db, computations, computation),
     outboxedIfChanged(db, {
       actor: { type: "system" },
       action: "improvement.signals.computed",
@@ -1027,23 +966,4 @@ const store = async (
       ),
     db.delete(computations).where(and(finished, before)),
   ]);
-};
-
-/**
- * Computes the improvement signals of `now`'s UTC day, unless that day's
- * are computed or being computed (see above). Does nothing while
- * `improvement_signals` is off. Its cron trigger calls it every 15 minutes.
- */
-export const refreshSignalsIfDue = async (
-  env: Env,
-  now = new Date()
-): Promise<void> => {
-  if (!featureEnabled(env, "improvement_signals")) {
-    return;
-  }
-  const computation = await claim(env, now);
-  if (computation === undefined) {
-    return;
-  }
-  await store(env, computation, await computeSignals(env, now));
 };

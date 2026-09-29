@@ -4,6 +4,7 @@ import { sweepPendingCopies } from "./app-blueprints.ts";
 import { auditLog } from "./audit-log.ts";
 import { drainAuditOutboxes } from "./audit-outbox.ts";
 import { consumeLeftoverAuditQueue } from "./audit-queue-leftovers.ts";
+import { refreshDailySignals } from "./daily-signals.ts";
 import { handleRequest } from "./entry.ts";
 import { featureEnabled } from "./features.ts";
 import { indexApps } from "./knowledge/apps-collection.ts";
@@ -11,7 +12,6 @@ import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import { sweepUploads } from "./knowledge/uploads.ts";
 import { retryDisconnects } from "./members.ts";
 import { recordPlatformUpdate } from "./platform-updates.ts";
-import { refreshSignalsIfDue } from "./signals.ts";
 import { receiveEmail } from "./workflows/inbound-email.ts";
 import { failOrphans } from "./workflows/runs.ts";
 import { startDueSchedules } from "./workflows/triggers.ts";
@@ -64,8 +64,9 @@ export default {
   // (see `failOrphans`, src/workflows/runs.ts).
   //
   // Every 15 minutes, on a trigger of its own so neither shares an
-  // invocation with the jobs above: the day's improvement signals, until
-  // they're computed (see src/signals.ts), and Apps whose entry in the Apps
+  // invocation with the jobs above: the day's improvement signals and
+  // Knowledge usage signals, until they're computed, from one pass over the audit log (see
+  // src/daily-signals.ts), and Apps whose entry in the Apps
   // collection isn't of their current version (see
   // src/knowledge/apps-collection.ts). And the audit log's retention
   // alarm armed, if it isn't yet: retention itself runs on that alarm (see
@@ -75,7 +76,7 @@ export default {
     const jobs =
       controller.cron === quarterHourCron
         ? [
-            refreshSignalsIfDue(env),
+            refreshDailySignals(env),
             indexApps(env),
             auditLog(env).armRetention(),
           ]

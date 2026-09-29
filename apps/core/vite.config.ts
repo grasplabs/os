@@ -132,6 +132,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               model_rules: true,
               model_settings: true,
               improvement_signals: true,
+              knowledge_signals: true,
               triggers: true,
               build_on_save: true,
               app_calls: true,

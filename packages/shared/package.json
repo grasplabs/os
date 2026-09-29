@@ -25,6 +25,7 @@
     "./ids": "./src/ids.ts",
     "./json": "./src/json.ts",
     "./knowledge": "./src/knowledge.ts",
+    "./knowledge-signals": "./src/knowledge-signals.ts",
     "./log": "./src/log.ts",
     "./members": "./src/members.ts",
     "./memory": "./src/memory.ts",

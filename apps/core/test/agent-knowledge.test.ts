@@ -1,10 +1,12 @@
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import { knowledgeErrors } from "@grasp-os/shared/knowledge";
+import type { CollectionInput } from "@grasp-os/shared/knowledge";
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { refreshDailySignals } from "../src/daily-signals.ts";
 import { workspace } from "../src/durable-objects.ts";
 import {
   chatOf,
@@ -76,6 +78,21 @@ const eventsOf = async (
     { timeout: 10_000, interval: 50 }
   );
   return await mine();
+};
+
+/** A collection of `admin`'s with a document past its review date. */
+const overdueIn = async (
+  admin: Admin,
+  input: CollectionInput
+): Promise<string> => {
+  const { id } = await admin.knowledge.createCollection(input);
+  await admin.knowledge.saveDocument({
+    collectionId: id,
+    path: "old.md",
+    text: "---\nreview: 2020-01-01\n---\n# Old\n\nDue for a look.",
+    ifVersion: 0,
+  });
+  return id;
 };
 
 const modelCalls = (events: AuditEvent[]) =>
@@ -403,6 +420,75 @@ describe("a chat's Knowledge", setUpTime, () => {
     await expect(
       outcome(stub.createChat("Questions", person.userId, "../other"))
     ).resolves.toBe("permission.context_invalid");
+  });
+
+  it("surfaces its person's usage signals, only of collections it may read and none sensitive", async () => {
+    const owner = await newAdmin();
+    const someoneElse = await newAdmin();
+    const teamId = await newTeam(owner, []);
+    const granted = await overdueIn(owner, {
+      name: "Granted",
+      access: "everyone",
+    });
+    // The agent may not read it.
+    await overdueIn(owner, {
+      name: "Not granted",
+      access: "everyone",
+    });
+    const sensitive = await overdueIn(owner, {
+      name: "Sensitive",
+      access: "teams",
+      teams: [teamId],
+      sensitive: true,
+    });
+    const theirs = await overdueIn(someoneElse, {
+      name: "Theirs",
+      access: "everyone",
+    });
+    const tomorrow = new Date(Date.now() + 24 * 60 * 60 * 1000);
+    await refreshDailySignals(env, tomorrow);
+    const { stub, chat, ask, agent } = await chatOf(
+      owner.userId,
+      codeStep(
+        "export default async (env) => { const { signals } = await env.knowledge.signals(); return signals.map(({ kind, collection }) => [kind, collection.id]); };"
+      ),
+      says("One document is past its review date.")
+    );
+    for (const collectionId of [granted, sensitive, theirs]) {
+      // oxlint-disable-next-line no-await-in-loop -- one grant at a time
+      await grantRead(owner, agent, collectionId);
+    }
+
+    const reply = await ask("Anything I should look at?");
+
+    const [result] = await codeResults(stub, chat.id);
+    const events = await eventsOf(
+      agent.agentId,
+      (all) => modelCalls(all).length === 2
+    );
+    expect({
+      reply,
+      result: result?.text,
+      calls: events
+        .filter(
+          ({ action, detail }) =>
+            action === "agent.call" && detail.method === "knowledge.signals"
+        )
+        .map(({ detail }) => ({
+          method: detail.method,
+          signals: detail.signals,
+          outcome: detail.outcome,
+        })),
+    }).toStrictEqual({
+      reply: {
+        outcome: "answered",
+        answer: "One document is past its review date.",
+        // It read nothing it must name, and nothing restricted.
+        provenance: { sources: [], restricted: false },
+      },
+      result: `Returned:\n${JSON.stringify([["overdue_review", granted]])}`,
+      calls: [{ method: "knowledge.signals", signals: 1, outcome: "ok" }],
+    });
   });
 
   it("records nothing for a code run that isn't open", async () => {

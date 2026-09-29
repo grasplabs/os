@@ -8,8 +8,8 @@ import { stringify } from "yaml";
 import type { z } from "zod";
 
 import { auditLog } from "../src/audit-log.ts";
+import { refreshDailySignals } from "../src/daily-signals.ts";
 import worker from "../src/index.ts";
-import { refreshSignalsIfDue } from "../src/signals.ts";
 import { allEvents, logHead } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { outcome, refusal, signedInApi, unique } from "./sign-in.ts";
@@ -454,7 +454,7 @@ describe("improvement signals", () => {
       expiresAt: later,
     });
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
     const { signals } = await api.signals.list({ app });
 
     // The first two of the oldest each names, and how many it names.
@@ -562,7 +562,7 @@ describe("improvement signals", () => {
     // Before the window: not counted.
     await failed("fetch", "connect.action_failed", 40 * dayMs);
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
     const { signals } = await api.signals.list({ app, workflow: "sync" });
     const missing = await outcome(
       api.signals.list({ app, workflow: "missing" })
@@ -655,7 +655,7 @@ describe("improvement signals", () => {
       expiresAt: ago(dayMs),
     });
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
     const { signals } = await api.signals.list({ app });
 
     expect(ofKind(signals, "correction")).toStrictEqual([
@@ -752,7 +752,7 @@ describe("improvement signals", () => {
       gain: { hoursPerWeek: 7 },
     });
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
     const { signals } = await api.signals.list({ app });
 
     expect(ofKind(signals, "cost_per_run")).toStrictEqual([
@@ -842,7 +842,7 @@ describe("improvement signals", () => {
       emptySearch({ type: "person", userId: `person-${unique()}` }, people)
     );
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
     const [mine, everyone] = await Promise.all([
       api.signals.list({ app }),
       admin.api.signals.list(),
@@ -938,7 +938,7 @@ describe("improvement signals", () => {
       payload: { comment: "jan.de.vries asked twice" },
     });
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
     const outcomes = await Promise.all([
       outcome(owner.api.signals.list({ app: owner.app })),
       outcome(admin.api.signals.list({ app: owner.app })),
@@ -1005,14 +1005,14 @@ describe("improvement signals", () => {
       )
       .run();
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
     const computed = await api.signals.list({ app });
     await failing("second");
-    await refreshSignalsIfDue(env, new Date(now.getTime() + hourMs));
+    await refreshDailySignals(env, new Date(now.getTime() + hourMs));
     const sameDay = await api.signals.list({ app });
     const tomorrow = new Date(now.getTime() + dayMs);
     days += 1;
-    await refreshSignalsIfDue(env, tomorrow);
+    await refreshDailySignals(env, tomorrow);
 
     expect({
       computations: await computationsOf(now),
@@ -1042,7 +1042,7 @@ describe("improvement signals", () => {
       )
       .run();
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
 
     await expect(computationsOf(now)).resolves.toBe(0);
   });
@@ -1051,8 +1051,8 @@ describe("improvement signals", () => {
     const now = nextDay();
 
     await Promise.all([
-      refreshSignalsIfDue(env, now),
-      refreshSignalsIfDue(env, now),
+      refreshDailySignals(env, now),
+      refreshDailySignals(env, now),
     ]);
 
     await expect(computationsOf(now)).resolves.toBe(1);
@@ -1075,12 +1075,12 @@ describe("improvement signals", () => {
     const racing = racingWhen(
       async () => (await claimsOf(older)) > 0,
       async () => {
-        await refreshSignalsIfDue(env, newer);
+        await refreshDailySignals(env, newer);
       }
     );
 
     const stopped = await refusal(
-      refreshSignalsIfDue({ ...env, DB: racing }, older)
+      refreshDailySignals({ ...env, DB: racing }, older)
     );
     const { computedAt, signals } = await api.signals.list({ app });
 
@@ -1119,12 +1119,12 @@ describe("improvement signals", () => {
     const racing = racingWhen(
       async () => (await signalsOf(older)) > 0,
       async () => {
-        await refreshSignalsIfDue(env, newer);
+        await refreshDailySignals(env, newer);
       }
     );
 
     const finishing = await outcome(
-      refreshSignalsIfDue({ ...env, DB: racing }, older)
+      refreshDailySignals({ ...env, DB: racing }, older)
     );
     const { signals } = await api.signals.list({ app });
 
@@ -1156,7 +1156,7 @@ describe("improvement signals", () => {
     await seedClaim(now, 2 * hourMs);
     await seedClaim(now, hourMs);
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
 
     expect({
       computed: await computationsOf(now),
@@ -1219,7 +1219,7 @@ describe("improvement signals", () => {
     });
     await logged(modelCall(app, "hr", run, 0.5));
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
     const { signals } = await builder.api.signals.list({ app });
     const read = JSON.stringify(signals);
 
@@ -1313,7 +1313,7 @@ describe("improvement signals", () => {
       expiresAt: later,
     });
 
-    await refreshSignalsIfDue(env, now);
+    await refreshDailySignals(env, now);
     const [built, all] = await Promise.all([
       builder.api.signals.list({ app }),
       admin.signals.list({ app }),
@@ -1353,7 +1353,7 @@ describe("improvement signals", () => {
   it("aren't computed while switched off", async () => {
     const now = nextDay();
 
-    await refreshSignalsIfDue({ ...env, FEATURES: { workflows: true } }, now);
+    await refreshDailySignals({ ...env, FEATURES: { workflows: true } }, now);
 
     await expect(computationsOf(now)).resolves.toBe(0);
   });

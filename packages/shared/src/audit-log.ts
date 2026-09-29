@@ -61,6 +61,11 @@ const typeRules: readonly {
   { action: "connection.action", type: "decision" },
   { action: "knowledge.search", type: "read" },
   { action: "knowledge.read", type: "read" },
+  // Knowledge usage signals: the daily computation, an owner reading those
+  // of their collections, and dismissing one.
+  { action: "knowledge.signals.computed", type: "action" },
+  { action: "knowledge.signals.read", type: "read" },
+  { action: "knowledge.signal.dismissed", type: "decision" },
   { action: "knowledge.collection", type: "config" },
   // An owner deciding on a proposed change to a shared memory file.
   { action: "knowledge.proposal.approved", type: "decision" },

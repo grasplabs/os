@@ -10,6 +10,7 @@ import { requireFeature, uploadFeatures } from "./features.ts";
 import type { Feature } from "./features.ts";
 import { MemoryRpc } from "./knowledge/memory-rpc.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
+import { KnowledgeSignalsRpc } from "./knowledge/signals-rpc.ts";
 import { UploadsRpc } from "./knowledge/uploads-rpc.ts";
 import { MembersRpc } from "./members.ts";
 import { ModelsRpc } from "./models-rpc.ts";
@@ -36,6 +37,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   readonly #check: SessionCheck;
   readonly #apps: AppsRpc;
   readonly #knowledge: KnowledgeRpc;
+  readonly #knowledgeSignals: KnowledgeSignalsRpc;
   readonly #memory: MemoryRpc;
   readonly #uploads: UploadsRpc;
   readonly #permissions: PermissionsRpc;
@@ -74,6 +76,11 @@ export class SessionRpc extends RpcTarget implements SessionApi {
       checkWith("apps", "app_sharing", "app_blueprints")
     );
     this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
+    // Usage signals are about Knowledge: that kill switch stops them too.
+    this.#knowledgeSignals = new KnowledgeSignalsRpc(
+      env,
+      checkWith("knowledge", "knowledge_signals")
+    );
     // Memory files are Knowledge documents: that kill switch stops them too.
     this.#memory = new MemoryRpc(env, checkWith("knowledge", "memory"));
     // Uploads become Knowledge documents: that kill switch stops them too.
@@ -113,6 +120,10 @@ export class SessionRpc extends RpcTarget implements SessionApi {
 
   get knowledge(): KnowledgeRpc {
     return this.#knowledge;
+  }
+
+  get knowledgeSignals(): KnowledgeSignalsRpc {
+    return this.#knowledgeSignals;
   }
 
   get memory(): MemoryRpc {

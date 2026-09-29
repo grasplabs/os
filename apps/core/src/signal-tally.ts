@@ -3,7 +3,7 @@ import type { AuditActor, AuditEvent } from "@grasp-os/shared/audit";
 // What the improvement signals (signals.ts) need of the audit log: model
 // calls' cost per workflow run, and Knowledge searches that found nothing,
 // per scope, key and asker. The AuditLog object tallies one stretch of the
-// log at a time with these (`AuditLog.tallySignals`), so only small
+// log at a time with these (`AuditLog.tallyStretch`), so only small
 // partial totals cross to the Worker, which adds them up.
 
 /** The most collections a tallied question keeps. */
@@ -43,7 +43,7 @@ export interface SignalTally {
  * Who asked, for counting how many different askers a question had: the
  * person or agent, the App's part, or the run.
  */
-const askerOf = (actor: AuditActor): string => {
+export const askerOf = (actor: AuditActor): string => {
   switch (actor.type) {
     case "person":
     case "staff": {
@@ -67,12 +67,24 @@ const askerOf = (actor: AuditActor): string => {
   }
 };
 
-/** Tallies events, one after another, oldest first. */
+/**
+ * Tallies events, one after another, oldest first: those the log received
+ * from `from` (ISO 8601) on, as a stretch may start earlier for the
+ * Knowledge usage signals it is read for too.
+ */
 export class SignalTallier {
+  readonly #from: string;
   readonly #costs = new Map<string, RunCost>();
   readonly #questions = new Map<string, QuestionTally>();
 
+  constructor(from: string) {
+    this.#from = from;
+  }
+
   add(event: AuditEvent, receivedAt: string): void {
+    if (receivedAt < this.#from) {
+      return;
+    }
     const { action, actor } = event;
     if (action === "model.call" && actor.type === "workflow") {
       if (event.cost?.currency !== "USD") {
