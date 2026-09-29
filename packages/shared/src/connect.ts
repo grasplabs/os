@@ -541,6 +541,8 @@ export interface PendingActionsApi {
 export const connectorEventActions = {
   "m365.mail.received": "mail.list",
   "m365.file.created": "files.list",
+  "google.mail.received": "mail.list",
+  "google.file.created": "files.list",
 } as const satisfies Record<string, string>;
 
 /** An event type a connection reports. */

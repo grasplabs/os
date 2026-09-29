@@ -5,7 +5,7 @@ import type { eventSources } from "./db/schema.ts";
 
 // What an event type is to connect (events.ts), and how its sources are
 // read from a provider: the types each provider's events module
-// (graph-events.ts) implements.
+// (graph-events.ts, google-events.ts) implements.
 
 /** A source's row. */
 export type EventSource = typeof eventSources.$inferSelect;
@@ -53,6 +53,12 @@ export interface EventKind {
   server: string;
   /** Whether a permission's resource is one of this type's sources. */
   isResource: (resource: string) => boolean;
+  /**
+   * Whether a permission on the whole connection is a source too: the
+   * account's own mailbox or drive. Without one (Google has no drive ID
+   * for a person's My Drive), only a permission naming a resource is.
+   */
+  wholeConnection: boolean;
   /**
    * For a provider that can only read on from a position, not from a
    * time: where it stands now, as the source's first cursor, taken as
@@ -169,17 +175,19 @@ export const providerLink = (
  * Fetches JSON from a provider with the connection's token: only on
  * `hosts`, over HTTPS, never following a redirect (it would take the
  * token along). A throttled answer says how long to wait; a gone cursor
- * (410) starts the source over.
+ * (410, or a status of `resyncStatuses`) starts the source over.
  */
 export const readFromProvider =
   ({
     name,
     hosts,
     headers = {},
+    resyncStatuses = [],
   }: {
     name: string;
     hosts: readonly string[];
     headers?: Record<string, string>;
+    resyncStatuses?: readonly number[];
   }) =>
   async (token: string, url: string): Promise<unknown> => {
     if (!isProviderUrl(url, hosts)) {
@@ -199,7 +207,7 @@ export const readFromProvider =
         status,
       });
     }
-    if (status === 410) {
+    if (status === 410 || resyncStatuses.includes(status)) {
       throw new SourceError(`${name} no longer has the cursor`, {
         resync: true,
         status,

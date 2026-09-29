@@ -133,6 +133,7 @@ const mailReceived: EventKind = {
   provider: "microsoft",
   server: "microsoft-365",
   isResource: isMailbox,
+  wholeConnection: true,
   read: async (read): Promise<ReadEvents> => {
     const { source } = read;
     const mailbox =
@@ -224,6 +225,7 @@ const fileCreated: EventKind = {
   provider: "microsoft",
   server: "microsoft-365",
   isResource: isDrive,
+  wholeConnection: true,
   prime: async (read): Promise<string> => {
     const { source } = read;
     const drive =

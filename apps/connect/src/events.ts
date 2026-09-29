@@ -37,6 +37,7 @@ import type {
   ReadEvents,
   SourceRead,
 } from "./event-kinds.ts";
+import { googleEventKinds } from "./google-events.ts";
 import { microsoftEventKinds } from "./graph-events.ts";
 import { accessTokenFor } from "./tokens.ts";
 
@@ -71,6 +72,7 @@ import { accessTokenFor } from "./tokens.ts";
 /** Every event type connect reports, by type. */
 const kinds: Readonly<Record<string, EventKind>> = {
   ...microsoftEventKinds,
+  ...googleEventKinds,
 };
 
 /** The types whose sources are primed before they're read. */
@@ -145,7 +147,9 @@ const mayListen = (
   connection.server === kind.server &&
   (connection.scope === "shared" ||
     connection.ownerUserId === listener.owner) &&
-  (listener.resource === null || kind.isResource(listener.resource));
+  (listener.resource === null
+    ? kind.wholeConnection
+    : kind.isResource(listener.resource));
 
 /** D1 binds at most 100 values a statement. */
 const idsPerQuery = 90;

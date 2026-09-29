@@ -1,3 +1,4 @@
+import { connectorEventActions } from "@grasp-os/shared/connect";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vite-plus/test";
@@ -201,7 +202,7 @@ describe("connector events", () => {
     const steps = plans.flat();
 
     // One query per event type.
-    expect(plans).toHaveLength(2);
+    expect(plans).toHaveLength(Object.keys(connectorEventActions).length);
     expect(steps.filter((step) => fullScan.test(step))).toStrictEqual([]);
     expect(steps.filter((step) => step.includes("TEMP B-TREE"))).toStrictEqual(
       []

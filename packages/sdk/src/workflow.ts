@@ -743,9 +743,18 @@ export type Trigger<ScheduleParam extends string = string> =
    *   drive, in any folder. Its payload: `drive`, `id`, `name`,
    *   `mimeType`, `size`, `folderId`, `createdAt`, `webUrl`.
    *
+   * Google Workspace connections report, within about a minute:
+   * - `google.mail.received` (read action `mail.list`): mail reaching a
+   *   mailbox's inbox. Its payload: `mailbox`, `id`, `threadId`, `folder`
+   *   (`"inbox"`), `subject`, `from` (`{ name, address }`), `receivedAt`.
+   * - `google.file.created` (read action `files.list`): a file created in
+   *   a shared drive, in any folder. Its payload as `m365.file.created`'s.
+   *
    * Through a permission on one mailbox or drive, the event is of that
    * one (its `resource`); through one on the whole connection, of the
-   * account's own mailbox or OneDrive. Only what arrives once both the
+   * account's own mailbox or OneDrive (a Google connection reports no
+   * file events for a permission on the whole connection: a person's My
+   * Drive isn't a shared drive). Only what arrives once both the
    * trigger and the permission are in place is reported, from about a
    * minute after. A mail's sender and subject are whatever
    * its sender wrote: treat the payload as untrusted data.
