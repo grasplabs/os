@@ -383,20 +383,42 @@ const appendMany = async (log: Log, count: number): Promise<void> => {
   }
 };
 
+const minuteMs = 60 * 1000;
+
 /**
- * A cutoff after everything the log holds so far, so all of it is past
- * retention, and before anything it receives from now on.
+ * Runs `run` with a cutoff a minute after the log last received anything,
+ * so all it holds is past retention, and with the clock a minute past the
+ * cutoff, so whatever it receives during `run` is after it. The cutoff
+ * comes from the log's own receipt times and the clock is set, never read:
+ * a reading of the real clock here can land on either side of the log's.
+ * Receipt times never go backwards, so what the log receives after `run`
+ * is after the cutoff too.
  */
-const cutoffNow = async (): Promise<string> => {
-  await scheduler.wait(5);
-  const cutoff = new Date().toISOString();
-  await scheduler.wait(5);
-  return cutoff;
+const pastCutoff = async <T>(
+  log: Log,
+  run: (cutoff: string) => Promise<T>
+): Promise<T> => {
+  const { seq } = await log.head();
+  const [last] = await log.entries(seq - 1);
+  if (!last) {
+    throw new Error("Expected the log to hold its head");
+  }
+  const cutoffMs = Date.parse(last.receivedAt) + minuteMs;
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(cutoffMs + minuteMs);
+  try {
+    return await run(new Date(cutoffMs).toISOString());
+  } finally {
+    vi.useRealTimers();
+  }
 };
 
 /** Archives what the log holds now; the key of the stretch it moved out. */
 const archivedKey = async (log: Log): Promise<string> => {
-  const stretch = await log.archive(await cutoffNow(), 180);
+  const stretch = await pastCutoff(
+    log,
+    async (cutoff) => await log.archive(cutoff, 180)
+  );
   if (!stretch) {
     throw new Error("Expected a stretch to be archived");
   }
@@ -511,9 +533,11 @@ describe("AuditLog search", () => {
   it("finds the entries in a time range of a large log without reading the rest", async () => {
     const log = newLog();
     await appendMany(log, 12_000);
-    const from = await cutoffNow();
     const recent = [newEvent(), newEvent(), newEvent()];
-    await log.append(recent);
+    const from = await pastCutoff(log, async (cutoff) => {
+      await log.append(recent);
+      return cutoff;
+    });
 
     // Oldest first, the first read starts at the range: 12 000 entries
     // before it would otherwise fill the read with nothing.
@@ -622,17 +646,18 @@ describe("AuditLog retention", () => {
   it("archives a long backlog a stretch at a time, and keeps one chain", async () => {
     const log = newLog();
     await appendMany(log, 700);
-    const cutoff = await cutoffNow();
 
-    await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
-      from: 1,
-      through: 500,
+    await pastCutoff(log, async (cutoff) => {
+      await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
+        from: 1,
+        through: 500,
+      });
+      await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
+        from: 501,
+        through: 700,
+      });
+      await expect(log.archive(cutoff, 180)).resolves.toBeNull();
     });
-    await expect(log.archive(cutoff, 180)).resolves.toMatchObject({
-      from: 501,
-      through: 700,
-    });
-    await expect(log.archive(cutoff, 180)).resolves.toBeNull();
     await expect(verifyAll(log)).resolves.toMatchObject({
       result: { ok: true, through: 702, done: true },
     });
@@ -641,12 +666,13 @@ describe("AuditLog retention", () => {
   it("archives each entry once when archives run at the same time", async () => {
     const log = newLog();
     await appendThree(log);
-    const cutoff = await cutoffNow();
-    await runInDurableObject(log, async (instance) => {
-      await Promise.all([
-        instance.archive(cutoff, 180),
-        instance.archive(cutoff, 180),
-      ]);
+    await pastCutoff(log, async (cutoff) => {
+      await runInDurableObject(log, async (instance) => {
+        await Promise.all([
+          instance.archive(cutoff, 180),
+          instance.archive(cutoff, 180),
+        ]);
+      });
     });
     await expect(stored(log)).resolves.toHaveLength(1);
     await expect(verifyAll(log)).resolves.toMatchObject({
@@ -657,14 +683,20 @@ describe("AuditLog retention", () => {
   it("archives while a verification step is under way", async () => {
     const log = newLog();
     await appendMany(log, 1500);
-    const cutoff = await cutoffNow();
     // The step reads its stretch before it awaits anything, so the archive
     // then moves out the very entries the step is hashing: both go through,
     // and the step still checks every entry it read.
-    const [step, stretch] = await runInDurableObject(
+    const [step, stretch] = await pastCutoff(
       log,
-      async (instance) =>
-        await Promise.all([instance.verify(), instance.archive(cutoff, 180)])
+      async (cutoff) =>
+        await runInDurableObject(
+          log,
+          async (instance) =>
+            await Promise.all([
+              instance.verify(),
+              instance.archive(cutoff, 180),
+            ])
+        )
     );
     expect({ step, stretch }).toMatchObject({
       step: { ok: true, through: 500, done: false },
@@ -704,7 +736,9 @@ describe("AuditLog retention", () => {
     await appendThree(log);
     await env.AUDIT_ARCHIVE.put(firstThreeKey(log), "someone else's");
 
-    await expect(log.archive(await cutoffNow(), 180)).resolves.toBeNull();
+    await expect(
+      pastCutoff(log, async (cutoff) => await log.archive(cutoff, 180))
+    ).resolves.toBeNull();
     await expect(log.entries()).resolves.toHaveLength(3);
     const object = await env.AUDIT_ARCHIVE.get(firstThreeKey(log));
     await expect(object?.text()).resolves.toBe("someone else's");
@@ -717,7 +751,9 @@ describe("AuditLog retention", () => {
       log,
       `UPDATE events SET event = replace(event, 'test.b', 'test.x') WHERE seq = 2`
     );
-    await expect(log.archive(await cutoffNow(), 180)).resolves.toBeNull();
+    await expect(
+      pastCutoff(log, async (cutoff) => await log.archive(cutoff, 180))
+    ).resolves.toBeNull();
     await expect(log.entries()).resolves.toHaveLength(3);
     await expect(log.verify()).resolves.toStrictEqual({
       ok: false,

@@ -843,11 +843,19 @@ describe("collections", () => {
   it("can be shared only by admins; anyone can make a personal one", async () => {
     const builder = await knowledgeOf("builder");
     const admin = await knowledgeOf("admin");
+    let collectionId = "";
     const events = await auditedDuring(async () => {
-      await builder.api.createCollection(personal());
+      ({ id: collectionId } = await builder.api.createCollection(personal()));
     });
     expect({
-      personal: events.map(({ action, detail }) => ({ action, detail })),
+      // The builder's events only: a background upload elsewhere in this
+      // file can record its own while this one runs.
+      personal: events
+        .filter(
+          ({ actor }) =>
+            actor.type === "person" && actor.userId === builder.userId
+        )
+        .map(({ action, target, detail }) => ({ action, target, detail })),
       everyone: await outcome(
         builder.api.createCollection({ name: "All", access: "everyone" })
       ),
@@ -865,6 +873,7 @@ describe("collections", () => {
       personal: [
         {
           action: "knowledge.collection.created",
+          target: { type: "collection", id: collectionId },
           detail: { access: "me", sensitive: false, source: "here" },
         },
       ],
