@@ -39,6 +39,22 @@ const signInFrom = async (
     { ...env, AUTH_RATE_LIMIT: limiter }
   );
 
+/** A guest's page's request to core, through the router. */
+const guestFrom = async (
+  ip: string,
+  url: string,
+  limiter: RateLimit,
+  signIn: RateLimit = limiterAllowing(1000)
+): Promise<Response> =>
+  await worker.fetch(
+    new Request(url, {
+      method: "POST",
+      headers: { "cf-connecting-ip": ip },
+      body: "{}",
+    }),
+    { ...env, GUEST_RATE_LIMIT: limiter, AUTH_RATE_LIMIT: signIn }
+  );
+
 describe("sign-in rate limit", () => {
   const cores = fakeCores();
 
@@ -171,6 +187,81 @@ describe("sign-in rate limit", () => {
       { headers: { "cf-connecting-ip": "192.0.2.5" } }
     );
 
+    expect(response.status).toBe(200);
+  });
+});
+
+describe("guest chat rate limit", () => {
+  const cores = fakeCores();
+
+  beforeAll(async () => {
+    const admin = await routerKeyAdmin();
+    await admin.create(testRouterKey);
+    const core = { coreUrl: "https://grasp-os-core.acme.workers.dev" };
+    await Promise.all([
+      mapHost("acme.guest.test", { ...core, clientId: "acme", generation: 1 }),
+      mapHost("beta.guest.test", { ...core, clientId: "beta", generation: 1 }),
+    ]);
+  });
+
+  it("limits a guest chat's endpoint per hostname and client address, without reaching core", async () => {
+    const limiter = limiterAllowing(2);
+    const guest = "https://acme.guest.test/api/guest";
+    const statuses = [
+      await guestFrom("192.0.2.11", guest, limiter),
+      await guestFrom("192.0.2.11", guest, limiter),
+      await guestFrom("192.0.2.11", guest, limiter),
+      // The same /64 counts as one address.
+      await guestFrom("2001:db8:9:9::1", guest, limiter),
+      await guestFrom("2001:db8:9:9::2", guest, limiter),
+      await guestFrom("2001:db8:9:9::3", guest, limiter),
+      await guestFrom("192.0.2.12", guest, limiter),
+      await guestFrom(
+        "192.0.2.11",
+        "https://beta.guest.test/api/guest",
+        limiter
+      ),
+    ].map(({ status }) => status);
+    expect(statuses).toStrictEqual([200, 200, 429, 200, 200, 429, 200, 200]);
+    expect(
+      cores.received.filter(({ url }) => new URL(url).pathname === "/api/guest")
+    ).toHaveLength(6);
+  });
+
+  it("limits nothing else by it, and lets guests through when it fails", async () => {
+    const none = limiterAllowing(0);
+    const others = await Promise.all(
+      ["/", "/guest", "/api/guests", "/api/things"].map(async (path) => {
+        const response = await guestFrom(
+          "192.0.2.13",
+          `https://acme.guest.test${path}`,
+          none
+        );
+        return response.status;
+      })
+    );
+    const broken: RateLimit = {
+      limit: async () => {
+        await Promise.resolve();
+        throw new Error("rate limiter unavailable");
+      },
+    };
+    const failing = await guestFrom(
+      "192.0.2.14",
+      "https://acme.guest.test/api/guest",
+      broken
+    );
+    expect({ others, failing: failing.status }).toStrictEqual({
+      others: [200, 200, 200, 200],
+      failing: 200,
+    });
+  });
+
+  it("counts with the rate limiter binding it's deployed with", async () => {
+    const response = await exports.default.fetch(
+      "https://acme.guest.test/api/guest",
+      { method: "POST", headers: { "cf-connecting-ip": "192.0.2.15" } }
+    );
     expect(response.status).toBe(200);
   });
 });

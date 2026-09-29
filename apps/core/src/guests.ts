@@ -39,13 +39,14 @@ import {
 } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
+import { appFor } from "./apps.ts";
 import {
   auditedBatch,
   keepAuditEvent,
-  outboxed,
   outboxedIfChanged,
 } from "./audit-outbox.ts";
 import { signInConfig } from "./auth/config.ts";
+import { memberRole, teamsOf } from "./auth/identity.ts";
 import { apps, guestChats, guestMessages } from "./db/core/schema.ts";
 import { errorResponse } from "./errors.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
@@ -68,8 +69,10 @@ import { authorize } from "./permissions.ts";
 // - A link that outlives its purpose: it works until it expires (at most
 //   14 days), the App revokes it, or the guest finishes; and only while
 //   the App still holds its permission, the member it was made for is
-//   still a member, and `guest_chats` is on. Each is checked on every
-//   request, never only at invitation.
+//   still a member who may use the App, and `guest_chats` is on. Each is
+//   checked on every request, never only at invitation. A revoked link
+//   opens nothing at all, not even what was written; a finished or
+//   expired one still shows it, and takes nothing more.
 // - The guest reaching the company's data: the model is called with no
 //   tools, only the skill's guidance and the chat so far, through the
 //   model gateway (its allowlist, rules and budgets), as the App for the
@@ -82,7 +85,9 @@ import { authorize } from "./permissions.ts";
 // - Cost and load: one turn at a time per chat (a turn claims the chat
 //   until it ends, `busy_until`), at most 20 turns of at most 1,000
 //   characters, short answers, and the member's model budget; at most 50
-//   open chats per App.
+//   open chats per App. A turn whose model call failed still counts (the
+//   gateway may have billed it), so a chat makes at most 20 model calls.
+//   The router limits the endpoint per client address too.
 // - Unseen: inviting, revoking and reading back are audited as the App
 //   for the member; the guest opening the chat, each message and
 //   finishing are audited as the guest; each model call is audited by
@@ -392,9 +397,9 @@ const viewOf = async (
 /**
  * The chat a guest's secret opens, and who it acts as: the App, for the
  * member it was made for, at the App's current version. A secret of no
- * chat, and a chat whose App, permission or member is gone, is
- * `guest.link_invalid`: the guest can't tell which, and needs a new link
- * either way.
+ * chat, a revoked chat, and a chat whose App, permission or member (or
+ * their use of the App) is gone, is `guest.link_invalid`: the guest can't
+ * tell which, and needs a new link either way.
  */
 const guestChat = async (
   env: Env,
@@ -411,6 +416,9 @@ const guestChat = async (
     throw guestErrors.create("guest.link_invalid");
   }
   const { chat: row, version } = found;
+  if (row.ended === "revoked") {
+    throw guestErrors.create("guest.link_invalid");
+  }
   const authority: Authority = {
     subject: { type: "app", appId: appIdSchema.parse(row.appId) },
     onBehalfOf: row.invitedBy,
@@ -425,6 +433,17 @@ const guestChat = async (
       "guests",
       permissionIdSchema.parse(row.permissionId)
     );
+    // And the member may still use the App: a chat is theirs through it.
+    const role = await memberRole(env.DB, row.invitedBy);
+    if (role === undefined) {
+      throw guestErrors.create("guest.link_invalid");
+    }
+    const person = {
+      userId: row.invitedBy,
+      role,
+      teams: await teamsOf(env.DB, row.invitedBy),
+    };
+    await appFor(env, person, row.appId, "user");
   } catch (error) {
     if (isExpectedError(error)) {
       throw guestErrors.create("guest.link_invalid");
@@ -511,8 +530,9 @@ const claimTurn = async (
 
 /**
  * Takes the guest's message, has the model answer it, and keeps both, as
- * the chat's next turn. A turn that fails gives its turn back, and keeps
- * nothing: the guest sends it again.
+ * the chat's next turn, only while the chat is still open: none lands
+ * after it was revoked or finished. A turn whose model call failed keeps
+ * nothing, and still counts: the gateway may have billed it.
  */
 const sendMessage = async (
   env: Env,
@@ -527,10 +547,11 @@ const sendMessage = async (
   }
   const db = drizzle(env.DB);
   const turn = await claimTurn(db, row);
-  const release = (turns: number) =>
+  // Frees the chat for its next turn, unless another claimed it since.
+  const release = () =>
     db
       .update(guestChats)
-      .set({ turns, busyUntil: null })
+      .set({ busyUntil: null })
       .where(and(eq(guestChats.id, row.id), eq(guestChats.turns, turn)));
   let answer: string;
   try {
@@ -554,30 +575,34 @@ const sendMessage = async (
     });
     answer = answered.text.trim();
   } catch (error) {
-    await release(turn - 1);
+    await release();
     log.warn("guest.turn_failed", { chat: row.id, ...errorFields(error) });
     throw guestErrors.create("guest.unavailable");
   }
-  const at = new Date();
+  const at = Date.now();
   const seq = (turn - 1) * 2;
+  const stillOpen = sql`EXISTS (SELECT 1 FROM ${guestChats} WHERE ${guestChats.id} = ${row.id} AND ${guestChats.ended} IS NULL)`;
+  const kept = (
+    at_: number,
+    n: number,
+    role: "guest" | "agent",
+    said: string
+  ) =>
+    db
+      .insert(guestMessages)
+      .select(
+        sql`SELECT ${row.id}, ${n}, ${role}, ${said}, ${at_} WHERE ${stillOpen}`
+      );
   await auditedBatch(env, db, [
-    db.insert(guestMessages).values([
-      { chatId: row.id, seq, role: "guest", text, createdAt: at },
-      {
-        chatId: row.id,
-        seq: seq + 1,
-        role: "agent",
-        text: answer === "" ? "…" : answer,
-        createdAt: at,
-      },
-    ]),
-    release(turn),
-    outboxed(db, {
+    kept(at, seq, "guest", text),
+    kept(at, seq + 1, "agent", answer === "" ? "…" : answer),
+    outboxedIfChanged(db, {
       actor: guestActor(row),
       action: "guest.message",
       target: target(row.id),
       detail: { turn, characters: text.length },
     }),
+    release(),
   ]);
   return await viewOf(db, { ...row, turns: turn });
 };
@@ -616,6 +641,43 @@ const statusFor: Record<string, number> = {
   "guest.unavailable": 503,
 };
 
+/**
+ * A request's body as text, read no further than `max` bytes: undefined
+ * past them, whatever its `content-length` said, or didn't.
+ */
+const boundedText = async (
+  body: ReadableStream<Uint8Array> | null,
+  max: number
+): Promise<string | undefined> => {
+  if (body === null) {
+    return "";
+  }
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
+  let size = 0;
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- chunk by chunk, in order
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+    size += value.byteLength;
+    if (size > max) {
+      // oxlint-disable-next-line no-await-in-loop -- once, as it stops reading
+      await reader.cancel();
+      return undefined;
+    }
+    chunks.push(value);
+  }
+  const whole = new Uint8Array(size);
+  let at = 0;
+  for (const chunk of chunks) {
+    whole.set(chunk, at);
+    at += chunk.byteLength;
+  }
+  return new TextDecoder().decode(whole);
+};
+
 /** `text` as JSON, or undefined when it isn't. */
 const jsonOf = (text: string): unknown => {
   try {
@@ -647,8 +709,11 @@ export const guestResponse = async (
       throw guestErrors.create("guest.link_invalid");
     }
     const length = Number(request.headers.get("content-length") ?? 0);
-    const raw = length > requestMaxLength ? "" : await request.text();
-    if (raw.length === 0 || raw.length > requestMaxLength) {
+    const raw =
+      length > requestMaxLength
+        ? undefined
+        : await boundedText(request.body, requestMaxLength);
+    if (raw === undefined || raw === "") {
       throw guestErrors.create("guest.invalid");
     }
     const parsed = guestRequestSchema.safeParse(jsonOf(raw));

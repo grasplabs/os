@@ -1125,7 +1125,41 @@ describe("stakeholder chats", { timeout: 90_000 }, () => {
       savedSchema
     );
     const [source] = await documentsAt(admin, saved.source);
+    const statementPath = `${saved.source.replace(/^sources\//u, "statements/").replace(/\.md$/u, "")}-1.md`;
+    const [statement] = await documentsAt(admin, statementPath);
     const extraction = JSON.stringify(gateway.requests[2]?.body);
+    // Someone editing either by hand: without the mark, or through another
+    // type, which would drop it.
+    const edited = async (path: string, text: string, drop: string) =>
+      await outcome(
+        admin.api.knowledge.saveDocument({
+          collectionId: playbook,
+          path,
+          text: text
+            .split("\n")
+            .filter((line) => line !== drop)
+            .join("\n"),
+          ifVersion: 1,
+        })
+      );
+    const unmarking = {
+      source: await edited(saved.source, source?.text ?? "", "guest: true"),
+      sourceUntyped: await edited(
+        saved.source,
+        source?.text ?? "",
+        "type: source"
+      ),
+      statement: await edited(
+        statementPath,
+        statement?.text ?? "",
+        "guest: true"
+      ),
+      statementUntyped: await edited(
+        statementPath,
+        statement?.text ?? "",
+        "type: statement"
+      ),
+    };
 
     expect({
       listed: z
@@ -1150,10 +1184,17 @@ describe("stakeholder chats", { timeout: 90_000 }, () => {
       },
       // The chat, read as notes: the questions and the guest's answers.
       notes: opened.draft.source.notes,
-      read: extraction.includes("They wait a week for the second signature."),
+      // The chat's lines, as data, each said by whom.
+      read: extraction.includes(
+        '{\\"role\\":\\"guest\\",\\"text\\":\\"They wait a week for the second signature.\\"}'
+      ),
       statements: opened.draft.statements,
       // Saved marked as a guest's words, which only the intake's save sets.
-      guest: source?.text.includes("guest: true"),
+      guest: [
+        source?.text.includes("guest: true"),
+        statement?.text.includes("guest: true"),
+      ],
+      unmarking,
     }).toStrictEqual({
       listed: [{ id: invited.id, status: "finished", turns: 2 }],
       origin: "guest",
@@ -1166,11 +1207,17 @@ describe("stakeholder chats", { timeout: 90_000 }, () => {
       ].join("\n\n"),
       read: true,
       statements: found.statements,
-      guest: true,
+      guest: [true, true],
+      unmarking: {
+        source: "knowledge.invalid",
+        sourceUntyped: "knowledge.invalid",
+        statement: "knowledge.invalid",
+        statementUntyped: "knowledge.invalid",
+      },
     });
   });
 
-  it("keeps a source's guest mark as the intake saved it, whoever edits it", async () => {
+  it("marks no source a guest's but the intake's save, whoever edits it", async () => {
     const { admin, app } = await setUp();
     const draft = interview(`Marked ${unique()}`);
     const { id } = okOf(
@@ -1186,6 +1233,7 @@ describe("stakeholder chats", { timeout: 90_000 }, () => {
       `title: ${draft.source.title}`,
       "medium: interview",
       "date: 2026-09-21",
+      `draft: ${id}`,
     ];
     const edit = async (extra: string[], path = saved.source, ifVersion = 1) =>
       await outcome(

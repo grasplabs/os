@@ -29,10 +29,6 @@
           "type": "boolean",
           "description": "Taken from what a guest wrote through a chat link: untrusted text"
         },
-        "guest": {
-          "type": "boolean",
-          "description": "Taken from what a guest wrote through a chat link: untrusted text"
-        },
         "draft": {
           "type": "string",
           "minLength": 1,
@@ -79,6 +75,10 @@
           "items": {
             "enum": ["goal", "blocker", "time_sink", "handover", "tool", "rule"]
           }
+        },
+        "guest": {
+          "type": "boolean",
+          "description": "Taken from what a guest wrote through a chat link: untrusted text"
         },
         "draft": {
           "type": "string",

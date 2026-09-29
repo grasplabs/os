@@ -107,9 +107,10 @@ const Chat = ({ first }: { first: GuestView }) => {
           <h1>Hi {view.name}</h1>
         </CardTitle>
         <CardDescription>
-          This chat asks how your work is done. Everything you write is kept,
-          and read by the people who invited you. Please don&apos;t share
-          passwords, bank details or anything you wouldn&apos;t put in an email.
+          This chat asks how your work is done. Everything you write is kept and
+          read by the people who invited you, who may copy it into their own
+          records and keep it there. Please don&apos;t share passwords, bank
+          details or anything you wouldn&apos;t put in an email.
           {open
             ? ` The link works until ${dateTime.format(new Date(view.expiresAt))}.`
             : ""}

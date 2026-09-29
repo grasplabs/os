@@ -2,7 +2,7 @@ import { DurableObject } from "cloudflare:workers";
 
 import { draftOf, refuse } from "./draft.ts";
 import type { Draft } from "./draft.ts";
-import { interviewSkill, notesOf, sourceOf } from "./guests.ts";
+import { interviewSkill, linesOf, notesOf, sourceOf } from "./guests.ts";
 import type { GuestChat, Guests } from "./guests.ts";
 
 // The intake's server: drafts of a source and the statements taken from
@@ -327,14 +327,24 @@ export class App extends DurableObject<Env> {
   async chatNotes(
     caller: Caller,
     id: string
-  ): Promise<Outcome<{ source: ReturnType<typeof sourceOf>; notes: string }>> {
+  ): Promise<
+    Outcome<{
+      source: ReturnType<typeof sourceOf>;
+      notes: string;
+      lines: ReturnType<typeof linesOf>;
+    }>
+  > {
     return await outcome(async () => {
       await this.#requireWriter(caller);
       const chat = await this.#guests().read(caller, id);
       if (!chat.messages.some(({ role }) => role === "guest")) {
         refuse("intake.empty_chat", "Nobody wrote in this chat yet.");
       }
-      return { source: sourceOf(chat), notes: notesOf(chat) };
+      return {
+        source: sourceOf(chat),
+        notes: notesOf(chat),
+        lines: linesOf(chat),
+      };
     });
   }
 
@@ -504,6 +514,8 @@ export class App extends DurableObject<Env> {
         }
       };
       const { source, statements } = draft;
+      // A stakeholder's words, and what was taken from them: untrusted.
+      const guestMark = row.origin === "guest" ? { guest: true } : {};
       stillSaving();
       await saveNew(playbook, caller, input.id, {
         path: paths.source,
@@ -513,7 +525,7 @@ export class App extends DurableObject<Env> {
           medium: source.medium,
           date: source.date,
           ...(source.from === "" ? {} : { from: source.from }),
-          ...(row.origin === "guest" ? { guest: true } : {}),
+          ...guestMark,
         },
         body: source.notes === "" ? "" : `${source.notes}\n`,
       });
@@ -525,6 +537,7 @@ export class App extends DurableObject<Env> {
           record: {
             type: "statement",
             title: statement.text,
+            ...guestMark,
             source: paths.source,
             date: source.date,
             tags: statement.tags,

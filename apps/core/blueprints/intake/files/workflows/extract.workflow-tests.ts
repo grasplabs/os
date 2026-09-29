@@ -45,7 +45,13 @@ export default workflowTests(extract, [
     name: "reads a stakeholder's chat as notes, and keeps a guest's draft",
     input: { chat: "chat-1" },
     mocks: {
-      "read-chat": { ok: { source: input.source, notes: input.notes } },
+      "read-chat": {
+        ok: {
+          source: input.source,
+          notes: input.notes,
+          lines: [{ role: "guest", text: input.notes }],
+        },
+      },
       extract: found,
       propose: { ok: { id: "draft-2" } },
     },

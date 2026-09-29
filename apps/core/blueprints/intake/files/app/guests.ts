@@ -43,21 +43,44 @@ export interface Guests {
   revoke: (caller: unknown, id: string) => Promise<GuestChat>;
 }
 
-/** Most characters of one answer the notes keep: its question, mostly. */
+/** Most characters of one answer a chat's notes keep: its question, mostly. */
 const answerKept = 300;
 
+/** A chat's message, as the model reads it: who said it, and what. */
+// A type, not an interface: a step's result is JSON, which an interface,
+// open to more members, can't be shown to be.
+// oxlint-disable-next-line typescript/consistent-type-definitions -- see above
+export type ChatLine = {
+  role: "guest" | "question";
+  text: string;
+};
+
 /**
- * A chat as notes to read: each question, shortened, and each of the
- * guest's answers, whole, within the notes' limit. Named so the model
- * can tell who said what.
+ * A chat as the model reads it: each question, shortened, and each of the
+ * guest's answers, whole, as data with who said each, so nothing the
+ * guest writes can pass for a question or for someone else.
+ */
+export const linesOf = (chat: GuestTranscript): ChatLine[] =>
+  chat.messages.map(({ role, text }) =>
+    role === "guest"
+      ? { role: "guest", text }
+      : {
+          role: "question",
+          text:
+            text.length > answerKept ? `${text.slice(0, answerKept)}…` : text,
+        }
+  );
+
+/**
+ * A chat as notes for people to read, kept as its source's text: each
+ * line said by whom, within the notes' limit.
  */
 export const notesOf = (chat: GuestTranscript): string => {
-  const lines = chat.messages.map(({ role, text }) =>
-    role === "guest"
-      ? `${chat.name}: ${text}`
-      : `Question: ${text.length > answerKept ? `${text.slice(0, answerKept)}…` : text}`
-  );
-  const notes = lines.join("\n\n");
+  const notes = linesOf(chat)
+    .map(({ role, text }) =>
+      role === "guest" ? `${chat.name}: ${text}` : `Question: ${text}`
+    )
+    .join("\n\n");
   return notes.length > notesMax ? notes.slice(0, notesMax) : notes;
 };
 

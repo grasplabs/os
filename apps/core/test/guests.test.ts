@@ -295,6 +295,12 @@ describe("guest chats", { timeout: 60_000 }, () => {
     const { id } = await invite(app, builder.userId);
     const madeUp = "A".repeat(43);
     const got = await routed("/api/guest");
+    // A body streamed without a length: read no further than the bound.
+    const streamed = await routed("/api/guest", {
+      method: "POST",
+      body: new Blob(["x".repeat(20_000)]).stream(),
+    });
+    const streamedBody: unknown = await streamed.json();
     expect({
       madeUp: codeOf(await guest({ action: "open", token: madeUp })),
       short: codeOf(await guest({ action: "open", token: "abc" })),
@@ -304,6 +310,7 @@ describe("guest chats", { timeout: 60_000 }, () => {
         await guest({ action: "send", token: madeUp, text: "x".repeat(20_000) })
       ),
       get: got.status,
+      streamed: codeOf({ status: streamed.status, body: streamedBody }),
       otherApp: await call(other, as(builder.userId), "read", id),
       otherRevoke: await call(other, as(builder.userId), "revoke", id),
     }).toStrictEqual({
@@ -312,15 +319,17 @@ describe("guest chats", { timeout: 60_000 }, () => {
       unknownAction: { status: 400, code: "guest.invalid" },
       notJson: { status: 400, code: "guest.invalid" },
       tooLarge: { status: 400, code: "guest.invalid" },
+      streamed: { status: 400, code: "guest.invalid" },
       get: 405,
       otherApp: { error: "guest.not_found" },
       otherRevoke: { error: "guest.not_found" },
     });
   });
 
-  it("stop a link once it expires, is revoked or finished, or its App's permission, its member or the feature is gone", async () => {
+  it("stop a link once it expires, is revoked or finished, or its App's permission, its member, their use of the App or the feature is gone", async () => {
     const builder = await signedInApi(idp, "builder");
     const admin = await signedInApi(idp, "admin");
+    const user = await signedInApi(idp, "user");
     const { app, permission } = await guestApp(builder);
     const revoked = await invite(app, builder.userId);
     const revokedChat = await call(
@@ -333,9 +342,10 @@ describe("guest chats", { timeout: 60_000 }, () => {
       chat: z
         .object({ ok: z.object({ status: z.string() }) })
         .parse(revokedChat).ok.status,
-      open: viewOf(await guest({ action: "open", token: revoked.token }))
-        .status,
+      // Nothing opens, what was written neither.
+      open: codeOf(await guest({ action: "open", token: revoked.token })),
       send: codeOf(await guest(send(revoked.token))),
+      finish: codeOf(await guest({ action: "finish", token: revoked.token })),
     };
     const finished = await invite(app, builder.userId);
     const finishing = await guest({ action: "finish", token: finished.token });
@@ -369,6 +379,17 @@ describe("guest chats", { timeout: 60_000 }, () => {
     const reopened = await guest({ action: "open", token: memberGone.token });
     const back = reopened.status;
 
+    // Someone the App is shared with invites; unshared, their link is gone.
+    const member = { type: "person", id: user.userId } as const;
+    await builder.api.apps.members.add(app, { ...member, role: "user" });
+    const unshared = await invite(app, user.userId);
+    const sharedOpen = await guest({ action: "open", token: unshared.token });
+    const whileShared = sharedOpen.status;
+    await builder.api.apps.members.remove(app, member);
+    const afterUnshared = codeOf(
+      await guest({ action: "open", token: unshared.token })
+    );
+
     const permissionGone = await invite(app, builder.userId);
     await admin.api.permissions.revoke(permission);
 
@@ -379,6 +400,8 @@ describe("guest chats", { timeout: 60_000 }, () => {
       off,
       whileGone,
       back,
+      whileShared,
+      afterUnshared,
       permissionGone: codeOf(
         await guest({ action: "open", token: permissionGone.token })
       ),
@@ -387,8 +410,9 @@ describe("guest chats", { timeout: 60_000 }, () => {
     }).toStrictEqual({
       revoked: {
         chat: "revoked",
-        open: "revoked",
-        send: { status: 410, code: "guest.ended" },
+        open: { status: 404, code: "guest.link_invalid" },
+        send: { status: 404, code: "guest.link_invalid" },
+        finish: { status: 404, code: "guest.link_invalid" },
       },
       finished: {
         answer: "finished",
@@ -399,29 +423,29 @@ describe("guest chats", { timeout: 60_000 }, () => {
       off: { status: 404, code: "guest.link_invalid" },
       whileGone: { status: 404, code: "guest.link_invalid" },
       back: 200,
+      whileShared: 200,
+      afterUnshared: { status: 404, code: "guest.link_invalid" },
       permissionGone: { status: 404, code: "guest.link_invalid" },
       appAfter: { error: "permission.denied" },
     });
   });
 
-  it("take one message at a time, at most 20 turns of at most 1,000 characters, and give back a turn whose model call failed", async () => {
+  it("take one message at a time, and none once the chat ended under it", async () => {
     const builder = await signedInApi(idp, "builder");
     const { app } = await guestApp(builder);
-    const { token } = await invite(app, builder.userId);
+    const { id, token } = await invite(app, builder.userId);
 
-    // The first message's model call waits until the second has been refused.
+    // The first message's model call waits until the second has been
+    // refused, and the guest has finished the chat.
     const gate = Promise.withResolvers<null>();
-    const gateway = fakeGateway(
-      ...Array.from({ length: guestTurnsMax }, (_, turn) =>
-        reply(`Question ${turn + 1}`)
-      )
-    );
+    const gateway = fakeGateway(reply("Question 1"));
     const ai: AiBinding = env.AI;
     const spy = vi.spyOn(ai, "fetch").mockImplementation(async (...args) => {
       await gate.promise;
       return await gateway.binding.fetch(...args);
     });
     let busy: { status: number; code: string };
+    let finished: GuestView;
     let first: { status: number; body: unknown };
     try {
       const sending = guest({ action: "send", token, text: "First" });
@@ -432,46 +456,66 @@ describe("guest chats", { timeout: 60_000 }, () => {
         { timeout: 10_000, interval: 20 }
       );
       busy = codeOf(await guest({ action: "send", token, text: "Second" }));
+      finished = viewOf(await guest({ action: "finish", token }));
       gate.resolve(null);
       first = await sending;
-      for (let turn = 2; turn <= guestTurnsMax; turn += 1) {
-        // oxlint-disable-next-line no-await-in-loop -- one turn at a time
-        await guest({ action: "send", token, text: `Answer ${turn}` });
-      }
     } finally {
       spy.mockRestore();
     }
-    const full = codeOf(await guest({ action: "send", token, text: "More" }));
-
-    const { token: failing } = await invite(app, builder.userId);
-    const failed = await answering(
-      [{ status: 500 }, { status: 500 }, { status: 500 }],
-      async () =>
-        codeOf(await guest({ action: "send", token: failing, text: "Hello" }))
-    );
-    const afterFailure = viewOf(
-      await guest({ action: "open", token: failing })
-    );
-
+    const after = viewOf(await guest({ action: "open", token }));
+    const logged = await allEvents();
     expect({
       busy,
-      first: viewOf(first).messages.map(({ text }) => text),
-      full,
-      tooLong: codeOf(
-        await guest({ action: "send", token: failing, text: "x".repeat(1001) })
-      ),
-      failed,
-      afterFailure: {
-        turnsLeft: afterFailure.turnsLeft,
-        messages: afterFailure.messages.length,
-      },
+      finished: finished.status,
+      // The turn ran, and landed nothing: the chat had ended.
+      first: viewOf(first).messages,
+      after: after.messages,
+      audited: logged
+        .filter(({ target }) => target?.id === id)
+        .map(({ action }) => action),
     }).toStrictEqual({
       busy: { status: 429, code: "guest.busy" },
-      first: ["First", "Question 1"],
-      full: { status: 409, code: "guest.no_turns_left" },
+      finished: "finished",
+      first: [],
+      after: [],
+      audited: ["guest.invited", "guest.finished", "guest.opened"],
+    });
+  });
+
+  it("make at most 20 model calls a chat, failed ones too, of at most 1,000 characters", async () => {
+    const builder = await signedInApi(idp, "builder");
+    const { app } = await guestApp(builder);
+    const { token } = await invite(app, builder.userId);
+    // Refused by the provider, as the gateway may bill: never asked again.
+    const refusals = Array.from({ length: guestTurnsMax + 1 }, () => ({
+      status: 400,
+      errorType: "invalid_request_error",
+    }));
+    const { sent, calls } = await answering(refusals, async (gateway) => {
+      const answers: { status: number; code: string }[] = [];
+      for (let turn = 0; turn <= guestTurnsMax; turn += 1) {
+        // oxlint-disable-next-line no-await-in-loop -- one turn at a time
+        answers.push(codeOf(await guest(send(token))));
+      }
+      return { sent: answers, calls: gateway.requests.length };
+    });
+    const after = viewOf(await guest({ action: "open", token }));
+    expect({
+      failed: sent
+        .slice(0, guestTurnsMax)
+        .every(({ code }) => code === "guest.unavailable"),
+      last: sent.at(-1),
+      calls,
+      after: { turnsLeft: after.turnsLeft, messages: after.messages.length },
+      tooLong: codeOf(
+        await guest({ action: "send", token, text: "x".repeat(1001) })
+      ),
+    }).toStrictEqual({
+      failed: true,
+      last: { status: 409, code: "guest.no_turns_left" },
+      calls: guestTurnsMax,
+      after: { turnsLeft: 0, messages: 0 },
       tooLong: { status: 400, code: "guest.invalid" },
-      failed: { status: 503, code: "guest.unavailable" },
-      afterFailure: { turnsLeft: guestTurnsMax, messages: 0 },
     });
   });
 
