@@ -3,7 +3,7 @@
  * the real one over the CONNECT service binding.
  */
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 
@@ -28,15 +28,21 @@ export const bundleConnect = async (): Promise<string> => {
   const out = mkdtempSync(path.join(tmpdir(), "grasp-os-connect-"));
   try {
     // Its output is only shown if bundling fails, in the error. Wrangler's
-    // launcher passes Node's flags on to the CLI it spawns, and reports the
-    // CLI dying of a signal as success: without Sparkplug, Node 24's GC
-    // segfault (vite.config.ts) can't kill it and leave no bundle behind.
+    // launcher passes Node's flags on to the CLI it spawns: without
+    // Sparkplug, Node 24's GC segfault (vite.config.ts) can't kill it.
     execFileSync(
       process.execPath,
       ["--no-sparkplug", wrangler, "deploy", "--dry-run", "--outdir", out],
       { cwd: connect }
     );
-    return readFileSync(path.join(out, "index.js"), "utf-8");
+    const bundle = path.join(out, "index.js");
+    // The launcher reports its CLI dying of a signal as success.
+    if (!existsSync(bundle)) {
+      throw new Error(
+        "Wrangler exited without writing connect's bundle: its CLI was killed by a signal."
+      );
+    }
+    return readFileSync(bundle, "utf-8");
   } finally {
     rmSync(out, { recursive: true, force: true });
   }

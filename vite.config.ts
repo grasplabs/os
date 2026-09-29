@@ -14,8 +14,11 @@ import { defineConfig } from "vite-plus";
 // register that the GC reads as a pointer
 // (https://github.com/nodejs/node/issues/62393). `vp test` starts Vitest
 // itself and NODE_OPTIONS rejects V8 flags, so switch the baseline tier off
-// here, where Vitest loads its config. Drop this once the Node release in
-// devEngines carries the backport (https://github.com/nodejs/node/pull/65753).
+// here, where Vitest loads its config. That covers `vp test` from the repo
+// root, and only code compiled from here on: what Node compiled while
+// starting stays baseline, so this makes the crash rare, not impossible.
+// Drop this once the Node release in devEngines carries the backport
+// (https://github.com/nodejs/node/pull/65753).
 setFlagsFromString("--no-sparkplug");
 
 const generated = [
