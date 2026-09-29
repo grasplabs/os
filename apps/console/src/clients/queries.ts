@@ -11,6 +11,10 @@ import { isConfigPending } from "../rollout/targets.ts";
 /** A client's settings, as its page shows them. */
 export interface ClientSettingsView {
   ring: number;
+  /** Whether it's live: only then can its settings be applied now. */
+  active: boolean;
+  /** The release rollouts leave it on, if it's pinned. */
+  pinnedReleaseId: string | null;
   /** Its feature flags, by name, as core's `FEATURES` will have them. */
   features: Record<string, boolean>;
   /** Its record's sign-in; null when it has none, or one that doesn't parse. */
@@ -38,6 +42,8 @@ export const clientSettings = async (
   const [client] = await db
     .select({
       ring: clients.ring,
+      status: clients.status,
+      pinnedReleaseId: clients.pinnedReleaseId,
       signIn: clients.signIn,
       configChangedAt: clients.configChangedAt,
     })
@@ -56,6 +62,8 @@ export const clientSettings = async (
   const signIn = clientSignInSchema.safeParse(parsedJson(client.signIn));
   return {
     ring: client.ring,
+    active: client.status === "active",
+    pinnedReleaseId: client.pinnedReleaseId,
     features: features.success ? features.data : {},
     signIn: signIn.success ? signIn.data : null,
     signInOverridden: rows.some(({ key }) => key === "SIGN_IN"),

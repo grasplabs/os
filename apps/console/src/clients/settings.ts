@@ -17,7 +17,12 @@ import type { Staff } from "../access.ts";
 import { actIfChanged, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
 import { clients, settings } from "../db/schema.ts";
-import { adminUnreachable, clientSignInSchema } from "../deploy/core-config.ts";
+import { signInApps } from "../deploy/context.ts";
+import {
+  adminUnreachable,
+  clientSignInSchema,
+  missingSignInApp,
+} from "../deploy/core-config.ts";
 import { featureNameSchema } from "./feature-name.ts";
 
 /** Why staff's change to a client's settings was refused, as the page words it. */
@@ -28,6 +33,14 @@ export const settingsErrorCodes = [
   "sign_in_invalid",
   /** The sign-in names no first admin, or one whose email isn't in its domains. */
   adminUnreachable,
+  /** The sign-in names an IdP the console has no OAuth app id for (ENTRA_CLIENT_ID, GOOGLE_CLIENT_ID). */
+  "sign_in_app_missing",
+  /** The client isn't active, so there's nothing live to apply settings to. */
+  "not_active",
+  /** The client's Workers don't run one release the console made live. */
+  "nothing_deployed",
+  /** Another runner (provisioning, a rollout, a rollback) has the client. */
+  "client_busy",
 ] as const;
 export type SettingsErrorCode = (typeof settingsErrorCodes)[number];
 
@@ -165,7 +178,8 @@ export const setFeature = async (
  * are personal data) when it changes. Its
  * next deploy makes core's `SIGN_IN` from it. Refused as the record's own
  * rule refuses it: `admin_unreachable` without a first admin who can sign
- * in, `sign_in_invalid` for anything else. Returns whether it changed.
+ * in, `sign_in_app_missing` for an IdP the console has no app id for,
+ * `sign_in_invalid` for anything else. Returns whether it changed.
  */
 export const setSignIn = async (
   env: Env,
@@ -183,6 +197,13 @@ export const setSignIn = async (
     throw new SettingsError(
       unreachable ? adminUnreachable : "sign_in_invalid",
       `${clientId}'s sign-in isn't one it can be given`
+    );
+  }
+  const missing = missingSignInApp(parsed.data, signInApps(env));
+  if (missing !== null) {
+    throw new SettingsError(
+      "sign_in_app_missing",
+      `The console has no ${missing} app id for ${clientId}'s sign-in`
     );
   }
   await assertClient(db, clientId);

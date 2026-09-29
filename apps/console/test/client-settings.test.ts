@@ -249,7 +249,7 @@ describe("a client's settings", () => {
     });
   });
 
-  it("refuse a sign-in no first admin could sign in with, or that isn't one, and keep the one it had", async () => {
+  it("refuse a sign-in no first admin could sign in with, one through an IdP the console has no app for, or one that isn't one, and keep the one it had", async () => {
     const clientId = await recordClient();
 
     const refused = {
@@ -274,6 +274,17 @@ describe("a client's settings", () => {
       garbled: await codeOf(
         setSignIn(env, staff, { clientId, signIn: "acme.test" })
       ),
+      // Through Entra, on a console with no Entra app: no deploy could set it.
+      noApp: await codeOf(
+        setSignIn({ ...env, ENTRA_CLIENT_ID: "" }, staff, {
+          clientId,
+          signIn: {
+            domains: signIn.domains,
+            admins: signIn.admins,
+            entraTenantId: "8f3c9a52-1d4e-4b6f-9a2c-3e5d7f9b1c2a",
+          },
+        })
+      ),
     };
 
     expect({
@@ -286,6 +297,7 @@ describe("a client's settings", () => {
         outside: "admin_unreachable",
         noIdp: "sign_in_invalid",
         garbled: "sign_in_invalid",
+        noApp: "sign_in_app_missing",
       },
       record: {
         ring: 1,

@@ -305,7 +305,8 @@ describe("the client pages", () => {
       signIn:
         html.includes('value="acme.test"') &&
         html.includes('value="ada@acme.test"'),
-      pending: html.includes("the next rollout deploys it"),
+      pending: html.includes("changed since its last deploy: apply them now"),
+      apply: html.includes("Apply settings now"),
       history: ["client.feature", "client.sign_in", "client.create"].map(
         (action) => html.includes(action)
       ),
@@ -315,6 +316,7 @@ describe("the client pages", () => {
       flag: true,
       signIn: true,
       pending: true,
+      apply: true,
       history: [true, true, true],
     });
   });

@@ -20,11 +20,17 @@ import {
   TableRow,
 } from "@grasp-os/ui/components/table";
 import { Link, useRouter } from "@tanstack/react-router";
+import { z } from "zod";
 
 import { formatTime } from "../releases/format.ts";
 import { InvalidFieldError, thenRefresh } from "../use-action.ts";
 import { featureNameSchema } from "./feature-name.ts";
-import { setFeatureFn, setRingFn, setSignInFn } from "./functions.ts";
+import {
+  applySettingsFn,
+  setFeatureFn,
+  setRingFn,
+  setSignInFn,
+} from "./functions.ts";
 import type { SettingsChange } from "./functions.ts";
 import type { ClientSettingsView, HistoryEntry } from "./queries.ts";
 import { Field, SignInFields, signInOf, textOf } from "./sign-in-fields.tsx";
@@ -201,9 +207,22 @@ const SignIn = ({
   );
 };
 
-/** A rollout's page, when an action names one. */
+/**
+ * The client's actions whose target is a rollout's id (src/rollout/): the
+ * others name a version, a release or nothing.
+ */
+const rolloutActions: ReadonlySet<string> = new Set([
+  "rollout.client_start",
+  "rollout.client_done",
+  "rollout.client_skip",
+  "rollout.client_stop",
+  "rollout.rollback",
+  "rollout.client_rolled_back",
+]);
+
+/** The rollout an action names, to link its page; null for any other. */
 const rolloutOf = (entry: HistoryEntry): string | null =>
-  entry.action.startsWith("rollout.") && entry.target !== null
+  rolloutActions.has(entry.action) && z.uuid().safeParse(entry.target).success
     ? entry.target
     : null;
 
@@ -256,6 +275,51 @@ const History = ({ history }: { history: HistoryEntry[] }) =>
     </Table>
   );
 
+/** What waits for the client's next deploy, in words. */
+const pendingWords = (settings: ClientSettingsView): string => {
+  if (!settings.configPending) {
+    return "Its core runs its flags and sign-in as they are. A change reaches it with its next deploy: apply it now, or a rollout that reaches it deploys it.";
+  }
+  if (settings.pinnedReleaseId !== null) {
+    return `Flags or sign-in changed since its last deploy. It's pinned to ${settings.pinnedReleaseId}, so only a rollout of that release reaches it: apply them now.`;
+  }
+  return "Flags or sign-in changed since its last deploy: apply them now, or the next rollout that reaches it deploys it, even on the release it runs.";
+};
+
+/** What waits for the client's next deploy, and applying it now. */
+const Apply = ({
+  clientId,
+  settings,
+}: {
+  clientId: string;
+  settings: ClientSettingsView;
+}) => {
+  const { busy, failure, save } = useSave();
+  return (
+    <div className="flex flex-col gap-2">
+      <p className="text-sm">{pendingWords(settings)}</p>
+      {settings.active ? (
+        <div className="flex items-center gap-4">
+          <Button
+            variant={settings.configPending ? "default" : "outline"}
+            disabled={busy}
+            onClick={() => {
+              save(async () => await applySettingsFn({ data: { clientId } }));
+            }}
+          >
+            Apply settings now
+          </Button>
+          <span className="text-muted-foreground text-sm">
+            Deploys the release it runs, live at once. Its deploy shows in
+            History.
+          </span>
+          <Failure failure={failure} />
+        </div>
+      ) : null}
+    </div>
+  );
+};
+
 /** A client's settings and history, on its page. */
 export const ClientSettings = ({
   clientId,
@@ -273,11 +337,7 @@ export const ClientSettings = ({
       </CardHeader>
       <CardContent>
         <div className="flex flex-col gap-8">
-          <p className="text-sm">
-            {settings.configPending
-              ? "Flags or sign-in changed since its last deploy: the next rollout deploys it, even on the release it runs."
-              : "Flags and sign-in reach its core with its next deploy."}
-          </p>
+          <Apply clientId={clientId} settings={settings} />
           <Ring clientId={clientId} ring={settings.ring} />
           <Features clientId={clientId} features={settings.features} />
           <SignIn clientId={clientId} settings={settings} />

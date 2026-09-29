@@ -215,6 +215,27 @@ export const checkDeployedSignIn = (
   }
 };
 
+/**
+ * The IdP `signIn` names that the console has no OAuth app id for
+ * (`apps`), or null when it has one for each: a deploy would refuse such
+ * a sign-in (`sign_in_incomplete`), so it's refused when saved.
+ */
+export const missingSignInApp = (
+  signIn: Pick<ClientSignInRecord, "entraTenantId" | "googleHostedDomain">,
+  apps: SignInApps
+): "entra" | "google" | null => {
+  if (signIn.entraTenantId !== undefined && apps.entraClientId === undefined) {
+    return "entra";
+  }
+  if (
+    signIn.googleHostedDomain !== undefined &&
+    apps.googleClientId === undefined
+  ) {
+    return "google";
+  }
+  return null;
+};
+
 /** What a client's derived core config is made from. */
 export interface CoreConfigInputs {
   clientId: string;

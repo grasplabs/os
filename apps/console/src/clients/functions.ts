@@ -10,6 +10,7 @@ import { env } from "cloudflare:workers";
 import { z } from "zod";
 
 import { consoleDatabase } from "../db/act.ts";
+import { applySettings } from "./apply.ts";
 import { clientHistory, clientSettings } from "./queries.ts";
 import {
   featureInputSchema,
@@ -66,6 +67,17 @@ export const setFeatureFn = createServerFn({ method: "POST" })
   .handler(
     async ({ data, context }) =>
       await change(async () => await setFeature(env, context.staff, data))
+  );
+
+/** Applies a client's settings now: a deploy of the release it runs, live at once. */
+export const applySettingsFn = createServerFn({ method: "POST" })
+  .validator(clientSchema)
+  .handler(
+    async ({ data, context }) =>
+      await change(async () => {
+        await applySettings(env, context.staff, data.clientId);
+        return true;
+      })
   );
 
 export const setSignInFn = createServerFn({ method: "POST" })

@@ -71,6 +71,13 @@
       "binding": "ROLLBACK_CLIENT",
       "class_name": "RollbackClient",
     },
+    // Applies a client's settings now (src/clients/apply.ts): a deploy of
+    // the release it runs, all at once, under the same claim as the others.
+    {
+      "name": "grasp-os-apply-client",
+      "binding": "APPLY_CLIENT",
+      "class_name": "ApplyClient",
+    },
   ],
   // The router's hostname map, which a deploy writes (src/deploy/router.ts).
   // The router's first deploy creates it as grasp-os-router-hosts; `deploy`

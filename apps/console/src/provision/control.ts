@@ -18,8 +18,8 @@ import { isRefused } from "../cloudflare/api.ts";
 import { audit, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
 import { auditEvents, clients, releases } from "../db/schema.ts";
-import { clientDomain, deployerApi } from "../deploy/context.ts";
-import { clientSignInSchema } from "../deploy/core-config.ts";
+import { clientDomain, deployerApi, signInApps } from "../deploy/context.ts";
+import { clientSignInSchema, missingSignInApp } from "../deploy/core-config.ts";
 import { latestDeployOf } from "../deploy/deploy.ts";
 import { claimRun, currentRun, isReplaceable } from "../runners.ts";
 import { scriptInTheWay, workersPaidEvent } from "./workflow.ts";
@@ -43,6 +43,8 @@ export const provisionErrorCodes = [
   "already_running",
   /** No run for that client, or it isn't where the action applies. */
   "not_provisioning",
+  /** Its sign-in names an IdP the console has no OAuth app id for. */
+  "sign_in_app_missing",
 ] as const;
 export type ProvisionErrorCode = (typeof provisionErrorCodes)[number];
 
@@ -157,6 +159,13 @@ export const startProvisioning = async (
     throw new ProvisionError(
       "domain_not_set",
       "Set CLIENT_DOMAIN on the console before provisioning a client"
+    );
+  }
+  const missing = missingSignInApp(parsed.signIn, signInApps(env));
+  if (missing !== null) {
+    throw new ProvisionError(
+      "sign_in_app_missing",
+      `The console has no ${missing} app id for ${clientId}'s sign-in`
     );
   }
   const [release] = await db

@@ -882,7 +882,7 @@ describe("provisioning a new client", () => {
     });
   });
 
-  it("refuses a client that exists, an account another client has, a release not imported, a console without a domain and an id that can't be a hostname", async () => {
+  it("refuses a client that exists, an account another client has, a release not imported, a console without a domain or the sign-in's OAuth app, and an id that can't be a hostname", async () => {
     const { clientId, input } = await setUp();
     await using run = await followRuns();
     await startProvisioning(env, staff, input);
@@ -909,6 +909,10 @@ describe("provisioning a new client", () => {
       domain: await codeOf(
         startProvisioning({ ...env, CLIENT_DOMAIN: "" }, staff, other.input)
       ),
+      // Its sign-in is through Google, and the console has no Google app.
+      app: await codeOf(
+        startProvisioning({ ...env, GOOGLE_CLIENT_ID: "" }, staff, other.input)
+      ),
       // Active now: nothing to resume.
       resume: await codeOf(retryProvisioning(env, staff, clientId)),
     }).toStrictEqual({
@@ -916,6 +920,7 @@ describe("provisioning a new client", () => {
       account: "account_taken",
       release: "release_not_imported",
       domain: "domain_not_set",
+      app: "sign_in_app_missing",
       resume: "not_provisioning",
     });
     await expect(

@@ -116,14 +116,15 @@ export const clientRuns = sqliteTable("client_runs", {
   clientId: text("client_id").primaryKey(),
   /**
    * The runner's id: a provisioning run's Workflow instance
-   * (`<clientId>-<random>`), a rollout's (the rollout's id), or a
-   * rollback's (`rollback-<random>`).
+   * (`<clientId>-<random>`), a rollout's (the rollout's id), a
+   * rollback's (`rollback-<random>`), or applying the client's settings
+   * (`apply-<random>`, src/clients/apply.ts).
    */
   runId: text("run_id").notNull(),
   /** When it was claimed: a run not created yet counts as starting for a while. */
   claimedAt: timestamp("claimed_at").notNull(),
   /** Which Workflow the runner is an instance of. */
-  kind: text({ enum: ["provision", "rollout", "rollback"] })
+  kind: text({ enum: ["provision", "rollout", "rollback", "apply"] })
     .notNull()
     .default("provision"),
 });
