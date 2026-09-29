@@ -92,6 +92,7 @@ export const signedCall = async (
       mask,
       restricted,
       origin: holds ? { permissionId, context } : undefined,
+      context,
       confirms,
     }
   );
@@ -168,6 +169,44 @@ export const requireStepKey = (
 };
 
 /**
+ * Everything of a stub call before connect sees it: the feature, the
+ * call's shape, the permission and the signed capability. What it refuses
+ * connect never saw, so connect recorded nothing of it; errors as the
+ * sandbox sees them.
+ */
+export const signedStubCall = async (
+  env: Env,
+  authority: Authority | ((key: string | undefined) => Promise<Authority>),
+  { context, permissionId, connection }: ConnectionGrant,
+  call: unknown[]
+): Promise<ConnectCall> => {
+  requireFeature(env, "connections");
+  const parsed = stubCallSchema.safeParse(call);
+  if (!parsed.success) {
+    throw connectErrors.create("connect.invalid");
+  }
+  const [action, input, options] = parsed.data;
+  try {
+    const { capability, scope } = await signedCall(
+      env,
+      {
+        authority:
+          typeof authority === "function"
+            ? await authority(options?.idempotencyKey)
+            : authority,
+        context,
+        connection,
+        permissionId,
+      },
+      { action, idempotencyKey: options?.idempotencyKey }
+    );
+    return { capability, ...scope, input };
+  } catch (error) {
+    throw forSandbox(error);
+  }
+};
+
+/**
  * Runs one stub call for `authority` (or for whoever it resolves to, given
  * the call's idempotency key, which the resolver may refuse), with errors
  * as the sandbox sees them. Every connection call of App, agent and
@@ -177,26 +216,12 @@ export const requireStepKey = (
 export const runStubCall = async (
   env: Env,
   authority: Authority | ((key: string | undefined) => Promise<Authority>),
-  { context, permissionId, connection }: ConnectionGrant,
+  grant: ConnectionGrant,
   call: unknown[]
 ): Promise<ConnectResult> => {
-  requireFeature(env, "connections");
-  const parsed = stubCallSchema.safeParse(call);
-  if (!parsed.success) {
-    throw connectErrors.create("connect.invalid");
-  }
-  const [action, input, options] = parsed.data;
+  const request = await signedStubCall(env, authority, grant, call);
   try {
-    return await callConnection(
-      env,
-      typeof authority === "function"
-        ? await authority(options?.idempotencyKey)
-        : authority,
-      context,
-      connection,
-      { action, input, idempotencyKey: options?.idempotencyKey },
-      permissionId
-    );
+    return await env.CONNECT.call(request);
   } catch (error) {
     throw forSandbox(error);
   }

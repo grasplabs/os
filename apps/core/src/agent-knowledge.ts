@@ -9,6 +9,7 @@ import type {
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import {
+  auditedCall,
   chatAuthority,
   chatContext,
   recordSources,
@@ -35,9 +36,12 @@ export class KnowledgeApi
   implements KnowledgeTools
 {
   /** Runs one read as the chat's agent, after the run's check. */
-  async #asAgent<T>(run: (reader: Reader) => Promise<T>): Promise<T> {
+  async #asAgent<T>(
+    method: string,
+    run: (reader: Reader) => Promise<T>
+  ): Promise<T> {
     const scope = this.ctx.props;
-    await requireOpenRun(this.env, scope);
+    await requireOpenRun(this.env, scope, method);
     return await readAsDelegate(
       this.env,
       chatAuthority(scope),
@@ -59,17 +63,37 @@ export class KnowledgeApi
 
   /**
    * The catalog names what may be read, and holds nothing of a sensitive
-   * collection (knowledge/tools.ts): nothing to record.
+   * collection (knowledge/tools.ts): no source to record with the chat.
+   * Knowledge doesn't record it; the call is, as every call of the chat's.
    */
   async catalog(): Promise<KnowledgeCatalog> {
-    return await this.#asAgent(
-      async (reader) => await catalog(this.env, reader)
+    const scope = this.ctx.props;
+    await requireOpenRun(this.env, scope, "knowledge.catalog");
+    return await auditedCall(
+      this.env,
+      scope,
+      {
+        method: "knowledge.catalog",
+        detailOf: (listed: KnowledgeCatalog) => ({
+          collections: listed.collections.length,
+          skills: listed.skills.length,
+        }),
+      },
+      async () =>
+        await readAsDelegate(
+          this.env,
+          chatAuthority(scope),
+          chatContext(scope),
+          undefined,
+          async (reader) => await catalog(this.env, reader)
+        )
     );
   }
 
   async search(query: unknown, options?: unknown): Promise<SearchResults> {
     return await this.#recorded(
       await this.#asAgent(
+        "knowledge.search",
         async (reader) => await search(this.env, reader, query, options)
       )
     );
@@ -78,6 +102,7 @@ export class KnowledgeApi
   async read(documentId: unknown, options?: unknown): Promise<KnowledgeRead> {
     return await this.#recorded(
       await this.#asAgent(
+        "knowledge.read",
         async (reader) => await read(this.env, reader, documentId, options)
       )
     );
@@ -86,6 +111,7 @@ export class KnowledgeApi
   async follow(documentId: unknown): Promise<FollowResult> {
     return await this.#recorded(
       await this.#asAgent(
+        "knowledge.follow",
         async (reader) => await follow(this.env, reader, documentId)
       )
     );

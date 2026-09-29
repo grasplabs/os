@@ -1,6 +1,7 @@
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
+import { connectionsApi } from "./agent-connections.ts";
 import { knowledgeApi } from "./agent-knowledge.ts";
 import { requireOpenRun } from "./agent-scope.ts";
 import type { AgentApi, AgentScope } from "./agent-scope.ts";
@@ -14,15 +15,16 @@ import type { AgentApi, AgentScope } from "./agent-scope.ts";
 // An API that reaches a person's data acts as the chat's agent on behalf
 // of the chat's person (`chatAuthority`), under the agent's permissions
 // and never past what the person may do themselves, checked again on every
-// call, with the chat as its context: where restricted mode is kept. What
-// it reads is recorded in the audit log, and what it read from is recorded
-// with the chat before the call hands it over (`recordSources`).
+// call, with the chat as its context: where restricted mode is kept. Every
+// call is recorded in the audit log, by what serves it or as `agent.call`
+// (`auditAgentCall`), and what it read from is recorded with the chat
+// before the call hands it over (`recordSources`).
 
 /** The chat the code runs in, for the code: `await env.chat.info()`. */
 export class ChatApi extends WorkerEntrypoint<Env, AgentScope> {
   /** The chat, the person it acts for, and the time now. */
   async info(): Promise<{ chatId: string; personId: string; now: string }> {
-    await requireOpenRun(this.env, this.ctx.props);
+    await requireOpenRun(this.env, this.ctx.props, "chat.info");
     const { chatId, personId } = this.ctx.props;
     return { chatId, personId, now: new Date().toISOString() };
   }
@@ -50,7 +52,7 @@ const apiNameSchema = z
 
 /** The APIs a chat's code gets. */
 export const agentApis = (): readonly AgentApi[] =>
-  [chatApi, knowledgeApi].map((api) => ({
+  [chatApi, knowledgeApi, connectionsApi].map((api) => ({
     ...api,
     name: apiNameSchema.parse(api.name),
   }));

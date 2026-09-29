@@ -268,17 +268,20 @@ export class Workspace extends DurableObject<Env> {
     const state = this.#codeRuns.get(key);
     if (typeof state === "number") {
       if (state >= codeLimits.subRequests) {
-        return "spent";
+        // Counted once past the most, so only the first refusal says so.
+        this.#codeRuns.set(key, codeLimits.subRequests + 1);
+        return { call: "spent", first: state === codeLimits.subRequests };
       }
       this.#codeRuns.set(key, state + 1);
-      return "open";
+      return { call: "open", first: false };
     }
     if (state === "ended") {
       // Code still acting after its run ended: worth seeing in the logs.
       log.warn("agent.run_ended", { chatId, runId });
       this.#codeRuns.set(key, "reported");
+      return { call: "ended", first: true };
     }
-    return "ended";
+    return { call: "ended", first: false };
   }
 
   /**

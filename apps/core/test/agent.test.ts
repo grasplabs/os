@@ -89,6 +89,26 @@ const codeOf = async (call: Promise<unknown>) => {
   return "answered";
 };
 
+/**
+ * The `agent.call` events of chat `chatId` refused for `reason`, once the
+ * outboxes are drained: all of them, however many there should be.
+ */
+const refusalsIn = async (chatId: string, reason: string) => {
+  const events = await allEvents();
+  return events
+    .filter(
+      ({ action, detail }) =>
+        action === "agent.call" &&
+        detail.chat === chatId &&
+        detail.reason === reason
+    )
+    .map(({ detail }) => ({
+      method: detail.method,
+      outcome: detail.outcome,
+      reason: detail.reason,
+    }));
+};
+
 /** The one warning a call from an ended run logs. */
 const runEndedSchema = z.object({
   event: z.literal("agent.run_ended"),
@@ -302,7 +322,7 @@ describe("chat agent sandbox", () => {
 
     expect(result).toStrictEqual({
       isError: false,
-      text: `Returned:\n${JSON.stringify({ given: ["chat", "knowledge"], imported: [], exports: [] })}`,
+      text: `Returned:\n${JSON.stringify({ given: ["chat", "knowledge", "connections"], imported: [], exports: [] })}`,
     });
   });
 
@@ -313,7 +333,7 @@ describe("chat agent sandbox", () => {
 
     expect(result?.isError).toBeTruthy();
     expect(result?.text).toContain(
-      "This chat has no API named env.mailbox. It has: env.chat, env.knowledge."
+      "This chat has no API named env.mailbox. It has: env.chat, env.knowledge, env.connections."
     );
   });
 
@@ -377,7 +397,7 @@ describe("chat agent sandbox", () => {
       runInDurableObject(stub, (instance) =>
         instance.callFromCodeRun(chat.id, "not-a-run")
       )
-    ).resolves.toBe("ended");
+    ).resolves.toStrictEqual({ call: "ended", first: false });
     const { runId } = runEndedSchema.parse(
       warned.mock.calls
         .map(([entry]: unknown[]) => entry)
@@ -393,27 +413,63 @@ describe("chat agent sandbox", () => {
             )
         )
       )
-    ).resolves.toStrictEqual(["ended", "ended"]);
+    ).resolves.toStrictEqual([
+      { call: "ended", first: false },
+      { call: "ended", first: false },
+    ]);
     expect(
       warned.mock.calls.filter(([entry]) =>
         JSON.stringify(entry).includes(chat.id)
       )
     ).toHaveLength(1);
     warned.mockRestore();
+    // And audited once, as a refused call of the chat's: the code's second
+    // call after the end, and the two above, add nothing.
+    await vi.waitFor(
+      async () => {
+        await expect(
+          refusalsIn(chat.id, "agent.run_ended")
+        ).resolves.toStrictEqual([
+          {
+            method: "chat.info",
+            outcome: "refused",
+            reason: "agent.run_ended",
+          },
+        ]);
+      },
+      { timeout: 10_000, interval: 100 }
+    );
   });
 
-  it("stops a run's API calls at the most one run may make", async () => {
-    const result = await runStep(
-      "export default async (env) => { let answered = 0; for (let i = 0; i < 150; i++) { try { await env.chat.info(); answered += 1; } catch (error) { return { answered, refused: String(error.message) }; } } return { answered }; };"
+  it("stops a run's API calls at the most one run may make, and audits that once", async () => {
+    const { stub, chat, ask } = await newChat(
+      codeStep(
+        "export default async (env) => { let answered = 0; let refused = 0; let message; for (let i = 0; i < 150; i++) { try { await env.chat.info(); answered += 1; } catch (error) { refused += 1; message = String(error.message); } } return { answered, refused, message }; };"
+      ),
+      says("Done.")
     );
 
+    await ask("Run it.");
+
+    const [result] = await codeResults(stub, chat.id);
     expect(result?.isError).toBeFalsy();
     expect(
       JSON.parse(result?.text.replace("Returned:\n", "") ?? "")
     ).toStrictEqual({
       answered: codeLimits.subRequests,
-      refused: agentErrors.create("agent.run_calls_spent").message,
+      refused: 150 - codeLimits.subRequests,
+      message: agentErrors.create("agent.run_calls_spent").message,
     });
+    // Fifty refusals, one audit event.
+    await expect(
+      refusalsIn(chat.id, "agent.run_calls_spent")
+    ).resolves.toStrictEqual([
+      {
+        method: "chat.info",
+        outcome: "refused",
+        reason: "agent.run_calls_spent",
+      },
+    ]);
   });
 
   it("has no Cache API to hand data to another chat", async () => {

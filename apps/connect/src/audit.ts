@@ -220,6 +220,11 @@ export const auditCall = async (
   add("sideEffect", sideEffect);
   // Only when it is: from a context that had read restricted data.
   add("restricted", claims?.restricted === true ? true : undefined);
+  // Which chat of its workspace an agent called from.
+  add(
+    "chat",
+    claims?.context?.type === "chat" ? claims.context.chatId : undefined
+  );
   add("reason", reason);
   add("pendingActionId", record.pendingActionId);
   add("provenanceCount", provenance.length);
