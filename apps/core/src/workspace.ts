@@ -19,7 +19,7 @@ import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
 
 import { agentApis } from "./agent-apis.ts";
-import { chatAuthority, chatContext } from "./agent-scope.ts";
+import { auditAgentCall, chatAuthority, chatContext } from "./agent-scope.ts";
 import type { CodeRunCall } from "./agent-scope.ts";
 import { isMessage, runTurn } from "./agent.ts";
 import type { TurnContext, TurnResult } from "./agent.ts";
@@ -188,7 +188,7 @@ export class Workspace extends DurableObject<Env> {
       const authority = chatAuthority(scope);
       const work = chatContext(scope);
       // Before the model is admitted: what memory reads is a source too.
-      const context = await this.#turnContext(authority, work);
+      const context = await this.#turnContext(scope, authority, work);
       // Refuses a model the deployment or its rules don't allow before
       // anything is kept. Every request carries everything the chat has
       // read from, in this turn and every one before it, read again for
@@ -262,6 +262,7 @@ export class Workspace extends DurableObject<Env> {
    * recorded as sources), and the skills in the chat's Knowledge catalog.
    */
   async #turnContext(
+    scope: Parameters<typeof auditAgentCall>[1],
     authority: Parameters<typeof forContext>[1],
     work: Extract<WorkContext, { type: "chat" }>
   ): Promise<TurnContext> {
@@ -272,13 +273,22 @@ export class Workspace extends DurableObject<Env> {
     if (!featureEnabled(this.env, "knowledge")) {
       return { memory, skills: [] };
     }
-    const { skills } = await readAsDelegate(
+    const { collections, skills } = await readAsDelegate(
       this.env,
       authority,
       work,
       undefined,
       async (reader) => await catalog(this.env, reader)
     );
+    // Recorded as the code's catalog call is: what the agent saw listed.
+    await auditAgentCall(this.env, scope, {
+      method: "knowledge.catalog",
+      detail: {
+        collections: collections.length,
+        skills: skills.length,
+        turn: true,
+      },
+    });
     return { memory, skills };
   }
 

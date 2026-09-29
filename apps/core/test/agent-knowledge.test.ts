@@ -223,11 +223,17 @@ describe("a chat's Knowledge", setUpTime, () => {
     );
     // The catalog, which Knowledge doesn't record, is recorded as a call.
     const events = await eventsOf(agent.agentId, (all) =>
-      all.some(({ action }) => action === "agent.call")
+      all.some(
+        ({ action, detail }) => action === "agent.call" && detail.turn !== true
+      )
     );
     expect(
       events
-        .filter(({ action }) => action === "agent.call")
+        // Not the catalog each turn reads for its skills.
+        .filter(
+          ({ action, detail }) =>
+            action === "agent.call" && detail.turn !== true
+        )
         .map(({ detail }) => detail)
     ).toStrictEqual([
       {

@@ -152,16 +152,20 @@ describe("a chat's connections", setUpTime, () => {
       chat.agent.agentId,
       (all) =>
         all.filter(
-          ({ action }) =>
-            action === "agent.call" || action === "connection.call"
+          ({ action, detail }) =>
+            // Not the catalog each turn reads for its skills.
+            (action === "agent.call" && detail.turn !== true) ||
+            action === "connection.call"
         ).length === 4
     );
     const actor = { ...chat.agent, onBehalfOf: person.userId };
     expect(
       events
         .filter(
-          ({ action }) =>
-            action === "agent.call" || action === "connection.call"
+          ({ action, detail }) =>
+            // Not the catalog each turn reads for its skills.
+            (action === "agent.call" && detail.turn !== true) ||
+            action === "connection.call"
         )
         .map(({ action, actor: by, target, detail }) => ({
           action,

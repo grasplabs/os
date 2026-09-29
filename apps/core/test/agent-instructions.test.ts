@@ -1,8 +1,9 @@
 import { permissionErrors } from "@grasp-os/shared/permissions";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 
 import { chatOf, codeResults, codeStep, says } from "./agent-chat.ts";
 import { requestGranted } from "./apps.ts";
+import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { readCollection } from "./knowledge.ts";
 import { signedInApi, unique } from "./sign-in.ts";
@@ -104,6 +105,45 @@ describe("a chat's instructions and memory", setUpTime, () => {
       third: [true, true, true],
       unchanged: true,
     });
+  });
+
+  it("record the catalog each turn reads for its skills, once a turn", async () => {
+    const person = await signedInApi(idp, "user");
+    const { ask, agent, chat } = await chatOf(
+      person.userId,
+      says("Hi."),
+      says("Hi again.")
+    );
+
+    await ask("Hi.");
+    await ask("Hi again.");
+
+    const turns = await vi.waitFor(
+      async () => {
+        const events = await allEvents();
+        const found = events.filter(
+          ({ action, actor, detail }) =>
+            action === "agent.call" &&
+            actor.type === "agent" &&
+            actor.agentId === agent.agentId &&
+            detail.turn === true
+        );
+        expect(found).toHaveLength(2);
+        return found;
+      },
+      { timeout: 10_000, interval: 50 }
+    );
+    expect(turns.map(({ detail }) => detail)).toStrictEqual(
+      Array.from({ length: 2 }, () => ({
+        method: "knowledge.catalog",
+        collections: 0,
+        skills: 0,
+        turn: true,
+        chat: chat.id,
+        outcome: "ok",
+        reason: null,
+      }))
+    );
   });
 
   it("label each answer with what the chat read, and whether it read restricted data", async () => {
