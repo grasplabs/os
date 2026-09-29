@@ -22,7 +22,13 @@ import type { WorkContext } from "./restricted.ts";
 
 /** Whom and where an agent's code acts for, as core sets it. */
 export interface AgentScope {
+  /** The Workspace object that holds the chat. */
   workspaceId: WorkspaceId;
+  /**
+   * The agent that acts, as the chat stored it: the workspace agent admins
+   * grant to, whichever object holds the chat (a person's own, say).
+   */
+  agentId: string;
   chatId: ChatId;
   /** The person the chat belongs to, whom the agent acts for. */
   personId: string;
@@ -49,29 +55,28 @@ export interface AgentApi {
 }
 
 /**
- * A workspace's ID as its agent's ID: letters, digits and `-` only (a
- * UUID, as core names workspaces), so it reads the same in a permission,
- * an audit event and a memory path (`agents/<id>/AGENTS.md`), and never
- * reaches into another's.
+ * A workspace agent's ID: letters, digits and `-` only (as core names
+ * workspaces), so it reads the same in a permission, an audit event and a
+ * memory path (`agents/<id>/AGENTS.md`), and never reaches into another's.
  */
-const workspaceAgentIdSchema = z.string().regex(/^[A-Za-z0-9-]{1,64}$/u);
+export const workspaceAgentIdSchema = z.string().regex(/^[A-Za-z0-9-]{1,64}$/u);
 
 /**
- * The workspace's agent, acting for the chat's person: the one acting on
- * every call its code makes, in the audit log and in every permission
- * check. One agent per workspace, so what an admin grants it holds in all
- * the workspace's chats; each chat still keeps its own sources, restricted
- * mode and code runs (the chat is the context, `chatContext`). Its
- * permissions are the agent's own, and every one reaches only as far as
- * the person may go themselves.
+ * The chat's agent, acting for the chat's person: the one acting on every
+ * call its code makes, in the audit log and in every permission check. One
+ * agent per workspace, so what an admin grants it holds in all the
+ * workspace's chats, whichever object holds them; each chat still keeps
+ * its own sources, restricted mode and code runs (the chat is the context,
+ * `chatContext`). Its permissions are the agent's own, and every one
+ * reaches only as far as the person may go themselves.
  */
 export const chatAuthority = ({
-  workspaceId,
+  agentId: stored,
   personId,
-}: Omit<AgentScope, "runId" | "chatId">): Authority => {
-  const agentId = workspaceAgentIdSchema.safeParse(workspaceId);
+}: Pick<AgentScope, "agentId" | "personId">): Authority => {
+  const agentId = workspaceAgentIdSchema.safeParse(stored);
   if (!agentId.success) {
-    // No workspace core names: nowhere an agent can work.
+    // No agent core names: nowhere an agent can work.
     throw permissionErrors.create("permission.context_invalid");
   }
   return authoritySchema.parse({

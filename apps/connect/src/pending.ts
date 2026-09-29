@@ -5,6 +5,7 @@ import {
   connectCallSchema,
   connectErrors,
   connectionPersonSchema,
+  declineChatActionsSchema,
   heldRequestSchema,
   pendingKeySchema,
   refuseConfirmationSchema,
@@ -520,6 +521,60 @@ export const pendingActionFor = async (
     )
     .get();
   return row === undefined ? null : summaryOf(row);
+};
+
+/** Most held actions one round of `declineChatActions` reads and declines. */
+const declineChunk = 100;
+
+/**
+ * Declines every held action of one chat waiting for the person, as the
+ * person declines one (`take`, each with its event): a chunk at a time,
+ * until none is left, so however many there are, none is missed and no
+ * read is unbounded. One decided meanwhile is gone already, which is what
+ * this wants. How many it declined; none for Grasp staff.
+ */
+export const declineChatActions = async (
+  env: Env,
+  request: unknown
+): Promise<number> => {
+  const parsed = declineChatActionsSchema.safeParse(request);
+  if (!parsed.success) {
+    throw connectErrors.create("connect.invalid");
+  }
+  const { person, workspaceId, chatId } = parsed.data;
+  if (person.staff) {
+    return 0;
+  }
+  let declined = 0;
+  for (;;) {
+    // oxlint-disable-next-line no-await-in-loop -- a chunk at a time
+    const rows = await drizzle(env.DB)
+      .select()
+      .from(pendingActions)
+      .where(
+        and(
+          eq(pendingActions.onBehalfOf, person.userId),
+          sql`json_extract(${pendingActions.context}, '$.type') = 'chat'`,
+          sql`json_extract(${pendingActions.context}, '$.workspaceId') = ${workspaceId}`,
+          sql`json_extract(${pendingActions.context}, '$.chatId') = ${chatId}`
+        )
+      )
+      .limit(declineChunk);
+    if (rows.length === 0) {
+      return declined;
+    }
+    for (const row of rows) {
+      try {
+        // oxlint-disable-next-line no-await-in-loop -- one at a time, each recorded
+        await take(env, person, row, "decline");
+        declined += 1;
+      } catch (error) {
+        if (connectErrors.codeOf(error) !== "connect.pending_not_found") {
+          throw error;
+        }
+      }
+    }
+  }
 };
 
 /**

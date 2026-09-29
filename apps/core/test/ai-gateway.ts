@@ -24,6 +24,11 @@ export type GatewayReply =
       outputTokens: number;
       /** The model hit its output limit (Anthropic and chat completions). */
       truncated?: boolean;
+      /**
+       * Streams the text's first `at` characters, then waits for `until`
+       * before the rest (Anthropic only): an answer caught mid-stream.
+       */
+      pause?: { at: number; until: Promise<unknown> };
     }
   | { status: number; errorType?: string }
   | { hang: true };
@@ -36,31 +41,56 @@ export interface GatewayRequest {
 
 const encoder = new TextEncoder();
 
-/** A server-sent event stream of `events`, each with its SSE event name. */
-const eventStream = (
-  events: readonly { event?: string; data: unknown }[],
-  logId: string
-): Response =>
-  new Response(
-    encoder.encode(
-      events
-        .map(({ event, data }) =>
-          [
-            ...(event === undefined ? [] : [`event: ${event}`]),
-            `data: ${typeof data === "string" ? data : JSON.stringify(data)}`,
-            "",
-            "",
-          ].join("\n")
-        )
-        .join("")
-    ),
-    {
-      headers: {
-        "content-type": "text/event-stream",
-        "cf-aig-log-id": logId,
-      },
-    }
+/** One server-sent event, with its SSE event name. */
+interface StreamEvent {
+  event?: string;
+  data: unknown;
+}
+
+/** Where a stream stops until the promise settles (`pause`). */
+interface StreamPause {
+  until: Promise<unknown>;
+}
+
+const sse = ({ event, data }: StreamEvent): Uint8Array =>
+  encoder.encode(
+    [
+      ...(event === undefined ? [] : [`event: ${event}`]),
+      `data: ${typeof data === "string" ? data : JSON.stringify(data)}`,
+      "",
+      "",
+    ].join("\n")
   );
+
+/**
+ * A server-sent event stream of `events`, stopping at each pause until it
+ * settles.
+ */
+const eventStream = (
+  events: readonly (StreamEvent | StreamPause)[],
+  logId: string
+): Response => {
+  const { readable, writable } = new TransformStream<Uint8Array>();
+  const write = async (): Promise<void> => {
+    const writer = writable.getWriter();
+    try {
+      for (const item of events) {
+        // oxlint-disable-next-line no-await-in-loop -- in order, pausing where told
+        await ("until" in item ? item.until : writer.write(sse(item)));
+      }
+      await writer.close();
+    } catch {
+      // The request was aborted: nobody reads the rest.
+    }
+  };
+  void write();
+  return new Response(readable, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cf-aig-log-id": logId,
+    },
+  });
+};
 
 type Answer = Extract<GatewayReply, { text: string }>;
 
@@ -75,7 +105,30 @@ const stopOf = (
   return (toolCalls ?? []).length > 0 ? toolUse : stop;
 };
 
-const anthropicEvents = (answer: Answer) => {
+/** A text block's deltas: the text, or its two parts either side of a pause. */
+const textDeltas = (
+  index: number,
+  text: string,
+  pause: Answer["pause"]
+): (StreamEvent | StreamPause)[] => {
+  const delta = (part: string): StreamEvent => ({
+    event: "content_block_delta",
+    data: {
+      type: "content_block_delta",
+      index,
+      delta: { type: "text_delta", text: part },
+    },
+  });
+  return pause === undefined
+    ? [delta(text)]
+    : [
+        delta(text.slice(0, pause.at)),
+        { until: pause.until },
+        delta(text.slice(pause.at)),
+      ];
+};
+
+const anthropicEvents = (answer: Answer): (StreamEvent | StreamPause)[] => {
   const { text, inputTokens, outputTokens } = answer;
   const blocks = [
     ...(text === "" ? [] : [{ type: "text" as const, text }]),
@@ -113,20 +166,21 @@ const anthropicEvents = (answer: Answer) => {
               : { type: "tool_use", id: block.id, name: block.name, input: {} },
         },
       },
-      {
-        event: "content_block_delta",
-        data: {
-          type: "content_block_delta",
-          index,
-          delta:
-            block.type === "text"
-              ? { type: "text_delta", text: block.text }
-              : {
+      ...(block.type === "text"
+        ? textDeltas(index, block.text, answer.pause)
+        : [
+            {
+              event: "content_block_delta",
+              data: {
+                type: "content_block_delta",
+                index,
+                delta: {
                   type: "input_json_delta",
                   partial_json: JSON.stringify(block.arguments),
                 },
-        },
-      },
+              },
+            },
+          ]),
       {
         event: "content_block_stop",
         data: { type: "content_block_stop", index },

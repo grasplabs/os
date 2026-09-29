@@ -29,7 +29,8 @@ export const newChat = async (
   );
   const { id } = await workspace(env, workspaceId).createChat(
     "Chat",
-    "person-1"
+    "person-1",
+    subject.type === "agent" ? subject.agentId : "nobody"
   );
   return { type: "chat", workspaceId, chatId: id };
 };

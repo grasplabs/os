@@ -1,33 +1,59 @@
-import type { Message } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 import { agentErrors } from "@grasp-os/shared/agent";
 import {
   auditProvenanceMaxItems,
+  createAuditEvent,
   delegateActorOf,
 } from "@grasp-os/shared/audit";
-import { featureErrors } from "@grasp-os/shared/errors";
+import type { AuditActor, AuditDetailValue } from "@grasp-os/shared/audit";
+import type {
+  ChatMessage,
+  ChatProvenance,
+  ChatSummary,
+} from "@grasp-os/shared/chat";
+import type { ConnectionPerson } from "@grasp-os/shared/connect";
+import {
+  featureErrors,
+  internalErrors,
+  isExpectedError,
+} from "@grasp-os/shared/errors";
 import {
   chatIdSchema,
   identifierSchema,
   workspaceIdSchema,
 } from "@grasp-os/shared/ids";
 import type { ChatId } from "@grasp-os/shared/ids";
-import { log } from "@grasp-os/shared/log";
+import { errorFields, log } from "@grasp-os/shared/log";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { DurableObject } from "cloudflare:workers";
-import { asc, eq } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
 
 import { agentApis } from "./agent-apis.ts";
-import { auditAgentCall, chatAuthority, chatContext } from "./agent-scope.ts";
+import {
+  auditAgentCall,
+  chatAuthority,
+  chatContext,
+  workspaceAgentIdSchema,
+} from "./agent-scope.ts";
 import type { CodeRunCall } from "./agent-scope.ts";
 import { isMessage, runTurn } from "./agent.ts";
 import type { TurnContext, TurnResult } from "./agent.ts";
+import { drainObjectOutbox } from "./audit-outbox.ts";
 import { memberRole } from "./auth/identity.ts";
+import { chatMessageOf, partialOf } from "./chat-messages.ts";
+import { ChatWatch } from "./chat-watch.ts";
+import type { ChatListener, ChatState } from "./chat-watch.ts";
 import { codeLimits } from "./code-mode.ts";
 import { migrateOnWake } from "./db/migrate.ts";
 import migrations from "./db/workspace/migrations/migrations.js";
-import { chatMessages, chatSources, chats } from "./db/workspace/schema.ts";
+import {
+  auditOutbox,
+  chatMessages,
+  chatSources,
+  chats,
+} from "./db/workspace/schema.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
 import { readAsDelegate } from "./knowledge/binding.ts";
 import { forContext } from "./knowledge/memory.ts";
@@ -38,7 +64,7 @@ import type { WorkContext } from "./restricted.ts";
 export type Chat = typeof chats.$inferSelect;
 
 /** A question for a chat's agent, and the model to answer it with. */
-const questionSchema = z.strictObject({
+export const questionSchema = z.strictObject({
   text: z.string().trim().min(1).max(100_000),
   /** `<provider>/<model>`, one the deployment allows. */
   model: z.string().min(1),
@@ -66,6 +92,9 @@ const storedMessageSchema = z.custom<Message>(
   (value) => typeof value === "object" && value !== null && isMessage(value)
 );
 
+/** The message a watcher saw last: none (`null`), or a stored one's ID. */
+const afterSchema = z.int().nonnegative().nullable();
+
 /**
  * Most characters a chat's transcript may hold: a chat past it takes no
  * more questions, so loading one never parses more than this and one turn.
@@ -84,6 +113,40 @@ const endedRunsKept = 1000;
  * a few collections or a connection, each an identifier.
  */
 const sourcesSchema = z.array(identifierSchema).max(auditProvenanceMaxItems);
+
+/**
+ * Most chats a person's list shows: their newest. Older ones are still
+ * there, and open from a link.
+ */
+export const listedChats = 200;
+
+/**
+ * Most watchers one Workspace object keeps at once: a person's own object
+ * holds their chats alone, so this bounds what their pages make it hold,
+ * and nobody else's.
+ */
+const maxWatchers = 50;
+
+/**
+ * How long the object waits to deliver its audit events again while the
+ * log is out of reach: at first, and at most, doubling in between.
+ */
+const auditRetryMs = { first: 5000, most: 15 * 60 * 1000 };
+
+/** Most chats a person keeps: delete one to make another. */
+export const maxChatsPerPerson = 500;
+
+/**
+ * Why a turn under way stopped short of an answer, as its person reads
+ * it: an unplanned error is logged, and shown as one.
+ */
+const stopReason = (chatId: ChatId, error: unknown): string => {
+  if (isExpectedError(error)) {
+    return error.message;
+  }
+  log.error("agent.turn_failed", { chatId, ...errorFields(error) });
+  return internalErrors.create("internal.unexpected").message;
+};
 
 /** A person's or team's workspace: chats and the Code Mode agent on Pi. */
 export class Workspace extends DurableObject<Env> {
@@ -104,27 +167,170 @@ export class Workspace extends DurableObject<Env> {
    */
   readonly #codeRuns = new Map<string, number | "ended" | "reported">();
 
+  /**
+   * The response each chat's agent is writing now, as it streams in: what
+   * a watcher sees of it before it is stored. In memory only, like turns.
+   */
+  readonly #partials = new Map<ChatId, AssistantMessage>();
+
+  /**
+   * Why each chat's last question stopped before the agent answered, when
+   * it wasn't the model (see `ChatUpdate.stopped`). In memory only.
+   */
+  readonly #stopped = new Map<ChatId, string>();
+
+  /**
+   * Turns `send` started, each settled once its turn ends: the alarm waits
+   * for them, so the object stays up while its agent works with nobody
+   * waiting on a call.
+   */
+  readonly #sent = new Set<Promise<void>>();
+
+  /**
+   * Bumped whenever a chat's sources or restricted mode change, so a
+   * watcher reads them again only then. In memory: a watcher starts with
+   * none, so it reads them first.
+   */
+  readonly #provenanceVersions = new Map<ChatId, number>();
+
+  /**
+   * Chats being deleted (`deleteChat`): they take no question meanwhile.
+   * In memory, for the one call that deletes: a restart ends that call.
+   */
+  readonly #deleting = new Set<ChatId>();
+
+  /** How long the alarm waits before delivering audit events again. */
+  #auditRetryMs = auditRetryMs.first;
+
+  /** Who follows each chat (`watch`), by chat and watch ID. */
+  readonly #watchers = new Map<ChatId, Map<string, ChatWatch>>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     migrateOnWake(ctx, migrations);
   }
 
-  /** A new chat, which belongs to `personId`: its agent acts for them. */
-  createChat(title: string, personId: string): Chat {
-    return this.#db
-      .insert(chats)
+  /**
+   * A new chat, which belongs to `personId`: agent `agentId` answers in it,
+   * acting for them. Refused past {@link maxChatsPerPerson}. Made `by`
+   * someone (the person, through the chat API), it is audited with it, in
+   * the same transaction; core's own chats (tests) pass nobody.
+   */
+  createChat(
+    title: string,
+    personId: string,
+    agentId: string,
+    by?: AuditActor
+  ): Chat {
+    const agent = workspaceAgentIdSchema.safeParse(agentId);
+    if (!agent.success) {
+      // No agent core names: nowhere an agent can work.
+      throw permissionErrors.create("permission.context_invalid");
+    }
+    const [kept] = this.#db
+      .select({ count: count() })
+      .from(chats)
+      .where(eq(chats.personId, personId))
+      .all();
+    if ((kept?.count ?? 0) >= maxChatsPerPerson) {
+      throw agentErrors.create("agent.too_many_chats");
+    }
+    const id = chatIdSchema.parse(crypto.randomUUID());
+    const chat = this.ctx.storage.transactionSync(() => {
+      if (by !== undefined) {
+        this.#outboxed(by, "chat.created", id);
+      }
+      return this.#db
+        .insert(chats)
+        .values({
+          id,
+          title,
+          createdAt: new Date(),
+          personId,
+          agentId: agent.data,
+        })
+        .returning()
+        .get();
+    });
+    this.#deliverAudit();
+    return chat;
+  }
+
+  /**
+   * Stores the audit event of a change to chat `chatId` in this object's
+   * outbox: call it in the change's transaction, so both are kept or
+   * neither, then `#deliverAudit`. Names the chat and this object, never
+   * the chat's title, which may quote a question.
+   */
+  #outboxed(
+    by: AuditActor,
+    action: "chat.created" | "chat.renamed" | "chat.deleted",
+    chatId: ChatId,
+    detail: Record<string, AuditDetailValue> = {}
+  ): void {
+    const event = createAuditEvent(
+      {
+        actor: by,
+        action,
+        target: { type: "chat", id: chatId },
+        detail: { workspace: this.ctx.id.name ?? null, ...detail },
+      },
+      "core"
+    );
+    this.#db
+      .insert(auditOutbox)
       .values({
-        id: chatIdSchema.parse(crypto.randomUUID()),
-        title,
+        id: event.id,
+        event: JSON.stringify(event),
         createdAt: new Date(),
-        personId,
       })
-      .returning()
-      .get();
+      .run();
+  }
+
+  /**
+   * Delivers the outbox's events to the audit log now, in the background;
+   * while any are left (the log out of reach), the alarm tries again,
+   * waiting longer each time.
+   */
+  #deliverAudit(): void {
+    this.ctx.waitUntil(this.#drainAudit());
+  }
+
+  async #drainAudit(): Promise<void> {
+    const left = await drainObjectOutbox(this.env, this.ctx.storage.sql);
+    if (left === 0) {
+      this.#auditRetryMs = auditRetryMs.first;
+      return;
+    }
+    const retryMs = this.#auditRetryMs;
+    this.#auditRetryMs = Math.min(retryMs * 2, auditRetryMs.most);
+    await this.#alarmBy(Date.now() + retryMs);
+  }
+
+  /** Sets the alarm to go at `time` at the latest, never later than it was. */
+  async #alarmBy(time: number): Promise<void> {
+    const set = await this.ctx.storage.getAlarm();
+    if (set === null || set > time) {
+      await this.ctx.storage.setAlarm(time);
+    }
   }
 
   // Restricted mode of a chat (see restricted.ts). A chat that isn't here
   // has nowhere to keep it: both say so, and whatever asked is refused.
+
+  /**
+   * The agent that works in the chat and whether the chat has read
+   * restricted data; `undefined`: no such chat.
+   */
+  chatState(
+    chatId: ChatId
+  ): { agentId: string | null; restricted: boolean } | undefined {
+    return this.#db
+      .select({ agentId: chats.agentId, restricted: chats.restricted })
+      .from(chats)
+      .where(eq(chats.id, chatId))
+      .get();
+  }
 
   /** Whether the chat has read restricted data; `undefined`: no such chat. */
   isChatRestricted(chatId: ChatId): boolean | undefined {
@@ -144,7 +350,11 @@ export class Workspace extends DurableObject<Env> {
       .where(eq(chats.id, chatId))
       .returning({ id: chats.id })
       .all();
-    return changed.length > 0;
+    if (changed.length === 0) {
+      return false;
+    }
+    this.#provenanceChanged(chatId);
+    return true;
   }
 
   /**
@@ -152,37 +362,56 @@ export class Workspace extends DurableObject<Env> {
    * loop runs here, its code runs in isolates of its own, and every model
    * request goes through the model gateway, and its rules, as the chat's
    * agent acting for the chat's person. One turn at a time per chat.
+   * It takes its caller's word for who asks: a person's questions come
+   * through `send`, which checks the chat is theirs.
    */
   async ask(chatId: unknown, question: Question): Promise<Answer> {
+    return await this.#turn(this.#chat(chatId), question);
+  }
+
+  /**
+   * One turn of `chat`'s agent (`ask`). `started` is called once the turn
+   * is under way: the model admitted, and nothing kept yet.
+   */
+  async #turn(
+    chat: Chat,
+    question: Question,
+    started?: () => void
+  ): Promise<Answer> {
     requireFeature(this.env, "agent");
-    const chat = this.#chat(chatId);
     const parsed = questionSchema.safeParse(question);
     if (!parsed.success) {
       throw agentErrors.create("agent.invalid_question");
     }
     // The agent acts for the chat's own person, as this object stored it,
     // never for whoever asks, and only while they are still a member.
-    const { personId } = chat;
-    if (personId === null) {
+    const { personId, agentId } = chat;
+    if (personId === null || agentId === null) {
       throw agentErrors.create("agent.no_person");
     }
-    if (!(await memberRole(this.env.DB, personId))) {
-      throw permissionErrors.create("permission.person_inactive");
+    // Being deleted: its writes are being rejected, and it takes no more.
+    if (this.#deleting.has(chat.id)) {
+      throw agentErrors.create("agent.chat_not_found");
     }
     if (this.#turns.has(chat.id)) {
       throw agentErrors.create("agent.busy");
     }
-    // Taken before the next await, so a second question waits its turn.
+    // Taken before the first await, so a second question waits its turn
+    // and the chat isn't deleted under it (`deleteChat`).
     const cancel = new AbortController();
     this.#turns.set(chat.id, cancel);
     try {
+      if (!(await memberRole(this.env.DB, personId))) {
+        throw permissionErrors.create("permission.person_inactive");
+      }
       if (this.#storedChars(chat.id) > maxChatChars) {
         throw agentErrors.create("agent.chat_full");
       }
-      // The object is named after its workspace (`workspace` in
-      // durable-objects.ts).
+      // Where the chat is (this object, by the name core gave it:
+      // `workspace` in durable-objects.ts), and whose agent acts in it, as
+      // the chat stored it.
       const workspaceId = workspaceIdSchema.parse(this.ctx.id.name);
-      const scope = { workspaceId, chatId: chat.id, personId };
+      const scope = { workspaceId, agentId, chatId: chat.id, personId };
       // The workspace's agent, acting for the chat's person, in this chat:
       // the audit log's actor, and the rules' context (its restricted mode).
       const authority = chatAuthority(scope);
@@ -204,6 +433,9 @@ export class Workspace extends DurableObject<Env> {
         },
         () => this.#sources(chat.id)
       );
+      this.#stopped.delete(chat.id);
+      started?.();
+      this.#changed(chat.id);
       const result = await runTurn({
         history: this.#transcript(chat.id),
         question: parsed.data.text,
@@ -234,14 +466,27 @@ export class Workspace extends DurableObject<Env> {
         loader: this.env.LOADER,
         signal: cancel.signal,
         keep: (message) => {
-          this.#db
+          const { id, createdAt } = this.#db
             .insert(chatMessages)
             .values({
               chatId: chat.id,
               message: JSON.stringify(message),
               createdAt: new Date(),
             })
-            .run();
+            .returning({
+              id: chatMessages.id,
+              createdAt: chatMessages.createdAt,
+            })
+            .get();
+          if (message.role === "assistant") {
+            this.#partials.delete(chat.id);
+          }
+          const shown = chatMessageOf(id, message, createdAt);
+          this.#changed(chat.id, shown === undefined ? [] : [shown]);
+        },
+        write: (partial) => {
+          this.#partials.set(chat.id, partial);
+          this.#changed(chat.id);
         },
       });
       return {
@@ -253,6 +498,81 @@ export class Workspace extends DurableObject<Env> {
       };
     } finally {
       this.#turns.delete(chat.id);
+      this.#partials.delete(chat.id);
+      this.#changed(chat.id);
+    }
+  }
+
+  /**
+   * Asks `personId`'s own chat's agent a question (`ask`), and resolves
+   * once the turn is under way; refused as `ask` refuses one that can't
+   * start. The turn goes on with nobody waiting: its messages go to the
+   * chat's watchers as they come, and why it stopped, if it stopped short
+   * of an answer, with the chat's state (`ChatUpdate.stopped`).
+   */
+  async send(
+    chatId: unknown,
+    personId: string,
+    question: Question
+  ): Promise<void> {
+    const chat = this.#ownChat(chatId, personId);
+    const started = Promise.withResolvers<boolean>();
+    const ended = this.#sentTurn(chat, question, started);
+    this.#sent.add(ended);
+    void this.#forget(ended);
+    await started.promise;
+    // The alarm keeps the object up until the turn ends (`alarm`).
+    await this.#alarmBy(Date.now());
+  }
+
+  /**
+   * The turn `send` started: `started` resolves once it is under way, or
+   * rejects with why it couldn't start. Why one under way stopped short
+   * goes to the chat's watchers.
+   */
+  async #sentTurn(
+    chat: Chat,
+    question: Question,
+    started: PromiseWithResolvers<boolean>
+  ): Promise<void> {
+    let underWay = false;
+    try {
+      await this.#turn(chat, question, () => {
+        underWay = true;
+        started.resolve(true);
+      });
+    } catch (error) {
+      if (!underWay) {
+        started.reject(error);
+        return;
+      }
+      this.#stopped.set(chat.id, stopReason(chat.id, error));
+      this.#changed(chat.id);
+    }
+  }
+
+  /** Forgets a turn `send` started once it has ended. */
+  async #forget(ended: Promise<void>): Promise<void> {
+    try {
+      await ended;
+    } finally {
+      this.#sent.delete(ended);
+    }
+  }
+
+  /**
+   * Waits for every turn `send` started, however long they take: an
+   * object runs while an event of its own does, so it isn't evicted under
+   * a turn nobody waits on. An alarm may run 15 minutes; a turn that takes
+   * longer goes on while the object stays up. After a restart there are
+   * none: the chat goes on from what it stored.
+   */
+  override async alarm(): Promise<void> {
+    // Audit events the log didn't take yet go first: a turn may run long.
+    await this.#drainAudit();
+    while (this.#sent.size > 0) {
+      // oxlint-disable-next-line no-await-in-loop -- until none is left, as more may start
+      await Promise.all(this.#sent);
     }
   }
 
@@ -317,11 +637,11 @@ export class Workspace extends DurableObject<Env> {
   }
 
   /**
-   * Stops the chat's running turn, if there is one: the model request or
-   * code run in flight ends, and the turn answers `cancelled`.
+   * Stops `personId`'s own chat's running turn, if there is one: the model
+   * request or code run in flight ends, and the turn answers `cancelled`.
    */
-  cancel(chatId: unknown): boolean {
-    const turn = this.#turns.get(this.#chat(chatId).id);
+  cancel(chatId: unknown, personId: string): boolean {
+    const turn = this.#turns.get(this.#ownChat(chatId, personId).id);
     turn?.abort();
     return turn !== undefined;
   }
@@ -385,6 +705,7 @@ export class Workspace extends DurableObject<Env> {
       .values(sources.map((sourceId) => ({ chatId, sourceId, createdAt })))
       .onConflictDoNothing()
       .run();
+    this.#provenanceChanged(chatId);
   }
 
   /** Everything the chat has read from, as `recordSources` kept it. */
@@ -397,9 +718,211 @@ export class Workspace extends DurableObject<Env> {
       .map(({ sourceId }) => sourceId);
   }
 
-  /** The chat's transcript, oldest first. */
+  /**
+   * The chat's transcript, oldest first, as pi keeps it; for core's own
+   * reads. A person follows their chat through `watch`, which checks it is
+   * theirs.
+   */
   messages(chatId: unknown): Message[] {
     return this.#transcript(this.#chat(chatId).id);
+  }
+
+  /** `personId`'s chats, newest first: at most {@link listedChats}. */
+  chats(personId: string): ChatSummary[] {
+    return this.#db
+      .select({ id: chats.id, title: chats.title, createdAt: chats.createdAt })
+      .from(chats)
+      .where(eq(chats.personId, personId))
+      .orderBy(desc(chats.createdAt))
+      .limit(listedChats)
+      .all()
+      .map(({ id, title, createdAt }) => ({
+        id,
+        title,
+        createdAt: createdAt.toISOString(),
+        running: this.#turns.has(id),
+      }));
+  }
+
+  /** Renames `personId`'s own chat, audited as `by`'s. */
+  renameChat(
+    chatId: unknown,
+    personId: string,
+    title: string,
+    by: AuditActor
+  ): void {
+    const { id } = this.#ownChat(chatId, personId);
+    this.ctx.storage.transactionSync(() => {
+      this.#db.update(chats).set({ title }).where(eq(chats.id, id)).run();
+      this.#outboxed(by, "chat.renamed", id);
+    });
+    this.#deliverAudit();
+  }
+
+  /**
+   * Deletes `personId`'s own chat once its agent isn't working on it:
+   * rejects every write its agent holds for `person` (connect's
+   * `declineChatActions`, each recorded there), then deletes it with its
+   * messages and sources, audited as `by`'s. While it does, the chat is
+   * marked deleting and takes no question, so no write can be held after
+   * the rejecting; if rejecting fails, the mark goes and the chat stays.
+   * Its watchers get nothing more. How many writes it rejected.
+   */
+  async deleteChat(
+    chatId: unknown,
+    personId: string,
+    person: ConnectionPerson,
+    by: AuditActor
+  ): Promise<number> {
+    const { id } = this.#ownChat(chatId, personId);
+    if (person.userId !== personId) {
+      throw agentErrors.create("agent.chat_not_found");
+    }
+    if (this.#turns.has(id) || this.#deleting.has(id)) {
+      throw agentErrors.create("agent.busy");
+    }
+    this.#deleting.add(id);
+    try {
+      const declined = await this.env.CONNECT.declineChatActions({
+        person,
+        workspaceId: workspaceIdSchema.parse(this.ctx.id.name),
+        chatId: id,
+      });
+      this.ctx.storage.transactionSync(() => {
+        this.#db.delete(chatMessages).where(eq(chatMessages.chatId, id)).run();
+        this.#db.delete(chatSources).where(eq(chatSources.chatId, id)).run();
+        this.#db.delete(chats).where(eq(chats.id, id)).run();
+        this.#outboxed(by, "chat.deleted", id, { declined });
+      });
+      this.#deliverAudit();
+      this.#stopped.delete(id);
+      this.#provenanceVersions.delete(id);
+      for (const watch of this.#watchers.get(id)?.values() ?? []) {
+        watch[Symbol.dispose]();
+      }
+      this.#watchers.delete(id);
+      return declined;
+    } finally {
+      this.#deleting.delete(id);
+    }
+  }
+
+  /**
+   * Follows `personId`'s own chat: `listener` gets the messages stored
+   * after the one with ID `after` (all of them for `null`) and the chat as
+   * it is now, then an update on every change (chat-watch.ts). Returns the
+   * ID `unwatch` drops it by; one that can't be reached drops itself.
+   */
+  watch(
+    chatId: unknown,
+    personId: string,
+    after: unknown,
+    listener: ChatListener
+  ): string {
+    const { id } = this.#ownChat(chatId, personId);
+    const since = afterSchema.safeParse(after);
+    if (!since.success) {
+      throw agentErrors.create("agent.invalid_request");
+    }
+    let watching = 0;
+    for (const watchers of this.#watchers.values()) {
+      watching += watchers.size;
+    }
+    if (watching >= maxWatchers) {
+      throw agentErrors.create("agent.too_many_watches");
+    }
+    const watchId = crypto.randomUUID();
+    const watch = new ChatWatch(
+      listener.dup(),
+      () => this.#state(id),
+      () => this.#provenance(id),
+      () => {
+        this.unwatch(id, watchId);
+      }
+    );
+    const watchers = this.#watchers.get(id) ?? new Map<string, ChatWatch>();
+    watchers.set(watchId, watch);
+    this.#watchers.set(id, watchers);
+    watch.push(this.#shownAfter(id, since.data ?? 0));
+    return watchId;
+  }
+
+  /** Drops the watcher `watch` kept as `watchId`, if it still does. */
+  unwatch(chatId: ChatId, watchId: string): void {
+    const watchers = this.#watchers.get(chatId);
+    const watch = watchers?.get(watchId);
+    watchers?.delete(watchId);
+    if (watchers?.size === 0) {
+      this.#watchers.delete(chatId);
+    }
+    watch?.[Symbol.dispose]();
+  }
+
+  /** Tells the chat's watchers it changed, with the messages just stored. */
+  #changed(chatId: ChatId, messages: readonly ChatMessage[] = []): void {
+    for (const watch of this.#watchers.get(chatId)?.values() ?? []) {
+      watch.push(messages);
+    }
+  }
+
+  /** The chat as its watchers see it now, besides its messages. */
+  #state(chatId: ChatId): ChatState {
+    const partial = this.#partials.get(chatId);
+    const stopped = this.#stopped.get(chatId);
+    return {
+      partial: partial === undefined ? null : partialOf(partial),
+      running: this.#turns.has(chatId),
+      provenanceVersion: this.#provenanceVersions.get(chatId) ?? 0,
+      ...(stopped === undefined ? {} : { stopped }),
+    };
+  }
+
+  /** What the chat's answers may hold: read only when it changed. */
+  #provenance(chatId: ChatId): ChatProvenance {
+    return {
+      sources: this.#sources(chatId),
+      restricted: this.isChatRestricted(chatId) === true,
+    };
+  }
+
+  /** Marks the chat's provenance changed, and tells its watchers. */
+  #provenanceChanged(chatId: ChatId): void {
+    this.#provenanceVersions.set(
+      chatId,
+      (this.#provenanceVersions.get(chatId) ?? 0) + 1
+    );
+    this.#changed(chatId);
+  }
+
+  /** The chat's messages stored after the one with ID `after`, as shown. */
+  #shownAfter(chatId: ChatId, after: number): ChatMessage[] {
+    return this.#db
+      .select()
+      .from(chatMessages)
+      .where(and(eq(chatMessages.chatId, chatId), gt(chatMessages.id, after)))
+      .orderBy(asc(chatMessages.id))
+      .all()
+      .flatMap(({ id, message, createdAt }) => {
+        const shown = chatMessageOf(
+          id,
+          storedMessageSchema.parse(JSON.parse(message)),
+          createdAt
+        );
+        return shown === undefined ? [] : [shown];
+      });
+  }
+
+  /**
+   * The chat, if it is `personId`'s: the one person its agent acts for,
+   * and the only one who reaches it. Anyone else's is refused as if there
+   * were none.
+   */
+  #ownChat(chatId: unknown, personId: string): Chat {
+    const chat = this.#chat(chatId);
+    if (chat.personId === null || chat.personId !== personId) {
+      throw agentErrors.create("agent.chat_not_found");
+    }
+    return chat;
   }
 
   #chat(chatId: unknown): Chat {

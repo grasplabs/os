@@ -78,7 +78,7 @@ export const pointAtGateway = async (
 export const chatOf = async (personId: string, ...replies: GatewayReply[]) => {
   const id = workspaceIdSchema.parse(crypto.randomUUID());
   const stub = workspace(env, id);
-  const chat = await stub.createChat("Questions", personId);
+  const chat = await stub.createChat("Questions", personId, id);
   const gateway = fakeGateway(...replies);
   await pointAtGateway(stub, gateway);
   const ask = async (text: string) => await stub.ask(chat.id, { text, model });

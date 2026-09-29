@@ -135,6 +135,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               triggers: true,
               build_on_save: true,
               agent: true,
+              chat: true,
             },
             // One memory limit set, the others at their defaults.
             MEMORY_LIMITS: { "USER.md": 500 },

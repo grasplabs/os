@@ -66,6 +66,8 @@ const typeRules: readonly {
   { action: "knowledge.proposal.approved", type: "decision" },
   { action: "knowledge.proposal.declined", type: "decision" },
   { action: "knowledge", type: "action" },
+  // A person making, renaming or deleting one of their chats.
+  { action: "chat", type: "action" },
   // A spending budget crossing its alert threshold or running out: filed
   // with the budgets it belongs to, not as a model call.
   { action: "model.budget", type: "config" },

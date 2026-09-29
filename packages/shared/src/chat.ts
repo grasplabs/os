@@ -1,0 +1,193 @@
+import { z } from "zod";
+
+// A person's chats with the workspace's agent, as the frontend sees them
+// (core's chats-rpc.ts). Each chat belongs to the person who made it: only
+// they list, rename, delete, ask in or follow it.
+
+/** A chat's title: what the person, or their first question, named it. */
+export const chatTitleSchema = z.string().trim().min(1).max(200);
+
+/** A chat in the person's list. */
+export interface ChatSummary {
+  id: string;
+  title: string;
+  /** When it was made (ISO 8601). */
+  createdAt: string;
+  /** Whether its agent is working on a question now. */
+  running: boolean;
+}
+
+/** Code the agent ran, or is writing, in a code step. */
+export interface ChatCode {
+  /** Pairs the code with its result. */
+  callId: string;
+  code: string;
+}
+
+/** How one of the agent's responses ended. */
+export type ChatReplyEnd =
+  /** It answered, or asked for code to run. */
+  | "done"
+  /** It hit the model's output limit. */
+  | "cut_off"
+  | "cancelled"
+  | "failed";
+
+/**
+ * One stored message of a chat, oldest first by `id`. The agent's
+ * instructions and the APIs it was shown aren't among them.
+ */
+export type ChatMessage =
+  | { id: number; role: "user"; text: string; at: string }
+  | {
+      id: number;
+      role: "assistant";
+      /** Its answer, in Markdown. */
+      text: string;
+      /** The code it asked to run, each run in a code step. */
+      code: ChatCode[];
+      end: ChatReplyEnd;
+      /** Why it failed, in the model gateway's words. */
+      error?: string;
+      at: string;
+    }
+  | {
+      id: number;
+      role: "result";
+      /** The code step this is the result of (`ChatCode.callId`). */
+      callId: string;
+      /** What the code returned, logged or threw, as the agent read it. */
+      text: string;
+      failed: boolean;
+      at: string;
+    };
+
+/** What the agent is writing now, before it is stored. */
+export interface ChatPartial {
+  text: string;
+  code: ChatCode[];
+}
+
+/**
+ * What a chat's answers may hold: every source the chat has read from
+ * (collections and connections, by ID), and whether it read restricted
+ * data, which puts it in restricted mode for good.
+ */
+export interface ChatProvenance {
+  sources: string[];
+  restricted: boolean;
+}
+
+/**
+ * What the response being written gained since the watcher's last update:
+ * each text as the length of what the watcher has that stays (`from`; 0
+ * starts it afresh) and what follows it. `applyPartial` puts it together.
+ */
+export interface ChatPartialUpdate {
+  from: number;
+  text: string;
+  /** Every code step of the response, each as its own text is. */
+  code: { callId: string; from: number; code: string }[];
+}
+
+/** A text the watcher has, with what an update adds from `from` on. */
+const extended = (shown: string, from: number, added: string): string =>
+  `${shown.slice(0, from)}${added}`;
+
+/**
+ * The response being written, as the watcher had it (`shown`), with an
+ * update's change applied; `null` between responses.
+ */
+export const applyPartial = (
+  shown: ChatPartial | null,
+  update: ChatPartialUpdate | null
+): ChatPartial | null => {
+  if (update === null) {
+    return null;
+  }
+  return {
+    text: extended(shown?.text ?? "", update.from, update.text),
+    code: update.code.map(({ callId, from, code }) => ({
+      callId,
+      code: extended(
+        shown?.code.find((step) => step.callId === callId)?.code ?? "",
+        from,
+        code
+      ),
+    })),
+  };
+};
+
+/**
+ * What changed in a chat since the last update: the messages stored since,
+ * and the chat as it is now. The first update of a `watch` catches up: the
+ * messages after the one it named, what the agent is writing then, and
+ * the chat's provenance.
+ */
+export interface ChatUpdate {
+  messages: ChatMessage[];
+  /**
+   * What the response being written gained (`applyPartial`); `null`
+   * between responses.
+   */
+  partial: ChatPartialUpdate | null;
+  /** Whether the agent is working on a question. */
+  running: boolean;
+  /** The chat's provenance: in the first update, and whenever it changes. */
+  provenance?: ChatProvenance;
+  /**
+   * Why the last question stopped before the agent answered, when it
+   * wasn't the model (the person left, the agent was switched off). Kept
+   * until the next question, and not over a restart.
+   */
+  stopped?: string;
+}
+
+/** A question for the chat's agent, and the model to answer it with. */
+export interface ChatQuestion {
+  text: string;
+  /** One of `ChatsApi.models()`. */
+  model: string;
+}
+
+/**
+ * A hold on a chat's updates (`watch`), until it's released: then core
+ * sends no more, and the slot it took is free again.
+ */
+export interface ChatSubscriptionApi {
+  release: () => Promise<void>;
+}
+
+/** The signed-in person's chats with the workspace's agent. */
+export interface ChatsApi {
+  /** The models a question may name, the default first. */
+  models: () => Promise<string[]>;
+  /** The person's chats, newest first. */
+  list: () => Promise<ChatSummary[]>;
+  create: (title: string) => Promise<ChatSummary>;
+  rename: (chatId: string, title: string) => Promise<void>;
+  /**
+   * Deletes the chat and its messages, rejecting every write its agent
+   * holds; refused while its agent works.
+   */
+  remove: (chatId: string) => Promise<void>;
+  /**
+   * Asks the chat's agent a question. Resolves once the agent has taken
+   * it; the answer streams to `watch`, and goes on without anyone
+   * watching.
+   */
+  send: (chatId: string, question: ChatQuestion) => Promise<void>;
+  /** Stops the agent's work on the chat; `false` when there was none. */
+  cancel: (chatId: string) => Promise<boolean>;
+  /**
+   * Follows the chat: `onUpdate` gets the messages after the one with ID
+   * `after` (all of them for `null`) and what the agent is writing, then
+   * every change. Watching again with the last message seen resumes after
+   * a lost connection; with `null`, after a reload.
+   */
+  watch: (
+    chatId: string,
+    after: number | null,
+    onUpdate: (update: ChatUpdate) => void
+  ) => Promise<ChatSubscriptionApi>;
+}

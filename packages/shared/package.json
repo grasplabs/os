@@ -12,6 +12,7 @@
     "./audit": "./src/audit.ts",
     "./audit-log": "./src/audit-log.ts",
     "./capability": "./src/capability.ts",
+    "./chat": "./src/chat.ts",
     "./client-secrets": "./src/client-secrets.ts",
     "./config": "./src/config.ts",
     "./connect": "./src/connect.ts",

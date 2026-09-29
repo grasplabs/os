@@ -293,7 +293,7 @@ describe("a chat's connections", setUpTime, () => {
       send,
       says("This one too.")
     );
-    const other = await chat.stub.createChat("Other", person.userId);
+    const other = await chat.stub.createChat("Other", person.userId, chat.id);
     await grant(mail.id, "MAIL");
 
     await chat.ask("Send Ben the invoice.");
