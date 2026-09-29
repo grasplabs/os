@@ -8,6 +8,7 @@ import type { Authority } from "@grasp-os/shared/permissions";
 import {
   isPlatformMeasure,
   statisticErrors,
+  statisticMaxApps,
   statisticMaxGroups,
   statisticPointSchema,
   statisticQuerySchema,
@@ -20,10 +21,12 @@ import type {
 } from "@grasp-os/shared/statistics";
 import {
   and,
+  asc,
   count,
   desc,
   eq,
   gte,
+  inArray,
   lte,
   max,
   min,
@@ -200,10 +203,11 @@ const windowOf = (now: Date, days: number) => ({
 const ownMeasure = async (
   env: Env,
   app: AppId,
-  { measure, where, groupBy }: Query,
+  query: Query,
   from: string,
   to: string
 ): Promise<StatisticAnswer> => {
+  const { measure, where, groupBy } = query;
   const grouped = groupBy.map((name) => dimension(name));
   const rows = await drizzle(env.DB)
     .select({
@@ -228,8 +232,12 @@ const ownMeasure = async (
     .groupBy(...grouped)
     // Without a group, no points still makes one row: none, then.
     .having(sql`count(*) > 0`)
-    .orderBy(desc(sql`sum(${appStatistics.count})`))
-    .limit(statisticMaxGroups + 1);
+    .orderBy(
+      desc(sql`sum(${appStatistics.count})`),
+      ...grouped.map((group) => asc(group))
+    )
+    .limit(statisticMaxGroups + 1)
+    .offset(query.offset);
   return answerOf(
     measure,
     from,
@@ -244,11 +252,11 @@ const ownMeasure = async (
 /** A column a platform measure's dimension is read from. */
 type Columns = Readonly<Record<string, SQLiteColumn>>;
 
-/** The runs of App `app` started from `start` to `now`, as `query` asks. */
+/** The runs of the Apps `apps` started from `start` to `now`, as `query` asks. */
 const workflowRunsMeasure = async (
   env: Env,
-  app: string,
-  { where, groupBy }: Query,
+  apps: readonly string[],
+  { where, groupBy, offset }: Query,
   start: Date,
   now: Date
 ) => {
@@ -265,7 +273,7 @@ const workflowRunsMeasure = async (
     .from(workflowRuns)
     .where(
       and(
-        eq(workflowRuns.appId, app),
+        inArray(workflowRuns.appId, [...apps]),
         where.workflow === undefined
           ? undefined
           : eq(workflowRuns.workflowId, where.workflow),
@@ -276,8 +284,9 @@ const workflowRunsMeasure = async (
     .groupBy(...grouped)
     // Without a group, no points still makes one row: none, then.
     .having(sql`count(*) > 0`)
-    .orderBy(desc(count()))
-    .limit(statisticMaxGroups + 1);
+    .orderBy(desc(count()), ...grouped.map((group) => asc(group)))
+    .limit(statisticMaxGroups + 1)
+    .offset(offset);
   // Each run is a point of value 1.
   return rows.map(({ groups, count: runs }) => ({
     groups: groupValues(groups),
@@ -289,14 +298,14 @@ const workflowRunsMeasure = async (
 };
 
 /**
- * The improvement signals of App `app` of the latest computation, if it
- * started within the window, from `start` to `now`, as `query` asks; none
- * while they are off.
+ * The improvement signals of the Apps `apps` of the latest computation,
+ * if it started within the window, from `start` to `now`, as `query`
+ * asks; none while they are off.
  */
 const signalsMeasure = async (
   env: Env,
-  app: string,
-  { where, groupBy }: Query,
+  apps: readonly string[],
+  { where, groupBy, offset }: Query,
   start: Date,
   now: Date
 ) => {
@@ -321,7 +330,7 @@ const signalsMeasure = async (
     .where(
       and(
         eq(improvementSignals.computation, latestComputation),
-        eq(improvementSignals.appId, app),
+        inArray(improvementSignals.appId, [...apps]),
         where.workflow === undefined
           ? undefined
           : eq(improvementSignals.workflowId, where.workflow),
@@ -335,22 +344,24 @@ const signalsMeasure = async (
     .groupBy(...grouped)
     // Without a group, no points still makes one row: none, then.
     .having(sql`count(*) > 0`)
-    .orderBy(desc(count()))
-    .limit(statisticMaxGroups + 1);
+    .orderBy(desc(count()), ...grouped.map((group) => asc(group)))
+    .limit(statisticMaxGroups + 1)
+    .offset(offset);
   return rows.map((row) =>
     groupRowSchema.parse({ ...row, groups: groupValues(row.groups) })
   );
 };
 
 /**
- * Refuses a read of App `app`'s platform measures for the person
- * `authority` acts for unless they may see its runs added up: an admin,
- * or a builder of it (`appFor`).
+ * Refuses a read of the Apps `apps`' platform measures for the person
+ * `authority` acts for unless they may see each one's runs added up: an
+ * admin, or a builder of each (`appFor`). One they may not see refuses the
+ * whole read, as `appFor` does, without saying which.
  */
 const requireRunsVisible = async (
   env: Env,
   authority: Authority,
-  app: string
+  apps: readonly string[]
 ): Promise<void> => {
   const userId = authority.onBehalfOf;
   const role = await memberRole(env.DB, userId);
@@ -360,19 +371,24 @@ const requireRunsVisible = async (
   if (role === "admin") {
     return;
   }
-  await appFor(
-    env,
-    { userId, role, teams: await teamsOf(env.DB, userId) },
-    app,
-    "builder"
-  );
+  const member = { userId, role, teams: await teamsOf(env.DB, userId) };
+  for (const app of apps) {
+    // oxlint-disable-next-line no-await-in-loop -- refused at the first
+    await appFor(env, member, app, "builder");
+  }
 };
+
+/** The Apps a platform read counts: `apps`, or the one `where.app`. */
+const appsOf = (query: Query): string[] =>
+  query.apps ?? (query.where.app === undefined ? [] : [query.where.app]);
 
 /** A platform read as its audit event names it. */
 interface PlatformRead {
   measure: string;
   /** The App whose measure it reads: none when the read names none. */
   app?: string;
+  /** The Apps it reads for in one read (`apps`), as far as they are IDs. */
+  apps?: string[];
   days?: number;
 }
 
@@ -381,6 +397,7 @@ const platformReadSchema = z.looseObject({
   measure: z.string().startsWith("platform."),
   days: z.unknown().optional(),
   where: z.looseObject({ app: z.unknown().optional() }).optional(),
+  apps: z.array(z.unknown()).optional(),
 });
 
 /**
@@ -394,11 +411,16 @@ export const platformReadOf = (input: unknown): PlatformRead | undefined => {
   if (!parsed.success) {
     return undefined;
   }
-  const { measure, days, where } = parsed.data;
+  const { measure, days, where, apps } = parsed.data;
   const app = appIdSchema.safeParse(where?.app);
+  const named = (apps ?? []).slice(0, statisticMaxApps).flatMap((entry) => {
+    const id = appIdSchema.safeParse(entry);
+    return id.success ? [id.data] : [];
+  });
   return {
     measure: isPlatformMeasure(measure) ? measure : "platform.unknown",
     ...(app.success ? { app: app.data } : {}),
+    ...(apps === undefined ? {} : { apps: named }),
     ...(typeof days === "number" && Number.isInteger(days) ? { days } : {}),
   };
 };
@@ -416,11 +438,14 @@ export const auditPlatformRead = async (
   await keepAuditEvent(env, drizzle(env.DB), {
     actor: delegateActorOf(authority),
     action: "statistics.read",
+    // The Apps one read counts, by ID: at most as many as provenance holds.
+    ...(read.apps === undefined ? {} : { provenance: read.apps }),
     ...(read.app === undefined
       ? {}
       : { target: { type: "app", id: read.app } }),
     detail: {
       measure: read.measure,
+      ...(read.apps === undefined ? {} : { apps: read.apps.length }),
       ...(read.days === undefined ? {} : { days: read.days }),
       onBehalfOf: authority.onBehalfOf,
       ...(refused === undefined ? {} : { refused }),
@@ -429,15 +454,15 @@ export const auditPlatformRead = async (
 };
 
 /**
- * Refuses a platform read of App `app`'s measures by App code acting as
- * `authority` unless under the permission `permissionId` (`{ type:
- * "platform" }`, `statistics`), for a person who may see that App's runs.
+ * Refuses a platform read of the Apps `apps`' measures by App code acting
+ * as `authority` unless under the permission `permissionId` (`{ type:
+ * "platform" }`, `statistics`), for a person who may see each one's runs.
  */
 const requirePlatformRead = async (
   env: Env,
   authority: Authority,
   permissionId: PermissionId | undefined,
-  app: string
+  apps: readonly string[]
 ): Promise<void> => {
   if (permissionId === undefined) {
     throw permissionErrors.create("permission.denied", {
@@ -451,12 +476,13 @@ const requirePlatformRead = async (
     "statistics",
     permissionId
   );
-  await requireRunsVisible(env, authority, app);
+  await requireRunsVisible(env, authority, apps);
 };
 
 /**
- * A platform measure, as `query` asks, for the App `query.where.app`, over
- * exactly the last `query.days` × 24 hours before `now`.
+ * A platform measure, as `query` asks, for the App `query.where.app` or
+ * the Apps `query.apps`, over exactly the last `query.days` × 24 hours
+ * before `now`.
  */
 const platformMeasure = async (
   env: Env,
@@ -464,12 +490,12 @@ const platformMeasure = async (
   query: Query,
   now: Date
 ): Promise<StatisticAnswer> => {
-  const app = query.where.app ?? "";
+  const apps = appsOf(query);
   const start = new Date(now.getTime() - query.days * dayMs);
   const rows =
     measure === "platform.workflow_runs"
-      ? await workflowRunsMeasure(env, app, query, start, now)
-      : await signalsMeasure(env, app, query, start, now);
+      ? await workflowRunsMeasure(env, apps, query, start, now)
+      : await signalsMeasure(env, apps, query, start, now);
   return answerOf(measure, dayOf(start), dayOf(now), query.groupBy, rows);
 };
 
@@ -515,7 +541,7 @@ export const readStatistics = async (
       throw permissionErrors.create("permission.denied");
     }
     ({ measure } = query);
-    await requirePlatformRead(env, authority, platform, query.where.app ?? "");
+    await requirePlatformRead(env, authority, platform, appsOf(query));
   } catch (error) {
     await auditPlatformRead(
       env,

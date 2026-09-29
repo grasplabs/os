@@ -75,8 +75,8 @@ const lower = (set: number | undefined, most: number): number =>
     : most;
 
 /**
- * Most reads one call of an App's method makes: enough for a board page's
- * snapshot, two reads for each of 50 Apps its workflows link to.
+ * Most reads one call of an App's method makes: a board page's snapshot
+ * makes a few, as one read counts many Apps (`apps`).
  */
 export const statisticReadsPerCall = 100;
 
@@ -115,6 +115,15 @@ export const statisticMaxDays = 366;
 /** Most groups one read answers. */
 export const statisticMaxGroups = 100;
 
+/**
+ * Most Apps one platform read counts (`apps`): as many as its audit event
+ * names as provenance, so the log says which Apps each read counted.
+ */
+export const statisticMaxApps = 100;
+
+/** Furthest into a read's groups a page starts (`offset`). */
+export const statisticMaxOffset = 10_000;
+
 /** The measures the platform publishes, and the dimensions of each. */
 export const platformMeasures = {
   /**
@@ -140,8 +149,11 @@ export const isPlatformMeasure = (
  * What to read: a measure, over the last `days` UTC days (today
  * included; a platform measure over exactly the last `days` × 24 hours),
  * only points whose dimensions are `where`, added up by the dimensions in
- * `groupBy` (all together without). A platform measure is read for one
- * App: `where.app`.
+ * `groupBy` (all together without), the page of groups from `offset` on
+ * (largest count first, then by their values, so pages don't overlap). A
+ * platform measure is read for one App (`where.app`), or for up to
+ * `statisticMaxApps` in one read (`apps`, grouped by `app` to tell them
+ * apart).
  */
 export const statisticQuerySchema = z
   .strictObject({
@@ -151,6 +163,15 @@ export const statisticQuerySchema = z
     ]),
     days: z.int().min(1).max(statisticMaxDays),
     where: dimensionsSchema,
+    apps: z
+      .array(appIdSchema)
+      .min(1)
+      .max(statisticMaxApps)
+      .refine((apps) => new Set(apps).size === apps.length, {
+        message: "Each App once",
+      })
+      .optional(),
+    offset: z.int().min(0).max(statisticMaxOffset).default(0),
     groupBy: z
       .array(dimensionNameSchema)
       .max(statisticMaxDimensions)
@@ -159,16 +180,25 @@ export const statisticQuerySchema = z
         message: "Each dimension once",
       }),
   })
-  .superRefine(({ measure, where, groupBy }, context) => {
+  .superRefine(({ measure, where, apps, groupBy }, context) => {
     if (!isPlatformMeasure(measure)) {
+      if (apps !== undefined) {
+        context.addIssue({
+          code: "custom",
+          path: ["apps"],
+          message: "Only a platform measure is read for Apps",
+        });
+      }
       return;
     }
     const known: readonly string[] = platformMeasures[measure];
-    if (where.app === undefined || !appIdSchema.safeParse(where.app).success) {
+    const oneApp =
+      where.app !== undefined && appIdSchema.safeParse(where.app).success;
+    if (oneApp === (apps !== undefined)) {
       context.addIssue({
         code: "custom",
         path: ["where", "app"],
-        message: "A platform measure is read for one App",
+        message: "A platform measure is read for one App, or for `apps`",
       });
     }
     for (const [index, name] of [...Object.keys(where), ...groupBy].entries()) {

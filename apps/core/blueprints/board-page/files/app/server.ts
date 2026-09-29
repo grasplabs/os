@@ -158,7 +158,13 @@ export class App extends DurableObject<Env> {
   ): Promise<Outcome<Summary>> {
     return await outcome(async () => {
       const playbook = this.#playbook();
-      // Whoever may not change the Playbook is refused by the save.
+      // Whoever may not change the Playbook is refused before any work
+      // (and by the save again).
+      if (!(await playbook.canWrite(caller))) {
+        throw Object.assign(new Error("You can't change the Playbook."), {
+          code: "knowledge.forbidden",
+        });
+      }
       const { workflows, figures } = await freeze(
         playbook,
         this.env.PLATFORM,

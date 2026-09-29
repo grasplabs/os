@@ -540,6 +540,96 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     });
   });
 
+  it("count many Apps' runs in one read, grouped by App, a page at a time, audited once with the Apps it counted", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const builder = await signedInApi(idp, "builder");
+    const reader = await statsApp(builder);
+    await grantPlatform(builder, reader);
+    // The builder builds `theirs`, not `watched`.
+    const watched = await statsApp(admin);
+    const theirs = await statsApp(builder);
+    await seedRun(watched, "pay");
+    await seedRun(watched, "pay");
+    await seedRun(theirs, "remind");
+    const both = {
+      measure: "platform.workflow_runs",
+      days: 7,
+      apps: [watched, theirs],
+      groupBy: ["app", "workflow"],
+    };
+    let counted: unknown;
+    const events = await auditedDuring(async () => {
+      counted = await platformRead(reader, admin.userId, both);
+    });
+    // 101 more workflows of `theirs`: more groups than one page holds.
+    await env.DB.prepare(
+      "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 101) INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at) SELECT ?1 || i, ?2, 'w' || i, 1, NULL, 'completed', ?3, ?3 FROM n"
+    )
+      .bind(`bulk-${unique()}-`, theirs, Date.now())
+      .run();
+    const page = async (offset: number) =>
+      answerSchema.parse(
+        await platformRead(reader, builder.userId, {
+          measure: "platform.workflow_runs",
+          days: 7,
+          apps: [theirs],
+          groupBy: ["workflow"],
+          offset,
+        })
+      ).ok;
+    const [first, second] = [await page(0), await page(100)];
+    const workflows = [...first.groups, ...second.groups].map(
+      ({ dimensions }) => dimensions.workflow
+    );
+    expect({
+      counted: answerSchema.parse(counted).ok.groups,
+      audited: events
+        .filter(({ action }) => action === "statistics.read")
+        .map(({ target, provenance, detail }) => ({
+          target,
+          provenance,
+          apps: detail.apps,
+        })),
+      // One App of the read the builder may not see refuses it whole.
+      notTheirs: await platformRead(reader, builder.userId, both),
+      pages: [first.truncated, second.groups.length, second.truncated],
+      distinct: new Set(workflows).size,
+      ownWithApps: await read(reader, admin.userId, {
+        measure: "ticks",
+        days: 1,
+        apps: [watched],
+      }),
+      oneAndApps: await platformRead(reader, admin.userId, {
+        ...both,
+        where: { app: watched },
+      }),
+    }).toStrictEqual({
+      counted: [
+        {
+          dimensions: { app: watched, workflow: "pay" },
+          count: 2,
+          sum: 2,
+          min: 1,
+          max: 1,
+        },
+        {
+          dimensions: { app: theirs, workflow: "remind" },
+          count: 1,
+          sum: 1,
+          min: 1,
+          max: 1,
+        },
+      ],
+      audited: [{ target: undefined, provenance: [watched, theirs], apps: 2 }],
+      notTheirs: { error: "app.not_found" },
+      // 102 workflows: a page of 100, then the other 2.
+      pages: [true, 2, false],
+      distinct: 102,
+      ownWithApps: { error: "statistics.invalid" },
+      oneAndApps: { error: "statistics.invalid" },
+    });
+  });
+
   it("give the latest improvement signals of an App's workflows by kind, and plan their reads by index", async () => {
     const admin = await signedInApi(idp, "admin");
     const reader = await statsApp(admin);

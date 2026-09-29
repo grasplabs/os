@@ -58,6 +58,7 @@ export interface Playbook {
     version?: number
   ) => Promise<RecordRead>;
   saveRecord: (caller: Caller, input: unknown) => Promise<Summary>;
+  canWrite: (caller: Caller) => Promise<boolean>;
 }
 
 /** A group of a statistics read: its dimensions, added up. */
@@ -67,18 +68,38 @@ interface StatisticGroup {
   max: number;
 }
 
+/** A statistics read, as the platform takes it. */
+interface StatisticQuery {
+  measure: string;
+  days: number;
+  where?: Record<string, string>;
+  /** The Apps one platform read counts, grouped by `app`. */
+  apps?: string[];
+  /** Where in the groups the page starts. */
+  offset?: number;
+  groupBy?: string[];
+}
+
 /** The App's statistics, which every App has. */
 export interface Statistics {
   read: (
     caller: Caller,
-    query: {
-      measure: string;
-      days: number;
-      where?: Record<string, string>;
-      groupBy?: string[];
-    }
-  ) => Promise<{ groups: StatisticGroup[] }>;
+    query: StatisticQuery
+  ) => Promise<{ groups: StatisticGroup[]; truncated: boolean }>;
 }
+
+/** Most Apps one platform read counts (the platform's bound). */
+const appsPerRead = 100;
+
+/** Most groups one read answers (the platform's bound): one page. */
+const groupsPerPage = 100;
+
+/**
+ * Most pages of one measure a snapshot reads. More groups than that
+ * refuse the snapshot (`board.figures_incomplete`) rather than freeze
+ * part of them: far more than a Playbook's 250 workflows make.
+ */
+const maxPages = 5;
 
 /** Days of runs the observed numbers are from: the signals' window. */
 export const windowDays = 30;
@@ -285,12 +306,50 @@ const keyOf = (appId: string, workflowId: string): string =>
   JSON.stringify([appId, workflowId]);
 
 /**
+ * Every group `query` has, page by page: refused with
+ * `board.figures_incomplete` past `maxPages`, so a snapshot never freezes
+ * part of them.
+ */
+const allGroups = async (
+  statistics: Statistics,
+  caller: Caller,
+  query: StatisticQuery
+): Promise<StatisticGroup[]> => {
+  const groups: StatisticGroup[] = [];
+  for (let page = 0; page < maxPages; page += 1) {
+    // oxlint-disable-next-line no-await-in-loop -- one page after another
+    const answer = await statistics.read(caller, {
+      ...query,
+      offset: page * groupsPerPage,
+    });
+    groups.push(...answer.groups);
+    if (!answer.truncated) {
+      return groups;
+    }
+  }
+  throw Object.assign(
+    new Error(
+      `The platform counts more than ${maxPages * groupsPerPage} groups of ${query.measure} for the Apps this Playbook links to, so the snapshot's figures would be incomplete.`
+    ),
+    { code: "board.figures_incomplete" }
+  );
+};
+
+/** `items` in runs of at most `size`. */
+const chunksOf = <T>(items: readonly T[], size: number): T[][] =>
+  Array.from({ length: Math.ceil(items.length / size) }, (_, index) =>
+    items.slice(index * size, (index + 1) * size)
+  );
+
+/**
  * The runs each workflow of the Apps `apps` started in the window, and
  * their improvement signals' highest value of each kind, by `keyOf` and
  * kind, as the platform's statistics count them (`statistics`, the stub of
- * the page's permission on them): none without it, of an App whose runs
- * the caller may not see, or while statistics are switched off. Any other
- * failure fails the snapshot.
+ * the page's permission on them): a few reads, each for up to
+ * `appsPerRead` Apps, grouped by App. None without it, for Apps one of
+ * which the caller may not see, or while statistics are switched off.
+ * Any other failure fails the snapshot, as more groups than it reads do
+ * (`board.figures_incomplete`).
  */
 const observed = async (
   statistics: Statistics | undefined,
@@ -302,28 +361,31 @@ const observed = async (
 }> => {
   const runs = new Map<string, number>();
   const signals = new Map<string, Map<string, number>>();
-  for (const app of apps) {
+  if (statistics === undefined) {
+    return { runs, signals };
+  }
+  for (const chunk of chunksOf(apps, appsPerRead)) {
     try {
-      // oxlint-disable-next-line no-await-in-loop -- one App at a time
+      // oxlint-disable-next-line no-await-in-loop -- a few chunks, one at a time
       const [started, signalled] = await Promise.all([
-        statistics?.read(caller, {
+        allGroups(statistics, caller, {
           measure: "platform.workflow_runs",
           days: windowDays,
-          where: { app },
-          groupBy: ["workflow"],
+          apps: chunk,
+          groupBy: ["app", "workflow"],
         }),
-        statistics?.read(caller, {
+        allGroups(statistics, caller, {
           measure: "platform.improvement_signals",
           days: windowDays,
-          where: { app },
-          groupBy: ["workflow", "kind"],
+          apps: chunk,
+          groupBy: ["app", "workflow", "kind"],
         }),
       ]);
-      for (const { dimensions, count } of started?.groups ?? []) {
-        runs.set(keyOf(app, dimensions.workflow ?? ""), count);
+      for (const { dimensions, count } of started) {
+        runs.set(keyOf(dimensions.app ?? "", dimensions.workflow ?? ""), count);
       }
-      for (const { dimensions, max } of signalled?.groups ?? []) {
-        const key = keyOf(app, dimensions.workflow ?? "");
+      for (const { dimensions, max } of signalled) {
+        const key = keyOf(dimensions.app ?? "", dimensions.workflow ?? "");
         const kinds = signals.get(key) ?? new Map<string, number>();
         kinds.set(dimensions.kind ?? "", max);
         signals.set(key, kinds);

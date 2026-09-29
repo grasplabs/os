@@ -537,12 +537,21 @@ describe("the board page", { timeout: 60_000 }, () => {
     });
   });
 
-  it("refuses whoever may not change the Playbook, and says it has no Playbook until an admin grants it", async () => {
-    const { admin, app } = await setUp();
+  it("refuses whoever may not change the Playbook before reading anything, and says it has no Playbook until an admin grants it", async () => {
+    const { admin, app, map } = await setUp();
+    // Workflows linked to an App, whose statistics a snapshot would read.
+    await seedPlaybook(admin, map);
     const user = await signedInApi(idp, "user");
     const { app: ungranted } = await fromBuiltin(admin, boardPage, false);
+    let refused: unknown;
+    const events = await auditedDuring(async () => {
+      refused = await call(app, user.userId, "take", { maturity: 1 });
+    });
     expect({
-      user: await call(app, user.userId, "take", { maturity: 1 }),
+      read: events.filter(({ action }) => action === "statistics.read").length,
+    }).toStrictEqual({ read: 0 });
+    expect({
+      user: refused,
       level: await call(app, admin.userId, "take", { maturity: 6 }),
       listed: await call(ungranted, admin.userId, "snapshots"),
       take: await call(ungranted, admin.userId, "take", { maturity: 1 }),
@@ -560,6 +569,8 @@ describe("the board page", { timeout: 60_000 }, () => {
       admin,
       map
     );
+    // Another App a workflow links to: counted in the same reads.
+    const { payables: another } = await seedPlaybook(admin, map);
     // 30 runs in the window: 7 a week. One before it doesn't count.
     await seedRuns(payables, 30, dayMs);
     await seedRuns(payables, 1, 40 * dayMs);
@@ -596,6 +607,13 @@ describe("the board page", { timeout: 60_000 }, () => {
       book: figuresOf(record, book.path),
       pay: figuresOf(record, pay.path),
       signals: signalsOf(record, folder),
+      // One read of the runs and one of the signals, for every App linked.
+      reads: events
+        .filter(({ action }) => action === "statistics.read")
+        .map(({ provenance }) => ({
+          payables: provenance.includes(payables),
+          another: provenance.includes(another),
+        })),
       saved: events
         .filter(({ action }) => action === "knowledge.document.saved")
         .map(({ actor, detail }) => ({
@@ -644,6 +662,10 @@ describe("the board page", { timeout: 60_000 }, () => {
         { path: pay.path, kind: "waiting_for_person", value: 7_200_000 },
         { path: pay.path, kind: "failing_step", value: 3 },
       ],
+      reads: [
+        { payables: true, another: true },
+        { payables: true, another: true },
+      ],
       saved: [
         {
           actor: { type: "app", appId: app, part: "server" },
@@ -652,6 +674,40 @@ describe("the board page", { timeout: 60_000 }, () => {
         },
       ],
     });
+  });
+
+  it("refuses to freeze figures it can't read whole, and saves nothing", async () => {
+    const { admin, app, map } = await setUp();
+    const { payables } = await seedPlaybook(admin, map);
+    // 501 workflows of a linked App ran: more groups than a snapshot reads.
+    const bulk = `bulk-${unique()}-`;
+    await env.DB.prepare(
+      "WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < 501) INSERT INTO workflow_runs (id, app_id, workflow_id, version, started_by, status, created_at, ended_at) SELECT ?1 || i, ?2, 'w' || i, 1, NULL, 'completed', ?3, ?3 FROM n"
+    )
+      .bind(bulk, payables, Date.now())
+      .run();
+    try {
+      const before = listedSchema.parse(
+        z
+          .object({ ok: z.unknown() })
+          .parse(await call(app, admin.userId, "snapshots")).ok
+      ).snapshots.length;
+      const taken = await call(app, admin.userId, "take", { maturity: 1 });
+      const after = listedSchema.parse(
+        z
+          .object({ ok: z.unknown() })
+          .parse(await call(app, admin.userId, "snapshots")).ok
+      ).snapshots.length;
+      expect({ taken, saved: after - before }).toStrictEqual({
+        taken: { error: "board.figures_incomplete" },
+        saved: 0,
+      });
+    } finally {
+      // The Playbook is shared by this file's tests.
+      await env.DB.prepare("DELETE FROM workflow_runs WHERE id LIKE ?")
+        .bind(`${bulk}%`)
+        .run();
+    }
   });
 
   it("keeps what a snapshot froze when the workflows, runs and signals change later, and when anyone saves it again", async () => {
