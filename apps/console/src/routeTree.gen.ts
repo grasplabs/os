@@ -15,6 +15,8 @@ import { Route as ClientsNewRouteImport } from './routes/clients/new'
 import { Route as ReleasesIndexRouteImport } from './routes/releases/index'
 import { Route as ReleasesReleaseIdRouteImport } from './routes/releases/$releaseId'
 import { Route as ReleasesDiffRouteImport } from './routes/releases/diff'
+import { Route as RolloutsIndexRouteImport } from './routes/rollouts/index'
+import { Route as RolloutsRolloutIdRouteImport } from './routes/rollouts/$rolloutId'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -46,6 +48,16 @@ const ReleasesDiffRoute = ReleasesDiffRouteImport.update({
   path: '/releases/diff',
   getParentRoute: () => rootRouteImport,
 } as any)
+const RolloutsIndexRoute = RolloutsIndexRouteImport.update({
+  id: '/rollouts/',
+  path: '/rollouts/',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const RolloutsRolloutIdRoute = RolloutsRolloutIdRouteImport.update({
+  id: '/rollouts/$rolloutId',
+  path: '/rollouts/$rolloutId',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
@@ -53,7 +65,9 @@ export interface FileRoutesByFullPath {
   '/clients/new': typeof ClientsNewRoute
   '/releases/$releaseId': typeof ReleasesReleaseIdRoute
   '/releases/diff': typeof ReleasesDiffRoute
+  '/rollouts/$rolloutId': typeof RolloutsRolloutIdRoute
   '/releases/': typeof ReleasesIndexRoute
+  '/rollouts/': typeof RolloutsIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
@@ -61,7 +75,9 @@ export interface FileRoutesByTo {
   '/clients/new': typeof ClientsNewRoute
   '/releases/$releaseId': typeof ReleasesReleaseIdRoute
   '/releases/diff': typeof ReleasesDiffRoute
+  '/rollouts/$rolloutId': typeof RolloutsRolloutIdRoute
   '/releases': typeof ReleasesIndexRoute
+  '/rollouts': typeof RolloutsIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -70,7 +86,9 @@ export interface FileRoutesById {
   '/clients/new': typeof ClientsNewRoute
   '/releases/$releaseId': typeof ReleasesReleaseIdRoute
   '/releases/diff': typeof ReleasesDiffRoute
+  '/rollouts/$rolloutId': typeof RolloutsRolloutIdRoute
   '/releases/': typeof ReleasesIndexRoute
+  '/rollouts/': typeof RolloutsIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
@@ -80,7 +98,9 @@ export interface FileRouteTypes {
     | '/clients/new'
     | '/releases/$releaseId'
     | '/releases/diff'
+    | '/rollouts/$rolloutId'
     | '/releases/'
+    | '/rollouts/'
   fileRoutesByTo: FileRoutesByTo
   to:
     | '/'
@@ -88,7 +108,9 @@ export interface FileRouteTypes {
     | '/clients/new'
     | '/releases/$releaseId'
     | '/releases/diff'
+    | '/rollouts/$rolloutId'
     | '/releases'
+    | '/rollouts'
   id:
     | '__root__'
     | '/'
@@ -96,7 +118,9 @@ export interface FileRouteTypes {
     | '/clients/new'
     | '/releases/$releaseId'
     | '/releases/diff'
+    | '/rollouts/$rolloutId'
     | '/releases/'
+    | '/rollouts/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -105,7 +129,9 @@ export interface RootRouteChildren {
   ClientsNewRoute: typeof ClientsNewRoute
   ReleasesReleaseIdRoute: typeof ReleasesReleaseIdRoute
   ReleasesDiffRoute: typeof ReleasesDiffRoute
+  RolloutsRolloutIdRoute: typeof RolloutsRolloutIdRoute
   ReleasesIndexRoute: typeof ReleasesIndexRoute
+  RolloutsIndexRoute: typeof RolloutsIndexRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -152,6 +178,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ReleasesDiffRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/rollouts/': {
+      id: '/rollouts/'
+      path: '/rollouts'
+      fullPath: '/rollouts/'
+      preLoaderRoute: typeof RolloutsIndexRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/rollouts/$rolloutId': {
+      id: '/rollouts/$rolloutId'
+      path: '/rollouts/$rolloutId'
+      fullPath: '/rollouts/$rolloutId'
+      preLoaderRoute: typeof RolloutsRolloutIdRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
@@ -161,7 +201,9 @@ const rootRouteChildren: RootRouteChildren = {
   ClientsNewRoute: ClientsNewRoute,
   ReleasesReleaseIdRoute: ReleasesReleaseIdRoute,
   ReleasesDiffRoute: ReleasesDiffRoute,
+  RolloutsRolloutIdRoute: RolloutsRolloutIdRoute,
   ReleasesIndexRoute: ReleasesIndexRoute,
+  RolloutsIndexRoute: RolloutsIndexRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

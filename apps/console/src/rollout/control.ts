@@ -35,7 +35,7 @@ import { importedManifest } from "../deploy/release.ts";
 import { hasEnded, instanceStatus } from "../runners.ts";
 import { RolloutError } from "./errors.ts";
 import { goOnToStop } from "./rollback.ts";
-import { rolloutScopeSchema, targetsOf } from "./targets.ts";
+import { firstRing, rolloutScopeSchema, targetsOf } from "./targets.ts";
 import { approvalEvent, rolloutSteps, stepBudget } from "./workflow.ts";
 import type { RolloutParams } from "./workflow.ts";
 
@@ -106,8 +106,9 @@ const settleEnded = async (env: Env, db: ConsoleDatabase): Promise<void> => {
  * Starts rolling release `input.releaseId` out, as `staff`, to ring 0
  * then `input.scope`, and returns the rollout's id. Refused while another
  * rollout is running or waiting (`rollout_running`), when no active
- * client is in scope, and when its run would take more steps than
- * `stepBudget` (`too_large`).
+ * client is in scope, when a ring past 0 or a client it names adds no one
+ * past ring 0 (`ring_zero_only`), and when its run would take more steps
+ * than `stepBudget` (`too_large`).
  */
 export const startRollout = async (
   env: Env,
@@ -137,6 +138,17 @@ export const startRollout = async (
   const [first] = targets;
   if (first === undefined) {
     throw new RolloutError("no_targets", "No active client is in scope");
+  }
+  // A scope that names a ring past ring 0, or a client, but reaches no one
+  // past ring 0 would quietly roll out to Grasp's own deployments only.
+  const namesMore =
+    scope.scope === "client" ||
+    (scope.scope === "ring" && scope.ring !== firstRing);
+  if (namesMore && targets.every(({ ring }) => ring === firstRing)) {
+    throw new RolloutError(
+      "ring_zero_only",
+      "No active client past ring 0 is in scope"
+    );
   }
   // Refused rather than left to stop part way at Workflows' step limit.
   const manifest = await importedManifest(db, releaseId);

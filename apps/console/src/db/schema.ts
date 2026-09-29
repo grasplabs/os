@@ -192,7 +192,11 @@ export const rollouts = sqliteTable(
     createdAt: timestamp("created_at").notNull(),
     updatedAt: timestamp("updated_at").notNull(),
   },
-  (table) => [index("rollouts_status_idx").on(table.status)]
+  (table) => [
+    index("rollouts_status_idx").on(table.status),
+    // The rollouts page lists the latest first (src/rollout/queries.ts).
+    index("rollouts_created_idx").on(table.createdAt),
+  ]
 );
 
 /** One client in a rollout, and how far it got. */

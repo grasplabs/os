@@ -25,6 +25,9 @@ const RootDocument = ({ children }: { children: ReactNode }) => (
         <Link to="/releases" activeProps={{ className: "font-medium" }}>
           Releases
         </Link>
+        <Link to="/rollouts" activeProps={{ className: "font-medium" }}>
+          Rollouts
+        </Link>
       </nav>
       {children}
       <Scripts />

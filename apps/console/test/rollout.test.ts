@@ -32,7 +32,12 @@ import {
 } from "../src/rollout/control.ts";
 import type { StartRolloutInput } from "../src/rollout/control.ts";
 import { driftOf } from "../src/rollout/drift.ts";
-import { rollbackClient, rollbackRing } from "../src/rollout/rollback.ts";
+import {
+  rollbackClient,
+  rollbackClientAndWait,
+  rollbackRing,
+  rollbackRingAndWait,
+} from "../src/rollout/rollback.ts";
 import type { AccountState } from "./cloudflare-api-kit.ts";
 import { mockCloudflareApi } from "./cloudflare-api.ts";
 import { publishRelease } from "./releases.ts";
@@ -858,6 +863,35 @@ describe("rolling a release out", () => {
     }).toStrictEqual({ refused: "too_large", created: 0 });
   });
 
+  it("refuses a rollout for a ring past 0, or a client, that reaches no one past ring 0, starting nothing", async () => {
+    const release = await importedRelease("feat(core): ring 0 only");
+    const internal = await activeClient(0, release);
+    const [before] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(rollouts);
+
+    const refused = {
+      emptyRing: await codeOf(rollOut(release, { scope: "ring", ring: 3 })),
+      ringZeroClient: await codeOf(
+        rollOut(release, { scope: "client", clientId: internal.clientId })
+      ),
+    };
+
+    const [after] = await db
+      .select({ count: sql<number>`count(*)` })
+      .from(rollouts);
+    expect({
+      refused,
+      created: (after?.count ?? 0) - (before?.count ?? 0),
+    }).toStrictEqual({
+      refused: {
+        emptyRing: "ring_zero_only",
+        ringZeroClient: "ring_zero_only",
+      },
+      created: 0,
+    });
+  });
+
   it("stops at a failure no retry fixes, the client marked failed and released, and reaches no later ring", async () => {
     const before = await importedRelease("feat(core): the release before");
     const internal = await activeClient(0, before);
@@ -1429,6 +1463,57 @@ describe("controlling a rollout", () => {
       targets: {
         [first.clientId]: { ring: 0, status: "rolled_back", error: null },
         [second.clientId]: { ring: 0, status: "rolled_back", error: null },
+      },
+    });
+  });
+
+  it("reports a rollback whose run failed, alone or as one of its ring's", async () => {
+    const before = await importedRelease("feat(core): the release before");
+    const { first, second } = await twoClients(before);
+    const release = await importedRelease("feat(core): failing rollbacks");
+    await using run = await followRollouts();
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const [, core] = await workersOf(second.clientId);
+    // Every attempt to put the second client's core back is refused, so
+    // its rollback's run fails.
+    const isSecondRestore = (call: { method: string; path: string }) =>
+      call.method === "POST" &&
+      call.path.startsWith(`/accounts/${second.account.id}/`) &&
+      call.path.endsWith(
+        `/workers/scripts/${core?.scriptName ?? ""}/deployments`
+      );
+    const warn = vi.spyOn(console, "warn").mockReturnValue();
+    await using rollbacks = await followRollbacks();
+
+    let alone: unknown = "not asked";
+    let ring: { clientId: string; refused: string | null }[] = [];
+    try {
+      cloudflare.failNext(isSecondRestore, 400);
+      alone = await codeOf(
+        rollbackClientAndWait(env, staff, rolloutId, second.clientId)
+      );
+      cloudflare.failNext(isSecondRestore, 400);
+      const results = await rollbackRingAndWait(env, staff, rolloutId, 0);
+      ring = results.map(({ clientId, refused }) => ({ clientId, refused }));
+      await rollbacks.waitForAll();
+    } finally {
+      warn.mockRestore();
+    }
+
+    expect({
+      alone,
+      ring: ring.toSorted((a, b) => a.clientId.localeCompare(b.clientId)),
+      targets: await targetsOf(rolloutId),
+    }).toStrictEqual({
+      alone: "rollback_failed",
+      ring: [
+        { clientId: first.clientId, refused: null },
+        { clientId: second.clientId, refused: "rollback_failed" },
+      ],
+      targets: {
+        [first.clientId]: { ring: 0, status: "rolled_back", error: null },
+        [second.clientId]: { ring: 0, status: "done", error: null },
       },
     });
   });
