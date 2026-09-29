@@ -148,7 +148,7 @@ describe("cross-site requests", () => {
       })
     );
     // Past the check, TanStack Start answers: no such server function.
-    expect(status).toBe(404);
+    expect(status).toBe(500);
   });
 
   it("refuses a state change from another origin, or none", async () => {

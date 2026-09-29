@@ -25,16 +25,13 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
 import { formatTime } from "../../releases/format.ts";
-import type { StartRolloutInput } from "../../rollout/control.ts";
 import { fetchRollouts, startRolloutFn } from "../../rollout/functions.ts";
 import type { RolloutOptions } from "../../rollout/queries.ts";
-import type { RolloutScope } from "../../rollout/targets.ts";
+import { startRequestOf } from "../../rollout/start-request.ts";
+import type { RolloutKind, ScopeKind } from "../../rollout/start-request.ts";
 import { useRolloutAction } from "../../rollout/use-action.ts";
-import { InvalidFieldError } from "../../use-action.ts";
 
-/** What a rollout reaches after ring 0, as the form offers it. */
-type ScopeKind = RolloutScope["scope"];
-
+/** Whom a rollout reaches after ring 0, as the form offers it. */
 const scopes: { value: ScopeKind; label: string }[] = [
   { value: "ring", label: "One ring" },
   { value: "client", label: "One client" },
@@ -42,8 +39,6 @@ const scopes: { value: ScopeKind; label: string }[] = [
 ];
 
 /** What a rollout takes to clients, as the form offers it. */
-type RolloutKind = StartRolloutInput["kind"];
-
 const kinds: { value: RolloutKind; label: string }[] = [
   { value: "release", label: "A release" },
   { value: "secrets", label: "Secrets only" },
@@ -53,25 +48,6 @@ const kinds: { value: RolloutKind; label: string }[] = [
 const textOf = (form: FormData, name: string): string => {
   const value = form.get(name);
   return typeof value === "string" ? value.trim() : "";
-};
-
-/** The scope the form says, or why it can't be one. */
-const scopeOf = (
-  kind: ScopeKind,
-  ring: number,
-  form: FormData
-): RolloutScope => {
-  if (kind === "all") {
-    return { scope: "all" };
-  }
-  if (kind === "client") {
-    const clientId = textOf(form, "clientId");
-    if (clientId === "") {
-      throw new InvalidFieldError("Name the client to roll out to.");
-    }
-    return { scope: "client", clientId };
-  }
-  return { scope: "ring", ring };
 };
 
 /** `count` clients, in words. */
@@ -103,14 +79,15 @@ const StartRollout = ({ options }: { options: RolloutOptions }) => {
   }
   const start = (form: FormData) => {
     void run(async () => {
-      // With no one past the first ring, every client is that ring.
-      const scope: RolloutScope =
-        later.length === 0 ? { scope: "all" } : scopeOf(kind, chosenRing, form);
       const result = await startRolloutFn({
-        data:
-          what === "secrets"
-            ? { kind: "secrets", scope }
-            : { kind: "release", releaseId: textOf(form, "releaseId"), scope },
+        data: startRequestOf({
+          what,
+          releaseId: textOf(form, "releaseId"),
+          scope: kind,
+          ring: chosenRing,
+          clientId: textOf(form, "clientId"),
+          pastFirstRing: later.length > 0,
+        }),
       });
       if (result.done !== null) {
         await navigate({

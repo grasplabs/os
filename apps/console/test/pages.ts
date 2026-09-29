@@ -1,4 +1,6 @@
 import { exports } from "cloudflare:workers";
+import { fromCrossJSON, toJSONAsync } from "seroval";
+import { z } from "zod";
 
 import { accessJwt } from "./access.ts";
 
@@ -51,4 +53,54 @@ export const page = async (
   const rendered = renderAfter(previous, path, email);
   previous = rendered;
   return await rendered;
+};
+
+/** What TanStack Start's route for server functions answers, deserialized. */
+const answerSchema = z.object({
+  result: z.unknown(),
+  error: z.unknown().optional(),
+});
+
+/**
+ * What server function `fn` answers `data` with, called as the console's
+ * own pages call it: through the Worker's entry as `email` (a staff
+ * member), at TanStack Start's route for server functions, in its wire
+ * format.
+ */
+export const callServerFn = async <Data, Result>(
+  fn: ((options: { data: Data }) => Promise<Result>) & {
+    serverFnMeta?: { id: string };
+  },
+  data: Data,
+  email = "staff@grasp.test"
+): Promise<Result> => {
+  const id = fn.serverFnMeta?.id;
+  if (id === undefined) {
+    throw new Error("Not a server function");
+  }
+  const response = await exports.default.fetch(`${origin}/_serverFn/${id}`, {
+    method: "POST",
+    headers: {
+      "cf-access-jwt-assertion": await accessJwt(email),
+      origin,
+      "x-tsr-serverFn": "true",
+      "content-type": "application/json",
+      accept: "application/json",
+    },
+    // Plain data needs none of the plugins the pages' client adds.
+    body: JSON.stringify(await toJSONAsync({ data })),
+  });
+  if (!response.ok) {
+    throw new Error(`The server function answered ${response.status}`);
+  }
+  // The entry answers `{ result }`, or `{ error }` for a function that threw.
+  const answer = answerSchema.parse(
+    fromCrossJSON(await response.json(), { refs: new Map() })
+  );
+  if (answer.error !== undefined) {
+    throw new Error("The server function threw", { cause: answer.error });
+  }
+  // SAFETY: `result` is what `fn` returned, which is `Result`.
+  // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
+  return answer.result as Result;
 };

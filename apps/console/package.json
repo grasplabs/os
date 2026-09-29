@@ -36,6 +36,7 @@
     "@vitejs/plugin-react": "catalog:",
     "babel-plugin-react-compiler": "catalog:",
     "drizzle-kit": "catalog:",
+    "seroval": "catalog:",
     "tailwindcss": "catalog:",
     "vite-plus": "catalog:",
     "wrangler": "catalog:"

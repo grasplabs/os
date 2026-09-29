@@ -1,12 +1,22 @@
+import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { eq } from "drizzle-orm";
+import { and, eq, inArray } from "drizzle-orm";
 import { describe, expect, it } from "vite-plus/test";
+import { z } from "zod";
 
 import { act, consoleDatabase } from "../src/db/act.ts";
-import { clients, rollouts, rolloutTargets } from "../src/db/schema.ts";
+import {
+  auditEvents,
+  clients,
+  rollouts,
+  rolloutTargets,
+} from "../src/db/schema.ts";
 import { importReleases } from "../src/releases/import.ts";
+import { startRolloutFn } from "../src/rollout/functions.ts";
+import { startRequestOf } from "../src/rollout/start-request.ts";
+import type { StartChoices } from "../src/rollout/start-request.ts";
 import { mockAccess } from "./access.ts";
-import { page } from "./pages.ts";
+import { callServerFn, page } from "./pages.ts";
 import { publishRelease } from "./releases.ts";
 
 mockAccess();
@@ -153,6 +163,73 @@ describe("the rollout pages", () => {
         ringTwo: true,
         ringZero: false,
       },
+    });
+  });
+
+  it("start the rollout the form's choices send, through the console's entry, recorded as sent", async () => {
+    const release = await importedRelease();
+    // No earlier test's rollout stands in the way.
+    await db
+      .update(rollouts)
+      .set({ status: "cancelled" })
+      .where(inArray(rollouts.status, ["running", "waiting"]));
+    const target = await recordClient(2);
+    // The runs it starts go nowhere: the test reads what was started.
+    await using runs = await introspectWorkflow(env.ROLLOUT);
+    const choices: StartChoices = {
+      what: "release",
+      releaseId: release,
+      scope: "client",
+      ring: 3,
+      clientId: target,
+      pastFirstRing: true,
+    };
+
+    const result = await callServerFn(startRolloutFn, startRequestOf(choices));
+
+    const rolloutId = result.done ?? "";
+    const [started] = await db
+      .select({ releaseId: rollouts.releaseId, kind: rollouts.kind })
+      .from(rollouts)
+      .where(eq(rollouts.id, rolloutId));
+    const [event] = await db
+      .select({ actor: auditEvents.actor, detail: auditEvents.detail })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.action, "rollout.start"),
+          eq(auditEvents.target, rolloutId)
+        )
+      );
+    const startedRuns = await runs.get();
+    const targets = await db
+      .select({ clientId: rolloutTargets.clientId, ring: rolloutTargets.ring })
+      .from(rolloutTargets)
+      .where(eq(rolloutTargets.rolloutId, rolloutId));
+    expect({
+      refused: result.refused,
+      started,
+      event: {
+        actor: event?.actor,
+        detail: z.unknown().parse(JSON.parse(event?.detail ?? "null")),
+      },
+      // Past ring 0, only the client named.
+      pastRingZero: targets.filter(({ ring }) => ring !== 0),
+      runs: startedRuns.length,
+    }).toMatchObject({
+      refused: null,
+      started: { releaseId: release, kind: "release" },
+      event: {
+        actor: staff.email,
+        detail: {
+          kind: "release",
+          release,
+          scope: "client",
+          client: target,
+        },
+      },
+      pastRingZero: [{ clientId: target, ring: 2 }],
+      runs: 1,
     });
   });
 
