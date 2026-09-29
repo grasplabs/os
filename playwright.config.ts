@@ -67,6 +67,7 @@ export default defineConfig({
             builtins: true,
             playbook: true,
             record_types: true,
+            statistics: true,
             screens: true,
             screen_workflows: true,
             members: true,

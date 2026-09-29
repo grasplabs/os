@@ -306,7 +306,7 @@ export const permissions = sqliteTable(
     subjectType: text("subject_type", { enum: ["app", "agent"] }).notNull(),
     subjectId: text("subject_id").notNull(),
     objectType: text("object_type", {
-      enum: ["connection", "collection", "workflow", "app"],
+      enum: ["connection", "collection", "workflow", "app", "platform"],
     }).notNull(),
     objectId: text("object_id").notNull(),
     resource: text(),
@@ -897,6 +897,39 @@ export const improvementSignals = sqliteTable(
       table.kind,
       table.value
     ),
+  ]
+);
+
+/**
+ * The statistics Apps record (src/statistics.ts), added up by the UTC day:
+ * one row per App, measure, day and dimensions (canonical JSON), holding
+ * how many points, their sum, lowest and highest. So a read over a year
+ * reads at most a day's rows (`statisticRowsPerDay`) for each day, and a
+ * point is one upsert. Rows past the retention (`statisticRetentionDays`)
+ * are swept.
+ */
+export const appStatistics = sqliteTable(
+  "app_statistics",
+  {
+    appId: text("app_id").notNull(),
+    measure: text().notNull(),
+    /** `YYYY-MM-DD`, UTC. */
+    day: text().notNull(),
+    /** Canonical JSON of the point's dimensions, `{}` for none. */
+    dimensions: text().notNull(),
+    count: integer().notNull(),
+    sum: real().notNull(),
+    min: real().notNull(),
+    max: real().notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [table.appId, table.measure, table.day, table.dimensions],
+    }),
+    // A day's rows of an App, counted against its daily bound.
+    index("app_statistics_app_day_idx").on(table.appId, table.day),
+    // The sweep of rows past the retention.
+    index("app_statistics_day_idx").on(table.day),
   ]
 );
 

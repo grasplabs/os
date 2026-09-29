@@ -102,6 +102,14 @@ export type Feature =
    */
   | "record_types"
   /**
+   * Statistics (statistics.ts): Apps recording measures of their own and
+   * reading them through their `STATISTICS` stub, and asking for and
+   * reading the platform's under an admin's grant.
+   * While off, every point and read is refused; what was recorded stays
+   * until the sweep's retention, and reads again once it's back on.
+   */
+  | "statistics"
+  /**
    * Skills (knowledge/grasp-skills.ts): the release's Grasp skills synced
    * into their collection, the client's own skills collection, and
    * copying a Grasp skill into it; needs `knowledge` on too. While off,

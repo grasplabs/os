@@ -846,7 +846,7 @@ describe("An App's next version", { timeout: 60_000 }, () => {
       before: { ok: { path, currentVersion: 1 } },
       // The new version has no Playbook stub to write with.
       after: { error: "failed" },
-      bindings: ["PLAYBOOK_READ"],
+      bindings: ["PLAYBOOK_READ", "STATISTICS"],
       // Asked for again, it is the newest request, and still says who
       // granted it before: not a first request.
       permissions: [

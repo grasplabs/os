@@ -120,6 +120,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               knowledge_uploads: true,
               playbook: true,
               record_types: true,
+              statistics: true,
               skills: true,
               apps_collection: true,
               connections: true,
@@ -144,6 +145,9 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               chat: true,
               app_builder: true,
             },
+            // Few enough statistics points to reach each bound in a test.
+            STATISTICS_POINT_LIMITS: "10/25",
+            STATISTICS_READ_LIMITS: "20/60",
             // One memory limit set, the others at their defaults.
             MEMORY_LIMITS: { "USER.md": 500 },
             // The gateway runs call the model through; tests fake the AI binding.

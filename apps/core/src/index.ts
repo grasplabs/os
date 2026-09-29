@@ -12,6 +12,7 @@ import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import { sweepUploads } from "./knowledge/uploads.ts";
 import { retryDisconnects } from "./members.ts";
 import { recordPlatformUpdate } from "./platform-updates.ts";
+import { sweepStatistics } from "./statistics.ts";
 import { pumpConnectorEvents } from "./workflows/connector-events.ts";
 import { receiveEmail } from "./workflows/inbound-email.ts";
 import { failOrphans } from "./workflows/runs.ts";
@@ -32,6 +33,7 @@ export { WorkflowsApi } from "./agent-workflows.ts";
 export { Builtins } from "./builtins.ts";
 export { AppConnectionBinding } from "./app-bindings.ts";
 export { AppExportBinding } from "./app-calls.ts";
+export { AppStatisticsBinding } from "./statistics-binding.ts";
 export { ConnectionBinding } from "./bindings.ts";
 export { AppCollectionBinding } from "./knowledge/app-binding.ts";
 export { CollectionBinding } from "./knowledge/binding.ts";
@@ -72,7 +74,8 @@ export default {
   // Knowledge usage signals, until they're computed, from one pass over the audit log (see
   // src/daily-signals.ts), and Apps whose entry in the Apps
   // collection isn't of their current version (see
-  // src/knowledge/apps-collection.ts). And the audit log's retention
+  // src/knowledge/apps-collection.ts), and statistics past their
+  // retention (see src/statistics.ts). And the audit log's retention
   // alarm armed, if it isn't yet: retention itself runs on that alarm (see
   // src/audit-log.ts), and a deployment that appends nothing after a
   // release still gets it.
@@ -82,6 +85,7 @@ export default {
         ? [
             refreshDailySignals(env),
             indexApps(env),
+            sweepStatistics(env),
             auditLog(env).armRetention(),
           ]
         : [

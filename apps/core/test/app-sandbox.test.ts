@@ -355,7 +355,8 @@ describe("App server code", { timeout: 60_000 }, () => {
       callApp(env, app, as(admin.userId), "importedEnv"),
     ]);
     expect({ envNames, importedEnv }).toStrictEqual({
-      envNames: ["OUTLOOK"],
+      // And its statistics, which every App has.
+      envNames: ["OUTLOOK", "STATISTICS"],
       importedEnv: [],
     });
   });
@@ -515,7 +516,7 @@ describe("App server code", { timeout: 60_000 }, () => {
     const afterNewGrant = await callApp(env, app, caller, "mail");
     expect({ whileGranted, afterRevoke, afterNewGrant }).toStrictEqual({
       whileGranted: reached,
-      afterRevoke: ["no binding", []],
+      afterRevoke: ["no binding", ["STATISTICS"]],
       afterNewGrant: reached,
     });
   });
@@ -908,7 +909,7 @@ describe("App server code reading Knowledge", { timeout: 60_000 }, () => {
       // Only its own collection, also for someone who can read another.
       other: await readsAs(member.userId, other.noteId),
     }).toStrictEqual({
-      envNames: ["HANDBOOK"],
+      envNames: ["HANDBOOK", "STATISTICS"],
       member: everyReadIs("ok"),
       outsider: everyReadIs("knowledge.not_found"),
       other: [
