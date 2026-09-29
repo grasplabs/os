@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "9a979c40-e249-4a06-b589-205baf86626e",
+  "id": "2d2d796a-55c0-4c14-88ae-15074fec6ce7",
   "prevId": "dd669e06-06eb-41bc-bcf9-bcdec1e10f0d",
   "tables": {
     "audit_outbox": {
@@ -605,6 +605,13 @@
         },
         "read_at": {
           "name": "read_at",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
+        "lost_at": {
+          "name": "lost_at",
           "type": "integer",
           "primaryKey": false,
           "notNull": false,

@@ -20,6 +20,7 @@ CREATE TABLE `event_sources` (
 	`poll_at` integer NOT NULL,
 	`failures` integer DEFAULT 0 NOT NULL,
 	`read_at` integer,
+	`lost_at` integer,
 	`created_at` integer NOT NULL,
 	`updated_at` integer NOT NULL
 );

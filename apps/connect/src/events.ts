@@ -413,10 +413,9 @@ const failRead = async (
     sourceError?.status !== undefined &&
     refusedStatuses.has(sourceError.status) &&
     failures >= refusedLimit;
-  let wait = Math.min(
-    sourceError?.retryAfterMs ?? backoffMs(failures),
-    maxWait
-  );
+  // The provider's own wait as it gave it; only a computed one is capped.
+  let wait =
+    sourceError?.retryAfterMs ?? Math.min(backoffMs(failures), maxWait);
   if (refused) {
     wait = refusedWaitMs;
   }
@@ -433,7 +432,9 @@ const failRead = async (
     .set({
       failures,
       pollAt: new Date(Date.now() + wait),
-      ...(sourceError?.resync === true ? { cursor: null } : {}),
+      ...(sourceError?.resync === true
+        ? { cursor: null, lostAt: new Date() }
+        : {}),
       updatedAt: new Date(),
     })
     .where(sameCursor(source));
@@ -570,6 +571,7 @@ const primeSources = async (env: Env): Promise<void> => {
         .set({
           cursor,
           failures: 0,
+          lostAt: null,
           pollAt: new Date(now),
           updatedAt: new Date(),
         })
@@ -579,7 +581,8 @@ const primeSources = async (env: Env): Promise<void> => {
         await primed;
         continue;
       }
-      const since = (source.readAt ?? source.createdAt).getTime();
+      // Since it lost its cursor, or, never primed, since it started.
+      const since = (source.lostAt ?? source.createdAt).getTime();
       // oxlint-disable-next-line no-await-in-loop -- sources in turn, bounded
       await recordEventIf(
         env,

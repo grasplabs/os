@@ -632,6 +632,48 @@ describe("connector events", () => {
     });
   });
 
+  it("wait as long as Graph asks when it throttles priming, however long", async () => {
+    const outlook = await connected();
+    instead = () =>
+      Response.json(
+        { error: { code: "TooManyRequests" } },
+        { status: 429, headers: { "retry-after": "3600" } }
+      );
+    const before = Date.now();
+    await sync([
+      listener(outlook, { type: "m365.file.created", resource: financeDrive }),
+    ]);
+    const [source] = await sources();
+
+    // An hour, as asked: the five-minute cap is only on the backoff connect
+    // works out itself.
+    expect((source?.poll_at ?? 0) - before).toBe(60 * 60_000);
+  });
+
+  it("record how long a drive went without a position from when it lost its cursor", async () => {
+    const outlook = await connected();
+    const files = listener(outlook, {
+      type: "m365.file.created",
+      resource: financeDrive,
+    });
+    await sync([files]);
+    later(10 * 60_000);
+    // Graph no longer has the cursor: the drive loses its position.
+    instead = () =>
+      Response.json({ error: { code: "SyncStateNotFound" } }, { status: 410 });
+    await sync([files]);
+    const lostAt = Date.now();
+    later();
+    await sync([files]);
+    const events = await listening();
+
+    expect(
+      events
+        .filter(({ action }) => action === "connection.events.primed_late")
+        .map(({ detail }) => detail.delayMs)
+    ).toStrictEqual([Date.now() - lostAt]);
+  });
+
   it("never hand core an event of a connection disconnected since, and drop it", async () => {
     const outlook = await connected();
     await sync([listener(outlook)]);
