@@ -316,6 +316,54 @@ describe("failed runs", slow, () => {
     ]);
   });
 
+  it("page past the latest 50, marking read only the page shown", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const app = await appWith(owner, failing("careless"));
+    const now = Date.now();
+    // 55 unread, the two oldest at the same time: told apart by ID.
+    const stored = await Promise.all(
+      Array.from(
+        { length: 55 },
+        async (_, index) =>
+          await storedNotice(owner.userId, app, `workflow-${index}`, {
+            updatedAt: now - Math.min(index, 53) * 1000,
+            readAt: null,
+          })
+      )
+    );
+    const first = await owner.api.notifications.list();
+    const shownFirst = first.notifications.map(({ id }) => id);
+    const [newest] = first.notifications;
+    const last = first.notifications.at(-1);
+    if (newest === undefined || last === undefined) {
+      throw new Error("Expected a first page");
+    }
+    await owner.api.notifications.markRead(shownFirst, newest.at);
+    const second = await owner.api.notifications.list({
+      at: last.at,
+      id: last.id,
+    });
+
+    expect({
+      first: [shownFirst.length, first.unread, first.more],
+      second: [
+        second.notifications.length,
+        second.unread,
+        second.more,
+        second.notifications.every(({ read }) => !read),
+      ],
+      // Every one shown once, in time order, then by ID.
+      all: [...shownFirst, ...second.notifications.map(({ id }) => id)],
+    }).toStrictEqual({
+      first: [50, 55, true],
+      second: [5, 5, false, true],
+      all: [
+        ...stored.slice(0, 53),
+        ...stored.slice(53).toSorted((one, other) => other.localeCompare(one)),
+      ],
+    });
+  });
+
   it("tell nobody while switched off", async () => {
     const owner = await signedInApi(idp, "builder");
     const app = await appWith(owner, failing("careless"));
@@ -353,6 +401,10 @@ describe("failed runs", slow, () => {
     const owner = await signedInApi(idp, "builder");
     const queries = await recordedQueries(async () => {
       await owner.api.notifications.list();
+      await owner.api.notifications.list({
+        at: new Date().toISOString(),
+        id: crypto.randomUUID(),
+      });
       await owner.api.notifications.markRead(
         [crypto.randomUUID()],
         new Date().toISOString()
@@ -372,9 +424,10 @@ describe("failed runs", slow, () => {
       scans: plans.flat().filter((step) => fullScan.test(step)),
       sorts: plans.flat().filter((step) => step.includes("TEMP B-TREE")),
     }).toStrictEqual({
-      // The list, its unread count, marking read and dropping old ones.
-      lists: 4,
-      byIndex: [true, true, true, true],
+      // A page, its unread count, an older page and its count, marking
+      // read and dropping old ones.
+      lists: 6,
+      byIndex: [true, true, true, true, true, true],
       scans: [],
       sorts: [],
     });

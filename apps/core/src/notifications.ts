@@ -4,7 +4,8 @@ import {
   notificationErrors,
 } from "@grasp-os/shared/notifications";
 import type {
-  Notification,
+  NotificationCursor,
+  NotificationPage,
   NotificationsApi,
 } from "@grasp-os/shared/notifications";
 import type { Identity } from "@grasp-os/shared/rpc";
@@ -96,15 +97,30 @@ export const failureNoticed = (
 const visibleTo = (env: Env, person: Identity): SQL | undefined =>
   and(eq(notifications.personId, person.userId), appsFoundBy(env, person));
 
+/** Where a page goes on from, as the page passes it. */
+const cursorSchema = z
+  .object({ at: z.iso.datetime(), id: z.string().max(64) })
+  .optional();
+
 /**
- * The person's latest notifications, and how many of those they can see
- * are unread: two reads of the person's index, joined to each App by its
+ * A page of the person's notifications, the latest or those older than
+ * `before`, and how many of all they can see are unread: two reads of the
+ * person's index, in its order (time, then ID), joined to each App by its
  * key.
  */
 export const listNotifications = async (
   env: Env,
-  person: Identity
-): Promise<{ notifications: Notification[]; unread: number }> => {
+  person: Identity,
+  before?: unknown
+): Promise<NotificationPage> => {
+  const cursor = cursorSchema.safeParse(before);
+  if (!cursor.success) {
+    throw notificationErrors.create("notification.invalid");
+  }
+  const after =
+    cursor.data === undefined
+      ? undefined
+      : sql`(${notifications.updatedAt}, ${notifications.id}) < (${new Date(cursor.data.at).getTime()}, ${cursor.data.id})`;
   const db = drizzle(env.DB);
   const [rows, [unread]] = await db.batch([
     db
@@ -120,9 +136,10 @@ export const listNotifications = async (
       })
       .from(notifications)
       .innerJoin(apps, eq(apps.id, notifications.appId))
-      .where(visibleTo(env, person))
+      .where(and(visibleTo(env, person), after))
       .orderBy(desc(notifications.updatedAt), desc(notifications.id))
-      .limit(listedNotifications),
+      // One past the page: whether more follow.
+      .limit(listedNotifications + 1),
     db
       .select({ count: count() })
       .from(notifications)
@@ -130,13 +147,16 @@ export const listNotifications = async (
       .where(and(visibleTo(env, person), isNull(notifications.readAt))),
   ]);
   return {
-    notifications: rows.map(({ updatedAt, readAt, ...row }) => ({
-      ...row,
-      type: "run_failed",
-      at: updatedAt.toISOString(),
-      read: readAt !== null,
-    })),
+    notifications: rows
+      .slice(0, listedNotifications)
+      .map(({ updatedAt, readAt, ...row }) => ({
+        ...row,
+        type: "run_failed",
+        at: updatedAt.toISOString(),
+        read: readAt !== null,
+      })),
     unread: unread?.count ?? 0,
+    more: rows.length > listedNotifications,
   };
 };
 
@@ -197,10 +217,10 @@ export class NotificationsRpc extends RpcTarget implements NotificationsApi {
     this.#check = check;
   }
 
-  async list(): Promise<{ notifications: Notification[]; unread: number }> {
+  async list(before?: NotificationCursor): Promise<NotificationPage> {
     return await withPerson(
       this.#check,
-      async (person) => await listNotifications(this.#env, person)
+      async (person) => await listNotifications(this.#env, person, before)
     );
   }
 

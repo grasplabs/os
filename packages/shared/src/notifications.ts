@@ -33,13 +33,32 @@ export type Notification = RunFailedNotification;
 /** Most notifications `list` returns: the latest. */
 export const listedNotifications = 50;
 
+/**
+ * Where a page of notifications goes on from: the last one shown, by its
+ * time (`at`) and ID. The next page lists those older than it.
+ */
+export interface NotificationCursor {
+  at: string;
+  id: string;
+}
+
+/** A page of the person's notifications. */
+export interface NotificationPage {
+  /** At most {@link listedNotifications}, latest first. */
+  notifications: Notification[];
+  /** How many of all those they can see are unread. */
+  unread: number;
+  /** Whether older ones follow: list again from the last one's cursor. */
+  more: boolean;
+}
+
 /** The signed-in person's notifications. */
 export interface NotificationsApi {
   /**
-   * Their latest notifications, latest first, of Apps they can still open,
-   * and how many of those are unread.
+   * Their notifications of Apps they can still open, latest first: the
+   * latest page, or the page older than `before`.
    */
-  list: () => Promise<{ notifications: Notification[]; unread: number }>;
+  list: (before?: NotificationCursor) => Promise<NotificationPage>;
   /**
    * Marks read the notifications `list` showed (their IDs, at most
    * {@link listedNotifications}) as they were shown: each only while its

@@ -1,5 +1,6 @@
 import type { ChatProvenance } from "@grasp-os/shared/chat";
-import { appIdSchema } from "@grasp-os/shared/ids";
+import { appIdSchema, chatIdSchema } from "@grasp-os/shared/ids";
+import { modelErrors } from "@grasp-os/shared/models";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
@@ -9,6 +10,7 @@ import { appHost, workspace } from "../src/durable-objects.ts";
 import {
   codeResults,
   codeStep,
+  gatewayConfig,
   model,
   pointAtGateway,
   says,
@@ -40,6 +42,9 @@ const idp = mockIdp();
 const slow = { timeout: 60_000 };
 
 type Person = Awaited<ReturnType<typeof signedInApi>>;
+
+/** A model the tests' config says is hosted in the EU. */
+const euModel = "openai/gpt-5.4";
 
 /** What a failed run's error says: an attack on whoever reads it. */
 const injection =
@@ -161,7 +166,7 @@ describe("asking the agent to fix a failed run", slow, () => {
       says("Hello.")
     );
 
-    const chat = await owner.api.chats.fixRun(run, model);
+    const { chat } = await owner.api.chats.fixRun(run, model);
     await answered(owner, chat.id);
     // An ordinary chat of the same person's, for its instructions.
     const plain = await owner.api.chats.create("Hello");
@@ -249,7 +254,7 @@ describe("asking the agent to fix a failed run", slow, () => {
       coreEnv: { ...env, FEATURES: withoutNotifications() },
     });
 
-    const byAdmin = await admin.api.chats.fixRun(failed, model);
+    const { chat: byAdmin } = await admin.api.chats.fixRun(failed, model);
     await answered(admin, byAdmin.id);
     const events = await allEvents();
     const asked = events
@@ -305,6 +310,45 @@ describe("asking the agent to fix a failed run", slow, () => {
     });
   });
 
+  it("keeps the chat, and says why, when its question is refused once the chat is made", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const app = await appWith(owner, workflows("Customer c-1 is blocked"));
+    const run = await endedRun(owner, app, "careless");
+    // The client's rules keep every call in the EU, and the model isn't
+    // hosted there: it is allowed, so the chat is made, and the rules
+    // refuse its question.
+    await pointAtGateway(
+      workspace(env, personalWorkspaceId(owner.userId)),
+      fakeGateway(),
+      {
+        config: {
+          ...gatewayConfig,
+          models: [model, euModel],
+          eu: { models: [euModel], deployment: true },
+        },
+      }
+    );
+
+    const started = await owner.api.chats.fixRun(run, model);
+    const chats = await owner.api.chats.list();
+    const attached = await workspace(
+      env,
+      personalWorkspaceId(owner.userId)
+    ).attachments(chatIdSchema.parse(started.chat.id));
+    expect({
+      sent: started.sent,
+      reason: started.sent ? null : started.reason,
+      // The one chat, holding the report, for the page to open.
+      chats: chats.map(({ id }) => id),
+      attached: attached.map(({ run: attachedRun }) => attachedRun),
+    }).toStrictEqual({
+      sent: false,
+      reason: modelErrors.create("model.eu_only").message,
+      chats: [started.chat.id],
+      attached: [run],
+    });
+  });
+
   it("carries what the report may hold from the start: the run, its App's sources and restricted mode, however many", async () => {
     const owner = await signedInApi(idp, "builder");
     const admin = await signedInApi(idp, "admin");
@@ -336,7 +380,7 @@ describe("asking the agent to fix a failed run", slow, () => {
     const run = await endedRun(owner, app, "careless");
     await answering(owner, says("Looking."));
 
-    const chat = await owner.api.chats.fixRun(run, model);
+    const { chat } = await owner.api.chats.fixRun(run, model);
     await answered(owner, chat.id);
     const events = await allEvents();
     const restricted = events.filter(

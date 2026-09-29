@@ -164,6 +164,11 @@ export interface ChatUpdate {
   held: number;
 }
 
+/** The chat `fixRun` started, and whether its question was taken. */
+export type FixRunResult =
+  | { chat: ChatSummary; sent: true }
+  | { chat: ChatSummary; sent: false; reason: string };
+
 /** A question for the chat's agent, and the model to answer it with. */
 export interface ChatQuestion {
   text: string;
@@ -204,10 +209,14 @@ export interface ChatsApi {
    * as data (the agent reads it with `env.chat.attachments()`), never put
    * into its instructions, and the question names only the run, its App
    * and its workflow. For the person the run acted for, and admins: anyone
-   * else is refused as if there were no such run. Resolves with the chat
-   * once the agent has taken the question.
+   * else is refused as if there were no such run, and a model the
+   * deployment doesn't allow before any chat is made. Resolves with the
+   * chat once the agent has taken the question, or, when the question is
+   * refused once the chat is made (the client's model rules, say), with
+   * the chat and why (`sent: false`): the chat holds the report, to ask
+   * in again, rather than a retry making another.
    */
-  fixRun: (run: string, model: string) => Promise<ChatSummary>;
+  fixRun: (run: string, model: string) => Promise<FixRunResult>;
   /**
    * The Apps the chat's agent is changing in the chat's drafts, not yet
    * proposed, most recently written first.

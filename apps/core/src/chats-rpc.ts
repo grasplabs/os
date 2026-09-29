@@ -7,7 +7,9 @@ import type {
   ChatsApi,
   ChatSummary,
   ChatUpdate,
+  FixRunResult,
 } from "@grasp-os/shared/chat";
+import { internalErrors, isExpectedError } from "@grasp-os/shared/errors";
 import { chatIdSchema, workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { ChatId, WorkspaceId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
@@ -67,6 +69,18 @@ const chatIdOf = (chatId: unknown): ChatId => {
     throw agentErrors.create("agent.chat_not_found");
   }
   return parsed.data;
+};
+
+/**
+ * Why a question wasn't taken, as its person reads it: an unplanned error
+ * is logged, and shown as one.
+ */
+const refusedBecause = (chatId: ChatId, error: unknown): string => {
+  if (isExpectedError(error)) {
+    return error.message;
+  }
+  log.error("chat.fix_not_asked", { chatId, ...errorFields(error) });
+  return internalErrors.create("internal.unexpected").message;
 };
 
 /** How a push to a chat page is refused. */
@@ -193,9 +207,11 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
    * with `model`; only while `workflows` and `run_notifications` are on.
    * A model the deployment doesn't allow is refused before any chat is
    * made. A question refused past that (the client's model rules, say)
-   * leaves the chat, with its report, in the person's list, to ask again.
+   * leaves the chat, with its report, in the person's list, to ask again:
+   * it resolves with the chat and why, so the page opens that chat rather
+   * than make another.
    */
-  async fixRun(run: string, model: string): Promise<ChatSummary> {
+  async fixRun(run: string, model: string): Promise<FixRunResult> {
     return await withPerson(this.#check, async (person) => {
       requireFeature(this.#env, "workflows");
       requireFeature(this.#env, "run_notifications");
@@ -210,16 +226,24 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
         fix,
         model
       );
-      await chats.send(chat.id, userId, {
-        text: fixQuestion(fix.report),
-        model,
-      });
-      return {
+      const summary = {
         id: chat.id,
         title: chat.title,
         createdAt: chat.createdAt.toISOString(),
-        running: true,
       };
+      try {
+        await chats.send(chat.id, userId, {
+          text: fixQuestion(fix.report),
+          model,
+        });
+      } catch (error) {
+        return {
+          chat: { ...summary, running: false },
+          sent: false,
+          reason: refusedBecause(chat.id, error),
+        };
+      }
+      return { chat: { ...summary, running: true }, sent: true };
     });
   }
 
