@@ -4,7 +4,9 @@ import type { OutlineNode } from "../src/describe.ts";
 const withoutLines = (nodes: OutlineNode[]): unknown[] =>
   nodes.map(({ line: _line, ...node }) => {
     if (node.type === "step") {
-      return node;
+      // The hash of its code, which formatting moves too.
+      const { code: _code, ...step } = node;
+      return step;
     }
     if (node.type === "loop") {
       return { ...node, steps: withoutLines(node.steps) };
@@ -16,6 +18,6 @@ const withoutLines = (nodes: OutlineNode[]): unknown[] =>
     };
   });
 
-/** A workflow's step list without line numbers, which formatting moves. */
+/** A workflow's step list without line numbers and code hashes, which formatting moves. */
 export const outlineOf = (source: string): unknown[] =>
   withoutLines(describeWorkflow(source).steps);

@@ -451,6 +451,11 @@ export interface StepOutline {
    * calls none.
    */
   env?: string[];
+  /**
+   * A hash of the step's call as written, its function included: changes
+   * whenever its code does (the review of a version compares it).
+   */
+  code: string;
   line: number;
 }
 

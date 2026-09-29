@@ -1,4 +1,8 @@
-import { compilerVersion, workflowPaths } from "@grasp-os/compiler";
+import {
+  compilerVersion,
+  serverFiles,
+  workflowPaths,
+} from "@grasp-os/compiler";
 import { describeWorkflow } from "@grasp-os/sdk/describe";
 import type {
   AppFiles,
@@ -35,7 +39,8 @@ import {
 // version: who proposed it, its files and server code, its workflows with
 // the steps and parameters that differ (a workflow counts as changed when
 // code outside screens changed, which it may import; a step that calls
-// the App's bindings may change things whether it says so or not), what
+// the App's bindings may change things whether it says so or not, and a
+// step counts as changed when its code does, by its hash), what
 // the App asks for that no admin granted yet, what it holds and which of
 // that making it current would ask an admin for again, and its workflows'
 // tests, kept per version's files so they run once.
@@ -43,8 +48,24 @@ import {
 /** Most test failures a review lists. */
 const maxFailures = 50;
 
-/** The App's server code, which acts for whoever uses the App. */
-const serverPath = "app/server.ts";
+/**
+ * How an App's server code changed, from its files that did (`changes`)
+ * and how many there were before and are now: added from none, removed
+ * to none, modified otherwise; null when none changed.
+ */
+const serverChangeOf = (
+  changes: readonly unknown[],
+  before: number,
+  now: number
+): ReviewChange | null => {
+  if (changes.length === 0) {
+    return null;
+  }
+  if (before === 0) {
+    return "added";
+  }
+  return now === 0 ? "removed" : "modified";
+};
 
 /** How `now` differs from `before`, or undefined when it doesn't. */
 const changeOf = <T>(
@@ -173,7 +194,9 @@ export const keepTests = async (
 
 /**
  * A version's workflows' tests: kept once per version's files (and
- * compiler), run the first time only.
+ * compiler), run the first time only. A failure kept is shown as it was,
+ * never run again: making the version current runs its tests anyway
+ * (`requireWorkflowTestsPass`), so a kept result can't let one through.
  */
 const testsOf = async (
   env: Env,
@@ -221,78 +244,70 @@ const proposerOf = async (
     return null;
   }
   const workspaceId = workspaceIdSchema.safeParse(proposedBy.workspaceId);
+  const ownChat = by.userId === proposedBy.onBehalfOf;
   const chatTitle =
-    by.userId === proposedBy.onBehalfOf && workspaceId.success
+    ownChat && workspaceId.success
       ? await workspace(env, workspaceId.data).chatTitle(
           proposedBy.chatId,
           by.userId
         )
       : null;
-  return { ...proposedBy, chatTitle };
+  return { ...proposedBy, ownChat, chatTitle };
 };
 
-/** What version `version` of App `app` changes, for its builders. */
-export const reviewVersion = async (
+/** A version's files, and its number. */
+interface VersionAt {
+  version: number;
+  files: AppFiles;
+}
+
+/** A version's workflows that differ from the current version's. */
+const workflowsOf = async (
   env: Env,
-  by: Member,
-  app: unknown,
-  version: unknown
-): Promise<VersionReview> => {
-  const found = await appFor(env, by, app, "builder");
-  const row = await findVersion(env, found.id, version);
-  const files = await versionFiles(env, found.id, row.version);
-  const { currentVersion: current } = found;
-  // The current version itself changes nothing against itself.
-  const before =
-    current === null
-      ? undefined
-      : { version: current, files: await versionFiles(env, found.id, current) };
-  const fileChanges = differences(
-    new Map(Object.entries(before?.files ?? {})),
-    new Map(Object.entries(files)),
-    (one, other) => one === other
-  );
-  const changedPaths = new Set(fileChanges.map(({ name }) => name));
+  app: AppId,
+  {
+    before,
+    proposed,
+    changedPaths,
+  }: {
+    before: VersionAt | undefined;
+    proposed: VersionAt;
+    changedPaths: ReadonlySet<string>;
+  }
+): Promise<VersionReview["workflows"]> => {
   const workflowIds = [
     ...new Set([
-      ...workflowIdsIn(files),
+      ...workflowIdsIn(proposed.files),
       ...workflowIdsIn(before?.files ?? {}),
     ]),
   ].toSorted();
-  const ownPaths = new Set(
-    workflowIds.flatMap((id) => Object.values(workflowPaths(id)))
-  );
-  // Code outside screens a workflow may import, its server's too: when it
-  // changes, every workflow may do something else.
-  const shared = [...changedPaths].filter(
-    (path) => sharedCode.test(path) && !ownPaths.has(path)
-  );
+  // Code outside screens a workflow may import, another workflow's and the
+  // server's too: when it changes, the workflow may do something else.
+  const changedCode = [...changedPaths].filter((path) => sharedCode.test(path));
   const workflows: VersionReview["workflows"] = [];
   for (const id of workflowIds) {
     const paths = workflowPaths(id);
+    const shared = changedCode.filter(
+      (path) => path !== paths.workflow && path !== paths.tests
+    );
     const ownChanged =
       changedPaths.has(paths.workflow) || changedPaths.has(paths.tests);
     const change = changeOf(
       before === undefined || !workflowIdsIn(before.files).includes(id)
         ? undefined
         : true,
-      workflowIdsIn(files).includes(id) ? true : undefined,
+      workflowIdsIn(proposed.files).includes(id) ? true : undefined,
       () => !ownChanged && shared.length === 0
     );
     if (change === undefined) {
       continue;
     }
     const stepsBefore = stepsOf(before?.files, id);
-    const stepsNow = stepsOf(files, id);
+    const stepsNow = stepsOf(proposed.files, id);
     // oxlint-disable-next-line no-await-in-loop -- one isolate at a time
-    const paramsBefore = await paramsOf(env, found.id, before, id);
+    const paramsBefore = await paramsOf(env, app, before, id);
     // oxlint-disable-next-line no-await-in-loop -- one isolate at a time
-    const paramsNow = await paramsOf(
-      env,
-      found.id,
-      { version: row.version, files },
-      id
-    );
+    const paramsNow = await paramsOf(env, app, proposed, id);
     workflows.push({
       id,
       change,
@@ -322,13 +337,58 @@ export const reviewVersion = async (
             ),
     });
   }
-  const server = fileChanges.find(({ name }) => name === serverPath);
+  return workflows;
+};
+
+/** What version `version` of App `app` changes, for its builders. */
+export const reviewVersion = async (
+  env: Env,
+  by: Member,
+  app: unknown,
+  version: unknown
+): Promise<VersionReview> => {
+  const found = await appFor(env, by, app, "builder");
+  const row = await findVersion(env, found.id, version);
+  const files = await versionFiles(env, found.id, row.version);
+  const { currentVersion: current } = found;
+  // The current version itself changes nothing against itself.
+  const before =
+    current === null
+      ? undefined
+      : { version: current, files: await versionFiles(env, found.id, current) };
+  const fileChanges = differences(
+    new Map(Object.entries(before?.files ?? {})),
+    new Map(Object.entries(files)),
+    (one, other) => one === other
+  );
+  const changedPaths = new Set(fileChanges.map(({ name }) => name));
+  const workflows = await workflowsOf(env, found.id, {
+    before,
+    proposed: { version: row.version, files },
+    changedPaths,
+  });
+  const serverChanges = differences(
+    new Map(Object.entries(serverFiles(before?.files ?? {}))),
+    new Map(Object.entries(serverFiles(files))),
+    (one, other) => one === other
+  );
+  // Asked for again only if not kept, as `madeCurrent` says: an App's
+  // first version copied from a blueprint, made current for the first time.
+  const keep = current === null && row.approved === 1;
   return {
     version: toVersion(row),
     proposedBy: await proposerOf(env, by, row),
     current,
     files: fileChanges.map(({ name, change }) => ({ path: name, change })),
-    server: server?.change ?? null,
+    server: serverChangeOf(
+      serverChanges,
+      Object.keys(serverFiles(before?.files ?? {})).length,
+      Object.keys(serverFiles(files)).length
+    ),
+    serverFiles: serverChanges.map(({ name, change }) => ({
+      path: name,
+      change,
+    })),
     workflows,
     permissions: await listPermissions(
       env,
@@ -337,7 +397,11 @@ export const reviewVersion = async (
       appsListedFor(env, by),
       "requested"
     ),
-    grants: await activeGrants(env, by, found.id),
+    grants: await activeGrants(env, by, {
+      app: found.id,
+      openApps: appsListedFor(env, by),
+      keep,
+    }),
     tests: await testsOf(env, found.id, row, files),
   };
 };

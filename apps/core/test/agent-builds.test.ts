@@ -733,7 +733,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
         proposedBy: proposer,
       },
       // The chat's title, for the person the agent acted for.
-      proposedBy: { ...proposer, chatTitle: "Questions" },
+      proposedBy: { ...proposer, ownChat: true, chatTitle: "Questions" },
       current: null,
       files: [
         { path: "screens/desk.tsx", change: "added" },
@@ -741,6 +741,7 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
         { path: "workflows/intake.workflow-tests.ts", change: "added" },
       ],
       server: null,
+      serverFiles: [],
       workflows: [
         {
           id: "intake",
@@ -932,11 +933,16 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
 `,
     };
     const { id: app } = await builder.api.apps.create({ name: "Notes" });
-    await release(builder, app, { "app/server.ts": server, ...notify });
+    await release(builder, app, {
+      "app/server.ts": server,
+      "app/lib/books.ts": "export const twice = false;\n",
+      ...notify,
+    });
     await requestGranted(idp, builder, outlook(app));
-    // Only the server changes: the workflow's steps call it.
+    // Only server code the server imports changes: the workflow's steps
+    // call the server.
     await builder.api.apps.files.write(app, {
-      "app/server.ts": `${server}\n// Books twice now.\n`,
+      "app/lib/books.ts": "export const twice = true;\n",
     });
     const { version } = await builder.api.apps.files.commit(app, "Server");
 
@@ -950,11 +956,12 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
     expect(review).toMatchObject({
       proposedBy: null,
       server: "modified",
+      serverFiles: [{ path: "app/lib/books.ts", change: "modified" }],
       workflows: [
         {
           id: "notify",
           change: "modified",
-          shared: ["app/server.ts"],
+          shared: ["app/lib/books.ts"],
           steps: [
             {
               name: "save",
@@ -976,6 +983,60 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
     ).resolves.toMatchObject({
       grants: [{ permission: grant, askedAgain: false }],
     });
+
+    // A change to one step's function alone shows that step as changed.
+    await builder.api.apps.files.write(app, {
+      "workflows/notify.ts": (notify["workflows/notify.ts"] ?? "").replace(
+        'call("hits", "notify")',
+        'call("hits", "notified")'
+      ),
+    });
+    const { version: bodyOnly } = await builder.api.apps.files.commit(
+      app,
+      "Body"
+    );
+    await expect(
+      builder.api.apps.versions.review(app, bodyOnly)
+    ).resolves.toMatchObject({
+      server: "modified",
+      workflows: [
+        {
+          id: "notify",
+          steps: [{ name: "save", change: "modified", calls: ["APP"] }],
+        },
+      ],
+    });
+  });
+
+  it("lists no grant naming an App its reviewer can't see", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const reviewer = await signedInApi(idp, "builder");
+    const { id: app } = await owner.api.apps.create({ name: "Invoicing" });
+    const { id: hidden } = await owner.api.apps.create({ name: "Ledger" });
+    await requestGranted(idp, owner, {
+      subject: { type: "app", appId: app },
+      object: { type: "app", appId: hidden },
+      actions: ["read"],
+      binding: "LEDGER",
+    });
+    await owner.api.apps.members.add(app, {
+      type: "person",
+      id: reviewer.userId,
+      role: "builder",
+    });
+    await owner.api.apps.files.write(app, { "notes.md": "new" });
+    const { version } = await owner.api.apps.files.commit(app, "Notes");
+
+    const [ownReview, theirs] = await Promise.all([
+      owner.api.apps.versions.review(app, version),
+      reviewer.api.apps.versions.review(app, version),
+    ]);
+
+    expect({
+      owner: ownReview.grants.map(({ permission }) => permission.binding),
+      reviewer: theirs.grants.map(({ permission }) => permission.binding),
+      named: JSON.stringify(theirs).includes(hidden),
+    }).toStrictEqual({ owner: ["LEDGER"], reviewer: [], named: false });
   });
 
   it("runs a version's tests once, and reviews nothing while the agent's building is off", async () => {

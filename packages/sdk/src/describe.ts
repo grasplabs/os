@@ -232,6 +232,21 @@ const paramsIn = (bindings: Bindings, nodes: Node[]): string[] => {
   return names;
 };
 
+/**
+ * A short hash of a step's call as written (FNV-1a, 32 bits): changes
+ * whenever its code does, so a change to its function alone shows.
+ */
+const sourceHash = (text: string): string => {
+  let hash = 0x81_1c_9d_c5;
+  for (let index = 0; index < text.length; index += 1) {
+    // oxlint-disable-next-line no-bitwise -- FNV-1a works on the bits
+    hash ^= text.codePointAt(index) ?? 0;
+    hash = Math.imul(hash, 0x01_00_01_93);
+  }
+  // oxlint-disable-next-line no-bitwise -- as an unsigned 32-bit number
+  return (hash >>> 0).toString(16).padStart(8, "0");
+};
+
 const isStepCall = (bindings: Bindings, node: Node): node is CallExpression =>
   node.type === "CallExpression" &&
   node.callee.type === "MemberExpression" &&
@@ -291,6 +306,43 @@ const envCallsIn = (bindings: Bindings, nodes: Node[]): string[] => {
   }
   return names;
 };
+
+/** Whether `body` reads `env` anywhere outside a step's call. */
+const envOutsideSteps = (body: Node, bindings: Bindings): boolean => {
+  let found = false;
+  visit(body, (node, ancestors) => {
+    if (
+      node.type !== "Identifier" ||
+      node.name !== bindings.env ||
+      isNamePosition(ancestors)
+    ) {
+      return;
+    }
+    const inStepCall = ancestors.some(
+      ({ node: ancestor, key }) =>
+        key === "arguments" && isStepCall(bindings, ancestor)
+    );
+    found ||= !inStepCall;
+  });
+  return found;
+};
+
+/** Every step of `nodes`, said to call `env` as well. */
+const withEnv = (nodes: readonly OutlineNode[]): OutlineNode[] =>
+  nodes.map((node): OutlineNode => {
+    if (node.type === "step") {
+      const env = node.env ?? [];
+      return { ...node, env: env.includes("env") ? env : [...env, "env"] };
+    }
+    if (node.type === "loop") {
+      return { ...node, steps: withEnv(node.steps) };
+    }
+    return {
+      ...node,
+      steps: withEnv(node.steps),
+      otherwise: withEnv(node.otherwise),
+    };
+  });
 
 // `step` may only be called as `step.method(…)`, parameters only read as
 // `params.name`: passed around or destructured, their use can't be read.
@@ -641,6 +693,7 @@ const describeCall = (
     params: paramsIn(reader.bindings, call.arguments),
     options: literalOptions(options),
     ...(env.length === 0 ? {} : { env }),
+    code: sourceHash(textOf(reader, call)),
     line: lineOf(call),
   };
 };
@@ -828,5 +881,9 @@ export const describeWorkflow = (source: string): WorkflowOutline => {
     run.body.type === "BlockStatement"
       ? describeStatement(reader, run.body, false)
       : describeExpression(reader, run.body, false);
-  return { steps };
+  // `env` read outside every step's call (a helper, an alias) may reach
+  // any step: then each step is said to call it, as far as can be told.
+  return {
+    steps: envOutsideSteps(run.body, bindings) ? withEnv(steps) : steps,
+  };
 };

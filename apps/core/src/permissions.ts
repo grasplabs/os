@@ -1132,7 +1132,13 @@ export const madeCurrent = (
       .update(permissions)
       // Who granted it, and when, stay: a request with them is one asked
       // for again (`Permission.grantedBy`). Only the status allows.
-      .set({ status: "requested", requestedBy: by.userId, requestedAt: now })
+      // Asked for by `by` now, a person: not the agent that once may have.
+      .set({
+        status: "requested",
+        requestedBy: by.userId,
+        requestedAt: now,
+        requestedVia: null,
+      })
       .where(requestedAgain),
   ];
 };
@@ -1243,42 +1249,36 @@ export const listPermissions = async (
 };
 
 /**
- * App `app`'s active permissions, oldest first, each with whether `by`
- * making one of its versions current would ask an admin for it again, as
- * `madeCurrent` does: one that changes things, unless `by` could grant it
- * (one of the organization's own admins). A subject's permissions are
- * few, so they are sorted here, off the subject's index.
+ * App `app`'s active permissions, oldest first, as `listPermissions` lists
+ * them for `by` with `openApps` (only those naming Apps `by` has a role
+ * in), each with whether `by` making one of its versions current would
+ * ask an admin for it again, as `madeCurrent` does: one that changes
+ * things, unless `by` could grant it (one of the organization's own
+ * admins) or the permissions are kept (`keep`, an App's first version
+ * copied from a blueprint, made current for the first time).
  */
 export const activeGrants = async (
   env: Env,
   by: Pick<Identity, "role" | "staff">,
-  app: AppId
+  { app, openApps, keep }: { app: AppId; openApps: SQL; keep: boolean }
 ): Promise<{ permission: Permission; askedAgain: boolean }[]> => {
-  const rows = await drizzle(env.DB)
-    .select()
-    .from(permissions)
-    .where(
-      and(
-        ofSubject({ type: "app", appId: app }),
-        eq(permissions.status, "active")
-      )
-    );
+  const listed = await listPermissions(
+    env,
+    by,
+    { type: "app", appId: app },
+    openApps,
+    "active"
+  );
   const canGrant = isAdmin(by.role) && !by.staff;
-  return rows
-    .toSorted(
-      (one, other) =>
-        one.requestedAt.getTime() - other.requestedAt.getTime() ||
-        (one.id < other.id ? -1 : 1)
-    )
-    .map(toPermission)
-    .map((permission) => ({
-      permission,
-      askedAgain:
-        !canGrant &&
-        permission.actions.some((action) =>
-          changesThings(permission.object, action)
-        ),
-    }));
+  return listed.map((permission) => ({
+    permission,
+    askedAgain:
+      !keep &&
+      !canGrant &&
+      permission.actions.some((action) =>
+        changesThings(permission.object, action)
+      ),
+  }));
 };
 
 /**

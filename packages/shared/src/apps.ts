@@ -185,20 +185,25 @@ export type ReviewChange = "added" | "modified" | "removed";
 export interface VersionReview {
   version: AppVersion;
   /**
-   * The chat's agent that wrote it, and the chat's title for the person
-   * it acted for (null for anyone else: a title may quote their
-   * question); null for a version a person committed.
+   * The chat's agent that wrote it; null for a version a person
+   * committed. `ownChat`: the reviewer is the person it acted for, who
+   * alone gets the chat's title (a title may quote their question); null
+   * for them once the chat is deleted.
    */
-  proposedBy: (AgentProposer & { chatTitle: string | null }) | null;
+  proposedBy:
+    | (AgentProposer & { ownChat: boolean; chatTitle: string | null })
+    | null;
   /** What it is compared with: the current version; null while none is. */
   current: number | null;
   /** Its files that differ from the current version's, by path. */
   files: { path: string; change: ReviewChange }[];
   /**
-   * How its server code (`app/server.ts`) differs, if it does: it runs as
-   * whoever uses the App, with every permission the App holds.
+   * How its server code (`app/**.ts`, as the server build reads it)
+   * differs, if it does: it runs as whoever uses the App, with every
+   * permission the App holds. Its files that differ are `serverFiles`.
    */
   server: ReviewChange | null;
+  serverFiles: { path: string; change: ReviewChange }[];
   /**
    * Its workflows that differ from the current version's: their own files,
    * or code outside `screens/` they may import (`shared`), such as the

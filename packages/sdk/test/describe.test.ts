@@ -20,6 +20,9 @@ ${body}
 });
 `;
 
+/** A step's code hash: 8 hex digits. */
+const hashPattern = /^[0-9a-f]{8}$/u;
+
 describe(describeWorkflow, () => {
   it("shows a step in a loop once, nested under the loop", () => {
     expect(outlineOf(payoutSource)).toStrictEqual([
@@ -78,7 +81,14 @@ describe(describeWorkflow, () => {
     timeout: params.signTimeout,
   });`);
 
-    expect(describeWorkflow(source).steps).toStrictEqual([
+    // Each step's code hash, as whether it is one.
+    const steps = describeWorkflow(source).steps.map((node) =>
+      node.type === "step"
+        ? { ...node, code: hashPattern.test(node.code) }
+        : node
+    );
+
+    expect(steps).toStrictEqual([
       {
         type: "step",
         name: "pause",
@@ -88,6 +98,7 @@ describe(describeWorkflow, () => {
         locked: false,
         params: [],
         options: { duration: "1 hour" },
+        code: true,
         line: 6,
       },
       {
@@ -99,6 +110,7 @@ describe(describeWorkflow, () => {
         locked: false,
         params: ["signTimeout"],
         options: { type: "document.signed" },
+        code: true,
         line: 7,
       },
     ]);
@@ -257,6 +269,48 @@ describe(describeWorkflow, () => {
         )
       )
     ).toThrow("Call the App's bindings as `env.NAME`");
+  });
+
+  it("says every step may call the App's bindings when a helper or alias reads them", () => {
+    const envOf = (body: string): unknown[] =>
+      describeWorkflow(workflowSource(body, "step, { input, env }")).steps.map(
+        (node) => (node.type === "step" ? node.env : node.type)
+      );
+    const steps = [
+      `await step.do("read", { description: "Read" }, async () => 1);`,
+      `await step.do("book", { description: "Book" }, async () => await book());`,
+    ].join("\n");
+
+    // A helper that reads env, called from a step.
+    expect(
+      envOf(
+        `const book = async () => await env.APP.call("book", input);\n${steps}`
+      )
+    ).toStrictEqual([["env"], ["env"]]);
+    // An alias of env.
+    expect(
+      envOf(
+        `const bindings = env;\nconst book = async () => await bindings.APP.call("book");\n${steps}`
+      )
+    ).toStrictEqual([["env"], ["env"]]);
+  });
+
+  it("changes a step's code hash when only its function changes", () => {
+    const codeOf = (body: string): string | undefined => {
+      const [first] = describeWorkflow(workflowSource(body)).steps;
+      return first?.type === "step" ? first.code : undefined;
+    };
+    const one = codeOf(
+      `await step.do("x", { description: "X" }, async () => 1);`
+    );
+
+    expect(one).toMatch(hashPattern);
+    expect(
+      codeOf(`await step.do("x", { description: "X" }, async () => 2);`)
+    ).not.toBe(one);
+    expect(
+      codeOf(`await step.do("x", { description: "X" }, async () => 1);`)
+    ).toBe(one);
   });
 
   it("rejects a source without exactly one workflow, or that doesn't parse", () => {

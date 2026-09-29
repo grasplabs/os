@@ -773,8 +773,9 @@ build: {
     review: {
       current: number | null;
       files: { path: string; change: "added" | "modified" | "removed" }[];
-      /** How app/server.ts changed: it acts for whoever uses the App. */
+      /** How the server code (app/**.ts) changed: it acts for whoever uses the App. */
       server: "added" | "modified" | "removed" | null;
+      serverFiles: { path: string; change: "added" | "modified" | "removed" }[];
       workflows: {
         id: string;
         change: "added" | "modified" | "removed";
