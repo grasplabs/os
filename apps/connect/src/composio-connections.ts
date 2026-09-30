@@ -408,12 +408,17 @@ const refuseUnlessAdmin = async (
 };
 
 /**
- * How many of an allowlist's tools the admin marked as reads: the consent
- * and connect events record it beside the `toolsHash`, so the log shows at
- * a glance what runs unheld and without a key.
+ * The tools of an allowlist the admin marked as reads, by name: they run
+ * unheld and without a key. The consent and connect events record how many
+ * beside the `toolsHash`, and the consent names each in an event of its own
+ * (`connection.consent.read_tool`, an audit detail being one small value),
+ * saying whether Composio tagged it read-only (`hinted`): one marked
+ * without the hint is the admin's word alone.
  */
-const readCountOf = (tools: readonly (string | ComposioToolRule)[]): number =>
-  tools.filter((tool) => typeof tool !== "string" && tool.read === true).length;
+const readToolsOf = (tools: readonly (string | ComposioToolRule)[]): string[] =>
+  tools.flatMap((tool) =>
+    typeof tool !== "string" && tool.read === true ? [tool.name] : []
+  );
 
 /**
  * Starts connecting a toolkit for an admin who consented: records their
@@ -441,6 +446,10 @@ export const startToolkitConnection = async (
   const inputsOf = new Map(
     toolkitTools.map(({ name, inputs }) => [name, inputs])
   );
+  const hinted = new Set(
+    toolkitTools.flatMap(({ name, readOnly }) => (readOnly ? [name] : []))
+  );
+  const readTools = readToolsOf(tools);
   const fits = tools.every((tool) => {
     const inputs = inputsOf.get(composioToolName(tool));
     const resource = typeof tool === "string" ? undefined : tool.resource;
@@ -514,8 +523,18 @@ export const startToolkitConnection = async (
           flowId,
           toolsHash: await sha256Hex(storedTools),
           toolCount: tools.length,
-          readCount: readCountOf(tools),
+          readCount: readTools.length,
+          unhintedReadCount: readTools.filter((tool) => !hinted.has(tool))
+            .length,
         }),
+        ...readTools.map((tool) =>
+          connectionEvent(person, "connection.consent.read_tool", undefined, {
+            ...detailOf(toolkit),
+            flowId,
+            tool,
+            hinted: hinted.has(tool),
+          })
+        ),
       ],
       [
         db.delete(composioCleanups).where(thisCleanup),
@@ -773,7 +792,7 @@ const finishToolkitConnection = async (
           flowId: flow.flowId,
           toolsHash: await sha256Hex(flow.tools),
           toolCount: tools.length,
-          readCount: readCountOf(tools),
+          readCount: readToolsOf(tools).length,
         }),
       ],
       [

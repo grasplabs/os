@@ -164,7 +164,9 @@ const ToolChoice = ({
  * Connecting a Composio toolkit: the admin picks the tools to allow, says
  * which of them only read, reads what they consent to, and consents by
  * connecting. A read-only tool runs without asking; a call of any other is
- * a side effect and waits for its person to confirm it.
+ * a side effect, which waits for its person to confirm it wherever a
+ * person is there (chat, an App they use), and which a workflow's run
+ * makes as a step.
  */
 const ComposioConnect = ({ entry }: { entry: Entry }) => {
   const { busy, failure, run } = useCoreAction();
@@ -223,10 +225,12 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
         <fieldset className="flex max-h-80 flex-col gap-2 overflow-y-auto">
           <legend className="mb-2 text-sm font-medium">Tools to allow</legend>
           <p className="text-muted-foreground text-sm">
-            A read-only tool runs without asking. Every other tool waits each
-            time for the person it acts for to confirm it. Mark a tool read-only
-            only if it changes nothing: marked wrongly, it changes things
-            without asking.
+            Read-only is ticked where Composio says a tool only reads; Grasp
+            doesn&apos;t check that. A read-only tool runs without asking. A
+            call of any other tool from chat, or from a person using an App,
+            waits for that person to confirm it; a workflow&apos;s run makes it
+            as one of its steps. Mark a tool read-only only if it changes
+            nothing: marked wrongly, it changes things without asking.
           </p>
           {tools === undefined && busy ? (
             <p className="text-muted-foreground text-sm">Loading its tools…</p>

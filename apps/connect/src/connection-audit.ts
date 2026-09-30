@@ -20,7 +20,8 @@ export const connectionEvent = (
     | "connection.connect"
     | "connection.reconnected"
     | "connection.disconnect"
-    | "connection.consent",
+    | "connection.consent"
+    | "connection.consent.read_tool",
   connectionId: string | undefined,
   detail: Record<string, AuditDetailValue>
 ): AuditEntry => ({

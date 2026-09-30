@@ -51,7 +51,17 @@ const toolkits: FakeToolkit[] = [
   {
     slug: "notion",
     name: "Notion",
-    tools: [{ slug: "NOTION_SEARCH" }],
+    tools: [
+      { slug: "NOTION_SEARCH", tags: ["readOnlyHint"] },
+      // Tags connect can't read, each beside the read-only tag.
+      { slug: "NOTION_NOT_STRINGS", tags: ["readOnlyHint", 7] },
+      { slug: "NOTION_TOO_LONG", tags: ["readOnlyHint", "t".repeat(129)] },
+      {
+        slug: "NOTION_TOO_MANY",
+        tags: Array.from({ length: 65 }, () => "readOnlyHint"),
+      },
+      { slug: "NOTION_NOT_A_LIST", tags: "readOnlyHint" },
+    ],
   },
 ];
 
@@ -292,6 +302,21 @@ describe("a catalog entry's tools", () => {
     expect(toolRequests()).toStrictEqual([
       "/tools?toolkit_slug=hubspot&limit=200",
       "/tools?toolkit_slug=hubspot&limit=200&cursor=2",
+    ]);
+  });
+
+  it("lists a tool whose tags it can't read as one that changes things", async () => {
+    const tools = await exports.default.catalogTools({
+      composio: true,
+      source: "composio",
+      id: "notion",
+    });
+    expect(tools.map(({ name, readOnly }) => [name, readOnly])).toStrictEqual([
+      ["NOTION_SEARCH", true],
+      ["NOTION_NOT_STRINGS", false],
+      ["NOTION_TOO_LONG", false],
+      ["NOTION_TOO_MANY", false],
+      ["NOTION_NOT_A_LIST", false],
     ]);
   });
 

@@ -20,8 +20,11 @@ export interface FakeComposioTool {
   description?: string;
   /** The properties its input takes. */
   inputs?: string[];
-  /** Its behaviour tags, such as `readOnlyHint`; by default none. */
-  tags?: string[];
+  /**
+   * Its behaviour tags, such as `readOnlyHint`; by default none. Anything
+   * else stands for an answer of Composio's that connect can't read.
+   */
+  tags?: unknown;
 }
 
 export interface FakeToolkit {

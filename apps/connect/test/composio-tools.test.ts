@@ -33,7 +33,12 @@ const composio = fakeComposioApi(
       name: "HubSpot",
       tools: [
         { slug: "HUBSPOT_LIST_CONTACTS", inputs: ["owner_id", "limit"] },
-        { slug: "HUBSPOT_GET_CONTACT", inputs: ["contact_id"] },
+        {
+          slug: "HUBSPOT_GET_CONTACT",
+          inputs: ["contact_id"],
+          // Composio says it only reads; the list above, it says nothing of.
+          tags: ["readOnlyHint"],
+        },
         { slug: "HUBSPOT_CREATE_CONTACT", inputs: ["owner_id", "email"] },
       ],
     },
@@ -273,9 +278,14 @@ const start = async (
   });
 
 describe("the admin's allowlist, when they connect", () => {
-  it("is kept with the flow, rules and all, and counted in the consent and the connection", async () => {
+  it("is kept with the flow, rules and all, and the log names each tool that runs unheld, and whether Composio said it only reads", async () => {
     const admin = someone("admin");
-    const { url } = await start(rules, admin);
+    const allowed = [
+      { name: "HUBSPOT_LIST_CONTACTS", read: true },
+      { name: "HUBSPOT_GET_CONTACT", read: true },
+      "HUBSPOT_CREATE_CONTACT",
+    ];
+    const { url } = await start(allowed, admin);
     const { state } = composio.authorize(url);
     await exports.default.finishConnection({
       person: admin,
@@ -291,11 +301,43 @@ describe("the admin's allowlist, when they connect", () => {
         action,
         toolCount: detail.toolCount,
         readCount: detail.readCount,
+        unhintedReadCount: detail.unhintedReadCount,
       }));
     expect(counted).toStrictEqual([
-      { action: "connection.consent", toolCount: 3, readCount: 1 },
-      { action: "connection.connect", toolCount: 3, readCount: 1 },
+      {
+        action: "connection.consent",
+        toolCount: 3,
+        readCount: 2,
+        unhintedReadCount: 1,
+      },
+      {
+        action: "connection.connect",
+        toolCount: 3,
+        readCount: 2,
+        unhintedReadCount: undefined,
+      },
     ]);
+    const consent = recorded.find(
+      ({ action }) => action === "connection.consent"
+    );
+    expect(
+      recorded
+        .filter(({ action }) => action === "connection.consent.read_tool")
+        .map(({ actor, detail }) => ({ actor, detail }))
+    ).toStrictEqual(
+      [
+        { tool: "HUBSPOT_LIST_CONTACTS", hinted: false },
+        { tool: "HUBSPOT_GET_CONTACT", hinted: true },
+      ].map((tool) => ({
+        actor: consent?.actor,
+        detail: {
+          provider: "hubspot",
+          scope: "shared",
+          flowId: consent?.detail.flowId,
+          ...tool,
+        },
+      }))
+    );
   });
 
   it("names only the tools' own input properties as resources, and each tool once", async () => {
