@@ -82,9 +82,11 @@ import type { Draft } from "./workspace.ts";
 // `maxFailedChecks` checks of one draft failed in a row in one turn, when
 // checking refuses and the agent tells the person what still fails. Each
 // check takes its place against the limit before it runs (in the
-// Workspace object, so checks started at once can't pass it). A draft
-// takes at most `maxDryRunsPerTurn` dry runs a turn, and a turn creates at
-// most `maxCreatesPerTurn` Apps.
+// Workspace object, so checks started at once can't pass it). A turn
+// creates at most `maxCreatesPerTurn` Apps. Nothing else of a turn's
+// building has a limit of its own: its code runs, and the calls one run may
+// make (code-mode.ts), bound the rest, dry runs included, which run in an
+// isolate with an empty env and leave nothing behind.
 //
 // The person's rights bound every call, read again each time: creating an
 // App needs a role that builds (and, from a blueprint, a role in its
@@ -102,14 +104,17 @@ import type { Draft } from "./workspace.ts";
  * Most checks of one draft that may fail in a row in one turn: the repair
  * loop's step limit. Checks running at once count against it before they
  * run. A turn has at most 30 code runs (agent.ts), so this leaves it room
- * to answer.
+ * to answer: without it a draft that never passes would take every run the
+ * turn has before the person hears it can't be fixed.
  */
 export const maxFailedChecks = 5;
 
-/** Most dry runs of one draft in one turn, apart from its checks. */
-export const maxDryRunsPerTurn = 10;
-
-/** Most Apps the chat's agent may create in one turn. */
+/**
+ * Most Apps the chat's agent may create in one turn. An App can't be
+ * deleted, and a turn's code runs and their calls would let one turn
+ * create thousands: this is what keeps a turn that runs away from leaving
+ * them behind.
+ */
 export const maxCreatesPerTurn = 3;
 
 /** Most diagnostics or test failures a check answers with, of each kind. */
@@ -505,7 +510,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   }
 
   /**
-   * Runs `run`, one check or dry run of the chat's draft of App `app`,
+   * Runs `run`, one check of the chat's draft of App `app`,
    * once it takes one of the draft's checks this turn (`takeCheck`, before
    * anything runs, so checks started at once can't pass the limit), and
    * settles it however it ends: passed only when `run` says so.
@@ -763,8 +768,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
   /**
    * Dry-runs each test of workflow `workflow` in the chat's draft of
    * `app`, with `params` over each test's own values: what it would do,
-   * with every step's side effect recorded, never made. At most
-   * {@link maxDryRunsPerTurn} a turn.
+   * with every step's side effect recorded, never made.
    */
   async dryRun(
     app: unknown,
@@ -787,16 +791,6 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
           throw appErrors.create("app.invalid", {
             issues: ["workflow: The draft has no such workflow."],
           });
-        }
-        // A turn runs only so many, apart from its checks.
-        const { workspaceId, chatId } = this.ctx.props;
-        const taken = await workspace(this.env, workspaceId).takeDryRun(
-          chatId,
-          id,
-          maxDryRunsPerTurn
-        );
-        if (!taken) {
-          throw appErrors.create("app.dry_runs_exhausted");
         }
         return await dryRunTests(
           this.env,
@@ -932,7 +926,6 @@ ${previewField}    failedInARow: number;
   /**
    * Dry-runs a workflow's tests in the draft with \`params\` over each
    * test's values: what it would do, its side effects recorded, never made.
-   * At most ${maxDryRunsPerTurn} a question.
    */
   dryRun(app: string, workflow: string, params?: Record<string, string | number>): Promise<{
     name: string;
