@@ -68,15 +68,17 @@ import { accessTokenFor } from "./tokens.ts";
 // stops once it has `readMaxItems` items (at most a page more); more waits
 // for the next read, which is due at once. A read that fails, or whose
 // result can't be kept, waits longer after each failure, up to an hour, or
-// as long as the provider asks; one refused access (401, 403, 404)
-// `refusedLimit` times in a row is recorded in the audit log and read only
-// daily from then on. A source is read only while the outbox has room for
-// all a read can find, so it never holds more than `outboxMax` events: the
-// sources' cursors keep their place meanwhile, and nothing is lost. Events
-// of a connection disconnected before core took them are never delivered,
-// and are dropped. One sync sends at most `requestsPerSync` requests to
-// providers, of every source together: once too few are left for another
-// read, it stops, and the sources still due are read by the next.
+// as long as the provider asks; a source that failed `failedLimit` times
+// in a row is recorded in the audit log, and, when it was refused access
+// (401, 403, 404), read only daily from then on. An event whose ID is
+// longer than core takes is dropped, which the audit log says too. A
+// source is read only while the outbox has room for all a read can find,
+// so it never holds more than `outboxMax` events: the sources' cursors
+// keep their place meanwhile, and nothing is lost. Events of a connection
+// disconnected before core took them are never delivered, and are dropped.
+// One sync sends at most `requestsPerSync` requests to providers, of every
+// source together: once too few are left for another read, it stops, and
+// the sources still due are read by the next.
 
 /** Every event type connect reports, by type. */
 const kinds: Readonly<Record<string, EventKind>> = {
@@ -131,8 +133,12 @@ export const requestsPerSync = 400;
 const requestsPerRead = 20;
 /** Events the outbox holds before sources stop being read. */
 export const outboxMax = 10_000;
-/** Refusals in a row after which a source is read only daily. */
-export const refusedLimit = 10;
+/**
+ * Failures in a row after which the audit log says a source is failing:
+ * one refused access is read only daily from then on, any other goes on
+ * being tried hourly.
+ */
+export const failedLimit = 10;
 /** How long a source refused that often waits. */
 const refusedWaitMs = 24 * 60 * 60_000;
 /** The statuses that say the connection can't read the source. */
@@ -206,6 +212,7 @@ const sourceEntry = (
     | "connection.events.started"
     | "connection.events.stopped"
     | "connection.events.refused"
+    | "connection.events.failed"
     | "connection.events.primed_late",
   { connectionId, type, resource }: SourceKey,
   detail: Record<string, number> = {}
@@ -348,7 +355,14 @@ const eventIdMaxLength = 200;
 /**
  * What a read found, kept: the events in the outbox, where to read on
  * from and when, in one batch with its audit events, one per hundred
- * events, so each names every item it read.
+ * events, so each names every item it read, and one for the events it
+ * had to drop, if any: those whose ID is longer than core takes.
+ *
+ * `read_at` moves only with a read that reached the end of what the
+ * provider had: a read that stopped with more to come leaves it, so the
+ * reads that take the rest still count as new what arrived since the last
+ * one that caught up (`newSince`), however long ago that was. An item
+ * read twice meanwhile is the same event (the outbox's key, and core's).
  */
 const keepRead = async (
   env: Env,
@@ -359,20 +373,15 @@ const keepRead = async (
 ): Promise<number> => {
   const db = drizzle(env.DB);
   const action = actionOf(source.type) ?? "";
-  const events = found.events.filter(({ id }) => {
-    const fits = id.length <= eventIdMaxLength;
-    if (!fits) {
-      log.warn("events.id_too_long", { type: source.type });
-    }
-    return fits;
-  });
+  const events = found.events.filter(({ id }) => id.length <= eventIdMaxLength);
+  const tooLong = found.events.length - events.length;
   const done = new Date();
   const update = db
     .update(eventSources)
     .set({
       cursor: found.cursor,
       failures: 0,
-      readAt,
+      ...(found.more ? {} : { readAt }),
       pollAt: new Date(done.getTime() + (found.more ? 0 : pollIntervalMs)),
       updatedAt: done,
     })
@@ -413,6 +422,20 @@ const keepRead = async (
       },
     });
   }
+  if (tooLong > 0) {
+    log.warn("events.id_too_long", { type: source.type, count: tooLong });
+    entries.push({
+      actor: { type: "system" },
+      action: "connection.events.dropped",
+      target: { type: "connection", id: connection.id },
+      detail: {
+        reason: "id_too_long",
+        type: source.type,
+        ...(source.resource === "" ? {} : { resource: source.resource }),
+        count: tooLong,
+      },
+    });
+  }
   const [first, ...rest] = entries;
   if (first === undefined) {
     await update;
@@ -425,9 +448,11 @@ const keepRead = async (
 /**
  * A read that failed, or whose result couldn't be kept: the source waits
  * longer, or as long as the provider asked, and starts over when its
- * cursor is gone (from its last read, where the provider can). Refused
- * `refusedLimit` times in a row, it's recorded in the audit log and read
- * only daily from then on.
+ * cursor is gone (from its last read, where the provider can). Its
+ * `failedLimit`th failure in a row is recorded in the audit log, once: as
+ * refused when the provider refused access, and the source is read only
+ * daily for as long as it is; as failed for any other reason, and it goes
+ * on being tried.
  */
 const failRead = async (
   env: Env,
@@ -441,7 +466,7 @@ const failRead = async (
   const refused =
     sourceError?.status !== undefined &&
     refusedStatuses.has(sourceError.status) &&
-    failures >= refusedLimit;
+    failures >= failedLimit;
   // The provider's own wait as it gave it; only a computed one is capped.
   let wait =
     sourceError?.retryAfterMs ?? Math.min(backoffMs(failures), maxWait);
@@ -467,14 +492,20 @@ const failRead = async (
       updatedAt: new Date(),
     })
     .where(sameCursor(source));
-  if (refused && failures === refusedLimit) {
+  if (failures === failedLimit) {
     await recordEvents(
       env,
       [
-        sourceEntry("connection.events.refused", source, {
-          status: sourceError?.status ?? 0,
-          failures,
-        }),
+        sourceEntry(
+          refused ? "connection.events.refused" : "connection.events.failed",
+          source,
+          {
+            ...(sourceError?.status === undefined
+              ? {}
+              : { status: sourceError.status }),
+            failures,
+          }
+        ),
       ],
       [update]
     );
