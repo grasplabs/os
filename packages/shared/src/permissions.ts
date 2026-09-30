@@ -252,13 +252,14 @@ export const permissionRequestSchema = z
 export type PermissionRequest = z.input<typeof permissionRequestSchema>;
 
 /**
- * A permission a built-in blueprint declares (its `blueprint.json`): a
- * request without its subject, which is every App created from it. Only
- * a collection one of its blueprints declares (`declaredCollectionSchema`
- * in `@grasp-os/shared/knowledge`), or what the platform offers (its
- * statistics, guest chats): the things a built-in can name the same way
- * in every deployment, where
- * connections have IDs of their own in each.
+ * A permission a blueprint declares (a built-in's `blueprint.json`, or
+ * what its App asked for as it was marked): a request without its
+ * subject, which is every App created from it. Only a collection (for a
+ * built-in, one it declares: `declaredCollectionSchema` in
+ * `@grasp-os/shared/knowledge`), or what the platform offers (its
+ * statistics, guest chats): the things that name the same thing for
+ * whoever creates from it, where a connection is someone's or set up for
+ * one App, and a workflow or exports name an App its creator may not see.
  */
 export const declaredPermissionSchema = z
   .strictObject({
@@ -346,9 +347,8 @@ export interface PermissionsApi {
   request: (request: PermissionRequest) => Promise<Permission>;
   /**
    * Grants a requested permission, the admin's own request included.
-   * Admins only, never Grasp staff; audited. Refused for a built-in
-   * blueprint's own permissions (`permission.builtin`): they are granted on
-   * the Apps created from it. `reviewed.version` is the version of the App
+   * Admins only, never Grasp staff; audited. `reviewed.version` is the
+   * version of the App
    * the admin reviewed, the one current as they decided (null for an
    * agent's permission, or an App with none current): the grant approves
    * it, and is refused with `app.conflict`, changing nothing, once another
@@ -357,8 +357,7 @@ export interface PermissionsApi {
   grant: (id: string, reviewed: GrantReview) => Promise<Permission>;
   /**
    * Revokes a permission; the next call that needs it is refused. Admins
-   * only, never Grasp staff; audited. Refused for a built-in blueprint's
-   * own permissions (`permission.builtin`), which only a release changes.
+   * only, never Grasp staff; audited.
    */
   revoke: (id: string) => Promise<Permission>;
   /**
@@ -443,6 +442,4 @@ export const permissionErrors = defineErrorFamily({
   "permission.not_requested": "Only a requested permission can be granted.",
   "permission.conflict":
     "This App or agent already has a permission with that binding name.",
-  "permission.builtin":
-    "A built-in blueprint's permissions are what the Apps created from it ask for: grant or revoke them on those Apps.",
 });

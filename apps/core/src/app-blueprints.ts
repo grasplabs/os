@@ -11,7 +11,6 @@ import type {
   FromBlueprint,
 } from "@grasp-os/shared/apps";
 import type { AuditEntry } from "@grasp-os/shared/audit";
-import { isExpectedError } from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { requireBuilder, roleErrors } from "@grasp-os/shared/roles";
@@ -37,12 +36,7 @@ import {
   workflowsIn,
 } from "./apps.ts";
 import type { AppRow, VersionRow } from "./apps.ts";
-import {
-  auditedBatch,
-  outboxed,
-  outboxedIfChanged,
-  outboxedWhere,
-} from "./audit-outbox.ts";
+import { auditedBatch, outboxed, outboxedIfChanged } from "./audit-outbox.ts";
 import type { Acting } from "./auth/identity.ts";
 import { builtinAppId, builtinOwner } from "./builtin-app-id.ts";
 import {
@@ -53,11 +47,7 @@ import {
 } from "./db/core/schema.ts";
 import { ensureCollection } from "./knowledge/collections.ts";
 import { appMemoryPath } from "./knowledge/memory-files.ts";
-import {
-  blueprintRequests,
-  declaredRequests,
-  toPermission,
-} from "./permissions.ts";
+import { declarableOf, declaredRequests, toPermission } from "./permissions.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -65,11 +55,11 @@ import type { SessionCheck } from "./session-check.ts";
 // blueprint; whoever has a role in the App (app-access.ts) and builds
 // (an admin or builder in the organization) creates an App of their own
 // from it. The new App is theirs. Its first version is the blueprint's
-// code, but for its AGENTS.md, and it asks for what the blueprint's App
-// was given or asked for, each request waiting for an admin
-// (permissions.ts), but for someone else's personal connections, which
-// only their owner's calls could use, and connections connect doesn't
-// know: those are left out, and recorded. Nothing else comes with it:
+// code, but for its AGENTS.md, and it asks for what the blueprint
+// declares, each request waiting for an admin: what the App asked for or
+// was given as the version was marked, of the kinds that name the same
+// thing for whoever creates from it (`declarableOf` in permissions.ts).
+// Its builders ask for the rest themselves. Nothing else comes with it:
 // none of the App's data (its storage, its workflows' state, its runs),
 // settings (parameter values), members or error log. A version never
 // changes, so neither does a blueprint's code.
@@ -111,6 +101,7 @@ const toBlueprint = (row: Row, app: App): Blueprint => ({
   version: row.version,
   markedBy: row.markedBy,
   markedAt: row.markedAt.toISOString(),
+  permissions: row.permissions,
 });
 
 /** The blueprint row of `app` at `version`, if it is marked. */
@@ -145,7 +136,11 @@ export const listBlueprints = async (
   return rows.map(({ blueprint, app }) => toBlueprint(blueprint, toApp(app)));
 };
 
-/** Marks a version as a blueprint; marking it again changes nothing. */
+/**
+ * Marks a version as a blueprint, declaring what its App asks for or was
+ * given that each App created from it asks for too (`declarableOf`);
+ * marking it again changes nothing.
+ */
 export const markBlueprint = async (
   env: Env,
   by: Identity,
@@ -164,6 +159,7 @@ export const markBlueprint = async (
         version: number,
         markedBy: by.userId,
         markedAt: new Date(),
+        permissions: await declarableOf(env, found.id),
       })
       .onConflictDoNothing(),
     outboxedIfChanged(
@@ -231,45 +227,19 @@ const approvedSource = async (
 };
 
 /**
- * Of the Apps `named`, those `by` may open, as `appFor` decides for each
- * (a role in it, and able to read what it read): the Apps whose workflows
- * and exports they could ask for themselves.
- */
-const openedBy = async (
-  env: Env,
-  by: Acting,
-  named: readonly AppId[]
-): Promise<Set<string>> => {
-  const opened = await Promise.all(
-    named.map(async (app) => {
-      try {
-        await appFor(env, by, app, "user");
-        return [app];
-      } catch (error) {
-        if (isExpectedError(error)) {
-          return [];
-        }
-        throw error;
-      }
-    })
-  );
-  return new Set(opened.flat());
-};
-
-/**
  * Creates an App of `by`'s own from the blueprint of App `app` at
  * `version`: the code at that version as its first version (its AGENTS.md
- * a stub), and requests for what that App was given or asked for. All of
- * it lands in one batch, or none of it (the version's files, stored
- * first, are only named once it lands), and only while the version is
- * still a blueprint and `by` still has a role in its App.
+ * a stub), and requests for what the blueprint declares. All of it lands
+ * in one batch, or none of it (the version's files, stored first, are
+ * only named once it lands), and only while the version is still a
+ * blueprint and `by` still has a role in its App.
  *
  * `by` passes the source App's check once, before anything is read,
  * what it read included (`appFor`). The batch's guard repeats the role,
  * not what it read, which SQL can't express; nor does it need to: the
  * copy holds only code (its AGENTS.md a stub, above) and requests that
- * wait for an admin, read from the source before the batch, so a source
- * that reads more after the check adds nothing to the copy.
+ * wait for an admin, declared as the version was marked, so a source that
+ * reads more after the check adds nothing to the copy.
  */
 export const createFromBlueprint = async (
   env: Env,
@@ -282,7 +252,8 @@ export const createFromBlueprint = async (
   requireNotStaff(by);
   const source = await appFor(env, by, app, "user");
   const number = appErrors.parse("app.invalid", appVersionSchema, version);
-  if (!(await blueprintRow(env, source.id, number))) {
+  const blueprint = await blueprintRow(env, source.id, number);
+  if (!blueprint) {
     throw appErrors.create("app.blueprint_not_found");
   }
   const { name, description } = appErrors.parse(
@@ -330,18 +301,13 @@ export const createFromBlueprint = async (
     proposedBy: null,
     records: recordTypesIn(files),
   };
-  const requests = await blueprintRequests(
-    env,
+  const requests = declaredRequests(
     by,
-    source.id,
     id,
-    async (named) => await openedBy(env, by, named)
+    blueprint.permissions,
+    `${source.id}@${number}`
   );
   const db = drizzle(env.DB);
-  /** Whether a request names another App: a workflow or exports of it. */
-  const namesOtherApp = (row: typeof permissions.$inferSelect): boolean =>
-    (row.objectType === "workflow" || row.objectType === "app") &&
-    row.objectId !== id;
   // The App, only while the blueprint is still marked and `by`
   // still has a role in its App (`stillOpenTo`), selected from its row:
   // unmarked or unshared since they were read above, nothing is inserted,
@@ -394,65 +360,7 @@ export const createFromBlueprint = async (
     ),
     // One statement each: D1 binds at most 100 values to one.
     ...requests.rows.map((row) => db.insert(permissions).values(row)),
-    // A request naming another App only while `by` still has a role in
-    // it as the batch runs: one they lost since `openedBy` read it is
-    // taken out again, in the same batch, so the copy never names it.
-    ...requests.rows
-      .filter(namesOtherApp)
-      .map((row) =>
-        db
-          .delete(permissions)
-          .where(
-            and(
-              eq(permissions.id, row.id),
-              sql`NOT ${stillOpenTo(by, appIdSchema.parse(row.objectId))}`
-            )
-          )
-      ),
-    // Each request's audit entry (`entries` are the rows', in order) if
-    // its row stayed; one taken out is recorded as dropped instead.
-    ...requests.rows.flatMap((row, index) => {
-      const entry = requests.entries[index];
-      if (entry === undefined) {
-        return [];
-      }
-      if (!namesOtherApp(row)) {
-        return [outboxed(db, entry)];
-      }
-      const kept = sql`EXISTS (SELECT 1 FROM ${permissions} WHERE ${permissions.id} = ${row.id})`;
-      return [
-        outboxedWhere(db, entry, kept),
-        outboxedWhere(
-          db,
-          changeEntry(by, "app.blueprint.app_dropped", id, {
-            objectType: row.objectType,
-            binding: row.binding,
-            fromApp: source.id,
-          }),
-          sql`NOT ${kept}`
-        ),
-      ];
-    }),
-    ...requests.dropped.map(({ connectionId, binding }) =>
-      outboxed(
-        db,
-        changeEntry(by, "app.blueprint.connection_dropped", id, {
-          connectionId,
-          binding,
-          fromApp: source.id,
-        })
-      )
-    ),
-    ...requests.droppedApps.map(({ type, binding }) =>
-      outboxed(
-        db,
-        changeEntry(by, "app.blueprint.app_dropped", id, {
-          objectType: type,
-          binding,
-          fromApp: source.id,
-        })
-      )
-    ),
+    ...requests.entries.map((entry) => outboxed(db, entry)),
   ] as const;
   try {
     await auditedBatch(env, db, statements);
@@ -464,31 +372,10 @@ export const createFromBlueprint = async (
     await appFor(env, by, source.id, "user");
     throw error;
   }
-  // The requests that stayed: those naming another App `by` lost their
-  // role in as the batch ran were taken out, and are dropped too.
-  const stayedRows = await db
-    .select({ id: permissions.id })
-    .from(permissions)
-    .where(
-      and(eq(permissions.subjectType, "app"), eq(permissions.subjectId, id))
-    );
-  const stayed = new Set(stayedRows.map((row) => row.id));
   return {
     app: toApp(appRow),
     version: toVersion(versionRow),
-    permissions: requests.rows
-      .filter((row) => stayed.has(row.id))
-      .map(toPermission),
-    dropped: requests.dropped,
-    droppedApps: [
-      ...requests.droppedApps,
-      ...requests.rows
-        .filter((row) => !stayed.has(row.id))
-        .map(({ objectType, binding }) => ({
-          type: objectType === "app" ? ("app" as const) : ("workflow" as const),
-          binding,
-        })),
-    ],
+    permissions: requests.rows.map(toPermission),
   };
 };
 
@@ -510,17 +397,15 @@ const installEntry = (
  * it is found, listed and created from as any blueprint is, by everyone
  * who builds, and changed by nobody but the install (app-access.ts): the App, if it
  * doesn't exist; its files as the App's next version, if its latest
- * version's differ; that version marked, and any other unmarked; its
- * name and description, if they changed; and its requests, as the release
- * declares them (`declaredRequests`). Each is audited, in the one batch
- * that writes it all, and only what differs from what's stored is
- * written, so installing it again writes nothing. The collections it
- * declares are created first, in Knowledge's database, each only if it
- * isn't there yet, and audited only then. The App never runs (it
- * has no current version, and nobody may make one current), so its
- * requests allow nothing: they are what an App created from it asks for,
- * each waiting for an admin there. Apps created from it earlier keep
- * their code and their permissions.
+ * version's differ; that version marked, with what the release declares
+ * each App created from it asks for, and any other unmarked; its name and
+ * description, if they changed. Each is audited, in the one batch that
+ * writes it all, and only what differs from what's stored is written, so
+ * installing it again writes nothing. The collections it declares are
+ * created first, in Knowledge's database, each only if it isn't there
+ * yet, and audited only then. The App never runs (it has no current
+ * version, and nobody may make one current). Apps created from it
+ * earlier keep their code and their permissions.
  *
  * Two installs at once both try the same version number, and the second
  * is refused by the version's primary key, writing nothing: the next
@@ -548,7 +433,10 @@ export const installBuiltinBlueprint = async (
       .orderBy(desc(appVersions.version))
       .limit(1),
     db
-      .select({ version: appBlueprints.version })
+      .select({
+        version: appBlueprints.version,
+        permissions: appBlueprints.permissions,
+      })
       .from(appBlueprints)
       .where(eq(appBlueprints.appId, id)),
   ]);
@@ -626,7 +514,9 @@ export const installBuiltinBlueprint = async (
         ),
       ]
     : [];
-  const markedNow = marked.some((row) => row.version === version)
+  const current = marked.find((row) => row.version === version);
+  const declared = JSON.stringify(blueprint.permissions);
+  const markedNow = current
     ? []
     : [
         db
@@ -636,6 +526,7 @@ export const installBuiltinBlueprint = async (
             version,
             markedBy: builtinOwner,
             markedAt: now,
+            permissions: [...blueprint.permissions],
           })
           .onConflictDoNothing(),
         outboxedIfChanged(
@@ -643,6 +534,27 @@ export const installBuiltinBlueprint = async (
           installEntry("app.blueprint.marked", id, { version })
         ),
       ];
+  // What its copies ask for, as the release declares it now: Apps created
+  // from it earlier keep what they asked for, and were granted.
+  const redeclared =
+    current && JSON.stringify(current.permissions) !== declared
+      ? [
+          db
+            .update(appBlueprints)
+            .set({ permissions: [...blueprint.permissions] })
+            .where(
+              and(
+                eq(appBlueprints.appId, id),
+                eq(appBlueprints.version, version),
+                sql`${appBlueprints.permissions} IS NOT ${declared}`
+              )
+            ),
+          outboxedIfChanged(
+            db,
+            installEntry("app.blueprint.declared", id, { version })
+          ),
+        ]
+      : [];
   // Only the release's version is offered: one built-in, one blueprint.
   const unmarked = marked.flatMap((row) =>
     row.version === version
@@ -685,19 +597,13 @@ export const installBuiltinBlueprint = async (
       { builtin: blueprint.id }
     );
   }
-  const requested = await declaredRequests(
-    env,
-    builtinOwner,
-    id,
-    blueprint.permissions
-  );
   const [first, ...rest] = [
     ...created,
     ...described,
     ...committed,
     ...markedNow,
+    ...redeclared,
     ...unmarked,
-    ...requested,
   ];
   if (first !== undefined) {
     await auditedBatch(env, db, [first, ...rest]);

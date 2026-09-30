@@ -1,0 +1,1 @@
+ALTER TABLE `app_blueprints` ADD `permissions` text DEFAULT '[]' NOT NULL;

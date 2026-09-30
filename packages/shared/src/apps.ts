@@ -5,7 +5,7 @@ import { defineErrorFamily } from "./errors.ts";
 import { collectionIdSchema, identifierSchema } from "./ids.ts";
 import type { AppId } from "./ids.ts";
 import { recordTypeNameSchema } from "./knowledge.ts";
-import type { Permission } from "./permissions.ts";
+import type { DeclaredPermission, Permission } from "./permissions.ts";
 import type { TriggerDeclaration } from "./workflows.ts";
 
 // An App's code is a tree of text files, versioned as a whole: builders
@@ -83,13 +83,6 @@ export const commitMessageSchema = z
   .trim()
   .min(1)
   .max(appLimits.messageLength);
-
-/**
- * The owner of the built-in blueprints' Apps: Grasp, never a person. A
- * built-in never runs: its permissions say what the Apps created from it
- * ask for, and nobody grants or revokes them (`permission.builtin`).
- */
-export const builtinOwner = "grasp";
 
 /** An App in the registry. Times are ISO 8601. */
 export interface App {
@@ -459,6 +452,8 @@ export interface Blueprint {
   version: number;
   markedBy: string;
   markedAt: string;
+  /** What each App created from it asks for, each waiting for an admin. */
+  permissions: DeclaredPermission[];
 }
 
 /** What a builder gives to create an App from a blueprint. */
@@ -472,27 +467,14 @@ export type FromBlueprint = z.input<typeof fromBlueprintSchema>;
  * An App created from a blueprint: its first version holds the code at
  * the blueprint's version, but for its AGENTS.md, a stub naming the
  * blueprint (the blueprint's was written from what its App read, which
- * the copy may not have read), and `permissions` are requests, waiting for an
- * admin, for the connections, collections, workflows and other Apps'
- * exports the blueprint's App was given or asked for, but for someone
- * else's personal connections, which only their owner's calls could use,
- * and connections connect doesn't know (`dropped`), and the workflows and
- * exports of Apps its creator has no role in, which they couldn't ask for
- * themselves (`droppedApps`): a copy never names an App its creator can't
- * see. Nothing else comes with it: no data, no settings, no runs,
- * no members.
+ * the copy may not have read), and `permissions` are requests, waiting for
+ * an admin, for what the blueprint declares (`Blueprint.permissions`).
+ * Nothing else comes with it: no data, no settings, no runs, no members.
  */
 export interface CreatedFromBlueprint {
   app: App;
   version: AppVersion;
   permissions: Permission[];
-  /** The connections, by binding, it doesn't ask for. */
-  dropped: { connectionId: string; binding: string }[];
-  /**
-   * The workflows and exports of other Apps, by binding, it doesn't ask
-   * for; never naming the App.
-   */
-  droppedApps: { type: "workflow" | "app"; binding: string }[];
 }
 
 /** Blueprints: App versions to create Apps from. */

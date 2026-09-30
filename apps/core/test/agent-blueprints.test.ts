@@ -93,7 +93,7 @@ describe(
   "creating Apps from blueprints from a chat",
   { timeout: 60_000 },
   () => {
-    it("creates one as its person may, asking for what the blueprint's App has, as the agent", async () => {
+    it("creates one as its person may, asking for what the blueprint declares, as the agent", async () => {
       const { person, chat, ledger } = await setUp(() => [
         codeStep(`export default async (env) => {
         const listed = await env.build.blueprints();

@@ -5,6 +5,7 @@ import type {
 } from "@grasp-os/shared/apps";
 import { auditRejectReasons } from "@grasp-os/shared/audit";
 import type { Json } from "@grasp-os/shared/json";
+import type { DeclaredPermission } from "@grasp-os/shared/permissions";
 import { signalKinds } from "@grasp-os/shared/signals";
 import type {
   EventFilter,
@@ -403,6 +404,15 @@ export const appBlueprints = sqliteTable(
     version: integer().notNull(),
     markedBy: text("marked_by").notNull(),
     markedAt: timestamp("marked_at").notNull(),
+    /**
+     * What each App created from it asks for (JSON, `DeclaredPermission[]`),
+     * each waiting for an admin there: declared as it is marked, or by a
+     * built-in's `blueprint.json`.
+     */
+    permissions: text({ mode: "json" })
+      .$type<DeclaredPermission[]>()
+      .notNull()
+      .default(sql`'[]'`),
   },
   (table) => [primaryKey({ columns: [table.appId, table.version] })]
 );

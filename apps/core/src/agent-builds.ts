@@ -843,17 +843,14 @@ build: {
   /**
    * Creates an App owned by the person from the blueprint of App \`app\` at
    * \`version\`: the blueprint's code as its first version, and a request
-   * for each permission the blueprint's App has, which an admin grants or
-   * not. Counts with \`create\`: at most ${maxCreatesPerTurn} a question. Change it
-   * afterwards in a draft, as any App.
+   * for each permission the blueprint declares, which an admin grants or
+   * not; ask for any other it needs as for any App. Counts with \`create\`:
+   * at most ${maxCreatesPerTurn} a question. Change it afterwards in a draft, as any App.
    */
   createFromBlueprint(app: string, version: number, created: { name: string; description?: string }): Promise<{
     app: { id: string; name: string };
     version: { version: number };
     permissions: { id: string; binding: string; status: string }[];
-    /** Connections and other Apps' workflows or exports it doesn't ask for, by binding. */
-    dropped: { binding: string }[];
-    droppedApps: { binding: string }[];
   }>;
   /**
    * This chat's draft of an App: every file as the draft has them, the
