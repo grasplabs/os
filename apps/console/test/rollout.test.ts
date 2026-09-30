@@ -1,10 +1,13 @@
 import { platformChangeSchema } from "@grasp-os/shared/platform-change";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { and, asc, eq, inArray, sql } from "drizzle-orm";
+import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { applySettings } from "../src/clients/apply.ts";
+import { clientSettings } from "../src/clients/queries.ts";
+import { SettingsError, setFeature } from "../src/clients/settings.ts";
 import { cloudflareApi } from "../src/cloudflare/api.ts";
 import { deployVersion, deployVersions } from "../src/cloudflare/workers.ts";
 import { act, consoleDatabase } from "../src/db/act.ts";
@@ -42,6 +45,7 @@ import {
 import { checkRevocation } from "../src/rollout/shared-secrets.ts";
 import type { AccountState } from "./cloudflare-api-kit.ts";
 import { mockCloudflareApi } from "./cloudflare-api.ts";
+import { racingDb } from "./racing-db.ts";
 import { publishRelease } from "./releases.ts";
 import {
   emptyStoreSecret,
@@ -347,6 +351,44 @@ const runnerOf = async (clientId: string) => {
     .from(clientRuns)
     .where(eq(clientRuns.clientId, clientId));
   return row ?? null;
+};
+
+/** The `FEATURES` var of the core version the console made live on the client. */
+const liveFeaturesOf = async (
+  clientId: string,
+  account: AccountState
+): Promise<unknown> => {
+  const workers = await workersOf(clientId);
+  const core = workers.find(({ worker }) => worker === "core");
+  return z
+    .array(z.object({ name: z.string(), json: z.unknown().optional() }))
+    .parse(
+      account.scripts
+        .get(core?.scriptName ?? "")
+        ?.versions.find(({ id }) => id === core?.versionId)?.metadata
+        .bindings ?? []
+    )
+    .find(({ name }) => name === "FEATURES")?.json;
+};
+
+/**
+ * Each of the client's Workers' deployments after the first `skip`, by
+ * app: its live version's share of each, oldest first.
+ */
+const liveSharesOf = async (
+  clientId: string,
+  account: AccountState,
+  skip: Record<string, number>
+): Promise<Record<string, number[][]>> => {
+  const workers = await workersOf(clientId);
+  return Object.fromEntries(
+    workers.map(({ worker, scriptName, versionId }) => [
+      worker,
+      deploymentsOf(account, scriptName, skip[scriptName] ?? 0, [
+        versionId ?? "",
+      ]),
+    ])
+  );
 };
 
 /** The rollout's own audit actions, oldest first. */
@@ -794,6 +836,48 @@ describe("rolling a release out", () => {
     });
   });
 
+  it("deploys a client on the release already once staff changed a flag, every Worker at once, so its core gets the flag, and skips it again after", async () => {
+    const release = await importedRelease("feat(core): flagged on it");
+    const internal = await activeClient(0, release);
+    const [, before] = await workersOf(internal.clientId);
+    const skip = deploymentCounts(internal.account);
+    await setFeature(env, staff, {
+      clientId: internal.clientId,
+      feature: "apps",
+      on: true,
+    });
+    await using run = await followRollouts();
+
+    const deployed = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+    const [, core] = await workersOf(internal.clientId);
+    const again = await rollOut(release, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    expect({
+      deployed: await targetsOf(deployed),
+      newVersion: core?.versionId !== before?.versionId,
+      features: await liveFeaturesOf(internal.clientId, internal.account),
+      // Only its config changed, which may be a kill switch: no stages.
+      shares: await liveSharesOf(internal.clientId, internal.account, skip),
+      again: await targetsOf(again),
+    }).toStrictEqual({
+      deployed: {
+        [internal.clientId]: { ring: 0, status: "done", error: null },
+      },
+      newVersion: true,
+      features: { apps: true },
+      shares: { connect: [[100]], core: [[100]] },
+      again: {
+        [internal.clientId]: {
+          ring: 0,
+          status: "skipped",
+          error: "on_release",
+        },
+      },
+    });
+  });
+
   it("skips a client that runs the release already, deploying none of its Workers", async () => {
     const release = await importedRelease("feat(core): on it already");
     const internal = await activeClient(0, release);
@@ -1125,26 +1209,6 @@ const liveSecretOf = (
     .get(script)
     ?.versions.find(({ id }) => id === live)
     ?.secrets.get(name);
-};
-
-/**
- * Each of the client's Workers' deployments after the first `skip`, by
- * app: its live version's share of each, oldest first.
- */
-const liveSharesOf = async (
-  clientId: string,
-  account: AccountState,
-  skip: Record<string, number>
-): Promise<Record<string, number[][]>> => {
-  const workers = await workersOf(clientId);
-  return Object.fromEntries(
-    workers.map(({ worker, scriptName, versionId }) => [
-      worker,
-      deploymentsOf(account, scriptName, skip[scriptName] ?? 0, [
-        versionId ?? "",
-      ]),
-    ])
-  );
 };
 
 describe("rolling new secrets out", () => {
@@ -1617,6 +1681,51 @@ describe("controlling a rollout", () => {
           change: { by: staff.email, what: "rollback", release: before },
         },
       ],
+    });
+  });
+
+  it("marks a client's settings pending again when a rollback puts back versions from before them, so the next rollout of its release deploys them again", async () => {
+    const before = await importedRelease("feat(core): before the flag");
+    const internal = await activeClient(0, before);
+    await activeClient(1, before);
+    await setFeature(env, staff, {
+      clientId: internal.clientId,
+      feature: "apps",
+      on: true,
+    });
+    const release = await importedRelease("feat(core): with the flag");
+    await using run = await followRollouts();
+    await using rollbacks = await followRollbacks();
+    const rolloutId = await rollOut(release, { scope: "ring", ring: 1 });
+    await run.waitForStepResult({ name: "ring 1 approved" });
+    const applied = await clientSettings(db, internal.clientId);
+
+    await rollbacks.rollBack(rolloutId, internal.clientId);
+    await run.waitForStatus("terminated");
+    const rolledBack = {
+      settings: await clientSettings(db, internal.clientId),
+      features: await liveFeaturesOf(internal.clientId, internal.account),
+    };
+    const again = await rollOut(before, { scope: "ring", ring: 0 });
+    await run.waitForStatus("complete");
+
+    const againTargets = await targetsOf(again);
+    const afterwards = await clientSettings(db, internal.clientId);
+    expect({
+      applied: applied?.configPending,
+      rolledBack: {
+        pending: rolledBack.settings?.configPending,
+        features: rolledBack.features,
+      },
+      again: againTargets[internal.clientId]?.status,
+      features: await liveFeaturesOf(internal.clientId, internal.account),
+      pending: afterwards?.configPending,
+    }).toStrictEqual({
+      applied: false,
+      rolledBack: { pending: true, features: undefined },
+      again: "done",
+      features: { apps: true },
+      pending: false,
     });
   });
 
@@ -3106,6 +3215,191 @@ describe("drift", () => {
         { worker: "connect", recorded: "recorded", state: "in_sync" },
         { worker: "core", recorded: null, state: "drifted" },
       ],
+    });
+  });
+});
+
+/** What `task` was refused with, as a settings refusal's code. */
+const settingsCodeOf = async (task: Promise<unknown>): Promise<string> => {
+  try {
+    await task;
+    return "done";
+  } catch (error) {
+    return error instanceof SettingsError ? error.code : "other";
+  }
+};
+
+describe("applying a client's settings now", () => {
+  useStoreSecrets({ deployer: token, tenant: tenantToken });
+  beforeEach(setAsideEarlierTests);
+
+  /** The runs applying settings starts, going at once, and waiting for the latest to end. */
+  const followApplies = async () => {
+    const runs = await introspectWorkflow(env.APPLY_CLIENT);
+    await runs.modifyAll(async (modifier) => {
+      await modifier.disableRetryDelays();
+    });
+    return {
+      settledLatest: async () => {
+        const all = await runs.get();
+        const last = all.at(-1);
+        if (last !== undefined) {
+          await settled(last);
+        }
+      },
+      [Symbol.asyncDispose]: async () => {
+        await runs.dispose();
+      },
+    };
+  };
+
+  it("deploys the release a client runs again with its new flag, every Worker at once, audited, and releases the client", async () => {
+    const release = await importedRelease("feat(core): apply me");
+    const client = await activeClient(1, release);
+    const skip = deploymentCounts(client.account);
+    await setFeature(env, staff, {
+      clientId: client.clientId,
+      feature: "memory",
+      on: true,
+    });
+    await using applies = await followApplies();
+
+    const runId = await applySettings(env, staff, client.clientId);
+    await applies.settledLatest();
+
+    const [event] = await db
+      .select({ actor: auditEvents.actor, target: auditEvents.target })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.clientId, client.clientId),
+          eq(auditEvents.action, "client.apply_settings")
+        )
+      );
+    const workers = await workersOf(client.clientId);
+    const shown = await clientSettings(db, client.clientId);
+    expect({
+      runId: runId.startsWith("apply-"),
+      features: await liveFeaturesOf(client.clientId, client.account),
+      shares: await liveSharesOf(client.clientId, client.account, skip),
+      releases: workers.map(({ releaseId }) => releaseId),
+      pending: shown?.configPending,
+      runner: await runnerOf(client.clientId),
+      event,
+    }).toStrictEqual({
+      runId: true,
+      features: { memory: true },
+      shares: { connect: [[100]], core: [[100]] },
+      releases: [release, release],
+      pending: false,
+      runner: null,
+      event: { actor: staff.email, target: null },
+    });
+  });
+
+  it("deploys the release a rollout just made live, not the one the client ran when staff asked, when the rollout ends before the apply claims the client", async () => {
+    const before = await importedRelease("feat(core): before the race");
+    const client = await activeClient(0, before);
+    const release = await importedRelease("feat(core): landed in the race");
+    await setFeature(env, staff, {
+      clientId: client.clientId,
+      feature: "memory",
+      on: true,
+    });
+    await using run = await followRollouts();
+    await using applies = await followApplies();
+    // The rollout runs to its end after the apply read what the client
+    // runs, right before its claim lands (its first batch).
+    let raced = false;
+    const racing = racingDb(async () => {
+      if (!raced) {
+        raced = true;
+        await rollOut(release, { scope: "ring", ring: 0 });
+        await run.waitForStatus("complete");
+      }
+    });
+
+    await applySettings({ ...env, DB: racing }, staff, client.clientId);
+    await applies.settledLatest();
+
+    const workers = await workersOf(client.clientId);
+    const [latest] = await db
+      .select({ releaseId: clientDeploys.releaseId, kind: clientDeploys.kind })
+      .from(clientDeploys)
+      .where(eq(clientDeploys.clientId, client.clientId))
+      .orderBy(desc(clientDeploys.createdAt))
+      .limit(1);
+    expect({
+      raced,
+      releases: workers.map(({ releaseId }) => releaseId),
+      applied: latest?.releaseId,
+      features: await liveFeaturesOf(client.clientId, client.account),
+      runner: await runnerOf(client.clientId),
+    }).toStrictEqual({
+      raced: true,
+      releases: [release, release],
+      applied: release,
+      features: { memory: true },
+      runner: null,
+    });
+  });
+
+  it("refuses a client another runner has, one that isn't live, and one the console doesn't have, and starts nothing", async () => {
+    const release = await importedRelease("feat(core): busy");
+    const busy = await activeClient(1, release);
+    // A rollout that just claimed it, its run not created yet: still starting.
+    await db.insert(clientRuns).values({
+      clientId: busy.clientId,
+      runId: crypto.randomUUID(),
+      kind: "rollout",
+      claimedAt: new Date(),
+    });
+    const provisioning = `client-${crypto.randomUUID().slice(0, 8)}`;
+    const now = new Date();
+    await db.insert(clients).values({
+      id: provisioning,
+      name: provisioning,
+      accountId: cloudflare.addAccount().id,
+      ring: 1,
+      status: "provisioning",
+      createdAt: now,
+      updatedAt: now,
+    });
+    await using applies = await followApplies();
+
+    const refused = {
+      busy: await settingsCodeOf(applySettings(env, staff, busy.clientId)),
+      provisioning: await settingsCodeOf(
+        applySettings(env, staff, provisioning)
+      ),
+      unknown: await settingsCodeOf(
+        applySettings(env, staff, "no-such-client")
+      ),
+    };
+    await applies.settledLatest();
+
+    const events = await db
+      .select({ id: auditEvents.id })
+      .from(auditEvents)
+      .where(
+        and(
+          eq(auditEvents.action, "client.apply_settings"),
+          inArray(auditEvents.clientId, [busy.clientId, provisioning])
+        )
+      );
+    const runner = await runnerOf(busy.clientId);
+    expect({
+      refused,
+      events: events.length,
+      runner: runner?.kind,
+    }).toMatchObject({
+      refused: {
+        busy: "client_busy",
+        provisioning: "not_active",
+        unknown: "unknown_client",
+      },
+      events: 0,
+      runner: "rollout",
     });
   });
 });

@@ -1,0 +1,1 @@
+ALTER TABLE `clients` ADD `config_changed_at` integer;

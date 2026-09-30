@@ -16,6 +16,8 @@ export interface ChatState {
   running: boolean;
   stopped: string | null;
   held: number;
+  /** Changes whenever the chat's drafts do. */
+  drafts: number;
   /** Changes whenever the chat's provenance does. */
   provenanceVersion: number;
 }
@@ -93,7 +95,7 @@ export class ChatWatch {
   }
 
   #next(): ChatUpdate {
-    const { partial, running, stopped, held, provenanceVersion } =
+    const { partial, running, stopped, held, drafts, provenanceVersion } =
       this.#state();
     const update: ChatUpdate = {
       messages: this.#unsent.splice(0),
@@ -101,6 +103,7 @@ export class ChatWatch {
       running,
       stopped,
       held,
+      drafts,
       ...(provenanceVersion === this.#provenanceSent
         ? {}
         : { provenance: this.#provenance() }),

@@ -124,6 +124,7 @@ const cast = {
   knowledgeReader: { admin: "admin", reader: "user" },
   workflowMap: { admin: "admin", reader: "user" },
   boardPage: { admin: "admin" },
+  intake: { admin: "admin" },
   models: { admin: "admin", builder: "builder" },
   workflows: { builder: "builder", user: "user" },
   activity: { admin: "admin", builder: "builder" },
@@ -131,6 +132,7 @@ const cast = {
   chat: { user: "user" },
   chatBuilds: { builder: "builder" },
   notifications: { builder: "builder" },
+  chatPreview: { builder: "builder" },
 } as const satisfies Record<string, Record<string, Role>>;
 
 type Scene = keyof typeof cast;

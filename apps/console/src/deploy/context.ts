@@ -137,7 +137,7 @@ const varOf = (value: string | undefined): string | undefined => {
  * Grasp's OAuth apps' client ids, from the console's vars (deploy-ops sets
  * them): not secrets, their secrets are shared secrets above.
  */
-const signInApps = (env: Env): SignInApps => {
+export const signInApps = (env: Env): SignInApps => {
   const entraClientId = varOf(env.ENTRA_CLIENT_ID);
   const googleClientId = varOf(env.GOOGLE_CLIENT_ID);
   return {

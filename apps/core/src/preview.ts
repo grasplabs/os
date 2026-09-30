@@ -1,11 +1,13 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import { deadline, whenAborted } from "@grasp-os/shared/deadline";
+import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, ChatId } from "@grasp-os/shared/ids";
 
 import { callTimeoutMs, invokeServer, requireAppMethod } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
 import { draftFiles } from "./apps.ts";
 import { previewBindings } from "./preview-bindings.ts";
+import type { PreviewOf } from "./preview-bindings.ts";
 import { sandbox } from "./sandbox.ts";
 import { buildFailed, buildServer } from "./screens.ts";
 import type { Draft } from "./workspace.ts";
@@ -32,19 +34,20 @@ const facetName = (chatId: ChatId, app: string): string =>
 /**
  * The draft's server code, as `draft` has it at its revision, as the
  * class its facet runs: loaded unnamed, never kept, as a draft's code
- * changes with each write.
+ * changes with each write. Its stubs name the preview (`of`), whose
+ * reports their refusals go to.
  */
 const loadPreview = async (
   env: Env,
-  app: AppId,
+  of: PreviewOf,
   draft: Draft
 ): Promise<DurableObjectClass> => {
-  const files = Object.fromEntries(await draftFiles(env, app, draft));
+  const files = Object.fromEntries(await draftFiles(env, of.app, draft));
   const build = await buildServer(env, files);
   if (!build.ok) {
     throw appErrors.create("app.build_failed", buildFailed(null, build));
   }
-  const bindings = await previewBindings(env, app);
+  const bindings = await previewBindings(env, of);
   return env.LOADER.get(null, () => ({
     ...sandbox,
     mainModule: build.mainModule,
@@ -71,6 +74,13 @@ export class Previews {
    */
   readonly #running = new Map<string, Running>();
 
+  /**
+   * The server calls running now, by the caller token each hands the
+   * draft's code, with the preview it runs in (by facet name), and
+   * whether one of its stubs refused a call of it (`refused`).
+   */
+  readonly #calls = new Map<string, { name: string; refused: boolean }>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     this.#ctx = ctx;
     this.#env = env;
@@ -81,7 +91,11 @@ export class Previews {
    * `app` at its revision, with `args`, for `personId`, whom the chat is
    * theirs: answers as an App's call does (`App.call`), with `app.failed`
    * for an error of the draft's code, and `app.timed_out` for a call that
-   * isn't answered in time.
+   * isn't answered in time. `ran.refused` says, once it ended, whether it
+   * failed for a refusal: a stub of the preview refused a call of it
+   * (`refused`), and the error the draft's code let out is that
+   * refusal's (`app.preview_side_effect`), passed on. Any other error, a
+   * TypeError after a refusal it caught say, is the draft's.
    */
   async call(
     chatId: ChatId,
@@ -89,12 +103,17 @@ export class Previews {
     app: AppId,
     draft: Draft,
     method: string,
-    args: unknown[]
+    args: unknown[],
+    ran: { refused: boolean }
   ): Promise<AppAnswer> {
     requireAppMethod(method);
     const name = facetName(chatId, app);
     const limit = deadline(callTimeoutMs(this.#env));
+    const token = crypto.randomUUID();
+    const call = { name, refused: false };
+    this.#calls.set(token, call);
     let running: Running | undefined;
+    let passedOn = false;
     try {
       // Starting the code counts against the call's time, as for an App.
       const started = await Promise.race([
@@ -105,10 +124,14 @@ export class Previews {
       return await Promise.race([
         invokeServer(
           started.facet,
-          // The stubs of a preview act for no one: the token names nothing.
-          { userId: personId, mode: "interactive", token: crypto.randomUUID() },
+          // The stubs of a preview act for no one: the token names only
+          // this call, for what they refuse of it (`refused`).
+          { userId: personId, mode: "interactive", token },
           args,
-          { app, version: null, method }
+          { app, version: null, method },
+          (error) => {
+            passedOn = appErrors.codeOf(error) === "app.preview_side_effect";
+          }
         ),
         whenAborted(limit.signal),
       ]);
@@ -124,6 +147,20 @@ export class Previews {
       throw error;
     } finally {
       limit.clear();
+      this.#calls.delete(token);
+      ran.refused = call.refused && passedOn;
+    }
+  }
+
+  /**
+   * Records that a stub of the chat's preview of `app` refused a call of
+   * the server call `token` names, while it runs: a caller token of any
+   * other preview, or of none, records nothing.
+   */
+  refused(chatId: ChatId, app: string, token: unknown): void {
+    const call = typeof token === "string" ? this.#calls.get(token) : undefined;
+    if (call?.name === facetName(chatId, app)) {
+      call.refused = true;
     }
   }
 
@@ -145,7 +182,15 @@ export class Previews {
       this.drop(chatId, app);
       running = {
         revision: draft.revision,
-        loaded: loadPreview(this.#env, app, draft),
+        loaded: loadPreview(
+          this.#env,
+          {
+            workspaceId: workspaceIdSchema.parse(this.#ctx.id.name),
+            chatId,
+            app,
+          },
+          draft
+        ),
       };
       this.#running.set(name, running);
     }

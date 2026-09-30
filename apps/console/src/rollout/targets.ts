@@ -7,7 +7,7 @@
  * started for: one ring, one client, or every client, ring by ring, with
  * an approval between each.
  */
-import { and, eq, inArray, or } from "drizzle-orm";
+import { and, desc, eq, inArray, or } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { z } from "zod";
 
@@ -15,6 +15,7 @@ import type { CloudflareApi } from "../cloudflare/api.ts";
 import { liveVersion } from "../cloudflare/workers.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
 import {
+  clientDeploys,
   clients,
   clientWorkers,
   releases,
@@ -120,6 +121,12 @@ export interface TargetClient {
    */
   rotationPending: boolean;
   /**
+   * Whether staff changed its sign-in or a setting after its latest done
+   * deploy started (`clients.configChangedAt`): a deploy must still take
+   * the change to its core.
+   */
+  configPending: boolean;
+  /**
    * The Workers the console deployed to it, with the release it last made
    * live on each and when that release was built.
    */
@@ -130,6 +137,33 @@ export interface TargetClient {
     releaseBuiltAt: Date | null;
   }[];
 }
+
+/**
+ * Whether client `clientId`'s config, changed at `configChangedAt`, waits
+ * for a deploy: no deploy of it finished, or its latest done one started
+ * no later than the change, and so may have read the config before it.
+ */
+export const isConfigPending = async (
+  db: ConsoleDatabase,
+  clientId: string,
+  configChangedAt: Date | null
+): Promise<boolean> => {
+  if (configChangedAt === null) {
+    return false;
+  }
+  const [lastDone] = await db
+    .select({ createdAt: clientDeploys.createdAt })
+    .from(clientDeploys)
+    .where(
+      and(
+        eq(clientDeploys.clientId, clientId),
+        eq(clientDeploys.status, "done")
+      )
+    )
+    .orderBy(desc(clientDeploys.createdAt))
+    .limit(1);
+  return lastDone === undefined || lastDone.createdAt <= configChangedAt;
+};
 
 /** Client `clientId`, as a rollout reads it; undefined when it's gone. */
 export const targetClient = async (
@@ -144,13 +178,14 @@ export const targetClient = async (
       pinnedReleaseId: clients.pinnedReleaseId,
       rotatedAt: clients.rotatedAt,
       rotationLiveAt: clients.rotationLiveAt,
+      configChangedAt: clients.configChangedAt,
     })
     .from(clients)
     .where(eq(clients.id, clientId));
   if (client === undefined) {
     return undefined;
   }
-  const { rotatedAt, rotationLiveAt, ...rest } = client;
+  const { rotatedAt, rotationLiveAt, configChangedAt, ...rest } = client;
   const workers = await db
     .select({
       worker: clientWorkers.worker,
@@ -164,6 +199,7 @@ export const targetClient = async (
   return {
     ...rest,
     rotationPending: rotatedAt !== null && rotationLiveAt === null,
+    configPending: await isConfigPending(db, clientId, configChangedAt),
     workers,
   };
 };
@@ -177,11 +213,11 @@ export interface ReleaseAt {
 /**
  * Why a rollout of `release` skips `client`, or null when it deploys it:
  * it's pinned to another release (`pinned`), whatever it runs now;
- * every Worker runs the release already and no secrets rotation waits
- * for a deploy (`on_release`); or one runs a release built after it
- * (`newer`), which the release's code may not run against (migrations
- * only expand for the release after), unless the client is pinned to
- * this release.
+ * every Worker runs the release already and neither a secrets rotation
+ * nor a config change waits for a deploy (`on_release`); or one runs a
+ * release built after it (`newer`), which the release's code may not run
+ * against (migrations only expand for the release after), unless the
+ * client is pinned to this release.
  */
 export const skipReason = (
   client: TargetClient,
@@ -195,6 +231,7 @@ export const skipReason = (
   }
   if (
     !client.rotationPending &&
+    !client.configPending &&
     client.workers.length > 0 &&
     client.workers.every((worker) => worker.releaseId === release.id)
   ) {

@@ -1,0 +1,18 @@
+{
+  "name": "Intake",
+  "description": "Turns what people say about their work into the statements a baseline rests on: each a claim from a source, tagged as a goal, a blocker, a time sink, a handover, a tool or a rule. A model takes them out of pasted notes, or they are typed in. Statements are reviewed and edited before they are saved to the Playbook.",
+  "collections": [
+    {
+      "id": "playbook",
+      "name": "Playbook",
+      "description": "The company's Playbook: its teams, its workflows drawn and designed, the sources and statements they rest on, and the snapshots it shows the board."
+    }
+  ],
+  "permissions": [
+    {
+      "object": { "type": "collection", "collectionId": "playbook" },
+      "actions": ["read", "write"],
+      "binding": "PLAYBOOK"
+    }
+  ]
+}

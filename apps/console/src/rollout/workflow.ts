@@ -13,7 +13,9 @@
  * or one with Durable Object migrations, goes live at once, and so does
  * every Worker whose new version has other secrets than the one before
  * (a rotation still to go live, or shared secrets changed in Secrets
- * Store): versions with different secrets can't share traffic.
+ * Store): versions with different secrets can't share traffic. So does a
+ * client on the release already, deployed again for a config change
+ * (src/clients/settings.ts): flags may be kill switches.
  *
  * A secrets rollout (no release) takes the shared secrets in Secrets
  * Store now to clients without a code release: it deploys each client's
@@ -625,9 +627,13 @@ const deployClaimed = async (
       params.releaseId !== null &&
       uploaded.sameSecrets &&
       prepared?.generation === previous.generation;
+    // The release the client runs already: only its config (flags,
+    // sign-in) changes, which may be a kill switch, so at once too.
+    const newCode = previous.release !== params.releaseId;
     if (
       !uploaded.live &&
       sameSecrets &&
+      newCode &&
       before !== undefined &&
       before !== uploaded.version
     ) {

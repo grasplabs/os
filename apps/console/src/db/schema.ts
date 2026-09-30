@@ -84,6 +84,13 @@ export const clients = sqliteTable(
      * client without one, whose core gets no `SIGN_IN`.
      */
     signIn: text("sign_in"),
+    /**
+     * When staff last changed what a deploy sets on its core: its sign-in
+     * or a setting (src/clients/settings.ts). A rollout deploys a client
+     * whose latest done deploy started before this, even on the release
+     * already (src/rollout/targets.ts); null while nothing changed.
+     */
+    configChangedAt: timestamp("config_changed_at"),
     /** The release it stays on while pinned, whatever the rollouts. */
     pinnedReleaseId: text("pinned_release_id").references(() => releases.id),
     createdAt: timestamp("created_at").notNull(),
@@ -109,14 +116,15 @@ export const clientRuns = sqliteTable("client_runs", {
   clientId: text("client_id").primaryKey(),
   /**
    * The runner's id: a provisioning run's Workflow instance
-   * (`<clientId>-<random>`), a rollout's (the rollout's id), or a
-   * rollback's (`rollback-<random>`).
+   * (`<clientId>-<random>`), a rollout's (the rollout's id), a
+   * rollback's (`rollback-<random>`), or applying the client's settings
+   * (`apply-<random>`, src/clients/apply.ts).
    */
   runId: text("run_id").notNull(),
   /** When it was claimed: a run not created yet counts as starting for a while. */
   claimedAt: timestamp("claimed_at").notNull(),
   /** Which Workflow the runner is an instance of. */
-  kind: text({ enum: ["provision", "rollout", "rollback"] })
+  kind: text({ enum: ["provision", "rollout", "rollback", "apply"] })
     .notNull()
     .default("provision"),
 });

@@ -92,6 +92,8 @@ export const signInProblem = (signIn: unknown): string | null => {
   return issue?.message ?? "The sign-in isn't complete.";
 };
 export type ClientSignIn = z.input<typeof clientSignInSchema>;
+/** A client's sign-in as its record keeps it, once checked. */
+export type ClientSignInRecord = z.output<typeof clientSignInSchema>;
 
 /**
  * Grasp's multi-tenant OAuth apps' client ids (not secret: their secrets
@@ -211,6 +213,27 @@ export const checkDeployedSignIn = (
       `${clientId}'s SIGN_IN to deploy: ${problem}`
     );
   }
+};
+
+/**
+ * The IdP `signIn` names that the console has no OAuth app id for
+ * (`apps`), or null when it has one for each: a deploy would refuse such
+ * a sign-in (`sign_in_incomplete`), so it's refused when saved.
+ */
+export const missingSignInApp = (
+  signIn: Pick<ClientSignInRecord, "entraTenantId" | "googleHostedDomain">,
+  apps: SignInApps
+): "entra" | "google" | null => {
+  if (signIn.entraTenantId !== undefined && apps.entraClientId === undefined) {
+    return "entra";
+  }
+  if (
+    signIn.googleHostedDomain !== undefined &&
+    apps.googleClientId === undefined
+  ) {
+    return "google";
+  }
+  return null;
 };
 
 /** What a client's derived core config is made from. */

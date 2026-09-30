@@ -5,7 +5,7 @@ import { testAuthSecret } from "./e2e/people.ts";
 import { corePort, idpOrigin, idpPort, origin, stateDir } from "./e2e/stack.ts";
 
 /** The end-to-end tests of the Playbook's built-ins (their own project). */
-const playbookTests = /(?:board-page|workflow-map)\.e2e\.ts$/u;
+const playbookTests = /(?:board-page|intake|workflow-map)\.e2e\.ts$/u;
 const ci = process.env.CI === "true";
 
 /**
@@ -104,6 +104,7 @@ export default defineConfig({
             chat: true,
             app_builder: true,
             run_notifications: true,
+            app_preview: true,
           })
         ),
         // `--local` has no Workers AI: a deployment kept in the EU extracts

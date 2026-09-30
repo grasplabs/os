@@ -542,21 +542,45 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
       owner: admin.userId,
     });
 
-    // Now a plain doc: an earlier version still reads as the task it was.
+    // It stays a task while it has its seal: a plain doc would drop it,
+    // and a task again after it would set it afresh.
+    const toDoc = await outcome(
+      admin.api.knowledge.saveDocument({
+        collectionId,
+        path,
+        text: "---\ntype: doc\n---\nNo longer a task.\n",
+        ifVersion: 6,
+      })
+    );
+    // One without a seal becomes a plain doc, and its earlier version
+    // still reads as the task it was.
+    const unsealedPath = `tasks/${unique()}.md`;
+    const unsealed = savedSchema.parse(
+      await callApp(
+        env,
+        app,
+        as(admin.userId),
+        "save",
+        saveArgs(unsealedPath, { ...task, owner: admin.userId })
+      )
+    );
     await admin.api.knowledge.saveDocument({
       collectionId,
-      path,
+      path: unsealedPath,
       text: "---\ntype: doc\n---\nNo longer a task.\n",
-      ifVersion: 6,
+      ifVersion: 1,
     });
     const earlier = recordSchema.parse(
       await callApp(env, app, as(admin.userId), "record", [
         "TASKS",
-        first.ok.id,
-        6,
+        unsealed.ok.id,
+        1,
       ])
     );
-    expect(earlier.ok.record).toMatchObject({ type: "task", seal: "signed" });
+    expect({ toDoc, earlier: earlier.ok.record }).toMatchObject({
+      toDoc: "knowledge.invalid",
+      earlier: { type: "task", title: "Sign the lease" },
+    });
   });
 
   it("carry a kept field over only from a version of the same type, never through a doc or another App's type with a field of that name", async () => {

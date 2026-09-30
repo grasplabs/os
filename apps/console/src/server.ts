@@ -8,8 +8,10 @@
  *
  * The cron imports newly published releases (src/releases/import.ts).
  * `ProvisionClient` is the Workflow that onboards a client
- * (src/provision/workflow.ts), and `Rollout` the one that rolls a release
- * out to clients (src/rollout/workflow.ts).
+ * (src/provision/workflow.ts), `Rollout` the one that rolls a release
+ * out to clients (src/rollout/workflow.ts), `RollbackClient` rolls a
+ * client back from one, and `ApplyClient` applies a client's settings
+ * now (src/clients/apply.ts).
  */
 import handler from "@tanstack/react-start/server-entry";
 
@@ -18,6 +20,7 @@ import type { Staff } from "./access.ts";
 import { consoleDatabase } from "./db/act.ts";
 import { importReleases } from "./releases/import.ts";
 
+export { ApplyClient } from "./clients/apply.ts";
 export { ProvisionClient } from "./provision/workflow.ts";
 export { RollbackClient } from "./rollout/rollback.ts";
 export { Rollout } from "./rollout/workflow.ts";

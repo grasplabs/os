@@ -1,4 +1,5 @@
 import type { App, FileDiff, VersionReview } from "@grasp-os/shared/apps";
+import { screenPath } from "@grasp-os/shared/screens";
 import type { TriggerDeclaration } from "@grasp-os/shared/workflows";
 
 // What the side panel's "Being built" section decides (builds.tsx): pure
@@ -192,3 +193,21 @@ export const exportChangeText = ({
   const does = access === null ? "" : `: it ${accessWords[access]}`;
   return { text: `${name} changed${does}`, widens: false };
 };
+
+/** The screens a draft changes (its `changed` paths), by name, in order. */
+export const changedScreens = (changed: readonly string[]): string[] =>
+  changed.flatMap((path) => {
+    const name = screenPath.exec(path)?.groups?.name;
+    return name === undefined ? [] : [name];
+  });
+
+/**
+ * The screen a draft's preview shows: the one the person picked while the
+ * draft still changes it, otherwise the first it changes; none when it
+ * changes no screen (core then shows the draft's first).
+ */
+export const previewedScreen = (
+  changed: readonly string[],
+  picked?: string
+): string | undefined =>
+  picked !== undefined && changed.includes(picked) ? picked : changed[0];

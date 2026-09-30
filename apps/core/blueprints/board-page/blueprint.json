@@ -5,7 +5,7 @@
     {
       "id": "playbook",
       "name": "Playbook",
-      "description": "The company's Playbook: its teams, its workflows drawn and designed, and the snapshots it shows the board."
+      "description": "The company's Playbook: its teams, its workflows drawn and designed, the sources and statements they rest on, and the snapshots it shows the board."
     }
   ],
   "permissions": [

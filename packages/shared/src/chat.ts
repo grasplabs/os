@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-import type { ScreenBundle } from "./screens.ts";
+import type { ScreenBundle, ScreenProblem } from "./screens.ts";
 
 // A person's chats with the organization's agent, as the frontend sees them
 // (core's chats-rpc.ts). Each chat belongs to the person who made it: only
@@ -29,6 +29,8 @@ export interface ChatDraft {
   base: number | null;
   /** The paths it changes, sorted. */
   changed: string[];
+  /** Which write of the draft this is: a preview of an earlier one is out of date. */
+  revision: number;
   /** When it was last written (ISO 8601). */
   updatedAt: string;
 }
@@ -43,6 +45,21 @@ export interface PreviewBundle extends Omit<ScreenBundle, "version"> {
   revision: number;
   /** The draft's screens, sorted. */
   screens: string[];
+}
+
+/**
+ * A problem a preview of a draft reported (`ChatsApi.previewReport`), or
+ * one its server code failed with: text the draft's code wrote, held to
+ * size, and only ever read as data.
+ */
+export interface PreviewProblem {
+  /** On one of the draft's screens, or in its server code. */
+  source: "screen" | "server";
+  /** The screen it happened on, or the server method that failed. */
+  at: string;
+  kind: "error" | "rejection" | "console" | "failed";
+  message: string;
+  stack?: string;
 }
 
 /** Code the agent ran, or is writing, in a code step. */
@@ -176,6 +193,12 @@ export interface ChatUpdate {
    * object last started; never what was held.
    */
   held: number;
+  /**
+   * Changes whenever the chat's agent writes or drops a draft: read the
+   * drafts again then, and preview the latest. Only a count, from when
+   * the object last started.
+   */
+  drafts: number;
 }
 
 /** The chat `fixRun` started, and whether its question was taken. */
@@ -259,6 +282,20 @@ export interface ChatsApi {
     method: string,
     args: unknown[]
   ) => Promise<unknown>;
+  /**
+   * Tells the chat's agent how the preview of the draft at `revision`
+   * runs on `screen`: `problem`, one its screen reported (an uncaught
+   * error, an unhandled rejection or a `console.error`), or, without one,
+   * that it rendered. Its next check of the draft reads them. A report of
+   * a revision the draft moved past is dropped.
+   */
+  previewReport: (
+    chatId: string,
+    app: string,
+    revision: number,
+    screen: string,
+    problem?: ScreenProblem
+  ) => Promise<void>;
   /** Stops the agent's work on the chat; `false` when there was none. */
   cancel: (chatId: string) => Promise<boolean>;
   /**
