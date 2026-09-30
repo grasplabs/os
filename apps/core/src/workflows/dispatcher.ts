@@ -7,10 +7,11 @@ import {
 } from "@grasp-os/shared/ids";
 import type { AppId, RunId } from "@grasp-os/shared/ids";
 import type { Authority } from "@grasp-os/shared/permissions";
+import { workflowErrors } from "@grasp-os/shared/workflows";
 import { z } from "zod";
 
 import { callApp } from "../app.ts";
-import { versionFiles } from "../apps.ts";
+import { findVersion, versionFiles } from "../apps.ts";
 import { runBindingsFor } from "../bindings.ts";
 import { runExtraction } from "../knowledge/extraction.ts";
 import type { WorkContext } from "../restricted.ts";
@@ -192,12 +193,28 @@ const runWorkflow = async (
       authority,
       contextOf(pinned.data.app, runId)
     );
+    // What the version's review shows its workflows calling, which the
+    // run's calls are held to (host.ts): kept for every workflow of a
+    // version as it is committed, so a run of one it doesn't name fails.
+    const { workflowCalls } = await findVersion(
+      env,
+      pinned.data.app,
+      pinned.data.version
+    );
+    const calls = Object.hasOwn(workflowCalls, pinned.data.workflow)
+      ? workflowCalls[pinned.data.workflow]
+      : undefined;
+    if (calls === undefined) {
+      throw workflowErrors.create("workflow.calls_not_kept");
+    }
     const run: HostedRun = {
       ...pinned.data,
       runId,
       authority,
+      collections: bindings,
       connections,
       apps,
+      calls,
     };
     const files = await versionFiles(env, run.app, run.version);
     // Read on every load, though only the run's first uses them: after
@@ -212,7 +229,6 @@ const runWorkflow = async (
       version: run.version,
       workflow: run.workflow,
       files,
-      env: bindings,
     });
     const host = new RunHost(env, step, run, {
       stepFailed,
@@ -227,6 +243,7 @@ const runWorkflow = async (
       runId,
       params: Object.fromEntries(params),
       input: event.payload,
+      collections: Object.keys(bindings),
       connections: Object.keys(connections),
       apps: Object.keys(apps),
     });

@@ -1,0 +1,1 @@
+ALTER TABLE `app_versions` ADD `workflow_calls` text DEFAULT '{}' NOT NULL;

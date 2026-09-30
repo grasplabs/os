@@ -50,6 +50,7 @@ export const screenTests = [
   "test/preview-repairs.test.ts",
   "test/workflows.test.ts",
   "test/workflow-chaos.test.ts",
+  "test/reviewed-calls.test.ts",
   "test/held-runs.test.ts",
   "test/decisions.test.ts",
   "test/decision-deadlines.test.ts",
