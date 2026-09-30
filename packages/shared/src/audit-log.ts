@@ -54,8 +54,8 @@ const typeRules: readonly {
   { action: "connection.reconnected", type: "config" },
   { action: "connection.disconnect", type: "config" },
   // An admin consenting to Composio holding a connection's tokens, and
-  // each tool they marked as a read, which runs unheld
-  // (`connection.consent.read_tool`).
+  // the tools they marked as reads, which run unheld
+  // (`connection.consent.read_tools`).
   { action: "connection.consent", type: "config" },
   // An admin changing which connectors are offered.
   { action: "connection.offer_changed", type: "config" },

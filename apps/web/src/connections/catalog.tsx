@@ -30,6 +30,8 @@ import type { ReactNode } from "react";
 import { ErrorText } from "../error-text.tsx";
 import { useCoreAction } from "../use-core-action.ts";
 import { SourceBadge } from "./source-badge.tsx";
+import { toolRules, withAllowed, withRead } from "./tool-choices.ts";
+import type { AllowedTool } from "./tool-choices.ts";
 import { useChange } from "./use-change.ts";
 
 // What can be connected, to search and connect from. A native provider
@@ -113,36 +115,24 @@ const NativeConnect = ({
   );
 };
 
-/** One tool the admin allows, and whether they say it only reads. */
-interface AllowedTool {
-  name: string;
-  read: boolean;
-}
-
 /**
  * One tool of the toolkit: whether to allow it and, once allowed, whether
- * it only reads. That starts as Composio's hint says (`CatalogTool.readOnly`),
- * so a tool without the hint changes things until the admin says otherwise.
+ * it only reads (tool-choices.ts).
  */
 const ToolChoice = ({
   tool,
   choice,
-  onChange,
+  onAllow,
+  onRead,
 }: {
   tool: CatalogTool;
   choice: AllowedTool | undefined;
-  onChange: (next: AllowedTool | undefined) => void;
+  onAllow: (allow: boolean) => void;
+  onRead: (read: boolean) => void;
 }) => (
   <div className="flex items-center justify-between gap-4 text-sm">
     <label className="flex items-center gap-2">
-      <Checkbox
-        checked={choice !== undefined}
-        onCheckedChange={(checked) => {
-          onChange(
-            checked ? { name: tool.name, read: tool.readOnly } : undefined
-          );
-        }}
-      />
+      <Checkbox checked={choice !== undefined} onCheckedChange={onAllow} />
       {tool.name}
     </label>
     {choice === undefined ? null : (
@@ -150,9 +140,7 @@ const ToolChoice = ({
         <Checkbox
           checked={choice.read}
           aria-label={`${tool.name} is read-only`}
-          onCheckedChange={(read) => {
-            onChange({ name: tool.name, read });
-          }}
+          onCheckedChange={onRead}
         />
         <span aria-hidden="true">Read-only</span>
       </div>
@@ -188,9 +176,7 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
         async (session) =>
           await session.connections.connectToolkit({
             toolkit: entry.id,
-            tools: allowed.map(({ name, read }) =>
-              read ? { name, read } : name
-            ),
+            tools: toolRules(allowed),
             consent: composioConsentText,
             returnTo,
           })
@@ -240,11 +226,11 @@ const ComposioConnect = ({ entry }: { entry: Entry }) => {
               key={tool.name}
               tool={tool}
               choice={allowed.find(({ name }) => name === tool.name)}
-              onChange={(next) => {
-                setAllowed((current) => [
-                  ...current.filter(({ name }) => name !== tool.name),
-                  ...(next === undefined ? [] : [next]),
-                ]);
+              onAllow={(allow) => {
+                setAllowed((current) => withAllowed(current, tool, allow));
+              }}
+              onRead={(read) => {
+                setAllowed((current) => withRead(current, tool.name, read));
               }}
             />
           ))}

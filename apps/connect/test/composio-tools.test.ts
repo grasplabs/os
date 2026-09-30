@@ -322,22 +322,23 @@ describe("the admin's allowlist, when they connect", () => {
     );
     expect(
       recorded
-        .filter(({ action }) => action === "connection.consent.read_tool")
+        .filter(({ action }) => action === "connection.consent.read_tools")
         .map(({ actor, detail }) => ({ actor, detail }))
     ).toStrictEqual(
       [
-        { tool: "HUBSPOT_LIST_CONTACTS", hinted: false },
-        { tool: "HUBSPOT_GET_CONTACT", hinted: true },
-      ].map((tool) => ({
+        { hinted: false, part: 1, names1: "HUBSPOT_LIST_CONTACTS" },
+        { hinted: true, part: 1, names1: "HUBSPOT_GET_CONTACT" },
+      ].map((names) => ({
         actor: consent?.actor,
         detail: {
           provider: "hubspot",
           scope: "shared",
           flowId: consent?.detail.flowId,
-          ...tool,
+          ...names,
         },
       }))
     );
+    expect(consent?.detail).not.toHaveProperty("unnamedReadCount");
   });
 
   it("names only the tools' own input properties as resources, and each tool once", async () => {
