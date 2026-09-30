@@ -583,10 +583,11 @@ export const workflowRuns = sqliteTable(
     ),
     uniqueIndex("workflow_runs_trigger_key_idx").on(table.triggerKey),
     // The retention sweep (src/workflows/retention.ts): ended runs that
-    // still have their details, longest ended first. Only those: a live
-    // run has no `ended_at`, and a swept one leaves the index.
+    // still have their details, longest ended first, then by ID, which
+    // the sweep pages by. Only those: a live run has no `ended_at`, and a
+    // swept one leaves the index.
     index("workflow_runs_details_kept_idx")
-      .on(table.endedAt)
+      .on(table.endedAt, table.id)
       .where(sql`ended_at IS NOT NULL AND details_removed_at IS NULL`),
   ]
 );

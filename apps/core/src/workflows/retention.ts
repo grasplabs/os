@@ -54,6 +54,11 @@ import { runEngine } from "./engine.ts";
 //   the two leaves the run due, and the next removes what is left and
 //   marks it: removing what is gone removes nothing. Marking is
 //   conditional on the row not being marked, so two passes mark it once.
+// - Runs the engine keeps refusing to remove, holding up every run
+//   behind them. A pass goes on past a run it couldn't remove (a cursor on
+//   when it ended and its ID), so the rest of its batch and the batches
+//   after it are swept all the same; it is logged and tried again by the
+//   next pass.
 // - A deployment's config that doesn't parse. Nothing is removed, and it
 //   is logged (`config.invalid`): never a guess at how long to keep.
 
@@ -103,8 +108,12 @@ export const removedText = (days: number): string =>
  * rest left to the next cron run. For each batch the engine's record goes
  * first, then, for the runs it has nothing of any more, in one batch: the
  * row is marked and its failure's message replaced, and its decisions'
- * descriptions and answers' payloads go. A run the engine couldn't remove
- * stays due and ends the pass, so it isn't asked again in the same one.
+ * descriptions and answers' payloads go.
+ *
+ * Each batch starts past the last run of the one before, by when it ended
+ * and its ID. So a run the engine couldn't remove is passed over for the
+ * rest of the pass, and the runs behind it are still swept: it stays due,
+ * is logged, and is asked for again by the next cron run.
  *
  * It runs whether or not `workflows` is on: what runs kept goes when its
  * days are over. On-prem has no runs, and so never reaches the engine.
@@ -128,13 +137,23 @@ export const sweepRunDetails = async (env: Env, now: Date): Promise<void> => {
   );
   let removed = 0;
   let kept = 0;
+  let last: { id: string; endedAt: number } | undefined;
   for (let batch = 0; batch < batchesPerSweep; batch += 1) {
     // oxlint-disable-next-line no-await-in-loop -- one bounded batch after another
     const rows = await db
-      .select({ id: workflowRuns.id })
+      .select({
+        id: workflowRuns.id,
+        endedAt: sql<number>`${workflowRuns.endedAt}`,
+      })
       .from(workflowRuns)
-      .where(due)
-      .orderBy(asc(workflowRuns.endedAt))
+      .where(
+        and(
+          due,
+          last &&
+            sql`(${workflowRuns.endedAt}, ${workflowRuns.id}) > (${last.endedAt}, ${last.id})`
+        )
+      )
+      .orderBy(asc(workflowRuns.endedAt), asc(workflowRuns.id))
       .limit(sweptPerBatch);
     if (rows.length === 0) {
       break;
@@ -161,9 +180,10 @@ export const sweepRunDetails = async (env: Env, now: Date): Promise<void> => {
     }
     removed += gone.length;
     kept += ids.length - gone.length;
-    if (rows.length < sweptPerBatch || gone.length < ids.length) {
+    if (rows.length < sweptPerBatch) {
       break;
     }
+    last = rows.at(-1);
   }
   if (kept > 0) {
     log.error("workflow.run_details_not_removed", { runs: kept });

@@ -40,7 +40,11 @@ const notFound = () => workflowErrors.create("workflow.run_not_found");
 /**
  * The failed run `run`, as a chat of `by`'s may be started to fix it: its
  * report, and what that may hold data from. Refused as not found for a
- * run `by` doesn't see the report of, and one that didn't fail.
+ * run `by` doesn't see the report of, and one that didn't fail. Refused
+ * with `workflow.run_details_removed` for one whose details were removed
+ * (workflows/retention.ts), only to who would have seen its report: the
+ * message that said why it failed went with them, and the engine has no
+ * record of its steps, so a chat would have nothing to go on.
  */
 export const runToFix = async (
   env: Env,
@@ -66,6 +70,9 @@ export const runToFix = async (
     !seesDetails(by, row, app.owner)
   ) {
     throw notFound();
+  }
+  if (row.detailsRemovedAt !== null) {
+    throw workflowErrors.create("workflow.run_details_removed");
   }
   const [sources, restricted] = await Promise.all([
     sourcesOf(env, app.id),

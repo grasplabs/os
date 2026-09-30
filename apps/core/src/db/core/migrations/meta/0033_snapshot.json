@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "22de96c3-561a-466a-aba4-921d1f85e6d5",
+  "id": "003d6238-4035-4f02-affc-dac50122634b",
   "prevId": "a972a5c2-38c7-465f-afa2-066611b6d59e",
   "tables": {
     "accounts": {
@@ -2816,7 +2816,8 @@
         "workflow_runs_details_kept_idx": {
           "name": "workflow_runs_details_kept_idx",
           "columns": [
-            "ended_at"
+            "ended_at",
+            "id"
           ],
           "isUnique": false,
           "where": "ended_at IS NOT NULL AND details_removed_at IS NULL"

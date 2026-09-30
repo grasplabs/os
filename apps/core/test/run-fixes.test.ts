@@ -19,6 +19,7 @@ import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
+import { runQuarterHourCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import {
   collectionWithNote,
@@ -307,6 +308,36 @@ describe("asking the agent to fix a failed run", slow, () => {
       asked: [[admin.userId, byAdmin.id]],
       chats: [0, 0, 0],
       kept: [],
+    });
+  });
+
+  it("is refused, saying why, once the run's details were removed, and makes no chat", async () => {
+    const owner = await signedInApi(idp, "builder");
+    const stranger = await signedInApi(idp, "builder");
+    const app = await appWith(owner, workflows("Customer c-1 is blocked"));
+    const failed = await endedRun(owner, app, "careless");
+    // The cron, run as it will be once the run's retention is over.
+    const day = 24 * 60 * 60 * 1000;
+    await runQuarterHourCron({}, new Date(Date.now() + 31 * day));
+
+    const refused = await owner.api.chats
+      .fixRun(failed, model)
+      .catch((error: unknown) => error);
+    const chats = await owner.api.chats.list();
+
+    expect({
+      refused,
+      // Whoever never saw its report learns nothing new of it.
+      stranger: await outcome(stranger.api.chats.fixRun(failed, model)),
+      chats: chats.length,
+    }).toMatchObject({
+      refused: {
+        code: "workflow.run_details_removed",
+        message:
+          "This run's details were removed when its retention ended, so there is nothing left to work out a fix from.",
+      },
+      stranger: "workflow.run_not_found",
+      chats: 0,
     });
   });
 

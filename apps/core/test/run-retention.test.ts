@@ -146,6 +146,49 @@ const sweptOf = async (runs: readonly string[]): Promise<number> => {
   return runs.filter((id) => swept.has(id)).length;
 };
 
+/**
+ * Has the engine refuse to remove the runs `refused`, as when it fails
+ * for them, and remove every other as ever, until the function it
+ * returns is called. With `instance`, a run the engine has, it also
+ * answers for each refused run as it does for that one: for rows that
+ * have nothing in the engine, which it would otherwise say are gone.
+ */
+const refusing = (
+  refused: ReadonlySet<string>,
+  instance?: string
+): (() => void) => {
+  const deleteBatch = env.WORKFLOWS.deleteBatch.bind(env.WORKFLOWS);
+  const get = env.WORKFLOWS.get.bind(env.WORKFLOWS);
+  const deletes = vi
+    .spyOn(env.WORKFLOWS, "deleteBatch")
+    .mockImplementation(async (ids) => {
+      const others = ids.filter((id) => !refused.has(id));
+      const { deleted, errors } =
+        others.length === 0
+          ? { deleted: [], errors: [] }
+          : await deleteBatch(others);
+      return {
+        deleted,
+        errors: [
+          ...errors,
+          ...ids
+            .filter((id) => refused.has(id))
+            .map((id) => ({ id, code: 10_001, message: "internal_server" })),
+        ],
+      };
+    });
+  const gets = vi
+    .spyOn(env.WORKFLOWS, "get")
+    .mockImplementation(
+      async (id) =>
+        await get(instance !== undefined && refused.has(id) ? instance : id)
+    );
+  return () => {
+    deletes.mockRestore();
+    gets.mockRestore();
+  };
+};
+
 describe("run retention", { timeout: 60_000 }, () => {
   afterEach(endLiveRuns);
 
@@ -506,24 +549,8 @@ describe("run retention", { timeout: 60_000 }, () => {
     const stuck = await endedRun(builder, app, "keeps");
     const unmarked = await endedRun(builder, app, "keeps");
 
-    // The engine removes every run but one, as when it fails for it.
-    const deleteBatch = env.WORKFLOWS.deleteBatch.bind(env.WORKFLOWS);
-    const failing = vi
-      .spyOn(env.WORKFLOWS, "deleteBatch")
-      .mockImplementation(async (ids) => {
-        const others = ids.filter((id) => id !== stuck.id);
-        const { deleted, errors } =
-          others.length === 0
-            ? { deleted: [], errors: [] }
-            : await deleteBatch(others);
-        return {
-          deleted,
-          errors: [
-            ...errors,
-            { id: stuck.id, code: 10_001, message: "internal_server" },
-          ],
-        };
-      });
+    // The engine removes every run but one.
+    const mend = refusing(new Set([stuck.id]));
     // And the database fails as the rows are marked, as D1 can.
     let broken = true;
     const db = racingDb(() => {
@@ -537,7 +564,7 @@ describe("run retention", { timeout: 60_000 }, () => {
         (error: unknown) => error
       );
     } finally {
-      failing.mockRestore();
+      mend();
     }
     const between = {
       stuck: await builder.api.workflows.status(stuck.id),
@@ -573,6 +600,34 @@ describe("run retention", { timeout: 60_000 }, () => {
     });
   });
 
+  it("sweeps the runs behind a batch of runs the engine keeps refusing to remove, in the same pass", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, keeps);
+    // A run the engine has, for it to answer about the refused ones with.
+    const held = await endedRun(builder, app, "keeps");
+    // A whole batch of them, ended longest ago: first in every pass.
+    const refused = await oldRuns(builder, app, sweptPerBatch, 60);
+    const behind = await oldRuns(builder, app, 3, 40);
+
+    const mend = refusing(new Set(refused), held.id);
+    let during: number[];
+    try {
+      await runQuarterHourCron();
+      during = [await sweptOf(refused), await sweptOf(behind)];
+      // Still refused by the next pass, which has nothing else to do.
+      await runQuarterHourCron();
+      during.push(await sweptOf(refused));
+    } finally {
+      mend();
+    }
+    await runQuarterHourCron();
+
+    expect({ during, after: await sweptOf(refused) }).toStrictEqual({
+      during: [0, 3, 0],
+      after: sweptPerBatch,
+    });
+  });
+
   it("sweeps a bounded number of runs at a time, and the rest the next time", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, keeps);
@@ -592,7 +647,8 @@ describe("run retention", { timeout: 60_000 }, () => {
   it("finds the runs to sweep by an index, reading no table whole and sorting nothing", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, keeps);
-    const runs = await oldRuns(builder, app, 3, 40);
+    // More than a batch, so the sweep pages on from its first.
+    const runs = await oldRuns(builder, app, sweptPerBatch + 3, 40);
     // A fresh D1 has no statistics: SQLite goes by the queries alone.
     const stats = await env.DB.prepare(
       "SELECT name FROM sqlite_master WHERE name LIKE 'sqlite_stat%'"
@@ -616,10 +672,20 @@ describe("run retention", { timeout: 60_000 }, () => {
       sorts: steps.filter((step) => step.includes("TEMP B-TREE")),
     }).toStrictEqual({
       stats: [],
-      swept: 3,
+      swept: sweptPerBatch + 3,
       plans: [
         [
           "SEARCH workflow_runs USING INDEX workflow_runs_details_kept_idx (ended_at>? AND ended_at<?)",
+        ],
+        [
+          "SEARCH workflow_runs USING INDEX sqlite_autoindex_workflow_runs_1 (id=?)",
+        ],
+        [
+          "SEARCH workflow_decisions USING INDEX workflow_decisions_run_status_idx (run_id=?)",
+        ],
+        // The next batch, from past the first one's last run.
+        [
+          "SEARCH workflow_runs USING INDEX workflow_runs_details_kept_idx ((ended_at,id)>(?,?) AND ended_at<?)",
         ],
         [
           "SEARCH workflow_runs USING INDEX sqlite_autoindex_workflow_runs_1 (id=?)",

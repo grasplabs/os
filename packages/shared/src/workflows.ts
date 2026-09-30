@@ -20,6 +20,8 @@ export const workflowErrors = defineErrorFamily({
   "workflow.invalid": "That isn't a valid request for a workflow.",
   "workflow.not_found": "The App's current version has no such workflow.",
   "workflow.run_not_found": "There's no such workflow run.",
+  "workflow.run_details_removed":
+    "This run's details were removed when its retention ended, so there is nothing left to work out a fix from.",
   "workflow.build_failed": "The App's workflows don't build.",
   "workflow.tests_failed":
     "A workflow's tests fail, or it has none, so this version can't be made current.",
