@@ -4,6 +4,8 @@ import { defineProject } from "vite-plus";
 import { coreStandInScript } from "./test/core-stand-in.ts";
 
 export default defineProject({
+  // Fails the suite when it isn't running in workerd.
+  test: { setupFiles: ["../../scripts/assert-workerd.ts"] },
   plugins: [
     cloudflareTest({
       wrangler: { configPath: "./wrangler.jsonc" },

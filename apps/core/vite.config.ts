@@ -74,9 +74,13 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
       // A worker's test files share one runtime, which loads core once:
       // starting workerd and loading core took longer than most files'
       // tests. Each file still starts with empty storage and the env as
-      // configured here (start-each-file.ts).
+      // configured here (start-each-file.ts), after a check that the
+      // runtime is workerd.
       isolate: false,
-      setupFiles: ["./test/start-each-file.ts"],
+      setupFiles: [
+        "../../scripts/assert-workerd.ts",
+        "./test/start-each-file.ts",
+      ],
       // Logs go straight to workerd's output, not to Vitest over RPC. A log
       // from another request (a workflow run, a cron run, a Durable
       // Object) can't use the test's socket, so the pool holds it until the

@@ -54,8 +54,12 @@ export default defineProject({
         ssr: { enabled: true, include: ["@grasp-os/ui > lucide-react"] },
       },
     },
-    // Brings the database up to the committed migrations.
-    setupFiles: ["./test/apply-migrations.ts"],
+    // Checks the runtime is workerd, then brings the database up to the
+    // committed migrations.
+    setupFiles: [
+      "../../scripts/assert-workerd.ts",
+      "./test/apply-migrations.ts",
+    ],
   },
   plugins: [
     tanstackStart(),
