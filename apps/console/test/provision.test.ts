@@ -1,3 +1,4 @@
+import { defaultGatewayModels } from "@grasp-os/shared/deployment-config";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { and, asc, eq, sql } from "drizzle-orm";
@@ -362,7 +363,7 @@ describe("provisioning a new client", () => {
       ],
       modelGateway: {
         gateway: "grasp-os",
-        models: ["workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast"],
+        models: [...defaultGatewayModels],
       },
       signIn: {
         origin: `https://${clientId}.${domain}`,
