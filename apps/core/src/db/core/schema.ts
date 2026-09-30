@@ -523,8 +523,9 @@ export const recordTypeOwners = sqliteTable(
  * `details_removed_at` is when an ended run's details were removed, its
  * retention over (workflows/retention.ts): the engine's record of it (its
  * input, what its steps returned, its output), the message of its
- * `failure`, and what its decisions asked and were answered. The row
- * itself stays, so the run is still listed, counted and found by the
+ * `failure` and the key of the step that names, and what its decisions
+ * asked and were answered, with the keys of their steps. The row itself
+ * stays, so the run is still listed, counted and found by the
  * audit log's events of it, and its trigger key still stands for it.
  */
 export const workflowRuns = sqliteTable(

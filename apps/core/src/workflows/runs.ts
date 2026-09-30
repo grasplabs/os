@@ -53,6 +53,7 @@ import { failureNoticed } from "../notifications.ts";
 import { hasWorkflow } from "./code.ts";
 import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
+import { markDetailsRemoved, removedText } from "./retention.ts";
 import { tellScreens } from "./run-changes.ts";
 import type { TriggerType } from "./trigger-registry.ts";
 
@@ -656,15 +657,29 @@ const foundRun = async (env: Env, run: unknown): Promise<RunRow> => {
   return row;
 };
 
-/** A run, with its failure report when `by` sees its details. */
+/**
+ * A run, with its failure report when `by` sees its details. Once its
+ * details were removed (retention.ts) the report's message, which went
+ * with them, says so, and how long the deployment keeps them now.
+ */
 export const runFor = (
+  env: Env,
   by: Member,
   row: RunRow,
   ownerId: string
-): WorkflowRun =>
-  row.failure !== null && seesDetails(by, row, ownerId)
-    ? { ...toRun(row), failure: row.failure }
-    : toRun(row);
+): WorkflowRun => {
+  if (row.failure === null || !seesDetails(by, row, ownerId)) {
+    return toRun(row);
+  }
+  const failure: RunFailure =
+    row.detailsRemovedAt === null
+      ? row.failure
+      : {
+          ...row.failure,
+          error: { ...row.failure.error, message: removedText(env) },
+        };
+  return { ...toRun(row), failure };
+};
 
 /**
  * Where the engine has a run; nothing for one still starting, or that
@@ -695,14 +710,27 @@ export const runStatus = async (
   by: Member,
   run: unknown
 ): Promise<WorkflowRun> => {
-  const row = await foundRun(env, run);
+  let row = await foundRun(env, run);
   const { owner: ownerId } = await appFor(env, by, row.appId, "user");
   const live = await liveOf(env, row);
+  // A run that completed had an instance. If the engine has none now, and
+  // the sweep didn't remove it, the engine dropped it itself (its own
+  // retention, shorter on some plans than the deployment's): what it
+  // returned is gone, so the rest of its details go too, and the run says
+  // so rather than answer as one that returned nothing.
+  if (
+    live === undefined &&
+    row.status === "completed" &&
+    row.detailsRemovedAt === null
+  ) {
+    await markDetailsRemoved(env, row.id, new Date());
+    row = await foundRun(env, row.id);
+  }
   const status =
     (row.status === "starting" || row.status === "running") && live
       ? liveStatuses[live.status]
       : shownStatus(row.status);
-  const found = { ...runFor(by, row, ownerId), status };
+  const found = { ...runFor(env, by, row, ownerId), status };
   if (!(live && seesDetails(by, row, ownerId))) {
     return found;
   }
@@ -732,7 +760,7 @@ export const listRuns = async (
     .where(eq(workflowRuns.appId, appId))
     .orderBy(desc(workflowRuns.createdAt), desc(workflowRuns.id))
     .limit(runsPerPage);
-  return rows.map((row) => runFor(by, row, ownerId));
+  return rows.map((row) => runFor(env, by, row, ownerId));
 };
 
 /** Drops the state writes an ended run applied (app.ts). */

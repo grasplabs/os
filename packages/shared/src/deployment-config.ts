@@ -285,9 +285,13 @@ export const runRetentionDefaultDays = 30;
 /**
  * `RUN_RETENTION_DAYS`: how long a workflow run keeps its details (its
  * input, what its steps returned, its output, why it failed) once it has
- * ended, in days: at least one, at most ten years.
+ * ended, in days: at least one, at most 30. Most of those details are the
+ * engine's record of the run, which Cloudflare Workflows keeps for at most
+ * 30 days after a run ends (its limit on the Workers Paid plan; an
+ * instance's own `retention` can only shorten it): a longer retention
+ * would promise what the engine no longer has.
  */
-export const runRetentionSchema = z.int().min(1).max(3650);
+export const runRetentionSchema = z.int().min(1).max(30);
 
 /**
  * The names of the deployment config vars above, the only settings the

@@ -74,7 +74,7 @@ export interface RunEngine {
    * {@link maxRemovedAtOnce} at once. Answers the runs the engine has
    * nothing of any more: removed now, or that it had no instance of, so
    * removing again removes nothing and answers the same. A run it
-   * couldn't remove is left out, to try again. It removes whatever it is
+   * couldn't remove, or can't tell of, is left out, to try again. It removes whatever it is
    * asked to, a live run too: the caller asks only for ended ones.
    */
   remove: (ids: readonly string[]) => Promise<string[]>;
@@ -121,7 +121,12 @@ const hasEnded = async (instance: WorkflowInstance): Promise<boolean> => {
 export const runEngine = (env: Env): RunEngine => ({
   create: async ({ id, pinned: { app, workflow, version }, input }) => {
     // Tagged with what the dispatcher loads it by; it reads the rest from
-    // the run's row. Placed in the EU where the platform can.
+    // the run's row. Placed in the EU where the platform can. No
+    // `retention` is set: it can only shorten how long the engine keeps an
+    // ended instance, and unset that is the longest the account's plan
+    // allows (30 days on Workers Paid, 3 on Free). Core's own retention
+    // (retention.ts) is never longer than those 30 days, and removes the
+    // instance itself when it is over.
     await wrapWorkflowBinding({ app, workflow, version }).create({
       id,
       params: input,
@@ -185,10 +190,15 @@ export const runEngine = (env: Env): RunEngine => ({
     const gone = new Set(deleted.map(({ id }) => id));
     // One the engine didn't delete: gone all the same if it has no such
     // instance, which `status` tells as it does everywhere else, rather
-    // than by this call's own error codes.
+    // than by this call's own error codes. One whose status can't be read
+    // either isn't known to be gone: it is left out, and holds up none of
+    // the others.
     await Promise.all(
       errors.map(async ({ id }) => {
-        if ((await runEngine(env).status(id)) === undefined) {
+        const live = await runEngine(env)
+          .status(id)
+          .catch(() => null);
+        if (live === undefined) {
           gone.add(id);
         }
       })

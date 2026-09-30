@@ -229,7 +229,7 @@ export const screenRuns = async (
   ]);
   const waiting = await waitingFor(env, by, owner, rows, open);
   return rows.map((row) =>
-    toScreenRun(runFor(by, row, owner), waiting.get(row.id) ?? [])
+    toScreenRun(runFor(env, by, row, owner), waiting.get(row.id) ?? [])
   );
 };
 

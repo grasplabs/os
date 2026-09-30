@@ -81,7 +81,7 @@
   //
   // And how long an ended workflow run keeps its details: the
   // `RUN_RETENTION_DAYS` var (src/workflows/retention.ts), 30 days unless
-  // set, at least 1.
+  // set, from 1 to 30: the engine keeps an ended run's record no longer.
   //
   // Local dev reads none of these from .dev.vars (Wrangler loads only the
   // required secrets and declared vars from it): pass them with

@@ -589,7 +589,10 @@ export const listAllRuns = async (
   );
   return {
     runs: rows.map(({ appName, decision, ...row }): ListedRun => {
-      const run = { ...runFor(by, row, owners.get(row.appId) ?? ""), appName };
+      const run = {
+        ...runFor(env, by, row, owners.get(row.appId) ?? ""),
+        appName,
+      };
       if (decision === null) {
         return run;
       }

@@ -236,7 +236,8 @@ export interface WorkflowRun {
   output?: unknown;
   /**
    * Why it stopped, once failed: for its starter and admins. Once its
-   * details are removed, its message says only that.
+   * details are removed, its message says only that, and its step is
+   * named without its key.
    */
   failure?: {
     step: string | null;
@@ -244,8 +245,8 @@ export interface WorkflowRun {
   };
   /**
    * When its details were removed (ISO 8601): an ended run keeps them for
-   * 30 days, unless the deployment sets another number. The run itself
-   * stays listed; show it as one whose details are gone.
+   * 30 days, or fewer if the deployment says so. The run itself stays
+   * listed; show it as one whose details are gone.
    */
   detailsRemovedAt?: string;
 }

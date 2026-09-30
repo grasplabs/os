@@ -498,6 +498,14 @@ export const heldRequestSchema = z.strictObject({
 });
 export type HeldRequest = z.input<typeof heldRequestSchema>;
 
+/** Workflow runs that have ended, each with its App: at most 50. */
+export const endedRunsSchema = z.strictObject({
+  runs: z
+    .array(z.strictObject({ appId: identifierSchema, runId: identifierSchema }))
+    .max(50),
+});
+export type EndedRuns = z.input<typeof endedRunsSchema>;
+
 /** A confirmation core refused, with why, for the audit log. */
 export const refuseConfirmationSchema = z.strictObject({
   person: connectionPersonSchema,
@@ -676,6 +684,12 @@ export interface ConnectApi {
    * person came to confirm it.
    */
   dropForEndedRun: (request: HeldRequest) => Promise<void>;
+  /**
+   * Drops every held action of the workflow runs `runs`, which have ended
+   * for their retention (core's src/workflows/retention.ts): nothing may
+   * keep their inputs past it. Dropping again drops nothing.
+   */
+  dropForEndedRuns: (request: EndedRuns) => Promise<void>;
   /**
    * Runs a held action its person confirmed: only with the capability core
    * signed for confirming it, and only for that person.

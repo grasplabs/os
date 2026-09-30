@@ -102,7 +102,7 @@ import { authorize } from "./permissions.ts";
 // What an App made of a chat is the App's, and outlives it only as long
 // as that does: a workflow run that read the transcript keeps it as its
 // input and in its steps until the run's own retention is over (30 days
-// after the run ends unless the deployment sets another number,
+// after the run ends, or fewer if the deployment says so,
 // workflows/retention.ts), and a record an App saved from it (a Playbook
 // source, say) is kept like any record, until it is deleted or purged.
 
