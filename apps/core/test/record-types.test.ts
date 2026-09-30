@@ -193,16 +193,25 @@ const recordSchema = z.object({
 
 const readsDocument = /from "documents"/iu;
 
+/** The read of one type's claim in a collection (`typeHeld`). */
+const readsClaim = /from "record_type_owners".*"type" = \?/iu;
+
 /**
- * Knowledge's database, with `first` run once, just before the first
- * statement whose query `when` matches is run: another request landing
- * while a write is being prepared.
+ * Knowledge's database (or `real`), with `first` run once, just before
+ * the first statement whose query `when` matches is run (or the `nth`):
+ * another request landing while a write is being prepared.
  */
-const racingOn = (when: RegExp, first: () => Promise<void>): D1Database => {
-  const real = env.KNOWLEDGE;
+const racingOn = (
+  when: RegExp,
+  first: () => Promise<void>,
+  real: D1Database = env.KNOWLEDGE,
+  nth = 1
+): D1Database => {
   let done = false;
+  let runs = 0;
   const once = async (): Promise<void> => {
-    if (!done) {
+    runs += 1;
+    if (!done && runs >= nth) {
       done = true;
       await first();
     }
@@ -707,6 +716,63 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
         ["app", 1, null],
         [admin.userId, 2, "task"],
       ],
+    });
+  });
+
+  it("keep a record of a type no App had that another App claims just as an admin makes it a doc", async () => {
+    const { admin, app, collectionId, permissionId } = await setUp();
+    const path = `tasks/${unique()}.md`;
+    const sealed = savedSchema.parse(
+      await callApp(
+        env,
+        app,
+        as(admin.userId),
+        "seal",
+        saveArgs(path, { type: "task", status: "open", seal: "signed" })
+      )
+    );
+    // Its owner may no longer write the collection: no App has `task`.
+    await admin.api.permissions.revoke(permissionId);
+    // Another App that declares it there, not yet granted the collection.
+    const claimer = await recordsApp(admin, taskTypes(collectionId));
+    // The admin's save finds nobody has the type; then, before it writes,
+    // the other App is granted the collection and its first record
+    // claims the type.
+    let claimed = "not tried";
+    const racing = racingOn(
+      readsClaim,
+      async () => {
+        await requestGranted(idp, admin, collectionFor(claimer, collectionId));
+        claimed = await outcome(
+          admin.api.knowledge.saveDocument({
+            collectionId,
+            path: `tasks/${unique()}.md`,
+            text: taskText("status: open"),
+            ifVersion: 0,
+          })
+        );
+      },
+      env.DB,
+      2
+    );
+    const raced = await outcome(
+      saveDocument({ ...env, DB: racing }, await admin.api.whoami(), {
+        collectionId,
+        path,
+        text: "---\ntype: doc\n---\nNo longer a task.\n",
+        ifVersion: 1,
+      })
+    );
+    const after = await admin.api.knowledge.getDocument(sealed.ok.id);
+
+    expect({
+      claimed,
+      raced,
+      after: [after.type, after.currentVersion],
+    }).toStrictEqual({
+      claimed: "ok",
+      raced: "knowledge.invalid",
+      after: ["task", 1],
     });
   });
 

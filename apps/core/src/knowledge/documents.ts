@@ -489,7 +489,8 @@ const requireFieldsKept = async (
   const undeclared =
     leaves && !isBuiltinDocumentType(previous) && !declared.has(previous);
   // But for an admin making it a plain doc once no App has the type any
-  // more: read only then, by the claim's key.
+  // more: read only then, by the claim's key, and again just before the
+  // write (`requireStillReleased`).
   const released =
     undeclared &&
     check.byAdmin === true &&
@@ -510,6 +511,34 @@ const requireFieldsKept = async (
     throw invalid(problems);
   }
   return released ? { releasedType: previous } : {};
+};
+
+/**
+ * Refuses with `knowledge.invalid` a save that takes a record out of a
+ * type no App had (`releasedType`, from `requireFieldsKept`) when an App
+ * has it now: another App may have claimed it while the save was being
+ * prepared, and the record is then that App's to keep. Read last, just
+ * before the write's batch, as an App's write checks its context
+ * (`Write.lastCheck`). The claim is in core's database and the document
+ * in Knowledge's, which share no transaction, so a claim that lands
+ * between this read and the batch is not seen: that takes an admin
+ * converting the record at the very moment another App, granted the
+ * collection and approved, first saves or reads a record of the type. The
+ * save is audited with `releasedType` either way.
+ */
+const requireStillReleased = async (
+  env: Env,
+  collectionId: string,
+  releasedType: string | undefined
+): Promise<void> => {
+  if (
+    releasedType !== undefined &&
+    (await typeHeld(env, collectionId, releasedType))
+  ) {
+    throw invalid([
+      `frontmatter.type: an App has ${releasedType} for this collection now, so it stays a ${releasedType}`,
+    ]);
+  }
 };
 
 /**
@@ -642,6 +671,7 @@ export const writeVersion = async (
           )
         )
     : db.insert(documents).values(row);
+  await requireStillReleased(env, collection.id, released.releasedType);
   await write.lastCheck?.();
   try {
     await auditedBatch(env, db, [document, ...statements]);
