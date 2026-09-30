@@ -73,7 +73,7 @@ import type { RunRow } from "./runs.ts";
 // A run waits when it hasn't ended and one of its decisions is still
 // open, as answering decides it (`stillOpen`): open, and not past its
 // deadline. It goes on once someone answers it, on the decision's own
-// page. A run that waits otherwise (a sleep, an event, a feature switched
+// page. A run that waits otherwise (a sleep, a feature switched
 // off, a decision past its deadline that it hasn't timed out yet) goes on
 // by itself, and counts as running.
 //

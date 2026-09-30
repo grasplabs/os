@@ -23,7 +23,7 @@ import {
 import { mockIdp } from "./idp.ts";
 import { fullScan, planOf, recordedQueries } from "./query-plans.ts";
 import { racingDb } from "./racing-db.ts";
-import { endLiveRuns, finished, listening, resumed, stopped } from "./runs.ts";
+import { endLiveRuns, finished, sleeping, stopped, woken } from "./runs.ts";
 import { openRpc, signedInApi } from "./sign-in.ts";
 import { appWith, runEvents, workflowFiles } from "./workflow-apps.ts";
 
@@ -88,8 +88,8 @@ const fails = workflowFiles(
 );
 
 /**
- * A workflow that does a step, waits for an event, and returns what it
- * read: a live run, until it is sent `go`.
+ * A workflow that does a step, sleeps a day, and returns what it
+ * read: a live run, until it is woken.
  */
 const waits = workflowFiles(
   "waits",
@@ -98,7 +98,7 @@ const waits = workflowFiles(
     await env.APP.call("hit", "work");
     return notes;
   });
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return { read };`,
   { work: "notes" }
 );
@@ -485,13 +485,13 @@ describe("run retention", { timeout: 60_000 }, () => {
     const run = await builder.api.workflows.start(app, "waits", {
       notes: transcript,
     });
-    await listening(run.id, "go");
+    await sleeping(run.id, "go");
     // Started long before any retention.
     await env.DB.prepare("UPDATE workflow_runs SET created_at = ? WHERE id = ?")
       .bind(Date.now() - 400 * day, run.id)
       .run();
 
-    // While it waits for its event.
+    // While it sleeps.
     await runQuarterHourCron({}, daysOn(400));
     const waiting = await rowOf(run.id);
     // While it is stopped, as by a deploy or a crash.
@@ -502,8 +502,8 @@ describe("run retention", { timeout: 60_000 }, () => {
       engine: await inEngine(run.id),
     };
     // Resumed, it replays the step it did from the engine's record.
-    await resumed(run.id);
-    await finished(run.id, { type: "go", payload: null });
+    await woken(run.id);
+    await finished(run.id);
     const ended = await builder.api.workflows.status(run.id);
 
     expect({
@@ -735,7 +735,7 @@ describe("run retention", { timeout: 60_000 }, () => {
     const run = await builder.api.workflows.start(app, "waits", {
       notes: transcript,
     });
-    await listening(run.id, "go");
+    await sleeping(run.id, "go");
     // A cancel whose termination failed: the row has ended, the instance
     // waits on, and the engine's own retention never starts for it.
     await env.DB.prepare(

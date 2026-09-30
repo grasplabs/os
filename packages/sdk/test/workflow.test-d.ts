@@ -14,7 +14,6 @@ import {
   schedule,
   template,
   workflow,
-  z,
 } from "../src/workflow.ts";
 import type {
   AppExportsStub,
@@ -26,10 +25,9 @@ import type {
   Person,
   SideEffectContext,
   SleepOptions,
-  WaitForOptions,
   StepRunner,
-  WaitResult,
   WorkflowContext,
+  z,
 } from "../src/workflow.ts";
 import {
   extractionSchema,
@@ -124,9 +122,6 @@ expectTypeOf<keyof DecisionOptions>().toEqualTypeOf<
 expectTypeOf<keyof SleepOptions>().toEqualTypeOf<
   keyof z.input<typeof stepOptionSchemas.sleep>
 >();
-expectTypeOf<keyof WaitForOptions<z.ZodType>>().toEqualTypeOf<
-  keyof z.input<typeof stepOptionSchemas.waitFor>
->();
 
 // step.llm needs instructions and a schema, can't be locked, and its answer
 // is typed by the schema.
@@ -189,23 +184,6 @@ await step.do(
   { description: "Match", input: { at: new Date(0) } },
   async () => 1
 );
-
-// An event's payload is typed by its schema, and unknown without one.
-expectTypeOf(
-  await step.waitFor("signed", {
-    description: "Wait for the signature",
-    type: "document.signed",
-    timeout: "1 day",
-    schema: z.object({ signer: z.string() }),
-  })
-).toEqualTypeOf<WaitResult<{ signer: string }>>();
-expectTypeOf(
-  await step.waitFor("signed", {
-    description: "Wait for the signature",
-    type: "document.signed",
-    timeout: "1 day",
-  })
-).toEqualTypeOf<WaitResult<unknown>>();
 
 // Schedule triggers refer to schedule parameters.
 workflow(

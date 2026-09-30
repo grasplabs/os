@@ -3,11 +3,6 @@ import type { RunId } from "@grasp-os/shared/ids";
 import type { Json } from "@grasp-os/shared/json";
 import type { z } from "zod";
 
-/** What a durable wait ends with: the event, or nothing before the timeout. */
-export type EngineEvent =
-  | { received: true; payload: unknown }
-  | { received: false };
-
 /** One call to the model gateway, made on behalf of an AI step. */
 export interface ModelRequest {
   /** The step the call is made for, for the audit log and cost reporting. */
@@ -140,7 +135,7 @@ export interface EngineStepOptions {
  * underneath (the cloud runtime now, on-prem later) can change without
  * touching a single workflow. It stays close to the common durable-execution
  * primitives (a named step whose result is recorded, a durable sleep, a
- * durable wait for an event), so any durable runtime maps onto it directly.
+ * durable wait for a decision), so any durable runtime maps onto it directly.
  *
  * Implemented once per run execution. A run can be replayed
  * from the start at any time: every method that takes a step name must return
@@ -178,16 +173,6 @@ export interface WorkflowEngine {
   ) => Promise<T>;
   /** Durably pauses the run. */
   sleep: (name: string, milliseconds: number) => Promise<void>;
-  /**
-   * Durably waits for the first event of `type` sent to this run that no
-   * earlier wait took, for at most `timeout` milliseconds (the SDK keeps it
-   * within 365 days). An event delivered twice is taken once: a copy of
-   * one an earlier wait took answers no later wait.
-   */
-  waitForEvent: (
-    name: string,
-    options: { type: string; timeout: number }
-  ) => Promise<EngineEvent>;
   /** Calls the model gateway and returns the model's JSON answer. */
   callModel: (request: ModelRequest) => Promise<unknown>;
   /**

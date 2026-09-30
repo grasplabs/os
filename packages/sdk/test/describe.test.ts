@@ -82,13 +82,12 @@ describe(describeWorkflow, () => {
     expect(keys).toStrictEqual(["run-1:pay:p1", "run-1:pay:p%2F2"]);
   });
 
-  it("gives every kind of step, with its literal options and line", () => {
+  it("gives a step its literal options, the parameters it reads, and its line", () => {
     const source = workflowSource(`
   await step.sleep("pause", { description: "Wait a bit", duration: "1 hour" });
-  await step.waitFor("signed", {
-    description: "Wait for the signature",
-    type: "document.signed",
-    timeout: params.signTimeout,
+  await step.sleep("cool-off", {
+    description: "Wait as long as set",
+    duration: params.coolOff,
   });`);
 
     // Each step's code, as whether it is its call as written.
@@ -113,13 +112,13 @@ describe(describeWorkflow, () => {
       },
       {
         type: "step",
-        name: "signed",
+        name: "cool-off",
         kind: "wait",
-        description: "Wait for the signature",
+        description: "Wait as long as set",
         sideEffect: false,
         locked: false,
-        params: ["signTimeout"],
-        options: { type: "document.signed" },
+        params: ["coolOff"],
+        options: {},
         code: true,
         line: 7,
       },

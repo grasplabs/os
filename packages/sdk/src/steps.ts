@@ -192,12 +192,6 @@ export const stepOptionSchemas = {
     ...common,
     duration: option(durationSchema, "value"),
   }),
-  waitFor: z.strictObject({
-    ...common,
-    type: option(text, "literal"),
-    timeout: option(durationSchema, "value"),
-    schema: option(zodSchema.optional(), "code"),
-  }),
 };
 
 export type StepMethod = keyof typeof stepOptionSchemas;
@@ -208,5 +202,4 @@ export const stepKinds: Record<StepMethod, StepKind> = {
   llm: "ai",
   decision: "decision",
   sleep: "wait",
-  waitFor: "wait",
 };

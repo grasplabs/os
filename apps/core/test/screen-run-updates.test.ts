@@ -185,14 +185,14 @@ describe("run status on screens", { timeout: 60_000 }, () => {
   it("tells a screen when a decision closes, timed out, and the run goes on", async () => {
     const builder = await personApi("builder");
     // The decision times out as the decision tests' own does, after a
-    // short deadline; then the run waits for an event, so it goes on
+    // short deadline; then the run sleeps a day, so it goes on
     // without ending, and only the closed decision can tell the screen.
     const app = await appWith(
       builder,
       workflowFiles(
         "expiring",
         `  await step.decision("review", { description: "Approve", from: "person:${builder.userId}", ask: async () => {}, timeout: 1500 });
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return 1;`
       )
     );

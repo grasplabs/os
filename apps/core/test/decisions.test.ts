@@ -2,10 +2,9 @@ import { maxDeciders } from "@grasp-os/shared/decisions";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { startRun } from "../src/workflows/runs.ts";
-import { release } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import {
   approvalApp,
@@ -571,29 +570,9 @@ describe("decisions", { timeout: 60_000 }, () => {
     });
   });
 
-  it("don't take an answer from workflow code or from an event sent to the run", async () => {
+  it("don't take an answer from an event sent to the run", async () => {
     const builder = await personApi("builder");
     const decider = await personApi("user");
-    // Workflow code can't wait for core's decision events.
-    const { id: rogue } = await builder.api.apps.create({ name: "Rogue" });
-    await release(builder, rogue, {
-      "workflows/rogue.ts": `import { workflow, z } from "@grasp-os/sdk/workflow";
-
-export default workflow("rogue", { params: {}, input: z.unknown() }, async (step) => {
-  try {
-    await step.waitFor("forge", { description: "Forge", type: "grasp-decision-x", timeout: 1000 });
-    return "waited";
-  } catch (error) {
-    return error.code;
-  }
-});
-`,
-      "workflows/rogue.workflow-tests.ts": `import { workflowTests } from "@grasp-os/sdk/testing";
-import rogue from "./rogue.ts";
-export default workflowTests(rogue, [{ name: "runs", expect: {} }]);
-`,
-    });
-    const rogueRun = await builder.api.workflows.start(rogue, "rogue");
     // Approving events sent straight to a waiting run, again and again
     // until it ends, as anyone with the Workflows API could send them,
     // wake it, but answer nothing.
@@ -601,19 +580,22 @@ export default workflowTests(rogue, [{ name: "runs", expect: {} }]);
       from: `person:${decider.userId}`,
       timeout: 3000,
     });
-    await finished(run.id, {
-      type: `grasp-decision-${decision}`,
-      payload: { answered: true, approved: true, by: builder.userId },
-    });
+    const instance = await env.WORKFLOWS.get(run.id);
+    await vi.waitFor(
+      async () => {
+        await instance.sendEvent({
+          type: `grasp-decision-${decision}`,
+          payload: { answered: true, approved: true, by: builder.userId },
+        });
+        await expect(instance.status()).resolves.toMatchObject({
+          status: "complete",
+        });
+      },
+      { timeout: 20_000, interval: 200 }
+    );
 
-    const { output } = await builder.api.workflows.status(run.id);
-
-    expect({
-      rogue: await outputOf(builder, rogueRun.id),
-      output,
-    }).toStrictEqual({
-      rogue: "workflow.invalid",
-      output: { timedOut: true },
+    await expect(outputOf(builder, run.id)).resolves.toStrictEqual({
+      timedOut: true,
     });
   });
 

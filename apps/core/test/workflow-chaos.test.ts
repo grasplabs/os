@@ -1,7 +1,6 @@
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { statisticRowsPerDay } from "@grasp-os/shared/statistics";
-import { introspectWorkflowInstance } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
@@ -14,13 +13,12 @@ import { mailConnection } from "./mail-connection.ts";
 import {
   endLiveRuns,
   finished,
-  listening,
   liveStatus,
   resumed,
-  sent,
   sleeping,
   stepDone,
   stopped,
+  woken,
 } from "./runs.ts";
 import { signedInApi } from "./sign-in.ts";
 import {
@@ -33,7 +31,7 @@ import {
 } from "./workflow-apps.ts";
 
 // Workflow runs under failure: crashes mid-step, restarts, long sleeps,
-// events and starts delivered twice, and failures that pass or last. Runs
+// starts delivered twice, and failures that pass or last. Runs
 // are real, on the Workflows engine (Miniflare's). Their side effects go
 // through the real connect to a fake mail server (test/mail-server.ts)
 // that counts every call that reached it, so a mail sent twice shows
@@ -50,10 +48,8 @@ import {
 //   that step, which runs it again from scratch;
 // - a long sleep: a day's sleep, cut short while the run is stopped (the
 //   engine's test introspection);
-// - an event or a start delivered twice: the same event (its ID) sent
-//   again through core's `sendEvent`, and a second create of the run's
-//   instance under its ID (a trigger's duplicate events are for its own
-//   tests);
+// - a start delivered twice: a second create of the run's instance under
+//   its ID (a trigger's duplicate events are for its own tests);
 // - a failure trying again may fix: the mail server turning calls away.
 // Failures trying again can't fix (a refused call, the workflow's own
 // error) stop a run at once: workflows.test.ts has them, with the report
@@ -247,7 +243,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       return JSON.parse((await env.MAIL.call("mail.send", mail, { idempotencyKey })).output);
     }
   );
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return sent;`,
         { send: { messageId: "mocked" } }
       )
@@ -267,7 +263,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       },
       { timeout: 10_000, interval: 100 }
     );
-    await finished(run.id, { type: "go", payload: null });
+    await woken(run.id);
+    await finished(run.id);
 
     expect({
       run: await admin.api.workflows.status(run.id),
@@ -313,7 +310,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     await env.APP.call("point", "kept", "kept");
     return await env.APP.call("hit", "forgetful");
   });
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return attempt;`,
         { count: 1 }
       ),
@@ -327,7 +324,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     }
     return attempt;
   });
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return attempt;`,
         { count: 1 }
       ),
@@ -384,7 +381,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       },
       { timeout: 10_000, interval: 100 }
     );
-    await finished(forgetful.id, { type: "go", payload: null });
+    await woken(forgetful.id);
+    await finished(forgetful.id);
     const anew = {
       attempts: await hitsOf(app, builder.userId, "forgetful"),
       once,
@@ -403,7 +401,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       },
       { timeout: 10_000, interval: 100 }
     );
-    await finished(silent.id, { type: "go", payload: null });
+    await woken(silent.id);
+    await finished(silent.id);
 
     const outlived = await builder.api.workflows.start(app, "outlived");
     await finished(outlived.id);
@@ -506,7 +505,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
         "durable",
         `  await step.do("before", { description: "Before" }, async () => await env.APP.call("hit", "before"));
   try {
-    await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+    await step.sleep("go", { description: "Wait", duration: "1 day" });
   } finally {
     // Winds down slowly: the stopped execution is still ending when the
     // run, resumed at once, goes on in the next.
@@ -532,8 +531,19 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     const run = await builder.api.workflows.start(app, "durable");
     await stepDone(run.id, "before");
     await stopped(run.id);
-    await resumed(run.id);
-    await finished(run.id, { type: "go", payload: null });
+    await woken(run.id);
+    // The local engine starts no execution while the one it stopped still
+    // winds down, and then leaves the run queued. Only an event makes it
+    // look again: one the run waits for nowhere, sent until it has.
+    const instance = await env.WORKFLOWS.get(run.id);
+    await vi.waitFor(
+      async () => {
+        await instance.sendEvent({ type: "look-again", payload: null });
+        await expect(liveStatus(run.id)).resolves.not.toBe("queued");
+      },
+      { timeout: 10_000, interval: 200 }
+    );
+    await finished(run.id);
 
     expect({
       status: await builder.api.workflows.status(run.id),
@@ -568,13 +578,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     const asleep = await hitsOf(app, builder.userId, "after");
     // The sleep is cut short while the run is stopped (whether the engine
     // keeps its deadline is the engine's to test): the resumed execution
-    // replays the sleep it began, which then ends at once. Not disposed:
-    // disposing deletes the run's instance.
-    const instance = await introspectWorkflowInstance(env.WORKFLOWS, run.id);
-    await instance.modify(async (modifier) => {
-      await modifier.disableSleeps();
-    });
-    await resumed(run.id);
+    // replays the sleep it began, which then ends at once.
+    await woken(run.id, "nap");
     await finished(run.id);
 
     expect({
@@ -665,7 +670,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       throw Object.assign(new Error("busy"), { code: "connect.server_unavailable" });
     });
   } catch {}
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return await step.do("after", { description: "After" }, async () => "done");`,
         { after: "done" }
       )
@@ -675,8 +680,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
     // Stopped and resumed while it waits: the new execution replays the
     // caught failure.
     await stopped(run.id);
-    await resumed(run.id);
-    await finished(run.id, { type: "go", payload: null });
+    await woken(run.id);
+    await finished(run.id);
     const audited = await runEvents(run.id, "workflow.run.completed");
     expect(
       audited.filter((event) => event.startsWith("workflow.step."))
@@ -685,74 +690,6 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       "workflow.step.completed after",
       "workflow.step.failed flaky",
     ]);
-  });
-
-  it("take an event delivered twice once, however late or often its copies come, send once, and still take new events of its type and its ID under another type", async () => {
-    const admin = await personApi("admin");
-    const mail = await mailConnection();
-    const app = await appWith(
-      admin,
-      workflowFiles(
-        "approved",
-        `  const approval = await step.waitFor("approval", { description: "Wait for approval", type: "approved", timeout: "1 day" });
-  const sent = await step.do(
-    "send",
-    { description: "Send the invoice", sideEffect: true, input: ${JSON.stringify(invoiceMail)} },
-    async ({ idempotencyKey, input: mail }) => {
-      await env.APP.call("hit", "send");
-      return JSON.parse((await env.MAIL.call("mail.send", mail, { idempotencyKey })).output);
-    }
-  );
-  const again = await step.waitFor("again", { description: "Wait again", type: "approved", timeout: "1 day" });
-  await step.waitFor("release", { description: "Wait for the test", type: "release", timeout: "1 day" });
-  const last = await step.waitFor("last", { description: "Wait once more", type: "approved", timeout: 1000 });
-  const filed = await step.waitFor("filed", { description: "Wait for filing", type: "filed", timeout: "1 day" });
-  return { approval: approval.received && approval.payload, again: again.received && again.payload, last: last.received, filed: filed.received && filed.payload, sent };`,
-        { send: { messageId: "mocked" } }
-      )
-    );
-    await grantMail(idp, admin, app, mail.id);
-    const run = await admin.api.workflows.start(app, "approved");
-    // Delivered twice at once, as an event source that retries may.
-    const first = { type: "approved", id: "first", payload: { by: "anna" } };
-    await Promise.all([sent(run.id, first), sent(run.id, first)]);
-    // Delivered again once the wait it answered has moved on, and again
-    // after a restart: the new execution replays the waits before, and
-    // knows the event as taken.
-    await listening(run.id, "again");
-    await sent(run.id, first);
-    await stopped(run.id);
-    await resumed(run.id);
-    await sent(run.id, first);
-    // A new event of the type, and more copies of both, in the engine
-    // before the last wait begins: it passes over them all, and waits
-    // out its timeout.
-    const second = { type: "approved", id: "second", payload: { by: "ben" } };
-    await sent(run.id, second);
-    await sent(run.id, second);
-    await sent(run.id, first);
-    // The first event's ID under another type: another event.
-    await sent(run.id, { type: "filed", id: "first", payload: "filed" });
-    await finished(run.id, { type: "release", payload: null });
-
-    expect({
-      run: await admin.api.workflows.status(run.id),
-      attempts: await hitsOf(app, admin.userId, "send"),
-      server: await mail.did(),
-    }).toMatchObject({
-      run: {
-        status: "completed",
-        output: {
-          approval: { by: "anna" },
-          again: { by: "ben" },
-          last: false,
-          filed: "filed",
-          sent: { messageId: "message-1" },
-        },
-      },
-      attempts: 1,
-      server: { calls: 1, sent: [invoiceMail] },
-    });
   });
 
   it("take a start delivered again under the run's ID as the run it is, sending once", async () => {
@@ -770,7 +707,7 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       return JSON.parse((await env.MAIL.call("mail.send", mail, { idempotencyKey })).output);
     }
   );
-  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  await step.sleep("go", { description: "Wait", duration: "1 day" });
   return sent;`,
         { send: { messageId: "mocked" } }
       )
@@ -788,7 +725,8 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
         input: null,
       })
     ).resolves.toBeUndefined();
-    await finished(run.id, { type: "go", payload: null });
+    await woken(run.id);
+    await finished(run.id);
     const completed = await eventsOf("workflow.run.completed", run.id);
 
     expect({

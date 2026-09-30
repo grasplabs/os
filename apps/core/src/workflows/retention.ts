@@ -49,7 +49,7 @@ import { runEngine, runRetentionDays } from "./engine.ts";
 //
 // What can go wrong, and why it doesn't:
 // - A live run swept. Only a run whose row has ended is swept, by the
-//   time it ended: a run that waits (for a decision, an event, a held
+//   time it ended: a run that waits (for a decision, a held
 //   side effect, a feature switched back on), sleeps or is paused has not
 //   ended, however long ago it started, and the engine's own retention
 //   starts only when its instance ends. Ending is final: every write that

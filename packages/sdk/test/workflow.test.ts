@@ -250,14 +250,6 @@ describe("step calls", () => {
       async (step) =>
         // @ts-expect-error -- a decision needs someone to ask, and how
         await step.decision("approve", withoutAsk),
-      async (step) =>
-        await step.waitFor("signed", {
-          description: "Wait",
-          type: "document.signed",
-          timeout: "1 day",
-          // @ts-expect-error -- the schema is a Zod schema
-          schema: "signer",
-        }),
     ];
 
     for (const call of calls) {
@@ -589,60 +581,23 @@ describe("step.llm", () => {
   });
 });
 
-const waitingWorkflow = withStep(async (step) => {
-  await step.sleep("pause", { description: "Pause", duration: "90 minutes" });
-  return await step.waitFor("signed", {
-    description: "Wait for the signature",
-    type: "document.signed",
-    timeout: "2 weeks",
-    schema: z.object({ signer: z.string() }),
-  });
-});
-
-describe("step.sleep and step.waitFor", () => {
-  it("hand the engine the wait in milliseconds", async () => {
+describe("step.sleep", () => {
+  it("hands the engine the sleep in milliseconds", async () => {
     const { engine, steps } = createFakeEngine();
 
-    await waitingWorkflow.run(engine);
+    await withStep(async (step) => {
+      await step.sleep("pause", {
+        description: "Pause",
+        duration: "90 minutes",
+      });
+    }).run(engine);
 
     expect(steps).toStrictEqual([
       { type: "sleep", name: "pause", milliseconds: 5_400_000 },
-      {
-        type: "wait",
-        name: "signed",
-        eventType: "document.signed",
-        timeout: 1_209_600_000,
-        event: { received: false },
-      },
     ]);
   });
 
-  it("return the event's checked payload, or that none came", async () => {
-    const signed = createFakeEngine({
-      events: [{ type: "document.signed", payload: { signer: "anna" } }],
-    });
-    const silent = createFakeEngine();
-
-    await expect(waitingWorkflow.run(signed.engine)).resolves.toStrictEqual({
-      received: true,
-      payload: { signer: "anna" },
-    });
-    await expect(waitingWorkflow.run(silent.engine)).resolves.toStrictEqual({
-      received: false,
-    });
-  });
-
-  it("fail the run on an event that doesn't match the schema", async () => {
-    const { engine } = createFakeEngine({
-      events: [{ type: "document.signed", payload: { signer: 7 } }],
-    });
-
-    await expect(waitingWorkflow.run(engine)).rejects.toMatchObject({
-      code: "workflow.invalid_event",
-    });
-  });
-
-  it("reject a duration that isn't whole milliseconds, up to 365 days", async () => {
+  it("rejects a duration that isn't whole milliseconds, up to 365 days", async () => {
     const definition = withStep(async (step, duration) => {
       // @ts-expect-error -- durations are milliseconds or "<n> <unit>"
       await step.sleep("pause", { description: "Pause", duration });

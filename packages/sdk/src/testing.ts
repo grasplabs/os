@@ -13,7 +13,6 @@ import { z } from "zod";
 import type {
   DecisionAnswer,
   EngineDecision,
-  EngineEvent,
   ModelRequest,
   WorkflowEngine,
   WorkflowEnv,
@@ -28,8 +27,8 @@ import type { WorkflowDefinition } from "./workflow.ts";
  * - steps can be mocked by name, or made to fail;
  * - side-effect steps don't run: they're recorded with their input, so a
  *   test asserts what the workflow would change and a dry run reports it;
- * - decisions and events are answered up front, and waits for anything else
- *   time out right away, as sleeps end right away.
+ * - decisions are answered up front, and a wait for one without an answer
+ *   times out right away, as sleeps end right away.
  *
  * Every workflow ships with its tests next to it (`invoice.workflow-tests.ts`
  * beside `invoice.ts`), written with `workflowTests`, and `runWorkflowTests`
@@ -81,7 +80,8 @@ export type StepRecord =
       name: string;
       eventType: string;
       timeout: number;
-      event: EngineEvent;
+      /** What the wait ended with, or nothing before the timeout. */
+      event: { received: true; payload: unknown } | { received: false };
     };
 
 /** A side effect the run would have had, in the order it would happen. */
@@ -102,12 +102,6 @@ export const createTestState = (
   values: new Map(Object.entries(initial)),
   appliedWrites: new Set(),
 });
-
-/** An event sent to a run. */
-export interface TestEvent {
-  type: string;
-  payload: unknown;
-}
 
 export interface TestEngineOptions {
   runId?: string;
@@ -136,8 +130,6 @@ export interface TestEngineOptions {
    * decision asks one stand-in person, `test-person`.
    */
   decisions?: Readonly<Record<string, DecisionAnswer>>;
-  /** Events sent to the run; each goes to the first wait for its type. */
-  events?: readonly TestEvent[];
   /**
    * The content of kept messages' attachments, by the message's `stored`
    * name, in the order its `attachments` lists them, for `readAttachment`.
@@ -261,7 +253,6 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
   const modelRequests: ModelRequest[] = [];
   /** The decisions opened, once each. */
   const decisions: { step: string; from: string; deadline: number }[] = [];
-  const events = [...(options.events ?? [])];
   const state = options.state ?? createTestState();
   const runSideEffects = options.sideEffects === "run";
   // The SDK's own steps (parameters, state) aren't the workflow's.
@@ -273,15 +264,6 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
 
   // How many steps' functions run now: `readAttachment` works only inside one.
   let stepsRunning = 0;
-
-  const receive = (type: string): EngineEvent => {
-    const index = events.findIndex((event) => event.type === type);
-    if (index !== -1) {
-      const [event] = events.splice(index, 1);
-      return { received: true, payload: event?.payload };
-    }
-    return { received: false };
-  };
 
   const engine: WorkflowEngine = {
     runId: runIdSchema.parse(options.runId ?? "run-1"),
@@ -353,27 +335,6 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
         options.skipTime?.(milliseconds);
       }
       await Promise.resolve();
-    },
-    waitForEvent: async (name, { type, timeout }) => {
-      const replayed = recorded.get(name);
-      if (replayed !== undefined) {
-        // SAFETY: only this method records under a wait's name.
-        // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
-        return replayed as EngineEvent;
-      }
-      const event = receive(type);
-      recorded.set(name, event);
-      log({
-        type: "wait",
-        name: stepNameOf(name).name,
-        eventType: type,
-        timeout,
-        event,
-      });
-      if (!event.received) {
-        options.skipTime?.(timeout);
-      }
-      return await Promise.resolve(event);
     },
     callModel: async (request) => {
       modelRequests.push(request);

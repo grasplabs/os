@@ -156,7 +156,7 @@ const endedStatuses: ReadonlySet<RunStatus> = new Set([
 /**
  * A run as a screen sees it, the same whichever call read it: `waiting`
  * exactly while a decision of it is open, and `running` while it waits on
- * anything else (a sleep, an event), whatever the engine calls that. An
+ * anything else (a sleep, a held side effect), whatever the engine calls that. An
  * ended run waits for nothing. A paused one stays paused.
  */
 export const toScreenRun = (

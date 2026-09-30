@@ -9,12 +9,7 @@ import { allEvents } from "./audit-events.ts";
 import { approvalApp, week } from "./decisions.ts";
 import type { Person } from "./decisions.ts";
 import { mockIdp } from "./idp.ts";
-import {
-  endLiveRuns,
-  finished,
-  listening as waitsForEvent,
-  sleeping,
-} from "./runs.ts";
+import { endLiveRuns, finished, sleeping } from "./runs.ts";
 import { openRpc, outcome, signedInApi, signedInWithRole } from "./sign-in.ts";
 import { appWith, workflowFiles } from "./workflow-apps.ts";
 
@@ -272,7 +267,7 @@ describe("workflows from screens", { timeout: 60_000 }, () => {
     });
   });
 
-  it("show a run that sleeps or waits for an event as running, in the list and on its own, and list only the workflow asked for", async () => {
+  it("show a run that sleeps as running, in the list and on its own, and list only the workflow asked for", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, {
       ...workflowFiles(
@@ -281,15 +276,15 @@ describe("workflows from screens", { timeout: 60_000 }, () => {
   return 1;`
       ),
       ...workflowFiles(
-        "listening",
-        `  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+        "resting",
+        `  await step.sleep("rest", { description: "Wait a day", duration: "1 day" });
   return 1;`
       ),
     });
     const napping = await builder.api.screens.startRun(app, "napping");
-    const listening = await builder.api.screens.startRun(app, "listening");
+    const resting = await builder.api.screens.startRun(app, "resting");
     await sleeping(napping.id, "nap");
-    await waitsForEvent(listening.id, "go");
+    await sleeping(resting.id, "rest");
     const seen = async (workflow: string, run: string) => ({
       listed: await builder.api.screens
         .runs(app, workflow)
@@ -303,14 +298,14 @@ describe("workflows from screens", { timeout: 60_000 }, () => {
 
     expect({
       napping: await seen("napping", napping.id),
-      listening: await seen("listening", listening.id),
+      resting: await seen("resting", resting.id),
     }).toStrictEqual({
       napping: {
         listed: [{ id: napping.id, status: "running", waitingFor: [] }],
         run: { status: "running", waitingFor: [] },
       },
-      listening: {
-        listed: [{ id: listening.id, status: "running", waitingFor: [] }],
+      resting: {
+        listed: [{ id: resting.id, status: "running", waitingFor: [] }],
         run: { status: "running", waitingFor: [] },
       },
     });
@@ -421,7 +416,7 @@ describe("workflows from screens", { timeout: 60_000 }, () => {
 // Where a screen shows a run, from where core has it and the decisions it
 // waits for: pure logic, and the one place both `run` and `runs` go
 // through. The local engine never reports `waiting`, which Cloudflare
-// Workflows does for a run that sleeps or waits for an event.
+// Workflows does for a run that sleeps.
 describe(toScreenRun, () => {
   const run = (status: RunStatus): WorkflowRun => ({
     id: unchecked("run"),
