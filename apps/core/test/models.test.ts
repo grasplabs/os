@@ -867,13 +867,20 @@ describe("model gateway for agents", () => {
     }
   );
 
-  it("logs a refused request with the provider's error body, and never the prompt", async () => {
-    const problem =
-      "AiError: Bad input: Error: Type mismatch of '/messages/2/content'";
+  it("logs what a refusal says went wrong, and never its message, which may quote the prompt or a key", async () => {
+    const prompt = "What is in the merger memo?";
+    const key = "sk-live-4f9a8b7c6d5e4f3a";
+    const problem = `AiError: Bad input: Type mismatch of '/messages/2/content', 'string' not in 'null', near '${prompt}' (key ${key})`;
     const { gatewayEnv } = withGateway([
       {
         status: 400,
-        body: { name: "AiError", internalCode: 5006, message: problem },
+        body: {
+          name: "AiError",
+          internalCode: 5006,
+          httpCode: 400,
+          message: problem,
+          description: problem,
+        },
       },
     ]);
     const warn = vi.spyOn(console, "warn").mockImplementation(() => {
@@ -886,32 +893,29 @@ describe("model gateway for agents", () => {
         trigger: newPerson(),
         work,
       });
-      const failed = await agent
-        .stream(agent.model, withTool("A secret question"))
-        .result();
+      const failed = await agent.stream(agent.model, withTool(prompt)).result();
 
       const logged = warn.mock.calls
-        .map(([fields]: unknown[]) =>
-          z
-            .object({
-              event: z.literal("model.failed"),
-              status: z.number(),
-              providerError: z.string(),
-            })
-            .safeParse(fields)
-        )
-        .find(({ success }) => success)?.data;
-      expect({
-        answer: failed.errorMessage,
-        status: logged?.status,
-        withBody: logged?.providerError.includes(problem),
-        withPrompt: logged?.providerError.includes("A secret question"),
-      }).toStrictEqual({
+        .map(([fields]: unknown[]) => fields)
+        .find(
+          (fields) =>
+            z.object({ event: z.literal("model.failed") }).safeParse(fields)
+              .success
+        );
+      expect({ answer: failed.errorMessage, logged }).toMatchObject({
         answer: "The model call failed (400).",
-        status: 400,
-        withBody: true,
-        withPrompt: false,
+        logged: {
+          status: 400,
+          providerErrorName: "AiError",
+          providerInternalCode: 5006,
+          providerErrorPaths: "/messages/2/content",
+        },
       });
+      const text = JSON.stringify(logged);
+      expect({
+        prompt: text.includes(prompt),
+        key: text.includes(key),
+      }).toStrictEqual({ prompt: false, key: false });
     } finally {
       warn.mockRestore();
     }

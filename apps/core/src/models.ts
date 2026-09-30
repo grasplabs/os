@@ -530,22 +530,92 @@ interface GatewayResponse {
   logId: string | undefined;
   /** Characters of the request's body as sent; 0 before it was. */
   sentChars: number;
-  /**
-   * The body of a response that refused the request, as far as the log
-   * keeps it (`failureFields`).
-   */
-  errorBody: string | undefined;
+  /** What the log keeps of a response that refused the request. */
+  refusal: ProviderRefusal | undefined;
 }
 
 interface Sent extends GatewayResponse {
   answer: AssistantMessage;
 }
 
-/** How much of a provider's error the log keeps. */
-const loggedErrorChars = 1000;
+/**
+ * What the log keeps of a provider's refusal: the fields that name what
+ * went wrong and can carry no content, never its message, which may quote
+ * the prompt or a credential. Workers AI's `internalCode` and the JSON
+ * pointers its message names, such as `/messages/2/content`, say which
+ * part of the request it refused.
+ */
+interface ProviderRefusal {
+  name: string | undefined;
+  type: string | undefined;
+  code: string | number | undefined;
+  internalCode: number | undefined;
+  /** The JSON pointers the message names, space-separated. */
+  paths: string | undefined;
+}
+
+/** An identifier or a number, as a provider names its errors. */
+const errorCodeSchema = z.union([
+  z.string().regex(/^[A-Za-z][\w.-]{0,63}$/u),
+  z.int(),
+]);
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null && !Array.isArray(value);
+
+/** A field of a refusal, if it is an identifier or a number. */
+const codeOf = (value: unknown): string | number | undefined =>
+  errorCodeSchema.safeParse(value).data;
+
+/** A field of a refusal, if it is an identifier. */
+const identifierOf = (value: unknown): string | undefined => {
+  const code = codeOf(value);
+  return typeof code === "string" ? code : undefined;
+};
+
+/** A field of the `error` in a refusal, as OpenAI and Anthropic nest it. */
+const nestedOf = (error: unknown, field: "type" | "code"): unknown =>
+  isRecord(error) ? error[field] : undefined;
+
+/**
+ * A JSON pointer in quotes, as Workers AI's schema errors name the part
+ * of the request they refuse: lowercase names and indexes only, so it
+ * can't carry a prompt's words or a key.
+ */
+const quotedPointerPattern = /'(?<path>(?:\/(?:[a-z_]{1,32}|\d{1,6})){1,8})'/gu;
+
+/** The most JSON pointers the log keeps of one refusal. */
+const maxLoggedPaths = 5;
+
+/** The most of a refusal's body that is read. */
+const maxRefusalChars = 64 * 1024;
+
+/** What the log keeps of a refusal's body (`ProviderRefusal`). */
+const refusalOf = (text: string): ProviderRefusal => {
+  const body = text.slice(0, maxRefusalChars);
+  let parsed: Record<string, unknown> | undefined = undefined;
+  try {
+    const value: unknown = JSON.parse(body);
+    parsed = isRecord(value) ? value : undefined;
+  } catch {
+    // Not JSON: only its pointers are kept.
+  }
+  const paths = [
+    ...new Set(
+      Array.from(body.matchAll(quotedPointerPattern), (match) => match[1])
+    ),
+  ].slice(0, maxLoggedPaths);
+  const internalCode = codeOf(parsed?.internalCode);
+  return {
+    name: identifierOf(parsed?.name),
+    type:
+      identifierOf(parsed?.type) ??
+      identifierOf(nestedOf(parsed?.error, "type")),
+    code: codeOf(parsed?.code) ?? codeOf(nestedOf(parsed?.error, "code")),
+    internalCode: typeof internalCode === "number" ? internalCode : undefined,
+    paths: paths.length === 0 ? undefined : paths.join(" "),
+  };
+};
 
 /**
  * The request as Workers AI takes it. pi sends an assistant message that
@@ -584,19 +654,19 @@ const open = (
     status: undefined,
     logId: undefined,
     sentChars: 0,
-    errorBody: undefined,
+    refusal: undefined,
   };
   // The request's size as sent, should what it used have to be estimated
-  // (`usedBy`); and the body of a refusal, which the provider SDKs drop
-  // when it isn't in their provider's shape (Workers AI's has no `error`,
-  // so OpenAI's SDK reports "400 status code (no body)").
+  // (`usedBy`); and what a refusal's body says went wrong, which the
+  // provider SDKs drop when it isn't in their provider's shape (Workers
+  // AI's has no `error`, so OpenAI's SDK reports "400 status code (no
+  // body)").
   const measured: FetchFunction = async (input, init) => {
     response.sentChars = typeof init?.body === "string" ? init.body.length : 0;
     const answered = await transport(input, init);
-    response.errorBody = undefined;
+    response.refusal = undefined;
     if (!answered.ok) {
-      const body = await answered.clone().text();
-      response.errorBody = body.slice(0, loggedErrorChars);
+      response.refusal = refusalOf(await answered.clone().text());
     }
     return answered;
   };
@@ -706,21 +776,24 @@ const failureOf = (
 
 /**
  * A failed request as the log records it: the status and error type, and
- * the provider's error, the body of its refusal where there was one, else
- * pi's error, with the reason, such as a field the provider doesn't take.
- * For the log only, never the audit log or the answer; the request itself
- * is never logged, and an error that quotes some of it is cut short.
+ * what the provider's refusal says went wrong, where there was one
+ * (`ProviderRefusal`). Never free text from the provider or pi: their
+ * messages may quote the prompt or a credential.
  */
 const failureFields = (
   model: string,
-  { answer, errorBody }: Sent,
+  { answer, refusal }: Sent,
   { status, errorType }: Failure
 ) => ({
   model,
   status,
   errorType,
   stopReason: answer.stopReason,
-  providerError: (errorBody ?? answer.errorMessage)?.slice(0, loggedErrorChars),
+  providerErrorName: refusal?.name,
+  providerErrorType: refusal?.type,
+  providerErrorCode: refusal?.code,
+  providerInternalCode: refusal?.internalCode,
+  providerErrorPaths: refusal?.paths,
 });
 
 /** A failure in our own words, for whoever reads the answer. */
