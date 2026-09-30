@@ -50,6 +50,8 @@ const typeRules: readonly {
   { action: "connection.call", sideEffect: true, type: "action" },
   { action: "connection.call", type: "read" },
   { action: "connection.connect", type: "config" },
+  // A connection whose grant ran out given a new one, by signing in again.
+  { action: "connection.reconnected", type: "config" },
   { action: "connection.disconnect", type: "config" },
   // An admin consenting to Composio holding a connection's tokens.
   { action: "connection.consent", type: "config" },

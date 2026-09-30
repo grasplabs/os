@@ -6,16 +6,21 @@ import { errorFields, log } from "@grasp-os/shared/log";
 
 import { recordEvents } from "./audit.ts";
 
-// Connecting, consenting and disconnecting, as the audit log records them:
+// Connecting, reconnecting, consenting and disconnecting, as the audit log
+// records them:
 // for OAuth flows (src/oauth.ts) and Composio's (src/composio-connections.ts).
 
 /**
- * One connect, disconnect or consent, for the audit log: IDs, never
+ * One connect, reconnect, disconnect or consent, for the audit log: IDs, never
  * tokens. Its actor is the person core named, or core itself (`null`).
  */
 export const connectionEvent = (
   person: ConnectionPerson | null,
-  action: "connection.connect" | "connection.disconnect" | "connection.consent",
+  action:
+    | "connection.connect"
+    | "connection.reconnected"
+    | "connection.disconnect"
+    | "connection.consent",
   connectionId: string | undefined,
   detail: Record<string, AuditDetailValue>
 ): AuditEntry => ({

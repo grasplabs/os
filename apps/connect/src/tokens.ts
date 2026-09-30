@@ -68,7 +68,12 @@ const accessTokenOf = async (
   return accessToken;
 };
 
-/** The row that stores a new connection's first tokens. */
+/**
+ * The row that stores the tokens of a new grant: a new connection's, or a
+ * reconnected one's. Its generation starts at the time, which no earlier
+ * row of the connection reached, so a refresh still under way for the
+ * tokens it had before it was reconnected can't pass for one of these.
+ */
 export const firstTokens = async (
   vault: Vault,
   connectionId: string,
@@ -81,7 +86,7 @@ export const firstTokens = async (
     refreshToken: tokens.refreshToken,
   }),
   accessExpiresAt: new Date(tokens.expiresAt),
-  generation: 1,
+  generation: now.getTime(),
   refreshUntil: null,
   updatedAt: now,
 });

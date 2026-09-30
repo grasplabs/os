@@ -104,11 +104,19 @@ describe("audit event types", () => {
       [
         "connection.offer_changed",
         "connection.needs_reauth",
+        "connection.reconnected",
         "workflow.param.updated",
         "model.budget.alert",
         "model.budget.exhausted",
       ].map((action) => typeOf(action))
-    ).toStrictEqual(["config", "config", "config", "config", "config"]);
+    ).toStrictEqual([
+      "config",
+      "config",
+      "config",
+      "config",
+      "config",
+      "config",
+    ]);
   });
 
   it("files a model call as one, and a budget crossing as config, not a call", () => {

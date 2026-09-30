@@ -193,12 +193,13 @@ describe("refreshing", () => {
   it("gets a new access token once the stored one is about to expire, and keeps it", async () => {
     const connectionId = await connected("microsoft");
     await expire(connectionId);
+    const before = await tokenRow(connectionId);
     const refreshed = await accessTokenFor(env, connectionId);
     expect(refreshed).not.toBe(firstAccessToken());
     await expect(accessTokenFor(env, connectionId)).resolves.toBe(refreshed);
     expect(providers.tokenRequests("refresh_token")).toHaveLength(1);
     await expect(tokenRow(connectionId)).resolves.toMatchObject({
-      generation: 2,
+      generation: (before?.generation ?? 0) + 1,
       refreshUntil: null,
     });
   });
@@ -319,6 +320,38 @@ describe("refreshing", () => {
     expect(
       audited.filter(({ action }) => action === "connection.needs_reauth")
     ).toStrictEqual([]);
+  });
+
+  it("still under way when its connection was reconnected leaves the new tokens be", async () => {
+    const person = someone();
+    const account = ownAccount(person, "microsoft");
+    const connectionId = await connected("microsoft", person);
+    await expire(connectionId);
+    const provider = Promise.withResolvers<Response>();
+    providers.state.refresh = async () => await provider.promise;
+    const refreshing = accessTokenFor(env, connectionId);
+    await refreshSent();
+    // Meanwhile a refresh elsewhere (this one's lease lapsed) heard the
+    // grant was gone, and the person connected the account again.
+    const db = drizzle(env.DB);
+    await db
+      .delete(connectionTokens)
+      .where(eq(connectionTokens.connectionId, connectionId));
+    await db
+      .update(connections)
+      .set({ status: "needs_reauth" })
+      .where(eq(connections.id, connectionId));
+    await expect(connectAccount(providers, person, account)).resolves.toBe(
+      connectionId
+    );
+    const reconnected = providers.state.issued.findLast((token) =>
+      token.startsWith("access")
+    );
+    // The old grant's refusal arrives now: it isn't about these tokens.
+    provider.resolve(providers.oauthError("invalid_grant"));
+    await expect(refreshing).resolves.toBe(reconnected);
+    await expect(statusOf(connectionId)).resolves.toBe("active");
+    await expect(accessTokenFor(env, connectionId)).resolves.toBe(reconnected);
   });
 
   it("marks the connection for reconnecting once the grant is gone, and records it", async () => {
