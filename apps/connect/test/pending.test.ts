@@ -290,6 +290,59 @@ describe("a side effect from chat", () => {
     ]);
   });
 
+  it("without a key of its caller's is held under one connect makes, runs once when confirmed, and is held as another action when asked again", async () => {
+    const anna = someone();
+    const connectionId = await addConnection();
+    const { idempotencyKey: _key, ...call } = mail(connectionId);
+    const first = await hold(inChat(anna), call);
+    // The model asks again: a second action, under a key of its own.
+    const second = await hold(inChat(anna), call);
+    const waiting = await waitingFor(anna);
+    const held = waiting.find(({ id }) => id === first.pending?.id);
+    if (held === undefined) {
+      throw new Error("Expected the first call's held action");
+    }
+    const confirmed = await confirm(anna, held);
+    const left = await waitingFor(anna);
+    expect({
+      held: new Set(waiting.map(({ id }) => id)),
+      keys: new Set(waiting.map(({ idempotencyKey }) => idempotencyKey)).size,
+      inputs: waiting.map(({ input }) => input),
+      confirmed: confirmed.output,
+      ran: server.ran,
+      left: left.map(({ id }) => id),
+      again: await outcome(confirm(anna, held)),
+    }).toStrictEqual({
+      held: new Set([first.pending?.id, second.pending?.id]),
+      keys: 2,
+      inputs: [JSON.stringify(call.input), JSON.stringify(call.input)],
+      confirmed: '{"sent":"ben@acme.test"}',
+      ran: [{ tool: "mail.send", input: call.input }],
+      left: [second.pending?.id],
+      again: "connect.pending_not_found",
+    });
+    await expect(eventsFor(connectionId)).resolves.toStrictEqual([
+      { action: "connection.call", actor: "agent", outcome: "held" },
+      { action: "connection.call", actor: "agent", outcome: "held" },
+      { action: "connection.action.confirmed", actor: "person", outcome: null },
+      { action: "connection.call", actor: "agent", outcome: "ok" },
+    ]);
+  });
+
+  it("from a workflow run without a key is refused, not held under a key of connect's", async () => {
+    const anna = someone();
+    const connectionId = await addConnection();
+    const { idempotencyKey: _key, ...call } = mail(connectionId);
+    const signed = { restricted: true, origin: runOrigin };
+    await expect(
+      outcome(callAs(agentFor(anna.userId), call, signed))
+    ).resolves.toBe("connect.idempotency_key_required");
+    expect({ waiting: await waitingFor(anna), ran: server.ran }).toStrictEqual({
+      waiting: [],
+      ran: [],
+    });
+  });
+
   it("runs once when confirmed twice at the same moment", async () => {
     const anna = someone();
     const connectionId = await addConnection();

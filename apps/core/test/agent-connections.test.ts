@@ -2,7 +2,6 @@ import type { AuditEvent } from "@grasp-os/shared/audit";
 import { connectErrors } from "@grasp-os/shared/connect";
 import { describe, expect, it, vi } from "vite-plus/test";
 
-import { chatKeyMaxLength } from "../src/agent-connections.ts";
 import {
   chatOf,
   codeResults,
@@ -71,10 +70,10 @@ const eventsOf = async (
 };
 
 describe("a chat's connections", setUpTime, () => {
-  it("hold a write for the person to confirm instead of sending it", async () => {
+  it("hold a write, with no key of the model's, for the person to confirm, and send it once when they do", async () => {
     const { person, mail, chat, grant } = await setUp(
       codeStep(
-        `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: "invoice-7" });`
+        `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)});`
       ),
       says("It waits for you to confirm it.")
     );
@@ -98,6 +97,24 @@ describe("a chat's connections", setUpTime, () => {
       held: JSON.stringify(invoiceMail),
       others: 0,
       sent: { calls: 0, sent: [] },
+    });
+
+    await person.api.pendingActions.confirm(
+      held?.id ?? "",
+      held?.inputHash ?? ""
+    );
+    // Taken: it can't be confirmed, and so sent, a second time.
+    await expect(
+      outcome(
+        person.api.pendingActions.confirm(held?.id ?? "", held?.inputHash ?? "")
+      )
+    ).resolves.toBe("connect.pending_not_found");
+    expect({
+      waiting: await person.api.pendingActions.list(),
+      sent: await mail.did(),
+    }).toStrictEqual({
+      waiting: [],
+      sent: { calls: 1, sent: [invoiceMail] },
     });
   });
 
@@ -229,16 +246,14 @@ describe("a chat's connections", setUpTime, () => {
     );
   });
 
-  it("refuse a key too long to be the chat's, and every call refused before connect, each audited once", async () => {
+  it("audit a call refused before connect once, by core, and one connect took by connect alone", async () => {
     const { mail, chat, grant } = await setUp(
       codeStep(
         `export default async (env) => {
-          const max = ${chatKeyMaxLength(crypto.randomUUID())};
-          const tried = async (action, key) => { try { await env.connections.call("MAIL", action, { query: "invoice" }, { idempotencyKey: key }); return "ok"; } catch (error) { return error.message; } };
+          const tried = async (action) => { try { await env.connections.call("MAIL", action, { query: "invoice" }); return "ok"; } catch (error) { return error.message; } };
           return {
-            longest: await tried("mail.search", "k".repeat(max)),
-            tooLong: await tried("mail.search", "k".repeat(max + 1)),
-            badAction: await tried("not an action!", "k"),
+            search: await tried("mail.search"),
+            badAction: await tried("not an action!"),
           };
         };`
       ),
@@ -251,10 +266,10 @@ describe("a chat's connections", setUpTime, () => {
     const invalid = connectErrors.create("connect.invalid").message;
     const [result] = await codeResults(chat.stub, chat.chat.id);
     expect(result?.text).toBe(
-      `Returned:\n${JSON.stringify({ longest: "ok", tooLong: invalid, badAction: invalid })}`
+      `Returned:\n${JSON.stringify({ search: "ok", badAction: invalid })}`
     );
-    // The two refused before connect, by core, once each; the one connect
-    // took, by connect alone.
+    // The one refused before connect, by core, once; the one connect took,
+    // by connect alone.
     const events = await eventsOf(
       chat.agent.agentId,
       (all) =>
@@ -262,7 +277,7 @@ describe("a chat's connections", setUpTime, () => {
           ({ action, detail }) =>
             (action === "agent.call" && detail.method === "connections.call") ||
             action === "connection.call"
-        ).length === 3
+        ).length === 2
     );
     expect(
       events
@@ -278,44 +293,39 @@ describe("a chat's connections", setUpTime, () => {
         .toSorted()
     ).toStrictEqual([
       "agent.call refused connect.invalid",
-      "agent.call refused connect.invalid",
       "connection.call ok ",
     ]);
   });
 
-  it("keep each chat's idempotency keys its own, in one workspace", async () => {
+  it("hold a write the model asks for again as a second one, for the person to decide each", async () => {
     const send = codeStep(
-      `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: "invoice-7" });`
+      `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)});`
     );
     const { person, mail, chat, grant } = await setUp(
       send,
       says("It waits for you."),
       send,
-      says("This one too.")
+      says("I asked again.")
     );
-    const other = await chat.stub.createChat("Other", person.userId, chat.id);
     await grant(mail.id, "MAIL");
 
     await chat.ask("Send Ben the invoice.");
-    await chat.stub.ask(other.id, { text: "Send it from here.", model });
+    await chat.ask("Try again.");
 
-    // Two held actions, one per chat, though both chats chose one key.
+    // Two held actions for the same call, neither sent.
     const held = await person.api.pendingActions.list();
-    const [first] = await codeResults(chat.stub, chat.chat.id);
-    const [second] = await codeResults(chat.stub, other.id);
+    const results = await codeResults(chat.stub, chat.chat.id);
     expect({
-      held: held.length,
+      held: held.map(({ input }) => input),
       distinct: new Set(held.map(({ id }) => id)).size,
-      pending: [first?.text, second?.text].map((text) =>
-        held.some(({ id }) => text?.includes(id) === true)
+      pending: results.map(({ text }) =>
+        held.some(({ id }) => text.includes(id))
       ),
-      sameAnswer: first?.text === second?.text,
       sent: await mail.did(),
     }).toStrictEqual({
-      held: 2,
+      held: [JSON.stringify(invoiceMail), JSON.stringify(invoiceMail)],
       distinct: 2,
       pending: [true, true],
-      sameAnswer: false,
       sent: { calls: 0, sent: [] },
     });
   });

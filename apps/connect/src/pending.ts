@@ -248,8 +248,8 @@ const value = <T>(literal: T, column: string) => sql<T>`${literal}`.as(column);
  * Holds a side effect for the person `claims` act for: the reference to
  * it, the one already held for this call if there is one. The same call
  * repeated with the same key finds the same held action; with another
- * input, it is refused. `idempotencyKey` is the call's, which every side
- * effect has by now.
+ * input, it is refused. `idempotencyKey` is the call's, or the one connect
+ * made for a call a person is there for that came without (call.ts).
  */
 export const hold = async (
   env: Env,

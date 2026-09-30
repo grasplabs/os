@@ -204,9 +204,8 @@ const actionFor = async (
 };
 
 /**
- * Whether a side effect waits for its person, or refuses it without an
- * idempotency key, which every side effect needs. One a person is there
- * for (`interactive`) waits for them to confirm it on a view of the exact
+ * Whether a side effect waits for its person. One a person is there for
+ * (`interactive`) waits for them to confirm it on a view of the exact
  * input (R7). So does every one of a context that read restricted data
  * (R12), whatever it is: what it sends may carry that data, so the person
  * it acts for decides, warned. Its reads of a native connector go on; on
@@ -217,13 +216,26 @@ const actionFor = async (
  */
 const mustHold = (
   { restricted, authority }: CapabilityClaims,
-  hasKey: boolean,
   held: HeldAction | undefined
-): boolean => {
-  if (!hasKey) {
+): boolean =>
+  held === undefined && (restricted || authority.mode === "interactive");
+
+/**
+ * The idempotency key a side effect is held under: the call's own, or, for
+ * one a person is there for that came without, one made here. Such a call
+ * is held and taken exactly once whatever its key, so its caller (a chat's
+ * model, say) needn't choose one: calling again holds a second action for
+ * the person to decide, under a key of its own. A workflow run's key is
+ * its step's and never made here: without one its side effect is refused.
+ */
+const heldKey = ({ authority, idempotencyKey }: CapabilityClaims): string => {
+  if (idempotencyKey !== null) {
+    return idempotencyKey;
+  }
+  if (authority.mode !== "interactive") {
     throw connectErrors.create("connect.idempotency_key_required");
   }
-  return held === undefined && (restricted || authority.mode === "interactive");
+  return crypto.randomUUID();
 };
 
 /**
@@ -311,22 +323,18 @@ export const carryOut = async (
   );
   progress.sideEffect = sideEffect;
   checkResourceScope(resource, tool, input);
-  if (
-    sideEffect &&
-    mustHold(claims, store !== undefined, held) &&
-    idempotencyKey !== null
-  ) {
+  if (sideEffect && mustHold(claims, held)) {
     const pending = await hold(env, claims, connection, {
       input,
       inputHash,
-      idempotencyKey,
+      idempotencyKey: heldKey(claims),
     });
     return { ...heldAnswer, sideEffect, replayed: false, pending };
   }
 
-  // Every refusal is behind: only now may a token be read.
-  const server = await open();
   if (!sideEffect) {
+    // Every refusal is behind: only now may a token be read.
+    const server = await open();
     let read: McpToolResult;
     try {
       read = withProvenance(
@@ -348,6 +356,8 @@ export const carryOut = async (
   if (store === undefined) {
     throw connectErrors.create("connect.idempotency_key_required");
   }
+  // Every refusal is behind: only now may a token be read.
+  const server = await open();
   const earlier = await store.claim();
   if (earlier !== undefined) {
     return { ...maskedAnswer(earlier, masks), sideEffect, replayed: true };

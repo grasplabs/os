@@ -24,7 +24,11 @@ export const connectCallSchema = z.strictObject({
   resource: identifierSchema.optional(),
   action: permissionActionSchema,
   input: z.json(),
-  /** Required for side effects: a repeat returns the stored result. */
+  /**
+   * Required for a workflow run's side effects: a repeat returns the
+   * stored result. A side effect a person is there for (from chat, or from
+   * a person using an App) needs none: connect makes one as it holds it.
+   */
   idempotencyKey: identifierSchema.optional(),
 });
 export type ConnectCall = z.infer<typeof connectCallSchema>;
@@ -50,7 +54,8 @@ export interface ConnectResult {
    * that read restricted data): nothing was done yet, so `output` is the
    * JSON text `"null"` and `provenance` is empty. A repeat with the same
    * idempotency key finds the same held action until it is decided, and
-   * the action's answer once it ran. A workflow run's call is never
+   * the action's answer once it ran; a repeat of a call without a key is
+   * held again, as another action. A workflow run's call is never
    * answered so: it fails with `connect.held`, and core waits for the
    * person's decision before running the step again.
    */
