@@ -85,6 +85,13 @@
       "when": 1790706289154,
       "tag": "0011_client_config_changed",
       "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "6",
+      "when": 1790801581082,
+      "tag": "0012_drop_features_settings",
+      "breakpoints": true
     }
   ]
 }
