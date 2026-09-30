@@ -74,9 +74,13 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
       // A worker's test files share one runtime, which loads core once:
       // starting workerd and loading core took longer than most files'
       // tests. Each file still starts with empty storage and the env as
-      // configured here (start-each-file.ts).
+      // configured here (start-each-file.ts), after a check that the
+      // runtime is workerd.
       isolate: false,
-      setupFiles: ["./test/start-each-file.ts"],
+      setupFiles: [
+        "../../scripts/assert-workerd.ts",
+        "./test/start-each-file.ts",
+      ],
       // Logs go straight to workerd's output, not to Vitest over RPC. A log
       // from another request (a workflow run, a cron run, a Durable
       // Object) can't use the test's socket, so the pool holds it until the
@@ -87,6 +91,10 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
       // longer than Vitest's 5 s default, most of all on a loaded CI runner.
       testTimeout: 60_000,
       ...test,
+      // Setup files one after another, as listed (Vitest's default runs
+      // them at once): the check of the runtime reports before
+      // start-each-file.ts fails on its `cloudflare:` imports.
+      sequence: { ...test?.sequence, setupFiles: "list" },
     },
     // The built-ins the global setup embeds, the tests' own included, in a
     // module of their own: core's build ships dist/blueprints.js.

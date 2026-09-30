@@ -54,8 +54,15 @@ export default defineProject({
         ssr: { enabled: true, include: ["@grasp-os/ui > lucide-react"] },
       },
     },
-    // Brings the database up to the committed migrations.
-    setupFiles: ["./test/apply-migrations.ts"],
+    // Checks the runtime is workerd, then brings the database up to the
+    // committed migrations: one after the other, as listed (Vitest's
+    // default runs them at once), so the check reports before the
+    // migrations fail on their `cloudflare:` imports.
+    setupFiles: [
+      "../../scripts/assert-workerd.ts",
+      "./test/apply-migrations.ts",
+    ],
+    sequence: { setupFiles: "list" },
   },
   plugins: [
     tanstackStart(),

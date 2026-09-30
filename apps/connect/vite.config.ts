@@ -42,8 +42,15 @@ export default defineProject({
   test: {
     // Builds the connectors the tests load, once per run.
     globalSetup: ["./test/global-setup.ts"],
-    // Brings the connect database up to the committed migrations.
-    setupFiles: ["./test/apply-migrations.ts"],
+    // Checks the runtime is workerd, then brings the connect database up to
+    // the committed migrations: one after the other, as listed (Vitest's
+    // default runs them at once), so the check reports before the
+    // migrations fail on their `cloudflare:` imports.
+    setupFiles: [
+      "../../scripts/assert-workerd.ts",
+      "./test/apply-migrations.ts",
+    ],
+    sequence: { setupFiles: "list" },
     // Logs go straight to workerd's output, not to Vitest: one from another
     // request than the test's could leave the file waiting forever (see
     // core's vite.config.ts).
