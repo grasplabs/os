@@ -35,50 +35,60 @@ const isOrigin = (value: string): boolean => {
  * How people sign in to a deployment: the `SIGN_IN` var. A compromised
  * admin session can't add a tenant, widen the domains or open staff
  * access. Without it nobody can sign in.
+ *
+ * It names at least one IdP for the client's people: its Entra tenant, its
+ * Google Workspace, or both. One that names neither isn't a sign-in config
+ * (its people could never sign in), so it's refused here, where core and
+ * the console both read it.
  */
-export const signInConfigSchema = z.object({
-  /**
-   * The deployment's own address, e.g. `https://acme.<domain>`: where the
-   * IdPs send people back, and the only page that may open `/rpc`.
-   */
-  origin: z.url().refine(isOrigin, "an https origin, without a path"),
-  /** Email domains people may sign in with, exactly (no subdomains). */
-  domains: z.array(domainSchema).min(1),
-  /** Emails that get the admin role when they join. */
-  admins: z.array(z.email().toLowerCase()).default([]),
-  /*
-   * A deployment may offer both IdPs, but a person is one account at one of
-   * them: an email already signed in through one is refused through the
-   * other, as accounts are never linked by email (threat model R15).
-   */
-  /** The client's Microsoft Entra tenant, pinned. */
-  entra: z
-    .object({ tenantId: z.guid(), clientId: z.string().min(1) })
-    .optional(),
-  /** The client's Google Workspace, pinned by its primary domain (`hd`). */
-  google: z
-    .object({ hostedDomain: domainSchema, clientId: z.string().min(1) })
-    .optional(),
-  /**
-   * Grasp staff access, off unless the console opens a window. Only the
-   * listed people (Entra object ids in Grasp's own tenant) sign in, get
-   * `role` without joining the organization, and lose access when `until`
-   * passes. A window longer than {@link staffWindowMaxMs} is closed
-   * (`staffWindowOpen`).
-   */
-  staff: z
-    .object({
-      tenantId: z.guid(),
-      clientId: z.string().min(1),
-      domains: z.array(domainSchema).min(1),
-      oids: z.array(z.guid()).min(1),
-      role: roleSchema,
-      /** When the console opened the window. */
-      opened: z.iso.datetime({ offset: true }),
-      until: z.iso.datetime({ offset: true }),
-    })
-    .optional(),
-});
+export const signInConfigSchema = z
+  .object({
+    /**
+     * The deployment's own address, e.g. `https://acme.<domain>`: where the
+     * IdPs send people back, and the only page that may open `/rpc`.
+     */
+    origin: z.url().refine(isOrigin, "an https origin, without a path"),
+    /** Email domains people may sign in with, exactly (no subdomains). */
+    domains: z.array(domainSchema).min(1),
+    /** Emails that get the admin role when they join. */
+    admins: z.array(z.email().toLowerCase()).default([]),
+    /*
+     * A deployment may offer both IdPs, but a person is one account at one of
+     * them: an email already signed in through one is refused through the
+     * other, as accounts are never linked by email (threat model R15).
+     */
+    /** The client's Microsoft Entra tenant, pinned. */
+    entra: z
+      .object({ tenantId: z.guid(), clientId: z.string().min(1) })
+      .optional(),
+    /** The client's Google Workspace, pinned by its primary domain (`hd`). */
+    google: z
+      .object({ hostedDomain: domainSchema, clientId: z.string().min(1) })
+      .optional(),
+    /**
+     * Grasp staff access, off unless the console opens a window. Only the
+     * listed people (Entra object ids in Grasp's own tenant) sign in, get
+     * `role` without joining the organization, and lose access when `until`
+     * passes. A window longer than {@link staffWindowMaxMs} is closed
+     * (`staffWindowOpen`).
+     */
+    staff: z
+      .object({
+        tenantId: z.guid(),
+        clientId: z.string().min(1),
+        domains: z.array(domainSchema).min(1),
+        oids: z.array(z.guid()).min(1),
+        role: roleSchema,
+        /** When the console opened the window. */
+        opened: z.iso.datetime({ offset: true }),
+        until: z.iso.datetime({ offset: true }),
+      })
+      .optional(),
+  })
+  .refine(({ entra, google }) => entra !== undefined || google !== undefined, {
+    message: "An Entra tenant or a Google Workspace",
+    path: ["entra"],
+  });
 export type SignInConfig = z.infer<typeof signInConfigSchema>;
 
 /**
