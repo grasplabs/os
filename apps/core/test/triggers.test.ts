@@ -88,8 +88,7 @@ const committed = async (
   app: string,
   files: Record<string, string>
 ): Promise<number> => {
-  await builder.api.apps.files.write(app, files);
-  const { version } = await builder.api.apps.files.commit(app, "Next");
+  const { version } = await builder.api.apps.files.commit(app, files, "Next");
   return version;
 };
 

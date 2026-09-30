@@ -46,7 +46,7 @@ export class AppsApi extends WorkerEntrypoint<Env, AgentScope> {
     });
   }
 
-  /** An App's files at `version`, or its working copy: for its builders. */
+  /** An App's files at `version`, or at its latest: for its builders. */
   async files(app: unknown, version?: unknown): Promise<AppFiles> {
     return await asPerson(this.env, this.ctx.props, {
       feature: "apps",
@@ -115,7 +115,7 @@ apps: {
     pendingVersion: number | null;
     createdAt: string;
   }[]>;
-  /** An App's files by path, at \`version\`, or its working copy without one. Only for Apps the person builds. */
+  /** An App's files by path, at \`version\`, or at its latest version without one. Only for Apps the person builds. */
   files(app: string, version?: number): Promise<Record<string, string>>;
   /**
    * The methods an App's current version lets other Apps call, by name, as

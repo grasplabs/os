@@ -382,17 +382,17 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
     const afterContract = await listed();
     const invalidCommit = await outcome(
       (async () => {
-        await admin.api.apps.files.write(app, {
-          "app/records.json": JSON.stringify({
-            doc: { collection: collectionId, schema: { type: "object" } },
-          }),
-        });
-        await admin.api.apps.files.commit(app, "Declare a built-in type");
+        await admin.api.apps.files.commit(
+          app,
+          {
+            "app/records.json": JSON.stringify({
+              doc: { collection: collectionId, schema: { type: "object" } },
+            }),
+          },
+          "Declare a built-in type"
+        );
       })()
     );
-    await admin.api.apps.files.write(app, {
-      "app/records.json": taskTypes(collectionId),
-    });
     await admin.api.permissions.revoke(permissionId);
     const afterRevoke = await outcome(
       admin.api.knowledge.saveDocument({
@@ -970,11 +970,14 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
     const commitOf = async (of: AppId, records: string) =>
       await outcome(
         (async () => {
-          await admin.api.apps.files.write(of, {
-            "app/records.json": records,
-            "app/notes.ts": `export const note = "${unique()}";\n`,
-          });
-          await admin.api.apps.files.commit(of, "Another change");
+          await admin.api.apps.files.commit(
+            of,
+            {
+              "app/records.json": records,
+              "app/notes.ts": `export const note = "${unique()}";\n`,
+            },
+            "Another change"
+          );
         })()
       );
     // A second copy declaring it exactly as the owner does: its seal
@@ -1046,11 +1049,14 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
     const whileOff = core.authenticate();
     const appWith = async (statuses: string[]): Promise<AppId> => {
       const { id } = await admin.api.apps.create({ name: `Tasks ${unique()}` });
-      await admin.api.apps.files.write(id, {
-        "app/server.ts": serverCode,
-        "app/records.json": taskTypes(collectionId, { statuses }),
-      });
-      await admin.api.apps.files.commit(id, "Tasks");
+      await admin.api.apps.files.commit(
+        id,
+        {
+          "app/server.ts": serverCode,
+          "app/records.json": taskTypes(collectionId, { statuses }),
+        },
+        "Tasks"
+      );
       await whileOff.apps.versions.setCurrent(id, 1);
       const { id: permission } = await whileOff.permissions.request(
         collectionFor(appIdSchema.parse(id), collectionId)

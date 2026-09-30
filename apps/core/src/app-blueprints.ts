@@ -423,7 +423,6 @@ export const createFromBlueprint = async (
     blueprint: `${source.id}@${number}`,
     currentVersion: null,
     pendingVersion: null,
-    workingRevision: null,
     pendingSince: now,
     createdAt: now,
   };
@@ -476,9 +475,6 @@ export const createFromBlueprint = async (
       ),
       pendingVersion: sql<number | null>`${appRow.pendingVersion}`.as(
         "pending_version"
-      ),
-      workingRevision: sql<string | null>`${appRow.workingRevision}`.as(
-        "working_revision"
       ),
       createdAt: sql<Date>`${appRow.createdAt.getTime()}`.as("created_at"),
       pendingSince: sql<Date | null>`${now.getTime()}`.as("pending_since"),
@@ -692,7 +688,6 @@ export const installBuiltinBlueprint = async (
             blueprint: null,
             currentVersion: null,
             pendingVersion: null,
-            workingRevision: null,
             pendingSince: null,
             createdAt: now,
           })

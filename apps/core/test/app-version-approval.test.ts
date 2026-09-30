@@ -362,10 +362,13 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     const late = await builder.api.permissions.request(
       collectionFor(app, ["read", "write"], "NOTES_LATE")
     );
-    await builder.api.apps.files.write(app, {
-      "app/server.ts": `${serverCode}\n// Asks for more.\n`,
-    });
-    const { version } = await builder.api.apps.files.commit(app, "More");
+    const { version } = await builder.api.apps.files.commit(
+      app,
+      {
+        "app/server.ts": `${serverCode}\n// Asks for more.\n`,
+      },
+      "More"
+    );
     // The admin grants the request after everything the change reads, and
     // before its batch lands.
     const racing: Env = {
@@ -453,9 +456,9 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     // A version never made current, marked as a blueprint.
     const { id } = await builder.api.apps.create({ name: `Map ${unique()}` });
     const source = appIdSchema.parse(id);
-    await builder.api.apps.files.write(source, { "app/server.ts": serverCode });
     const { version } = await builder.api.apps.files.commit(
       source,
+      { "app/server.ts": serverCode },
       "Never run"
     );
     await builder.api.permissions.request(collectionFor(source));
@@ -499,10 +502,13 @@ describe("An App's next version", { timeout: 60_000 }, () => {
     ]);
     const app = await builtBy(builder, admin);
     const granted = await permissionsOf(admin, app);
-    await builder.api.apps.files.write(app, {
-      "app/server.ts": `${serverCode}\n// Reviewed.\n`,
-    });
-    const { version } = await builder.api.apps.files.commit(app, "Reviewed");
+    const { version } = await builder.api.apps.files.commit(
+      app,
+      {
+        "app/server.ts": `${serverCode}\n// Reviewed.\n`,
+      },
+      "Reviewed"
+    );
     // The admin makes it current after the builder's request read the
     // App, and before its batch lands: that batch changes nothing.
     const racing: Env = {
@@ -536,10 +542,13 @@ describe("An App's next version", { timeout: 60_000 }, () => {
       personApi("builder"),
     ]);
     const app = await builtBy(builder, admin);
-    await builder.api.apps.files.write(app, {
-      "app/server.ts": `${serverCode}\n// Demoted.\n`,
-    });
-    const { version } = await builder.api.apps.files.commit(app, "Demoted");
+    const { version } = await builder.api.apps.files.commit(
+      app,
+      {
+        "app/server.ts": `${serverCode}\n// Demoted.\n`,
+      },
+      "Demoted"
+    );
     const racing: Env = {
       ...env,
       DB: racingDb(async () => {

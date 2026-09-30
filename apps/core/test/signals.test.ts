@@ -62,16 +62,16 @@ const running = async (
   { api, app }: Person & { app: string },
   ...workflows: string[]
 ): Promise<void> => {
-  await api.apps.files.write(
+  const { version } = await api.apps.files.commit(
     app,
     Object.fromEntries(
       workflows.map((workflow) => [
         `workflows/${workflow}.ts`,
         "export default {};\n",
       ])
-    )
+    ),
+    "Workflows"
   );
-  const { version } = await api.apps.files.commit(app, "Workflows");
   await env.DB.prepare("UPDATE apps SET current_version = ? WHERE id = ?")
     .bind(version, app)
     .run();

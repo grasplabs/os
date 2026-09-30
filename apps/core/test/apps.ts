@@ -45,8 +45,11 @@ export const release = async (
   app: string,
   files: Record<string, string | null>
 ): Promise<number> => {
-  await builder.api.apps.files.write(app, files);
-  const { version } = await builder.api.apps.files.commit(app, "Release");
+  const { version } = await builder.api.apps.files.commit(
+    app,
+    files,
+    "Release"
+  );
   await builder.api.apps.versions.setCurrent(app, version);
   return version;
 };

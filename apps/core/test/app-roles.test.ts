@@ -77,8 +77,9 @@ const callsOn = async ({ api }: Person, app: string) => ({
   members: await outcome(api.apps.members.list(app)),
   // Its code and settings.
   read: await outcome(api.apps.files.read(app)),
-  write: await outcome(api.apps.files.write(app, { "notes.md": "# Mine\n" })),
-  commit: await outcome(api.apps.files.commit(app, "Mine")),
+  commit: await outcome(
+    api.apps.files.commit(app, { "notes.md": "# Mine\n" }, "Mine")
+  ),
   versions: await outcome(api.apps.versions.list(app)),
   version: await outcome(api.apps.versions.get(app, 1)),
   diff: await outcome(api.apps.versions.diff(app, 1, 1)),
@@ -116,7 +117,6 @@ const asUser = {
   workflow: "workflow.not_found",
   members: "ok",
   read: "role.forbidden",
-  write: "role.forbidden",
   commit: "role.forbidden",
   versions: "role.forbidden",
   version: "role.forbidden",
@@ -174,8 +174,10 @@ describe("App roles", { timeout: 60_000 }, () => {
     ).resolves.toStrictEqual([false, false, true, true]);
     // Admins manage every App.
     await expect(
-      admin.api.apps.files.write(app, { "notes.md": "# Admin\n" })
-    ).resolves.toBeUndefined();
+      outcome(
+        admin.api.apps.files.commit(app, { "notes.md": "# Admin\n" }, "Admin")
+      )
+    ).resolves.toBe("ok");
   });
 
   it("let a user work in an App's screens and nothing more, and a builder build it", async () => {
@@ -200,7 +202,6 @@ describe("App roles", { timeout: 60_000 }, () => {
     const asBuilder = await callsOn(builder, app);
     expect(asBuilder).toMatchObject({
       read: "ok",
-      write: "ok",
       commit: "ok",
       versions: "ok",
       version: "ok",

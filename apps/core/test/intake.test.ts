@@ -852,10 +852,11 @@ describe("the intake", { timeout: 60_000 }, () => {
     };
     // A builder makes current a version nobody approved yet: nobody
     // declares `statement` until an admin grants its requests again.
-    await builder.api.apps.files.write(app, {
-      "app/notes.ts": "export const note = 1;\n",
-    });
-    const { version } = await builder.api.apps.files.commit(app, "Notes");
+    const { version } = await builder.api.apps.files.commit(
+      app,
+      { "app/notes.ts": "export const note = 1;\n" },
+      "Notes"
+    );
     await builder.api.apps.versions.setCurrent(app, version);
     const unapproved = await outcome(admin.api.knowledge.saveDocument(untyped));
     const permissions = await admin.api.permissions.list();

@@ -797,8 +797,11 @@ import definition from "./failing.ts";
 export default workflowTests(definition, [{ name: "returns two", expect: { output: 2 } }]);
 `;
     const setCurrent = async (files: Record<string, string | null>) => {
-      await builder.api.apps.files.write(app, files);
-      const { version } = await builder.api.apps.files.commit(app, "Try");
+      const { version } = await builder.api.apps.files.commit(
+        app,
+        files,
+        "Try"
+      );
       return await refusal(builder.api.apps.versions.setCurrent(app, version));
     };
     const outcomes = [
@@ -834,8 +837,11 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
     const importing = (from: string) =>
       `import { greeting } from "${from}";\n${greet["workflows/greet.ts"]}`;
     const setCurrent = async (files: Record<string, string | null>) => {
-      await builder.api.apps.files.write(app, files);
-      const { version } = await builder.api.apps.files.commit(app, "Try");
+      const { version } = await builder.api.apps.files.commit(
+        app,
+        files,
+        "Try"
+      );
       return await refusal(builder.api.apps.versions.setCurrent(app, version));
     };
 

@@ -1,17 +1,21 @@
 import { appLimits } from "@grasp-os/shared/app-limits";
 import { appErrors } from "@grasp-os/shared/apps";
+import { sha256Hex } from "@grasp-os/shared/encoding";
+import { canonicalJson } from "@grasp-os/shared/json";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
+import { commitFiles } from "../src/apps.ts";
+import { racingDb } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { auditedDuring, outcome, signedInApi } from "./sign-in.ts";
 
-// An App's code is versioned as a whole: builders write files to its
-// working copy and commit them as the next version, which never changes
-// afterwards. One version runs (current) and another can wait for review
-// (pending). Every commit and every change of version is audited.
+// An App's code is versioned as a whole: builders commit changes over its
+// latest version as the next version, which never changes afterwards. One
+// version runs (current) and another can wait for review (pending). Every
+// commit and every change of version is audited.
 
 const idp = mockIdp();
 
@@ -43,15 +47,31 @@ const issuesOf = async (promise: Promise<unknown>): Promise<string> => {
 const newApp = async (apps: Apps) =>
   await apps.create({ name: "Invoice desk", description: "Invoices@" });
 
-/** Writes `files` and commits them. */
+/** Commits `files` over the App's latest version. */
 const commit = async (
   apps: Apps,
   app: string,
   files: Record<string, string | null>,
   message = "Change"
-) => {
-  await apps.files.write(app, files);
-  return await apps.files.commit(app, message);
+) => await apps.files.commit(app, files, message);
+
+/**
+ * Gives an App without versions a first one holding `files` exactly,
+ * unchecked: committed before a check existed or a limit was lowered.
+ */
+const storedUnchecked = async (
+  app: string,
+  author: string,
+  files: Record<string, string>
+): Promise<void> => {
+  const json = canonicalJson(files);
+  const tree = await sha256Hex(json);
+  await env.FILES.put(`apps/${app}/trees/${tree}.json`, json);
+  await env.DB.prepare(
+    "INSERT INTO app_versions (app_id, version, tree, files, author_id, message, created_at) VALUES (?, 1, ?, ?, ?, 'Earlier', 0)"
+  )
+    .bind(app, tree, Object.keys(files).length, author)
+    .run();
 };
 
 const first = {
@@ -131,43 +151,42 @@ describe("App code", { timeout: 60_000 }, () => {
     });
   });
 
-  it("keeps writes in the working copy until they are committed", async () => {
+  it("reads the latest version without a version, and refuses a commit that changes nothing", async () => {
     const { apps } = await appsApi("builder");
     const app = await newApp(apps);
+    const none = await apps.files.read(app.id);
     await commit(apps, app.id, first);
-
-    await apps.files.write(app.id, { "AGENTS.md": "# Draft\n" });
-    await apps.files.write(app.id, { "app/server.ts": null });
-    await expect(apps.files.read(app.id)).resolves.toStrictEqual({
-      "screens/inbox.tsx": first["screens/inbox.tsx"],
-      "AGENTS.md": "# Draft\n",
+    const afterFirst = await apps.files.read(app.id);
+    await commit(apps, app.id, {
+      "AGENTS.md": "# Second\n",
+      "app/server.ts": null,
     });
-    await expect(apps.files.read(app.id, 1)).resolves.toStrictEqual(first);
 
-    await apps.files.commit(app.id, "Draft");
-    await expect(apps.files.read(app.id)).resolves.toStrictEqual(
-      await apps.files.read(app.id, 2)
-    );
-    await expect(outcome(apps.files.commit(app.id, "Again"))).resolves.toBe(
-      "app.nothing_to_commit"
-    );
-    // Writing what is already there changes nothing either.
-    await apps.files.write(app.id, { "AGENTS.md": "# Draft\n" });
-    await expect(outcome(apps.files.commit(app.id, "Same"))).resolves.toBe(
-      "app.nothing_to_commit"
-    );
-  });
-
-  it("empties the working copy of what a commit took", async () => {
-    const { apps } = await appsApi("builder");
-    const app = await newApp(apps);
-    await commit(apps, app.id, first);
-    const left = await env.DB.prepare(
-      "SELECT count(*) AS count FROM app_working_files WHERE app_id = ?"
-    )
-      .bind(app.id)
-      .first("count");
-    expect(left).toBe(0);
+    expect({
+      none,
+      afterFirst,
+      latest: await apps.files.read(app.id),
+      one: await apps.files.read(app.id, 1),
+    }).toStrictEqual({
+      none: {},
+      afterFirst: first,
+      latest: {
+        "screens/inbox.tsx": first["screens/inbox.tsx"],
+        "AGENTS.md": "# Second\n",
+      },
+      one: first,
+    });
+    // What is already there, and deleting what isn't, change nothing.
+    await expect(
+      Promise.all([
+        outcome(commit(apps, app.id, { "AGENTS.md": "# Second\n" })),
+        outcome(commit(apps, app.id, { "app/server.ts": null })),
+      ])
+    ).resolves.toStrictEqual([
+      "app.nothing_to_commit",
+      "app.nothing_to_commit",
+    ]);
+    await expect(apps.versions.list(app.id)).resolves.toHaveLength(2);
   });
 
   it("fails loudly when a version's files are missing or damaged", async () => {
@@ -191,7 +210,7 @@ describe("App code", { timeout: 60_000 }, () => {
   it("refuses paths that can't both exist: a file and its folder, or names differing only in case", async () => {
     const { apps } = await appsApi("builder");
     const app = await newApp(apps);
-    await apps.files.write(app.id, { "components/card.tsx": "x" });
+    await commit(apps, app.id, { "components/card.tsx": "x" });
     const refusals: Record<string, string | null>[] = [
       { components: "x" },
       { "components/card.tsx/x.ts": "x" },
@@ -200,15 +219,15 @@ describe("App code", { timeout: 60_000 }, () => {
       { "a/b.ts": "x", a: "x" },
     ];
     const outcomes: string[] = [];
-    // One after another, so no write sees another's files.
+    // One after another, so each is refused for its paths alone.
     for (const changes of refusals) {
       // oxlint-disable-next-line no-await-in-loop -- sequential by design
-      outcomes.push(await issuesOf(apps.files.write(app.id, changes)));
+      outcomes.push(await issuesOf(commit(apps, app.id, changes)));
     }
-    // Replacing the file with a folder of its name, in one write, is fine.
+    // Replacing the file with a folder of its name, in one commit, is fine.
     outcomes.push(
       await issuesOf(
-        apps.files.write(app.id, {
+        commit(apps, app.id, {
           "components/card.tsx": null,
           "components/card.tsx/index.ts": "x",
         })
@@ -224,29 +243,19 @@ describe("App code", { timeout: 60_000 }, () => {
     ]);
   });
 
-  it("still takes other writes to an App whose paths already collide", async () => {
+  it("still takes other commits to an App whose paths already collide", async () => {
     const { apps, userId } = await appsApi("builder");
     const app = await newApp(apps);
-    // Written before the check existed, straight into its working copy.
-    await env.DB.batch([
-      env.DB.prepare(
-        "UPDATE apps SET working_revision = 'earlier' WHERE id = ?"
-      ).bind(app.id),
-      ...["lib/a.ts", "Lib/b.ts"].map((path) =>
-        env.DB.prepare(
-          "INSERT INTO app_working_files (app_id, path, content, revision, written_by, written_at) VALUES (?, ?, 'x', 'earlier', ?, 0)"
-        ).bind(app.id, path, userId)
-      ),
-    ]);
+    await storedUnchecked(app.id, userId, { "lib/a.ts": "x", "Lib/b.ts": "x" });
     const outcomes: string[] = [];
-    const writes: Record<string, string>[] = [
+    const changes: Record<string, string>[] = [
       { "other.ts": "x" },
       { "lib/a.ts": "y" },
       { "LIB/c.ts": "x" },
     ];
-    for (const changes of writes) {
+    for (const changed of changes) {
       // oxlint-disable-next-line no-await-in-loop -- sequential by design
-      outcomes.push(await issuesOf(apps.files.write(app.id, changes)));
+      outcomes.push(await issuesOf(commit(apps, app.id, changed)));
     }
     expect(outcomes).toStrictEqual([
       "ok",
@@ -255,38 +264,43 @@ describe("App code", { timeout: 60_000 }, () => {
     ]);
   });
 
-  it("commits the working copy once when two commits race", async () => {
-    const { apps } = await appsApi("builder");
+  it("keeps one of two commits over the same version, and refuses the other whole", async () => {
+    const { api, apps } = await appsApi("builder");
     const app = await newApp(apps);
-    await apps.files.write(app.id, first);
+    await commit(apps, app.id, first);
+    const theirs = { "AGENTS.md": "# Theirs\n" };
+    // Someone else commits after this commit read the latest version, and
+    // before its batch lands.
+    const racing: Env = {
+      ...env,
+      DB: racingDb(
+        async () => await commit(apps, app.id, theirs, "Theirs"),
+        /^insert into "app_versions"/iu
+      ),
+    };
 
-    const results = await Promise.all([
-      outcome(apps.files.commit(app.id, "One")),
-      outcome(apps.files.commit(app.id, "Two")),
-    ]);
-    expect(results.filter((result) => result === "ok")).toHaveLength(1);
-    expect(
-      results.every((result) =>
-        ["ok", "app.conflict", "app.nothing_to_commit"].includes(result)
+    await expect(
+      outcome(
+        commitFiles(
+          racing,
+          await api.whoami(),
+          app.id,
+          { "AGENTS.md": "# Mine\n", "screens/mine.tsx": "x" },
+          "Mine"
+        )
       )
-    ).toBeTruthy();
-    await expect(apps.versions.list(app.id)).resolves.toHaveLength(1);
-    await expect(apps.files.read(app.id)).resolves.toStrictEqual(first);
-  });
-
-  it("loses no write made while a commit runs", async () => {
-    const { apps } = await appsApi("builder");
-    const app = await newApp(apps);
-    await apps.files.write(app.id, first);
-
-    const edited = { ...first, "AGENTS.md": "# Edited meanwhile\n" };
-    await Promise.all([
-      apps.files.commit(app.id, "First"),
-      apps.files.write(app.id, { "AGENTS.md": edited["AGENTS.md"] }),
+    ).resolves.toBe("app.conflict");
+    const versions = await apps.versions.list(app.id);
+    expect(
+      versions.map(({ version, message }) => [version, message])
+    ).toStrictEqual([
+      [2, "Theirs"],
+      [1, "Change"],
     ]);
-    // Committed with the first version or left in the working copy, the
-    // write is in the working copy's files either way.
-    await expect(apps.files.read(app.id)).resolves.toStrictEqual(edited);
+    await expect(apps.files.read(app.id)).resolves.toStrictEqual({
+      ...first,
+      ...theirs,
+    });
   });
 
   it("diffs two versions by path", async () => {
@@ -416,10 +430,10 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
   it("refuses to commit exports that aren't valid, saying why", async () => {
     const { apps } = await appsApi("builder");
     const app = await newApp(apps);
-    const committing = async (text: string): Promise<string> => {
-      await apps.files.write(app.id, { "app/exports.json": text });
-      return await outcome(apps.files.commit(app.id, "Exports"));
-    };
+    const committing = async (text: string): Promise<string> =>
+      await outcome(
+        commit(apps, app.id, { "app/exports.json": text }, "Exports")
+      );
     const valid = exported.findInvoices;
     const refused: string[] = [];
     for (const text of [
@@ -494,19 +508,20 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
         findInvoices: { ...valid, description: "x".repeat(64_000) },
       }),
     ]) {
-      // One at a time: each writes the same working copy.
+      // One at a time: each is refused for its own exports alone.
       // oxlint-disable-next-line no-await-in-loop -- see above
       refused.push(await committing(text));
     }
     expect(refused).toStrictEqual(refused.map(() => "app.exports_invalid"));
     await expect(apps.versions.list(app.id)).resolves.toStrictEqual([]);
     // Refused with what's wrong, never failing on the way.
-    await apps.files.write(app.id, {
-      "app/exports.json": JSON.stringify({
-        findInvoices: { ...valid, input: { type: "constructor" } },
-      }),
-    });
-    await expect(apps.files.commit(app.id, "Exports")).rejects.toMatchObject({
+    await expect(
+      commit(apps, app.id, {
+        "app/exports.json": JSON.stringify({
+          findInvoices: { ...valid, input: { type: "constructor" } },
+        }),
+      })
+    ).rejects.toMatchObject({
       code: "app.exports_invalid",
       details: {
         issues: [expect.stringContaining("findInvoices.input")],
@@ -556,9 +571,9 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
     let tree = "";
     const recorded = await auditedDuring(async () => {
       const app = await newApp(apps);
-      await apps.files.write(app.id, first);
       ({ tree } = await apps.files.commit(
         app.id,
+        first,
         "Secret plans in the message"
       ));
       await apps.versions.propose(app.id, 1);
@@ -635,8 +650,7 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
       outcome(user.get(app.id)),
       outcome(user.contents(app.id)),
       outcome(user.files.read(app.id, 1)),
-      outcome(user.files.write(app.id, { "AGENTS.md": "# Mine\n" })),
-      outcome(user.files.commit(app.id, "Mine")),
+      outcome(user.files.commit(app.id, { "AGENTS.md": "# Mine\n" }, "Mine")),
       outcome(user.versions.list(app.id)),
       outcome(user.versions.diff(app.id, 1, 1)),
       outcome(user.versions.propose(app.id, 1)),
@@ -666,7 +680,7 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
     ];
     const refusedPaths = await Promise.all(
       paths.map(
-        async (path) => await outcome(apps.files.write(app.id, { [path]: "x" }))
+        async (path) => await outcome(commit(apps, app.id, { [path]: "x" }))
       )
     );
     expect(refusedPaths).toStrictEqual(paths.map(() => "app.invalid"));
@@ -679,13 +693,14 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
         (_, index) => [`components/part-${index}.ts`, nearlyFull]
       )
     );
-    await apps.files.write(app.id, full);
+    // Exactly an App's limit is within it.
+    await commit(apps, app.id, full);
     await expect(
       Promise.all([
-        outcome(apps.files.write(app.id, { "AGENTS.md": tooLong })),
-        outcome(apps.files.write(app.id, { "AGENTS.md": "x" })),
-        outcome(apps.files.write(app.id, {})),
-        outcome(apps.files.commit(app.id, " ")),
+        outcome(commit(apps, app.id, { "AGENTS.md": tooLong })),
+        outcome(commit(apps, app.id, { "AGENTS.md": "x" })),
+        outcome(commit(apps, app.id, {})),
+        outcome(commit(apps, app.id, { "AGENTS.md": "" }, " ")),
         outcome(apps.create({ name: "" })),
       ])
     ).resolves.toStrictEqual([
@@ -696,106 +711,49 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
       "app.invalid",
     ]);
     // Deleting makes room.
-    await apps.files.write(app.id, {
-      "components/part-0.ts": null,
-      "AGENTS.md": "x",
-    });
-    await expect(apps.files.commit(app.id, "Full")).resolves.toMatchObject({
-      version: 1,
-    });
+    await expect(
+      commit(apps, app.id, { "components/part-0.ts": null, "AGENTS.md": "x" })
+    ).resolves.toMatchObject({ version: 2 });
   });
 
-  it("keeps the working copy within its limits when two writes race", async () => {
-    const { apps } = await appsApi("builder");
+  it("commits over a version that is over the limits only what is within them", async () => {
+    const { apps, userId } = await appsApi("builder");
     const app = await newApp(apps);
-    const largest = "x".repeat(appLimits.fileLength);
-    const count = appLimits.totalLength / appLimits.fileLength;
-    // Room for one more of the largest files, not two.
-    await apps.files.write(
+    // More files than an App may have now: committed when the limits were
+    // higher.
+    const count = appLimits.files + 2;
+    await storedUnchecked(
       app.id,
+      userId,
       Object.fromEntries(
-        Array.from({ length: count - 1 }, (_, index) => [
+        Array.from({ length: count }, (_, index) => [
           `components/part-${index}.ts`,
-          largest,
+          "x",
         ])
       )
     );
 
-    const results = await Promise.all(
-      ["components/a.ts", "components/b.ts"].map(
-        async (path) =>
-          await outcome(apps.files.write(app.id, { [path]: largest }))
-      )
-    );
-    expect(results.toSorted()).toStrictEqual(
-      results.includes("app.conflict")
-        ? ["app.conflict", "ok"]
-        : ["app.too_large", "ok"]
-    );
-    await expect(apps.files.read(app.id)).resolves.toSatisfy(
-      (files: Record<string, string>) => Object.keys(files).length === count
-    );
-  });
-
-  it("lets an App over its limits shrink, but not grow or commit", async () => {
-    const { apps, userId } = await appsApi("builder");
-    const app = await newApp(apps);
-    // More files than an App may have now: written when the limits were
-    // higher, straight into its working copy.
-    const count = appLimits.files + 2;
-    await env.DB.batch([
-      env.DB.prepare(
-        "UPDATE apps SET working_revision = 'earlier' WHERE id = ?"
-      ).bind(app.id),
-      ...Array.from({ length: count }, (_, index) =>
-        env.DB.prepare(
-          "INSERT INTO app_working_files (app_id, path, content, revision, written_by, written_at) VALUES (?, ?, 'x', 'earlier', ?, 0)"
-        ).bind(app.id, `components/part-${index}.ts`, userId)
-      ),
-    ]);
-
-    // One after another: each step depends on the one before.
-    const steps: [string, () => Promise<unknown>][] = [
+    // One after another: each is over the same version.
+    const steps: [string, Record<string, string | null>][] = [
+      ["add", { "components/new.ts": "x" }],
+      ["grow", { "components/part-0.ts": "xx" }],
+      // Still over them: no version until it's within them.
+      ["shrink", { "components/part-0.ts": null }],
       [
-        "add",
-        async () => {
-          await apps.files.write(app.id, { "components/new.ts": "x" });
-        },
+        "shrink to fit",
+        { "components/part-0.ts": null, "components/part-1.ts": null },
       ],
-      [
-        "grow",
-        async () => {
-          await apps.files.write(app.id, { "components/part-0.ts": "xx" });
-        },
-      ],
-      [
-        "shrink",
-        async () => {
-          await apps.files.write(app.id, { "components/part-0.ts": null });
-        },
-      ],
-      // Still over them: it can't become a version until it's within them.
-      ["commit over", async () => await apps.files.commit(app.id, "Smaller")],
-      [
-        "shrink again",
-        async () => {
-          await apps.files.write(app.id, { "components/part-1.ts": null });
-        },
-      ],
-      ["commit within", async () => await apps.files.commit(app.id, "Fits")],
     ];
     const outcomes: [string, string][] = [];
-    for (const [step, run] of steps) {
+    for (const [step, changes] of steps) {
       // oxlint-disable-next-line no-await-in-loop -- steps are sequential by design
-      outcomes.push([step, await outcome(run())]);
+      outcomes.push([step, await outcome(commit(apps, app.id, changes))]);
     }
     expect(outcomes).toStrictEqual([
       ["add", "app.too_large"],
       ["grow", "app.too_large"],
-      ["shrink", "ok"],
-      ["commit over", "app.too_large"],
-      ["shrink again", "ok"],
-      ["commit within", "ok"],
+      ["shrink", "app.too_large"],
+      ["shrink to fit", "ok"],
     ]);
   });
 
@@ -805,7 +763,7 @@ export default workflowTests(report, [{ name: "counts", mocks: { count: 1 }, exp
     await expect(
       Promise.all([
         outcome(apps.get("no-such-app")),
-        outcome(apps.files.write("no-such-app", { "AGENTS.md": "x" })),
+        outcome(commit(apps, "no-such-app", { "AGENTS.md": "x" })),
         outcome(apps.files.read(app.id, 1)),
         outcome(apps.versions.get(app.id, 1)),
         outcome(apps.versions.diff(app.id, 1, 2)),

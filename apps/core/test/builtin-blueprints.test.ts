@@ -213,8 +213,9 @@ describe("the built-in blueprints", () => {
     const builder = await signedInApi(idp, "builder");
     const changes = async (api: typeof admin.api) =>
       await Promise.all([
-        outcome(api.apps.files.write(helloApp, { "notes.md": "# Mine\n" })),
-        outcome(api.apps.files.commit(helloApp, "Mine")),
+        outcome(
+          api.apps.files.commit(helloApp, { "notes.md": "# Mine\n" }, "Mine")
+        ),
         outcome(api.apps.blueprints.mark(helloApp, 1)),
         outcome(api.apps.blueprints.unmark(helloApp, 1)),
         outcome(api.apps.versions.setCurrent(helloApp, 1)),
@@ -234,7 +235,7 @@ describe("the built-in blueprints", () => {
           })
         ),
       ]);
-    const refused = Array.from({ length: 7 }, () => "role.forbidden");
+    const refused = Array.from({ length: 6 }, () => "role.forbidden");
 
     const before = await helloState();
     await expect(changes(admin.api)).resolves.toStrictEqual(refused);
@@ -251,13 +252,16 @@ describe("the built-in blueprints", () => {
     expect({
       refused: await Promise.all([
         outcome(
-          offAdmin.apps.files.write(helloApp, { "notes.md": "# Mine\n" })
+          offAdmin.apps.files.commit(
+            helloApp,
+            { "notes.md": "# Mine\n" },
+            "Mine"
+          )
         ),
-        outcome(offAdmin.apps.files.commit(helloApp, "Mine")),
         outcome(offAdmin.apps.versions.setCurrent(helloApp, 1)),
       ]),
       listed: listedOff.some(({ id }) => id === helloApp),
-    }).toStrictEqual({ refused: refused.slice(0, 3), listed: true });
+    }).toStrictEqual({ refused: refused.slice(0, 2), listed: true });
     await expect(helloState()).resolves.toStrictEqual(before);
 
     // Nor does another App get to call its exports: a built-in never runs.
@@ -643,11 +647,11 @@ describe("the built-in blueprints", () => {
     const afterRelease = await admin.api.permissions.list(copy);
 
     // Code of the builder's own is asked for again.
-    await builder.api.apps.files.write(created.app.id, {
-      "app/server.ts": `${hello().files["app/server.ts"]}\n// Mine.\n`,
-    });
     const { version } = await builder.api.apps.files.commit(
       created.app.id,
+      {
+        "app/server.ts": `${hello().files["app/server.ts"]}\n// Mine.\n`,
+      },
       "Mine"
     );
     await builder.api.apps.versions.setCurrent(created.app.id, version);

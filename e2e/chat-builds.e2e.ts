@@ -48,24 +48,24 @@ test("the side panel shows an App being built, and a builder makes its version c
   const name = `Invoice desk ${tag}`;
   try {
     const app = await api.apps.create({ name });
-    await api.apps.files.write(app.id, {
-      "screens/desk.tsx": screen,
-      ...weekly,
-      // Server code the server build reads, though not app/server.ts.
-      "app/lib/format.ts":
-        "export const format = (total: number) => String(total);\n",
-      // A method other Apps may call, which changes the App's data.
-      "app/exports.json": JSON.stringify({
-        book: {
-          access: "write",
-          description: "Book an invoice",
-          input: { type: "object" },
-          output: { type: "object" },
-        },
-      }),
-    });
     const { version } = await api.apps.files.commit(
       app.id,
+      {
+        "screens/desk.tsx": screen,
+        ...weekly,
+        // Server code the server build reads, though not app/server.ts.
+        "app/lib/format.ts":
+          "export const format = (total: number) => String(total);\n",
+        // A method other Apps may call, which changes the App's data.
+        "app/exports.json": JSON.stringify({
+          book: {
+            access: "write",
+            description: "Book an invoice",
+            input: { type: "object" },
+            output: { type: "object" },
+          },
+        }),
+      },
       "An invoice desk for invoices@"
     );
     await api.apps.versions.propose(app.id, version);

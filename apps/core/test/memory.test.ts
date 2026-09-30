@@ -547,14 +547,22 @@ describe("memory limits", setUpTime, () => {
       ),
       user: await outcome(saveOver(admin, personal, "USER.md", sized(2001))),
       appCode: await outcome(
-        builder.api.apps.files.write(appId, { "AGENTS.md": sized(8001) })
+        builder.api.apps.files.commit(
+          appId,
+          { "AGENTS.md": sized(8001) },
+          "Over"
+        )
       ),
       atLimit: await outcome(saveOver(admin, memory, "MEMORY.md", sized(8000))),
       userAtLimit: await outcome(
         saveOver(admin, personal, "USER.md", sized(2000))
       ),
       appCodeAtLimit: await outcome(
-        builder.api.apps.files.write(appId, { "AGENTS.md": sized(8000) })
+        builder.api.apps.files.commit(
+          appId,
+          { "AGENTS.md": sized(8000) },
+          "At the limit"
+        )
       ),
       // Not memory files: another collection's, another path in the App.
       elsewhere: await outcome(saveOver(admin, notes, "USER.md", sized(9000))),
@@ -562,7 +570,11 @@ describe("memory limits", setUpTime, () => {
         saveOver(admin, memory, "notes.md", sized(9000))
       ),
       appOtherFile: await outcome(
-        builder.api.apps.files.write(appId, { "docs/AGENTS.md": sized(9000) })
+        builder.api.apps.files.commit(
+          appId,
+          { "docs/AGENTS.md": sized(9000) },
+          "Another file"
+        )
       ),
     };
     const refused = await admin.api.knowledge

@@ -753,8 +753,11 @@ describe("email triggers", () => {
     const builder = await personApi("builder");
     const first = await appWith(builder, intake("inbox"));
     const { id: second } = await builder.api.apps.create({ name: "Second" });
-    await builder.api.apps.files.write(second, intake("raced"));
-    const { version } = await builder.api.apps.files.commit(second, "Raced");
+    const { version } = await builder.api.apps.files.commit(
+      second,
+      intake("raced"),
+      "Raced"
+    );
     // The first App takes the address just before the second's batch
     // lands: after the second checked it was free.
     const racing = racingDb(

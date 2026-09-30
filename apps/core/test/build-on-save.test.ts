@@ -55,13 +55,11 @@ const where = (build: SavedBuild): string[] =>
     ({ file, line, rule, severity }) => `${file}:${line} ${rule} ${severity}`
   );
 
-/** A new App of `builder`'s with `files` in its working copy. */
-const appWith = async (
-  builder: Awaited<ReturnType<typeof signedInApi>>,
-  files: Record<string, string>
+/** A new App of `builder`'s, without versions. */
+const newApp = async (
+  builder: Awaited<ReturnType<typeof signedInApi>>
 ): Promise<string> => {
   const { id } = await builder.api.apps.create({ name: "Saved" });
-  await builder.api.apps.files.write(id, files);
   return id;
 };
 
@@ -70,14 +68,15 @@ describe("building on save", { timeout: 60_000 }, () => {
     const builder = await signedInApi(idp, "builder");
     // Files no other test builds, so nothing is in the cache before.
     const unique = crypto.randomUUID();
-    const app = await appWith(builder, {
-      ...screen(unique),
-      ...server(unique),
-      ...workflowFiles("saved", `  return "${unique}";`),
-    });
+    const app = await newApp(builder);
 
     const { version, builds } = await builder.api.apps.files.commit(
       app,
+      {
+        ...screen(unique),
+        ...server(unique),
+        ...workflowFiles("saved", `  return "${unique}";`),
+      },
       "Save"
     );
     const files = await versionFiles(env, appIdSchema.parse(app), version);
@@ -102,7 +101,8 @@ describe("building on save", { timeout: 60_000 }, () => {
 
   it("tells whoever saved what doesn't build and where, and commits all the same", async () => {
     const builder = await signedInApi(idp, "builder");
-    const app = await appWith(builder, {
+    const app = await newApp(builder);
+    const broken = {
       "screens/desk.tsx": `export default function Desk() {
   const count: number = "three";
   return <p>{count}</p>;
@@ -111,9 +111,13 @@ describe("building on save", { timeout: 60_000 }, () => {
       "app/server.ts": `import { readFileSync } from "node:fs";
 export class App {}
 `,
-    });
+    };
 
-    const committed = await builder.api.apps.files.commit(app, "Broken");
+    const committed = await builder.api.apps.files.commit(
+      app,
+      broken,
+      "Broken"
+    );
 
     const { screens, server: serverBuild, workflows } = committed.builds;
 
@@ -140,7 +144,7 @@ export class App {}
 
   it("says a build couldn't run when the compiler can't be reached, commits, and leaves it to its first use", async () => {
     const builder = await signedInApi(idp, "builder");
-    const app = await appWith(builder, screen(crypto.randomUUID()));
+    const app = await newApp(builder);
     const by = await builder.api.whoami();
     const unreachable: WorkerLoader = {
       get: () => {
@@ -155,6 +159,7 @@ export class App {}
       { ...env, LOADER: unreachable },
       by,
       app,
+      screen(crypto.randomUUID()),
       "Save"
     );
 
@@ -179,10 +184,7 @@ export class App {}
 
   it("builds nothing on save while build_on_save is off, leaving the builds to their first use", async () => {
     const builder = await signedInApi(idp, "builder");
-    const app = await appWith(builder, {
-      ...screen(crypto.randomUUID()),
-      ...server(crypto.randomUUID()),
-    });
+    const app = await newApp(builder);
     const by = await builder.api.whoami();
     const features = z.record(z.string(), z.boolean()).parse(env.FEATURES);
 
@@ -190,6 +192,7 @@ export class App {}
       { ...env, FEATURES: { ...features, build_on_save: false } },
       by,
       app,
+      { ...screen(crypto.randomUUID()), ...server(crypto.randomUUID()) },
       "Save"
     );
     const files = await versionFiles(env, appIdSchema.parse(app), 1);

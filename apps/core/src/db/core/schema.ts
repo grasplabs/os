@@ -362,8 +362,6 @@ export const apps = sqliteTable("apps", {
   blueprint: text(),
   currentVersion: integer("current_version"),
   pendingVersion: integer("pending_version"),
-  /** The latest write to the working copy (`app_working_files.revision`). */
-  workingRevision: text("working_revision"),
   createdAt: timestamp("created_at").notNull(),
   /**
    * Set while an App created from a blueprint waits for the check that
@@ -677,26 +675,6 @@ export const workflowDecisions = sqliteTable(
     ),
     index("workflow_decisions_decided_idx").on(table.decidedAt, table.id),
   ]
-);
-
-/**
- * An App's working copy: the files written since its latest version, until
- * they are committed. A null `content` means the file is deleted.
- * `revision` names the write that wrote the row.
- */
-export const appWorkingFiles = sqliteTable(
-  "app_working_files",
-  {
-    appId: text("app_id")
-      .notNull()
-      .references(() => apps.id),
-    path: text().notNull(),
-    content: text(),
-    revision: text().notNull(),
-    writtenBy: text("written_by").notNull(),
-    writtenAt: timestamp("written_at").notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.appId, table.path] })]
 );
 
 /**

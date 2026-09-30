@@ -279,7 +279,6 @@ export const release = async (
   files: Record<string, string | null>,
   message: string
 ): Promise<void> => {
-  await api.apps.files.write(app, files);
-  const { version } = await api.apps.files.commit(app, message);
+  const { version } = await api.apps.files.commit(app, files, message);
   await api.apps.versions.setCurrent(app, version);
 };
