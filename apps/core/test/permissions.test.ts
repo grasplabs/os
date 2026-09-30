@@ -692,21 +692,29 @@ describe("permissions", () => {
 describe("connect, called over the service binding", () => {
   it("refuses a call without a capability core signed for exactly it", async () => {
     const admin = await permissionApi("admin");
-    const authority = actingFor(await newApp(admin.api), "user-anna");
+    const app = await newApp(admin.api);
+    const authority = actingFor(app, "user-anna");
     const call = {
       connectionId: "connection-outlook",
       action: "mail.list",
       input: {},
     };
+    const signed = {
+      ...call,
+      origin: {
+        permissionId: "permission-outlook",
+        context: app,
+      },
+    };
     const forged = await signCapability(
       "an-attackers-own-key-of-32-characters-or-more",
       authority,
-      call
+      signed
     );
     const forRead = await signCapability(
       env.CAPABILITY_SIGNING_KEY,
       authority,
-      call
+      signed
     );
     const refused = await Promise.all([
       outcome(env.CONNECT.call({ ...call, capability: "" })),

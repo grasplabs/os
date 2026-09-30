@@ -141,7 +141,6 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               members: true,
               audit: true,
               audit_retention: true,
-              confirmations: true,
               model_rules: true,
               model_settings: true,
               improvement_signals: true,

@@ -98,13 +98,9 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     this.#members = new MembersRpc(env, checkWith("members"));
     this.#audit = new AuditRpc(env, checkWith("audit"));
     this.#models = new ModelsRpc(env, checkWith("model_settings"));
-    // Held actions are calls on connections: that kill switch stops them
-    // too. With the flag off, connect still holds side effects, and nobody
-    // can confirm them: nothing runs without the person.
-    this.#pendingActions = new PendingActionsRpc(
-      env,
-      checkWith("connections", "confirmations")
-    );
+    // Held actions are calls on connections: that kill switch stops them.
+    // While it's off, nobody lists, confirms or declines them.
+    this.#pendingActions = new PendingActionsRpc(env, checkWith("connections"));
     this.#signals = new SignalsRpc(env, checkWith("improvement_signals"));
     // Chats are how people ask the agent: its kill switch stops them too.
     this.#chats = new ChatsRpc(env, checkWith("agent", "chat"));

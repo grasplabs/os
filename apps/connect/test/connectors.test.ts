@@ -258,7 +258,10 @@ describe("a native connector", () => {
     });
     const ended = await exports.default.heldOutcome({
       ...keyed,
-      capability: await signCapability(env.CAPABILITY_SIGNING_KEY, chat, keyed),
+      capability: await signCapability(env.CAPABILITY_SIGNING_KEY, chat, {
+        ...keyed,
+        origin: chatOrigin,
+      }),
     });
     expect(
       ended.state === "done" ? JSON.parse(ended.result.output) : ended
@@ -269,11 +272,10 @@ describe("a native connector", () => {
       outcome(
         exports.default.heldOutcome({
           ...whole,
-          capability: await signCapability(
-            env.CAPABILITY_SIGNING_KEY,
-            chat,
-            whole
-          ),
+          capability: await signCapability(env.CAPABILITY_SIGNING_KEY, chat, {
+            ...whole,
+            origin: chatOrigin,
+          }),
         })
       )
     ).resolves.toBe("connect.pending_not_found");
@@ -331,14 +333,6 @@ describe("a native connector", () => {
           { resource: "invoices@acme.test" }
         )
       ),
-      outcome(
-        callAs(chat, {
-          connectionId: connection.id,
-          action: "items.send",
-          input: { mailbox: "invoices@acme.test", subject: "Paid" },
-          idempotencyKey: "chat-1:send",
-        })
-      ),
       // Held for the person to confirm: nothing is sent yet.
       outcome(
         callAs(
@@ -363,7 +357,6 @@ describe("a native connector", () => {
     ]);
     expect(refusals).toStrictEqual([
       "connect.resource_out_of_scope",
-      "connect.confirmation_required",
       "ok",
       "connect.idempotency_key_required",
       "connect.action_not_found",

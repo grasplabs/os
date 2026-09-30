@@ -4,7 +4,6 @@ import { authoritySchema } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { z } from "zod";
 
 import { bindingsFor } from "../src/bindings.ts";
 import { restrict } from "../src/restricted.ts";
@@ -269,41 +268,5 @@ describe("a side effect an agent asks for in chat", () => {
       events.find(({ action }) => action === "connection.action.declined")
         ?.actor
     ).toStrictEqual({ type: "person", userId: owner.userId });
-  });
-
-  it("is refused as before, and a restricted chat calls nothing, while held actions are switched off", async () => {
-    const { owner, agent, chat, mail, send } = await setUp();
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    let whileOff: { unrestricted: string; restricted: string };
-    try {
-      env.FEATURES = { ...on, confirmations: false };
-      const unrestricted = await outcome(send());
-      await restrict(
-        env,
-        authoritySchema.parse({
-          subject: agent,
-          onBehalfOf: owner.userId,
-          mode: "interactive",
-        }),
-        chat,
-        ["collection-payroll"]
-      );
-      whileOff = { unrestricted, restricted: await outcome(send()) };
-    } finally {
-      env.FEATURES = features;
-    }
-    expect({
-      whileOff,
-      waiting: await owner.api.pendingActions.list(),
-      sent: await mail.did(),
-    }).toStrictEqual({
-      whileOff: {
-        unrestricted: "connect.confirmation_required",
-        restricted: "permission.restricted",
-      },
-      waiting: [],
-      sent: { calls: 0, sent: [] },
-    });
   });
 });

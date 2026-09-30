@@ -2,7 +2,6 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import { appHost } from "../src/durable-objects.ts";
@@ -402,36 +401,6 @@ describe("a run's held side effects", { timeout: 60_000 }, () => {
       server: { calls: 0, sent: [] },
       // Failed once, not retried: a decline is final.
       audited: ["workflow.run.waiting held", "workflow.step.failed send"],
-    });
-  });
-
-  it("fail at once in restricted mode while held actions are switched off", async () => {
-    const admin = await personApi("admin");
-    const mail = await mailConnection();
-    const app = await appWith(admin, mailer(`retries: { limit: 0 }`));
-    await grantMail(idp, admin, app, mail.id);
-    await appHost(env, appIdSchema.parse(app)).restrict();
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    let run: { id: string };
-    try {
-      env.FEATURES = { ...on, confirmations: false };
-      run = await admin.api.workflows.start(app, "mailer");
-      await finished(run.id);
-    } finally {
-      env.FEATURES = features;
-    }
-    const audited = await runEvents(run.id, "workflow.run.failed");
-    expect({
-      run: await admin.api.workflows.status(run.id),
-      waited: audited.some((event) => event.startsWith("workflow.run.waiting")),
-      waiting: await admin.api.pendingActions.list(),
-      server: await mail.did(),
-    }).toMatchObject({
-      run: { status: "failed" },
-      waited: false,
-      waiting: [],
-      server: { calls: 0, sent: [] },
     });
   });
 });

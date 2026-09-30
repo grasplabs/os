@@ -138,6 +138,7 @@ const readOutcome = async (
     ...stated,
     capability: await signCapability(env.CAPABILITY_SIGNING_KEY, authority, {
       ...stated,
+      origin: chatOrigin,
       ...signed,
     }),
   });
@@ -1248,19 +1249,6 @@ describe("a side effect from chat", () => {
       newestFirst: true,
       oldestListed: false,
       ran: [{ tool: "mail.send", input: first.input }],
-    });
-  });
-
-  it("isn't held without what core checks again on confirming it", async () => {
-    const anna = someone();
-    const connectionId = await addConnection();
-    // As a core of the release before signs it: refused, as it was then.
-    await expect(
-      outcome(callAs(inChat(anna), mail(connectionId)))
-    ).resolves.toBe("connect.confirmation_required");
-    expect({ ran: server.ran, waiting: await waitingFor(anna) }).toStrictEqual({
-      ran: [],
-      waiting: [],
     });
   });
 });

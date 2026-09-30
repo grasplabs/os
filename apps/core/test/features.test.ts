@@ -313,7 +313,7 @@ describe("feature flags", () => {
     ]);
   });
 
-  it("stop held actions with either the connections or the confirmations flag", async () => {
+  it("stop held actions with the connections flag", async () => {
     const admin = await signedInWithRole(idp, "admin");
     const callsWithFlags = async (features: Record<string, boolean>) => {
       const coreEnv: Env = { ...env, FEATURES: features };
@@ -327,13 +327,11 @@ describe("feature flags", () => {
       ]);
     };
     await expect(
-      Promise.all([
-        callsWithFlags({ connections: true }),
-        callsWithFlags({ confirmations: true }),
-      ])
+      Promise.all([callsWithFlags({}), callsWithFlags({ connections: true })])
     ).resolves.toStrictEqual([
       Array.from({ length: 3 }, () => "feature.disabled"),
-      Array.from({ length: 3 }, () => "feature.disabled"),
+      // Past the flag: these held actions don't exist.
+      ["ok", "connect.pending_not_found", "connect.pending_not_found"],
     ]);
   });
 
