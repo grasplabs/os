@@ -9,6 +9,7 @@ import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
 import { builtinAppId } from "../src/builtin-app-id.ts";
 import { builtins, fingerprintOf, release } from "../src/builtins.ts";
+import { saveDocument } from "../src/knowledge/documents.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import { grantReviewed, revokeOtherCopies, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
@@ -27,7 +28,9 @@ import { outcome, routed, signedInApi, unique } from "./sign-in.ts";
 // change the Playbook reading or writing drafts; edits over someone
 // else's; and records saved or edited by hand past the App: without tags,
 // with tags or a date the intake doesn't take, or changing, or dropping
-// through another type, what only its save sets.
+// through another type, what only its save sets, while the intake
+// declares its types or while nobody does (its version unapproved, record
+// types off).
 
 const idp = mockIdp();
 
@@ -98,19 +101,26 @@ const interview = (title: string) => ({
   ],
 });
 
-/** An App created from the intake by an admin, its Playbook granted. */
-const copyOf = async (admin: Awaited<ReturnType<typeof signedInApi>>) => {
-  const created = await admin.api.apps.blueprints.create(intake, 1, {
+/**
+ * An App created from the intake by `builder` (the admin, unless given),
+ * its Playbook granted by `admin`.
+ */
+const copyOf = async (
+  admin: Awaited<ReturnType<typeof signedInApi>>,
+  builder = admin
+) => {
+  const created = await builder.api.apps.blueprints.create(intake, 1, {
     name: `Intake ${unique()}`,
   });
   for (const { id } of created.permissions) {
     // oxlint-disable-next-line no-await-in-loop -- one grant at a time
     await grantReviewed(admin.api, id);
   }
-  await admin.api.apps.versions.setCurrent(created.app.id, 1);
+  await builder.api.apps.versions.setCurrent(created.app.id, 1);
   await serverBuilt(created.app.id, 1);
   return {
     app: appIdSchema.parse(created.app.id),
+    granted: created.permissions.map(({ id }) => id),
     // By binding: the order they are listed in isn't theirs.
     asked: created.permissions
       .map(({ object, actions, binding }) => ({ object, actions, binding }))
@@ -814,6 +824,70 @@ describe("the intake", { timeout: 60_000 }, () => {
       sourceByHand: "knowledge.invalid",
       notADate: "knowledge.invalid",
       badMedium: "knowledge.invalid",
+    });
+  });
+
+  it("has the Playbook keep a statement a statement while nobody declares its type: its intake's version unapproved, or record types off", async () => {
+    await builtins(env).ensureInstalled(await fingerprintOf(env, release));
+    const admin = await signedInApi(idp, "admin");
+    const builder = await signedInApi(idp, "builder");
+    const { app, granted } = await copyOf(admin, builder);
+    await revokeOtherCopies(admin.api, intake, app);
+    const draft = interview(`Unapproved ${unique()}`);
+    const { id } = okOf(
+      await call(app, admin.userId, "create", draft),
+      createdSchema
+    );
+    const saved = okOf(
+      await call(app, admin.userId, "save", { id, ifVersion: 1, draft }),
+      savedSchema
+    );
+    const statementPath = `statements/${stemOf(saved.source)}-1.md`;
+    // No type: a plain document, which would drop what only the save sets.
+    const untyped = {
+      collectionId: playbook,
+      path: statementPath,
+      text: recordText(["title: Closing takes three days."]),
+      ifVersion: 1,
+    };
+    // A builder makes current a version nobody approved yet: nobody
+    // declares `statement` until an admin grants its requests again.
+    await builder.api.apps.files.write(app, {
+      "app/notes.ts": "export const note = 1;\n",
+    });
+    const { version } = await builder.api.apps.files.commit(app, "Notes");
+    await builder.api.apps.versions.setCurrent(app, version);
+    const unapproved = await outcome(admin.api.knowledge.saveDocument(untyped));
+    const permissions = await admin.api.permissions.list();
+    for (const { id: permission, status } of permissions) {
+      if (granted.includes(permission) && status === "requested") {
+        // oxlint-disable-next-line no-await-in-loop -- one grant at a time
+        await grantReviewed(admin.api, permission);
+      }
+    }
+    const off = await outcome(
+      saveDocument(
+        {
+          ...env,
+          FEATURES: { knowledge: true, apps: true, permissions: true },
+        },
+        await admin.api.whoami(),
+        untyped
+      )
+    );
+    const [statement] = await documentsAt(admin, statementPath);
+    expect({
+      unapproved,
+      off,
+      kept: statement?.text
+        .split("\n")
+        .filter((line) =>
+          ["type:", "source:", "draft:"].some((field) => line.startsWith(field))
+        ),
+    }).toStrictEqual({
+      unapproved: "knowledge.invalid",
+      off: "knowledge.invalid",
+      kept: ["type: statement", `source: ${saved.source}`, `draft: ${id}`],
     });
   });
 });

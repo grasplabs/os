@@ -27,6 +27,7 @@ import type {
   Version,
   VersionSummary,
 } from "@grasp-os/shared/knowledge";
+import { isAdmin } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { and, asc, desc, eq, gt, lt, ne } from "drizzle-orm";
 import type { BatchItem } from "drizzle-orm/batch";
@@ -61,7 +62,12 @@ import type { ParsedRecord } from "./frontmatter.ts";
 import { extractLinks, splitSections } from "./markdown.ts";
 import type { Link, Section } from "./markdown.ts";
 import { memoryFileOf, requireWithinLimit } from "./memory-files.ts";
-import { declaredTypes, keptSetters, noDeclaredTypes } from "./record-types.ts";
+import {
+  declaredTypes,
+  keptSetters,
+  noDeclaredTypes,
+  typeHeld,
+} from "./record-types.ts";
 import type { DeclaredTypes } from "./record-types.ts";
 
 // Saving a document: its frontmatter is read and checked (and a memory
@@ -307,18 +313,21 @@ export const checkedText = async (
  * frontmatter): a person saving themselves, or the one an agent or App
  * acts for. `detail` goes into the save's audit event: for an App, the
  * person it acted for, how (interactive or a workflow run) and its
- * version, which its actor doesn't name.
+ * version, which its actor doesn't name. `admin` is set only for an admin
+ * saving themselves, never for an agent or App acting for one.
  */
 export interface Writer {
   actor: AuditActor;
   userId: string;
   detail?: Record<string, AuditDetailValue>;
+  admin?: boolean;
 }
 
 /** A person, saving a version themselves. */
 export const personWriter = (person: Identity): Writer => ({
   actor: actorOf(person),
   userId: person.userId,
+  admin: isAdmin(person.role),
 });
 
 /** A new version of the document at `path` in `collection`. */
@@ -382,6 +391,8 @@ interface KeptCheck {
   declared: DeclaredTypes;
   /** A purge's: it rewrites kept fields too, personal data coming first. */
   purge: boolean;
+  /** An admin's own save (`Writer.admin`). */
+  byAdmin: boolean | undefined;
 }
 
 /**
@@ -395,16 +406,30 @@ interface KeptCheck {
  * batch requires is still current, so nothing saved in between is
  * compared against. A version of another type than the one it goes over
  * is refused too while that one has a kept field its write doesn't set:
- * otherwise a round trip through another type would drop the field.
+ * otherwise a round trip through another type would drop the field. A
+ * write sets a field of the type it goes over only when the same App
+ * owns that field in both types: another App's method sets its own
+ * type's field of that name, never this one.
+ *
+ * While nobody declares the type it goes over, which fields it keeps
+ * isn't known, so a record of it stays of it, whatever the write sets.
+ * That is for as long as an App still has the type (`typeHeld`): its
+ * current version waits for approval, or `record_types` is off. Once no
+ * App has it (its owner may no longer write the collection, or no longer
+ * declares it), nothing would ever declare it again for its owner, and an
+ * admin makes the record a plain `doc` by hand. Returns what the save's
+ * audit event says of that: the type such a save takes the record out of
+ * (`releasedType`), and nothing for any other save.
  */
 const requireFieldsKept = async (
+  env: Env,
   db: DrizzleD1Database,
   check: KeptCheck,
   sets: Record<string, unknown> = {}
-): Promise<void> => {
+): Promise<{ releasedType?: string }> => {
   const { existing, ifVersion, path, text, type, declared, purge } = check;
   if (purge) {
-    return;
+    return {};
   }
   const before = existing
     ? await db
@@ -442,20 +467,77 @@ const requireFieldsKept = async (
   // again after it would then set them afresh. So a record whose type
   // keeps fields doesn't change type by hand while it has any of them.
   const previous = savedRaw?.type;
-  const droppedProblems =
-    previous === undefined || sameType
-      ? []
-      : [...keptSetters(declared, previous).keys()].flatMap((field) =>
-          fieldOf(savedRaw?.fields, field) === undefined ||
-          Object.hasOwn(sets, field)
-            ? []
-            : [
-                `frontmatter.type: a ${previous} keeps its ${field}, which only the method its record type gives it to changes, so it stays a ${previous}`,
-              ]
-        );
-  const problems = [...declaredProblems, ...droppedProblems];
+  const leaves = previous !== undefined && !sameType;
+  // The write's `sets` are by the new type's setters: they set a field
+  // of the type it goes over only where that field is the same App's in
+  // both, never another App's field of the same name.
+  const setters = keptSetters(declared, type);
+  const droppedProblems = leaves
+    ? [...keptSetters(declared, previous)].flatMap(([field, { app }]) =>
+        fieldOf(savedRaw?.fields, field) === undefined ||
+        (Object.hasOwn(sets, field) && setters.get(field)?.app === app)
+          ? []
+          : [
+              `frontmatter.type: a ${previous} keeps its ${field}, which only the method its record type gives it to changes, so it stays a ${previous}`,
+            ]
+      )
+    : [];
+  // A type nobody declares now (record-types.ts) has no kept fields to
+  // read here, though its records may hold some. A version of another
+  // type over one would drop them unseen, and one of the type again, once
+  // it is declared again, would set them afresh.
+  const undeclared =
+    leaves && !isBuiltinDocumentType(previous) && !declared.has(previous);
+  // But for an admin making it a plain doc once no App has the type any
+  // more: read only then, by the claim's key, and again just before the
+  // write (`requireStillReleased`).
+  const released =
+    undeclared &&
+    check.byAdmin === true &&
+    type === "doc" &&
+    !(await typeHeld(env, check.collection.id, previous));
+  const undeclaredProblems =
+    undeclared && !released
+      ? [
+          `frontmatter.type: no App declares ${previous} for this collection now, so which fields a ${previous} keeps isn't known, and it stays a ${previous}; once no App has the type any more, an admin can make it a plain doc`,
+        ]
+      : [];
+  const problems = [
+    ...declaredProblems,
+    ...droppedProblems,
+    ...undeclaredProblems,
+  ];
   if (problems.length > 0) {
     throw invalid(problems);
+  }
+  return released ? { releasedType: previous } : {};
+};
+
+/**
+ * Refuses with `knowledge.invalid` a save that takes a record out of a
+ * type no App had (`releasedType`, from `requireFieldsKept`) when an App
+ * has it now: another App may have claimed it while the save was being
+ * prepared, and the record is then that App's to keep. Read last, just
+ * before the write's batch, as an App's write checks its context
+ * (`Write.lastCheck`). The claim is in core's database and the document
+ * in Knowledge's, which share no transaction, so a claim that lands
+ * between this read and the batch is not seen: that takes an admin
+ * converting the record at the very moment another App, granted the
+ * collection and approved, first saves or reads a record of the type. The
+ * save is audited with `releasedType` either way.
+ */
+const requireStillReleased = async (
+  env: Env,
+  collectionId: string,
+  releasedType: string | undefined
+): Promise<void> => {
+  if (
+    releasedType !== undefined &&
+    (await typeHeld(env, collectionId, releasedType))
+  ) {
+    throw invalid([
+      `frontmatter.type: an App has ${releasedType} for this collection now, so it stays a ${releasedType}`,
+    ]);
   }
 };
 
@@ -491,7 +573,8 @@ export const writeVersion = async (
   if ((existing?.currentVersion ?? 0) !== ifVersion) {
     throw conflict(existing);
   }
-  await requireFieldsKept(
+  const released = await requireFieldsKept(
+    env,
     db,
     {
       existing,
@@ -502,6 +585,7 @@ export const writeVersion = async (
       collection,
       declared,
       purge: write.purge === true,
+      byAdmin: by.admin,
     },
     write.sets
   );
@@ -537,6 +621,8 @@ export const writeVersion = async (
       collectionId: collection.id,
       version: number,
       ...(restoredFrom === null ? {} : { restoredFrom }),
+      // An admin made a record of a type no App has any more a plain doc.
+      ...released,
     },
   };
   const statements: BatchItem<"sqlite">[] = [
@@ -585,6 +671,7 @@ export const writeVersion = async (
           )
         )
     : db.insert(documents).values(row);
+  await requireStillReleased(env, collection.id, released.releasedType);
   await write.lastCheck?.();
   try {
     await auditedBatch(env, db, [document, ...statements]);
