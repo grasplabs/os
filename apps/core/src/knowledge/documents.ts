@@ -395,7 +395,11 @@ interface KeptCheck {
  * batch requires is still current, so nothing saved in between is
  * compared against. A version of another type than the one it goes over
  * is refused too while that one has a kept field its write doesn't set:
- * otherwise a round trip through another type would drop the field.
+ * otherwise a round trip through another type would drop the field. And
+ * while nobody declares the type it goes over (its owner's current
+ * version waits for approval, `record_types` is off, its owner may no
+ * longer write the collection), which fields it keeps isn't known, so a
+ * record of it stays of it, whatever the write sets.
  */
 const requireFieldsKept = async (
   db: DrizzleD1Database,
@@ -442,18 +446,33 @@ const requireFieldsKept = async (
   // again after it would then set them afresh. So a record whose type
   // keeps fields doesn't change type by hand while it has any of them.
   const previous = savedRaw?.type;
-  const droppedProblems =
-    previous === undefined || sameType
-      ? []
-      : [...keptSetters(declared, previous).keys()].flatMap((field) =>
-          fieldOf(savedRaw?.fields, field) === undefined ||
-          Object.hasOwn(sets, field)
-            ? []
-            : [
-                `frontmatter.type: a ${previous} keeps its ${field}, which only the method its record type gives it to changes, so it stays a ${previous}`,
-              ]
-        );
-  const problems = [...declaredProblems, ...droppedProblems];
+  const leaves = previous !== undefined && !sameType;
+  const droppedProblems = leaves
+    ? [...keptSetters(declared, previous).keys()].flatMap((field) =>
+        fieldOf(savedRaw?.fields, field) === undefined ||
+        Object.hasOwn(sets, field)
+          ? []
+          : [
+              `frontmatter.type: a ${previous} keeps its ${field}, which only the method its record type gives it to changes, so it stays a ${previous}`,
+            ]
+      )
+    : [];
+  // A type nobody declares now (record-types.ts) has no kept fields to
+  // read here, though its records may hold some: its owner's current
+  // version waits for approval, or `record_types` is off. A version of
+  // another type over one would drop them unseen, and one of the type
+  // again, once it is declared again, would set them afresh.
+  const undeclaredProblems =
+    leaves && !isBuiltinDocumentType(previous) && !declared.has(previous)
+      ? [
+          `frontmatter.type: no App declares ${previous} for this collection now, so which fields a ${previous} keeps isn't known, and it stays a ${previous}`,
+        ]
+      : [];
+  const problems = [
+    ...declaredProblems,
+    ...droppedProblems,
+    ...undeclaredProblems,
+  ];
   if (problems.length > 0) {
     throw invalid(problems);
   }

@@ -31,7 +31,8 @@ import {
 // field is changed by anyone but the method that owns it (a person, the
 // App's other methods, another App declaring the same type), dropped by a
 // save that leaves it out, or laundered through a version of another
-// type; another App takes a type over, or blocks it with a schema of its
+// type, while its type is declared or while nobody declares it (its
+// owner's version unapproved, the flag off); another App takes a type over, or blocks it with a schema of its
 // own; a purge is refused because a record's type is no longer declared
 // or its text no longer fits; the stub writes without a permission to
 // write, for someone who couldn't write themselves, or from a context
@@ -580,6 +581,91 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
     expect({ toDoc, earlier: earlier.ok.record }).toMatchObject({
       toDoc: "knowledge.invalid",
       earlier: { type: "task", title: "Sign the lease" },
+    });
+  });
+
+  it("keep a kept field while nobody declares their type: a record stays of it through a version nobody approved yet, and with the flag off", async () => {
+    const admin = await signedInApi(idp, "admin");
+    const builder = await signedInApi(idp, "builder");
+    const { id: collectionId } = await admin.api.knowledge.createCollection({
+      name: `Tasks ${unique()}`,
+      access: "everyone",
+    });
+    const owner = await recordsApp(builder, taskTypes(collectionId));
+    const ownerGrant = await requestGranted(
+      idp,
+      builder,
+      collectionFor(owner, collectionId)
+    );
+    const path = `tasks/${unique()}.md`;
+    const task = { type: "task", title: "Sign the lease", status: "open" };
+    const sealed = savedSchema.parse(
+      await callApp(
+        env,
+        owner,
+        as(admin.userId),
+        "seal",
+        saveArgs(path, { ...task, seal: "signed" })
+      )
+    );
+    const asDoc = "---\ntype: doc\n---\nNo longer a task.\n";
+    const plain = async (text: string) =>
+      await outcome(
+        admin.api.knowledge.saveDocument({
+          collectionId,
+          path,
+          text,
+          ifVersion: 1,
+        })
+      );
+    // A builder makes current a version nobody approved yet: nobody
+    // declares `task` meanwhile, so its seal isn't known as kept.
+    await release(builder, owner, {
+      "app/records.json": taskTypes(collectionId),
+      "app/notes.ts": "export const note = 1;\n",
+    });
+    const unapproved = {
+      toDoc: await plain(asDoc),
+      unsealed: await plain(taskText("status: open")),
+    };
+    await grantReviewed(admin.api, ownerGrant);
+    // And with the flag off, which declares no types at all.
+    const off = await outcome(
+      saveDocument(
+        {
+          ...env,
+          FEATURES: { knowledge: true, apps: true, permissions: true },
+        },
+        await admin.api.whoami(),
+        { collectionId, path, text: asDoc, ifVersion: 1 }
+      )
+    );
+    const approved = {
+      toDoc: await plain(asDoc),
+      unsealed: await plain(taskText("status: open")),
+    };
+    const read = recordSchema.parse(
+      await callApp(env, owner, as(admin.userId), "record", [
+        "TASKS",
+        sealed.ok.id,
+      ])
+    );
+    const refused = {
+      toDoc: "knowledge.invalid",
+      unsealed: "knowledge.invalid",
+    };
+    expect({
+      unapproved,
+      off,
+      approved,
+      version: sealed.ok.currentVersion,
+      seal: read.ok.record.seal,
+    }).toStrictEqual({
+      unapproved: refused,
+      off: "knowledge.invalid",
+      approved: refused,
+      version: 1,
+      seal: "signed",
     });
   });
 

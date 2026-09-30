@@ -32,9 +32,11 @@ import { featureEnabled } from "../features.ts";
 // keeps it until it loses its permission to write there, or its current
 // version, approved, no longer declares the type (`released`): a version
 // nobody approved yet doesn't release it, whatever it declares, though
-// meanwhile nobody declares the type. Another App declaring the type there is ignored, however it
-// declares it, a copy of the same blueprint too: it can neither loosen nor
-// block the owner's records, nor set their kept fields. A commit of it is
+// meanwhile nobody declares the type, and a record of it stays of it
+// (documents.ts, `requireFieldsKept`). Another App declaring the type
+// there is ignored, however it declares it, a copy of the same blueprint
+// too: it can neither loosen nor block the owner's records, nor set their
+// kept fields. A commit of it is
 // refused while it may write there (`requireOwnTypes`), and an admin sees,
 // as they grant a request to write, which types it would claim and which
 // another App has (`typeClaims`). Read on each save and each read of
