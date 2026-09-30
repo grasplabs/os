@@ -23,12 +23,11 @@ import { drizzle } from "drizzle-orm/d1";
 
 import type { BuiltinBlueprint } from "#blueprints";
 
-import { stillOpenTo } from "./app-access.ts";
+import { appsFoundBy, stillOpenTo } from "./app-access.ts";
 import { exportsIn } from "./app-exports.ts";
 import { recordTypesIn } from "./app-records.ts";
 import {
   appFor,
-  appsListedFor,
   changeEntry,
   findVersion,
   storeTree,
@@ -140,7 +139,7 @@ export const listBlueprints = async (
     .select({ blueprint: appBlueprints, app: apps })
     .from(appBlueprints)
     .innerJoin(apps, eq(apps.id, appBlueprints.appId))
-    .where(appsListedFor(env, by))
+    .where(appsFoundBy(env, by))
     .orderBy(
       desc(appBlueprints.markedAt),
       asc(appBlueprints.appId),

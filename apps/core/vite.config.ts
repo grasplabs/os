@@ -122,7 +122,6 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             // tests check what was written. builtins.test.ts switches it on.
             FEATURES: {
               apps: true,
-              app_sharing: true,
               app_blueprints: true,
               permissions: true,
               knowledge: true,

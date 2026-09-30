@@ -23,13 +23,7 @@ import { buildScreens } from "../src/screens.ts";
 import { grantReviewed, racingDb, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { collectionWithNote } from "./knowledge.ts";
-import {
-  auditedDuring,
-  openRpc,
-  outcome,
-  signedInApi,
-  unique,
-} from "./sign-in.ts";
+import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // The built-in blueprints: Apps' blueprints that ship with each release,
 // installed on the first request (src/builtins.ts) through the App
@@ -207,7 +201,7 @@ describe("the built-in blueprints", () => {
     ).resolves.toStrictEqual(["app.not_found", "role.forbidden"]);
   });
 
-  it("can't be changed, run, shared or given permissions, by an admin neither, whatever app_sharing says", async () => {
+  it("can't be changed, run, shared or given permissions, by an admin neither", async () => {
     await expect(ensureInstalled()).resolves.toBeTruthy();
     const admin = await signedInApi(idp, "admin");
     const builder = await signedInApi(idp, "builder");
@@ -240,28 +234,6 @@ describe("the built-in blueprints", () => {
     const before = await helloState();
     await expect(changes(admin.api)).resolves.toStrictEqual(refused);
 
-    // With app_sharing off (and so blueprints too), every builder may build
-    // every App, but still not a built-in, which they still find.
-    const off: Env = { ...env, FEATURES: { apps: true, permissions: true } };
-    const { core } = await openRpc(admin.session, { coreEnv: off });
-    const offAdmin = core.authenticate();
-    const { core: builderCore } = await openRpc(builder.session, {
-      coreEnv: off,
-    });
-    const listedOff = await builderCore.authenticate().apps.list();
-    expect({
-      refused: await Promise.all([
-        outcome(
-          offAdmin.apps.files.commit(
-            helloApp,
-            { "notes.md": "# Mine\n" },
-            "Mine"
-          )
-        ),
-        outcome(offAdmin.apps.versions.setCurrent(helloApp, 1)),
-      ]),
-      listed: listedOff.some(({ id }) => id === helloApp),
-    }).toStrictEqual({ refused: refused.slice(0, 2), listed: true });
     await expect(helloState()).resolves.toStrictEqual(before);
 
     // Nor does another App get to call its exports: a built-in never runs.

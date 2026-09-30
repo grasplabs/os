@@ -1,6 +1,6 @@
 import { collectionIdSchema } from "@grasp-os/shared/ids";
 import type { CollectionId } from "@grasp-os/shared/ids";
-import { canBuild, isAdmin } from "@grasp-os/shared/roles";
+import { isAdmin } from "@grasp-os/shared/roles";
 import { and, ne, or } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
@@ -13,7 +13,6 @@ import { memberOf } from "../auth/identity.ts";
 import { apps } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { collections, documents } from "../db/knowledge/schema.ts";
-import { featureEnabled } from "../features.ts";
 import { appsCollectionEnabled, collectionsAllowed } from "./access.ts";
 import type { Reader } from "./access.ts";
 
@@ -36,9 +35,9 @@ import type { Reader } from "./access.ts";
 // permissions.ts `requireCollection`; an App granted it before counts it
 // as a source that doesn't resolve, app-provenance.ts, so the App reaches
 // nobody but its owner and admins), and not for those who may open
-// every App (admins; admins and builders while `app_sharing` is off),
-// who find every entry. Entries exist only for Apps in use: a pending copy
-// is never indexed, and Apps are never deleted once in use.
+// every App (admins), who find every entry. Entries exist only for Apps in
+// use: a pending copy is never indexed, and Apps are never deleted once in
+// use.
 
 /** The Apps collection, under this ID: no other has it. */
 export const appsCollectionId: CollectionId = collectionIdSchema.parse("apps");
@@ -83,13 +82,9 @@ type Found = "every" | readonly string[];
 
 /** The entries `person` finds: those of the Apps they may open. */
 const foundBy = async (env: Env, person: Person): Promise<Found> => {
-  const sharing = featureEnabled(env, "app_sharing");
   // Who may open every App (as `appFor` decides it), whatever it read.
-  if (isAdmin(person.role) || (!sharing && canBuild(person.role))) {
+  if (isAdmin(person.role)) {
     return "every";
-  }
-  if (!sharing) {
-    return [];
   }
   const rows = await drizzle(env.DB)
     .select({ id: apps.id })

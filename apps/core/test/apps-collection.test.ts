@@ -137,7 +137,7 @@ const entryState = async (owner: Person, app: string, words: string[]) => {
 };
 
 /** Everything creating and releasing an App needs, without indexing. */
-const indexingOff = { apps: true, app_sharing: true, knowledge: true };
+const indexingOff = { apps: true, knowledge: true };
 
 /** Runs `run` with `owner`'s API on a connection where indexing is off. */
 const withIndexingOff = async (

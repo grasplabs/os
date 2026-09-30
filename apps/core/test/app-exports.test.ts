@@ -130,7 +130,7 @@ describe("another App's exports", () => {
     ]);
     const off: Env = {
       ...env,
-      FEATURES: { apps: true, app_sharing: true, permissions: true },
+      FEATURES: { apps: true, permissions: true },
     };
     const { core } = await openRpc(admin.session, { coreEnv: off });
     await expect(

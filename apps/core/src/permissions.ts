@@ -1267,7 +1267,7 @@ const withTypeClaims = async (
 /**
  * Every permission, or those of one App or agent, oldest first; only those
  * in `status` when given. With `openApps` (a condition on `apps`: the Apps
- * the person has a role in, as `appsListedFor` in apps.ts says), one that
+ * the person has a role in, as `appsFoundBy` in app-access.ts says), one that
  * names an App, as its subject or as a workflow's, only if that App is one
  * of them.
  */

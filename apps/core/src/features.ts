@@ -62,14 +62,8 @@ export const uploadFeatures = [
 export type Feature =
   | "apps"
   /**
-   * App roles and sharing (app-access.ts). While off, admins and builders
-   * build every App and users none, as before Apps had roles, and nobody
-   * shares one.
-   */
-  | "app_sharing"
-  /**
-   * Blueprints: App versions to create Apps from (app-blueprints.ts);
-   * needs `app_sharing` on too, whose roles decide who marks and copies.
+   * Blueprints: App versions to create Apps from (app-blueprints.ts):
+   * App roles decide who marks and copies.
    */
   | "app_blueprints"
   | "permissions"
@@ -233,7 +227,7 @@ export type Feature =
   | "chat"
   /**
    * The chat's agent building Apps (agent-builds.ts): creating one (from
-   * a blueprint too, while `app_blueprints` and `app_sharing` are on),
+   * a blueprint too, while `app_blueprints` is on),
    * writing, checking and dry-running a draft of its own per chat, and
    * proposing it as a pending version for a builder to make current, with
    * the permissions it asks for; needs

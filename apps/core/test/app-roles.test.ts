@@ -513,38 +513,4 @@ describe("App roles", { timeout: 60_000 }, () => {
       ])
     ).resolves.toStrictEqual(["ok", "ok", "role.forbidden"]);
   });
-
-  it("are as before while sharing is switched off: builders on every App, users on none", async () => {
-    const owner = await personApi("builder");
-    const app = await newApp(owner);
-    const coreEnv: Env = {
-      ...env,
-      FEATURES: { apps: true, screens: true },
-    };
-    const connect = async (role: Role) => {
-      const { session } = await signedInWithRole(idp, role);
-      const { core } = await openRpc(session, { coreEnv });
-      return await core.authenticate();
-    };
-    const [builder, user] = await Promise.all([
-      connect("builder"),
-      connect("user"),
-    ]);
-
-    await expect(
-      Promise.all([
-        outcome(builder.apps.files.read(app)),
-        builder.apps.list().then((all) => all.some(({ id }) => id === app)),
-        outcome(builder.apps.members.list(app)),
-        outcome(user.apps.get(app)),
-        outcome(user.apps.list()),
-      ])
-    ).resolves.toStrictEqual([
-      "ok",
-      true,
-      "feature.disabled",
-      "role.forbidden",
-      "role.forbidden",
-    ]);
-  });
 });
