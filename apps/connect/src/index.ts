@@ -10,6 +10,7 @@ import {
   connectErrors,
   declineActionSchema,
   heldOutcomeRequestSchema,
+  markTaken,
 } from "@grasp-os/shared/connect";
 import type {
   Catalog,
@@ -445,7 +446,12 @@ export default class Connect
       throw error;
     }
     await take(this.env, person, held, "confirm", claims.restricted);
-    return await this.#carryOutAudited(call, claims, held);
+    try {
+      return await this.#carryOutAudited(call, claims, held);
+    } catch (error) {
+      // Taken, and failed: said so, so core tells the action's chat.
+      throw markTaken(error);
+    }
   }
 
   async call(request: unknown): Promise<ConnectResult> {

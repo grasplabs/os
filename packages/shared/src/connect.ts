@@ -946,3 +946,36 @@ export const connectErrors = defineErrorFamily({
   "connect.catalog_unavailable":
     "Composio's toolkits can't be listed right now. Try again shortly.",
 });
+
+/**
+ * An error of a held action's confirmation that came after connect took the
+ * action (`confirmAction`), so it no longer waits and it failed: marked in
+ * its details, which cross RPC with it. A refusal before connect took it,
+ * which leaves it waiting, never is. Only a confirmation that took the
+ * action tells anyone it failed, so a refused one racing it can't.
+ */
+export const markTaken = (error: unknown): unknown => {
+  if (typeof error === "object" && error !== null && "code" in error) {
+    const details: unknown = Reflect.get(error, "details");
+    Object.assign(error, {
+      details: {
+        ...(typeof details === "object" && details !== null ? details : {}),
+        taken: true,
+      },
+    });
+  }
+  return error;
+};
+
+/** Whether `error` is one `markTaken` marked. */
+export const wasTaken = (error: unknown): boolean => {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const details: unknown = Reflect.get(error, "details");
+  return (
+    typeof details === "object" &&
+    details !== null &&
+    Reflect.get(details, "taken") === true
+  );
+};

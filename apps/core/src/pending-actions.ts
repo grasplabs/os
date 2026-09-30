@@ -1,4 +1,4 @@
-import { connectErrors } from "@grasp-os/shared/connect";
+import { connectErrors, wasTaken } from "@grasp-os/shared/connect";
 import type {
   ConnectResult,
   PendingAction,
@@ -179,14 +179,9 @@ export const confirmPendingAction = async (
   try {
     result = await env.CONNECT.confirmAction({ ...request, capability });
   } catch (error) {
-    // Refused, it waits on, or another decision took it first
-    // (`connect.pending_not_found`); taken by this one, it is gone, and
-    // failed. Accepted: a refusal while another decision takes it at the
-    // same moment reads as a failure too.
-    const taken =
-      connectErrors.codeOf(error) !== "connect.pending_not_found" &&
-      (await env.CONNECT.pendingAction({ person, id: held.id })) === null;
-    if (taken) {
+    // Only when this confirmation took it (`markTaken`): a refused one
+    // tells nothing, whatever another decision did meanwhile.
+    if (wasTaken(error)) {
       await tellChat(env, held, identity.userId, "failed");
     }
     throw error;

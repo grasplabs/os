@@ -14,6 +14,7 @@ import { bindingsFor } from "../src/bindings.ts";
 import { chatAgentId, personalWorkspaceId } from "../src/chats-rpc.ts";
 import { personOf } from "../src/connections.ts";
 import { workspace } from "../src/durable-objects.ts";
+import { confirmPendingAction } from "../src/pending-actions.ts";
 import { maxChatsPerPerson } from "../src/workspace.ts";
 import {
   codeStep,
@@ -481,6 +482,96 @@ describe("chats", () => {
         { calls: 1, sent: [{ to: "ben@acme.test", subject: "OUTCOME_SENT" }] },
         { calls: 0, sent: [] },
       ],
+    });
+  });
+
+  it("tell their agent one outcome of a write when a refused confirmation races the one that runs it", async () => {
+    const ann = await person();
+    const admin = await signedInApi(idp, "admin");
+    const mail = await mailConnection();
+    await requestGranted(idp, admin, {
+      subject: { type: "agent", agentId: chatAgentId },
+      object: { type: "connection", connectionId: mail.id },
+      actions: ["mail.send"],
+      binding: "RACED_MAIL",
+    });
+    await answering(
+      ann,
+      codeStep(
+        'export default async (env) => await env.connections.call("RACED_MAIL", "mail.send", { to: "ben@acme.test", subject: "Raced" });'
+      ),
+      says("It waits for you.")
+    );
+    const chat = await ann.chats.create("Raced");
+    const follower = await follow(ann.chats, chat.id);
+    await ann.chats.send(chat.id, { text: "Send Ben the mail.", model });
+    await settled(follower);
+    const [held] = await ann.api.pendingActions.list();
+    if (held === undefined) {
+      throw new Error("Expected a held write");
+    }
+    // Connect refuses the first confirmation (another input than shown)
+    // while the action still waits; before core hears of it, the second
+    // confirmation runs the action.
+    let confirmed: string | undefined;
+    const connect = env.CONNECT;
+    const racing: Env = {
+      ...env,
+      CONNECT: new Proxy(connect, {
+        get: (target, property) => {
+          if (property === "confirmAction") {
+            return async (
+              request: Parameters<typeof connect.confirmAction>[0]
+            ) => {
+              try {
+                return await target.confirmAction(request);
+              } finally {
+                confirmed = await outcome(
+                  ann.api.pendingActions.confirm(held.id, held.inputHash)
+                );
+              }
+            };
+          }
+          const value: unknown = Reflect.get(target, property);
+          return typeof value === "function"
+            ? (...args: unknown[]): unknown =>
+                Reflect.apply(value, target, args)
+            : value;
+        },
+      }),
+    };
+    const refused = await outcome(
+      confirmPendingAction(
+        racing,
+        await ann.api.whoami(),
+        held.id,
+        "0".repeat(64)
+      )
+    );
+
+    const gateway = await answering(ann, says("Noted."));
+    await ann.chats.send(chat.id, { text: "Was it sent?", model });
+    await vi.waitFor(
+      () => {
+        expect(follower.messages().at(-1)).toMatchObject({ text: "Noted." });
+      },
+      { timeout: 10_000 }
+    );
+    const asked = JSON.stringify(gateway.requests[0]?.body);
+    expect({
+      refused,
+      confirmed,
+      outcomes: asked.split("was decided.").length - 1,
+      told: asked.includes(
+        `(pending ID ${held.id}), was decided. The person confirmed it and it was carried out.`
+      ),
+      sent: await mail.did(),
+    }).toStrictEqual({
+      refused: "connect.pending_changed",
+      confirmed: "ok",
+      outcomes: 1,
+      told: true,
+      sent: { calls: 1, sent: [{ to: "ben@acme.test", subject: "Raced" }] },
     });
   });
 

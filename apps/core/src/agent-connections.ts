@@ -328,8 +328,8 @@ const connectionsDeclaration = `/**
  * away: it waits for the person to confirm it in Grasp, and \`pending\`
  * says so. Tell them it waits for them; don't call it again to push it:
  * while it waits, the same call only finds the same waiting change. Once
- * they decided, a note in this chat says how it ended; read its answer
- * with \`outcome\`.
+ * they decided, a note in this chat says how it ended, from your next
+ * turn on; \`outcome\` reads how it ended, and its answer, at any time.
  */
 connections: {
   /** The connections this chat may use, and the actions each allows. */
