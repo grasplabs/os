@@ -174,7 +174,6 @@ const listEvents = defineTool({
   }),
   readOnly: true,
   resource: "calendar",
-  mask: ["events.subject"],
   routes: [{ method: "GET", host: apisHost, path: `${calendars}/events` }],
   run: async ({ calendar, start, end, top, page }) => {
     if (Date.parse(end) <= Date.parse(start)) {
@@ -232,7 +231,6 @@ const getEvent = defineTool({
   }),
   readOnly: true,
   resource: "calendar",
-  mask: ["event.subject", "event.body"],
   routes: [
     { method: "GET", host: apisHost, path: `${calendars}/events/{event}` },
   ],

@@ -185,7 +185,6 @@ const listMessages = defineTool({
   }),
   readOnly: true,
   resource: "mailbox",
-  mask: ["messages.subject", "messages.bodyPreview"],
   routes: [get("/messages"), get("/mailFolders/{folder}/messages")],
   run: async ({
     mailbox,
@@ -330,7 +329,6 @@ const getMessage = defineTool({
   }),
   readOnly: true,
   resource: "mailbox",
-  mask: ["message.subject", "message.bodyPreview", "message.body"],
   routes: [get("/messages/{message}"), get("/messages/{message}/attachments")],
   run: async ({ mailbox, message: id, bodyType }) => {
     const path = `/users/${segment(mailbox)}/messages/${segment(id)}`;
@@ -387,7 +385,6 @@ const readAttachment = defineTool({
   }),
   readOnly: true,
   resource: "mailbox",
-  mask: ["content"],
   routes: [get("/messages/{message}/attachments/{attachment}")],
   run: async ({ mailbox, message, attachment, as }) => {
     const path = `/users/${segment(mailbox)}/messages/${segment(message)}/attachments/${segment(attachment)}`;

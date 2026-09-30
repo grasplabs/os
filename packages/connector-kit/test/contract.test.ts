@@ -126,32 +126,6 @@ describe("a tool", () => {
     }
   });
 
-  it("masks only nullable fields its output has", () => {
-    const withMask = (mask: string[]) =>
-      defineTool({
-        name: "items.list",
-        description: "Lists items",
-        input: z.strictObject({ search: z.string().optional() }),
-        output: z.strictObject({
-          items: z.array(
-            z.strictObject({ subject: z.string().nullable(), id: z.string() })
-          ),
-        }),
-        readOnly: true,
-        mask,
-        routes: [route],
-        run: async () => await Promise.resolve({ output: { items: [] } }),
-      });
-    expect(withMask(["items.subject"]).action).toMatchObject({
-      mask: ["items.subject"],
-    });
-    for (const path of ["items.body", "subject", "items.subject.x"]) {
-      expect(() => withMask([path])).toThrow("to mask");
-    }
-    // Masked, a field becomes null: one that can't be isn't maskable.
-    expect(() => withMask(["items.id"])).toThrow("must be nullable");
-  });
-
   it("reports an error with a code callers can act on, when it has one", async () => {
     const failing = (error: Error) =>
       defineTool({

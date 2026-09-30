@@ -540,11 +540,10 @@ describe("a side effect from chat", () => {
       declined: await ended(archived),
       // Decided, it is still only its own chat's.
       elsewhere: await outcome(callOf({ chatId: "chat-2" })),
-      // A capability for another resource, another agent's, or one whose
-      // permission masks what this server can't mask, reads nothing.
+      // A capability for another resource, or another agent's, reads
+      // nothing.
       otherResource: await outcome(ended(sent, { resource: "other" })),
       otherAgent: await outcome(ended(sent, {}, inChat(anna, "agent-other"))),
-      masked: await outcome(ended(sent, { mask: ["body"] })),
       confirming: await outcome(ended(sent, { confirms: id })),
     }).toStrictEqual({
       sent: {
@@ -566,7 +565,6 @@ describe("a side effect from chat", () => {
       elsewhere: "connect.pending_not_found",
       otherResource: "connect.pending_not_found",
       otherAgent: "connect.pending_not_found",
-      masked: "connect.mask_unsupported",
       confirming: "capability.invalid",
     });
     // Each read is recorded as a call is: waiting, handed over, refused.
@@ -579,7 +577,6 @@ describe("a side effect from chat", () => {
       { action: "connection.call", actor: "agent", outcome: "ok" },
       { action: "connection.action.declined", actor: "person", outcome: null },
       { action: "connection.call", actor: "agent", outcome: "replayed" },
-      { action: "connection.call", actor: "agent", outcome: "refused" },
       { action: "connection.call", actor: "agent", outcome: "refused" },
       { action: "connection.call", actor: "agent", outcome: "refused" },
       { action: "connection.call", actor: "agent", outcome: "refused" },

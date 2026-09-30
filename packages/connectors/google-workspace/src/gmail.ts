@@ -176,7 +176,6 @@ const listMessages = defineTool({
   }),
   readOnly: true,
   resource: "mailbox",
-  mask: ["messages.subject", "messages.bodyPreview"],
   // Gmail lists IDs only; each message's metadata is one more request.
   routes: [get("/messages"), get("/messages/{message}")],
   run: async ({
@@ -314,7 +313,6 @@ const getMessage = defineTool({
   }),
   readOnly: true,
   resource: "mailbox",
-  mask: ["message.subject", "message.bodyPreview", "message.body"],
   routes: [
     get("/messages/{message}"),
     get("/messages/{message}/attachments/{attachment}"),
@@ -377,7 +375,6 @@ const readAttachment = defineTool({
   }),
   readOnly: true,
   resource: "mailbox",
-  mask: ["content"],
   routes: [
     get("/messages/{message}"),
     get("/messages/{message}/attachments/{attachment}"),

@@ -38,26 +38,6 @@ export type PermissionSubject = z.infer<typeof permissionSubjectSchema>;
 /** A subject as a client sends it, with a plain string ID. */
 export type PermissionSubjectInput = z.input<typeof permissionSubjectSchema>;
 
-/**
- * A field of a connection's results, by name, such as `body`: a permission
- * that masks it gets every field of that name its native connector's tools
- * declare maskable back as `null`. A call connect can't mask for (a
- * remote server's, or with a field no tool of the connector declares) is
- * refused.
- */
-export const maskFieldSchema = z.string().regex(/^[A-Za-z]\w{0,63}$/u);
-
-/** Most fields one permission masks. */
-export const permissionMaxMaskFields = 16;
-
-/** The fields a permission masks, each once. */
-export const maskFieldsSchema = z
-  .array(maskFieldSchema)
-  .max(permissionMaxMaskFields)
-  .refine((fields) => new Set(fields).size === fields.length, {
-    message: "Each field once",
-  });
-
 /** A Knowledge collection, as a permission's object. */
 const collectionObjectSchema = z.strictObject({
   type: z.literal("collection"),
@@ -92,11 +72,6 @@ export const permissionObjectSchema = z.discriminatedUnion("type", [
     connectionId: connectionIdSchema,
     /** One resource in the connection; absent means the whole connection. */
     resource: identifierSchema.optional(),
-    /**
-     * Fields of its results masked for this permission, such as `body`
-     * and `content` for one that may see metadata only.
-     */
-    mask: maskFieldsSchema.min(1).optional(),
   }),
   collectionObjectSchema,
   z.strictObject({
@@ -236,8 +211,8 @@ const grantShape = {
 };
 
 /**
- * Refuses an action the object doesn't have, and actions or masked fields
- * too long for the audit log.
+ * Refuses an action the object doesn't have, and actions too long for the
+ * audit log.
  */
 const checkGrant = (
   { object, actions }: { object: PermissionObject; actions: readonly string[] },
@@ -266,15 +241,6 @@ const checkGrant = (
       code: "custom",
       path: ["actions"],
       message: "Too many actions for one permission",
-    });
-  }
-  // And the masked fields too.
-  const mask = object.type === "connection" ? (object.mask ?? []) : [];
-  if (mask.join(" ").length > identifierMaxLength) {
-    context.addIssue({
-      code: "custom",
-      path: ["object", "mask"],
-      message: "Too many masked fields for one permission",
     });
   }
 };

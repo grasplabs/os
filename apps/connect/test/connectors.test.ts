@@ -224,33 +224,7 @@ describe("a native connector", () => {
     expect(outcomes).toStrictEqual(["connect.server_unavailable", "ok"]);
   });
 
-  it("masks a repeated side effect's answer as the repeat's capability says", async () => {
-    const connection = await connectionTo("sample");
-    const stated = {
-      connectionId: connection.id,
-      action: "items.send",
-      input: { mailbox: "invoices@acme.test", subject: "Paid" },
-      idempotencyKey: "run-2:send",
-    };
-    const send = async (mask: string[]): Promise<unknown> => {
-      const { output } = await callAs(
-        agentFor(connection.person.userId),
-        stated,
-        { mask }
-      );
-      const parsed: unknown = JSON.parse(output);
-      return parsed;
-    };
-    await expect(send([])).resolves.toMatchObject({ subject: "Paid" });
-    await expect(send(["subject"])).resolves.toMatchObject({ subject: null });
-    // A mask connect can't apply is refused before any repeat is answered.
-    await expect(outcome(send(["nonsense"]))).resolves.toBe(
-      "connect.mask_unsupported"
-    );
-    expect(api.sent.map(({ method }) => method)).toStrictEqual(["POST"]);
-  });
-
-  it("masks a held call's answer, read later, as the capability of that read says", async () => {
+  it("answers a held call's outcome, read later, only to a capability for that call's resource", async () => {
     const connection = await connectionTo("sample");
     const chat = agentFor(
       connection.person.userId,
@@ -272,7 +246,6 @@ describe("a native connector", () => {
       throw new Error("Expected the held action");
     }
     const keyed = { ...stated, idempotencyKey: held.idempotencyKey };
-    // Confirmed while the permission masked nothing.
     await exports.default.confirmAction({
       person: connection.person,
       id: held.id,
@@ -283,23 +256,13 @@ describe("a native connector", () => {
         confirms: held.id,
       }),
     });
-    const read = async (mask: string[]): Promise<unknown> => {
-      const ended = await exports.default.heldOutcome({
-        ...keyed,
-        capability: await signCapability(env.CAPABILITY_SIGNING_KEY, chat, {
-          ...keyed,
-          mask,
-        }),
-      });
-      return ended.state === "done" ? JSON.parse(ended.result.output) : ended;
-    };
-    await expect(read([])).resolves.toMatchObject({ subject: "Paid" });
-    // The permission masks the subject by now: so does the read.
-    await expect(read(["subject"])).resolves.toMatchObject({ subject: null });
-    // A mask connect can't apply is refused, never ignored.
-    await expect(outcome(read(["nonsense"]))).resolves.toBe(
-      "connect.mask_unsupported"
-    );
+    const ended = await exports.default.heldOutcome({
+      ...keyed,
+      capability: await signCapability(env.CAPABILITY_SIGNING_KEY, chat, keyed),
+    });
+    expect(
+      ended.state === "done" ? JSON.parse(ended.result.output) : ended
+    ).toMatchObject({ subject: "Paid" });
     // And a capability for the whole connection isn't one for this call.
     const whole = { ...keyed, resource: undefined };
     await expect(

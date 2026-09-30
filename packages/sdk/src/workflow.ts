@@ -717,8 +717,8 @@ export type Trigger<ScheduleParam extends string = string> =
    * When a connection reports an event of this type, e.g.
    * `m365.mail.received`, and only what the App could read: through a
    * permission on the connection (or on the part of it the event is
-   * about) that allows the read action the event names, e.g. `mail.list`,
-   * and masks no fields; from someone's personal connection, only if the
+   * about) that allows the read action the event names, e.g. `mail.list`;
+   * from someone's personal connection, only if the
    * App's owner is that person. `filter` narrows it: each field it names must hold
    * that value at the top of the event's payload, e.g.
    * `{ folder: "inbox" }`. The run starts with the event as input: declare

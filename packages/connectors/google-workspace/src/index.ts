@@ -14,16 +14,6 @@ import { apisHost, gmailHost } from "./google.ts";
  * for good), `calendar.events.readonly` (events only, not calendar
  * settings or sharing) and `drive.readonly` (reading a file's content
  * needs it).
- *
- * Maskable fields, by name, as the Microsoft 365 connector's: `subject`,
- * `bodyPreview` and `body` (messages; events' titles and descriptions)
- * and `content` (attachments and files). A metadata-only permission
- * masking all four still shows: senders and recipients, dates, labels,
- * the read and draft flags, thread IDs; attachments' names, types and
- * sizes; events' times, location, organizer and attendees; files' names,
- * types, sizes and folders. Mail and file searches still run, and look
- * through masked fields: which items match can tell something of what
- * those fields hold.
  */
 export default defineConnector({
   name: "google-workspace",

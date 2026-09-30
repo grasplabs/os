@@ -303,7 +303,6 @@ describe("An App's next version", { timeout: 60_000 }, () => {
           type: "connection",
           connectionId: "connection-outlook",
           resource: "inbox",
-          mask: ["body", "subject"],
         },
         actions: ["mail.list", "mail.send"],
         binding: "OUTLOOK",
