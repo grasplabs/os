@@ -48,7 +48,7 @@ import { featureEnabled, requireFeature } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
 import { requireOwnTypes } from "./knowledge/record-types.ts";
 import { madeCurrent } from "./permissions.ts";
-import { buildOnSave, notBuiltOnSave } from "./save-builds.ts";
+import { buildOnSave } from "./save-builds.ts";
 import { requireWorkflowTestsPass } from "./workflows/code.ts";
 import {
   registerTriggers,
@@ -608,19 +608,16 @@ export const commitFiles = async (
     throw error;
   }
   // Committed: now built, so the version opens without building, and
-  // whoever saved hears what doesn't build (save-builds.ts). Its kill
-  // switch leaves the builds to their first use, as before. Built from
+  // whoever saved hears what doesn't build (save-builds.ts). Built from
   // the files as the version reads back, paths in order, so a build says
   // the same here as at its first use.
   return {
     ...toVersion(row),
-    builds: featureEnabled(env, "build_on_save")
-      ? await buildOnSave(env, {
-          app: appId,
-          version: row.version,
-          files: storedTreeSchema.parse(JSON.parse(json)),
-        })
-      : notBuiltOnSave,
+    builds: await buildOnSave(env, {
+      app: appId,
+      version: row.version,
+      files: storedTreeSchema.parse(JSON.parse(json)),
+    }),
   };
 };
 

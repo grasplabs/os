@@ -1,8 +1,7 @@
 import type { SavedBuild } from "@grasp-os/shared/apps";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
-import { z } from "zod";
+import { describe, expect, it } from "vite-plus/test";
 
 import { commitFiles, versionFiles } from "../src/apps.ts";
 import { buildOnSave } from "../src/save-builds.ts";
@@ -13,7 +12,8 @@ import { workflowFiles } from "./workflow-apps.ts";
 
 // Saving an App's files builds them at once, so the version opens without
 // building, and whoever saved (an agent, most of all) hears what doesn't
-// build in the same call. A build never fails or holds up the save.
+// build in the same call. A build never fails the save, and one that
+// can't finish is reported as such within a bound.
 
 const idp = mockIdp();
 
@@ -182,33 +182,7 @@ export class App {}
     });
   });
 
-  it("builds nothing on save while build_on_save is off, leaving the builds to their first use", async () => {
-    const builder = await signedInApi(idp, "builder");
-    const app = await newApp(builder);
-    const by = await builder.api.whoami();
-    const features = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-
-    const committed = await commitFiles(
-      { ...env, FEATURES: { ...features, build_on_save: false } },
-      by,
-      app,
-      { ...screen(crypto.randomUUID()), ...server(crypto.randomUUID()) },
-      "Save"
-    );
-    const files = await versionFiles(env, appIdSchema.parse(app), 1);
-
-    expect(committed.builds).toStrictEqual({
-      screens: { status: "pending", diagnostics: [] },
-      server: { status: "pending", diagnostics: [] },
-      workflows: { status: "pending", diagnostics: [] },
-    });
-    // Nothing was built: the first open builds.
-    await expect(
-      buildScreens({ ...env, LOADER: noBuilds }, files)
-    ).rejects.toThrow("Built again");
-  });
-
-  it("answers after at most its wait, and builds on in the background", async () => {
+  it("says a build that doesn't finish within its wait couldn't run, rather than wait on", async () => {
     const files = screen(crypto.randomUUID());
     const held = Promise.withResolvers<boolean>();
     // The build cache, which answers only once the test lets it: the
@@ -228,24 +202,43 @@ export class App {}
       },
     });
 
+    // The compiler, counting the builds that start it.
+    let built = 0;
+    const counting: WorkerLoader = {
+      get: (...args) => {
+        built += 1;
+        return env.LOADER.get(...args);
+      },
+      load: (...args) => {
+        built += 1;
+        return env.LOADER.load(...args);
+      },
+    };
+
     const builds = await buildOnSave(
-      { ...env, FILES: holding },
-      { app: appIdSchema.parse(crypto.randomUUID()), version: 1, files },
-      50
+      { ...env, FILES: holding, BUILD_WAIT_MS: "50" },
+      { app: appIdSchema.parse(crypto.randomUUID()), version: 1, files }
     );
+    // Still held: the build that didn't finish has cached nothing, so its
+    // first use builds it anew.
+    const firstUse = await buildScreens({ ...env, LOADER: counting }, files);
     held.resolve(true);
 
-    expect(builds.screens).toStrictEqual({
-      status: "pending",
-      diagnostics: [],
-    });
-    await vi.waitFor(
-      async () => {
-        await expect(
-          buildScreens({ ...env, LOADER: noBuilds }, files)
-        ).resolves.toMatchObject({ ok: true });
-      },
-      { timeout: 10_000, interval: 100 }
+    expect({ builds, firstUse: firstUse.ok, rebuilt: built > 0 }).toStrictEqual(
+      {
+        builds: {
+          screens: {
+            status: "error",
+            diagnostics: [],
+            error:
+              "The build didn't finish in time. It runs again when this is first used.",
+          },
+          server: { status: "none", diagnostics: [] },
+          workflows: { status: "none", diagnostics: [] },
+        },
+        firstUse: true,
+        rebuilt: true,
+      }
     );
   });
 });
