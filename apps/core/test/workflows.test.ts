@@ -232,16 +232,30 @@ const hitsOf = async (app: string, userId: string, name: string) =>
   );
 
 /**
- * A step `name` that ends once the test opens it (`openGate`): until then
- * the run is in that step, and goes on from it in the same execution.
+ * A step `name` that says it began (`atGate`), then ends once the test
+ * opens it (`openGate`): until then the run is in that step, and goes on
+ * from it in the same execution.
  */
 const gate = (name: string): string =>
   `  await step.do("${name}", { description: "Wait for the test" }, async () => {
+    await env.APP.call("hit", "at-gate:${name}");
     while ((await env.APP.call("hits", "gate:${name}")) === 0) {
       await new Promise((resolve) => setTimeout(resolve, 20));
     }
     return null;
   });`;
+
+/** Once a run of the App is in its gate step `name`, which began. */
+const atGate = async (app: string, userId: string, name: string) => {
+  await vi.waitFor(
+    async () => {
+      await expect(
+        hitsOf(app, userId, `at-gate:${name}`)
+      ).resolves.toBeGreaterThan(0);
+    },
+    { timeout: 10_000, interval: 100 }
+  );
+};
 
 /** Opens the gate `name` of the App's runs. */
 const openGate = async (app: string, userId: string, name: string) => {
@@ -1143,9 +1157,10 @@ ${gate("again")}
       )
     );
     const run = await builder.api.workflows.start(app, "held");
-    // Past a step before it is held, as a run mostly is: the new execution
-    // below replays that step first.
-    await stepDone(run.id, "$params");
+    // In its gate step, past a step before it, as a run mostly is: the new
+    // execution below replays that step first. The gate's step began while
+    // workflows were on, so what is held below is the step after it.
+    await atGate(app, builder.userId, "go");
     const { FEATURES: features } = env;
     const off = {
       ...z.record(z.string(), z.boolean()).parse(features),
@@ -1186,7 +1201,7 @@ ${gate("again")}
       broken.mend();
     }
     // Switched off again later, it waits again: a new wait, recorded too.
-    await stepDone(run.id, "work");
+    await atGate(app, builder.userId, "again");
     try {
       env.FEATURES = off;
       await openGate(app, builder.userId, "again");
