@@ -27,6 +27,10 @@ const scope: CapabilityScope = {
   resource: "finance@acme.test",
   action: "mail.send",
   idempotencyKey: "run-1/book",
+  origin: {
+    permissionId: "permission-outlook",
+    context: { type: "app", appId: "app-invoices" },
+  },
 };
 
 const refusedSchema = z.object({
@@ -55,7 +59,18 @@ describe("capabilities", () => {
       resource: scope.resource,
       action: scope.action,
       idempotencyKey: scope.idempotencyKey,
+      origin: scope.origin,
     });
+  });
+
+  it("are made only with the permission and context core checks again when a held call is confirmed", async () => {
+    // Without them connect couldn't hold the call for the person: nothing
+    // may sign a capability that leaves them out.
+    const withoutOrigin: CapabilityScope = { ...scope };
+    Reflect.deleteProperty(withoutOrigin, "origin");
+    await expect(
+      signCapability(key, authority, withoutOrigin, now)
+    ).rejects.toThrow(/origin/u);
   });
 
   it("are refused when made with another key", async () => {

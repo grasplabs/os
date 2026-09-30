@@ -201,12 +201,11 @@ describe("a call on a connection", () => {
     expect(server.ran).toStrictEqual([]);
   });
 
-  it("refuses a side effect from chat until the person can confirm it", async () => {
+  it("holds a side effect from chat until the person confirms it", async () => {
     const connectionId = await addConnection();
     const inChat = agentFor("user-anna", "agent-chat", "interactive");
-    await expect(outcome(callAs(inChat, write(connectionId)))).resolves.toBe(
-      "connect.confirmation_required"
-    );
+    const result = await callAs(inChat, write(connectionId));
+    expect(result.pending?.id).toBeTypeOf("string");
     expect(server.ran).toStrictEqual([]);
   });
 

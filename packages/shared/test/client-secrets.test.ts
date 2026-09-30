@@ -62,6 +62,10 @@ describe("a client's derived secrets", () => {
       resource: "finance@acme.test",
       action: "mail.send",
       idempotencyKey: "run-1/book",
+      origin: {
+        permissionId: "permission-outlook",
+        context: { type: "app" as const, appId: "app-invoices" },
+      },
     };
     const authority = authoritySchema.parse({
       subject: { type: "app", appId: "app-invoices" },

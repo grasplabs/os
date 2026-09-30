@@ -911,8 +911,6 @@ export const connectErrors = defineErrorFamily({
     "This is someone's personal connection: only calls for its owner can use it.",
   "connect.action_not_found": "This connection has no such action.",
   "connect.input_too_large": "This call's input is too large.",
-  "connect.confirmation_required":
-    "This action has a side effect, and changes from chat need the person to confirm them first.",
   "connect.resource_out_of_scope":
     "This call reaches beyond the one resource it may use.",
   "connect.idempotency_key_required":

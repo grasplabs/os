@@ -720,9 +720,11 @@ describe("a Composio connection", () => {
   it("holds a write from chat for the person to confirm", async () => {
     const connectionId = await connectHubSpot(someone("admin"));
     const inChat = agentFor("user-anna", "agent-chat", "interactive");
-    await expect(
-      outcome(callAs(inChat, call(connectionId, "HUBSPOT_CREATE_CONTACT")))
-    ).resolves.toBe("connect.confirmation_required");
+    const result = await callAs(
+      inChat,
+      call(connectionId, "HUBSPOT_CREATE_CONTACT")
+    );
+    expect(result.pending?.id).toBeTypeOf("string");
     expect(composio.state.mcp.ran).toStrictEqual([]);
   });
 

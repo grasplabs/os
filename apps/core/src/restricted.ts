@@ -26,10 +26,8 @@ import { appHost, workspace } from "./durable-objects.ts";
 // restricted context may still call a native connector's reads (as its
 // manifest declares them, never a server's own word), and every other
 // call, a Composio toolkit's reads too (their input leaves for a third
-// party), is held there for the person (a workflow run waits for their decision). With
-// held actions switched off (`confirmations`), core refuses every call of
-// a restricted context instead (bindings.ts). Knowledge, which stays in
-// the deployment, can be read too.
+// party), is held there for the person (a workflow run waits for their
+// decision). Knowledge, which stays in the deployment, can be read too.
 //
 // The flag is only as good as the boundaries between contexts: it must
 // follow every way data moves from one to another. A workflow run started

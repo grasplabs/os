@@ -4,10 +4,7 @@ import type { ConnectCall, ConnectResult } from "@grasp-os/shared/connect";
 import { isExpectedError, toOpaqueError } from "@grasp-os/shared/errors";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
-import {
-  bindingNameSchema,
-  permissionErrors,
-} from "@grasp-os/shared/permissions";
+import { bindingNameSchema } from "@grasp-os/shared/permissions";
 import type {
   Authority,
   Permission,
@@ -17,7 +14,7 @@ import { workflowErrors } from "@grasp-os/shared/workflows";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
-import { featureEnabled, requireFeature } from "./features.ts";
+import { requireFeature } from "./features.ts";
 import type {
   CollectionBinding,
   CollectionGrant,
@@ -52,11 +49,6 @@ export interface CallGrant {
  * again should connect hold it for them. `confirms` is the held action a
  * person confirmed (pending-actions.ts). Core makes capabilities here and
  * nowhere else, and nothing outside core reaches this function.
- *
- * With held actions switched off (`confirmations`), the release before's
- * behaviour: a restricted context makes no connection calls at all
- * (`permission.restricted`), and no origin is signed, so connect holds
- * nothing and refuses side effects from chat (`confirmation_required`).
  */
 export const signedCall = async (
   env: Env,
@@ -66,10 +58,6 @@ export const signedCall = async (
 ) => {
   await authorize(env, authority, connection, action, permissionId);
   const restricted = await isRestricted(env, authority, context);
-  const holds = featureEnabled(env, "confirmations");
-  if (restricted && !holds) {
-    throw permissionErrors.create("permission.restricted");
-  }
   const scope = {
     connectionId: connection.connectionId,
     resource: connection.resource,
@@ -82,7 +70,7 @@ export const signedCall = async (
     {
       ...scope,
       restricted,
-      origin: holds ? { permissionId, context } : undefined,
+      origin: { permissionId, context },
       context,
       confirms,
     }

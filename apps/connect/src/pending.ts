@@ -405,11 +405,6 @@ export const hold = async (
   }
 ): Promise<PendingReference> => {
   const { authority, origin } = claims;
-  // Only core's capability for a call it can check again on confirmation
-  // (a core of the release before sets none): refused as before.
-  if (origin === undefined) {
-    throw connectErrors.create("connect.confirmation_required");
-  }
   const db = drizzle(env.DB);
   const { subject } = authority;
   const subjectType = subject.type;

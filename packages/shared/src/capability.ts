@@ -78,9 +78,9 @@ export const capabilityClaimsSchema = z.strictObject({
   /**
    * What core checks again if connect holds the call and the person
    * confirms it: the permission that allowed it and the context it came
-   * from. Connect holds nothing without (a core of the release before).
+   * from.
    */
-  origin: originSchema.optional(),
+  origin: originSchema,
   /**
    * Where the call is made: the chat, App or run, for the audit log. A
    * chat's agent is its workspace's, in every chat, so only this says
@@ -97,15 +97,19 @@ export const capabilityClaimsSchema = z.strictObject({
 export type CapabilityClaims = z.infer<typeof capabilityClaimsSchema>;
 
 /** The one call a capability is for, as the call itself states it. */
-export interface CapabilityScope {
+export interface CapabilityCall {
   connectionId: string;
   resource?: string | undefined;
   action: string;
   idempotencyKey?: string | undefined;
+}
+
+/** The call a capability is for, and what core signs with it. */
+export interface CapabilityScope extends CapabilityCall {
   /** The caller's context is in restricted mode: signed, not compared. */
   restricted?: boolean | undefined;
   /** What core checks again when a held call is confirmed: signed. */
-  origin?: z.input<typeof originSchema> | undefined;
+  origin: z.input<typeof originSchema>;
   /** Where the call is made, for the audit log: signed, not compared. */
   context?: z.input<typeof workContextSchema> | undefined;
   /** The held action the person confirmed: signed, not compared. */
@@ -161,10 +165,8 @@ export const signCapability = async (
     resource: scope.resource ?? null,
     action: scope.action,
     idempotencyKey: scope.idempotencyKey ?? null,
-    // Only when set: a connect that knows no restricted mode refuses a
-    // capability that says it, which fails closed.
-    ...(scope.restricted === true ? { restricted: true } : {}),
-    ...(scope.origin === undefined ? {} : { origin: scope.origin }),
+    restricted: scope.restricted === true,
+    origin: scope.origin,
     ...(scope.context === undefined ? {} : { context: scope.context }),
     ...(scope.confirms === undefined ? {} : { confirms: scope.confirms }),
   };
@@ -249,7 +251,7 @@ const readClaims = async (
 export const verifyCapability = async (
   secrets: readonly string[],
   token: unknown,
-  scope: CapabilityScope,
+  scope: CapabilityCall,
   now: number = Date.now()
 ): Promise<CapabilityClaims> => {
   const claims = await readClaims(secrets, token);

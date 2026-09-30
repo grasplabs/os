@@ -105,25 +105,45 @@ export const appFor = (person: string, appId = "app-crm"): Authority =>
 /** A call as core states it, with plain string IDs. */
 export type Call = Omit<z.input<typeof connectCallSchema>, "capability">;
 
+/** Where a chat's call comes from, as core signs it for connect to hold. */
+export const chatOrigin: CapabilityScope["origin"] = {
+  permissionId: "permission-mail",
+  context: { type: "chat", workspaceId: "workspace-1", chatId: "chat-1" },
+};
+
+/**
+ * Where a call by `authority` comes from, as core signs it: an agent's
+ * from its chat, an App's from the App.
+ */
+export const originOf = (authority: Authority): CapabilityScope["origin"] =>
+  authority.subject.type === "app"
+    ? {
+        permissionId: "permission-mail",
+        context: { type: "app", appId: authority.subject.appId },
+      }
+    : chatOrigin;
+
 /** The capability core would sign for `call` by `authority`. */
 export const capabilityFor = async (
   authority: Authority,
   call: Call,
   key: string = env.CAPABILITY_SIGNING_KEY,
   now?: number
-): Promise<string> => await signCapability(key, authority, call, now);
+): Promise<string> =>
+  await signCapability(
+    key,
+    authority,
+    { origin: originOf(authority), ...call },
+    now
+  );
 
-/** What core signs into a capability besides the call itself. */
-export type Signed = Pick<
-  CapabilityScope,
-  "restricted" | "origin" | "confirms"
+/**
+ * What core signs into a capability besides the call itself; the origin
+ * is `originOf` the authority unless it says another.
+ */
+export type Signed = Partial<
+  Pick<CapabilityScope, "restricted" | "origin" | "confirms">
 >;
-
-/** Where a chat's call comes from, as core signs it for connect to hold. */
-export const chatOrigin: NonNullable<Signed["origin"]> = {
-  permissionId: "permission-mail",
-  context: { type: "chat", workspaceId: "workspace-1", chatId: "chat-1" },
-};
 
 /**
  * Makes `call` for `authority`, as core does: with a capability that also
@@ -139,6 +159,7 @@ export const callAs = async (
   await connect.call({
     ...call,
     capability: await signCapability(env.CAPABILITY_SIGNING_KEY, authority, {
+      origin: originOf(authority),
       ...call,
       ...signed,
     }),

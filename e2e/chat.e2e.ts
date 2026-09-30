@@ -225,7 +225,7 @@ test("a chat shows nothing of held writes while they're switched off", async ({
 
   // The page's list of held writes goes to an API this stack has switched
   // off (improvement signals), which core refuses as `feature.disabled`,
-  // as it refuses held writes while connections or confirmations are off.
+  // as it refuses held writes while connections are off.
   let refused = 0;
   await page.routeWebSocket("**/rpc", (socket) => {
     const toCore = socket.connectToServer();

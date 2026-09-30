@@ -56,7 +56,7 @@ const readHeld = async (
       ),
     };
   } catch (error) {
-    // Held writes switched off (connections or confirmations): nothing to
+    // Held writes switched off (connections): nothing to
     // show under the chat, rather than a refusal under every one.
     if (featureErrors.codeOf(error) === "feature.disabled") {
       return { state: "ready", actions: [] };

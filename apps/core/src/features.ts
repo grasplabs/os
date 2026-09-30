@@ -136,8 +136,6 @@ export type Feature =
   | "audit"
   /** Archiving and purging the audit log (audit-log.ts, `retainAuditLog`). */
   | "audit_retention"
-  /** Held side effects: listing, confirming and declining them. */
-  | "confirmations"
   /**
    * The client's rules for model calls beyond the allowlist, which always
    * applies (model-rules.ts). Uploads read the rule that keeps the whole
