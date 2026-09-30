@@ -202,26 +202,43 @@ export class App {}
       },
     });
 
+    // The compiler, counting the builds that start it.
+    let built = 0;
+    const counting: WorkerLoader = {
+      get: (...args) => {
+        built += 1;
+        return env.LOADER.get(...args);
+      },
+      load: (...args) => {
+        built += 1;
+        return env.LOADER.load(...args);
+      },
+    };
+
     const builds = await buildOnSave(
-      { ...env, FILES: holding },
-      { app: appIdSchema.parse(crypto.randomUUID()), version: 1, files },
-      50
+      { ...env, FILES: holding, BUILD_WAIT_MS: "50" },
+      { app: appIdSchema.parse(crypto.randomUUID()), version: 1, files }
     );
+    // Still held: the build that didn't finish has cached nothing, so its
+    // first use builds it anew.
+    const firstUse = await buildScreens({ ...env, LOADER: counting }, files);
     held.resolve(true);
 
-    expect(builds).toStrictEqual({
-      screens: {
-        status: "error",
-        diagnostics: [],
-        error:
-          "The build didn't finish in time. It runs again when this is first used.",
-      },
-      server: { status: "none", diagnostics: [] },
-      workflows: { status: "none", diagnostics: [] },
-    });
-    // Its first use builds it.
-    await expect(buildScreens(env, files)).resolves.toMatchObject({
-      ok: true,
-    });
+    expect({ builds, firstUse: firstUse.ok, rebuilt: built > 0 }).toStrictEqual(
+      {
+        builds: {
+          screens: {
+            status: "error",
+            diagnostics: [],
+            error:
+              "The build didn't finish in time. It runs again when this is first used.",
+          },
+          server: { status: "none", diagnostics: [] },
+          workflows: { status: "none", diagnostics: [] },
+        },
+        firstUse: true,
+        rebuilt: true,
+      }
+    );
   });
 });

@@ -800,6 +800,68 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     });
   });
 
+  it("fails a check whose build doesn't finish within its bound, and proposes nothing", async () => {
+    const { chat, grant } = await setUp([
+      codeStep(`export default async (env) => {
+        const app = await env.build.create({ name: ${JSON.stringify(appName)} });
+        await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": fixed })});
+        const check = await env.build.check(app.id);
+        const proposal = await env.build.propose(app.id, "Fixed the button");
+        return {
+          check: { passed: check.passed, screens: check.screens, failedInARow: check.failedInARow },
+          proposal: { version: proposal.version, passed: proposal.check.passed, failedInARow: proposal.check.failedInARow },
+        };
+      };`),
+      says("It couldn't be built in time."),
+    ]);
+    await grant();
+    // The build cache holds every build until the test ends: none finishes
+    // within the bound, which the test shortens.
+    const held = Promise.withResolvers<boolean>();
+    const { FILES: files } = env;
+    const holding = new Proxy(files, {
+      get: (target, property) => {
+        const value: unknown = Reflect.get(target, property);
+        if (property === "get" && typeof value === "function") {
+          return async (key: string, ...rest: unknown[]): Promise<unknown> => {
+            if (key.includes("-builds/")) {
+              await held.promise;
+            }
+            return await Reflect.apply(value, target, [key, ...rest]);
+          };
+        }
+        return typeof value === "function"
+          ? (...args: unknown[]): unknown => Reflect.apply(value, target, args)
+          : value;
+      },
+    });
+    try {
+      env.FILES = holding;
+      env.BUILD_WAIT_MS = "50";
+      await chat.ask("Build an invoice desk");
+    } finally {
+      env.FILES = files;
+      delete env.BUILD_WAIT_MS;
+      held.resolve(true);
+    }
+
+    const [result] = await codeResults(chat.stub, chat.chat.id);
+    expect(returned(result?.text)).toStrictEqual({
+      check: {
+        passed: false,
+        screens: {
+          status: "error",
+          diagnostics: [],
+          error:
+            "The build didn't finish in time. It runs again when this is first used.",
+        },
+        failedInARow: 1,
+      },
+      // Counted as failed too, and not proposed.
+      proposal: { version: null, passed: false, failedInARow: 2 },
+    });
+  });
+
   it("proposes a passing draft for review, and nothing goes live until a builder makes it current", async () => {
     const { person, chat, grant } = await setUp([
       codeStep(`export default async (env) => {

@@ -21,6 +21,17 @@ import { buildScreens, buildServer, buildWorkflows } from "./screens.ts";
  */
 const buildWaitMs = 15_000;
 
+/**
+ * How long a save waits for one build: {@link buildWaitMs}, or less where
+ * tests set `BUILD_WAIT_MS`.
+ */
+const waitMsOf = (env: Env): number => {
+  const set = Number(env.BUILD_WAIT_MS);
+  return Number.isInteger(set) && set > 0 && set < buildWaitMs
+    ? set
+    : buildWaitMs;
+};
+
 type SavedBuilds = CommittedVersion["builds"];
 
 /** What a save says of a build that couldn't run; nothing of App code. */
@@ -101,15 +112,15 @@ const savedBuild = async (
  * once, into the build cache (screens.ts), so the version opens, answers
  * and runs without building. Answers once all three are done with how each
  * went, for whoever saved (an agent repairs what failed); none takes
- * longer than `waitMs`. Never throws: a build is never a reason for a save
- * to fail.
+ * longer than {@link buildWaitMs}. Never throws: a build is never a reason
+ * for a save to fail.
  */
 export const buildOnSave = async (
   env: Env,
-  source: SavedSource,
-  waitMs = buildWaitMs
+  source: SavedSource
 ): Promise<SavedBuilds> => {
   const { files } = source;
+  const waitMs = waitMsOf(env);
   const [screens, server, workflows] = await Promise.all([
     savedBuild(
       "screens",
