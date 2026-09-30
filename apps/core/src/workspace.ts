@@ -19,7 +19,6 @@ import type {
 } from "@grasp-os/shared/chat";
 import type { ConnectionPerson } from "@grasp-os/shared/connect";
 import {
-  featureErrors,
   internalErrors,
   isExpectedError,
   withReference,
@@ -73,7 +72,6 @@ import {
   chatSources,
   chats,
 } from "./db/workspace/schema.ts";
-import { featureEnabled, requireFeature } from "./features.ts";
 import { readAsDelegate } from "./knowledge/binding.ts";
 import { forContext } from "./knowledge/memory.ts";
 import { catalog, noteListedSkills } from "./knowledge/tools.ts";
@@ -688,7 +686,6 @@ export class Workspace extends DurableObject<Env> {
     question: Question,
     started?: () => void
   ): Promise<Answer> {
-    requireFeature(this.env, "agent");
     const parsed = questionSchema.safeParse(question);
     if (!parsed.success) {
       throw agentErrors.create("agent.invalid_question");
@@ -754,19 +751,13 @@ export class Workspace extends DurableObject<Env> {
         history: this.#transcript(chat.id),
         question: parsed.data.text,
         model,
-        apis: agentApis(this.env),
+        apis: agentApis,
         context,
         scope,
-        whyStop: async () => {
-          if (!featureEnabled(this.env, "agent")) {
-            return featureErrors.create("feature.disabled", {
-              feature: "agent",
-            });
-          }
-          return (await memberRole(this.env.DB, personId)) === undefined
+        whyStop: async () =>
+          (await memberRole(this.env.DB, personId)) === undefined
             ? permissionErrors.create("permission.person_inactive")
-            : undefined;
-        },
+            : undefined,
         runs: {
           open: () => {
             const runId = crypto.randomUUID();
@@ -893,9 +884,6 @@ export class Workspace extends DurableObject<Env> {
       type: "own",
     });
     this.#keepSources(work.chatId, memory.provenance.collectionIds);
-    if (!featureEnabled(this.env, "knowledge")) {
-      return { memory, skills: [] };
-    }
     // The skills listed go into the prompt: a read of their collections,
     // noted as any Knowledge read is (restricting the chat first were any
     // sensitive), and carried as the chat's sources like memory.

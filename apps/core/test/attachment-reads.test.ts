@@ -61,9 +61,6 @@ const hooks: HostHooks = {
   waiting: async () => {
     await Promise.resolve();
   },
-  goesOn: async () => {
-    await Promise.resolve();
-  },
   callApp: () => {
     throw new Error("A read calls no App");
   },

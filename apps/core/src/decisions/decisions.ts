@@ -35,7 +35,6 @@ import {
   workflowRuns,
 } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
-import { requireFeature } from "../features.ts";
 import { runEngine } from "../workflows/engine.ts";
 import { removedText } from "../workflows/retention.ts";
 import { tellScreens } from "../workflows/run-changes.ts";
@@ -160,17 +159,13 @@ const runUnended = (): SQL => sql`EXISTS (
 /**
  * Opens the run's decision for `step`, or finds the one it opened: a step
  * that runs again after a crash opens nothing new. Its deadline is set
- * here, once, and is the one the run and every answer go by. While
- * decisions are switched off, the run waits before the step that opens
- * one (host.ts); one that got past that just as the switch went is
- * refused here with `feature.disabled`, which its retries try again.
+ * here, once, and is the one the run and every answer go by.
  */
 export const openDecision = async (
   env: Env,
   run: DecisionRun,
   request: { step: string; from: string; description: string; timeout: number }
 ): Promise<{ decision: string; deadline: number }> => {
-  requireFeature(env, "decisions");
   const db = drizzle(env.DB);
   const now = Date.now();
   const row: DecisionRow = {
@@ -348,10 +343,6 @@ const mayAnswer = (
  * starter counts only when the decision names exactly them, as only then
  * may they answer. Who was asked is audited: their IDs, never their
  * emails.
- * While decisions are switched off, nobody is asked: the run waits
- * before the step that asks (host.ts), and a call that got past that just
- * as the switch went is refused with `feature.disabled`, which the ask
- * step's retries try again.
  */
 export const decisionRecipients = async (
   env: Env,
@@ -359,7 +350,6 @@ export const decisionRecipients = async (
   decision: string,
   reminder: boolean
 ): Promise<DecisionRecipient[]> => {
-  requireFeature(env, "decisions");
   const row = await runDecision(env, run, decision);
   // Past its deadline, nobody can answer it, so nobody is asked: a link
   // sent then would lead to a decision that takes no answer.

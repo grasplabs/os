@@ -4,12 +4,11 @@
  */
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
-import { expect, vi } from "vite-plus/test";
+import { vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import { release, serverBuilt } from "./apps.ts";
-import { allEvents } from "./audit-events.ts";
 import { finished } from "./runs.ts";
 import type { signedInApi } from "./sign-in.ts";
 
@@ -196,25 +195,4 @@ export const deadlinePassed = async (decision: string): Promise<boolean> => {
     .bind(decision)
     .first<{ past: number }>();
   return row?.past === 1;
-};
-
-/** Once run `run` waits because `feature` is switched off, as audited. */
-export const waitingFor = async (
-  run: string,
-  feature: string
-): Promise<void> => {
-  await vi.waitFor(
-    async () => {
-      const events = await allEvents();
-      expect(
-        events.some(
-          ({ action, target, detail }) =>
-            action === "workflow.run.waiting" &&
-            target?.id === run &&
-            detail.feature === feature
-        )
-      ).toBeTruthy();
-    },
-    { timeout: 10_000, interval: 100 }
-  );
 };

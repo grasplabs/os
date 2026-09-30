@@ -1,4 +1,3 @@
-import { isExpectedError } from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import {
@@ -13,11 +12,7 @@ import { z } from "zod";
 import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
 import { refreshDailySignals } from "../src/daily-signals.ts";
-import {
-  readStatistics,
-  recordStatistic,
-  sweepStatistics,
-} from "../src/statistics.ts";
+import { recordStatistic, sweepStatistics } from "../src/statistics.ts";
 import { release, requestGranted, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
 import { fullScan, planOf, recordedQueries } from "./query-plans.ts";
@@ -999,7 +994,7 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
     });
   });
 
-  it("audit every platform read refused, and why: invalid, switched off, or past their bounds, those once a minute", async () => {
+  it("audit every platform read refused, and why: invalid, or past their bounds, those once a minute", async () => {
     const admin = await signedInApi(idp, "admin");
     const reader = await statsApp(admin);
     await grantPlatform(admin, reader);
@@ -1017,13 +1012,6 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
         perCall + 1,
         "PLATFORM",
       ]);
-    const off: Env = {
-      ...env,
-      FEATURES: {
-        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-        statistics: false,
-      },
-    };
     const results: Record<string, unknown> = {};
     const events = await auditedDuring(async () => {
       results.invalid = await platformRead(reader, admin.userId, {
@@ -1034,18 +1022,6 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
         measure: "platform.everything",
         days: 7,
       });
-      results.off = await readStatistics(
-        off,
-        {
-          subject: { type: "app", appId: reader },
-          onBehalfOf: admin.userId,
-          mode: "interactive",
-          appVersion: 1,
-        },
-        query
-      ).catch((error: unknown) =>
-        isExpectedError(error) ? error.code : "unexpected"
-      );
       // Two calls past the bound of one in the same minute, audited once;
       // one in the next minute, audited again.
       const minute = Math.floor(held / 60_000) * 60_000;
@@ -1072,7 +1048,6 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
       results: {
         invalid: { error: "statistics.invalid" },
         unknown: { error: "statistics.invalid" },
-        off: "feature.disabled",
         limited: { error: "statistics.rate_limited" },
         limitedAgain: { error: "statistics.rate_limited" },
         nextMinute: { error: "statistics.rate_limited" },
@@ -1087,11 +1062,6 @@ describe("the platform's statistics", { timeout: 60_000 }, () => {
           app: undefined,
           measure: "platform.unknown",
           refused: "statistics.invalid",
-        },
-        {
-          app: watched,
-          measure: "platform.workflow_runs",
-          refused: "feature.disabled",
         },
         {
           app: watched,

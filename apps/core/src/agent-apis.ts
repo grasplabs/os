@@ -116,16 +116,15 @@ const apiNameSchema = z
   .refine((name) => !(name in Object.prototype));
 
 /** The APIs a chat's code gets. */
-export const agentApis = (env: Env): readonly AgentApi[] =>
-  [
-    chatApi,
-    knowledgeApi,
-    connectionsApi,
-    appsApi,
-    buildApi(env),
-    workflowsApi,
-    memoryApi,
-  ].map((api) => ({
-    ...api,
-    name: apiNameSchema.parse(api.name),
-  }));
+export const agentApis: readonly AgentApi[] = [
+  chatApi,
+  knowledgeApi,
+  connectionsApi,
+  appsApi,
+  buildApi,
+  workflowsApi,
+  memoryApi,
+].map((api) => ({
+  ...api,
+  name: apiNameSchema.parse(api.name),
+}));

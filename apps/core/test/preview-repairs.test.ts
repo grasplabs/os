@@ -494,46 +494,4 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       mail: { calls: 0, sent: [] },
     });
   });
-
-  it("says nothing of a preview, and waits for none, while previews are off", async () => {
-    const { builder, chatId, stub, gateway } = await setUp([
-      codeStep(
-        write({ "screens/desk.tsx": screen, "app/server.ts": server(true) })
-      ),
-      codeStep(`export default async (env) => {
-        const [app] = (await env.apps.list()).filter(({ name }) => name === "Invoice desk");
-        const checked = await env.build.check(app.id);
-        return { passed: checked.passed, preview: "preview" in checked };
-      };`),
-      says("Checked."),
-    ]);
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    try {
-      env.FEATURES = { ...on, app_preview: false };
-      await pointAtGateway(stub, gateway);
-      await stub.ask(chatIdSchema.parse(chatId), {
-        text: "Build an invoice desk",
-        model,
-      });
-    } finally {
-      env.FEATURES = features;
-    }
-
-    const results = await codeResults(stub, chatId);
-    const declared = JSON.stringify(gateway.requests[0]?.body);
-    const drafts = await builder.api.chats.drafts(chatId);
-    expect({
-      checked: returned(results[1]?.text),
-      declared: [
-        declared.includes("preview (runtime errors)"),
-        declared.includes("refused: boolean"),
-      ],
-      drafts: drafts.length,
-    }).toStrictEqual({
-      checked: { passed: true, preview: false },
-      declared: [false, false],
-      drafts: 1,
-    });
-  });
 });

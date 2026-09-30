@@ -503,11 +503,6 @@ export const recordTypeOwners = sqliteTable(
  * run's report (JSON): where and why it stopped, without the values it
  * worked on.
  *
- * `waiting_for` is the switched-off feature the run was last seen waiting
- * on, until it goes on: so a run stopped and resumed while it waits (a
- * deploy, a crash) records its wait once, though the resumed execution
- * waits again before the first step it replays (workflows/runs.ts).
- *
  * `details_removed_at` is when an ended run's details were removed, its
  * retention over (workflows/retention.ts): the engine's record of it (its
  * input, what its steps returned, its output), the message of its
@@ -541,7 +536,6 @@ export const workflowRuns = sqliteTable(
     createdAt: timestamp("created_at").notNull(),
     endedAt: timestamp("ended_at"),
     failure: text({ mode: "json" }).$type<RunFailure>(),
-    waitingFor: text("waiting_for"),
     /**
      * What a trigger started it for (src/workflows/triggers.ts): one key
      * per scheduled time, so the same one delivered twice starts one run.

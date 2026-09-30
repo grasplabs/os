@@ -1,7 +1,6 @@
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import {
   deliverConnectorEvent,
@@ -362,10 +361,7 @@ describe("event triggers", () => {
     await expect(runsOf(builder, app)).resolves.toHaveLength(0);
   });
 
-  it("refuse an event that isn't one, or while switched off", async () => {
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const off = { ...env, FEATURES: { ...on, triggers: false } };
-
+  it("refuse an event that isn't one", async () => {
     await expect(outcome(deliver({ id: "e", type: "x" }))).resolves.toBe(
       "workflow.invalid"
     );
@@ -377,8 +373,5 @@ describe("event triggers", () => {
         })
       )
     ).resolves.toBe("workflow.invalid");
-    await expect(
-      outcome(deliverConnectorEvent(off, mailEvent()))
-    ).resolves.toBe("feature.disabled");
   });
 });

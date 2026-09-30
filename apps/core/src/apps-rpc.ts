@@ -35,15 +35,14 @@ export class AppsRpc extends RpcTarget implements AppsApi {
   readonly #members: AppMembersRpc;
   readonly #blueprints: AppBlueprintsRpc;
 
-  /** `blueprints` is the check for `blueprints`, which have a flag of their own. */
-  constructor(env: Env, check: SessionCheck, blueprints: SessionCheck) {
+  constructor(env: Env, check: SessionCheck) {
     super();
     this.#env = env;
     this.#check = check;
     this.#files = new AppFilesRpc(env, check);
     this.#versions = new AppVersionsRpc(env, check);
     this.#members = new AppMembersRpc(env, check);
-    this.#blueprints = new AppBlueprintsRpc(env, blueprints);
+    this.#blueprints = new AppBlueprintsRpc(env, check);
   }
 
   get files(): AppFilesRpc {

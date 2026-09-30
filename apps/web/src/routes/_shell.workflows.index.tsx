@@ -79,8 +79,8 @@ const listWorkflows = async (session: Session): Promise<WorkflowSummary[]> => {
 };
 
 /**
- * The runs core lists for the person, as `filter` narrows them; none for
- * the user role while sharing Apps is switched off, as for the list.
+ * The runs core lists for the person, as `filter` narrows them; none
+ * when refused to their role, as for the list.
  */
 const listRuns = async (
   session: Session,

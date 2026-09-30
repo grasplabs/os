@@ -2,7 +2,6 @@ import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { z } from "zod";
 
 import { runEngine } from "../src/workflows/engine.ts";
 import { failOrphans, startRun } from "../src/workflows/runs.ts";
@@ -317,22 +316,6 @@ describe("runs that never reached the engine", () => {
       // The dispatcher refused it before its first step.
       engine: "errored",
       actions: ["workflow.run.failed", "workflow.run.notified"],
-    });
-  });
-
-  it("are left while workflows are switched off, and marked failed once they're back on", async () => {
-    const builder = await personApi("builder");
-    const app = await appWith(builder, waiting);
-    const orphan = await orphanOf(builder, app, 20 * minute);
-
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    await runCron({ FEATURES: { ...on, workflows: false } });
-    const whileOff = await rowStatus(orphan);
-    await runCron();
-
-    expect({ whileOff, after: await rowStatus(orphan) }).toStrictEqual({
-      whileOff: "starting",
-      after: "failed",
     });
   });
 

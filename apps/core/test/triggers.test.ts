@@ -3,7 +3,6 @@ import type { Role } from "@grasp-os/shared/roles";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { z } from "zod";
 
 import { setCurrentVersion } from "../src/apps.ts";
 import { setParam } from "../src/workflows/params.ts";
@@ -262,15 +261,10 @@ describe("schedule triggers", () => {
     );
   });
 
-  it("start nothing while switched off, and a time missed meanwhile once, late", async () => {
+  it("start a time missed while the cron trigger didn't run once, late", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, weekly());
     const due = await nextRunOf(app);
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-
-    await runCron({ FEATURES: { ...on, triggers: false } }, due);
-
-    await expect(runCount(builder, app)).resolves.toBe(0);
 
     await runCron({}, new Date(due.getTime() + day));
     await runCron({}, new Date(due.getTime() + day + minute));

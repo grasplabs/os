@@ -8,13 +8,12 @@ import type { CoreConnection } from "../core-connection.ts";
 import { useCore } from "../use-core.ts";
 
 // The nav's way to the person's notifications, with how many are unread,
-// read again on every other page the person opens. Only while core lists
-// them: switched off (or out of reach), the nav leaves it out.
+// read again on every other page the person opens.
 
 /**
  * How many of the person's notifications are unread; `undefined` when
- * core doesn't list them. Outside the component, as the React Compiler
- * can't compile `try`.
+ * core couldn't list them, and the nav shows no count. Outside the
+ * component, as the React Compiler can't compile `try`.
  */
 const readUnread = async (
   core: CoreConnection
@@ -60,9 +59,6 @@ export const NotificationsLink = () => {
       unsubscribe();
     };
   }, [router, core]);
-  if (unread === undefined) {
-    return null;
-  }
   return (
     <li>
       <Link
@@ -74,7 +70,7 @@ export const NotificationsLink = () => {
         to="/notifications"
       >
         Notifications
-        {unread > 0 ? (
+        {unread !== undefined && unread > 0 ? (
           <Badge className="ml-auto">
             {unread}
             <span className="sr-only"> unread</span>

@@ -1,5 +1,4 @@
 /** Reading a client's settings and history, as its page shows them. */
-import { featuresSchema } from "@grasp-os/shared/deployment-config";
 import { desc, eq, sql } from "drizzle-orm";
 
 import type { ConsoleDatabase } from "../db/act.ts";
@@ -15,13 +14,11 @@ export interface ClientSettingsView {
   active: boolean;
   /** The release rollouts leave it on, if it's pinned. */
   pinnedReleaseId: string | null;
-  /** Its feature flags, by name, as core's `FEATURES` will have them. */
-  features: Record<string, boolean>;
   /** Its record's sign-in; null when it has none, or one that doesn't parse. */
   signIn: ClientSignInRecord | null;
   /** Whether a `SIGN_IN` setting replaces its record's sign-in on deploy. */
   signInOverridden: boolean;
-  /** Whether a change to its flags or sign-in waits for its next deploy. */
+  /** Whether a change to its sign-in waits for its next deploy. */
   configPending: boolean;
 }
 
@@ -56,15 +53,11 @@ export const clientSettings = async (
     .select({ key: settings.key, value: settings.value })
     .from(settings)
     .where(eq(settings.clientId, clientId));
-  const features = featuresSchema.safeParse(
-    parsedJson(rows.find(({ key }) => key === "FEATURES")?.value)
-  );
   const signIn = clientSignInSchema.safeParse(parsedJson(client.signIn));
   return {
     ring: client.ring,
     active: client.status === "active",
     pinnedReleaseId: client.pinnedReleaseId,
-    features: features.success ? features.data : {},
     signIn: signIn.success ? signIn.data : null,
     signInOverridden: rows.some(({ key }) => key === "SIGN_IN"),
     configPending: await isConfigPending(db, clientId, client.configChangedAt),

@@ -27,7 +27,7 @@ import {
   storedGrant,
 } from "./knowledge.ts";
 import { finished } from "./runs.ts";
-import { openRpc, outcome, signedInApi } from "./sign-in.ts";
+import { outcome, signedInApi } from "./sign-in.ts";
 import { appWith, workflowFiles } from "./workflow-apps.ts";
 
 // Asking the chat's agent to fix a failed run, from its threat model
@@ -102,12 +102,6 @@ const partsOf = (body: unknown) => {
     .parse(body);
   return { system: JSON.stringify(system), messages };
 };
-
-/** The tests' flags, with `run_notifications` off. */
-const withoutNotifications = () => ({
-  ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-  run_notifications: false,
-});
 
 /** The text of every `tool_result` block among `messages`. */
 const toolResults = (messages: readonly unknown[]): string[] =>
@@ -260,9 +254,6 @@ describe("asking the agent to fix a failed run", slow, () => {
       "ARCHIVE"
     );
     await answering(admin, says("On it."));
-    const switchedOff = await openRpc(owner.session, {
-      coreEnv: { ...env, FEATURES: withoutNotifications() },
-    });
 
     const { chat: byAdmin } = await admin.api.chats.fixRun(failed, model);
     await answered(admin, byAdmin.id);
@@ -287,9 +278,6 @@ describe("asking the agent to fix a failed run", slow, () => {
         owner.api.chats.fixRun(crypto.randomUUID(), model)
       ),
       notAnId: await outcome(owner.api.chats.fixRun("../runs", model)),
-      switchedOff: await outcome(
-        switchedOff.core.authenticate().chats.fixRun(failed, model)
-      ),
     };
     const unrefusedChats = await owner.api.chats.list();
     // A model the deployment doesn't allow: refused before any chat.
@@ -315,7 +303,6 @@ describe("asking the agent to fix a failed run", slow, () => {
       completed: "workflow.run_not_found",
       unknown: "workflow.run_not_found",
       notAnId: "workflow.run_not_found",
-      switchedOff: "feature.disabled",
       badModel: "model.not_allowed",
       asked: [[admin.userId, byAdmin.id]],
       chats: [0, 0, 0],

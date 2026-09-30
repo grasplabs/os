@@ -136,16 +136,41 @@ const entryState = async (owner: Person, app: string, words: string[]) => {
   };
 };
 
-/** Everything creating and releasing an App needs, without indexing. */
-const indexingOff = { apps: true, knowledge: true };
+const entriesQuery = /"app_entries"/u;
 
-/** Runs `run` with `owner`'s API on a connection where indexing is off. */
-const withIndexingOff = async (
+/**
+ * The Knowledge database, but every query of the Apps collection's
+ * entries fails: an indexing that can't run, where the rest works.
+ */
+const knowledgeWithoutEntries = (): D1Database => {
+  const real = env.KNOWLEDGE;
+  return {
+    prepare: (query) => {
+      if (entriesQuery.test(query)) {
+        throw new Error("D1 unavailable");
+      }
+      return real.prepare(query);
+    },
+    batch: async <T>(statements: D1PreparedStatement[]) =>
+      await real.batch<T>(statements),
+    exec: async (query) => await real.exec(query),
+    // oxlint-disable-next-line typescript/no-deprecated -- D1Database still has it
+    dump: async () => await real.dump(),
+    withSession: (constraint) => real.withSession(constraint),
+  };
+};
+
+/**
+ * Runs `run` with `owner`'s API on a connection where indexing fails, so
+ * versions it makes current are left unindexed, as a failed indexing
+ * leaves them.
+ */
+const withIndexingFailing = async (
   owner: Person,
   run: (api: Person["api"]) => Promise<void>
 ): Promise<void> => {
   const { core } = await openRpc(owner.session, {
-    coreEnv: { ...env, FEATURES: indexingOff },
+    coreEnv: { ...env, KNOWLEDGE: knowledgeWithoutEntries() },
   });
   try {
     await run(core.authenticate());
@@ -227,20 +252,14 @@ describe("indexing", setUpTime, () => {
     });
   });
 
-  it("catches up on the 15-minute cron trigger with versions made current while indexing was off", async () => {
+  it("catches up on the 15-minute cron trigger with versions whose indexing failed", async () => {
     const owner = await personOf("builder");
     const word = term();
     let id = "";
-    await withIndexingOff(owner, async (api) => {
+    await withIndexingFailing(owner, async (api) => {
       ({ id } = await api.apps.create({ name: `Leave ${term()}` }));
       await release({ api }, id, { "AGENTS.md": agentsMd(word) });
     });
-    await expect(entriesFound(owner.knowledge, word)).resolves.toStrictEqual(
-      []
-    );
-
-    // Nothing while it is still off.
-    await runQuarterHourCron({ FEATURES: indexingOff });
     await expect(entriesFound(owner.knowledge, word)).resolves.toStrictEqual(
       []
     );
@@ -268,7 +287,7 @@ describe("indexing", setUpTime, () => {
     const app = await releasedApp(owner, agentsMd(first));
     const { id: entryId } = await entryOf(owner, app.id);
     // Version 2 made current unindexed, version 3 committed.
-    await withIndexingOff(owner, async (api) => {
+    await withIndexingFailing(owner, async (api) => {
       await release({ api }, app.id, { "AGENTS.md": agentsMd(second) });
       await api.apps.files.commit(
         app.id,
@@ -304,7 +323,7 @@ describe("indexing", setUpTime, () => {
     const owner = await personOf("builder");
     const [first, second] = [term(), term()];
     const app = await releasedApp(owner, agentsMd(first));
-    await withIndexingOff(owner, async (api) => {
+    await withIndexingFailing(owner, async (api) => {
       await release({ api }, app.id, { "AGENTS.md": agentsMd(second) });
     });
 
@@ -390,34 +409,6 @@ describe("who finds an App", setUpTime, () => {
       id: other.userId,
     });
     await expect(readsOf(other)).resolves.toStrictEqual(notFound);
-  });
-
-  it("finds no App, nor the collection, while indexing is switched off, its owner neither", async () => {
-    const owner = await personOf("builder");
-    const word = term();
-    const app = await releasedApp(owner, agentsMd(word));
-    const { id: entryId } = await entryOf(owner, app.id);
-    const { core } = await openRpc(owner.session, {
-      coreEnv: { ...env, FEATURES: { knowledge: true } },
-    });
-    const knowledge: KnowledgeApi = core.authenticate().knowledge;
-    try {
-      const collections = await knowledge.listCollections();
-      await expect(
-        Promise.all([
-          entriesFound(knowledge, word),
-          outcome(knowledge.getDocument(entryId)),
-          outcome(knowledge.listDocuments(appsCollection)),
-        ])
-      ).resolves.toStrictEqual([
-        [],
-        "knowledge.not_found",
-        "knowledge.not_found",
-      ]);
-      expect(collections.map(({ id }) => id)).not.toContain(appsCollection);
-    } finally {
-      core[Symbol.dispose]();
-    }
   });
 
   it("finds no App for someone it is shared with while it has read what they can't", async () => {
@@ -703,7 +694,7 @@ describe("read-only", setUpTime, () => {
     // Indexing lags: the entry is of a clean version still, but the App's
     // current version holds the term again, which the next indexing writes.
     await release(owner, app.id, { "AGENTS.md": agentsMd(term()) });
-    await withIndexingOff(owner, async (api) => {
+    await withIndexingFailing(owner, async (api) => {
       await release({ api }, app.id, { "AGENTS.md": agentsMd(word) });
     });
     expect({

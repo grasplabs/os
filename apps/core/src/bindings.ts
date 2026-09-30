@@ -14,7 +14,6 @@ import { workflowErrors } from "@grasp-os/shared/workflows";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
-import { requireFeature } from "./features.ts";
 import type {
   CollectionBinding,
   CollectionGrant,
@@ -159,7 +158,6 @@ export const signedStubCall = async (
   { context, permissionId, connection }: ConnectionGrant,
   call: unknown[]
 ): Promise<ConnectCall> => {
-  requireFeature(env, "connections");
   const parsed = stubCallSchema.safeParse(call);
   if (!parsed.success) {
     throw connectErrors.create("connect.invalid");
@@ -189,8 +187,7 @@ export const signedStubCall = async (
  * Runs one stub call for `authority` (or for whoever it resolves to, given
  * the call's idempotency key, which the resolver may refuse), with errors
  * as the sandbox sees them. Every connection call of App, agent and
- * workflow code comes through here, so switching `connections` off stops
- * them all at their next call.
+ * workflow code comes through here.
  */
 export const runStubCall = async (
   env: Env,

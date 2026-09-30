@@ -7,8 +7,6 @@ import type { AgentScope } from "./agent-scope.ts";
 import { memberOf } from "./auth/identity.ts";
 import type { Member } from "./auth/identity.ts";
 import { forSandbox } from "./bindings.ts";
-import type { Feature } from "./features.ts";
-import { requireFeature } from "./features.ts";
 import { grantedPermissions } from "./permissions.ts";
 
 // Calls of a chat's code that go through the functions of the person's own
@@ -19,8 +17,6 @@ import { grantedPermissions } from "./permissions.ts";
 
 /** One read of the chat's code, as `asPerson` runs it. */
 export interface PersonRead<T> {
-  /** The feature it belongs to: switched off, it reads nothing. */
-  feature: Feature;
   /** Whether the agent's permissions, read now, allow it. */
   allowed: (permissions: Permission[]) => boolean;
   /** What the permission it lacks would allow: `read` unless it writes. */
@@ -44,7 +40,7 @@ export const readDenied = (action: "read" | "write" = "read") =>
 export const asPerson = async <T>(
   env: Env,
   scope: AgentScope,
-  { feature, allowed, action, method, read, detail }: PersonRead<T>
+  { allowed, action, method, read, detail }: PersonRead<T>
 ): Promise<T> => {
   await requireOpenRun(env, scope, method);
   try {
@@ -53,7 +49,6 @@ export const asPerson = async <T>(
       scope,
       { method, ...(detail === undefined ? {} : { detailOf: detail }) },
       async () => {
-        requireFeature(env, feature);
         const permissions = await grantedPermissions(env, chatAuthority(scope));
         if (!allowed(permissions)) {
           throw readDenied(action);

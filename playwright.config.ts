@@ -62,7 +62,7 @@ export default defineConfig({
     // Cloudflare credentials. It starts from empty state, as in CI, kept
     // apart from `vp run dev`'s. This can't wait for the global setup,
     // which Playwright runs once the servers are up. People sign in through
-    // the fake IdP below (e2e/people.ts), and the flagged features are on.
+    // the fake IdP below (e2e/people.ts).
     {
       command: [
         // The dir comes from `env` below, so no path is ever shell syntax.
@@ -74,37 +74,6 @@ export default defineConfig({
             name,
             typeof value === "string" ? value : JSON.stringify(value)
           )
-        ),
-        devVar(
-          "FEATURES",
-          JSON.stringify({
-            apps: true,
-            app_blueprints: true,
-            builtins: true,
-            record_types: true,
-            statistics: true,
-            screens: true,
-            screen_workflows: true,
-            members: true,
-            audit: true,
-            workflows: true,
-            decisions: true,
-            connections: true,
-            permissions: true,
-            knowledge: true,
-            memory: true,
-            knowledge_uploads: true,
-            model_rules: true,
-            model_settings: true,
-            app_calls: true,
-            confirmations: true,
-            agent: true,
-            chat: true,
-            app_builder: true,
-            run_notifications: true,
-            app_preview: true,
-            guest_chats: true,
-          })
         ),
         // `--local` has no Workers AI: a deployment kept in the EU extracts
         // uploads' text in the Worker instead (knowledge/extract.ts). The

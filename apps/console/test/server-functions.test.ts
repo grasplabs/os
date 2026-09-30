@@ -5,7 +5,6 @@ import { beforeEach, describe, expect, it } from "vite-plus/test";
 
 import {
   applySettingsFn,
-  setFeatureFn,
   setRingFn,
   setSignInFn,
 } from "../src/clients/functions.ts";
@@ -329,21 +328,6 @@ const changes: {
             { email: caller }
           ),
         audited: { action: "client.ring", clientId, target: null },
-      };
-    },
-  },
-  {
-    name: "switching a client's feature flag",
-    arrange: async () => {
-      const clientId = await recordClient(1);
-      return {
-        make: async () =>
-          await callServerFn(
-            setFeatureFn,
-            { clientId, feature: "apps", on: true },
-            { email: caller }
-          ),
-        audited: { action: "client.feature", clientId, target: "apps" },
       };
     },
   },

@@ -1287,12 +1287,4 @@ describe("improvement signals", () => {
       admin: { listed: 50, people: true },
     });
   });
-
-  it("aren't computed while switched off", async () => {
-    const now = nextDay();
-
-    await refreshDailySignals({ ...env, FEATURES: { workflows: true } }, now);
-
-    await expect(computationsOf(now)).resolves.toBe(0);
-  });
 });

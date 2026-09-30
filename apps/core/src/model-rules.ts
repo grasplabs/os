@@ -8,7 +8,6 @@ import { drizzle } from "drizzle-orm/d1";
 import type { OutboxEnv } from "./audit-outbox.ts";
 import { inList } from "./db/d1.ts";
 import { collections, documents } from "./db/knowledge/schema.ts";
-import { featureEnabled } from "./features.ts";
 import { budgetMonth, budgetsFor, checkBudgets } from "./model-budgets.ts";
 import type { Budgeted } from "./model-budgets.ts";
 import { isRestricted } from "./restricted.ts";
@@ -25,11 +24,9 @@ import type { RestrictedEnv, WorkContext } from "./restricted.ts";
 // don't parse refuses every call while they apply (models.ts), and is
 // never read while they don't.
 //
-// They apply while `model_rules` is on; switching it off is the kill
-// switch, which leaves only the allowlist. The rule that keeps the whole
+// They apply whenever they are configured. The rule that keeps the whole
 // deployment in the EU also keeps uploads' text extraction in the Worker,
-// off Workers AI, and uploads read it whatever `model_rules` says
-// (knowledge/extract.ts): it is what the client agreed to.
+// off Workers AI (knowledge/extract.ts): it is what the client agreed to.
 //
 // "Hosted in the EU" is the config's word for a model: the client's
 // provider serves it in the EU (its EU data residency, with the keys AI
@@ -209,16 +206,10 @@ const restrictedWork = async (
 export const judgeCall = async (
   env: RestrictedEnv &
     OutboxEnv &
-    Pick<Env, "FEATURES" | "KNOWLEDGE" | "MODEL_BUDGET_MONTH">,
+    Pick<Env, "KNOWLEDGE" | "MODEL_BUDGET_MONTH">,
   rules: ModelRules,
   input: RulesInput
 ): Promise<{ ok: true; judged: Judged } | ({ ok: false } & Refusal)> => {
-  if (!featureEnabled(env, "model_rules")) {
-    return {
-      ok: true,
-      judged: { euOnly: undefined, sensitive: undefined, budgets: [] },
-    };
-  }
   const restricted = await restrictedWork(env, input);
   if (restricted === undefined) {
     return { ok: false, code: "permission.context_invalid" };

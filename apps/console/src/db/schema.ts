@@ -285,7 +285,7 @@ export const rolloutTargets = sqliteTable(
 );
 
 /**
- * A client's deployment config (sign-in, model gateway, features), one row
+ * A client's deployment config (sign-in, model gateway), one row
  * per setting. Never a secret: those go straight to the client's Worker.
  */
 export const settings = sqliteTable(

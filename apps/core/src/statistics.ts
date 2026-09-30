@@ -38,7 +38,6 @@ import {
   workflowRuns,
 } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
-import { featureEnabled, requireFeature } from "./features.ts";
 import { authorize } from "./permissions.ts";
 
 // Statistics (@grasp-os/shared/statistics): an App's server code records
@@ -119,7 +118,6 @@ export const recordStatistic = async (
   input: unknown,
   { now = new Date(), step }: { now?: Date; step?: StepAttemptRef } = {}
 ): Promise<void> => {
-  requireFeature(env, "statistics");
   const { measure, value, dimensions } = statisticErrors.parse(
     "statistics.invalid",
     statisticPointSchema,
@@ -387,9 +385,6 @@ const signalsMeasure = async (
   rows: z.infer<typeof groupRowSchema>[];
   computation: string | null;
 }> => {
-  if (!featureEnabled(env, "improvement_signals")) {
-    return { rows: [], computation: null };
-  }
   const db = drizzle(env.DB);
   // Its computation's start, within the window.
   const inWindow = sql`${improvementSignalComputations.startedAt} >= ${start.getTime()} AND ${improvementSignalComputations.startedAt} <= ${now.getTime()}`;
@@ -687,7 +682,6 @@ export const readStatistics = async (
 ): Promise<StatisticAnswer> => {
   const read = platformReadOf(input);
   if (read === undefined) {
-    requireFeature(env, "statistics");
     const query = statisticErrors.parse(
       "statistics.invalid",
       statisticQuerySchema,
@@ -703,7 +697,6 @@ export const readStatistics = async (
   let measure: PlatformMeasure;
   let counted: { visible: string[]; unavailable?: string[] };
   try {
-    requireFeature(env, "statistics");
     query = statisticErrors.parse(
       "statistics.invalid",
       statisticQuerySchema,

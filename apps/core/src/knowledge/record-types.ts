@@ -13,7 +13,6 @@ import {
   permissions,
   recordTypeOwners,
 } from "../db/core/schema.ts";
-import { featureEnabled } from "../features.ts";
 
 // The record types Knowledge checks a collection's records against: those
 // the current version of an App declares for it (`app/records.json`,
@@ -27,7 +26,7 @@ import { featureEnabled } from "../features.ts";
 // that finds no claim, or only a released one (`declaredTypes`): by the
 // App that may declare it there whose permission to write was granted
 // first (ties by App ID), inserted if nobody claimed it meanwhile, then
-// read back. So a claim needs no grant, version or flag change to happen
+// read back. So a claim needs no grant or version change to happen
 // first, and a failed one is claimed again at the next save. The owner
 // keeps it until it loses its permission to write there, or its current
 // version, approved, no longer declares the type (`released`): a version
@@ -57,7 +56,7 @@ export interface RecordTypeRule {
 /** The types declared for one collection, each by its owning App. */
 export type DeclaredTypes = ReadonlyMap<string, RecordTypeRule>;
 
-/** No types declared: while `record_types` is off, and for most collections. */
+/** No types declared, as for most collections. */
 export const noDeclaredTypes: DeclaredTypes = new Map();
 
 const objectSchema = z.record(z.string(), z.unknown());
@@ -304,8 +303,7 @@ const claimedNow = async (
 
 /**
  * The record types declared for the collection `collectionId` now, each
- * by the App that claimed it, while that App may declare it there: none
- * while `record_types` is off. A type an App may declare there that nobody
+ * by the App that claimed it, while that App may declare it there. A type an App may declare there that nobody
  * claimed, or whose claim is released, is claimed first (`claimTypes`),
  * and the claims read back. A type whose owner may not declare it now (a
  * version nobody approved yet) is declared by nobody meanwhile.
@@ -314,9 +312,6 @@ export const declaredTypes = async (
   env: Env,
   collectionId: string
 ): Promise<DeclaredTypes> => {
-  if (!featureEnabled(env, "record_types")) {
-    return noDeclaredTypes;
-  }
   const { declaring, claims } = await claimedNow(env, collectionId);
   const declared = new Map<string, RecordTypeRule>();
   for (const [type, claim] of claims) {
@@ -377,9 +372,7 @@ export const typeClaims = async (
     return { claims: [], taken: [] };
   }
   // As a save there now would find them.
-  const { claims } = featureEnabled(env, "record_types")
-    ? await claimedNow(env, collectionId)
-    : { claims: await claimsOf(env, collectionId) };
+  const { claims } = await claimedNow(env, collectionId);
   const taken = types.flatMap((type) => {
     const claim = claims.get(type);
     return claim === undefined || claim.released || claim.app === app

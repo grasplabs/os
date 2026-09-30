@@ -5,7 +5,6 @@ import type { KnowledgeApi, KnowledgeTools } from "@grasp-os/shared/knowledge";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import { workspace } from "../src/durable-objects.ts";
 import { catalogMaxCharacters } from "../src/knowledge/tools.ts";
@@ -676,41 +675,6 @@ describe("an agent's Knowledge tools", setUpTime, () => {
     expect(results).toStrictEqual(
       reads.map(() => ({ restricted: true, provenance: true }))
     );
-  });
-
-  it("read nothing while Knowledge is switched off", async () => {
-    const admin = await personOf("admin");
-    const agent = newAgent();
-    const handbook = await collectionWithNote(admin, {
-      name: "Handbook",
-      access: "everyone",
-    });
-    await requestGranted(
-      idp,
-      admin,
-      readCollection(agent, handbook.collectionId)
-    );
-    const knowledge = await toolsOf(agent, admin);
-    const every = async () =>
-      await Promise.all([
-        outcome(knowledge.catalog()),
-        outcome(knowledge.search("note")),
-        outcome(knowledge.read(handbook.noteId)),
-        outcome(knowledge.follow(handbook.noteId)),
-      ]);
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    let whileOff: string[];
-    try {
-      env.FEATURES = { ...on, knowledge: false };
-      whileOff = await every();
-    } finally {
-      env.FEATURES = features;
-    }
-    expect({ whileOff, backOn: await every() }).toStrictEqual({
-      whileOff: Array.from({ length: 4 }, () => "feature.disabled"),
-      backOn: ["ok", "ok", "ok", "ok"],
-    });
   });
 });
 

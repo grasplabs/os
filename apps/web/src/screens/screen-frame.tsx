@@ -6,7 +6,6 @@ import { runPreview, runScreen } from "./screen-host.ts";
 import type { FailureReason, ScreenState } from "./screen-host.ts";
 
 const failureMessages: Readonly<Record<FailureReason, string>> = {
-  disabled: "Screens aren't switched on for this organization.",
   forbidden:
     "You can't open this App's screens: your role doesn't allow it, or the App has read data you can't read.",
   "not-found": "This App has no such screen.",
@@ -133,15 +132,12 @@ const FramedScreen = ({
   label,
   embedded,
   onReload,
-  hiddenWhenOff = false,
 }: {
   source: FrameSource;
   title: string;
   label: string;
   embedded: boolean;
   onReload?: () => void;
-  /** Shows nothing while what it runs is switched off. */
-  hiddenWhenOff?: boolean;
 }) => {
   const Title = embedded ? "h2" : "h1";
   const [state, setState] = useState<ScreenState>({ status: "loading" });
@@ -152,13 +148,6 @@ const FramedScreen = ({
     setAttempt(attempt + 1);
     onReload?.();
   };
-  if (
-    hiddenWhenOff &&
-    state.status === "failed" &&
-    state.reason === "disabled"
-  ) {
-    return null;
-  }
   return (
     <div className="flex flex-1 flex-col">
       <header className="flex items-center gap-2 border-b p-3 print:hidden">
@@ -224,7 +213,6 @@ export const PreviewFrame = ({
 }) => (
   <FramedScreen
     embedded
-    hiddenWhenOff
     label="Preview: changes nothing, reads no real data"
     source={{ chatId, app, ...(screen === undefined ? {} : { screen }) }}
     title={`Preview of ${screen ?? "the draft's first"} screen`}

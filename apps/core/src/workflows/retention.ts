@@ -250,9 +250,7 @@ const removedElsewhere = async (
  * the last run of the one before, by when it ended and its ID, so a run
  * left out stays due for the next cron run and holds up none behind it.
  *
- * It runs whether or not `workflows` is on: what runs kept goes when its
- * days are over. On-prem has no runs, and so reaches neither the engine
- * nor connect.
+ * On-prem has no runs, and so reaches neither the engine nor connect.
  */
 export const sweepRunDetails = async (env: Env, now: Date): Promise<void> => {
   const days = runRetentionDays(env);

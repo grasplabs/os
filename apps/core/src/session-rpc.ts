@@ -6,8 +6,6 @@ import { AuditRpc } from "./audit-rpc.ts";
 import { ChatsRpc } from "./chats-rpc.ts";
 import { ConnectionsRpc } from "./connections.ts";
 import { DecisionsRpc } from "./decisions/rpc.ts";
-import { requireFeature, uploadFeatures } from "./features.ts";
-import type { Feature } from "./features.ts";
 import { MemoryRpc } from "./knowledge/memory-rpc.ts";
 import { KnowledgeRpc } from "./knowledge/rpc.ts";
 import { KnowledgeSignalsRpc } from "./knowledge/signals-rpc.ts";
@@ -29,8 +27,8 @@ import { WorkflowsRpc } from "./workflows/rpc.ts";
  * check, holding no identity. Each method runs through `withPerson`, which
  * checks the session first and hands over the identity that check returned,
  * so a method can't reach the person without the check, or use one kept
- * from an earlier call. A feature's namespace is created with its flag in
- * the check and handed out as the same object every time. There's no base
+ * from an earlier call. Each namespace is created once and handed out as
+ * the same object every time. There's no base
  * class: an RpcTarget's methods, protected ones too, can be called over
  * RPC, so each keeps its env and check in private fields.
  */
@@ -57,58 +55,23 @@ export class SessionRpc extends RpcTarget implements SessionApi {
   constructor(env: Env, check: SessionCheck) {
     super();
     this.#check = check;
-    /**
-     * The session check, refused first while any of `features` is switched
-     * off, so switching a feature off stops its API at the next call.
-     */
-    const checkWith =
-      (...features: Feature[]): SessionCheck =>
-      async () => {
-        for (const feature of features) {
-          requireFeature(env, feature);
-        }
-        return await check();
-      };
-    // Blueprints are Apps' versions: the Apps kill switch stops them too.
-    this.#apps = new AppsRpc(
-      env,
-      checkWith("apps"),
-      checkWith("apps", "app_blueprints")
-    );
-    this.#knowledge = new KnowledgeRpc(env, checkWith("knowledge"));
-    // Usage signals are about Knowledge: that kill switch stops them too.
-    this.#knowledgeSignals = new KnowledgeSignalsRpc(
-      env,
-      checkWith("knowledge", "knowledge_signals")
-    );
-    // Memory files are Knowledge documents: that kill switch stops them too.
-    this.#memory = new MemoryRpc(env, checkWith("knowledge", "memory"));
-    // Uploads become Knowledge documents: that kill switch stops them too.
-    this.#uploads = new UploadsRpc(env, checkWith(...uploadFeatures));
-    this.#permissions = new PermissionsRpc(env, checkWith("permissions"));
-    this.#connections = new ConnectionsRpc(env, checkWith("connections"));
-    this.#workflows = new WorkflowsRpc(env, checkWith("workflows"));
-    // Decisions belong to runs: the workflows kill switch stops them too.
-    this.#decisions = new DecisionsRpc(
-      env,
-      checkWith("workflows", "decisions")
-    );
-    // Screens run Apps: the Apps kill switch stops them too.
-    this.#screens = new ScreensRpc(env, checkWith("apps", "screens"));
-    this.#members = new MembersRpc(env, checkWith("members"));
-    this.#audit = new AuditRpc(env, checkWith("audit"));
-    this.#models = new ModelsRpc(env, checkWith("model_settings"));
-    // Held actions are calls on connections: that kill switch stops them.
-    // While it's off, nobody lists, confirms or declines them.
-    this.#pendingActions = new PendingActionsRpc(env, checkWith("connections"));
-    this.#signals = new SignalsRpc(env, checkWith("improvement_signals"));
-    // Chats are how people ask the agent: its kill switch stops them too.
-    this.#chats = new ChatsRpc(env, checkWith("agent", "chat"));
-    // They tell of failed runs: the workflows kill switch stops them too.
-    this.#notifications = new NotificationsRpc(
-      env,
-      checkWith("workflows", "run_notifications")
-    );
+    this.#apps = new AppsRpc(env, check);
+    this.#knowledge = new KnowledgeRpc(env, check);
+    this.#knowledgeSignals = new KnowledgeSignalsRpc(env, check);
+    this.#memory = new MemoryRpc(env, check);
+    this.#uploads = new UploadsRpc(env, check);
+    this.#permissions = new PermissionsRpc(env, check);
+    this.#connections = new ConnectionsRpc(env, check);
+    this.#workflows = new WorkflowsRpc(env, check);
+    this.#decisions = new DecisionsRpc(env, check);
+    this.#screens = new ScreensRpc(env, check);
+    this.#members = new MembersRpc(env, check);
+    this.#audit = new AuditRpc(env, check);
+    this.#models = new ModelsRpc(env, check);
+    this.#pendingActions = new PendingActionsRpc(env, check);
+    this.#signals = new SignalsRpc(env, check);
+    this.#chats = new ChatsRpc(env, check);
+    this.#notifications = new NotificationsRpc(env, check);
   }
 
   get notifications(): NotificationsRpc {

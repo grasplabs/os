@@ -33,13 +33,13 @@ import { ScreenFrame } from "../screens/screen-frame.tsx";
 
 /**
  * The App's runs, read on a connection of their own: a read that hangs or
- * is refused (workflows switched off) only leaves the Workflows tab empty.
+ * is refused only leaves the Workflows tab empty.
  */
 type Runs = Promise<Loaded<WorkflowRun[]>>;
 
 /**
- * Whom the App is shared with, read the same way: refused while sharing
- * Apps is switched off, which leaves only the Members tab without them.
+ * Whom the App is shared with, read the same way: a refused read leaves
+ * only the Members tab without them.
  */
 type MemberList = Promise<Loaded<AppMember[]>>;
 

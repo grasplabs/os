@@ -14,7 +14,6 @@ import {
   auditRetentionDefaultDays,
   auditRetentionSchema,
   defaultGatewayModels,
-  featuresSchema,
   modelGatewayConfigSchema,
   modelRulesConfigSchema,
   runRetentionSchema,
@@ -240,7 +239,6 @@ const modelRefShape = z.string().regex(/^[^/\s]+\/\S+$/u);
  * rules, which core reads apart.
  */
 const configSchemas: Readonly<Record<string, readonly z.ZodType[]>> = {
-  FEATURES: [featuresSchema],
   MODEL_GATEWAY: [
     modelGatewayConfigSchema(modelRefShape),
     modelRulesConfigSchema(modelRefShape),

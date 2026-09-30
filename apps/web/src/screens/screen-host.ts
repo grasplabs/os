@@ -1,7 +1,7 @@
 import type { ScreenBridge, Theme } from "@grasp-os/sdk/screen-runtime";
 import { appErrors } from "@grasp-os/shared/apps";
 import type { PreviewBundle } from "@grasp-os/shared/chat";
-import { authErrors, featureErrors } from "@grasp-os/shared/errors";
+import { authErrors } from "@grasp-os/shared/errors";
 import { roleErrors } from "@grasp-os/shared/roles";
 import {
   screenErrors,
@@ -41,7 +41,6 @@ export type ScreenState =
   | { status: "failed"; reason: FailureReason };
 
 export type FailureReason =
-  | "disabled"
   | "forbidden"
   | "not-found"
   | "not-running"
@@ -60,7 +59,6 @@ const minuteMs = 60_000;
 const renderedAfterMs = 1500;
 
 const failures: Readonly<Record<string, FailureReason>> = {
-  "feature.disabled": "disabled",
   "role.forbidden": "forbidden",
   "app.unreadable": "forbidden",
   "app.not_found": "not-found",
@@ -74,7 +72,6 @@ const failures: Readonly<Record<string, FailureReason>> = {
 /** Why opening a screen failed, as the page says it. */
 const failureOf = (error: unknown): FailureReason => {
   const code =
-    featureErrors.codeOf(error) ??
     roleErrors.codeOf(error) ??
     appErrors.codeOf(error) ??
     screenErrors.codeOf(error);

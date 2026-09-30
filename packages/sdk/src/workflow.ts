@@ -436,7 +436,7 @@ export interface WorkflowContext<P extends Params, Input> {
    * bytes. A message is kept for 30 days from when it arrived; after
    * that, and for a message its App didn't receive, an attachment it
    * doesn't have, or a message that isn't kept (`stored: null`: it has
-   * no attachments but inline ones, or keeping mail is switched off), it
+   * no attachments but inline ones), it
    * fails with `workflow.attachment_not_found`; a kept message that can't
    * be read any more fails with `workflow.attachment_unreadable`. Neither
    * is retried. Every read is audited, a refused one too. The content,
@@ -707,8 +707,8 @@ export type Trigger<ScheduleParam extends string = string> =
    * so `0 8 * * 1` is 8:00 on Mondays there, summer time or not. A time
    * the change to summer time skips runs an hour later (2:30 at 3:30); in
    * the hour the change back repeats, times run once, in its first pass. A
-   * scheduled run starts with no input. A time missed (while triggers are
-   * switched off, say) starts one run late, however many times were
+   * scheduled run starts with no input. A time missed (an outage, say)
+   * starts one run late, however many times were
    * missed; a schedule set or made current starts from the next time
    * after, never one already past.
    */
@@ -770,9 +770,8 @@ export type Trigger<ScheduleParam extends string = string> =
    * the workflow: the same Message-ID is the same message (without one,
    * or with one lacking an `@` such as `<>`, the same bytes are), so a
    * message that reuses an earlier one's Message-ID starts none. Mail
-   * starts at most 60 runs of a workflow an hour. Past that, and while
-   * triggers are switched off, mail is refused for now, and its sender
-   * tries again later. The input lists the message's attachments; a
+   * starts at most 60 runs of a workflow an hour. Past that, mail is
+   * refused for now, and its sender tries again later. The input lists the message's attachments; a
    * message with any is kept for 30 days, and the run reads their content
    * with `readAttachment`.
    */
@@ -1035,7 +1034,7 @@ const createRunner = (
         // computes the same waits.
         const { decision, deadline } = await engine.do(
           step,
-          { input: { from }, decision: true },
+          { input: { from } },
           async () =>
             await engine.openDecision({ step, from, description, timeout })
         );
@@ -1045,7 +1044,7 @@ const createRunner = (
           const askStep = `${step}#${reminder ? "remind" : "ask"}`;
           await engine.do(
             askStep,
-            { sideEffect: true, input: { from, reminder }, decision: true },
+            { sideEffect: true, input: { from, reminder } },
             async () => {
               const recipients = await engine.decisionRecipients(
                 decision,

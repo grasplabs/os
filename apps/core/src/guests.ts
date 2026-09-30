@@ -51,7 +51,6 @@ import { signInConfig } from "./auth/config.ts";
 import { memberRole, teamsOf } from "./auth/identity.ts";
 import { apps, guestChats, guestMessages } from "./db/core/schema.ts";
 import { errorResponse } from "./errors.ts";
-import { featureEnabled, requireFeature } from "./features.ts";
 import { graspSkills } from "./knowledge/grasp-skills.ts";
 import { gatewaySettings, models } from "./models.ts";
 import { authorize } from "./permissions.ts";
@@ -70,8 +69,8 @@ import { authorize } from "./permissions.ts";
 //   secret, for one chat, and the member hands it to one person.
 // - A link that outlives its purpose: it works until it expires (at most
 //   14 days), the App revokes it, or the guest finishes; and only while
-//   the App still holds its permission, the member it was made for is
-//   still a member who may use the App, and `guest_chats` is on. Each is
+//   the App still holds its permission, and the member it was made for
+//   is still a member who may use the App. Each is
 //   checked on every request, never only at invitation. A revoked link
 //   opens nothing at all, not even what was written, however late the
 //   revoke lands in a request (what was written is read in one batch
@@ -211,13 +210,12 @@ const notRevoked = or(
 // The App's side: inviting, listing, reading back and revoking, each for
 // the member its method runs for, under the App's permission.
 
-/** Refuses an App call unless `guest_chats` is on and it may, now. */
+/** Refuses an App call unless it may, now. */
 const requireGuests = async (
   env: Env,
   authority: Authority,
   permissionId: PermissionId
 ): Promise<void> => {
-  requireFeature(env, "guest_chats");
   await authorize(env, authority, { type: "platform" }, "guests", permissionId);
 };
 
@@ -776,8 +774,7 @@ const jsonOf = (text: string): unknown => {
 
 /**
  * The guest's page's calls (`POST /api/guest`): open, send and finish,
- * each with the link's secret in the body. While `guest_chats` is off,
- * every link is `guest.link_invalid`.
+ * each with the link's secret in the body.
  */
 export const guestResponse = async (
   request: Request,
@@ -792,9 +789,6 @@ export const guestResponse = async (
     );
   }
   try {
-    if (!featureEnabled(env, "guest_chats")) {
-      throw guestErrors.create("guest.link_invalid");
-    }
     const length = Number(request.headers.get("content-length") ?? 0);
     const raw =
       length > requestMaxLength

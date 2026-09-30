@@ -451,8 +451,8 @@ export const retryDisconnects = async (env: Env): Promise<void> => {
 };
 
 /**
- * A signed-in admin's `members`. Every call checks the session (and the
- * `members` flag) first, then the caller's role.
+ * A signed-in admin's `members`. Every call checks the session first,
+ * then the caller's role.
  */
 export class MembersRpc extends RpcTarget implements MembersApi {
   readonly #env: Env;

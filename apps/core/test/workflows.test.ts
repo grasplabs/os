@@ -1,6 +1,5 @@
 import type { AiBinding } from "@earendil-works/pi-ai/api/cloudflare-ai-binding";
 import { appErrors } from "@grasp-os/shared/apps";
-import { featureErrors } from "@grasp-os/shared/errors";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { workflowErrors } from "@grasp-os/shared/workflows";
@@ -17,16 +16,12 @@ import { fakeGateway } from "./ai-gateway.ts";
 import { grantReviewed, outlook, release, requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
-import { collectionWithNote, readCollection } from "./knowledge.ts";
 import { mailConnection } from "./mail-connection.ts";
 import {
   endLiveRuns,
   finished,
   leave,
   liveStatus,
-  resumed,
-  failingGoingOn,
-  sleepingOnceResumed,
   stepDone,
   stopped,
   woken,
@@ -61,31 +56,6 @@ const idp = mockIdp();
 
 const personApi = async (role: Role) => await signedInApi(idp, role);
 type Person = Awaited<ReturnType<typeof personApi>>;
-
-/**
- * App server code that reads a collection and calls a connection for its
- * caller, and says how each went: "ok", or the code it was refused with.
- */
-const probeServer = `import { DurableObject } from "cloudflare:workers";
-
-const codeOf = async (call) => {
-  try {
-    await call();
-    return "ok";
-  } catch (error) {
-    return error.code;
-  }
-};
-
-export class App extends DurableObject {
-  async probe(caller) {
-    return {
-      knowledge: await codeOf(async () => await this.env.HANDBOOK.listDocuments(caller)),
-      connections: await codeOf(async () => await this.env.OUTLOOK.call(caller, "mail.list", {})),
-    };
-  }
-}
-`;
 
 const extractionModel = "workers-ai/@cf/meta/llama-3.3-70b-instruct-fp8-fast";
 
@@ -230,43 +200,6 @@ const hitsOf = async (app: string, userId: string, name: string) =>
     "hits",
     [name]
   );
-
-/**
- * A step `name` that says it began (`atGate`), then ends once the test
- * opens it (`openGate`): until then the run is in that step, and goes on
- * from it in the same execution.
- */
-const gate = (name: string): string =>
-  `  await step.do("${name}", { description: "Wait for the test" }, async () => {
-    await env.APP.call("hit", "at-gate:${name}");
-    while ((await env.APP.call("hits", "gate:${name}")) === 0) {
-      await new Promise((resolve) => setTimeout(resolve, 20));
-    }
-    return null;
-  });`;
-
-/** Once a run of the App is in its gate step `name`, which began. */
-const atGate = async (app: string, userId: string, name: string) => {
-  await vi.waitFor(
-    async () => {
-      await expect(
-        hitsOf(app, userId, `at-gate:${name}`)
-      ).resolves.toBeGreaterThan(0);
-    },
-    { timeout: 10_000, interval: 100 }
-  );
-};
-
-/** Opens the gate `name` of the App's runs. */
-const openGate = async (app: string, userId: string, name: string) => {
-  await callApp(
-    env,
-    appIdSchema.parse(app),
-    { userId, mode: "interactive" },
-    "hit",
-    [`gate:${name}`]
-  );
-};
 
 /** A run a trigger started, which acts for the App's owner. */
 const triggered = async (app: string, workflow: string) =>
@@ -826,22 +759,9 @@ export default workflowTests(definition, [{ name: "returns two", expect: { outpu
       await setCurrent({ "app/server.ts": server, ...failing }),
       await setCurrent({ "workflows/failing.workflow-tests.ts": null }),
     ];
-    // Also while workflows are switched off: switching them on runs
-    // nothing untested.
-    const { FEATURES: features } = env;
-    try {
-      env.FEATURES = { apps: true };
-      outcomes.push(await setCurrent({ "workflows/other.ts": "export {};\n" }));
-    } finally {
-      env.FEATURES = features;
-    }
     expect(
       outcomes.map((outcome) => workflowErrors.codeOf(outcome))
-    ).toStrictEqual([
-      "workflow.tests_failed",
-      "workflow.tests_failed",
-      "workflow.tests_failed",
-    ]);
+    ).toStrictEqual(["workflow.tests_failed", "workflow.tests_failed"]);
     await expect(builder.api.apps.get(app)).resolves.toMatchObject({
       currentVersion: null,
     });
@@ -1057,254 +977,6 @@ export default workflowTests(definition, [{ name: "fails", expect: { error: "bad
       after: 0,
       raced: ["cancelled", "cancelled"],
       racedAudited: 1,
-    });
-  });
-
-  it("retry a step while a feature it uses is switched off, go on once it's back on, and start no run while workflows are off", async () => {
-    const admin = await personApi("admin");
-    const app = await appWith(
-      admin,
-      workflowFiles(
-        "switchable",
-        `  return await step.do("work", { description: "Work" }, async () => {
-    try {
-      await env.OUTLOOK.call("mail.list", {});
-    } catch (error) {
-      if (error.code === "connect.connection_not_found") {
-        return "reached";
-      }
-      await env.APP.call("hit", "refused");
-      throw error;
-    }
-    return "sent";
-  });`,
-        { work: "reached" }
-      )
-    );
-    await requestGranted(idp, admin, outlook(app));
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    let startedWhileOff: unknown;
-    let run: Awaited<ReturnType<typeof triggered>>;
-    try {
-      env.FEATURES = { ...on, workflows: false };
-      startedWhileOff = await refusal(triggered(app, "switchable"));
-      env.FEATURES = { ...on, connections: false };
-      run = await triggered(app, "switchable");
-      // Its first attempt was refused the connection.
-      await vi.waitFor(
-        async () => {
-          await expect(
-            hitsOf(app, admin.userId, "refused")
-          ).resolves.toBeGreaterThan(0);
-        },
-        { timeout: 10_000, interval: 100 }
-      );
-    } finally {
-      env.FEATURES = features;
-    }
-    // Back on: the step's retry goes through.
-    await finished(run.id);
-    const { status, output } = await admin.api.workflows.status(run.id);
-    expect({
-      startedWhileOff: featureErrors.codeOf(startedWhileOff),
-      status,
-      output,
-      refused: await hitsOf(app, admin.userId, "refused"),
-      audited: await runEvents(run.id, "workflow.run.completed"),
-    }).toStrictEqual({
-      startedWhileOff: "feature.disabled",
-      status: "completed",
-      output: "reached",
-      refused: 1,
-      audited: [
-        "workflow.run.completed",
-        "workflow.run.started",
-        "workflow.step.completed $params",
-        "workflow.step.completed work",
-      ],
-    });
-  });
-
-  it("wait before a step while workflows are switched off, and go on by themselves once they are back on", async () => {
-    const builder = await personApi("builder");
-    const app = await appWith(
-      builder,
-      workflowFiles(
-        "held",
-        `${gate("go")}
-  await step.do("work", { description: "Work" }, async () => await env.APP.call("hit", "work"));
-${gate("again")}
-  return await step.do("more", { description: "More" }, async () => await env.APP.call("hit", "more"));`,
-        { go: null, work: 1, again: null, more: 1 }
-      )
-    );
-    const run = await builder.api.workflows.start(app, "held");
-    // In its gate step, past a step before it, as a run mostly is: the new
-    // execution below replays that step first. The gate's step began while
-    // workflows were on, so what is held below is the step after it.
-    await atGate(app, builder.userId, "go");
-    const { FEATURES: features } = env;
-    const off = {
-      ...z.record(z.string(), z.boolean()).parse(features),
-      workflows: false,
-    };
-    let whileOff: unknown;
-    let whileUnkept: unknown;
-    // The database fails to keep that a wait is over, until mended below;
-    // nothing is kept so before the run first waits.
-    const broken = failingGoingOn();
-    try {
-      try {
-        env.FEATURES = off;
-        await openGate(app, builder.userId, "go");
-        await runEvents(run.id, "workflow.run.waiting");
-        // Stopped and resumed while it waits, as a deploy or a crash does:
-        // the new execution waits on, before the first step it replays,
-        // and records nothing new. Once it sleeps between checks, it has.
-        await stopped(run.id);
-        await resumed(run.id);
-        await sleepingOnceResumed(run.id, "$grasp:off:");
-        whileOff = await hitsOf(app, builder.userId, "work");
-      } finally {
-        env.FEATURES = features;
-      }
-      // Back on: nobody resumes it; it checks again, and goes on. But not
-      // while the database fails to keep that the wait is over: it checks
-      // again (twice here), and goes on only once that is kept, so the
-      // next wait is recorded.
-      await vi.waitFor(
-        () => {
-          expect(broken.failures()).toBeGreaterThanOrEqual(2);
-        },
-        { timeout: 10_000, interval: 100 }
-      );
-      whileUnkept = await hitsOf(app, builder.userId, "work");
-    } finally {
-      broken.mend();
-    }
-    // Switched off again later, it waits again: a new wait, recorded too.
-    await atGate(app, builder.userId, "again");
-    try {
-      env.FEATURES = off;
-      await openGate(app, builder.userId, "again");
-      await vi.waitFor(
-        async () => {
-          const waits = await runEvents(run.id, "workflow.run.waiting");
-          expect(
-            waits.filter((event) => event.startsWith("workflow.run.waiting"))
-          ).toHaveLength(2);
-        },
-        { timeout: 10_000, interval: 100 }
-      );
-    } finally {
-      env.FEATURES = features;
-    }
-    await finished(run.id);
-    expect({
-      whileOff,
-      whileUnkept,
-      live: await liveStatus(run.id),
-      work: await hitsOf(app, builder.userId, "work"),
-      more: await hitsOf(app, builder.userId, "more"),
-      audited: await runEvents(run.id, "workflow.run.completed"),
-    }).toStrictEqual({
-      whileOff: 0,
-      whileUnkept: 0,
-      live: "complete",
-      work: 1,
-      more: 1,
-      audited: [
-        "workflow.run.completed",
-        "workflow.run.started",
-        "workflow.run.waiting switched_off workflows",
-        "workflow.run.waiting switched_off workflows",
-        "workflow.step.completed $params",
-        "workflow.step.completed again",
-        "workflow.step.completed go",
-        "workflow.step.completed more",
-        "workflow.step.completed work",
-      ],
-    });
-  });
-
-  it("refuse Knowledge, connection and App calls, their own and their App's, while that feature is switched off", async () => {
-    const admin = await personApi("admin");
-    const { id: app } = await admin.api.apps.create({ name: "Probes" });
-    await release(admin, app, {
-      "app/server.ts": probeServer,
-      ...workflowFiles(
-        "probe",
-        `  return await step.do("probe", { description: "Probe" }, async () => ({
-    knowledge: await codeOf(async () => await env.HANDBOOK.listDocuments()),
-    connections: await codeOf(async () => await env.OUTLOOK.call("mail.list", {})),
-    app: await env.APP.call("probe").catch((error) => error.code),
-  }));
-  async function codeOf(call) {
-    try {
-      await call();
-      return "ok";
-    } catch (error) {
-      return error.code;
-    }
-  }`,
-        { probe: null }
-      ),
-    });
-    const { collectionId } = await collectionWithNote(admin.api, {
-      name: "Handbook",
-      access: "everyone",
-    });
-    await requestGranted(idp, admin, outlook(app));
-    await requestGranted(
-      idp,
-      admin,
-      readCollection(
-        { type: "app", appId: appIdSchema.parse(app) },
-        collectionId
-      )
-    );
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const probedWith = async (off: string[]) => {
-      const { FEATURES: features } = env;
-      let run: Awaited<ReturnType<typeof triggered>>;
-      try {
-        env.FEATURES = {
-          ...on,
-          ...Object.fromEntries(off.map((feature) => [feature, false])),
-        };
-        run = await triggered(app, "probe");
-        await finished(run.id);
-      } finally {
-        env.FEATURES = features;
-      }
-      const { output } = await admin.api.workflows.status(run.id);
-      return output;
-    };
-    const reached = "connect.connection_not_found";
-    expect({
-      allOn: await probedWith([]),
-      knowledgeAndConnectionsOff: await probedWith([
-        "knowledge",
-        "connections",
-      ]),
-      appsOff: await probedWith(["apps"]),
-    }).toStrictEqual({
-      allOn: {
-        knowledge: "ok",
-        connections: reached,
-        app: { knowledge: "ok", connections: reached },
-      },
-      knowledgeAndConnectionsOff: {
-        knowledge: "feature.disabled",
-        connections: "feature.disabled",
-        app: { knowledge: "feature.disabled", connections: "feature.disabled" },
-      },
-      appsOff: {
-        knowledge: "ok",
-        connections: reached,
-        app: "feature.disabled",
-      },
     });
   });
 

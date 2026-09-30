@@ -190,9 +190,8 @@ export class AppCollectionBinding extends WorkerEntrypoint<
    * The record types this App owns in the collection now, of those it
    * declares there (record-types.ts): only the owner's saves may set a
    * type's kept fields, so an App checks it owns the types it is about to
-   * write before it starts a write of several records. None while
-   * `record_types` is off. A hint, like `canWrite`: each save is checked
-   * again.
+   * write before it starts a write of several records. A hint, like
+   * `canWrite`: each save is checked again.
    */
   async ownedTypes(caller: unknown): Promise<string[]> {
     const { app, collectionId } = this.ctx.props;

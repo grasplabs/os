@@ -30,12 +30,8 @@ export class ModelsRpc extends RpcTarget implements ModelsApi {
       requireAdmin(person);
       const { models, rules } = gatewaySettings(this.#env);
       const month = budgetMonth(this.#env);
-      if (rules === "off" || rules === undefined) {
-        return {
-          models,
-          rules: { state: rules === "off" ? "off" : "invalid" },
-          month,
-        };
+      if (rules === undefined) {
+        return { models, rules: { state: "invalid" }, month };
       }
       return {
         models,

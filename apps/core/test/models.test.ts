@@ -5,7 +5,7 @@ import type { AuditEvent } from "@grasp-os/shared/audit";
 import { defaultGatewayModels } from "@grasp-os/shared/deployment-config";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { models } from "../src/models.ts";
@@ -14,7 +14,8 @@ import { fakeGateway } from "./ai-gateway.ts";
 import type { GatewayReply } from "./ai-gateway.ts";
 import { allEvents } from "./audit-events.ts";
 import { runCron } from "./cron.ts";
-import { outcome } from "./sign-in.ts";
+import { mockIdp } from "./idp.ts";
+import { outcome, signedInApi } from "./sign-in.ts";
 
 // AI Gateway is the outside system here: a fake behind the AI binding
 // answers in each provider's own wire format. Everything else is real,
@@ -36,9 +37,8 @@ const answer = (text: string): GatewayReply => ({
 });
 
 /**
- * Core's env with the fake gateway and the given config. The client's
- * rules are off: model-rules.test.ts tests them, and with them the `work`
- * context, which the calls here carry but nothing reads.
+ * Core's env with the fake gateway and the given config, which sets no
+ * rules beyond the allowlist: model-rules.test.ts tests them.
  */
 const withGateway = (
   replies: GatewayReply[],
@@ -48,25 +48,45 @@ const withGateway = (
   const gatewayEnv: ModelsEnv = {
     ...env,
     AI: gateway.binding,
-    FEATURES: {
-      ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-      model_rules: false,
-    },
     MODEL_GATEWAY: modelGateway,
   };
   return { gateway, gatewayEnv };
 };
 
-/** Where the calls here work: an App's, unread while the rules are off. */
-const work = {
-  authority: {
-    subject: { type: "app", appId: appIdSchema.parse("app-models") },
-    onBehalfOf: "person-models",
-    mode: "interactive",
-    appVersion: 1,
-  },
-  context: { type: "app", appId: appIdSchema.parse("app-models") },
-} as const;
+const idp = mockIdp();
+
+/**
+ * Where the calls here work: an App of their own, made before the first
+ * test and kept for the rest, as every call's context must exist.
+ */
+let madeWork: ModelCall<undefined>["work"] | undefined;
+
+/** Makes the calls' App, before the file's first test. */
+const makeWork = async (): Promise<void> => {
+  if (madeWork !== undefined) {
+    return;
+  }
+  const builder = await signedInApi(idp, "builder");
+  const { id } = await builder.api.apps.create({ name: "Models" });
+  const appId = appIdSchema.parse(id);
+  madeWork = {
+    authority: {
+      subject: { type: "app", appId },
+      onBehalfOf: builder.userId,
+      mode: "interactive",
+      appVersion: 1,
+    },
+    context: { type: "app", appId },
+  };
+};
+
+/** The calls' work context, once made. */
+const work = (): ModelCall<undefined>["work"] => {
+  if (madeWork === undefined) {
+    throw new Error("The tests' App isn't made yet");
+  }
+  return madeWork;
+};
 
 /** A person no other test uses, so their audit events are this test's. */
 const newPerson = () =>
@@ -103,6 +123,8 @@ const refuse = (): never => {
 // as the events that never came. No test waits more than once, so thirty
 // seconds holds that wait and the calls around it on a slow runner.
 describe("model gateway", { timeout: 30_000 }, () => {
+  beforeEach(makeWork);
+
   it.each([
     [workersAi, "/workers-ai/v1/chat/completions"],
     [anthropic, "/anthropic/v1/messages"],
@@ -122,7 +144,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
         ],
         purpose: "chat.turn",
         trigger: newPerson(),
-        work,
+        work: work(),
       });
 
       expect(result).toMatchObject({
@@ -161,7 +183,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
       messages: [{ role: "user", content: "Say hello." }],
       purpose: "chat.turn",
       trigger: newPerson(),
-      work,
+      work: work(),
     });
 
     expect({
@@ -186,7 +208,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
         input: "Count.",
         purpose: "chat.turn",
         trigger: newPerson(),
-        work,
+        work: work(),
       });
     }
 
@@ -227,7 +249,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
       schema: z.object({ vendor: z.string(), total: z.number() }),
       purpose: "workflow.step",
       trigger: newPerson(),
-      work,
+      work: work(),
     });
 
     expect(result.output).toStrictEqual({ vendor: "Acme", total: 42.5 });
@@ -246,7 +268,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
       schema: z.object({ total: z.number() }),
       purpose: "workflow.step",
       trigger,
-      work,
+      work: work(),
     });
 
     // Both requests count.
@@ -283,7 +305,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
           schema: z.object({ total: z.number() }),
           purpose: "workflow.step",
           trigger,
-          work,
+          work: work(),
         })
       )
     ).resolves.toBe("model.invalid_output");
@@ -304,7 +326,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
         input: "Hello.",
         purpose: "chat.turn",
         trigger: newPerson(),
-        work,
+        work: work(),
       });
 
     // A model the gateway offers, but not this deployment.
@@ -333,7 +355,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
         input: "Say hello.",
         purpose: "chat.turn",
         trigger: newPerson(),
-        work,
+        work: work(),
       });
 
     await expect(call(model)).resolves.toMatchObject({ text: "Hello." });
@@ -366,7 +388,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
             input: "Hello.",
             purpose: "chat.turn",
             trigger: newPerson(),
-            work,
+            work: work(),
           })
         )
       ).resolves.toBe("model.unconfigured");
@@ -383,7 +405,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
           input: "Hello.",
           purpose: "chat.turn",
           trigger: newPerson(),
-          work,
+          work: work(),
         })
       )
     ).resolves.toBe("ok");
@@ -416,7 +438,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
       model: workersAi,
       purpose: "chat.turn",
       trigger: newPerson(),
-      work,
+      work: work(),
       ...fields,
     } as ModelCall<undefined>;
     await expect(outcome(models(gatewayEnv).call(call))).resolves.toBe(
@@ -455,7 +477,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
             input: "Hi.",
             purpose: "chat.turn",
             trigger,
-            work,
+            work: work(),
             provenance,
           })
         )
@@ -488,7 +510,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
       input: "When is the Acme invoice due?",
       purpose: "chat.turn",
       trigger,
-      work,
+      work: work(),
       provenance: ["doc-invoice-1", "mail-2"],
       requestId: "request-1",
     });
@@ -533,7 +555,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
       input: "Write a long essay.",
       purpose: "chat.turn",
       trigger,
-      work,
+      work: work(),
     });
 
     expect(result).toMatchObject({
@@ -565,7 +587,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
             input: "Hello.",
             purpose: "chat.turn",
             trigger,
-            work,
+            work: work(),
           })
         )
       ).resolves.toBe("model.failed");
@@ -592,7 +614,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
       input: "Hello.",
       purpose: "chat.turn",
       trigger,
-      work,
+      work: work(),
     });
 
     expect(result.text).toBe("Hi.");
@@ -613,7 +635,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
           timeoutMs: 100,
           purpose: "chat.turn",
           trigger,
-          work,
+          work: work(),
         })
       )
     ).resolves.toBe("model.failed");
@@ -635,7 +657,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
         input: "Hello.",
         purpose: "chat.turn",
         trigger: newPerson(),
-        work,
+        work: work(),
       });
 
       // A timer left would keep a Durable Object awake for the timeout.
@@ -660,7 +682,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
         maxTokens,
         purpose: "chat.turn",
         trigger: newPerson(),
-        work,
+        work: work(),
       });
     }
 
@@ -688,7 +710,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
       input: "Say hello.",
       purpose: "chat.turn",
       trigger,
-      work,
+      work: work(),
     });
 
     expect(result.text).toBe("Hello, Ada.");
@@ -701,8 +723,20 @@ describe("model gateway", { timeout: 30_000 }, () => {
   it("keeps a paid answer when the database refuses its audit event, and appends the event straight to the log", async () => {
     const trigger = newPerson();
     const { gatewayEnv } = withGateway([answer("Hello, Ada.")]);
+    // Reads still work, so the rules can check where the call works; every
+    // write, the audit event's among them, is refused.
     const databaseDown = new Proxy(env.DB, {
-      get: () => refuse,
+      get: (target, key) => {
+        if (key === "batch") {
+          return refuse;
+        }
+        const value: unknown = Reflect.get(target, key);
+        if (typeof value !== "function") {
+          return value;
+        }
+        const bound: unknown = value.bind(target);
+        return bound;
+      },
     });
 
     const result = await models({ ...gatewayEnv, DB: databaseDown }).call({
@@ -710,7 +744,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
       input: "Say hello.",
       purpose: "chat.turn",
       trigger,
-      work,
+      work: work(),
     });
 
     expect(result.text).toBe("Hello, Ada.");
@@ -729,7 +763,7 @@ describe("model gateway", { timeout: 30_000 }, () => {
           input: "Hello.",
           purpose: "chat.turn",
           trigger: newPerson(),
-          work,
+          work: work(),
         })
       )
     ).resolves.toBe("model.unconfigured");
@@ -737,6 +771,8 @@ describe("model gateway", { timeout: 30_000 }, () => {
 });
 
 describe("model gateway for agents", () => {
+  beforeEach(makeWork);
+
   const codeTool = {
     name: "executeCode",
     description: "Runs code.",
@@ -769,7 +805,7 @@ describe("model gateway for agents", () => {
         model,
         purpose: "chat.turn",
         trigger,
-        work,
+        work: work(),
       });
 
       const stream = agent.stream(agent.model, withTool("What is 1 + 1?"));
@@ -826,7 +862,7 @@ describe("model gateway for agents", () => {
         model,
         purpose: "chat.turn",
         trigger: newPerson(),
-        work,
+        work: work(),
       });
       const context = withTool("What is 1 + 1?");
 
@@ -891,7 +927,7 @@ describe("model gateway for agents", () => {
         model: workersAi,
         purpose: "chat.turn",
         trigger: newPerson(),
-        work,
+        work: work(),
       });
       const failed = await agent.stream(agent.model, withTool(prompt)).result();
 
@@ -933,7 +969,7 @@ describe("model gateway for agents", () => {
           model: anthropic,
           purpose: "chat.turn",
           trigger: newPerson(),
-          work,
+          work: work(),
         })
       )
     ).resolves.toBe("model.not_allowed");
@@ -947,7 +983,7 @@ describe("model gateway for agents", () => {
       model: anthropic,
       purpose: "chat.turn",
       trigger,
-      work,
+      work: work(),
     });
 
     await agent.stream(agent.model, withTool("First.")).result();
@@ -981,7 +1017,7 @@ describe("model gateway for agents", () => {
       model: anthropic,
       purpose: "chat.turn",
       trigger,
-      work,
+      work: work(),
     });
 
     const final = await agent.stream(agent.model, withTool("Hello.")).result();
@@ -1003,7 +1039,7 @@ describe("model gateway for agents", () => {
     const { gatewayEnv } = withGateway([answer("One."), answer("Two.")]);
     const read: string[] = [];
     const agent = await models(gatewayEnv).agent(
-      { model: anthropic, purpose: "chat.turn", trigger, work },
+      { model: anthropic, purpose: "chat.turn", trigger, work: work() },
       () => read
     );
 
@@ -1023,7 +1059,7 @@ describe("model gateway for agents", () => {
       model: anthropic,
       purpose: "chat.turn",
       trigger: newPerson(),
-      work,
+      work: work(),
     });
 
     const final = await agent
@@ -1043,7 +1079,7 @@ describe("model gateway for agents", () => {
       model: openai,
       purpose: "chat.turn",
       trigger,
-      work,
+      work: work(),
     });
     const cancel = new AbortController();
 

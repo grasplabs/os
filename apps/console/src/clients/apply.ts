@@ -1,7 +1,7 @@
 /**
  * Applying a client's settings now, without waiting for a rollout: a
- * deploy of the release it runs, so its core gets its flags and sign-in,
- * with every Worker live at once (a kill switch can't wait for a gradual
+ * deploy of the release it runs, so its core gets its sign-in, with
+ * every Worker live at once (a config change doesn't wait for a gradual
  * rollout). Staff start it from the client's page.
  *
  * It's a runner like the others (src/runners.ts): it claims the client

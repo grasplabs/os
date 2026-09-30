@@ -12,7 +12,6 @@ import { drizzle } from "drizzle-orm/d1";
 import type { Address, Email } from "postal-mime";
 
 import { apps, workflowTriggers } from "../db/core/schema.ts";
-import { featureEnabled } from "../features.ts";
 import { isWorthKeeping, keepMessage, parsedOf } from "./kept-email.ts";
 import { deliveryRoom, maxInputLength, startRun } from "./runs.ts";
 
@@ -22,10 +21,8 @@ import { deliveryRoom, maxInputLength, startRun } from "./runs.ts";
 // the `@`: to the workflows of Apps' current versions that receive mail
 // there. The address is looked up first, so mail nobody receives is never
 // read: mail to an address nobody receives at bounces (a permanent
-// failure), and while triggers or workflows are switched off, mail to an
-// address someone receives at fails for now (the handler throws), so its
-// sender tries again later. Only then is the message read and parsed: one
-// too large, or that doesn't parse, bounces.
+// failure). Only then is the message read and parsed: one too large, or
+// that doesn't parse, bounces.
 //
 // A run gets the message parsed (`InboundEmail`), bounded to fit a run's
 // input: at most 100 each of To and Cc, names, subject and file names
@@ -34,8 +31,7 @@ import { deliveryRoom, maxInputLength, startRun } from "./runs.ts";
 // of its bytes.
 //
 // A message with an attachment that isn't inline is kept for its runs to
-// read its attachments, while `email_attachments` is on (kept-email.ts);
-// its input names it (`stored`), or says `stored: null`. It is kept only
+// read its attachments (kept-email.ts); its input names it (`stored`), or says `stored: null`. It is kept only
 // for the Apps it may start a run of: one delivered again, whose runs
 // started, is not kept again, whatever its bytes are this time.
 //
@@ -298,9 +294,6 @@ export const receiveEmail = async (
     message.setReject("No such address.");
     return;
   }
-  if (!(featureEnabled(env, "triggers") && featureEnabled(env, "workflows"))) {
-    throw new Error("Mail triggers are switched off: try again later");
-  }
   const raw = await readAtMost(message.raw, maxMessageBytes);
   if (raw === undefined) {
     message.setReject("The message is too large.");
@@ -350,18 +343,16 @@ export const receiveEmail = async (
   // So mail sent again under one Message-ID with other bytes each time
   // keeps nothing more, and what is kept stays within the hourly limit.
   // Failing to keep it fails the delivery for now: its sender tries again.
-  const stored =
-    featureEnabled(env, "email_attachments") &&
-    isWorthKeeping(parsed.attachments)
-      ? await keepMessage(
-          env,
-          receivers
-            .filter((_, index) => rooms[index] === "new")
-            .map(({ appId }) => appId),
-          id,
-          raw
-        )
-      : null;
+  const stored = isWorthKeeping(parsed.attachments)
+    ? await keepMessage(
+        env,
+        receivers
+          .filter((_, index) => rooms[index] === "new")
+          .map(({ appId }) => appId),
+        id,
+        raw
+      )
+    : null;
   const input = inputOf(id, stored, message.from, parsed);
   const started = await Promise.allSettled(
     withRoom.map(

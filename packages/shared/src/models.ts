@@ -93,14 +93,10 @@ export interface ModelSettings {
    */
   models: string[];
   /**
-   * The client's other rules: `off` while switched off, and only the
-   * allowlist applies; `invalid` when they don't parse, and every call is
-   * refused.
+   * The client's other rules: `invalid` when they don't parse, and every
+   * call is refused.
    */
-  rules:
-    | { state: "off" }
-    | { state: "invalid" }
-    | ({ state: "on" } & ModelRulesSettings);
+  rules: { state: "invalid" } | ({ state: "on" } & ModelRulesSettings);
   /** The UTC month budgets count in now, such as `2026-09`. */
   month: string;
 }

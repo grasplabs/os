@@ -479,8 +479,7 @@ export type FromBlueprint = z.input<typeof fromBlueprintSchema>;
  * and connections connect doesn't know (`dropped`), and the workflows and
  * exports of Apps its creator has no role in, which they couldn't ask for
  * themselves (`droppedApps`): a copy never names an App its creator can't
- * see. While calls between Apps are switched off, any App's exports are
- * dropped too. Nothing else comes with it: no data, no settings, no runs,
+ * see. Nothing else comes with it: no data, no settings, no runs,
  * no members.
  */
 export interface CreatedFromBlueprint {
@@ -527,8 +526,7 @@ export interface AppsApi {
   contents: (app: string) => Promise<AppContents>;
   /**
    * What the App's current version exports to other Apps: read from its
-   * version alone, for anyone with a role in the App. Refused with
-   * `feature.disabled` while calls between Apps are off.
+   * version alone, for anyone with a role in the App.
    */
   exports: (app: string) => Promise<CurrentExports>;
   readonly files: AppFilesApi;

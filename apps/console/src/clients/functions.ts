@@ -14,9 +14,7 @@ import { applySettings } from "./apply.ts";
 import { clientGrid, gridLive } from "./grid.ts";
 import { clientHistory, clientSettings } from "./queries.ts";
 import {
-  featureInputSchema,
   ringInputSchema,
-  setFeature,
   setRing,
   setSignIn,
   SettingsError,
@@ -75,13 +73,6 @@ export const setRingFn = createServerFn({ method: "POST" })
   .handler(
     async ({ data, context }) =>
       await change(async () => await setRing(env, context.staff, data))
-  );
-
-export const setFeatureFn = createServerFn({ method: "POST" })
-  .validator(featureInputSchema)
-  .handler(
-    async ({ data, context }) =>
-      await change(async () => await setFeature(env, context.staff, data))
   );
 
 /** Applies a client's settings now: a deploy of the release it runs, live at once. */

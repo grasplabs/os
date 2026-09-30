@@ -105,13 +105,13 @@ describe(act, () => {
         [
           db.insert(settings).values({
             clientId,
-            key: "FEATURES",
-            value: "{}",
+            key: "AUDIT_RETENTION_DAYS",
+            value: "90",
             updatedBy: staff.email,
             updatedAt: new Date(),
           }),
         ],
-        { action: "setting.update", clientId, target: "FEATURES" }
+        { action: "setting.update", clientId, target: "AUDIT_RETENTION_DAYS" }
       )
     ).rejects.toThrow("FOREIGN KEY constraint failed");
 

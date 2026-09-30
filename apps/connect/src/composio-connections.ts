@@ -433,15 +433,14 @@ export const startToolkitConnection = async (
   env: Env,
   request: unknown
 ): Promise<{ url: string }> => {
-  const { person, composio, toolkit, tools, origin, returnTo } =
-    connectionErrors.parse(
-      "connection.invalid",
-      startToolkitConnectionSchema,
-      request
-    );
+  const { person, toolkit, tools, origin, returnTo } = connectionErrors.parse(
+    "connection.invalid",
+    startToolkitConnectionSchema,
+    request
+  );
   await refuseUnlessAdmin(env, person, toolkit);
   const key = composioKey(env);
-  if (!composio || key === undefined || new URL(origin).origin !== origin) {
+  if (key === undefined || new URL(origin).origin !== origin) {
     throw connectionErrors.create("connection.provider_unavailable");
   }
   // Only tools the toolkit has, each held to a resource only by one of its
@@ -719,13 +718,12 @@ const isServerFor = (
 
 /**
  * Finishes a Composio flow for the admin who started it, once Composio
- * sent their browser back: the new connection. `composio` is core's flag.
+ * sent their browser back: the new connection.
  */
 const finishToolkitConnection = async (
   env: Env,
   person: ConnectionPerson,
-  flow: ToolkitFlow,
-  composio: boolean
+  flow: ToolkitFlow
 ): Promise<{ connectionId: string; returnTo: string }> => {
   const detail = detailOf(flow.toolkit);
   const refuse = async (
@@ -752,7 +750,7 @@ const finishToolkitConnection = async (
     }
     // The role is read again: it may have changed since the flow started.
     await refuseUnlessAdmin(env, person, flow.toolkit);
-    if (!composio || key === undefined) {
+    if (key === undefined) {
       await refuse("connection.provider_unavailable");
       throw connectionErrors.create("connection.provider_unavailable");
     }
@@ -866,12 +864,12 @@ export const finishToolkitFlow = async (
   if (!parsed.success) {
     return undefined;
   }
-  const { person, state, composio = false } = parsed.data;
+  const { person, state } = parsed.data;
   const flow = await takeToolkitFlow(env, await sha256Hex(state));
   if (flow === undefined) {
     return undefined;
   }
-  return await finishToolkitConnection(env, person, flow, composio);
+  return await finishToolkitConnection(env, person, flow);
 };
 
 /**

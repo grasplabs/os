@@ -2,7 +2,7 @@ import type {
   ActionDescription,
   PendingAction,
 } from "@grasp-os/shared/connect";
-import { featureErrors, failureText } from "@grasp-os/shared/errors";
+import { failureText } from "@grasp-os/shared/errors";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
 import {
@@ -56,11 +56,6 @@ const readHeld = async (
       ),
     };
   } catch (error) {
-    // Held writes switched off (connections): nothing to
-    // show under the chat, rather than a refusal under every one.
-    if (featureErrors.codeOf(error) === "feature.disabled") {
-      return { state: "ready", actions: [] };
-    }
     return { state: "refused", message: failureText(error) };
   }
 };

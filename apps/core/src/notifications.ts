@@ -37,8 +37,7 @@ import type { SessionCheck } from "./session-check.ts";
 // `workflow.run.notified` in it too, only if that batch ended the run: a
 // run ends once, so it notifies once. While a notification of a workflow
 // is unread, its next failures count on it, so a workflow failing every
-// minute is one notification, not thousands. Behind `run_notifications`,
-// with the Workflows kill switch: while off, a failure notifies nobody.
+// minute is one notification, not thousands.
 //
 // A person lists only notifications of Apps they can still open
 // (`appsFoundBy`), so one of an App taken from them tells them nothing

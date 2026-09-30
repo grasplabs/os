@@ -2,20 +2,13 @@ import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import { env } from "cloudflare:workers";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { startRun } from "../src/workflows/runs.ts";
 import { release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import {
-  endLiveRuns,
-  finished,
-  resumed,
-  stepDone,
-  stopped,
-  woken,
-} from "./runs.ts";
+import { endLiveRuns, finished, stepDone, stopped, woken } from "./runs.ts";
 import {
   auditedDuring,
   openRpc,
@@ -25,7 +18,6 @@ import {
   signedInApi,
   staffPerson,
 } from "./sign-in.ts";
-import { runEvents } from "./workflow-apps.ts";
 
 // The values of workflows' parameters: builders set them directly, audited
 // without the value (R16), and runs read them as the version they are
@@ -389,34 +381,35 @@ describe("runs", buildTime, () => {
     async () => {
       const builder = await personApi("builder");
       const app = await invoicesApp(builder);
-      // A run pinned to v1, where the limit is money, started just before
-      // workflows were switched off: it waits before its first step, where it
-      // records its values, and is stopped there.
-      const { FEATURES: features } = env;
-      const on = z.record(z.string(), z.boolean()).parse(features);
-      let run: Awaited<ReturnType<typeof startRun>>;
-      try {
-        env.FEATURES = { ...on, workflows: false };
-        run = await startRun(
-          { ...env, FEATURES: on },
-          {
-            app: appIdSchema.parse(app),
-            workflow: workflowIdSchema.parse("invoices"),
-            input: undefined,
-            startedBy: builder.userId,
-            actor: { type: "system" },
-          }
-        );
-        await runEvents(run.id, "workflow.run.waiting");
-        await stopped(run.id);
-      } finally {
-        env.FEATURES = features;
-      }
+      // A run pinned to v1, where the limit is money, whose engine instance
+      // is slow to be created: its first step, where it records its values,
+      // runs only after that.
+      const create = env.WORKFLOWS.create.bind(env.WORKFLOWS);
+      const { promise: created, resolve: createNow } =
+        Promise.withResolvers<null>();
+      const slow = vi
+        .spyOn(env.WORKFLOWS, "create")
+        .mockImplementationOnce(async (options) => {
+          await created;
+          return await create(options);
+        });
+      const starting = startRun(env, {
+        app: appIdSchema.parse(app),
+        workflow: workflowIdSchema.parse("invoices"),
+        input: undefined,
+        startedBy: builder.userId,
+        actor: { type: "system" },
+      });
+      await vi.waitFor(() => {
+        expect(slow).toHaveBeenCalledOnce();
+      });
       // Meanwhile v2, where the limit is text, is current, with a text value.
-      // The run's next execution reads the values anew.
+      // The run's first step reads the values then.
       await release(builder, app, textLimitVersion());
       await builder.api.workflows.params.set(app, "invoices", "limit", "none");
-      await resumed(run.id);
+      createNow(null);
+      const run = await starting;
+      slow.mockRestore();
       expect({
         pinned: await limitOfRun(builder, run.id),
         current: await runLimit(builder, app),

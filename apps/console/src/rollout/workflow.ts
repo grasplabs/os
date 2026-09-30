@@ -15,7 +15,7 @@
  * (a rotation still to go live, or shared secrets changed in Secrets
  * Store): versions with different secrets can't share traffic. So does a
  * client on the release already, deployed again for a config change
- * (src/clients/settings.ts): flags may be kill switches.
+ * (src/clients/settings.ts): the same code, so nothing to roll out gradually.
  *
  * A secrets rollout (no release) takes the shared secrets in Secrets
  * Store now to clients without a code release: it deploys each client's
@@ -674,8 +674,8 @@ const deployClaimed = async (
       params.releaseId !== null &&
       uploaded.sameSecrets &&
       prepared?.generation === running.generation;
-    // The release the client runs already: only its config (flags,
-    // sign-in) changes, which may be a kill switch, so at once too.
+    // The release the client runs already: only its config (sign-in)
+    // changes, with the same code, so at once too.
     const newCode = running.release !== params.releaseId;
     if (
       !uploaded.live &&

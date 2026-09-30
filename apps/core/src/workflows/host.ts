@@ -43,8 +43,6 @@ import type {
   DecisionOutcome,
   DecisionRecipient,
 } from "../decisions/decisions.ts";
-import { featureEnabled, requireFeature } from "../features.ts";
-import type { Feature } from "../features.ts";
 import { models } from "../models.ts";
 import { requireActivePerson, requireApprovedVersion } from "../permissions.ts";
 import { commitStepStatistics } from "../statistic-steps.ts";
@@ -122,20 +120,10 @@ interface StepAttempt {
   keptMessages?: Map<string, Email>;
 }
 
-/** Why a run waits before a step. */
-export type WaitReason =
-  | { reason: "switched_off"; feature: Feature }
-  | { reason: "held" };
-
-/** What a wait records a reason under: once per wait for each. */
-const waitName = (why: WaitReason): string =>
-  why.reason === "held" ? "held" : why.feature;
-
-/**
- * What a wait's check answers when the run may not go on yet, though it
- * waits on no reason to record: it checks again after the next sleep.
- */
-const checkAgain = Symbol("checkAgain");
+/** Why a run waits before running a step again. */
+export interface WaitReason {
+  reason: "held";
+}
 
 /** The code a held side effect answers a run's call with (connect). */
 const heldCode = "connect.held";
@@ -191,7 +179,6 @@ const doOptionsSchema = z.object({
   timeout: milliseconds.optional(),
   sideEffect: z.boolean().optional(),
   input: z.json().optional(),
-  decision: z.boolean().optional(),
 });
 
 /**
@@ -361,26 +348,26 @@ const defaultStepLimit = 10_000;
  * how the run ended always fits, with room to spare. A run's own steps
  * are refused this far short of the limit; past the limit, the engine
  * would refuse core's end too. Core's steps that the run's code causes
- * without bound count as the run's own: the sleeps of a wait while a
- * feature is off ({@link offStepPrefix}).
+ * without bound count as the run's own: the steps of a wait while a
+ * side effect is held ({@link waitStepPrefix}).
  */
 const coreStepReserve = 5;
 
 /**
- * The sleeps a run waits in while a feature is switched off. They are
- * core's (workflow code can't name one), but count as the run's own
- * against the reserve, so waiting can't use up the steps core's end needs.
+ * The steps a run waits in while a side effect is held. They are core's
+ * (workflow code can't name one), but count as the run's own against the
+ * reserve, so waiting can't use up the steps core's end needs.
  */
-const offStepPrefix = `${coreStepPrefix}off:`;
+const waitStepPrefix = `${coreStepPrefix}wait:`;
 
 /**
- * How long a run first waits before it checks a switched-off feature
- * again; each wait after doubles, up to {@link maxOffWaits} times this.
+ * How long a run first waits before it checks a held side effect again;
+ * each wait after doubles, up to {@link maxWaits} times this.
  */
-const defaultOffWaitMs = 60_000;
+const defaultWaitMs = 60_000;
 
 /** The longest wait between checks, in first waits: 15 minutes. */
-const maxOffWaits = 15;
+const maxWaits = 15;
 
 /**
  * Tries of one check whether a held side effect still waits, after the
@@ -392,7 +379,7 @@ const heldCheckRetries = 5;
  * A short, stable key for the step `name` a wait holds, as the wait's own
  * step names take it: a step's name can be as long as a step name may be.
  */
-const offKeyOf = async (name: unknown): Promise<string> => {
+const waitKeyOf = async (name: unknown): Promise<string> => {
   const digest = await crypto.subtle.digest(
     "SHA-256",
     new TextEncoder().encode(String(name))
@@ -401,11 +388,11 @@ const offKeyOf = async (name: unknown): Promise<string> => {
 };
 
 /** The first wait between checks for this deployment; tests shorten it. */
-const offWaitOf = (env: Env): number => {
+const waitMsOf = (env: Env): number => {
   const set = Number(env.WORKFLOW_OFF_WAIT_MS);
-  return Number.isInteger(set) && set > 0 && set < defaultOffWaitMs
+  return Number.isInteger(set) && set > 0 && set < defaultWaitMs
     ? set
-    : defaultOffWaitMs;
+    : defaultWaitMs;
 };
 
 /** The engine's step limit for this deployment. */
@@ -448,7 +435,7 @@ export const watchedStep = (
   const take = (name: string): void => {
     taken += 1;
     const reserved =
-      name.startsWith(coreStepPrefix) && !name.startsWith(offStepPrefix);
+      name.startsWith(coreStepPrefix) && !name.startsWith(waitStepPrefix);
     if (!reserved && taken > stepLimit - coreStepReserve) {
       throw workflowErrors.create("workflow.too_many_steps");
     }
@@ -629,15 +616,10 @@ export interface HostHooks {
   /** Whether the engine has stopped this execution (`watchedStep`). */
   engineStopped: () => boolean;
   /**
-   * Records that the run waits: while a feature is switched off, or while
-   * a side effect of a step is held for the person it acts for.
+   * Records that the run waits while a side effect of a step is held for
+   * the person it acts for.
    */
   waiting: (why: WaitReason) => Promise<void>;
-  /**
-   * Hears that the run goes on past a check for `features`, none of them
-   * off: a wait for one of them, if any, is over.
-   */
-  goesOn: (features: readonly Feature[]) => Promise<void>;
   /** Calls a method of the run's App for `caller` (`callApp`). */
   callApp: (
     caller: AppCallerInput,
@@ -715,95 +697,47 @@ export class RunHost extends RpcTarget {
   }
 
   /**
-   * Waits, before the step `name`, while any of `features` is switched
-   * off, then lets the run go on: a kill switch holds a run without
-   * failing or pausing it, and nobody has to resume it.
-   *
-   * Each check is a durable sleep: a minute first (`offWaitOf`), doubling
-   * up to 15 minutes. Each is one step of the run's budget, so a run waits
-   * a long time (days at the default step limit), and past that its next
-   * step fails with `workflow.too_many_steps`.
-   *
-   * The wait's steps are named after the step it holds, so they are the
-   * same on every execution that waits there. But every step is checked,
-   * the ones a new execution replays too, so one that starts while the
-   * feature is still off (a deploy, a crash, a resume) waits before the
-   * first step it replays, in steps of its own. The wait is recorded in a
-   * step of its own per feature waited on (`waiting`), and the run's row
-   * keeps the feature until the run goes on past it (`goesOn`), so each
-   * stretch is audited once for each, whatever the executions
-   * (`recordWaiting`). That step's retries cover a failing audit write;
-   * one that still fails is logged, and the run keeps waiting. The run
-   * goes on only once its row no longer keeps the feature: while that
-   * write fails, it is logged and the run waits on, checking again as it
-   * would while the feature is off, so a later wait is never left
-   * unrecorded.
-   */
-  async #waitWhileOff(
-    name: unknown,
-    features: readonly Feature[]
-  ): Promise<void> {
-    await this.#waitWhile(
-      async () => `${offStepPrefix}${await offKeyOf(name)}`,
-      async () => {
-        const off = features.find(
-          (feature) => !featureEnabled(this.#env, feature)
-        );
-        if (off !== undefined) {
-          return { reason: "switched_off" as const, feature: off };
-        }
-        return (await this.#keptGoingOn(features)) ? undefined : checkAgain;
-      }
-    );
-  }
-
-  /** Whether the run's going on past `features` is kept; logged if not. */
-  async #keptGoingOn(features: readonly Feature[]): Promise<boolean> {
-    try {
-      await this.#hooks.goesOn(features);
-      return true;
-    } catch (error) {
-      log.error("workflow.going_on_failed", {
-        runId: this.#run.runId,
-        features: features.join(","),
-        ...errorFields(error),
-      });
-      return false;
-    }
-  }
-
-  /**
    * Waits, before running the step `step` again, while a side effect it
-   * asked for is held for the person the run acts for, as `#waitWhileOff`
-   * waits: the same sleeps, recorded once per hold. But each check is a
-   * step of its own (retried, and replayed without asking connect again),
-   * so the wait takes about twice the step budget per check: about 52 days
-   * at the default limit, against about 104 for a switched-off feature. A
-   * decline or a drop ends the wait too: the step's next run fails with
-   * `connect.declined`.
+   * asked for is held for the person the run acts for: each check a step
+   * of its own (retried, and replayed without asking connect again), then
+   * a durable sleep, a minute first (`waitMsOf`), doubling up to 15
+   * minutes, in steps named after `prefix`. The wait is recorded once, in
+   * a step of its own. Each check and sleep is a step of the run's budget,
+   * so a run waits about 52 days at the default limit. A decline or a drop
+   * ends the wait too: the step's next run fails with `connect.declined`.
    */
   async #waitWhileHeld(step: string, prefix: string): Promise<void> {
-    await this.#waitWhile(
-      async () => await Promise.resolve(prefix),
-      async (checks) => {
-        // Each check is a step of its own, with retries of its own: its
-        // answer is recorded, so a replay asks connect nothing, and a
-        // failing connect is tried again rather than failing the step.
-        const first = offWaitOf(this.#env);
-        const held = await this.#step.do(
-          `${prefix}:${checks}:check`,
-          {
-            retries: {
-              limit: heldCheckRetries,
-              delay: first,
-              backoff: "exponential",
-            },
+    const first = waitMsOf(this.#env);
+    for (let checks = 0; ; checks += 1) {
+      // Its answer is recorded, so a replay asks connect nothing, and a
+      // failing connect is tried again rather than failing the step.
+      // oxlint-disable-next-line no-await-in-loop -- one check at a time
+      const held = await this.#step.do(
+        `${prefix}:${checks}:check`,
+        {
+          retries: {
+            limit: heldCheckRetries,
+            delay: first,
+            backoff: "exponential",
           },
-          async () => await this.#stillHeld(step)
-        );
-        return held === true ? { reason: "held" as const } : undefined;
+        },
+        async () => await this.#stillHeld(step)
+      );
+      if (held !== true) {
+        return;
       }
-    );
+      if (checks === 0) {
+        // oxlint-disable-next-line no-await-in-loop -- once per wait
+        await this.#recordWaiting(`${prefix}:waiting:held`, {
+          reason: "held",
+        });
+      }
+      // oxlint-disable-next-line no-await-in-loop -- one check at a time
+      await this.#step.sleep(
+        `${prefix}:${checks}`,
+        Math.min(first * 2 ** checks, first * maxWaits)
+      );
+    }
   }
 
   /**
@@ -829,47 +763,6 @@ export class RunHost extends RpcTarget {
       onBehalfOf: this.#run.authority.onBehalfOf,
       idempotencyKey: stepIdempotencyKey(this.#run.runId, step),
     });
-  }
-
-  /**
-   * Waits while `waitingFor` names a reason: each check a durable sleep, a
-   * minute first (`offWaitOf`), doubling up to 15 minutes, in steps named
-   * after `prefixOf` (asked only once there is a wait). Each reason is
-   * recorded once per wait, in a step of its own; `checkAgain` waits for
-   * the next check without one.
-   */
-  async #waitWhile(
-    prefixOf: () => Promise<string>,
-    waitingFor: (
-      checks: number
-    ) => Promise<WaitReason | typeof checkAgain | undefined>
-  ): Promise<void> {
-    let prefix: string | undefined;
-    // Each reason the run waits on is recorded once: with two features
-    // off, the run waits on the first, then on the other once the first
-    // is on.
-    const recorded = new Set<string>();
-    for (let checks = 0; ; checks += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- one check at a time
-      const why = await waitingFor(checks);
-      if (why === undefined) {
-        return;
-      }
-      // oxlint-disable-next-line no-await-in-loop -- once per wait
-      prefix ??= await prefixOf();
-      const name = why === checkAgain ? undefined : waitName(why);
-      if (why !== checkAgain && name !== undefined && !recorded.has(name)) {
-        recorded.add(name);
-        // oxlint-disable-next-line no-await-in-loop -- once per reason
-        await this.#recordWaiting(`${prefix}:waiting:${name}`, why);
-      }
-      const first = offWaitOf(this.#env);
-      // oxlint-disable-next-line no-await-in-loop -- one check at a time
-      await this.#step.sleep(
-        `${prefix}:${checks}`,
-        Math.min(first * 2 ** checks, first * maxOffWaits)
-      );
-    }
   }
 
   /** Records, once in step `step`, that the run waits, and why. */
@@ -910,13 +803,11 @@ export class RunHost extends RpcTarget {
    * when it happened; a step the engine stopped (a pause, a cancel) runs,
    * or replays, in the execution that goes on, if any. A step that fails
    * before it starts (options that don't parse, a person who has left) is
-   * neither: the run's own failure records it. While `workflows` is
-   * switched off, or `decisions` for a step that opens or asks a
-   * decision, the run waits before the step (`#waitWhileOff`). When a side
-   * effect of the step is held for the person the run acts for, the step
-   * ends as held, not failed, uses no retries, and the run waits the same
-   * way until the person decided, then runs the step again under the same
-   * key (`#waitWhileHeld`): confirmed, it gets the answer; declined or
+   * neither: the run's own failure records it. When a side effect of the
+   * step is held for the person the run acts for, the step ends as held,
+   * not failed, uses no retries, and the run waits until the person
+   * decided, then runs the step again under the same key
+   * (`#waitWhileHeld`): confirmed, it gets the answer; declined or
    * dropped, it fails with `connect.declined`.
    */
   async do(
@@ -924,19 +815,6 @@ export class RunHost extends RpcTarget {
     options: unknown,
     fn: (attempt: string) => Promise<unknown>
   ): Promise<Settled<unknown>> {
-    // Before the step's name and options are checked, which fail the step:
-    // waiting mustn't. Options that don't parse wait for `workflows` only,
-    // and fail below.
-    const waited = await settle(async () => {
-      const decision = doOptionsSchema.safeParse(options).data?.decision;
-      await this.#waitWhileOff(
-        name,
-        decision === true ? ["workflows", "decisions"] : ["workflows"]
-      );
-    });
-    if (!waited.ok) {
-      return waited;
-    }
     let failed: StepError | undefined;
     let attempted = false;
     let step = "";
@@ -1035,12 +913,11 @@ export class RunHost extends RpcTarget {
         return result.value;
       };
       let value = await this.#step.do(step, stepConfig(parsed), attemptStep);
-      // Held: wait, as for a switched-off feature, until the person decided,
-      // then run the step again under the same key, in a step of its own
+      // Held: wait until the person decided, then run the step again under the same key, in a step of its own
       // each time, so every execution replays the same steps.
       for (let round = 1; isHeldMarker(value); round += 1) {
         // oxlint-disable-next-line no-await-in-loop -- one round at a time
-        const prefix = `${offStepPrefix}${await offKeyOf(step)}:held:${round}`;
+        const prefix = `${waitStepPrefix}${await waitKeyOf(step)}:held:${round}`;
         // oxlint-disable-next-line no-await-in-loop -- one round at a time
         await this.#waitWhileHeld(step, prefix);
         // oxlint-disable-next-line no-await-in-loop -- one round at a time
@@ -1070,7 +947,6 @@ export class RunHost extends RpcTarget {
     return await settle(async () => {
       const step = checked(stepNameSchema, name);
       const ms = checked(milliseconds, duration);
-      await this.#waitWhileOff(step, ["workflows"]);
       await this.#step.sleep(step, ms);
       return null;
     });
@@ -1344,8 +1220,6 @@ export class RunHost extends RpcTarget {
    * event that wakes the run carries nothing it takes. With `last`, a
    * decision still open is closed, timed out, unless an answer lands
    * first. An answer that came before the wait began is taken at once.
-   * Switching decisions off stops only answering (decisions/rpc.ts): a wait
-   * that runs out meanwhile ends timed out, never approved.
    */
   async waitForDecision(
     name: unknown,
@@ -1354,7 +1228,6 @@ export class RunHost extends RpcTarget {
     return await settle(async () => {
       const step = checked(stepNameSchema, name);
       const { decision, timeout, last } = checked(decisionWaitSchema, options);
-      await this.#waitWhileOff(step, ["workflows"]);
       const before = await decisionOutcome(
         this.#env,
         this.#run,
@@ -1364,9 +1237,9 @@ export class RunHost extends RpcTarget {
       if (before.answered) {
         return before;
       }
-      // The SDK worked `timeout` out from when it asked, but a hold for
-      // switched-off workflows (just above) may have outlasted that: so
-      // never wait past the decision's deadline, as its row has it. Once
+      // The SDK worked `timeout` out from when it asked, but a pause or a
+      // restart may have outlasted that: so never wait past the decision's
+      // deadline, as its row has it. Once
       // that has passed, the decision is closed as timed out at once, so a
       // reminder that follows asks nobody.
       const deadline = await decisionDeadline(this.#env, this.#run, decision);
@@ -1398,7 +1271,7 @@ export class RunHost extends RpcTarget {
    * a step, for a person who is still there (kept-email.ts). Checked
    * against the run's own App, never one the isolate names: another App's
    * message is found as none. Every call is audited as a read, whatever
-   * refuses it (outside a step, switched off, a name or index that isn't
+   * refuses it (outside a step, a name or index that isn't
    * one), with the name and index as sent. An attachment is handed on,
    * and a refusal answered, only once it's recorded: one that can't be
    * recorded fails as `internal.unexpected`, to be tried again. A step
@@ -1422,7 +1295,6 @@ export class RunHost extends RpcTarget {
       let content: Uint8Array;
       try {
         const attempt = this.#requireStep();
-        requireFeature(this.#env, "email_attachments");
         await this.#requirePerson();
         // A message that isn't kept names nothing to read.
         if (stored === null) {

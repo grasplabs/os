@@ -2,7 +2,6 @@ import type { CreatedFromBlueprint } from "@grasp-os/shared/apps";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import { createFromBlueprint } from "../src/app-blueprints.ts";
 import { outlook, release, requestGranted, serverBuilt } from "./apps.ts";
@@ -199,32 +198,6 @@ describe("blueprints", { timeout: 60_000 }, () => {
         { type: "workflow", binding: "HIDDEN_FLOW", fromApp: source },
       ],
       namesHidden: false,
-    });
-
-    // While calls between Apps are off, no App's exports are asked for.
-    const off = await createFromBlueprint(
-      {
-        ...env,
-        FEATURES: {
-          ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-          app_calls: false,
-        },
-      },
-      await maker.api.whoami(),
-      source,
-      1,
-      { name: `Off ${unique()}` }
-    );
-    expect({
-      asked: off.permissions.map(({ binding }) => binding),
-      droppedApps: off.droppedApps.toSorted(byBinding),
-    }).toStrictEqual({
-      asked: ["VISIBLE_FLOW"],
-      droppedApps: [
-        { type: "app", binding: "HIDDEN_CRM" },
-        { type: "workflow", binding: "HIDDEN_FLOW" },
-        { type: "app", binding: "VISIBLE_CRM" },
-      ],
     });
   });
 

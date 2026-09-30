@@ -10,7 +10,6 @@ import { drizzle } from "drizzle-orm/d1";
 
 import { auditedBatch, outboxedIfChanged } from "../audit-outbox.ts";
 import { apps, workflowTriggers } from "../db/core/schema.ts";
-import { featureEnabled } from "../features.ts";
 import { startRun } from "./runs.ts";
 
 // Starting the runs of registered triggers (trigger-registry.ts): here
@@ -38,13 +37,10 @@ import { startRun } from "./runs.ts";
 // and shown with its workflow (overview.ts). It starts again when its
 // parameter is set (params.ts) or a version is made current, which
 // registers its triggers anew (trigger-registry.ts). A start that works
-// clears the count. A schedule that missed times, while triggers
-// were off or the cron trigger didn't run, starts one run for them all,
+// clears the count. A schedule that missed times, while the cron trigger
+// didn't run, starts one run for them all,
 // late, then goes on from the next time after. One whose parameter
 // changes goes on from the next time after the change (params.ts).
-//
-// The `triggers` flag stops every trigger; so does `workflows`, which
-// stops every run.
 
 /** Most due schedules one cron run starts; the rest start a minute later. */
 const schedulesPerRun = 50;
@@ -182,9 +178,6 @@ export const startDueSchedules = async (
   env: Env,
   now = new Date()
 ): Promise<void> => {
-  if (!(featureEnabled(env, "triggers") && featureEnabled(env, "workflows"))) {
-    return;
-  }
   const due = await drizzle(env.DB)
     .select({
       id: workflowTriggers.id,

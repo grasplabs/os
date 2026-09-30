@@ -414,7 +414,7 @@ interface KeptCheck {
  * While nobody declares the type it goes over, which fields it keeps
  * isn't known, so a record of it stays of it, whatever the write sets.
  * That is for as long as an App still has the type (`typeHeld`): its
- * current version waits for approval, or `record_types` is off. Once no
+ * current version waits for approval. Once no
  * App has it (its owner may no longer write the collection, or no longer
  * declares it), nothing would ever declare it again for its owner, and an
  * admin makes the record a plain `doc` by hand. Returns what the save's

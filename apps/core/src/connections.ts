@@ -39,7 +39,6 @@ import { providerIds, signInConfig } from "./auth/config.ts";
 import { identify } from "./auth/identity.ts";
 import { accounts, hiddenConnectors, users } from "./db/core/schema.ts";
 import { inList } from "./db/d1.ts";
-import { featureEnabled } from "./features.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -239,15 +238,13 @@ const requireOffered = async (
 /**
  * Refuses to hide the Composio toolkit `slug` unless Composio lists it: a
  * misspelled slug would otherwise be hidden without a word, while the
- * toolkit meant stays offered. While `composio` is off, Composio isn't
- * asked, and hiding is refused as unavailable. Offering one again needs no
+ * toolkit meant stays offered. While Composio isn't listed, hiding is
+ * refused as unavailable. Offering one again needs no
  * check, so an entry hidden before Composio dropped it can always be let
  * go.
  */
 const requireListedToolkit = async (env: Env, slug: string): Promise<void> => {
-  const catalog = await env.CONNECT.catalog({
-    composio: featureEnabled(env, "composio"),
-  });
+  const catalog = await env.CONNECT.catalog();
   if (catalog.composio !== "listed") {
     throw connectionErrors.create("connection.provider_unavailable");
   }
@@ -260,8 +257,8 @@ const requireListedToolkit = async (env: Env, slug: string): Promise<void> => {
 };
 
 /**
- * A signed-in person's `connections`. Every call checks the session (and
- * the `connections` flag) first; connect checks the rest: who may connect
+ * A signed-in person's `connections`. Every call checks the session
+ * first; connect checks the rest: who may connect
  * or disconnect what.
  */
 export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
@@ -346,7 +343,6 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
     }
     return await this.#env.CONNECT.startToolkitConnection({
       person,
-      composio: featureEnabled(this.#env, "composio"),
       toolkit,
       tools,
       consent,
@@ -389,9 +385,7 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
   async catalog(): Promise<OfferedCatalog> {
     return await withPerson(this.#check, async ({ role }) => {
       const [catalog, hidden] = await Promise.all([
-        this.#env.CONNECT.catalog({
-          composio: featureEnabled(this.#env, "composio"),
-        }),
+        this.#env.CONNECT.catalog(),
         hiddenEntries(this.#env),
       ]);
       const entries = catalog.entries.map((entry) => ({
@@ -484,7 +478,6 @@ export class ConnectionsRpc extends RpcTarget implements ConnectionsApi {
       throw connectErrors.create("connect.catalog_entry_not_found");
     }
     return await this.#env.CONNECT.catalogTools({
-      composio: featureEnabled(this.#env, "composio"),
       source,
       id,
     });
@@ -530,11 +523,7 @@ export const handleConnectionCallback = async (
   env: Env
 ): Promise<Response | undefined> => {
   const config = signInConfig(env);
-  if (
-    request.method !== "GET" ||
-    config === undefined ||
-    !featureEnabled(env, "connections")
-  ) {
+  if (request.method !== "GET" || config === undefined) {
     return undefined;
   }
   // A flow that fails returns to the Connections page, where people start
@@ -564,7 +553,6 @@ export const handleConnectionCallback = async (
       code: params.get("code") ?? undefined,
       // Only whether there is one matters; the provider's text isn't kept.
       error: params.get("error")?.slice(0, 64) ?? undefined,
-      composio: featureEnabled(env, "composio"),
     });
   } catch (error) {
     return failed(errorCodeOf(error));

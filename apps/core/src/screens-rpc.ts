@@ -30,8 +30,6 @@ import { callApp, isPlainData } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
 import { appFor, findVersion, getApp, versionFiles } from "./apps.ts";
 import { appHost } from "./durable-objects.ts";
-import { requireFeature } from "./features.ts";
-import type { Feature } from "./features.ts";
 import { callbackFor, isStub } from "./page-callbacks.ts";
 import type { StillOpen } from "./page-callbacks.ts";
 import { RunSubscription } from "./run-subscription.ts";
@@ -40,7 +38,6 @@ import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 import {
   decideScreenRun,
-  requireScreenWorkflows,
   screenRun,
   screenRuns,
   screenWorkflow,
@@ -228,7 +225,6 @@ const watchRuns = async (
   stillOpenFor: (app: AppId) => StillOpen,
   subscriptions: Set<Disposable>
 ): Promise<RunSubscription> => {
-  requireScreenWorkflows(env);
   const { id } = await getApp(env, by, app);
   const name = screenWorkflow(workflow);
   if (!isStub(onChange)) {
@@ -267,10 +263,9 @@ const watchRuns = async (
 
 /**
  * Whether the person behind the connection still has `role` in `app`
- * (any role: `user`), with `features` on, read now: the connection's own
- * session check (`check`), which reads their session, role and teams as
- * every call does, Grasp staff's window included, then the flags, then
- * the App's rules (`appFor`). Anything that goes wrong on the way is a
+ * (any role: `user`), read now: the connection's own session check
+ * (`check`), which reads their session, role and teams as every call does,
+ * Grasp staff's window included, then the App's rules (`appFor`). Anything that goes wrong on the way is a
  * no: a callback must not outlive access because a check failed. A
  * session that ended also closes the connection, as on any call. For the
  * callbacks of an App's screens, and of a draft's preview (chats-rpc.ts).
@@ -279,14 +274,10 @@ export const stillHasRole = async (
   env: Env,
   check: SessionCheck,
   app: AppId,
-  role: "user" | "builder" = "user",
-  features: readonly Feature[] = []
+  role: "user" | "builder" = "user"
 ): Promise<boolean> => {
   try {
     const person = await check();
-    for (const feature of features) {
-      requireFeature(env, feature);
-    }
     await appFor(env, person, app, role);
     return true;
   } catch (error) {

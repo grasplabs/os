@@ -238,12 +238,6 @@ const Settings = ({ settings }: { settings: ModelSettings }) => {
           so every model call is refused. Contact Grasp.
         </ErrorText>
       ) : null}
-      {rules.state === "off" ? (
-        <p className="text-sm">
-          The rules beyond the allowlist are switched off: any allowed model may
-          take any call, and no budget applies.
-        </p>
-      ) : null}
       <Section id="allowed" title="Allowed models">
         <AllowedModels models={settings.models} rules={on} />
       </Section>

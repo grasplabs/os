@@ -26,8 +26,7 @@ import { outcome, routed, signedInApi, unique } from "./sign-in.ts";
 // - A link that opens more than its one chat: a made-up or malformed
 //   secret, another App reading the chat, a request in any other shape.
 // - A link that outlives its purpose: past its expiry, revoked, finished,
-//   its App's permission revoked, the member it was made for gone, or the
-//   feature switched off.
+//   its App's permission revoked, or the member it was made for gone.
 // - A guest reaching anything but the model: the model is called with no
 //   tools, only the chat's guide and the chat, and as the guest, for the
 //   member, through the gateway.
@@ -160,12 +159,6 @@ const readsMessages = /^select .* from "guest_messages"/iu;
 
 /** A guest's message, "Hello", with the secret `token`. */
 const send = (token: string) => ({ action: "send", token, text: "Hello" });
-
-/** Core's env with guest chats switched off, and what they need on. */
-const guestsOff = {
-  ...env,
-  FEATURES: { knowledge: true, apps: true, permissions: true },
-};
 
 /** The model answers with `replies`, in order, while `run` runs. */
 const answering = async <T>(
@@ -378,11 +371,6 @@ describe("guest chats", { timeout: 60_000 }, () => {
     };
     vi.useRealTimers();
 
-    const switchedOff = await invite(app, builder.userId);
-    const off = codeOf(
-      await guest({ action: "open", token: switchedOff.token }, {}, guestsOff)
-    );
-
     const memberGone = await invite(app, builder.userId);
     const rejoin = await leave(builder.userId);
     const whileGone = codeOf(
@@ -410,7 +398,6 @@ describe("guest chats", { timeout: 60_000 }, () => {
       revoked: afterRevoke,
       finished: afterFinish,
       expired,
-      off,
       whileGone,
       back,
       whileShared,
@@ -436,7 +423,6 @@ describe("guest chats", { timeout: 60_000 }, () => {
         afterRevoke: { status: 404, code: "guest.link_invalid" },
       },
       expired: { open: "expired", send: { status: 410, code: "guest.ended" } },
-      off: { status: 404, code: "guest.link_invalid" },
       whileGone: { status: 404, code: "guest.link_invalid" },
       back: 200,
       whileShared: 200,

@@ -1,6 +1,5 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import type { AuditEvent } from "@grasp-os/shared/audit";
-import { featureErrors } from "@grasp-os/shared/errors";
 import { appIdSchema } from "@grasp-os/shared/ids";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { workflowErrors } from "@grasp-os/shared/workflows";
@@ -304,61 +303,6 @@ describe("a chat's Apps and workflows", () => {
         method: "workflows.status",
         outcome: "refused",
         reason: "workflow.run_not_found",
-      },
-    ]);
-  });
-
-  it("show no App while the Apps collection is switched off", async () => {
-    const { chat, grant } = await setUp(() => [
-      codeStep(
-        "export default async (env) => { try { return await env.apps.list(); } catch (error) { return error.message; } };"
-      ),
-      says("None."),
-    ]);
-    await grant();
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    try {
-      env.FEATURES = { ...on, apps_collection: false };
-      await chat.ask("Which Apps are there?");
-    } finally {
-      env.FEATURES = features;
-    }
-
-    await expect(codeResults(chat.stub, chat.chat.id)).resolves.toStrictEqual([
-      { isError: false, text: `Returned:\n${denied}` },
-    ]);
-  });
-
-  it("show no App's exports while calls between Apps are switched off", async () => {
-    const { app, chat, grant } = await setUp(({ app: made }) => [
-      codeStep(
-        tryEach({
-          apps: "(await env.apps.list()).length",
-          exports: `await env.apps.exports(${JSON.stringify(made)})`,
-        })
-      ),
-      says("None."),
-    ]);
-    await grant();
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    try {
-      env.FEATURES = { ...on, app_calls: false };
-      await chat.ask(`What does ${app} export?`);
-    } finally {
-      env.FEATURES = features;
-    }
-
-    await expect(codeResults(chat.stub, chat.chat.id)).resolves.toStrictEqual([
-      {
-        isError: false,
-        text: `Returned:\n${JSON.stringify({
-          apps: 1,
-          exports: featureErrors.create("feature.disabled", {
-            feature: "app_calls",
-          }).message,
-        })}`,
       },
     ]);
   });

@@ -14,7 +14,6 @@ import { z } from "zod";
 import { appFor } from "../apps.ts";
 import { workflowDecisions, workflowRuns } from "../db/core/schema.ts";
 import { answerableBy, answerDecision } from "../decisions/decisions.ts";
-import { featureEnabled, requireFeature } from "../features.ts";
 import {
   findRun,
   runFor,
@@ -48,12 +47,6 @@ import type { RunRow } from "./runs.ts";
 
 /** A decision's name, as the workflow gives it (`step.decision(name)`). */
 const decisionNameSchema = z.string().min(1).max(256);
-
-/** Refuses while screens' calls on runs are switched off. */
-export const requireScreenWorkflows = (env: Env): void => {
-  requireFeature(env, "workflows");
-  requireFeature(env, "screen_workflows");
-};
 
 /** A workflow's ID as a screen names it; `workflow.invalid` if it isn't one. */
 export const screenWorkflow = (workflow: unknown): WorkflowId => {
@@ -110,8 +103,7 @@ const openNow = (now: Date): SQL | undefined =>
  * description is written by workflow code, and can hold what the run read
  * for its person, so it goes only to whoever sees the run's details
  * (`seesDetails`) or may answer the decision; everyone else gets its name
- * and deadline. None while `decisions` is off: nobody can answer one on a
- * screen then (`decideScreenRun`), so a run shows as running.
+ * and deadline.
  */
 const waitingFor = async (
   env: Env,
@@ -120,9 +112,6 @@ const waitingFor = async (
   runs: readonly RunRow[],
   open: readonly OpenDecision[]
 ): Promise<Map<string, WaitingDecision[]>> => {
-  if (!featureEnabled(env, "decisions")) {
-    return new Map();
-  }
   const detailed = new Set(
     runs.filter((row) => seesDetails(by, row, owner)).map(({ id }) => id)
   );
@@ -183,10 +172,8 @@ export const startScreenRun = async (
   app: unknown,
   workflow: unknown,
   input: unknown
-): Promise<WorkflowRun> => {
-  requireScreenWorkflows(env);
-  return await startWorkflow(env, by, app, workflow, input, "screen");
-};
+): Promise<WorkflowRun> =>
+  await startWorkflow(env, by, app, workflow, input, "screen");
 
 /**
  * The App's latest runs of `workflow`, newest first: at most
@@ -200,7 +187,6 @@ export const screenRuns = async (
   app: unknown,
   workflow: unknown
 ): Promise<ScreenRun[]> => {
-  requireScreenWorkflows(env);
   const { id, owner } = await appFor(env, by, app, "user");
   const db = drizzle(env.DB);
   const ofWorkflow = and(
@@ -244,7 +230,6 @@ export const screenRun = async (
   app: unknown,
   run: unknown
 ): Promise<ScreenRun> => {
-  requireScreenWorkflows(env);
   const { id, owner } = await appFor(env, by, app, "user");
   const row = await appRun(env, id, run);
   const found = await runStatus(env, by, row.id);
@@ -273,8 +258,6 @@ export const decideScreenRun = async (
   decision: unknown,
   answer: unknown
 ): Promise<DecisionView> => {
-  requireScreenWorkflows(env);
-  requireFeature(env, "decisions");
   const { id } = await appFor(env, by, app, "user");
   const runId = runIdSchema.safeParse(run);
   if (!runId.success) {

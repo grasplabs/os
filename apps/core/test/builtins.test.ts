@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   builtins,
+  builtinsInstaller,
   builtinsRetryMs,
   fingerprintOf,
   installBuiltins,
@@ -21,34 +22,23 @@ import {
   syncGraspSkills,
 } from "../src/knowledge/grasp-skills.ts";
 import type { GraspSkill } from "../src/knowledge/grasp-skills.ts";
-import { auditedDuring, routed } from "./sign-in.ts";
+import { auditedDuring } from "./sign-in.ts";
 
 // What ships with the release, installed once per release on the first
 // request (src/builtins.ts). These tests start from the ways that can
-// fail: the first request never starts the install, or a failed start is
-// never tried again; an unchanged release writes again; callers arriving
-// together each install, and write twice or refuse each other; a partial
-// install is recorded as done, stranding what failed; switching a part's
-// flag on installs nothing because the release didn't change.
+// fail: a failed start is never tried again, or tried on every request; an
+// isolate of another release counts the object's install as its own; a
+// request starts another install once the isolate's is done; an unchanged
+// release writes again; callers arriving together each install, and write
+// twice or refuse each other; and a partial install is recorded as done,
+// stranding what failed. That the first request starts it, every file's
+// setup checks (builtins-first.ts).
 //
 // The tests of a file share their storage, the singleton's included, so
 // each test that needs an install forgets the last one first.
 
-const features = {
-  knowledge: true,
-  skills: true,
-  apps: true,
-  app_blueprints: true,
-  // The collections built-in blueprints declare are installed with it.
-  record_types: true,
-};
-
-/** Core's env with `builtins` on, and the flags the built-ins need. */
-const on: Env = { ...env, FEATURES: { ...features, builtins: true } };
-
 /** This release's fingerprint, as an isolate of it works it out. */
-const thisRelease = async (): Promise<string> =>
-  await fingerprintOf(env, release);
+const thisRelease = async (): Promise<string> => await fingerprintOf(release);
 
 /** Each Grasp skill's current text, by path. */
 const storedSkills = async (): Promise<Record<string, string>> => {
@@ -137,65 +127,58 @@ const knowledgeFailingOnce = (): D1Database => {
 };
 
 /** A request that passed the router's check, handled to the end. */
-const request = async (coreEnv: Env): Promise<void> => {
+const request = async (): Promise<void> => {
   const ctx = createExecutionContext();
   const response = await worker.fetch(
     new Request("https://core/health", {
       headers: { [routerSecretHeader]: env.ROUTER_SECRET },
     }),
-    coreEnv,
+    env,
     ctx
   );
   expect(response.status).toBe(200);
   await waitOnExecutionContext(ctx);
 };
 
+/** An isolate's installer started as a request would, run to the end. */
+const started = async (
+  install: ReturnType<typeof builtinsInstaller>
+): Promise<void> => {
+  const ctx = createExecutionContext();
+  install(env, ctx);
+  await waitOnExecutionContext(ctx);
+};
+
 describe("the built-ins", () => {
-  // First in the file: the isolate counts at most one install as done.
-  // Other files share this isolate (`isolate: false` in vite.config.ts)
-  // and its module state, which start-each-file.ts doesn't reset: none may
-  // switch `builtins` on, or this finds an install already counted.
-  it("are installed by the first request, and after a failed start, or one of another release, by the first request a minute later", async () => {
+  it("are installed after a failed start by the first request a minute later, not before, and then asked for no more", async () => {
     const changed = otherRelease(...firstPaths(1));
     await forgetInstall(...firstPaths(1));
-    // An isolate whose release differs from the object's: without skills.
-    const otherIsolate: Env = {
-      ...env,
-      FEATURES: { ...features, skills: false, builtins: true },
-    };
+    const install = builtinsInstaller();
     const calls = vi
       .spyOn(env.BUILTINS, "getByName")
       .mockImplementationOnce(() => {
         throw new Error("Durable Objects unavailable");
       });
-    const later = async (coreEnv: Env): Promise<void> => {
-      vi.setSystemTime(Date.now() + builtinsRetryMs);
-      await request(coreEnv);
-    };
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
-      await request(on);
+      await started(install);
       // Not tried again before the minute is up.
-      await request(on);
+      await started(install);
       expect([
         calls.mock.calls.length,
         await installed(),
         await storedSkills(),
       ]).toStrictEqual([1, undefined, releaseSkills(changed)]);
 
-      // The object installs its own release, which isn't this isolate's:
-      // not done for this isolate, which asks again a minute later.
-      await later(otherIsolate);
-      await request(on);
+      vi.setSystemTime(Date.now() + builtinsRetryMs);
+      await started(install);
+      // Done: the isolate asks no more.
+      vi.setSystemTime(Date.now() + builtinsRetryMs);
+      await started(install);
       expect([calls.mock.calls.length, await storedSkills()]).toStrictEqual([
         2,
         releaseSkills(),
       ]);
-
-      await later(on);
-      // Done: the isolate asks no more.
-      await later(on);
-      expect(calls).toHaveBeenCalledTimes(3);
     } finally {
       vi.useRealTimers();
       calls.mockRestore();
@@ -203,10 +186,39 @@ describe("the built-ins", () => {
     await expect(installed()).resolves.toBe(await thisRelease());
   });
 
-  it("aren't installed by a request while builtins is off", async () => {
+  it("aren't done for an isolate of another release, which asks again a minute later", async () => {
     await forgetInstall(...firstPaths(1));
-    await routed("/health");
-    await expect(installed()).resolves.toBeUndefined();
+    const install = builtinsInstaller({
+      ...release,
+      skills: otherRelease(...firstPaths(1)),
+    });
+    const calls = vi.spyOn(env.BUILTINS, "getByName");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      // The object installs its own release, which isn't this isolate's.
+      await started(install);
+      await started(install);
+      expect([calls.mock.calls.length, await storedSkills()]).toStrictEqual([
+        1,
+        releaseSkills(),
+      ]);
+      vi.setSystemTime(Date.now() + builtinsRetryMs);
+      await started(install);
+      expect(calls).toHaveBeenCalledTimes(2);
+    } finally {
+      vi.useRealTimers();
+      calls.mockRestore();
+    }
+  });
+
+  it("aren't asked for by a request once the isolate's install is done", async () => {
+    const calls = vi.spyOn(env.BUILTINS, "getByName");
+    try {
+      await request();
+      expect(calls).not.toHaveBeenCalled();
+    } finally {
+      calls.mockRestore();
+    }
   });
 
   it("write nothing when the release is installed already", async () => {
@@ -269,21 +281,5 @@ describe("the built-ins", () => {
     expect(skillSaves(events)).toHaveLength(1);
     await expect(storedSkills()).resolves.toStrictEqual(releaseSkills());
     await expect(installed()).resolves.toStrictEqual(expect.any(String));
-  });
-
-  it("install the skills once skills is switched on, though the release didn't change", async () => {
-    await forgetInstall(...firstPaths(1));
-    const off: Env = { ...env, FEATURES: { knowledge: true } };
-    await runInDurableObject(builtins(env), async (_instance, state) => {
-      await expect(
-        installBuiltins(off, state.storage, release)
-      ).resolves.toBeTruthy();
-    });
-    await expect(storedSkills()).resolves.not.toStrictEqual(releaseSkills());
-
-    await expect(
-      builtins(env).ensureInstalled(await thisRelease())
-    ).resolves.toBeTruthy();
-    await expect(storedSkills()).resolves.toStrictEqual(releaseSkills());
   });
 });

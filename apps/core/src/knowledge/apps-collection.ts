@@ -10,7 +10,6 @@ import { stringify } from "yaml";
 import { versionFiles } from "../apps.ts";
 import { apps } from "../db/core/schema.ts";
 import { appEntries, documents, versions } from "../db/knowledge/schema.ts";
-import { appsCollectionEnabled } from "./access.ts";
 import { appEntryPath, appsCollectionId } from "./app-entries.ts";
 import { ensureCollection } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
@@ -37,8 +36,7 @@ import { appMemoryPath } from "./memory-files.ts";
 // Knowledge's, so no batch holds both. Making a version current indexes
 // the App straight after (`indexAppNow`), and a cron trigger every 15
 // minutes indexes every App whose entry isn't of its current version
-// (`indexApps`): one whose indexing failed, one made current while
-// indexing was off, and every App when it is first switched on. Indexing
+// (`indexApps`): one whose indexing failed. Indexing
 // where a version is made current keeps entries current; the cron trigger
 // only catches up, so every 15 minutes is enough. `app_entries` has the
 // version each entry holds, written in the entry's batch.
@@ -169,12 +167,9 @@ const noteVersion = (
  * Indexes the App `appId` at its current version, unless its entry holds
  * that version already, or it has none.
  * Throws what failed, `knowledge.conflict` when another indexing wrote
- * first. Does nothing while indexing is off.
+ * first.
  */
 const indexApp = async (env: Env, appId: string): Promise<void> => {
-  if (!appsCollectionEnabled(env)) {
-    return;
-  }
   const knowledge = drizzle(env.KNOWLEDGE);
   const path = appEntryPath(appId);
   // The entry first, then the App (see above).
@@ -262,13 +257,10 @@ export const indexAppNow = async (env: Env, appId: string): Promise<void> => {
  * Indexes the Apps in use whose entries aren't of their current version,
  * at most `indexedPerRun`, one at a time, from a random one on (by ID,
  * wrapping around): Apps whose indexing fails every time can't keep the
- * others waiting run after run. Does nothing while indexing is off. The
- * cron trigger calls it every 15 minutes.
+ * others waiting run after run. The cron trigger calls it every 15
+ * minutes.
  */
 export const indexApps = async (env: Env): Promise<void> => {
-  if (!appsCollectionEnabled(env)) {
-    return;
-  }
   const [noted, inUse] = await Promise.all([
     drizzle(env.KNOWLEDGE)
       .select({ appId: appEntries.appId, version: appEntries.version })

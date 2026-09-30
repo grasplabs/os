@@ -183,8 +183,8 @@ export const listSignals = async (
 };
 
 /**
- * A signed-in person's `signals`. Every call checks the session (and the
- * flag) first and hands the identity that check returned to `listSignals`,
+ * A signed-in person's `signals`. Every call checks the session first and
+ * hands the identity that check returned to `listSignals`,
  * which checks their role.
  */
 export class SignalsRpc extends RpcTarget implements SignalsApi {

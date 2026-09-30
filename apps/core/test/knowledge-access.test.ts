@@ -15,7 +15,6 @@ import type { Role } from "@grasp-os/shared/roles";
 import { evictDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import { appHost, workspace } from "../src/durable-objects.ts";
 import { isRestricted, restrict } from "../src/restricted.ts";
@@ -228,51 +227,6 @@ describe("Apps and agents reading Knowledge", setUpTime, () => {
     await expect(everyRead(reader, handbook.noteId)).resolves.toStrictEqual(
       everyReadIs("permission.denied")
     );
-  });
-
-  it("read nothing, and call out to nothing, while Knowledge or connections are switched off", async () => {
-    const admin = await personOf("admin");
-    const agent = newAgent();
-    const handbook = await collectionWithNote(admin, {
-      name: "Handbook",
-      access: "everyone",
-    });
-    await requestGranted(
-      idp,
-      admin,
-      readCollection(agent, handbook.collectionId)
-    );
-    await requestGranted(idp, admin, outlook(agent));
-    const bindings = await envOf(
-      actingFor(agent, admin.userId),
-      await newChat(agent)
-    );
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    let whileOff: { reads: string[]; call: string };
-    try {
-      env.FEATURES = { ...on, knowledge: false, connections: false };
-      whileOff = {
-        reads: await everyRead(readerIn(bindings), handbook.noteId),
-        call: await callOutlook(bindings),
-      };
-    } finally {
-      env.FEATURES = features;
-    }
-    // The stubs it holds work again once they are switched on.
-    expect({
-      whileOff,
-      backOn: {
-        reads: await everyRead(readerIn(bindings), handbook.noteId),
-        call: await callOutlook(bindings),
-      },
-    }).toStrictEqual({
-      whileOff: {
-        reads: everyReadIs("feature.disabled"),
-        call: "feature.disabled",
-      },
-      backOn: { reads: everyReadIs("ok"), call: reached },
-    });
   });
 
   it("read only what the person they act for may read too", async () => {

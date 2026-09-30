@@ -157,7 +157,6 @@ const platformBindingNames: ReadonlySet<string> = new Set([
   "DEV_SKIP_ROUTER_SECRET",
   "DURABLE_OBJECT_JURISDICTION",
   "EMAIL",
-  "FEATURES",
   "ENTRA_CLIENT_SECRET",
   "FILES",
   "GOOGLE_CLIENT_ID",

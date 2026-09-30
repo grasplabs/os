@@ -7,7 +7,7 @@ import { z } from "zod";
 
 import { applySettings } from "../src/clients/apply.ts";
 import { clientSettings } from "../src/clients/queries.ts";
-import { SettingsError, setFeature } from "../src/clients/settings.ts";
+import { SettingsError, setSignIn } from "../src/clients/settings.ts";
 import { cloudflareApi } from "../src/cloudflare/api.ts";
 import { deployVersion, deployVersions } from "../src/cloudflare/workers.ts";
 import { act, consoleDatabase } from "../src/db/act.ts";
@@ -378,11 +378,29 @@ const liveVarOf = async (
     .find((binding) => binding.name === name)?.json;
 };
 
-/** The `FEATURES` var of the core version the console made live on the client. */
-const liveFeaturesOf = async (
+/** The admins in the `SIGN_IN` var of the core version the console made live on the client. */
+const liveAdminsOf = async (
   clientId: string,
   account: AccountState
-): Promise<unknown> => await liveVarOf(clientId, account, "FEATURES");
+): Promise<unknown> =>
+  z
+    .object({ admins: z.array(z.string()) })
+    .safeParse(await liveVarOf(clientId, account, "SIGN_IN")).data?.admins;
+
+/** The admins staff's sign-in change (`addAdmin`) gives a client. */
+const addedAdmins = ["ada@acme.test", "bo@acme.test"];
+
+/** Staff adding an admin to client `clientId`'s sign-in: a change that waits for its next deploy. */
+const addAdmin = async (clientId: string): Promise<void> => {
+  await setSignIn(env, staff, {
+    clientId,
+    signIn: {
+      domains: ["acme.test"],
+      admins: addedAdmins,
+      googleHostedDomain: "acme.test",
+    },
+  });
+};
 
 /**
  * What the client's latest deploy changed: as the console audited its
@@ -895,16 +913,12 @@ describe("rolling a release out", () => {
     });
   });
 
-  it("deploys a client on the release already once staff changed a flag, every Worker at once, so its core gets the flag as a settings change, and skips it again after", async () => {
+  it("deploys a client on the release already once staff changed its sign-in, every Worker at once, so its core gets it as a settings change, and skips it again after", async () => {
     const release = await importedRelease("feat(core): flagged on it");
     const internal = await activeClient(0, release);
     const [, before] = await workersOf(internal.clientId);
     const skip = deploymentCounts(internal.account);
-    await setFeature(env, staff, {
-      clientId: internal.clientId,
-      feature: "apps",
-      on: true,
-    });
+    await addAdmin(internal.clientId);
     await using run = await followRollouts();
 
     const deployed = await rollOut(release, { scope: "ring", ring: 0 });
@@ -916,8 +930,8 @@ describe("rolling a release out", () => {
     expect({
       deployed: await targetsOf(deployed),
       newVersion: core?.versionId !== before?.versionId,
-      features: await liveFeaturesOf(internal.clientId, internal.account),
-      // Only its config changed, which may be a kill switch: no stages.
+      admins: await liveAdminsOf(internal.clientId, internal.account),
+      // Only its config changed, the same code: no stages.
       shares: await liveSharesOf(internal.clientId, internal.account, skip),
       // In the console's audit trail and the client's Activity alike.
       change: await latestChangeOf(internal.clientId, internal.account),
@@ -927,7 +941,7 @@ describe("rolling a release out", () => {
         [internal.clientId]: { ring: 0, status: "done", error: null },
       },
       newVersion: true,
-      features: { apps: true },
+      admins: addedAdmins,
       shares: { connect: [[100]], core: [[100]] },
       change: {
         audited: "settings",
@@ -943,14 +957,10 @@ describe("rolling a release out", () => {
     });
   });
 
-  it("records a deploy that takes both a flag and a secrets rotation live, on the release the client runs, as both", async () => {
+  it("records a deploy that takes both a sign-in change and a secrets rotation live, on the release the client runs, as both", async () => {
     const release = await importedRelease("feat(core): flagged and rotated");
     const internal = await activeClient(0, release);
-    await setFeature(env, staff, {
-      clientId: internal.clientId,
-      feature: "apps",
-      on: true,
-    });
+    await addAdmin(internal.clientId);
     await rotateClientSecrets(db, staff, internal.clientId, new Date());
     await using run = await followRollouts();
 
@@ -963,14 +973,14 @@ describe("rolling a release out", () => {
       .where(eq(clients.id, internal.clientId));
     expect({
       targets: await targetsOf(rolloutId),
-      features: await liveFeaturesOf(internal.clientId, internal.account),
+      admins: await liveAdminsOf(internal.clientId, internal.account),
       rotationLive: client?.rotationLiveAt instanceof Date,
       change: await latestChangeOf(internal.clientId, internal.account),
     }).toStrictEqual({
       targets: {
         [internal.clientId]: { ring: 0, status: "done", error: null },
       },
-      features: { apps: true },
+      admins: addedAdmins,
       rotationLive: true,
       change: {
         audited: "settings_and_secrets",
@@ -1547,14 +1557,10 @@ describe("rolling new secrets out", () => {
     ).not.toContain(rotatedMicrosoft);
   });
 
-  it("records a secrets rollout's deploy as settings too when it takes a flag that waited live with the secrets", async () => {
+  it("records a secrets rollout's deploy as settings too when it takes a sign-in change that waited live with the secrets", async () => {
     const release = await importedRelease("feat(core): a flag was waiting");
     const internal = await activeClient(0, release);
-    await setFeature(env, staff, {
-      clientId: internal.clientId,
-      feature: "apps",
-      on: true,
-    });
+    await addAdmin(internal.clientId);
     await rotateMicrosoftSecret();
     await using run = await followRollouts();
 
@@ -1562,10 +1568,10 @@ describe("rolling new secrets out", () => {
     await run.waitForStatus("complete");
 
     expect({
-      features: await liveFeaturesOf(internal.clientId, internal.account),
+      admins: await liveAdminsOf(internal.clientId, internal.account),
       change: await latestChangeOf(internal.clientId, internal.account),
     }).toStrictEqual({
-      features: { apps: true },
+      admins: addedAdmins,
       change: {
         audited: "settings_and_secrets",
         told: { by: staff.email, what: "settings_and_secrets" },
@@ -1991,11 +1997,7 @@ describe("controlling a rollout", () => {
     const before = await importedRelease("feat(core): before the flag");
     const internal = await activeClient(0, before);
     await activeClient(1, before);
-    await setFeature(env, staff, {
-      clientId: internal.clientId,
-      feature: "apps",
-      on: true,
-    });
+    await addAdmin(internal.clientId);
     const release = await importedRelease("feat(core): with the flag");
     await using run = await followRollouts();
     await using rollbacks = await followRollbacks();
@@ -2007,7 +2009,7 @@ describe("controlling a rollout", () => {
     await run.waitForStatus("terminated");
     const rolledBack = {
       settings: await clientSettings(db, internal.clientId),
-      features: await liveFeaturesOf(internal.clientId, internal.account),
+      admins: await liveAdminsOf(internal.clientId, internal.account),
     };
     const again = await rollOut(before, { scope: "ring", ring: 0 });
     await run.waitForStatus("complete");
@@ -2018,16 +2020,16 @@ describe("controlling a rollout", () => {
       applied: applied?.configPending,
       rolledBack: {
         pending: rolledBack.settings?.configPending,
-        features: rolledBack.features,
+        admins: rolledBack.admins,
       },
       again: againTargets[internal.clientId]?.status,
-      features: await liveFeaturesOf(internal.clientId, internal.account),
+      admins: await liveAdminsOf(internal.clientId, internal.account),
       pending: afterwards?.configPending,
     }).toStrictEqual({
       applied: false,
-      rolledBack: { pending: true, features: undefined },
+      rolledBack: { pending: true, admins: ["ada@acme.test"] },
       again: "done",
-      features: { apps: true },
+      admins: addedAdmins,
       pending: false,
     });
   });
@@ -3806,15 +3808,11 @@ describe("applying a client's settings now", () => {
     };
   };
 
-  it("deploys the release a client runs again with its new flag, every Worker at once, audited and told to its core as a settings change, and releases the client", async () => {
+  it("deploys the release a client runs again with its new sign-in, every Worker at once, audited and told to its core as a settings change, and releases the client", async () => {
     const release = await importedRelease("feat(core): apply me");
     const client = await activeClient(1, release);
     const skip = deploymentCounts(client.account);
-    await setFeature(env, staff, {
-      clientId: client.clientId,
-      feature: "memory",
-      on: true,
-    });
+    await addAdmin(client.clientId);
     await using applies = await followApplies();
 
     const runId = await applySettings(env, staff, client.clientId);
@@ -3833,7 +3831,7 @@ describe("applying a client's settings now", () => {
     const shown = await clientSettings(db, client.clientId);
     expect({
       runId: runId.startsWith("apply-"),
-      features: await liveFeaturesOf(client.clientId, client.account),
+      admins: await liveAdminsOf(client.clientId, client.account),
       shares: await liveSharesOf(client.clientId, client.account, skip),
       releases: workers.map(({ releaseId }) => releaseId),
       pending: shown?.configPending,
@@ -3843,7 +3841,7 @@ describe("applying a client's settings now", () => {
       change: await latestChangeOf(client.clientId, client.account),
     }).toStrictEqual({
       runId: true,
-      features: { memory: true },
+      admins: addedAdmins,
       shares: { connect: [[100]], core: [[100]] },
       releases: [release, release],
       pending: false,
@@ -3861,11 +3859,7 @@ describe("applying a client's settings now", () => {
       "feat(core): applied with a rotation"
     );
     const client = await activeClient(1, release);
-    await setFeature(env, staff, {
-      clientId: client.clientId,
-      feature: "memory",
-      on: true,
-    });
+    await addAdmin(client.clientId);
     await rotateClientSecrets(db, staff, client.clientId, new Date());
     await using applies = await followApplies();
 
@@ -3877,11 +3871,11 @@ describe("applying a client's settings now", () => {
       .from(clients)
       .where(eq(clients.id, client.clientId));
     expect({
-      features: await liveFeaturesOf(client.clientId, client.account),
+      admins: await liveAdminsOf(client.clientId, client.account),
       rotationLive: record?.rotationLiveAt instanceof Date,
       change: await latestChangeOf(client.clientId, client.account),
     }).toStrictEqual({
-      features: { memory: true },
+      admins: addedAdmins,
       rotationLive: true,
       change: {
         audited: "settings_and_secrets",
@@ -3894,11 +3888,7 @@ describe("applying a client's settings now", () => {
     const before = await importedRelease("feat(core): before the race");
     const client = await activeClient(0, before);
     const release = await importedRelease("feat(core): landed in the race");
-    await setFeature(env, staff, {
-      clientId: client.clientId,
-      feature: "memory",
-      on: true,
-    });
+    await addAdmin(client.clientId);
     await using run = await followRollouts();
     await using applies = await followApplies();
     // The rollout runs to its end after the apply read what the client
@@ -3926,13 +3916,13 @@ describe("applying a client's settings now", () => {
       raced,
       releases: workers.map(({ releaseId }) => releaseId),
       applied: latest?.releaseId,
-      features: await liveFeaturesOf(client.clientId, client.account),
+      admins: await liveAdminsOf(client.clientId, client.account),
       runner: await runnerOf(client.clientId),
     }).toStrictEqual({
       raced: true,
       releases: [release, release],
       applied: release,
-      features: { memory: true },
+      admins: addedAdmins,
       runner: null,
     });
   });

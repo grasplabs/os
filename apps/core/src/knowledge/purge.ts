@@ -29,7 +29,6 @@ import {
   versions,
 } from "../db/knowledge/schema.ts";
 import { derivedHmacKey } from "../derived-keys.ts";
-import { requireFeature } from "../features.ts";
 import { appOfEntry } from "./app-entries.ts";
 import { entryNow } from "./apps-collection.ts";
 import type { CollectionRow } from "./collections.ts";
@@ -968,7 +967,6 @@ export const preparePurge = async (
   person: Identity,
   input: unknown
 ): Promise<PurgePlan> => {
-  requireFeature(env, "knowledge_purge");
   requirePurger(person);
   const parsed = parseInput(input);
   const db = drizzle(env.KNOWLEDGE);
@@ -1025,7 +1023,6 @@ export const purge = async (
   input: unknown,
   token: unknown
 ): Promise<PurgeResult> => {
-  requireFeature(env, "knowledge_purge");
   requirePurger(person);
   const parsed = parseInput(input);
   await requireToken(env, person, parsed, token);

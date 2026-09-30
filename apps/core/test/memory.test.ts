@@ -503,23 +503,6 @@ describe("memory for a context", setUpTime, () => {
       files: second.files,
     }).toStrictEqual({ sameKey: true, files: asReturned });
   });
-
-  it("is empty while memory is switched off", async () => {
-    const agent = newAgent();
-    const admin = await personOf("admin");
-    const memory = await memoryOf(admin);
-    await saveOver(admin, memory, "AGENTS.md", `On ${unique()}`);
-    const found = await forContext(
-      { ...env, FEATURES: { knowledge: true } },
-      actingFor(agent, admin.userId),
-      await newChat(agent),
-      { type: "own" }
-    );
-    expect({ files: found.files, text: found.text }).toStrictEqual({
-      files: [],
-      text: "",
-    });
-  });
 });
 
 describe("memory limits", setUpTime, () => {
@@ -714,15 +697,6 @@ describe("an agent's USER.md", setUpTime, () => {
         firstSave(asApp, work, { type: "own" }),
         firstSave(asAgent, restricted, { type: "own" }),
         firstSave(actingFor(agent, `gone-${unique()}`), work, { type: "own" }),
-        outcome(
-          saveUserMemory(
-            { ...env, FEATURES: { knowledge: true } },
-            asAgent,
-            work,
-            { type: "own" },
-            { text: "x", ifVersion: 0 }
-          )
-        ),
       ])
     ).resolves.toStrictEqual([
       "permission.denied",
@@ -730,7 +704,6 @@ describe("an agent's USER.md", setUpTime, () => {
       "permission.denied",
       "permission.restricted",
       "permission.person_inactive",
-      "feature.disabled",
     ]);
   });
 });

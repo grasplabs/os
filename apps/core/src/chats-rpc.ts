@@ -26,7 +26,6 @@ import { appFor, draftFiles, screensIn } from "./apps.ts";
 import { organizationId } from "./auth/auth.ts";
 import { personOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
-import { previewFeatures, requireFeature } from "./features.ts";
 import { gatewaySettings } from "./models.ts";
 import { callbackFor, isStub, recheckedEvery } from "./page-callbacks.ts";
 import type { StillOpen } from "./page-callbacks.ts";
@@ -61,13 +60,6 @@ export const chatAgentId = organizationId;
  */
 export const personalWorkspaceId = (userId: string): WorkspaceId =>
   workspaceIdSchema.parse(`person:${userId}`);
-
-/** Refuses while anything a preview needs is switched off. */
-const requirePreviews = (env: Env): void => {
-  for (const feature of previewFeatures) {
-    requireFeature(env, feature);
-  }
-};
 
 /** How long one answer to whether the person may still follow chats holds. */
 const recheckMs = 5000;
@@ -112,9 +104,9 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
   /** This connection's watches, each until it's released. */
   readonly #watches = new Set<Disposable>();
   /**
-   * Whether this connection may still follow chats: its session holds and
-   * chats (and the agent) are switched on, as every call checks, read
-   * again at most every {@link recheckMs} as updates are pushed.
+   * Whether this connection may still follow chats: its session holds, as
+   * every call checks, read again at most every {@link recheckMs} as
+   * updates are pushed.
    */
   readonly #stillOpen: StillOpen;
 
@@ -220,8 +212,7 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
 
   /**
    * Starts a chat to fix a failed run (run-fixes.ts), and asks its agent
-   * with `model`; only while `workflows` and `run_notifications` are on.
-   * A model the deployment doesn't allow is refused before any chat is
+   * with `model`. A model the deployment doesn't allow is refused before any chat is
    * made. A question refused past that (the client's model rules, say)
    * leaves the chat, with its report, in the person's list, to ask again:
    * it resolves with the chat and why, so the page opens that chat rather
@@ -229,8 +220,6 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
    */
   async fixRun(run: string, model: string): Promise<FixRunResult> {
     return await withPerson(this.#check, async (person) => {
-      requireFeature(this.#env, "workflows");
-      requireFeature(this.#env, "run_notifications");
       const { userId } = person;
       const fix = await runToFix(this.#env, person, run);
       const chats = this.#chatsOf(userId);
@@ -263,19 +252,17 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
     });
   }
 
-  /** Only while the agent builds Apps (`app_builder`). */
   async drafts(chatId: string): Promise<ChatDraft[]> {
-    return await withPerson(this.#check, async ({ userId }) => {
-      requireFeature(this.#env, "app_builder");
-      return await this.#chatsOf(userId).drafts(chatIdOf(chatId), userId);
-    });
+    return await withPerson(
+      this.#check,
+      async ({ userId }) =>
+        await this.#chatsOf(userId).drafts(chatIdOf(chatId), userId)
+    );
   }
 
   /**
    * A screen of the chat's draft of `app`, to preview (preview.ts): only
-   * while the person builds the App, as the agent must to write it, and
-   * while everything a preview runs is switched on
-   * ({@link previewFeatures}).
+   * while the person builds the App, as the agent must to write it.
    */
   async preview(
     chatId: string,
@@ -283,7 +270,6 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
     screen?: string
   ): Promise<PreviewBundle> {
     return await withPerson(this.#check, async (by) => {
-      requirePreviews(this.#env);
       const { id, name } = await appFor(this.#env, by, app, "builder");
       const draft = await this.#chatsOf(by.userId).previewDraft(
         chatIdOf(chatId),
@@ -314,9 +300,8 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
    * Calls a method of the draft's server code in its preview, with plain
    * data and the screen's callbacks, as a screen's call does
    * (screens-rpc.ts); each push through a callback checks again, at most
-   * every {@link recheckMs}, what the call itself needs: the session, a
-   * builder's role in the App, and previews, Apps and screens switched
-   * on ({@link previewFeatures}). Once any is gone, the callback is
+   * every {@link recheckMs}, what the call itself needs: the session and
+   * a builder's role in the App. Once either is gone, the callback is
    * released and forwards nothing more.
    */
   async previewCall(
@@ -327,21 +312,13 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
     args: unknown[]
   ): Promise<unknown> {
     return await withPerson(this.#check, async (by) => {
-      requirePreviews(this.#env);
       const { id } = await appFor(this.#env, by, app, "builder");
       if (typeof method !== "string" || !Array.isArray(args)) {
         throw screenErrors.create("screen.invalid");
       }
       const stillOpen = recheckedEvery(
         recheckMs,
-        async () =>
-          await stillHasRole(
-            this.#env,
-            this.#check,
-            id,
-            "builder",
-            previewFeatures
-          )
+        async () => await stillHasRole(this.#env, this.#check, id, "builder")
       );
       const { passed, callbacks } = argumentsFor(args, stillOpen);
       try {
@@ -375,7 +352,6 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
     problem?: ScreenProblem
   ): Promise<void> {
     await withPerson(this.#check, async (by) => {
-      requirePreviews(this.#env);
       const { id } = await appFor(this.#env, by, app, "builder");
       const at = screenErrors.parse("screen.invalid", screenNameSchema, screen);
       const reported =

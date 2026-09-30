@@ -210,49 +210,6 @@ test("a person asks in a new chat, follows the answer, renames it, and reads and
   await expect(waiting).toHaveCount(0);
 });
 
-test("a chat shows nothing of held writes while they're switched off", async ({
-  browser,
-}) => {
-  const { user } = peopleIn("chat");
-  const page = await pageOf(browser, user);
-  const tag = crypto.randomUUID().slice(0, 8);
-  await page.goto("/");
-  await page.getByLabel("Your question").fill(`Held off ${tag}.`);
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page).toHaveURL(/[?&]chat=/u);
-  const chatId = new URL(page.url()).searchParams.get("chat") ?? "";
-  await holdWrite(user, chatId);
-
-  // The page's list of held writes goes to an API this stack has switched
-  // off (improvement signals), which core refuses as `feature.disabled`,
-  // as it refuses held writes while connections are off.
-  let refused = 0;
-  await page.routeWebSocket("**/rpc", (socket) => {
-    const toCore = socket.connectToServer();
-    socket.onMessage((message) => {
-      const text = String(message);
-      if (text.includes('["pendingActions","list"]')) {
-        refused += 1;
-        toCore.send(
-          text.replaceAll('["pendingActions","list"]', '["signals","list"]')
-        );
-        return;
-      }
-      toCore.send(text);
-    });
-  });
-  await page.reload();
-  await expect.poll(() => refused).toBeGreaterThan(0);
-  const messages = page.getByRole("list", { name: "Messages" });
-  await expect(messages.getByRole("listitem").first()).toHaveText(
-    `Held off ${tag}.`
-  );
-  await expect(
-    page.getByRole("region", { name: "Waiting for you" })
-  ).toHaveCount(0);
-  await expect(page.getByText("This isn't switched on")).toHaveCount(0);
-});
-
 test("a followed chat says core can't be reached when it stays out of reach", async ({
   browser,
 }) => {

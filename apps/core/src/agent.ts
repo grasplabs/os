@@ -279,8 +279,7 @@ export interface Turn {
   write?: (partial: AssistantMessage) => void;
   /**
    * Why the turn may not go on, if it may not: asked before every model
-   * request, so a person who left, or the agent switched off, stops a turn
-   * under way.
+   * request, so a person who left stops a turn under way.
    */
   whyStop: () => Promise<Error | undefined>;
 }

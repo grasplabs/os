@@ -58,12 +58,10 @@ const newMonth = (): string => {
 
 /**
  * Core's env with the fake gateway answering up to eight calls with
- * `answer`, the rules `config` adds, and `features`; budgets count in
- * `month`.
+ * `answer`, and the rules `config` adds; budgets count in `month`.
  */
 const withRules = (
   config: Record<string, unknown>,
-  features: unknown = env.FEATURES,
   answer: GatewayReply = cheapAnswer,
   month = newMonth()
 ) => {
@@ -71,7 +69,6 @@ const withRules = (
   const rulesEnv: ModelsEnv = {
     ...env,
     AI: fake.binding,
-    FEATURES: features,
     MODEL_GATEWAY: { gateway, models: allowed, ...config },
     MODEL_BUDGET_MONTH: month,
   };
@@ -302,61 +299,13 @@ describe("model rules", { timeout: 60_000 }, () => {
     ["eu", { eu: { models: "all of them" } }],
     ["sensitive", { sensitive: { models: [euModel], connections: 7 } }],
     ["budgets", { budgets: { user: { limit: -5 } } }],
-  ])(
-    "read the rules only while model_rules is on: a malformed %s rule refuses every call then, and none while it's off",
-    async (_, malformed) => {
-      const off = withRules(malformed, {
-        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-        model_rules: false,
-      });
-      const on = withRules(malformed);
+  ])("refuse every call while a %s rule is malformed", async (_, malformed) => {
+    const { fake, call } = withRules(malformed);
 
-      await expect(
-        Promise.all([
-          outcome(off.call(hello(anthropic))),
-          outcome(off.call(hello("openai/gpt-4o-mini"))),
-          outcome(on.call(hello(anthropic))),
-        ])
-      ).resolves.toStrictEqual([
-        "ok",
-        "model.not_allowed",
-        "model.unconfigured",
-      ]);
-      expect(on.fake.requests).toStrictEqual([]);
-    }
-  );
-
-  it("leave only the allowlist while model_rules is switched off: the kill switch", async () => {
-    const { call } = withRules(
-      {
-        eu: { models: [euModel], deployment: true },
-        sensitive: { models: [euModel], connections: ["connection-hr"] },
-        // Used up by the third call, were it checked.
-        budgets: { user: { limit: 0.01 } },
-      },
-      {
-        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-        model_rules: false,
-      },
-      pricedAnswer
+    await expect(outcome(call(hello(anthropic)))).resolves.toBe(
+      "model.unconfigured"
     );
-    const answered = hello(anthropic, { connections: ["connection-hr"] });
-    const outcomes: string[] = [];
-    for (let count = 0; count < 4; count += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- one after another, as a person would
-      outcomes.push(await outcome(call(answered)));
-    }
-
-    expect(outcomes).toStrictEqual(["ok", "ok", "ok", "ok"]);
-    await expect(outcome(call(hello("openai/gpt-4o-mini")))).resolves.toBe(
-      "model.not_allowed"
-    );
-    await expect(eventsOf(answered.trigger)).resolves.toMatchObject(
-      Array.from({ length: 4 }, () => ({
-        action: "model.call",
-        detail: { euOnly: null, sensitive: null },
-      }))
-    );
+    expect(fake.requests).toStrictEqual([]);
   });
 
   it.each([
@@ -483,38 +432,29 @@ describe("model rules", { timeout: 60_000 }, () => {
     }
   );
 
-  it("refuse and audit a call that comes without a work context while the rules apply, and not while they're off", async () => {
+  it("refuse and audit a call that comes without a work context", async () => {
     const { fake, call } = withRules({});
-    const off = withRules(
-      {},
-      {
-        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-        model_rules: false,
-      }
-    );
     const { work: _, ...withoutWork } = hello(anthropic);
     // SAFETY: missing on purpose, as from a caller that isn't type-checked;
     // every typed caller must pass `work`.
     // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
     const contextless = withoutWork as ModelCall<undefined>;
 
-    await expect(
-      Promise.all([outcome(call(contextless)), outcome(off.call(contextless))])
-    ).resolves.toStrictEqual(["permission.context_invalid", "ok"]);
+    await expect(outcome(call(contextless))).resolves.toBe(
+      "permission.context_invalid"
+    );
     expect(fake.requests).toStrictEqual([]);
     await expect(eventsOf(contextless.trigger)).resolves.toMatchObject([
       {
         action: "model.refused",
         detail: { reason: "permission.context_invalid", because: null },
       },
-      { action: "model.call" },
     ]);
   });
 
   it("alert admins when a person's spend crosses the alert threshold and the limit, then stop their calls, and no one else's", async () => {
     const { call } = withRules(
       { budgets: { user: { limit: 0.01, alertAt: 40 } } },
-      env.FEATURES,
       pricedAnswer
     );
     const trigger = newPerson();
@@ -565,7 +505,6 @@ describe("model rules", { timeout: 60_000 }, () => {
     // Exactly four calls' worth: any call's cost lost would leave room.
     const { call } = withRules(
       { budgets: { user: { limit: 0.018, alertAt: 50 } } },
-      env.FEATURES,
       pricedAnswer
     );
     const ada = hello(anthropic);
@@ -593,7 +532,6 @@ describe("model rules", { timeout: 60_000 }, () => {
     const appId = appIdSchema.parse(app);
     const { call } = withRules(
       { budgets: { user: { limit: 0.01 } } },
-      env.FEATURES,
       pricedAnswer
     );
     const ada = { type: "person", userId: builder.userId } as const;
@@ -631,7 +569,6 @@ describe("model rules", { timeout: 60_000 }, () => {
     const rest = Promise.withResolvers<boolean>();
     const { agent, call } = withRules(
       { budgets: { user: { limit: 0.01 } } },
-      env.FEATURES,
       {
         text: "Hello there, how are you today?",
         inputTokens: 1000,
@@ -724,7 +661,6 @@ describe("model rules", { timeout: 60_000 }, () => {
     // The stream closes after the answer's first 12 characters.
     const { agent, call } = withRules(
       { budgets: { user: { limit: 0.01 } } },
-      env.FEATURES,
       {
         text: "Hello there, how are you today?",
         inputTokens: 1000,
@@ -798,19 +734,16 @@ describe("model rules", { timeout: 60_000 }, () => {
     const month = newMonth();
     const spend = withRules(
       { budgets: { user: { limit: 0.02 }, deployment: { limit: 0.02 } } },
-      env.FEATURES,
       pricedAnswer,
       month
     );
     const lowered = withRules(
       { budgets: { user: { limit: 0.01 }, deployment: { limit: 0.01 } } },
-      env.FEATURES,
       pricedAnswer,
       month
     );
     const nextMonth = withRules(
       { budgets: { user: { limit: 0.01 } } },
-      env.FEATURES,
       pricedAnswer
     );
     const ada = hello(anthropic);
@@ -852,13 +785,11 @@ describe("model rules", { timeout: 60_000 }, () => {
     const month = newMonth();
     const early = withRules(
       { budgets: { user: { limit: 0.02, alertAt: 90 } } },
-      env.FEATURES,
       pricedAnswer,
       month
     );
     const lowered = withRules(
       { budgets: { user: { limit: 0.02, alertAt: 40 } } },
-      env.FEATURES,
       pricedAnswer,
       month
     );
@@ -884,7 +815,6 @@ describe("model rules", { timeout: 60_000 }, () => {
   it("check the budgets again before a retry: an attempt that used one up stops the call before anything more is sent", async () => {
     const { fake, call } = withRules(
       { budgets: { user: { limit: 0.01 } } },
-      env.FEATURES,
       // An answer that doesn't fit, and costs $0.0105: past the limit.
       { text: "No JSON here.", inputTokens: 1000, outputTokens: 500 }
     );
@@ -906,12 +836,7 @@ describe("model rules", { timeout: 60_000 }, () => {
   it("alert once per limit value a month, however the limit changes back and forth", async () => {
     const month = newMonth();
     const withLimit = (limit: number) =>
-      withRules(
-        { budgets: { user: { limit } } },
-        env.FEATURES,
-        pricedAnswer,
-        month
-      ).call;
+      withRules({ budgets: { user: { limit } } }, pricedAnswer, month).call;
     const ada = hello(anthropic);
     const outcomes: string[] = [];
     // $0.0135 spent under $0.03; then $0.012, $0.01 and $0.012 again.
@@ -1029,7 +954,6 @@ describe("model rules", { timeout: 60_000 }, () => {
     const app = `app-${crypto.randomUUID()}`;
     const { call } = withRules(
       { budgets: { workflow: { limit: 0.01 } } },
-      env.FEATURES,
       pricedAnswer
     );
     const step = async (workflow: string) =>
@@ -1043,7 +967,6 @@ describe("model rules", { timeout: 60_000 }, () => {
       );
     const { call: anyone } = withRules(
       { budgets: { deployment: { limit: 0.01 } } },
-      env.FEATURES,
       pricedAnswer
     );
     const outcomes: string[] = [];

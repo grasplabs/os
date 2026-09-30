@@ -105,7 +105,7 @@ const firstFailure = (
 
 /**
  * Computes the day's improvement signals and Knowledge usage signals of
- * `now`'s UTC day, those that are due and switched on. Its cron trigger
+ * `now`'s UTC day, those that are due. Its cron trigger
  * calls it every 15 minutes. Throws the first failure once both are done.
  */
 export const refreshDailySignals = async (

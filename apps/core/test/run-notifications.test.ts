@@ -1,7 +1,6 @@
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { z } from "zod";
 
 import { startRun } from "../src/workflows/runs.ts";
 import { allEvents } from "./audit-events.ts";
@@ -388,39 +387,6 @@ describe("failed runs", slow, () => {
         ...stored.slice(0, 53),
         ...stored.slice(53).toSorted((one, other) => other.localeCompare(one)),
       ],
-    });
-  });
-
-  it("tell nobody while switched off", async () => {
-    const owner = await signedInApi(idp, "builder");
-    const app = await appWith(owner, failing("careless"));
-    const { FEATURES } = env;
-    env.FEATURES = {
-      ...z.record(z.string(), z.boolean()).parse(FEATURES),
-      run_notifications: false,
-    };
-    let run: string;
-    try {
-      run = await failedRun(owner, app, "careless");
-    } finally {
-      env.FEATURES = FEATURES;
-    }
-    const events = await allEvents();
-
-    expect({
-      listed: await listed(owner),
-      failed: events.some(
-        ({ action, target }) =>
-          action === "workflow.run.failed" && target?.id === run
-      ),
-      notified: events.some(
-        ({ action, target }) =>
-          action === "workflow.run.notified" && target?.id === run
-      ),
-    }).toStrictEqual({
-      listed: { unread: 0, notifications: [] },
-      failed: true,
-      notified: false,
     });
   });
 

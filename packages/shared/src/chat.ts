@@ -185,7 +185,7 @@ export interface ChatUpdate {
   provenance?: ChatProvenance;
   /**
    * Why the last question stopped before the agent answered, when it
-   * wasn't the model (the person left, the agent was switched off). Kept
+   * wasn't the model (the person left). Kept
    * until the next question starts (then `null`), and not over a restart.
    */
   stopped: string | null;
@@ -264,9 +264,7 @@ export interface ChatsApi {
   /**
    * Screen `screen` of the chat's draft of `app` (its first screen when
    * none is named), built, to preview: for the person while they build
-   * the App. Behind `app_preview`, and the kill switches of what a
-   * preview runs (`apps`, `screens`), as are `previewCall` and
-   * `previewReport`.
+   * the App.
    */
   preview: (
     chatId: string,

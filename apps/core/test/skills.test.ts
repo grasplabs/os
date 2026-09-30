@@ -16,7 +16,6 @@ import { mockIdp } from "./idp.ts";
 import { knowledgeRacing, readCollection } from "./knowledge.ts";
 import {
   auditedDuring,
-  openRpc,
   outcome,
   refusal,
   signedInApi,
@@ -192,29 +191,6 @@ describe("the Grasp skills", setUpTime, () => {
       changed.currentVersion + 2,
       skill.text,
     ]);
-  });
-
-  it("aren't synced, created or copied while skills is off", async () => {
-    const admin = await personOf("admin");
-    const [skill] = graspSkills;
-    if (!skill) {
-      throw new Error("This release ships no Grasp skills");
-    }
-    const document = await graspDocument(admin, skill.path);
-    const before = await graspDocuments(admin);
-    const off: Env = { ...env, FEATURES: { knowledge: true } };
-
-    await syncGraspSkills(off, releaseChanging(skill.path, "# Off"));
-
-    await expect(graspDocuments(admin)).resolves.toStrictEqual(before);
-    const { core } = await openRpc(admin.session, { coreEnv: off });
-    const { knowledge } = core.authenticate();
-    await expect(
-      Promise.all([
-        outcome(knowledge.skillCollections()),
-        outcome(knowledge.copySkill({ documentId: document.id })),
-      ])
-    ).resolves.toStrictEqual(["feature.disabled", "feature.disabled"]);
   });
 
   it("can't be changed by anyone, an admin neither: not saved, restored or purged", async () => {

@@ -138,15 +138,6 @@ export const staffWindowOpen = (
   return opened <= now && now < until && until - opened <= staffWindowMaxMs;
 };
 
-// FEATURES (core's src/features.ts)
-
-/**
- * Feature flags: the `FEATURES` var, e.g. `{"apps": true}`. A feature it
- * doesn't name is off. Names nobody knows (a flag since removed) are
- * ignored, not an error.
- */
-export const featuresSchema = z.record(z.string(), z.boolean());
-
 // MODEL_GATEWAY (core's src/models.ts and src/model-rules.ts)
 //
 // Its model references are checked against the models the gateway offers,
@@ -234,9 +225,7 @@ export type ModelRules = z.output<
 
 /**
  * The client's other rules, in the same var as the allowlist. Core parses
- * them apart from it, and only while `model_rules` is on: so a rule that
- * doesn't parse never stops the calls the kill switch leaves to the
- * allowlist, and while the rules are on, it refuses every call.
+ * them apart from it: a rule that doesn't parse refuses every call.
  */
 export const modelRulesConfigSchema = (modelRef: z.ZodType<string>) =>
   z
@@ -300,7 +289,6 @@ export const runRetentionSchema = z.int().min(1).max(30);
  */
 export const deploymentConfigVars = [
   "SIGN_IN",
-  "FEATURES",
   "MODEL_GATEWAY",
   "MEMORY_LIMITS",
   "AUDIT_RETENTION_DAYS",

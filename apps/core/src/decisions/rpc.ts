@@ -11,7 +11,7 @@ import { answerDecision, decisionFor } from "./decisions.ts";
 
 /**
  * A signed-in person's `decisions`: for screens and the decision's page.
- * Every call checks the session (and the flags) first and hands the
+ * Every call checks the session first and hands the
  * identity that check returned, with its role and teams read now, to the
  * decision functions, which check that person may answer.
  */

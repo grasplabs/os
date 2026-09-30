@@ -14,13 +14,7 @@ import { grantReviewed, release, requestGranted, serverBuilt } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
 import { fullScan, planOf, recordedQueries } from "./query-plans.ts";
-import {
-  auditedDuring,
-  openRpc,
-  outcome,
-  signedInApi,
-  unique,
-} from "./sign-in.ts";
+import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // Record types an App declares (app/records.json) for a collection it
 // writes, and the collection stub that reads and writes them as data
@@ -402,21 +396,6 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
         ifVersion: 0,
       })
     );
-    const off = await outcome(
-      saveDocument(
-        {
-          ...env,
-          FEATURES: { knowledge: true, apps: true, permissions: true },
-        },
-        await admin.api.whoami(),
-        {
-          collectionId,
-          path: `tasks/${unique()}.md`,
-          text: taskText("status: open"),
-          ifVersion: 0,
-        }
-      )
-    );
     expect({
       refusedBefore,
       saved: saved.type,
@@ -424,7 +403,6 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
       contracted: afterContract.ok.unreadable.some(({ id }) => id === saved.id),
       invalidCommit,
       afterRevoke,
-      off,
     }).toStrictEqual({
       refusedBefore: "knowledge.invalid",
       saved: "task",
@@ -432,7 +410,6 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
       contracted: true,
       invalidCommit: "app.records_invalid",
       afterRevoke: "knowledge.invalid",
-      off: "knowledge.invalid",
     });
   });
 
@@ -597,7 +574,7 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
     });
   });
 
-  it("keep a kept field while nobody declares their type: a record stays of it through a version nobody approved yet, and with the flag off, until no App has the type and an admin makes it a doc", async () => {
+  it("keep a kept field while nobody declares their type: a record stays of it through a version nobody approved yet, until no App has the type and an admin makes it a doc", async () => {
     const admin = await signedInApi(idp, "admin");
     const builder = await signedInApi(idp, "builder");
     const { id: collectionId } = await admin.api.knowledge.createCollection({
@@ -642,17 +619,6 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
       unsealed: await plain(taskText("status: open")),
     };
     await grantReviewed(admin.api, ownerGrant);
-    // And with the flag off, which declares no types at all.
-    const off = await outcome(
-      saveDocument(
-        {
-          ...env,
-          FEATURES: { knowledge: true, apps: true, permissions: true },
-        },
-        await admin.api.whoami(),
-        { collectionId, path, text: asDoc, ifVersion: 1 }
-      )
-    );
     const approved = {
       toDoc: await plain(asDoc),
       unsealed: await plain(taskText("status: open")),
@@ -686,7 +652,6 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
     };
     expect({
       unapproved,
-      off,
       approved,
       version: sealed.ok.currentVersion,
       seal: read.ok.record.seal,
@@ -703,7 +668,6 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
         ]),
     }).toStrictEqual({
       unapproved: refused,
-      off: "knowledge.invalid",
       approved: refused,
       version: 1,
       seal: "signed",
@@ -1031,22 +995,12 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
     });
   });
 
-  it("are claimed as their records are first saved, whatever the flag was as Apps were granted and made current, by one App of two saving at once", async () => {
+  it("are claimed as their records are first saved, not as Apps are granted and made current, by one App of two saving at once", async () => {
     const admin = await signedInApi(idp, "admin");
     const { id: collectionId } = await admin.api.knowledge.createCollection({
       name: `Tasks ${unique()}`,
       access: "everyone",
     });
-    // Made current and granted while record types were off.
-    const off: Env = {
-      ...env,
-      FEATURES: {
-        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-        record_types: false,
-      },
-    };
-    const { core } = await openRpc(admin.session, { coreEnv: off });
-    const whileOff = core.authenticate();
     const appWith = async (statuses: string[]): Promise<AppId> => {
       const { id } = await admin.api.apps.create({ name: `Tasks ${unique()}` });
       await admin.api.apps.files.commit(
@@ -1057,11 +1011,11 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
         },
         "Tasks"
       );
-      await whileOff.apps.versions.setCurrent(id, 1);
-      const { id: permission } = await whileOff.permissions.request(
+      await admin.api.apps.versions.setCurrent(id, 1);
+      const { id: permission } = await admin.api.permissions.request(
         collectionFor(appIdSchema.parse(id), collectionId)
       );
-      await whileOff.permissions.grant(permission, { version: 1 });
+      await admin.api.permissions.grant(permission, { version: 1 });
       return appIdSchema.parse(id);
     };
     await appWith(["open"]);
@@ -1075,7 +1029,7 @@ describe("record types an App declares", { timeout: 60_000 }, () => {
           ifVersion: 0,
         })
       );
-    // With the flag on, no admin doing anything: both first saves at once.
+    // No admin doing anything: both first saves at once.
     const raced = await Promise.all([save("open"), save("done")]);
     const after = await Promise.all([save("open"), save("done")]);
     expect({

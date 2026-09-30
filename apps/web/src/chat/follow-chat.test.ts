@@ -29,12 +29,12 @@ describe("a chat as the page shows it", () => {
   it("drops why the last question stopped once the next one runs", () => {
     const stopped = applyUpdate(
       emptyView,
-      update({ stopped: "This isn't switched on for this deployment." })
+      update({ stopped: "You're no longer a member of this organization." })
     );
     const next = applyUpdate(stopped, update({ running: true }));
 
     expect([stopped.stopped, next.stopped]).toStrictEqual([
-      "This isn't switched on for this deployment.",
+      "You're no longer a member of this organization.",
       null,
     ]);
   });
