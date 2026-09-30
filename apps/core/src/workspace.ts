@@ -36,7 +36,7 @@ import { permissionErrors } from "@grasp-os/shared/permissions";
 import type { ScreenProblem } from "@grasp-os/shared/screens";
 import type { RunFailure } from "@grasp-os/shared/workflows";
 import { DurableObject } from "cloudflare:workers";
-import { and, asc, count, desc, eq, gt, sql } from "drizzle-orm";
+import { and, asc, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
 import type { SQL } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/durable-sqlite";
 import { z } from "zod";
@@ -1133,7 +1133,7 @@ export class Workspace extends DurableObject<Env> {
   /**
    * `personId`'s own chat's drafts with changes, the most recently
    * written first: which Apps, over which version, and the paths each
-   * changes.
+   * changes, and which of those it deletes.
    */
   drafts(chatId: unknown, personId: string): ChatDraft[] {
     const { id } = this.#ownChat(chatId, personId);
@@ -1146,9 +1146,14 @@ export class Workspace extends DurableObject<Env> {
       .toSorted(
         (one, other) => other.updatedAt.getTime() - one.updatedAt.getTime()
       );
-    // In key order: by App, then path.
+    // In key order: by App, then path. Whether each is deleted (it has no
+    // content), without reading any file's content.
     const paths = this.#db
-      .select({ appId: chatDraftFiles.appId, path: chatDraftFiles.path })
+      .select({
+        appId: chatDraftFiles.appId,
+        path: chatDraftFiles.path,
+        deleted: isNull(chatDraftFiles.content).mapWith(Boolean),
+      })
       .from(chatDraftFiles)
       .where(eq(chatDraftFiles.chatId, id))
       .orderBy(asc(chatDraftFiles.appId), asc(chatDraftFiles.path))
@@ -1156,16 +1161,17 @@ export class Workspace extends DurableObject<Env> {
     // A draft whose changes are all gone keeps its row (its revision
     // goes on), and isn't one to show.
     return rows.flatMap(({ appId, base, revision, updatedAt }) => {
-      const changed = paths
-        .filter((row) => row.appId === appId)
-        .map(({ path }) => path);
-      return changed.length === 0
+      const files = paths.filter((row) => row.appId === appId);
+      return files.length === 0
         ? []
         : [
             {
               app: appId,
               base,
-              changed,
+              changed: files.map(({ path }) => path),
+              deleted: files
+                .filter(({ deleted }) => deleted)
+                .map(({ path }) => path),
               revision,
               updatedAt: updatedAt.toISOString(),
             },

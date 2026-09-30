@@ -29,6 +29,8 @@ export interface ChatDraft {
   base: number | null;
   /** The paths it changes, sorted. */
   changed: string[];
+  /** Those of `changed` it deletes, sorted: nothing to open or preview. */
+  deleted: string[];
   /** Which write of the draft this is: a preview of an earlier one is out of date. */
   revision: number;
   /** When it was last written (ISO 8601). */
@@ -262,7 +264,9 @@ export interface ChatsApi {
   /**
    * Screen `screen` of the chat's draft of `app` (its first screen when
    * none is named), built, to preview: for the person while they build
-   * the App. Behind `app_preview`, as is `previewCall`.
+   * the App. Behind `app_preview`, and the kill switches of what a
+   * preview runs (`apps`, `screens`), as are `previewCall` and
+   * `previewReport`.
    */
   preview: (
     chatId: string,

@@ -255,8 +255,10 @@ export type Feature =
   /**
    * Previewing a chat's draft of an App (preview.ts): its screens in the
    * chat's side panel, calling its server code in a preview with no side
-   * effects; needs `app_builder` on too. While off, no draft is previewed,
-   * and a preview open in a page stops at its next call.
+   * effects; needs `app_builder`, `apps` and `screens` on too (a preview
+   * runs an App's screens and server code, so their kill switches stop it).
+   * While off, no draft is previewed, and a preview open in a page stops
+   * at its next call.
    */
   | "app_preview"
   /**
@@ -277,6 +279,23 @@ export const featureEnabled = (
 ): boolean =>
   deploymentConfig(featuresSchema, "FEATURES", env.FEATURES)?.[feature] ===
   true;
+
+/**
+ * What a preview of a chat's draft needs switched on: it runs an App's
+ * screens and server code, so the kill switches of both (`apps`,
+ * `screens`) stop it as they stop an App's own, besides the agent's
+ * building and previews themselves.
+ */
+export const previewFeatures = [
+  "apps",
+  "screens",
+  "app_builder",
+  "app_preview",
+] as const satisfies readonly Feature[];
+
+/** Whether drafts can be previewed: all of {@link previewFeatures} are on. */
+export const previewsEnabled = (env: Pick<Env, "FEATURES">): boolean =>
+  previewFeatures.every((feature) => featureEnabled(env, feature));
 
 /** Refuses with `feature.disabled` while `feature` is off. */
 export const requireFeature = (env: Env, feature: Feature): void => {

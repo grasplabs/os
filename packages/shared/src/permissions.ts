@@ -127,6 +127,13 @@ const platformActions = {
   platform: ["statistics", "guests"],
 } as const;
 
+/**
+ * What a platform permission's one action is: each is a binding of its
+ * own kind in an App's env (statistics, guest chats).
+ */
+export const platformActionSchema = z.enum(platformActions.platform);
+export type PlatformAction = z.infer<typeof platformActionSchema>;
+
 /** One action a permission allows. */
 export const permissionActionSchema = z.string().regex(connectionActionPattern);
 

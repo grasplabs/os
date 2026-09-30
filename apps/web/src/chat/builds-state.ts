@@ -1,4 +1,5 @@
 import type { App, FileDiff, VersionReview } from "@grasp-os/shared/apps";
+import type { ChatDraft } from "@grasp-os/shared/chat";
 import { screenPath } from "@grasp-os/shared/screens";
 import type { TriggerDeclaration } from "@grasp-os/shared/workflows";
 
@@ -194,17 +195,25 @@ export const exportChangeText = ({
   return { text: `${name} changed${does}`, widens: false };
 };
 
-/** The screens a draft changes (its `changed` paths), by name, in order. */
-export const changedScreens = (changed: readonly string[]): string[] =>
+/**
+ * The screens a draft changes and still has (its `changed` paths, less
+ * the ones it deletes), by name, in order: a deleted screen has nothing
+ * to preview.
+ */
+export const changedScreens = ({
+  changed,
+  deleted,
+}: Pick<ChatDraft, "changed" | "deleted">): string[] =>
   changed.flatMap((path) => {
     const name = screenPath.exec(path)?.groups?.name;
-    return name === undefined ? [] : [name];
+    return name === undefined || deleted.includes(path) ? [] : [name];
   });
 
 /**
  * The screen a draft's preview shows: the one the person picked while the
  * draft still changes it, otherwise the first it changes; none when it
- * changes no screen (core then shows the draft's first).
+ * changes no screen, or only deletes some (core then shows the draft's
+ * first).
  */
 export const previewedScreen = (
   changed: readonly string[],

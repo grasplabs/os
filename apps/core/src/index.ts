@@ -47,6 +47,7 @@ export {
   PreviewCollection,
   PreviewConnection,
   PreviewExports,
+  PreviewGuests,
   PreviewStatistics,
 } from "./preview-bindings.ts";
 export { Workspace } from "./workspace.ts";
