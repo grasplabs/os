@@ -84,17 +84,39 @@ const recordClient = async (
 const noSuchClient = (id: string) => `There&#x27;s no client ${id}.`;
 
 describe("the client pages", () => {
-  it("list every client, with a way to add one", async () => {
+  it("list every client in a grid from what the console recorded, with links to its deployment, account and Activity, a way to add one, and its live columns still to read", async () => {
     const client = await recordClient();
+    const live = await recordClient("active");
 
+    // The live columns are read after the page shows (test/client-grid.test.ts).
     const { status, html } = await page("/");
 
     expect({
       status,
-      listed:
-        html.includes(`Acme ${client.id}`) && html.includes(client.accountId),
+      listed: html.includes(`href="/clients/${client.id}"`),
+      columns: [
+        "Release",
+        "Last deploy (UTC)",
+        "Drift",
+        "Shared secrets",
+        "Health",
+        "Cost this month",
+      ].every((column) => html.includes(column)),
+      links: [
+        `href="https://${live.id}.grasp.test"`,
+        `href="https://${live.id}.grasp.test/activity"`,
+        `href="https://dash.cloudflare.com/${live.accountId}"`,
+      ].every((link) => html.includes(link)),
+      reading: html.includes("reading…"),
       add: html.includes('href="/clients/new"'),
-    }).toStrictEqual({ status: 200, listed: true, add: true });
+    }).toStrictEqual({
+      status: 200,
+      listed: true,
+      columns: true,
+      links: true,
+      reading: true,
+      add: true,
+    });
   });
 
   it("offer the imported releases on the new-client form, newest first by default", async () => {

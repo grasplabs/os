@@ -19,7 +19,7 @@ import {
   startProvisioning,
 } from "./control.ts";
 import type { ProvisionErrorCode } from "./control.ts";
-import { getProvisioning, listClients } from "./queries.ts";
+import { getProvisioning } from "./queries.ts";
 
 const clientSchema = z.object({ clientId: newClientIdSchema });
 
@@ -39,10 +39,6 @@ const change = async (task: () => Promise<string>): Promise<ChangeResult> => {
     throw error;
   }
 };
-
-export const fetchClients = createServerFn({ method: "GET" }).handler(
-  async () => await listClients(env)
-);
 
 /** What the new-client form offers: the imported releases, newest first. */
 export const fetchNewClientOptions = createServerFn({ method: "GET" }).handler(

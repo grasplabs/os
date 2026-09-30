@@ -9,7 +9,7 @@
  * is stored (threat model R17, CO3).
  */
 import { cloudflareApi } from "../cloudflare/api.ts";
-import type { CloudflareApi } from "../cloudflare/api.ts";
+import type { CloudflareApi, CloudflareApiOptions } from "../cloudflare/api.ts";
 import { consoleDatabase } from "../db/act.ts";
 import type { SignInApps } from "./core-config.ts";
 import type { DeployContext } from "./deploy.ts";
@@ -77,12 +77,22 @@ const storeSecret = async (env: Env, name: StoreSecret): Promise<string> => {
 export const tenantAdminApi = async (env: Env): Promise<CloudflareApi> =>
   cloudflareApi({ token: await storeSecret(env, "TENANT_ADMIN_TOKEN") });
 
+/** The deployer's API token, from Secrets Store. */
+export const deployerToken = async (env: Env): Promise<string> =>
+  await storeSecret(env, "DEPLOYER_API_TOKEN");
+
 /**
  * The Cloudflare API as the deployer: a member of every client account,
  * its token scoped to what a deploy does.
  */
-export const deployerApi = async (env: Env): Promise<CloudflareApi> =>
-  cloudflareApi({ token: await storeSecret(env, "DEPLOYER_API_TOKEN") });
+export const deployerApi = async (
+  env: Env,
+  options: Pick<CloudflareApiOptions, "waitBudgetMs" | "signal"> = {}
+): Promise<CloudflareApi> =>
+  cloudflareApi({
+    ...options,
+    token: await storeSecret(env, "DEPLOYER_API_TOKEN"),
+  });
 
 /** The domain clients are served under, or null while none is set. */
 export const clientDomain = (env: Env): string | null => {

@@ -79,12 +79,20 @@ const severity: readonly ClientDriftState[] = [
 ];
 
 /**
+ * A release's manifest, as the console imported it: `importedManifest`,
+ * or one read once for many clients (the grid).
+ */
+export type ManifestOf = (
+  releaseId: string
+) => ReturnType<typeof importedManifest>;
+
+/**
  * Every Worker the releases `releaseIds` have, by app, with its script's
  * name: what a client on them should run, whether or not the console
  * recorded each.
  */
 const expectedWorkers = async (
-  db: ConsoleDatabase,
+  manifestOf: ManifestOf,
   releaseIds: readonly (string | null)[]
 ): Promise<Map<string, string>> => {
   const expected = new Map<string, string>();
@@ -93,7 +101,7 @@ const expectedWorkers = async (
       continue;
     }
     // oxlint-disable-next-line no-await-in-loop -- one or two releases
-    const manifest = await importedManifest(db, id);
+    const manifest = await manifestOf(id);
     for (const [app, { name }] of Object.entries(manifest?.workers ?? {})) {
       expected.set(app, name);
     }
@@ -112,7 +120,8 @@ const expectedWorkers = async (
 export const driftOf = async (
   api: CloudflareApi,
   db: ConsoleDatabase,
-  clientId: string
+  clientId: string,
+  manifestOf: ManifestOf = async (id) => await importedManifest(db, id)
 ): Promise<ClientDrift | null> => {
   const [client] = await db
     .select({
@@ -133,7 +142,7 @@ export const driftOf = async (
     })
     .from(clientWorkers)
     .where(eq(clientWorkers.clientId, clientId));
-  const expected = await expectedWorkers(db, [
+  const expected = await expectedWorkers(manifestOf, [
     ...recorded.map(({ releaseId }) => releaseId),
     ...(client.pinnedReleaseId === null ? [] : [client.pinnedReleaseId]),
   ]);

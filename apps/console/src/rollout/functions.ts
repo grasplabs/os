@@ -32,7 +32,11 @@ import type { RolloutErrorCode } from "./errors.ts";
 import { getRollout, listRollouts, rolloutOptions } from "./queries.ts";
 import { rollbackClientAndWait, rollbackRingAndWait } from "./rollback.ts";
 import type { RingRollback } from "./rollback.ts";
-import { checkRevocation, runsSharedSecrets } from "./shared-secrets.ts";
+import {
+  checkRevocation,
+  sharedSecretsStatus,
+  storeCheck,
+} from "./shared-secrets.ts";
 
 const rolloutSchema = z.object({ rolloutId: z.uuid() });
 const clientSchema = z.object({ clientId: z.string().min(1) });
@@ -182,7 +186,9 @@ export const fetchDrift = createServerFn({ method: "GET" })
     return {
       ...drift,
       sharedSecretsCurrent:
-        store === null ? null : await runsSharedSecrets(db, drift, store),
+        store === null
+          ? null
+          : await sharedSecretsStatus(db, drift, await storeCheck(store)),
     };
   });
 
