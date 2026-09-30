@@ -191,14 +191,16 @@ export const Route = createFileRoute("/_shell/knowledge/$collection")({
   loaderDeps: ({ search: { doc } }) => ({ doc }),
   // The collection and the open document are read on their own, and say on
   // their own why they failed.
-  loader: async ({ params, deps: { doc } }) => {
+  loader: async ({ context: { core }, params, deps: { doc } }) => {
     const [collection, open] = await Promise.all([
       loadFromCore(
+        core,
         async (session) => await loadCollection(session, params.collection)
       ),
       doc === undefined
         ? undefined
         : loadFromCore(
+            core,
             async (session) =>
               await loadDocument(session, params.collection, doc)
           ),

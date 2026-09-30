@@ -268,11 +268,9 @@ test("an App whose contents can't be read, or never come, keeps its row, and the
   ).toHaveText([name, "Counts clicks", "1", "counter", "tally"]);
   await expect(page.getByRole("alert")).toHaveCount(0);
 
-  // A read that never comes costs only its own row too, not the page. On
-  // one connection the gate can only hold this App's call and everything
-  // the page sends after it, which the other reads' requests for their
-  // answers follow: those rows wait out their limit too. The list shows,
-  // where a page waiting on every read would say core can't be reached.
+  // A read that never comes costs only its own row too, not the page: the
+  // list shows, where a page waiting on every read would say core can't
+  // be reached.
   const hangingName = `Hanging ${crypto.randomUUID()}`;
   const hanging = await newApp(builder, hangingName, {});
   const waiting = await pageOf(browser, builder);

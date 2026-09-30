@@ -12,7 +12,7 @@ import {
 } from "@tanstack/react-router";
 import type { ErrorComponentProps } from "@tanstack/react-router";
 
-import { loadCoreStatus, signOut } from "../core.ts";
+import { loadCoreStatus, signOut } from "../core-connection.ts";
 import { ErrorText } from "../error-text.tsx";
 import { NotificationsLink } from "../notifications/nav-link.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
@@ -57,7 +57,7 @@ const sections: readonly Section[] = [
 ];
 
 const Shell = () => {
-  const { identity } = Route.useRouteContext();
+  const { core, identity } = Route.useRouteContext();
   return (
     <div className="flex h-svh">
       <nav
@@ -95,7 +95,7 @@ const Shell = () => {
           <Button
             variant="outline"
             onClick={() => {
-              void signOut();
+              void signOut(core);
             }}
           >
             Sign out
@@ -152,8 +152,8 @@ const ShellError = ({ error }: ErrorComponentProps) => {
 export const Route = createFileRoute("/_shell")({
   // Before any page's loader, so each runs for someone signed in, with
   // their identity in its context.
-  beforeLoad: async ({ location }) => {
-    const { connected, identity } = await loadCoreStatus();
+  beforeLoad: async ({ context: { core }, location }) => {
+    const { connected, identity } = await loadCoreStatus(core);
     if (!connected) {
       // Nobody can tell who is signed in: sending them to sign in again
       // would say they were signed out.

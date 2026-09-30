@@ -6,6 +6,7 @@ import { useEffect, useRef, useState } from "react";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { ScreenFrame } from "../screens/screen-frame.tsx";
+import { useCore } from "../use-core.ts";
 import { ChatBuilds } from "./builds.tsx";
 
 // Beside the chat: a slot for what the chat is about. The Apps its agent
@@ -66,11 +67,13 @@ export const SidePanel = ({
   drafts: number;
 }) => {
   const [apps, setApps] = useState<Loaded<App[]>>();
+  const core = useCore();
   const [opened, setOpened] = useState<Loaded<Opened>>();
   useEffect(() => {
     let current = true;
     const read = async (): Promise<void> => {
       const found = await loadFromCore(
+        core,
         async (session) => await session.apps.list()
       );
       if (current) {
@@ -81,12 +84,12 @@ export const SidePanel = ({
     return () => {
       current = false;
     };
-  }, []);
+  }, [core]);
   // Only the App opened last shows, whichever read ends last.
   const latest = useRef<App | null>(null);
   const open = async (app: App): Promise<void> => {
     latest.current = app;
-    const found = await loadFromCore(async (session) => ({
+    const found = await loadFromCore(core, async (session) => ({
       app,
       contents: await session.apps.contents(app.id),
     }));

@@ -234,6 +234,6 @@ const Members = () => {
 
 export const Route = createFileRoute("/_shell/members")({
   component: Members,
-  loader: async () =>
-    await loadFromCore(async (session) => await session.members.list()),
+  loader: async ({ context: { core } }) =>
+    await loadFromCore(core, async (session) => await session.members.list()),
 });

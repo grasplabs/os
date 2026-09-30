@@ -1,6 +1,6 @@
 import { createFileRoute, redirect } from "@tanstack/react-router";
 
-import { loadCoreStatus } from "../core.ts";
+import { loadCoreStatus } from "../core-connection.ts";
 import { ErrorText } from "../error-text.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
 import { SignInOptions } from "../sign-in-options.tsx";
@@ -65,8 +65,8 @@ export const Route = createFileRoute("/sign-in")({
     ...signInErrorSearch(search),
   }),
   loaderDeps: ({ search }) => ({ returnTo: search.returnTo }),
-  loader: async ({ deps }) => {
-    const status = await loadCoreStatus();
+  loader: async ({ context: { core }, deps }) => {
+    const status = await loadCoreStatus(core);
     if (status.identity !== undefined) {
       // oxlint-disable-next-line typescript/only-throw-error -- the router redirects on a thrown redirect
       throw redirect({ href: deps.returnTo });

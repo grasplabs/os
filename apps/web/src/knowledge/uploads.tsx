@@ -11,9 +11,11 @@ import { Input } from "@grasp-os/ui/components/input";
 import { Link, useRouter } from "@tanstack/react-router";
 import { useEffect, useId, useRef, useState } from "react";
 
-import { isTransient, wait, withSession, withTimeout } from "../core.ts";
+import type { CoreConnection } from "../core-connection.ts";
+import { isTransient, wait, withTimeout } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { useCoreAction } from "../use-core-action.ts";
+import { useCore } from "../use-core.ts";
 
 // Uploading a file into a collection, and following it: core answers at
 // once with the upload `pending`, and extracts its text in the background,
@@ -48,6 +50,7 @@ interface Followed {
  * ends it, with core's reason.
  */
 const follow = async (
+  core: CoreConnection,
   upload: Upload,
   onChange: (upload: Upload) => void,
   following: () => boolean
@@ -67,8 +70,10 @@ const follow = async (
     }
     try {
       // oxlint-disable-next-line no-await-in-loop -- one ask at a time
-      current = await withSession(
-        async (session) => await withTimeout(session.uploads.get(upload.id))
+      current = await withTimeout(
+        core.withSession(
+          async (session) => await session.uploads.get(upload.id)
+        )
       );
       onChange(current);
     } catch (error) {
@@ -156,6 +161,7 @@ export const Uploads = ({
 }) => {
   const router = useRouter();
   const inputId = useId();
+  const core = useCore();
   const { busy, failure, run } = useCoreAction();
   const [followed, setFollowed] = useState<Followed[]>([]);
   // Whether the page is still open: nobody sees the status once it isn't.
@@ -193,6 +199,7 @@ export const Uploads = ({
     }
     setFollowed((all) => [{ upload: started }, ...all]);
     const end = await follow(
+      core,
       started,
       (news) => {
         update({ upload: news });

@@ -1,6 +1,7 @@
 import { messageOf } from "@grasp-os/shared/errors";
 
-import { CoreTimeoutError, withSession, withTimeout } from "./core.ts";
+import type { CoreConnection } from "./core-connection.ts";
+import { CoreTimeoutError, withTimeout } from "./core.ts";
 import type { Session } from "./core.ts";
 import { ErrorText } from "./error-text.tsx";
 
@@ -11,17 +12,16 @@ export type Loaded<T> =
   | { state: "ready"; data: T };
 
 /**
- * Reads a page's data with `read`, on the signed-in person's session,
- * within a few seconds: a read that hangs counts as core being out of
- * reach, and a refusal carries core's reason.
+ * Reads a page's data with `read`, on the signed-in person's session over
+ * the tab's connection, within a few seconds: a read that hangs counts as
+ * core being out of reach, and a refusal carries core's reason.
  */
 export const loadFromCore = async <T,>(
+  core: CoreConnection,
   read: (session: Session) => Promise<T>
 ): Promise<Loaded<T>> => {
   try {
-    const data = await withSession(
-      async (session) => await withTimeout(read(session))
-    );
+    const data = await withTimeout(core.withSession(read));
     return { state: "ready", data };
   } catch (error) {
     if (error instanceof CoreTimeoutError) {

@@ -8,10 +8,11 @@ import type {
 import { messageOf } from "@grasp-os/shared/errors";
 import { RpcStub } from "capnweb";
 
-import { CoreLink } from "../screens/core-link.ts";
+import type { CoreConnection } from "../core-connection.ts";
+import { retrying } from "../core.ts";
 
-// Following one chat as it streams (`chats.watch` in core), on a
-// connection that reconnects when it drops. After a drop, the watch starts
+// Following one chat as it streams (`chats.watch` in core), on the tab's
+// connection, which connects again when it drops. After a drop, the watch starts
 // again after the last message this page has, so nothing is missed or
 // shown twice; a reload starts from the first.
 
@@ -62,6 +63,13 @@ export const applyUpdate = (view: ChatView, update: ChatUpdate): ChatView => {
   };
 };
 
+/**
+ * The pauses before trying again to start following while core fails: only
+ * a few, so a chat whose core keeps failing says so. A try made while the
+ * tab's connection is down waits for the next connection first.
+ */
+const startRetryMs = [1000, 2000, 4000] as const;
+
 /** Lets go of a watch; one whose connection is gone already is let go. */
 const releaseQuietly = async (subscription: {
   release: () => Promise<void>;
@@ -74,11 +82,12 @@ const releaseQuietly = async (subscription: {
 };
 
 /**
- * Follows `chatId`: `onUpdate` gets every update, `onFailed` why following
- * stopped for good (the chat is gone, the session ended). Returns what
+ * Follows `chatId` over `core`: `onUpdate` gets every update, `onFailed`
+ * why following stopped for good (the chat is gone, say). Returns what
  * stops it.
  */
 export const followChat = (
+  core: CoreConnection,
   chatId: string,
   onUpdate: (update: ChatUpdate) => void,
   onFailed: (reason: string) => void
@@ -86,10 +95,6 @@ export const followChat = (
   let closed = false;
   let after: number | null = null;
   let release: (() => void) | undefined;
-  const link = new CoreLink(() => {
-    // The session ended: the shell sends the person to sign in.
-    window.location.reload();
-  });
   const received = (update: ChatUpdate): void => {
     const last = update.messages.at(-1);
     if (last !== undefined) {
@@ -99,8 +104,13 @@ export const followChat = (
   };
   const watch = async (): Promise<void> => {
     try {
-      const subscription = await link.retrying(
-        async (session) => await session.chats.watch(chatId, after, received)
+      const subscription = await retrying(
+        async () =>
+          await core.withSession(
+            async (session) =>
+              await session.chats.watch(chatId, after, received)
+          ),
+        startRetryMs
       );
       release = () => {
         void releaseQuietly(subscription);
@@ -130,6 +140,5 @@ export const followChat = (
   return () => {
     closed = true;
     release?.();
-    link.close();
   };
 };

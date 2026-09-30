@@ -36,6 +36,7 @@ import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import { useCoreAction } from "../use-core-action.ts";
+import { useCore } from "../use-core.ts";
 
 // Chat with the organization's agent: the person's chats beside the one open,
 // its messages streaming in as the agent writes them, the changes it holds
@@ -337,16 +338,18 @@ const OpenChat = ({
   const [view, setView] = useState<ChatView>(emptyView);
   const [failure, setFailure] = useState<string>();
   const [panel, setPanel] = useState(false);
+  const core = useCore();
   useEffect(
     () =>
       followChat(
+        core,
         chat.id,
         (update) => {
           setView((before) => applyUpdate(before, update));
         },
         setFailure
       ),
-    [chat.id]
+    [core, chat.id]
   );
   return (
     <div className="flex min-h-0 flex-1">
@@ -493,8 +496,8 @@ const Chat = () => {
 export const Route = createFileRoute("/_shell/")({
   validateSearch: (search: Record<string, unknown>): { chat?: string } =>
     typeof search.chat === "string" ? { chat: search.chat } : {},
-  loader: async () =>
-    await loadFromCore(async (session): Promise<ChatPage> => {
+  loader: async ({ context: { core } }) =>
+    await loadFromCore(core, async (session): Promise<ChatPage> => {
       const [chats, models, sourceNames] = await Promise.all([
         session.chats.list(),
         session.chats.models(),

@@ -98,16 +98,19 @@ export const Route = createFileRoute("/_shell/activity")({
     tab: search.tab === "pending" ? "pending" : undefined,
   }),
   loaderDeps: ({ search }) => search,
-  loader: async ({ deps }) => {
+  loader: async ({ context: { core }, deps }) => {
     if (deps.tab === "pending") {
       return {
         tab: "pending" as const,
-        pending: await loadFromCore(readPendingRequests),
+        pending: await loadFromCore(core, readPendingRequests),
       };
     }
     return {
       tab: "log" as const,
-      log: await loadFromCore(async (session) => await readLog(session, deps)),
+      log: await loadFromCore(
+        core,
+        async (session) => await readLog(session, deps)
+      ),
     };
   },
   component: Activity,

@@ -2,7 +2,14 @@ import { expect } from "@playwright/test";
 
 import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
-import { peopleIn, signInTo } from "./people.ts";
+import { endSession, peopleIn, signInTo } from "./people.ts";
+
+/**
+ * How long the page may take to show what came of a connection that had to
+ * be made again: the read's own 5 s for one that never comes, and the
+ * pauses between attempts (1 s, 2 s, then 3 s each) for one that does.
+ */
+const reconnectMs = 10_000;
 
 test("loads the frontend from core, reaches core over RPC, and asks whoever isn't signed in to sign in", async ({
   page,
@@ -89,19 +96,23 @@ test("shows the members page only to someone signed in, and never signs them out
   const { admin } = peopleIn("membersRecover");
   await signInTo(context, admin);
 
-  // A couple of failures pass: the page asks again and lets them in.
+  // A couple of failures pass: the page's connection tries again, with a
+  // growing pause, and lets them in.
   failing = 2;
   await page.goto("/members");
-  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible({
+    timeout: reconnectMs,
+  });
   expect(new URL(page.url()).pathname).toBe("/members");
   expect(failing).toBe(0);
 
-  // Failing for good says so, rather than asking them to sign in again.
+  // Failing for good says so, rather than asking them to sign in again:
+  // once the page has waited its few seconds for a connection.
   failing = Number.POSITIVE_INFINITY;
   await page.goto("/members");
   await expect(
     page.getByText("Grasp can't be reached right now. Try again in a moment.")
-  ).toBeVisible();
+  ).toBeVisible({ timeout: reconnectMs });
   expect(new URL(page.url()).pathname).toBe("/members");
   await expect(page.getByText("Sign in to go on.")).toHaveCount(0);
 
@@ -112,14 +123,17 @@ test("shows the members page only to someone signed in, and never signs them out
     page.getByRole("button", { name: "Trying again…" })
   ).toBeDisabled();
   await expect(unreachable).toHaveText(
-    "Grasp can't be reached right now. Try again in a moment."
+    "Grasp can't be reached right now. Try again in a moment.",
+    { timeout: reconnectMs }
   );
   expect(new URL(page.url()).pathname).toBe("/members");
 
   // Once core answers again, trying again lets them in.
   failing = 0;
   await page.getByRole("button", { name: "Try again" }).click();
-  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Members" })).toBeVisible({
+    timeout: reconnectMs,
+  });
 });
 
 test("an admin changes a member's role, and the controls wait for the list to show it", async ({
@@ -167,4 +181,26 @@ test("says core can't be reached when the members list never comes", async ({
     page.getByText("Grasp can't be reached right now. Try again in a moment.")
   ).toBeVisible({ timeout: 15_000 });
   await expect(page.getByRole("table")).toHaveCount(0);
+});
+
+test("sends someone whose session ended elsewhere to sign in, and back to the page they asked for", async ({
+  context,
+  page,
+}) => {
+  const { member } = peopleIn("sessionEnded");
+  await signInTo(context, member);
+  await page.goto("/knowledge");
+  const nav = page.getByRole("navigation", { name: "Main" });
+  await expect(nav.getByRole("link", { name: "Apps" })).toBeVisible();
+
+  // Signed out in another tab, or revoked: the page's connection, opened
+  // while they were signed in, is refused at the next page they open.
+  await endSession(member);
+  await nav.getByRole("link", { name: "Apps" }).click();
+  await expect(page.getByText("Sign in to go on.")).toBeVisible({
+    timeout: reconnectMs,
+  });
+  expect(new URL(page.url()).pathname).toBe("/sign-in");
+  expect(new URL(page.url()).searchParams.get("returnTo")).toBe("/apps");
+  await expect(nav).toHaveCount(0);
 });

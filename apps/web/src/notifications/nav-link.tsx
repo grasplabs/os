@@ -3,7 +3,9 @@ import { buttonVariants } from "@grasp-os/ui/components/button";
 import { Link, useRouter } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
-import { withSession, withTimeout } from "../core.ts";
+import type { CoreConnection } from "../core-connection.ts";
+import { withTimeout } from "../core.ts";
+import { useCore } from "../use-core.ts";
 
 // The nav's way to the person's notifications, with how many are unread,
 // read again on every other page the person opens. Only while core lists
@@ -14,10 +16,12 @@ import { withSession, withTimeout } from "../core.ts";
  * core doesn't list them. Outside the component, as the React Compiler
  * can't compile `try`.
  */
-const readUnread = async (): Promise<number | undefined> => {
+const readUnread = async (
+  core: CoreConnection
+): Promise<number | undefined> => {
   try {
-    const { unread } = await withSession(
-      async (session) => await withTimeout(session.notifications.list())
+    const { unread } = await withTimeout(
+      core.withSession(async (session) => await session.notifications.list())
     );
     return unread;
   } catch {
@@ -28,6 +32,7 @@ const readUnread = async (): Promise<number | undefined> => {
 /** The nav's Notifications entry, with its unread count. */
 export const NotificationsLink = () => {
   const router = useRouter();
+  const core = useCore();
   const [unread, setUnread] = useState<number>();
   useEffect(() => {
     // Each read's number: only the latest one's count is shown.
@@ -35,7 +40,7 @@ export const NotificationsLink = () => {
     const read = async (): Promise<void> => {
       latest += 1;
       const mine = latest;
-      const count = await readUnread();
+      const count = await readUnread(core);
       if (mine === latest) {
         setUnread(count);
       }
@@ -53,7 +58,7 @@ export const NotificationsLink = () => {
       latest += 1;
       unsubscribe();
     };
-  }, [router]);
+  }, [router, core]);
   if (unread === undefined) {
     return null;
   }
