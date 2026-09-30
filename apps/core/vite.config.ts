@@ -61,6 +61,7 @@ export const screenTests = [
   "test/event-triggers.test.ts",
   "test/event-sources.test.ts",
   "test/orphaned-runs.test.ts",
+  "test/run-retention.test.ts",
 ];
 
 /** Core's Worker test setup, shared by both of core's test projects. */

@@ -1,0 +1,2 @@
+ALTER TABLE `workflow_runs` ADD `details_removed_at` integer;--> statement-breakpoint
+CREATE INDEX `workflow_runs_details_kept_idx` ON `workflow_runs` (`ended_at`,`id`) WHERE ended_at IS NOT NULL AND details_removed_at IS NULL;

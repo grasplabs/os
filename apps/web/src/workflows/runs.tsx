@@ -41,7 +41,8 @@ const startedByOf = ({ startedBy }: ListedRun, me: string): string => {
  * Where a run is: its status, with the link to the decision it waits for
  * when the person may answer it (core sends it only then), or, for those
  * who see it, why it failed. That reason is the workflow's
- * own text, shown as text.
+ * own text, shown as text. A run whose details were removed, its
+ * retention over, says so in place of the reason, which went with them.
  */
 const RunStatusCell = ({ run }: { run: ListedRun }) => (
   <div className="flex flex-col gap-1">
@@ -55,13 +56,16 @@ const RunStatusCell = ({ run }: { run: ListedRun }) => (
         Decide
       </Link>
     )}
-    {run.failure === undefined ? null : (
+    {run.failure === undefined || run.detailsRemoved ? null : (
       <span className="text-muted-foreground text-xs">
         {run.failure.step === null
           ? run.failure.error.message
           : `At ${run.failure.step}: ${run.failure.error.message}`}
       </span>
     )}
+    {run.detailsRemoved ? (
+      <span className="text-muted-foreground text-xs">Details removed</span>
+    ) : null}
   </div>
 );
 

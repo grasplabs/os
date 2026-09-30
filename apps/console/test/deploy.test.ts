@@ -752,6 +752,8 @@ describe("deploying safely", () => {
       ["MEMORY_LIMITS", JSON.stringify({ "USER.md": 0 })],
       ["AUDIT_RETENTION_DAYS", "7"],
       ["AUDIT_ARCHIVE_RETENTION_DAYS", "30"],
+      // Longer than the engine keeps an ended run.
+      ["RUN_RETENTION_DAYS", "31"],
       ["FEATURES", "{not json"],
     ];
     const outcomes: unknown[] = [];

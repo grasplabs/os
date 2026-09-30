@@ -20,6 +20,8 @@ export const workflowErrors = defineErrorFamily({
   "workflow.invalid": "That isn't a valid request for a workflow.",
   "workflow.not_found": "The App's current version has no such workflow.",
   "workflow.run_not_found": "There's no such workflow run.",
+  "workflow.run_details_removed":
+    "This run's details were removed when its retention ended, so there is nothing left to work out a fix from.",
   "workflow.build_failed": "The App's workflows don't build.",
   "workflow.tests_failed":
     "A workflow's tests fail, or it has none, so this version can't be made current.",
@@ -439,15 +441,30 @@ export interface WorkflowRun {
   status: RunStatus;
   createdAt: string;
   endedAt: string | null;
-  /** What it returned, once completed; only from `status`. */
+  /**
+   * What it returned, once completed; only from `status`, and gone once
+   * its details are removed.
+   */
   output?: Json;
-  /** Why it failed; only from `status`. */
+  /**
+   * Why it failed; only from `status`, and gone once its details are
+   * removed.
+   */
   error?: { name: string; message: string };
   /**
    * Why it stopped, once failed: for admins and the person the run acts
-   * for (who started it, or the App's owner for a triggered run).
+   * for (who started it, or the App's owner for a triggered run). Once
+   * its details are removed, its message says only that, and its step is
+   * named without its key.
    */
   failure?: RunFailure;
+  /**
+   * Set once its details are removed, its retention over: an ended run
+   * keeps them for the deployment's `RUN_RETENTION_DAYS`, 30 days unless
+   * set, counted from when it ended. The same wherever the run is read.
+   * The run itself stays: what it was, how it ended, when and for whom.
+   */
+  detailsRemoved?: true;
 }
 
 /**

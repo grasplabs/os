@@ -519,6 +519,14 @@ export const recordTypeOwners = sqliteTable(
  * on, until it goes on: so a run stopped and resumed while it waits (a
  * deploy, a crash) records its wait once, though the resumed execution
  * waits again before the first step it replays (workflows/runs.ts).
+ *
+ * `details_removed_at` is when an ended run's details were removed, its
+ * retention over (workflows/retention.ts): the engine's record of it (its
+ * input, what its steps returned, its output), the message of its
+ * `failure` and the key of the step that names, and what its decisions
+ * asked and were answered, with the keys of their steps. The row itself
+ * stays, so the run is still listed, counted and found by the
+ * audit log's events of it, and its trigger key still stands for it.
  */
 export const workflowRuns = sqliteTable(
   "workflow_runs",
@@ -553,6 +561,7 @@ export const workflowRuns = sqliteTable(
      * which gives its key up for the delivery tried again.
      */
     triggerKey: text("trigger_key"),
+    detailsRemovedAt: timestamp("details_removed_at"),
   },
   (table) => [
     index("workflow_runs_app_idx").on(table.appId, table.createdAt),
@@ -574,6 +583,13 @@ export const workflowRuns = sqliteTable(
       table.id
     ),
     uniqueIndex("workflow_runs_trigger_key_idx").on(table.triggerKey),
+    // The retention sweep (src/workflows/retention.ts): ended runs that
+    // still have their details, longest ended first, then by ID, which
+    // the sweep pages by. Only those: a live run has no `ended_at`, and a
+    // swept one leaves the index.
+    index("workflow_runs_details_kept_idx")
+      .on(table.endedAt, table.id)
+      .where(sql`ended_at IS NOT NULL AND details_removed_at IS NULL`),
   ]
 );
 

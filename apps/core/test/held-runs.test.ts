@@ -6,6 +6,8 @@ import { z } from "zod";
 
 import { appHost } from "../src/durable-objects.ts";
 import { requestGranted, serverBuilt } from "./apps.ts";
+import { allEvents } from "./audit-events.ts";
+import { runQuarterHourCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
 import { mailConnection, mailWithSearch } from "./mail-connection.ts";
 import { endLiveRuns, finished, liveStatus } from "./runs.ts";
@@ -292,6 +294,48 @@ describe("a run's held side effects", { timeout: 60_000 }, () => {
     }).toStrictEqual({
       confirmed: "connect.run_ended",
       waiting: [],
+      server: { calls: 0, sent: [] },
+    });
+  });
+
+  it("drop a held side effect, input and all, once its run has ended for its retention, without its person coming back", async () => {
+    const admin = await personApi("admin");
+    const mail = await mailConnection();
+    const app = await appWith(admin, mailer(`retries: { limit: 0 }`));
+    await grantMail(idp, admin, app, mail.id);
+    await appHost(env, appIdSchema.parse(app)).restrict();
+    const run = await admin.api.workflows.start(app, "mailer");
+    // Another run's, still waiting: not this retention's to drop.
+    const live = await admin.api.workflows.start(app, "mailer");
+    await runEvents(run.id, "workflow.run.waiting");
+    await runEvents(live.id, "workflow.run.waiting");
+    await admin.api.workflows.cancel(run.id);
+    const day = 24 * 60 * 60 * 1000;
+
+    await runQuarterHourCron({}, new Date(Date.now() + 29 * day));
+    const within = await admin.api.pendingActions.list();
+    await runQuarterHourCron({}, new Date(Date.now() + 31 * day));
+    const after = await admin.api.pendingActions.list();
+    const events = await allEvents();
+    const dropped = events
+      .filter(
+        ({ action, target }) =>
+          action === "connection.action.dropped" && target?.id === mail.id
+      )
+      .map(({ actor, detail }) => [actor.type, detail.reason]);
+
+    expect({
+      within: within.length,
+      after: after.map(({ idempotencyKey }) =>
+        idempotencyKey.startsWith(`${live.id}:`)
+      ),
+      dropped,
+      server: await mail.did(),
+    }).toStrictEqual({
+      within: 2,
+      // The live run's stays.
+      after: [true],
+      dropped: [["system", "run.ended"]],
       server: { calls: 0, sent: [] },
     });
   });

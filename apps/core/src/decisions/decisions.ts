@@ -37,6 +37,7 @@ import {
 import { inList } from "../db/d1.ts";
 import { requireFeature } from "../features.ts";
 import { runEngine } from "../workflows/engine.ts";
+import { removedText } from "../workflows/retention.ts";
 import { tellScreens } from "../workflows/run-changes.ts";
 
 // Decisions workflow runs wait for (`step.decision`), and the only ways to
@@ -516,18 +517,18 @@ const allowedDecision = async (
 /** Statuses of a run that hasn't ended. */
 const unended: ReadonlySet<string> = new Set(["starting", "running", "paused"]);
 
-const toView = ({
-  decision,
-  app,
-  workflow,
-  runStatus,
-  decidedByName,
-}: DecisionWithRun): DecisionView => ({
+const toView = (
+  env: Env,
+  { decision, app, workflow, runStatus, decidedByName }: DecisionWithRun
+): DecisionView => ({
   id: decision.id,
   app: { id: appIdSchema.parse(app.id), name: app.name },
   workflow: workflowIdSchema.parse(workflow),
   run: runIdSchema.parse(decision.runId),
-  description: decision.description,
+  // None is asked with an empty description: one that is empty went with
+  // its run's details (workflows/retention.ts), and says so.
+  description:
+    decision.description === "" ? removedText(env) : decision.description,
   // An open decision of a run that has ended takes no answer.
   status:
     decision.status === "open" && !unended.has(runStatus)
@@ -549,7 +550,8 @@ export const decisionFor = async (
   env: Env,
   by: Identity,
   decision: unknown
-): Promise<DecisionView> => toView(await allowedDecision(env, by, decision));
+): Promise<DecisionView> =>
+  toView(env, await allowedDecision(env, by, decision));
 
 /**
  * Wakes the run waiting on the decision. A run that misses it still finds
@@ -685,7 +687,7 @@ export const answerDecision = async (
   }
   await wake(env, answered);
   await tellScreens(env, changed(run));
-  return toView({
+  return toView(env, {
     ...found,
     decision: answered,
     decidedByName: by.name,

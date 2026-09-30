@@ -53,6 +53,7 @@ import { failureNoticed } from "../notifications.ts";
 import { hasWorkflow } from "./code.ts";
 import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
+import { detailsRemoved, removedText } from "./retention.ts";
 import { tellScreens } from "./run-changes.ts";
 import type { TriggerType } from "./trigger-registry.ts";
 
@@ -127,10 +128,14 @@ type RunFields = Pick<
   | "status"
   | "createdAt"
   | "endedAt"
+  | "detailsRemovedAt"
 >;
 
-/** A run as its row has it; `status` names what the row last saw. */
-const toRun = (row: RunFields): WorkflowRun => ({
+/**
+ * A run as its row has it; `status` names what the row last saw. It says
+ * so once its details are removed (`detailsRemoved`, retention.ts).
+ */
+const toRun = (env: Env, row: RunFields): WorkflowRun => ({
   id: runIdSchema.parse(row.id),
   app: appIdSchema.parse(row.appId),
   workflow: workflowIdSchema.parse(row.workflowId),
@@ -142,6 +147,7 @@ const toRun = (row: RunFields): WorkflowRun => ({
   status: shownStatus(row.status),
   createdAt: row.createdAt.toISOString(),
   endedAt: iso(row.endedAt),
+  ...(detailsRemoved(env, row) ? { detailsRemoved: true } : {}),
 });
 
 /** What runs need of their App: its current version and its owner. */
@@ -538,6 +544,7 @@ export const startRun = async (
     endedAt: null,
     failure: null,
     triggerKey: trigger?.key ?? null,
+    detailsRemovedAt: null,
   } satisfies RunFields & typeof workflowRuns.$inferInsert;
   // Nothing is written, audit event included, for a key a run has.
   const [inserted] = await auditedBatch(env, db, [
@@ -567,7 +574,7 @@ export const startRun = async (
       throw new Error(`No run has the trigger key of run ${row.id}`);
     }
     await restartOrphan(env, started, input);
-    return toRun(started);
+    return toRun(env, started);
   }
   try {
     await runEngine(env).create({
@@ -603,7 +610,7 @@ export const startRun = async (
   }
   // Only now: a screen told of the run reads it from the engine too.
   await tellScreens(env, row);
-  return toRun(row);
+  return toRun(env, row);
 };
 
 /**
@@ -651,20 +658,40 @@ const foundRun = async (env: Env, run: unknown): Promise<RunRow> => {
   return row;
 };
 
-/** A run, with its failure report when `by` sees its details. */
+/**
+ * A run, with its failure report when `by` sees its details. Once its
+ * details are removed (retention.ts) the report's message says so, and
+ * how long the deployment keeps them now, and its step is named without
+ * its key: as the sweep leaves the row, whether it has reached it or not.
+ */
 export const runFor = (
+  env: Env,
   by: Member,
   row: RunRow,
   ownerId: string
-): WorkflowRun =>
-  row.failure !== null && seesDetails(by, row, ownerId)
-    ? { ...toRun(row), failure: row.failure }
-    : toRun(row);
+): WorkflowRun => {
+  const run = toRun(env, row);
+  if (row.failure === null || !seesDetails(by, row, ownerId)) {
+    return run;
+  }
+  if (!run.detailsRemoved) {
+    return { ...run, failure: row.failure };
+  }
+  const { step, error } = row.failure;
+  return {
+    ...run,
+    failure: {
+      ...row.failure,
+      step: step === null ? null : (step.split(":", 1)[0] ?? step),
+      error: { ...error, message: removedText(env) },
+    },
+  };
+};
 
 /**
  * Where the engine has a run; nothing for one still starting, or that
- * has ended without an instance to ask (its start failed), whose row
- * says all there is.
+ * has ended without an instance to ask (its start failed, or the engine
+ * removed its record, its retention over), whose row says all there is.
  */
 const liveOf = async (
   env: Env,
@@ -697,8 +724,10 @@ export const runStatus = async (
     (row.status === "starting" || row.status === "running") && live
       ? liveStatuses[live.status]
       : shownStatus(row.status);
-  const found = { ...runFor(by, row, ownerId), status };
-  if (!(live && seesDetails(by, row, ownerId))) {
+  const found = { ...runFor(env, by, row, ownerId), status };
+  // Once its details are removed, nothing the engine may still have of it
+  // is shown: the list, the overview and screens show none either.
+  if (found.detailsRemoved || !(live && seesDetails(by, row, ownerId))) {
     return found;
   }
   const output = z.json().safeParse(live.output);
@@ -727,7 +756,7 @@ export const listRuns = async (
     .where(eq(workflowRuns.appId, appId))
     .orderBy(desc(workflowRuns.createdAt), desc(workflowRuns.id))
     .limit(runsPerPage);
-  return rows.map((row) => runFor(by, row, ownerId));
+  return rows.map((row) => runFor(env, by, row, ownerId));
 };
 
 /** Drops the state writes an ended run applied (app.ts). */
@@ -754,10 +783,10 @@ export const cancelRun = async (
   if (row.status === "cancelled") {
     await runEngine(env).terminate(row.id);
     await forgetWrites(env, row);
-    return toRun(row);
+    return toRun(env, row);
   }
   if (!unended.includes(row.status)) {
-    return toRun(row);
+    return toRun(env, row);
   }
   const db = drizzle(env.DB);
   const [[cancelled]] = await auditedBatch(env, db, [
@@ -780,7 +809,7 @@ export const cancelRun = async (
     await runEngine(env).terminate(row.id);
     await forgetWrites(env, now);
   }
-  return toRun(now);
+  return toRun(env, now);
 };
 
 /** What a run that stopped reports: where it stopped, and why. */

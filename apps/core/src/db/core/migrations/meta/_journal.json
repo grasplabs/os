@@ -232,6 +232,13 @@
       "when": 1790753386721,
       "tag": "0032_guest_chats",
       "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "6",
+      "when": 1790755038751,
+      "tag": "0033_run_details_removed",
+      "breakpoints": true
     }
   ]
 }

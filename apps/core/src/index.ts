@@ -16,6 +16,7 @@ import { sweepStatistics } from "./statistics.ts";
 import { pumpConnectorEvents } from "./workflows/connector-events.ts";
 import { receiveEmail } from "./workflows/inbound-email.ts";
 import { deleteExpiredEmail } from "./workflows/kept-email.ts";
+import { sweepRunDetails } from "./workflows/retention.ts";
 import { failOrphans } from "./workflows/runs.ts";
 import { startDueSchedules } from "./workflows/triggers.ts";
 
@@ -78,8 +79,10 @@ export default {
   // collection isn't of their current version (see
   // src/knowledge/apps-collection.ts), statistics past their retention
   // (see src/statistics.ts), and messages email triggers kept, deleted
-  // once their days are over (see src/workflows/kept-email.ts), and guest
-  // chats 30 days after they ended (see src/guests.ts). And the
+  // once their days are over (see src/workflows/kept-email.ts), guest
+  // chats 30 days after they ended (see src/guests.ts), and the details
+  // of workflow runs that ended longer ago than their retention (see
+  // src/workflows/retention.ts). And the
   // audit log's retention alarm armed, if it isn't yet: retention itself
   // runs on that alarm (see
   // src/audit-log.ts), and a deployment that appends nothing after a
@@ -93,6 +96,7 @@ export default {
             sweepStatistics(env),
             deleteExpiredEmail(env, new Date(controller.scheduledTime)),
             sweepGuestChats(env, new Date(controller.scheduledTime)),
+            sweepRunDetails(env, new Date(controller.scheduledTime)),
             auditLog(env).armRetention(),
           ]
         : [

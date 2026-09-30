@@ -99,6 +99,12 @@ import { authorize } from "./permissions.ts";
 //
 // Chats are deleted 30 days after they end or expire (`sweepGuestChats`):
 // ending one moves its expiry to when it ended, so one index finds both.
+// What an App made of a chat is the App's, and outlives it only as long
+// as that does: a workflow run that read the transcript keeps it as its
+// input and in its steps until the run's own retention is over (30 days
+// after the run ends, or fewer if the deployment says so,
+// workflows/retention.ts), and a record an App saved from it (a Playbook
+// source, say) is kept like any record, until it is deleted or purged.
 
 /** How long a turn holds its chat: past the model call's own limit. */
 const turnHoldMs = 90_000;

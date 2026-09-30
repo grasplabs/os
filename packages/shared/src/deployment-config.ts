@@ -277,6 +277,21 @@ export const auditRetentionSchema = z.int().min(30).max(3650);
  */
 export const auditArchiveRetentionSchema = z.int().min(365).max(3650);
 
+// RUN_RETENTION_DAYS (core's src/workflows/retention.ts)
+
+/** Days an ended workflow run keeps its details, unless set. */
+export const runRetentionDefaultDays = 30;
+
+/**
+ * `RUN_RETENTION_DAYS`: how long a workflow run keeps its details (its
+ * input, what its steps returned, its output, why it failed) once it has
+ * ended, in days: at least one, at most 30. Most of those details are the
+ * engine's record of the run, and core has Cloudflare Workflows keep it
+ * for this long (each instance's `retention`), which can be no longer
+ * than the 30 days it keeps an ended instance on the Workers Paid plan.
+ */
+export const runRetentionSchema = z.int().min(1).max(30);
+
 /**
  * The names of the deployment config vars above, the only settings the
  * console sets on core as vars. `PLATFORM_CHANGE` is the console's own, set
@@ -289,4 +304,5 @@ export const deploymentConfigVars = [
   "MEMORY_LIMITS",
   "AUDIT_RETENTION_DAYS",
   "AUDIT_ARCHIVE_RETENTION_DAYS",
+  "RUN_RETENTION_DAYS",
 ] as const;

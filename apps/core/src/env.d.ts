@@ -25,6 +25,8 @@ interface __BaseEnv_Env {
   AUDIT_RETENTION_DAYS?: unknown;
   /** Days archived audit events are kept before they're purged (src/audit-log.ts). */
   AUDIT_ARCHIVE_RETENTION_DAYS?: unknown;
+  /** Days an ended workflow run keeps its details (src/workflows/retention.ts). */
+  RUN_RETENTION_DAYS?: unknown;
   /** `none` where Durable Objects have no jurisdiction (src/durable-objects.ts). */
   DURABLE_OBJECT_JURISDICTION?: string;
   /**

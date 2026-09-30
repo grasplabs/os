@@ -6,6 +6,7 @@ import {
   connectErrors,
   connectionPersonSchema,
   declineChatActionsSchema,
+  endedRunsSchema,
   heldRequestSchema,
   pendingKeySchema,
   refuseConfirmationSchema,
@@ -598,6 +599,39 @@ export const dropForEndedRun = async (
     "run.ended",
     person
   );
+};
+
+/**
+ * Drops every held action of the workflow runs core names, whose
+ * retention is over (core's src/workflows/retention.ts): a run that ended
+ * while a side effect of it was held leaves the action, with its exact
+ * input, until its person comes to confirm it (`dropForEndedRun`), which
+ * they may never do. A held action's idempotency key starts with its
+ * run's ID (`stepIdempotencyKey`), and its subject is the run's App: one
+ * read per App, by the index of its held actions. Each is recorded as
+ * `connection.action.dropped` with reason `run.ended`, by core itself.
+ */
+export const dropForEndedRuns = async (
+  env: Env,
+  request: unknown
+): Promise<void> => {
+  const parsed = endedRunsSchema.safeParse(request);
+  if (!parsed.success) {
+    throw connectErrors.create("connect.invalid");
+  }
+  const byApp = new Map<string, string[]>();
+  for (const { appId, runId } of parsed.data.runs) {
+    byApp.set(appId, [...(byApp.get(appId) ?? []), encodeURIComponent(runId)]);
+  }
+  for (const [appId, runs] of byApp) {
+    // oxlint-disable-next-line no-await-in-loop -- one App at a time, each recorded
+    await dropPendingActions(
+      env,
+      sql`${pendingActions.subjectType} = 'app' AND ${pendingActions.subjectId} = ${appId} AND ${pendingActions.mode} = 'workflow' AND substr(${pendingActions.idempotencyKey}, 1, instr(${pendingActions.idempotencyKey}, ':') - 1) IN ${runs}`,
+      "run.ended",
+      null
+    );
+  }
 };
 
 /**
