@@ -736,46 +736,34 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     ]);
   });
 
-  it("counts no check whose builds are still going as failed, up to ten a turn", async () => {
-    const checks = `export default async (env) => {
+  it("fails a check whose build couldn't run, saying so, and passes it once the build can", async () => {
+    const check = `export default async (env) => {
       ${findApp}
-      const checks = [];
-      for (let count = 0; count < 12; count += 1) {
-        try {
-          const check = await env.build.check(app.id);
-          checks.push({ passed: check.passed, pending: check.pending, failedInARow: check.failedInARow });
-        } catch (error) {
-          checks.push(error.message);
-        }
-      }
-      return checks;
+      const check = await env.build.check(app.id);
+      return { passed: check.passed, screens: check.screens, failedInARow: check.failedInARow };
     };`;
     const { chat, grant } = await setUp([
       codeStep(`export default async (env) => {
         const app = await env.build.create({ name: ${JSON.stringify(appName)} });
         await env.build.write(app.id, ${JSON.stringify({ "screens/desk.tsx": fixed })});
       };`),
-      codeStep(checks),
-      says("Still building."),
-      codeStep(`export default async (env) => {
-        ${findApp}
-        const check = await env.build.check(app.id);
-        return { passed: check.passed, pending: check.pending, failedInARow: check.failedInARow };
-      };`),
+      codeStep(check),
+      says("It couldn't be built now."),
+      codeStep(check),
       says("Built."),
     ]);
     await grant();
-    // The build cache answers only once the test lets it: every build waits
-    // on it past a check's wait.
-    const held = Promise.withResolvers<boolean>();
-    const { FILES: files, CHECK_BUILD_WAIT_MS: wait } = env;
-    const holding = new Proxy(files, {
+    // The build cache is down: no build can be read from it, or run.
+    const { FILES: files } = env;
+    const down = new Proxy(files, {
       get: (target, property) => {
         const value: unknown = Reflect.get(target, property);
         if (property === "get" && typeof value === "function") {
-          return async (...args: unknown[]): Promise<unknown> => {
-            await held.promise;
-            return Reflect.apply(value, target, args);
+          return async (key: string, ...rest: unknown[]): Promise<unknown> => {
+            if (key.includes("-builds/")) {
+              throw new Error("The build cache is down");
+            }
+            return await Reflect.apply(value, target, [key, ...rest]);
           };
         }
         return typeof value === "function"
@@ -784,29 +772,30 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
       },
     });
     try {
-      env.FILES = holding;
-      env.CHECK_BUILD_WAIT_MS = "50";
+      env.FILES = down;
       await chat.ask("Build an invoice desk");
     } finally {
       env.FILES = files;
-      env.CHECK_BUILD_WAIT_MS = wait;
-      held.resolve(true);
     }
     await chat.ask("Check it again");
 
     const results = await codeResults(chat.stub, chat.chat.id);
-    const pending = { passed: false, pending: true, failedInARow: 0 };
-    // More than the repair loop allows to fail, none counted as failed;
-    // past ten a turn, refused: each asks the compiler for work.
-    const unfinished = appErrors.create("app.builds_unfinished").message;
-    expect(returned(results[1]?.text)).toStrictEqual([
-      ...Array.from({ length: 10 }, () => pending),
-      unfinished,
-      unfinished,
-    ]);
+    // Not passed, so never proposed, and counted by the repair loop as any
+    // check that didn't pass: a build that can't run can't be checked
+    // without end.
+    expect(returned(results[1]?.text)).toStrictEqual({
+      passed: false,
+      screens: {
+        status: "error",
+        diagnostics: [],
+        error:
+          "The build couldn't run now. It runs again when this is first used.",
+      },
+      failedInARow: 1,
+    });
     expect(returned(results[2]?.text)).toStrictEqual({
       passed: true,
-      pending: false,
+      screens: { status: "ok", diagnostics: [] },
       failedInARow: 0,
     });
   });

@@ -174,7 +174,6 @@ const platformBindingNames: ReadonlySet<string> = new Set([
   "BUILTINS",
   "CAPABILITY_SIGNING_KEY",
   "CAPABILITY_SIGNING_KEY_PREVIOUS",
-  "CHECK_BUILD_WAIT_MS",
   "CF_VERSION_METADATA",
   "COMPOSIO_API_KEY",
   "CONNECT",

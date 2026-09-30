@@ -51,7 +51,7 @@ import {
   workflowTestFailures,
 } from "./workflows/code.ts";
 import type { DryRuns } from "./workflows/code.ts";
-import type { CheckOutcome, Draft } from "./workspace.ts";
+import type { Draft } from "./workspace.ts";
 
 // Building Apps from a chat: `await env.build.write(app, { ... })`. The
 // chat's agent creates Apps (new, or from a blueprint the person may
@@ -106,25 +106,11 @@ import type { CheckOutcome, Draft } from "./workspace.ts";
  */
 export const maxFailedChecks = 5;
 
-/**
- * Most checks of one draft in one turn whose builds didn't finish in time
- * or couldn't run (`pending`): they don't count as failed, but each still
- * asks the compiler for work, so a build that never finishes can't be
- * checked without end.
- */
-export const maxUnsettledChecks = 10;
-
 /** Most dry runs of one draft in one turn, apart from its checks. */
 export const maxDryRunsPerTurn = 10;
 
 /** Most Apps the chat's agent may create in one turn. */
 export const maxCreatesPerTurn = 3;
-
-/**
- * How long a check waits for its builds. A code run has 30 seconds
- * (code-mode.ts), and the tests run after the builds.
- */
-const checkWaitMs = 15_000;
 
 /** Most diagnostics or test failures a check answers with, of each kind. */
 const maxReported = 50;
@@ -177,14 +163,11 @@ export interface DraftFiles {
 
 /** How a check of a draft went. */
 export interface DraftCheck {
-  /** It all builds and every workflow test passes: what proposing needs. */
-  passed: boolean;
   /**
-   * A build didn't finish in time, or couldn't run now, and nothing
-   * failed: not counted as a failed check. The build goes on, and the
-   * next check reads it from the cache.
+   * It all builds and every workflow test passes: what proposing needs. A
+   * build that couldn't run (`error`) doesn't pass either.
    */
-  pending: boolean;
+  passed: boolean;
   screens: SavedBuild;
   server: SavedBuild;
   workflows: SavedBuild;
@@ -221,24 +204,6 @@ const draftOf = async (
 /** Whether a build lets a draft through: it built, or had nothing to. */
 const buildPassed = ({ status }: SavedBuild): boolean =>
   status === "ok" || status === "none";
-
-/**
- * Whether a build says nothing of the draft yet: still going past the
- * check's wait, or it couldn't run now. Nothing the agent could fix.
- */
-const buildUnknown = ({ status }: SavedBuild): boolean =>
-  status === "pending" || status === "error";
-
-/**
- * How long a check waits for its builds: {@link checkWaitMs}, or less
- * where tests set `CHECK_BUILD_WAIT_MS`.
- */
-const buildWaitMs = (env: Env): number => {
-  const set = Number(env.CHECK_BUILD_WAIT_MS);
-  return Number.isInteger(set) && set > 0 && set < checkWaitMs
-    ? set
-    : checkWaitMs;
-};
 
 /** A build as a check answers it: its first diagnostics only. */
 const reported = (build: SavedBuild): SavedBuild => ({
@@ -307,17 +272,6 @@ const testsOf = async (
   };
 };
 
-/** How a check counts: passed, failed, or neither while a build is pending. */
-const outcomeOf = ({
-  passed,
-  pending,
-}: Pick<DraftCheck, "passed" | "pending">): CheckOutcome => {
-  if (passed) {
-    return "passed";
-  }
-  return pending ? "pending" : "failed";
-};
-
 /**
  * Logs what failed after a draft was proposed (committed, and up for
  * review): the proposal stands, so the failure is no reason to fail it.
@@ -361,7 +315,7 @@ const previewOf = async (
     chatId,
     app,
     revision,
-    built ? Math.min(previewWaitMs, buildWaitMs(env)) : 0
+    built ? previewWaitMs : 0
   );
   return {
     ...outcome,
@@ -386,27 +340,18 @@ const checkFiles = async (
   { base, revision }: Pick<Draft, "base" | "revision">,
   files: Record<string, string>
 ): Promise<Omit<DraftCheck, "failedInARow" | "maxFailedChecks">> => {
-  const saved = await buildOnSave(
-    env,
-    { app, version: base ?? 0, files },
-    buildWaitMs(env)
-  );
+  const saved = await buildOnSave(env, { app, version: base ?? 0, files });
   const builds = {
     ...saved,
     workflows: withBindingsRead(saved.workflows, files),
   };
   const tests = await testsOf(env, base, files, builds.workflows);
-  const all = [builds.screens, builds.server, builds.workflows];
-  const failed =
-    all.some((build) => !buildPassed(build) && !buildUnknown(build)) ||
-    tests.status === "failed";
-  const built = !failed && all.every(buildPassed);
+  const built =
+    [builds.screens, builds.server, builds.workflows].every(buildPassed) &&
+    tests.status !== "failed";
   const preview = await previewOf(env, scope, app, revision, built);
-  // A preview that failed fails the check, even with a build still going.
-  const previewFailed = preview?.status === "failed";
   return {
-    passed: built && !previewFailed,
-    pending: !failed && !previewFailed && all.some(buildUnknown),
+    passed: built && preview?.status !== "failed",
     screens: reported(builds.screens),
     server: reported(builds.server),
     workflows: reported(builds.workflows),
@@ -565,21 +510,15 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
    * anything runs, so checks started at once can't pass the limit), and
    * settles it however it ends: passed only when `run` says so.
    */
-  async #counted<T extends Pick<DraftCheck, "passed" | "pending">>(
+  async #counted<T extends Pick<DraftCheck, "passed">>(
     app: AppId,
     run: () => Promise<T>
   ): Promise<{ result: T; failedInARow: number }> {
     const { workspaceId, chatId } = this.ctx.props;
     const chats = workspace(this.env, workspaceId);
-    const taken = await chats.takeCheck(chatId, app, {
-      failed: maxFailedChecks,
-      unsettled: maxUnsettledChecks,
-    });
-    if (taken === "failed") {
+    const taken = await chats.takeCheck(chatId, app, maxFailedChecks);
+    if (!taken) {
       throw appErrors.create("app.checks_exhausted");
-    }
-    if (taken === "unsettled") {
-      throw appErrors.create("app.builds_unfinished");
     }
     let result: T;
     try {
@@ -587,14 +526,10 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
     } catch (error) {
       // Settled as failed; a failure to settle is logged, never in the way
       // of why the check failed.
-      await chats.settleCheck(chatId, app, "failed").catch(logCountFailure);
+      await chats.settleCheck(chatId, app, false).catch(logCountFailure);
       throw error;
     }
-    const failedInARow = await chats.settleCheck(
-      chatId,
-      app,
-      outcomeOf(result)
-    );
+    const failedInARow = await chats.settleCheck(chatId, app, result.passed);
     return { result, failedInARow };
   }
 
@@ -885,7 +820,7 @@ export class BuildApi extends WorkerEntrypoint<Env, AgentScope> {
 /** The types `env.build` returns, as the model reads them. */
 const buildTypes = `/** One build's result: \`none\` when there's nothing of its kind. */
 interface Build {
-  status: "ok" | "failed" | "none" | "pending" | "error";
+  status: "ok" | "failed" | "none" | "error";
   diagnostics: {
     file: string | null;
     line: number | null;
@@ -897,7 +832,7 @@ interface Build {
     /** A change that would fix it, when the check suggests one. */
     fix?: string;
   }[];
-  /** Why it couldn't run, with \`error\`. */
+  /** Why it couldn't run or finish, with \`error\`: check again, and tell the person if it still can't. */
   error?: string;
 }`;
 
@@ -987,12 +922,6 @@ build: {
    */
   check(app: string): Promise<{
     passed: boolean;
-    /**
-     * A build is still going (or couldn't run now) and nothing failed: not
-     * a failed check. Check again: the next one reads the build's result.
-     * After ${maxUnsettledChecks} such checks in a question, checking refuses.
-     */
-    pending: boolean;
     screens: Build;
     server: Build;
     workflows: Build;
@@ -1022,8 +951,7 @@ ${previewField}    failedInARow: number;
    */
   propose(app: string, message: string): Promise<{
     version: number | null;
-    /** \`pending\`: a build is still going; propose again shortly. */
-    check: { passed: boolean; pending: boolean; screens: Build; server: Build; workflows: Build; tests: { status: string; failures: string[] }${previewProposed} };
+    check: { passed: boolean; screens: Build; server: Build; workflows: Build; tests: { status: string; failures: string[] }${previewProposed} };
     /** What the version changes, as its reviewer reads it; null when not proposed. */
     review: {
       current: number | null;

@@ -314,14 +314,12 @@ export interface BuildDiagnostic {
  * - `ok`: built.
  * - `failed`: it doesn't build; `diagnostics` says why.
  * - `none`: the version has no files of this kind.
- * - `pending`: not built by the time the save answered: still building
- *   after the save's wait (it lands in the background), or building on
- *   save is switched off. It builds at its first use otherwise.
- * - `error`: the build couldn't run (the compiler unreachable, or out of
- *   CPU); `error` says so. It runs again at its first use.
+ * - `error`: the build couldn't run (the compiler unreachable or out of
+ *   CPU) or didn't finish in time; `error` says so. It runs again at its
+ *   first use.
  */
 export interface SavedBuild {
-  status: "ok" | "failed" | "none" | "pending" | "error";
+  status: "ok" | "failed" | "none" | "error";
   diagnostics: BuildDiagnostic[];
   /** Why a build couldn't run, with `error`. */
   error?: string;
@@ -345,11 +343,9 @@ export interface AppFilesApi {
   read: (app: string, version?: number) => Promise<AppFiles>;
   /**
    * Commits `changes` over the App's latest version as its next version,
-   * and starts its screen, server and workflow builds at once, so the
-   * version opens without building. Answers with how they went (`builds`)
-   * once they are done, or after a few seconds with those still building
-   * as `pending` (all three `pending` while `build_on_save` is off).
-   * A build never fails or holds up the commit. Exports that aren't
+   * and builds its screens, server code and workflows, so the version
+   * opens without building. Answers once they are done with how they went
+   * (`builds`). A build never fails the commit. Exports that aren't
    * valid (`appExportsPath`) do: the commit is refused with
    * `app.exports_invalid`, naming the issues; and so do record types
    * that aren't (`appRecordTypesPath`), with `app.records_invalid`.
@@ -579,8 +575,6 @@ export const appErrors = defineErrorFamily({
     "Pass the caller of the App method this runs in, while that call runs.",
   "app.checks_exhausted":
     "This draft failed its checks too many times in a row this turn. Stop, and tell the person what still fails.",
-  "app.builds_unfinished":
-    "This draft's builds didn't finish in time too many times this turn. Tell the person it couldn't be checked now.",
   "app.dry_runs_exhausted":
     "This draft has had as many dry runs as one question may. Tell the person what you found.",
   "app.creates_exhausted":

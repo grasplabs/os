@@ -149,7 +149,6 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
               triggers: true,
               connector_events: true,
               email_attachments: true,
-              build_on_save: true,
               app_calls: true,
               agent: true,
               chat: true,

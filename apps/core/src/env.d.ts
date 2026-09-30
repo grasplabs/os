@@ -51,8 +51,6 @@ interface __BaseEnv_Env {
   CONNECTOR_EVENTS_PER_RUN?: string;
   /** Tests only: a shorter limit for one call into an App (src/app.ts). */
   APP_CALL_TIMEOUT_MS?: string;
-  /** Tests only: a shorter wait for a check's builds (src/agent-builds.ts). */
-  CHECK_BUILD_WAIT_MS?: string;
   /**
    * Tests only: lower bounds on an App's statistics points, `perCall/
    * perMinute` (src/app.ts, `claimStatistic`).

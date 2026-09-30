@@ -197,13 +197,6 @@ export type Feature =
    */
   | "email_attachments"
   /**
-   * Building an App's code as it is committed (save-builds.ts), and
-   * answering the commit with how the builds went. While off, a commit
-   * builds nothing and answers each build as `pending`: they build at
-   * their first use, as before.
-   */
-  | "build_on_save"
-  /**
    * Apps calling each other's exports (app-exports.ts): reading what an
    * App exports (people and the agent alike), asking for a permission on
    * another App's exports, and every call through one; needs `apps` on
