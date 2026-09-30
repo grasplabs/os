@@ -1,4 +1,5 @@
 import type { AiBinding } from "@earendil-works/pi-ai/api/cloudflare-ai-binding";
+import { normalizeContext } from "@earendil-works/pi-ai/utils/transcript";
 import { runActorOf } from "@grasp-os/shared/audit";
 import type { AuditEvent } from "@grasp-os/shared/audit";
 import { appIdSchema, runIdSchema } from "@grasp-os/shared/ids";
@@ -74,7 +75,8 @@ const withRules = (
     MODEL_GATEWAY: { gateway, models: allowed, ...config },
     MODEL_BUDGET_MONTH: month,
   };
-  return { fake, call: models(rulesEnv).call };
+  const { call, agent } = models(rulesEnv);
+  return { fake, call, agent };
 };
 
 /** A person no other test uses, so their audit events are this test's. */
@@ -621,6 +623,101 @@ describe("model rules", { timeout: 60_000 }, () => {
     }
 
     expect(outcomes).toStrictEqual(["ok", "ok", "ok", "model.over_budget"]);
+  });
+
+  it("count an answer cancelled midway by an estimate of what it used, said in its audit event, so cancelling isn't free", async () => {
+    // The answer stops after its first 12 characters, until released: the
+    // provider's count, which comes with the answer's end, never arrives.
+    const rest = Promise.withResolvers<boolean>();
+    const { agent, call } = withRules(
+      { budgets: { user: { limit: 0.01 } } },
+      env.FEATURES,
+      {
+        text: "Hello there, how are you today?",
+        inputTokens: 1000,
+        outputTokens: 100,
+        pause: { at: 12, until: rest.promise },
+      }
+    );
+    // Some 50,000 tokens at four characters each: $0.0146 from Llama 3.3
+    // at its list price of $0.293 per million tokens in, past a cent.
+    const prompt = "word ".repeat(40_000);
+    /** A request of `trigger`'s to `model`, cancelled once text came. */
+    const cancelled = async (
+      model: string,
+      trigger: ReturnType<typeof newPerson>
+    ) => {
+      const session = await agent({
+        model,
+        purpose: "chat.turn",
+        trigger,
+        work: requireWork(),
+      });
+      const cancel = new AbortController();
+      const stream = session.stream(
+        session.model,
+        normalizeContext({
+          messages: [{ role: "user", content: prompt, timestamp: Date.now() }],
+        }),
+        { signal: cancel.signal }
+      );
+      for await (const event of stream) {
+        if (event.type === "text_delta") {
+          cancel.abort();
+        }
+      }
+      const { stopReason } = await stream.result();
+      return stopReason;
+    };
+    const ada = newPerson();
+    const ben = newPerson();
+    try {
+      // Chat completions count nothing until their last chunk; Anthropic
+      // counts the prompt at the start, and the answer at its end.
+      const stopped = [
+        await cancelled(workersAi, ada),
+        await cancelled(anthropic, ben),
+      ];
+      const after = await outcome(call(hello(workersAi, { trigger: ada })));
+      const [[adas], [bens]] = [await eventsOf(ada), await eventsOf(ben)];
+      const tokens = adas?.model?.inputTokens ?? 0;
+      expect({
+        stopped,
+        after,
+        ada: [adas?.action, adas?.detail, adas?.model?.outputTokens],
+        // The prompt, and the little the request holds besides.
+        prompt: tokens >= prompt.length / 4 && tokens < prompt.length / 4 + 200,
+        ben: [bens?.action, bens?.detail, bens?.model],
+      }).toMatchObject({
+        stopped: ["aborted", "aborted"],
+        // The estimate used up Ada's cent.
+        after: "model.over_budget",
+        ada: [
+          "model.call",
+          { outcome: "cancelled", errorType: "cancelled", estimated: true },
+          // "Hello there," at four characters a token.
+          3,
+        ],
+        prompt: true,
+        ben: [
+          "model.call",
+          { outcome: "cancelled", errorType: "cancelled", estimated: true },
+          // The prompt as Anthropic counted it, the answer estimated.
+          { inputTokens: 1000, outputTokens: 3 },
+        ],
+      });
+      // At the models' list prices, per million tokens in and out.
+      expect(adas?.cost?.amount).toBeCloseTo(
+        (tokens * 0.293 + 3 * 2.253) / 1_000_000,
+        6
+      );
+      expect(bens?.cost?.amount).toBeCloseTo(
+        (1000 * 3 + 3 * 15) / 1_000_000,
+        6
+      );
+    } finally {
+      rest.resolve(true);
+    }
   });
 
   it("alert admins once for every limit lowered below what was spent, and count each month on its own", async () => {

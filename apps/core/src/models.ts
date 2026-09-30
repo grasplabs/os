@@ -378,6 +378,10 @@ const gatewayHeaders = (call: Session): ProviderHeaders => ({
   "x-api-key": null,
   // The gateway logs metadata, never prompts or answers.
   "cf-aig-collect-log-payload": "false",
+  // Never an answer from the gateway's cache, whatever the gateway is set
+  // to (one the console adopted keeps its settings): a cached answer is
+  // one person's, and would be served to another.
+  "cf-aig-skip-cache": "true",
   // So the gateway's log can be searched by why and for what kind of
   // caller; identifiers only, like the audit event.
   "cf-aig-metadata": JSON.stringify({
@@ -461,6 +465,30 @@ const costOf = ({ cost }: Usage): number =>
 const hasFailed = ({ stopReason }: AssistantMessage): boolean =>
   stopReason === "error" || stopReason === "aborted";
 
+/**
+ * Characters taken for one token where the provider gave no count: the
+ * usual rule of thumb for text, not a tokenizer's count.
+ */
+const estimatedCharsPerToken = 4;
+
+const estimatedTokens = (chars: number): number =>
+  Math.ceil(chars / estimatedCharsPerToken);
+
+/** The answer as far as it came: its text, reasoning and tool calls. */
+const receivedChars = ({ content }: AssistantMessage): number => {
+  let chars = 0;
+  for (const block of content) {
+    if (block.type === "text") {
+      chars += block.text.length;
+    } else if (block.type === "thinking") {
+      chars += block.thinking.length;
+    } else {
+      chars += block.name.length + JSON.stringify(block.arguments).length;
+    }
+  }
+  return chars;
+};
+
 /** A call the gateway took: its model, and what the rules made of it. */
 interface Admitted {
   call: Session;
@@ -486,6 +514,8 @@ interface Request extends Route {
 interface GatewayResponse {
   status: number | undefined;
   logId: string | undefined;
+  /** Characters of the request's body as sent; 0 before it was. */
+  sentChars: number;
 }
 
 interface Sent extends GatewayResponse {
@@ -502,7 +532,17 @@ const open = (
   context: TranscriptContext,
   signal: AbortSignal
 ) => {
-  const response: GatewayResponse = { status: undefined, logId: undefined };
+  const response: GatewayResponse = {
+    status: undefined,
+    logId: undefined,
+    sentChars: 0,
+  };
+  // The request's size as sent, should what it used have to be estimated
+  // (`usedBy`).
+  const measured: FetchFunction = async (input, init) => {
+    response.sentChars = typeof init?.body === "string" ? init.body.length : 0;
+    return await transport(input, init);
+  };
   // SAFETY: the provider picks both the adapter and the catalog the model
   // comes from, so the model always speaks the adapter's API.
   // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
@@ -511,7 +551,7 @@ const open = (
     SimpleStreamOptions
   >;
   const events = adapter(model, context, {
-    fetch: transport,
+    fetch: measured,
     headers: gatewayHeaders(call),
     maxTokens: Math.min(call.maxTokens ?? defaultMaxTokens, model.maxTokens),
     maxRetries,
@@ -625,11 +665,57 @@ type Outcome =
   | "failed"
   | "cancelled";
 
-/** What the audit log records of one request. */
-interface Recorded {
+/** What one request used, and cost in US dollars. */
+interface Used {
   inputTokens: number;
   outputTokens: number;
   cost: number;
+  /** Whether any of it is an estimate, not the provider's count. */
+  estimated: boolean;
+}
+
+/**
+ * What a request used, as the provider counted it, and where it didn't,
+ * an estimate. A request the provider began to answer and that then
+ * failed, timed out or was cancelled comes without a full count: chat
+ * completions and OpenAI's responses count in their last event only, and
+ * Anthropic counts the answer at its end. Counted as nothing, someone at
+ * their budget could start answers and cancel them for free. So the
+ * prompt, if it wasn't counted, is taken from the request's size as sent,
+ * and the answer from what came of it, if that is more than was counted,
+ * at {@link estimatedCharsPerToken} characters a token and the model's
+ * list prices. A request that got no response is charged nothing: the
+ * provider may not have taken it.
+ */
+const usedBy = ({ ref }: Admitted, sent: Sent): Used => {
+  const { answer, status } = sent;
+  const counted = {
+    inputTokens: inputTokens(answer.usage),
+    outputTokens: answer.usage.output,
+    cost: costOf(answer.usage),
+  };
+  const responded = status !== undefined && status >= 200 && status < 300;
+  if (!(responded && hasFailed(answer))) {
+    return { ...counted, estimated: false };
+  }
+  const input = counted.inputTokens > 0 ? 0 : estimatedTokens(sent.sentChars);
+  const output = Math.max(
+    0,
+    estimatedTokens(receivedChars(answer)) - counted.outputTokens
+  );
+  const { cost: rates } = ref.catalog;
+  return {
+    inputTokens: counted.inputTokens + input,
+    outputTokens: counted.outputTokens + output,
+    // The catalog's prices are per million tokens.
+    cost:
+      counted.cost + (input * rates.input + output * rates.output) / 1_000_000,
+    estimated: input + output > 0,
+  };
+};
+
+/** What the audit log records of one request. */
+interface Recorded extends Used {
   logId: string | undefined;
   attempt: number;
   outcome: Outcome;
@@ -699,6 +785,8 @@ const auditEntry = (
       attempt: recorded.attempt,
       status: recorded.status ?? null,
       errorType: recorded.errorType ?? null,
+      // Whether its tokens and cost are partly an estimate (`usedBy`).
+      estimated: recorded.estimated,
       // Never an ID so long that the event would be refused.
       gatewayLogId:
         logId !== undefined && logId.length <= auditIdentifierMaxLength
@@ -723,6 +811,7 @@ const largestRecord: Recorded = {
   inputTokens: Number.MAX_SAFE_INTEGER,
   outputTokens: Number.MAX_SAFE_INTEGER,
   cost: Number.MAX_VALUE,
+  estimated: true,
   logId: "x".repeat(auditIdentifierMaxLength),
   attempt: 2,
   outcome: "invalid_output",
@@ -739,24 +828,26 @@ const largestJudged: Judged = {
 
 /**
  * Records one request in the audit log, however it ended, and adds its
- * cost to the call's budgets. Never throws: a caller that lost a paid
- * answer to a bookkeeping failure would ask (and pay) again.
+ * cost to the call's budgets: what it used as the provider counted it,
+ * or an estimate where a request that failed mid-answer has no count
+ * (`usedBy`). Never throws: a caller that lost a paid answer to a
+ * bookkeeping failure would ask (and pay) again.
  */
 const record = async (
   env: ModelsEnv,
   admitted: Admitted,
-  { answer, logId, status }: Sent,
+  sent: Sent,
   attempt: number,
   outcome: Outcome,
   failure?: Failure
 ): Promise<void> => {
+  const { logId, status } = sent;
+  const used = usedBy(admitted, sent);
   await keepAuditEvent(
     env,
     drizzle(env.DB),
     auditEntry(admitted, {
-      inputTokens: inputTokens(answer.usage),
-      outputTokens: answer.usage.output,
-      cost: costOf(answer.usage),
+      ...used,
       logId,
       attempt,
       outcome,
@@ -769,7 +860,7 @@ const record = async (
     env,
     admitted.call.trigger,
     admitted.judged.budgets,
-    costOf(answer.usage)
+    used.cost
   );
 };
 

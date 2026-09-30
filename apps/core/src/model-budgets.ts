@@ -27,7 +27,9 @@ import {
 // workflow and per person, in US dollars at the providers' list prices.
 // A call's cost is what its provider reported it used (tokens in and out)
 // at the prices in the model catalog (models.ts), the same cost its audit
-// event records.
+// event records; for a request that failed or was cancelled mid-answer,
+// which the provider didn't count in full, an estimate, which the event
+// says (`usedBy`, models.ts).
 //
 // Before each request a call sends (a retry too), in the month it is
 // sent in, it is refused once any of its budgets is used up: the call
