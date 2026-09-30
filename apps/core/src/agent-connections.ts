@@ -1,7 +1,13 @@
 import { connectErrors } from "@grasp-os/shared/connect";
-import type { ConnectResult, PendingReference } from "@grasp-os/shared/connect";
+import type {
+  ConnectResult,
+  HeldOutcome,
+  PendingReference,
+} from "@grasp-os/shared/connect";
 import { errorFields, log } from "@grasp-os/shared/log";
+import { permissionErrors } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
+import { z } from "zod";
 
 import {
   auditRefusal,
@@ -48,6 +54,41 @@ export interface AgentCallResult {
   /** Set when the call waits for the person to confirm it. */
   pending: PendingReference | null;
 }
+
+/** How a call that waited for the person ended, as a chat's code reads it. */
+export interface AgentCallOutcome {
+  /**
+   * `waiting` for the person still (or being carried out now), `declined`
+   * by them (or dropped), `done`, or `failed`.
+   */
+  status: HeldOutcome["state"];
+  /** What the action returned, once done; what it said, if it failed. */
+  output: unknown;
+  /** Why it failed. */
+  error: string | null;
+}
+
+/** `outcome` as a chat's code reads it; read outputs are JSON text. */
+const callOutcome = (outcome: HeldOutcome): AgentCallOutcome => {
+  if (outcome.state === "done") {
+    return {
+      status: "done",
+      output: JSON.parse(outcome.result.output),
+      error: null,
+    };
+  }
+  if (outcome.state === "failed") {
+    return {
+      status: "failed",
+      output: outcome.output === null ? null : JSON.parse(outcome.output),
+      error: outcome.reason,
+    };
+  }
+  return { status: outcome.state, output: null, error: null };
+};
+
+/** The ID a held call was answered with (`AgentCallResult.pending`). */
+const pendingIdSchema = z.uuid();
 
 /** The chat's connection grants, as its agent holds them now. */
 const connectionGrants = async (
@@ -143,8 +184,9 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
    * Calls `action` on the connection named `connection`. A side effect is
    * held for the person to confirm: nothing is done yet, and `pending`
    * says so. The call names no idempotency key: connect makes one for each
-   * side effect it holds, which the person takes exactly once, so the same
-   * call made again is held again, as a second action for them to decide.
+   * side effect it holds, which the person takes exactly once. While it
+   * waits, the same call made again finds the same held action; how it
+   * ended, `outcome` says.
    */
   async call(
     connection: unknown,
@@ -191,6 +233,68 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
     await recordSources(this.env, scope, [grant.connection.connectionId]);
     return { output: JSON.parse(result.output), pending: null };
   }
+
+  /**
+   * How the held call `pendingId` of this chat ended: the chat's code has
+   * no other way to a confirmed call's answer, as a call made again is a
+   * call of its own. Only for a call this chat's agent made for its
+   * person (connect finds no other), and only while the agent still holds
+   * a permission that allows that action on that connection. What it
+   * hands over it records with the chat first, as a direct call's answer
+   * (`call`), and the call is audited with the connection and the held
+   * action it read.
+   */
+  async outcome(pendingId: unknown): Promise<AgentCallOutcome> {
+    const scope = this.ctx.props;
+    await requireOpenRun(this.env, scope, "connections.outcome");
+    const id = pendingIdSchema.safeParse(pendingId);
+    try {
+      const ended = await auditedCall(
+        this.env,
+        scope,
+        {
+          method: "connections.outcome",
+          detail: { pendingActionId: id.success ? id.data : null },
+          detailOf: ({ state, connectionId, action }: HeldOutcome) => ({
+            status: state,
+            connection: connectionId,
+            action,
+          }),
+        },
+        async () => {
+          requireFeature(this.env, "connections");
+          if (!id.success) {
+            throw connectErrors.create("connect.invalid");
+          }
+          const outcome = await this.env.CONNECT.heldOutcome({
+            agentId: scope.agentId,
+            onBehalfOf: scope.personId,
+            workspaceId: scope.workspaceId,
+            chatId: scope.chatId,
+            id: id.data,
+          });
+          const grants = await connectionGrants(this.env, scope);
+          const allowed = grants.some(
+            ({ connection, actions }) =>
+              connection.connectionId === outcome.connectionId &&
+              actions.includes(outcome.action)
+          );
+          if (!allowed) {
+            throw permissionErrors.create("permission.denied", {
+              action: outcome.action,
+            });
+          }
+          if (outcome.state === "done" || outcome.state === "failed") {
+            await recordSources(this.env, scope, [outcome.connectionId]);
+          }
+          return outcome;
+        }
+      );
+      return callOutcome(ended);
+    } catch (error) {
+      throw forSandbox(error);
+    }
+  }
 }
 
 /** What the model reads of `env.connections`. */
@@ -200,7 +304,8 @@ const connectionsDeclaration = `/**
  * that changes something (sends, creates, deletes) is never done straight
  * away: it waits for the person to confirm it in Grasp, and \`pending\`
  * says so. Tell them it waits for them; don't call it again to push it:
- * every such call waits as a change of its own.
+ * while it waits, the same call only finds the same waiting change. Once
+ * they decided, read how it ended with \`outcome\`.
  */
 connections: {
   /** The connections this chat may use, and the actions each allows. */
@@ -215,6 +320,17 @@ connections: {
     output: unknown;
     /** Set while it waits for the person to confirm it. */
     pending: { id: string } | null;
+  }>;
+  /**
+   * How a call that waited for the person ended, by its \`pending.id\`:
+   * still \`waiting\`, \`declined\` by them, \`done\` (with what the action
+   * returned) or \`failed\` (with why, and what the action said). Only for
+   * calls of this chat.
+   */
+  outcome(pendingId: string): Promise<{
+    status: "waiting" | "declined" | "done" | "failed";
+    output: unknown;
+    error: string | null;
   }>;
 };`;
 

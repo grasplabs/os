@@ -54,8 +54,9 @@ export interface ConnectResult {
    * that read restricted data): nothing was done yet, so `output` is the
    * JSON text `"null"` and `provenance` is empty. A repeat with the same
    * idempotency key finds the same held action until it is decided, and
-   * the action's answer once it ran; a repeat of a call without a key is
-   * held again, as another action. A workflow run's call is never
+   * the action's answer once it ran; a repeat of a call without a key
+   * finds the same held action while it waits, and is held as a new one
+   * once that is decided. A workflow run's call is never
    * answered so: it fails with `connect.held`, and core waits for the
    * person's decision before running the step again.
    */
@@ -513,6 +514,34 @@ export const heldRequestSchema = z.strictObject({
 });
 export type HeldRequest = z.input<typeof heldRequestSchema>;
 
+/**
+ * How one held action of a chat ended, for the chat's agent: core names
+ * the agent, its person and the chat from the chat's own scope.
+ */
+export const heldOutcomeRequestSchema = z.strictObject({
+  agentId: identifierSchema,
+  onBehalfOf: identifierSchema,
+  /** The Workspace object that holds the chat, as its context names it. */
+  workspaceId: workspaceIdSchema,
+  chatId: chatIdSchema,
+  id: z.uuid(),
+});
+export type HeldOutcomeRequest = z.input<typeof heldOutcomeRequestSchema>;
+
+/**
+ * What became of a held action a chat's agent asked for under a key
+ * connect made: it still waits for its person (or is being carried out
+ * now); they declined it, or it was dropped; it ran and answered (`done`);
+ * or it didn't end well (`failed`: `reason` is the error's code, and
+ * `output` what the tool said, for a tool's own error).
+ */
+export type HeldOutcome = { connectionId: string; action: string } & (
+  | { state: "waiting" }
+  | { state: "declined" }
+  | { state: "done"; result: ConnectResult }
+  | { state: "failed"; reason: string; output: string | null }
+);
+
 /** Workflow runs that have ended, each with its App: at most 50. */
 export const endedRunsSchema = z.strictObject({
   runs: z
@@ -700,6 +729,13 @@ export interface ConnectApi {
   listPendingActions: (person: ConnectionPerson) => Promise<PendingAction[]>;
   /** One held action waiting for the person, or `null`. */
   pendingAction: (request: HeldRequest) => Promise<PendingAction | null>;
+  /**
+   * How a held action ended, for the chat whose agent asked for it, by the
+   * ID its call was answered with: `connect.pending_not_found` for any
+   * other chat, agent or person, as for an ID there never was, and for an
+   * action held under a key of its caller's.
+   */
+  heldOutcome: (request: HeldOutcomeRequest) => Promise<HeldOutcome>;
   /**
    * Drops a workflow run's held action whose run has ended, found when its
    * person came to confirm it.

@@ -131,6 +131,8 @@ export const idempotentCalls = sqliteTable(
       ],
     }),
     index("idempotent_calls_created_idx").on(table.createdAt),
+    // How a held action ended, found by the key connect made for it.
+    index("idempotent_calls_key_idx").on(table.idempotencyKey),
   ]
 );
 

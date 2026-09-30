@@ -85,11 +85,11 @@ export const hashCall = async (
 ): Promise<string> => await sha256Hex(canonicalJson({ resource, input }));
 
 /** What a stored row means for a repeat of the call: its answer, or why not. */
-const replay = (
+export const replay = (
   row: Row,
   inputHash: string,
   now: number
-): StoredAnswer | undefined => {
+): StoredAnswer => {
   if (row.inputHash !== inputHash) {
     throw connectErrors.create("connect.idempotency_conflict");
   }

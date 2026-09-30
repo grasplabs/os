@@ -22,6 +22,7 @@ import type {
   Disconnect,
   DisconnectPersonal,
   FinishConnection,
+  HeldOutcome,
   OutboxedConnectorEvent,
   PendingAction,
   StartConnection,
@@ -65,6 +66,7 @@ import {
   dropForEndedRuns,
   heldFor,
   declineChatActions,
+  heldOutcome,
   listPendingActions,
   pendingActionFor,
   refuseConfirmation,
@@ -286,6 +288,10 @@ export default class Connect
 
   async pendingAction(request: unknown): Promise<PendingAction | null> {
     return await pendingActionFor(this.env, request);
+  }
+
+  async heldOutcome(request: unknown): Promise<HeldOutcome> {
+    return await heldOutcome(this.env, request);
   }
 
   async dropForEndedRun(request: unknown): Promise<void> {

@@ -86,6 +86,11 @@ test("a person asks in a new chat, follows the answer, renames it, and decides a
   await page.reload();
   const waiting = page.getByRole("region", { name: "Waiting for you" });
   await expect(waiting).toContainText("ben@acme.test");
+  // When it was asked for, so an old one isn't taken for a new one.
+  await expect(waiting.locator("time")).toHaveAttribute(
+    "datetime",
+    /^\d{4}-\d{2}-\d{2}T/u
+  );
   // Confirming goes through core's checks again: the agent was never
   // granted this connection, so it's refused, and the write still waits.
   await waiting.getByRole("button", { name: /^Confirm/u }).click();

@@ -290,43 +290,146 @@ describe("a side effect from chat", () => {
     ]);
   });
 
-  it("without a key of its caller's is held under one connect makes, runs once when confirmed, and is held as another action when asked again", async () => {
+  it("without a key of its caller's is held under one connect makes, once however often it is asked while it waits, and runs once when confirmed", async () => {
     const anna = someone();
     const connectionId = await addConnection();
     const { idempotencyKey: _key, ...call } = mail(connectionId);
     const first = await hold(inChat(anna), call);
-    // The model asks again: a second action, under a key of its own.
-    const second = await hold(inChat(anna), call);
+    // The model asks again, and twice at once: the same action each time.
+    const repeats = await Promise.all([
+      hold(inChat(anna), call),
+      hold(inChat(anna), call),
+    ]);
+    // Another input, another chat, another person: each an action of its own.
+    const other = await hold(inChat(anna), {
+      ...call,
+      input: { to: "cleo@acme.test", subject: "Invoice" },
+    });
+    const elsewhere = await hold(inChat(anna), call, {
+      origin: {
+        ...chatOrigin,
+        context: {
+          type: "chat",
+          workspaceId: "workspace-1",
+          chatId: "chat-2",
+        },
+      },
+    });
+    const ben = someone();
+    await hold(inChat(ben), call);
     const waiting = await waitingFor(anna);
     const held = waiting.find(({ id }) => id === first.pending?.id);
     if (held === undefined) {
       throw new Error("Expected the first call's held action");
     }
     const confirmed = await confirm(anna, held);
-    const left = await waitingFor(anna);
+    // Decided: asked again, it is a new action.
+    const after = await hold(inChat(anna), call);
     expect({
-      held: new Set(waiting.map(({ id }) => id)),
-      keys: new Set(waiting.map(({ idempotencyKey }) => idempotencyKey)).size,
-      inputs: waiting.map(({ input }) => input),
+      repeats: repeats.map(({ pending }) => pending?.id),
+      waiting: new Set(waiting.map(({ id }) => id)),
+      bens: await waitingFor(ben),
       confirmed: confirmed.output,
       ran: server.ran,
-      left: left.map(({ id }) => id),
       again: await outcome(confirm(anna, held)),
+      after: after.pending?.id === first.pending?.id,
     }).toStrictEqual({
-      held: new Set([first.pending?.id, second.pending?.id]),
-      keys: 2,
-      inputs: [JSON.stringify(call.input), JSON.stringify(call.input)],
+      repeats: [first.pending?.id, first.pending?.id],
+      waiting: new Set([
+        first.pending?.id,
+        other.pending?.id,
+        elsewhere.pending?.id,
+      ]),
+      bens: [expect.objectContaining({ input: JSON.stringify(call.input) })],
       confirmed: '{"sent":"ben@acme.test"}',
       ran: [{ tool: "mail.send", input: call.input }],
-      left: [second.pending?.id],
       again: "connect.pending_not_found",
+      after: false,
     });
-    await expect(eventsFor(connectionId)).resolves.toStrictEqual([
-      { action: "connection.call", actor: "agent", outcome: "held" },
-      { action: "connection.call", actor: "agent", outcome: "held" },
-      { action: "connection.action.confirmed", actor: "person", outcome: null },
-      { action: "connection.call", actor: "agent", outcome: "ok" },
-    ]);
+    expect(new Set(waiting.map(({ id }) => id)).size).toBe(3);
+  });
+
+  it("tells the chat that asked how it ended, by its ID, and no other chat, agent or person", async () => {
+    const anna = someone();
+    const connectionId = await addConnection();
+    const { idempotencyKey: _key, ...call } = mail(connectionId);
+    const chat = {
+      agentId: "agent-chat",
+      onBehalfOf: anna.userId,
+      // The chat of `chatOrigin`.
+      workspaceId: "workspace-1",
+      chatId: "chat-1",
+    };
+    const send = await hold(inChat(anna), call);
+    const archive = await hold(inChat(anna), {
+      connectionId,
+      action: "mail.archive",
+      input: {},
+    });
+    // One under a key of its caller's: only a repeat of the call finds it.
+    const keyed = await hold(inChat(anna), mail(connectionId, "dan@acme.test"));
+    const id = send.pending?.id ?? "";
+    const ended = async (request: object) =>
+      await exports.default.heldOutcome({ ...chat, id, ...request });
+    const called = { connectionId, action: "mail.send" };
+    const whileWaiting = await ended({});
+    const others = await Promise.all(
+      [
+        { chatId: "chat-2" },
+        { onBehalfOf: someone().userId },
+        { agentId: "agent-other" },
+        { id: crypto.randomUUID() },
+        { id: keyed.pending?.id },
+      ].map(async (request) => await outcome(ended(request)))
+    );
+    const waiting = await waitingFor(anna);
+    const heldOf = (pendingId: string | undefined): PendingAction => {
+      const held = waiting.find((each) => each.id === pendingId);
+      if (held === undefined) {
+        throw new Error("Expected the held action");
+      }
+      return held;
+    };
+    await confirm(anna, heldOf(id));
+    await decline(anna, heldOf(archive.pending?.id));
+    expect({
+      whileWaiting,
+      others,
+      confirmed: await ended({}),
+      declined: await ended({ id: archive.pending?.id }),
+      // Decided, it is still only its own chat's.
+      elsewhere: await outcome(ended({ chatId: "chat-2" })),
+    }).toStrictEqual({
+      whileWaiting: { ...called, state: "waiting" },
+      others: others.map(() => "connect.pending_not_found"),
+      confirmed: {
+        ...called,
+        state: "done",
+        result: {
+          output: '{"sent":"ben@acme.test"}',
+          provenance: ["mail/mail.send"],
+        },
+      },
+      declined: { connectionId, action: "mail.archive", state: "declined" },
+      elsewhere: "connect.pending_not_found",
+    });
+    // Declined, it left its key spent and nothing of its input.
+    const { held, answers } = await leftFor(connectionId);
+    expect({
+      held: held.map(({ id: left }) => left),
+      declined: answers
+        .filter(({ state }) => state === "declined")
+        .map(({ action, output, provenance }) => ({
+          action,
+          output,
+          provenance,
+        })),
+    }).toStrictEqual({
+      held: [keyed.pending?.id],
+      declined: [
+        { action: "mail.archive", output: "declined", provenance: null },
+      ],
+    });
   });
 
   it("from a workflow run without a key is refused, not held under a key of connect's", async () => {

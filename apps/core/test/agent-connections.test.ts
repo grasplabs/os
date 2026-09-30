@@ -11,6 +11,7 @@ import {
   pointAtGateway,
   says,
 } from "./agent-chat.ts";
+import { fakeGateway } from "./ai-gateway.ts";
 import { requestGranted } from "./apps.ts";
 import { allEvents } from "./audit-events.ts";
 import { mockIdp } from "./idp.ts";
@@ -67,6 +68,25 @@ const eventsOf = async (
     { timeout: 10_000, interval: 50 }
   );
   return await mine();
+};
+
+/** What a held call returned to the chat's code, as the model read it. */
+const pendingOf = (id: string | undefined) =>
+  `Returned:\n${JSON.stringify({ output: null, pending: { id } })}`;
+
+/** The model reads how the held call `id` ended, or why it can't. */
+const outcomeOf = (id: string) =>
+  codeStep(
+    `export default async (env) => { try { return await env.connections.outcome(${JSON.stringify(id)}); } catch (error) { return error.message; } };`
+  );
+
+/** What the chat's code steps returned, as the model read them. */
+const texts = async (
+  stub: Awaited<ReturnType<typeof chatOf>>["stub"],
+  chatId: string
+) => {
+  const results = await codeResults(stub, chatId);
+  return results.map(({ text }) => text);
 };
 
 describe("a chat's connections", setUpTime, () => {
@@ -297,37 +317,141 @@ describe("a chat's connections", setUpTime, () => {
     ]);
   });
 
-  it("hold a write the model asks for again as a second one, for the person to decide each", async () => {
-    const send = codeStep(
-      `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)});`
-    );
+  it("find the same held write when the model asks for it again while it waits, whatever options it passes, and hold a new one once it is decided", async () => {
+    // A fourth argument, as the API once took a key there, is ignored: two
+    // keys don't make two actions.
+    const send = (key: string) =>
+      codeStep(
+        `export default async (env) => await env.connections.call("MAIL", "mail.send", ${JSON.stringify(invoiceMail)}, { idempotencyKey: "${key}" });`
+      );
     const { person, mail, chat, grant } = await setUp(
-      send,
+      send("first"),
       says("It waits for you."),
-      send,
-      says("I asked again.")
+      send("second"),
+      says("It still waits for you."),
+      send("third"),
+      says("I asked anew.")
     );
     await grant(mail.id, "MAIL");
 
     await chat.ask("Send Ben the invoice.");
     await chat.ask("Try again.");
+    const waiting = await person.api.pendingActions.list();
+    const [held] = waiting;
+    await person.api.pendingActions.decline(held?.id ?? "");
+    await chat.ask("Once more.");
 
-    // Two held actions for the same call, neither sent.
-    const held = await person.api.pendingActions.list();
+    const anew = await person.api.pendingActions.list();
     const results = await codeResults(chat.stub, chat.chat.id);
     expect({
-      held: held.map(({ input }) => input),
-      distinct: new Set(held.map(({ id }) => id)).size,
-      pending: results.map(({ text }) =>
-        held.some(({ id }) => text.includes(id))
-      ),
+      waiting: waiting.map(({ input }) => input),
+      anew: anew.map(({ input }) => input),
+      sameAction: anew[0]?.id === held?.id,
+      results: results.map(({ text }) => text),
       sent: await mail.did(),
     }).toStrictEqual({
-      held: [JSON.stringify(invoiceMail), JSON.stringify(invoiceMail)],
-      distinct: 2,
-      pending: [true, true],
+      waiting: [JSON.stringify(invoiceMail)],
+      anew: [JSON.stringify(invoiceMail)],
+      sameAction: false,
+      results: [
+        pendingOf(held?.id),
+        pendingOf(held?.id),
+        pendingOf(anew[0]?.id),
+      ],
       sent: { calls: 0, sent: [] },
     });
+  });
+
+  it("read how a held call ended by its ID: a read held in a restricted chat, once its person confirmed it, and only in the chat that asked", async () => {
+    const { person, mail, chat, grant } = await setUp(
+      codeStep(
+        `export default async (env) => {
+          const held = await env.connections.call("MAIL", "mail.search", { query: "invoice" });
+          return { held: held.output, now: await env.connections.outcome(held.pending.id) };
+        };`
+      ),
+      says("It waits for you.")
+    );
+    await grant(mail.id, "MAIL");
+    // The chat has read restricted data: on a Composio connection every
+    // call from it is held now, a read too.
+    await chat.stub.restrictChat(chat.chat.id);
+
+    await chat.ask("Find the invoice.");
+    const [held] = await person.api.pendingActions.list();
+    const id = held?.id ?? "";
+    const searchedBefore = await mail.searched();
+    await person.api.pendingActions.confirm(id, held?.inputHash ?? "");
+
+    await pointAtGateway(
+      chat.stub,
+      fakeGateway(outcomeOf(id), says("Found it."), outcomeOf(id), says("No."))
+    );
+    await chat.ask("What did it find?");
+    // Another chat of the same person and agent, and another person's chat.
+    const other = await chat.stub.createChat("Other", person.userId, chat.id);
+    await chat.stub.ask(other.id, { text: "What did it find?", model });
+    const ben = await signedInApi(idp, "user");
+    const bens = await chatOf(ben.userId, outcomeOf(id), says("No."));
+    await bens.ask("What did it find?");
+
+    const notFound = connectErrors.create("connect.pending_not_found").message;
+    const found = { messages: ["invoice-1"] };
+    expect({
+      searchedBefore,
+      searched: await mail.searched(),
+      mine: await texts(chat.stub, chat.chat.id),
+      otherChat: await texts(chat.stub, other.id),
+      bens: await texts(bens.stub, bens.chat.id),
+    }).toStrictEqual({
+      searchedBefore: [],
+      searched: ["invoice"],
+      mine: [
+        `Returned:\n${JSON.stringify({ held: null, now: { status: "waiting", output: null, error: null } })}`,
+        `Returned:\n${JSON.stringify({ status: "done", output: found, error: null })}`,
+      ],
+      otherChat: [`Returned:\n${notFound}`],
+      bens: [`Returned:\n${notFound}`],
+    });
+    // Each read of the outcome is audited, with the connection it read.
+    const events = await eventsOf(
+      chat.agent.agentId,
+      (all) =>
+        all.filter(({ detail }) => detail.method === "connections.outcome")
+          .length === 3
+    );
+    expect(
+      events
+        .filter(({ detail }) => detail.method === "connections.outcome")
+        .map(({ detail }) => ({
+          outcome: detail.outcome,
+          status: detail.status ?? detail.reason,
+          connection: detail.connection ?? null,
+          pendingActionId: detail.pendingActionId,
+        }))
+        .toSorted((one, two) =>
+          String(one.status).localeCompare(String(two.status))
+        )
+    ).toStrictEqual([
+      {
+        outcome: "refused",
+        status: "connect.pending_not_found",
+        connection: null,
+        pendingActionId: id,
+      },
+      {
+        outcome: "ok",
+        status: "done",
+        connection: mail.id,
+        pendingActionId: id,
+      },
+      {
+        outcome: "ok",
+        status: "waiting",
+        connection: mail.id,
+        pendingActionId: id,
+      },
+    ]);
   });
 
   it("keep a chat that read an EU-only connection to EU models, in every later turn", async () => {

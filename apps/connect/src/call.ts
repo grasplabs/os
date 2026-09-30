@@ -221,24 +221,6 @@ const mustHold = (
   held === undefined && (restricted || authority.mode === "interactive");
 
 /**
- * The idempotency key a side effect is held under: the call's own, or, for
- * one a person is there for that came without, one made here. Such a call
- * is held and taken exactly once whatever its key, so its caller (a chat's
- * model, say) needn't choose one: calling again holds a second action for
- * the person to decide, under a key of its own. A workflow run's key is
- * its step's and never made here: without one its side effect is refused.
- */
-const heldKey = ({ authority, idempotencyKey }: CapabilityClaims): string => {
-  if (idempotencyKey !== null) {
-    return idempotencyKey;
-  }
-  if (authority.mode !== "interactive") {
-    throw connectErrors.create("connect.idempotency_key_required");
-  }
-  return crypto.randomUUID();
-};
-
-/**
  * The connection a call may use, as `usableConnection` says; for a held
  * action, only while it reaches the account it reached when the action was
  * held (CN15).
@@ -324,10 +306,15 @@ export const carryOut = async (
   progress.sideEffect = sideEffect;
   checkResourceScope(resource, tool, input);
   if (sideEffect && mustHold(claims, held)) {
+    // A workflow run's key is its step's and never made by connect:
+    // without one its side effect is refused, not held.
+    if (idempotencyKey === null && authority.mode !== "interactive") {
+      throw connectErrors.create("connect.idempotency_key_required");
+    }
     const pending = await hold(env, claims, connection, {
       input,
       inputHash,
-      idempotencyKey: heldKey(claims),
+      idempotencyKey,
     });
     return { ...heldAnswer, sideEffect, replayed: false, pending };
   }

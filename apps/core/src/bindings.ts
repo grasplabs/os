@@ -241,8 +241,9 @@ export class ConnectionBinding extends WorkerEntrypoint<
    * data; on a Composio connection a read is one too by then) is held for
    * the person to confirm: the answer then has `pending` set, `output` is
    * the JSON text `"null"` and `provenance` is empty. It needs no
-   * `idempotencyKey`: connect makes one as it holds the call, and a call
-   * without one made again is held again, as another action. With a key
+   * `idempotencyKey`: connect makes one as it holds the call, and the same
+   * call without one made again finds the same held action while it waits,
+   * and is a new action once that one is decided. With a key
    * of the caller's, repeating the call finds the same held action, and
    * later the action's result once it ran. A workflow's side effect needs
    * its step's key: without one it is refused
