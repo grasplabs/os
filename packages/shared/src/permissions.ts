@@ -322,6 +322,15 @@ export interface Permission {
    */
   requestedVia: AgentProposer | null;
   /**
+   * The ID of the one chat it holds in, for `requestedBy` alone: a shared
+   * connection the chat's agent asked for there, which an admin grants.
+   * It goes with the chat. (A chat's request for its person's own
+   * personal connection is theirs alone to see and decide: it is never
+   * listed here.) Null for a permission that holds wherever its App or
+   * agent works.
+   */
+  chat: string | null;
+  /**
    * On an App's request to write a collection: the record types the
    * version of it current now declares there (`@grasp-os/shared/apps`),
    * those it would claim once granted, and those another App has there
@@ -445,4 +454,10 @@ export const permissionErrors = defineErrorFamily({
     "This App or agent already has a permission with that binding name.",
   "permission.builtin":
     "A built-in blueprint's permissions are what the Apps created from it ask for: grant or revoke them on those Apps.",
+  "permission.admin_decides":
+    "A shared connection is granted by an admin. You can withdraw the request.",
+  "permission.denied_before":
+    "The person already turned this down in this chat. Don't ask again unless they say so.",
+  "permission.too_many_requests":
+    "This chat already has too many connection requests waiting. Wait until the person decides them.",
 });

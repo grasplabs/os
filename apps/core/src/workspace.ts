@@ -33,6 +33,7 @@ import type { ChatId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import { modelErrors } from "@grasp-os/shared/models";
 import {
+  bindingNameSchema,
   permissionActionSchema,
   permissionErrors,
 } from "@grasp-os/shared/permissions";
@@ -57,6 +58,7 @@ import type { TurnContext, TurnResult } from "./agent.ts";
 import type { AppAnswer } from "./app.ts";
 import { drainObjectOutbox } from "./audit-outbox.ts";
 import { memberRole } from "./auth/identity.ts";
+import { revokeChatPermissions } from "./chat-connections.ts";
 import { chatMessageOf, partialOf } from "./chat-messages.ts";
 import { ChatWatch } from "./chat-watch.ts";
 import type { ChatListener, ChatState } from "./chat-watch.ts";
@@ -1059,10 +1061,12 @@ export class Workspace extends DurableObject<Env> {
   /**
    * Deletes `personId`'s own chat once its agent isn't working on it:
    * rejects every write its agent holds for `person` (connect's
-   * `declineChatActions`, each recorded there), then deletes it with its
+   * `declineChatActions`, each recorded there) and revokes every
+   * connection granted or asked for in it, each audited, then deletes it with its
    * messages and sources, audited as `by`'s. While it does, the chat is
    * marked deleting and takes no question, so no write can be held after
-   * the rejecting; if rejecting fails, the mark goes and the chat stays.
+   * the rejecting; if rejecting or revoking fails, the mark goes and the
+   * chat stays.
    * Its watchers get nothing more. How many writes it rejected.
    */
   async deleteChat(
@@ -1080,11 +1084,19 @@ export class Workspace extends DurableObject<Env> {
     }
     this.#deleting.add(id);
     try {
+      const workspaceId = workspaceIdSchema.parse(this.ctx.id.name);
       const declined = await this.env.CONNECT.declineChatActions({
         person,
-        workspaceId: workspaceIdSchema.parse(this.ctx.id.name),
+        workspaceId,
         chatId: id,
       });
+      // No connection granted in the chat outlives it (chat-connections.ts).
+      await revokeChatPermissions(
+        this.env,
+        { chatId: id },
+        { userId: personId, actor: by },
+        "chat_deleted"
+      );
       // Every App it has a draft of, even one with no changes left: its
       // preview may still run.
       const drafted = this.#db
@@ -1214,6 +1226,46 @@ export class Workspace extends DurableObject<Env> {
         createdAt: new Date(),
       })
       .run();
+  }
+
+  /**
+   * Tells the agent of `personId`'s own chat how a connection it asked for
+   * there was decided (chat-connections.ts), as `heldDecided` does a
+   * write: a system message for its next turn, and the page reads what
+   * waits again. No turn starts: the person says what to do next.
+   */
+  connectionDecided(
+    chatId: unknown,
+    personId: string,
+    { binding, decision }: { binding: string; decision: "granted" | "denied" }
+  ): void {
+    const chat = this.#ownChat(chatId, personId);
+    const name = bindingNameSchema.parse(binding);
+    const message: Message = {
+      role: "system",
+      content:
+        decision === "granted"
+          ? `The connection you asked for as "${name}" was granted, in this chat only: \`env.connections.call("${name}", …)\` works now.`
+          : `The connection you asked for as "${name}" was denied: this chat can't use it. Don't ask for it again unless the person says so.`,
+      timestamp: Date.now(),
+    };
+    this.#db
+      .insert(chatMessages)
+      .values({
+        chatId: chat.id,
+        message: JSON.stringify(message),
+        createdAt: new Date(),
+      })
+      .run();
+    this.heldChanged(chat.id);
+  }
+
+  /**
+   * Refuses a chat that isn't `personId`'s own, as if there were none: for
+   * what core keeps of a chat elsewhere (its connection requests).
+   */
+  requireChat(chatId: unknown, personId: string): ChatId {
+    return this.#ownChat(chatId, personId).id;
   }
 
   // A chat's drafts of Apps (agent-builds.ts). Only core calls these, for

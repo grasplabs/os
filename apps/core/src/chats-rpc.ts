@@ -2,6 +2,7 @@ import { agentErrors } from "@grasp-os/shared/agent";
 import { actorOf } from "@grasp-os/shared/audit";
 import { chatTitleSchema } from "@grasp-os/shared/chat";
 import type {
+  ChatConnectionRequest,
   ChatDraft,
   ChatQuestion,
   ChatsApi,
@@ -24,6 +25,7 @@ import { RpcTarget } from "capnweb";
 
 import { appFor, draftFiles, screensIn } from "./apps.ts";
 import { organizationId } from "./auth/auth.ts";
+import { chatRequests, decideInChat } from "./chat-connections.ts";
 import { personOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
 import { gatewaySettings } from "./models.ts";
@@ -43,7 +45,8 @@ import { questionSchema } from "./workspace.ts";
 // else lists, renames, deletes, asks in, stops or follows a chat, and a
 // chat of someone else's is refused as if there were none. Making,
 // renaming and deleting one is audited, and so is starting one to fix a
-// failed run (`fixRun`).
+// failed run (`fixRun`), and deciding a connection its agent asked for
+// (chat-connections.ts).
 
 /**
  * The agent every chat's agent is: the organization workspace's, so
@@ -365,6 +368,47 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
         revision,
         at,
         reported
+      );
+    });
+  }
+
+  /** The person's own chat `chatId`, or refused as if there were none. */
+  async #ownChat(userId: string, chatId: unknown): Promise<ChatId> {
+    return await this.#chatsOf(userId).requireChat(chatIdOf(chatId), userId);
+  }
+
+  async connectionRequests(chatId: string): Promise<ChatConnectionRequest[]> {
+    return await withPerson(
+      this.#check,
+      async (person) =>
+        await chatRequests(
+          this.#env,
+          person,
+          await this.#ownChat(person.userId, chatId)
+        )
+    );
+  }
+
+  async grantConnection(chatId: string, id: string): Promise<void> {
+    await withPerson(this.#check, async (person) => {
+      await decideInChat(
+        this.#env,
+        person,
+        await this.#ownChat(person.userId, chatId),
+        id,
+        "granted"
+      );
+    });
+  }
+
+  async denyConnection(chatId: string, id: string): Promise<void> {
+    await withPerson(this.#check, async (person) => {
+      await decideInChat(
+        this.#env,
+        person,
+        await this.#ownChat(person.userId, chatId),
+        id,
+        "denied"
       );
     });
   }

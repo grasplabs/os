@@ -26,6 +26,7 @@ import {
   notRemoved,
   organizationId,
 } from "./auth/auth.ts";
+import { revokeChatPermissions } from "./chat-connections.ts";
 import { personOf } from "./connections.ts";
 import {
   memberRemovals,
@@ -227,8 +228,11 @@ const markDisconnected = async (
  * which revokes each grant at its provider where it can, deletes the
  * tokens and spends their open OAuth flows. Their connections take no
  * calls for them anyway (they are no longer a member); this takes the
- * tokens out of the vault. What fails here, the cron trigger retries
- * (`retryDisconnects`).
+ * tokens out of the vault. First, what their chats' agent was granted or
+ * asked for in their chats is revoked, audited (chat-connections.ts):
+ * none of it holds for them anyway. What fails here, the cron trigger
+ * retries (`retryDisconnects`), both parts: they are done only once both
+ * are.
  */
 const disconnectPersonal = async (
   env: Env,
@@ -236,6 +240,12 @@ const disconnectPersonal = async (
   userId: string
 ): Promise<number> => {
   try {
+    await revokeChatPermissions(
+      env,
+      { requestedBy: userId },
+      { userId: by.userId, actor: actorOf(by) },
+      "person_removed"
+    );
     const { disconnected } = await env.CONNECT.disconnectPersonal({
       person: await personOf(env, by),
       ownerUserIds: [userId],
@@ -250,7 +260,8 @@ const disconnectPersonal = async (
 
 /**
  * Removes `userId` from the organization for good (see `recordRemoval`),
- * then disconnects their personal connections. Removing someone already
+ * then revokes what their chats' agent was granted or asked for there and
+ * disconnects their personal connections (`disconnectPersonal`). Removing someone already
  * removed only does the second part again, so a removal whose disconnect
  * failed can also be finished by trying again.
  */
@@ -397,8 +408,10 @@ const disconnectBatchesAtOnce = 4;
  * lifetime, completed or not. A flow the person took back before the
  * removal (taking it needs their session) can still finish into a
  * connection after their disconnect completed; the flow's lifetime bounds
- * that with room to spare. When nobody is pending, it doesn't call
- * connect at all. The cron trigger calls it.
+ * that with room to spare. First it revokes what their chats' agent was
+ * granted or asked for (as the system), as `disconnectPersonal` does, so
+ * a removal whose revoke failed ends revoked too. When nobody is pending,
+ * it doesn't call connect at all. The cron trigger calls it.
  */
 export const retryDisconnects = async (env: Env): Promise<void> => {
   const pending = await drizzle(env.DB)
@@ -436,10 +449,33 @@ export const retryDisconnects = async (env: Env): Promise<void> => {
   const disconnectNext = async (): Promise<void> => {
     for (const ownerUserIds of queue) {
       try {
+        // Each person's revoke on its own: one that fails leaves that
+        // person pending for the next run, and holds up nobody else.
+        // oxlint-disable-next-line no-await-in-loop -- one batch at a time per lane
+        const revokes = await Promise.allSettled(
+          ownerUserIds.map(
+            async (requestedBy) =>
+              await revokeChatPermissions(
+                env,
+                { requestedBy },
+                { userId: null, actor: { type: "system" } },
+                "person_removed"
+              )
+          )
+        );
+        const revoked = ownerUserIds.filter((_, index) => {
+          const settled = revokes[index];
+          if (settled?.status === "rejected") {
+            log.error("member.revoke_failed", errorFields(settled.reason));
+          }
+          return settled?.status === "fulfilled";
+        });
         // oxlint-disable-next-line no-await-in-loop -- one batch at a time per lane
         await env.CONNECT.disconnectPersonal({ person: null, ownerUserIds });
-        // oxlint-disable-next-line no-await-in-loop -- one batch at a time per lane
-        await markDisconnected(env, ownerUserIds);
+        if (revoked.length > 0) {
+          // oxlint-disable-next-line no-await-in-loop -- one batch at a time per lane
+          await markDisconnected(env, revoked);
+        }
       } catch (error) {
         log.error("member.disconnect_failed", errorFields(error));
       }

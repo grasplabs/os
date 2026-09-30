@@ -190,9 +190,10 @@ export interface ChatUpdate {
    */
   stopped: string | null;
   /**
-   * Changes whenever the chat's agent has a write held for the person to
-   * confirm: read the held writes again then. Only a count, from when the
-   * object last started; never what was held.
+   * Changes whenever something of the chat waits for the person, or no
+   * longer does: a write its agent had held for them to confirm, or a
+   * connection it asked for (`connectionRequests`). Read both again then.
+   * Only a count, from when the object last started; never what waits.
    */
   held: number;
   /**
@@ -201,6 +202,32 @@ export interface ChatUpdate {
    * the object last started.
    */
   drafts: number;
+}
+
+/**
+ * A connection the chat's agent asked to use in this chat alone, waiting
+ * for a decision: the person's own personal connection, which they grant
+ * or deny themselves (`decidedBy: "you"`), or a shared one, which only an
+ * admin grants (`"admin"`) and they may still withdraw. Everything but
+ * the connection's name is the request as stored: granting it grants
+ * exactly this.
+ */
+export interface ChatConnectionRequest {
+  /** The permission it would be. */
+  id: string;
+  connectionId: string;
+  /** The connection's provider and account, while connect lists it. */
+  provider: string | null;
+  accountName: string | null;
+  resource: string | null;
+  actions: string[];
+  /** The name the agent's code would call it by. */
+  binding: string;
+  /** Why the agent asked, in its words. */
+  reason: string | null;
+  /** ISO 8601. */
+  requestedAt: string;
+  decidedBy: "you" | "admin";
 }
 
 /** The chat `fixRun` started, and whether its question was taken. */
@@ -300,6 +327,19 @@ export interface ChatsApi {
   ) => Promise<void>;
   /** Stops the agent's work on the chat; `false` when there was none. */
   cancel: (chatId: string) => Promise<boolean>;
+  /** The connections the chat's agent asked for that wait, oldest first. */
+  connectionRequests: (chatId: string) => Promise<ChatConnectionRequest[]>;
+  /**
+   * Grants the chat's request `id` as it was asked for, in this chat
+   * alone: only for the person's own personal connection, while it is
+   * connected and offered. Audited; the agent is told.
+   */
+  grantConnection: (chatId: string, id: string) => Promise<void>;
+  /**
+   * Denies (or, for a shared connection, withdraws) the chat's request
+   * `id`. Audited; the agent is told.
+   */
+  denyConnection: (chatId: string, id: string) => Promise<void>;
   /**
    * Follows the chat: `onUpdate` gets the messages after the one with ID
    * `after` (all of them for `null`) and what the agent is writing, then

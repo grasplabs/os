@@ -55,7 +55,7 @@ export const signedCall = async (
   { action, idempotencyKey }: Pick<ConnectCall, "action" | "idempotencyKey">,
   confirms?: string
 ) => {
-  await authorize(env, authority, connection, action, permissionId);
+  await authorize(env, authority, connection, action, permissionId, context);
   const restricted = await isRestricted(env, authority, context);
   const scope = {
     connectionId: connection.connectionId,
@@ -340,7 +340,7 @@ export const bindingsFor = async (
 > => {
   const grantOf = connectionGrantOf(context);
   const collectionOf = collectionStubOf(authority, context);
-  const permissions = await grantedPermissions(env, authority);
+  const permissions = await grantedPermissions(env, authority, context);
   const stubs = stubsOf<
     Fetcher<ConnectionBinding> | Fetcher<CollectionBinding>
   >(permissions, (permission) => {
@@ -380,7 +380,7 @@ export const runBindingsFor = async (
   connections: Record<string, ConnectionGrant>;
   apps: Record<string, ExportGrant>;
 }> => {
-  const permissions = await grantedPermissions(env, authority);
+  const permissions = await grantedPermissions(env, authority, context);
   return {
     bindings: stubsOf(permissions, collectionStubOf(authority, context)),
     connections: stubsOf(permissions, connectionGrantOf(context)),

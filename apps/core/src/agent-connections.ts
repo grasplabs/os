@@ -25,6 +25,8 @@ import {
   signedStubCall,
 } from "./bindings.ts";
 import type { ConnectionGrant } from "./bindings.ts";
+import { askInChat, askableConnections } from "./chat-connections.ts";
+import type { AskableConnection, AskedConnection } from "./chat-connections.ts";
 import { connectionOwnersOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
 import { grantedPermissions } from "./permissions.ts";
@@ -99,8 +101,13 @@ const connectionGrants = async (
   env: Env,
   scope: AgentScope
 ): Promise<(ConnectionGrant & { name: string; actions: string[] })[]> => {
-  const grantOf = connectionGrantOf(chatContext(scope));
-  const permissions = await grantedPermissions(env, chatAuthority(scope));
+  const context = chatContext(scope);
+  const grantOf = connectionGrantOf(context);
+  const permissions = await grantedPermissions(
+    env,
+    chatAuthority(scope),
+    context
+  );
   return permissions.flatMap((permission) => {
     const grant = grantOf(permission);
     return grant === undefined
@@ -176,6 +183,55 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
               actions,
             }));
         }
+      );
+    } catch (error) {
+      throw forSandbox(error);
+    }
+  }
+
+  /**
+   * The connections the agent may ask its person for, in this chat
+   * (chat-connections.ts): their own personal ones, which they decide,
+   * and the shared ones, which an admin does; connected and offered.
+   */
+  async available(): Promise<AskableConnection[]> {
+    const scope = this.ctx.props;
+    await requireOpenRun(this.env, scope, "connections.available");
+    try {
+      return await auditedCall(
+        this.env,
+        scope,
+        {
+          method: "connections.available",
+          detailOf: (listed: AskableConnection[]) => ({
+            connections: listed.length,
+          }),
+        },
+        async () => await askableConnections(this.env, scope)
+      );
+    } catch (error) {
+      throw forSandbox(error);
+    }
+  }
+
+  /**
+   * Asks to use a connection in this chat alone, under `binding`: it
+   * allows nothing until its person grants it on a card in the chat (their
+   * own personal connection) or an admin does (a shared one). Recorded as
+   * the agent's request for its person.
+   */
+  async request(ask: unknown): Promise<AskedConnection> {
+    const scope = this.ctx.props;
+    await requireOpenRun(this.env, scope, "connections.request");
+    try {
+      return await auditedCall(
+        this.env,
+        scope,
+        {
+          method: "connections.request",
+          detailOf: (asked: AskedConnection) => ({ permission: asked.id }),
+        },
+        async () => await askInChat(this.env, scope, ask)
       );
     } catch (error) {
       throw forSandbox(error);
@@ -316,10 +372,41 @@ const connectionsDeclaration = `/**
  * while it waits, the same call only finds the same waiting change. Once
  * they decided, a note in this chat says how it ended, from your next
  * turn on; \`outcome\` reads how it ended, and its answer, at any time.
+ *
+ * A connection this chat can't use yet, you may ask for: \`available\`
+ * lists those you may ask for, \`request\` asks. The person grants or
+ * denies their own personal connection (their mailbox, their drive) on a
+ * card in this chat; an admin decides a shared one. Tell them it waits for
+ * them, and end your turn; don't ask again for what waits. What they
+ * turned down can't be asked for again in this chat. A note in this
+ * chat says how it was decided, from your next turn on; once granted, it
+ * is in \`list\` under the name you asked for, in this chat only.
  */
 connections: {
   /** The connections this chat may use, and the actions each allows. */
   list(): Promise<{ name: string; connectionId: string; resource: string | null; actions: string[] }[]>;
+  /** The connections you may ask for, the actions each has, and who decides. */
+  available(): Promise<{
+    connectionId: string;
+    provider: string;
+    account: string | null;
+    scope: "personal" | "shared";
+    actions: string[];
+    decidedBy: "person" | "admin";
+  }[]>;
+  /**
+   * Asks to use one of \`available\` in this chat, with only the actions
+   * you need, under \`binding\` (upper case, such as \`MAIL\`), saying why
+   * in a sentence the person reads. It allows nothing until it is granted.
+   */
+  request(ask: {
+    connectionId: string;
+    /** One resource in it, such as one mailbox; omit for all of it. */
+    resource?: string;
+    actions: string[];
+    binding: string;
+    reason: string;
+  }): Promise<{ id: string; binding: string; decidedBy: "person" | "admin" }>;
   /** Calls one of a connection's actions with its input. */
   call(
     name: string,

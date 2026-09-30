@@ -326,6 +326,21 @@ export const permissions = sqliteTable(
     requestedVia: text("requested_via", {
       mode: "json",
     }).$type<AgentProposer>(),
+    /**
+     * The one chat an agent's permission holds in (chat-connections.ts),
+     * by its ID (a random UUID, unique across Workspace objects), and only
+     * for its `requested_by`. Null for a permission that holds wherever
+     * its subject works.
+     */
+    chatId: text("chat_id"),
+    /** Why the chat's agent asked for it, in its words; null otherwise. */
+    reason: text(),
+    /**
+     * A chat's request for its person's own personal connection: only
+     * they see and decide it, never an admin. A connection's owner never
+     * changes, so this is read from connect once, as it is asked for.
+     */
+    personal: integer({ mode: "boolean" }).notNull().default(false),
   },
   (table) => [
     index("permissions_subject_idx").on(
@@ -337,10 +352,14 @@ export const permissions = sqliteTable(
     // (app-provenance.ts): by object, not subject.
     index("permissions_object_idx").on(table.objectType, table.objectId),
     // A binding name is one stub in the subject's env, so it is unique
-    // among the permissions that aren't revoked.
+    // among the permissions that aren't revoked: those that hold anywhere,
+    // and within each chat, those that hold in it alone.
     uniqueIndex("permissions_live_binding_idx")
       .on(table.subjectType, table.subjectId, table.binding)
-      .where(sql`status <> 'revoked'`),
+      .where(sql`status <> 'revoked' AND chat_id IS NULL`),
+    uniqueIndex("permissions_live_chat_binding_idx")
+      .on(table.chatId, table.subjectType, table.subjectId, table.binding)
+      .where(sql`status <> 'revoked' AND chat_id IS NOT NULL`),
   ]
 );
 

@@ -6,7 +6,11 @@ import type {
   AuditEntry,
 } from "@grasp-os/shared/audit";
 import { actorOf, createAuditEvent } from "@grasp-os/shared/audit";
-import { appIdSchema, permissionIdSchema } from "@grasp-os/shared/ids";
+import {
+  appIdSchema,
+  permissionIdSchema,
+  workspaceIdSchema,
+} from "@grasp-os/shared/ids";
 import type { AppId, PermissionId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
@@ -24,6 +28,7 @@ import type {
   PermissionObject,
   PermissionStatus,
   PermissionSubject,
+  WorkContext,
 } from "@grasp-os/shared/permissions";
 import {
   isAdmin,
@@ -38,6 +43,7 @@ import {
   desc,
   eq,
   inArray,
+  getTableColumns,
   isNull,
   ne,
   notInArray,
@@ -60,7 +66,11 @@ import { activeMember } from "./auth/auth.ts";
 import { memberRole } from "./auth/identity.ts";
 import type { Acting } from "./auth/identity.ts";
 import { builtinOwner } from "./builtin-app-id.ts";
-import { connectionOwnersOf } from "./connections.ts";
+import {
+  connectionOwnersOf,
+  personOf,
+  requireOfferedConnection,
+} from "./connections.ts";
 import {
   apps,
   appVersions,
@@ -69,7 +79,7 @@ import {
 } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
 import { collections } from "./db/knowledge/schema.ts";
-import { appHost } from "./durable-objects.ts";
+import { appHost, workspace } from "./durable-objects.ts";
 import { byCollection, typeClaims } from "./knowledge/record-types.ts";
 
 // Permission records and the one check every server path runs. A person
@@ -82,6 +92,11 @@ import { byCollection, typeClaims } from "./knowledge/record-types.ts";
 //
 // Granting is one conditional update, from requested to active, in the
 // same batch as its audit event.
+//
+// A connection the chat's agent asks for in a chat holds in that chat
+// alone (chat-connections.ts): its person grants their own personal
+// connection there, an admin a shared one, and every read and check here
+// leaves it out anywhere else (`holdsIn`).
 
 type Row = typeof permissions.$inferSelect;
 
@@ -198,7 +213,56 @@ export const toPermission = (row: Row): Permission => ({
   revokedBy: row.revokedBy,
   revokedAt: row.revokedAt?.toISOString() ?? null,
   requestedVia: row.requestedVia ?? null,
+  chat: row.chatId,
 });
+
+/** Where a check runs: the context, and the person it acts for. */
+export interface Where {
+  context?: WorkContext;
+  onBehalfOf?: string;
+}
+
+/**
+ * The permissions that hold `where`, as SQL: those that hold wherever
+ * their subject works, and, in a chat, those of that chat alone
+ * (chat-connections.ts), for the person who asked for them there.
+ * Anywhere else, or with no chat and person, a chat's permission holds
+ * nowhere: it fails closed.
+ */
+const holdsIn = ({ context, onBehalfOf }: Where = {}): SQL =>
+  context?.type === "chat" && onBehalfOf !== undefined
+    ? sql`(${permissions.chatId} IS NULL OR (${permissions.chatId} = ${context.chatId} AND ${permissions.requestedBy} = ${onBehalfOf}))`
+    : isNull(permissions.chatId);
+
+/**
+ * That no other live permission of the same subject has this row's
+ * binding the other way round, as SQL on the row being granted: one of a
+ * chat's against one that holds everywhere, and back. One name is one
+ * stub in an env: a later grant must never take over a name a chat's
+ * code already calls (the unique indexes cover each side on its own).
+ */
+export const noBindingClash = sql`NOT EXISTS (SELECT 1 FROM "permissions" AS "other" WHERE "other"."subject_type" = "permissions"."subject_type" AND "other"."subject_id" = "permissions"."subject_id" AND "other"."binding" = "permissions"."binding" AND "other"."status" <> 'revoked' AND ("other"."chat_id" IS NULL) <> ("permissions"."chat_id" IS NULL))`;
+
+/**
+ * Refuses a grant of `row` (with `permission.conflict`) while
+ * `noBindingClash` doesn't hold for it; the grant's own update checks it
+ * again, for a clash that lands in between.
+ */
+export const requireNoBindingClash = async (
+  env: Env,
+  row: Pick<Row, "id" | "binding">
+): Promise<void> => {
+  const clash = await drizzle(env.DB)
+    .select({ id: permissions.id })
+    .from(permissions)
+    .where(and(eq(permissions.id, row.id), sql`NOT ${noBindingClash}`))
+    .get();
+  if (clash !== undefined) {
+    throw permissionErrors.create("permission.conflict", {
+      binding: row.binding,
+    });
+  }
+};
 
 /** Rows of `subject`, as a condition. */
 const ofSubject = (subject: PermissionSubject): SQL | undefined => {
@@ -215,6 +279,7 @@ const auditDetail = ({
   object,
   actions,
   binding,
+  chat,
 }: Permission): Record<string, AuditDetailValue> => {
   // The object's IDs by name: connectionId and resource, collectionId,
   // appId and workflowId, or appId.
@@ -227,16 +292,20 @@ const auditDetail = ({
     ...ids,
     actions: actions.join(" "),
     binding,
+    // A chat's own permission: which chat, as its person's other events
+    // name it.
+    ...(chat === null ? {} : { chat }),
   };
 };
 
-type PermissionAction = `permission.${"requested" | "granted" | "revoked"}`;
+export type PermissionAction =
+  `permission.${"requested" | "granted" | "request_denied" | "revoked"}`;
 
 /**
  * The audit entry of a change to `permission` by `actor`, with `extra`
  * detail such as who asked for it.
  */
-const permissionEntry = (
+export const permissionEntry = (
   actor: AuditActor,
   action: PermissionAction,
   permission: Permission,
@@ -252,7 +321,7 @@ const permissionEntry = (
  * The audit entry of a change to `permission` by `by`: a person, or the
  * chat's agent acting for them.
  */
-const changeEntry = (
+export const changeEntry = (
   by: Pick<Acting, "userId" | "staff" | "actor">,
   action: PermissionAction,
   permission: Permission,
@@ -277,13 +346,17 @@ const requireMemberAdmin = (by: Identity): void => {
  * the very update that grants or revokes, so an admin demoted or removed
  * after their session was checked changes nothing.
  */
-const stillAdmin = (by: Identity): SQL => activeMember(by.userId, ["admin"]);
+export const stillAdmin = (by: Identity): SQL =>
+  activeMember(by.userId, ["admin"]);
 
 /**
  * After a grant or revoke changed nothing: refuses with `role.forbidden`
  * if that was because `by` is no longer an active admin.
  */
-const requireStillAdmin = async (env: Env, by: Identity): Promise<void> => {
+export const requireStillAdmin = async (
+  env: Env,
+  by: Identity
+): Promise<void> => {
   const row = await drizzle(env.DB).get<{ admin: number }>(
     sql`SELECT ${stillAdmin(by)} AS admin`
   );
@@ -323,7 +396,7 @@ const restartApp = async (
   }
 };
 
-const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
+export const findRow = async (env: Env, id: string): Promise<Row | undefined> =>
   await drizzle(env.DB)
     .select()
     .from(permissions)
@@ -434,6 +507,31 @@ const requireCollection = async (
 };
 
 /**
+ * Inserts `row` only while `condition` holds as the statement runs: one
+ * statement, so nothing lands between the check and the insert. Each
+ * column's value as the table stores it, in the order an insert from a
+ * select names them (every column, as defined). `outboxedIfChanged`
+ * after it records it only if it landed.
+ */
+export const insertWhere = (
+  db: ReturnType<typeof drizzle>,
+  row: Row,
+  condition: SQL
+) => {
+  const values = Object.entries(getTableColumns(permissions)).map(
+    ([key, column]) => {
+      const value: unknown = Reflect.get(row, key);
+      return value === null
+        ? sql`NULL`
+        : sql`${column.mapToDriverValue(value)}`;
+    }
+  );
+  return db
+    .insert(permissions)
+    .select(sql`SELECT ${sql.join(values, sql`, `)} WHERE ${condition}`);
+};
+
+/**
  * Asks for a permission for an App or agent. It allows nothing until an
  * admin grants it. For an App, only its builders ask, and a workflow or
  * the exports of another App only someone with a role in that App:
@@ -499,19 +597,36 @@ export const requestPermission = async (
     revokedBy: null,
     revokedAt: null,
     requestedVia: by.via ?? null,
+    personal: false,
+    chatId: null,
+    reason: null,
   };
   const permission = toPermission(row);
   const db = drizzle(env.DB);
+  // Not under a name one of a chat's own permissions has
+  // (`noBindingClash`), in the insert itself: the unique indexes each
+  // cover one side only.
+  const { subjectType, subjectId } = subjectColumns(subject);
   try {
     await auditedBatch(env, db, [
-      db.insert(permissions).values(row),
-      outboxed(db, changeEntry(by, "permission.requested", permission)),
+      insertWhere(
+        db,
+        row,
+        sql`NOT EXISTS (SELECT 1 FROM ${permissions} WHERE subject_type = ${subjectType} AND subject_id = ${subjectId} AND binding = ${binding} AND chat_id IS NOT NULL AND status <> 'revoked')`
+      ),
+      outboxedIfChanged(
+        db,
+        changeEntry(by, "permission.requested", permission)
+      ),
     ]);
   } catch (error) {
     if (isUniqueViolation(error)) {
       throw permissionErrors.create("permission.conflict", { binding });
     }
     throw error;
+  }
+  if ((await findRow(env, row.id)) === undefined) {
+    throw permissionErrors.create("permission.conflict", { binding });
   }
   return permission;
 };
@@ -580,6 +695,9 @@ export const declaredRequests = async (
     revokedBy: null,
     revokedAt: null,
     requestedVia: null,
+    personal: false,
+    chatId: null,
+    reason: null,
   }));
   const liveKeys = new Set(live.map(grantKey));
   const wantedKeys = new Set(wanted.map(grantKey));
@@ -768,6 +886,37 @@ const requireNotBuiltin = async (env: Env, row: Row): Promise<void> => {
 };
 
 /**
+ * Tells the chat's agent how its request for `permission` was decided,
+ * for its next turn, and the chat's page that it no longer waits
+ * (`Workspace.connectionDecided`). Only for a chat's own permission. A
+ * failure is logged: the decision stands.
+ */
+export const tellChat = async (
+  env: Env,
+  permission: Permission,
+  decision: "granted" | "denied"
+): Promise<void> => {
+  const { chat: chatId, requestedVia } = permission;
+  if (chatId === null || requestedVia === null) {
+    return;
+  }
+  try {
+    await workspace(
+      env,
+      workspaceIdSchema.parse(requestedVia.workspaceId)
+    ).connectionDecided(chatId, permission.requestedBy, {
+      binding: permission.binding,
+      decision,
+    });
+  } catch (error) {
+    log.warn("chat.connection_decided_failed", {
+      chatId,
+      ...errorFields(error),
+    });
+  }
+};
+
+/**
  * Grants a requested permission, the admin's own request included. Only
  * from requested: an active or revoked one is refused, so a revoke is for
  * good. Audited with who asked for it.
@@ -798,6 +947,20 @@ export const grantPermission = async (
   // No grant ever names a missing or personal collection, nor gives an App
   // the Apps collection, however old its request.
   await requireCollection(env, subjectOf(found), objectOf(found));
+  // A chat's own request: an admin grants only a shared connection, still
+  // connected and offered. A personal one is its person's alone: to anyone
+  // else it doesn't exist.
+  if (found.personal) {
+    throw permissionErrors.create("permission.not_found");
+  }
+  if (found.chatId !== null) {
+    await requireOfferedConnection(
+      env,
+      await personOf(env, by),
+      found.objectId
+    );
+  }
+  await requireNoBindingClash(env, found);
   const db = drizzle(env.DB);
   const event = createAuditEvent(
     changeEntry(by, "permission.granted", toPermission(found), {
@@ -824,7 +987,8 @@ export const grantPermission = async (
           eq(permissions.id, found.id),
           eq(permissions.status, "requested"),
           stillAdmin(by),
-          stillReviewed
+          stillReviewed,
+          noBindingClash
         )
       )
       .returning(),
@@ -846,6 +1010,7 @@ export const grantPermission = async (
   ]);
   if (!granted) {
     await requireStillAdmin(env, by);
+    await requireNoBindingClash(env, found);
     // Still requested: then the version reviewed is no longer current.
     const now = await findRow(env, found.id);
     if (now?.status === "requested") {
@@ -855,6 +1020,7 @@ export const grantPermission = async (
   }
   const permission = toPermission(granted);
   await restartApp(env, permission.subject);
+  await tellChat(env, permission, "granted");
   return permission;
 };
 
@@ -944,13 +1110,16 @@ const unapprovedSql = (
  * App and its version may be columns of the query it runs in. `changes`
  * says whether the action changes things when the action alone doesn't:
  * an export named in a permission changes things if it is marked `write`.
+ * A chat's own permission allows only in that chat, for the person who
+ * asked for it there (`where`, `holdsIn`).
  */
 export const allowingPermissionSql = (
   subject: PermissionSubject | { type: "app"; appId: SQLWrapper },
   appVersion: number | SQLWrapper | undefined,
   object: PermissionObject,
   action: string,
-  changes = changesThings(object, action)
+  changes = changesThings(object, action),
+  where?: Where
 ): SQL => {
   const { objectType, objectId, resource } = objectColumns(object);
   let unapproved: SQL | undefined;
@@ -974,7 +1143,8 @@ export const allowingPermissionSql = (
         ? isNull(permissions.resource)
         : or(isNull(permissions.resource), eq(permissions.resource, resource)),
       sql`EXISTS (SELECT 1 FROM json_each(${permissions.actions}) WHERE value = ${action})`,
-      unapproved
+      unapproved,
+      holdsIn(where)
     ) ?? sql`0`
   );
 };
@@ -996,7 +1166,8 @@ export const listeningPermissionSql = (
     eq(permissions.subjectId, appId),
     eq(permissions.status, "active"),
     eq(permissions.objectType, "connection"),
-    sql`NOT ${unapprovedSql(appId, appVersion)}`
+    sql`NOT ${unapprovedSql(appId, appVersion)}`,
+    holdsIn()
   ) ?? sql`0`;
 
 /**
@@ -1139,7 +1310,8 @@ export const revokePermission = async (
 ): Promise<Permission> => {
   requireMemberAdmin(by);
   const found = await findRow(env, parseId(id));
-  if (!found) {
+  // A chat's request for its person's own connection is theirs alone.
+  if (!found || found.personal) {
     throw permissionErrors.create("permission.not_found");
   }
   await requireNotBuiltin(env, found);
@@ -1168,6 +1340,11 @@ export const revokePermission = async (
   }
   const permission = toPermission(revoked);
   await restartApp(env, permission.subject);
+  // A chat's request that waited: revoking it decides it, so the chat's
+  // agent is told, and its card goes.
+  if (found.status === "requested") {
+    await tellChat(env, permission, "denied");
+  }
   return permission;
 };
 
@@ -1287,7 +1464,9 @@ export const listPermissions = async (
   const rows = await db
     .select()
     .from(permissions)
-    .where(and(ofOne, ofOpenApp, inStatus))
+    // A chat's request for its person's own connection, and why its agent
+    // asked, are that person's alone: never listed to admins or builders.
+    .where(and(ofOne, ofOpenApp, inStatus, eq(permissions.personal, false)))
     .orderBy(asc(permissions.requestedAt), asc(permissions.id));
   return await Promise.all(
     rows.map(async (row) => await withTypeClaims(env, by, row))
@@ -1323,28 +1502,43 @@ export const requireActivePerson = async (
   }
 };
 
-/** A subject's permissions in any of `statuses`, in the order asked for. */
+/**
+ * A subject's permissions in any of `statuses` that hold `where`
+ * (`holdsIn`), in the order asked for. No two share a binding: a chat's
+ * own and one that holds everywhere never both go live under one name
+ * (`noBindingClash`).
+ */
 const permissionsIn = async (
   env: Env,
   subject: PermissionSubject,
-  statuses: PermissionStatus[]
+  statuses: PermissionStatus[],
+  where?: Where
 ): Promise<Permission[]> => {
   const rows = await drizzle(env.DB)
     .select()
     .from(permissions)
-    .where(and(ofSubject(subject), inArray(permissions.status, statuses)))
+    .where(
+      and(
+        ofSubject(subject),
+        inArray(permissions.status, statuses),
+        holdsIn(where)
+      )
+    )
     .orderBy(asc(permissions.requestedAt), asc(permissions.id));
   return rows.map(toPermission);
 };
 
 /**
- * The active permissions of an App or agent, whoever it acts for. Only for
- * building an env whose stubs check the person on every call.
+ * The active permissions of an App or agent, whoever it acts for, that
+ * hold `where` (`holdsIn`). Only for building an env whose stubs check
+ * the person on every call.
  */
 export const activePermissions = async (
   env: Env,
-  subject: PermissionSubject
-): Promise<Permission[]> => await permissionsIn(env, subject, ["active"]);
+  subject: PermissionSubject,
+  where?: Where
+): Promise<Permission[]> =>
+  await permissionsIn(env, subject, ["active"], where);
 
 /**
  * An App's permissions that are active or asked for and not yet granted:
@@ -1361,13 +1555,20 @@ export const activeOrRequestedPermissions = async (
     "requested",
   ]);
 
-/** The active permissions of the App or agent `authority` names. */
+/**
+ * The active permissions of the App or agent `authority` names that hold
+ * in `context`: a chat's own ones only in that chat.
+ */
 export const grantedPermissions = async (
   env: Env,
-  authority: Authority
+  authority: Authority,
+  context?: WorkContext
 ): Promise<Permission[]> => {
   await requireActivePerson(env, authority);
-  return await activePermissions(env, authority.subject);
+  return await activePermissions(env, authority.subject, {
+    context,
+    onBehalfOf: authority.onBehalfOf,
+  });
 };
 
 /**
@@ -1381,7 +1582,8 @@ export const grantedPermissions = async (
  * one for a resource covers only that resource. For an App's code, an
  * action that changes things (on a connection, or other than `read`) also
  * needs the version it runs to be one an admin approved (`madeCurrent`).
- * Throws `permission.denied`
+ * A chat's own permission allows only in that chat, `context` (none
+ * given: nowhere), and only for the person who asked for it there. Throws `permission.denied`
  * or `permission.person_inactive` otherwise.
  *
  * It doesn't intersect the grant with the person's own access (R5): connect
@@ -1393,7 +1595,8 @@ export const authorize = async (
   authority: Authority,
   object: PermissionObject,
   action: string,
-  permissionId: PermissionId
+  permissionId: PermissionId,
+  context?: WorkContext
 ): Promise<void> => {
   await requireActivePerson(env, authority);
   const allowing = await drizzle(env.DB)
@@ -1405,7 +1608,9 @@ export const authorize = async (
           authority.subject,
           authority.appVersion,
           object,
-          action
+          action,
+          changesThings(object, action),
+          { context, onBehalfOf: authority.onBehalfOf }
         ),
         eq(permissions.id, permissionId)
       )
