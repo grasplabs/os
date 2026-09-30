@@ -239,11 +239,14 @@ export const triggerSummary = ({
 /** The columns of `workflow_triggers`, in the order an insert names them. */
 const triggerColumns = Object.keys(getTableColumns(workflowTriggers));
 
-/** A row as JSON: times as milliseconds, what's missing as null. */
+/**
+ * A row as JSON: times as milliseconds, what's missing as null. A new
+ * row's schedule has failed no start yet.
+ */
 const asJson = (row: TriggerRow): Record<string, unknown> =>
   Object.fromEntries(
     triggerColumns.map((column) => {
-      const value: unknown = Reflect.get(row, column);
+      const value: unknown = Reflect.get({ failedStarts: 0, ...row }, column);
       return [
         column,
         value instanceof Date ? value.getTime() : (value ?? null),

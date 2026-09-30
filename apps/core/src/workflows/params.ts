@@ -131,6 +131,7 @@ const setDirectly = async (
   // The schedule triggers on the parameter go on from the next time after
   // now in its new expression, in each time zone the code reads it in
   // (triggers.ts): every registered row of the version on it, whichever.
+  // One that stopped after its starts kept failing starts again.
   const triggers =
     param.kind === "schedule"
       ? await declaredTriggers(
@@ -190,6 +191,7 @@ const setDirectly = async (
         .set({
           cron,
           nextRunAt: nextScheduledRun({ cron, timeZone }, now) ?? null,
+          failedStarts: 0,
         })
         .where(
           and(

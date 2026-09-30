@@ -325,6 +325,7 @@ describe("the Workflows page", buildTime, () => {
       appName,
       version: 1,
       owner: { userId: owner.userId, name: owner.person.name },
+      scheduleStopped: false,
     };
     const invoiceWorkflows = [
       {
@@ -635,7 +636,8 @@ describe("the Workflows page", buildTime, () => {
       "SELECT name FROM sqlite_master WHERE name LIKE 'sqlite_stat%'"
     ).all();
     const { api } = owner;
-    // Each call, and the plans of its statements that read runs.
+    // Each call, and the plans of its statements that read runs or
+    // triggers.
     const calls = {
       all: async () => await api.workflows.runs(),
       done: async () => await api.workflows.runs({ status: "done" }),
@@ -655,7 +657,11 @@ describe("the Workflows page", buildTime, () => {
       // oxlint-disable-next-line no-await-in-loop -- as above
       const planned = await Promise.all(
         queries
-          .filter(({ query }) => query.includes('"workflow_runs"'))
+          .filter(
+            ({ query }) =>
+              query.includes('"workflow_runs"') ||
+              query.includes('"workflow_triggers"')
+          )
           .map(async ({ query, values }) => {
             const { results } = await env.DB.prepare(
               `EXPLAIN QUERY PLAN ${query}`

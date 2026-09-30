@@ -2,7 +2,7 @@ import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { workflowErrors } from "@grasp-os/shared/workflows";
 import { env } from "cloudflare:workers";
-import { afterEach, describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
 import { setCurrentVersion } from "../src/apps.ts";
@@ -95,7 +95,7 @@ const committed = async (
 /** The App's schedules as core has them: ID, version, cron and next time. */
 const schedulesOf = async (app: string) => {
   const { results } = await env.DB.prepare(
-    "SELECT id, version, cron, next_run_at FROM workflow_triggers WHERE app_id = ? ORDER BY id"
+    "SELECT id, version, cron, next_run_at, failed_starts FROM workflow_triggers WHERE app_id = ? ORDER BY id"
   )
     .bind(app)
     .all();
@@ -275,6 +275,168 @@ describe("schedule triggers", () => {
     await runCron({}, new Date(due.getTime() + day + minute));
 
     await expect(runCount(builder, app)).resolves.toBe(1);
+  });
+});
+
+/**
+ * Runs `run` while the engine takes no new run, as when Cloudflare
+ * Workflows is down: every start fails once its run's row is written.
+ */
+const whileEngineDown = async <T>(run: () => Promise<T>): Promise<T> => {
+  const down = vi
+    .spyOn(env.WORKFLOWS, "create")
+    .mockRejectedValue(new Error("Workflows unavailable"));
+  try {
+    return await run();
+  } finally {
+    down.mockRestore();
+  }
+};
+
+/**
+ * Runs the cron trigger for each of `minutes` after `due`, in order; how
+ * many runs the App has after each: one more wherever a start was tried.
+ */
+const triedAt = async (
+  builder: Person,
+  app: string,
+  due: Date,
+  minutes: readonly number[]
+): Promise<number[]> => {
+  const counts: number[] = [];
+  for (const after of minutes) {
+    // oxlint-disable-next-line no-await-in-loop -- one minute after another
+    await runCron({}, new Date(due.getTime() + after * minute));
+    // oxlint-disable-next-line no-await-in-loop -- as above
+    counts.push(await runCount(builder, app));
+  }
+  return counts;
+};
+
+/** The minutes after a schedule is due at which its 8 starts are tried. */
+const tries = [0, 1, 3, 7, 15, 31, 63, 127];
+
+/** Whether the Workflows page and the workflow's view say it stopped. */
+const shownStopped = async (builder: Person, app: string) => {
+  const overview = await builder.api.workflows.overview();
+  const { summary } = await builder.api.workflows.get(app, "weekly");
+  return [
+    overview.find((workflow) => workflow.app === app)?.scheduleStopped,
+    summary.scheduleStopped,
+  ];
+};
+
+describe("a schedule whose run keeps failing to start", () => {
+  afterEach(endLiveRuns);
+
+  it("is tried again after twice as long each time, then stops, audited once and shown with its workflow", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, weekly());
+    const due = await nextRunOf(app);
+
+    const counts = await whileEngineDown(
+      async () =>
+        await triedAt(
+          builder,
+          app,
+          due,
+          // Each try, the minute before the later ones, and well after
+          // the last.
+          [0, 1, 2, 3, 6, 7, 14, 15, 30, 31, 62, 63, 126, 127, 128, 24 * 60]
+        )
+    );
+
+    expect(counts).toStrictEqual([
+      1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 8,
+    ]);
+    // The engine back, it still starts nothing.
+    await expect(
+      triedAt(builder, app, due, [2 * 24 * 60])
+    ).resolves.toStrictEqual([8]);
+    await expect(schedulesOf(app)).resolves.toMatchObject([
+      { next_run_at: null },
+    ]);
+    await expect(shownStopped(builder, app)).resolves.toStrictEqual([
+      true,
+      true,
+    ]);
+    const events = await allEvents();
+    expect(
+      events.filter(
+        ({ action, target }) =>
+          action === "workflow.schedule.stopped" && target?.id === app
+      )
+    ).toMatchObject([
+      {
+        actor: { type: "system" },
+        detail: { workflow: "weekly", version: 1, failedStarts: 8 },
+      },
+    ]);
+  });
+
+  it("starts from nothing again once a start works", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, weekly());
+    const due = await nextRunOf(app);
+
+    await whileEngineDown(
+      async () => await triedAt(builder, app, due, tries.slice(0, 3))
+    );
+    // The fourth try works: the schedule goes on to its next time.
+    await expect(triedAt(builder, app, due, [7])).resolves.toStrictEqual([4]);
+    const next = await nextRunOf(app);
+
+    expect(next.getTime()).toBeGreaterThan(due.getTime());
+    await expect(shownStopped(builder, app)).resolves.toStrictEqual([
+      false,
+      false,
+    ]);
+    // A failed start then is its first: tried again the minute after.
+    await expect(
+      whileEngineDown(async () => await triedAt(builder, app, next, [0, 1]))
+    ).resolves.toStrictEqual([5, 6]);
+  });
+
+  it.each([
+    [
+      "its schedule is set",
+      async (builder: Person, app: string) => {
+        await builder.api.workflows.params.set(
+          app,
+          "weekly",
+          "every",
+          "30 9 * * *"
+        );
+      },
+    ],
+    [
+      "a new version is made current",
+      async (builder: Person, app: string) => {
+        await release(
+          builder,
+          app,
+          weekly(`[{ type: "schedule", param: "every" }]`)
+        );
+      },
+    ],
+  ])("starts again once %s", async (_, fix) => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, weekly());
+    const due = await nextRunOf(app);
+    await whileEngineDown(async () => await triedAt(builder, app, due, tries));
+
+    await fix(builder, app);
+
+    await expect(shownStopped(builder, app)).resolves.toStrictEqual([
+      false,
+      false,
+    ]);
+    const next = await nextRunOf(app);
+    await expect(triedAt(builder, app, next, [0])).resolves.toStrictEqual([9]);
+    // And a failed start is its first again.
+    await expect(schedulesOf(app)).resolves.toMatchObject([
+      { failed_starts: 0 },
+    ]);
   });
 });
 

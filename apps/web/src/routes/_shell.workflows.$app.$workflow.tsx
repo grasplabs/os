@@ -1,4 +1,5 @@
 import type { AppVersion } from "@grasp-os/shared/apps";
+import { maxFailedStarts } from "@grasp-os/shared/workflows";
 import type {
   RunsPage,
   OutlineNode,
@@ -454,6 +455,11 @@ const WorkflowView = ({
             </Link>
             {`, version ${summary.version}, owned by ${owner}`}
           </p>
+          {summary.scheduleStopped ? (
+            <p className="text-destructive text-sm">
+              {`Its schedule stopped: its run failed to start ${maxFailedStarts} times in a row. It starts again when its schedule is set under Parameters, or when a new version of the App is made current.`}
+            </p>
+          ) : null}
         </div>
         {params === null ? null : (
           <TestButton app={summary.app} workflow={summary.workflow} />

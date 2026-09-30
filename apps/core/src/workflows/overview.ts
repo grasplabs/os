@@ -12,6 +12,7 @@ import { roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import {
   failedRunDays,
+  maxFailedStarts,
   runFilterStatuses,
   runsPageSize,
   workflowErrors,
@@ -54,6 +55,7 @@ import {
   users,
   workflowDecisions,
   workflowRuns,
+  workflowTriggers,
 } from "../db/core/schema.ts";
 import { answerableBy, stillOpen } from "../decisions/decisions.ts";
 import { declaredParams, dryRunTests, hasWorkflow } from "./code.ts";
@@ -273,8 +275,8 @@ const latestRuns = async (
 /**
  * The summaries of `workflows`: each one's latest run, its runs waiting
  * now (counted from the open decisions) and those failed lately (from the
- * failed runs ended since): three queries, whatever the number of
- * workflows.
+ * failed runs ended since), and whether a schedule of it stopped
+ * (triggers.ts): four queries, whatever the number of workflows.
  */
 const summariesOf = async (
   env: Env,
@@ -291,7 +293,7 @@ const summariesOf = async (
   };
   const now = new Date();
   const failedSince = new Date(now.getTime() - failedRunDays * dayMs);
-  const [latest, waiting, failed] = await Promise.all([
+  const [latest, waiting, failed, stopped] = await Promise.all([
     latestRuns(db, workflows, now),
     db
       .select({
@@ -315,9 +317,27 @@ const summariesOf = async (
         )
       )
       .groupBy(workflowRuns.appId, workflowRuns.workflowId),
+    // The Apps' triggers, by the index that starts with their App.
+    db
+      .select({
+        app: workflowTriggers.appId,
+        workflow: workflowTriggers.workflowId,
+        version: workflowTriggers.version,
+      })
+      .from(workflowTriggers)
+      .where(
+        and(
+          sql`${workflowTriggers.appId} IN ${listOf(appIds)}`,
+          eq(workflowTriggers.type, "schedule"),
+          gte(workflowTriggers.failedStarts, maxFailedStarts)
+        )
+      ),
   ]);
   const waitingOf = countsByKey(waiting);
   const failedOf = countsByKey(failed);
+  const stoppedOf = new Set(
+    stopped.map((row) => `${keyOf(row.app, row.workflow)}@${row.version}`)
+  );
   return workflows.map(({ app, workflow }) => ({
     app: app.id,
     appName: app.name,
@@ -327,6 +347,10 @@ const summariesOf = async (
     lastRun: latest.get(keyOf(app.id, workflow)) ?? null,
     waiting: waitingOf.get(keyOf(app.id, workflow)) ?? 0,
     failed: failedOf.get(keyOf(app.id, workflow)) ?? 0,
+    // Of the current version: only its triggers start runs.
+    scheduleStopped: stoppedOf.has(
+      `${keyOf(app.id, workflow)}@${app.currentVersion}`
+    ),
   }));
 };
 
