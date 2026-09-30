@@ -5,7 +5,9 @@ import type {
   AssistantMessage,
   Message,
   SystemMessage,
+  Tool,
 } from "@earendil-works/pi-ai";
+import { toToolDeclaration } from "@earendil-works/pi-ai/utils/transcript";
 import { agentErrors } from "@grasp-os/shared/agent";
 import type { CatalogSkill } from "@grasp-os/shared/knowledge";
 import type { Memory } from "@grasp-os/shared/memory";
@@ -312,16 +314,35 @@ const unknownWindowChars = 300_000;
  * Most characters a request sends, as JSON: what fits in the tokens the
  * model takes (`AgentModel.inputTokens`), so a model with a large window
  * reads more of a long chat and one with a small window is never sent
- * more than it can take. The system messages come first (the
- * instructions, the API declarations, memory and skills, measured as they
- * are), and the chat's turns get what they leave ({@link recentHistory}).
+ * more than it can take. {@link measureTurns} divides them.
  */
 export const requestChars = (inputTokens?: number): number =>
   inputTokens === undefined ? unknownWindowChars : inputTokens * charsPerToken;
 
-/** Where a request leaves a chat's earlier turns out. */
-const leftOut =
-  "Earlier messages of this chat are left out: the chat is longer than what each request sends. Say so if a question needs them.";
+/** What a request has room for, and the tools it declares. */
+export interface RequestRoom {
+  /** The model's {@link requestChars}. */
+  chars: number;
+  tools: readonly Tool[];
+}
+
+/** The note where a request leaves a chat's earlier turns out. */
+const leftOutNote = (timestamp: number): SystemMessage => ({
+  role: "system",
+  content:
+    "Earlier messages of this chat are left out: the chat is longer than what each request sends. Say so if a question needs them.",
+  timestamp,
+});
+
+/**
+ * Room kept for a request's own fields, which no message holds: the
+ * model, its limits and reasoning settings, the provider's cache markers.
+ * A few hundred characters at most, whatever the chat.
+ */
+const envelopeChars = 1000;
+
+/** The note's size, as a request carries it. */
+const leftOutChars = JSON.stringify(leftOutNote(Date.now())).length;
 
 /**
  * The turn under way made to fit in `budget` characters where it can: its
@@ -365,48 +386,58 @@ const fitTurnUnderWay = (
 };
 
 /**
- * Which turn each message is in (-1 before the first question), each
- * turn's size as JSON, its system messages left out, and the size of all
- * the system messages, which every request sends.
+ * How a request's room divides over `messages`: which turn each message
+ * is in (-1 before the first question), each turn's size as JSON, its
+ * system messages left out, and `budget`, what the turns together may
+ * take. That is the room less everything else the request carries: the
+ * tools' declarations, once, as the provider gets them (the transcript's
+ * system messages carry them too, and those copies aren't counted); the
+ * system messages (the instructions, the API declarations, memory and
+ * skills); the note of turns left out, kept room for whether or not any
+ * are; and the request's own fields ({@link envelopeChars}). The one place that says what fits: the check of a question
+ * (`runTurn`) and the request itself ({@link recentHistory}) both go by it.
  */
 const measureTurns = (
-  messages: readonly Message[]
-): { turns: number[]; sizes: number[]; system: number } => {
+  messages: readonly Message[],
+  { chars, tools }: RequestRoom
+): { turns: number[]; sizes: number[]; budget: number } => {
   const turns: number[] = [];
   const sizes: number[] = [];
-  let system = 0;
+  let system =
+    envelopeChars +
+    JSON.stringify(tools.map(toToolDeclaration)).length +
+    leftOutChars;
   for (const message of messages) {
     if (message.role === "user") {
       sizes.push(0);
     }
     const turn = sizes.length - 1;
     turns.push(turn);
-    const size = JSON.stringify(message).length;
     if (message.role === "system") {
-      system += size;
+      const { toolsAdded: _added, toolsRemoved: _removed, ...said } = message;
+      system += JSON.stringify(said).length;
     } else if (turn >= 0) {
-      sizes[turn] = (sizes[turn] ?? 0) + size;
+      sizes[turn] = (sizes[turn] ?? 0) + JSON.stringify(message).length;
     }
   }
-  return { turns, sizes, system };
+  return { turns, sizes, budget: Math.max(chars - system, 0) };
 };
 
 /**
- * What a request sends of a long chat, in at most `chars` characters (the
- * model's {@link requestChars}) where it can: the system messages
- * (instructions, API declarations, memory and skills), the newest turns
- * that fit in what those leave, and always the turn under way (its oldest
- * code results shortened when it alone is over), with a note where
- * earlier turns were left out. A turn is a question and everything after
- * it up to the next, so a tool call is never parted from its result.
+ * What a request sends of a long chat, within `room` where it can: the
+ * system messages (instructions, API declarations, memory and skills), the
+ * newest turns that fit in what is left ({@link measureTurns}), and always
+ * the turn under way (its oldest code results shortened when it alone is
+ * over), with a note where earlier turns were left out. A turn is a
+ * question and everything after it up to the next, so a tool call is
+ * never parted from its result.
  */
 export const recentHistory = (
   history: readonly Message[],
-  chars: number
+  room: RequestRoom
 ): Message[] => {
   const messages = [...history];
-  const { turns, sizes, system } = measureTurns(messages);
-  const budget = Math.max(chars - system, 0);
+  const { turns, sizes, budget } = measureTurns(messages, room);
   const turn = sizes.length - 1;
   if (turn >= 0 && (sizes[turn] ?? 0) > budget) {
     sizes[turn] = fitTurnUnderWay(
@@ -432,11 +463,7 @@ export const recentHistory = (
     const at = turns[index] ?? -1;
     // The question that starts the first turn sent: one per turn.
     if (at === first && message.role === "user") {
-      sent.push({
-        role: "system",
-        content: leftOut,
-        timestamp: message.timestamp,
-      });
+      sent.push(leftOutNote(message.timestamp));
     }
     if (message.role === "system" || at >= first) {
       sent.push(message);
@@ -532,25 +559,24 @@ export const runTurn = async ({
     { role: "user", content: question, timestamp: Date.now() },
   ];
   const progress: Progress = { steps: 0, runs: 0 };
-  const chars = requestChars(model.inputTokens);
-  // A question that doesn't fit next to the system messages is refused
-  // here, before anything is kept or sent: the provider would refuse the
-  // request, and nothing can be left out to make room for it.
-  const asked = measureTurns([...history, ...prompts]);
-  if (asked.system + (asked.sizes.at(-1) ?? 0) > chars) {
+  const tools = [executeCode({ apis, scope, runs, loader })];
+  const room = { chars: requestChars(model.inputTokens), tools };
+  // A question that doesn't fit next to the rest of what the request
+  // carries is refused here, before anything is kept or sent: the provider
+  // would refuse the request, and nothing can be left out to make room
+  // for it.
+  const asked = measureTurns([...history, ...prompts], room);
+  if ((asked.sizes.at(-1) ?? 0) > asked.budget) {
     throw agentErrors.create("agent.question_too_long");
   }
   await runAgentLoop(
     prompts,
-    {
-      messages: [...history],
-      tools: [executeCode({ apis, scope, runs, loader })],
-    },
+    { messages: [...history], tools },
     {
       model: model.model,
       // The transcript holds only pi's own messages.
       convertToLlm: (messages) =>
-        recentHistory(messages.filter(isMessage), chars),
+        recentHistory(messages.filter(isMessage), room),
       toolExecution: "sequential",
       // Checked again before every model request.
       prepareRequest: async () => {

@@ -60,16 +60,17 @@ const bothModels = {
 
 /**
  * Adds `count` turns to the chat as the object keeps them: questions of
- * 30,000 characters, each answered.
+ * `chars` characters (30,000 unless given), each answered.
  */
 const addTurns = async (
   stub: WorkspaceStub,
   chatId: string,
-  count: number
+  count: number,
+  chars = 30_000
 ): Promise<void> => {
   const question = JSON.stringify({
     role: "user",
-    content: "q".repeat(30_000),
+    content: "q".repeat(chars),
     timestamp: 1,
   });
   const answer = JSON.stringify({
@@ -919,6 +920,36 @@ describe("chat agent turns", () => {
       question: true,
       withinWindow: true,
       turns: true,
+    });
+  });
+
+  it("keeps a request that nearly fills the model's window within it, its note and tool declaration included", async () => {
+    const { stub, chat, gateway } = await newChat(says("Still here."));
+    await pointAtGateway(stub, gateway, { config: bothModels });
+    // Turns of 5,000 characters, more than twice what the small model
+    // takes: those sent fill its window to within one of them.
+    await addTurns(stub, chat.id, 250, 5000);
+
+    await expect(
+      stub.ask(chat.id, { text: "And now?", model: smallModel })
+    ).resolves.toMatchObject({ outcome: "answered" });
+
+    // The whole request as the provider got it: instructions, the tool's
+    // declaration, the note and the turns.
+    const sent = JSON.stringify(gateway.requests.at(-1)?.body);
+    const windowChars = requestChars(inputTokens.small);
+    expect({
+      tool: sent.includes('"name":"executeCode"'),
+      note: sent.includes("Earlier messages of this chat are left out"),
+      question: sent.includes("And now?"),
+      nearlyFull: sent.length > windowChars * 0.9,
+      withinWindow: sent.length <= windowChars,
+    }).toStrictEqual({
+      tool: true,
+      note: true,
+      question: true,
+      nearlyFull: true,
+      withinWindow: true,
     });
   });
 
