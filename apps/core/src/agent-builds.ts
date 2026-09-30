@@ -20,6 +20,7 @@ import type { AppId } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import type { Permission } from "@grasp-os/shared/permissions";
 import { permissionErrors } from "@grasp-os/shared/permissions";
+import type { ServerLog } from "@grasp-os/shared/screens";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 import { z } from "zod";
 
@@ -193,9 +194,15 @@ export interface DraftCheck {
    * What the preview of the draft in the person's side panel ran into so
    * far (preview-reports.ts): any problem fails the check. `seen` is
    * false when it reported nothing on this revision within
-   * {@link previewWaitMs}.
+   * {@link previewWaitMs}. With what the draft's server code wrote with
+   * `console` there, the agent's calls included, which fails nothing.
    */
-  preview: { problems: PreviewProblem[]; seen: boolean; note: string };
+  preview: {
+    problems: PreviewProblem[];
+    logs: ServerLog[];
+    seen: boolean;
+    note: string;
+  };
   /** Checks of this draft that failed in a row this turn. */
   failedInARow: number;
   /** How many may fail in a row before checking refuses. */
@@ -323,13 +330,12 @@ const previewOf = async (
   revision: number,
   built: boolean
 ): Promise<DraftCheck["preview"]> => {
-  const { problems, seen } = await workspace(env, workspaceId).previewProblems(
-    chatId,
-    app,
-    revision,
-    built ? previewWaitMs : 0
-  );
+  const { problems, logs, seen } = await workspace(
+    env,
+    workspaceId
+  ).previewReports(chatId, app, revision, built ? previewWaitMs : 0);
   return {
+    logs,
     seen,
     problems: problems.map(({ stack, ...problem }) =>
       stack === undefined
@@ -966,10 +972,13 @@ build: {
      * nothing on this write within a few seconds: nobody has it open, or
      * its screens neither called the server nor failed. Its screens then
      * weren't checked at run time: say so, or \`call\` the server yourself.
+     * \`logs\`: the newest lines the draft's server code wrote with
+     * \`console\` there, your \`call\`s included; they fail nothing.
      */
     preview: {
       problems: { source: "screen" | "server"; at: string; kind: string; message: string; stack?: string }[];
       seen: boolean;
+      logs: { at: string; level: string; message: string; method: string | null }[];
       note: string;
     };
     failedInARow: number;
@@ -991,7 +1000,8 @@ build: {
    * other Apps and writes to Knowledge are refused
    * (\`app.preview_side_effect\`, thrown) and Knowledge is empty. Never the
    * App's live data. What the draft's code failed with comes back as
-   * \`ok: false\`.
+   * \`ok: false\`; what it wrote with \`console\`, in the next check's
+   * \`preview.logs\`.
    */
   call(app: string, method: string, args?: unknown[]): Promise<
     | { ok: true; answer: unknown }

@@ -1,6 +1,8 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import { deadline, whenAborted } from "@grasp-os/shared/deadline";
+import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import type { AppId, ChatId } from "@grasp-os/shared/ids";
+import { exports } from "cloudflare:workers";
 
 import { callTimeoutMs, invokeServer, requireAppMethod } from "./app.ts";
 import type { AppAnswer } from "./app.ts";
@@ -8,6 +10,7 @@ import { draftFiles } from "./apps.ts";
 import { previewBindings } from "./preview-bindings.ts";
 import { sandbox } from "./sandbox.ts";
 import { buildFailed, buildServer } from "./screens.ts";
+import type { TailOf } from "./server-logs.ts";
 import type { Draft } from "./workspace.ts";
 
 // A chat's preview of its draft of an App: the draft's screens, in the
@@ -33,11 +36,12 @@ const facetName = (chatId: ChatId, app: string): string =>
 /**
  * The draft's server code, as `draft` has it at its revision, as the
  * class its facet runs: loaded unnamed, never kept, as a draft's code
- * changes with each write.
+ * changes with each write. What it writes with `console` goes to the
+ * chat's Workspace object, for the agent's next check (server-logs.ts).
  */
 const loadPreview = async (
   env: Env,
-  app: AppId,
+  { app, preview }: Required<Omit<TailOf, "version">>,
   draft: Draft
 ): Promise<DurableObjectClass> => {
   const files = Object.fromEntries(await draftFiles(env, app, draft));
@@ -51,6 +55,7 @@ const loadPreview = async (
     mainModule: build.mainModule,
     modules: build.modules,
     env: bindings,
+    tails: [exports.AppTail({ props: { app, version: null, preview } })],
   })).getDurableObjectClass("App");
 };
 
@@ -154,7 +159,18 @@ export class Previews {
       this.drop(chatId, app);
       running = {
         revision: draft.revision,
-        loaded: loadPreview(this.#env, app, draft),
+        loaded: loadPreview(
+          this.#env,
+          {
+            app,
+            preview: {
+              workspaceId: workspaceIdSchema.parse(this.#ctx.id.name),
+              chatId,
+              revision: draft.revision,
+            },
+          },
+          draft
+        ),
       };
       this.#running.set(name, running);
     }

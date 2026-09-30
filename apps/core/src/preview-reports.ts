@@ -1,6 +1,7 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import type { PreviewProblem } from "@grasp-os/shared/chat";
 import type { ChatId } from "@grasp-os/shared/ids";
+import type { ServerLog } from "@grasp-os/shared/screens";
 
 // What a chat's preview of its draft ran into (preview.ts), for the
 // agent's next check of the draft (agent-builds.ts): a plain list, read as
@@ -8,15 +9,18 @@ import type { ChatId } from "@grasp-os/shared/ids";
 // side panel adds what the preview's screen reported (uncaught errors,
 // unhandled rejections, `console.error` calls); core adds what the draft's
 // server code failed with on the screen's calls. The agent's own calls
-// (`env.build.call`) answer it directly and add nothing here.
+// (`env.build.call`) answer it directly and add nothing here. Next to the
+// problems, what the draft's server code wrote with `console`, on anyone's
+// calls (server-logs.ts): for the agent to read, failing nothing.
 //
 // Only the draft's current revision's problems are kept, in memory: a
-// write starts the list afresh, and a restart loses it. With them, the
-// last revision the preview reported on at all (a problem, or a server
-// call of its screen): a check right after a write waits a moment for the
-// preview to catch up (agent-builds.ts), and says when it didn't. It waits
-// only while the person has the preview open in the side panel (loaded,
-// called or reported on lately); the agent's own calls don't count.
+// write starts the list afresh, and a restart loses it. With them, whether
+// the side panel reported on that revision at all (a problem, or a server
+// call of its screen; never the agent's calls or logs): a check right
+// after a write waits a moment for the preview to catch up
+// (agent-builds.ts), and says when it didn't. It waits only while the
+// person has the preview open in the side panel (loaded, called or
+// reported on lately); the agent's own calls don't count.
 //
 // A problem is text the draft's code wrote, or what the person typed into
 // the preview. It reaches the agent only as data in a check's result,
@@ -25,6 +29,9 @@ import type { ChatId } from "@grasp-os/shared/ids";
 
 /** Most problems kept of one revision: the first ones. */
 const maxProblems = 10;
+
+/** Most lines of server `console` output kept of one revision: the newest. */
+const maxLogs = 50;
 
 /**
  * How long a preview counts as open in the side panel after it was last
@@ -78,43 +85,54 @@ export const serverProblem = (
   };
 };
 
-/** The preview problems of one Workspace object's chats (workspace.ts). */
+/**
+ * What a preview of one revision ran into, what its server logged, and
+ * whether the side panel reported on it at all (`seen`).
+ */
+export interface Reports {
+  problems: PreviewProblem[];
+  logs: ServerLog[];
+  seen: boolean;
+}
+
+/** The preview reports of one Workspace object's chats (workspace.ts). */
 export class PreviewReports {
-  readonly #reports = new Map<
-    string,
-    { revision: number; problems: PreviewProblem[] }
-  >();
+  readonly #reports = new Map<string, Reports & { revision: number }>();
 
   /** When the side panel was last on each preview, by key (`opened`). */
   readonly #open = new Map<string, number>();
 
   /**
-   * Notes that the preview of the draft of `app` reported on `revision`:
-   * the revision kept is the last one it reported on. A later revision
-   * starts the list afresh; an earlier one's report is dropped (undefined).
+   * The reports of the preview of the draft of `app` at `revision`, to
+   * add to: undefined for an earlier revision than the one kept, whose
+   * reports are dropped; a later one starts afresh.
    */
-  saw(
-    chatId: ChatId,
-    app: string,
-    revision: number
-  ): PreviewProblem[] | undefined {
-    this.opened(chatId, app);
+  #at(chatId: ChatId, app: string, revision: number): Reports | undefined {
     const key = keyOf(chatId, app);
     const kept = this.#reports.get(key);
     if (kept !== undefined && kept.revision > revision) {
       return undefined;
     }
     if (kept?.revision === revision) {
-      return kept.problems;
+      return kept;
     }
-    const fresh = { revision, problems: [] };
+    const fresh = { revision, problems: [], logs: [], seen: false };
     this.#reports.set(key, fresh);
-    return fresh.problems;
+    return fresh;
+  }
+
+  /** Notes that the side panel reported on the draft of `app` at `revision`. */
+  saw(chatId: ChatId, app: string, revision: number): void {
+    this.opened(chatId, app);
+    const reports = this.#at(chatId, app, revision);
+    if (reports !== undefined) {
+      reports.seen = true;
+    }
   }
 
   /**
    * Keeps `problem`, one the preview of the draft of `app` at `revision`
-   * ran into, while there's room (`saw`).
+   * ran into, while there's room: the first ones.
    */
   report(
     chatId: ChatId,
@@ -122,30 +140,39 @@ export class PreviewReports {
     revision: number,
     problem: PreviewProblem
   ): void {
-    const problems = this.saw(chatId, app, revision);
-    if (problems !== undefined && problems.length < maxProblems) {
-      problems.push(problem);
+    this.opened(chatId, app);
+    const reports = this.#at(chatId, app, revision);
+    if (reports === undefined) {
+      return;
+    }
+    reports.seen = true;
+    if (reports.problems.length < maxProblems) {
+      reports.problems.push(problem);
     }
   }
 
   /**
-   * What the preview of the draft of `app` at `revision` ran into, and
-   * whether it reported anything on that revision yet (`seen`).
+   * Keeps `logs`, what the server code of the draft of `app` at `revision`
+   * wrote with `console` in its preview (server-logs.ts): the newest ones.
    */
-  read(
-    chatId: ChatId,
-    app: string,
-    revision: number
-  ): { problems: PreviewProblem[]; seen: boolean } {
+  log(chatId: ChatId, app: string, revision: number, logs: ServerLog[]): void {
+    const reports = this.#at(chatId, app, revision);
+    if (reports !== undefined) {
+      reports.logs = [...reports.logs, ...logs].slice(-maxLogs);
+    }
+  }
+
+  /** What the preview of the draft of `app` at `revision` reported. */
+  read(chatId: ChatId, app: string, revision: number): Reports {
     const reports = this.#reports.get(keyOf(chatId, app));
     return reports?.revision === revision
-      ? { problems: reports.problems, seen: true }
-      : { problems: [], seen: false };
+      ? { problems: reports.problems, logs: reports.logs, seen: reports.seen }
+      : { problems: [], logs: [], seen: false };
   }
 
   /**
    * Notes that the person has the chat's preview of `app` open in the side
-   * panel: it loaded it, called its server, or reported (`saw`).
+   * panel: it loaded it, called its server, or reported.
    */
   opened(chatId: ChatId, app: string): void {
     this.#open.set(keyOf(chatId, app), Date.now());

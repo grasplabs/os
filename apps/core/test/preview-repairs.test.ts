@@ -90,6 +90,14 @@ export class App extends DurableObject {
     return now;
   }
 
+  chatty(_caller: unknown, note: string): string {
+    console.warn("about to log", { note });
+    for (let line = 1; line <= 25; line += 1) {
+      console.log("line", line);
+    }
+    return "logged";
+  }
+
   broken(): never {
     throw new Error(atob(${JSON.stringify(btoa(`Invoice 7 has no total. ${attack}`))}));
   }
@@ -429,7 +437,7 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
     };
     /** Where each problem the preview of `revision` ran into comes from. */
     const sources = async (revision: number) => {
-      const { problems } = await stub.previewProblems(id, app, revision, 0);
+      const { problems } = await stub.previewReports(id, app, revision, 0);
       return problems.map(({ source }) => source);
     };
     /** The draft's `method`, as its screen calls it: its answer, or code. */
@@ -445,7 +453,7 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
     const first = await writeDraft(0);
     // Nobody opened it: nothing to read, not seen, and no wait for it.
     const asked = Date.now();
-    const unopened = await stub.previewProblems(id, app, first, 5000);
+    const unopened = await stub.previewReports(id, app, first, 5000);
     const waited = Date.now() - asked < 2000;
     // The mail the preview refused, let out by the draft and handled by
     // the screen: the draft may be right.
@@ -490,7 +498,7 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       moved,
       mail: await mail.did(),
     }).toStrictEqual({
-      unopened: { problems: [], seen: false },
+      unopened: { problems: [], logs: [], seen: false },
       answeredAtOnce: true,
       refused: "app.preview_side_effect",
       handled: [],
@@ -500,6 +508,73 @@ describe("the repair loop, fed by the preview", { timeout: 180_000 }, () => {
       looping: 10,
       moved: [],
       mail: { calls: 0, sent: [] },
+    });
+  });
+
+  it("keeps what the draft's server code writes with console, bounded, and fails nothing with it", async () => {
+    const { builder, app, chatId, stub } = await setUp([], false);
+    await buildServer(env, { "app/server.ts": mailing });
+    const id = chatIdSchema.parse(chatId);
+    const { chats } = builder.api;
+    const writeDraft = async (revision: number) => {
+      await stub.saveDraft(
+        id,
+        app,
+        1,
+        { "screens/desk.tsx": screen, "app/server.ts": mailing },
+        [],
+        revision
+      );
+      return revision + 1;
+    };
+    /** The preview's reports once `lines` lines are in. */
+    const logged = async (revision: number, lines: number) =>
+      await vi.waitFor(
+        async () => {
+          const reports = await stub.previewReports(id, app, revision, 0);
+          expect(reports.logs).toHaveLength(lines);
+          return reports;
+        },
+        { timeout: 10_000, interval: 50 }
+      );
+
+    const first = await writeDraft(0);
+    const called = await chats.previewCall(chatId, app, first, "chatty", [
+      "ship",
+    ]);
+    // The first twenty lines of the call, each with its method.
+    const once = await logged(first, 20);
+    // Three calls: the newest fifty lines.
+    await chats.previewCall(chatId, app, first, "chatty", ["again"]);
+    await chats.previewCall(chatId, app, first, "chatty", ["and again"]);
+    const thrice = await logged(first, 50);
+    // A new write starts with none.
+    const second = await writeDraft(first);
+    const moved = await stub.previewReports(id, app, second, 0);
+
+    const [{ at, ...firstLine } = { at: "" }] = once.logs;
+    expect({
+      called,
+      first: firstLine,
+      dated: !Number.isNaN(Date.parse(at)),
+      last: once.logs.at(-1)?.message,
+      problems: once.problems,
+      newest: thrice.logs.at(-1)?.message,
+      oldest: thrice.logs[0]?.message,
+      moved,
+    }).toStrictEqual({
+      called: "logged",
+      dated: true,
+      first: {
+        level: "warn",
+        message: 'about to log {"note":"ship"}',
+        method: "chatty",
+      },
+      last: "line 19",
+      problems: [],
+      newest: "line 19",
+      oldest: "line 10",
+      moved: { problems: [], logs: [], seen: false },
     });
   });
 

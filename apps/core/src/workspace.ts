@@ -16,7 +16,6 @@ import type {
   ChatMessage,
   ChatProvenance,
   ChatSummary,
-  PreviewProblem,
 } from "@grasp-os/shared/chat";
 import type { ConnectionPerson } from "@grasp-os/shared/connect";
 import {
@@ -37,7 +36,7 @@ import {
   permissionActionSchema,
   permissionErrors,
 } from "@grasp-os/shared/permissions";
-import type { ScreenProblem } from "@grasp-os/shared/screens";
+import type { ScreenProblem, ServerLog } from "@grasp-os/shared/screens";
 import type { RunFailure } from "@grasp-os/shared/workflows";
 import { DurableObject } from "cloudflare:workers";
 import { and, asc, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
@@ -78,6 +77,7 @@ import { forContext } from "./knowledge/memory.ts";
 import { catalog, noteListedSkills } from "./knowledge/tools.ts";
 import { gatewaySettings, models } from "./models.ts";
 import { PreviewReports, serverProblem } from "./preview-reports.ts";
+import type { Reports } from "./preview-reports.ts";
 import { Previews } from "./preview.ts";
 import type { WorkContext } from "./restricted.ts";
 
@@ -1508,19 +1508,19 @@ export class Workspace extends DurableObject<Env> {
 
   /**
    * What the preview of the chat's draft of App `appId` at `revision` ran
-   * into, for the agent's checks of the draft (agent-builds.ts): while the
-   * person has it open in the side panel, waiting up to `waitMs` for the
-   * preview to report on that revision at all, as a check may come right
-   * after the write. `seen` is false when it didn't: nobody has it open
-   * (answered at once), or its screens neither called the server nor
-   * failed.
+   * into, and what its server code logged, for the agent's checks of the
+   * draft (agent-builds.ts): while the person has it open in the side
+   * panel, waiting up to `waitMs` for it to report on that revision at
+   * all, as a check may come right after the write. `seen` is false when
+   * it didn't: nobody has it open (answered at once), or its screens
+   * neither called the server nor failed.
    */
-  async previewProblems(
+  async previewReports(
     chatId: ChatId,
     appId: string,
     revision: number,
     waitMs: number
-  ): Promise<{ problems: PreviewProblem[]; seen: boolean }> {
+  ): Promise<Reports> {
     const until = Date.now() + waitMs;
     let now = this.#previewReports.read(chatId, appId, revision);
     while (
@@ -1533,6 +1533,20 @@ export class Workspace extends DurableObject<Env> {
       now = this.#previewReports.read(chatId, appId, revision);
     }
     return now;
+  }
+
+  /**
+   * Keeps what the server code of the chat's draft of App `appId` at
+   * `revision` wrote with `console` in its preview: for the preview's
+   * tail alone (server-logs.ts).
+   */
+  previewLogs(
+    chatId: ChatId,
+    appId: string,
+    revision: number,
+    logs: ServerLog[]
+  ): void {
+    this.#previewReports.log(chatId, appId, revision, logs);
   }
 
   /**

@@ -34,6 +34,14 @@ export class App extends DurableObject {
     return caller.userId;
   }
 
+  chatty(_caller: Caller, note: string): string {
+    console.error("could not file", { note });
+    for (let line = 1; line <= 25; line += 1) {
+      console.log("line", line);
+    }
+    return "logged";
+  }
+
   notes(): string[] {
     this.ctx.storage.sql.exec("CREATE TABLE IF NOT EXISTS notes (note TEXT)");
     return this.ctx.storage.sql
@@ -761,6 +769,45 @@ describe("screens", { timeout: 60_000 }, () => {
         "screen.invalid",
         "app.version_not_found",
       ],
+    });
+  });
+
+  it("keeps what the App's server code writes with console, the first lines of each call", async () => {
+    const builder = await personApi("builder");
+    const app = await sampleApp(builder);
+    const called = await builder.api.screens.call(app, "chatty", ["invoice 7"]);
+    const log = await vi.waitFor(
+      async () => {
+        const entries = await builder.api.screens.errors(app);
+        expect(entries).toHaveLength(20);
+        return entries;
+      },
+      { timeout: 10_000, interval: 50 }
+    );
+    const undated = log.map(({ at: _at, ...entry }) => entry);
+    expect({
+      called,
+      newest: undated[0],
+      oldest: undated.at(-1),
+      dated: log.every(({ at }) => !Number.isNaN(Date.parse(at))),
+    }).toStrictEqual({
+      called: "logged",
+      dated: true,
+      newest: {
+        source: "server",
+        version: 1,
+        method: "chatty",
+        level: "log",
+        message: "line 19",
+      },
+      // What the App wrote, with its method and time: never who called.
+      oldest: {
+        source: "server",
+        version: 1,
+        method: "chatty",
+        level: "error",
+        message: 'could not file {"note":"invoice 7"}',
+      },
     });
   });
 

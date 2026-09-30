@@ -72,13 +72,29 @@ export const screenProblemSchema = z.strictObject({
 });
 export type ScreenProblem = z.output<typeof screenProblemSchema>;
 
-/** One entry of an App's error log. Times are ISO 8601. */
-export interface AppErrorEntry extends ScreenProblem {
+/** What an App's server code wrote with `console`, one call at a time. */
+export interface ServerLog {
+  /** When, ISO 8601. */
   at: string;
-  source: "screen";
-  version: number;
-  screen: string;
+  level: "debug" | "info" | "log" | "warn" | "error";
+  /** Its arguments as text, held to size. */
+  message: string;
+  /** The server method whose call wrote it, when the runtime says. */
+  method: string | null;
 }
+
+/**
+ * One entry of an App's error log: a problem one of its screens reported,
+ * or a line its server code wrote with `console`. Times are ISO 8601.
+ */
+export type AppErrorEntry =
+  | (ScreenProblem & {
+      at: string;
+      source: "screen";
+      version: number;
+      screen: string;
+    })
+  | (ServerLog & { source: "server"; version: number });
 
 /** A decision a run waits for, as its App's screens see it. */
 export interface WaitingDecision {
