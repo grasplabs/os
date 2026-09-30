@@ -17,6 +17,7 @@ import {
 } from "./knowledge.ts";
 import {
   auditedDuring,
+  letSessionRecheckPass,
   openRpc,
   outcome,
   refusal,
@@ -476,6 +477,7 @@ describe("who finds an App", setUpTime, () => {
       id: team,
       role: "user",
     });
+    using _clock = letSessionRecheckPass();
     await expect(entriesFound(member.knowledge, word)).resolves.toStrictEqual([
       entryPath(app.id),
     ]);

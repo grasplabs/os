@@ -28,12 +28,12 @@ import { personOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
 import { previewFeatures, requireFeature } from "./features.ts";
 import { gatewaySettings } from "./models.ts";
-import { callbackFor, isStub, recheckedEvery } from "./page-callbacks.ts";
+import { callbackFor, isStub } from "./page-callbacks.ts";
 import type { StillOpen } from "./page-callbacks.ts";
 import { fixQuestion, runToFix } from "./run-fixes.ts";
 import { RunSubscription } from "./run-subscription.ts";
 import { argumentsFor, screenCode, stillHasRole } from "./screens-rpc.ts";
-import { withPerson } from "./session-check.ts";
+import { recheckedEvery, withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 import { questionSchema } from "./workspace.ts";
 
@@ -69,7 +69,10 @@ const requirePreviews = (env: Env): void => {
   }
 };
 
-/** How long one answer to whether the person may still follow chats holds. */
+/**
+ * How long one answer to whether the person may still build a previewed
+ * App holds, for the callbacks of its preview.
+ */
 const recheckMs = 5000;
 
 /**
@@ -112,24 +115,29 @@ export class ChatsRpc extends RpcTarget implements ChatsApi {
   /** This connection's watches, each until it's released. */
   readonly #watches = new Set<Disposable>();
   /**
-   * Whether this connection may still follow chats: its session holds and
-   * chats (and the agent) are switched on, as every call checks, read
-   * again at most every {@link recheckMs} as updates are pushed.
+   * Whether this connection may still follow chats, before each push: its
+   * session holds, as the connection last read it (every few seconds). Not
+   * the switches, which every call checks: an agent switched off mid-turn
+   * stops the turn in the chat's object, and the page is told why.
    */
   readonly #stillOpen: StillOpen;
 
-  constructor(env: Env, check: SessionCheck) {
+  /**
+   * `check` is the session check with chats and the agent switched on, for
+   * calls; `session` the connection's own, for pushes.
+   */
+  constructor(env: Env, check: SessionCheck, session: SessionCheck) {
     super();
     this.#env = env;
     this.#check = check;
-    this.#stillOpen = recheckedEvery(recheckMs, async () => {
+    this.#stillOpen = async () => {
       try {
-        await check();
+        await session();
         return true;
       } catch {
         return false;
       }
-    });
+    };
   }
 
   /** The object that holds `userId`'s chats. */

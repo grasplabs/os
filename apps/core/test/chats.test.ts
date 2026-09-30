@@ -14,6 +14,7 @@ import { bindingsFor } from "../src/bindings.ts";
 import { chatAgentId, personalWorkspaceId } from "../src/chats-rpc.ts";
 import { personOf } from "../src/connections.ts";
 import { workspace } from "../src/durable-objects.ts";
+import { sessionRecheckMs } from "../src/session-check.ts";
 import { maxChatsPerPerson } from "../src/workspace.ts";
 import {
   codeStep,
@@ -984,10 +985,10 @@ describe("chats", () => {
     );
 
     await callAuth("/sign-out", ann.session, {});
-    // Past the few seconds one check of the session holds.
+    // Past the few seconds one reading of the session holds.
     vi.useFakeTimers({ toFake: ["Date"] });
     try {
-      vi.setSystemTime(Date.now() + 10_000);
+      vi.setSystemTime(Date.now() + sessionRecheckMs);
       release();
       await vi.waitFor(
         async () => {

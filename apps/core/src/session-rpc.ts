@@ -107,7 +107,7 @@ export class SessionRpc extends RpcTarget implements SessionApi {
     );
     this.#signals = new SignalsRpc(env, checkWith("improvement_signals"));
     // Chats are how people ask the agent: its kill switch stops them too.
-    this.#chats = new ChatsRpc(env, checkWith("agent", "chat"));
+    this.#chats = new ChatsRpc(env, checkWith("agent", "chat"), check);
     // They tell of failed runs: the workflows kill switch stops them too.
     this.#notifications = new NotificationsRpc(
       env,

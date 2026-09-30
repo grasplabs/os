@@ -72,22 +72,3 @@ export const callbackFor = (
     { [Symbol.dispose]: release }
   );
 };
-
-/**
- * `open`, asked again at most every `ms` and shared by every push
- * meanwhile: so a stream of pushes costs a check every few seconds, not
- * one each.
- */
-export const recheckedEvery = (
-  ms: number,
-  open: () => Promise<boolean>
-): StillOpen => {
-  let cached: { open: Promise<boolean>; until: number } | undefined;
-  return async () => {
-    const now = Date.now();
-    if (cached === undefined || cached.until <= now) {
-      cached = { open: open(), until: now + ms };
-    }
-    return await cached.open;
-  };
-};

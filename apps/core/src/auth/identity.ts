@@ -110,9 +110,10 @@ export const staffRole = async (
 
 /**
  * Who a request comes from: the person behind its session cookie, with their
- * role and teams read now, from the database. Called on every request and
- * RPC call that needs a person, so a revoked or expired session, a changed
- * role, a removal or a closed staff window takes effect on the next one.
+ * role and teams read now, from the database. Called on every request that
+ * needs a person, so a revoked or expired session, a changed role, a
+ * removal or a closed staff window takes effect on the next one; an open
+ * RPC connection reads it again every few seconds (rpc.ts).
  * `undefined` means nobody is signed in.
  */
 export const identify = async (

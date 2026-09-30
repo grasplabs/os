@@ -30,9 +30,11 @@ import { inList } from "./db/d1.ts";
 // while it has read data they can't read where it comes from
 // (app-provenance.ts).
 //
-// Roles are read from the database on every call, like the session and
-// the person's role and teams (auth/identity.ts), so unsharing, a team
-// change or a new role in the organization applies to the next call.
+// Roles in an App are read from the database on every call, so unsharing
+// applies to the next call. The person's session, role and teams come from
+// their connection's latest reading (auth/identity.ts, rpc.ts), at most a
+// few seconds old, so a team change or a new role in the organization
+// applies within those seconds.
 // Grasp staff, who are admins while their window is open, manage Apps as
 // admins do, but never share one (app-members.ts): whom a client's data
 // reaches is the client's decision.
