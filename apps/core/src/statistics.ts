@@ -26,7 +26,6 @@ import {
   count,
   eq,
   gte,
-  inArray,
   isNull,
   lte,
   max,
@@ -49,6 +48,7 @@ import {
   improvementSignals,
   workflowRuns,
 } from "./db/core/schema.ts";
+import { inList } from "./db/d1.ts";
 import { featureEnabled, requireFeature } from "./features.ts";
 import { authorize } from "./permissions.ts";
 
@@ -272,7 +272,7 @@ const workflowRunsMeasure = async (
     .from(workflowRuns)
     .where(
       and(
-        inArray(workflowRuns.appId, [...apps]),
+        inList(workflowRuns.appId, apps),
         where.workflow === undefined
           ? undefined
           : eq(workflowRuns.workflowId, where.workflow),
@@ -350,7 +350,7 @@ const signalsMeasure = async (
     .where(
       and(
         eq(improvementSignals.computation, latestFinishedBy(now)),
-        inArray(improvementSignals.appId, [...apps]),
+        inList(improvementSignals.appId, apps),
         where.workflow === undefined
           ? undefined
           : eq(improvementSignals.workflowId, where.workflow),
@@ -410,9 +410,7 @@ const runsVisible = async (
     const rows = await drizzle(env.DB)
       .select({ id: appsTable.id })
       .from(appsTable)
-      .where(
-        and(inArray(appsTable.id, [...apps]), isNull(appsTable.pendingSince))
-      );
+      .where(and(inList(appsTable.id, apps), isNull(appsTable.pendingSince)));
     const existing = new Set(rows.map(({ id }) => id));
     return {
       visible: apps.filter((app) => existing.has(app)),
