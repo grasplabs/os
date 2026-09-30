@@ -310,19 +310,31 @@ const unfinished = ["deploying", "failed", "stopped"] as const;
 
 /**
  * What client `clientId` ran before the rollout that last deployed to it,
- * when that rollout never finished it and nothing was deployed since (its
- * deploy is the client's latest, and not done); null otherwise. The
- * client may be part way between that and the rollout's release (one
- * Worker live, the next failed), so what it runs now is nothing to roll
- * back to: the next rollout carries this forward as its own `previous`,
- * and a rollback of it puts the client back where it last ran whole.
+ * for the rollout that now deploys `next.releaseId` to it to carry
+ * forward as its own `previous`; null when there's nothing to carry.
+ *
+ * It's carried only when that rollout never finished the client and
+ * nothing was deployed since (its deploy is the client's latest, and not
+ * done), and what the client runs now is nothing to roll back to:
+ * - the rollout now is of that same release, a retry: what the client
+ *   runs now is that release's own unfinished work, in part or whole;
+ * - or the client runs no one release whole (`next.running` is null: one
+ *   Worker live, the next failed).
+ * A rollback then puts the client back where it last ran whole. Anything
+ * else is a later release reaching a client that runs the unfinished one
+ * whole (it failed after its Workers went live): that release is what it
+ * ran before, and what a rollback puts back.
  */
 export const unfinishedPrevious = async (
   db: ConsoleDatabase,
-  clientId: string
+  clientId: string,
+  next: { releaseId: string; running: string | null }
 ): Promise<PreviousRun | null> => {
   const latest = await latestDeployOf(db, clientId);
   if (latest === undefined || latest.status === "done") {
+    return null;
+  }
+  if (latest.releaseId !== next.releaseId && next.running !== null) {
     return null;
   }
   const [target] = await db

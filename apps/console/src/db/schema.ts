@@ -270,8 +270,9 @@ export const rolloutTargets = sqliteTable(
     deployId: text("deploy_id"),
     /**
      * What the client ran before the rollout reached it, which a rollback
-     * restores: JSON (`PreviousRun`, src/rollout/targets.ts). After a
-     * rollout that never finished the client, what it ran before that one
+     * restores: JSON (`PreviousRun`, src/rollout/targets.ts). For a
+     * retry of a rollout that never finished the client, or a client left
+     * between releases, what it ran before that one
      * (`unfinishedPrevious`).
      */
     previous: text(),
