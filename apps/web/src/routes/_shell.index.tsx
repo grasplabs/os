@@ -27,6 +27,7 @@ import {
 } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 
+import { ConnectionRequests } from "../chat/connection-requests.tsx";
 import { Conversation } from "../chat/conversation.tsx";
 import { applyUpdate, emptyView, followChat } from "../chat/follow-chat.ts";
 import type { ChatView } from "../chat/follow-chat.ts";
@@ -387,6 +388,7 @@ const OpenChat = ({
           ) : null}
           <ErrorText>{view.stopped ?? undefined}</ErrorText>
           <HeldWrites chatId={chat.id} version={view.held} />
+          <ConnectionRequests chatId={chat.id} version={view.held} />
         </div>
         <Composer chatId={chat.id} models={models} running={view.running} />
       </section>

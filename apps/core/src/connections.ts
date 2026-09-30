@@ -15,6 +15,7 @@ import type {
   CatalogTool,
   ConnectionOwner,
   ConnectionPerson,
+  ConnectionSummary,
   ConnectionsApi,
   ListedConnection,
   OAuthProvider,
@@ -23,6 +24,7 @@ import type {
 import type { SignInConfig } from "@grasp-os/shared/deployment-config";
 import { authErrors } from "@grasp-os/shared/errors";
 import { errorFields, log } from "@grasp-os/shared/log";
+import { permissionErrors } from "@grasp-os/shared/permissions";
 import { isAdmin, requireAdmin, roleErrors } from "@grasp-os/shared/roles";
 import type { Identity } from "@grasp-os/shared/rpc";
 import { RpcTarget } from "capnweb";
@@ -72,7 +74,12 @@ type StartRequest = Parameters<ConnectionsApi["start"]>[0];
  */
 export const personOf = async (
   env: Env,
-  { userId, role, staff, email }: Identity
+  {
+    userId,
+    role,
+    staff,
+    email,
+  }: Pick<Identity, "userId" | "role" | "staff" | "email">
 ): Promise<ConnectionPerson> => {
   const signIns = await drizzle(env.DB)
     .select({
@@ -201,6 +208,46 @@ const isHidden = async (
     )
     .get();
   return hidden !== undefined;
+};
+
+/**
+ * The connections `person` may have their chat's agent ask for
+ * (chat-connections.ts): their own personal ones and the shared ones, as
+ * connect lists them, active, of entries an admin hasn't hidden. Hiding an
+ * entry stops new requests for it and grants of those waiting, as it stops
+ * new connections; what was granted before goes on, as above.
+ */
+export const offeredConnections = async (
+  env: Env,
+  person: ConnectionPerson
+): Promise<ConnectionSummary[]> => {
+  const [listed, hidden] = await Promise.all([
+    env.CONNECT.listConnections(person),
+    hiddenEntries(env),
+  ]);
+  return listed.filter(
+    ({ status, source, provider }) =>
+      status === "active" && !hidden.has(entryKey(source, provider))
+  );
+};
+
+/**
+ * Refuses `connectionId` unless it is one of `person`'s
+ * `offeredConnections`: what a chat's request for it needs to be granted.
+ */
+export const requireOfferedConnection = async (
+  env: Env,
+  person: ConnectionPerson,
+  connectionId: string
+): Promise<void> => {
+  const offered = await offeredConnections(env, person);
+  if (!offered.some(({ id }) => id === connectionId)) {
+    throw permissionErrors.create("permission.invalid", {
+      issues: [
+        "object.connectionId: It is no longer connected, or no longer offered.",
+      ],
+    });
+  }
 };
 
 /**

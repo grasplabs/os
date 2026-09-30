@@ -3,6 +3,7 @@ import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 
+import { personalWorkspaceId } from "../src/chats-rpc.ts";
 import { workspace } from "../src/durable-objects.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import type { Answer, GatewayReply } from "./ai-gateway.ts";
@@ -90,6 +91,29 @@ export const chatOf = async (personId: string, ...replies: GatewayReply[]) => {
   // The workspace's agent: its grants hold in all the workspace's chats.
   const agent = { type: "agent" as const, agentId: id };
   return { id, stub, chat, personId, gateway, ask, agent };
+};
+
+/**
+ * `personId`'s own Workspace object, the one their session's chats are in
+ * (`personalWorkspaceId`), answered by `replies` in all its chats, with an
+ * agent of its own: `newChat` makes each chat.
+ */
+export const personalChatsOf = async (
+  personId: string,
+  ...replies: GatewayReply[]
+) => {
+  const id = personalWorkspaceId(personId);
+  const stub = workspace(env, id);
+  const gateway = fakeGateway(...replies);
+  await pointAtGateway(stub, gateway);
+  const agent = { type: "agent" as const, agentId: crypto.randomUUID() };
+  const newChat = async () => {
+    const chat = await stub.createChat("Questions", personId, agent.agentId);
+    const ask = async (text: string) =>
+      await stub.ask(chat.id, { text, model });
+    return { chat, ask };
+  };
+  return { id, stub, gateway, agent, newChat };
 };
 
 /** The chat's transcript, as the object keeps it. */
