@@ -62,6 +62,16 @@ export const auditActorSchema = z.discriminatedUnion("type", [
     runId: runIdSchema,
   }),
   z.object({ type: z.literal("staff"), userId: identifierSchema }),
+  /**
+   * Someone who isn't a member, in a guest chat an App invited them to
+   * (`@grasp-os/shared/guests`), for the member it was made for.
+   */
+  z.object({
+    type: z.literal("guest"),
+    chatId: identifierSchema,
+    appId: appIdSchema,
+    invitedBy: identifierSchema,
+  }),
   z.object({ type: z.literal("system") }),
 ]);
 export type AuditActor = z.infer<typeof auditActorSchema>;

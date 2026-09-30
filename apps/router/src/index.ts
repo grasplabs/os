@@ -1,5 +1,6 @@
 import { requestErrors } from "@grasp-os/shared/errors";
 import type { ErrorPayload } from "@grasp-os/shared/errors";
+import { guestApiPath } from "@grasp-os/shared/guests";
 import {
   requestIdHeader,
   strictTransportSecurity,
@@ -73,31 +74,33 @@ const routeFor = async (host: string, env: Env): Promise<Route | null> => {
 /** Core's sign-in routes (Better Auth, core's `authBasePath`). */
 const authBasePath = "/api/auth";
 
-/** The sign-in limit's window, as `AUTH_RATE_LIMIT` has it in wrangler.jsonc. */
-const signInLimitPeriodS = 60;
+/**
+ * The limits' window, as `AUTH_RATE_LIMIT` and `GUEST_RATE_LIMIT` both
+ * have it in wrangler.jsonc.
+ */
+const limitPeriodS = 60;
 
 /**
- * Whether a request to core's sign-in routes is within the limit for its
- * hostname and client address. Better Auth's own limiter is off in core:
- * behind the router, every request comes from the router's address. Keyed
- * by the client's IPv4 address or IPv6 /64 (`clientAddress`), so rotating
- * through a /64 buys no fresh budget, and by hostname too, so one office
- * behind one address signing in to two clients counts separately for
- * each. When the limiter itself fails, the request goes through (and is
- * logged): sign-in stays up.
+ * Whether a request is within `limiter`'s limit for its hostname and
+ * client address: core's sign-in routes (Better Auth's own limiter is off
+ * in core, as behind the router every request comes from the router's
+ * address), and a guest chat's endpoint, which has no session to limit
+ * by. Keyed by the client's IPv4 address or IPv6 /64 (`clientAddress`),
+ * so rotating through a /64 buys no fresh budget, and by hostname too, so
+ * one office behind one address counts separately for each client. When
+ * the limiter itself fails, the request goes through (and is logged):
+ * sign-in and guests stay up.
  */
-const withinSignInLimit = async (
+const withinLimit = async (
+  limiter: RateLimit,
   request: Request,
-  host: string,
-  env: Env
+  host: string
 ): Promise<boolean> => {
   const ip = clientAddress(
     request.headers.get("cf-connecting-ip") ?? "unknown"
   );
   try {
-    const { success } = await env.AUTH_RATE_LIMIT.limit({
-      key: `${host}|${ip}`,
-    });
+    const { success } = await limiter.limit({ key: `${host}|${ip}` });
     return success;
   } catch (error) {
     log.error("router.rate_limit_failed", { host, ...errorFields(error) });
@@ -117,7 +120,7 @@ const rateLimited = (url: URL, host: string): Response => {
   const requestId = crypto.randomUUID();
   const { code, message } = requestErrors.create("request.rate_limited");
   const headers = new Headers({
-    "retry-after": String(signInLimitPeriodS),
+    "retry-after": String(limitPeriodS),
     [requestIdHeader]: requestId,
     "x-content-type-options": "nosniff",
   });
@@ -161,7 +164,15 @@ export default {
     // Signing out needs no protection from guessing, and refusing it would
     // leave the person signed in.
     const isLimited = isAuth && pathname !== signOutPath;
-    if (isLimited && !(await withinSignInLimit(request, host, env))) {
+    if (isLimited && !(await withinLimit(env.AUTH_RATE_LIMIT, request, host))) {
+      return rateLimited(url, host);
+    }
+    // A guest chat's endpoint (core's src/guests.ts), which anyone with a
+    // link, or without one, can reach.
+    if (
+      pathname === guestApiPath &&
+      !(await withinLimit(env.GUEST_RATE_LIMIT, request, host))
+    ) {
       return rateLimited(url, host);
     }
 

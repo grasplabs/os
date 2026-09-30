@@ -105,6 +105,7 @@ export default defineConfig({
             app_builder: true,
             run_notifications: true,
             app_preview: true,
+            guest_chats: true,
           })
         ),
         // `--local` has no Workers AI: a deployment kept in the EU extracts

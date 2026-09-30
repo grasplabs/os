@@ -62,6 +62,7 @@ export interface Draft {
 export const originLabels = {
   manual: "Typed in",
   notes: "Notes",
+  guest: "Stakeholder chat",
 } as const;
 export type Origin = keyof typeof originLabels;
 
@@ -82,11 +83,28 @@ export interface OpenedDraft extends DraftSummary {
   draft: Draft;
 }
 
+/** A stakeholder chat, as the platform's guest chats list it. */
+export interface GuestChat {
+  id: string;
+  name: string;
+  status: "open" | "finished" | "revoked" | "expired";
+  turns: number;
+  createdAt: string;
+  expiresAt: string;
+}
+
+/** A chat just made, with its link: shown once. */
+export interface Invited extends GuestChat {
+  link: string;
+}
+
 export interface Overview {
   access: "none" | "ok";
   /** Whether the person may change the Playbook: intake is only theirs. */
   writable: boolean;
   drafts: DraftSummary[];
+  /** Stakeholder chats; null while the App can't invite anyone. */
+  guests: GuestChat[] | null;
 }
 
 /** What a save answers: the source's path and how many statements. */
@@ -230,6 +248,21 @@ export const refusal = (code: string): string => {
     }
     case "permission.restricted": {
       return "Intake read restricted data, so it can't write to the Playbook, which everyone reads.";
+    }
+    case "intake.empty_chat": {
+      return "Nobody wrote in that chat yet.";
+    }
+    case "guest.too_many_open": {
+      return "Too many chats are open. Revoke some, or wait for them to end.";
+    }
+    case "guest.no_model": {
+      return "No model is set up for this deployment, so nobody can be invited.";
+    }
+    case "guest.invalid": {
+      return "That can't be invited: give their name, of at most 100 characters.";
+    }
+    case "guest.not_found": {
+      return "That chat is gone.";
     }
     case "app.unreachable": {
       return "Grasp can't be reached right now. Try again in a moment.";

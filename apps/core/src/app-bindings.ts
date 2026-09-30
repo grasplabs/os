@@ -18,6 +18,7 @@ import {
 } from "./bindings.ts";
 import type { ConnectionGrant } from "./bindings.ts";
 import { appHost } from "./durable-objects.ts";
+import type { AppGuestsBinding } from "./guests-binding.ts";
 import type { AppCollectionBinding } from "./knowledge/app-binding.ts";
 import { activePermissions } from "./permissions.ts";
 import type { AppStatisticsBinding } from "./statistics-binding.ts";
@@ -131,13 +132,14 @@ type AppStub =
   | Fetcher<AppConnectionBinding>
   | Fetcher<AppCollectionBinding>
   | Fetcher<AppExportBinding>
-  | Fetcher<AppStatisticsBinding>;
+  | Fetcher<AppStatisticsBinding>
+  | Fetcher<AppGuestsBinding>;
 
 /**
  * The env of an App's server code, built from the App's permission
  * records as they are now: its connections, the collections it may read,
- * the other Apps whose exports it may call, and the platform's statistics
- * if it may read them; and its own statistics (`STATISTICS`), which every
+ * the other Apps whose exports it may call, the platform's statistics if
+ * it may read them, and guest chats if it may invite guests; and its own statistics (`STATISTICS`), which every
  * App has. Its stubs act for no one person:
  * each call passes its caller.
  */
@@ -161,10 +163,15 @@ export const appBindings = async (
           props: { ...exported, caller: app },
         });
       }
+      // A platform permission has one action, which its stub does.
       if (permission.object.type === "platform") {
-        return exports.AppStatisticsBinding({
-          props: { app, permissionId: permission.id },
-        });
+        return permission.actions.includes("guests")
+          ? exports.AppGuestsBinding({
+              props: { app, permissionId: permission.id },
+            })
+          : exports.AppStatisticsBinding({
+              props: { app, permissionId: permission.id },
+            });
       }
       const collection = collectionOf(permission);
       return collection === undefined

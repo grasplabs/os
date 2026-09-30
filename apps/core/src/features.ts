@@ -26,7 +26,8 @@ import { featureErrors } from "@grasp-os/shared/errors";
 // runs and every step of one (`workflows`), opening
 // or asking a decision (`decisions`), and screens' calls on their App's
 // runs (`screen_workflows`), and telling people of failed runs and asking
-// the agent to fix them (`run_notifications`). `model_rules` stops the model
+// the agent to fix them (`run_notifications`), and guest chats, their
+// links and what Apps read of them (`guest_chats`). `model_rules` stops the model
 // gateway checking the client's rules beyond the allowlist,
 // `model_settings` admins reading those rules and the month's spend, and
 // `improvement_signals` the daily signals and reading them, and
@@ -257,7 +258,17 @@ export type Feature =
    * effects; needs `app_builder` on too. While off, no draft is previewed,
    * and a preview open in a page stops at its next call.
    */
-  | "app_preview";
+  | "app_preview"
+  /**
+   * Guest chats (guests.ts): Apps inviting people who aren't members to a
+   * short chat with a model through a link, the guests chatting, and Apps
+   * reading back what they wrote. Its kill switch: while off, nobody is
+   * invited, no link opens and no message is taken (a guest's page says
+   * the link doesn't work), and no App reads a chat back; what was written
+   * stays until its retention ends, and the links that haven't expired
+   * work again once it's back on.
+   */
+  | "guest_chats";
 
 /** Whether `feature` is switched on for this deployment. */
 export const featureEnabled = (

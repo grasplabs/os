@@ -87,6 +87,10 @@ const personOf = ({ trigger, work }: BudgetInput): string | undefined => {
   if (trigger.type === "agent") {
     return trigger.onBehalfOf;
   }
+  // A guest's chat spends the budget of the member it was made for.
+  if (trigger.type === "guest") {
+    return trigger.invitedBy;
+  }
   return work?.authority.onBehalfOf;
 };
 

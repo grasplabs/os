@@ -18,6 +18,7 @@ import { ask, originLabels, refusal, settle } from "../components/intake";
 import type { DraftSummary, OpenedDraft, Overview } from "../components/intake";
 import { NotesForm } from "../components/notes-form";
 import type { NotesInput } from "../components/notes-form";
+import { Stakeholders } from "../components/stakeholders";
 
 /**
  * What the screen shows: the drafts, a new source typed in (the
@@ -219,16 +220,20 @@ const Intake = () => {
     setView({ kind: "open", opened: answer.ok, problem: "" });
   };
 
-  /** Starts reading `input`, and says why it didn't start, if it didn't. */
+  /**
+   * Starts reading notes, or a stakeholder's chat, called `title` while
+   * it is read, and says why it didn't start, if it didn't.
+   */
   const startReading = async (
-    input: NotesInput
+    input: NotesInput | { chat: string },
+    title: string
   ): Promise<string | undefined> => {
     const started = await settle(async () => await extract.start(input));
     if ("error" in started) {
       return refusal(started.error);
     }
     const { id } = started.ok;
-    setReading((runs) => [{ id, title: input.source.title }, ...runs]);
+    setReading((runs) => [{ id, title }, ...runs]);
     openings.current += 1;
     setView({ kind: "list" });
     await list();
@@ -287,10 +292,14 @@ const Intake = () => {
   };
 
   const writable = overview?.writable === true;
+  // Stakeholder chats, while the App may invite: null otherwise.
+  const chats = overview?.guests ?? null;
+  // The lists, for someone who takes intake, while nothing is open.
+  const listing = view.kind === "list" && writable;
   return (
     <main className="flex flex-col gap-4 p-6">
       <IntakeHeader
-        canStart={view.kind === "list" && writable}
+        canStart={listing}
         onNotes={() => {
           openings.current += 1;
           setNotice("");
@@ -306,7 +315,7 @@ const Intake = () => {
       <Problem text={problem} />
       {notice === "" ? null : <output className="text-sm">{notice}</output>}
       <AccessNote overview={overview} />
-      {view.kind === "list" && writable ? (
+      {listing ? (
         <Extractions
           started={reading}
           onReady={() => {
@@ -320,7 +329,22 @@ const Intake = () => {
           }}
         />
       ) : null}
-      {view.kind === "list" && writable ? (
+      {listing && chats !== null ? (
+        <Stakeholders
+          chats={chats}
+          onChanged={list}
+          onRead={(chat) => {
+            void (async () => {
+              const why = await startReading(
+                { chat: chat.id },
+                `Chat with ${chat.name}`
+              );
+              setProblem(why ?? "");
+            })();
+          }}
+        />
+      ) : null}
+      {listing ? (
         <DraftList
           drafts={overview?.drafts ?? []}
           onOpen={(id) => {
@@ -330,7 +354,9 @@ const Intake = () => {
       ) : null}
       {view.kind === "notes" ? (
         <NotesForm
-          onStart={startReading}
+          onStart={async (input) =>
+            await startReading(input, input.source.title)
+          }
           onBack={() => {
             void showList();
           }}
