@@ -18,7 +18,6 @@ import { recordPlatformUpdate } from "../src/platform-updates.ts";
 import { allEvents } from "./audit-events.ts";
 import { runCron } from "./cron.ts";
 import { routed } from "./sign-in.ts";
-import { testBinding } from "./test-env.ts";
 
 // Platform updates: the every-minute cron records each version of core it
 // hasn't seen running as `platform.updated`, with the change the console
@@ -38,11 +37,6 @@ const change: PlatformChange = {
   release: "r000123-abcdef0",
   at: "2031-01-02T03:04:00.000Z",
 };
-
-/** Core's migrations, as vite.config.ts binds them. */
-const migrationsSchema = z.array(
-  z.object({ name: z.string(), queries: z.array(z.string()) })
-);
 
 /**
  * Core's database, with `first` run just before each batch lands: another
@@ -179,54 +173,6 @@ describe("platform updates", () => {
     await runCron({ CF_VERSION_METADATA: version });
 
     await expect(updatesOf(version)).resolves.toHaveLength(1);
-  });
-
-  it("aren't recorded again for the version the job's first release recorded last", async () => {
-    const running = newVersion();
-    const next = newVersion();
-    const migration = migrationsSchema
-      .parse(testBinding("CORE_MIGRATIONS"))
-      .find(({ name }) => name.startsWith("0018_"));
-    if (migration === undefined) {
-      throw new Error("Migration 0018 is missing");
-    }
-    // As before the migration that adds `platform_versions` ran, with the
-    // running version in the one row the first release kept. That row is
-    // put back as it was afterwards, so later tests see what they did.
-    const oldRow = await env.DB.prepare(
-      "SELECT version_id, recorded_at FROM platform_version WHERE id = 1"
-    ).first<{ version_id: string; recorded_at: number }>();
-    await env.DB.exec(
-      "ALTER TABLE platform_versions RENAME TO platform_versions_away"
-    );
-    try {
-      await env.DB.prepare(
-        "INSERT OR REPLACE INTO platform_version (id, version_id, recorded_at) VALUES (1, ?, ?)"
-      )
-        .bind(running.id, Date.now())
-        .run();
-      await env.DB.batch(
-        migration.queries.map((query) => env.DB.prepare(query))
-      );
-
-      await runCron({ CF_VERSION_METADATA: running });
-      await runCron({ CF_VERSION_METADATA: next });
-    } finally {
-      await env.DB.exec("DROP TABLE IF EXISTS platform_versions");
-      await env.DB.exec(
-        "ALTER TABLE platform_versions_away RENAME TO platform_versions"
-      );
-      await (
-        oldRow === null
-          ? env.DB.prepare("DELETE FROM platform_version WHERE id = 1")
-          : env.DB.prepare(
-              "INSERT OR REPLACE INTO platform_version (id, version_id, recorded_at) VALUES (1, ?, ?)"
-            ).bind(oldRow.version_id, oldRow.recorded_at)
-      ).run();
-    }
-
-    await expect(updatesOf(running)).resolves.toHaveLength(0);
-    await expect(updatesOf(next)).resolves.toHaveLength(1);
   });
 
   it("are not recorded without version metadata, as on plain workerd", async () => {

@@ -5,10 +5,8 @@ import { auditLog } from "./audit-log.ts";
 import { drainAuditOutboxes } from "./audit-outbox.ts";
 import { refreshDailySignals } from "./daily-signals.ts";
 import { handleRequest } from "./entry.ts";
-import { featureEnabled } from "./features.ts";
 import { sweepGuestChats } from "./guests.ts";
 import { indexApps } from "./knowledge/apps-collection.ts";
-import { syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import { sweepUploads } from "./knowledge/uploads.ts";
 import { retryDisconnects } from "./members.ts";
 import { recordPlatformUpdate } from "./platform-updates.ts";
@@ -62,9 +60,7 @@ export default {
   // Every minute: audit events waiting in core's outboxes and connect's
   // (see src/audit-outbox.ts), personal connections of removed people still
   // connected (see src/members.ts), Apps copied from a blueprint left
-  // pending (see src/app-blueprints.ts), the release's Grasp skills while
-  // `builtins` is off (see src/knowledge/grasp-skills.ts; once it's on, the
-  // first request installs them, src/builtins.ts), uploads left behind
+  // pending (see src/app-blueprints.ts), uploads left behind
   // (see src/knowledge/uploads.ts), a new version of core, audited as
   // a platform update (see src/platform-updates.ts), and workflows'
   // schedules due by the minute it runs for (see src/workflows/triggers.ts),
@@ -104,8 +100,6 @@ export default {
             drainAuditOutboxes(env),
             retryDisconnects(env),
             sweepPendingCopies(env),
-            // Remove with the `builtins` flag, in a later release.
-            ...(featureEnabled(env, "builtins") ? [] : [syncGraspSkills(env)]),
             sweepUploads(env),
             // Deploys apply migrations first (CI's db:migrate, and the
             // console's deploy), so `platform_versions` exists. A version

@@ -167,46 +167,6 @@ export const links = sqliteTable(
 );
 
 /**
- * A change an agent proposed to a shared memory file
- * (knowledge/memory-proposals.ts):
- * the whole new text, from `base_version` of the document at `path`, which
- * waits for someone who can change the collection to approve or decline it.
- */
-export const memoryProposals = sqliteTable(
-  "memory_proposals",
-  {
-    id: text().primaryKey(),
-    collectionId: text("collection_id")
-      .notNull()
-      .references(() => collections.id, { onDelete: "cascade" }),
-    path: text().notNull(),
-    /** The document's version it was proposed from, 0 for a new one. */
-    baseVersion: integer("base_version").notNull(),
-    text: text().notNull(),
-    message: text(),
-    /** JSON: who proposed it, and where. */
-    source: text().notNull(),
-    /** The agent that proposed it: its proposals waiting are capped. */
-    agentId: text("agent_id").notNull(),
-    /** User ID: the person it acted for, whom the cap counts by too. */
-    onBehalfOf: text("on_behalf_of").notNull(),
-    status: text({ enum: ["pending", "approved", "declined"] }).notNull(),
-    /** User ID. */
-    decidedBy: text("decided_by"),
-    createdAt: timestamp("created_at").notNull(),
-    decidedAt: timestamp("decided_at"),
-  },
-  (table) => [
-    index("memory_proposals_status_idx").on(table.status, table.createdAt),
-    index("memory_proposals_agent_idx").on(
-      table.agentId,
-      table.onBehalfOf,
-      table.status
-    ),
-  ]
-);
-
-/**
  * Which version of each App its entry in the Apps collection holds
  * (knowledge/apps-collection.ts): written in the same batch as the entry,
  * so it never names a version the entry doesn't have. An App whose current

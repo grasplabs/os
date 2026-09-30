@@ -81,9 +81,6 @@ const typeRules: readonly {
   { action: "knowledge.signals.read", type: "read" },
   { action: "knowledge.signal.dismissed", type: "decision" },
   { action: "knowledge.collection", type: "config" },
-  // An owner deciding on a proposed change to a shared memory file.
-  { action: "knowledge.proposal.approved", type: "decision" },
-  { action: "knowledge.proposal.declined", type: "decision" },
   { action: "knowledge", type: "action" },
   // A person making, renaming or deleting one of their chats.
   { action: "chat", type: "action" },

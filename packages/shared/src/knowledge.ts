@@ -752,8 +752,8 @@ const purgeTermSchema = z
 
 /**
  * What a purge removes, for good, from every version:
- * - `personal`: the person's Personal collection, with their USER.md, all
- *   its versions, and the memory proposals their agents made;
+ * - `personal`: the person's Personal collection, with their USER.md and
+ *   all its versions;
  * - `content`: every occurrence of the `terms` (a name, an email address,
  *   a passage), in any case and as a whole word (never inside a longer
  *   word), from the documents named, which stay: each becomes
@@ -790,12 +790,10 @@ export interface PurgePlan {
   documents: number;
   /** Versions of them it deletes or rewrites. */
   versions: number;
-  /** Memory proposals it deletes or rewrites. */
-  proposals: number;
   /**
    * How often a term would still start a longer word in what the purge
-   * leaves of the documents named: every version, the one it saves too,
-   * and every memory proposal ("Toms", "Tomin", "tomVisser" or
+   * leaves of the documents named: every version, the one it saves too
+   * ("Toms", "Tomin", "tomVisser" or
    * "tom.visser@acme.test.evil" for "Tom" or the address; not "automated"
    * or "custom", where it is inside or ends one). List the forms to remove
    * as terms of their own. Always 0 for `personal`.
@@ -820,7 +818,6 @@ export interface PurgeResult {
   purgeId: string;
   documents: number;
   versions: number;
-  proposals: number;
 }
 
 /**
@@ -945,10 +942,6 @@ export const knowledgeErrors = defineErrorFamily({
     "This document has too many headings to save. Split it into several documents.",
   "knowledge.too_many_links":
     "This document has too many links to save. Split it into several documents.",
-  "knowledge.proposal_decided":
-    "This proposal was already approved or declined.",
-  "knowledge.too_many_proposals":
-    "This agent has too many proposals waiting. Approve or decline some first.",
   "knowledge.conflict":
     "This document changed since you opened it. Load the latest version and apply your change to it.",
   "knowledge.purge_expired":

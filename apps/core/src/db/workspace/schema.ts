@@ -22,17 +22,15 @@ export const chats = sqliteTable(
     restricted: integer({ mode: "boolean" }).notNull().default(false),
     /**
      * The person the chat belongs to, whom its agent acts for, and the
-     * only one who reaches it. Chats made before agents have none: nobody
-     * lists them, and their agent can't act.
+     * only one who reaches it.
      */
-    personId: text("person_id"),
+    personId: text("person_id").notNull(),
     /**
      * The agent that answers in the chat, acting for its person: the
      * organization's agent admins grant to, whichever object holds the
      * chat.
-     * Chats made before have none, and their agent can't act.
      */
-    agentId: text("agent_id"),
+    agentId: text("agent_id").notNull(),
   },
   // A person's list, newest first.
   (table) => [index("chats_person").on(table.personId, table.createdAt)]

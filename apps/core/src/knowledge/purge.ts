@@ -19,12 +19,11 @@ import type { DrizzleD1Database } from "drizzle-orm/d1";
 import type { z } from "zod";
 
 import { auditedBatch, outboxed } from "../audit-outbox.ts";
-import { inList, notInList } from "../db/d1.ts";
+import { inList } from "../db/d1.ts";
 import {
   collections,
   documents,
   links,
-  memoryProposals,
   sections,
   uploads,
   versions,
@@ -37,7 +36,6 @@ import type { CollectionRow } from "./collections.ts";
 import { checkedText, personWriter, writeVersion } from "./documents.ts";
 import type { DocumentRow } from "./documents.ts";
 import { personalCollectionId } from "./memory-files.ts";
-import { failBatchIfProposals } from "./memory-proposals.ts";
 import { cleanUpOriginals, forgetUploads } from "./uploads.ts";
 
 // Purging personal data from Knowledge, for good, when someone leaves or
@@ -46,13 +44,12 @@ import { cleanUpOriginals, forgetUploads } from "./uploads.ts";
 //
 // - `personal`: the person's Personal collection (their USER.md and
 //   whatever else is in it) is deleted with every version, section, link
-//   and search row, and so are the memory proposals their agents made,
-//   which hold text from their chats. One batch, with its audit event.
+//   and search row. One batch, with its audit event.
 // - `content`: every occurrence of some terms (a name, an email address, a
 //   passage), in any case and as a whole word (never inside a longer
 //   word, except in scripts written without spaces), is replaced with
-//   `purgedMarker` in every version of the documents named, and in their
-//   memory proposals. Preparing one also counts how often a term would
+//   `purgedMarker` in every version of the documents named. Preparing one
+//   also counts how often a term would
 //   still start a longer word ("Toms"), so the admin can add those forms
 //   as terms of their own. Whenever anything changed, the current text is also
 //   saved as the next version, which makes its sections, links, search
@@ -123,17 +120,15 @@ type ContentPurge = Extract<PurgeInput, { type: "content" }>;
 interface Counts {
   documents: number;
   versions: number;
-  proposals: number;
 }
 
-const nothing: Counts = { documents: 0, versions: 0, proposals: 0 };
+const nothing: Counts = { documents: 0, versions: 0 };
 
 const sum = (all: Counts[]): Counts => {
   const total = { ...nothing };
   for (const counts of all) {
     total.documents += counts.documents;
     total.versions += counts.versions;
-    total.proposals += counts.proposals;
   }
   return total;
 };
@@ -270,13 +265,6 @@ const documentsIn = (db: DrizzleD1Database, collectionId: string) =>
     .from(documents)
     .where(eq(documents.collectionId, collectionId));
 
-/** The memory proposals a personal purge deletes. */
-const proposalsOf = (collectionId: string, userId: string) =>
-  or(
-    eq(memoryProposals.collectionId, collectionId),
-    eq(memoryProposals.onBehalfOf, userId)
-  );
-
 /** What purging `userId`'s Personal collection deletes. */
 const personalScope = async (
   db: DrizzleD1Database,
@@ -288,24 +276,19 @@ const personalScope = async (
     .select({ count: count() })
     .from(versions)
     .where(inArray(versions.documentId, documentsIn(db, collectionId)));
-  const [proposalCount] = await db
-    .select({ count: count() })
-    .from(memoryProposals)
-    .where(proposalsOf(collectionId, userId));
   return {
     collectionId,
     documentIds: found.map(({ id }) => id),
     counts: {
       documents: found.length,
       versions: versionCount?.count ?? 0,
-      proposals: proposalCount?.count ?? 0,
     },
   };
 };
 
 /**
- * Deletes `userId`'s Personal collection, everything in it and their
- * agents' proposals, with the audit event, in one batch: all or nothing.
+ * Deletes `userId`'s Personal collection and everything in it, with the
+ * audit event, in one batch: all or nothing.
  * The sections go first, row by row, so the triggers take them out of the
  * search index; the rest in the order they refer to one another. The
  * originals of files uploaded to it are recorded for deleting in the same
@@ -325,7 +308,6 @@ const purgePersonal = async (
     db.delete(sections).where(inArray(sections.documentId, inCollection)),
     db.delete(links).where(inArray(links.fromDocumentId, inCollection)),
     db.delete(versions).where(inArray(versions.documentId, inCollection)),
-    db.delete(memoryProposals).where(proposalsOf(collectionId, input.userId)),
     ...forgetUploads(db, eq(uploads.collectionId, collectionId)),
     db.delete(documents).where(eq(documents.collectionId, collectionId)),
     db.delete(collections).where(eq(collections.id, collectionId)),
@@ -511,7 +493,7 @@ const joinedIn = (texts: (string | null)[], matcher: Matcher): number => {
   return total;
 };
 
-/** A version's or proposal's text and message, rewritten if they change. */
+/** A version's text and message, rewritten if they change. */
 const rewritten = (
   row: { text: string; message: string | null },
   matcher: Matcher
@@ -782,54 +764,9 @@ const rewriteVersions = async (
 };
 
 /**
- * Updates of `document`'s memory proposals that hold a term, the IDs of
- * those waiting that were read (only those, rewritten or not, move to the
- * version a purge saves), and how often a term still starts a longer word
- * in them (`joinedIn`).
- */
-const proposalRewrites = async (
-  db: DrizzleD1Database,
-  document: DocumentRow,
-  matcher: Matcher
-) => {
-  const proposals = await db
-    .select({
-      id: memoryProposals.id,
-      text: memoryProposals.text,
-      message: memoryProposals.message,
-      status: memoryProposals.status,
-    })
-    .from(memoryProposals)
-    .where(
-      and(
-        eq(memoryProposals.collectionId, document.collectionId),
-        eq(memoryProposals.path, document.path)
-      )
-    );
-  let joined = 0;
-  const updates = proposals.flatMap(({ id, text, message }) => {
-    const changed = rewritten({ text, message }, matcher);
-    const left = changed ?? { text, message };
-    joined += joinedIn([left.text, left.message], matcher);
-    return changed === undefined
-      ? []
-      : [
-          db
-            .update(memoryProposals)
-            .set(changed)
-            .where(eq(memoryProposals.id, id)),
-        ];
-  });
-  const pendingIds = proposals
-    .filter(({ status }) => status === "pending")
-    .map(({ id }) => id);
-  return { updates, pendingIds, joined };
-};
-
-/**
  * What purging the terms from `named` would change, and how often a term
  * would still start a longer word in what it leaves: every version, the
- * one it saves too, and every memory proposal. Checks it can.
+ * one it saves too. Checks it can.
  */
 const countDocument = async (
   env: Env,
@@ -846,8 +783,7 @@ const countDocument = async (
     matcher,
     false
   );
-  const inProposals = await proposalRewrites(db, document, matcher);
-  const changes = inVersions.changed + inProposals.updates.length > 0;
+  const changes = inVersions.changed > 0;
   // When anything changes, the purge saves the current text, rewritten,
   // as the next version too (`purgeDocument`).
   const inSaved =
@@ -856,9 +792,8 @@ const countDocument = async (
     counts: {
       documents: changes ? 1 : 0,
       versions: inVersions.changed,
-      proposals: inProposals.updates.length,
     },
-    joined: inVersions.joined + inProposals.joined + inSaved,
+    joined: inVersions.joined + inSaved,
   };
 };
 
@@ -893,13 +828,11 @@ const originalsOf = async (
  * (`writeVersion`), which makes the sections, links, search rows, title,
  * description, owner and tags again, and gives memory cached by version a
  * new key. In the same batch, the current version is rewritten in place
- * too, the memory proposals are rewritten, and those read waiting on the
- * version it had move to the new one, which has the same text but for the
- * terms.
+ * too.
  *
- * The proposals are read first, and the save is from the version the purge
- * started at, so anyone who saved, restored or proposed meanwhile, from
- * text the purge hadn't rewritten yet, makes it fail with
+ * The save is from the version the purge started at, so anyone who saved
+ * or restored meanwhile, from text the purge hadn't rewritten yet, makes
+ * it fail with
  * `knowledge.conflict`; running the purge again rewrites theirs too. A purge cut short leaves the current version as it
  * was, so running it again finishes it; one run again after it finished
  * finds nothing, and writes nothing.
@@ -913,15 +846,13 @@ const purgeDocument = async (
 ): Promise<Counts> => {
   const { document, collection } = named;
   const at = document.currentVersion;
-  const { updates, pendingIds } = await proposalRewrites(db, document, matcher);
   const earlier = await rewriteVersions(db, document, at - 1, matcher, true);
   const current = await versionOf(db, document, at);
   const changed = current && rewritten(current, matcher);
   const changedVersions = earlier.changed + (changed === undefined ? 0 : 1);
   const counts: Counts = {
-    documents: changedVersions + updates.length > 0 ? 1 : 0,
+    documents: changedVersions > 0 ? 1 : 0,
     versions: changedVersions,
-    proposals: updates.length,
   };
   if (current === undefined || counts.documents === 0) {
     // Nothing in its text, but maybe in a file uploaded as it (a term in
@@ -956,35 +887,7 @@ const purgeDocument = async (
                 )
               ),
           ]),
-      ...updates,
       ...forgetUploads(db, uploadsNamed(document)),
-      // A proposal made from version N after they were read would wait
-      // on it with text this purge never saw: the batch fails, as a
-      // conflict, and running the purge again rewrites it too.
-      failBatchIfProposals(
-        db,
-        and(
-          eq(memoryProposals.collectionId, document.collectionId),
-          eq(memoryProposals.path, document.path),
-          eq(memoryProposals.status, "pending"),
-          eq(memoryProposals.baseVersion, at),
-          notInList(memoryProposals.id, pendingIds)
-        )
-      ),
-      ...(pendingIds.length === 0
-        ? []
-        : [
-            db
-              .update(memoryProposals)
-              .set({ baseVersion: at + 1 })
-              .where(
-                and(
-                  inList(memoryProposals.id, pendingIds),
-                  eq(memoryProposals.status, "pending"),
-                  eq(memoryProposals.baseVersion, at)
-                )
-              ),
-          ]),
     ],
   });
   return counts;

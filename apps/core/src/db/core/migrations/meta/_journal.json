@@ -267,6 +267,13 @@
       "when": 1790793391346,
       "tag": "0037_drop_permission_mask",
       "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "6",
+      "when": 1790795385179,
+      "tag": "0038_drop_platform_version",
+      "breakpoints": true
     }
   ]
 }

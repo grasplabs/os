@@ -33,11 +33,6 @@ import { errorResponse } from "./errors.ts";
 // below). The event waits in core's outbox for the cron's drain, this
 // run's or the next.
 //
-// `platform_version`, the one row the first release of this job kept, is
-// no longer written; a later release drops it. The migration that added
-// `platform_versions` copied that row in, so the version running then
-// isn't recorded twice.
-//
 // A version made outside the console (a `wrangler deploy`, which keeps the
 // vars) carries the previous version's `PLATFORM_CHANGE`; the event names
 // the version's own ID and creation time, so a reader can tell. Without
