@@ -45,7 +45,7 @@ export default defineProject({
     testTimeout: 30_000,
     // The pool inlines every dependency, and the module runner loads each
     // module with its own round trip to Vite, one import after another.
-    // lucide-react's entry re-exports about 2,000 icon modules, so a page
+    // lucide-react's entry re-exports about 1,850 icon modules, so a page
     // with an icon (the rollouts page's Selects) took several times as long
     // as the rest of the app: past 30 s under CI's load. Pre-bundled, it is
     // one module. React stays out of the bundle, so there is one React.
