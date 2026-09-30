@@ -530,7 +530,7 @@ describe("chats", () => {
     core[Symbol.dispose]();
   });
 
-  it("survive the object restarting, and a turn cut short by it ends", async () => {
+  it("survive the object restarting, and a turn cut short by it ends, which the chat says once", async () => {
     const ann = await person();
     await answering(ann, says("Kept."), { hang: true });
     const chat = await ann.chats.create("Durable");
@@ -548,12 +548,17 @@ describe("chats", () => {
 
     // Restarted, as a deploy restarts it: its alarm and its watchers keep
     // it up, so the runtime won't just evict it.
-    await runInDurableObject(objectOf(ann), (_instance, state) => {
-      state.abort("Restarted by the test");
-    }).catch(() => {
-      // Aborting fails the call that aborted: that is the restart.
-    });
-    await answering(ann, says("Still here."));
+    const restart = async () => {
+      await runInDurableObject(objectOf(ann), (_instance, state) => {
+        state.abort("Restarted by the test");
+      }).catch(() => {
+        // Aborting fails the call that aborted: that is the restart.
+      });
+    };
+    await restart();
+    // Restarted again with no turn under way: nothing more to say.
+    await restart();
+    const gateway = await answering(ann, says("Still here."));
     const after = await follow(ann.chats, chat.id);
     await vi.waitFor(
       () => {
@@ -561,21 +566,35 @@ describe("chats", () => {
       },
       { timeout: 10_000 }
     );
-    // What was stored is there; the cut-short turn isn't running any more.
+    // What was stored is there, and the chat says, once, that the turn was
+    // cut short; it isn't running any more.
+    const interrupted =
+      "I was interrupted before I finished, so what I was doing may be incomplete. Ask again and I'll go on from here.";
     expect(shown(after)).toStrictEqual([
       { role: "user", text: "Keep this." },
       { role: "assistant", text: "Kept." },
       { role: "user", text: "And this?" },
+      { role: "assistant", text: interrupted },
     ]);
     expect(after.now()).toMatchObject({ running: false, partial: null });
     await expect(ann.chats.list()).resolves.toMatchObject([
       { id: chat.id, title: "Durable", running: false },
     ]);
 
-    // The chat goes on from there.
+    // The chat goes on from there, its agent knowing what was cut short.
     await ann.chats.send(chat.id, { text: "Hello again.", model });
-    await settled(after);
-    expect(after.messages().at(-1)).toMatchObject({ text: "Still here." });
+    await vi.waitFor(
+      () => {
+        expect(after.messages().at(-1)).toMatchObject({ text: "Still here." });
+      },
+      { timeout: 10_000 }
+    );
+    const sent = JSON.stringify(gateway.requests[0]?.body);
+    expect(
+      ["And this?", interrupted, "Hello again."].map((text) =>
+        sent.includes(text)
+      )
+    ).toStrictEqual([true, true, true]);
   });
 
   it("take one question at a time, and aren't deleted under their agent", async () => {
