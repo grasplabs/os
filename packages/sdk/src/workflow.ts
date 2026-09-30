@@ -460,9 +460,9 @@ export interface WorkflowContext<P extends Params, Input> {
   state: StateStore;
   /**
    * The App's connections and other permissions, and its own server
-   * methods, by binding name; call them inside steps, each written as
-   * `env.NAME.method(…)`, `appServer(env)` or `appExports(env.NAME)` (see
-   * `WorkflowEnv`).
+   * methods, by binding name; call them in a step's own function, each
+   * written out as `env.NAME.method(…)`, `appServer(env).method(…)` or
+   * `appExports(env.NAME).method(…)` (see `WorkflowEnv`).
    */
   env: WorkflowEnv;
   /**

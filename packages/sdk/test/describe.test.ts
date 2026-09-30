@@ -1,7 +1,11 @@
 /* oxlint-disable require-await -- fakes of async interfaces answer right away */
 import { describe, expect, it } from "vite-plus/test";
 
-import { checkWorkflowBindings, describeWorkflow } from "../src/describe.ts";
+import {
+  checkWorkflowBindings,
+  checkWorkflowModule,
+  describeWorkflow,
+} from "../src/describe.ts";
 import { createTestEngine } from "../src/testing.ts";
 import { outlineOf } from "./outline.ts";
 import { payoutWorkflow } from "./payout-workflow.ts";
@@ -25,9 +29,9 @@ ${body}
 const mail = (to: string): string =>
   `await step.do("mail", { description: "Mail" }, async () => await env.MAIL.call("mail.send", ${JSON.stringify(to)}));`;
 
-/** A step whose function runs `code`. */
-const inStep = (code: string): string =>
-  `await step.do("tidy-up", { description: "Tidy" }, async () => { ${code} });`;
+/** A step, `tidy-up` unless named, whose function runs `code`. */
+const inStep = (code: string, name = "tidy-up"): string =>
+  `await step.do("${name}", { description: "Tidy" }, async () => { ${code} });`;
 
 describe(describeWorkflow, () => {
   it("shows a step in a loop once, nested under the loop", () => {
@@ -294,27 +298,127 @@ describe(describeWorkflow, () => {
     ).toThrow("Call the App's bindings as `env.NAME`");
   });
 
-  it("says every step may call the App's bindings when a helper outside the steps calls them", () => {
-    const envOf = (body: string): unknown[] =>
-      describeWorkflow(workflowSource(body, "step, { input, env }")).steps.map(
-        (node) => (node.type === "step" ? node.env : node.type)
-      );
-    const steps = [
-      `await step.do("read", { description: "Read" }, async () => 1);`,
-      `await step.do("book", { description: "Book" }, async () => await book());`,
-    ].join("\n");
+  it("names a binding a step's option calls, such as a decision's ask", () => {
+    const source = workflowSource(
+      `await step.decision("approve", { description: "Approve", from: params.reviewer, timeout: "1 day", ask: async (request) => await env.MAIL.call("mail.send", request) });`,
+      "step, { params, env }"
+    );
 
+    expect(describeWorkflow(source).steps).toMatchObject([
+      { name: "approve", env: ["MAIL"] },
+    ]);
+  });
+
+  it("refuses a workflow that calls a binding anywhere but in the function of the step that makes the call", () => {
+    const own = "in the step's own function";
+    const cases: [string, string][] = [
+      // A stub made in one step and called in another: the call would
+      // show under the step that made the stub.
+      [
+        `let app;\n${inStep(`app = appServer(env);`, "prepare")}\n${inStep(`await app.hit();`)}`,
+        "don't keep `env`",
+      ],
+      // A function over env kept in one step and run in another.
+      [
+        `const later = [];\n${inStep(`later.push(() => env.APP.call("hit"));`, "prepare")}\n${inStep(`await later[0]();`)}`,
+        own,
+      ],
+      // A stub kept within one step.
+      [inStep(`const app = appServer(env); await app.hit();`), "don't keep"],
+      [inStep(`const crm = appExports(env.CRM); await crm.find({});`), "keep"],
+      // A function inside the step's own, which could outlive it.
+      [
+        inStep(
+          `await Promise.all(input.ids.map((id) => env.CRM.call("get", id)));`
+        ),
+        own,
+      ],
+      // A helper of the workflow's, which any step could run.
+      [
+        `const book = async () => await env.APP.call("book", input);\n${inStep(`await book();`)}`,
+        own,
+      ],
+      // Between steps, where no step makes the call.
+      [`await env.APP.call("book", input);`, own],
+      [
+        `await step.do("book", { description: "Book", sideEffect: true, input: await env.APP.call("total") }, async () => 1);`,
+        own,
+      ],
+    ];
+
+    for (const [body, message] of cases) {
+      expect(() =>
+        describeWorkflow(workflowSource(body, "step, { input, env }"))
+      ).toThrow(message);
+    }
+    // In the step's own function, a loop makes each call where it's read.
     expect(
-      envOf(
-        `const book = async () => await env.APP.call("book", input);\n${steps}`
-      )
-    ).toStrictEqual([["env"], ["env"]]);
-    // The App's server, as the SDK's stub of it.
-    expect(
-      envOf(
-        `const app = appServer<App>(env);\nconst book = async () => await app.book(input);\n${steps}`
-      )
-    ).toStrictEqual([["env"], ["env"]]);
+      describeWorkflow(
+        workflowSource(
+          inStep(
+            `for (const id of input.ids) { await env.CRM.call("get", id); }`
+          ),
+          "step, { input, env }"
+        )
+      ).steps
+    ).toMatchObject([{ name: "tidy-up", env: ["CRM"] }]);
+  });
+
+  it("refuses a workflow whose file takes a built-in the run is made with, or changes what it doesn't declare", () => {
+    const tidy = workflowSource(
+      inStep(`await leaked.APP.call("sendAll");`),
+      "step, { input }"
+    );
+    const cases: [string, string][] = [
+      // The run wraps its bindings in a Proxy: a constructor put in its
+      // place as the module loads is handed them, with no `env` in sight.
+      [
+        `const Real = globalThis.Proxy;\nlet leaked;\nglobalThis.Proxy = function (target, handler) { leaked = target; return new Real(target, handler); };`,
+        "Don't use `globalThis`",
+      ],
+      [
+        `let leaked;\nself.Proxy = class { constructor(target) { leaked = target; } };`,
+        "Don't use `self`",
+      ],
+      [`const Real = Proxy;\nlet leaked;`, "Don't use `Proxy`"],
+      [`const leaked = Reflect.get(input, "env");`, "Don't use `Reflect`"],
+      [`const leaked = Function("return this")();`, "Don't use `Function`"],
+      [`const leaked = (0, eval)("this");`, "Don't use `eval`"],
+      // A built-in, or what another module exports, changed for everyone.
+      [
+        `let leaked;\nArray.prototype.map = function () { leaked = this; return []; };`,
+        "Don't change `Array`, a global",
+      ],
+      [
+        `let leaked;\nObject.fromEntries = (entries) => { leaked = entries; };`,
+        "Don't change `Object`, a global",
+      ],
+      [`let leaked;\ndelete Object.hasOwn;`, "Don't change `Object`, a global"],
+      [`let leaked;\nPromise = undefined;`, "Don't change `Promise`, a global"],
+      // A name declared somewhere else in the file is still the global here.
+      [
+        `let leaked;\nconst first = (Array) => Array[0];\nArray.prototype.map = function () { leaked = this; return []; };`,
+        "Don't change `Array`, a global",
+      ],
+      [
+        `import { z } from "@grasp-os/sdk/workflow";\nlet leaked;\nz.object = () => leaked;`,
+        "Don't change `z`, which is imported",
+      ],
+    ];
+
+    for (const [top, message] of cases) {
+      expect(() => describeWorkflow(`${top}\n${tidy}`)).toThrow(message);
+      // The same in a file the workflow imports.
+      expect(() => {
+        checkWorkflowModule(`${top}\nexport const take = () => leaked;`);
+      }).toThrow(message);
+    }
+    // A module may change what it declares, and name a type as it likes.
+    const own = `let leaked = 0;\nleaked += 1;\nconst seen: Record<string, number> = {};\nseen.first = leaked;\ninterface Holder { self: string; Proxy: Function }`;
+    expect(describeWorkflow(`${own}\n${tidy}`).steps).toHaveLength(1);
+    expect(() => {
+      checkWorkflowModule(`${own}\nexport const take = () => seen;`);
+    }).not.toThrow();
   });
 
   it("rejects every way to reach the App's bindings that the step list couldn't name", () => {

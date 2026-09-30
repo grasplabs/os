@@ -175,7 +175,9 @@ const contextHint =
 const parametersHint =
   "The workflow function takes `step` and its context, without default values or computed names";
 const envHint = (env: string): string =>
-  `Call the App's bindings as \`${env}.NAME.method(…)\`, \`appServer(${env})\` or \`appExports(${env}.NAME)\`; don't keep \`${env}\` or a binding in a variable or pass it on`;
+  `Call the App's bindings as \`${env}.NAME.method(…)\`, \`appServer(${env}).method(…)\` or \`appExports(${env}.NAME).method(…)\`; don't keep \`${env}\`, a binding or a stub in a variable or pass it on`;
+const stepHint =
+  "Call the App's bindings in the step's own function, not between steps or in a function inside it (loop with `for...of` there)";
 
 /** How to read what the workflow function's context holds, instead. */
 const destructuringHints = {
@@ -295,6 +297,13 @@ const isObjectOfMember = (ancestor: Ancestor | undefined): boolean =>
   ancestor.key === "object" &&
   !ancestor.node.computed;
 
+const isFunctionNode = (node: Node): boolean =>
+  node.type === "ArrowFunctionExpression" ||
+  node.type === "FunctionExpression" ||
+  node.type === "FunctionDeclaration" ||
+  node.type === "ObjectMethod" ||
+  node.type === "ClassMethod";
+
 /** Whether `ancestor` holds the one argument of a call to the SDK's `stub`. */
 const isStubArgument = (
   bindings: Bindings,
@@ -307,32 +316,68 @@ const isStubArgument = (
   ancestor.node.callee.type === "Identifier" &&
   bindings.stubs.get(ancestor.node.callee.name) === stub;
 
+/** Whether the node `ancestors` end above is called as `node.method(…)`. */
+const isMethodCalled = (ancestors: Ancestor[]): boolean => {
+  const caller = ancestors.at(-2);
+  return (
+    isObjectOfMember(ancestors.at(-1)) &&
+    caller?.node.type === "CallExpression" &&
+    caller.key === "callee"
+  );
+};
+
 /**
  * The binding a use of `env` calls, from the use's `ancestors`: `NAME` in
- * `env.NAME.method(…)` and `appExports(env.NAME)`, `APP` in
- * `appServer(env)`. Undefined for any other use (an alias, an argument, a
- * spread, a computed name), which could reach a binding unseen.
+ * `env.NAME.method(…)` and `appExports(env.NAME).method(…)`, `APP` in
+ * `appServer(env).method(…)`. Each is a call made where it is written.
+ * Undefined for any other use (an alias, an argument, a spread, a computed
+ * name, a stub that isn't called at once), which could reach a binding
+ * somewhere the step list doesn't name it.
  */
 const envCallOf = (
   bindings: Bindings,
   ancestors: Ancestor[]
 ): string | undefined => {
   const parent = ancestors.at(-1);
-  const grandparent = ancestors.at(-2);
   if (isStubArgument(bindings, parent, "appServer")) {
-    return "APP";
+    return isMethodCalled(ancestors.slice(0, -1)) ? "APP" : undefined;
   }
   if (parent?.node.type !== "MemberExpression" || !isObjectOfMember(parent)) {
     return undefined;
   }
-  const caller = ancestors.at(-3);
-  const called =
-    isObjectOfMember(grandparent) &&
-    caller?.node.type === "CallExpression" &&
-    caller.key === "callee";
-  return called || isStubArgument(bindings, grandparent, "appExports")
-    ? nameOf(parent.node.property)
-    : undefined;
+  const binding = ancestors.slice(0, -1);
+  const called = isStubArgument(bindings, binding.at(-1), "appExports")
+    ? isMethodCalled(binding.slice(0, -1))
+    : isMethodCalled(binding);
+  return called ? nameOf(parent.node.property) : undefined;
+};
+
+/**
+ * Whether the innermost function around a node (`ancestors` end above the
+ * node) is a step's own: written in the step's call, as an argument
+ * (`step.do`'s function) or as an option (a decision's `ask`). Only there
+ * does a binding call belong to the step that names it: a function inside
+ * it could be kept and run by another step, and code between steps runs
+ * in none.
+ */
+const inStepFunction = (bindings: Bindings, ancestors: Ancestor[]): boolean => {
+  const index = ancestors.findLastIndex(({ node }) => isFunctionNode(node));
+  const holder = ancestors[index - 1];
+  if (index === -1 || holder === undefined) {
+    return false;
+  }
+  if (holder.key === "arguments") {
+    return isStepCall(bindings, holder.node);
+  }
+  const options = ancestors[index - 2];
+  const call = ancestors[index - 3];
+  return (
+    holder.node.type === "ObjectProperty" &&
+    holder.key === "value" &&
+    options?.node.type === "ObjectExpression" &&
+    call?.key === "arguments" &&
+    isStepCall(bindings, call.node)
+  );
 };
 
 /** The App's bindings `nodes` call, in source order. */
@@ -355,43 +400,6 @@ const envCallsIn = (bindings: Bindings, nodes: Node[]): string[] => {
   }
   return names;
 };
-
-/** Whether `body` calls the App's bindings anywhere outside a step's call. */
-const envOutsideSteps = (body: Node, bindings: Bindings): boolean => {
-  let found = false;
-  visit(body, (node, ancestors) => {
-    if (
-      node.type !== "Identifier" ||
-      node.name !== bindings.env ||
-      isNamePosition(ancestors)
-    ) {
-      return;
-    }
-    const inStepCall = ancestors.some(
-      ({ node: ancestor, key }) =>
-        key === "arguments" && isStepCall(bindings, ancestor)
-    );
-    found ||= !inStepCall;
-  });
-  return found;
-};
-
-/** Every step of `nodes`, said to call `env` as well. */
-const withEnv = (nodes: readonly OutlineNode[]): OutlineNode[] =>
-  nodes.map((node): OutlineNode => {
-    if (node.type === "step") {
-      const env = node.env ?? [];
-      return { ...node, env: env.includes("env") ? env : [...env, "env"] };
-    }
-    if (node.type === "loop") {
-      return { ...node, steps: withEnv(node.steps) };
-    }
-    return {
-      ...node,
-      steps: withEnv(node.steps),
-      otherwise: withEnv(node.otherwise),
-    };
-  });
 
 // `step` may only be called as `step.method(…)`, parameters only read as
 // `params.name`: passed around or destructured, their use can't be read.
@@ -437,10 +445,12 @@ const checkBindingUses = (body: Node, bindings: Bindings): void => {
 };
 
 // The context reaches the workflow's code only by the names its parameter
-// list binds, and the App's bindings only as calls the step list names.
-// `this`, `arguments` and `eval` could read the context unseen; so could
+// list binds, and the App's bindings only as calls the step list names:
+// each made where it is written, in the function of the step it is named
+// under. `this` and `arguments` could read the context unseen; so could
 // `env`, a binding or an SDK stub that is kept in a variable, passed on,
-// spread or read by a computed name.
+// spread or read by a computed name, and a call in a function inside a
+// step's own could be kept there and made by another step.
 const checkEnvUses = (body: Node, bindings: Bindings): void => {
   visit(body, (node, ancestors) => {
     if (node.type === "ThisExpression") {
@@ -449,8 +459,8 @@ const checkEnvUses = (body: Node, bindings: Bindings): void => {
     if (node.type !== "Identifier" || isNamePosition(ancestors)) {
       return;
     }
-    if (node.name === "arguments" || node.name === "eval") {
-      throw fail(node, `Don't use \`${node.name}\` in the workflow's function`);
+    if (node.name === "arguments") {
+      throw fail(node, "Don't use `arguments` in the workflow's function");
     }
     const parent = ancestors.at(-1);
     const called =
@@ -461,11 +471,202 @@ const checkEnvUses = (body: Node, bindings: Bindings): void => {
         `Only call \`${node.name}\`; don't rename it or pass it on`
       );
     }
-    if (
-      node.name === bindings.env &&
-      envCallOf(bindings, ancestors) === undefined
-    ) {
+    if (node.name !== bindings.env) {
+      return;
+    }
+    if (envCallOf(bindings, ancestors) === undefined) {
       throw fail(node, envHint(node.name));
+    }
+    if (!inStepFunction(bindings, ancestors)) {
+      throw fail(node, stepHint);
+    }
+  });
+};
+
+/** The names a declaration's pattern binds, without its defaults' code. */
+const patternNames = (node: Node): string[] => {
+  if (node.type === "Identifier") {
+    return [node.name];
+  }
+  if (node.type === "ObjectPattern") {
+    return node.properties.flatMap((property) =>
+      patternNames(
+        property.type === "ObjectProperty" ? property.value : property
+      )
+    );
+  }
+  if (node.type === "ArrayPattern") {
+    return node.elements.flatMap((element) =>
+      element ? patternNames(element) : []
+    );
+  }
+  if (node.type === "RestElement") {
+    return patternNames(node.argument);
+  }
+  return node.type === "AssignmentPattern" ? patternNames(node.left) : [];
+};
+
+// Nodes whose declarations are their own: a name declared in one isn't
+// one outside it.
+const scopeTypes = new Set([
+  "Program",
+  "BlockStatement",
+  "StaticBlock",
+  "ForStatement",
+  "ForInStatement",
+  "ForOfStatement",
+  "CatchClause",
+]);
+
+const isScope = (node: Node): boolean =>
+  scopeTypes.has(node.type) || isFunctionNode(node);
+
+/** The names a node declares in the scope around it. */
+const declaredAround = (node: Node): string[] => {
+  if (node.type === "VariableDeclarator") {
+    return patternNames(node.id);
+  }
+  return (node.type === "FunctionDeclaration" ||
+    node.type === "ClassDeclaration") &&
+    node.id
+    ? [node.id.name]
+    : [];
+};
+
+/** The names a node declares for what is inside it: its parameters. */
+const declaredWithin = (node: Node): string[] => {
+  if (node.type === "CatchClause") {
+    return node.param ? patternNames(node.param) : [];
+  }
+  if (
+    node.type === "ArrowFunctionExpression" ||
+    node.type === "FunctionExpression" ||
+    node.type === "FunctionDeclaration" ||
+    node.type === "ObjectMethod" ||
+    node.type === "ClassMethod"
+  ) {
+    const named =
+      node.type === "FunctionExpression" && node.id ? [node.id.name] : [];
+    return [...named, ...node.params.flatMap((param) => patternNames(param))];
+  }
+  return [];
+};
+
+/** The names each scope of a file declares, by the scope's node. */
+const scopesOf = (file: Node): Map<Node, Set<string>> => {
+  const scopes = new Map<Node, Set<string>>();
+  const declare = (scope: Node | undefined, names: string[]): void => {
+    if (scope === undefined || names.length === 0) {
+      return;
+    }
+    const known = scopes.get(scope) ?? new Set<string>();
+    for (const name of names) {
+      known.add(name);
+    }
+    scopes.set(scope, known);
+  };
+  visit(file, (node, ancestors) => {
+    declare(
+      ancestors.findLast(({ node: above }) => isScope(above))?.node,
+      declaredAround(node)
+    );
+    declare(node, declaredWithin(node));
+  });
+  return scopes;
+};
+
+/** The variable an assignment's target is, or is a property of, if any. */
+const rootOf = (target: Node): string | undefined => {
+  if (target.type === "Identifier") {
+    return target.name;
+  }
+  return target.type === "MemberExpression" ||
+    target.type === "OptionalMemberExpression"
+    ? rootOf(target.object)
+    : undefined;
+};
+
+/** What a node assigns to, deletes or counts up: the targets it changes. */
+const changedBy = (node: Node): Node[] => {
+  if (node.type === "AssignmentExpression") {
+    return node.left.type === "ObjectPattern" ||
+      node.left.type === "ArrayPattern"
+      ? []
+      : [node.left];
+  }
+  if (node.type === "UpdateExpression") {
+    return [node.argument];
+  }
+  return node.type === "UnaryExpression" && node.operator === "delete"
+    ? [node.argument]
+    : [];
+};
+
+// The run's own code builds its bindings with these, and a module that
+// replaces one could take what it is built from: no workflow code needs
+// them.
+const refusedGlobals = new Set([
+  "globalThis",
+  "self",
+  "Proxy",
+  "Reflect",
+  "Function",
+  "eval",
+]);
+
+// Type declarations hold no code.
+const typeDeclarations = new Set([
+  "TSInterfaceDeclaration",
+  "TSTypeAliasDeclaration",
+]);
+
+// A module's own code, top level included, runs in the run's isolate
+// before any step, where it could change what the run itself is built
+// from: a built-in it replaces, or what another module exports. So it
+// names no global object, replaces no built-in, and changes only what it
+// declares itself.
+const checkModuleScope = (file: Node): void => {
+  const imported = new Set<string>();
+  visit(file, (node) => {
+    if (node.type === "ImportDeclaration") {
+      for (const specifier of node.specifiers) {
+        imported.add(specifier.local.name);
+      }
+    }
+  });
+  const scopes = scopesOf(file);
+  const refuse = (node: Node, name: string): WorkflowError =>
+    fail(node, `Don't use \`${name}\` in a workflow's code`);
+  visit(file, (node, ancestors) => {
+    if (ancestors.some(({ node: above }) => typeDeclarations.has(above.type))) {
+      return;
+    }
+    if (
+      node.type === "Identifier" &&
+      refusedGlobals.has(node.name) &&
+      !isNamePosition(ancestors)
+    ) {
+      throw refuse(node, node.name);
+    }
+    for (const target of changedBy(node)) {
+      const root = rootOf(target);
+      const declared =
+        root === undefined ||
+        ancestors.some(
+          ({ node: above }) => scopes.get(above)?.has(root) === true
+        );
+      if (root === undefined || declared) {
+        continue;
+      }
+      if (refusedGlobals.has(root)) {
+        throw refuse(target, root);
+      }
+      throw fail(
+        target,
+        imported.has(root)
+          ? `Don't change \`${root}\`, which is imported: a module changes only what it declares`
+          : `Don't change \`${root}\`, a global: a module changes only what it declares`
+      );
     }
   });
 };
@@ -815,13 +1016,6 @@ const describeCall = (
   };
 };
 
-const isFunctionNode = (node: Node): boolean =>
-  node.type === "ArrowFunctionExpression" ||
-  node.type === "FunctionExpression" ||
-  node.type === "FunctionDeclaration" ||
-  node.type === "ObjectMethod" ||
-  node.type === "ClassMethod";
-
 /** Parts of a node that run only sometimes: one side of `?:`, `&&`, `||`, `??`. */
 const conditionalPartsOf = (node: Node): Node[] => {
   if (node.type === "ConditionalExpression") {
@@ -971,16 +1165,20 @@ const describeStatement: DescribeStatement = (reader, node, inLoop) => {
   return [];
 };
 
+const parseModule = (source: string): Node => {
+  try {
+    return parse(source, { sourceType: "module", plugins: ["typescript"] });
+  } catch (error) {
+    throw fail(undefined, `The workflow doesn't parse: ${messageOf(error)}`);
+  }
+};
+
 /** The workflow function of `source` and the names it binds, its use of its context checked. */
 const readContext = (
   source: string
 ): { run: ArrowFunctionExpression; bindings: Bindings } => {
-  let file: Node;
-  try {
-    file = parse(source, { sourceType: "module", plugins: ["typescript"] });
-  } catch (error) {
-    throw fail(undefined, `The workflow doesn't parse: ${messageOf(error)}`);
-  }
+  const file = parseModule(source);
+  checkModuleScope(file);
   const { run, stubs } = findWorkflowFunction(file);
   const bindings = bindingsOf(run.params, stubs);
   checkEnvUses(run.body, bindings);
@@ -988,20 +1186,42 @@ const readContext = (
 };
 
 /**
+ * Throws when a file a workflow may import (any under `workflows/`) could
+ * change, as it loads, what a run is built from: it names a global object
+ * (`globalThis`, `self`) or a built-in the run's bindings are made with
+ * (`Proxy`, `Reflect`, `Function`, `eval`), or assigns to anything it
+ * doesn't declare itself: a global, a built-in, or what it imports.
+ * `checkWorkflowBindings` asks the same of the workflow's own file.
+ */
+export const checkWorkflowModule = (source: string): void => {
+  checkModuleScope(parseModule(source));
+};
+
+/**
  * Throws unless every call a workflow's code makes to the App's bindings
- * can be read from its TypeScript source, so the step list names each. The
- * workflow is the file's default export, made by the SDK's `workflow`, and
- * its function an arrow function that destructures its context in its
- * parameter list: the context has no other name. `env` appears only as
- * `env.NAME.method(…)`, `appServer(env)` or `appExports(env.NAME)`.
- * `this`, `arguments`, `eval`, and `env`, a binding or an SDK stub that is
- * renamed, passed on, spread or read by a computed name are errors, each
+ * can be read from its TypeScript source, so the step list names each
+ * under the step that makes it. The workflow is the file's default
+ * export, made by the SDK's `workflow`, and its function an arrow
+ * function that destructures its context in its parameter list: the
+ * context has no other name. `env` appears only in a call made where it
+ * is written, `env.NAME.method(…)`, `appServer(env).method(…)` or
+ * `appExports(env.NAME).method(…)`, and only in a step's own function
+ * (`step.do`'s, or an option such as a decision's `ask`), not between
+ * steps and not in a function inside it, which another step could run.
+ * `this`, `arguments`, and `env`, a binding or an SDK stub that is
+ * renamed, kept in a variable, passed on, spread or read by a computed
+ * name are errors, and so is what `checkWorkflowModule` refuses, each
  * saying how to write it instead.
  *
  * It is the part of `describeWorkflow` that isn't about how steps are laid
  * out: a workflow that passes may still have steps that can't be read (a
- * step in a `try`, say), which a review then shows as unread, never as a
- * list that leaves a call out.
+ * step in a `try`, say), which a review then shows as unread.
+ *
+ * It reads one file's source, so it closes what that source can say, not
+ * what code does as it runs: a module that reaches a built-in some other
+ * way and changes it may still take a binding from a step that calls one.
+ * Every binding call is checked against the App's permissions and audited
+ * where it lands, in core, whatever the step list says.
  */
 export const checkWorkflowBindings = (source: string): void => {
   readContext(source);
@@ -1028,9 +1248,5 @@ export const describeWorkflow = (source: string): WorkflowOutline => {
     run.body.type === "BlockStatement"
       ? describeStatement(reader, run.body, false)
       : describeExpression(reader, run.body, false);
-  // A binding called outside every step's call (in a helper, say) may be
-  // reached from any step: then each step is said to call `env`.
-  return {
-    steps: envOutsideSteps(run.body, bindings) ? withEnv(steps) : steps,
-  };
+  return { steps };
 };

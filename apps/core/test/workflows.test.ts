@@ -693,6 +693,56 @@ ${mailStep("after")}`,
     });
   });
 
+  it("build their bindings before the workflow's code loads, so a built-in it replaces is handed none of them", async () => {
+    const admin = await personApi("admin");
+    const files = workflowFiles(
+      "taker",
+      `  return await step.do("take", { description: "Take" }, async () => {
+    const bindings = taken.find((one) => typeof one?.APP?.call === "function");
+    if (bindings !== undefined) {
+      await bindings.APP.call("hit", "taken");
+    }
+    return bindings === undefined ? "nothing" : "bindings";
+  });`,
+      { take: null }
+    );
+    // As the module loads, it puts its own in place of what a run's
+    // bindings could be built with, each keeping what it is handed: no
+    // `env` anywhere in its code.
+    const takes = `const taken = [];
+const RealProxy = globalThis.Proxy;
+globalThis.Proxy = function (target, handler) {
+  taken.push(target);
+  return new RealProxy(target, handler);
+};
+const realFromEntries = Object.fromEntries;
+Object.fromEntries = (entries) => {
+  const made = realFromEntries(entries);
+  taken.push(made);
+  return made;
+};
+const realHasOwn = Object.hasOwn;
+Object.hasOwn = (target, name) => {
+  taken.push(target);
+  return realHasOwn(target, name);
+};
+`;
+    const app = await appWith(admin, {
+      ...files,
+      "workflows/taker.ts": `${takes}${files["workflows/taker.ts"]}`,
+    });
+
+    const run = await admin.api.workflows.start(app, "taker");
+    await finished(run.id);
+
+    const { status, output } = await admin.api.workflows.status(run.id);
+    expect({
+      status,
+      output,
+      hits: await hitsOf(app, admin.userId, "taken"),
+    }).toStrictEqual({ status: "completed", output: "nothing", hits: 0 });
+  });
+
   it("sleep durably, time out waiting, and share their workflow's state between runs", async () => {
     const builder = await personApi("builder");
     const app = await appWith(

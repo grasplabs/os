@@ -500,9 +500,7 @@ export interface StepOutline {
   /**
    * The App's bindings the step's code calls (`env.NAME`): its own server
    * (`APP`), a connection, another App's exports, each of which may change
-   * things; `env` itself when the workflow calls a binding outside its
-   * steps' calls (in a helper, say), which any step may then reach. Absent
-   * when it calls none.
+   * things. Absent when it calls none.
    */
   env?: string[];
   /**
