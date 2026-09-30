@@ -12,6 +12,7 @@ import {
 } from "../src/clients/settings.ts";
 import { act, consoleDatabase } from "../src/db/act.ts";
 import { auditEvents, clients, settings } from "../src/db/schema.ts";
+import { racingDb } from "./racing-db.ts";
 import { emptyStoreSecret, useStoreSecrets } from "./secrets-store.ts";
 
 const db = consoleDatabase(env.DB);
@@ -314,10 +315,64 @@ describe("a client's settings", () => {
     });
   });
 
+  it("apply and audit a sign-in saved as the client had it when another staff member changed it a moment before, never calling it no change", async () => {
+    const clientId = await recordClient();
+    const shown = { ...signIn, admins: ["cy@acme.test"] };
+    await setSignIn(env, staff, { clientId, signIn: shown });
+    // Another staff member's change lands right before this save's write.
+    let raced = false;
+    const racing = racingDb(async () => {
+      if (!raced) {
+        raced = true;
+        await setSignIn(env, other, {
+          clientId,
+          signIn: { ...signIn, admins: ["bo@acme.test"] },
+        });
+      }
+    });
+
+    const changed = await setSignIn({ ...env, DB: racing }, staff, {
+      clientId,
+      signIn: shown,
+    });
+
+    const record = await recordOf(clientId);
+    // By who made each, whatever order their moments put them in: this
+    // save's event is timed before the other's write, which lands first.
+    const events = await eventsOf(clientId, "client.sign_in");
+    const admins = (actor: string): string[] =>
+      events
+        .filter((event) => event.actor === actor)
+        .map(
+          ({ detail }) =>
+            signInDetailSchema.parse(JSON.parse(detail ?? "null"))
+              .adminsFingerprint
+        );
+    const [first, again, ...more] = admins(staff.email);
+    const theirs = admins(other.email);
+    expect({
+      raced,
+      changed,
+      signIn: z.unknown().parse(JSON.parse(record?.signIn ?? "null")),
+      // Both of this staff member's saves audited, the second as the same
+      // admins as the first; the other's one change as others.
+      audited: { again: again === first, more: more.length },
+      theirs: theirs.map((fingerprint) => fingerprint === first),
+    }).toStrictEqual({
+      raced: true,
+      changed: true,
+      signIn: shown,
+      audited: { again: true, more: 0 },
+      theirs: [false],
+    });
+  });
+
   it("refuse a change of sign-in while Secrets Store has no key to fingerprint its admins with, and still take the one it has as no change", async () => {
     const clientId = await recordClient();
     const current = { ...signIn, admins: ["cy@acme.test"] };
     await setSignIn(env, staff, { clientId, signIn: current });
+    // What an open form still shows, from before that change.
+    const stale = signIn;
     const before = await recordOf(clientId);
     await emptyStoreSecret(env.CLIENT_KEY, "CLIENT_KEY");
 
@@ -330,6 +385,9 @@ describe("a client's settings", () => {
           signIn: { ...signIn, admins: ["bo@acme.test"] },
         })
       ),
+      // Unchanged as its form saw it, but not what the client has now:
+      // refused, never called no change.
+      stale: await codeOf(setSignIn(env, staff, { clientId, signIn: stale })),
     };
 
     const events = await eventsOf(clientId, "client.sign_in");
@@ -338,7 +396,11 @@ describe("a client's settings", () => {
       record: await recordOf(clientId),
       events: events.length,
     }).toStrictEqual({
-      saved: { unchanged: false, changed: "store_secret_missing" },
+      saved: {
+        unchanged: false,
+        changed: "store_secret_missing",
+        stale: "store_secret_missing",
+      },
       record: before,
       // The one change made while the store had its key.
       events: 1,
