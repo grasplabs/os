@@ -416,21 +416,11 @@ interface UntypedStepRunner {
   sleep: (name: string, options: unknown) => Promise<void>;
 }
 
-/**
- * Key-value state of the workflow, shared by all its runs. Read and write it
- * between steps, never while one runs.
- */
-export interface StateStore {
-  get: (key: string) => Promise<Json | undefined>;
-  set: (key: string, value: Json) => Promise<void>;
-}
-
 /** Everything a workflow reads besides its steps. */
 export interface WorkflowContext<P extends Params, Input> {
   runId: RunId;
   input: Input;
   params: ParamValues<P>;
-  state: StateStore;
   /**
    * The App's connections and other permissions, and its own server
    * methods, by binding name; call them in a step's own function, each
@@ -924,19 +914,18 @@ const createRunner = (
   engine: WorkflowEngine
 ): {
   steps: UntypedStepRunner;
-  state: StateStore;
   readAttachment: WorkflowContext<Params, unknown>["readAttachment"];
 } => {
   const started = new Set<string>();
-  // The step or state call running now, if any. They run one after
-  // another: one started from inside a step's function, or next to another,
-  // would be recorded in an order a replay can't promise to repeat.
+  // The step running now, if any. They run one after another: one started
+  // from inside a step's function, or next to another, would be recorded
+  // in an order a replay can't promise to repeat.
   let running: string | undefined;
 
   const exclusive = async <T>(what: string, run: () => Promise<T>) => {
     if (running !== undefined) {
       throw invalidCall(
-        `${what} started while ${running} runs; run steps and state calls one after another, never inside a step`
+        `${what} started while ${running} runs; run steps one after another, never inside a step`
       );
     }
     running = what;
@@ -1134,46 +1123,6 @@ const createRunner = (
     },
   };
 
-  // State is shared by all runs of a workflow, so another run can change it
-  // between two replays of this one. Each read and write is its own step, so
-  // a replay sees exactly what the first execution saw, and each write
-  // carries an idempotency key, so a replayed write never lands twice.
-  const calls = new Map<string, number>();
-  const stateStep = (operation: "get" | "set", key: string): string => {
-    if (typeof key !== "string" || !namePattern.test(key)) {
-      throw invalidCall(`State key "${key}" needs ${nameRule}`);
-    }
-    const base = `$state:${operation}:${key}`;
-    const count = (calls.get(base) ?? 0) + 1;
-    calls.set(base, count);
-    return `${base}:${count}`;
-  };
-  const state: StateStore = {
-    get: async (key) =>
-      await exclusive(`State "${key}"`, async () => {
-        const name = stateStep("get", key);
-        return await engine.do(
-          name,
-          {},
-          async () => await engine.getState(key)
-        );
-      }),
-    set: async (key, value) => {
-      await exclusive(`State "${key}"`, async () => {
-        const name = stateStep("set", key);
-        const json = parseOrThrow(
-          z.json(),
-          value,
-          "workflow.invalid_step_call",
-          `Value for state "${key}"`
-        );
-        await engine.do(name, {}, async () => {
-          await engine.setState(key, json, idempotencyKeyOf(engine, name));
-        });
-      });
-    },
-  };
-
   // Not a step of its own: bytes can't be recorded, so the step it runs in
   // reads again whenever it runs again. Every call goes to the engine,
   // which refuses and records each one it must (see `WorkflowEngine`):
@@ -1192,7 +1141,7 @@ const createRunner = (
     );
   };
 
-  return { steps, state, readAttachment };
+  return { steps, readAttachment };
 };
 
 /**
@@ -1263,7 +1212,6 @@ export const workflow = <
         // schema of its kind, which is what ParamValues<P> describes.
         // oxlint-disable-next-line typescript/no-unsafe-type-assertion -- see SAFETY
         params: Object.freeze(params) as ParamValues<P>,
-        state: runner.state,
         env: engine.env,
         readAttachment: runner.readAttachment,
       }

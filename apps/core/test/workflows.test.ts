@@ -4,7 +4,7 @@ import { featureErrors } from "@grasp-os/shared/errors";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
 import { workflowErrors } from "@grasp-os/shared/workflows";
-import { introspectWorkflow, runInDurableObject } from "cloudflare:test";
+import { introspectWorkflow } from "cloudflare:test";
 import type { WorkflowInstanceIntrospector } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -782,43 +782,26 @@ Object.hasOwn = (target, name) => {
     }).toStrictEqual({ status: "completed", output: "nothing", hits: 0 });
   });
 
-  it("sleep durably, and share their workflow's state between runs", async () => {
+  it("sleep durably", async () => {
     const builder = await personApi("builder");
     const app = await appWith(
       builder,
       workflowFiles(
-        "counter",
+        "sleeper",
         `  await step.sleep("nap", { description: "Wait a day", duration: "1 day" });
-  const seen = (await state.get("runs")) ?? 0;
-  await state.set("runs", seen + 1);
-  return { seen };`
+  return "slept";`
       )
     );
     await using introspector = await introspectWorkflow(env.WORKFLOWS);
     await introspector.modifyAll(async (modifier) => {
       await modifier.disableSleeps();
     });
-    const outputs: unknown[] = [];
-    for (let count = 0; count < 2; count += 1) {
-      // oxlint-disable-next-line no-await-in-loop -- one run after another
-      const run = await builder.api.workflows.start(app, "counter");
-      // oxlint-disable-next-line no-await-in-loop -- one run after another
-      await finished(run.id);
-      // oxlint-disable-next-line no-await-in-loop -- one run after another
-      const { output } = await builder.api.workflows.status(run.id);
-      outputs.push(output);
-    }
-    // What guards the ended runs' writes against a replay goes with them.
-    const guards = await runInDurableObject(
-      appHost(env, appIdSchema.parse(app)),
-      async (_app, state) => {
-        const writes = await state.storage.list({ prefix: "workflow-write:" });
-        return writes.size;
-      }
-    );
-    expect({ outputs, guards }).toStrictEqual({
-      outputs: [{ seen: 0 }, { seen: 1 }],
-      guards: 0,
+    const run = await builder.api.workflows.start(app, "sleeper");
+    await finished(run.id);
+    const { status, output } = await builder.api.workflows.status(run.id);
+    expect({ status, output }).toStrictEqual({
+      status: "completed",
+      output: "slept",
     });
   });
 

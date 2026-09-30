@@ -54,8 +54,8 @@ import { appHost, workspace } from "./durable-objects.ts";
  * workflows. The host sets it, like the authority.
  *
  * A run keeps its App's flag, not one of its own: a run and its App share
- * data both ways (the workflow's state is shared by all its runs, and a run
- * calls its App's methods, whose answers carry the App's data), so a run
+ * data both ways (a run calls its App's methods, which keep what it sends
+ * and whose answers carry the App's data), so a run
  * starts restricted when its App is, becomes so when its App does, and
  * restricts its App when it reads restricted data itself.
  */

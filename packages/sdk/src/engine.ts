@@ -141,10 +141,10 @@ export interface EngineStepOptions {
  * from the start at any time: every method that takes a step name must return
  * the recorded outcome when that name already completed in this run.
  *
- * The SDK reads `params` and calls `callModel`, `openDecision`,
- * `decisionRecipients`, `getState` and `setState` only inside `do`, so
- * they need not be durable themselves; workflow code calls
- * `readAttachment`, which the engine checks is inside a step.
+ * The SDK reads `params` and calls `callModel`, `openDecision` and
+ * `decisionRecipients` only inside `do`, so they need not be durable
+ * themselves; workflow code calls `readAttachment`, which the engine
+ * checks is inside a step.
  *
  * Engines may keep only a failed step's error name and message (Cloudflare
  * Workflows does); the SDK puts what it needs to recover into both.
@@ -209,14 +209,6 @@ export interface WorkflowEngine {
     name: string,
     options: { decision: string; timeout: number; last: boolean }
   ) => Promise<EngineDecision>;
-  /** Reads the workflow's key-value state, shared by all its runs. */
-  getState: (key: string) => Promise<Json | undefined>;
-  /**
-   * Writes the workflow's key-value state, shared by all its runs. Applies
-   * each idempotency key once and ignores a repeat, so a step that wrote but
-   * crashed before it was recorded can't overwrite a newer value on replay.
-   */
-  setState: (key: string, value: Json, idempotencyKey: string) => Promise<void>;
   /**
    * The content of attachment `index` of a message an email trigger kept
    * (`stored`, as its run's input names it), as the run's App received it.

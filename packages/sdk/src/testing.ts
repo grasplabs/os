@@ -90,19 +90,6 @@ export interface SideEffect {
   input?: Json;
 }
 
-/** A workflow's key-value state, shared by the engines given the same one. */
-export interface TestState {
-  values: Map<string, Json>;
-  appliedWrites: Set<string>;
-}
-
-export const createTestState = (
-  initial: Readonly<Record<string, Json>> = {}
-): TestState => ({
-  values: new Map(Object.entries(initial)),
-  appliedWrites: new Set(),
-});
-
 export interface TestEngineOptions {
   runId?: string;
   /** Parameter values people set, by name; missing ones use the default. */
@@ -137,7 +124,6 @@ export interface TestEngineOptions {
    * message another App received does.
    */
   attachments?: Readonly<Record<string, readonly Uint8Array[]>>;
-  state?: TestState;
   /**
    * `record` (the default) records side-effect steps without running them;
    * `run` runs them, e.g. against a fake of the system they change.
@@ -253,9 +239,8 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
   const modelRequests: ModelRequest[] = [];
   /** The decisions opened, once each. */
   const decisions: { step: string; from: string; deadline: number }[] = [];
-  const state = options.state ?? createTestState();
   const runSideEffects = options.sideEffects === "run";
-  // The SDK's own steps (parameters, state) aren't the workflow's.
+  // The SDK's own step (parameters) isn't the workflow's.
   const log = (record: StepRecord): void => {
     if (!record.name.startsWith("$")) {
       steps.push(record);
@@ -399,14 +384,6 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
       }
       return await Promise.resolve(outcome);
     },
-    getState: async (key) => await Promise.resolve(state.values.get(key)),
-    setState: async (key, value, idempotencyKey) => {
-      if (!state.appliedWrites.has(idempotencyKey)) {
-        state.appliedWrites.add(idempotencyKey);
-        state.values.set(key, value);
-      }
-      await Promise.resolve();
-    },
     // Refuses as the platform does, but records nothing.
     readAttachment: async (stored, index) => {
       if (stepsRunning === 0) {
@@ -436,18 +413,16 @@ export const createTestEngine = (options: TestEngineOptions = {}) => {
     },
   };
 
-  return { engine, steps, modelRequests, decisions, state };
+  return { engine, steps, modelRequests, decisions };
 };
 
 /** What a test run or dry run needs besides the workflow. */
 export interface TestRunOptions extends Omit<
   TestEngineOptions,
-  "state" | "sideEffects" | "skipTime"
+  "sideEffects" | "skipTime"
 > {
   /** The run's input, e.g. the invoice that started it. */
   input?: unknown;
-  /** The workflow's state when the run starts. */
-  state?: Readonly<Record<string, Json>>;
 }
 
 /** How a test run or dry run went. */
@@ -459,8 +434,6 @@ export type TestRun<Output = unknown> = (
   steps: StepRecord[];
   /** The side effects the run would have had, and their input. */
   sideEffects: SideEffect[];
-  /** The workflow's state after the run. */
-  state: Record<string, Json>;
 };
 
 /**
@@ -472,11 +445,10 @@ export type TestRun<Output = unknown> = (
  */
 export const testRun = async <Output>(
   definition: WorkflowDefinition<Output>,
-  { input, state: initialState, ...options }: TestRunOptions = {}
+  { input, ...options }: TestRunOptions = {}
 ): Promise<TestRun<Output>> => {
-  const { engine, steps, state } = createTestEngine({
+  const { engine, steps } = createTestEngine({
     ...options,
-    state: createTestState(initialState),
     // Last, so no option sets it: `TestRunOptions` has no `sideEffects`,
     // but untyped options (a test file's, sent to core) may.
     sideEffects: "record",
@@ -508,7 +480,6 @@ export const testRun = async <Output>(
           ]
         : []
     ),
-    state: Object.fromEntries(state.values),
   };
 };
 
@@ -583,14 +554,6 @@ export const dryRun = async <Output>(
     ({ name, input }) =>
       `- ${name}${input === undefined ? "" : ` ${describeValue(input)}`}`
   );
-  // State is the workflow's own, but a dry run doesn't keep it either.
-  const initialState = options.state ?? {};
-  const stateWrites = Object.entries(run.state).flatMap(([key, value]) =>
-    Object.hasOwn(initialState, key) &&
-    canonical(initialState[key]) === canonical(value)
-      ? []
-      : [`- state "${key}" to ${describeValue(value)}`]
-  );
   // Whatever the run did after a side effect without a result may differ
   // from a real run, where that side effect returns something.
   const withoutResult = run.steps.flatMap((record) =>
@@ -611,9 +574,7 @@ export const dryRun = async <Output>(
     ...run.steps.map((record) => `- ${describeRecord(record)}`),
     "",
     "Would have changed:",
-    ...(writes.length + stateWrites.length === 0
-      ? ["- nothing"]
-      : [...writes, ...stateWrites]),
+    ...(writes.length === 0 ? ["- nothing"] : writes),
   ].join("\n");
   return { ...run, report };
 };

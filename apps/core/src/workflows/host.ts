@@ -43,7 +43,6 @@ import type {
   DecisionOutcome,
   DecisionRecipient,
 } from "../decisions/decisions.ts";
-import { appHost } from "../durable-objects.ts";
 import { featureEnabled, requireFeature } from "../features.ts";
 import type { Feature } from "../features.ts";
 import { models } from "../models.ts";
@@ -56,7 +55,7 @@ import { attachmentOf, keptMessage } from "./kept-email.ts";
 // `WorkflowEngine` (`@grasp-os/sdk/engine`) on Cloudflare's `step` API. The
 // run's main module (code.ts) sends each engine call here over RPC. The
 // isolate is untrusted, so everything it sends is checked, and what it can
-// do is only this run's: steps, waits, model calls and state, all as this
+// do is only this run's: steps, waits and model calls, all as this
 // run and this workflow, for the person it acts for while they are there.
 //
 // Errors cross as plain data both ways (`Settled`). Cloudflare Workflows
@@ -228,13 +227,6 @@ const decisionWaitSchema = z.object({
     .max(365 * 86_400_000),
   last: z.boolean(),
 });
-
-/** A state key, as the SDK allows one: never with the `:` storage uses. */
-const stateKeySchema = z.string().regex(/^[A-Za-z][\w-]{0,63}$/u);
-const idempotencyKeySchema = z
-  .string()
-  .min(1)
-  .max(maxStepName * 2);
 
 /**
  * An error code the audit log may name: shaped like the platform's
@@ -684,7 +676,7 @@ export class RunHost extends RpcTarget {
 
   /**
    * Records how a step went, through the outbox. Every step the host ran
-   * is recorded, the SDK's own (`$params`, `$state:…`) too: the isolate
+   * is recorded, the SDK's own (`$params`) too: the isolate
    * names them, so a name is no reason to leave one out. A record that
    * can't be stored is logged, and the run goes on: the step happened.
    */
@@ -901,7 +893,7 @@ export class RunHost extends RpcTarget {
 
   /**
    * The person the run acts for must still be there: checked before every
-   * step, and inside one (a model call, an App call, state). One who has
+   * step, and inside one (a model call, an App call). One who has
    * left fails the step, and with it the run.
    */
   async #requirePerson(): Promise<void> {
@@ -1397,39 +1389,6 @@ export class RunHost extends RpcTarget {
         decision,
         last || Date.now() >= deadline
       );
-    });
-  }
-
-  /** A value of the workflow's state, shared by all its runs. */
-  async getState(key: unknown): Promise<Settled<unknown>> {
-    return await settle(async () => {
-      await this.#requirePerson();
-      const stored = await appHost(this.#env, this.#run.app).workflowState(
-        this.#run.workflow,
-        checked(stateKeySchema, key)
-      );
-      const value: unknown =
-        stored === undefined ? undefined : JSON.parse(stored);
-      return value;
-    });
-  }
-
-  /** Writes a value of the workflow's state, once per idempotency key. */
-  async setState(
-    key: unknown,
-    value: unknown,
-    idempotencyKey: unknown
-  ): Promise<Settled<null>> {
-    return await settle(async () => {
-      await this.#requirePerson();
-      await appHost(this.#env, this.#run.app).setWorkflowState(
-        this.#run.workflow,
-        this.#run.runId,
-        checked(stateKeySchema, key),
-        JSON.stringify(checked(z.json(), value)),
-        checked(idempotencyKeySchema, idempotencyKey)
-      );
-      return null;
     });
   }
 

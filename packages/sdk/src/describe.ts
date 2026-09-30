@@ -149,13 +149,11 @@ type Stub = "appServer" | "appExports";
 const isStub = (name: string | undefined): name is Stub =>
   name === "appServer" || name === "appExports";
 
-/** Names the workflow function binds for its steps, parameters and state. */
+/** Names the workflow function binds for its steps and parameters. */
 interface Bindings {
   step: string | undefined;
   /** `params` in `async (step, { params }) => …`, or what it's renamed to. */
   params: string | undefined;
-  /** `state` in `async (step, { state }) => …`, or what it's renamed to. */
-  state: string | undefined;
   /** `env` in `async (step, { env }) => …`, or what it's renamed to. */
   env: string | undefined;
   /** The SDK's stubs the file imports, by the name it imports each as. */
@@ -165,13 +163,12 @@ interface Bindings {
 const contextKeys = new Set([
   "params",
   "input",
-  "state",
   "runId",
   "env",
   "readAttachment",
 ]);
 const contextHint =
-  "Destructure the workflow function's context, e.g. `async (step, { params, input, state }) => …`";
+  "Destructure the workflow function's context, e.g. `async (step, { params, input, env }) => …`";
 const parametersHint =
   "The workflow function takes `step` and its context, without default values or computed names";
 const envHint = (env: string): string =>
@@ -182,7 +179,6 @@ const stepHint =
 /** How to read what the workflow function's context holds, instead. */
 const destructuringHints = {
   params: "Read parameters as `params.name`, without destructuring it",
-  state: "Read state as `state.get(…)`, without destructuring it",
   env: "Call the App's bindings as `env.NAME`, without destructuring it",
 } as const;
 
@@ -209,7 +205,6 @@ const bindingsOf = (
   const bindings: Bindings = {
     step: stepParam?.name,
     params: undefined,
-    state: undefined,
     env: undefined,
     stubs,
   };
@@ -232,7 +227,7 @@ const bindingsOf = (
     ) {
       throw fail(property, contextHint);
     }
-    if (key !== "params" && key !== "state" && key !== "env") {
+    if (key !== "params" && key !== "env") {
       continue;
     }
     if (property.value.type !== "Identifier") {
@@ -427,18 +422,6 @@ const checkBindingUses = (body: Node, bindings: Bindings): void => {
       throw fail(
         node,
         `Read parameters as \`${node.name}.name\`, so the step list shows which are used`
-      );
-    }
-    // A step's function runs inside the step, where state can't be used, and
-    // its options are read before it: state belongs between steps.
-    const inStepCall = ancestors.some(
-      ({ node: ancestor, key }) =>
-        key === "arguments" && isStepCall(bindings, ancestor)
-    );
-    if (node.name === bindings.state && inStepCall) {
-      throw fail(
-        node,
-        `Read and write \`${node.name}\` between steps, not in a step's options or function`
       );
     }
   });

@@ -35,7 +35,7 @@ import { fromIsolate } from "./host.ts";
 //
 // A run is pinned to its App version's workflow code. The SDK's modules
 // come from the release that runs it, and so does the engine contract
-// between them (step names, `$params`, `$state:…`): that contract must stay
+// between them (step names, `$params`): that contract must stay
 // the same across releases, or runs started before a release replay
 // differently after it. `env.APP` calls the App's current server version,
 // as every caller of the App does.
@@ -308,8 +308,6 @@ export class Run extends WorkerEntrypoint {
         openDecision: async (request) => unwrapped(await host.openDecision(request)),
         decisionRecipients: async (decision, reminder) => unwrapped(await host.decisionRecipients(decision, reminder)),
         waitForDecision: async (name, options) => unwrapped(await host.waitForDecision(name, options)),
-        getState: async (key) => unwrapped(await host.getState(key)),
-        setState: async (key, value, idempotencyKey) => unwrapped(await host.setState(key, value, idempotencyKey)),
         readAttachment: async (stored, index) => unwrapped(await host.readAttachment(stored, index)),
       };
       return await definition.run(engine, input);

@@ -21,16 +21,6 @@ const unusedSystems: InvoiceSystems = {
 
 const noAsk = async (): Promise<void> => {};
 
-/** Counts its runs in its state. */
-const counter = workflow(
-  "counter",
-  { params: {} },
-  async (_step, { state }) => {
-    const count = await state.get("count");
-    await state.set("count", typeof count === "number" ? count + 1 : 1);
-  }
-);
-
 /** Reads a customer, then emails each of their open orders. */
 const reminders = (systems: {
   customer: (id: string) => Promise<{ email: string; open: string[] }>;
@@ -197,12 +187,6 @@ describe("test runs", () => {
       "second#remind",
     ]);
   });
-
-  it("start from the state they're given and keep what the run writes", async () => {
-    const run = await testRun(counter, { state: { count: 41 } });
-
-    expect(run.state).toStrictEqual({ count: 42 });
-  });
 });
 
 describe("dry runs", () => {
@@ -248,16 +232,6 @@ describe("dry runs", () => {
         '- book {"invoice":"INV-7","total":800000}',
       ].join("\n")
     );
-  });
-
-  it("report the state they would have written, and keep none of it", async () => {
-    const state = { count: 41, other: "same" };
-
-    const run = await dryRun(counter, { state });
-
-    expect(run.report).toContain('Would have changed:\n- state "count" to 42');
-    expect(run.report).not.toContain("other");
-    expect(state).toStrictEqual({ count: 41, other: "same" });
   });
 
   it("report a run that fails, and where", async () => {

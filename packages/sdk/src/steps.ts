@@ -21,7 +21,7 @@ export const nameRule =
 /**
  * The name the engine gets for a step: its name, `name:key` for a keyed step
  * (the key URI-encoded), plus `#part` for the parts of a decision
- * (`review#ask`). The SDK's own steps (parameters, state) start with `$`.
+ * (`review#ask`). The SDK's own step (parameters) starts with `$`.
  */
 export const engineStepPattern = new RegExp(
   // namePattern without its anchors.
