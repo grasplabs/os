@@ -141,6 +141,9 @@ interface MetadataEntrypoint extends Rpc.WorkerEntrypointBranded {
  */
 const workflowSandbox = {
   ...sandbox,
+  // `AsyncLocalStorage` only, for a run's bindings: which attempt of a
+  // step a call comes from (`runBindings`).
+  compatibilityFlags: [...sandbox.compatibilityFlags, "nodejs_als"],
   limits: { cpuMs: 30_000 },
 } satisfies Omit<WorkerLoaderWorkerCode, "mainModule" | "modules">;
 
@@ -204,11 +207,23 @@ const settled = async (run) => {
  * at load is handed the bindings as they are wrapped. It is the isolate's
  * own convenience all the same: every call a binding makes is checked and
  * audited on core's side of the RPC, whatever code makes it.
+ *
+ * It also keeps which attempt of a step the code running belongs to
+ * (`inAttempt`), as the host names it: every App call says which attempt
+ * it comes from, so the host can tell a call of an attempt the engine
+ * gave up on. Its storage's methods are kept here too, bound as the
+ * runtime made them.
  */
 const runBindingsModule = "grasp-run-bindings.js";
-const runBindings = `const ProxyOf = Proxy;
+const runBindings = `import { AsyncLocalStorage } from "node:async_hooks";
+
+const ProxyOf = Proxy;
 const ErrorOf = Error;
 const hasOwn = Object.hasOwn;
+const attempts = new AsyncLocalStorage();
+const attemptOf = attempts.getStore.bind(attempts);
+
+export const inAttempt = attempts.run.bind(attempts);
 
 export const unwrapped = (result) => {
   if (result.ok) {
@@ -240,7 +255,7 @@ export const bindings = (env, host, connections, apps) => {
     __proto__: null,
     ...env,
     APP: {
-      call: async (method, ...args) => unwrapped(await host.callApp(method, args)),
+      call: async (method, ...args) => unwrapped(await host.callApp(method, args, attemptOf())),
     },
   };
   for (let index = 0; index < connections.length; index += 1) {
@@ -253,7 +268,7 @@ export const bindings = (env, host, connections, apps) => {
   for (let index = 0; index < apps.length; index += 1) {
     const name = apps[index];
     all[name] = {
-      call: async (method, input) => unwrapped(await host.callExport(name, method, input)),
+      call: async (method, input) => unwrapped(await host.callExport(name, method, input, attemptOf())),
     };
   }
   return guarded(all);
@@ -264,7 +279,8 @@ export const bindings = (env, host, connections, apps) => {
  * The main module of a run of workflow `id`: the engine the SDK runs on,
  * each of its calls sent to core's host (host.ts), and each error in plain
  * data both ways. Its connections and its App go through the host too,
- * which knows the step running. A binding the run doesn't have (a permission revoked
+ * which knows the step running; each App call says which attempt of the
+ * step its code runs in. A binding the run doesn't have (a permission revoked
  * since, or never granted) fails with a permission error, not `undefined`.
  * It imports what builds the bindings (`runBindings`) before the
  * workflow's module, so that is built from the runtime's own built-ins.
@@ -272,7 +288,7 @@ export const bindings = (env, host, connections, apps) => {
 const runMain = (
   id: WorkflowId
 ): string => `import { WorkerEntrypoint } from "cloudflare:workers";
-import { bindings, unwrapped } from ${JSON.stringify(runBindingsModule)};
+import { bindings, inAttempt, unwrapped } from ${JSON.stringify(runBindingsModule)};
 import definition from ${JSON.stringify(appModuleName(workflowPaths(id).workflow))};
 ${settling}
 
@@ -286,7 +302,7 @@ export class Run extends WorkerEntrypoint {
         runId,
         params,
         env: bindings(this.env, host, connections, apps),
-        do: async (name, options, fn) => unwrapped(await host.do(name, options, async () => await settled(fn))),
+        do: async (name, options, fn) => unwrapped(await host.do(name, options, async (attempt) => await inAttempt(attempt, async () => await settled(fn)))),
         sleep: async (name, milliseconds) => unwrapped(await host.sleep(name, milliseconds)),
         waitForEvent: async (name, options) => unwrapped(await host.waitForEvent(name, options)),
         callModel: async (request) => unwrapped(await host.callModel(request)),

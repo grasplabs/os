@@ -14,8 +14,9 @@ type Builder = Parameters<typeof release>[0];
 
 /**
  * The sample App's server code: purchase orders, a ledger that books each
- * entry once per idempotency key, and counters that show how often a step
- * really ran.
+ * entry once per idempotency key, counters that show how often a step
+ * really ran, statistics points, recorded around a mail or by name, and
+ * gates a call waits at until another opens them.
  */
 export const server = `import { DurableObject } from "cloudflare:workers";
 
@@ -57,6 +58,62 @@ export class App extends DurableObject {
     } catch (error) {
       return { refused: (error as { code?: string }).code };
     }
+  }
+
+  // Records two points alike of the App's statistics, mails the invoice,
+  // and records a third once the mail was sent.
+  async mailCounted(caller: Caller): Promise<unknown> {
+    const stats = (this.env as any).STATISTICS;
+    await stats.record(caller, { measure: "mails", value: 1 });
+    await stats.record(caller, { measure: "mails", value: 1 });
+    const sent = await this.mail(caller, false);
+    if (!("refused" in (sent as object))) {
+      await stats.record(caller, { measure: "sent", value: 1 });
+    }
+    return sent;
+  }
+
+  // How many points of \`measure\` the App's statistics hold of today
+  // and yesterday: a run that crosses midnight counts the same.
+  async points(caller: Caller, measure: string): Promise<number> {
+    const { groups } = await (this.env as any).STATISTICS.read(caller, { measure, days: 2 });
+    return groups[0]?.count ?? 0;
+  }
+
+  // Records a point of each of \`measures\`, in that order.
+  async point(caller: Caller, ...measures: string[]): Promise<void> {
+    for (const measure of measures) {
+      await (this.env as any).STATISTICS.record(caller, { measure, value: 1 });
+    }
+  }
+
+  // Waits at \`gate\`, then records a point of \`measure\`, and counts
+  // whether the call was taken (\`measure\`:recorded) or refused.
+  async pointAfter(caller: Caller, gate: string, measure: string): Promise<void> {
+    await this.gate(gate).promise;
+    try {
+      await this.point(caller, measure);
+      this.hit(caller, measure + ":recorded");
+    } catch {
+      this.hit(caller, measure + ":refused");
+    }
+  }
+
+  // Waits until \`open\` was called for \`gate\`, before or after.
+  async waitFor(_caller: Caller, gate: string): Promise<void> {
+    await this.gate(gate).promise;
+  }
+
+  open(_caller: Caller, gate: string): void {
+    this.gate(gate).resolve();
+  }
+
+  gates = new Map<string, PromiseWithResolvers<void>>();
+
+  gate(name: string): PromiseWithResolvers<void> {
+    const gate = this.gates.get(name) ?? Promise.withResolvers<void>();
+    this.gates.set(name, gate);
+    return gate;
   }
 }
 `;

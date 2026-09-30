@@ -871,6 +871,51 @@ export const appStatistics = sqliteTable(
 );
 
 /**
+ * The statistics points the attempts of a workflow run's steps recorded
+ * through Apps' methods, not yet added up (src/statistics.ts): one row
+ * per step (its idempotency key), attempt, App, measure, day and
+ * dimensions, holding what `app_statistics` holds of them. When a step
+ * that called an App completes, the points of the attempt that completed
+ * it are added to `app_statistics`, and the step gets its marker (a row
+ * of no App and no measure, `committed`), in one batch; no other
+ * attempt's ever are, and a step with its marker adds nothing again.
+ * Kept only while the run hasn't ended, and deleted when it ends.
+ */
+export const appStatisticSteps = sqliteTable(
+  "app_statistic_steps",
+  {
+    /** The step's idempotency key (`stepIdempotencyKey`): its run's ID first. */
+    stepKey: text("step_key").notNull(),
+    /** The attempt of the step, an ID the run's engine gives each. */
+    attempt: text().notNull(),
+    appId: text("app_id").notNull(),
+    measure: text().notNull(),
+    /** `YYYY-MM-DD`, UTC. */
+    day: text().notNull(),
+    /** Canonical JSON of the point's dimensions, `{}` for none. */
+    dimensions: text().notNull(),
+    count: integer().notNull(),
+    sum: real().notNull(),
+    min: real().notNull(),
+    max: real().notNull(),
+    /** Set on the step's marker only: the step completed with this attempt. */
+    committed: integer({ mode: "boolean" }).notNull(),
+  },
+  (table) => [
+    primaryKey({
+      columns: [
+        table.stepKey,
+        table.attempt,
+        table.appId,
+        table.measure,
+        table.day,
+        table.dimensions,
+      ],
+    }),
+  ]
+);
+
+/**
  * The version of core the cron last saw running, one row, `id` 1, as the
  * first release of src/platform-updates.ts kept it. No longer written:
  * `platform_versions` replaces it. Drop it in a later release, once no

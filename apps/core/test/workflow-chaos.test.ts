@@ -1,5 +1,6 @@
 import { appIdSchema } from "@grasp-os/shared/ids";
 import type { Role } from "@grasp-os/shared/roles";
+import { statisticRowsPerDay } from "@grasp-os/shared/statistics";
 import { introspectWorkflowInstance } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -75,6 +76,16 @@ const hitsOf = async (app: string, userId: string, name: string) =>
     { userId, mode: "interactive" },
     "hits",
     [name]
+  );
+
+/** How many points of `measure` the App's statistics hold (its server's `points`). */
+const pointsOf = async (app: string, userId: string, measure: string) =>
+  await callApp(
+    env,
+    appIdSchema.parse(app),
+    { userId, mode: "interactive" },
+    "points",
+    [measure]
   );
 
 /**
@@ -266,6 +277,224 @@ ${mailStep("late", "Late", { after: hangOnFirst("late") })}
       run: { status: "completed", output: { messageId: "message-1" } },
       attempts: 2,
       server: { calls: 1, sent: [invoiceMail] },
+    });
+  });
+
+  it("add a step's statistics points up once, as it completes: never an abandoned attempt's, nor when the engine runs the step anew, nor past the day's rows, and keep none for an ended run", async () => {
+    const builder = await personApi("builder");
+    const app = await appWith(builder, {
+      // The first attempt hangs in an App call until the engine gave up on
+      // it and the second opened its gate; then it calls on, late, while
+      // the second still runs.
+      ...workflowFiles(
+        "late",
+        `  return await step.do(
+    "count",
+    { description: "Count", timeout: "${attemptTimeout}", retries: { limit: 1, delay: 10 } },
+    async () => {
+      const attempt = await env.APP.call("hit", "late");
+      await env.APP.call("point", "tried");
+      if (attempt === 1) {
+        await env.APP.call("waitFor", "second");
+        await env.APP.call("point", "late");
+        await env.APP.call("open", "late");
+        return "first";
+      }
+      await env.APP.call("open", "second");
+      await env.APP.call("waitFor", "late");
+      return "second";
+    }
+  );`,
+        { count: "second" }
+      ),
+      ...workflowFiles(
+        "forgetful",
+        `  const attempt = await step.do("count", { description: "Count" }, async () => {
+    await env.APP.call("point", "kept", "kept");
+    return await env.APP.call("hit", "forgetful");
+  });
+  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  return attempt;`,
+        { count: 1 }
+      ),
+      // Records nothing the first time it runs, and a point when run anew.
+      ...workflowFiles(
+        "silent",
+        `  const attempt = await step.do("count", { description: "Count" }, async () => {
+    const attempt = await env.APP.call("hit", "silent");
+    if (attempt > 1) {
+      await env.APP.call("point", "anew");
+    }
+    return attempt;
+  });
+  await step.waitFor("go", { description: "Wait", type: "go", timeout: "1 day" });
+  return attempt;`,
+        { count: 1 }
+      ),
+      // The first attempt's App call waits at a gate the test opens once
+      // the run has ended, and records a point then.
+      ...workflowFiles(
+        "outlived",
+        `  return await step.do(
+    "count",
+    { description: "Count", timeout: "${attemptTimeout}", retries: { limit: 1, delay: 10 } },
+    async () => {
+      if ((await env.APP.call("hit", "outlived")) === 1) {
+        await env.APP.call("pointAfter", "ended", "outlived");
+      }
+      return null;
+    }
+  );`,
+        { count: null }
+      ),
+      ...workflowFiles(
+        "bounded",
+        `  return await step.do("count", { description: "Count" }, async () => {
+    await env.APP.call("point", "over", "known", "fits");
+    return null;
+  });`,
+        { count: null }
+      ),
+    });
+    await serverBuilt(app, 1);
+    const count = async (measure: string) =>
+      await pointsOf(app, builder.userId, measure);
+
+    const late = await builder.api.workflows.start(app, "late");
+    await finished(late.id);
+    const abandoned = {
+      status: await builder.api.workflows.status(late.id),
+      attempts: await hitsOf(app, builder.userId, "late"),
+      tried: await count("tried"),
+      late: await count("late"),
+    };
+
+    const forgetful = await builder.api.workflows.start(app, "forgetful");
+    await stepDone(forgetful.id, "count");
+    const once = await count("kept");
+    // Runs the step again from scratch, as if its result had never been
+    // stored, after its points were added up.
+    const instance = await env.WORKFLOWS.get(forgetful.id);
+    await instance.restart({ from: { name: "count" } });
+    await vi.waitFor(
+      async () => {
+        await expect(
+          hitsOf(app, builder.userId, "forgetful")
+        ).resolves.toBeGreaterThan(1);
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+    await finished(forgetful.id, { type: "go", payload: null });
+    const anew = {
+      attempts: await hitsOf(app, builder.userId, "forgetful"),
+      once,
+      kept: await count("kept"),
+    };
+
+    const silent = await builder.api.workflows.start(app, "silent");
+    await stepDone(silent.id, "count");
+    const silentInstance = await env.WORKFLOWS.get(silent.id);
+    await silentInstance.restart({ from: { name: "count" } });
+    await vi.waitFor(
+      async () => {
+        await expect(
+          hitsOf(app, builder.userId, "silent")
+        ).resolves.toBeGreaterThan(1);
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+    await finished(silent.id, { type: "go", payload: null });
+
+    const outlived = await builder.api.workflows.start(app, "outlived");
+    await finished(outlived.id);
+    // The run has ended: the call its first attempt left waiting goes on.
+    await callApp(
+      env,
+      appIdSchema.parse(app),
+      { userId: builder.userId, mode: "interactive" },
+      "open",
+      ["ended"]
+    );
+    await vi.waitFor(
+      async () => {
+        await expect(
+          hitsOf(app, builder.userId, "outlived:recorded")
+        ).resolves.toBe(1);
+      },
+      { timeout: 10_000, interval: 100 }
+    );
+    const { results: kept } = await env.DB.prepare(
+      "SELECT step_key, measure FROM app_statistic_steps WHERE app_id = ?"
+    )
+      .bind(app)
+      .all();
+
+    // A day's rows, but for one, with those the runs above made: today's
+    // and tomorrow's, should the run cross midnight. `known` has its row,
+    // holding no point yet.
+    const days = [0, 1].map((ahead) =>
+      new Date(Date.now() + ahead * 24 * 60 * 60 * 1000)
+        .toISOString()
+        .slice(0, 10)
+    );
+    for (const day of days) {
+      // oxlint-disable-next-line no-await-in-loop -- one day at a time
+      const held = await env.DB.prepare(
+        "SELECT count(*) AS held FROM app_statistics WHERE app_id = ? AND day = ?"
+      )
+        .bind(app, day)
+        .first<number>("held");
+      // oxlint-disable-next-line no-await-in-loop -- one day's batch at a time
+      await env.DB.batch(
+        Array.from(
+          { length: statisticRowsPerDay - 1 - (held ?? 0) },
+          (_, index) =>
+            env.DB.prepare(
+              "INSERT INTO app_statistics (app_id, measure, day, dimensions, count, sum, min, max) VALUES (?, ?, ?, ?, 0, 0, 0, 0)"
+            ).bind(
+              app,
+              index === 0 ? "known" : "filled",
+              day,
+              index === 0 ? "{}" : JSON.stringify({ n: String(index) })
+            )
+        )
+      );
+    }
+    const bounded = await builder.api.workflows.start(app, "bounded");
+    await finished(bounded.id);
+
+    expect({
+      abandoned,
+      anew,
+      silent: await count("anew"),
+      outlived: { counted: await count("outlived"), kept },
+      bounded: {
+        status: await builder.api.workflows.status(bounded.id),
+        known: await count("known"),
+        fits: await count("fits"),
+        over: await count("over"),
+      },
+    }).toMatchObject({
+      // Both attempts recorded `tried`, and the first, given up on,
+      // recorded `late` while the second ran: only the second's count.
+      abandoned: {
+        status: { status: "completed", output: "second" },
+        attempts: 2,
+        tried: 1,
+        late: 0,
+      },
+      // Two points alike, added up when the step first completed, and not
+      // again when it ran anew.
+      anew: { attempts: 2, once: 2, kept: 2 },
+      // Completed without a point: what it records when run anew isn't
+      // added either.
+      silent: 0,
+      // Recorded once its run had ended: taken, but neither counted nor
+      // kept.
+      outlived: { counted: 0, kept: [] },
+      // The point in a row the day has, and the first new row, which
+      // fits; the next is left out, and the step completes all the same.
+      bounded: { status: { status: "completed" }, known: 1, fits: 1, over: 0 },
     });
   });
 

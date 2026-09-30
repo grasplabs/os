@@ -10,7 +10,11 @@ import { appIdSchema } from "./ids.ts";
 // measures the platform publishes (`platform.` ones, such as the runs its
 // workflows start) of an App whose runs the person it acts for may see:
 // counts and sums, never one run in detail. What an App keeps for itself stays in the App (its
-// own storage); what the company should remember goes in Knowledge.
+// own storage); what the company should remember goes in Knowledge. The
+// points a method records for a workflow run's step are added up when
+// the step completes, once however often the step runs: a read sees them
+// from then, a step that fails adds none, and one that would make a row
+// past the day's bound is left out then, not refused when recorded.
 
 /** A measure's name: `invoices_booked`. `platform.` ones are the platform's. */
 export const measureNameSchema = z

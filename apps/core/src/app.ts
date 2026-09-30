@@ -235,8 +235,14 @@ export const invokeServer = async (
  */
 export type RunWatcher = Rpc.Stub<(change: RunChange) => Promise<void>>;
 
-/** Who calls the App, as core knows it; the token is the host's. */
-export type AppCallerInput = Omit<AppCaller, "token">;
+/**
+ * Who calls the App, as core knows it; the token is the host's. For a
+ * workflow run's step, also which attempt of the step the call comes from
+ * (`attempt`, the run's engine's ID for it): kept by the host, for the
+ * statistics points the call records (statistics.ts), and never shown to
+ * the App's code.
+ */
+export type AppCallerInput = Omit<AppCaller, "token"> & { attempt?: string };
 
 /**
  * What a call from another App's code through an export carries besides
@@ -414,6 +420,7 @@ export class App extends DurableObject<Env> {
       throw appErrors.create("app.timed_out", { version: null, method });
     }
     const token = crypto.randomUUID();
+    const { attempt: _attempt, ...shown } = caller;
     const call: RunningCall = {
       caller,
       method,
@@ -444,7 +451,7 @@ export class App extends DurableObject<Env> {
       this.#calls.set(token, { ...call, version });
       return await invokeServer(
         running.facet,
-        { ...caller, token } satisfies AppCaller,
+        { ...shown, token } satisfies AppCaller,
         args,
         { app: this.#app, version: running.version, method }
       );
@@ -632,7 +639,7 @@ export class App extends DurableObject<Env> {
   /**
    * Who a stub call acts for: the caller of the running call `token`
    * names, with the version of the code the call runs, and, for a
-   * workflow run's step, that step's idempotency key, and where the call
+   * workflow run's step, that step's idempotency key and its attempt, and where the call
    * is within calls between Apps (`path`), and the method it calls,
    * which a record's kept fields go by (knowledge/records.ts). For the
    * App's stubs (app-bindings.ts, app-calls.ts) only. A call whose code
@@ -642,6 +649,7 @@ export class App extends DurableObject<Env> {
   callerOf(token: string): {
     authority: Authority;
     idempotencyKey: string | undefined;
+    attempt: string | undefined;
     path: CallPath;
     method: string;
   } {
@@ -658,6 +666,7 @@ export class App extends DurableObject<Env> {
         appVersion: version,
       },
       idempotencyKey: caller.idempotencyKey,
+      attempt: caller.attempt,
       path: { chain: [...above, this.#app], deadline: ends, readOnly },
       method,
     };

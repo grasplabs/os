@@ -48,6 +48,7 @@ import { featureEnabled, requireFeature } from "../features.ts";
 import type { Feature } from "../features.ts";
 import { models } from "../models.ts";
 import { requireActivePerson, requireApprovedVersion } from "../permissions.ts";
+import { commitStepStatistics } from "../statistic-steps.ts";
 import type { Settled, StepError } from "./code.ts";
 import { sentEventSchema } from "./engine.ts";
 import { attachmentOf, keptMessage } from "./kept-email.ts";
@@ -114,6 +115,12 @@ export const coreEventPrefix = "grasp-";
  * (`readAttachment`): each parsed once per attempt.
  */
 interface StepAttempt {
+  /**
+   * Its own ID, which the isolate hands back with each App call the
+   * attempt's code makes: the statistics points those calls record are
+   * kept by it, and added up only if this attempt completes the step.
+   */
+  id: string;
   step: string;
   held: boolean;
   calledApp: boolean;
@@ -960,7 +967,7 @@ export class RunHost extends RpcTarget {
   async do(
     name: unknown,
     options: unknown,
-    fn: () => Promise<unknown>
+    fn: (attempt: string) => Promise<unknown>
   ): Promise<Settled<unknown>> {
     // Before the step's name and options are checked, which fail the step:
     // waiting mustn't. Options that don't parse wait for `workflows` only,
@@ -990,14 +997,19 @@ export class RunHost extends RpcTarget {
         attempted = true;
         // Only the last attempt's error counts: an earlier one was retried.
         failed = undefined;
-        const attempt: StepAttempt = { step, held: false, calledApp: false };
+        const attempt: StepAttempt = {
+          id: crypto.randomUUID(),
+          step,
+          held: false,
+          calledApp: false,
+        };
         this.#running = attempt;
         let result: Settled<unknown>;
         // Whether no newer attempt began, and the step didn't end, while
         // this one ran: an abandoned attempt's result is thrown away.
         let current = false;
         try {
-          result = fromIsolate(await fn());
+          result = fromIsolate(await fn(attempt.id));
         } finally {
           current = this.#running === attempt;
           if (current) {
@@ -1053,6 +1065,16 @@ export class RunHost extends RpcTarget {
         // between the two can't lose it: at least once, as a stop before
         // the result is stored runs the step, and records it, again.
         if (current) {
+          // The step completes with this attempt: the statistics points
+          // its App calls recorded are added up, once (a step run again
+          // after this adds nothing), and no other attempt's.
+          if (attempt.calledApp) {
+            await commitStepStatistics(
+              this.#env,
+              stepIdempotencyKey(this.#run.runId, step),
+              attempt.id
+            );
+          }
           await this.#audited(step, "completed", { sideEffect });
         }
         return result.value;
@@ -1247,6 +1269,17 @@ export class RunHost extends RpcTarget {
     return stepIdempotencyKey(this.#run.runId, this.#requireStep().step);
   }
 
+  /**
+   * The attempt an App call comes from, as the isolate says (`from`, the
+   * ID the attempt's function was started with): the one running now, or
+   * one the engine gave up on, whose code still runs. The statistics
+   * points the call records are kept by it, so a late call of an
+   * abandoned attempt never counts with the attempt that replaced it.
+   */
+  #attemptOf(from: unknown): string {
+    return checked(z.uuid().optional(), from) ?? this.#requireStep().id;
+  }
+
   /** The step whose function runs now; refuses a call outside a step. */
   #requireStep(): StepAttempt {
     const running = this.#running;
@@ -1304,21 +1337,30 @@ export class RunHost extends RpcTarget {
    * data (`callApp`), and whatever it holds of the App's data is covered by
    * the run's restricted mode, which is the App's (restricted.ts).
    */
-  async callApp(method: unknown, args: unknown): Promise<Settled<unknown>> {
+  async callApp(
+    method: unknown,
+    args: unknown,
+    from?: unknown
+  ): Promise<Settled<unknown>> {
     return await settle(async () => {
       const attempt = this.#requireStep();
       attempt.calledApp = true;
       const idempotencyKey = this.#stepKey();
+      const caller: AppCallerInput = {
+        userId: this.#run.authority.onBehalfOf,
+        mode: "workflow",
+        idempotencyKey,
+        attempt: this.#attemptOf(from),
+      };
       await this.#requirePerson();
       await requireApprovedVersion(this.#env, this.#run.app, this.#run.version);
-      const { authority } = this.#run;
       // The App's own connection calls take the step's key: held, they
       // hold the step as the run's own do (`do` asks connect too).
       return await heldNoted(
         attempt,
         async () =>
           await this.#hooks.callApp(
-            { userId: authority.onBehalfOf, mode: "workflow", idempotencyKey },
+            caller,
             String(method),
             checked(z.array(z.unknown()), args)
           )
@@ -1337,7 +1379,8 @@ export class RunHost extends RpcTarget {
   async callExport(
     binding: unknown,
     method: unknown,
-    input: unknown
+    input: unknown,
+    calling?: unknown
   ): Promise<Settled<unknown>> {
     return await settle(async () => {
       const attempt = this.#requireStep();
@@ -1349,6 +1392,7 @@ export class RunHost extends RpcTarget {
         throw workflowErrors.create("workflow.invalid");
       }
       attempt.calledApp = true;
+      const from = this.#attemptOf(calling);
       return await heldNoted(
         attempt,
         async () =>
@@ -1357,6 +1401,7 @@ export class RunHost extends RpcTarget {
             {
               authority,
               idempotencyKey,
+              attempt: from,
               // A run's call ends by the called App's own limit.
               path: {
                 chain: [app],

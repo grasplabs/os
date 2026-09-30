@@ -50,6 +50,7 @@ import { appHost } from "../durable-objects.ts";
 import { featureEnabled, requireFeature } from "../features.ts";
 import type { Feature } from "../features.ts";
 import { failureNoticed } from "../notifications.ts";
+import { forgetStepStatistics } from "../statistic-steps.ts";
 import { hasWorkflow } from "./code.ts";
 import { runEngine } from "./engine.ts";
 import type { WaitReason } from "./host.ts";
@@ -759,12 +760,16 @@ export const listRuns = async (
   return rows.map((row) => runFor(env, by, row, ownerId));
 };
 
-/** Drops the state writes an ended run applied (app.ts). */
+/**
+ * Drops the state writes an ended run applied (app.ts), and the
+ * statistics points its steps' attempts recorded (statistic-steps.ts).
+ */
 const forgetWrites = async (env: Env, row: RunRow): Promise<void> => {
   await appHost(env, appIdSchema.parse(row.appId)).forgetWorkflowWrites(
     row.workflowId,
     row.id
   );
+  await forgetStepStatistics(env, row.id);
 };
 
 /**

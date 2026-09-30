@@ -194,7 +194,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
       env,
       app,
       { measure: "invoices", value: 1000, dimensions: { supplier: "acme" } },
-      new Date(Date.now() - 8 * dayMs)
+      { now: new Date(Date.now() - 8 * dayMs) }
     );
     const bySupplier = answerSchema.parse(
       await read(app, admin.userId, {
@@ -425,7 +425,7 @@ describe("an App's own statistics", { timeout: 60_000 }, () => {
       env,
       app,
       { measure: "old", value: 1 },
-      new Date(Date.now() - 500 * dayMs)
+      { now: new Date(Date.now() - 500 * dayMs) }
     );
     const recorded = await recordedQueries(async () => {
       await callApp(env, app, as(admin.userId), "record", [

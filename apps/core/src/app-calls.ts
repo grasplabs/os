@@ -92,6 +92,8 @@ export interface ExportCaller {
   authority: Authority;
   /** For a workflow run's step: its key, handed on to the called App. */
   idempotencyKey: string | undefined;
+  /** For a workflow run's step: its attempt, handed on with the key. */
+  attempt?: string | undefined;
   /** Where the call is: the calling App last in its chain. */
   path: CallPath;
   /** Who the audit log says called: the App's server code, or the run. */
@@ -378,6 +380,7 @@ export const callExport = async (
         ...(caller.idempotencyKey === undefined
           ? {}
           : { idempotencyKey: caller.idempotencyKey }),
+        ...(caller.attempt === undefined ? {} : { attempt: caller.attempt }),
         app: { id: calling, version: callingVersion },
       },
       name,
@@ -463,12 +466,13 @@ export class AppExportBinding extends WorkerEntrypoint<
         });
         throw error;
       }
-      const { authority, idempotencyKey, path } = known;
+      const { authority, idempotencyKey, attempt, path } = known;
       return await callExport(
         this.env,
         {
           authority,
           idempotencyKey,
+          attempt,
           path,
           actor: delegateActorOf(authority),
         },
