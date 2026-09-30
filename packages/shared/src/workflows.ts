@@ -133,6 +133,13 @@ export const nextScheduledRun = (
   }
 };
 
+/**
+ * How many starts of a schedule's run may fail in a row before the
+ * schedule stops. The tries are spread over about two hours, so a short
+ * outage stops nothing.
+ */
+export const maxFailedStarts = 8;
+
 /** Whether `cron` is five cron fields that name a time to come. */
 export const isCronExpression = (cron: string): boolean =>
   nextScheduledRun({ cron, timeZone: defaultTimeZone }, new Date()) !==
@@ -611,6 +618,12 @@ export interface WorkflowSummary {
   waiting: number;
   /** Its runs that failed in the last {@link failedRunDays} days. */
   failed: number;
+  /**
+   * A schedule of it stopped: its run failed to start
+   * {@link maxFailedStarts} times in a row. It starts again once its
+   * schedule parameter is set, or a new version is made current.
+   */
+  scheduleStopped: boolean;
 }
 
 /**

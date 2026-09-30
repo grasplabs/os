@@ -115,6 +115,8 @@ const typeRules: readonly {
   { action: "workflow.run", type: "action" },
   { action: "workflow.step", type: "action" },
   { action: "workflow.param", type: "config" },
+  // A schedule stopped after its run kept failing to start.
+  { action: "workflow.schedule", type: "action" },
   { action: "platform", type: "platform_update" },
   // Improvement signals: the daily computation, and reading them.
   { action: "improvement.signals.computed", type: "action" },

@@ -7,6 +7,7 @@ import type {
   RunFilterStatus,
   WorkflowSummary,
 } from "@grasp-os/shared/workflows";
+import { Badge } from "@grasp-os/ui/components/badge";
 import {
   Select,
   SelectContent,
@@ -193,13 +194,18 @@ const WorkflowRow = ({
 }) => (
   <TableRow>
     <TableCell>
-      <Link
-        className="underline"
-        params={{ app: workflow.app, workflow: workflow.workflow }}
-        to="/workflows/$app/$workflow"
-      >
-        {workflow.workflow}
-      </Link>
+      <div className="flex flex-wrap items-center gap-2">
+        <Link
+          className="underline"
+          params={{ app: workflow.app, workflow: workflow.workflow }}
+          to="/workflows/$app/$workflow"
+        >
+          {workflow.workflow}
+        </Link>
+        {workflow.scheduleStopped ? (
+          <Badge variant="destructive">Schedule stopped</Badge>
+        ) : null}
+      </div>
     </TableCell>
     <TableCell>
       <Link

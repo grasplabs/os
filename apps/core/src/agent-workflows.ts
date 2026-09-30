@@ -202,6 +202,8 @@ workflows: {
     waiting: number;
     /** Runs that failed in the last 7 days. */
     failed: number;
+    /** A schedule of it stopped: its run failed to start 8 times in a row. */
+    scheduleStopped: boolean;
   }[]>;
   /** A workflow's runs: waiting first, then failed, then the newest, at most 100. */
   runs(app: string, workflow: string): Promise<WorkflowRun[]>;

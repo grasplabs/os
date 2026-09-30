@@ -1,0 +1,1 @@
+ALTER TABLE `workflow_triggers` ADD `failed_starts` integer DEFAULT 0 NOT NULL;

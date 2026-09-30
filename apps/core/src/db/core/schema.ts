@@ -596,8 +596,10 @@ export const workflowRuns = sqliteTable(
  * (src/workflows/trigger-registry.ts), written when a version is made
  * current and removed when another is. `position` is the trigger's place
  * among its workflow's. A schedule keeps its cron expression as its
- * parameter holds it now (`cron`), in its time zone, and when it next
- * fires (`next_run_at`). An email trigger keeps the address it receives
+ * parameter holds it now (`cron`), in its time zone, when it next
+ * fires (`next_run_at`), and how many starts of its run have failed in a
+ * row (`failed_starts`): at `maxFailedStarts` it stops, with no next time
+ * (src/workflows/triggers.ts). An email trigger keeps the address it receives
  * mail at (`address`, the part before the `@`); an event trigger its event
  * type (`event`) and filter (`filter`, JSON).
  */
@@ -620,6 +622,7 @@ export const workflowTriggers = sqliteTable(
     address: text(),
     event: text(),
     filter: text({ mode: "json" }).$type<EventFilter>(),
+    failedStarts: integer("failed_starts").notNull().default(0),
   },
   (table) => [
     uniqueIndex("workflow_triggers_position_idx").on(
