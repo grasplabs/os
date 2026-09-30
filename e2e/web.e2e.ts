@@ -1,5 +1,7 @@
+import { errorReportMaxBytes } from "@grasp-os/shared/error-reports";
 import { expect } from "@playwright/test";
 import type { WebSocketRoute } from "@playwright/test";
+import { z } from "zod";
 
 import { callGate } from "./call-gate.ts";
 import { test } from "./csp.ts";
@@ -48,6 +50,63 @@ test("shows a refusal with the request ID core answered it under, for the person
   await expect(page.getByRole("alert")).toHaveText(
     `This link doesn't work. Ask whoever sent it for a new one. Reference: ${requestId}`
   );
+});
+
+test("reports an error the page never caught once core has it, cut to the size core takes", async ({
+  context,
+  page,
+}) => {
+  const { member } = peopleIn("errorReports");
+  await signInTo(context, member);
+  // The first report never gets there; the rest go on to core.
+  let attempts = 0;
+  const taken: { message: string; status: number; bytes: number }[] = [];
+  await page.route("**/api/error-reports", async (route) => {
+    attempts += 1;
+    if (attempts === 1) {
+      await route.abort();
+      return;
+    }
+    const response = await route.fetch();
+    const body = route.request().postData() ?? "";
+    const { message } = z
+      .object({ message: z.string() })
+      .parse(JSON.parse(body));
+    taken.push({
+      message: message.slice(0, 1),
+      status: response.status(),
+      bytes: Buffer.byteLength(body),
+    });
+    await route.fulfill({ response });
+  });
+  await page.goto("/");
+  await expect(page.getByRole("navigation", { name: "Main" })).toBeVisible();
+
+  // Within each field's limit in characters, but over core's body limit
+  // in bytes: each of these characters is two in UTF-8.
+  const rejectWide = async (): Promise<void> => {
+    await page.evaluate(() => {
+      const error = new Error("é".repeat(1000));
+      error.stack = "ü".repeat(4000);
+      void Promise.reject(error);
+    });
+  };
+  await rejectWide();
+  await expect.poll(() => attempts).toBe(1);
+  // Not taken the first time, so reported again the next.
+  await rejectWide();
+  await expect.poll(() => attempts).toBe(2);
+  // Taken now: never again on this page, unlike another error.
+  await rejectWide();
+  await page.evaluate(() => {
+    void Promise.reject(new Error("another"));
+  });
+  await expect.poll(() => attempts).toBe(3);
+  expect(taken).toStrictEqual([
+    { message: "é", status: 204, bytes: expect.any(Number) },
+    { message: "a", status: 204, bytes: expect.any(Number) },
+  ]);
+  expect(taken[0]?.bytes).toBeLessThanOrEqual(errorReportMaxBytes);
 });
 
 test("names each member's actions for them, and asks before making someone an admin", async ({

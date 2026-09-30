@@ -141,6 +141,7 @@ const cast = {
   membersRecover: { admin: "admin" },
   sessionEnded: { member: "user" },
   readsGivenUp: { member: "user" },
+  errorReports: { member: "user" },
   connections: { admin: "admin", user: "user" },
   knowledge: { one: "user", two: "user" },
   knowledgeUploads: { one: "user" },

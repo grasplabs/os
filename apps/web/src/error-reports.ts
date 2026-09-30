@@ -1,5 +1,6 @@
 import {
   errorReportLimits,
+  errorReportMaxBytes,
   errorReportPath,
 } from "@grasp-os/shared/error-reports";
 import type { ErrorReport } from "@grasp-os/shared/error-reports";
@@ -38,6 +39,46 @@ const reported = new Map<string, Promise<string | undefined>>();
 /** Where the page is: its route's pattern, never the URL itself. */
 let routeNow = (): string => "unknown";
 
+/** How many bytes `report` is as the body core reads. */
+const bytesOf = (report: ErrorReport): number =>
+  new TextEncoder().encode(JSON.stringify(report)).byteLength;
+
+/**
+ * `text`'s code points: cut between them, no half of a pair is left, which
+ * JSON would escape into more bytes than it was. A joined emoji may come
+ * apart, which a report can live with.
+ */
+// oxlint-disable-next-line typescript/no-misused-spread -- see above
+const pointsOf = (text: string): string[] => [...text];
+
+/** `text` without its last `count` code points. */
+const withoutLast = (text: string, count: number): string => {
+  const points = pointsOf(text);
+  return points.slice(0, Math.max(0, points.length - count)).join("");
+};
+
+/**
+ * `report`, cut to fit in the body core takes: its fields' limits count
+ * characters, and a character can take several bytes (or an escape) in
+ * JSON. The stack goes first, then the message. A cut drops as many
+ * characters as the body is bytes over, and every character is a byte at
+ * least, so it fits after the cut.
+ */
+const fitted = (report: ErrorReport): ErrorReport => {
+  const over = bytesOf(report) - errorReportMaxBytes;
+  if (over <= 0) {
+    return report;
+  }
+  const { stack, ...withoutStack } = report;
+  if (stack !== undefined && pointsOf(stack).length > over) {
+    return { ...report, stack: withoutLast(stack, over) };
+  }
+  const still = bytesOf(withoutStack) - errorReportMaxBytes;
+  return still <= 0
+    ? withoutStack
+    : { ...withoutStack, message: withoutLast(report.message, still) };
+};
+
 /**
  * Sends `report` to core: the request ID core logged it under, or
  * undefined for a report it didn't take or that never got there.
@@ -48,7 +89,7 @@ const send = async (report: ErrorReport): Promise<string | undefined> => {
     const response = await fetch(errorReportPath, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(report),
+      body: JSON.stringify(fitted(report)),
       keepalive: true,
     });
     return response.ok
@@ -62,7 +103,8 @@ const send = async (report: ErrorReport): Promise<string | undefined> => {
 
 /**
  * Reports `error` to core, once per page load for the same message and
- * stack, and only if it is the page's own fault (`isPageFault`): resolves
+ * stack (while a report of it is on its way, or once core took one), and
+ * only if it is the page's own fault (`isPageFault`): resolves
  * to the request ID core logged it under, for the person to quote, the
  * same one for each time it is reported again. Never rejects: reporting
  * must not change what the page does.
@@ -93,7 +135,13 @@ export const reportError = async (
       build,
     });
     reported.set(seen, sent);
-    return await sent;
+    const requestId = await sent;
+    if (requestId === undefined) {
+      // Not taken (core out of reach, or past its limit): the next time
+      // the error comes, it is reported again.
+      reported.delete(seen);
+    }
+    return requestId;
   } catch {
     // Something thrown that can't even be read as text: let it go.
     return undefined;
