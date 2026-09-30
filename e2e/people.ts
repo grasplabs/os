@@ -104,6 +104,27 @@ export const apiOf = (person: Pick<Person, "cookie">) => {
 };
 
 /**
+ * Ends the person's session as signing out elsewhere does: their cookie
+ * stays in the browser, and no longer says who they are.
+ */
+export const endSession = async (
+  person: Pick<Person, "cookie">
+): Promise<void> => {
+  const ended = await fetch(new URL("/api/auth/sign-out", origin), {
+    method: "POST",
+    headers: {
+      origin,
+      "content-type": "application/json",
+      cookie: `${sessionCookie}=${encodeURIComponent(person.cookie)}`,
+    },
+    body: "{}",
+  });
+  if (!ended.ok) {
+    throw new Error(`The session did not end (${ended.status})`);
+  }
+};
+
+/**
  * Everyone the tests sign in as, by scene: a test, or a file whose tests
  * share them. Scenes don't share people, so what a test changes about
  * someone, their role say, no other test sees.
@@ -118,6 +139,8 @@ const cast = {
   roleChange: { admin: "admin", one: "user" },
   membersUnreachable: { admin: "admin" },
   membersRecover: { admin: "admin" },
+  sessionEnded: { member: "user" },
+  readsGivenUp: { member: "user" },
   connections: { admin: "admin", user: "user" },
   knowledge: { one: "user", two: "user" },
   knowledgeUploads: { one: "user" },

@@ -14,12 +14,9 @@ import { Textarea } from "@grasp-os/ui/components/textarea";
 import { createFileRoute } from "@tanstack/react-router";
 import { useState } from "react";
 
-import {
-  CoreTimeoutError,
-  loadCoreStatus,
-  withSession,
-  withTimeout,
-} from "../core.ts";
+import { loadCoreStatus, readWithin } from "../core-connection.ts";
+import type { CoreConnection } from "../core-connection.ts";
+import { CoreTimeoutError } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { signInErrorSearch } from "../sign-in-errors.ts";
 import { SignInOptions } from "../sign-in-options.tsx";
@@ -36,8 +33,11 @@ type DecisionPage =
   | { state: "refused"; name: string; message: string }
   | { state: "ready"; name: string; decision: DecisionView };
 
-const loadDecision = async (decision: string): Promise<DecisionPage> => {
-  const { connected, signInOptions, identity } = await loadCoreStatus();
+const loadDecision = async (
+  core: CoreConnection,
+  decision: string
+): Promise<DecisionPage> => {
+  const { connected, signInOptions, identity } = await loadCoreStatus(core);
   if (!connected) {
     return { state: "offline" };
   }
@@ -46,8 +46,9 @@ const loadDecision = async (decision: string): Promise<DecisionPage> => {
   }
   try {
     // A connection that answered the status check can still hang here.
-    const found = await withSession(
-      async (session) => await withTimeout(session.decisions.get(decision))
+    const found = await readWithin(
+      core,
+      async (session) => await session.decisions.get(decision)
     );
     return { state: "ready", name: identity.name, decision: found };
   } catch (error) {
@@ -206,5 +207,6 @@ export const Route = createFileRoute("/decisions/$decision")({
   // A refused sign-in comes back as `error=<code>`.
   validateSearch: (search: Record<string, unknown>): { error?: string } =>
     signInErrorSearch(search),
-  loader: async ({ params }) => await loadDecision(params.decision),
+  loader: async ({ context: { core }, params }) =>
+    await loadDecision(core, params.decision),
 });

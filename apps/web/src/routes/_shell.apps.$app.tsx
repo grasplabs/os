@@ -307,15 +307,18 @@ const AppPageView = () => {
 
 export const Route = createFileRoute("/_shell/apps/$app")({
   component: AppPageView,
-  loader: async ({ params }) => ({
+  loader: async ({ context: { core }, params }) => ({
     // Not awaited: only their tabs wait for them.
     runs: loadFromCore(
+      core,
       async (session) => await session.workflows.list(params.app)
     ),
     members: loadFromCore(
+      core,
       async (session) => await session.apps.members.list(params.app)
     ),
     page: await loadFromCore(
+      core,
       async (session) => await loadApp(session, params.app)
     ),
   }),

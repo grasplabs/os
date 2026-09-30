@@ -3,17 +3,17 @@
 // main.tsx does. Importing this first keeps Zod jitless before any of them
 // builds a schema, whichever chunk they land in.
 import "./zod-jitless.ts";
-import { authErrors, internalErrors } from "@grasp-os/shared/errors";
-import type { CoreApi, Identity, SignInOption } from "@grasp-os/shared/rpc";
+import { internalErrors } from "@grasp-os/shared/errors";
+import type { CoreApi } from "@grasp-os/shared/rpc";
 import { newWebSocketRpcSession } from "capnweb";
 import type { RpcStub } from "capnweb";
 
 /**
  * Opens a Cap'n Web session with core, on the origin this page came from.
- * The browser sends the session cookie with it; core checks it on connect
- * and on every call that needs the person.
+ * The browser sends the session cookie with it, which says who the
+ * connection is for as long as it lasts.
  */
-export const connectCore = () => {
+export const connectCore = (): RpcStub<CoreApi> => {
   const url = new URL("/rpc", window.location.href);
   url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
   return newWebSocketRpcSession<CoreApi>(url.href);
@@ -22,10 +22,19 @@ export const connectCore = () => {
 /** How long a read from core may take before core counts as unreachable. */
 export const timeoutMs = 5000;
 
-/** Core didn't answer in time: a hanging connection, not a refusal. */
+/** What the page says when core can't be reached. */
+const unreachable = "Grasp can't be reached right now. Try again in a moment.";
+
+/**
+ * Core didn't answer in time, or no connection to it came in time: out of
+ * reach, not a refusal. Its message is what the person reads.
+ */
 export class CoreTimeoutError extends Error {
+  readonly ms: number;
+
   constructor(ms: number) {
-    super(`Timed out after ${ms} ms`);
+    super(unreachable);
+    this.ms = ms;
     this.name = "CoreTimeoutError";
   }
 }
@@ -49,6 +58,39 @@ export const withTimeout = async <T>(
     return await Promise.race([promise, timeout]);
   } finally {
     clearTimeout(timer);
+  }
+};
+
+/**
+ * A signal that gives up after `ms` (a few seconds unless given), with a
+ * `CoreTimeoutError`.
+ */
+export const deadline = (ms = timeoutMs): AbortSignal => {
+  const controller = new AbortController();
+  setTimeout(() => {
+    controller.abort(new CoreTimeoutError(ms));
+  }, ms);
+  return controller.signal;
+};
+
+/**
+ * `promise`, unless `signal` gives up first: then rejects with the
+ * signal's reason. What `promise` stands for goes on either way.
+ */
+export const unlessAborted = async <T>(
+  promise: Promise<T>,
+  signal: AbortSignal
+): Promise<T> => {
+  signal.throwIfAborted();
+  const aborted = Promise.withResolvers<never>();
+  const abort = (): void => {
+    aborted.reject(signal.reason);
+  };
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    return await Promise.race([promise, aborted.promise]);
+  } finally {
+    signal.removeEventListener("abort", abort);
   }
 };
 
@@ -107,82 +149,8 @@ export const retrying = async <T>(
   return await attempt();
 };
 
-/** Who is signed in on this connection, or `undefined` for nobody. */
-const signedInAs = async (
-  core: RpcStub<CoreApi>
-): Promise<Identity | undefined> => {
-  try {
-    using session = core.authenticate();
-    return await session.whoami();
-  } catch (error) {
-    if (authErrors.codeOf(error) === "auth.unauthenticated") {
-      return undefined;
-    }
-    throw error;
-  }
-};
-
 /** The signed-in person's API, as a connection hands it out. */
-export type Session = ReturnType<RpcStub<CoreApi>["authenticate"]>;
-
-/**
- * Runs `run` with the signed-in person's API, on a connection opened just
- * for it and closed after.
- */
-export const withSession = async <T>(
-  run: (session: Session) => Promise<T>
-): Promise<T> => {
-  const core = connectCore();
-  try {
-    using session = core.authenticate();
-    return await run(session);
-  } finally {
-    core[Symbol.dispose]();
-  }
-};
-
-/** Whether core answers, how people sign in here, and who is signed in. */
-export interface CoreStatus {
-  connected: boolean;
-  signInOptions: SignInOption[];
-  identity?: Identity;
-}
-
-/** Asks core once, on a connection opened just for it. */
-const askCoreStatus = async (): Promise<CoreStatus> => {
-  const core = connectCore();
-  try {
-    const [pong, signInOptions, identity] = await withTimeout(
-      Promise.all([core.ping(), core.signInOptions(), signedInAs(core)])
-    );
-    return { connected: pong === "pong", signInOptions, identity };
-  } finally {
-    core[Symbol.dispose]();
-  }
-};
-
-/** How long to wait before asking core for its status again, each time. */
-const statusRetryMs = [250, 500, 1000] as const;
-
-/**
- * Asks core over RPC whether it answers, how people sign in here and who is
- * signed in. Core failing or out of reach is asked again a few times, with
- * a growing pause, before it counts as unreachable: one failed request must
- * not look like nobody being signed in. A connection that hangs past the
- * timeout counts as unreachable at once; it has had its few seconds.
- */
-export const loadCoreStatus = async (): Promise<CoreStatus> => {
-  try {
-    return await retrying(
-      askCoreStatus,
-      statusRetryMs,
-      (failure) =>
-        isTransient(failure) && !(failure instanceof CoreTimeoutError)
-    );
-  } catch {
-    return { connected: false, signInOptions: [] };
-  }
-};
+export type Session = Awaited<ReturnType<RpcStub<CoreApi>["authenticate"]>>;
 
 /**
  * Starts signing in with the IdP `providerId`: core answers with the IdP's
@@ -214,14 +182,4 @@ export const signIn = async (
     throw new Error(`Sign-in did not start (${response.status})`);
   }
   window.location.assign(body.url);
-};
-
-/** Ends this browser's session, then reloads the page signed out. */
-export const signOut = async (): Promise<void> => {
-  await fetch("/api/auth/sign-out", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: "{}",
-  });
-  window.location.reload();
 };

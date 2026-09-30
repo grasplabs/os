@@ -1,4 +1,5 @@
 import { expect } from "@playwright/test";
+import type { WebSocketRoute } from "@playwright/test";
 
 import { execute } from "./connections-seed.ts";
 import { test } from "./csp.ts";
@@ -250,6 +251,51 @@ test("a chat shows nothing of held writes while they're switched off", async ({
     page.getByRole("region", { name: "Waiting for you" })
   ).toHaveCount(0);
   await expect(page.getByText("This isn't switched on")).toHaveCount(0);
+});
+
+test("a followed chat says core can't be reached when it stays out of reach", async ({
+  browser,
+}) => {
+  const { user } = peopleIn("chat");
+  const page = await pageOf(browser, user);
+  let refusing = false;
+  let open: WebSocketRoute | undefined;
+  await page.routeWebSocket("**/rpc", async (socket) => {
+    if (refusing) {
+      await socket.close();
+      return;
+    }
+    socket.connectToServer();
+    open = socket;
+  });
+  const tag = crypto.randomUUID().slice(0, 8);
+  await page.goto("/");
+  await page.getByLabel("Your question").fill(`Out of reach ${tag}.`);
+  await page.getByRole("button", { name: "Send" }).click();
+  await expect(page).toHaveURL(/[?&]chat=/u);
+  // The turn has ended (the local stack reaches no model), so nothing
+  // else is on its way when the connection drops.
+  const messages = page.getByRole("list", { name: "Messages" });
+  await expect(messages.getByRole("listitem").first()).toHaveText(
+    `Out of reach ${tag}.`
+  );
+  await expect(messages.getByRole("alert")).toHaveText(
+    "The model call failed.",
+    { timeout: 30_000 }
+  );
+  await expect(
+    page
+      .getByRole("navigation", { name: "Chats" })
+      .getByRole("link", { name: `Out of reach ${tag}.` })
+  ).toBeVisible();
+
+  // The page's connection drops and none gets in: following stops, and
+  // says why, once the page has waited its few seconds for a connection.
+  refusing = true;
+  await open?.close();
+  await expect(
+    page.getByText("Grasp can't be reached right now. Try again in a moment.")
+  ).toBeVisible({ timeout: 15_000 });
 });
 
 test("the side panel opens over the chat on a narrow screen, and beside it on a wide one", async ({

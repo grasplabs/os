@@ -148,11 +148,14 @@ export const Route = createFileRoute("/_shell/connections")({
   // Each part is read on its own, and says on its own why it failed: one
   // read that fails or hangs leaves the others. Permissions only for those
   // who may list them (admins and builders).
-  loader: async ({ context: { identity } }) => {
+  loader: async ({ context: { core, identity } }) => {
     const [catalog, connections, held] = await Promise.all([
-      loadFromCore(async (session) => await session.connections.catalog()),
-      loadFromCore(async (session) => await session.connections.list()),
-      canBuild(identity.role) ? loadFromCore(heldPermissions) : undefined,
+      loadFromCore(
+        core,
+        async (session) => await session.connections.catalog()
+      ),
+      loadFromCore(core, async (session) => await session.connections.list()),
+      canBuild(identity.role) ? loadFromCore(core, heldPermissions) : undefined,
     ]);
     return { catalog, connections, held };
   },

@@ -14,13 +14,14 @@ import {
 } from "@grasp-os/ui/components/card";
 import { useEffect, useRef, useState } from "react";
 
-import { withSession } from "../core.ts";
+import type { CoreConnection } from "../core-connection.ts";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
 import type { Loaded } from "../load-from-core.tsx";
 import { PreviewFrame } from "../screens/screen-frame.tsx";
 import { useCoreAction } from "../use-core-action.ts";
+import { useCore } from "../use-core.ts";
 import {
   exportChangeText,
   pendingToShow,
@@ -56,10 +57,11 @@ interface Builds {
  * as the React Compiler can't compile `try`.
  */
 const readBuilds = async (
+  core: CoreConnection,
   chatId: string
 ): Promise<Loaded<Builds> | { state: "off" }> => {
   try {
-    const [apps, drafts] = await withSession(
+    const [apps, drafts] = await core.withSession(
       async (session) =>
         await Promise.all([session.apps.list(), session.chats.drafts(chatId)])
     );
@@ -77,11 +79,12 @@ const readBuilds = async (
  * only builders review and make versions current, so they alone see it.
  */
 const readReview = async (
+  core: CoreConnection,
   app: string,
   version: number
 ): Promise<Loaded<VersionReview> | { state: "hidden" }> => {
   try {
-    const review = await withSession(
+    const review = await core.withSession(
       async (session) => await session.apps.versions.review(app, version)
     );
     return { state: "ready", data: review };
@@ -419,11 +422,12 @@ const PendingVersion = ({
   // Bumped to read what failed again.
   const [reviewReads, setReviewReads] = useState(0);
   const [codeReads, setCodeReads] = useState(0);
+  const core = useCore();
   const { busy, failure, run } = useCoreAction();
   useEffect(() => {
     let current = true;
     const read = async (): Promise<void> => {
-      const found = await readReview(app.id, version);
+      const found = await readReview(core, app.id, version);
       if (current) {
         setReview(found);
       }
@@ -433,7 +437,7 @@ const PendingVersion = ({
       current = false;
     };
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- `reviewReads` says when to read again
-  }, [app.id, version, reviewReads]);
+  }, [core, app.id, version, reviewReads]);
   const loaded = review?.state === "ready" ? review.data : undefined;
   useEffect(() => {
     let current = true;
@@ -442,6 +446,7 @@ const PendingVersion = ({
         return;
       }
       const found = await loadFromCore(
+        core,
         async (session) =>
           await serverCodeOf(session, {
             app: app.id,
@@ -459,7 +464,7 @@ const PendingVersion = ({
       current = false;
     };
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- `codeReads` says when to read again
-  }, [app.id, version, loaded, codeReads]);
+  }, [core, app.id, version, loaded, codeReads]);
   const makeCurrent = async (): Promise<void> => {
     const made = await run(
       async (session) => await session.apps.versions.setCurrent(app.id, version)
@@ -607,6 +612,7 @@ export const ChatBuilds = ({
   // The drafts' changes read so far: those go whether the agent works or
   // not, so a preview follows each write.
   const handledDrafts = useRef(-1);
+  const core = useCore();
   useEffect(() => {
     if (
       running &&
@@ -620,7 +626,7 @@ export const ChatBuilds = ({
     latest.current += 1;
     const read = latest.current;
     const load = async (): Promise<void> => {
-      const found = await readBuilds(chatId);
+      const found = await readBuilds(core, chatId);
       if (latest.current === read) {
         setBuilds(found);
         if (found.state === "ready") {
@@ -629,7 +635,7 @@ export const ChatBuilds = ({
       }
     };
     void load();
-  }, [chatId, running, reads, drafts]);
+  }, [core, chatId, running, reads, drafts]);
   if (builds === undefined || builds.state === "off") {
     return null;
   }

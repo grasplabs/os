@@ -14,10 +14,11 @@ import {
 } from "@grasp-os/ui/components/card";
 import { useEffect, useId, useState } from "react";
 
-import { withSession } from "../core.ts";
+import type { CoreConnection } from "../core-connection.ts";
 import type { Session } from "../core.ts";
 import { ErrorText } from "../error-text.tsx";
 import { useCoreAction } from "../use-core-action.ts";
+import { useCore } from "../use-core.ts";
 
 // The changes the chat's agent asked for in outside systems (sending,
 // booking, deleting), which connect holds until the person confirms or
@@ -40,9 +41,12 @@ type Held =
  * The person's held writes from chat `chatId`, newest first. Outside the
  * component, as the React Compiler can't compile `try`.
  */
-const readHeld = async (chatId: string): Promise<Held> => {
+const readHeld = async (
+  core: CoreConnection,
+  chatId: string
+): Promise<Held> => {
   try {
-    const waiting = await withSession(
+    const waiting = await core.withSession(
       async (session) => await session.pendingActions.list()
     );
     return {
@@ -356,11 +360,12 @@ export const HeldWrites = ({
   version: number;
 }) => {
   const [held, setHeld] = useState<Held>({ state: "loading" });
+  const core = useCore();
   const [reads, setReads] = useState(0);
   useEffect(() => {
     let current = true;
     const read = async (): Promise<void> => {
-      const found = await readHeld(chatId);
+      const found = await readHeld(core, chatId);
       // A read for another chat, or an older one, doesn't show.
       if (current) {
         setHeld(found);
@@ -371,7 +376,7 @@ export const HeldWrites = ({
       current = false;
     };
     // oxlint-disable-next-line react/exhaustive-effect-dependencies -- `version` and `reads` say when to read again
-  }, [chatId, version, reads]);
+  }, [core, chatId, version, reads]);
   if (held.state === "refused") {
     return <ErrorText>{held.message}</ErrorText>;
   }

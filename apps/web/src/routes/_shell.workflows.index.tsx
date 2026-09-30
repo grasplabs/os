@@ -451,15 +451,19 @@ export const Route = createFileRoute("/_shell/workflows/")({
   loaderDeps: ({ search }) => search,
   // Each tab reads only what it shows, and each read says on its own why
   // it failed.
-  loader: async ({ deps: { tab, app, workflow, status } }) => {
+  loader: async ({
+    context: { core },
+    deps: { tab, app, workflow, status },
+  }) => {
     if (tab !== "runs") {
       return {
         tab: "workflows" as const,
-        workflows: await loadFromCore(listWorkflows),
+        workflows: await loadFromCore(core, listWorkflows),
       };
     }
     const [runs, filters] = await Promise.all([
       loadFromCore(
+        core,
         async (session) =>
           await listRuns(session, {
             ...(app === undefined ? {} : { app }),
@@ -467,7 +471,7 @@ export const Route = createFileRoute("/_shell/workflows/")({
             ...(status === undefined ? {} : { status }),
           })
       ),
-      loadFromCore(async (session) => await filterOptions(session, app)),
+      loadFromCore(core, async (session) => await filterOptions(session, app)),
     ]);
     return { tab: "runs" as const, runs, filters };
   },

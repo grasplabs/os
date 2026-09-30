@@ -17,6 +17,7 @@ import { Input } from "@grasp-os/ui/components/input";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 
+import type { CoreConnection } from "../core-connection.ts";
 import type { Session } from "../core.ts";
 import { CollectionMarkers } from "../knowledge/collection-markers.tsx";
 import { loadFromCore, NotLoaded } from "../load-from-core.tsx";
@@ -63,11 +64,16 @@ const loadMemory = async (session: Session): Promise<MemoryFiles> => {
  * The memory files, then the collections: asking for memory creates the
  * Personal collection on a first visit (and an admin's Memory
  * collection), which the list then has. Each says on its own why it
- * failed; the list is read whatever memory's outcome.
+ * failed; the list is read whatever memory's outcome. Asking for memory
+ * isn't sent once the page was `left`: nobody asked for those collections.
  */
-const memoryThenCollections = async () => {
-  const memory = await loadFromCore(loadMemory);
+const memoryThenCollections = async (
+  core: CoreConnection,
+  left: AbortSignal
+) => {
+  const memory = await loadFromCore(core, loadMemory, left);
   const collections = await loadFromCore(
+    core,
     async (session) => await session.knowledge.listCollections()
   );
   return { memory, collections };
@@ -282,12 +288,15 @@ export const Route = createFileRoute("/_shell/knowledge/")({
       : {},
   loaderDeps: ({ search: { q } }) => ({ q }),
   // Each part says on its own why it failed; search runs beside the rest.
-  loader: async ({ deps: { q } }) => {
+  loader: async ({ abortController, context: { core }, deps: { q } }) => {
     const [{ collections, memory }, results] = await Promise.all([
-      memoryThenCollections(),
+      memoryThenCollections(core, abortController.signal),
       q === undefined
         ? undefined
-        : loadFromCore(async (session) => await session.knowledge.search(q)),
+        : loadFromCore(
+            core,
+            async (session) => await session.knowledge.search(q)
+          ),
     ]);
     return { collections, memory, results };
   },

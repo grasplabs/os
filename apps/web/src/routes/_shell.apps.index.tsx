@@ -135,5 +135,5 @@ const Apps = () => {
 
 export const Route = createFileRoute("/_shell/apps/")({
   component: Apps,
-  loader: async () => await loadFromCore(listApps),
+  loader: async ({ context: { core } }) => await loadFromCore(core, listApps),
 });

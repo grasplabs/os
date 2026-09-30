@@ -283,6 +283,9 @@ const Models = () => {
 
 export const Route = createFileRoute("/_shell/models")({
   component: Models,
-  loader: async () =>
-    await loadFromCore(async (session) => await session.models.settings()),
+  loader: async ({ context: { core } }) =>
+    await loadFromCore(
+      core,
+      async (session) => await session.models.settings()
+    ),
 });

@@ -218,6 +218,7 @@ const NotificationList = ({ page }: { page: NotificationsPage }) => {
 };
 
 export const Route = createFileRoute("/_shell/notifications")({
-  loader: async () => await loadFromCore(readNotifications),
+  loader: async ({ context: { core } }) =>
+    await loadFromCore(core, readNotifications),
   component: Notifications,
 });

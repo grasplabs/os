@@ -1,8 +1,8 @@
 import { messageOf } from "@grasp-os/shared/errors";
 import { useState } from "react";
 
-import { withSession } from "./core.ts";
 import type { Session } from "./core.ts";
+import { useCore } from "./use-core.ts";
 
 /**
  * Runs a change against core on the signed-in person's session: `busy`
@@ -10,6 +10,7 @@ import type { Session } from "./core.ts";
  * sends that reason somewhere else instead.
  */
 export const useCoreAction = () => {
+  const core = useCore();
   const [busy, setBusy] = useState(false);
   const [failure, setFailure] = useState<string>();
   const run = async <T>(
@@ -20,7 +21,7 @@ export const useCoreAction = () => {
     setFailure(undefined);
     let result: T | undefined;
     try {
-      result = await withSession(action);
+      result = await core.withSession(action);
     } catch (error) {
       report(messageOf(error));
     }

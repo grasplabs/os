@@ -552,18 +552,21 @@ export const Route = createFileRoute("/_shell/workflows/$app/$workflow")({
   // The workflow and its runs are read on their own, and the App's
   // versions only for those who build it: each says on its own why it
   // failed.
-  loader: async ({ params: { app, workflow } }) => {
+  loader: async ({ context: { core }, params: { app, workflow } }) => {
     const [detail, runs] = await Promise.all([
       loadFromCore(
+        core,
         async (session) => await session.workflows.get(app, workflow)
       ),
       loadFromCore(
+        core,
         async (session) => await session.workflows.runs({ app, workflow })
       ),
     ]);
     const builds = detail.state === "ready" && detail.data.params !== null;
     const versions = builds
       ? await loadFromCore(
+          core,
           async (session) => await session.apps.versions.list(app)
         )
       : undefined;

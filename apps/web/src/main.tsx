@@ -5,9 +5,17 @@ import { createRouter, RouterProvider } from "@tanstack/react-router";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
 
+import { CoreConnection } from "./core-connection.ts";
 import { routeTree } from "./routeTree.gen.ts";
 
-const router = createRouter({ routeTree });
+// The tab's one connection to core, made once and handed to every route.
+// When the person's session ends, the page loads again: the shell finds
+// nobody signed in, and sends them to sign in and back to where they were.
+const core = new CoreConnection(() => {
+  window.location.reload();
+});
+
+const router = createRouter({ routeTree, context: { core } });
 
 declare module "@tanstack/react-router" {
   interface Register {
