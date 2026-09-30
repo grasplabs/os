@@ -5,9 +5,8 @@ import type { AppId } from "@grasp-os/shared/ids";
 // (run by Node) checks each built-in's App ID as the install makes it, and
 // permissions.ts knows a built-in's owner without importing App access.
 
-// Shared, so the frontend leaves the built-ins' permissions out of what an
-// admin decides.
-export { builtinOwner } from "@grasp-os/shared/apps";
+/** The owner of the built-in blueprints' Apps: Grasp, never a person. */
+export const builtinOwner = "grasp";
 
 /**
  * The App of the built-in blueprint `id`, under this ID: no other has it.

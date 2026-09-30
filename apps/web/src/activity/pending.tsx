@@ -1,4 +1,4 @@
-import { appErrors, builtinOwner } from "@grasp-os/shared/apps";
+import { appErrors } from "@grasp-os/shared/apps";
 import type { AppExports } from "@grasp-os/shared/apps";
 import type { Permission } from "@grasp-os/shared/permissions";
 import { Button } from "@grasp-os/ui/components/button";
@@ -38,9 +38,7 @@ import { useCoreAction } from "../use-core-action.ts";
 // Pending approvals: the permissions Apps and agents asked for, which an
 // admin grants or rejects. Core checks the role on every call; the page
 // offers the decision only to those core lets decide (the organization's
-// own admins, never Grasp staff), and leaves out the built-in blueprints'
-// requests, which say what the Apps created from them ask for and are
-// decided on those Apps.
+// own admins, never Grasp staff).
 
 /** The requests an admin decides, oldest first, with the names to show. */
 export interface PendingRequests {
@@ -54,29 +52,21 @@ export interface PendingRequests {
   exports: ReadonlyMap<string, AppExports>;
 }
 
-/** Whether a request is a built-in blueprint's own, decided on its copies. */
-const isBuiltins = ({ subject }: Permission, directory: Directory): boolean =>
-  subject.type === "app" &&
-  directory.apps.get(subject.appId)?.owner === builtinOwner;
-
 /**
  * Every request waiting for an admin, oldest first as core lists them. The
- * Apps are read in full, not only for names: they say which requests are
- * the built-ins' and which version an admin reviews, so the tab fails
- * without them rather than offer the wrong decisions.
+ * Apps are read in full, not only for names: they say which version an
+ * admin reviews, so the tab fails without them rather than offer the
+ * wrong decisions.
  */
 export const readPendingRequests = async (
   session: Session
 ): Promise<PendingRequests> => {
-  const [requested, apps, people] = await Promise.all([
+  const [requests, apps, people] = await Promise.all([
     session.permissions.list(undefined, "requested"),
     session.apps.list(),
     readPeople(session),
   ]);
   const directory = { people, apps: appsById(apps) };
-  const requests = requested.filter(
-    (permission) => !isBuiltins(permission, directory)
-  );
   const called = [
     ...new Set(
       requests.flatMap(({ object }) =>
