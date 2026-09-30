@@ -36,7 +36,7 @@ import {
   permissionActionSchema,
   permissionErrors,
 } from "@grasp-os/shared/permissions";
-import type { ScreenProblem } from "@grasp-os/shared/screens";
+import type { ScreenProblem, ServerLog } from "@grasp-os/shared/screens";
 import type { RunFailure } from "@grasp-os/shared/workflows";
 import { DurableObject } from "cloudflare:workers";
 import { and, asc, count, desc, eq, gt, isNull, sql } from "drizzle-orm";
@@ -77,7 +77,7 @@ import { forContext } from "./knowledge/memory.ts";
 import { catalog, noteListedSkills } from "./knowledge/tools.ts";
 import { gatewaySettings, models } from "./models.ts";
 import { PreviewReports, serverProblem } from "./preview-reports.ts";
-import type { PreviewOutcome } from "./preview-reports.ts";
+import type { Reports } from "./preview-reports.ts";
 import { Previews } from "./preview.ts";
 import type { WorkContext } from "./restricted.ts";
 
@@ -194,6 +194,9 @@ const maxWatchers = 50;
  * log is out of reach: at first, and at most, doubling in between.
  */
 const auditRetryMs = { first: 5000, most: 15 * 60 * 1000 };
+
+/** How often a check waiting for a preview reads its reports again. */
+const previewPollMs = 100;
 
 /** Most chats a person keeps: delete one to make another. */
 export const maxChatsPerPerson = 500;
@@ -352,7 +355,7 @@ export class Workspace extends DurableObject<Env> {
   /** The chats' previews of their drafts (preview.ts). */
   readonly #previews = new Previews(this.ctx, this.env);
 
-  /** What those previews reported (preview-reports.ts). */
+  /** What those previews ran into (preview-reports.ts). */
   readonly #previewReports = new PreviewReports();
 
   /**
@@ -1379,7 +1382,7 @@ export class Workspace extends DurableObject<Env> {
     });
     if (saved) {
       // The preview of the revision before is over: its database goes now;
-      // what it reported goes once the new revision reports.
+      // its problems are not the new revision's (preview-reports.ts).
       this.#previews.drop(chatId, appId);
       this.#draftsChanged(chatId);
     }
@@ -1449,27 +1452,39 @@ export class Workspace extends DurableObject<Env> {
   }
 
   // A chat's preview of its draft of an App (preview.ts), for the chat's
-  // own person: core checks their role in the App first (chats-rpc.ts).
+  // own person and the chat's agent acting for them: core checks the
+  // person's role in the App first (chats-rpc.ts, agent-builds.ts).
 
   /**
    * `personId`'s own chat's draft of App `appId`, to preview, which they
-   * have open now: `app.no_draft` while it changes nothing.
+   * have open in the side panel now: `app.no_draft` while it changes
+   * nothing.
    */
   previewDraft(chatId: unknown, personId: string, appId: string): Draft {
+    const { id, draft } = this.#draftToPreview(chatId, personId, appId);
+    this.#previewReports.opened(id, appId);
+    return draft;
+  }
+
+  /** `personId`'s own chat's draft of App `appId`: `app.no_draft` while it changes nothing. */
+  #draftToPreview(
+    chatId: unknown,
+    personId: string,
+    appId: string
+  ): { id: ChatId; draft: Draft } {
     const { id } = this.#ownChat(chatId, personId);
     const draft = this.draft(id, appId);
     if (Object.keys(draft.changes).length === 0) {
       throw appErrors.create("app.no_draft");
     }
-    this.#previewReports.opened(id, appId);
-    return draft;
+    return { id, draft };
   }
 
   /**
-   * Keeps what the preview of `personId`'s own chat's draft of App
-   * `appId` at `revision` reported on `screen`: `problem`, or, without
-   * one, that it rendered (preview-reports.ts). Dropped once the draft
-   * is at another revision.
+   * Keeps `problem`, what the preview of `personId`'s own chat's draft of
+   * App `appId` at `revision` reported on `screen`, for the agent's next
+   * check (preview-reports.ts). Dropped once the draft is at another
+   * revision.
    */
   previewReport(
     chatId: unknown,
@@ -1477,51 +1492,93 @@ export class Workspace extends DurableObject<Env> {
     appId: string,
     revision: unknown,
     screen: string,
-    problem?: ScreenProblem
+    problem: ScreenProblem
   ): void {
     const { id } = this.#ownChat(chatId, personId);
     const { revision: now } = this.draft(id, appId);
     if (revision !== now) {
       return;
     }
-    this.#previewReports.report(
-      id,
-      appId,
-      now,
-      problem === undefined
-        ? undefined
-        : { source: "screen", at: screen, ...problem }
-    );
+    this.#previewReports.report(id, appId, now, {
+      source: "screen",
+      at: screen,
+      ...problem,
+    });
   }
 
   /**
-   * Records that a stub of the chat's preview of App `appId` refused a
-   * call of the server call `token` names (`Previews.refused`): for
-   * core's preview stubs alone (preview-bindings.ts), before the draft's
-   * code hears of it.
+   * What the preview of the chat's draft of App `appId` at `revision` ran
+   * into, and what its server code logged, for the agent's checks of the
+   * draft (agent-builds.ts): while the person has it open in the side
+   * panel, waiting up to `waitMs` for it to report on that revision at
+   * all, as a check may come right after the write. `seen` is false when
+   * it didn't: nobody has it open (answered at once), or its screens
+   * neither called the server nor failed.
    */
-  previewRefused(chatId: ChatId, appId: string, token: unknown): void {
-    this.#previews.refused(chatId, appId, token);
-  }
-
-  /**
-   * How the preview of the chat's draft of App `appId` at `revision` ran,
-   * waiting up to `waitMs` for it to report while the person has it open:
-   * for the agent's checks of the draft (agent-builds.ts).
-   */
-  async previewOutcome(
+  async previewReports(
     chatId: ChatId,
     appId: string,
     revision: number,
     waitMs: number
-  ): Promise<PreviewOutcome> {
-    return await this.#previewReports.outcome(chatId, appId, revision, waitMs);
+  ): Promise<Reports> {
+    const until = Date.now() + waitMs;
+    let now = this.#previewReports.read(chatId, appId, revision);
+    while (
+      !now.seen &&
+      Date.now() < until &&
+      this.#previewReports.isOpen(chatId, appId)
+    ) {
+      // oxlint-disable-next-line no-await-in-loop -- polls until it reported, or the wait ends
+      await scheduler.wait(previewPollMs);
+      now = this.#previewReports.read(chatId, appId, revision);
+    }
+    return now;
+  }
+
+  /**
+   * Keeps what the server code of the chat's draft of App `appId` at
+   * `revision` wrote with `console` in its preview: for the preview's
+   * tail alone (server-logs.ts).
+   */
+  previewLogs(
+    chatId: ChatId,
+    appId: string,
+    revision: number,
+    logs: ServerLog[]
+  ): void {
+    this.#previewReports.log(chatId, appId, revision, logs);
   }
 
   /**
    * Calls `method` of the server code of `personId`'s own chat's draft of
-   * App `appId` with `args`, in its preview, as the draft is at
-   * `revision`: `app.preview_outdated` once it is at another.
+   * App `appId` with `args`, in its preview, as the draft is now: for the
+   * chat's agent (`env.build.call`), which hears how it went, so nothing
+   * is kept of it.
+   */
+  async callDraft(
+    chatId: unknown,
+    personId: string,
+    appId: string,
+    method: string,
+    args: unknown[]
+  ): Promise<AppAnswer> {
+    // Not the side panel's: the preview doesn't count as open for it.
+    const { id, draft } = this.#draftToPreview(chatId, personId, appId);
+    return await this.#previews.call(
+      id,
+      personId,
+      appIdSchema.parse(appId),
+      draft,
+      method,
+      args
+    );
+  }
+
+  /**
+   * Calls `method` of the server code of `personId`'s own chat's draft of
+   * App `appId` with `args`, in its preview, as a screen of the draft at
+   * `revision` does: `app.preview_outdated` once it is at another. What
+   * the draft's code failed with is kept for the agent's next check.
    */
   async previewCall(
     chatId: unknown,
@@ -1536,7 +1593,6 @@ export class Workspace extends DurableObject<Env> {
       throw appErrors.create("app.preview_outdated");
     }
     const id = chatIdSchema.parse(chatId);
-    const ran = { refused: false };
     try {
       return await this.#previews.call(
         id,
@@ -1544,25 +1600,17 @@ export class Workspace extends DurableObject<Env> {
         appIdSchema.parse(appId),
         draft,
         method,
-        args,
-        ran
+        args
       );
     } catch (error) {
-      // What the draft's code failed with is the agent's to fix too, but
-      // for a call a preview stub refused a call of, as core saw it.
       const problem = serverProblem(method, error);
-      if (problem === undefined) {
-        throw error;
+      if (problem !== undefined) {
+        this.#previewReports.report(id, appId, draft.revision, problem);
       }
-      this.#previewReports.report(
-        id,
-        appId,
-        draft.revision,
-        problem,
-        ran.refused
-      );
-      // The screen hears it was refused, as it would of a failed call.
-      throw ran.refused ? appErrors.create("app.preview_side_effect") : error;
+      throw error;
+    } finally {
+      // Once the call ended, however: its failure is kept by then.
+      this.#previewReports.saw(id, appId, draft.revision);
     }
   }
 

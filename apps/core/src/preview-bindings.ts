@@ -2,7 +2,7 @@
 import { appErrors } from "@grasp-os/shared/apps";
 import type { GuestChat } from "@grasp-os/shared/guests";
 import { guestErrors } from "@grasp-os/shared/guests";
-import type { AppId, ChatId, WorkspaceId } from "@grasp-os/shared/ids";
+import type { AppId } from "@grasp-os/shared/ids";
 import type {
   DocumentPage,
   RecordPage,
@@ -15,7 +15,6 @@ import type { StatisticAnswer } from "@grasp-os/shared/statistics";
 import { WorkerEntrypoint, exports } from "cloudflare:workers";
 
 import { stubsOf } from "./bindings.ts";
-import { workspace } from "./durable-objects.ts";
 import { activeOrRequestedPermissions } from "./permissions.ts";
 
 // The env of a draft's preview (preview.ts): the binding names the App's
@@ -28,12 +27,8 @@ import { activeOrRequestedPermissions } from "./permissions.ts";
 // that isn't there, which nothing the agent writes can fix. A stub allows
 // nothing, so a name gives nothing its permission hasn't.
 //
-// Each stub that refuses names its preview (the chat and the App), and
-// before the draft's code hears of a refusal tells the preview which
-// server call it refused, by the caller token that call passed it
-// (`Previews.refused`, preview.ts): so core, not what the draft's code
-// writes, says what a refusal caused (preview-reports.ts). What a preview
-// means for each binding:
+// A stub that refuses throws `app.preview_side_effect`, as the draft's
+// code sees it. What a preview means for each binding:
 //
 // - A connection (`OUTLOOK`): every call refused, reads too. A preview
 //   reaches no outside system: a read would carry out what the draft
@@ -62,35 +57,8 @@ import { activeOrRequestedPermissions } from "./permissions.ts";
 //   its App's runs go through the page, which answers them itself in a
 //   preview and starts none.
 
-/** Whose preview a stub is: the chat's draft of `app`. */
-export interface PreviewOf {
-  workspaceId: WorkspaceId;
-  chatId: ChatId;
-  app: AppId;
-}
-
-/** The caller token App code passes a stub first, if it passed one. */
-const tokenOf = (caller: unknown): unknown =>
-  typeof caller === "object" && caller !== null && "token" in caller
-    ? caller.token
-    : undefined;
-
-/**
- * Refuses what a preview doesn't do, as the draft's code sees it
- * (`app.preview_side_effect`): recorded first against the server call
- * `caller` names, so what it causes counts as the preview's doing, not
- * the draft's (preview-reports.ts).
- */
-const refuse = async (
-  env: Env,
-  { workspaceId, chatId, app }: PreviewOf,
-  caller: unknown
-): Promise<never> => {
-  await workspace(env, workspaceId).previewRefused(
-    chatId,
-    app,
-    tokenOf(caller)
-  );
+/** Refuses what a preview doesn't do, as the draft's code sees it. */
+const refuse = (): never => {
   throw appErrors.create("app.preview_side_effect");
 };
 
@@ -108,21 +76,23 @@ const notFound = (): Error => knowledgeErrors.create("knowledge.not_found");
 // and its binding's differ.
 
 /** A connection, in a preview (`AppConnectionBinding`'s methods). */
-export class PreviewConnection extends WorkerEntrypoint<Env, PreviewOf> {
-  async call(caller: unknown): Promise<never> {
-    return await refuse(this.env, this.ctx.props, caller);
+export class PreviewConnection extends WorkerEntrypoint<Env> {
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  call(): never {
+    return refuse();
   }
 }
 
 /** Another App's exports, in a preview (`AppExportBinding`'s methods). */
-export class PreviewExports extends WorkerEntrypoint<Env, PreviewOf> {
-  async call(caller: unknown): Promise<never> {
-    return await refuse(this.env, this.ctx.props, caller);
+export class PreviewExports extends WorkerEntrypoint<Env> {
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  call(): never {
+    return refuse();
   }
 }
 
 /** A collection, in a preview (`AppCollectionBinding`'s methods). */
-export class PreviewCollection extends WorkerEntrypoint<Env, PreviewOf> {
+export class PreviewCollection extends WorkerEntrypoint<Env> {
   // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
   listDocuments(): DocumentPage {
     return { documents: [], provenance: nothingRead };
@@ -178,8 +148,9 @@ export class PreviewCollection extends WorkerEntrypoint<Env, PreviewOf> {
     return [];
   }
 
-  async saveRecord(caller: unknown): Promise<never> {
-    return await refuse(this.env, this.ctx.props, caller);
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  saveRecord(): never {
+    return refuse();
   }
 }
 
@@ -205,9 +176,10 @@ export class PreviewStatistics extends WorkerEntrypoint<Env> {
 }
 
 /** Guest chats, in a preview (`AppGuestsBinding`'s methods). */
-export class PreviewGuests extends WorkerEntrypoint<Env, PreviewOf> {
-  async invite(caller: unknown): Promise<never> {
-    return await refuse(this.env, this.ctx.props, caller);
+export class PreviewGuests extends WorkerEntrypoint<Env> {
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  invite(): never {
+    return refuse();
   }
 
   // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
@@ -220,8 +192,9 @@ export class PreviewGuests extends WorkerEntrypoint<Env, PreviewOf> {
     throw guestErrors.create("guest.not_found");
   }
 
-  async revoke(caller: unknown): Promise<never> {
-    return await refuse(this.env, this.ctx.props, caller);
+  // oxlint-disable-next-line class-methods-use-this -- a preview's stubs answer the same, whoever holds them
+  revoke(): never {
+    return refuse();
   }
 }
 
@@ -234,13 +207,13 @@ type PreviewStub =
   | Fetcher<PreviewGuests>;
 
 /** The preview stub of what a platform permission's one `action` offers. */
-const platformStubOf = (of: PreviewOf, action: PlatformAction): PreviewStub => {
+const platformStubOf = (action: PlatformAction): PreviewStub => {
   switch (action) {
     case "statistics": {
       return exports.PreviewStatistics({});
     }
     case "guests": {
-      return exports.PreviewGuests({ props: of });
+      return exports.PreviewGuests({});
     }
     default: {
       return action satisfies never;
@@ -256,19 +229,19 @@ const platformStubOf = (of: PreviewOf, action: PlatformAction): PreviewStub => {
  * stub too. Nothing for a workflow permission, which gives server code no
  * binding, live or in a preview.
  */
-const previewStubOf = (
-  of: PreviewOf,
-  { object, actions }: Permission
-): PreviewStub | undefined => {
+const previewStubOf = ({
+  object,
+  actions,
+}: Permission): PreviewStub | undefined => {
   switch (object.type) {
     case "connection": {
-      return exports.PreviewConnection({ props: of });
+      return exports.PreviewConnection({});
     }
     case "collection": {
-      return exports.PreviewCollection({ props: of });
+      return exports.PreviewCollection({});
     }
     case "app": {
-      return exports.PreviewExports({ props: of });
+      return exports.PreviewExports({});
     }
     case "workflow": {
       return undefined;
@@ -276,7 +249,7 @@ const previewStubOf = (
     case "platform": {
       // A platform permission has one action, which its stub does.
       const action = platformActionSchema.safeParse(actions[0]);
-      return action.success ? platformStubOf(of, action.data) : undefined;
+      return action.success ? platformStubOf(action.data) : undefined;
     }
     default: {
       return object satisfies never;
@@ -285,17 +258,17 @@ const previewStubOf = (
 };
 
 /**
- * The env of `of`, a preview of App `app`'s draft: a preview stub under
+ * The env of a preview of App `app`'s draft: a preview stub under
  * each name its permissions give its server code now (app-bindings.ts)
  * or will once granted, and `STATISTICS`, which every App has.
  */
 export const previewBindings = async (
   env: Env,
-  of: PreviewOf
+  app: AppId
 ): Promise<Record<string, PreviewStub>> => {
   const granted = stubsOf<PreviewStub>(
-    await activeOrRequestedPermissions(env, of.app),
-    (permission) => previewStubOf(of, permission)
+    await activeOrRequestedPermissions(env, app),
+    previewStubOf
   );
   return { ...granted, STATISTICS: exports.PreviewStatistics({}) };
 };

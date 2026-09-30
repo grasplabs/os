@@ -14,13 +14,17 @@ import { appIdSchema } from "@grasp-os/shared/ids";
 import type { AppId } from "@grasp-os/shared/ids";
 import { log } from "@grasp-os/shared/log";
 import type { Authority } from "@grasp-os/shared/permissions";
-import type { AppErrorEntry, RunChange } from "@grasp-os/shared/screens";
+import type {
+  AppErrorEntry,
+  RunChange,
+  ServerLog,
+} from "@grasp-os/shared/screens";
 import {
   statisticErrors,
   statisticLimitsOf,
 } from "@grasp-os/shared/statistics";
 import type { StatisticUse } from "@grasp-os/shared/statistics";
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject, exports } from "cloudflare:workers";
 
 import { appBindings } from "./app-bindings.ts";
 import { addToErrorLog, readErrorLog } from "./app-error-log.ts";
@@ -323,6 +327,8 @@ const loadServer = async (
     mainModule: build.mainModule,
     modules: build.modules,
     env: bindings,
+    // What its code writes with `console` goes to its error log.
+    tails: [exports.AppTail({ props: { app, version } })],
   })).getDurableObjectClass("App");
 };
 
@@ -510,7 +516,18 @@ export class App extends DurableObject<Env> {
 
   /** Adds an entry to the App's error log (app-error-log.ts). */
   async logError(entry: AppErrorEntry): Promise<void> {
-    await addToErrorLog(this.ctx.storage, entry);
+    await addToErrorLog(this.ctx.storage, [entry]);
+  }
+
+  /**
+   * Adds what the App's server code at `version` wrote with `console` to
+   * its error log: for its tail alone (server-logs.ts).
+   */
+  async logServer(version: number, logs: ServerLog[]): Promise<void> {
+    await addToErrorLog(
+      this.ctx.storage,
+      logs.map((line) => ({ ...line, source: "server", version }))
+    );
   }
 
   /** The App's error log, newest first. */
