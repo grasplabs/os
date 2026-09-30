@@ -1,7 +1,6 @@
 import { compilerVersion } from "@grasp-os/compiler";
 import { agentErrors } from "@grasp-os/shared/agent";
 import { appErrors } from "@grasp-os/shared/apps";
-import { featureErrors } from "@grasp-os/shared/errors";
 import { chatIdSchema } from "@grasp-os/shared/ids";
 import { permissionErrors } from "@grasp-os/shared/permissions";
 import { roleErrors } from "@grasp-os/shared/roles";
@@ -637,36 +636,18 @@ describe("building Apps from a chat", { timeout: 120_000 }, () => {
     });
   });
 
-  it("writes no App code from a restricted chat, or while switched off", async () => {
+  it("writes no App code from a restricted chat", async () => {
     const calls = tryEach({
       create: `(await env.build.create({ name: "Refused" })).name`,
     });
-    const { chat, grant } = await setUp([
-      codeStep(calls),
-      says("No."),
-      codeStep(calls),
-      says("No."),
-    ]);
+    const { chat, grant } = await setUp([codeStep(calls), says("No.")]);
     await grant();
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    try {
-      env.FEATURES = { ...on, app_builder: false };
-      await chat.ask("Build something");
-    } finally {
-      env.FEATURES = features;
-    }
     await runInDurableObject(chat.stub, (instance) =>
       instance.restrictChat(chatIdSchema.parse(chat.chat.id))
     );
     await chat.ask("Build something now");
 
-    const [off, restricted] = await codeResults(chat.stub, chat.chat.id);
-    expect(returned(off?.text)).toStrictEqual({
-      create: featureErrors.create("feature.disabled", {
-        feature: "app_builder",
-      }).message,
-    });
+    const [restricted] = await codeResults(chat.stub, chat.chat.id);
     expect(returned(restricted?.text)).toStrictEqual({
       create: permissionErrors.create("permission.restricted").message,
     });
@@ -1618,7 +1599,7 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
     }).toStrictEqual({ owner: ["LEDGER"], reviewer: [], named: false });
   });
 
-  it("runs a version's tests once, and reviews nothing while the agent's building is off", async () => {
+  it("runs a version's tests once", async () => {
     const builder = await signedInApi(idp, "builder");
     const { id: app } = await builder.api.apps.create({ name: "Invoices" });
     await release(builder, app, invoices(500, false));
@@ -1637,17 +1618,5 @@ export default workflowTests(definition, [{ name: "runs", mocks: { save: 1 }, ex
     ).resolves.toMatchObject({
       tests: { status: "failed", failures: ["kept"] },
     });
-
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    try {
-      env.FEATURES = { ...on, app_builder: false };
-      await expect(builder.api.apps.versions.review(app, 1)).rejects.toThrow(
-        featureErrors.create("feature.disabled", { feature: "app_builder" })
-          .message
-      );
-    } finally {
-      env.FEATURES = features;
-    }
   });
 });

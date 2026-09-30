@@ -630,21 +630,15 @@ describe("collections", () => {
       refused,
       listed: created.map(({ id }) => {
         const collection = listed.find((each) => each.id === id);
-        return {
-          writable: collection?.writable,
-          uploadable: collection?.uploadable,
-        };
+        return { writable: collection?.writable };
       }),
     }).toStrictEqual({
       refused: ["knowledge.read_only", "knowledge.read_only"],
-      listed: [
-        { writable: false, uploadable: false },
-        { writable: false, uploadable: false },
-      ],
+      listed: [{ writable: false }, { writable: false }],
     });
   });
 
-  it("take uploads from those who may change them, while uploads are on", async () => {
+  it("take uploads from those who may change them", async () => {
     const owner = await knowledgeOf("admin");
     const reader = await knowledgeOf("user");
     const { id: collectionId } = await owner.api.createCollection({
@@ -652,16 +646,11 @@ describe("collections", () => {
       access: "everyone",
     });
     // What the collection offers, and what core does with an upload there
-    // that passes every other check, on the same connection and flags:
-    // taken (`ok`) exactly where it is offered. (What becomes of one taken
-    // is in uploads.test.ts.)
-    const offered = async (
-      session: string,
-      features: Record<string, boolean>
-    ) => {
-      const { core } = await openRpc(session, {
-        coreEnv: { ...env, FEATURES: features },
-      });
+    // that passes every other check, on the same connection: taken (`ok`)
+    // exactly where it is writable. (What becomes of one taken is in
+    // uploads.test.ts.)
+    const offered = async (session: string) => {
+      const { core } = await openRpc(session);
       try {
         const api = core.authenticate();
         const listed = await api.knowledge.listCollections();
@@ -673,34 +662,17 @@ describe("collections", () => {
             bytes: new TextEncoder().encode("%PDF-"),
           })
         );
-        return {
-          writable: collection?.writable,
-          uploadable: collection?.uploadable,
-          upload,
-        };
+        return { writable: collection?.writable, upload };
       } finally {
         core[Symbol.dispose]();
       }
     };
-    const uploadsOn = { knowledge: true, knowledge_uploads: true };
-    const uploadsOff = { knowledge: true };
-
     expect({
-      owner: await offered(owner.session, uploadsOn),
-      ownerWithUploadsOff: await offered(owner.session, uploadsOff),
-      reader: await offered(reader.session, uploadsOn),
+      owner: await offered(owner.session),
+      reader: await offered(reader.session),
     }).toStrictEqual({
-      owner: { writable: true, uploadable: true, upload: "ok" },
-      ownerWithUploadsOff: {
-        writable: true,
-        uploadable: false,
-        upload: "feature.disabled",
-      },
-      reader: {
-        writable: false,
-        uploadable: false,
-        upload: "knowledge.forbidden",
-      },
+      owner: { writable: true, upload: "ok" },
+      reader: { writable: false, upload: "knowledge.forbidden" },
     });
   });
 

@@ -52,7 +52,6 @@ import migrations from "./db/audit-log/migrations/migrations.js";
 import { archives, events } from "./db/audit-log/schema.ts";
 import { migrateOnWake } from "./db/migrate.ts";
 import { inJurisdiction } from "./durable-objects.ts";
-import { featureEnabled } from "./features.ts";
 import { KnowledgeTallier } from "./knowledge/usage-tally.ts";
 import type { KnowledgeTally } from "./knowledge/usage-tally.ts";
 import { SignalTallier } from "./signal-tally.ts";
@@ -147,8 +146,7 @@ export const archiveRetentionDays = (
 // whole number of days, is logged as `config.invalid` and archives nothing:
 // events stay searchable until the config is fixed. It's deployment config,
 // not an in-product setting, so a compromised admin session can't shorten
-// it. Archiving and purging run only while the `audit_retention` feature
-// is on (not `audit`, which gates reading the log).
+// it.
 //
 // The log runs retention itself, daily, on its alarm (`AuditLog.alarm`),
 // which it arms when it appends an event while none is set (and core's
@@ -193,9 +191,8 @@ const archiveExpired = async (store: Retained, env: Env): Promise<boolean> => {
  * stretch as `audit.archived`, in the same transaction. Then purges the
  * archived stretches past archive retention, likewise recorded as
  * `audit.purged`. At most {@link stretchesPerPass} of each, so a backlog
- * is worked off over several passes. Only while `audit_retention` is
- * switched on: a flag of its own, so switching audit search off (`audit`)
- * doesn't stop retention. Returns whether it archived or purged anything.
+ * is worked off over several passes. Returns whether it archived or
+ * purged anything.
  *
  * Running it again, also after a pass cut short, is safe: an archive
  * starts where the last recorded one ended, and a purge records each
@@ -206,14 +203,6 @@ export const retainAuditLog = async (
   store: Retained,
   env: Env
 ): Promise<boolean> => {
-  if (!featureEnabled(env, "audit_retention")) {
-    // Most likely a deployment that switched the log on before retention
-    // had a flag of its own: events are kept, not archived, until it's on.
-    if (featureEnabled(env, "audit")) {
-      log.warn("audit.retention_off", {});
-    }
-    return false;
-  }
   const archived = await archiveExpired(store, env);
   for (let pass = 0; pass < stretchesPerPass; pass += 1) {
     // One stretch after another, oldest first.

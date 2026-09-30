@@ -22,7 +22,7 @@ import { cancelRun, listRuns, runStatus, startWorkflow } from "./runs.ts";
 
 /**
  * A signed-in person's `workflows`. Like AppsRpc, every call checks the
- * session (and the feature flag) first and hands the identity that check
+ * session first and hands the identity that check
  * returned to the run functions, which check the person's role and
  * validate what the client sent.
  */

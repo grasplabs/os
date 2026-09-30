@@ -489,7 +489,7 @@ export const rollbackClient = async (
  * `rolloutId`, audited: its target `rolled_back`, the console's record of
  * its Workers back on the previous versions, the rollout stopped
  * (`cancelled`), its config marked changed (the previous versions carry
- * the flags and sign-in of their own deploy, not staff's latest, so the
+ * the sign-in of their own deploy, not staff's latest, so the
  * next rollout or apply deploys them again), and the client released.
  * All of it only while the rollback still holds the client, in the same
  * batch: one that lost it changes nothing (`runner_replaced`).

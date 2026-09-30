@@ -8,7 +8,6 @@ import type {
   OutboxedConnectorEvent,
 } from "@grasp-os/shared/connect";
 import { sha256Hex } from "@grasp-os/shared/encoding";
-import { featureErrors } from "@grasp-os/shared/errors";
 import { appIdSchema, workflowIdSchema } from "@grasp-os/shared/ids";
 import { errorFields, log } from "@grasp-os/shared/log";
 import {
@@ -21,7 +20,6 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/d1";
 
 import { apps, permissions, workflowTriggers } from "../db/core/schema.ts";
-import { featureEnabled } from "../features.ts";
 import {
   allowingPermissionSql,
   listeningPermissionSql,
@@ -30,8 +28,7 @@ import { deliveryRoom, startRun } from "./runs.ts";
 
 // Events connections report, to workflows' event triggers
 // (trigger-registry.ts). Connect can't reach core, so core drives it, as
-// it drains connect's audit outbox: every minute, while
-// `connector_events`, `triggers` and `workflows` are on, the cron trigger
+// it drains connect's audit outbox: every minute, the cron trigger
 // tells connect who listens for events where (`listenersOf`), which is
 // where connect listens and nowhere else, then takes the events connect
 // read, delivers each here, and settles them (`pumpConnectorEvents`).
@@ -113,11 +110,6 @@ export const deliverConnectorEvent = async (
   env: Env,
   input: unknown
 ): Promise<{ runs: number }> => {
-  for (const feature of ["triggers", "workflows"] as const) {
-    if (!featureEnabled(env, feature)) {
-      throw featureErrors.create("feature.disabled", { feature });
-    }
-  }
   const event = workflowErrors.parse(
     "workflow.invalid",
     connectorEventSchema,
@@ -305,17 +297,9 @@ const deliverOne = async (
  * Every minute, from the cron trigger: tells connect who listens for
  * events where, then delivers at most `eventsPerRun` of the events it
  * read and settles them; the rest wait for the next run. Those read
- * before are delivered even when telling connect fails. Nothing while
- * `connector_events`, `triggers` or `workflows` is off: connect then reads
- * nothing, and the events it holds wait.
+ * before are delivered even when telling connect fails.
  */
 export const pumpConnectorEvents = async (env: Env): Promise<void> => {
-  const on = (["connector_events", "triggers", "workflows"] as const).every(
-    (feature) => featureEnabled(env, feature)
-  );
-  if (!on) {
-    return;
-  }
   try {
     await env.CONNECT.syncEventSources(await listenersOf(env));
   } catch (error) {

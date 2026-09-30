@@ -99,7 +99,7 @@ const drawn = {
 
 /** An admin's App created from the workflow map, its Playbook granted. */
 const setUp = async () => {
-  await builtins(env).ensureInstalled(await fingerprintOf(env, release));
+  await builtins(env).ensureInstalled(await fingerprintOf(release));
   const admin = await signedInApi(idp, "admin");
   const created = await admin.api.apps.blueprints.create(workflowMap, 1, {
     name: `Our map ${unique()}`,
@@ -538,7 +538,7 @@ export default workflowTests(pay, [{ name: "counts", mocks: { count: 1 }, expect
   });
 
   it("says it has no Playbook until an admin grants it", async () => {
-    await builtins(env).ensureInstalled(await fingerprintOf(env, release));
+    await builtins(env).ensureInstalled(await fingerprintOf(release));
     const admin = await signedInApi(idp, "admin");
     const created = await admin.api.apps.blueprints.create(workflowMap, 1, {
       name: `Ungranted ${unique()}`,

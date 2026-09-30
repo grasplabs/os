@@ -2,7 +2,6 @@ import { actorOf, auditActorSchema } from "@grasp-os/shared/audit";
 import type { AuditActor } from "@grasp-os/shared/audit";
 import {
   authErrors,
-  featureErrors,
   internalErrors,
   isExpectedError,
   requestErrors,
@@ -38,14 +37,9 @@ import {
   uploads,
 } from "../db/knowledge/schema.ts";
 import { errorResponse } from "../errors.ts";
-import { requireFeature, uploadFeatures } from "../features.ts";
 import { runEngine } from "../workflows/engine.ts";
 import { allowedCollections, noteProvenance } from "./access.ts";
-import {
-  readableCollection,
-  requireWritable,
-  uploadsOn,
-} from "./collections.ts";
+import { readableCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
 import { findByPath, writeVersion } from "./documents.ts";
 import { ExtractorUnavailableError, extractorFor } from "./extract.ts";
@@ -108,10 +102,6 @@ const failureMessage = (code: string): string => {
   if (knowledge !== undefined) {
     return knowledgeErrors.create(knowledge).message;
   }
-  const feature = featureErrors.codeOf(coded);
-  if (feature !== undefined) {
-    return featureErrors.create(feature).message;
-  }
   return internalErrors.create("internal.unexpected").message;
 };
 
@@ -132,13 +122,6 @@ const toUpload = (row: UploadRow): Upload => ({
   createdAt: row.createdAt.toISOString(),
   updatedAt: row.updatedAt.toISOString(),
 });
-
-/** Refuses while uploads, or Knowledge itself, are switched off. */
-const requireUploads = (env: Env): void => {
-  for (const feature of uploadFeatures) {
-    requireFeature(env, feature);
-  }
-};
 
 /**
  * How long after an upload is recorded its original may still be being
@@ -501,7 +484,6 @@ export const extractUpload = async (
   ) {
     return;
   }
-  requireUploads(env);
   const { upload: row, collection } = found;
   await db
     .update(uploads)
@@ -687,9 +669,6 @@ const endedStatuses: ReadonlySet<string> = new Set([
  */
 export const sweepUploads = async (env: Env): Promise<void> => {
   await cleanUpOriginals(env);
-  if (!uploadsOn(env)) {
-    return;
-  }
   const stale = await drizzle(env.KNOWLEDGE)
     .select({ id: uploads.id })
     .from(uploads)
@@ -745,7 +724,7 @@ export const originalResponse = async (
 ): Promise<Response> => {
   const notFound = () =>
     errorResponse(404, requestErrors.create("request.not_found"), requestId);
-  if (request.method !== "GET" || !uploadsOn(env)) {
+  if (request.method !== "GET") {
     return notFound();
   }
   const person = await identify(env, request.headers);

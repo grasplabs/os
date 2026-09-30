@@ -696,8 +696,8 @@ describe("deploying safely", () => {
     const now = new Date();
     await db.insert(settings).values({
       clientId,
-      key: "FEATURES",
-      value: JSON.stringify({ apps: true }),
+      key: "AUDIT_RETENTION_DAYS",
+      value: JSON.stringify(90),
       updatedBy: staff.email,
       updatedAt: now,
     });
@@ -714,14 +714,55 @@ describe("deploying safely", () => {
     await failingDeploy(refused);
 
     expect(
-      bindingsOf(liveVersionOf(account, "grasp-os-core")).get("FEATURES")
-    ).toStrictEqual({
-      type: "json",
-      name: "FEATURES",
-      json: { apps: true },
-    });
+      bindingsOf(liveVersionOf(account, "grasp-os-core")).get(
+        "AUDIT_RETENTION_DAYS"
+      )
+    ).toStrictEqual({ type: "json", name: "AUDIT_RETENTION_DAYS", json: 90 });
     await expect(deployRow(refused)).resolves.toMatchObject({
       error: "unknown_setting",
+    });
+  });
+
+  it("deploys a client whose feature flags were stored before they were removed, once its migration ran, keeping its other settings", async () => {
+    const { account, clientId, deployId } = await setUp();
+    const now = new Date();
+    await db.insert(settings).values(
+      [
+        ["FEATURES", JSON.stringify({ apps: true })],
+        ["AUDIT_RETENTION_DAYS", JSON.stringify(90)],
+      ].map(([key = "", value = ""]) => ({
+        clientId,
+        key,
+        value,
+        updatedBy: staff.email,
+        updatedAt: now,
+      }))
+    );
+    // Run again as a console that stored such a row: the test database has
+    // every migration applied already.
+    const migration = z
+      .array(z.object({ name: z.string(), queries: z.array(z.string()) }))
+      .parse(Reflect.get(env, "CONSOLE_MIGRATIONS"))
+      .find(({ name }) => name.startsWith("0012_drop_features_settings"));
+    for (const query of migration?.queries ?? []) {
+      // oxlint-disable-next-line no-await-in-loop -- in order, as D1 applies them
+      await env.DB.prepare(query).run();
+    }
+
+    await runDeploy(context, deployId);
+
+    const bindings = bindingsOf(liveVersionOf(account, "grasp-os-core"));
+    const deploy = await deployRow(deployId);
+    expect({
+      ran: migration !== undefined,
+      features: bindings.get("FEATURES"),
+      retention: bindings.get("AUDIT_RETENTION_DAYS"),
+      error: deploy?.error,
+    }).toStrictEqual({
+      ran: true,
+      features: undefined,
+      retention: { type: "json", name: "AUDIT_RETENTION_DAYS", json: 90 },
+      error: null,
     });
   });
 
@@ -748,13 +789,12 @@ describe("deploying safely", () => {
           eu: { models: ["mistral/mistral-large"] },
         }),
       ],
-      ["FEATURES", JSON.stringify({ apps: "yes" })],
       ["MEMORY_LIMITS", JSON.stringify({ "USER.md": 0 })],
       ["AUDIT_RETENTION_DAYS", "7"],
       ["AUDIT_ARCHIVE_RETENTION_DAYS", "30"],
       // Longer than the engine keeps an ended run.
       ["RUN_RETENTION_DAYS", "31"],
-      ["FEATURES", "{not json"],
+      ["MEMORY_LIMITS", "{not json"],
     ];
     const outcomes: unknown[] = [];
     for (const [key, value] of refusedSettings) {
@@ -1097,8 +1137,8 @@ describe("resuming and superseding, Worker by Worker", () => {
     failing.mockRestore();
     await db.insert(settings).values({
       clientId,
-      key: "FEATURES",
-      value: JSON.stringify({ apps: true }),
+      key: "AUDIT_RETENTION_DAYS",
+      value: JSON.stringify(90),
       updatedBy: staff.email,
       updatedAt: new Date(),
     });
@@ -1108,12 +1148,12 @@ describe("resuming and superseding, Worker by Worker", () => {
       uploaded:
         (account.scripts.get("grasp-os-core")?.versions.length ?? 0) -
         (coreVersions ?? 0),
-      features: bindingsOf(liveVersionOf(account, "grasp-os-core")).get(
-        "FEATURES"
+      retention: bindingsOf(liveVersionOf(account, "grasp-os-core")).get(
+        "AUDIT_RETENTION_DAYS"
       ),
     }).toStrictEqual({
       uploaded: 1,
-      features: { type: "json", name: "FEATURES", json: { apps: true } },
+      retention: { type: "json", name: "AUDIT_RETENTION_DAYS", json: 90 },
     });
   });
 

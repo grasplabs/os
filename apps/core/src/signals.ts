@@ -37,7 +37,6 @@ import {
   workflowRuns,
 } from "./db/core/schema.ts";
 import { chunks, inList } from "./db/d1.ts";
-import { featureEnabled } from "./features.ts";
 import { collectionsPerQuestion } from "./signal-tally.ts";
 import type { SignalTally } from "./signal-tally.ts";
 import { auditableCode } from "./workflows/host.ts";
@@ -741,8 +740,8 @@ const computeSignals = async (
 };
 
 /**
- * Claims the improvement signals of `now`'s UTC day (src/daily-claims.ts),
- * unless `improvement_signals` is off. In the same batch, the unfinished
+ * Claims the improvement signals of `now`'s UTC day (src/daily-claims.ts).
+ * In the same batch, the unfinished
  * claims of earlier days go, with anything they wrote: a computation still
  * running on one then stops at its next write, or finishes nothing (see
  * `storeImprovementSignals`).
@@ -751,9 +750,6 @@ export const claimImprovementSignals = async (
   env: Env,
   now: Date
 ): Promise<Computation | undefined> => {
-  if (!featureEnabled(env, "improvement_signals")) {
-    return undefined;
-  }
   const db = drizzle(env.DB);
   const computation = newComputation(now);
   const stale = unfinishedBefore(computations, computation);

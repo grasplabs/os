@@ -6,7 +6,6 @@ import type { DeclaredPermission } from "@grasp-os/shared/permissions";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import type { BuiltinBlueprint } from "#blueprints";
 
@@ -59,7 +58,7 @@ const helloApp = builtinAppId("hello");
 
 /** The singleton's install, asked for by an isolate of this release. */
 const ensureInstalled = async (): Promise<boolean> =>
-  await builtins(env).ensureInstalled(await fingerprintOf(env, release));
+  await builtins(env).ensureInstalled(await fingerprintOf(release));
 
 /** This release, with `hello` changed as `change` says: another release. */
 const releaseWith = (change: Partial<BuiltinBlueprint>): Release => ({
@@ -349,20 +348,6 @@ describe("the built-in blueprints", () => {
     const declared = releaseWith({
       collections: [{ id, name: "Greetings", description: "Said hello." }],
     });
-    // Not while record types are off: nothing would keep records there.
-    const off: Env = {
-      ...env,
-      FEATURES: {
-        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-        record_types: false,
-      },
-    };
-    await expect(install(declared, off)).resolves.toBeTruthy();
-    const whileOff = await env.KNOWLEDGE.prepare(
-      "SELECT count(*) AS count FROM collections WHERE id = ?"
-    )
-      .bind(id)
-      .first<{ count: number }>();
     const events = await auditedDuring(async () => {
       await expect(install(declared)).resolves.toBeTruthy();
       await expect(install(declared)).resolves.toBeTruthy();
@@ -382,7 +367,6 @@ describe("the built-in blueprints", () => {
         })
       );
     expect({
-      whileOff: whileOff?.count,
       collection,
       created: events.filter(
         ({ action, target }) =>
@@ -391,7 +375,6 @@ describe("the built-in blueprints", () => {
       admin: await save(admin),
       builder: await save(builder),
     }).toStrictEqual({
-      whileOff: 0,
       collection: {
         name: "Greetings",
         owner: "grasp",
@@ -479,8 +462,8 @@ describe("the built-in blueprints", () => {
     const declared = notesOf(collectionId);
     const declaring = releaseWith({ permissions: [declared] });
     // Another release: every isolate installs it again.
-    await expect(fingerprintOf(env, declaring)).resolves.not.toBe(
-      await fingerprintOf(env, release)
+    await expect(fingerprintOf(declaring)).resolves.not.toBe(
+      await fingerprintOf(release)
     );
     const requested = await auditedDuring(async () => {
       await expect(install(declaring)).resolves.toBeTruthy();
@@ -780,13 +763,5 @@ describe("the built-in blueprints", () => {
     });
 
     await reinstall();
-  });
-
-  it("aren't installed while app_blueprints is off", async () => {
-    await reinstall();
-    const before = await helloState();
-    const off: Env = { ...env, FEATURES: { apps: true } };
-    await expect(install(changedHello(), off)).resolves.toBeTruthy();
-    await expect(helloState()).resolves.toStrictEqual(before);
   });
 });

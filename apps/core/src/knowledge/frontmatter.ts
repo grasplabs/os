@@ -265,7 +265,7 @@ export const parseRecord = (
  * fields every type has (`baseSchema`, what a document's row keeps), and
  * not its type's schema: for a purge, which removes personal data from
  * whatever a document holds, a record no App declares any more (its
- * permission revoked, its App gone, `record_types` off) or that no longer
+ * permission revoked, its App gone) or that no longer
  * fits its type (a narrower schema since) too. A skill's name is still
  * read for its title.
  */

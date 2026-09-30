@@ -8,12 +8,11 @@ import type { BuiltinBlueprint } from "#blueprints";
 
 import { installBuiltinBlueprint } from "./app-blueprints.ts";
 import { inJurisdiction } from "./durable-objects.ts";
-import { featureEnabled } from "./features.ts";
 import { graspSkills, syncGraspSkills } from "./knowledge/grasp-skills.ts";
 import type { GraspSkill } from "./knowledge/grasp-skills.ts";
 
 // What ships with the release, installed once per release on the first
-// request, while the `builtins` flag is on: the built-in blueprints
+// request: the built-in blueprints
 // (apps/core/blueprints/, embedded by build-blueprints.ts, each the
 // blueprint of an ordinary App, app-blueprints.ts), and the Grasp skills
 // (knowledge/grasp-skills.ts). Workers have no deploy hook, so the first
@@ -61,22 +60,15 @@ export const release: Release = {
 /** Where the singleton keeps the fingerprint of what it installed. */
 const installedKey = "installed";
 
-const blueprintsEnabled = (env: Env): boolean =>
-  featureEnabled(env, "apps") && featureEnabled(env, "app_blueprints");
-
 /**
  * Makes each built-in blueprint an App's blueprint, one at a time (each is
- * one batch, well within D1's limits), while `apps` and `app_blueprints`
- * are on. A blueprint that fails is logged, and the others are still
- * installed. Resolves whether all of them are.
+ * one batch, well within D1's limits). A blueprint that fails is logged,
+ * and the others are still installed. Resolves whether all of them are.
  */
 const installBlueprints = async (
   env: Env,
   blueprints: readonly BuiltinBlueprint[]
 ): Promise<boolean> => {
-  if (!blueprintsEnabled(env)) {
-    return true;
-  }
   let complete = true;
   for (const blueprint of blueprints) {
     try {
@@ -93,38 +85,23 @@ const installBlueprints = async (
   return complete;
 };
 
-/**
- * The fingerprint of what installing `release` writes on `env`: each part
- * is in it only while its flags are on, so switching one on installs it
- * even when the release hasn't changed.
- */
-export const fingerprintOf = async (env: Env, of: Release): Promise<string> => {
-  const skillsOn =
-    featureEnabled(env, "knowledge") && featureEnabled(env, "skills");
-  return await sha256Hex(
+/** The fingerprint of what installing `of` writes. */
+export const fingerprintOf = async (of: Release): Promise<string> =>
+  await sha256Hex(
     canonicalJson({
-      blueprints: blueprintsEnabled(env)
-        ? of.blueprints.map(
-            ({ id, name, description, collections, permissions, files }) => ({
-              id,
-              name,
-              description,
-              // Created only while record types are on: switching them on
-              // installs again, and creates them.
-              collections: featureEnabled(env, "record_types")
-                ? [...collections]
-                : [],
-              permissions: [...permissions],
-              files: { ...files },
-            })
-          )
-        : null,
-      skills: skillsOn
-        ? of.skills.map(({ path, text }) => ({ path, text }))
-        : null,
+      blueprints: of.blueprints.map(
+        ({ id, name, description, collections, permissions, files }) => ({
+          id,
+          name,
+          description,
+          collections: [...collections],
+          permissions: [...permissions],
+          files: { ...files },
+        })
+      ),
+      skills: of.skills.map(({ path, text }) => ({ path, text })),
     })
   );
-};
 
 /**
  * Installs `of` unless `storage` holds its fingerprint already, and stores
@@ -136,7 +113,7 @@ export const installBuiltins = async (
   storage: Pick<DurableObjectStorage, "get" | "put">,
   of: Release
 ): Promise<boolean> => {
-  const fingerprint = await fingerprintOf(env, of);
+  const fingerprint = await fingerprintOf(of);
   if ((await storage.get(installedKey)) === fingerprint) {
     return true;
   }
@@ -192,43 +169,38 @@ export const builtins = (
 export const builtinsRetryMs = 60_000;
 
 /**
- * This isolate's install: `started` while one is under way or its release
- * is in, and when the next may start after one that wasn't.
- */
-const isolate = { started: false, retryAt: 0 };
-
-/**
- * Starts installing the release's built-ins in the background, once per
- * isolate, while `builtins` is on. After a partial or failed install, or
- * one of another release than this isolate's, the first request
+ * An isolate's installer of release `of`'s built-ins: it starts installing
+ * them in the background, once per isolate. After a partial or failed
+ * install, or one of another release than `of`, the first request
  * `builtinsRetryMs` later starts another; the singleton makes that one
- * comparison once everything is in.
+ * comparison once everything is in. Core has one, `installBuiltinsOnce`;
+ * tests make others, each for an isolate of their own.
  */
-export const installBuiltinsOnce = (
-  env: Env,
-  ctx: Pick<ExecutionContext, "waitUntil">
-): void => {
-  if (
-    isolate.started ||
-    Date.now() < isolate.retryAt ||
-    !featureEnabled(env, "builtins")
-  ) {
-    return;
-  }
-  isolate.started = true;
-  const install = async (): Promise<void> => {
-    let complete = false;
-    try {
-      // Worked out for each attempt, which is at most one a minute.
-      const expected = await fingerprintOf(env, release);
-      complete = await builtins(env).ensureInstalled(expected);
-    } catch (error) {
-      log.error("builtins.install_failed", errorFields(error));
+export const builtinsInstaller = (of: Release = release) => {
+  // `started` while an install is under way or `of` is in, and when the
+  // next may start after one that wasn't.
+  const isolate = { started: false, retryAt: 0 };
+  return (env: Env, ctx: Pick<ExecutionContext, "waitUntil">): void => {
+    if (isolate.started || Date.now() < isolate.retryAt) {
+      return;
     }
-    isolate.started = complete;
-    if (!complete) {
-      isolate.retryAt = Date.now() + builtinsRetryMs;
-    }
+    isolate.started = true;
+    const install = async (): Promise<void> => {
+      let complete = false;
+      try {
+        const expected = await fingerprintOf(of);
+        complete = await builtins(env).ensureInstalled(expected);
+      } catch (error) {
+        log.error("builtins.install_failed", errorFields(error));
+      }
+      isolate.started = complete;
+      if (!complete) {
+        isolate.retryAt = Date.now() + builtinsRetryMs;
+      }
+    };
+    ctx.waitUntil(install());
   };
-  ctx.waitUntil(install());
 };
+
+/** This isolate's installer, which the first request core serves starts. */
+export const installBuiltinsOnce = builtinsInstaller();

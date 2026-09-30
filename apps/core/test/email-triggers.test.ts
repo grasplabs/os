@@ -263,14 +263,6 @@ const addedSince = async (before: readonly string[]): Promise<string[]> => {
     .map((object) => object.split("@")[0] ?? object);
 };
 
-/** The deployment's features, all on, with `changes`. */
-const featuresWith = (changes: Record<string, boolean>): Partial<Env> => ({
-  FEATURES: {
-    ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-    ...changes,
-  },
-});
-
 /** A kept message's name: its day, and the SHA-256 of its bytes. */
 const storedName = /^(?<day>\d{4}-\d{2}-\d{2})\/[0-9a-f]{64}$/u;
 
@@ -302,16 +294,11 @@ describe("email triggers", () => {
     ]);
   });
 
-  it("keep nothing of a message without attachments, with inline ones only, or while keeping mail is off", async () => {
+  it("keep nothing of a message without attachments, or with inline ones only", async () => {
     const builder = await personApi("builder");
     const app = await appWith(builder, intake("unkept"));
     const before = await storedObjects();
 
-    await deliver(
-      "unkept@grasp.test",
-      invoiceMail({ to: "unkept@grasp.test", subject: "Off" }),
-      { changes: featuresWith({ email_attachments: false }) }
-    );
     await deliver("unkept@grasp.test", unclosed("Plain", "<p>No files.</p>"));
     await deliver("unkept@grasp.test", inlineOnly);
 
@@ -326,7 +313,6 @@ describe("email triggers", () => {
         .toSorted((a, b) => a.subject.localeCompare(b.subject))
     ).toStrictEqual([
       { subject: "Inline", stored: null, attachments: 1 },
-      { subject: "Off", stored: null, attachments: 1 },
       { subject: "Plain", stored: null, attachments: 0 },
     ]);
     await expect(addedSince(before)).resolves.toStrictEqual([]);
@@ -639,22 +625,14 @@ describe("email triggers", () => {
     ).toStrictEqual(Array.from({ length: 5 }, () => ["system", "email", true]));
   });
 
-  it("bounce mail to an address nobody receives at, and fail it for now while switched off", async () => {
+  it("bounce mail to an address nobody receives at", async () => {
     const builder = await personApi("builder");
-    const app = await appWith(builder, intake("switched"));
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const mail = invoiceMail({ to: "switched@grasp.test" });
+    const app = await appWith(builder, intake("somebody"));
+    const mail = invoiceMail({ to: "somebody@grasp.test" });
 
     const unknown = await deliver("nobody@grasp.test", mail);
 
     expect(unknown.rejected).toBe("No such address.");
-    await expect(
-      outcome(
-        deliver("switched@grasp.test", mail, {
-          changes: { FEATURES: { ...on, triggers: false } },
-        })
-      )
-    ).resolves.toMatch(/switched off: try again later/u);
     await expect(runsOf(builder, app)).resolves.toHaveLength(0);
   });
 
@@ -1039,11 +1017,8 @@ describe("attachments of mail", () => {
       new Date(dayEnded + 30 * 24 * 60 * 60 * 1000 - 1)
     );
     await expect(kept()).resolves.toBeTruthy();
-    // Then the next run deletes it, whether or not keeping mail is on.
-    await runQuarterHourCron(
-      featuresWith({ email_attachments: false }),
-      new Date(dayEnded + 30 * 24 * 60 * 60 * 1000)
-    );
+    // Then the next run deletes it.
+    await runQuarterHourCron({}, new Date(dayEnded + 30 * 24 * 60 * 60 * 1000));
     await expect(kept()).resolves.toBeFalsy();
   });
 

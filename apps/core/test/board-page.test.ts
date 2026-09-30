@@ -82,7 +82,7 @@ const savedSchema = z.object({
 
 /** An App created from the built-in `blueprint` by `admin`, granted or not. */
 const fromBuiltin = async (admin: Person, blueprint: string, grant = true) => {
-  await builtins(env).ensureInstalled(await fingerprintOf(env, release));
+  await builtins(env).ensureInstalled(await fingerprintOf(release));
   const created = await admin.api.apps.blueprints.create(blueprint, 1, {
     name: `Ours ${unique()}`,
   });

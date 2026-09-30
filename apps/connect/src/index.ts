@@ -268,11 +268,10 @@ export default class Connect
     return await startToolkitConnection(this.env, request);
   }
 
-  // The catalog (src/catalog.ts): what can be connected. Core says whether
-  // its `composio` flag is on.
+  // The catalog (src/catalog.ts): what can be connected.
 
-  async catalog(request: unknown): Promise<Catalog> {
-    return await catalog(this.env, request);
+  async catalog(): Promise<Catalog> {
+    return await catalog(this.env);
   }
 
   async catalogTools(request: unknown): Promise<CatalogTool[]> {

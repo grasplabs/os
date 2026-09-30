@@ -1,7 +1,5 @@
 import { appErrors } from "@grasp-os/shared/apps";
-import { featureErrors } from "@grasp-os/shared/errors";
 import { roleErrors } from "@grasp-os/shared/roles";
-import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { z } from "zod";
 
@@ -169,7 +167,7 @@ describe(
       );
     });
 
-    it("creates only from what its person may, within a question's creates, while blueprints are on", async () => {
+    it("creates only from what its person may, within a question's creates", async () => {
       const attempts = ({ ledger, vault }: { ledger: string; vault: string }) =>
         codeStep(
           tryEach({
@@ -198,33 +196,13 @@ describe(
         "user"
       );
       await uses.chat.ask("Make me a ledger");
-      const off = await setUp(({ ledger }) => [
-        codeStep(
-          tryEach({
-            listed: "(await env.build.blueprints()).length",
-            create: `(await env.build.createFromBlueprint(${JSON.stringify(ledger)}, 1, { name: "Mine" })).app.name`,
-          })
-        ),
-        says("Off."),
-      ]);
-      const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-      const { FEATURES: features } = env;
-      try {
-        env.FEATURES = { ...on, app_blueprints: false };
-        await off.chat.ask("Make me a ledger");
-      } finally {
-        env.FEATURES = features;
-      }
 
       const results = await Promise.all(
-        [builds, uses, off].map(async ({ chat }) => {
+        [builds, uses].map(async ({ chat }) => {
           const [result] = await codeResults(chat.stub, chat.chat.id);
           return returned(result?.text);
         })
       );
-      const blueprintOff = featureErrors.create("feature.disabled", {
-        feature: "app_blueprints",
-      }).message;
       expect(results).toStrictEqual([
         {
           // Of an App the person has no role in: as if there were none.
@@ -241,7 +219,6 @@ describe(
           listed: 1,
           create: roleErrors.create("role.forbidden").message,
         },
-        { listed: blueprintOff, create: blueprintOff },
       ]);
     });
   }

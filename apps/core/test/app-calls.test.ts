@@ -6,7 +6,6 @@ import type { KnowledgeApi } from "@grasp-os/shared/knowledge";
 import type { Role } from "@grasp-os/shared/roles";
 import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
-import { z } from "zod";
 
 import { callExport } from "../src/app-calls.ts";
 import { callApp } from "../src/app.ts";
@@ -932,30 +931,6 @@ describe("calls between Apps", { timeout: 60_000 }, () => {
         plan.some((step) => fullScan.test(step) || step.includes("TEMP B-TREE"))
       )
     ).toStrictEqual([]);
-  });
-
-  it("are refused while switched off, and work again once back on", async () => {
-    const { admin, clerk, invoicing, crm } = await setUp();
-    await grantCalls(admin, invoicing, crm, ["read"], "CRM");
-    const find = async () =>
-      await via(invoicing, clerk.userId, "CRM", "findCustomers", {
-        query: "BV",
-      });
-    const { FEATURES: features } = env;
-    let off: unknown;
-    try {
-      env.FEATURES = {
-        ...z.record(z.string(), z.boolean()).parse(features),
-        app_calls: false,
-      };
-      off = await find();
-    } finally {
-      env.FEATURES = features;
-    }
-    expect({ off, on: await find() }).toMatchObject({
-      off: { refused: "feature.disabled" },
-      on: { ok: [{ name: "Acme BV" }] },
-    });
   });
 
   it("reach another App's export from a workflow step, with the step's key", async () => {

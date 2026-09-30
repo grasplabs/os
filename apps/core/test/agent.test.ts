@@ -1,6 +1,5 @@
 import { agentErrors } from "@grasp-os/shared/agent";
 import type { AuditEvent } from "@grasp-os/shared/audit";
-import { featureErrors } from "@grasp-os/shared/errors";
 import type { WorkspaceId } from "@grasp-os/shared/ids";
 import { modelErrors } from "@grasp-os/shared/models";
 import { permissionErrors } from "@grasp-os/shared/permissions";
@@ -85,7 +84,6 @@ const codeOf = async (call: Promise<unknown>) => {
     return (
       agentErrors.codeOf(error) ??
       modelErrors.codeOf(error) ??
-      featureErrors.codeOf(error) ??
       permissionErrors.codeOf(error) ??
       "failed"
     );
@@ -288,12 +286,15 @@ describe("chat agent", () => {
     expect(gateway.requests).toHaveLength(1);
   });
 
-  it("stops the turn when the agent is switched off during it", async () => {
+  it("stops the turn when its person leaves during it", async () => {
     const { reply, release } = pausedReply(
       { ...codeStep("export default async () => 'done';"), text: "Running." },
       1
     );
-    const { stub, gateway, ask } = await newChat(reply, says("Never asked."));
+    const { personId, gateway, ask } = await newChat(
+      reply,
+      says("Never asked.")
+    );
 
     const turn = codeOf(ask("Wait."));
     await vi.waitFor(
@@ -302,10 +303,12 @@ describe("chat agent", () => {
       },
       { timeout: 10_000 }
     );
-    await pointAtGateway(stub, gateway, { agentOn: false });
+    await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
+      .bind(personId)
+      .run();
     release();
 
-    await expect(turn).resolves.toBe("feature.disabled");
+    await expect(turn).resolves.toBe("permission.person_inactive");
     expect(gateway.requests).toHaveLength(1);
   });
 });
@@ -648,15 +651,6 @@ describe("chat agent turns", () => {
     );
   });
 
-  it("refuses every question while the agent is switched off", async () => {
-    const { stub, chat, gateway, ask } = await newChat(says("Hi."));
-    await pointAtGateway(stub, gateway, { agentOn: false });
-
-    await expect(codeOf(ask("Hi."))).resolves.toBe("feature.disabled");
-    expect(gateway.requests).toStrictEqual([]);
-    await expect(transcript(stub, chat.id)).resolves.toStrictEqual([]);
-  });
-
   it("stops acting for a person who has left", async () => {
     const { personId, gateway, ask } = await newChat(says("Hi."));
     await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
@@ -863,7 +857,7 @@ describe("chat agent after a restart", () => {
     await stopped.stub.cancel(stopped.chat.id, stopped.personId);
     await cancelled;
 
-    // The agent is switched off while the model answers: the turn throws.
+    // The person leaves while the model answers: the turn throws.
     const { reply, release } = pausedReply(
       { ...codeStep("export default async () => 'done';"), text: "Running." },
       1
@@ -876,9 +870,11 @@ describe("chat agent after a restart", () => {
       },
       { timeout: 10_000 }
     );
-    await pointAtGateway(failed.stub, failed.gateway, { agentOn: false });
+    await env.DB.prepare("DELETE FROM members WHERE user_id = ?")
+      .bind(failed.personId)
+      .run();
     release();
-    await expect(failing).resolves.toBe("feature.disabled");
+    await expect(failing).resolves.toBe("permission.person_inactive");
 
     const said: boolean[] = [];
     for (const { id, chat } of [answered, stopped, failed]) {

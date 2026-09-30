@@ -51,7 +51,6 @@ import {
   appVersions,
   permissions,
 } from "./db/core/schema.ts";
-import { featureEnabled } from "./features.ts";
 import { ensureCollection } from "./knowledge/collections.ts";
 import { appMemoryPath } from "./knowledge/memory-files.ts";
 import {
@@ -667,14 +666,9 @@ export const installBuiltinBlueprint = async (
   );
   // The collections its copies ask for, before anything asks for them:
   // each is created once, by the first install that declares it, and
-  // shared by every App created from a blueprint that names it. Only while
-  // record types are on, as nothing keeps records there without them (the
-  // install's fingerprint says so, so switching them on installs again).
-  // Nothing deletes such a collection once created.
-  const declared = featureEnabled(env, "record_types")
-    ? blueprint.collections
-    : [];
-  for (const collection of declared) {
+  // shared by every App created from a blueprint that names it. Nothing
+  // deletes such a collection once created.
+  for (const collection of blueprint.collections) {
     // oxlint-disable-next-line no-await-in-loop -- a few, one at a time
     await ensureCollection(
       env,

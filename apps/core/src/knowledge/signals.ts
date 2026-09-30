@@ -60,7 +60,6 @@ import {
   knowledgeSignalDismissals as dismissals,
   knowledgeSignals,
 } from "../db/knowledge/schema.ts";
-import { featureEnabled, requireFeature } from "../features.ts";
 import { allowedCollections } from "./access.ts";
 import type { Reader } from "./access.ts";
 import type { KnowledgeTally } from "./usage-tally.ts";
@@ -148,12 +147,8 @@ const owned = notInArray(collections.source, [...readOnlySources]);
  * the audit log's retention while that's shorter, as the log holds no
  * reads older than that.
  */
-const unreadWindowDays = (env: Env): number => {
-  if (!featureEnabled(env, "audit_retention")) {
-    return unreadDays;
-  }
-  return Math.min(unreadDays, auditRetentionDays(env) ?? unreadDays);
-};
+const unreadWindowDays = (env: Env): number =>
+  Math.min(unreadDays, auditRetentionDays(env) ?? unreadDays);
 
 /** What the audit log holds of reads and questions, added up. */
 export interface KnowledgeTotals {
@@ -421,8 +416,8 @@ const overdueSignals = async (
 };
 
 /**
- * Claims the usage signals of `now`'s UTC day (src/daily-claims.ts),
- * unless `knowledge` or `knowledge_signals` is off. Earlier days' claims
+ * Claims the usage signals of `now`'s UTC day (src/daily-claims.ts).
+ * Earlier days' claims
  * that never finished go once a later computation finishes, with anything
  * they wrote.
  */
@@ -430,14 +425,6 @@ export const claimKnowledgeSignals = async (
   env: Env,
   now: Date
 ): Promise<Computation | undefined> => {
-  if (
-    !(
-      featureEnabled(env, "knowledge") &&
-      featureEnabled(env, "knowledge_signals")
-    )
-  ) {
-    return undefined;
-  }
   const db = drizzle(env.KNOWLEDGE);
   const computation = newComputation(now);
   const claimed = await claimComputation(db, computations, computation);
@@ -864,7 +851,6 @@ export const listKnowledgeSignals = async (
   env: Env,
   person: Identity
 ): Promise<KnowledgeSignals> => {
-  requireFeature(env, "knowledge_signals");
   await keepAuditEvent(env, drizzle(env.KNOWLEDGE), {
     actor: actorOf(person),
     action: "knowledge.signals.read",
@@ -884,7 +870,6 @@ export const agentKnowledgeSignals = async (
   reader: Reader,
   owner: string
 ): Promise<KnowledgeSignals> => {
-  requireFeature(env, "knowledge_signals");
   const db = drizzle(env.KNOWLEDGE);
   const allowed = await allowedCollections(env, db, reader);
   return await signalsFor(
@@ -905,7 +890,6 @@ export const dismissKnowledgeSignal = async (
   person: Identity,
   signalId: unknown
 ): Promise<void> => {
-  requireFeature(env, "knowledge_signals");
   const id = knowledgeSignalErrors.parse(
     "knowledge_signal.invalid",
     knowledgeSignalIdSchema,

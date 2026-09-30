@@ -43,7 +43,7 @@
     "run_worker_first": true,
   },
   // The console sets the deployment config vars below (SIGN_IN,
-  // MODEL_GATEWAY, FEATURES, PLATFORM_CHANGE) through the API; without this, every deploy
+  // MODEL_GATEWAY, PLATFORM_CHANGE) through the API; without this, every deploy
   // would delete them, as Wrangler deletes the vars it doesn't find here.
   "keep_vars": true,
   // Every secret core needs: deploys fail while one is unset, and local dev
@@ -69,9 +69,6 @@
   // So is `PLATFORM_CHANGE` (src/platform-updates.ts): who made this
   // version, and what they changed, which the cron records in the audit log
   // once per version.
-  //
-  // So are feature flags: the `FEATURES` var (src/features.ts), e.g.
-  // `{"apps": true}`. Every feature is off until it names it.
   //
   // And the audit log's retention: the `AUDIT_RETENTION_DAYS` var
   // (src/audit-log.ts), 180 days unless set, at least 30. And an

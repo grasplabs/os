@@ -1,23 +1,22 @@
 /**
- * A client's settings, as staff change them on its page: its ring, its
- * feature flags (core's `FEATURES`, a row in `settings`) and its sign-in
- * (its record's `signIn`, which every deploy makes core's `SIGN_IN`
- * from). Each change is audited in the same batch as the change, and
+ * A client's settings, as staff change them on its page: its ring and
+ * its sign-in (its record's `signIn`, which every deploy makes core's
+ * `SIGN_IN` from). Each change is audited in the same batch as the change, and
  * only when it changes something.
  *
  * None of it reaches the client's account at once. The ring decides which
- * rollouts reach it; flags and sign-in are set on core by its next deploy.
- * They also mark the client (`configChangedAt`), so the next rollout
+ * rollouts reach it; sign-in is set on core by its next deploy. It also
+ * marks the client (`configChangedAt`), so the next rollout
  * deploys it even when it's on the release already (src/rollout/targets.ts).
  */
 import { hkdfHmacKey } from "@grasp-os/shared/client-secrets";
-import { and, eq, isNull, ne, or, sql } from "drizzle-orm";
+import { and, eq, isNull, ne, or } from "drizzle-orm";
 import { z } from "zod";
 
 import type { Staff } from "../access.ts";
 import { actIfChanged, consoleDatabase } from "../db/act.ts";
 import type { ConsoleDatabase } from "../db/act.ts";
-import { clients, settings } from "../db/schema.ts";
+import { clients } from "../db/schema.ts";
 import {
   MissingStoreSecretError,
   signInApps,
@@ -29,7 +28,6 @@ import {
   missingSignInApp,
 } from "../deploy/core-config.ts";
 import { keyedHash } from "../deploy/upload.ts";
-import { featureNameSchema } from "./feature-name.ts";
 
 /** Why staff's change to a client's settings was refused, as the page words it. */
 export const settingsErrorCodes = [
@@ -62,20 +60,11 @@ export class SettingsError extends Error {
   }
 }
 
-/** The setting core's feature flags are in. */
-const featuresKey = "FEATURES";
-
 const clientIdSchema = z.string().min(1);
 
 export const ringInputSchema = z.object({
   clientId: clientIdSchema,
   ring: z.int().nonnegative(),
-});
-
-export const featureInputSchema = z.object({
-  clientId: clientIdSchema,
-  feature: featureNameSchema,
-  on: z.boolean(),
 });
 
 /**
@@ -122,61 +111,6 @@ export const setRing = async (
       .set({ ring, updatedAt: new Date() })
       .where(and(eq(clients.id, clientId), ne(clients.ring, ring))),
     { action: "client.ring", clientId, detail: { ring } }
-  );
-};
-
-/**
- * Marks client `clientId`'s config changed at `now`, as the statement
- * that follows `actIfChanged`'s audit event: `changes()` then counts that
- * event's insert, which happened only if the change did.
- */
-const configChanged = (db: ConsoleDatabase, clientId: string, now: Date) =>
-  db
-    .update(clients)
-    .set({ configChangedAt: now, updatedAt: now })
-    .where(and(eq(clients.id, clientId), sql`changes() > 0`));
-
-/**
- * Switches feature `feature` on or off in client `clientId`'s `FEATURES`,
- * as `staff`, audited (`client.feature`) when it changes. One flag at a
- * time, set inside the stored JSON, so staff changing two flags at once
- * both land. Returns whether it changed.
- */
-export const setFeature = async (
-  env: Env,
-  staff: Staff,
-  input: z.input<typeof featureInputSchema>
-): Promise<boolean> => {
-  const db = consoleDatabase(env.DB);
-  const { clientId, feature, on } = featureInputSchema.parse(input);
-  await assertClient(db, clientId);
-  const now = new Date();
-  // The name is checked above, so it's safe in a JSON path.
-  const path = `$.${feature}`;
-  const flag = on ? sql`json('true')` : sql`json('false')`;
-  return await actIfChanged(
-    db,
-    staff,
-    db
-      .insert(settings)
-      .values({
-        clientId,
-        key: featuresKey,
-        value: JSON.stringify({ [feature]: on }),
-        updatedBy: staff.email,
-        updatedAt: now,
-      })
-      .onConflictDoUpdate({
-        target: [settings.clientId, settings.key],
-        set: {
-          value: sql`json_set(${settings.value}, ${path}, ${flag})`,
-          updatedBy: staff.email,
-          updatedAt: now,
-        },
-        setWhere: sql`json_extract(${settings.value}, ${path}) IS NOT ${on ? 1 : 0}`,
-      }),
-    { action: "client.feature", clientId, target: feature, detail: { on } },
-    [configChanged(db, clientId, now)]
   );
 };
 

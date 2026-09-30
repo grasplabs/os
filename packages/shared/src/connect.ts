@@ -141,11 +141,6 @@ export const finishConnectionSchema = z.strictObject({
   code: z.string().min(1).max(4096).optional(),
   /** The provider's error code, when it sent one instead of a code. */
   error: z.string().min(1).max(256).optional(),
-  /**
-   * Whether core's `composio` flag is on: a Composio flow finishes only
-   * while it is. Left out by a core from before Composio, which starts none.
-   */
-  composio: z.boolean().optional(),
 });
 export type FinishConnection = z.input<typeof finishConnectionSchema>;
 
@@ -244,8 +239,8 @@ export interface ConnectionsApi {
   list: () => Promise<ListedConnection[]>;
   disconnect: (connectionId: string) => Promise<{ revoked: boolean }>;
   /**
-   * What can be connected: the native providers, and, while the
-   * `composio` flag is on, Composio's toolkits. Admins see every entry,
+   * What can be connected: the native providers, and Composio's
+   * toolkits while connect has a Composio key. Admins see every entry,
    * each saying whether it is offered; everyone else only the offered ones.
    */
   catalog: () => Promise<OfferedCatalog>;
@@ -256,7 +251,7 @@ export interface ConnectionsApi {
    * them are still requested and granted (blueprint copies' too). One that
    * needs reconnecting (`needs_reauth`) can't be until the entry is offered
    * again. Hiding a Composio toolkit needs Composio to list it, so it is
-   * `connection.provider_unavailable` while the `composio` flag is off.
+   * `connection.provider_unavailable` while Composio isn't listed.
    * Every entry is offered until an admin says otherwise. Admins only,
    * never Grasp staff; audited.
    */
@@ -314,8 +309,7 @@ export interface CatalogEntry {
 
 /**
  * The catalog, native entries first. `composio` says whether Composio's
- * toolkits are in it: `listed`, `off` (the `composio` flag is off, or
- * connect has no Composio key), or `unavailable` (Composio didn't answer,
+ * toolkits are in it: `listed`, `off` (connect has no Composio key), or `unavailable` (Composio didn't answer,
  * or not completely: the native entries are listed all the same). Listed
  * are the toolkits Composio holds an app for that have tools.
  */
@@ -410,8 +404,6 @@ export const composioToolsSchema = z
  */
 export const startToolkitConnectionSchema = z.strictObject({
   person: connectionPersonSchema,
-  /** Whether core's `composio` flag is on. */
-  composio: z.boolean(),
   toolkit: composioToolkitSchema,
   tools: composioToolsSchema,
   /** Exactly {@link composioConsentText}, as the admin was shown it. */
@@ -425,13 +417,8 @@ export type StartToolkitConnection = z.input<
   typeof startToolkitConnectionSchema
 >;
 
-/** Lists the catalog, with Composio's toolkits only when `composio`. */
-export const catalogRequestSchema = z.strictObject({ composio: z.boolean() });
-export type CatalogRequest = z.input<typeof catalogRequestSchema>;
-
-/** Lists one entry's tools; a Composio entry's only when `composio`. */
+/** Lists one entry's tools. */
 export const catalogToolsRequestSchema = z.strictObject({
-  composio: z.boolean(),
   source: catalogSourceSchema,
   id: identifierSchema,
 });
@@ -764,10 +751,10 @@ export interface ConnectApi {
   abandonFlow: (state: string) => Promise<void>;
   /**
    * The catalog: the native providers, then Composio's toolkits if
-   * `composio` and connect has a Composio key. Composio failing to answer
-   * leaves the native entries listed.
+   * connect has a Composio key. Composio failing to answer leaves the
+   * native entries listed.
    */
-  catalog: (request: CatalogRequest) => Promise<Catalog>;
+  catalog: () => Promise<Catalog>;
   /**
    * Starts connecting a Composio toolkit for an admin who consented, and
    * records their consent: the Composio URL to send their browser to.

@@ -1,5 +1,5 @@
 /**
- * A client's settings on its page: its ring, feature flags and sign-in,
+ * A client's settings on its page: its ring and sign-in,
  * each saved on its own and audited, and its latest console actions.
  */
 import { Button } from "@grasp-os/ui/components/button";
@@ -10,7 +10,6 @@ import {
   CardTitle,
 } from "@grasp-os/ui/components/card";
 import { Input } from "@grasp-os/ui/components/input";
-import { Switch } from "@grasp-os/ui/components/switch";
 import {
   Table,
   TableBody,
@@ -23,14 +22,8 @@ import { Link, useRouter } from "@tanstack/react-router";
 import { z } from "zod";
 
 import { formatTime } from "../releases/format.ts";
-import { InvalidFieldError, thenRefresh } from "../use-action.ts";
-import { featureNameSchema } from "./feature-name.ts";
-import {
-  applySettingsFn,
-  setFeatureFn,
-  setRingFn,
-  setSignInFn,
-} from "./functions.ts";
+import { thenRefresh } from "../use-action.ts";
+import { applySettingsFn, setRingFn, setSignInFn } from "./functions.ts";
 import type { SettingsChange } from "./functions.ts";
 import type { ClientSettingsView, HistoryEntry } from "./queries.ts";
 import { Field, SignInFields, signInOf, textOf } from "./sign-in-fields.tsx";
@@ -92,75 +85,6 @@ const Ring = ({ clientId, ring }: { clientId: string; ring: number }) => {
         <Failure failure={failure} />
       </div>
     </form>
-  );
-};
-
-const Features = ({
-  clientId,
-  features,
-}: {
-  clientId: string;
-  features: Record<string, boolean>;
-}) => {
-  const { busy, failure, save } = useSave();
-  const set = (feature: string, on: boolean) => {
-    save(async () => await setFeatureFn({ data: { clientId, feature, on } }));
-  };
-  const names = Object.keys(features).toSorted();
-  return (
-    <div className="flex flex-col gap-3">
-      <span className="text-sm font-medium">Feature flags</span>
-      {names.length === 0 ? (
-        <p className="text-muted-foreground text-sm">
-          None set: every feature behind a flag is off.
-        </p>
-      ) : (
-        <ul className="flex flex-col gap-2">
-          {names.map((name) => (
-            <li key={name} className="flex items-center gap-3 text-sm">
-              <Switch
-                checked={features[name] === true}
-                disabled={busy}
-                aria-label={`Feature ${name}`}
-                onCheckedChange={(on) => {
-                  set(name, on);
-                }}
-              />
-              <span className="font-mono">{name}</span>
-            </li>
-          ))}
-        </ul>
-      )}
-      <form
-        onSubmit={(event) => {
-          event.preventDefault();
-          const name = textOf(new FormData(event.currentTarget), "feature");
-          save(async () => {
-            if (!featureNameSchema.safeParse(name).success) {
-              throw new InvalidFieldError(
-                "A feature's name is lowercase letters, digits and _, as core names it."
-              );
-            }
-            return await setFeatureFn({
-              data: { clientId, feature: name, on: true },
-            });
-          });
-        }}
-        className="flex flex-wrap items-center gap-4"
-      >
-        <Input
-          name="feature"
-          required
-          aria-label="Feature to switch on"
-          placeholder="feature_name"
-          className="max-w-xs"
-        />
-        <Button type="submit" variant="outline" disabled={busy}>
-          Switch on
-        </Button>
-      </form>
-      <Failure failure={failure} />
-    </div>
   );
 };
 
@@ -278,12 +202,12 @@ const History = ({ history }: { history: HistoryEntry[] }) =>
 /** What waits for the client's next deploy, in words. */
 const pendingWords = (settings: ClientSettingsView): string => {
   if (!settings.configPending) {
-    return "Its core runs its flags and sign-in as they are. A change reaches it with its next deploy: apply it now, or a rollout that reaches it deploys it.";
+    return "Its core runs its sign-in as it is. A change reaches it with its next deploy: apply it now, or a rollout that reaches it deploys it.";
   }
   if (settings.pinnedReleaseId !== null) {
-    return `Flags or sign-in changed since its last deploy. It's pinned to ${settings.pinnedReleaseId}, so only a rollout of that release reaches it: apply them now.`;
+    return `Sign-in changed since its last deploy. It's pinned to ${settings.pinnedReleaseId}, so only a rollout of that release reaches it: apply it now.`;
   }
-  return "Flags or sign-in changed since its last deploy: apply them now, or the next rollout that reaches it deploys it, even on the release it runs.";
+  return "Sign-in changed since its last deploy: apply it now, or the next rollout that reaches it deploys it, even on the release it runs.";
 };
 
 /** What waits for the client's next deploy, and applying it now. */
@@ -339,7 +263,6 @@ export const ClientSettings = ({
         <div className="flex flex-col gap-8">
           <Apply clientId={clientId} settings={settings} />
           <Ring clientId={clientId} ring={settings.ring} />
-          <Features clientId={clientId} features={settings.features} />
           <SignIn clientId={clientId} settings={settings} />
         </div>
       </CardContent>

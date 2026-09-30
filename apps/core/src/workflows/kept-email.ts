@@ -8,8 +8,7 @@ import PostalMime from "postal-mime";
 import type { Attachment, Email } from "postal-mime";
 
 // A message with attachments that an email trigger received
-// (inbound-email.ts) is kept while `email_attachments` is on, so its runs
-// can read them (`keptMessage` and `attachmentOf`, through
+// (inbound-email.ts) is kept, so its runs can read them (`keptMessage` and `attachmentOf`, through
 // workflows/host.ts): its bytes as they arrived, in R2 (`FILES`, in the
 // EU), for the App whose runs it starts, before any starts, under the UTC
 // day it was kept, the App and its ID. The run's input names it by day and
@@ -138,8 +137,7 @@ export const attachmentOf = (message: Email, index: number): Uint8Array => {
  * Deletes kept messages once their days are over: up to
  * `maxDeletedPerRun` of the oldest day's at `now`, so a day of any size is
  * gone within a few runs, and days missed (an outage) one after another.
- * R2 lists a day only while it holds a message. Whether or not
- * `email_attachments` is on: what was kept goes when its days are over.
+ * R2 lists a day only while it holds a message.
  */
 export const deleteExpiredEmail = async (
   env: Env,

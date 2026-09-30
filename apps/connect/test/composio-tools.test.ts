@@ -269,7 +269,6 @@ const start = async (
 ) =>
   await exports.default.startToolkitConnection({
     person,
-    composio: true,
     toolkit: "hubspot",
     tools,
     consent: composioConsentText,
@@ -290,7 +289,6 @@ describe("the admin's allowlist, when they connect", () => {
     await exports.default.finishConnection({
       person: admin,
       state,
-      composio: true,
     });
     const recorded = await events();
     const counted = recorded
@@ -364,7 +362,6 @@ describe("the admin's allowlist, when they connect", () => {
     await exports.default.finishConnection({
       person: admin,
       state,
-      composio: true,
     });
     const [server] = composio.state.holds.servers.values();
     expect(server?.allowedTools).toStrictEqual([

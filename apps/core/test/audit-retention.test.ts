@@ -228,21 +228,6 @@ describe("audit log retention", () => {
     ]);
   });
 
-  it("archives only while retention is switched on, whatever the audit search flag says", async () => {
-    const event = await logged();
-    await passAfter(event, 400, {
-      FEATURES: { audit: true, audit_retention: false },
-    });
-    const whileOff = await held(event);
-    await passAfter(event, 400, {
-      FEATURES: { audit: false, audit_retention: true },
-    });
-    expect({ whileOff, whileOn: await held(event) }).toStrictEqual({
-      whileOff: true,
-      whileOn: false,
-    });
-  });
-
   it("arms its alarm a day out on its first event, and archives once the event passes retention", async () => {
     const log = newLog();
     await expect(alarmOf(log)).resolves.toBeNull();

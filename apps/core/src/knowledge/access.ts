@@ -19,7 +19,6 @@ import { keepAuditEvent } from "../audit-outbox.ts";
 import { teamsOf } from "../auth/identity.ts";
 import { inList } from "../db/d1.ts";
 import { collectionTeams, collections } from "../db/knowledge/schema.ts";
-import { featureEnabled } from "../features.ts";
 import { grantedPermissions } from "../permissions.ts";
 import { restrict } from "../restricted.ts";
 import type { WorkContext } from "../restricted.ts";
@@ -157,10 +156,6 @@ const grantedToRead = async (
   return ids;
 };
 
-/** Whether Apps are indexed into the Apps collection, and found there. */
-export const appsCollectionEnabled = (env: Pick<Env, "FEATURES">): boolean =>
-  featureEnabled(env, "knowledge") && featureEnabled(env, "apps_collection");
-
 /** The collections a reader may read, and for a delegate, those granted. */
 export interface CollectionsAllowed {
   /** A condition on `collections`. */
@@ -172,8 +167,11 @@ export interface CollectionsAllowed {
   granted: readonly string[] | undefined;
 }
 
-/** A person's or delegate's collections, before the Apps collection's flag. */
-const collectionsOf = async (
+/**
+ * The collections `reader` may read (`condition`), and those an App or
+ * agent is granted.
+ */
+export const collectionsAllowed = async (
   env: Env,
   db: DrizzleD1Database,
   reader: Reader
@@ -209,26 +207,6 @@ const collectionsOf = async (
         })
       ) ?? sql`0`,
     granted,
-  };
-};
-
-/**
- * The collections `reader` may read (`condition`), and those an App or
- * agent is granted. The Apps collection (app-entries.ts) is none of them
- * while `apps_collection` is off: nobody lists, reads or searches it.
- */
-export const collectionsAllowed = async (
-  env: Env,
-  db: DrizzleD1Database,
-  reader: Reader
-): Promise<CollectionsAllowed> => {
-  const allowed = await collectionsOf(env, db, reader);
-  if (appsCollectionEnabled(env)) {
-    return allowed;
-  }
-  return {
-    ...allowed,
-    condition: and(allowed.condition, ne(collections.source, "apps")) ?? sql`0`,
   };
 };
 

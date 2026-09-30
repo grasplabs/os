@@ -47,10 +47,9 @@ const newMonth = (): string => {
 };
 
 /** Core's env with `config` as the gateway's, counting in its own month. */
-const envWith = (config?: unknown, features: unknown = env.FEATURES) => {
+const envWith = (config?: unknown) => {
   const coreEnv: ModelsEnv & Env = {
     ...env,
-    FEATURES: features,
     MODEL_GATEWAY: config,
     MODEL_BUDGET_MONTH: newMonth(),
   };
@@ -66,16 +65,6 @@ const settingsIn = async (
   const { core } = await openRpc(session, { coreEnv });
   return await core.authenticate().models.settings();
 };
-
-/** The test env's flags, as the object they are. */
-const flagsOf = (features: unknown): Record<string, boolean> =>
-  typeof features === "object" && features !== null
-    ? Object.fromEntries(
-        Object.entries(features).filter(
-          (entry): entry is [string, boolean] => typeof entry[1] === "boolean"
-        )
-      )
-    : {};
 
 describe("model settings", { timeout: 60_000 }, () => {
   it("show admins the allowlist, the rules, and this month's spend against each budget, most first, with names", async () => {
@@ -216,17 +205,12 @@ describe("model settings", { timeout: 60_000 }, () => {
     });
   });
 
-  it("say when the rules are off, don't parse, or models aren't set up, and read to admins only", async () => {
+  it("say when the rules don't parse, or models aren't set up, and read to admins only", async () => {
     const config = {
       gateway: "grasp-os-test",
       models: [workersAi],
       budgets: { user: { limit: 1 } },
     };
-    const rulesOff = { ...flagsOf(env.FEATURES), model_rules: false };
-    await expect(settingsIn(envWith(config, rulesOff))).resolves.toMatchObject({
-      models: [workersAi],
-      rules: { state: "off" },
-    });
     await expect(
       settingsIn(envWith({ ...config, budgets: { user: { limit: -1 } } }))
     ).resolves.toMatchObject({

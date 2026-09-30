@@ -24,11 +24,10 @@ import type { Json } from "@grasp-os/shared/json";
 // it have `LOADER` unless workerd runs with `--experimental`: workerd
 // refuses a Worker Loader binding without it. The loader runs App methods
 // (app.ts), the screen compiler (screens.ts) and workflow code (code.ts).
-// So on-prem, `apps` and `screens` stay switched off unless workerd runs
-// with `--experimental`, and `workflows` and `knowledge_uploads` (whose
-// extractions are core's own runs, knowledge/uploads.ts) stay off either
-// way. With both off no run starts (runs.ts, uploads.ts), and nothing here
-// is reached.
+// So on-prem, Apps and screens need workerd's `--experimental`, and
+// workflow runs and uploads (whose extractions are core's own runs,
+// knowledge/uploads.ts) fail either way: the on-prem profile needs an
+// engine of its own behind this module before they work there.
 
 export { DynamicWorkflowBinding } from "@cloudflare/dynamic-workflows";
 

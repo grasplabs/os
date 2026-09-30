@@ -4,15 +4,17 @@
  * the env as configured, real timers, no spies, and the databases at the
  * committed migrations. Module state in core's isolate carries over, as it
  * does between requests in production: caches keyed by IDs a reset never
- * reuses, and once-per-isolate state, such as the built-ins' install
- * (builtins.test.ts) and the missing-table warning (platform-updates.test.ts),
- * which only those files may trip.
+ * reuses, and once-per-isolate state, such as the built-ins' install,
+ * which the first file's setup runs and waits for (builtins-first.ts), and
+ * the missing-table warning (platform-updates.test.ts), which only that
+ * file may trip.
  */
 import { applyD1Migrations, reset } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { vi } from "vite-plus/test";
 import { z } from "zod";
 
+import { installBuiltinsFirst } from "./builtins-first.ts";
 import { configuredEnv } from "./configured-env.ts";
 import { connectDb, testBinding } from "./test-env.ts";
 
@@ -21,35 +23,44 @@ const migrationsSchema = z.array(
   z.object({ name: z.string(), queries: z.array(z.string()) })
 );
 
-// Every Durable Object's storage, and with it every D1 database, R2 bucket
-// and workflow, connect's included: they are all Durable Objects locally.
-await reset();
+/** Empty storage, the env as configured, and the databases migrated. */
+const startEmpty = async (): Promise<void> => {
+  // Every Durable Object's storage, and with it every D1 database, R2 bucket
+  // and workflow, connect's included: they are all Durable Objects locally.
+  await reset();
 
-// What a test changed in the env and didn't put back: restore it.
-for (const name of Object.keys(env)) {
-  if (!configuredEnv.has(name)) {
-    Reflect.deleteProperty(env, name);
+  // What a test changed in the env and didn't put back: restore it.
+  for (const name of Object.keys(env)) {
+    if (!configuredEnv.has(name)) {
+      Reflect.deleteProperty(env, name);
+    }
   }
+  for (const [name, value] of configuredEnv) {
+    Reflect.set(env, name, value);
+  }
+
+  vi.useRealTimers();
+  vi.restoreAllMocks();
+
+  await applyD1Migrations(
+    env.DB,
+    migrationsSchema.parse(testBinding("CORE_MIGRATIONS"))
+  );
+  await applyD1Migrations(
+    env.KNOWLEDGE,
+    migrationsSchema.parse(testBinding("KNOWLEDGE_MIGRATIONS"))
+  );
+
+  // Connect's database too: core's tests call the real connect Worker, which
+  // reads its connection registry there.
+  await applyD1Migrations(
+    connectDb(),
+    migrationsSchema.parse(testBinding("CONNECT_MIGRATIONS"))
+  );
+};
+
+await startEmpty();
+// The built-ins' install, once per runtime, then empty storage again.
+if (await installBuiltinsFirst()) {
+  await startEmpty();
 }
-for (const [name, value] of configuredEnv) {
-  Reflect.set(env, name, value);
-}
-
-vi.useRealTimers();
-vi.restoreAllMocks();
-
-await applyD1Migrations(
-  env.DB,
-  migrationsSchema.parse(testBinding("CORE_MIGRATIONS"))
-);
-await applyD1Migrations(
-  env.KNOWLEDGE,
-  migrationsSchema.parse(testBinding("KNOWLEDGE_MIGRATIONS"))
-);
-
-// Connect's database too: core's tests call the real connect Worker, which
-// reads its connection registry there.
-await applyD1Migrations(
-  connectDb(),
-  migrationsSchema.parse(testBinding("CONNECT_MIGRATIONS"))
-);

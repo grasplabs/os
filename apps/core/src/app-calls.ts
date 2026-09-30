@@ -19,7 +19,6 @@ import { forSandbox } from "./bindings.ts";
 import type { ExportGrant } from "./bindings.ts";
 import { apps, appVersions } from "./db/core/schema.ts";
 import { appHost } from "./durable-objects.ts";
-import { requireFeature } from "./features.ts";
 import { authorizeExport } from "./permissions.ts";
 import { isRestricted, restrict } from "./restricted.ts";
 
@@ -283,8 +282,6 @@ export const callExport = async (
   const db = drizzle(env.DB);
   let checked: { version: number; exported: AppExport; input: Json };
   try {
-    requireFeature(env, "apps");
-    requireFeature(env, "app_calls");
     requireWithinChain(caller.path, grant.app);
     const { version, exports } = await currentExports(env, grant.app);
     const exported =

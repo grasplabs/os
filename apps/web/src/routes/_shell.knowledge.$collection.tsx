@@ -118,8 +118,6 @@ const CollectionView = () => {
   // every change: the page offers only the changes core would take.
   const writable =
     collection.state === "ready" && collection.data.collection.writable;
-  const uploadable =
-    collection.state === "ready" && collection.data.collection.uploadable;
   // `[[links]]` name paths in the collection: those in the file list open
   // here; any other stays as written.
   const paths = new Map(
@@ -154,7 +152,7 @@ const CollectionView = () => {
                 </h2>
                 <FileList documents={collection.data.documents} open={doc} />
               </section>
-              {uploadable ? (
+              {writable ? (
                 <Uploads
                   // Another collection starts with no uploads to follow.
                   key={collection.data.collection.id}

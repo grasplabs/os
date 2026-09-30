@@ -298,8 +298,8 @@ const drawnVersion = async (
 
 /**
  * Refusals of a statistics read that leave a snapshot without what runs:
- * an App whose runs the caller may not see, or no longer may use,
- * statistics switched off, or a read another release refuses.
+ * an App whose runs the caller may not see, or no longer may use, or a
+ * read another release refuses.
  */
 const expectedRefusals: ReadonlySet<string> = new Set([
   "permission.denied",
@@ -307,7 +307,6 @@ const expectedRefusals: ReadonlySet<string> = new Set([
   "app.not_found",
   "role.forbidden",
   "statistics.invalid",
-  "feature.disabled",
 ]);
 
 /** A key for an App workflow. */
@@ -372,8 +371,8 @@ const chunksOf = <T>(items: readonly T[], size: number): T[][] =>
 
 /**
  * `query` read for each of `chunks` of Apps (`allGroups`), each chunk's
- * pages in turn. A chunk refused as expected (not the caller's to use, or
- * statistics switched off) has all its Apps `unavailable`; any other
+ * pages in turn. A chunk refused as expected (not the caller's to use)
+ * has all its Apps `unavailable`; any other
  * failure fails the snapshot.
  */
 const readChunks = async (
@@ -414,7 +413,7 @@ const readChunks = async (
  * `appsPerRead` Apps, grouped by App. The Apps whose runs couldn't be read
  * are `unavailable`, never counted as none: each the caller may not see,
  * or that is gone, and every App without the permission, or of a read
- * refused as expected (statistics switched off, say). The signals of every
+ * refused as expected (another release's, say). The signals of every
  * page come from one computation, the latest finished by `until`: should
  * pages differ (a new computation cleaned it up meanwhile), they are read
  * again from the first page once, and then the snapshot is refused

@@ -4,14 +4,9 @@ import { describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
 import { clientHistory, clientSettings } from "../src/clients/queries.ts";
-import {
-  SettingsError,
-  setFeature,
-  setRing,
-  setSignIn,
-} from "../src/clients/settings.ts";
+import { SettingsError, setRing, setSignIn } from "../src/clients/settings.ts";
 import { act, consoleDatabase } from "../src/db/act.ts";
-import { auditEvents, clients, settings } from "../src/db/schema.ts";
+import { auditEvents, clients } from "../src/db/schema.ts";
 import { racingDb } from "./racing-db.ts";
 import { emptyStoreSecret, useStoreSecrets } from "./secrets-store.ts";
 
@@ -140,92 +135,10 @@ describe("a client's settings", () => {
     });
   });
 
-  it("switch feature flags one at a time, so two staff switching two at once both land, each audited once and marking the config changed", async () => {
-    const clientId = await recordClient();
-
-    const raced = await Promise.all([
-      setFeature(env, staff, { clientId, feature: "apps", on: true }),
-      setFeature(env, other, { clientId, feature: "knowledge", on: true }),
-    ]);
-    const afterRace = await recordOf(clientId);
-    const again = await setFeature(env, staff, {
-      clientId,
-      feature: "apps",
-      on: true,
-    });
-    const unchanged = await recordOf(clientId);
-    const off = await setFeature(env, staff, {
-      clientId,
-      feature: "apps",
-      on: false,
-    });
-
-    const events = await eventsOf(clientId, "client.feature");
-    const shown = await clientSettings(db, clientId);
-    expect({
-      raced,
-      again,
-      off,
-      features: shown?.features,
-      marked: afterRace?.configChangedAt instanceof Date,
-      // A switch that changes nothing doesn't count as a change.
-      sameMark:
-        unchanged?.configChangedAt?.getTime() ===
-        afterRace?.configChangedAt?.getTime(),
-      // The race's two in either order, then switching apps off.
-      events: [
-        ...events
-          .slice(0, 2)
-          .toSorted((a, b) => (a.target ?? "").localeCompare(b.target ?? "")),
-        ...events.slice(2),
-      ].map(({ target, detail }) => ({ target, detail })),
-    }).toStrictEqual({
-      raced: [true, true],
-      again: false,
-      off: true,
-      features: { apps: false, knowledge: true },
-      marked: true,
-      sameMark: true,
-      events: [
-        { target: "apps", detail: JSON.stringify({ on: true }) },
-        { target: "knowledge", detail: JSON.stringify({ on: true }) },
-        { target: "apps", detail: JSON.stringify({ on: false }) },
-      ],
-    });
-  });
-
-  it("refuse a feature name core couldn't have, and a client that doesn't exist", async () => {
-    const clientId = await recordClient();
-
-    const refused = {
-      name: await codeOf(
-        setFeature(env, staff, { clientId, feature: "Apps!", on: true })
-      ),
-      client: await codeOf(
-        setFeature(env, staff, {
-          clientId: "no-such-client",
-          feature: "apps",
-          on: true,
-        })
-      ),
-      ring: await codeOf(
-        setRing(env, staff, { clientId: "no-such-client", ring: 2 })
-      ),
-    };
-
-    const rows = await db
-      .select({ key: settings.key })
-      .from(settings)
-      .where(eq(settings.clientId, clientId));
-    expect({ refused, rows }).toStrictEqual({
-      // A name the schema refuses fails before anything is read.
-      refused: {
-        name: "other",
-        client: "unknown_client",
-        ring: "unknown_client",
-      },
-      rows: [],
-    });
+  it("refuse a client that doesn't exist", async () => {
+    await expect(
+      codeOf(setRing(env, staff, { clientId: "no-such-client", ring: 2 }))
+    ).resolves.toBe("unknown_client");
   });
 
   it("change a client's sign-in, audited with its domains, its IdP and a fingerprint of its admins but never their emails, and mark its config changed", async () => {
@@ -470,15 +383,17 @@ describe("a client's settings", () => {
     const clientId = await recordClient();
     const otherClient = await recordClient();
     await setRing(env, staff, { clientId, ring: 2 });
-    await setFeature(env, staff, { clientId, feature: "apps", on: true });
+    await setRing(env, staff, { clientId, ring: 3 });
     await setRing(env, staff, { clientId: otherClient, ring: 4 });
 
     const history = await clientHistory(db, clientId);
 
-    expect(history.map(({ action }) => action)).toStrictEqual([
-      "client.feature",
-      "client.ring",
-      "client.create",
-    ]);
+    expect(history.map(({ action, detail }) => [action, detail])).toStrictEqual(
+      [
+        ["client.ring", JSON.stringify({ ring: 3 })],
+        ["client.ring", JSON.stringify({ ring: 2 })],
+        ["client.create", null],
+      ]
+    );
   });
 });

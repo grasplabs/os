@@ -3,7 +3,7 @@ import { env } from "cloudflare:workers";
 import { eq } from "drizzle-orm";
 import { describe, expect, it } from "vite-plus/test";
 
-import { setFeature, setSignIn } from "../src/clients/settings.ts";
+import { setSignIn } from "../src/clients/settings.ts";
 import { act, audit, consoleDatabase } from "../src/db/act.ts";
 import { clientDeploys, clientRuns, clients } from "../src/db/schema.ts";
 import { startProvisioning } from "../src/provision/control.ts";
@@ -301,7 +301,7 @@ describe("the client pages", () => {
     });
   });
 
-  it("show a client's ring, flags and sign-in to change, what waits for its next deploy, and its history", async () => {
+  it("show a client's ring and sign-in to change, what waits for its next deploy, and its history", async () => {
     const client = await recordClient("active");
     // The key a sign-in change fingerprints its admins with, for its audit.
     const store = await adminOf(env.CLIENT_KEY);
@@ -318,36 +318,27 @@ describe("the client pages", () => {
     } finally {
       await store.delete(key);
     }
-    await setFeature(env, staff, {
-      clientId: client.id,
-      feature: "knowledge_uploads",
-      on: true,
-    });
 
     const { status, html } = await page(`/clients/${client.id}`);
 
     expect({
       status,
       ring: html.includes('name="ring"') && html.includes('value="3"'),
-      flag:
-        html.includes("knowledge_uploads") &&
-        html.includes('aria-label="Feature knowledge_uploads"'),
       signIn:
         html.includes('value="acme.test"') &&
         html.includes('value="ada@acme.test"'),
-      pending: html.includes("changed since its last deploy: apply them now"),
+      pending: html.includes("changed since its last deploy: apply it now"),
       apply: html.includes("Apply settings now"),
-      history: ["client.feature", "client.sign_in", "client.create"].map(
-        (action) => html.includes(action)
+      history: ["client.sign_in", "client.create"].map((action) =>
+        html.includes(action)
       ),
     }).toStrictEqual({
       status: 200,
       ring: true,
-      flag: true,
       signIn: true,
       pending: true,
       apply: true,
-      history: [true, true, true],
+      history: [true, true],
     });
   });
 

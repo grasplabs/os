@@ -15,9 +15,9 @@ import { sandbox } from "./sandbox.ts";
 // back as data, and core bounds it again: the code runs in the same
 // isolate as the harness, so nothing the harness does is trusted.
 //
-// The CPU limit is enforced by Cloudflare's runtime, not by plain workerd.
-// On-prem (plain workerd) the `agent` feature stays off: without that
-// limit a run could spin forever.
+// The CPU limit is enforced by Cloudflare's runtime, not by plain workerd:
+// on-prem, without that limit, a run could spin forever, so the agent
+// needs a limit of its own there before it is used.
 
 /**
  * How far one run may go beyond App code's CPU limit: calls out of the

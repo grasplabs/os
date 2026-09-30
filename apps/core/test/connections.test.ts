@@ -305,34 +305,18 @@ describe("connecting an account", () => {
     ).resolves.toStrictEqual({ revoked: false });
     await expect(anna.connections.list()).resolves.toStrictEqual([]);
   });
-
-  it("is switched off with its flag: the callback is not found", async () => {
-    const anna = await person();
-    const off: Env = { ...env, FEATURES: {} };
-    const response = await backFromProvider(
-      anna.session,
-      { code: "x", state: "y" },
-      off
-    );
-    expect(response.status).toBe(404);
-  });
 });
 
 describe("the catalog", () => {
-  /** What someone signed in sees in the catalog with `features` as the flags. */
-  const sessionWith = async (features: Record<string, boolean>) => {
+  /** Someone signed in's `connections`. */
+  const userConnections = async () => {
     const { session } = await signedInWithRole(idp, "user");
-    const { core } = await openRpc(session, {
-      coreEnv: { ...env, FEATURES: features },
-    });
+    const { core } = await openRpc(session);
     return await core.authenticate().connections;
   };
 
-  it("lists Composio's toolkits next to the native providers while its flag is on", async () => {
-    const connections = await sessionWith({
-      connections: true,
-      composio: true,
-    });
+  it("lists Composio's toolkits next to the native providers", async () => {
+    const connections = await userConnections();
     const { entries, composio } = await connections.catalog();
     expect(composio).toBe("listed");
     expect(entries.map(({ source, id }) => `${source}:${id}`)).toStrictEqual([
@@ -341,38 +325,17 @@ describe("the catalog", () => {
       "composio:hubspot",
     ]);
   });
-
-  it("lists only the native providers, and finds no toolkit, while the composio flag is off", async () => {
-    const connections = await sessionWith({ connections: true });
-    const { entries, composio } = await connections.catalog();
-    expect(composio).toBe("off");
-    expect(entries.map(({ source }) => source)).toStrictEqual([
-      "native",
-      "native",
-    ]);
-    await expect(
-      outcome(connections.catalogTools("composio", "hubspot"))
-    ).resolves.toBe("connect.catalog_entry_not_found");
-  });
-
-  it("is switched off with the connections flag", async () => {
-    const connections = await sessionWith({ composio: true });
-    await expect(outcome(connections.catalog())).resolves.toBe(
-      "feature.disabled"
-    );
-  });
 });
 
 describe("connecting a Composio toolkit", () => {
-  /** An admin's `connections`, with `features` as the flags. */
-  const adminWith = async (features: Record<string, boolean>) => {
+  /** An admin's `connections`. */
+  const signedInAdmin = async () => {
     const { session, userId } = await signedInWithRole(idp, "admin");
-    const coreEnv: Env = { ...env, FEATURES: features };
-    const { core } = await openRpc(session, { coreEnv });
+    const { core } = await openRpc(session);
     return {
       session,
       userId,
-      coreEnv,
+      coreEnv: env,
       connections: core.authenticate().connections,
     };
   };
@@ -389,7 +352,7 @@ describe("connecting a Composio toolkit", () => {
   };
 
   it("goes from the admin's consent through Composio and back, to one shared connection", async () => {
-    const admin = await adminWith({ connections: true, composio: true });
+    const admin = await signedInAdmin();
     const { url } = await admin.connections.connectToolkit(request);
     // Composio sends the browser straight back to the callback it was given.
     const state = new URL(url).searchParams.get("state") ?? "";
@@ -412,31 +375,8 @@ describe("connecting a Composio toolkit", () => {
     });
   });
 
-  it("isn't offered or hidden while the composio flag is off, nor finished if it goes off meanwhile", async () => {
-    const off = await adminWith({ connections: true });
-    await expect(
-      outcome(off.connections.connectToolkit(request))
-    ).resolves.toBe("connection.provider_unavailable");
-    // Composio isn't asked whether it lists the toolkit, so nothing is hidden.
-    await expect(
-      outcome(off.connections.setOffered("composio", "hubspot", false))
-    ).resolves.toBe("connection.provider_unavailable");
-    const on = await adminWith({ connections: true, composio: true });
-    const { entries } = await on.connections.catalog();
-    expect(entries.find(({ id }) => id === "hubspot")?.offered).toBeTruthy();
-    const { url } = await on.connections.connectToolkit(request);
-    const response = await backFromProvider(
-      on.session,
-      { state: new URL(url).searchParams.get("state") ?? "" },
-      off.coreEnv
-    );
-    expect(response.headers.get("location")).toBe(
-      `${clientOrigin}/connections?connectionError=connection.provider_unavailable`
-    );
-  });
-
   it("sends the browser back nowhere but this origin", async () => {
-    const admin = await adminWith({ connections: true, composio: true });
+    const admin = await signedInAdmin();
     await expect(
       outcome(
         admin.connections.connectToolkit({

@@ -27,7 +27,6 @@ import {
 import type { ConnectionGrant } from "./bindings.ts";
 import { connectionOwnersOf } from "./connections.ts";
 import { workspace } from "./durable-objects.ts";
-import { requireFeature } from "./features.ts";
 import { grantedPermissions } from "./permissions.ts";
 
 // Connections for a chat's code: `await env.connections.call("OUTLOOK",
@@ -132,7 +131,6 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
   async #grantNamed(
     name: unknown
   ): Promise<Awaited<ReturnType<typeof connectionGrants>>[number]> {
-    requireFeature(this.env, "connections");
     const grants = await connectionGrants(this.env, this.ctx.props);
     const grant = grants.find((held) => held.name === name);
     if (grant === undefined) {
@@ -160,7 +158,6 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
           }),
         },
         async () => {
-          requireFeature(this.env, "connections");
           const grants = await connectionGrants(this.env, scope);
           const owners = await connectionOwnersOf(this.env, [
             ...new Set(grants.map(({ connection }) => connection.connectionId)),
@@ -255,7 +252,6 @@ export class ConnectionsApi extends WorkerEntrypoint<Env, AgentScope> {
     await requireOpenRun(this.env, scope, "connections.outcome");
     const id = pendingIdSchema.safeParse(pendingId);
     const request = await (async () => {
-      requireFeature(this.env, "connections");
       if (!id.success) {
         throw connectErrors.create("connect.invalid");
       }

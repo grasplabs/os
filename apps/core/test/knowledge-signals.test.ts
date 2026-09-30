@@ -10,7 +10,6 @@ import type { z } from "zod";
 import { auditLog } from "../src/audit-log.ts";
 import { chatAgentId } from "../src/chats-rpc.ts";
 import { refreshDailySignals } from "../src/daily-signals.ts";
-import { agentKnowledgeSignals } from "../src/knowledge/signals.ts";
 import { allEvents, logHead } from "./audit-events.ts";
 import { runQuarterHourCron } from "./cron.ts";
 import { mockIdp } from "./idp.ts";
@@ -905,34 +904,6 @@ describe("Knowledge usage signals", () => {
       computedAt: listed.computedAt === null,
       reads: reads.length,
     }).toStrictEqual({ computedAt: false, reads: 1 });
-  });
-
-  it("compute nothing, and give an agent nothing, while switched off", async () => {
-    const owner = await newOwner();
-    const off: Env = {
-      ...env,
-      FEATURES: { knowledge: true, improvement_signals: true },
-    };
-    const day = nextDay();
-
-    await refreshDailySignals(off, day);
-    const agent = await outcome(
-      agentKnowledgeSignals(
-        off,
-        { type: "person", person: await owner.api.whoami() },
-        owner.userId
-      )
-    );
-
-    expect({
-      knowledge: await computedOn(day),
-      improvement: await computedOn(day, "improvement.signals.computed"),
-      agent,
-    }).toStrictEqual({
-      knowledge: 0,
-      improvement: 1,
-      agent: "feature.disabled",
-    });
   });
 
   it("read the documents, signals and searches by index, never a whole table", async () => {

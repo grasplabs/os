@@ -4,7 +4,6 @@ import type { Upload } from "@grasp-os/shared/uploads";
 import { introspectWorkflow } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { z } from "zod";
 
 import { extractUpload, originalKey } from "../src/knowledge/uploads.ts";
 import { allEvents } from "./audit-events.ts";
@@ -117,20 +116,17 @@ const timesSent = async (upload: Upload): Promise<number> => {
   ).length;
 };
 
-/** Runs `run` with `config` as the deployment's gateway config and `features` as its flags. */
+/** Runs `run` with `config` as the deployment's gateway config. */
 const withDeployment = async (
   config: unknown,
-  features: unknown,
   run: () => Promise<void>
 ): Promise<void> => {
-  const { MODEL_GATEWAY: gateway, FEATURES: flags } = env;
+  const { MODEL_GATEWAY: gateway } = env;
   env.MODEL_GATEWAY = config;
-  env.FEATURES = features;
   try {
     await run();
   } finally {
     env.MODEL_GATEWAY = gateway;
-    env.FEATURES = flags;
   }
 };
 
@@ -211,7 +207,7 @@ describe("upload routing", { timeout: 60_000 }, () => {
     }).toStrictEqual({ sent: [], status: "ready", extractor: "local" });
   });
 
-  it("keep every file of a deployment whose rules keep everything in the EU in the Worker, model rules on or off", async () => {
+  it("keep every file of a deployment whose rules keep everything in the EU in the Worker", async () => {
     const person = await signedInApi(idp, "user");
     const { id: collectionId } = await person.api.knowledge.createCollection({
       name: `Files ${unique()}`,
@@ -221,17 +217,9 @@ describe("upload routing", { timeout: 60_000 }, () => {
     const sent = await withWorkersAi(
       ({ name }) => converted(name, "# Left the EU"),
       async () => {
-        const features = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-        for (const modelRules of [true, false]) {
-          // oxlint-disable-next-line no-await-in-loop -- one deployment at a time
-          await withDeployment(
-            euOnly,
-            { ...features, model_rules: modelRules },
-            async () => {
-              uploads.push(await uploadedTo(person.api, collectionId));
-            }
-          );
-        }
+        await withDeployment(euOnly, async () => {
+          uploads.push(await uploadedTo(person.api, collectionId));
+        });
       }
     );
 
@@ -246,10 +234,7 @@ describe("upload routing", { timeout: 60_000 }, () => {
       ),
     }).toStrictEqual({
       sent: [],
-      uploads: [
-        { status: "ready", extractor: "local", sent: 0 },
-        { status: "ready", extractor: "local", sent: 0 },
-      ],
+      uploads: [{ status: "ready", extractor: "local", sent: 0 }],
     });
   });
 
@@ -265,7 +250,6 @@ describe("upload routing", { timeout: 60_000 }, () => {
       async () => {
         await withDeployment(
           { ...euOnly, eu: { deployment: "yes" } },
-          env.FEATURES,
           async () => {
             upload = await uploadedTo(person.api, collectionId);
           }

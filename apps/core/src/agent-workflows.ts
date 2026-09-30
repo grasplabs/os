@@ -114,7 +114,6 @@ export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {
   /** The workflows the agent may read, of Apps the person sees. */
   async list(): Promise<WorkflowSummary[]> {
     return await asPerson(this.env, this.ctx.props, {
-      feature: "workflows",
       allowed: () => true,
       method: "workflows.list",
       // Only the workflows the agent may read are summed up at all.
@@ -129,7 +128,6 @@ export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {
   /** A workflow's runs: waiting first, then failed, then newest. */
   async runs(app: unknown, workflow: unknown): Promise<AgentRun[]> {
     return await asPerson(this.env, this.ctx.props, {
-      feature: "workflows",
       allowed: readsWorkflow(app, workflow),
       method: "workflows.runs",
       read: async (person) => {
@@ -151,7 +149,6 @@ export class WorkflowsApi extends WorkerEntrypoint<Env, AgentScope> {
   /** One run, as it is now. */
   async status(run: unknown): Promise<AgentRun> {
     return await asPerson(this.env, this.ctx.props, {
-      feature: "workflows",
       allowed: () => true,
       method: "workflows.status",
       read: async (person, permissions) => {

@@ -23,7 +23,6 @@ import runABaseline from "../../skills/run-a-baseline/SKILL.md";
 import writeBoardPage from "../../skills/write-board-page/SKILL.md";
 import { outboxed } from "../audit-outbox.ts";
 import { collections, documents, versions } from "../db/knowledge/schema.ts";
-import { featureEnabled, requireFeature } from "../features.ts";
 import { allowedFor } from "./app-entries.ts";
 import { ensureCollection, requireWritable } from "./collections.ts";
 import type { CollectionRow } from "./collections.ts";
@@ -112,30 +111,18 @@ const clientSkillsRow = (ownerId: string): CollectionRow => ({
   createdAt: new Date(),
 });
 
-const skillsEnabled = (env: Env): boolean =>
-  featureEnabled(env, "knowledge") && featureEnabled(env, "skills");
-
-const requireSkills = (env: Env): void => {
-  requireFeature(env, "knowledge");
-  requireFeature(env, "skills");
-};
-
 /**
  * Writes each Grasp skill whose current text isn't the release's (`skills`,
  * this one's unless a test passes another) as its next version, creating
- * the collection first if it doesn't exist. Does nothing while `skills`
- * is off. A skill that fails, or that another sync wrote from the same
+ * the collection first if it doesn't exist. A skill that fails, or that another sync wrote from the same
  * version first, is logged, and the others are still written; the next
- * sync compares it again. Resolves whether every skill is the release's
- * (or `skills` is off). The install on the first request calls it.
+ * sync compares it again. Resolves whether every skill is the release's.
+ * The install on the first request calls it.
  */
 export const syncGraspSkills = async (
   env: Env,
   skills: readonly GraspSkill[] = graspSkills
 ): Promise<boolean> => {
-  if (!skillsEnabled(env)) {
-    return true;
-  }
   const db = drizzle(env.KNOWLEDGE);
   const stored = await db
     .select({
@@ -223,13 +210,12 @@ const exists = async (env: Env, id: CollectionId): Promise<boolean> => {
 
 /**
  * The Grasp skills and the client's skills collections, creating the
- * client's for an admin (`clientSkills`). Behind the `skills` flag.
+ * client's for an admin (`clientSkills`).
  */
 export const skillCollections = async (
   env: Env,
   person: Identity
 ): Promise<SkillCollections> => {
-  requireSkills(env);
   const client = await clientSkills(env, person);
   return {
     grasp: (await exists(env, graspSkillsCollectionId))
@@ -253,7 +239,6 @@ export const copySkill = async (
   person: Identity,
   input: unknown
 ): Promise<DocumentSummary> => {
-  requireSkills(env);
   const { documentId } = knowledgeErrors.parse(
     "knowledge.invalid",
     copySkillInputSchema,

@@ -9,7 +9,6 @@ import { callApp } from "../src/app.ts";
 import type { AppCallerInput } from "../src/app.ts";
 import { builtinAppId } from "../src/builtin-app-id.ts";
 import { builtins, fingerprintOf, release } from "../src/builtins.ts";
-import { saveDocument } from "../src/knowledge/documents.ts";
 import { fakeGateway } from "./ai-gateway.ts";
 import { grantReviewed, revokeOtherCopies, serverBuilt } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
@@ -130,7 +129,7 @@ const copyOf = async (
 
 /** An admin's intake, the one copy with the Playbook's intake types. */
 const setUp = async () => {
-  await builtins(env).ensureInstalled(await fingerprintOf(env, release));
+  await builtins(env).ensureInstalled(await fingerprintOf(release));
   const admin = await signedInApi(idp, "admin");
   const { app, asked } = await copyOf(admin);
   await revokeOtherCopies(admin.api, intake, app);
@@ -827,11 +826,11 @@ describe("the intake", { timeout: 60_000 }, () => {
     });
   });
 
-  it("has the Playbook keep a statement a statement while nobody declares its type: its intake's version unapproved, or record types off", async () => {
-    await builtins(env).ensureInstalled(await fingerprintOf(env, release));
+  it("has the Playbook keep a statement a statement while nobody declares its type: its intake's version unapproved", async () => {
+    await builtins(env).ensureInstalled(await fingerprintOf(release));
     const admin = await signedInApi(idp, "admin");
     const builder = await signedInApi(idp, "builder");
-    const { app, granted } = await copyOf(admin, builder);
+    const { app } = await copyOf(admin, builder);
     await revokeOtherCopies(admin.api, intake, app);
     const draft = interview(`Unapproved ${unique()}`);
     const { id } = okOf(
@@ -859,27 +858,9 @@ describe("the intake", { timeout: 60_000 }, () => {
     );
     await builder.api.apps.versions.setCurrent(app, version);
     const unapproved = await outcome(admin.api.knowledge.saveDocument(untyped));
-    const permissions = await admin.api.permissions.list();
-    for (const { id: permission, status } of permissions) {
-      if (granted.includes(permission) && status === "requested") {
-        // oxlint-disable-next-line no-await-in-loop -- one grant at a time
-        await grantReviewed(admin.api, permission);
-      }
-    }
-    const off = await outcome(
-      saveDocument(
-        {
-          ...env,
-          FEATURES: { knowledge: true, apps: true, permissions: true },
-        },
-        await admin.api.whoami(),
-        untyped
-      )
-    );
     const [statement] = await documentsAt(admin, statementPath);
     expect({
       unapproved,
-      off,
       kept: statement?.text
         .split("\n")
         .filter((line) =>
@@ -887,7 +868,6 @@ describe("the intake", { timeout: 60_000 }, () => {
         ),
     }).toStrictEqual({
       unapproved: "knowledge.invalid",
-      off: "knowledge.invalid",
       kept: ["type: statement", `source: ${saved.source}`, `draft: ${id}`],
     });
   });

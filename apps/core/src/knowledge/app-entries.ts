@@ -13,7 +13,7 @@ import { memberOf } from "../auth/identity.ts";
 import { apps } from "../db/core/schema.ts";
 import { inList } from "../db/d1.ts";
 import { collections, documents } from "../db/knowledge/schema.ts";
-import { appsCollectionEnabled, collectionsAllowed } from "./access.ts";
+import { collectionsAllowed } from "./access.ts";
 import type { Reader } from "./access.ts";
 
 // Who finds what in the Apps collection (apps-collection.ts): one entry
@@ -27,8 +27,7 @@ import type { Reader } from "./access.ts";
 // copied into Knowledge, so unsharing, a team change, a new role or a
 // source the App is granted counts from the next read.
 //
-// The lookup is made only when a read can reach the collection: not while
-// `apps_collection` is off (access.ts hides the collection then), not for
+// The lookup is made only when a read can reach the collection: not for
 // a read scoped to another collection, not for an App or agent without a
 // permission to read the Apps collection (only agents are given one:
 // permissions.ts `requireCollection`; an App granted it before counts it
@@ -112,7 +111,6 @@ export const allowedFor = async (
     reader
   );
   const reaches =
-    appsCollectionEnabled(env) &&
     (scope === undefined || scope === appsCollectionId) &&
     (granted === undefined || granted.includes(appsCollectionId));
   const person = reaches ? await personOf(env, reader) : undefined;

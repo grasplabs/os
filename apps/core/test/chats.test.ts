@@ -859,48 +859,12 @@ describe("chats", () => {
     expect(follower.messages()).toStrictEqual([]);
   });
 
-  it("show why a turn stopped short, and a failed answer with the gateway's reason", async () => {
+  it("show a failed answer with the gateway's reason, and nothing as stopped", async () => {
     const ann = await person();
-    const { reply, release } = pausedReply(says("Looking it up."), 7);
-    await answering(
-      ann,
-      {
-        ...reply,
-        toolCalls: [
-          {
-            id: "call_look",
-            name: "executeCode",
-            arguments: { code: "export default async () => 1;" },
-          },
-        ],
-      },
-      { status: 500 }
-    );
-    const chat = await ann.chats.create("Stopped");
+    await answering(ann, { status: 500 });
+    const chat = await ann.chats.create("Failed");
     const follower = await follow(ann.chats, chat.id);
     await ann.chats.send(chat.id, { text: "Look it up.", model });
-    await vi.waitFor(
-      () => {
-        expect(follower.now()?.partial?.text).toBe("Looking");
-      },
-      { timeout: 10_000 }
-    );
-    // The agent is switched off mid-turn: the next request doesn't go.
-    await pointAtGateway(objectOf(ann), fakeGateway(), { agentOn: false });
-    release();
-    await vi.waitFor(
-      () => {
-        expect(follower.now()).toMatchObject({
-          running: false,
-          stopped: "This isn't switched on for this deployment.",
-        });
-      },
-      { timeout: 10_000 }
-    );
-
-    // Back on, the model fails: the answer says so, and nothing is stopped.
-    await answering(ann, { status: 500 });
-    await ann.chats.send(chat.id, { text: "Again.", model });
     await settled(follower);
     const last = follower.messages().at(-1);
     expect(

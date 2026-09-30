@@ -3,7 +3,6 @@ import type { AppId } from "@grasp-os/shared/ids";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
 import { describe, expect, it, vi } from "vite-plus/test";
-import { z } from "zod";
 
 import { callApp } from "../src/app.ts";
 import { personalWorkspaceId } from "../src/chats-rpc.ts";
@@ -27,9 +26,8 @@ import { auditedDuring, signedInApi } from "./sign-in.ts";
 // statistic, reaches the network, or reads real data it could show; a
 // name a permission asked for and not granted gives the preview reaches
 // what only a grant allows; a preview keeps what an earlier draft wrote;
-// someone other than the chat's person, or a person who no longer builds
-// the App, previews it; and a preview runs App code while Apps or screens
-// are switched off.
+// and someone other than the chat's person, or a person who no longer
+// builds the App, previews it.
 
 const idp = mockIdp();
 
@@ -451,7 +449,7 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
     });
   });
 
-  it("is only for the chat's person, while they build the App and it's switched on", async () => {
+  it("is only for the chat's person, while they build the App", async () => {
     const { admin, builder, app, chatId, revision } = await setUp();
     const [stranger, user] = await Promise.all([
       signedInApi(idp, "builder"),
@@ -486,27 +484,11 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
       // Someone who only uses the App: not even a draft in their own chat.
       user: await both(user, theirs.chatId, theirs.revision),
     };
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    // Previews themselves, and the kill switch of each thing one runs: an
-    // App's server code (`apps`) and its screens (`screens`).
-    const off: Record<string, unknown[]> = {};
-    try {
-      for (const feature of ["app_preview", "apps", "screens"]) {
-        env.FEATURES = { ...on, [feature]: false };
-        // oxlint-disable-next-line no-await-in-loop -- one switch at a time
-        off[feature] = await both(builder, chatId, revision);
-      }
-    } finally {
-      env.FEATURES = features;
-    }
 
-    const disabled = ["feature.disabled", "feature.disabled"];
-    expect({ ...refusals, off }).toStrictEqual({
+    expect(refusals).toStrictEqual({
       strangers: ["agent.chat_not_found", "agent.chat_not_found"],
       empty: ["app.no_draft", "app.no_draft"],
       user: ["role.forbidden", "role.forbidden"],
-      off: { app_preview: disabled, apps: disabled, screens: disabled },
     });
   });
 
@@ -586,7 +568,7 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
     await expect(slow).resolves.toBe("app.preview_outdated");
   });
 
-  it("stops a preview's callbacks once their person no longer builds the App, or previews, Apps or screens are off", async () => {
+  it("stops a preview's callbacks once their person no longer builds the App", async () => {
     const { admin, app } = await setUp();
     const other = await signedInApi(idp, "builder");
     const role = async (member: "builder" | "user") => {
@@ -648,34 +630,8 @@ describe("previewing a chat's draft", { timeout: 120_000 }, () => {
         await role("builder");
       }
     );
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    const { FEATURES: features } = env;
-    const switchedOff: Record<string, unknown> = {};
-    for (const feature of ["app_preview", "apps", "screens"]) {
-      // oxlint-disable-next-line no-await-in-loop -- one switch at a time
-      switchedOff[feature] = await stopsWhen(
-        async () => {
-          await Promise.resolve();
-          env.FEATURES = { ...on, [feature]: false };
-        },
-        async () => {
-          await Promise.resolve();
-          env.FEATURES = features;
-        }
-      ).finally(() => {
-        env.FEATURES = features;
-      });
-    }
-
     // Each push was refused by core, as a screen's is once its person may
     // no longer use the App.
-    expect({ unshared, switchedOff }).toStrictEqual({
-      unshared: "app.not_found",
-      switchedOff: {
-        app_preview: "app.not_found",
-        apps: "app.not_found",
-        screens: "app.not_found",
-      },
-    });
+    expect(unshared).toBe("app.not_found");
   });
 });

@@ -2,7 +2,6 @@ import type { Message } from "@earendil-works/pi-ai";
 import { workspaceIdSchema } from "@grasp-os/shared/ids";
 import { runInDurableObject } from "cloudflare:test";
 import { env } from "cloudflare:workers";
-import { z } from "zod";
 
 import { workspace } from "../src/durable-objects.ts";
 import { fakeGateway } from "./ai-gateway.ts";
@@ -56,19 +55,14 @@ export type WorkspaceStub = ReturnType<typeof workspace>;
 export const gatewayConfig = { gateway: "grasp-os-test", models: [model] };
 
 /**
- * Points the object's model gateway at a fake AI Gateway, with `config`,
- * and switches the agent on or off, the other flags as the tests' env
- * sets them (the client's model rules on). Objects may share their env,
- * so every test sets both; a restarted object may get a new one, so it is
- * pointed again.
+ * Points the object's model gateway at a fake AI Gateway, with `config`.
+ * Objects may share their env, so every test sets it; a restarted object
+ * may get a new one, so it is pointed again.
  */
 export const pointAtGateway = async (
   stub: WorkspaceStub,
   gateway: ReturnType<typeof fakeGateway>,
-  {
-    agentOn = true,
-    config = gatewayConfig,
-  }: { agentOn?: boolean; config?: object } = {}
+  { config = gatewayConfig }: { config?: object } = {}
 ) => {
   await runInDurableObject(stub, (instance) => {
     const objectEnv: unknown = Reflect.get(instance, "env");
@@ -78,10 +72,6 @@ export const pointAtGateway = async (
     Object.assign(objectEnv, {
       AI: gateway.binding,
       MODEL_GATEWAY: config,
-      FEATURES: {
-        ...z.record(z.string(), z.boolean()).parse(env.FEATURES),
-        agent: agentOn,
-      },
     });
   });
 };

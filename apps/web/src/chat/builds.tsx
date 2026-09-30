@@ -1,7 +1,7 @@
 import type { App, VersionReview } from "@grasp-os/shared/apps";
 import { appErrors } from "@grasp-os/shared/apps";
 import type { ChatDraft } from "@grasp-os/shared/chat";
-import { featureErrors, failureText } from "@grasp-os/shared/errors";
+import { failureText } from "@grasp-os/shared/errors";
 import { roleErrors } from "@grasp-os/shared/roles";
 import { Badge } from "@grasp-os/ui/components/badge";
 import { Button } from "@grasp-os/ui/components/button";
@@ -52,14 +52,13 @@ interface Builds {
 }
 
 /**
- * The person's Apps and the chat's drafts; `off` while the agent doesn't
- * build Apps, when the panel shows none of this. Outside the component,
- * as the React Compiler can't compile `try`.
+ * The person's Apps and the chat's drafts. Outside the component, as the
+ * React Compiler can't compile `try`.
  */
 const readBuilds = async (
   core: CoreConnection,
   chatId: string
-): Promise<Loaded<Builds> | { state: "off" }> => {
+): Promise<Loaded<Builds>> => {
   try {
     const [apps, drafts] = await core.withSession(
       async (session) =>
@@ -67,9 +66,6 @@ const readBuilds = async (
     );
     return { state: "ready", data: { apps, drafts } };
   } catch (error) {
-    if (featureErrors.codeOf(error) === "feature.disabled") {
-      return { state: "off" };
-    }
     return { state: "refused", message: failureText(error) };
   }
 };
@@ -91,8 +87,7 @@ const readReview = async (
   } catch (error) {
     const hidden =
       roleErrors.codeOf(error) !== undefined ||
-      appErrors.codeOf(error) === "app.not_found" ||
-      featureErrors.codeOf(error) === "feature.disabled";
+      appErrors.codeOf(error) === "app.not_found";
     return hidden
       ? { state: "hidden" }
       : { state: "refused", message: failureText(error) };
@@ -598,7 +593,7 @@ export const ChatBuilds = ({
 }) => {
   // The draft whose preview shows, by App; the latest when none is picked.
   const [previewing, setPreviewing] = useState<string>();
-  const [builds, setBuilds] = useState<Loaded<Builds> | { state: "off" }>();
+  const [builds, setBuilds] = useState<Loaded<Builds>>();
   const [reads, setReads] = useState(0);
   // Versions made current here: gone from the section at once.
   const [madeCurrent, setMadeCurrent] = useState<ReadonlySet<string>>(
@@ -636,7 +631,7 @@ export const ChatBuilds = ({
     };
     void load();
   }, [core, chatId, running, reads, drafts]);
-  if (builds === undefined || builds.state === "off") {
+  if (builds === undefined) {
     return null;
   }
   if (builds.state !== "ready") {

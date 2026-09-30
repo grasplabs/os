@@ -100,7 +100,6 @@ const start = async (
 ): Promise<string> => {
   const { url } = await exports.default.startToolkitConnection({
     person,
-    composio: true,
     toolkit: "hubspot",
     tools: allowed,
     consent: composioConsentText,
@@ -112,16 +111,8 @@ const start = async (
 };
 
 /** Composio sending `person`'s browser back to core with the flow's state. */
-const back = async (
-  person: ConnectionPerson,
-  state: string,
-  composioOn = true
-) =>
-  await exports.default.finishConnection({
-    person,
-    state,
-    composio: composioOn,
-  });
+const back = async (person: ConnectionPerson, state: string) =>
+  await exports.default.finishConnection({ person, state });
 
 /** Connects HubSpot end to end for the admin `person`. */
 const connectHubSpot = async (person: ConnectionPerson): Promise<string> => {
@@ -341,16 +332,12 @@ describe("connecting a Composio toolkit", () => {
     await expect(events()).resolves.toStrictEqual([]);
   });
 
-  it("isn't offered while the flag is off, or connect has no Composio key", async () => {
+  it("isn't offered while connect has no Composio key", async () => {
     const admin = someone("admin");
-    await expect(outcome(start(admin, { composio: false }))).resolves.toBe(
-      "connection.provider_unavailable"
-    );
     await expect(
       outcome(
         connectWith({ COMPOSIO_API_KEY: undefined }).startToolkitConnection({
           person: admin,
-          composio: true,
           toolkit: "hubspot",
           tools: allowed,
           consent: composioConsentText,
@@ -391,15 +378,6 @@ describe("connecting a Composio toolkit", () => {
       accounts: 0,
       servers: 0,
     });
-  });
-
-  it("doesn't finish while the flag is off", async () => {
-    const admin = someone("admin");
-    const { state } = composio.authorize(await start(admin));
-    await expect(outcome(back(admin, state, false))).resolves.toBe(
-      "connection.provider_unavailable"
-    );
-    expect(heldAtComposio().accounts).toBe(0);
   });
 
   it("stores nothing, and deletes what it made, when Composio fails on the way", async () => {
@@ -633,7 +611,7 @@ describe("connecting a Composio toolkit", () => {
     const { state } = composio.authorize(await start(admin));
     const withoutKey = connectWith({ COMPOSIO_API_KEY: undefined });
     const finished = await outcome(
-      withoutKey.finishConnection({ person: admin, state, composio: true })
+      withoutKey.finishConnection({ person: admin, state })
     );
     const kept = { held: heldAtComposio(), cleanups: await cleanupsLeft() };
     // Due once the finish would long be done.

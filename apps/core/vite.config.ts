@@ -52,7 +52,7 @@ export const screenTests = [
   "test/workflow-chaos.test.ts",
   "test/held-runs.test.ts",
   "test/decisions.test.ts",
-  "test/decisions-switched-off.test.ts",
+  "test/decision-deadlines.test.ts",
   "test/workflow-params.test.ts",
   "test/build-on-save.test.ts",
   "test/workflow-overview.test.ts",
@@ -116,46 +116,6 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             // env: the shortest archive retention the console may set.
             AUDIT_ARCHIVE_RETENTION_DAYS: "365",
             ...testSignIn,
-            // Every flagged feature on, features.test.ts switches them off,
-            // but `builtins`: its install, started in the background by
-            // whichever test first sends a request, would write while other
-            // tests check what was written. builtins.test.ts switches it on.
-            FEATURES: {
-              apps: true,
-              app_blueprints: true,
-              permissions: true,
-              knowledge: true,
-              memory: true,
-              knowledge_purge: true,
-              knowledge_uploads: true,
-              record_types: true,
-              statistics: true,
-              skills: true,
-              apps_collection: true,
-              connections: true,
-              composio: true,
-              workflows: true,
-              decisions: true,
-              screens: true,
-              screen_workflows: true,
-              members: true,
-              audit: true,
-              audit_retention: true,
-              model_rules: true,
-              model_settings: true,
-              improvement_signals: true,
-              knowledge_signals: true,
-              triggers: true,
-              connector_events: true,
-              email_attachments: true,
-              app_calls: true,
-              agent: true,
-              chat: true,
-              app_builder: true,
-              run_notifications: true,
-              app_preview: true,
-              guest_chats: true,
-            },
             // Few enough statistics points to reach each bound in a test.
             STATISTICS_POINT_LIMITS: "10/25",
             STATISTICS_READ_LIMITS: "20/60",
@@ -173,7 +133,7 @@ export const coreProject = (test: UserWorkspaceConfig["test"]) =>
             // The engine's step limit, lowered below (`workflows`) so a test
             // reaches it; core must know it too.
             WORKFLOW_STEP_LIMIT: String(testStepLimit),
-            // So a run held by a kill switch checks again at once.
+            // So a run waiting on a held side effect checks again at once.
             WORKFLOW_OFF_WAIT_MS: "250",
             CORE_MIGRATIONS: coreMigrations,
             KNOWLEDGE_MIGRATIONS: knowledgeMigrations,

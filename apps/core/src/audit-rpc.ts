@@ -26,7 +26,6 @@ import type { SearchRange } from "./audit-log.ts";
 import { appendAuditEvent } from "./audit-outbox.ts";
 import { identify } from "./auth/identity.ts";
 import { errorResponse } from "./errors.ts";
-import { featureEnabled, requireFeature } from "./features.ts";
 import { withPerson } from "./session-check.ts";
 import type { SessionCheck } from "./session-check.ts";
 
@@ -145,8 +144,8 @@ const jsonRecord = ({ event: _parsed, ...record }: AuditRecord): string =>
 /**
  * An export, oldest first, as a stream that reads the log a page at a time
  * while the client takes it in: `json` or `csv`, per `AuditApi.export`.
- * It reads only when the client asks for more, and checks the session, role
- * and flag again (`recheck`) before every read of the log. It reads the
+ * It reads only when the client asks for more, and checks the session and
+ * role again (`recheck`) before every read of the log. It reads the
  * positions that matched when it began, up to the head then, so it ends;
  * if retention archives some it hasn't read yet, it stops.
  */
@@ -303,7 +302,7 @@ const exportTypes: Record<AuditExportFormat, string> = {
  * `GET /api/audit/export?format=<json|csv>&<filter>`: an export as a
  * download, which the browser writes to disk as it arrives, the same
  * export `AuditApi.export` streams over `/rpc`: for admins, recorded
- * before anything is read, and the session, role and flag checked again
+ * before anything is read, and the session and role checked again
  * before every page. The filter's fields are query parameters, as
  * `auditFilterSchema` names them; any other parameter is refused. The
  * session cookie is `SameSite=Lax`, so a link from another site would
@@ -318,7 +317,7 @@ export const auditExportResponse = async (
 ): Promise<Response> => {
   const fetchSite = request.headers.get("sec-fetch-site");
   const fromElsewhere = fetchSite !== null && !sameSiteFetches.has(fetchSite);
-  if (request.method !== "GET" || !featureEnabled(env, "audit")) {
+  if (request.method !== "GET") {
     return errorResponse(
       404,
       requestErrors.create("request.not_found"),
@@ -345,7 +344,6 @@ export const auditExportResponse = async (
     [...searchParams].filter(([name]) => name !== "format")
   );
   const recheck = async (): Promise<void> => {
-    requireFeature(env, "audit");
     const now = await identify(env, request.headers);
     if (now?.userId !== person.userId) {
       throw authErrors.create("auth.unauthenticated");

@@ -11,8 +11,6 @@ interface __BaseEnv_Env {
   GOOGLE_CLIENT_SECRET?: string;
   /** The model gateway (src/models.ts): JSON. */
   MODEL_GATEWAY?: unknown;
-  /** Feature flags (src/features.ts): JSON. */
-  FEATURES?: unknown;
   /** Memory files' size limits, in tokens (src/knowledge/memory-files.ts): JSON. */
   MEMORY_LIMITS?: unknown;
   /**
@@ -35,8 +33,8 @@ interface __BaseEnv_Env {
    */
   WORKFLOW_STEP_LIMIT?: string;
   /**
-   * Tests only: a shorter wait between a run's checks of a switched-off
-   * feature (src/workflows/host.ts).
+   * Tests only: a shorter wait between a run's checks of a held side
+   * effect (src/workflows/host.ts).
    */
   WORKFLOW_OFF_WAIT_MS?: string;
   /**

@@ -53,7 +53,6 @@ import { drizzle } from "drizzle-orm/d1";
 import { z } from "zod";
 
 import { keepAuditEvent } from "./audit-outbox.ts";
-import { featureEnabled } from "./features.ts";
 import {
   budgetMonth,
   budgetsFor,
@@ -175,9 +174,7 @@ type ModelGatewayConfig = z.infer<typeof modelGatewayConfigSchema>;
 
 /**
  * The client's other rules, in the same var (model-rules.ts). Parsed apart
- * from the allowlist, and only while `model_rules` is on: so a rule that
- * doesn't parse never stops the calls the kill switch leaves to the
- * allowlist, and while the rules are on, it refuses every call.
+ * from the allowlist: a rule that doesn't parse refuses every call.
  */
 const modelRulesConfigSchema = rulesConfigSchema(modelRefSchema);
 
@@ -225,13 +222,10 @@ const modelGatewayConfig = (env: ModelsEnv): ModelGatewayConfig | undefined => {
 };
 
 /**
- * The deployment's rules while `model_rules` is on; none while it's off.
- * `undefined` for rules that don't parse: every call then fails closed.
+ * The deployment's rules. `undefined` for rules that don't parse: every
+ * call then fails closed.
  */
 const modelRules = (env: ModelsEnv): ModelRules | undefined => {
-  if (!featureEnabled(env, "model_rules")) {
-    return {};
-  }
   const parsed = modelRulesConfigSchema.safeParse(gatewayVar(env));
   if (!parsed.success) {
     log.error("model.rules_invalid", {
@@ -245,20 +239,18 @@ const modelRules = (env: ModelsEnv): ModelRules | undefined => {
 /**
  * The allowlist and the rules as they apply now, for admins to read
  * (models-rpc.ts): the allowed models, none while the config doesn't parse;
- * and the rules, `off` while `model_rules` is, `undefined` when they
- * don't parse.
+ * and the rules, `undefined` when they don't parse.
  */
 export const gatewaySettings = (
   env: ModelsEnv
-): { models: string[]; rules: ModelRules | "off" | undefined } => ({
+): { models: string[]; rules: ModelRules | undefined } => ({
   models: modelGatewayConfig(env)?.models ?? [],
-  rules: featureEnabled(env, "model_rules") ? modelRules(env) : "off",
+  rules: modelRules(env),
 });
 
 /**
  * Whether the deployment's config keeps every call in the EU
- * (`eu.deployment`), read as deployment config whatever `model_rules`
- * says: for what sends data out of the Worker without being a model call,
+ * (`eu.deployment`): for what sends data out of the Worker without being a model call,
  * such as Workers AI's document conversion (knowledge/extract.ts), which
  * then stays in the Worker. A config whose rules don't parse keeps it
  * there too: it fails closed. The default config has no EU rule.

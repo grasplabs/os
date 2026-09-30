@@ -1518,25 +1518,4 @@ describe("purging", setUpTime, () => {
       kept: ["# Kept\nRoos stays."],
     });
   });
-
-  it("is switched off by its flag", async () => {
-    const admin = await personOf("admin");
-    const coreEnv: Env = {
-      ...env,
-      FEATURES: { knowledge: true, knowledge_purge: false },
-    };
-    const { core } = await openRpc(admin.session, { coreEnv });
-    const { knowledge } = core.authenticate();
-    const input: PurgeInput = {
-      type: "personal",
-      userId: admin.userId,
-      reason: "other",
-    };
-    await expect(
-      Promise.all([
-        outcome(knowledge.preparePurge(input)),
-        outcome(knowledge.purge(input, "0.x")),
-      ])
-    ).resolves.toStrictEqual(["feature.disabled", "feature.disabled"]);
-  });
 });

@@ -31,7 +31,6 @@ import { drizzle } from "drizzle-orm/d1";
 import { appFor, versionFiles } from "../apps.ts";
 import { memberRole, teamsOf } from "../auth/identity.ts";
 import { collections, documents, versions } from "../db/knowledge/schema.ts";
-import { featureEnabled, requireFeature } from "../features.ts";
 import { isRestricted } from "../restricted.ts";
 import type { WorkContext } from "../restricted.ts";
 import { noteProvenance, readableForPerson } from "./access.ts";
@@ -376,8 +375,7 @@ const assemble = async (
  * person has left, and, for an App's AGENTS.md, `role.forbidden` when they
  * don't build that App and `app.not_found` for one that doesn't exist or
  * that they have no role in, and `app.unreadable` when it is shared with
- * them but has read data they can't read (app-provenance.ts). No
- * memory while `memory` (or `knowledge`) is switched off.
+ * them but has read data they can't read (app-provenance.ts).
  */
 export const forContext = async (
   env: Env,
@@ -396,9 +394,7 @@ export const forContext = async (
   if (authority.subject.type !== "agent" && context.type !== "workflow") {
     throw contextInvalid();
   }
-  const switchedOn =
-    featureEnabled(env, "knowledge") && featureEnabled(env, "memory");
-  const wanted = switchedOn ? await wantedFor(authority, context) : [];
+  const wanted = await wantedFor(authority, context);
   const found =
     wanted.length === 0
       ? []
@@ -551,8 +547,6 @@ export const saveUserMemory = async (
   context: unknown,
   input: unknown
 ): Promise<DocumentSummary> => {
-  requireFeature(env, "knowledge");
-  requireFeature(env, "memory");
   const { type } = knowledgeErrors.parse(
     "knowledge.invalid",
     memoryContextSchema,

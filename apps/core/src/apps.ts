@@ -44,7 +44,6 @@ import {
 import type { Acting, Member } from "./auth/identity.ts";
 import { apps, appVersions } from "./db/core/schema.ts";
 import { isUniqueViolation } from "./db/d1.ts";
-import { featureEnabled, requireFeature } from "./features.ts";
 import { appMemoryPath, requireWithinLimit } from "./knowledge/memory-files.ts";
 import { requireOwnTypes } from "./knowledge/record-types.ts";
 import { madeCurrent } from "./permissions.ts";
@@ -321,8 +320,7 @@ const checkLimits = (
 /**
  * `knowledge.memory_too_large` if the App's AGENTS.md, which agents
  * working on the App have in their context (knowledge/memory.ts), is over
- * its limit, and only if it also grew, as with `checkLimits`. While
- * `memory` is switched off, an App's AGENTS.md is a file like any other.
+ * its limit, and only if it also grew, as with `checkLimits`.
  */
 const checkMemory = (
   env: Env,
@@ -332,7 +330,7 @@ const checkMemory = (
   const grew =
     after !== undefined &&
     (before === undefined || after.length > before.length);
-  if (grew && featureEnabled(env, "memory")) {
+  if (grew) {
     requireWithinLimit(env, "AGENTS.md", after);
   }
 };
@@ -480,7 +478,6 @@ export const appExports = async (
   by: Person,
   app: unknown
 ): Promise<CurrentExports> => {
-  requireFeature(env, "app_calls");
   const { id, currentVersion } = await appFor(env, by, app, "user");
   if (currentVersion === null) {
     return { version: null, exports: {} };
@@ -895,11 +892,8 @@ export const setCurrentVersion = async (
   if (found.currentVersion === number) {
     return found;
   }
-  // Tested whatever the workflows flag says, so switching it on never runs untested code.
   const files = await versionFiles(env, appId, number);
   await requireWorkflowTestsPass(env, number, files);
-  // Registered whatever the triggers flag says, so switching it on starts
-  // the triggers of the version current then.
   const triggers = await triggerRegistration(env, appId, number, files);
   const previous = found.currentVersion;
   const event = createAuditEvent(

@@ -17,7 +17,7 @@ export const platformChangeSchema = z.object({
   /**
    * What changed, e.g. `release`, `secrets` (new secrets on the same
    * release: shared ones, or the deployment's own after a rotation),
-   * `settings` (its flags or sign-in, on the same release),
+   * `settings` (its sign-in, on the same release),
    * `settings_and_secrets` (both in one version) or `rollback`.
    */
   what: identifierSchema,

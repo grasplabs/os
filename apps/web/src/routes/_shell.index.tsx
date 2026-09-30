@@ -52,8 +52,7 @@ interface ChatPage {
 
 /**
  * The names of the collections and connections the person can see, by
- * ID: a list refused (its feature switched off, say) only leaves those
- * IDs unnamed.
+ * ID: a list refused only leaves those IDs unnamed.
  */
 const readSourceNames = async (
   session: Session

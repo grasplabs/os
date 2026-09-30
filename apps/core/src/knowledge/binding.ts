@@ -13,7 +13,6 @@ import type { Authority } from "@grasp-os/shared/permissions";
 import { WorkerEntrypoint } from "cloudflare:workers";
 
 import { forSandbox } from "../bindings.ts";
-import { requireFeature } from "../features.ts";
 import type { WorkContext } from "../restricted.ts";
 import type { Reader } from "./access.ts";
 import { backlinks, getDocument, history, listDocuments } from "./documents.ts";
@@ -48,8 +47,8 @@ interface CollectionReads {
  * the permission `permissionId` only, or under all it has to read. Every
  * read goes through `allowedCollections` (access.ts) as a delegate: only
  * while a permission allows reading, and only what the person it acts for
- * may read too. And only while `knowledge` is switched on: every stub
- * reads through here. Errors are as the sandbox sees them.
+ * may read too. Every stub reads through here. Errors are as the sandbox
+ * sees them.
  */
 export const readAsDelegate = async <T>(
   env: Env,
@@ -58,7 +57,6 @@ export const readAsDelegate = async <T>(
   permissionId: PermissionId | undefined,
   run: (reader: Reader) => Promise<T>
 ): Promise<T> => {
-  requireFeature(env, "knowledge");
   try {
     return await run({
       type: "delegate",

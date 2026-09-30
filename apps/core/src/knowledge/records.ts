@@ -22,7 +22,6 @@ import { stringify } from "yaml";
 import type { Person } from "../app-access.ts";
 import { memberRole, teamsOf } from "../auth/identity.ts";
 import { collections, documents, versions } from "../db/knowledge/schema.ts";
-import { requireFeature } from "../features.ts";
 import { authorize } from "../permissions.ts";
 import { isRestricted } from "../restricted.ts";
 import { noteProvenance } from "./access.ts";
@@ -133,7 +132,6 @@ export const delegateWriter = async (
   permissionId: PermissionId,
   collectionId: CollectionId
 ): Promise<RecordWriter> => {
-  requireFeature(env, "knowledge");
   await authorize(
     env,
     authority,

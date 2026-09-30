@@ -1,17 +1,10 @@
 import type { PermissionRequest } from "@grasp-os/shared/permissions";
 import type { Role } from "@grasp-os/shared/roles";
-import { env } from "cloudflare:workers";
 import { describe, expect, it } from "vite-plus/test";
 
 import { grantReviewed, release } from "./apps.ts";
 import { mockIdp } from "./idp.ts";
-import {
-  auditedDuring,
-  openRpc,
-  outcome,
-  signedInApi,
-  unique,
-} from "./sign-in.ts";
+import { auditedDuring, outcome, signedInApi, unique } from "./sign-in.ts";
 
 // Asking for another App's exports: the permission an App needs to call
 // the methods another App lets other Apps call. These tests start from
@@ -120,22 +113,6 @@ describe("another App's exports", () => {
       // As for any App the person has no role in.
       "app.not_found",
     ]);
-  });
-
-  it("are refused while App calls are switched off", async () => {
-    const admin = await personApi("admin");
-    const [app, other] = await Promise.all([
-      newApp(admin),
-      newApp(admin, "Other"),
-    ]);
-    const off: Env = {
-      ...env,
-      FEATURES: { apps: true, permissions: true },
-    };
-    const { core } = await openRpc(admin.session, { coreEnv: off });
-    await expect(
-      outcome(core.authenticate().permissions.request(exportsOf(app, other)))
-    ).resolves.toBe("feature.disabled");
   });
 
   it("are asked for again when a builder makes a new version current, but for reading", async () => {

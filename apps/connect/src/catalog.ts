@@ -1,5 +1,4 @@
 import {
-  catalogRequestSchema,
   catalogToolsRequestSchema,
   composioToolkitSchema,
   connectErrors,
@@ -21,12 +20,11 @@ import { providers } from "./providers.ts";
 
 // The catalog: what an admin can connect. The native providers come from
 // this release (src/providers.ts and their connectors' manifests); Composio's
-// toolkits from Composio's API, with connect's key, while the `composio`
-// flag is on (core says so with each request). Each entry is marked with
+// toolkits from Composio's API, with connect's key. Each entry is marked with
 // who carries out its actions, and so who holds its tokens: connect
 // (`native`) or Composio's cloud (`composio`). What Composio lists is kept
-// for ten minutes (`cachedIn`), and only asked for while the flag is on and
-// connect has its key.
+// for ten minutes (`cachedIn`), and only asked for while connect has its
+// key.
 
 /** How native providers are shown in the catalog. */
 const nativeShown: Record<
@@ -306,14 +304,10 @@ const listedToolkits = async (key: string): Promise<CatalogEntry[]> =>
   );
 
 /** The catalog, as `ConnectApi.catalog` describes it. */
-export const catalog = async (env: Env, request: unknown): Promise<Catalog> => {
-  const parsed = catalogRequestSchema.safeParse(request);
-  if (!parsed.success) {
-    throw connectErrors.create("connect.invalid");
-  }
+export const catalog = async (env: Env): Promise<Catalog> => {
   const native = nativeEntries();
   const key = composioKey(env);
-  if (!parsed.data.composio || key === undefined) {
+  if (key === undefined) {
     return { entries: native, composio: "off" };
   }
   try {
@@ -391,7 +385,7 @@ export const catalogTools = async (
   if (!parsed.success) {
     throw connectErrors.create("connect.invalid");
   }
-  const { composio, source, id } = parsed.data;
+  const { source, id } = parsed.data;
   if (source === "native") {
     const provider = Object.values(providers).find((each) => each.id === id);
     const connector =
@@ -410,8 +404,8 @@ export const catalogTools = async (
   }
   const key = composioKey(env);
   const toolkit = composioToolkitSchema.safeParse(id);
-  // Off, Composio's toolkits aren't in the catalog at all.
-  if (!composio || key === undefined || !toolkit.success) {
+  // Without a key, Composio's toolkits aren't in the catalog at all.
+  if (key === undefined || !toolkit.success) {
     throw connectErrors.create("connect.catalog_entry_not_found");
   }
   return await composioTools(key, toolkit.data);

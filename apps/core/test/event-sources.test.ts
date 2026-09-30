@@ -1,5 +1,4 @@
 import type { Role } from "@grasp-os/shared/roles";
-import { env } from "cloudflare:workers";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 import { z } from "zod";
 
@@ -181,14 +180,6 @@ describe("connector events", () => {
       before: ["m365.mail.received"],
       after: [],
     });
-  });
-
-  it("listen nowhere while connector events are switched off", async () => {
-    const { connection } = await listening();
-    const on = z.record(z.string(), z.boolean()).parse(env.FEATURES);
-    await runCron({ FEATURES: { ...on, connector_events: false } });
-
-    await expect(sources(connection)).resolves.toStrictEqual([]);
   });
 
   it("find who listens by index, reading no table whole", async () => {
